@@ -1501,7 +1501,7 @@
     {
       "name": "DEFENSECLAW_FAIL_MODE",
       "category": "security_opt_out",
-      "purpose": "Per-process tightening of guardrail.hook_fail_mode: closed closes hook delivery, missing-token/authentication, and invalid-response failures; open is ignored, so the environment cannot reopen an installed closed hook, except in the Antigravity, Devin, Hermes and Kiro shell hooks of an authenticated Secure Client deployment, which take open or closed as a full override. Read by every per-user hook, the native Windows hook and the OpenCode plugin; other managed hooks ignore it.",
+      "purpose": "Not read by 1.0.4 hooks: a hook's fail mode is the guardrail.hook_fail_mode installed with it (the shell hook, the OpenCode plugin, hooks/.hookcfg for the native Windows hook), and status and doctor report that. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again, and the Antigravity, Devin, Hermes and Kiro shell hooks of an authenticated Secure Client deployment keep it as a full override. Set the mode with defenseclaw guardrail fail-mode.",
       "default": "(value from guardrail.hook_fail_mode in config.yaml)",
       "accepted_values": [
         "open",

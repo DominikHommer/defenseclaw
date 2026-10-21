@@ -574,12 +574,17 @@ def connector_agent_missing(data_dir: str, connector: str, *, last_activity_at: 
     recorded discovery scan found no installation and no executable, however
     old it is, because neither ``status`` nor ``doctor`` rescans and the
     cache's one-day lifetime made a staged connector RUNNING again on day
-    two. An executable on PATH now (an agent installed after the scan,
-    GAP-0052) and a verified harness image for the connector (the
-    sandbox-only layout, in which setup and the gateway admit the connector
-    for the agent inside the image) are not missing. Without a recorded scan
-    there is no proof, so the answer is then False. Nothing is scanned or
-    run.
+    two. A verified harness image for the connector (the sandbox-only
+    layout, in which setup and the gateway admit the connector for the
+    agent inside the image) is not missing. An executable on the PATH of
+    the shell that runs status or doctor is no proof either way: that shell
+    is not the agent, and any file named like the agent on its PATH would
+    otherwise turn a negative scan into a healthy RUNNING row (1.0.4
+    review, loop round 4). Such an agent counts once ``defenseclaw agent
+    discover --refresh`` records it or the gateway takes a hook call from
+    it; until then status and doctor only name it (GAP-0052). Without a
+    recorded scan there is no proof, so the answer is then False. Nothing
+    is scanned or run.
 
     ``last_activity_at`` is the gateway's last authenticated hook call for
     the connector (``ConnectorHealth.last_activity_at``). A call after the
@@ -591,10 +596,6 @@ def connector_agent_missing(data_dir: str, connector: str, *, last_activity_at: 
     if not _last_scan_found_no_agent(data_dir, connector):
         return False
     if hook_call_after_scan(data_dir, last_activity_at):
-        return False
-    from defenseclaw.inventory import agent_discovery
-
-    if agent_discovery.binary_on_path(connector):
         return False
     from defenseclaw.sandbox_images import verified_harness_contract
 

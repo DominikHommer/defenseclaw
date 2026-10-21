@@ -9,7 +9,7 @@ keywords:
   - DEFENSECLAW_FAIL_MODE
 ---
 
-One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows (`open`) or blocks (`closed`) when the gateway cannot give a usable answer. It covers transport failures and invalid responses alike. Two environment variables can only make it stricter for one process (one Secure Client exception, see [Process override](#process-override-tighten-only)).
+One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows (`open`) or blocks (`closed`) when the gateway cannot give a usable answer. It covers transport failures and invalid responses alike. The mode is the one installed with the hooks: the environment does not set it, and one variable, `DEFENSECLAW_STRICT_AVAILABILITY`, can only make an outage stricter ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
 
 ## Controls
 
@@ -17,9 +17,9 @@ One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows
 | --- | --- | --- |
 | `guardrail.hook_fail_mode` | `open` allows, `closed` blocks supported hook events when delivery or the gateway response fails. | `closed`. Under Secure Client an unset value is `open` ([Secure Client](#secure-client)). Per connector: `guardrail.connectors.<name>.hook_fail_mode`. |
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force a closed connector open. | Unset. Per agent process. |
-| `DEFENSECLAW_FAIL_MODE=closed` | Closes the hooks of one agent process. `open` is ignored, except in the Secure Client shell hooks named under [Process override](#process-override-tighten-only). | Unset. Per agent process; set normal posture with the CLI. |
+| `DEFENSECLAW_FAIL_MODE` | Not read by 1.0.4 hooks: the installed mode is the fail mode. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again; Secure Client shell hooks keep it ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)). | Set the mode with `defenseclaw guardrail fail-mode`. |
 
-An explicit value always wins, on every install: the OSS per-user install, the standalone enterprise profile, MDM-managed standalone hosts and Secure Client. On a managed computer the value comes from the administrator's config, so an `open` there is the administrator's choice and the managed hooks follow it. On a managed standalone host both variables are tighten-only: a stricter value is honored, a looser one is ignored ([Environment variables](/docs/reference/configuration/env-vars)).
+An explicit value always wins, on every install: the OSS per-user install, the standalone enterprise profile, MDM-managed standalone hosts and Secure Client. On a managed computer the value comes from the administrator's config, so an `open` there is the administrator's choice and the managed hooks follow it. On a managed standalone host `DEFENSECLAW_STRICT_AVAILABILITY` is tighten-only: a stricter value is honored, a looser one is ignored ([Environment variables](/docs/reference/configuration/env-vars)).
 
 `status --json` and `verify --json` give each protected connector's resolved mode as `connectors.<id>.effective_hook_fail_mode`.
 
@@ -157,13 +157,15 @@ An already-completed result event cannot undo its side effect, and an observatio
 
 Administrator-managed hooks force the relevant unavailable-home and transport failures closed rather than trusting a user-controlled process environment.
 
-## Process override (tighten only)
+## The environment does not set the fail mode
 
-`DEFENSECLAW_FAIL_MODE=closed` closes the hooks of one agent process, the OpenCode plugin included, whatever mode is installed. Any other value is ignored, so a project's agent settings or a parent process cannot turn a closed hook open. To run fail-open, use `defenseclaw guardrail fail-mode open`, which saves it in the config and the installed hooks, and which status and doctor report.
+A hook's fail mode is the one installed with it: the mode setup baked into the shell hook or the OpenCode plugin, or the one in `hooks/.hookcfg` that the native Windows hook reads. On a managed computer that is the administrator's config, which only root or SYSTEM can change. Nothing in the agent's environment changes it: `DEFENSECLAW_FAIL_MODE` is not read, so `open` does not open a closed hook and `closed` does not close an open one. A missing, unreadable or malformed installed record is `closed`. To change the mode, run `defenseclaw guardrail fail-mode open|closed`, which saves it in the config and the installed hooks.
 
-Status and doctor report the installed mode. A `DEFENSECLAW_FAIL_MODE=closed` in the shell that runs them is shown next to it as unverified, because the agent may have been started without it.
+`defenseclaw status` and `defenseclaw doctor` read the same installed state, so what they report is what the hooks do. A variable set in the shell that runs them changes nothing.
 
-The one exception is an authenticated Secure Client deployment: there the Antigravity, Devin, Hermes and Kiro shell hooks still take `DEFENSECLAW_FAIL_MODE` as a full override (`open` opens them and `closed` closes them for that agent process). Its Claude Code, Codex and Cursor shell hooks and its OpenCode plugin ignore the variable, and the native Windows hook only tightens. On every other managed install the shell hooks ignore it, and the OpenCode plugin and the native Windows hook only tighten.
+`DEFENSECLAW_STRICT_AVAILABILITY=1` is the one process setting the hooks read. It can only close: it blocks a call while the gateway is down, even on a hook installed open. Status still reports the installed mode.
+
+Hooks rendered by 1.0.3 or earlier read `DEFENSECLAW_FAIL_MODE` until the upgrade's connector refresh renders them again. Under an authenticated Secure Client deployment, the Antigravity, Devin, Hermes and Kiro shell hooks still take it as a full override (Secure Client delivery is unchanged in 1.0.4).
 
 The shared `inspect-*.sh` scripts serve every connector of one data directory, and `DEFENSECLAW_CONNECTOR` only picks the connector they report as. They run open only when every connector recorded there is open: one connector set to `closed` closes them for all, also after an upgrade that kept an older global `open`. A malformed or partial record (for example a `fail_modes` value in `hooks/.hookcfg` that is not a map) also closes them.
 

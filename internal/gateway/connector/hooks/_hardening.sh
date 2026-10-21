@@ -345,21 +345,17 @@ defenseclaw_shared_hook_token_file() {
 # together. After an upgrade, a kept legacy open therefore never reopens a
 # connector recorded closed. A v2 JSON whose fail_modes is present but not an
 # object (null included) is malformed; a missing fail_modes is the shape every
-# release writes for an install with no connector entry yet. An inherited
-# DEFENSECLAW_FAIL_MODE can only tighten (GAP-0315); guardian-managed hooks
-# trust only installer-owned state. Malformed, ambiguous or missing state
-# fails closed. A record counts as open only with its config source
-# (FAIL_MODE_SOURCE=config, fail_mode_sources, legacy_fail_mode_source): an
-# earlier release's open may be an unset mode it resolved open, and an open
-# lowered for a vendor that cannot fail closed is not an operator's choice.
+# release writes for an install with no connector entry yet. The sidecars are
+# the only input: DEFENSECLAW_FAIL_MODE in the agent's environment is not read
+# (GAP-0315); guardian-managed hooks trust only installer-owned state.
+# Malformed, ambiguous or missing state fails closed. A record counts as open
+# only with its config source (FAIL_MODE_SOURCE=config, fail_mode_sources,
+# legacy_fail_mode_source): an earlier release's open may be an unset mode it
+# resolved open, and an open lowered for a vendor that cannot fail closed is
+# not an operator's choice.
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
-  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != "1" ]; then
-    case "${DEFENSECLAW_FAIL_MODE:-}" in
-      [Cc][Ll][Oo][Ss][Ee][Dd]) printf closed; return 0 ;;
-    esac
-  fi
   local config="${hook_dir}/.hookcfg"
   local candidate suffix recorded mode source selected="" summary=""
   for candidate in "${hook_dir}"/.hookcfg.*; do
@@ -883,7 +879,7 @@ defenseclaw_log_hook_failure() {
   local hook_name="${2:-unknown}"
   local reason="${3:-unknown}"
   local category="${4:-response}"
-  local fail_mode="${5:-${FAIL_MODE:-open}}"
+  local fail_mode="${5:-${FAIL_MODE:-closed}}"
   local outcome="${6:-unknown}"
   case "$outcome" in
     fail_open|fail_closed|diagnostic) : ;;
@@ -928,7 +924,7 @@ defenseclaw_log_hook_delivery_failure() {
 
 defenseclaw_hook_delivery_outcome() {
   local outcome=fail_closed
-  if [ "${2:-${FAIL_MODE:-open}}" = "open" ]; then
+  if [ "${2:-${FAIL_MODE:-closed}}" = "open" ]; then
     outcome=fail_open
     if [ "${1:-response}" = "transport" ] && defenseclaw_should_fail_closed_on_unreachable; then
       outcome=fail_closed
@@ -1292,8 +1288,10 @@ defenseclaw_response_failure_reason() {
 # auth failures, and transport failures instead of silently opening only the
 # latter class.
 defenseclaw_should_fail_closed_on_unreachable() {
-  case "${FAIL_MODE:-open}" in
-    closed) return 0 ;;
+  # Only an explicit open opens: an unset, empty or unknown FAIL_MODE closes.
+  case "${FAIL_MODE:-}" in
+    open) ;;
+    *) return 0 ;;
   esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;
@@ -1580,9 +1578,9 @@ defenseclaw_handle_missing_token() {
     defenseclaw_allow_failed_stop_event "$connector" "$hook_name" "${5:-}" "${6:-}" "$reason" transport
   fi
   if defenseclaw_should_fail_closed_on_missing_token; then
-    defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}" fail_closed
+    defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-closed}" fail_closed
   else
-    defenseclaw_log_hook_delivery_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
+    defenseclaw_log_hook_delivery_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-closed}"
   fi
   if defenseclaw_should_fail_closed_on_missing_token; then
     echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)$(defenseclaw_missing_token_next_step "$connector")" >&2
@@ -1685,7 +1683,7 @@ sys.stdout.buffer.write(data+b"x")')"
   # condition; the cap and NUL refusals still apply.
   defenseclaw_log_hook_failure "${DEFENSECLAW_HOOK_CONNECTOR:-unknown}" "${DEFENSECLAW_HOOK_NAME:-unknown}" \
     "head(1)/python3 missing; reading stdin unbounded (set DEFENSECLAW_HOOK_MAX_BODY)" \
-    transport "${FAIL_MODE:-open}" diagnostic
+    transport "${FAIL_MODE:-closed}" diagnostic
   _dc_read_stdin_exact "$cap" "$overflow_outcome"
 }
 
@@ -1712,12 +1710,12 @@ _dc_stdin_refused() {
   local hook_name="${DEFENSECLAW_HOOK_NAME:-unknown}"
   if [ "$2" = nul ]; then
     defenseclaw_log_hook_failure "$connector" "$hook_name" \
-      "stdin body has a NUL byte" transport "${FAIL_MODE:-open}" "$3"
+      "stdin body has a NUL byte" transport "${FAIL_MODE:-closed}" "$3"
     echo "defenseclaw: hook payload has a NUL byte; refusing to alter it" >&2
     return 0
   fi
   defenseclaw_log_hook_failure "$connector" "$hook_name" \
-    "stdin body exceeded $1 byte cap" transport "${FAIL_MODE:-open}" "$3"
+    "stdin body exceeded $1 byte cap" transport "${FAIL_MODE:-closed}" "$3"
   echo "defenseclaw: hook payload exceeded $1 bytes; refusing to truncate" >&2
 }
 
@@ -1816,7 +1814,7 @@ defenseclaw_extract_trace_context() {
     else
       defenseclaw_log_hook_failure "$connector" "$hook_name" \
         "rejected malformed traceparent (length=${#tp})" \
-        response "${FAIL_MODE:-open}" diagnostic
+        response "${FAIL_MODE:-closed}" diagnostic
     fi
   fi
 
@@ -1829,7 +1827,7 @@ defenseclaw_extract_trace_context() {
     else
       defenseclaw_log_hook_failure "$connector" "$hook_name" \
         "rejected malformed tracestate (length=${#ts})" \
-        response "${FAIL_MODE:-open}" diagnostic
+        response "${FAIL_MODE:-closed}" diagnostic
     fi
   fi
 }

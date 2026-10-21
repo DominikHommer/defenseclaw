@@ -25,7 +25,7 @@ import (
 
 // A per-user Copilot CLI, Antigravity or Hermes hook with an unset
 // hook_fail_mode resolves closed outside Secure Client; only an explicit
-// "open" renders open. The environment can only tighten it.
+// "open" renders open. No hook reads DEFENSECLAW_FAIL_MODE (GAP-0315).
 func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 	scripts := map[string]string{"antigravity": "antigravity-hook.sh", "copilot": "copilot-hook.sh", "hermes": "hermes-hook.sh"}
 	for _, conn := range nativeDenyConnectors() {
@@ -54,8 +54,8 @@ func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 				if err != nil {
 					t.Fatalf("read %s: %v", scripts[conn.Name()], err)
 				}
-				if want := "\nFAIL_MODE=\"" + tc.want + "\"\n"; !strings.Contains(string(body), want) || !strings.Contains(string(body), perUserEnvTightenLine) {
-					t.Fatalf("%s does not render %s with the tighten-only environment line", scripts[conn.Name()], want)
+				if want := "\nFAIL_MODE=\"" + tc.want + "\"\n"; !strings.Contains(string(body), want) || strings.Contains(string(body), perUserEnvFailModeRead) {
+					t.Fatalf("%s does not render %s, or reads DEFENSECLAW_FAIL_MODE", scripts[conn.Name()], want)
 				}
 				if strings.Contains(string(body), "\nFAIL_MODE=\"open\"\n") != (tc.want == "open") {
 					t.Fatalf("%s renders another fail mode next to %s", scripts[conn.Name()], tc.want)

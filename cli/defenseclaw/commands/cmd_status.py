@@ -1161,7 +1161,8 @@ def _agent_missing(cfg, connector: str, live: dict | None = None) -> bool:
     active while doctor fails it. Claude Code uses the same proof: a
     ``claude`` missing from the PATH of the shell that runs status is no
     evidence, because Claude Code often runs from an absolute path or an IDE
-    (GAP-1331, GAP-1333). ``live`` is the gateway's health row for the
+    (GAP-1331, GAP-1333), and one on that PATH is no proof that it runs the
+    hooks (1.0.4 review, loop round 4). ``live`` is the gateway's health row for the
     connector: a hook call it took after the scan outranks the scan.
     OpenClaw keeps its own install check.
     """
@@ -1180,8 +1181,22 @@ def _agent_missing(cfg, connector: str, live: dict | None = None) -> bool:
 
 
 def _agent_missing_detail(connector: str) -> str:
+    name = _friendly_connector_name(connector)
+    try:
+        from defenseclaw.inventory import agent_discovery
+
+        on_path = agent_discovery.binary_on_path(connector)
+    except Exception:  # noqa: BLE001 - the hint is optional.
+        on_path = ""
+    if on_path:
+        # This shell's PATH is a hint, not proof that the agent runs the
+        # hooks (1.0.4 review, loop round 4): name it, keep the row off.
+        return (
+            f"the last agent discovery found no {name}; {on_path} on this shell's PATH is unverified, "
+            "so nothing shows it runs the hooks setup staged; run: defenseclaw agent discover --refresh"
+        )
     return (
-        f"{_friendly_connector_name(connector)} is not installed, so nothing runs the hooks setup staged; "
+        f"{name} is not installed, so nothing runs the hooks setup staged; "
         "install it, then run: defenseclaw agent discover --refresh"
     )
 

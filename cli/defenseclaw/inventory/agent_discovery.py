@@ -2491,11 +2491,13 @@ def _which(binary_name: str) -> str:
 
 
 def binary_on_path(connector: str) -> str:
-    """The connector's agent executable on PATH now, or "" (a lookup, no run).
+    """The connector's agent executable on this process's PATH now, or "" (a lookup, no run).
 
-    Doctor reads discovery evidence that is cached for a day and never runs
-    an agent itself, so this tells an agent installed after the last scan
-    from one that is missing (GAP-0052)."""
+    Doctor and status read discovery evidence that is cached for a day and
+    never run an agent themselves, so this names an agent that may have been
+    installed after the last scan (GAP-0052). It is a hint, never proof: the
+    caller's PATH is not the agent's, and only a refreshed scan or a hook
+    call the gateway took makes the agent count (1.0.4 review, loop round 4)."""
     spec = _SPECS.get(_normalize_connector(connector))
     if spec is None or not spec.binary_name:
         return ""

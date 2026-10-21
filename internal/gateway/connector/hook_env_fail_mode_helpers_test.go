@@ -10,10 +10,11 @@
 
 package connector
 
-// perUserEnvTightenComment and perUserEnvTightenLine are what a per-user
-// shell hook renders after its baked FAIL_MODE: the environment can close it,
-// never open it (GAP-0315).
+// perUserInstalledModeComment is what a per-user shell hook renders after its
+// baked FAIL_MODE, and perUserEnvFailModeRead is any read of the variable: no
+// hook outside Secure Client delivery reads a fail mode from its environment
+// (GAP-0315, 1.0.4 lead directive).
 const (
-	perUserEnvTightenComment = "# An inherited DEFENSECLAW_FAIL_MODE can only tighten the installed mode:"
-	perUserEnvTightenLine    = `case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) FAIL_MODE="closed" ;; esac`
+	perUserInstalledModeComment = "# The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's"
+	perUserEnvFailModeRead      = "${DEFENSECLAW_FAIL_MODE"
 )

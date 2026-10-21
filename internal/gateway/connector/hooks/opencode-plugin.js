@@ -41,7 +41,6 @@ import { dirname, join } from "node:path";
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
 const DC_API_ADDR = "{{.APIAddr}}";
 {{if .Sandbox}}const DC_FAIL_MODE = "closed"; // sandbox hooks always fail closed
-const DC_RUNTIME_FAIL_MODE = DC_FAIL_MODE;
 const DC_TRANSPORT_FAIL_MODE = DC_FAIL_MODE;
 const DC_TIMEOUT_MS = {{.SandboxMaxTime}}000;
 const DC_RETRY_TIMEOUT_MS = {{.SandboxRetryMaxTime}}000;
@@ -56,12 +55,11 @@ const DC_FOREIGN_GUARD = "";
 const DC_INSTALL_MARKER = "";
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}";
 const DC_FAIL_MODE = "{{if and .Managed (not .SecureClient)}}closed{{else}}{{.FailMode}}{{end}}"; // "open" or "closed"
-// The process environment can only tighten the installed mode, as in the
-// shell hooks: DEFENSECLAW_FAIL_MODE=closed closes every failure (GAP-0315),
-// and DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035).
-// Neither can open a closed plugin.
-const DC_RUNTIME_FAIL_MODE = String(process.env.DEFENSECLAW_FAIL_MODE || "").trim().toLowerCase() === "closed" ? "closed" : DC_FAIL_MODE;
-const DC_TRANSPORT_FAIL_MODE = ["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || "")) ? "closed" : DC_RUNTIME_FAIL_MODE;
+// The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process
+// environment is not read (GAP-0315). As in the shell hooks,
+// DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035); it can
+// never open a closed plugin.
+const DC_TRANSPORT_FAIL_MODE = ["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || "")) ? "closed" : DC_FAIL_MODE;
 // Standalone managed installs talk to the gateway's peer-authorized unix
 // hook socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user
@@ -677,7 +675,7 @@ async function defenseclawLogFailOpen(reason, category) {
     if (!res.ok) {
       // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
       // is an outage, as in the shell hooks, so strict availability closes it.
-      if ((res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_RUNTIME_FAIL_MODE) === "closed") {
+      if ((res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE) === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
 {{if not .Sandbox}}      await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
@@ -689,7 +687,7 @@ async function defenseclawLogFailOpen(reason, category) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
 {{else}}{{if not .SecureClient}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
-{{if not .Managed}}      if (DC_RUNTIME_FAIL_MODE === "open") {
+{{if not .Managed}}      if (DC_FAIL_MODE === "open") {
         await defenseclawLogFailOpen("invalid gateway verdict", "response");
         return null;
       }

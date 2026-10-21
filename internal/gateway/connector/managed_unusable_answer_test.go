@@ -132,7 +132,11 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 							env = append(env, kv)
 						}
 					}
-					// The environment can only tighten the rendered mode.
+					// No hook reads DEFENSECLAW_FAIL_MODE (GAP-0315): the mode
+					// rendered from the config decides. Cursor in observe keeps
+					// its outages closed without an explicit open
+					// (OutageHookFailMode), and per-user Antigravity follows
+					// closed (w3-g3-hooks).
 					cmd.Env = append(env, "HOME="+home, "DEFENSECLAW_FAIL_MODE="+failMode)
 					cmd.Stdin = strings.NewReader(hook.stdin)
 					var stdout, stderr bytes.Buffer

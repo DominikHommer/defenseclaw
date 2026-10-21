@@ -310,8 +310,8 @@ func (c hookFailureContext) resolve() hookFailureContext {
 // other than 0 and 2 as a failed hook, shows its stderr as a warning and
 // lets the prompt or tool call go ahead (kiro.dev/docs/hooks/actions). A
 // Kiro hook that fails closed (an administrator-managed hook, or any hook
-// whose flag, hook sidecar or DEFENSECLAW_FAIL_MODE does not say open,
-// resolved as hookexec resolves it) exits 2, the only status Kiro honors as
+// whose flag or hook sidecar does not say open, resolved as hookexec
+// resolves it) exits 2, the only status Kiro honors as
 // a block. An explicitly fail-open Kiro hook and every other connector keep 1.
 func hookFailureExitCode(failure hookFailureContext) int {
 	failure = failure.resolve()
@@ -323,8 +323,7 @@ func hookFailureExitCode(failure hookFailureContext) int {
 
 // hookPreRunFailsClosed reports whether the failed invocation's policy is to
 // fail closed, with buildHookOptionsForRuntime's precedence: a managed hook
-// always does; otherwise --fail-mode, else the sidecar, then an inherited
-// DEFENSECLAW_FAIL_MODE only when it tightens.
+// always does; otherwise --fail-mode, else the sidecar.
 func hookPreRunFailsClosed(failure hookFailureContext) bool {
 	if failure.managed || implicitEnterpriseManagedHook() {
 		return true
@@ -337,23 +336,11 @@ func hookPreRunFailsClosed(failure hookFailureContext) bool {
 	if mode == "" {
 		mode = hookSidecarFailMode(readHookSidecar(filepath.Join(home, "hooks", ".hookcfg")), failure.connector, home)
 	}
-	if hookEnvTightensFailMode() {
-		mode = "closed"
-	}
 	return nativeHookFailMode(mode) == "closed"
 }
 
-// hookEnvTightensFailMode reports whether an inherited DEFENSECLAW_FAIL_MODE
-// asks for closed. The environment can only tighten the installed mode, for
-// packaged and source hooks alike: a project's agent settings or a parent
-// process cannot reopen a closed hook (GAP-0315). An explicit per-user open is
-// chosen with guardrail fail-mode, which persists it in config and the hooks.
-func hookEnvTightensFailMode() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("DEFENSECLAW_FAIL_MODE")), "closed")
-}
-
 // nativeHookFailMode resolves the fail mode a hook command ends with (flag,
-// sidecar, environment) as the config resolver does: only an explicit
+// else sidecar) as the config resolver does: only an explicit
 // "open" opens. A Windows native command carries no --fail-mode and relies
 // on hooks/.hookcfg; when that sidecar is missing, unreadable or names no
 // mode for the connector the hook fails closed, never open. Managed hooks
@@ -582,11 +569,12 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
 	}
 
+	// The fail mode is installed state only: the registered command's
+	// --fail-mode, else the hook sidecar setup wrote. DEFENSECLAW_FAIL_MODE in
+	// the agent's environment is never read, so status and doctor, which read
+	// the same sidecar, report what the hook does (GAP-0315).
 	if failMode == "" {
 		failMode = hookSidecarFailMode(sidecar, connector, home)
-	}
-	if hookEnvTightensFailMode() {
-		failMode = "closed"
 	}
 	failMode = nativeHookFailMode(failMode)
 	token := os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")
@@ -640,13 +628,13 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		}
 		opts.ManagedRuntimeFailure = managedRuntimeFailure
 		// A managed hook takes its fail mode from administrator-owned runtime
-		// state only, never from the command line or the environment: the
-		// authenticated Windows runtime generation, or the root-owned Unix
-		// runtime descriptor. Each records the mode the administrator's config
-		// resolved (owner decision 2026-10-20: explicit open or closed wins,
-		// unset is closed, and open under Secure Client, #1163). A runtime
-		// failure, and anything but open, keeps the fail-closed,
-		// strict-availability contract.
+		// state, never from the command line: the authenticated Windows
+		// runtime generation, or the root-owned Unix runtime descriptor. Each
+		// records the mode the administrator's config resolved (owner
+		// decision 2026-10-20: explicit open or closed wins, unset is closed,
+		// and open under Secure Client, #1163). A runtime failure, and
+		// anything but open, keeps the fail-closed, strict-availability
+		// contract. The agent's environment never changes it.
 		opts.FailMode = enterpriseManagedHookRuntimeFailMode()
 		if managedRuntimeFailure != "" || opts.FailMode != "open" {
 			opts.FailMode = "closed"
@@ -679,6 +667,9 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 // included), or a blank entry, is malformed state: it resolves closed and
 // never falls back to the legacy mode. A missing map is what every release
 // writes before the first connector entry, so the legacy mode still applies.
+// A JSON document that does not parse, or is not version 2 or later, is
+// malformed too: it resolves closed and is never read as KEY=value lines.
+// A missing or unreadable file names no mode, which is closed as well.
 func readHookSidecar(path string) map[string]string {
 	out := map[string]string{}
 	data, err := os.ReadFile(path)
@@ -715,6 +706,14 @@ func readHookSidecar(path string) map[string]string {
 			out["DEFENSECLAW_FAIL_MODE"] = current.LegacyMode
 			out[hookSidecarFailModeSourceKey("")] = current.LegacySrc
 		}
+		return out
+	}
+	if trimmed := bytes.TrimSpace(data); json.Valid(trimmed) ||
+		(len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')) {
+		// JSON that is not a v2 sidecar (an older or unknown version, an
+		// array, a scalar) or that does not parse is no sidecar this hook
+		// understands: closed, never KEY=value lines.
+		out["DEFENSECLAW_FAIL_MODE"] = "closed"
 		return out
 	}
 	for _, line := range strings.Split(string(data), "\n") {

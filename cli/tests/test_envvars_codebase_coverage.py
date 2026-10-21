@@ -218,6 +218,8 @@ _NON_ENVVAR_TOKENS = frozenset(
 # exemption.
 _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
     "DEFENSECLAW_CLAWHUB_ARG_": frozenset({"cli/defenseclaw/commands/cmd_skill.py"}),
+    # The connector-scoped keys of the 0.8.x KEY=value hooks/.hookcfg, read by
+    # the native hook and, the same way, by the status reader.
     "DEFENSECLAW_FAIL_MODE_": frozenset({"internal/cli/hook.go", "cli/defenseclaw/fail_mode.py"}),
     "DEFENSECLAW_MIGRATED_": frozenset(
         {

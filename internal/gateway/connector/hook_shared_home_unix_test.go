@@ -24,9 +24,10 @@ import (
 // directory, so the renderer bakes no fail mode into them. Their missing or
 // disabled DEFENSECLAW_HOME exit must therefore read the installed mode from
 // the sidecars next to the script: a closed installation blocks, missing
-// state reads closed, and an open one tightens with DEFENSECLAW_FAIL_MODE=
-// closed or strict availability, also when the agent's environment claims a
-// managed hook (DEFENSECLAW_MANAGED_HOOK=1).
+// state reads closed, and an open one closes only with strict availability,
+// also when the agent's environment claims a managed hook
+// (DEFENSECLAW_MANAGED_HOOK=1). DEFENSECLAW_FAIL_MODE is not read (1.0.4 lead
+// directive).
 func TestSharedInspectHookHomeUnavailableReadsTheInstalledMode(t *testing.T) {
 	for _, invoke := range hookArgvInspectCases() {
 		if len(invoke.stdin) > 4096 {
@@ -41,11 +42,12 @@ func TestSharedInspectHookHomeUnavailableReadsTheInstalledMode(t *testing.T) {
 				}{
 					{"no-env", nil, true},
 					{"env-open", []string{"DEFENSECLAW_FAIL_MODE=open"}, true},
-					{"env-closed", []string{"DEFENSECLAW_FAIL_MODE=closed"}, false},
+					{"env-closed", []string{"DEFENSECLAW_FAIL_MODE=closed"}, true},
 					{"strict", []string{"DEFENSECLAW_STRICT_AVAILABILITY=true"}, false},
-					{"managed-marker-env-closed", []string{"DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_FAIL_MODE=closed"}, false},
-					{"managed-marker-secure-client-env-closed", []string{"DEFENSECLAW_MANAGED_HOOK=1", "_DC_SECURE_CLIENT_HOOK=1",
-						"_DC_SECURE_CLIENT_DELIVERY=1", "DEFENSECLAW_FAIL_MODE=closed"}, false},
+					{"managed-marker-env-closed", []string{"DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_FAIL_MODE=closed"}, true},
+					{"managed-marker-strict", []string{"DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_STRICT_AVAILABILITY=1"}, false},
+					{"managed-marker-secure-client-env-open", []string{"DEFENSECLAW_MANAGED_HOOK=1", "_DC_SECURE_CLIENT_HOOK=1",
+						"_DC_SECURE_CLIENT_DELIVERY=1", "DEFENSECLAW_FAIL_MODE=open"}, true},
 				} {
 					t.Run(invoke.script+"/"+install+"/"+home+"/"+tc.name, func(t *testing.T) {
 						dataDir := t.TempDir()
@@ -103,8 +105,8 @@ func TestSharedInspectHookHomeUnavailableReadsTheInstalledMode(t *testing.T) {
 
 // 1.0.4 review (GAP-0315): a per-user hook never takes the managed or Secure
 // Client markers from the agent's environment. With them inherited, an open
-// install still tightens to closed with DEFENSECLAW_FAIL_MODE=closed and
-// answers an outage with the per-user hook's own answer.
+// install still closes an outage under strict availability with the
+// per-user hook's own answer.
 func TestPerUserHooksIgnoreAnInheritedManagedMarker(t *testing.T) {
 	marker := []string{"DEFENSECLAW_MANAGED_HOOK=1", "_DC_SECURE_CLIENT_HOOK=1", "_DC_SECURE_CLIENT_DELIVERY=1"}
 	type hookRun struct {
@@ -150,12 +152,12 @@ func TestPerUserHooksIgnoreAnInheritedManagedMarker(t *testing.T) {
 
 			cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, run.invoke.script)}, run.invoke.args...)...)
 			cmd.Stdin = strings.NewReader(run.invoke.stdin)
-			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_FAIL_MODE=closed")
+			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_STRICT_AVAILABILITY=1")
 			cmd.Env = append(cmd.Env, run.invoke.env...)
 			cmd.Env = append(cmd.Env, marker...)
 			output, err := cmd.CombinedOutput()
 			if !hookCallBlocked(err, string(output)) {
-				t.Fatalf("an inherited managed marker kept an open hook open under DEFENSECLAW_FAIL_MODE=closed:\n%s", output)
+				t.Fatalf("an inherited managed marker kept an open hook open under strict availability:\n%s", output)
 			}
 		})
 	}

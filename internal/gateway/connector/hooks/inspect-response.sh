@@ -41,8 +41,8 @@ export DEFENSECLAW_HOME
 {{else}}
 # A per-user render is never a managed or Secure Client hook: those markers
 # come only from a managed render (the branch above), never from the
-# agent's environment, where they would switch off the per-user closed-mode
-# tightening.
+# agent's environment, where they would change how the per-user hook answers
+# a missing token.
 unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 {{end}}

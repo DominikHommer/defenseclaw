@@ -28,17 +28,16 @@ copilot_deny() {
 }
 trap '_dc_copilot_rc=$?; if [ "$_dc_copilot_rc" -ne 0 ]; then copilot_managed_failure; fi' EXIT
 {{end}}{{if and (not .Managed) (not .Sandbox)}}FAIL_MODE="{{.FailMode}}"
-# An inherited DEFENSECLAW_FAIL_MODE can only tighten the installed mode:
-# a project or parent process cannot reopen a closed hook. Strict
-# availability closes it too.
-case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) FAIL_MODE="closed" ;; esac
+# The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
+# environment is not read, so status and doctor report what runs (GAP-0315).
+# Strict availability closes it.
 case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) FAIL_MODE="closed" ;; esac
 # Copilot CLI lets a call run when its hook fails. In fail mode closed every
 # failure DefenseClaw sees prints Copilot's native deny with the reason ($1)
 # instead; Copilot's other events cannot block. Fail mode open lets the call
 # run.
 copilot_hook_failure() {
-  [ "$FAIL_MODE" = "closed" ] || exit 0
+  [ "$FAIL_MODE" != "open" ] || exit 0
   local text="DefenseClaw blocked this tool call (fail mode closed). Run \`defenseclaw doctor\` to see why."
   if [ -n "${1:-}" ] && declare -F defenseclaw_json_escape >/dev/null 2>&1; then
     text="$(defenseclaw_json_escape "DefenseClaw blocked this tool call: $1")"
@@ -87,13 +86,13 @@ export DEFENSECLAW_HOME
 {{else}}
 # A per-user render is never a managed or Secure Client hook: those markers
 # come only from a managed render (the branch above), never from the
-# agent's environment, where they would switch off the per-user closed-mode
-# tightening.
+# agent's environment, where they would change how the per-user hook answers
+# a missing token.
 unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
-  if [ "$FAIL_MODE" = "closed" ]; then
+  if [ "$FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     copilot_hook_failure
   fi
@@ -371,7 +370,7 @@ if [ "$ACTION" = "confirm" ]; then
   esac
   [ "$NATIVE_ASK" = "true" ] || fail_response "missing native confirmation in gateway response"
 fi
-{{else if not .Managed}}if [ "$FAIL_MODE" = "closed" ]; then
+{{else if not .Managed}}if [ "$FAIL_MODE" != "open" ]; then
   # Every verdict names its action, and on a tool boundary a block carries
   # Copilot's native deny and a confirmation its native ask, as the Windows
   # hook checks: anything else is no verdict, and would let the call run.

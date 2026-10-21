@@ -479,8 +479,8 @@ func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
 // hook returns confirm, which Claude Code surfaces as a native HITL
 // prompt.
 //
-// SupportsFailClosed=true: claude-code-hook.sh honours
-// DEFENSECLAW_FAIL_MODE=closed at the shell layer.
+// SupportsFailClosed=true: claude-code-hook.sh blocks a failed call when
+// its installed fail mode is closed.
 func (c *ClaudeCodeConnector) HookCapabilities(opts SetupOpts) HookCapability {
 	return HookCapability{
 		CanBlock:     true,

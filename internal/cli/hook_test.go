@@ -105,6 +105,7 @@ func TestBuildHookOptionsEnvWiring(t *testing.T) {
 	t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "yes")
 	t.Setenv("DEFENSECLAW_FAIL_MODE", "closed")
 	t.Setenv("DEFENSECLAW_TRACEPARENT", "tp-value")
+	writeHookSidecarForTest(t, home, "DEFENSECLAW_FAIL_MODE=closed\n")
 
 	opts := buildHookOptions("codex", "PreToolUse", "127.0.0.1:9999", "open")
 
@@ -120,8 +121,10 @@ func TestBuildHookOptionsEnvWiring(t *testing.T) {
 	if !opts.StrictAvailability {
 		t.Error("strict availability not parsed from env")
 	}
-	if opts.FailMode != "closed" {
-		t.Errorf("fail mode = %q, want env override 'closed'", opts.FailMode)
+	// The registered --fail-mode open is the installed mode: the
+	// environment's closed is not read (1.0.4 lead directive).
+	if opts.FailMode != "open" {
+		t.Errorf("fail mode = %q, want the flag's 'open'", opts.FailMode)
 	}
 	if opts.TraceParent != "tp-value" {
 		t.Errorf("traceparent = %q", opts.TraceParent)
@@ -217,18 +220,21 @@ func TestBuildHookOptionsFlagAndEnvBeatSidecar(t *testing.T) {
 		t.Error("pre-run failure: env 'open' reopened a closed kiro hook")
 	}
 
-	// It can tighten an installed open mode.
-	writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:12345","fail_modes":{"codex":"open"},"fail_mode_sources":{"codex":"config"}}`)
-	t.Setenv("DEFENSECLAW_FAIL_MODE", "")
-	if opts = buildHookOptions("codex", "", "", ""); opts.FailMode != "open" {
-		t.Errorf("fail mode = %q, want the sidecar's open", opts.FailMode)
-	}
-	t.Setenv("DEFENSECLAW_FAIL_MODE", " Closed ")
-	if opts = buildHookOptions("codex", "", "", ""); opts.FailMode != "closed" {
-		t.Errorf("fail mode = %q, want env 'closed' to tighten the sidecar's open", opts.FailMode)
-	}
-	if opts = buildHookOptions("codex", "", "", "open"); opts.FailMode != "closed" {
-		t.Errorf("fail mode = %q, want env 'closed' to tighten --fail-mode open", opts.FailMode)
+	// Nor close an installed open mode: the installed state is the only
+	// input (1.0.4 lead directive), so status, which reads the same sidecar,
+	// reports what the hook does.
+	writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:12345","fail_modes":{"codex":"open","kiro":"open"},"fail_mode_sources":{"codex":"config","kiro":"config"}}`)
+	for _, env := range []string{"", " Closed ", "closed", "CLOSED"} {
+		t.Setenv("DEFENSECLAW_FAIL_MODE", env)
+		if opts = buildHookOptions("codex", "", "", ""); opts.FailMode != "open" {
+			t.Errorf("env %q: fail mode = %q, want the sidecar's open", env, opts.FailMode)
+		}
+		if opts = buildHookOptions("codex", "", "", "open"); opts.FailMode != "open" {
+			t.Errorf("env %q: fail mode = %q, want --fail-mode open", env, opts.FailMode)
+		}
+		if hookPreRunFailsClosed(hookFailureContext{connector: "kiro"}) {
+			t.Errorf("env %q: pre-run failure closed an open kiro hook", env)
+		}
 	}
 
 	// Upgrade path: the 0.8.x and 1.0.2 sidecar shapes keep the open mode
@@ -302,6 +308,24 @@ func TestReadHookSidecarMalformedConnectorMapResolvesClosed(t *testing.T) {
 		// An open no config chose (w3-g3-upg) is closed.
 		{"own-entry-open-unsourced", `{"version":2,"fail_modes":{"codex":"open"},"legacy_fail_mode":"closed"}`, "closed"},
 		{"own-entry-closed", `{"version":2,"fail_modes":{"codex":"closed"},"legacy_fail_mode":"open"}`, "closed"},
+		// 1.0.4 lead directive: JSON that does not parse, or is not a v2
+		// sidecar, is malformed state and closed; it is never read as
+		// KEY=value lines, where a stray line would otherwise open it.
+		{"unparseable-json-with-a-flat-open-line", "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"}\nDEFENSECLAW_FAIL_MODE=open\n", "closed"},
+		{"brace-then-flat-open-line", "  {\nDEFENSECLAW_FAIL_MODE=open\n", "closed"},
+		{"version-1", `{"version":1,"fail_modes":{"codex":"open"},"legacy_fail_mode":"open"}`, "closed"},
+		{"version-string", `{"version":"2","fail_modes":{"codex":"open"}}`, "closed"},
+		{"version-fraction", `{"version":2.5,"fail_modes":{"codex":"open"}}`, "closed"},
+		{"no-version", `{"fail_modes":{"codex":"open"}}`, "closed"},
+		{"array", `["DEFENSECLAW_FAIL_MODE=open"]`, "closed"},
+		{"scalar", `"open"`, "closed"},
+		{"empty-file", "", "closed"},
+		// Controls: the 0.8.x KEY=value sidecar keeps the persisted open.
+		// A flat open with no config source is an earlier release's mode,
+		// which may be an unset mode it resolved open: closed unless the
+		// config sets open (g3-upg, hookSidecarFailMode).
+		{"flat-open-without-a-config-source", "DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970\nDEFENSECLAW_FAIL_MODE=open\n", "closed"},
+		{"flat-scoped-closed", "DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE_CODEX=closed\n", "closed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), ".hookcfg")
@@ -313,6 +337,11 @@ func TestReadHookSidecarMalformedConnectorMapResolvesClosed(t *testing.T) {
 			}
 		})
 	}
+	t.Run("missing-file", func(t *testing.T) {
+		if got := nativeHookFailMode(hookSidecarFailMode(readHookSidecar(filepath.Join(t.TempDir(), ".hookcfg")), "codex", t.TempDir())); got != "closed" {
+			t.Fatalf("fail mode %q, want closed", got)
+		}
+	})
 }
 
 func TestBuildHookOptionsRejectsNonLoopbackAddr(t *testing.T) {
