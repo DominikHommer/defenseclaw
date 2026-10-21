@@ -50,6 +50,49 @@ func TestBundleInboxGivesLowerVersionsASupersededReceipt(t *testing.T) {
 	}
 }
 
+// One run processes at most maxInboxFiles inbox files, in file-name order;
+// the rest stay for the next run, which applies them. The apply help states
+// the bound, so it must match the constant.
+func TestBundleInboxProcessesAtMostMaxInboxFilesARun(t *testing.T) {
+	b := newBundleHost(t)
+	v1, _, _ := bundleConfigs(b.testHost)
+	requireOK(t, b.apply(b.dir(1, v1)))
+	// File i holds version i+2, so the file left over holds the top version.
+	for i := 0; i <= maxInboxFiles; i++ {
+		var buf bytes.Buffer
+		if err := enterprisebundle.WriteArchive(&buf, b.signed(uint64(i+2), v1+fmt.Sprintf("\n# %d\n", i))); err != nil {
+			t.Fatal(err)
+		}
+		writeRooted(t, filepath.Join(b.env.bundleInboxDir(), fmt.Sprintf("v%02d.dcbundle", i)), buf.String())
+	}
+	left := fmt.Sprintf("v%02d.dcbundle", maxInboxFiles)
+	top := uint64(maxInboxFiles + 2)
+	requireOK(t, b.run(Options{Action: ActionEnsure, BundleInbox: true}))
+	if st := b.state(); st.Current == nil || st.Current.BundleID != bundleID(top-1) {
+		t.Fatalf("first run: state = %+v", st)
+	}
+	if r := b.receipt(bundleID(2)); r.State != enterprisebundle.StateFailed || r.ErrorCode != enterprisebundle.CodeSuperseded {
+		t.Fatalf("first run: lowest version receipt = %+v", r)
+	}
+	if entries, _ := os.ReadDir(b.env.bundleInboxDir()); len(entries) != 1 || entries[0].Name() != left {
+		t.Fatalf("first run: inbox = %v, want only %s", entries, left)
+	}
+	requireOK(t, b.run(Options{Action: ActionEnsure, BundleInbox: true}))
+	if st := b.state(); st.Current == nil || st.Current.BundleID != bundleID(top) {
+		t.Fatalf("second run: state = %+v", st)
+	}
+	if entries, _ := os.ReadDir(b.env.bundleInboxDir()); len(entries) != 0 {
+		t.Fatalf("second run: inbox not emptied: %v", entries)
+	}
+	help, err := os.ReadFile(filepath.Join("..", "cli", "enterprise_bundle_apply.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("at most %d inbox files", maxInboxFiles); !strings.Contains(strings.Join(strings.Fields(string(help)), " "), want) {
+		t.Fatalf("the bundle apply help does not say %q", want)
+	}
+}
+
 // A damaged current version directory does not stop a changing run that
 // gives no config: the installed config is kept, the run reports it, and a
 // new bundle still applies. A --config is still refused.

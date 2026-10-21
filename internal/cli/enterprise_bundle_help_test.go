@@ -17,10 +17,13 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
 // The bundle limits are documented in the command help, not on the public
@@ -31,13 +34,21 @@ func TestEnterpriseBundleHelpNamesTheLimits(t *testing.T) {
 		cmd  *cobra.Command
 		want []string
 	}{
-		{"verify", newEnterpriseBundleVerifyCommand(), []string{"floor_unchecked", "retired or revoked"}},
-		{"status", newEnterpriseBundleStatusCommand(), []string{"gateway_unchecked", "last 20 receipts"}},
-		{"apply", newEnterpriseBundleApplyCommand(), []string{"superseded", "bundle_state_unreadable"}},
+		{"verify", newEnterpriseBundleVerifyCommand(), []string{
+			"floor_unchecked", "already_applied", "On Windows the installed anchors", "not_admin",
+			"revoked key is refused (key_revoked)", "retired key verifies only the confirmed bundle", "(key_expired)",
+		}},
+		{"status", newEnterpriseBundleStatusCommand(), []string{
+			"gateway_unchecked", fmt.Sprintf("last %d receipts", enterprisebundle.MaxReceipts),
+		}},
+		{"apply", newEnterpriseBundleApplyCommand(), []string{
+			"superseded", "bundle_state_unreadable", "On Linux and macOS, --inbox", "Windows has no inbox",
+		}},
 	}
 	for _, c := range cases {
+		long := strings.Join(strings.Fields(c.cmd.Long), " ")
 		for _, w := range c.want {
-			if !strings.Contains(c.cmd.Long, w) {
+			if !strings.Contains(long, w) {
 				t.Errorf("bundle %s help does not mention %q", c.verb, w)
 			}
 		}

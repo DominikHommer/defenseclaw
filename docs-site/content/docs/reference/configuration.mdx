@@ -205,7 +205,7 @@ llm:
 
   azure:
     endpoint: https://my-resource.openai.azure.com
-    api_version: 2024-10-21
+    api_version: "2024-10-21"
     auth_mode: api_key         # api_key | managed_identity
     deployment_aliases: {}     # model -> deployment, populated by --azure-deployment-alias
 
@@ -251,10 +251,10 @@ guardrail:
   mode: action                 # observe | action (default observe)
   scanner_mode: local          # local | remote | both (default both)
   rule_pack: default           # default | strict | permissive, or a guardrail.custom_packs name (guardrail use-pack)
-  custom_packs:                # a pack directory pinned by digest; select it with rule_pack: acme-hardened
-    acme-hardened:
-      path: /etc/acme/defenseclaw/packs/acme-hardened
-      digest: sha256:<64 hex digits>
+  custom_packs: {}             # pack directories pinned by digest; `guardrail use-pack` adds an entry, for example:
+  #   acme-hardened:           # select it with rule_pack: acme-hardened
+  #     path: /etc/acme/defenseclaw/packs/acme-hardened
+  #     digest: sha256:<64 hex digits of the pack files>
   rules:                       # layered on the selected pack in memory; no files are written
     protections: []            # built-in use-case packs, for example database-destruction-protection
     enable: []                 # rule IDs, as the pack spells them (SEC-AWS-KEY, exec.remote_ip_download_execute_same_artifact)

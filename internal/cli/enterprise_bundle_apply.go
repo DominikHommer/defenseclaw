@@ -49,9 +49,11 @@ verify, the version floor and the credentials included), then installed by the
 ensure transaction. The policy in force keeps enforcing until the gateway
 reports the new policy; a failed or interrupted apply keeps or puts back the
 last good bundle. Every apply ends in a receipt (bundle status). A repeated
-apply of the current bundle is a no-op (already_applied). --inbox applies the
-highest version in <etc>/bundles/inbox and removes the processed files; every
-lower inbox version gets a receipt that ends failed with superseded.
+apply of the current bundle is a no-op (already_applied). On Linux and macOS,
+--inbox applies the highest version in <etc>/bundles/inbox and removes the
+files it processed; every lower version it processed gets a receipt that ends
+failed with superseded. One run processes at most 16 inbox files, in file-name
+order; the rest stay for the next run. Windows has no inbox: give --bundle.
 If the current-version directory is damaged, ensure and repair keep the
 installed config, warn bundle_state_unreadable and still repair the host:
 deliver a new signed bundle to replace it.
@@ -81,7 +83,7 @@ Exit codes: 0, 1 (errors[].code names the refusal), 75 busy, 2 usage. With
 	}
 	f := cmd.Flags()
 	f.StringVar(&opts.bundle, "bundle", "", "the .dcbundle file or bundle directory")
-	f.BoolVar(&opts.inbox, "inbox", false, "apply the highest version in the bundle inbox")
+	f.BoolVar(&opts.inbox, "inbox", false, "apply the highest version in the bundle inbox (Linux and macOS)")
 	f.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")
 	f.BoolVar(&opts.deferRestart, "defer-restart", false, "refuse, before anything changes, a bundle whose config change restarts the gateway (restart_deferred, retry exit code)")
 	f.StringVar(&opts.reason, "reason", "bundle", "annotate the run (recorded in the lifecycle result)")

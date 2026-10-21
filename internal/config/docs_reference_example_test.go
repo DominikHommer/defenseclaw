@@ -19,6 +19,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -43,9 +44,22 @@ func TestReferenceConfigurationExampleMatchesSchema(t *testing.T) {
 	if end < 0 {
 		t.Fatalf("the complete example in %s has no closing fence", page)
 	}
-	// The page spells a digest as a placeholder; give it a well-formed value.
-	example := strings.ReplaceAll(body[:end], "sha256:<64 hex digits>", "sha256:"+strings.Repeat("0", 64))
+	// Validate the example exactly as a reader copies it.
+	example := body[:end]
 	if err := ValidateV8SchemaBytes(page, []byte(example+"\n")); err != nil {
 		t.Fatalf("the complete config example does not match the config_version 9 schema: %v", err)
 	}
+	// A placeholder the schema does not catch (a free-form string) would
+	// still break a copied file, so placeholders live only in comments.
+	for n, line := range strings.Split(example, "\n") {
+		if i := strings.Index(line, "#"); i >= 0 {
+			line = line[:i]
+		}
+		if placeholder.MatchString(line) {
+			t.Errorf("line %d of the complete example holds a placeholder outside a comment: %q", n+1, line)
+		}
+	}
 }
+
+// placeholder matches a <name> placeholder such as <64 hex digits>.
+var placeholder = regexp.MustCompile(`<[^<>\s][^<>]*>`)
