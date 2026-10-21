@@ -304,10 +304,46 @@ type windowsBundleRun struct {
 	// gatewayRestarted is set by the config apply path after it actually
 	// restarts the gateway, and is copied into the shared receipt.
 	gatewayRestarted bool
-	unlock           func()
+	// anchorReservation holds room for the change event of TRUSTANCHORS=;
+	// anchorStaged is set while the anchors staged for the bundle wait for
+	// commitAnchors, so a run that ends without committing them records one
+	// refused anchor install (refuseStagedAnchors).
+	anchorReservation *enterprisestatus.ChangeReservation
+	anchorStaged      bool
+	unlock            func()
+}
+
+// refuseStagedAnchors records one refused install, with code, of the trust
+// anchors this run staged and did not commit. It does nothing once they
+// were committed or recorded.
+func (run *windowsBundleRun) refuseStagedAnchors(code string) error {
+	if !run.anchorStaged {
+		return nil
+	}
+	run.anchorStaged = false
+	current, _ := safefile.ReadRegularFileBounded(run.anchorPath, windowsBundleMaxAnchors)
+	return recordWindowsAnchorsFailure(run.layout, run.anchorReservation, code, false, current)
+}
+
+// windowsStagedAnchorsRefusalCode is the code of a bundle run that ended
+// without committing its staged anchors: its first error, else the failure
+// of its receipt, else not_confirmed.
+func windowsStagedAnchorsRefusalCode(result *enterprisestatus.Result, p *enterprisebundle.Prepared) string {
+	if len(result.Errors) > 0 {
+		return result.Errors[0].Code
+	}
+	if p != nil && p.Receipt != nil && p.Receipt.ErrorCode != "" {
+		return string(p.Receipt.ErrorCode)
+	}
+	return string(enterprisebundle.CodeNotConfirmed)
 }
 
 func (run *windowsBundleRun) release() {
+	// A run that returned after prepare without finish installed none of
+	// the anchors it staged.
+	_ = run.refuseStagedAnchors(string(enterprisebundle.CodeInterrupted))
+	run.anchorReservation.Release()
+	run.anchorReservation = nil
 	if run.anchorStage != "" {
 		_ = os.Remove(run.anchorStage)
 		run.anchorStage = ""
@@ -722,13 +758,20 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	// From here a refused TRUSTANCHORS= run records one refused anchor
 	// install, as Linux and macOS do; once the install runs it records its
 	// own outcome.
+	// The same holds for a refusal after the anchors were staged for the
+	// bundle: they are not installed.
 	anchorPath := driver.AnchorsPath
 	anchorRefusalPending := opts.trustAnchors != ""
+	var run *windowsBundleRun
 	refuseAnchors := func(code, message string) (bool, error) {
 		if anchorRefusalPending {
 			anchorRefusalPending = false
+			var reservation *enterprisestatus.ChangeReservation
+			if run != nil {
+				reservation = run.anchorReservation
+			}
 			current, _ := safefile.ReadRegularFileBounded(anchorPath, windowsBundleMaxAnchors)
-			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsAnchorsFailure(layout, code, false, current))
+			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsAnchorsFailure(layout, reservation, code, false, current))
 		}
 		return refuse(code, message)
 	}
@@ -736,7 +779,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	if err != nil {
 		return refuseAnchors("lifecycle_busy", err.Error())
 	}
-	run := &windowsBundleRun{ctx: ctx, layout: layout, driver: driver, unlock: unlock}
+	run = &windowsBundleRun{ctx: ctx, layout: layout, driver: driver, unlock: unlock}
 	opts.bundle = run
 	// Prepare owns the lock until it hands the run to the lifecycle caller.
 	// A refusal may print a result before returning, but cannot transfer it.
@@ -751,10 +794,13 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	}
 	if opts.trustAnchors != "" {
 		// An install this computer could not audit is not made: the spool
-		// must take its change event before the file is written.
-		if err := windowsChangeSpoolReady(layout); err != nil {
+		// must hold room for its change event before the file is written,
+		// until the event is written.
+		reservation, err := reserveWindowsChange(layout, enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, "")
+		if err != nil {
 			return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot record the trust anchor change: "+err.Error())
 		}
+		run.anchorReservation = reservation
 		if opts.bundlePath != "" {
 			run.anchorPath = anchorPath
 			run.anchorStage = filepath.Join(layout.LifecycleDir, windowsBundleStagedAnchorsName)
@@ -776,14 +822,18 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		if err != nil {
 			code := windowsBundleCode(err, enterprisebundle.CodeAnchorInsecure)
 			current, _ := safefile.ReadRegularFileBounded(anchorPath, windowsBundleMaxAnchors)
-			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsAnchorsFailure(layout, string(code), code == enterprisebundle.CodeStateInvalid, current))
+			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsAnchorsFailure(layout, run.anchorReservation, string(code), code == enterprisebundle.CodeStateInvalid, current))
 			return refuse(string(code), "the trust anchors were not installed: "+err.Error())
 		}
 		if run.anchorOnly != nil {
 			run.anchorOnly.installed = installed
-			if err := recordWindowsAnchorsChange(layout, run.anchorOnly); err != nil {
+			if err := recordWindowsAnchorsChange(layout, run.anchorReservation, run.anchorOnly); err != nil {
 				run.warnings = append(run.warnings, changeUnrecordedWarning(err))
 			}
+		} else {
+			// Staged for the bundle: until finish commits them, a refusal
+			// of this run records one refused anchor install.
+			anchorRefusalPending = true
 		}
 	}
 	if opts.bundlePath == "" {
@@ -792,7 +842,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	}
 	installed, readConfigErr := readBoundedConfigFile(layout.ConfigPath, windowsBundleMaxConfig)
 	if readConfigErr != nil && !errors.Is(readConfigErr, fs.ErrNotExist) {
-		return refuse(string(enterprisebundle.CodeStateInvalid), "cannot read the enforced config: "+readConfigErr.Error())
+		return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot read the enforced config: "+readConfigErr.Error())
 	}
 	run.previous = installed
 	run.previousGeneration, _ = configwrite.ReadGenerationState(layout.ConfigPath)
@@ -804,7 +854,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	driver.DeliveryID = opts.bundleDeliveryID
 	report, rollback, err := driver.SettleRun(installed, windowsBundlePolicy(ctx))
 	if err != nil {
-		return refuse(string(enterprisebundle.CodeStateInvalid), "cannot settle the earlier bundle receipts: "+err.Error())
+		return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot settle the earlier bundle receipts: "+err.Error())
 	}
 	if len(report.Interrupted) > 0 {
 		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: string(enterprisebundle.CodeInterrupted),
@@ -825,16 +875,18 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		run.warnings = append(run.warnings, prepared.Warnings...)
 	}
 	if err != nil {
-		return refuse(string(windowsBundleCode(err, enterprisebundle.CodeApplyFailed)), windowsBundleNotApplied(prepared, err.Error(), windowsBundleHasCurrent(driver.Store)))
+		return refuseAnchors(string(windowsBundleCode(err, enterprisebundle.CodeApplyFailed)), windowsBundleNotApplied(prepared, err.Error(), windowsBundleHasCurrent(driver.Store)))
 	}
 	path := filepath.Join(layout.LifecycleDir, windowsBundleConfigName)
 	if err := writeWindowsBundleAdminFile(path, prepared.Config); err != nil {
 		if prepared.Receipt != nil {
 			_ = driver.Store.Fail(prepared.Receipt, enterprisebundle.CodeApplyFailed, "cannot write the rendered bundle config")
 		}
-		return refuse(string(enterprisebundle.CodeApplyFailed), "cannot write the rendered bundle config: "+err.Error())
+		return refuseAnchors(string(enterprisebundle.CodeApplyFailed), "cannot write the rendered bundle config: "+err.Error())
 	}
 	opts.configPath = path
+	// finish (or release) records the staged anchors from here.
+	run.anchorStaged = anchorRefusalPending
 	handedOff = true
 	return false, nil
 }
@@ -1098,6 +1150,10 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 	if p != nil && p.AlreadyApplied && len(result.Errors) == 0 && run.anchorStage != "" {
 		run.commitAnchors(result)
 	}
+	if err := run.refuseStagedAnchors(windowsStagedAnchorsRefusalCode(result, p)); err != nil {
+		warning := changeUnrecordedWarning(err)
+		result.AddWarning(warning.Code, warning.Message)
+	}
 	var receipt *enterprisebundle.Receipt
 	if p != nil {
 		receipt = p.Receipt
@@ -1128,6 +1184,7 @@ func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions ent
 // records what it installed for the result; a failed commit puts the
 // previous anchors back and fails the run.
 func (run *windowsBundleRun) commitAnchors(result *enterprisestatus.Result) {
+	run.anchorStaged = false // The commit records its own outcome.
 	installed, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath)
 	if err != nil {
 		result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
@@ -1137,14 +1194,14 @@ func (run *windowsBundleRun) commitAnchors(result *enterprisestatus.Result) {
 			code = "anchor_restore_failed"
 		}
 		current, _ := safefile.ReadRegularFileBounded(run.anchorPath, windowsBundleMaxAnchors)
-		if err := recordWindowsAnchorsFailure(run.layout, code, true, current); err != nil {
+		if err := recordWindowsAnchorsFailure(run.layout, run.anchorReservation, code, true, current); err != nil {
 			warning := changeUnrecordedWarning(err)
 			result.AddWarning(warning.Code, warning.Message)
 		}
 		return
 	}
 	run.anchorCommit = &anchorOnlyChange{path: run.anchorPath, existed: run.anchorExisted, previous: run.anchorPrevious, installed: installed}
-	if err := recordWindowsAnchorsChange(run.layout, run.anchorCommit); err != nil {
+	if err := recordWindowsAnchorsChange(run.layout, run.anchorReservation, run.anchorCommit); err != nil {
 		warning := changeUnrecordedWarning(err)
 		result.AddWarning(warning.Code, warning.Message)
 	}

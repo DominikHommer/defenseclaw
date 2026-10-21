@@ -149,9 +149,7 @@ func TestInstallBundleAnchorsRefusedWhenTheChangeCannotBeRecorded(t *testing.T) 
 	b, dest := newAnchorsHost(t)
 	b.accounts.accounts[b.env.Layout.ServiceUser] = Account{Name: b.env.Layout.ServiceUser, UID: 991, GID: 988}
 	spool := b.env.P(enterprisestatus.ChangeEventsDir(b.env.Layout.ConfigDir))
-	if err := b.env.ChangeSpoolReady(); err != nil {
-		t.Fatal(err)
-	}
+	prepareChangeSpool(t, b.env)
 	if got := b.owners[spool]; got != [2]int{0, 988} {
 		t.Fatalf("spool owner = %v, want root with the service group", got)
 	}
@@ -190,10 +188,78 @@ func TestChangeSpoolKeepsItsGroupBeforeTheServiceAccountExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	gid := int(info.Sys().(*syscall.Stat_t).Gid)
-	if err := b.env.ChangeSpoolReady(); err != nil {
-		t.Fatal(err)
-	}
+	prepareChangeSpool(t, b.env)
 	if got := b.owners[spool]; got != [2]int{0, gid} {
 		t.Fatalf("spool owner = %v, want root with the folder's group %d", got, gid)
+	}
+}
+
+// prepareChangeSpool creates the change spool as a command does when it
+// reserves room for a change, and gives the room back.
+func prepareChangeSpool(t *testing.T, env *Env) {
+	t.Helper()
+	reservation, err := env.ReserveChange(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation.Release()
+}
+
+// fillChangeSpool leaves n unreported change events in the spool.
+func fillChangeSpool(t *testing.T, dir string, n int) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < n; i++ {
+		ev, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall,
+			enterprisestatus.ChangeApplied, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ev.EventID+".json"), []byte("{}\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// pendingChangeEventLimit is enterprisestatus.maxPendingChangeEvents.
+const pendingChangeEventLimit = 4096
+
+// While another change holds the last place in the spool (a credential
+// command between its check and its event), an anchor install is refused
+// before the file is written, and the other change still records its
+// event. Without reservations both passed the check and the second change
+// was made with no room left for its event.
+func TestInstallBundleAnchorsRefusedWhileAnotherChangeHoldsTheLastPlace(t *testing.T) {
+	b, dest := newAnchorsHost(t)
+	spool := b.env.P(enterprisestatus.ChangeEventsDir(b.env.Layout.ConfigDir))
+	fillChangeSpool(t, spool, pendingChangeEventLimit-1)
+	held, err := b.env.ReserveChange(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet, "splunk-hec-token")
+	if err != nil {
+		t.Fatalf("reserve the last place: %v", err)
+	}
+	defer held.Release()
+	before := readFile(t, dest)
+	src, base := agentAnchors(t, anchorsDoc(t, b, "k1:active", "k9:active"))
+	b.env.Trust = modeTrust(base, b.env.Root)
+	_, err = b.env.InstallBundleAnchors(context.Background(), src)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeStateInvalid || !strings.Contains(err.Error(), "cannot record the trust anchor change") {
+		t.Fatalf("install with no room left: %v", err)
+	}
+	if readFile(t, dest) != before {
+		t.Fatal("the anchor file was written with no room left for its change event")
+	}
+	applied, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet,
+		enterprisestatus.ChangeApplied, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied.SecretName = "splunk-hec-token"
+	if err := held.Write(applied); err != nil {
+		t.Fatalf("the change that held the place could not record its event: %v", err)
+	}
+	if got := len(enterprisestatus.ListChangeEventIDs(spool)); got != pendingChangeEventLimit {
+		t.Fatalf("spool holds %d events, want %d", got, pendingChangeEventLimit)
 	}
 }

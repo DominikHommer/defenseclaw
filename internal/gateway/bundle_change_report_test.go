@@ -36,7 +36,7 @@ func writeTestChangeEvent(t *testing.T, dir string, kind, action, outcome, code 
 	if edit != nil {
 		edit(&ev)
 	}
-	if err := (enterprisestatus.ChangeSpool{Dir: dir}).Write(ev); err != nil {
+	if err := (enterprisestatus.ChangeSpool{Dir: dir, StateDir: t.TempDir()}).Write(ev); err != nil {
 		t.Fatal(err)
 	}
 	return ev

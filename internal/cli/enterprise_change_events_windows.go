@@ -29,8 +29,9 @@ import (
 // windowsChangeSpool is the change spool <ConfigDir>\bundles\change-events
 // of layout (the layout the command changes) with the bundle version
 // descriptors: SYSTEM and Administrators full control, the gateway service
-// read, no standard user. An event the gateway marked reported under
-// <DataDir> may be removed. A test replaces it.
+// read, no standard user. Its lock and reservations live in the
+// Administrators-only lifecycle directory. An event the gateway marked
+// reported under <DataDir> may be removed. A test replaces it.
 var windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
 	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)
 	if err != nil {
@@ -38,6 +39,7 @@ var windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus
 	}
 	return enterprisestatus.ChangeSpool{
 		Dir:      enterprisestatus.ChangeEventsDir(layout.ConfigDir),
+		StateDir: layout.LifecycleDir,
 		Reported: func(id string) bool { return enterprisestatus.ChangeReported(layout.DataDir, id) },
 		Prepare: func(dir string) error {
 			return createWindowsBundleDirectory(dir, windowsBundleVersionSDDL(service.String(), true))
@@ -48,13 +50,30 @@ var windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus
 	}, nil
 }
 
-// recordWindowsChange writes one change event. Only an elevated caller
-// records; any other records nothing and reports no error. A command calls
-// windowsChangeSpoolReady before it changes anything and reports a failure
-// here as change_unrecorded.
-func recordWindowsChange(layout managed.StandaloneLayout, ev enterprisestatus.ChangeEvent) error {
+// reserveWindowsChange reserves room in the change spool for the event of
+// a change about to be made (enterprisestatus.ChangeSpool.Reserve). A
+// caller that is not elevated records nothing and gets no reservation.
+func reserveWindowsChange(layout managed.StandaloneLayout, kind, action, name string) (*enterprisestatus.ChangeReservation, error) {
+	if !windowsSecretIsElevated() {
+		return nil, nil
+	}
+	spool, err := windowsChangeSpool(layout)
+	if err != nil {
+		return nil, err
+	}
+	return spool.Reserve(kind, action, name)
+}
+
+// recordWindowsChange writes one change event: through reservation when
+// the command reserved room for its change, else (a refusal) straight
+// into the spool. Only an elevated caller records; any other records
+// nothing and reports no error. A failure is reported as change_unrecorded.
+func recordWindowsChange(layout managed.StandaloneLayout, reservation *enterprisestatus.ChangeReservation, ev enterprisestatus.ChangeEvent) error {
 	if !windowsSecretIsElevated() {
 		return nil
+	}
+	if reservation != nil {
+		return reservation.Write(ev)
 	}
 	spool, err := windowsChangeSpool(layout)
 	if err != nil {
@@ -63,21 +82,8 @@ func recordWindowsChange(layout managed.StandaloneLayout, ev enterprisestatus.Ch
 	return spool.Write(ev)
 }
 
-// windowsChangeSpoolReady checks that the change spool can take the event
-// of a change about to be made (enterprisestatus.ChangeSpool.Ready).
-func windowsChangeSpoolReady(layout managed.StandaloneLayout) error {
-	if !windowsSecretIsElevated() {
-		return nil
-	}
-	spool, err := windowsChangeSpool(layout)
-	if err != nil {
-		return err
-	}
-	return spool.Ready()
-}
-
 // recordWindowsAnchorsChange records an anchor file a run installed.
-func recordWindowsAnchorsChange(layout managed.StandaloneLayout, change *anchorOnlyChange) error {
+func recordWindowsAnchorsChange(layout managed.StandaloneLayout, reservation *enterprisestatus.ChangeReservation, change *anchorOnlyChange) error {
 	if change == nil {
 		return nil
 	}
@@ -86,16 +92,16 @@ func recordWindowsAnchorsChange(layout managed.StandaloneLayout, change *anchorO
 		previous = nil
 	}
 	if ev, ok := anchorsChangeEvent(previous, change.installed); ok {
-		return recordWindowsChange(layout, ev)
+		return recordWindowsChange(layout, reservation, ev)
 	}
 	return nil
 }
 
 // recordWindowsAnchorsFailure records a refused or failed anchor install;
 // installed is the file still installed (nil: none).
-func recordWindowsAnchorsFailure(layout managed.StandaloneLayout, code string, failed bool, installed []byte) error {
+func recordWindowsAnchorsFailure(layout managed.StandaloneLayout, reservation *enterprisestatus.ChangeReservation, code string, failed bool, installed []byte) error {
 	if ev, ok := anchorsFailureEvent(code, failed, installed); ok {
-		return recordWindowsChange(layout, ev)
+		return recordWindowsChange(layout, reservation, ev)
 	}
 	return nil
 }

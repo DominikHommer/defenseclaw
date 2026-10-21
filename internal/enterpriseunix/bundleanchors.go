@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -75,14 +76,18 @@ type AnchorsInstall struct {
 // lifecycle_busy and state_invalid; nothing is written for any of them but
 // anchor_restore_failed.
 func (e *Env) InstallBundleAnchors(ctx context.Context, src string) (*AnchorsInstall, error) {
-	out, err := e.installBundleAnchors(ctx, src)
-	if recordErr := e.recordAnchorsChange(out, err); recordErr != nil && out != nil {
+	var reservation *enterprisestatus.ChangeReservation
+	defer func() { reservation.Release() }()
+	out, err := e.installBundleAnchors(ctx, src, &reservation)
+	if recordErr := e.recordAnchorsChange(reservation, out, err); recordErr != nil && out != nil {
 		out.Unrecorded = recordErr
 	}
 	return out, err
 }
 
-func (e *Env) installBundleAnchors(ctx context.Context, src string) (*AnchorsInstall, error) {
+// installBundleAnchors sets *reservation once it reserved room for the
+// change event, before the file is written.
+func (e *Env) installBundleAnchors(ctx context.Context, src string, reservation **enterprisestatus.ChangeReservation) (*AnchorsInstall, error) {
 	dest := e.bundleAnchorsPath()
 	out := &AnchorsInstall{Path: filepath.Join(e.Layout.ConfigDir, "trust", enterprisebundle.AnchorsName)}
 	attempted := false
@@ -139,10 +144,13 @@ func (e *Env) installBundleAnchors(ctx context.Context, src string) (*AnchorsIns
 		return refuse(enterprisebundle.CodeStateInvalid, "prepare the trust anchor folder: %v", err)
 	}
 	// An install this device could not audit is not made: the spool must
-	// take its change event before the file is written.
-	if err := e.ChangeSpoolReady(); err != nil {
+	// hold room for its change event before the file is written, until the
+	// event is written.
+	reserved, err := e.ReserveChange(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, "")
+	if err != nil {
 		return refuse(enterprisebundle.CodeStateInvalid, "cannot record the trust anchor change: %v", err)
 	}
+	*reservation = reserved
 	if previous != nil {
 		if old, err := enterprisebundle.DecodeAnchors(previous); err == nil {
 			for _, key := range old.Keys {

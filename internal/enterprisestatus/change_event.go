@@ -256,47 +256,53 @@ func ChangedKeyIDs(previous, next []string) (added, removed []string) {
 // gateway has reported (ChangeReported); nil counts none as reported.
 // Prepare creates (or repairs) the spool directory with its owner and
 // access, and Publish sets the owner and access of one written file; both
-// are platform hooks. A nil hook does nothing.
+// are platform hooks. A nil hook does nothing. StateDir is the existing
+// root-only (Windows: SYSTEM and Administrators) lifecycle directory that
+// holds the spool lock and the reservations of changes in progress
+// (Reserve).
 type ChangeSpool struct {
 	Dir      string
+	StateDir string
 	Reported func(id string) bool
 	Prepare  func(dir string) error
 	Publish  func(path string) error
 }
 
-// Ready prepares the spool directory, removes the oldest reported events
-// beyond maxReportedChangeEvents and checks that one more event fits. A
-// command calls it before it changes anything, so a change it could not
-// record is refused rather than made unaudited.
-func (s ChangeSpool) Ready() error {
-	if s.Prepare != nil {
-		if err := s.Prepare(s.Dir); err != nil {
-			return err
-		}
-	} else if err := os.MkdirAll(s.Dir, 0o750); err != nil {
-		return err
-	}
-	info, err := os.Lstat(s.Dir)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("change events directory is not a regular directory: %s", s.Dir)
-	}
-	return s.prune()
-}
-
-// Write validates ev and writes it as <Dir>/<event_id>.json (Ready first).
+// Write validates ev and writes it as <Dir>/<event_id>.json when the spool
+// has room for one more event beside the reservations held. It is for an
+// event no reservation holds room for: a refusal, which changed nothing. A
+// change reserves its room before it is made (Reserve).
 func (s ChangeSpool) Write(ev ChangeEvent) error {
-	if err := ev.Validate(); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(ev, "", "  ")
+	data, err := marshalChangeEvent(ev)
 	if err != nil {
 		return err
 	}
-	if err := s.Ready(); err != nil {
+	unlock, err := s.lock()
+	if err != nil {
 		return err
 	}
-	path := filepath.Join(s.Dir, ev.EventID+".json")
-	if err := configwrite.WriteFileDurable(path, append(data, '\n'), 0o640); err != nil {
+	defer unlock()
+	if err := s.ready(); err != nil {
+		return err
+	}
+	return s.writeEvent(ev.EventID, data)
+}
+
+func marshalChangeEvent(ev ChangeEvent) ([]byte, error) {
+	if err := ev.Validate(); err != nil {
+		return nil, err
+	}
+	data, err := json.MarshalIndent(ev, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+// writeEvent writes one validated event durably and publishes it.
+func (s ChangeSpool) writeEvent(id string, data []byte) error {
+	path := filepath.Join(s.Dir, id+".json")
+	if err := configwrite.WriteFileDurable(path, data, 0o640); err != nil {
 		return err
 	}
 	if s.Publish != nil {
@@ -308,12 +314,35 @@ func (s ChangeSpool) Write(ev ChangeEvent) error {
 	return nil
 }
 
+// ready prepares the spool directory, moves the event of every reservation
+// whose command ended into the spool, removes the oldest reported events
+// beyond maxReportedChangeEvents and checks that one more event fits beside
+// the reservations still held. The caller holds the spool lock.
+func (s ChangeSpool) ready() error {
+	if s.Prepare != nil {
+		if err := s.Prepare(s.Dir); err != nil {
+			return err
+		}
+	} else if err := os.MkdirAll(s.Dir, 0o750); err != nil {
+		return err
+	}
+	info, err := os.Lstat(s.Dir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("change events directory is not a regular directory: %s", s.Dir)
+	}
+	held, err := s.settleReservations()
+	if err != nil {
+		return err
+	}
+	return s.prune(held)
+}
+
 // prune makes room for one more event: it removes the oldest reported
 // events while the spool holds maxReportedChangeEvents or more, and never
 // an event the gateway has not reported. It returns ErrChangeSpoolFull when
-// maxPendingChangeEvents events wait to be reported. The ids are ULIDs, so
-// name order is time order.
-func (s ChangeSpool) prune() error {
+// the unreported events and the held reservations reach
+// maxPendingChangeEvents. The ids are ULIDs, so name order is time order.
+func (s ChangeSpool) prune(held int) error {
 	ids := ListChangeEventIDs(s.Dir)
 	var reported []string
 	pending := 0
@@ -328,7 +357,7 @@ func (s ChangeSpool) prune() error {
 		_ = os.Remove(filepath.Join(s.Dir, reported[0]+".json"))
 		reported = reported[1:]
 	}
-	if pending >= maxPendingChangeEvents {
+	if pending+held >= maxPendingChangeEvents {
 		return ErrChangeSpoolFull
 	}
 	return nil
