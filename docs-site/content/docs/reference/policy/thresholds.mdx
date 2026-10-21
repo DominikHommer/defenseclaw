@@ -156,9 +156,9 @@ $ defenseclaw config get guardrail.block_at --effective            # block_at: H
 HIGH
 $ defenseclaw config get guardrail.connectors.codex.block_at --effective   # codex sets its own
 (source: config:guardrail.connectors.codex.block_at)
-HIGH
-$ defenseclaw config get guardrail.alert_at --effective            # alert_at not set anywhere
-(source: pack-default:default)
+CRITICAL
+$ defenseclaw config get guardrail.alert_at --effective            # global alert_at: MEDIUM
+(source: config:guardrail.alert_at)
 MEDIUM
 ```
 
@@ -172,10 +172,10 @@ defenseclaw guardrail profile explain --connector codex
 Guardrail profile resolution
 profile: contractors
 match:   connector
-applies (codex): mode=action block_at=MEDIUM alert_at=pack hilt=off rule_pack=...
+applies (codex): mode=action block_at=HIGH alert_at=LOW hilt=off rule_pack=...
 ```
 
-`alert_at=pack` means the profile sets no alert level, so the rule pack's default applies. Add `--user alice` to resolve a specific user. Two more views:
+The profile's connector sets `HIGH`, and its profile sets `alert_at: LOW`. Add `--user alice` to resolve a specific user. Two more views:
 
 ```bash
 defenseclaw guardrail status
