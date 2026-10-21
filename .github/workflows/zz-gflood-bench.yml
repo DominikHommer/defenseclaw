@@ -9,13 +9,19 @@ permissions:
   contents: read
 
 jobs:
-  sync:
+  probe:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        include:
+          - { os: windows-latest, v: A-hold800, holdmax: "", settle: "", settled: "", nosync: "" }
+          - { os: windows-latest, v: B-hold800-settle8, holdmax: "", settle: "8", settled: "50", nosync: "" }
+          - { os: windows-latest, v: C-ckpt-nosync, holdmax: "", settle: "", settled: "", nosync: "1" }
+          - { os: windows-latest, v: E-hold1500-settle8, holdmax: "1500", settle: "8", settled: "50", nosync: "" }
+          - { os: ubuntu-latest, v: A-linux, holdmax: "", settle: "", settled: "", nosync: "" }
+    name: probe ${{ matrix.os }} ${{ matrix.v }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -24,9 +30,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: sync cost
+      - name: probe
         shell: bash
         env:
-          GFLOOD_SYNC: "1"
+          DEFENSECLAW_HOOK_FLOOD_PROBE: "1"
+          DEFENSECLAW_HOOK_FLOOD_CALLS: "6000"
+          GFLOOD_HOLDMAX_MS: ${{ matrix.holdmax }}
+          GFLOOD_SETTLE: ${{ matrix.settle }}
+          GFLOOD_SETTLED_MS: ${{ matrix.settled }}
+          GFLOOD_CKPT_NOSYNC: ${{ matrix.nosync }}
         run: |
-          go test -count=1 -run '^TestGFlood(SyncCost|FlushViewCost)$' -v ./internal/audit/ 2>&1 | grep -E "sync|flush|Flush|ok|FAIL|PASS|panic|Error"
+          nproc 2>/dev/null || echo "$NUMBER_OF_PROCESSORS"
+          go test -count=1 -timeout 45m -run '^TestHookFloodProbe$' -v ./internal/gateway/ 2>&1 | grep -E "minute|WAL|PASS|FAIL|sent|drained|flat|ok " || true

@@ -25,7 +25,7 @@ const (
 	auditWALLimitBytes = 256 << 20
 	// auditWALWriterBudget bounds the idle-gap trim, the only statement a pass
 	// runs on the audit store's writer connection (the catch-up copy holds it
-	// for at most 100 ms). Hooks need that connection for correlation and their
+	// for at most 100 ms, on Windows at most 800 ms: audit.walCatchUpHold). Hooks need that connection for correlation and their
 	// verdict records, so never let maintenance consume a hook's budget.
 	auditWALWriterBudget = 200 * time.Millisecond
 	// auditWALCopyTimeout bounds the copy on the dedicated checkpoint
@@ -92,9 +92,11 @@ func auditWALGuardPass(ctx context.Context, store auditWALCheckpointer, alarm *a
 	// interrupted while SQLite syncs or truncates a file, so its real hold can
 	// be longer than the budget. Hooks waited this long for their audit
 	// records (rel-1-0-3 GAP-0288).
-	if pass.WriterHeld > auditWALWriterBudget {
+	// A Windows catch-up may hold it past the budget by design, up to the
+	// limit it reports (WriterLimit, under a second).
+	if budget := max(auditWALWriterBudget, pass.WriterLimit); pass.WriterHeld > budget {
 		fmt.Fprintf(log, "[sidecar] audit WAL checkpoint held the audit writer for %s (budget %s)\n",
-			pass.WriterHeld.Round(time.Millisecond), auditWALWriterBudget)
+			pass.WriterHeld.Round(time.Millisecond), budget)
 	}
 	if line := alarm.observe(now, pass.FileBytes); line != "" {
 		fmt.Fprintln(log, line)

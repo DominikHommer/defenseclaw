@@ -118,6 +118,7 @@ func (s *Store) checkpointConn() (*sql.DB, error) {
 			_ = db.Close()
 			return nil, fmt.Errorf("audit: revalidate database paths for checkpoint connection: %w", err)
 		}
+		gfloodCheckpointNoSync(db)
 		s.checkpointDB = db
 	}
 	return s.checkpointDB, nil
