@@ -35,6 +35,29 @@ def _dashboard(name: str) -> dict:
 def _panel(dashboard: dict, title: str) -> dict:
     return next(panel for panel in dashboard["panels"] if panel.get("title") == title)
 
+def test_ide_plugins_per_user_table_keeps_hosts_apart() -> None:
+    # GAP-1282: user IDs are host-local, so two hosts' alice (uid 1000) with
+    # the same plugin must stay two rows, with the host shown.
+    panel = _panel(_dashboard("defenseclaw-ai-discovery.json"), "IDE plugins per user (records in range)")
+    expr = panel["targets"][0]["expr"]
+    grouping = re.search(r"sum by \(([^)]*)\)", expr)
+    assert grouping is not None and "host_name" in [label.strip() for label in grouping.group(1).split(",")]
+    organize = next(step for step in panel["transformations"] if step["id"] == "organize")["options"]
+    assert organize["indexByName"]["host_name"] == 0
+    assert organize["renameByName"]["host_name"] == "Host"
+
+
+@pytest.mark.parametrize(
+    "name", ["defenseclaw-identity.json", "defenseclaw-agent-identity.json", "defenseclaw-hitl.json"]
+)
+def test_static_connector_pickers_offer_kiro(name: str) -> None:
+    # GAP-1148: Kiro is a supported connector, so every static Connector
+    # picker offers it in both its query and its option list.
+    variable = next(v for v in _dashboard(name)["templating"]["list"] if v["name"] == "connector")
+    assert "kiro" in [value.strip() for value in variable["query"].split(",")]
+    assert "kiro" in [option["value"] for option in variable["options"]]
+
+
 
 def test_kernel_denials_table_shows_verified_name_with_uid_fallback() -> None:
     dashboard = _dashboard("defenseclaw-blocked-events.json")
