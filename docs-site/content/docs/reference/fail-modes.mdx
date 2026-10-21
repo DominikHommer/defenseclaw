@@ -103,6 +103,8 @@ On a managed Linux or macOS host the hook is the administrator-owned `defensecla
 
 ## Persisted fail mode
 
+These commands are for a per-user install. On a managed standalone computer the administrator sets the mode in the managed config (see the end of this section).
+
 ```bash
 defenseclaw guardrail fail-mode
 defenseclaw guardrail fail-mode closed --connector codex --yes
@@ -126,7 +128,7 @@ Claude Code shows `open` because it has no value of its own; Codex shows `closed
 
 The mode is written to `guardrail.hook_fail_mode` (or the connector's `hook_fail_mode`) in `config.yaml` and baked into the generated hook scripts, each with a `# defenseclaw-derived: sha256=... fail_mode=closed` header. The command restarts the gateway by default to render them again. The key is not a [restart-required key](/docs/reference/cli#restart-required-keys): with `--no-restart` the running gateway still reloads the mode and, with hook self-heal on, renders the scripts itself. `guardrail status` shows configured and runtime values, and `defenseclaw doctor` warns with `stale generated script (... bakes hook fail mode open; config.yaml says closed)` and names the repair.
 
-A connector turned off with `guardrail disable --connector X` has no hooks and no fail mode: `guardrail status` shows `-` in its Fail column and `guardrail fail-mode` lists it as `disabled (no hooks)`. On a managed standalone host the administrator's config sets the value.
+A connector turned off with `guardrail disable --connector X` has no hooks and no fail mode: `guardrail status` shows `-` in its Fail column and `guardrail fail-mode` lists it as `disabled (no hooks)`. On a managed standalone host the administrator sets `guardrail.hook_fail_mode`, or the connector's `hook_fail_mode`, in the managed `config.yaml` and applies it as in [Change the config](/docs/enterprise/lifecycle#change-the-config).
 
 ## Connector response shapes
 
@@ -167,6 +169,23 @@ On Windows, environment keys are case-insensitive; do not define case-variants w
 defenseclaw guardrail status      # configured and runtime fail mode per connector
 defenseclaw guardrail fail-mode   # effective value per connector
 defenseclaw doctor --passive      # no synthetic telemetry, LLM or inspection probes
+```
+
+These commands are for a per-user install. On a managed standalone computer `defenseclaw` offers users only `sandbox` commands (exit 2), `defenseclaw-gateway` is not on their `PATH`, and on native Windows the managed `defenseclaw` has no `guardrail` group and no `version` command. The administrator reads each connector's `effective_hook_fail_mode` from `status --json` or `verify --json`:
+
+```bash title="Linux"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json
+```
+
+```bash title="macOS"
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --json
+```
+
+```powershell title="Windows (elevated)"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone --json
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone --json
 ```
 
 Hook delivery and response failures are recorded in `$DEFENSECLAW_HOME/logs/hook-failures.jsonl` (`%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl` on packaged native Windows). The file is sensitive; do not publish it whole.

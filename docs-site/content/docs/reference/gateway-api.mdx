@@ -1103,7 +1103,7 @@ but never stops the API.
 The gateway checks the `openshell:` block every time it loads the config and
 refuses a config that fails; the error starts with `config: openshell:`. An
 explicit port that is not between 1 and 65535, or both keys set to the same
-port, always fails. When `openshell.enabled` is `true`, the effective ports
+port, always fails. A port of `0` is the same as unset and uses the default in the table. When `openshell.enabled` is `true`, the effective ports
 must also be at most 65535 and differ from `gateway.api_port`,
 `guardrail.port` and each other. On a config reload, turning
 `openshell.enabled` on or off, or moving either port while it is on, restarts

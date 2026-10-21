@@ -551,7 +551,7 @@ order, and requirement states.
 
 One gateway can protect N hook connectors at once (see [Multi-connector](/docs/how-to/guardrail/add-or-remove-an-agent)). That splits the CLI into a few contracts:
 
-- **Read / status / inventory — fan out to all active connectors.** `defenseclaw status`, `defenseclaw doctor`, bare `defenseclaw guardrail status`, the bare `guardrail fail-mode` / `hilt` / `block-message` reads, and the list/status commands (`skill list`, `mcp list`, `plugin list`, `tool list`, `tool status`, `codeguard status`) render every active connector where applicable. Use `--connector X` on commands that expose it to narrow the view.
+- **Read / status / inventory — fan out to all active connectors.** `defenseclaw status`, `defenseclaw doctor`, bare `defenseclaw guardrail status`, the bare `guardrail fail-mode` / `hilt` / `block-message` reads, and the list/status commands (`skill list`, `mcp list`, `plugin list`, `tool list`, `codeguard status`) render every active connector where applicable. `tool status` is not a fan-out read: it needs the tool's `NAME`. Use `--connector X` on commands that expose it to narrow the view.
 - **Mutating guardrail commands — `--connector` means one connector.** `guardrail enable` / `disable` / `fail-mode` / `hilt` / `block-message` change one connector when given `--connector X`. Omit it for the broad path: enable/disable is global, while fail-mode, HITL, and block-message reconcile active connector posture where supported.
 - **Asset policy/config commands — default broad, `--connector` scoped.** `skill`, `mcp`, `plugin`, and `tool` `block`, `allow` and `unblock` write broad fallback entries to `asset_policy` by default and one connector's scoped entries with `--connector X`. Config/install verbs such as `mcp set`, `mcp unset`, `skill install`, `plugin remove`, and `codeguard install` operate across configured/active connectors by default and narrow with `--connector X`.
 - **Scan commands — default to configured/active connectors, narrow with flags.** `skill scan --all`, `mcp scan --all`, `plugin scan --all`, and `aibom scan` cover configured/active connector sources by default; pass a positional target and `--connector X` where supported to scope to one.
@@ -625,7 +625,7 @@ The Python CLI exposes one scan group per asset family — there is no top-level
 
 | Command | Binary | Use it for |
 | --- | --- | --- |
-| `defenseclaw skill scan [target] [--connector X] [--all] [--path] [--remote] [--action]` | `defenseclaw` | Scan a configured skill, a path, a URL (`https://…` / `clawhub://…`), or every configured skill with `--all`. A bare skill name searches matching configured connector copies; `--connector X` narrows. `--all --json` always emits one top-level result array, including per-skill error rows, before returning nonzero for scanner failures; a telemetry-recording warning never discards or fails a completed scan. |
+| `defenseclaw skill scan [target] [--connector X] [--all] [--path DIR] [--remote] [--action]` | `defenseclaw` | Scan a configured skill, a path (`--path DIR`, or the path as `target`; `target` is optional with `--path`), a URL (`https://…` / `clawhub://…`), or every configured skill with `--all`. A bare skill name searches matching configured connector copies; `--connector X` narrows. `--all --json` always emits one top-level result array, including per-skill error rows, before returning nonzero for scanner failures; a telemetry-recording warning never discards or fails a completed scan. |
 | `defenseclaw mcp scan [target] [--connector X] [--all] [--scan-prompts] [--scan-resources] [--scan-instructions]` | `defenseclaw` | Scan one MCP server by name or URL, every configured server with `--all`, or every server on one connector with `--connector X`. |
 | `defenseclaw plugin scan [name_or_path] [--all] [--connector X] [--profile default\|strict] [--use-llm] [--include-self]` | `defenseclaw` | Scan one plugin/extension package, or all discovered plugins with `--all`. `--connector X` narrows discovery or duplicate plugin names to one connector. Exact first-party DefenseClaw package/connector artifacts are excluded by default; `--include-self` opts into scanning them for product development. Ordinary third-party `dist/` trees and plugins merely named `defenseclaw` remain in scope. |
 | `defenseclaw aibom scan [--connector X] [--json] [--summary] [--only <cat>]` | `defenseclaw` | Build the agent SBOM (skills, MCP, plugins, models, sinks) for every active connector by default, or one connector when scoped. `--only` takes a comma-separated list of `skills`, `plugins`, `mcp`, `agents`, `rules`, `tools`, `models`, `memory`, `ide_plugins` (the IDE plugin inventory, read from the gateway); an unknown name exits 2. |
@@ -982,9 +982,20 @@ notice and exits `3`; an administrator checks the device with
 `guardrail ...` writers are also refused on a managed standalone device.
 For example, `guardrail block-at` prints `This device is managed: change
 config.yaml in the admin config (MDM or management plane), not on the device`
-and exits `3`. `policy activate` is refused there too. Read commands
-(`config get`, `config show`, `config validate`, `status`, `doctor`) work
-everywhere.
+and exits `3`. `policy activate` is refused there too. Where the Python CLI is
+installed, `config get`, `config show`, `config validate` and `status` still
+work.
+
+A standard user on a computer with the standalone enterprise package does not
+get the Python CLI. The `defenseclaw` command there offers only `sandbox`
+commands: every other command, readers included (`status`, `doctor`,
+`config get`, `skill list`), prints "This computer is managed; only
+`defenseclaw sandbox` commands are available here." and exits `2`, not `3`.
+`defenseclaw-gateway` is not on that user's `PATH`. The administrator reads and
+checks the computer with `defenseclaw-gateway enterprise ...` by its packaged
+path, as root (`/opt/defenseclaw/bin` on Linux, `/opt/cisco/defenseclaw/bin` on
+macOS), or with `defenseclaw.exe enterprise ...` from an elevated PowerShell on
+Windows.
 
 ## Registries
 
