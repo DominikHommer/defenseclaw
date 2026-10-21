@@ -5,12 +5,61 @@ package gateway
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 )
+
+// GAP-1253: a stop writes the rows still queued and the counts of the windows
+// still open before the refusal audit returns.
+func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) {
+	sid := "S-1-5-21-1111-2222-3333-1042"
+	report := refusalpipe.Report{Connector: "claudecode", Reason: refusalpipe.ReasonSIDUnregistered, Tool: "Bash"}
+	ctx, cancel := context.WithCancel(context.Background())
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var rows []unenrolledRefusalRow
+	write := func(ctx context.Context, row unenrolledRefusalRow) {
+		<-release // a slow account lookup holds the writer past the stop
+		if ctx.Err() != nil {
+			t.Errorf("row written with a canceled context: %+v", row)
+		}
+		mu.Lock()
+		rows = append(rows, row)
+		mu.Unlock()
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runUnenrolledRefusalAudit(ctx, func(ctx context.Context, auditor *unenrolledRefusalAuditor) {
+			for range 50 {
+				auditor.record(sid, report)
+			}
+			auditor.record(sid, refusalpipe.Report{Connector: "codex", Reason: refusalpipe.ReasonSIDUnregistered})
+			cancel()
+			<-ctx.Done()
+		}, write)
+	}()
+	<-ctx.Done()
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refusal audit did not return after the stop")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	attempts := 0
+	for _, row := range rows {
+		attempts += row.Attempts
+	}
+	if len(rows) != 3 || attempts != 51 {
+		t.Fatalf("rows after the stop = %+v (attempts %d), want 3 rows covering all 51 refusals", rows, attempts)
+	}
+}
 
 // GAP-1242: a call the Windows standalone hook refuses for an excluded or
 // not-yet-enrolled account is written as a block row naming the account the
