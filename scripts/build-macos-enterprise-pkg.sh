@@ -209,12 +209,27 @@ refuse() {
 # A Mac that takes signed policy bundles must not run a release below the one
 # its confirmed bundle requires (min_product_version), even for a deliberate
 # rollback or a reinstall after uninstall --keep-state: a bundle signed with
-# a lower floor lifts it. The installed gateway reads the floor before any
-# file is replaced; exit 3 is its refusal, and a gateway without the check
-# (before 1.0.4) leaves the install alone.
-if root_owned "$gateway" && [ -x "$gateway" ]; then
-    floor_msg=$("$gateway" enterprise bundle floor-check --product-version "$package_version" 2>&1 >/dev/null)
-    if [ $? -eq 3 ]; then
+# a lower floor lifts it. A gateway from 1.0.4 on reads the floor before any
+# file is replaced, and its binary carries floor_check_marker: looking for
+# it, without running the gateway, tells a gateway that cannot run from one
+# before 1.0.4, which has no check and is not asked. When the installed
+# gateway is gone or older (uninstall --keep-state, or an uninstall that
+# failed after removing the binaries), the root-only copy that uninstall kept
+# in the lifecycle folder answers. Only exit 0 lets the install go on: exit 3
+# is the refusal, and any other result (execution denied, killed, crashed)
+# leaves the floor unchecked, so the install is refused too.
+floor_check_marker=defenseclaw-package-floor-check/1
+checker=
+if root_owned "$gateway" && grep -qaF "$floor_check_marker" "$gateway" 2>/dev/null; then
+    checker=$gateway
+elif [ ! -L "$state/floor-check" ] && root_owned "$state/floor-check/defenseclaw-gateway"; then
+    checker="$state/floor-check/defenseclaw-gateway"
+fi
+if [ -n "$checker" ]; then
+    floor_msg=$("$checker" enterprise bundle floor-check --product-version "$package_version" 2>&1 >/dev/null)
+    floor_rc=$?
+    if [ "$floor_rc" -ne 0 ]; then
+        [ "$floor_rc" -eq 3 ] || floor_msg="The release floor of the confirmed signed policy bundle could not be checked: $checker exited $floor_rc${floor_msg:+ ($floor_msg)}. Let it run (for example, trust it in the application control policy) and install again."
         floor_msg=$(printf '%s' "${floor_msg#Error: }" | tr '\n' ' ' | tr -d '"\\|&')
         refuse product_floor_refused "Refusing to install DefenseClaw $package_version: $floor_msg Nothing was changed."
     fi

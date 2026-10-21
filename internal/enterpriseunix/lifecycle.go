@@ -182,6 +182,9 @@ type lifecycle struct {
 	// perUserRemoved counts the per-user hook registrations an uninstall
 	// removed, for its summary.
 	perUserRemoved int
+	// floorCheckerKept: the uninstall kept the floor checker
+	// (keepFloorChecker), for its summary.
+	floorCheckerKept bool
 	// keptPerUser is what each enrolled account keeps after a default
 	// uninstall; keptKnown is false when the accounts record was unreadable.
 	keptPerUser []perUserKept
@@ -3511,6 +3514,20 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		r.AddError(codeUninstallIncomplete, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because "+strings.Join(holders, " and ")+" still name them; fix the cause and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
 		return 0
 	}
+	// A device that takes signed bundles keeps a copy of the gateway for the
+	// package scripts' release floor check: once the binaries are gone (a
+	// --keep-state uninstall, or one that fails after removing them) the
+	// installed gateway cannot answer, and a package below the confirmed
+	// bundle's floor would write its files before its postinstall ensure
+	// refused it. The machine state removal below takes the copy with the
+	// rest of the lifecycle state.
+	if !l.opts.Purge {
+		kept, err := env.keepFloorChecker(record)
+		if err != nil {
+			r.AddWarning(codeFloorCheckerNotKept, "could not keep the gateway that checks the release floor of the confirmed policy bundle ("+err.Error()+"); a package below that floor is refused only by its postinstall, after its files are in place")
+		}
+		l.floorCheckerKept = kept
+	}
 	// On Linux the deb/rpm removes its own files (the binaries, units and
 	// the managed OpenCode plugin). A macOS pkg has no uninstaller, so the
 	// lifecycle removes the binaries and the receipt.
@@ -3853,6 +3870,9 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	switch {
 	case l.opts.KeepState:
 		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
+		if l.floorCheckerKept {
+			lines = append(lines, "kept a root-only copy of the gateway in "+filepath.Join(layout.LifecycleDir, floorCheckerDir)+": the package scripts run its release floor check of the confirmed policy bundle before a reinstall replaces any file")
+		}
 		if l.openshellRecordKept {
 			lines = append(lines, "kept the record of the sandbox setup the kept sandboxes were made under in "+layout.LifecycleDir)
 		}
