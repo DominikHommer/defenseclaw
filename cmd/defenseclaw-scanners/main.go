@@ -232,11 +232,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "defenseclaw-scanners: unknown tool %q\n", args[0])
 		return 2
 	}
-	dir, err := ensureRuntime(manifest)
+	dir, release, err := pinnedRuntime(manifest)
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw-scanners: %v\n", err)
 		return 1
 	}
+	defer release()
 	pythonDir := filepath.Join(dir, "python")
 	// -B: the gateway runs the runtime read-only; prepare compiled it.
 	cmd := exec.Command(filepath.Join(pythonDir, "python.exe"), append([]string{"-I", "-B", "-c", script}, scriptArgs...)...)
@@ -595,8 +596,40 @@ func runtimeComplete(dir, sha string) bool {
 	return err == nil && strings.TrimSpace(string(marker)) == sha
 }
 
-// pruneOtherRuntimes removes runtimes an earlier build unpacked. Failures
-// (a scan still running from one) are left for the next upgrade.
+// pinnedRuntime is ensureRuntime for a scan: it keeps the runtime's
+// completion marker open until release, so a prune by a later build cannot
+// move the folder away while the scan imports from it. A folder pruned
+// between ensureRuntime and the open is unpacked again once.
+func pinnedRuntime(manifest runtimeManifest) (string, func(), error) {
+	for attempt := 0; ; attempt++ {
+		dir, err := ensureRuntime(manifest)
+		if err != nil {
+			return "", nil, err
+		}
+		pin, err := os.Open(filepath.Join(dir, completeMarker))
+		if err == nil && runtimeComplete(dir, manifest.SHA256) {
+			return dir, func() { _ = pin.Close() }, nil
+		}
+		if pin != nil {
+			_ = pin.Close()
+		}
+		if attempt > 0 {
+			return "", nil, fmt.Errorf("the scanner runtime at %s was removed while the scan started", dir)
+		}
+	}
+}
+
+// renameRuntimeDir is os.Rename; a seam so a test can stand for a runtime
+// folder a running scan keeps open.
+var renameRuntimeDir = os.Rename
+
+// pruneOtherRuntimes removes runtimes an earlier build unpacked. Each one is
+// first renamed aside: Windows refuses to rename a folder while a process
+// holds a file in it open (a scan's python.exe, its loaded modules, the
+// completion marker pinnedRuntime holds), so a runtime in use is left whole
+// for the next prune. Removing it in place deleted the Python modules a
+// running scan had not imported yet before the locked file stopped the
+// removal (GAP-0920).
 func pruneOtherRuntimes(root, keep string) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -606,7 +639,15 @@ func pruneOtherRuntimes(root, keep string) {
 		if entry.Name() == keep || !entry.IsDir() {
 			continue
 		}
-		_ = os.RemoveAll(filepath.Join(root, entry.Name()))
+		suffix := make([]byte, 8)
+		if _, err := rand.Read(suffix); err != nil {
+			return
+		}
+		aside := filepath.Join(root, ".prune-"+hex.EncodeToString(suffix))
+		if err := renameRuntimeDir(filepath.Join(root, entry.Name()), aside); err != nil {
+			continue
+		}
+		_ = os.RemoveAll(aside)
 	}
 }
 

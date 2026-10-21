@@ -675,8 +675,20 @@ func windowsEnterpriseInstalledAdminCLI() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve trusted Program Files for installed CLI: %w", err)
 	}
-	return filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe"), nil
+	installedCLI := filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe")
+	// An elevated lifecycle runs this image with the service pins. Check
+	// that only SYSTEM, Administrators and TrustedInstaller can replace it,
+	// and that its folders are not links, before any process is created
+	// (GAP-1493).
+	if err := windowsEnterpriseInstalledCLICustody(installedCLI, "installed DefenseClaw CLI"); err != nil {
+		return "", fmt.Errorf("refuse to run the installed CLI: %w", err)
+	}
+	return installedCLI, nil
 }
+
+// windowsEnterpriseInstalledCLICustody validates the installed CLI file and
+// its ancestors. A seam for tests.
+var windowsEnterpriseInstalledCLICustody = managed.ValidateTrustedFilePath
 
 func windowsEnterprisePolicyDigestCommand(ctx context.Context) (*exec.Cmd, error) {
 	layout, err := windowsEnterpriseHotConfigLayout()
@@ -744,15 +756,27 @@ func writeWindowsEnterprisePolicyState(state *enterprisestatus.PolicyState) erro
 
 // writeFileKeepingDACL replaces path with data, giving the new file the
 // DACL of sibling before it is renamed into place, so it is never readable
-// by more than sibling is.
+// by more than sibling is. Each write stages in its own exclusively created
+// file beside path: two lifecycle runs that finish at the same time shared
+// path+".tmp" before, so one could publish the other's bytes or fail on a
+// staging file the other had already renamed (GAP-1404).
 func writeFileKeepingDACL(path string, data []byte, sibling string) error {
 	restore, err := keepConfigDACL(sibling)
 	if err != nil {
 		return err
 	}
-	temporary := path + ".tmp"
-	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+	staging, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
+	}
+	temporary := staging.Name()
+	_, writeErr := staging.Write(data)
+	if closeErr := staging.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		_ = os.Remove(temporary)
+		return writeErr
 	}
 	if err := restore(temporary); err != nil {
 		_ = os.Remove(temporary)
