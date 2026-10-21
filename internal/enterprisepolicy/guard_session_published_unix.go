@@ -99,7 +99,7 @@ func publishedSessionOwnDir(path string, self uint32, rootOwnerOK bool) error {
 	if !ok {
 		return fmt.Errorf("%s: cannot read its owner", path)
 	}
-	if st.Uid != self && !(rootOwnerOK && st.Uid == 0) {
+	if st.Uid != self && (!rootOwnerOK || st.Uid != 0) {
 		return fmt.Errorf("%s is owned by uid %d", path, st.Uid)
 	}
 	return nil
