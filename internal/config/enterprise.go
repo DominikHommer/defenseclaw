@@ -902,6 +902,11 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 		standalonePolicyDirDefault(cfg, cfg.DataDir, goos)
 		standaloneRulePackDefault(cfg, cfg.DataDir, goos)
 		if !cfg.openShellPackDirDeclared {
+			// The loader's default was set before the file's data_dir was
+			// read (a staged candidate's own folder); re-base it on that
+			// data_dir, as the installed config gets it, so validate and
+			// ensure find the same packs folder (GAP-0049).
+			cfg.OpenShell.PackDir = joinPathForPlatform(goos, cfg.DataDir, "policies", DefaultOpenShellPackDirName)
 			standaloneOpenShellPackDirDefault(cfg, cfg.DataDir, goos)
 		}
 	}

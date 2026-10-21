@@ -200,6 +200,11 @@ type SandboxDaemon struct {
 	// sandboxes resolve against their own confirmed registration floors.
 	floorMu sync.Mutex
 	floor   *config.OpenShellAdminConfig
+	// creating is the sandbox a Create makes, under the lifecycle lock, and
+	// the floor the managed gateway resolved it with, until its
+	// registration is kept (configForSandbox).
+	creating      string
+	creatingFloor config.OpenShellAdminConfig
 
 	// Lazy listeners (D3).
 	listenMu     sync.Mutex
@@ -425,10 +430,29 @@ func (d *SandboxDaemon) configWithFloor(floor config.OpenShellAdminConfig) *conf
 // its status still names the deny and it cannot borrow another run's policy.
 func (d *SandboxDaemon) configForSandbox(name string) *config.Config {
 	r, ok := d.regs.get(name)
+	if !ok {
+		// The sandbox a Create is making has no registration until the
+		// manager returns: a policy refresh of it meanwhile judged it
+		// against the closed floor, and the run's banner said the
+		// organization disallowed the run it was starting (GAP-0016).
+		d.floorMu.Lock()
+		creating, floor := d.creating, d.creatingFloor
+		d.floorMu.Unlock()
+		if creating != "" && creating == name {
+			return d.configWithFloor(floor)
+		}
+	}
 	if !ok || !r.Confirmed || r.Revoked {
 		return d.buildConfigWith(nil)
 	}
 	return d.configWithFloor(r.Floor)
+}
+
+// setCreating names the sandbox a Create makes under floor ("" when none).
+func (d *SandboxDaemon) setCreating(name string, floor config.OpenShellAdminConfig) {
+	d.floorMu.Lock()
+	d.creating, d.creatingFloor = name, floor
+	d.floorMu.Unlock()
 }
 
 // buildConfigWith is buildConfig under floor (nil: the closed floor).
@@ -2145,6 +2169,10 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 	// refuses the create otherwise); the record keeps the reason.
 	createCtx := withManagedMCPJudge(manager.WithCreateConfig(manager.WithDriverChoice(ctx, choice), d.configWithFloor(floor)),
 		fixedMCPJudge(resolveMCPDecision(resolveReq.Harness, mcp, resp)))
+	if req.Name != "" {
+		d.setCreating(req.Name, floor)
+		defer d.setCreating("", config.OpenShellAdminConfig{})
+	}
 	sb, err := c.Manager.Create(createCtx, req)
 	if err != nil {
 		undo()
@@ -2170,6 +2198,11 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 		return nil, managedRelayError(err)
 	}
 	d.rt.manager.RefreshPolicies()
+	if fresh, err := c.Manager.Get(ctx, sb.Name); err == nil && fresh != nil {
+		// The view under the registration just kept, not one a refresh
+		// during the create judged against the closed floor (GAP-0016).
+		sb = fresh
+	}
 	return sb, nil
 }
 
@@ -2348,6 +2381,23 @@ func (c *managedSandboxController) Explain(ctx context.Context, req sandboxapi.E
 	}
 	applyManagedPosture(out, me.Posture)
 	me.Posture = nil
+	if req.Sandbox == "" && req.Project != "" {
+		// The project's own MCP servers, which only this process can read
+		// as the caller: the MCP row counts them (#1200).
+		project := req.Project
+		if real, err := filepath.EvalSymlinks(project); err == nil {
+			project = real
+		}
+		if spec, ok := harness.Get(connectorName); ok {
+			me.MCPProjectCount = manager.ProjectMCPServerCount(spec.Name, project)
+		}
+		me.MCPProjectBlocked = true
+		for _, s := range out.Settings {
+			if s.Key == "mcp.project_servers" {
+				me.MCPProjectBlocked = s.Value != packs.MCPProjectServersAllow
+			}
+		}
+	}
 	if me.Workspace != nil {
 		// A new run's copy policy is the managed gateway's: the explain floor
 		// leaves out the organization's pack, which the gateway resolves

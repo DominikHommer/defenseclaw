@@ -1175,6 +1175,12 @@ type ManagedExplain struct {
 	// MCPBlocked those it leaves out, with the reason.
 	MCPIncluded []string     `json:"mcp_included,omitempty"`
 	MCPBlocked  []ManagedMCP `json:"mcp_blocked,omitempty"`
+	// MCPProjectCount is how many MCP servers the project of a new run
+	// defines (.mcp.json, .codex/config.toml), and MCPProjectBlocked says
+	// the pack's mcp.project_servers keeps them from starting. The sandbox
+	// daemon reads the project as the caller; the gateway never sets them.
+	MCPProjectCount   int  `json:"mcp_project_count,omitempty"`
+	MCPProjectBlocked bool `json:"mcp_project_blocked,omitempty"`
 	// WorkdirMode is copy on managed hosts; AllowMount, AllowHostPorts and
 	// AllowYolo are the floor's.
 	WorkdirMode    string `json:"workdir_mode,omitempty"`

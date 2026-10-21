@@ -175,3 +175,29 @@ func TestSandboxDaemonDecisionConfirmsTheSandboxPolicy(t *testing.T) {
 		t.Fatalf("asked for a sandbox without a registration: %d calls", f.calls.Load())
 	}
 }
+
+// GAP-0016: a policy refresh of the sandbox a Create is making, before its
+// registration is kept, judged it against the closed floor, and the run's
+// banner said the organization disallowed the run it was starting. The
+// sandbox being created resolves under the floor its create resolved with;
+// any other sandbox without a registration stays on the closed floor.
+func TestSandboxBeingCreatedResolvesUnderItsCreateFloor(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	closed := f.d.configForSandbox("dc-new").OpenShell.Admin
+	if closed.Allowed == nil || *closed.Allowed {
+		t.Fatalf("closed floor = %+v, want allowed false", closed)
+	}
+	floor := config.OpenShellAdminConfig{EgressBlock: []string{"paste.example"}}
+	f.d.setCreating("dc-new", floor)
+	got := f.d.configForSandbox("dc-new").OpenShell.Admin
+	if got.Allowed != nil && !*got.Allowed || !slices.Equal(got.EgressBlock, floor.EgressBlock) {
+		t.Fatalf("the sandbox being created resolves under %+v, want its create floor", got)
+	}
+	if other := f.d.configForSandbox("dc-other").OpenShell.Admin; other.Allowed == nil || *other.Allowed {
+		t.Fatalf("another sandbox borrowed the create floor: %+v", other)
+	}
+	f.d.setCreating("", config.OpenShellAdminConfig{})
+	if after := f.d.configForSandbox("dc-new").OpenShell.Admin; after.Allowed == nil || *after.Allowed {
+		t.Fatalf("after the create: %+v", after)
+	}
+}

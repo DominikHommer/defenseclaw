@@ -83,7 +83,6 @@ type agentConfigCopy struct {
 	Path    string `json:"path"`
 	SHA256  string `json:"sha256"`
 	Bytes   []byte `json:"bytes"`
-	SavedAt string `json:"saved_at"`
 }
 
 // agentConfigNotice records how setup recreated a missing agent config.
@@ -225,7 +224,6 @@ func (s agentConfigSpec) recordCopy(dataDir, configPath string) error {
 		Path:    configPath,
 		SHA256:  sha256Hex(data),
 		Bytes:   data,
-		SavedAt: time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		return err

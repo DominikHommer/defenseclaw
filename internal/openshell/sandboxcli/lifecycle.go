@@ -1167,7 +1167,7 @@ func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 	}
 	switch {
 	case err != nil:
-		return "may hold work that was never pulled back" + why("it could not be checked: "+truncate(err.Error(), 120)) + "; " + pull + " brings it back"
+		return "may hold work that was never pulled back" + why("it could not be checked: "+truncate(gatewayTransportText(err.Error()), 120)) + "; " + pull + " brings it back"
 	case work == workspace.CopyWorkUnpulled:
 		return "holds work that was never pulled back" + why() + "; " + pull + " brings it back"
 	case work == workspace.CopyWorkUnapplied:

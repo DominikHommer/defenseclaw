@@ -1009,7 +1009,8 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		AllowedHarnesses: slices.Clone(floor.AllowedHarnesses), AllowedCredentials: slices.Clone(floor.AllowedCredentials),
 		EgressAllowOnly: slices.Clone(floor.EgressAllowOnly), EgressBlock: slices.Clone(floor.EgressBlock),
 		UserApprovals: floor.UserApprovals, AllowUnblock: floor.AllowUnblock == nil || *floor.AllowUnblock,
-		ForeignSandboxes: floor.ForeignSandboxes,
+		// The action in force, stop when the floor leaves it unset (r103 GAP-0225).
+		ForeignSandboxes: sandboxForeignAction(floor),
 		WorkdirMode:      "copy", AllowMount: false, AllowHostPorts: floor.AllowHostPorts == nil || *floor.AllowHostPorts,
 		AllowYolo: floor.AllowYolo == nil || *floor.AllowYolo, OnSilence: floor.OnSilence, MaxSilenceAfter: floor.MaxSilenceAfter,
 		ProcessTree: floor.ProcessTree != nil && *floor.ProcessTree, DeleteStoppedAfter: floor.DeleteStoppedAfter,

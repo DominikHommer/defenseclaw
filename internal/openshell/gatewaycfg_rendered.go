@@ -314,6 +314,9 @@ func ParseRenderedGateway(tomlData, envData []byte) (RenderedGateway, error) {
 		vm := doc.OpenShell.Drivers.VM
 		r.DriverDir, r.VMSandboxUID, r.VMSandboxGID = vm.DriverDir, vm.SandboxUID, vm.SandboxGID
 	}
+	if doc.OpenShell.Drivers != nil && doc.OpenShell.Drivers.Docker != nil {
+		r.DefaultDockerNamespaceBridge = strings.TrimSpace(doc.OpenShell.Drivers.Docker.SandboxLabel) == ""
+	}
 	if v, ok := parseEnvFile(envData)[EnvTelemetryEnabled]; ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			r.TelemetryEnabled = b
@@ -357,6 +360,12 @@ func (s *GatewayConfigState) Drift(want RenderedGateway) []SettingDrift {
 	if want.ComputeDriver == DriverVM {
 		id := s.VM.Identity()
 		add("MicroVM workload identity", VMIdentity{UID: want.VMSandboxUID, GID: want.VMSandboxGID}.String(), id.String())
+	}
+	if want.ComputeDriver == DriverDocker && !want.DefaultDockerNamespaceBridge && s.SharesDefaultDockerNamespace() {
+		// A gateway in the shared default namespace removes the supervisors
+		// of other accounts' sandboxes each time it starts; the rendered
+		// gateways keep theirs in ManagedDockerNamespace.
+		drift = append(drift, SettingDrift{Field: "Docker sandbox namespace", Want: ManagedDockerNamespace, Have: DefaultDockerNamespace})
 	}
 	add("OpenShell telemetry", strconv.FormatBool(want.TelemetryEnabled), strconv.FormatBool(s.TelemetryEnabled()))
 	return drift

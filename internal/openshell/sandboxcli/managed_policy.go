@@ -406,7 +406,7 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 	}
 	add("Other sandboxes", "sandboxes outside DefenseClaw are "+foreign, "foreign_sandboxes")
 
-	if len(m.MCPIncluded) > 0 || len(m.MCPBlocked) > 0 {
+	if len(m.MCPIncluded) > 0 || len(m.MCPBlocked) > 0 || m.MCPProjectCount > 0 {
 		var org, asset int
 		for _, b := range m.MCPBlocked {
 			if b.Reason == "asset_policy" {
@@ -421,6 +421,16 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 		}
 		if asset > 0 {
 			text += fmt.Sprintf("; %d left out by your organization's asset policy", asset)
+		}
+		if n := m.MCPProjectCount; n > 0 {
+			verb, why := "don't start", "the pack blocks project servers"
+			if !m.MCPProjectBlocked {
+				verb, why = "start", "the pack allows project servers"
+			}
+			if n == 1 {
+				verb = map[string]string{"don't start": "doesn't start", "start": "starts"}[verb]
+			}
+			text += "; the project's " + plural(int64(n), "server", "servers") + " " + verb + " (" + why + ")"
 		}
 		add("MCP", text, "mcp_included", "mcp_blocked")
 	}

@@ -467,10 +467,19 @@ func (a *App) gatewayDriverNow(ctx context.Context) openshell.Driver {
 // names none selects docker), and false when neither does.
 func (a *App) gatewayDriverKnown(ctx context.Context) (openshell.Driver, bool) {
 	if api, err := a.api(); err == nil {
-		if st, err := api.Status(ctx); err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
+		st, err := api.Status(ctx)
+		if err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
 			// A driver DefenseClaw does not drive (podman, say) is not
 			// known: nothing says which images it boots.
 			d, ok := openshell.LookupDriver(st.Gateway.Driver)
+			return d, ok
+		}
+		if err == nil && st.Managed != nil && st.Managed.Driver != "" {
+			// A managed gateway that does not run yet starts on the driver
+			// the organization's settings select for this account, never on
+			// the account's own gateway.toml: an image built from that file
+			// was a docker one the MicroVM gateway could not boot (GAP-0005).
+			d, ok := openshell.LookupDriver(st.Managed.Driver)
 			return d, ok
 		}
 	}
