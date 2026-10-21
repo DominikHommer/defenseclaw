@@ -73,7 +73,7 @@ The sandbox reaches your machine only at `host.openshell.internal`, which OpenSh
 
 ## Linux and macOS
 
-Sandboxes run on Linux (amd64 and arm64) and on Macs with Apple silicon. They are not supported on Windows or WSL2, on Intel Macs, or when you run DefenseClaw as root. On Windows, the connector hooks guard your agents instead ([Windows](/docs/get-started/windows)). On a standalone enterprise install an administrator decides who may use sandboxes and which agents must ([Sandboxes on managed computers](/docs/enterprise/sandboxes)).
+Sandboxes run on Linux (amd64 and arm64) and on Macs with Apple silicon. They are not supported on Windows or WSL2, on Intel Macs, or when you run DefenseClaw as root. On Windows, the connector hooks guard your agents instead ([Windows](/docs/get-started/windows)). On a standalone enterprise install an administrator decides who may use sandboxes and which agents must ([Sandboxes on managed computers](/docs/enterprise/runtime/sandboxes)).
 
 The driver decides these rows, not the operating system. A Linux host with KVM can run the MicroVM driver too and then behaves like the macOS column.
 
@@ -119,11 +119,11 @@ Claude Code and Codex are set up by default. GitHub Copilot CLI, OpenCode, Kiro 
 | Amp | `amp` | user | Unverified |
 | Devin CLI | `devin` | user | Unverified |
 
-The hook tier says whether the agent could switch DefenseClaw's hooks off. **Managed**: the hook configuration is a root-owned file that user and project settings cannot override. **User**: the configuration lives where the agent could edit it, so the run banner says so and DefenseClaw watches for hooks that go silent. The [capability matrix](/docs/reference/capability-matrix) lists each harness's hook file and version. Add another agent with `defenseclaw sandbox setup --harness NAME`.
+The hook tier says whether the agent could switch DefenseClaw's hooks off. **Managed**: the hook configuration is a root-owned file that user and project settings cannot override. **User**: the configuration lives where the agent could edit it, so the run banner says so and DefenseClaw watches for hooks that go silent. The [capability matrix](/docs/reference/apis/capability-matrix) lists each harness's hook file and version. Add another agent with `defenseclaw sandbox setup --harness NAME`.
 
 ## What to trust
 
-Some of what DefenseClaw reports about a sandbox it measures itself, and some is what OpenShell or the sandboxed program says about itself. [Sandbox telemetry](/docs/reference/sandbox-telemetry#what-to-trust) says which is which, signal by signal.
+Some of what DefenseClaw reports about a sandbox it measures itself, and some is what OpenShell or the sandboxed program says about itself. [Sandbox telemetry](/docs/reference/sandboxes/telemetry#what-to-trust) says which is which, signal by signal.
 
 ## What is in the image
 
@@ -150,7 +150,7 @@ Each harness image is NVIDIA's OpenShell community base image (Ubuntu 24.04, pin
 
 ## Reference
 
-- [Sandbox CLI](/docs/reference/sandbox-cli): every `defenseclaw sandbox` command and flag.
-- [Sandbox policy](/docs/reference/sandbox-policy): pack keys and `openshell.admin` limits.
-- [Sandbox network](/docs/reference/sandbox-network): the egress decision order and profiles.
+- [Sandbox CLI](/docs/reference/sandboxes/cli): every `defenseclaw sandbox` command and flag.
+- [Sandbox policy](/docs/reference/sandboxes/policy): pack keys and `openshell.admin` limits.
+- [Sandbox network](/docs/reference/sandboxes/network): the egress decision order and profiles.
 - [Sandbox troubleshooting](/docs/troubleshooting/sandboxes)

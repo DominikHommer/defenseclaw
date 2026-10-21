@@ -2862,8 +2862,8 @@ OpenClaw gateway (18789 by default).
 A standalone enterprise install (rpm, deb, pkg; Linux and macOS) runs sandboxes
 for standard users, with the policy chosen by the same identity rules as the
 guardrail profile. The user documentation is
-[Sandboxes on managed computers](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/)
-(`docs-site/content/docs/enterprise/sandboxes.mdx`). This section is the
+[Sandboxes on managed computers](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/runtime/sandboxes/)
+(`docs-site/content/docs/enterprise/runtime/sandboxes.mdx`). This section is the
 contributor view.
 
 ### Processes and trust

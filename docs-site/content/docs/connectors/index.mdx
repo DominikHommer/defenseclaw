@@ -29,13 +29,13 @@ A connector is how DefenseClaw guards one coding agent. **Hook** connectors regi
 | [OpenClaw](/docs/connectors/openclaw) | Proxy | Requests, responses, tool calls | `before_tool_call` | Linux, macOS |
 | [ZeptoClaw](/docs/connectors/zeptoclaw) | Proxy | Requests, responses, tool calls | No | Linux, macOS |
 
-Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept. You can review it in audit or the TUI, but you cannot resume the call. The [capability matrix](/docs/reference/capability-matrix) has the full per-connector detail, and [Human approval](/docs/features/guardrail) has the per-event matrix.
+Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept. You can review it in audit or the TUI, but you cannot resume the call. The [capability matrix](/docs/reference/apis/capability-matrix) has the full per-connector detail, and [Human approval](/docs/features/guardrail) has the per-event matrix.
 
-One gateway can serve several hook connectors, each with its own posture under `guardrail.connectors.<name>`. Choose **Add**, not Replace, when you run a second `setup <connector>`. Proxy connectors own the traffic plane and cannot be combined this way. See [Multi-connector](/docs/how-to/guardrail/add-or-remove-an-agent).
+One gateway can serve several hook connectors, each with its own posture under `guardrail.connectors.<name>`. Choose **Add**, not Replace, when you run a second `setup <connector>`. Proxy connectors own the traffic plane and cannot be combined this way. See [Multi-connector](/docs/how-to/agents/add-or-remove-an-agent).
 
 ## Platform support
 
-What each OS supports, and what live tests verified. Switch to **Enterprise** for the managed edition. The [support matrix](/docs/support-matrix) adds features by edition.
+What each OS supports, and what live tests verified. Switch to **Enterprise** for the managed edition. The [support matrix](/docs/get-started/support-matrix) adds features by edition.
 
 <ConnectorOsMatrix />
 
@@ -52,6 +52,6 @@ OpenClaw and ZeptoClaw do not run in a sandbox.
 
 ## Next
 
-- [Hook contracts](/docs/reference/hook-contracts): supported agent versions per connector.
+- [Hook contracts](/docs/reference/apis/hook-contracts): supported agent versions per connector.
 - [Connector reference](/docs/reference/connectors): how connectors work inside DefenseClaw.
 - [Upgrade](/docs/get-started/upgrade#renamed-and-removed-connectors): connectors that were renamed or removed.

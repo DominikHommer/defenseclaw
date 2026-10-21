@@ -1,10 +1,10 @@
 # Guardrail rule-pack engineering contract
 
 Operator CEL authoring and engine behavior are maintained in the published
-[CEL authoring guide](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cel/authoring/)
-and [CEL engine reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cel/engine/).
+[CEL authoring guide](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/policy/cel/authoring/)
+and [CEL engine reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/policy/cel/engine/).
 The complete shipped detector inventory and enforcement boundaries are in the
-[deterministic detection reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/detection/).
+[deterministic detection reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/policy/detection/).
 Recipes, suppressions, and verification steps remain in the broader
 [policies documentation](https://cisco-ai-defense.github.io/defenseclaw/docs/features/policies/).
 

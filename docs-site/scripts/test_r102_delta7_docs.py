@@ -15,10 +15,10 @@ DOCS = ROOT / "docs-site/content/docs"
 PAGES = (
     "features/sandboxes.mdx",
     "troubleshooting/sandboxes.mdx",
-    "enterprise/sandboxes.mdx",
-    "enterprise/sandbox-reference.mdx",
-    "reference/sandbox-cli.mdx",
-    "reference/tui.mdx",
+    "enterprise/runtime/sandboxes.mdx",
+    "enterprise/runtime/sandbox-reference.mdx",
+    "reference/sandboxes/cli.mdx",
+    "reference/commands/tui.mdx",
 )
 
 
@@ -35,9 +35,9 @@ class R102Delta7DocsTest(unittest.TestCase):
     def test_pages_name_the_release_setup_installs(self):
         v = installer_version()
         self.assertIn(f"Setup installs OpenShell {v} with NVIDIA's installer", page("features/sandboxes.mdx"))
-        self.assertIn(f"| Release `prerequisite` mode expects and `setup` installs | `{v}` |", page("enterprise/sandbox-reference.mdx"))
-        self.assertIn(f"older than {v} in place", page("reference/sandbox-cli.mdx"))
-        self.assertIn(f"Installing OpenShell {v} for your account", page("reference/sandbox-cli.mdx"))
+        self.assertIn(f"| Release `prerequisite` mode expects and `setup` installs | `{v}` |", page("enterprise/runtime/sandbox-reference.mdx"))
+        self.assertIn(f"older than {v} in place", page("reference/sandboxes/cli.mdx"))
+        self.assertIn(f"Installing OpenShell {v} for your account", page("reference/sandboxes/cli.mdx"))
 
     def test_every_install_and_upgrade_target_is_the_pinned_release(self):
         v = installer_version()

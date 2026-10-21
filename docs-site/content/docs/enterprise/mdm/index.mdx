@@ -17,9 +17,9 @@ to enterprise deployment? Start with
 
 | MDM | OS | What you push |
 | --- | --- | --- |
-| [Intune on Windows](/docs/enterprise/mdm/intune-windows) | Windows x64 | A Win32 app with the standalone Setup and your config, plus a PowerShell 7 app |
-| [Intune on macOS](/docs/enterprise/mdm/intune-macos) | macOS (Apple silicon) | A root shell script: the kit wrapper, which downloads the `.pkg` |
-| [Intune on Linux](/docs/enterprise/mdm/intune-linux) | Ubuntu, RHEL | A root platform script: the kit wrapper, which downloads the package or payload archive |
+| [Intune on Windows](/docs/enterprise/mdm/intune/windows) | Windows x64 | A Win32 app with the standalone Setup and your config, plus a PowerShell 7 app |
+| [Intune on macOS](/docs/enterprise/mdm/intune/macos) | macOS (Apple silicon) | A root shell script: the kit wrapper, which downloads the `.pkg` |
+| [Intune on Linux](/docs/enterprise/mdm/intune/linux) | Ubuntu, RHEL | A root platform script: the kit wrapper, which downloads the package or payload archive |
 | [Jamf Pro](/docs/enterprise/mdm/jamf) | macOS (Apple silicon) | The `.pkg`, plus kit scripts that stage the config and run `ensure` |
 | [Iru (formerly Kandji)](/docs/enterprise/mdm/kandji) | macOS (Apple silicon) | A Custom App with the `.pkg` and a script that runs `ensure`, or one script |
 | [Workspace ONE UEM](/docs/enterprise/mdm/workspace-one) | Windows, macOS, Linux | A Win32 app, the `.pkg` or the Linux package, with scripts and sensors |
@@ -31,7 +31,7 @@ to enterprise deployment? Start with
 Linux) delivered DefenseClaw end to end on a test tenant in the PR #1304 pass,
 including a cached Intune install script that reinstalled the macOS package after an
 uninstall. See
-[Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant). Jamf Pro, Iru,
+[Prepare your Intune tenant](/docs/enterprise/mdm/intune/tenant). Jamf Pro, Iru,
 Workspace ONE, Configuration Manager and the Linux tools are templates built from
 the vendor's documentation and checked with [Simulate your MDM](#simulate-your-mdm).
 The tenant helper's create, update and assign commands ran against the same
@@ -45,7 +45,7 @@ profile. This page is the contract: what you deliver, how you run it, how you
 read the result, how you detect it, and how you upgrade, roll back, reconfigure
 and remove it. Each recipe page keeps only its MDM's steps. Terms such as
 *standalone profile*, *lifecycle* and *ensure* are in
-[Concepts](/docs/enterprise/concepts).
+[Concepts](/docs/enterprise/plan/concepts).
 
 The kit lives in [`packaging/mdm`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/packaging/mdm).
 It holds three scripts per OS:
@@ -58,7 +58,7 @@ It holds three scripts per OS:
 
 The Linux and macOS copies differ only in the line `DC_SCRIPT_OS`, and each
 refuses to run on the other OS. Intune has its own launcher and Remediations
-scripts in `intune/windows`; see [Intune on Windows](/docs/enterprise/mdm/intune-windows).
+scripts in `intune/windows`; see [Intune on Windows](/docs/enterprise/mdm/intune/windows).
 
 <Flow
   direction="TB"
@@ -115,14 +115,14 @@ Replace `FILE` with the artifact you deploy. On a Mac, use `shasum -a 256 -c`.
 Signature-based trust is optional; see the kit's `signing/README.md`. If you
 stage releases on an internal mirror, copy `checksums.txt` and
 `checksums.txt.bundle` unchanged and verify them the same way; see
-[Where releases come from](/docs/enterprise/rollout#where-releases-come-from).
+[Where releases come from](/docs/enterprise/plan/rollout#where-releases-come-from).
 
 ## Deliver the config
 
 The config decides which agents are protected and how. It is the only policy a
-managed host enforces ([Policy in the config](/docs/enterprise/configuration#policy-in-the-config)).
-Its content is in [Configuration](/docs/enterprise/settings);
-start with [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
+managed host enforces ([Policy in the config](/docs/enterprise/configure/configuration#policy-in-the-config)).
+Its content is in [Configuration](/docs/enterprise/configure/settings);
+start with [Choose the agents to protect](/docs/enterprise/configure/configuration#choose-the-agents-to-protect).
 A `config_version: 8` file is migrated to 9 when the lifecycle applies it. The
 Intune Win32 packager requires `config_version: 9`, because migration would
 change the config hash in its detection rule. The lifecycle installs the config
@@ -169,7 +169,7 @@ Rules for every method:
 The Cisco AI Defense API key is optional. Without it the local policy engine
 decides alone. To use it, the config names the credential
 (`enterprise.inspection.ai_defense.credential`) and turns the feature on; see
-[Cisco AI Defense key](/docs/enterprise/ai-defense-key). The key never goes on a
+[Cisco AI Defense key](/docs/enterprise/configure/ai-defense-key). The key never goes on a
 command line, in an MDM script body, or in the config.
 
 | OS | In the same wrapper run | Directly |
@@ -194,7 +194,7 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret status
 
 On macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. Storing
 the key re-runs `ensure`, which applies it. On Windows the command restarts the
-gateway service; [Intune on Windows](/docs/enterprise/mdm/intune-windows#5-deliver-the-cisco-ai-defense-key)
+gateway service; [Intune on Windows](/docs/enterprise/mdm/intune/windows#5-deliver-the-cisco-ai-defense-key)
 shows a way that never writes the key to disk.
 
 ## Run ensure
@@ -262,7 +262,7 @@ exit $LASTEXITCODE
 | `--bundle-file FILE`, `--trust-anchor-file FILE`, `--refuse-capability-loss` | `-BundlePath`, `-TrustAnchorPath`, `-RefuseCapabilityLoss` | A signed policy bundle, its trust anchors, and an opt-in refusal of a bundle that disables an enforced capability. The bundle carries its own config. See [Install order with a signed bundle](#install-order-with-a-signed-bundle). |
 | `--format json\|jamf` | — | `jamf` wraps the result document in `<result>` for Jamf Pro. |
 | `--product-version X.Y.Z` | `-ProductVersion X.Y.Z` | Linux and macOS: refuse an artifact of any other version (`mdm_version_mismatch`) before anything is installed. Windows: only without `-SetupPath`, where it sets the version the installed CLI's `ensure` records; with `-SetupPath` it is refused (`mdm_invalid_arguments`, `1639`), because the `-Sha256` pin already ties the Setup to one release. |
-| `--https-proxy URL` | — | Proxy for the download only. The services' own proxy is set in the config ([Network proxy](/docs/enterprise/configuration#network-proxy)). |
+| `--https-proxy URL` | — | Proxy for the download only. The services' own proxy is set in the config ([Network proxy](/docs/enterprise/configure/configuration#network-proxy)). |
 | `--log FILE` | — | Wrapper log path. |
 | `--staging-dir DIR` | — | The root-only folder the wrapper stages the artifact and the config in. Default `/var/lib/defenseclaw-mdm` on Linux (created `root`, `0700`) and `/var/tmp` on macOS. A payload source runs its `defenseclaw-gateway` from there, so the folder must allow execution; CIS hosts mount `/tmp` and `/var/tmp` `noexec`. It must be owned by root and not writable by others (`mdm_staging_untrusted`). |
 
@@ -314,7 +314,7 @@ gpg --dearmor < defenseclaw-enterprise-release-key.asc > defenseclaw-enterprise-
   `enterprise linux ensure` or `enterprise macos ensure` as root with
   `--adopt-existing` and `--from-package` (or `--payload <dir>`). It backs the old
   files up first. The wrapper does not pass `--adopt-existing`. See
-  [Troubleshooting](/docs/enterprise/troubleshooting#lifecycle-error-codes).
+  [Troubleshooting](/docs/troubleshooting/enterprise#lifecycle-error-codes).
 
 ### Setup properties
 
@@ -347,7 +347,7 @@ post-install step applies the built-in default, which protects no agents and
 installs no hooks. The wrapper then installs the trust anchors and applies the
 bundle, so the first policy the hooks answer under is the bundle's. On Windows,
 Setup accepts `BUNDLE=` only after the first install; see
-[Intune on Windows](/docs/enterprise/mdm/intune-windows#signed-bundle-after-the-base-install).
+[Intune on Windows](/docs/enterprise/mdm/intune/windows#signed-bundle-after-the-base-install).
 
 A bundle-only run leaves the host unprotected if the first bundle does not apply
 (an expired trust anchor, for example). To protect agents in that case, also
@@ -433,7 +433,7 @@ document, `"installed": false` means "not evaluated". The Windows wrapper's
 parameters are checked by PowerShell: an unknown parameter, or starting the
 wrapper in Windows PowerShell 5.1, stops it with exit `1` before it prints a
 document. Run the `status` action to inspect the host. Every other code comes
-from the lifecycle; see [Troubleshooting](/docs/enterprise/troubleshooting#lifecycle-error-codes).
+from the lifecycle; see [Troubleshooting](/docs/troubleshooting/enterprise#lifecycle-error-codes).
 
 | Code | Exit (Windows / Linux, macOS) | Meaning |
 | --- | --- | --- |
@@ -583,7 +583,7 @@ so run it as root. A standard user gets `unknown` in `value` and `jamf` format.
   `enterprise linux tetragon verify --ready-for MODE --json`; a failing check is
   `tetragon-not-ready:<first failing check>` in `value` and `jamf` format. The
   macOS copy refuses it with "Linux only". See
-  [Tetragon on a Linux fleet](/docs/enterprise/tetragon#check-the-fleet).
+  [Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon#check-the-fleet).
 - `--require-bundle` (`-RequireBundle`) requires a signed policy bundle: a bundle
   id (`b-<ULID>`) must be the current confirmed bundle, a version number must be
   at most the current version, and the running gateway must enforce its digest.
@@ -617,7 +617,7 @@ enrolled user's own session, have Claude Code make a tool call, then from an
 elevated prompt export the gateway's record with
 `defenseclaw audit export --connector claudecode -o <file>`. Once the record shows
 that call, run Setup `/repair JSON=1 ATTESTCLAUDEEFFECTIVEPOLICY=1` (see
-[Verify the install](/docs/enterprise/windows#verify-the-install)). The record is
+[Verify the install](/docs/enterprise/install/windows#verify-the-install)). The record is
 bound to the hashes of the installed Claude Code policy and hook binary, so every
 upgrade makes it stale. Computers on the same release and Claude Code hook
 contract share the binding: check one reference computer, then push the `/repair`
@@ -643,7 +643,7 @@ files, because the results name other accounts; users can read both event logs,
 whose entries carry only codes. Only SYSTEM and Administrators can write the files
 and the `DefenseClaw` log. Any account can write Application-log entries under any
 source name, so detect from the `DefenseClaw` log. The services' own logs are in
-[Operations](/docs/enterprise/operations#logs-and-events).
+[Operations](/docs/enterprise/operate/operations#logs-and-events).
 
 ## Upgrades, rollback and config changes
 
@@ -656,7 +656,7 @@ a package-manager upgrade also works: the package's post-install step runs
 refuses a payload-archive upgrade (`package_owned_binaries`). The first `ensure`
 of a new release migrates a `config_version: 8` config to 9 and, on Linux and
 macOS, reports the applied policy in the result's `policy` object
-([Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)).
+([Effective policy digest](/docs/enterprise/operate/operations#effective-policy-digest-and-config-generation)).
 
 **Roll back.** Every lifecycle refuses an older release than the installed one
 unless you ask for the rollback (`downgrade_refused`; exit `1603` on Windows). The
@@ -664,7 +664,7 @@ wrappers do not ask for it: `rpm -U` refuses an older rpm, and on Linux the
 lifecycle refuses an older deb after dpkg installs it. On macOS, create the
 root-owned marker `/opt/cisco/defenseclaw/lifecycle/allow-downgrade` before you
 deliver the older pkg; the package consumes it. See
-[Roll back](/docs/enterprise/lifecycle#roll-back).
+[Roll back](/docs/enterprise/operate/lifecycle#roll-back).
 
 **Change the config.**
 
@@ -675,9 +675,9 @@ deliver the older pkg; the package consumes it. See
 
 An MDM that detects the Windows deployment by version does not re-run it for a
 config-only change.
-[Intune on Windows](/docs/enterprise/mdm/intune-windows#6-change-the-config-upgrade-and-roll-back)
+[Intune on Windows](/docs/enterprise/mdm/intune/windows#6-change-the-config-upgrade-and-roll-back)
 shows a detection rule that also checks the config. More in
-[Change the config](/docs/enterprise/lifecycle#change-the-config).
+[Change the config](/docs/enterprise/operate/lifecycle#change-the-config).
 
 ## Uninstall
 
@@ -697,7 +697,7 @@ lifecycle only while the DefenseClaw binaries are installed, so a purge after a
 plain removal finds nothing to run and exits `0` with that state still there.
 Install the package again and purge, or delete it by hand. To keep the machine
 state for a reinstall, run the lifecycle's own `uninstall --keep-state`; see
-[Uninstall](/docs/enterprise/lifecycle#uninstall).
+[Uninstall](/docs/enterprise/operate/lifecycle#uninstall).
 
 ## Simulate your MDM
 

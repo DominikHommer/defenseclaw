@@ -45,7 +45,7 @@ keywords:
 
 The step from `config_version: 8` to `9` moves the decisions 0.8.x kept outside `config.yaml` into it: admission and thresholds from `policies/rego/data.json`, the `skill_actions`, `mcp_actions` and `plugin_actions` keys, `rule_pack_dir`, the scanner switches, and your skill, MCP server and plugin block and allow entries from `audit.db`. It keeps `config.yaml.v8.bak`, renames `data.json` to `data.json.migrated-v9`, and writes `migration-v9.json` with every value it moved and every conflict it settled. An unmodified install moves one value. `defenseclaw doctor` shows a **Config migration** row until you run `defenseclaw config migrate --ack`. Preview with `defenseclaw config migrate --dry-run`. Until the file is migrated, the gateway reads a version 8 file as if it were migrated, in memory only.
 
-[Migrate config.yaml from v8 to v9](/docs/appendix/migrate-v9) shows before and after for every key and covers going back. On a managed standalone host, the [lifecycle](/docs/enterprise/lifecycle) migrates the administrator config.
+[Migrate config.yaml from v8 to v9](/docs/appendix/migrate-v9) shows before and after for every key and covers going back. On a managed standalone host, the [lifecycle](/docs/enterprise/operate/lifecycle) migrates the administrator config.
 
 ### Shipped policy files
 

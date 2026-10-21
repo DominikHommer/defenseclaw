@@ -31,9 +31,9 @@ A policy is what turns a finding into an action. DefenseClaw checks each prompt,
   <Edge from="levels" to="verdict" label="returns" />
 </Flow>
 
-- **Rule pack.** A folder of YAML rules, judge prompts and suppressions. Three ship with DefenseClaw: `permissive`, `default` and `strict`. The pack also sets the default [block and alert levels](/docs/reference/thresholds). The balanced/default enabled catalog currently contains 239 local rules. Regexes compile during [rule-pack validation](/docs/how-to/policies/validate-a-rule-pack); an invalid expression rejects the complete candidate.
-- **Structured tool calls.** For a shell command or file write, the gateway first extracts the commands, paths and network targets, and CEL rules match those facts. A regex match on its own is recorded as detection only and does not block. See [deterministic detection](/docs/reference/detection).
-- **LLM judge.** Off until you turn it on. It reads prompts, replies and tool calls for subtle injection, personal data and exfiltration. See [set up an LLM key](/docs/how-to/guardrail/set-up-an-llm-key).
+- **Rule pack.** A folder of YAML rules, judge prompts and suppressions. Three ship with DefenseClaw: `permissive`, `default` and `strict`. The pack also sets the default [block and alert levels](/docs/reference/policy/thresholds). The balanced/default enabled catalog currently contains 239 local rules. Regexes compile during [rule-pack validation](/docs/how-to/policies/validate-a-rule-pack); an invalid expression rejects the complete candidate.
+- **Structured tool calls.** For a shell command or file write, the gateway first extracts the commands, paths and network targets, and CEL rules match those facts. A regex match on its own is recorded as detection only and does not block. See [deterministic detection](/docs/reference/policy/detection).
+- **LLM judge.** Off until you turn it on. It reads prompts, replies and tool calls for subtle injection, personal data and exfiltration. See [set up an LLM key](/docs/how-to/agents/set-up-an-llm-key).
 - **Suppressions.** Three lists in the pack drop known noise from the judge. They never silence a regex or CEL rule. See [tune the LLM judge](/docs/how-to/policies/tune-the-llm-judge).
 - **Session correlator.** Watches saved findings in one session and records a `CORR-*` finding when untrusted input, sensitive access and external egress happen in order. It is detection after the fact, not a block.
 - **Admission.** Skills, MCP servers and plugins are decided separately, by scan severity and the allow and block lists. See [scanning](/docs/features/scanning).
@@ -53,4 +53,4 @@ A policy is what turns a finding into an action. DefenseClaw checks each prompt,
   <Card title="Build a policy in the browser" href="/docs/how-to/policies/build-a-policy-in-the-browser" description="The policy creator." />
 </Cards>
 
-Reference: [thresholds](/docs/reference/thresholds), [rules](/docs/reference/rules), [defaults](/docs/reference/policy-defaults), [detection](/docs/reference/detection), [CEL](/docs/reference/cel/engine).
+Reference: [thresholds](/docs/reference/policy/thresholds), [rules](/docs/reference/policy/rules), [defaults](/docs/reference/policy/defaults), [detection](/docs/reference/policy/detection), [CEL](/docs/reference/policy/cel/engine).

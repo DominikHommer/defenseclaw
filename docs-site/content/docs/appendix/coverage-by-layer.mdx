@@ -35,7 +35,7 @@ A host-run agent is covered by hooks, the runtime planes and, on managed Linux, 
 | **OpenShell sandbox** | A Linux container, or a MicroVM on a Mac | Network and HTTP events for the sandbox, and process starts the OpenShell supervisor launches | The sandbox boundary: filesystem rules (Landlock), seccomp, no network of its own, your uid without capabilities |
 | **Workspace protections** | The host side of a sandbox | New `.git` entries, hidden files, changed files at the end | Read-only `.git/hooks` and `.git/config`, empty stand-ins for secret files, quarantine of nested repositories |
 | **The egress proxy** | The DefenseClaw gateway, reached from the sandbox | Every site a sandboxed agent contacts | Allow list, block feeds, admin lists and large-upload blocks, per sandbox |
-| **The runtime planes** (A, B and C) | The computer | A: process compute. B: connections per process. C: process starts, file opens and identity changes | Nothing. They detect and score; see [AI discovery](/docs/reference/ai-discovery) |
+| **The runtime planes** (A, B and C) | The computer | A: process compute. B: connections per process. C: process starts, file opens and identity changes | Nothing. They detect and score; see [AI discovery](/docs/reference/scanning/ai-discovery) |
 | **Tetragon** (customer-owned, Linux only) | The Linux kernel | Every process start with its arguments, file opens of credential and persistence paths, and connects. The events of your own kprobe and LSM policies, when they hit an AI agent | DefenseClaw: on managed Linux only, `EPERM` for two fixed controls, when the administrator approves it. Your own policies enforce whatever you wrote in them. See [Tetragon on managed Linux](#what-tetragon-adds-on-managed-linux) |
 | **The sandbox manager** | The per-user gateway | Hook traffic, destinations, the process tree and the agent's activity inside each sandbox | Stops the sandbox on tampering or hook silence, turns its egress off in deny mode, raises alerts |
 
@@ -45,7 +45,7 @@ A sandboxed agent's hooks run inside the sandbox and reach the gateway through a
 
 | Computer | Hooks | Sandbox layers | Runtime planes | Tetragon |
 | --- | --- | --- | --- | --- |
-| **Linux, open-source (per-user)** | Yes | Yes, on the Docker driver (rootful Docker and the `docker` group) | A and B. C needs capabilities a per-user install does not have; see [What to grant](/docs/reference/ai-discovery) | Detected and explained; the per-user gateway never connects to it. For docker sandboxes, see the next row |
+| **Linux, open-source (per-user)** | Yes | Yes, on the Docker driver (rootful Docker and the `docker` group) | A and B. C needs capabilities a per-user install does not have; see [What to grant](/docs/reference/scanning/ai-discovery) | Detected and explained; the per-user gateway never connects to it. For docker sandboxes, see the next row |
 | **Linux, managed (standalone enterprise)** | Yes; the native hook is a root-owned binary | No: sandboxes are refused on a managed computer | A, B and C, through the root sensor helper | Consume, observe or enforce, through the root sensor helper |
 | **Linux sandbox** (Docker driver) | Yes, always fail closed | Yes | None inside the sandbox; the per-user gateway has no Plane C | Read only, when an administrator runs Tetragon and installs the opt-in [sandbox kernel feed](/docs/how-to/sandboxes/set-up-on-linux): every process start and exit in your sandboxes joins their process tree. No policy and no enforcement; the sandbox is contained by OpenShell |
 | **macOS, open-source** | Yes | Yes, MicroVM driver on Apple silicon | A and B | Not available: Tetragon has no macOS agent |
@@ -200,7 +200,7 @@ The layers divide the work so that two of them never make the same decision:
 | The sensor helper stops | Loaded policies keep running with their last scope until the helper returns, and status says so |
 | Events are lost | Kernel enforcement is unaffected (it runs in the kernel). Coverage is reported as partial, and the burn-in clock stops |
 
-See [Fail modes](/docs/reference/fail-modes) for the hook settings.
+See [Fail modes](/docs/reference/configuration/fail-modes) for the hook settings.
 
 ## What Tetragon adds on managed Linux
 
@@ -246,14 +246,14 @@ denied. They deny only through a native agent binary, and for
 one user per computer: a script-hosted agent (such as an npm install) and,
 when several users who finished burn-in have a native agent install, every one
 but the lowest uid stay in monitor mode
-([limits](/docs/enterprise/tetragon-reference#the-kernel-controls)). Everything in
+([limits](/docs/enterprise/runtime/tetragon-reference#the-kernel-controls)). Everything in
 `enforce` mode is a cap, never a rejection: when a
 condition is not met, the controls stay in monitor mode and status names the
 reason.
 
-Read [Tetragon on a Linux fleet](/docs/enterprise/tetragon)
+Read [Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon)
 for the setup, the readiness check, the pause runbook and the removal
-steps, and [Tetragon (Linux)](/docs/enterprise/configuration/) for
+steps, and [Tetragon (Linux)](/docs/enterprise/configure/configuration/) for
 the settings.
 
 ### Your own Tetragon policies
@@ -282,7 +282,7 @@ passes the instruction on.
 
 DefenseClaw does not distribute your policies to the fleet and does not
 compile its own guardrail, egress or sandbox policy into Tetragon. Those are
-separate decisions. See [Your policies' events](/docs/enterprise/tetragon#step-2-see-your-own-policies-events).
+separate decisions. See [Your policies' events](/docs/enterprise/runtime/tetragon#step-2-see-your-own-policies-events).
 
 ### What the kernel controls leave to other layers
 
@@ -310,7 +310,7 @@ separate decisions. See [Your policies' events](/docs/enterprise/tetragon#step-2
 
 ## Related
 
-- [AI discovery reference](/docs/reference/ai-discovery): the runtime planes and what each platform delivers
+- [AI discovery reference](/docs/reference/scanning/ai-discovery): the runtime planes and what each platform delivers
 - [Sandboxes](/docs/features/sandboxes): containment, the egress proxy and the sandbox manager
-- [Fail modes](/docs/reference/fail-modes): the hook fail mode
-- [Tetragon on a Linux fleet](/docs/enterprise/tetragon): rollout guide, readiness check and reference
+- [Fail modes](/docs/reference/configuration/fail-modes): the hook fail mode
+- [Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon): rollout guide, readiness check and reference

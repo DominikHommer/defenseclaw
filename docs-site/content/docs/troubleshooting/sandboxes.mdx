@@ -475,7 +475,7 @@ The upgrade restarts the gateway, which affects every sandbox on it, of every ow
 
 **Cause:** an `openshell.admin` limit refused the setting.
 
-**Fix:** run `defenseclaw sandbox policy explain`, which shows which limit. See [sandbox policy](/docs/reference/sandbox-policy#admin-limits).
+**Fix:** run `defenseclaw sandbox policy explain`, which shows which limit. See [sandbox policy](/docs/reference/sandboxes/policy#admin-limits).
 
 **Confirm:** the run starts with an allowed value.
 
@@ -580,7 +580,7 @@ The next run rebuilds the harness image with the CA in its system store, and eac
 
 **Cause:** the recorder refused sandbox records (for example the telemetry runtime was down), counted and logged. For the egress case, something presented the proxy a malformed, unknown or revoked credential: a sandbox that kept an environment from before a restart, or another program on the machine.
 
-**Fix:** run `defenseclaw doctor` and `defenseclaw observability plan` ([sandbox telemetry](/docs/reference/sandbox-telemetry/#health)). The egress case ends by itself after a minute without a refusal; if it repeats, run `defenseclaw sandbox doctor`.
+**Fix:** run `defenseclaw doctor` and `defenseclaw observability plan` ([sandbox telemetry](/docs/reference/sandboxes/telemetry/#health)). The egress case ends by itself after a minute without a refusal; if it repeats, run `defenseclaw sandbox doctor`.
 
 **Confirm:** the row turns green.
 

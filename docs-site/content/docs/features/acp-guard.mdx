@@ -37,7 +37,7 @@ The ACP guard sits between an editor that speaks the Agent Client Protocol (ACP)
 - It talks only to the gateway on a loopback address. Each request is encrypted and each verdict is authenticated, so another process on the port cannot read content or fake a verdict.
 - Setup starts in observe mode: it records and never blocks. Add `--activate` for action mode.
 - In action mode a blocked prompt ends that turn, and the editor shows the reason as an agent message.
-- Policy is set per editor and agent pair through [profiles](/docs/reference/acp-guard#configuration), so one editor can enforce on one agent and observe another.
+- Policy is set per editor and agent pair through [profiles](/docs/reference/apis/acp-guard#configuration), so one editor can enforce on one agent and observe another.
 
 ## Supported agents
 
@@ -67,6 +67,6 @@ Zed is tested. JetBrains is cataloged. A cataloged entry point matches the vendo
 ## Next
 
 <Cards>
-  <Card title="Guard an ACP editor" href="/docs/how-to/guard-an-acp-editor" description="Put Kiro behind the guard in Zed, find unguarded agents, guard several agents." />
-  <Card title="ACP guard reference" href="/docs/reference/acp-guard" description="What is checked, failure behavior, configuration, telemetry and routes." />
+  <Card title="Guard an ACP editor" href="/docs/how-to/agents/guard-an-acp-editor" description="Put Kiro behind the guard in Zed, find unguarded agents, guard several agents." />
+  <Card title="ACP guard reference" href="/docs/reference/apis/acp-guard" description="What is checked, failure behavior, configuration, telemetry and routes." />
 </Cards>

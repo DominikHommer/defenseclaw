@@ -1,0 +1,892 @@
+---
+title: Tetragon on a Linux fleet
+description: Roll DefenseClaw out to Linux computers that already run Tetragon, ring by ring - harden Tetragon, turn on Plane C, see your own policies' events, observe, approve and enforce, check the fleet, and pause or roll back - with tested Ansible and shell examples.
+keywords:
+  - DefenseClaw Tetragon
+  - Tetragon fleet
+  - Tetragon enforce
+  - Tetragon Ansible
+  - enforce_ack
+  - burn-in
+---
+
+<Callout title="Where this applies">
+Linux, standalone enterprise profile, computers that run [Tetragon](https://tetragon.io). The Secure Client profile refuses the `enterprise.tetragon` block, macOS and Windows accept and ignore it, and the open-source per-user product never connects to Tetragon.
+</Callout>
+
+If your Linux computers already run Tetragon, DefenseClaw's root sensor helper can read its events as Plane C's source of what AI agents did to the computer. It can also report the events of *your own* Tetragon policies when they hit an AI agent, and, only when you approve it, deny two fixed actions in the kernel. This page is the task flow for an administrator who pushes configuration with Ansible, Puppet, Chef, Satellite or an MDM tool. Every mode, cap, file and warning code is in the [Tetragon reference](/docs/enterprise/runtime/tetragon-reference).
+
+<Callout title="What DefenseClaw never does to your Tetragon" type="info">
+DefenseClaw does not install, update or configure Tetragon, and never writes under `/etc/tetragon`. It never changes or deletes a policy of yours, and it never connects to a TCP address. The sensor helper reads events over Tetragon's root-owned unix socket. In `observe` and `enforce` it also loads its own `defenseclaw-*` policies, and only those: it touches a policy only if it recorded loading that exact name itself.
+</Callout>
+
+<Flow
+  direction="TB"
+  compact
+  caption="Linux. Your config management pushes config.yaml; the apply trigger runs ensure, which restarts the sensor helper with a drop-in. The helper reads your Tetragon over its root-owned unix socket and, in observe and enforce, loads only its own defenseclaw-* policies. The gateway records what the helper reports and sends it to Grafana, Splunk and your other destinations."
+>
+  <Node id="mgmt" kind="operator">{`Config management\nAnsible, Puppet, Chef`}</Node>
+  <Node id="cfg" kind="policy">{`config.yaml\nenterprise.tetragon`}</Node>
+  <Node id="ensure" kind="generic" tag="runs as root">{`ensure\napplies the config`}</Node>
+  <Node id="helper" kind="connector" tag="runs as root">{`Sensor helper\nreads Tetragon`}</Node>
+  <Node id="tg" kind="generic" tag="yours">{`Tetragon\nand your policies`}</Node>
+  <Node id="gw" kind="gateway">{`Gateway\nrecords and exports`}</Node>
+  <Node id="obs" kind="datastore">{`Grafana and Splunk\nalerts, dashboards`}</Node>
+  <Edge from="mgmt" to="cfg" label="pushes" />
+  <Edge from="cfg" to="ensure" label="triggers" />
+  <Edge from="ensure" to="helper" label="restarts" />
+  <Edge from="helper" to="tg" label="reads, unix socket" />
+  <Edge from="helper" to="gw" label="reports" />
+  <Edge from="gw" to="obs" label="exports" />
+</Flow>
+
+## What you get
+
+Each step adds to the one before it, and you can stop at any step.
+
+| Step | Mode | What you get | What it changes on the computer |
+| --- | --- | --- | --- |
+| 1 | `consume` | Plane C reads Tetragon's process events: short-lived processes keep their names and arguments, native Claude Code is identified by its executable, and container processes are never mistaken for host agents | Nothing in Tetragon. Needs Plane C turned on |
+| 2 | `consume`, `customer_events: agent` | The events of your own kprobe and LSM policies, when they hit an AI agent, tagged with the policy name and tied to the agent, the user and the hook decision | Nothing in Tetragon. Your policies are read, never changed |
+| 3 | `observe` | DefenseClaw's own read-only policies, and two kernel controls in monitor mode that count what they would have denied | Loads three `defenseclaw-*` policies |
+| 4 | `enforce` | The two controls return `Operation not permitted` after a measured burn-in and your approval, for one user per computer whose agent is a native binary (see [the kernel controls](/docs/enterprise/runtime/tetragon-reference#the-kernel-controls)) | The same policies; the controls move to enforce mode |
+
+How this fits with hooks, sandboxes and the egress proxy is on [Agent segmentation, visibility and enforcement](/docs/appendix/coverage-by-layer).
+
+## Before you start
+
+| Need | Detail |
+| --- | --- |
+| DefenseClaw | The standalone enterprise package installed with the [Linux configuration management recipes](/docs/enterprise/mdm/linux-config-management), or the lifecycle in [Linux](/docs/enterprise/install/linux). Users and agents enrolled. The config reads `config_version: 9` and `enterprise.tetragon`. |
+| Tetragon | 1.7.x on RHEL 9 x86_64 supports `consume`, `observe` and `enforce`. 1.6.x supports `consume` only. Ubuntu 22.04 and 24.04 and arm64: `consume` only, expected to work and not verified. RHEL 8 (kernel 4.18) is not supported. Other versions fall back to `cn_proc` and `fanotify` and report `tetragon_unsupported_version`. |
+| Kernel | `consume` works wherever Tetragon runs. `enforce` needs BPF LSM: `bpf` in the kernel's `lsm=` list |
+| Root | Every command below runs as root. The DefenseClaw binaries are not on `PATH`, so the commands spell out `/opt/defenseclaw/bin` |
+
+Run this read-only check on one computer first, as root:
+
+```bash
+jq -r .server_address /var/run/tetragon/tetragon-info.json   # want unix:///var/run/tetragon/tetragon.sock
+stat -c '%U:%G %a %n' /var/run/tetragon /var/run/tetragon/tetragon.sock   # want root:root, not world-writable
+tetra version                       # want 1.7.x for observe and enforce (1.6.x: consume only)
+cat /sys/kernel/security/lsm        # enforce needs bpf in the list
+ls /etc/tetragon/tetragon.conf.d/   # your settings; DefenseClaw never writes here
+```
+
+| Output | Meaning | If it is not as wanted |
+| --- | --- | --- |
+| `server_address` | Tetragon's API address. A `unix://` path is what DefenseClaw uses. Tetragon's packaged default is a TCP port on localhost, which any local account can use to load kernel policies | Set `server-address` in [Harden Tetragon](#harden-tetragon) |
+| `stat` | The socket and its folder must belong to root and not be writable by others; the info file `tetragon-info.json` and its folder (the same `/var/run/tetragon`) must belong to root and be writable only by root. Otherwise the helper refuses to connect (`tetragon_untrusted_endpoint`), and `tetragon status` and `verify` name the path | Restart Tetragon so it recreates the socket, and fix any other owner or group write bit of the folder (`sudo chmod go-w /var/run/tetragon`) |
+| `tetra version` | The supported window for each mode | Keep `mode: consume` on 1.6.x, or install 1.7.x |
+| `lsm` | BPF LSM is what lets a kernel control return an error | Add `bpf` to the `lsm=` boot parameter and reboot before you enforce |
+
+## Harden Tetragon
+
+The helper trusts Tetragon's API only as far as it can verify it. The settings are files in `/etc/tetragon/tetragon.conf.d`, one file per setting, named for the flag.
+
+<Callout title="A restart of Tetragon drops policies added with tetra" type="warn">
+Restarting Tetragon drops every policy that was added over its API, yours and DefenseClaw's. Policies in `/etc/tetragon/tetragon.tp.d` reload. DefenseClaw's own policies come back within about a minute. Policies you added by hand with `tetra` do not, so put the ones you keep in `tetragon.tp.d`, and restart in a maintenance window, a few computers at a time.
+</Callout>
+
+**Required**
+
+| Setting | Value | When | Why |
+| --- | --- | --- | --- |
+| `server-address` | `unix:///var/run/tetragon/tetragon.sock` | every mode | The default TCP port lets any local account load kernel policies. The helper never connects to TCP: it stays on `cn_proc` and `fanotify`, and status reports `tetragon_tcp_api` |
+| Socket ownership | `root:root`, mode `0660`, in a root-owned folder | every mode | The helper connects only when the socket and its folder belong to root, and the server behind the socket runs as root and is the process named in `/var/run/tetragon/tetragon-info.json` |
+| `keep-sensors-on-exit` | `false` (Tetragon's default) | `enforce` | With `true`, stopping Tetragon leaves its programs enforcing with nobody updating their scope. `enforce` is refused and the controls stay in monitor mode (`tetragon_persistent_sensors`) |
+| BPF LSM | `bpf` in the kernel's `lsm=` boot parameter | `enforce` | The controls are LSM programs. Without it they cannot deny (`kernel_lsm_unavailable`) |
+| Version | Tetragon 1.7.x | `observe`, `enforce` | 1.6.x supports `consume` only |
+
+**Recommended**
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `health-server-address` | `127.0.0.1:6789` | The default listens on every interface |
+| `metrics-server` | `127.0.0.1:2112` | The helper reads loss counters only from a loopback address whose listener is Tetragon. Without it, "events lost" reads unknown. The counts are shown, never acted on |
+| `redaction-filters` | Your filters for secrets in command lines | Tetragon's own export file holds every user's arguments. DefenseClaw never reads or widens it |
+
+`enable-ancestors` is not needed: the helper requests no ancestors on its own stream, and ancestors cost CPU on every event. Policies that use `uprobe` (for example DNS naming through `getaddrinfo`) pin about 137 MB of kernel memory. DefenseClaw loads none.
+
+<Tabs items={['Shell', 'Ansible']}>
+
+<Tab value="Shell">
+
+```bash
+echo unix:///var/run/tetragon/tetragon.sock | sudo tee /etc/tetragon/tetragon.conf.d/server-address
+echo 127.0.0.1:6789 | sudo tee /etc/tetragon/tetragon.conf.d/health-server-address
+echo 127.0.0.1:2112 | sudo tee /etc/tetragon/tetragon.conf.d/metrics-server
+# Only on computers that will enforce:
+echo false | sudo tee /etc/tetragon/tetragon.conf.d/keep-sensors-on-exit
+# This drops policies added with tetra; tetragon.tp.d policies reload.
+sudo systemctl restart tetragon
+```
+
+</Tab>
+
+<Tab value="Ansible">
+
+`harden-tetragon.yml` writes the same files, restarts Tetragon only when a file changed, and on rings that will enforce also checks that BPF LSM is on. Run it twice: the second run changes nothing.
+
+```yaml title="harden-tetragon.yml"
+# Harden the Tetragon you already run so the DefenseClaw sensor helper can
+# read it. This play is yours: DefenseClaw never writes under /etc/tetragon.
+#
+# Restarting Tetragon drops every policy added over its API with `tetra`
+# (DefenseClaw's and yours). Policies in /etc/tetragon/tetragon.tp.d reload.
+# Run it in a maintenance window, a few hosts at a time (tetragon_serial).
+#
+#   ansible-playbook -i inventory harden-tetragon.yml
+#   ansible-playbook -i inventory harden-tetragon.yml -e tetragon_for_enforce=true
+- name: Harden Tetragon for DefenseClaw
+  hosts: tetragon_hosts
+  become: true
+  serial: "{{ tetragon_serial | default(5) }}"
+  vars:
+    tetragon_conf_dir: /etc/tetragon/tetragon.conf.d
+    # Set to true on the rings that will enforce.
+    tetragon_for_enforce: false
+    # Required in every mode: the API is a root-owned unix socket, never TCP.
+    tetragon_required:
+      server-address: "unix:///var/run/tetragon/tetragon.sock"
+    # Required to enforce: stopping Tetragon must not leave programs enforcing
+    # with nobody updating them.
+    tetragon_required_for_enforce:
+      keep-sensors-on-exit: "false"
+    # Recommended: listeners on loopback only.
+    tetragon_recommended:
+      metrics-server: "127.0.0.1:2112"
+      health-server-address: "127.0.0.1:6789"
+    # Not needed: enable-ancestors. DefenseClaw requests no ancestors and
+    # they cost CPU on every event.
+  tasks:
+    - name: Create the Tetragon settings folder
+      ansible.builtin.file:
+        path: "{{ tetragon_conf_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write the required settings
+      ansible.builtin.copy:
+        content: "{{ item.value }}\n"
+        dest: "{{ tetragon_conf_dir }}/{{ item.key }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ tetragon_required | dict2items }}"
+      notify: Restart Tetragon
+
+    - name: Write the settings that enforcement needs
+      ansible.builtin.copy:
+        content: "{{ item.value }}\n"
+        dest: "{{ tetragon_conf_dir }}/{{ item.key }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ tetragon_required_for_enforce | dict2items }}"
+      when: tetragon_for_enforce | bool
+      notify: Restart Tetragon
+
+    - name: Write the recommended settings
+      ansible.builtin.copy:
+        content: "{{ item.value }}\n"
+        dest: "{{ tetragon_conf_dir }}/{{ item.key }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ tetragon_recommended | dict2items }}"
+      notify: Restart Tetragon
+
+    - name: Restart Tetragon now, so the checks below see the new settings
+      ansible.builtin.meta: flush_handlers
+
+    - name: Read the kernel's list of security modules
+      ansible.builtin.command: cat /sys/kernel/security/lsm
+      register: tetragon_lsm
+      changed_when: false
+      when: tetragon_for_enforce | bool
+
+    - name: Require BPF LSM on hosts that will enforce
+      ansible.builtin.assert:
+        that: "'bpf' in tetragon_lsm.stdout"
+        fail_msg: "bpf is not in the kernel's lsm= list. Add it to the boot parameters and reboot before you enforce."
+        quiet: true
+      when: tetragon_for_enforce | bool
+
+  handlers:
+    - name: Restart Tetragon
+      ansible.builtin.systemd:
+        name: tetragon
+        state: restarted
+```
+
+</Tab>
+
+</Tabs>
+
+## Step 1: Turn on Plane C and consume
+
+`consume` is the default mode, but it does nothing until Plane C is on, and Plane C is opt-in. With Plane C off, the effective mode is `off` and `status` reports `tetragon_plane_c_off`. Merge this into the admin config you already push:
+
+```yaml title="config.yaml (merge into your admin config)"
+ai_discovery:
+  runtime:
+    enabled: true
+    enable_host_plane: true      # Plane C; without it the Tetragon mode is off
+enterprise:
+  profile: standalone
+  tetragon:
+    mode: consume                # consume | observe | enforce | off
+    customer_events: agent       # your policies' events from AI agents: agent | off
+```
+
+Push it the way you push the rest of the config. The package's `ensure` step validates the candidate, applies it, and rolls back on failure; see [the procedure every recipe follows](/docs/enterprise/mdm/linux-config-management#the-procedure-every-recipe-follows). A change to `enterprise.tetragon` is rendered into a drop-in for the sensor helper, and the helper restarts into it. The gateway re-attaches to the restarted helper within seconds; until its next poll (30 seconds by default), `tetragon verify` warns that the gateway records nothing from Plane C. A warning never fails the gate.
+
+<Tabs items={['Ansible', 'Puppet, Chef, Salt']}>
+
+<Tab value="Ansible">
+
+`defenseclaw-tetragon.yml` installs the package, renders the candidate config from `config.yaml.j2` for the ring, runs `ensure` and `verify`, and then gates the ring on `tetragon verify`. The gate retries for up to two minutes: the helper applies a new mode at its first pass after `ensure` restarted it, within a minute, and until then `verify` can fail `defenseclaw.policies` and `defenseclaw.agents`. The play takes one ring at a time and stops at the first computer that fails (`serial` and `any_errors_fatal`). The ring variables go in `group_vars`, as the play's header shows.
+
+```yaml title="defenseclaw-tetragon.yml"
+# Install DefenseClaw standalone enterprise and set its Tetragon mode, ring by
+# ring. Ring variables live in group_vars, one file per ring group:
+#
+#   group_vars/defenseclaw_ring_pilot.yml
+#     defenseclaw_tetragon_mode: observe
+#     defenseclaw_tetragon_burn_in: 40h
+#   group_vars/defenseclaw_ring_broad.yml
+#     defenseclaw_tetragon_mode: enforce
+#     defenseclaw_tetragon_enforce_ack: sha256:08b71155b713   # from `tetragon verify --ready-for enforce`
+#     defenseclaw_guardrail_mode: action   # the kernel controls deny only for connectors in action mode
+#
+# Run one ring at a time, and stop at the first host that fails its checks:
+#
+#   ansible-playbook -i inventory defenseclaw-tetragon.yml -e defenseclaw_ring=defenseclaw_ring_pilot
+- name: DefenseClaw standalone enterprise with Tetragon
+  hosts: "{{ defenseclaw_ring | default('defenseclaw_linux') }}"
+  become: true
+  serial: "{{ defenseclaw_serial | default(5) }}"
+  any_errors_fatal: true
+  vars:
+    # The release you deploy. It must include the Tetragon integration: it
+    # reads config_version 9 and enterprise.tetragon, which 1.0.0 refuses.
+    defenseclaw_version: "<version>"
+    # SHA-256 values from the release's cosign-verified checksums.txt
+    defenseclaw_pins:
+      defenseclaw-enterprise-<version>-linux-amd64.deb: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-amd64.rpm: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-arm64.deb: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-arm64.rpm: "<sha256>"
+    defenseclaw_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] }}"
+    defenseclaw_format: "{{ 'deb' if ansible_facts['pkg_mgr'] == 'apt' else 'rpm' }}"
+    defenseclaw_package: "defenseclaw-enterprise-{{ defenseclaw_version }}-linux-{{ defenseclaw_arch }}.{{ defenseclaw_format }}"
+    defenseclaw_gateway: /opt/defenseclaw/bin/defenseclaw-gateway
+    # The ring variables are not set here: play vars outrank group_vars, so a
+    # ring's mode would never take effect. They default where they are read.
+  tasks:
+    - name: Create the root-only staging folder
+      ansible.builtin.file:
+        path: /etc/mdm/defenseclaw
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Render the candidate config for this ring
+      ansible.builtin.template:
+        src: config.yaml.j2
+        dest: /etc/mdm/defenseclaw/config.yaml
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Create the config folder
+      ansible.builtin.file:
+        path: /etc/defenseclaw
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Put the config in place before the first install
+      ansible.builtin.template:
+        src: config.yaml.j2
+        dest: /etc/defenseclaw/config.yaml
+        owner: root
+        mode: "0640"
+        force: false
+
+    - name: Download the package and check its SHA-256
+      ansible.builtin.get_url:
+        url: "https://github.com/cisco-ai-defense/defenseclaw/releases/download/{{ defenseclaw_version }}/{{ defenseclaw_package }}"
+        dest: "/var/cache/{{ defenseclaw_package }}"
+        checksum: "sha256:{{ defenseclaw_pins[defenseclaw_package] }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install or upgrade the package (Debian, Ubuntu)
+      ansible.builtin.apt:
+        deb: "/var/cache/{{ defenseclaw_package }}"
+      when: ansible_facts['pkg_mgr'] == 'apt'
+
+    - name: Install or upgrade the package (RHEL family)
+      ansible.builtin.dnf:
+        name: "/var/cache/{{ defenseclaw_package }}"
+        state: present
+        # The rpm has no embedded signature; the SHA-256 check above proves it.
+        disable_gpg_check: true
+      when: ansible_facts['pkg_mgr'] in ['dnf', 'dnf5']
+
+    - name: Apply the config and converge
+      ansible.builtin.command:
+        argv:
+          - "{{ defenseclaw_gateway }}"
+          - enterprise
+          - linux
+          - ensure
+          - --from-package
+          - --config
+          - /etc/mdm/defenseclaw/config.yaml
+          - --json
+      register: defenseclaw_ensure
+      until: defenseclaw_ensure.rc != 75
+      retries: 5
+      delay: 30
+      changed_when: defenseclaw_ensure.rc == 0 and not (defenseclaw_ensure.stdout | from_json).noop
+      failed_when: defenseclaw_ensure.rc != 0
+
+    - name: Verify the deployment
+      ansible.builtin.command:
+        argv: ["{{ defenseclaw_gateway }}", enterprise, linux, verify, --json]
+      changed_when: false
+
+    - name: Gate the ring on Tetragon readiness for its mode
+      ansible.builtin.command:
+        argv:
+          - "{{ defenseclaw_gateway }}"
+          - enterprise
+          - linux
+          - tetragon
+          - verify
+          - --ready-for
+          - "{{ defenseclaw_tetragon_mode | default('consume') }}"
+      register: defenseclaw_tetragon_ready
+      # ensure restarts the sensor helper into a new mode, and the helper
+      # loads that mode's policies at its first pass, within a minute: the
+      # gate waits for it rather than failing on the first look.
+      until: defenseclaw_tetragon_ready.rc == 0
+      retries: 6
+      delay: 20
+      changed_when: false
+      failed_when: defenseclaw_tetragon_ready.rc != 0
+      when: (defenseclaw_tetragon_mode | default('consume')) != 'off'
+```
+
+```yaml title="config.yaml.j2"
+# Candidate DefenseClaw admin config, rendered per ring by defenseclaw-tetragon.yml.
+# Merge the ai_discovery and enterprise.tetragon parts into the config you already push.
+config_version: 9
+deployment_mode: managed_enterprise
+data_dir: /var/lib/defenseclaw
+policy_dir: /etc/defenseclaw/policies
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: "{{ defenseclaw_guardrail_mode | default('observe') }}"         # observe | action; a kernel control denies only for a connector in action mode
+  connectors:
+    claudecode: {}
+    codex: {}
+ai_discovery:
+  runtime:
+    enabled: true
+    enable_host_plane: true      # Plane C; without it the Tetragon mode is off
+enterprise:
+  profile: standalone
+  tetragon:
+    mode: "{{ defenseclaw_tetragon_mode | default('consume') }}"                # consume | observe | enforce | off
+    customer_events: "{{ defenseclaw_tetragon_customer_events | default('agent') }}"       # your policies' events from AI agents: agent | off
+{% if defenseclaw_tetragon_burn_in | default('') | string != '' %}
+    burn_in: {{ defenseclaw_tetragon_burn_in }}                # covered agent-hours per user; 0, or 24h to 2160h
+{% endif %}
+{% if defenseclaw_tetragon_enforce_ack | default('') | length > 0 %}
+    enforce_ack: {{ defenseclaw_tetragon_enforce_ack | tojson }}   # one digest, or a list of up to 4 during a ring upgrade
+{% endif %}
+```
+
+</Tab>
+
+<Tab value="Puppet, Chef, Salt">
+
+<Callout title="Template">These snippets are templates, validated by reading the command lines. They have not been run in a live tenant.</Callout>
+
+They run the same three commands: `ensure`, `verify` and `tetragon verify`. Stage the config file the way the [recipes](/docs/enterprise/mdm/linux-config-management) do, and run the commands only when it changes. The readiness check retries for up to two minutes, as the play's gate does.
+
+```puppet
+$gateway = '/opt/defenseclaw/bin/defenseclaw-gateway'
+exec { 'defenseclaw ensure':
+  command     => "${gateway} enterprise linux ensure --from-package --config /etc/mdm/defenseclaw/config.yaml --json",
+  refreshonly => true,
+  subscribe   => File['/etc/mdm/defenseclaw/config.yaml'],
+}
+exec { 'defenseclaw tetragon verify':
+  command     => "${gateway} enterprise linux tetragon verify --ready-for observe",
+  refreshonly => true,
+  tries       => 6,
+  try_sleep   => 20,
+  subscribe   => Exec['defenseclaw ensure'],
+}
+```
+
+```ruby
+execute 'defenseclaw ensure' do
+  command '/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --config /etc/mdm/defenseclaw/config.yaml --json'
+  action :nothing
+  subscribes :run, 'template[/etc/mdm/defenseclaw/config.yaml]', :immediately
+end
+
+execute 'defenseclaw tetragon verify' do
+  command '/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for observe'
+  retries 6
+  retry_delay 20
+  action :nothing
+  subscribes :run, 'execute[defenseclaw ensure]', :immediately
+end
+```
+
+```yaml
+defenseclaw-ensure:
+  cmd.run:
+    - name: /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --config /etc/mdm/defenseclaw/config.yaml --json
+    - onchanges:
+      - file: /etc/mdm/defenseclaw/config.yaml
+
+defenseclaw-tetragon-ready:
+  cmd.run:
+    - name: /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for observe
+    - retry:
+        attempts: 6
+        interval: 20
+    - onchanges:
+      - cmd: defenseclaw-ensure
+```
+
+</Tab>
+
+</Tabs>
+
+Check one computer by hand. `verify` never changes anything and never connects to Tetragon. It reads the installed config, the helper's state, Tetragon's info file and the unit states, and it exits `0` when no check fails and `1` when one does. Warnings never fail it, so your tool can gate on the exit code.
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for consume
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status
+```
+
+Each line is a pass (`✓`), a warning (`!`), a failure (`✗`) or information (`i`). A failure prints the exact command that fixes it. The checks, in order: Tetragon is installed and running, its API is a root-owned unix socket, its version is in the window for the mode, the helper's stream is connected (and not on the `cn_proc` fallback), the metrics and health listeners are on loopback, Plane C is on and the gateway records it, and your policies are counted. `defenseclaw-gateway status` ends its Subsystems list with one line, `Kernel sensor: Tetragon v1.7.1 (consume)`, and adds `; kernel controls: ...` once DefenseClaw's controls are loaded. On the fallback it reads `Kernel sensor: cn_proc and fanotify (Tetragon not used: <reason>)`.
+
+![tetragon verify --ready-for consume on a RHEL 9 computer that passes: Tetragon installed and running, its API a root-owned unix socket, version 1.7.1 supported, the sensor helper reading events, loopback metrics and health listeners, Plane C on and recorded by the gateway, no policy left without a helper, four of your policies loaded and read only, and the closing line Ready: this host runs consume as its config asks](/images/tetragon/terminal-tetragon-verify-consume.png)
+
+## Step 2: See your own policies' events
+
+If you already run Tetragon policies on kprobe or LSM hooks, for example one that watches opens of `~/.aws/credentials` or `tcp_connect`, DefenseClaw reports their events when they hit an AI agent. It does this in `consume`, `observe` and `enforce`, and it never manages, changes or deletes your policies.
+
+- **Ownership is by record.** A policy is DefenseClaw's only when this helper recorded loading it. Everything else is yours, including a policy named `defenseclaw-controls-deadbeef` (which also raises `tetragon_foreign_defenseclaw_name`).
+- **Only agent events become records.** The gateway attributes each event to the agent's process lineage, the user, and the hook decision for that tool call when there is one (`hook_join` is `exact` or `temporal`). Events from the user's normal shell, from other processes and from containers are counted per policy and never exported one by one.
+- **Not scored.** Your events are not part of DefenseClaw's risk scores or findings, so a noisy policy of yours cannot inflate them.
+
+The forwarded fields and what is never forwarded are in the [reference](/docs/enterprise/runtime/tetragon-reference#your-tetragon-policies). Each policy has a budget of 20 events a second (a burst of 100) and the host 200; the overflow is counted, and `status` warns `tetragon_customer_events_capped` for the hour it happens. To forward nothing and keep only the counts, set `customer_events: off`.
+
+Where you see them:
+
+| Surface | What |
+| --- | --- |
+| `tetragon status` | A section "Your Tetragon policies": name, mode, state, events seen, forwarded, blocked, last event |
+| `enterprise linux discovery` | One line: how many policies are loaded and enforcing, and how many agent events were forwarded since the sensor helper started |
+| Telemetry | The `ai.runtime.kernel_event` log family and the `defenseclaw.kernel.events` metric with `owner=customer` |
+| Grafana and Splunk | The row "Your Tetragon policies: events from AI agents" |
+| Developer | A block by your policy is explained in the agent's next answer, like a DefenseClaw block |
+
+![Grafana AI Discovery Runtime Planes, row Your Tetragon policies: events from AI agents. Tiles for agent events, blocked by your policies, would-block in monitor mode and every event your policies saw, a chart of agent events by policy, and a table by policy, agent, action, outcome and hook join](/images/tetragon/grafana-kernel-your-policies.png)
+
+## Step 3: Observe on a pilot ring
+
+`observe` loads three DefenseClaw policies in Tetragon (`defenseclaw-observe`, `defenseclaw-connect` and `defenseclaw-controls`, the last in monitor mode) and counts what the two kernel controls would have denied. Nothing is denied. The ring decides the mode through the ring variables. A pilot ring uses a short `burn_in`:
+
+```yaml title="group_vars/defenseclaw_ring_pilot.yml"
+defenseclaw_tetragon_mode: observe
+defenseclaw_tetragon_burn_in: 40h
+```
+
+Who is enrolled for the kernel controls: every user with a row in `targets.yaml`, and, for the connectors that reach users through vendor machine policy (Claude Code, Codex, Cursor, Copilot CLI and OpenCode), every eligible account of `enterprise.enrollment`, which has no row for them. A `targets.yaml` row for the same user and connector, enabled or not, decides for that pair. `status` marks a connector a user is enrolled for through machine policy with `*`.
+
+<Callout title="168h is 168 hours of agent use, not a week" type="info">
+`burn_in` counts covered agent-hours per user and computer. Time accrues only while an anchored agent of that user is running and the Tetragon stream is connected, so 168h is about five to six working weeks for a full-time agent user. The default stays `168h`; shorten it for a pilot, and keep it long for the rings that follow.
+</Callout>
+
+Run the play for the pilot ring, then watch it for a working session. From `observe` on, `verify` also checks that Tetragon loaded DefenseClaw's own policies (`defenseclaw.policies`): a policy Tetragon refused (`load_error`) or a pass that did not apply them fails the gate, with the commands that show why.
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for observe
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status
+```
+
+What to read in `status`:
+
+- **Users.** One row per enrolled user: whether they are `enforcing` (an agent session of theirs is anchored and denied), `armed` (enforce is loaded for them and no running agent session is anchored yet), in burn-in, reset by a hit, or monitor-only and why, with their burn-in as progress, percent and an estimate. The estimate appears after the window is 24 hours old; before that it reads "measuring".
+- **A hit.** A *would-block* hit is an agent that did what a control would deny: it opened an SSH private key, or wrote a shell profile. It lists the control, the user's path, the binary and the time, and sends that user back to the start of a fresh window. Read it as a question: was the tool expected to do this? If it was, this user cannot be enforced for this control, and other users are not affected.
+- **Observed, not enforced.** Sessions the controls will never cover, with the reason in words: an IDE terminal, a process that looks like an agent only by its name, a user who is not enrolled, or a connector in observe mode.
+- **Users with no agent.** A user with no command-line agent installed has no control at all. `verify` names them.
+
+![tetragon status in observe with burn_in 40h: Tetragon version and socket, the three DefenseClaw policies in monitor mode, a Users table with two users reset by a hit and one in burn-in, the would-block hits with the path and the binary, your four Tetragon policies with their event counts, and the Next line](/images/tetragon/terminal-tetragon-status.png)
+
+## Step 4: Approve and enforce, ring by ring
+
+Enforcement is explicit. Nothing promotes on its own, and a timer alone never starts it. `verify --ready-for enforce` is the promotion guide:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce
+```
+
+It checks everything `observe` checks, plus `keep-sensors-on-exit`, BPF LSM, that an enrolled user has an anchored agent, and that each enrolled connector is in `action` mode. A kernel control never denies for a connector in observe mode, so a user counts as ready only when their burn-in is done and one of their connectors is in `action` mode. `defenseclaw.connectors_action` fails when enforce would deny for nobody. Then it prints the burn-in per user with progress and an estimate, the details of each hit, and the block to approve. On a computer that still runs `consume`, nothing is measured yet: `defenseclaw.burn_in` fails and the next step is the observe ring.
+
+```yaml title="group_vars/defenseclaw_ring_broad.yml"
+defenseclaw_tetragon_mode: enforce
+defenseclaw_tetragon_enforce_ack: sha256:08b71155b713   # the value `verify` prints for your build
+defenseclaw_guardrail_mode: action   # the kernel controls deny only for connectors in action mode
+```
+
+`defenseclaw_guardrail_mode` sets `guardrail.mode` in the config template. In `action` mode the hooks also block what your guardrail policy blocks, so turn it on for the rings where you want enforcement, not only the kernel controls.
+
+Read these rules before you roll it out:
+
+1. **Approve once per build.** The digest covers only the controls that ship in the binary, so it is the same on every computer of one build. A build that changes a control changes the digest; the release notes carry a line "Kernel controls digest: sha256:..., changed or unchanged since the previous release".
+2. **Enforce per user, per computer.** The approval is fleet-wide, but the burn-in is not. On a computer, a user who finished the burn-in is enforced and the rest stay in monitor mode until theirs completes. At most one user per computer is denied, and only through a native agent binary: when several ready users have a native agent install, the lowest uid is enforced and the others stay in monitor (`kernel_binary_anchor_scope_limited`), and a script-hosted agent, such as an npm install, is never denied (`kernel_pid_anchor_monitor_only`). An agent installed once under an administrator prefix (`enterprise.enrollment.agent_prefixes`) is every eligible account's native agent, so the lowest eligible uid holds the deny anchor, often an administrator account that never runs an agent. `verify --ready-for enforce` names the user who holds it; leave such accounts out with `enterprise.enrollment.exclude_users` before you enforce.
+3. **Go through the rings.** Roll out with `serial` as in the play, and gate each ring on `tetragon verify --ready-for enforce` (exit `0`).
+4. **Controls are caps, never rejections.** A stale approval, a connector in observe mode or a persistent-sensors setting never rejects the config; it keeps the controls in monitor mode and `status` says why.
+5. **Restart agent sessions after enforce starts.** Tetragon marks an agent's processes when the agent starts, so a session that was already running when the controls loaded in enforce is monitored, not denied, until it restarts. The same holds after a Tetragon restart. An agent's own update does not have this effect, and a pause and a resume keep the controls loaded. `status` lists such sessions under "Observed, not enforced" and warns with `kernel_sessions_predate_controls`; ask developers to restart their agents, or roll enforce out when they start new sessions.
+
+What changes for developers: nothing for the normal shell, IDE terminals, other users and `tmux`. Below an enrolled user's command-line agent, an open of an SSH private key or an in-place write of a shell profile or user autostart entry returns `Operation not permitted`; see [When a control blocks something](#when-a-control-blocks-something).
+
+![tetragon verify --ready-for enforce on a computer that runs observe: the checks, the burn-in table with two users reset by a hit (each hit with its control, path and binary) and one still measuring, and the enterprise.tetragon block to approve with mode enforce and the enforce_ack digest](/images/tetragon/terminal-tetragon-verify-enforce.png)
+
+Once a ring enforces, `status` shows each user's state. In this lab ring `burn_in: 0` let the controls deny without the wait (`status` warns `kernel_burn_in_skipped`); a real ring keeps a measured burn-in. `alice` is enforcing, `bob` stays in monitor mode because another user's native agent holds the one deny anchor, and `carol` has no agent installed.
+
+![tetragon status in enforce: the kernel controls digest approved, four DefenseClaw policies with controls in enforce mode and controls-burnin in monitor mode, a Users table where alice is enforcing, bob is monitor only because another user's native agent holds the one deny anchor and carol has no agent installed, the blocked and would-block hits with their paths and binaries, your four Tetragon policies, and three warnings](/images/tetragon/terminal-tetragon-status-enforce.png)
+
+## Check the fleet
+
+Three views come from what each computer already reports; no new server is needed.
+
+**The fleet play.** `fleet-readiness.yml` runs `tetragon verify --json` on every computer and prints one summary: computers ready and not ready (with the failing checks); users enforcing, armed, ready for enforce, in burn-in, reset by a hit, monitor-only, with no agent installed, and held in monitor by a deny-anchor limit, a pause or an operator change; and whether the computers run different builds (more than one digest).
+
+```yaml title="fleet-readiness.yml"
+# One-screen readiness of the whole fleet for a Tetragon mode.
+#
+#   ansible-playbook -i inventory fleet-readiness.yml -e defenseclaw_tetragon_mode=enforce
+#
+# It changes nothing. Each host runs `tetragon verify --json` (exit 0 ready,
+# 1 not ready); one summary follows. The user counts are each user's phase
+# toward enforce (verify's phase field, for observe and enforce). The
+# plain-shell twin is fleet-readiness.sh.
+- name: Fleet readiness for the DefenseClaw Tetragon integration
+  hosts: defenseclaw_linux
+  become: true
+  gather_facts: false
+  vars:
+    defenseclaw_gateway: /opt/defenseclaw/bin/defenseclaw-gateway
+    defenseclaw_tetragon_mode: observe
+  tasks:
+    - name: Check readiness for the mode
+      ansible.builtin.command:
+        argv:
+          - "{{ defenseclaw_gateway }}"
+          - enterprise
+          - linux
+          - tetragon
+          - verify
+          - --ready-for
+          - "{{ defenseclaw_tetragon_mode }}"
+          - --json
+      register: fleet_verify
+      changed_when: false
+      failed_when: fleet_verify.rc not in [0, 1]
+
+    - name: Keep what the summary needs
+      ansible.builtin.set_fact:
+        fleet_ready: "{{ fleet_verify.rc == 0 }}"
+        fleet_failing: "{{ ((fleet_verify.stdout | from_json).checks | default([]) | selectattr('status', 'equalto', 'fail') | map(attribute='id') | list) }}"
+        fleet_digest: "{{ (fleet_verify.stdout | from_json).kernel_policy | default('') }}"
+        fleet_users: "{{ (fleet_verify.stdout | from_json).users | default([]) }}"
+
+    - name: Summarize the fleet
+      ansible.builtin.debug:
+        msg:
+          - "Mode checked: {{ defenseclaw_tetragon_mode }}"
+          - "Hosts ready: {{ fleet_ready_hosts | length }} of {{ fleet_vars | length }}"
+          - "Hosts not ready: {{ fleet_not_ready_hosts | join(', ') | default('none', true) }}"
+          - "Users enforcing: {{ fleet_users_all | selectattr('phase', 'equalto', 'enforcing') | list | length }}"
+          - "Users armed (enforce loaded, no agent session anchored yet): {{ fleet_users_all | selectattr('phase', 'equalto', 'armed') | list | length }}"
+          - "Users ready for enforce: {{ fleet_users_all | selectattr('phase', 'equalto', 'ready') | list | length }}"
+          - "Users in burn-in: {{ fleet_users_all | selectattr('phase', 'equalto', 'burn_in') | list | length }}"
+          - "Users reset by a hit: {{ fleet_users_all | selectattr('phase', 'equalto', 'reset') | list | length }}"
+          - "Users monitor-only (connector in observe mode): {{ fleet_users_all | selectattr('phase', 'equalto', 'monitor_only') | list | length }}"
+          - "Users with no agent installed: {{ fleet_users_all | selectattr('phase', 'equalto', 'no_agent') | list | length }}"
+          - "Users held in monitor (a deny-anchor limit, a pause or an operator change): {{ fleet_users_all | selectattr('phase', 'equalto', 'held') | list | length }}"
+          - "Kernel controls digests: {{ fleet_vars | map(attribute='fleet_digest') | unique | list }} (more than one means hosts run different builds)"
+      run_once: true
+      vars:
+        fleet_vars: "{{ ansible_play_hosts | map('extract', hostvars) | list }}"
+        fleet_ready_hosts: "{{ fleet_vars | selectattr('fleet_ready') | map(attribute='inventory_hostname') | list }}"
+        fleet_not_ready_hosts: "{{ fleet_vars | rejectattr('fleet_ready') | map(attribute='inventory_hostname') | list }}"
+        fleet_users_all: "{{ fleet_vars | map(attribute='fleet_users') | flatten }}"
+
+    - name: Name each host that is not ready
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is not ready for {{ defenseclaw_tetragon_mode }}: {{ fleet_failing | join(', ') | default('see tetragon verify', true) }}"
+      when: not fleet_ready
+```
+
+**The shell twin.** `fleet-readiness.sh` does the same with an ssh loop and `jq`, for teams without Ansible. Satellite remote execution can run the same two commands per host. It exits `0` when every computer is ready, `1` when one is not, and `2` when a computer could not be checked.
+
+```bash title="fleet-readiness.sh"
+#!/bin/sh
+# Fleet readiness for the DefenseClaw Tetragon integration, without Ansible.
+# It changes nothing on the hosts. Satellite remote execution can run the same
+# commands on each host; this script is the ssh version.
+#
+# Usage: fleet-readiness.sh MODE HOSTFILE
+#   MODE      consume, observe or enforce: the mode you want to move to
+#   HOSTFILE  one ssh target per line; blank lines and lines starting with # are skipped
+#
+# Needs key-based ssh to an account that can run sudo without a prompt, and jq here.
+# Exit 0 when every host is ready, 1 when a host is not ready, 2 for bad arguments
+# or a host that could not be checked.
+set -u
+
+GW=/opt/defenseclaw/bin/defenseclaw-gateway
+mode=${1:-}
+hosts=${2:-}
+
+case "$mode" in
+consume | observe | enforce) ;;
+*)
+	echo "usage: $0 consume|observe|enforce HOSTFILE" >&2
+	exit 2
+	;;
+esac
+if [ ! -r "$hosts" ]; then
+	echo "$0: cannot read the host file: $hosts" >&2
+	exit 2
+fi
+if ! command -v jq >/dev/null 2>&1; then
+	echo "$0: jq is required on this machine" >&2
+	exit 2
+fi
+
+work=$(mktemp -d) || exit 2
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+n=0
+while IFS= read -r host; do
+	case "$host" in
+	'' | '#'*) continue ;;
+	esac
+	n=$((n + 1))
+	# -n keeps ssh from reading the host list on standard input.
+	ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$host" \
+		"sudo $GW enterprise linux tetragon verify --ready-for $mode --json" >"$work/$n.verify" 2>/dev/null
+	vrc=$?
+	jq -c . "$work/$n.verify" >"$work/$n.verify.json" 2>/dev/null || echo null >"$work/$n.verify.json"
+	# The users are each user's phase toward enforce (verify reports them
+	# for observe and enforce).
+	jq -n -c --arg host "$host" --argjson rc "$vrc" --slurpfile verify "$work/$n.verify.json" '
+		{
+		  host: $host,
+		  rc: $rc,
+		  failing: [($verify[0].checks // [])[] | select(.status == "fail") | .id],
+		  digest: ($verify[0].kernel_policy // ""),
+		  users: [($verify[0].users // [])[] | {phase: (.phase // "held")}]
+		}' >>"$work/rows.jsonl"
+done <"$hosts"
+
+if [ "$n" -eq 0 ]; then
+	echo "$0: no hosts in $hosts" >&2
+	exit 2
+fi
+
+jq -s -r --arg mode "$mode" '
+	def unchecked: (.rc != 0 and .rc != 1);
+	def ready: (.rc == 0);
+	(map(select(unchecked)) | map(.host)) as $unchecked
+	| (map(select(unchecked | not) | select(ready | not))) as $notready
+	| (map(.users[]?)) as $users
+	| (map(select(unchecked | not) | .digest) | unique) as $digests
+	| (
+	    (.[] | if unchecked then "\(.host): could not be checked (exit \(.rc))"
+	           elif ready then "\(.host): ready for \($mode)"
+	           else "\(.host): not ready for \($mode): \(if (.failing | length) > 0 then (.failing | join(", ")) else "see tetragon verify" end)" end),
+	    "",
+	    "Mode checked: \($mode)",
+	    "Hosts ready: \(map(select(ready)) | length) of \(length)",
+	    "Hosts not ready: \(if ($notready | length) > 0 then ($notready | map(.host) | join(", ")) else "none" end)",
+	    "Hosts not checked: \(if ($unchecked | length) > 0 then ($unchecked | join(", ")) else "none" end)",
+	    "Users enforcing: \($users | map(select(.phase == "enforcing")) | length)",
+	    "Users armed (enforce loaded, no agent session anchored yet): \($users | map(select(.phase == "armed")) | length)",
+	    "Users ready for enforce: \($users | map(select(.phase == "ready")) | length)",
+	    "Users in burn-in: \($users | map(select(.phase == "burn_in")) | length)",
+	    "Users reset by a hit: \($users | map(select(.phase == "reset")) | length)",
+	    "Users monitor-only (connector in observe mode): \($users | map(select(.phase == "monitor_only")) | length)",
+	    "Users with no agent installed: \($users | map(select(.phase == "no_agent")) | length)",
+	    "Users held in monitor (a deny-anchor limit, a pause or an operator change): \($users | map(select(.phase == "held")) | length)",
+	    "Kernel controls digests: \(if ($digests | length) > 0 then ($digests | join(", ")) else "none" end)\(if ($digests | length) > 1 then " (more than one means hosts run different builds)" else "" end)"
+	  )
+' "$work/rows.jsonl"
+
+if jq -s -e 'any(.[]; .rc != 0 and .rc != 1)' "$work/rows.jsonl" >/dev/null; then
+	exit 2
+fi
+if jq -s -e 'any(.[]; .rc == 1)' "$work/rows.jsonl" >/dev/null; then
+	exit 1
+fi
+exit 0
+```
+
+**MDM compliance.** `detect.sh --require-tetragon consume|observe|enforce` runs `tetragon verify --ready-for <mode> --json` and maps it to the existing `exit`, `value` and `jamf` formats; `value` prints `tetragon-not-ready:<first failing check>`. The macOS copy refuses the flag with "Linux only". See [Install with an MDM](/docs/enterprise/mdm).
+
+**Grafana.** The AI Discovery Runtime dashboard has a first row, "Fleet: kernel controls per host", with Tetragon version, backend, mode, approval, enforced and enrolled users, burn-in, pause and digest per computer, and stats for stale approvals, computers on fallback and paused computers. See [Grafana dashboards](/docs/reference/observability/dashboards).
+
+![fleet-readiness.sh enforce hosts.txt: one line per computer, then the summary with computers ready and not ready, users enforcing, ready for enforce, in burn-in, reset by a hit, monitor-only, with no agent installed, held in monitor, and the controls digests](/images/tetragon/terminal-fleet-readiness.png)
+
+## When a control blocks something
+
+**What the developer sees.** The tool gets `Operation not permitted`. In the agent's next answer DefenseClaw adds an explanation, for the agents whose post-tool hook answer the model reads (Claude Code, Codex, Copilot CLI, Cursor and Devin):
+
+> DefenseClaw blocked `python3` from reading your SSH private key (`~/.ssh/id_ed25519`) under your organization's policy (`PATH-SSH-KEY`, a kernel control). The tool saw "Operation not permitted". Do not retry it. Contact your administrator if you need it allowed.
+
+A block by your own Tetragon policy is told too, while `customer_events` is `agent`: "Your organization's Tetragon policy `file-sensitive` blocked `cat` (security_file_open). The call failed. Do not retry it. Contact your administrator if you need it allowed." Your policy decides the error the tool sees, so the notice names none; for a `Sigkill` it says "The process was stopped." A notice names only blocks, never would-blocks; it is told once, at most three to an answer, only to the agent of the user whose process was blocked, and it never replaces a block or ask answer. On other agents, and wherever the post-tool hook has no context field, the developer sees only the error.
+
+![Claude Code after a Bash tool call that ran wc on the SSH key decoy under enforce: the command failed with Operation not permitted, and the answer says DefenseClaw's kernel control policy blocked wc from reading the SSH private key under PATH-SSH-KEY and not to retry it](/images/tetragon/terminal-claude-kernel-notice.png)
+
+**The help-desk runbook** for an administrator, on the computer:
+
+1. Find the user's state, blocks and hits with their paths and binaries:
+
+   ```bash
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status --user alice
+   ```
+
+2. Find the block in the audit trail. A kernel denial is an `enforcement.block.applied` record with the initiator `kernel`, or the "Kernel denials" panel of the Grafana **Blocked events** dashboard:
+
+   ```bash
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --output /root/kernel.jsonl
+   ```
+
+3. Unblock now with a host-wide pause (below), or for good by moving the connector to `observe` or the ring to `mode: observe`. There is no per-user exemption.
+
+## Pause, roll back and the kill switch
+
+| Level | How | Scope | Effect |
+| --- | --- | --- | --- |
+| Pause | `enterprise linux tetragon pause` | **Every user on that computer** | The controls move to monitor mode within about five seconds. Visibility continues. It ends by itself |
+| Roll back | `mode: observe`, then `mode: off`, in the admin config | The ring | At the next `ensure` the controls return to monitor mode, and then the helper deletes its `defenseclaw-*` policies. Your policies are not touched |
+| Remove | Uninstall or purge | The computer | The helper deletes the policies it loaded before any file goes |
+
+A pause is a runtime action, not a config write, so it works on a managed computer. It lasts across restarts of the helper and of Tetragon, across `ensure` runs and across reboots. The default is 4 hours and the longest is 7 days; `--until-reboot` keeps it in `/run`.
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon pause --for 4h --reason "TICKET-123"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon resume
+```
+
+```text
+✓ paused kernel enforcement for every user on this host until 2026-10-08T08:49:39Z; the sensor helper moves enforcing controls to monitor mode within seconds and keeps them visible
+  check the host with: sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status
+✓ resumed kernel enforcement for every user on this host; the sensor helper re-applies enterprise.tetragon on its next pass
+  check the host with: sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status
+```
+
+**Fleet emergency pause.** `emergency-pause.yml` runs the same command on every computer of the group. The ad-hoc one-liner does the same without the file:
+
+```bash
+ansible defenseclaw_linux -b -m ansible.builtin.command -a '/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon pause --for 4h --reason TICKET-123'
+```
+
+```yaml title="emergency-pause.yml"
+# Pause (or resume) DefenseClaw kernel enforcement on every host in the group.
+# A pause is host-wide: every user on the host moves to monitor mode within
+# about five seconds, and visibility continues. It ends by itself.
+#
+#   ansible-playbook -i inventory emergency-pause.yml -e reason=TICKET-123
+#   ansible-playbook -i inventory emergency-pause.yml -e reason=TICKET-123 -e pause_for=8h
+#   ansible-playbook -i inventory emergency-pause.yml -e pause_action=resume
+- name: Pause or resume DefenseClaw kernel enforcement
+  hosts: defenseclaw_linux
+  become: true
+  gather_facts: false
+  vars:
+    defenseclaw_gateway: /opt/defenseclaw/bin/defenseclaw-gateway
+    pause_action: pause
+    pause_for: 4h
+  tasks:
+    - name: Require a reason for a pause
+      ansible.builtin.assert:
+        that:
+          - reason is defined
+          - reason | length > 0
+        fail_msg: "Pass the ticket or reason with -e reason=TICKET-123"
+        quiet: true
+      when: pause_action == 'pause'
+
+    - name: Pause kernel enforcement
+      ansible.builtin.command:
+        argv:
+          - "{{ defenseclaw_gateway }}"
+          - enterprise
+          - linux
+          - tetragon
+          - pause
+          - --for
+          - "{{ pause_for }}"
+          - --reason
+          - "{{ reason }}"
+      changed_when: true
+      when: pause_action == 'pause'
+
+    - name: Resume kernel enforcement
+      ansible.builtin.command:
+        argv: ["{{ defenseclaw_gateway }}", enterprise, linux, tetragon, resume]
+      changed_when: true
+      when: pause_action == 'resume'
+```
+
+Stopping Tetragon is not a kill switch: with `keep-sensors-on-exit` on, its programs would keep enforcing.
+
+## Upgrades
+
+**DefenseClaw.** A build that changes a control changes the kernel controls digest, so a single `enforce_ack` goes stale on the whole fleet at once and every user falls back to monitor mode (`kernel_enforce_ack_stale`). To roll the approval with the upgrade, push a list of up to four digests, the old one and the new one:
+
+```yaml
+enterprise:
+  tetragon:
+    mode: enforce
+    enforce_ack: [sha256:08b71155b713, sha256:000000000000]   # old, new
+```
+
+Each computer enforces with whichever digest its build ships, and the approval reads `approved` when its digest is in the list. Drop the old value once the last ring has upgraded.
+
+**Tetragon.** A restart drops every policy added with `tetra`, yours included (see [Harden Tetragon](#harden-tetragon)), and DefenseClaw's policies load again within about a minute, honoring any pause. A new Tetragon minor outside the supported window (1.8, for example) makes the helper fall back to `cn_proc` and `fanotify` and warn `tetragon_unsupported_version`. Alert on it: `DefenseClawTetragonFallback` fires when a computer that has Tetragon installed runs on the fallback.
+
+**Kernel.** A kernel change can change BPF LSM. `verify --ready-for enforce` checks it again.
+
+Removal, downgrade and cleanup of the policies DefenseClaw loaded are in the [reference](/docs/enterprise/runtime/tetragon-reference#remove-the-policies-or-downgrade). If something does not work, see [Troubleshooting](/docs/enterprise/runtime/tetragon-reference#troubleshooting) and [Kernel sensor warnings](/docs/troubleshooting/enterprise#kernel-sensor-warnings).
+
+## See also
+
+- [Tetragon reference](/docs/enterprise/runtime/tetragon-reference)
+- [Agent segmentation, visibility and enforcement](/docs/appendix/coverage-by-layer)
+- [Linux standalone deployment](/docs/enterprise/install/linux)
+- [Roll out in rings](/docs/enterprise/plan/rollout)

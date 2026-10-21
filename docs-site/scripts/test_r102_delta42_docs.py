@@ -12,7 +12,7 @@ def flat(name):
 
 class Delta42DocsTest(unittest.TestCase):
     def test_sandboxes_upgrade_from_101_keeps_kept_sandboxes(self):
-        text = flat("sandboxes.mdx")
+        text = flat("runtime/sandboxes.mdx")
         bullet = text.split("- **Upgrade from 1.0.1 with the docker driver or the docker fallback.**", 1)[1]
         bullet = bullet.split("- **Roll back.**", 1)[0]
         for phrase in (
@@ -44,7 +44,7 @@ class Delta42DocsTest(unittest.TestCase):
     def test_sandboxes_uninstall_keeps_the_101_bridge(self):
         # rel-1-0-2:GAP-0675 and GAP-0666 (1.0.3): kept sandboxes, the ones
         # kept under 1.0.1 included, come back after a package reinstall.
-        text = flat("sandboxes.mdx")
+        text = flat("runtime/sandboxes.mdx")
         bullet = text.split("- **Uninstall and purge.**", 1)[1].split("## Troubleshooting", 1)[0]
         for phrase in (
             "keeps the root-only record of the sandbox setup they were made under (`openshell-state.kept.json`)",
@@ -62,7 +62,7 @@ class Delta42DocsTest(unittest.TestCase):
     def test_sandboxes_purge_removes_containers_in_both_namespaces(self):
         # rel-1-0-2:GAP-0026 (DELTA-52): a managed Linux purge removes the
         # account's sandbox containers and volumes in both Docker namespaces.
-        text = flat("sandboxes.mdx")
+        text = flat("runtime/sandboxes.mdx")
         bullet = text.split("- **Uninstall and purge.**", 1)[1].split("## Troubleshooting", 1)[0]
         for phrase in (
             (
@@ -78,7 +78,7 @@ class Delta42DocsTest(unittest.TestCase):
             self.assertIn(phrase, bullet)
 
     def test_lifecycle_upgrade_names_the_bridge(self):
-        text = flat("lifecycle.mdx")
+        text = flat("operate/lifecycle.mdx")
         section = text.split("## Upgrade", 1)[1].split("### Windows", 1)[0]
         for phrase in (
             "keeps the sandboxes users kept under 1.0.1 working",

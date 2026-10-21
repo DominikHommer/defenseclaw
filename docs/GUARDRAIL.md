@@ -35,7 +35,7 @@ proxy topology:
   [`../internal/gateway/application_protection.go`](../internal/gateway/application_protection.go).
 
 The exact supported behavior for each connector is published in the
-[connector compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/hook-contracts/).
+[connector compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/hook-contracts/).
 
 ## Configuration and policy ownership
 

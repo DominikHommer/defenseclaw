@@ -35,7 +35,7 @@ Before you start: the levels apply in action mode. In observe mode a finding at 
      OK Codex (codex) now alerts on tool calls, prompts and LLM traffic at MEDIUM+. The gateway isn't running; it loads this when it starts.
    ```
 
-3. Give a profile its own level. The commands above have no `--profile` option, so use `config set` (see [group policies](/docs/how-to/guardrail/give-a-group-its-own-policy)).
+3. Give a profile its own level. The commands above have no `--profile` option, so use `config set` (see [group policies](/docs/how-to/policies/give-a-group-its-own-policy)).
 
    ```bash
    defenseclaw config set guardrail.profiles.contractors.block_at MEDIUM
@@ -80,4 +80,4 @@ defenseclaw config unset guardrail.profiles.contractors.block_at
 On a device managed by MDM or a management plane, `config set` and the `guardrail` commands exit with status 3. Change the levels in the admin config.
 </Callout>
 
-Next: [which scope wins](/docs/reference/thresholds), [switch the rule pack](/docs/how-to/policies/use-a-different-rule-pack).
+Next: [which scope wins](/docs/reference/policy/thresholds), [switch the rule pack](/docs/how-to/policies/use-a-different-rule-pack).

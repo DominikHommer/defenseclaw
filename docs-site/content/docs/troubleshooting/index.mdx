@@ -10,7 +10,7 @@ keywords:
 
 Start with `defenseclaw doctor`; each failing row names a next step ([Read doctor](/docs/troubleshooting/doctor)). Then find your symptom below. Each entry gives the symptom, the cause, the fix and how to confirm.
 
-More: [Windows](/docs/troubleshooting/windows), [Sandboxes](/docs/troubleshooting/sandboxes), [Enterprise](/docs/enterprise/troubleshooting). An AI agent can run these checks for you: [Troubleshoot DefenseClaw](/docs/for-agents/troubleshoot).
+More: [Windows](/docs/troubleshooting/windows), [Sandboxes](/docs/troubleshooting/sandboxes), [Enterprise](/docs/troubleshooting/enterprise). An AI agent can run these checks for you: [Troubleshoot DefenseClaw](/docs/for-agents/troubleshoot).
 
 ## Install
 
@@ -100,7 +100,7 @@ More: [Windows](/docs/troubleshooting/windows), [Sandboxes](/docs/troubleshootin
 
 **Cause.** Its installed version has no hook contract (below the tested floor or known broken). Action mode needs one.
 
-**Fix.** Update the agent to a supported version ([Hook contracts](/docs/reference/hook-contracts)). `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` overrides the check for exploratory testing only.
+**Fix.** Update the agent to a supported version ([Hook contracts](/docs/reference/apis/hook-contracts)). `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` overrides the check for exploratory testing only.
 
 **Confirm.** `defenseclaw doctor` shows `Connector compatibility` as `[PASS]`.
 
@@ -184,7 +184,7 @@ More: [Windows](/docs/troubleshooting/windows), [Sandboxes](/docs/troubleshootin
 
 **Cause.** The agent has no native approval prompt. The call takes the connector's fallback right away, and the audit log records that approval was asked for.
 
-**Fix.** None needed. See which agents can ask on the [capability matrix](/docs/reference/capability-matrix).
+**Fix.** None needed. See which agents can ask on the [capability matrix](/docs/reference/apis/capability-matrix).
 
 **Confirm.** The matrix lists the agent's ask support.
 
@@ -202,7 +202,7 @@ More: [Windows](/docs/troubleshooting/windows), [Sandboxes](/docs/troubleshootin
 
 **Cause.** No LLM key is configured. The local rules work without one.
 
-**Fix.** To add the judge: `defenseclaw setup llm`, or follow [Set up an LLM key](/docs/how-to/guardrail/set-up-an-llm-key). Check what is set with `defenseclaw keys list`.
+**Fix.** To add the judge: `defenseclaw setup llm`, or follow [Set up an LLM key](/docs/how-to/agents/set-up-an-llm-key). Check what is set with `defenseclaw keys list`.
 
 **Confirm.** `defenseclaw doctor` shows `LLM API key` and `LLM reachable` as `[PASS]`.
 

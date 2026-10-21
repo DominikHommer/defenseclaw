@@ -79,7 +79,7 @@ INSTALL_ACL_SELF_HEAL_SMOKE = (
     / "tests"
     / "enterprise-install-acl-self-heal-smoke.ps1"
 )
-DEPLOYMENT_DOC = ROOT / "docs-site" / "content" / "docs" / "enterprise" / "secure-client.mdx"
+DEPLOYMENT_DOC = ROOT / "docs-site" / "content" / "docs" / "enterprise" / "install" / "secure-client.mdx"
 CERTIFICATION_DOC = ROOT / "docs" / "WINDOWS-ENTERPRISE-CERTIFICATION.md"
 MATRIX_TEST = ROOT / "internal" / "gateway" / "enterprise_mode_matrix_test.go"
 WINDOWS_LIFECYCLE_CLI = ROOT / "internal" / "cli" / "windows_enterprise_service.go"

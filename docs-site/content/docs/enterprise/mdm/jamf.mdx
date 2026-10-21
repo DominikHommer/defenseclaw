@@ -23,12 +23,12 @@ config and keys are delivered.
   hardware and older releases.
 - No Cisco Secure Client DefenseClaw deployment on the Mac.
 - DefenseClaw ships no privacy (PPPC) profile; see
-  [macOS requirements](/docs/enterprise/macos#requirements) for when you need one.
+  [macOS requirements](/docs/enterprise/install/macos#requirements) for when you need one.
 - A cloud distribution point, if you upload the package through the Jamf Pro web
   interface ([Uploading a Package to Jamf Pro](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Uploading_a_Package_to_Jamf_Pro)).
 - Your administrator config; see
-  [Where the config lives](/docs/enterprise/configuration#where-the-config-lives)
-  and [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
+  [Where the config lives](/docs/enterprise/configure/configuration#where-the-config-lives)
+  and [Choose the agents to protect](/docs/enterprise/configure/configuration#choose-the-agents-to-protect).
   The default config protects no agent.
 - `cosign` on the workstation where you verify the release.
 
@@ -232,7 +232,7 @@ enterprise:
 ```
 
 See [Deliver the AI Defense key](/docs/enterprise/mdm#deliver-the-ai-defense-key) and
-[AI Defense key](/docs/enterprise/ai-defense-key).
+[AI Defense key](/docs/enterprise/configure/ai-defense-key).
 
 ## Detect and report
 
@@ -275,7 +275,7 @@ The value changes only when the Mac submits inventory. See
 | Task | What to do |
 | --- | --- |
 | Upgrade | Upload the new package. Set `DC_MIN_VERSION` in the extension attribute to the new version, so older Macs join `DefenseClaw needs install`. Create a new install policy with the new package, or replace the package and flush the policy's logs: a **Once per computer** policy does not run again on a computer that has a log entry. The package's `ensure --from-package` upgrades in place and keeps the config and state. |
-| Roll back | Follow [Roll back](/docs/enterprise/lifecycle#roll-back): run a script that creates the root-owned marker (`touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`), then deploy the earlier package the same way. Without the marker the package refuses to downgrade. |
+| Roll back | Follow [Roll back](/docs/enterprise/operate/lifecycle#roll-back): run a script that creates the root-owned marker (`touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`), then deploy the earlier package the same way. Without the marker the package refuses to downgrade. |
 | Change the config | Edit the YAML in `DefenseClaw stage config`. The ensure policy applies it at its next run; the lifecycle validates it first and rolls back if applying fails. |
 
 ## Deliver a custom macOS rule pack
@@ -311,7 +311,7 @@ config.
 | `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | The automatic apply and daily verify jobs |
 
 See [Logs](/docs/enterprise/mdm#logs) and
-[Status and verify](/docs/enterprise/operations#status-and-verify).
+[Status and verify](/docs/enterprise/operate/operations#status-and-verify).
 
 ## Exit codes in Jamf Pro
 
@@ -321,7 +321,7 @@ document in the policy log for `errors[].code`.
 | Code | Meaning | What to do in Jamf Pro |
 | --- | --- | --- |
 | `0` | Success, or nothing to do | Nothing |
-| `1` | The action failed and rolled back, or the script refused an input | Read `errors[].code` in the policy log; see [MDM wrapper error codes](/docs/enterprise/troubleshooting#mdm-wrapper-error-codes) |
+| `1` | The action failed and rolled back, or the script refused an input | Read `errors[].code` in the policy log; see [MDM wrapper error codes](/docs/troubleshooting/enterprise#mdm-wrapper-error-codes) |
 | `2` | Invalid arguments or settings, such as a missing `set --` line | Fix the script settings; a retry gives the same result |
 | `75` | Another lifecycle run or the installer holds a lock | Let the next scheduled run retry |
 

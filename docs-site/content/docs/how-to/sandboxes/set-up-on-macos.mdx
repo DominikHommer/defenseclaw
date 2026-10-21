@@ -23,7 +23,7 @@ Install and configure OpenShell sandboxes on an Apple-silicon Mac. Each sandbox 
 | Docker Desktop, running | DefenseClaw builds the harness images in Docker, and the MicroVM driver reads them from it. Start it once on your own account first ([first start](#docker-desktops-first-start)). |
 | Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. A MicroVM image's first start uses about 11 GiB of free host space while it prepares its disk (the VM volume needs at least 12 GiB free, 22 GiB recommended). The driver then keeps a disk of about 5 GB per image it has started. |
 
-On a Mac your organization manages with a standalone enterprise install, an administrator provides OpenShell and `e2fsprogs`, and the managed setup mode needs no Homebrew on your account: [Sandboxes on managed computers](/docs/enterprise/sandboxes).
+On a Mac your organization manages with a standalone enterprise install, an administrator provides OpenShell and `e2fsprogs`, and the managed setup mode needs no Homebrew on your account: [Sandboxes on managed computers](/docs/enterprise/runtime/sandboxes).
 
 ### Developer tools
 
@@ -93,7 +93,7 @@ It ends with:
   ✓ Done →  cd <project> && defenseclaw sandbox run claude
 ```
 
-There is no mounts question on a Mac. Flags are in the [sandbox CLI reference](/docs/reference/sandbox-cli#sandbox-setup).
+There is no mounts question on a Mac. Flags are in the [sandbox CLI reference](/docs/reference/sandboxes/cli#sandbox-setup).
 
 </Tab>
 <Tab value="TUI">
@@ -198,7 +198,7 @@ brew services stop nvidia/openshell/openshell
 
 ## Undo
 
-`defenseclaw sandbox teardown` removes this install's sandboxes, images and MicroVM disks, restores the gateway configuration from before setup (which takes the gateway off the MicroVM driver) and turns `openshell.enabled` off. OpenShell stays installed. See [`sandbox teardown`](/docs/reference/sandbox-cli#sandbox-teardown).
+`defenseclaw sandbox teardown` removes this install's sandboxes, images and MicroVM disks, restores the gateway configuration from before setup (which takes the gateway off the MicroVM driver) and turns `openshell.enabled` off. OpenShell stays installed. See [`sandbox teardown`](/docs/reference/sandboxes/cli#sandbox-teardown).
 
 ## Next
 

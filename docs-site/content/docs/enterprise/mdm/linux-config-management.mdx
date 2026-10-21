@@ -17,7 +17,7 @@ configuration-management tool. They install the `defenseclaw-enterprise` deb or
 rpm, and the package's lifecycle does the rest. The contract every recipe follows
 (exit codes, detection, config and key delivery) is in
 [Install with an MDM](/docs/enterprise/mdm). For the layout and the systemd units,
-see [Linux](/docs/enterprise/linux).
+see [Linux](/docs/enterprise/install/linux).
 
 ## The procedure every recipe follows
 
@@ -60,7 +60,7 @@ missing, before the first install.
 
 ## Tetragon
 
-For computers that already run Tetragon, [Tetragon on a Linux fleet](/docs/enterprise/tetragon)
+For computers that already run Tetragon, [Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon)
 has tested plays that build on these steps, with the config per ring and
 `tetragon verify` as a gate. `detect.sh --require-tetragon` reports compliance to
 your MDM.
@@ -69,10 +69,10 @@ your MDM.
 
 - A systemd host (systemd 239 or later, a package dependency). Without a
   running systemd the postinstall step does nothing. See
-  [Linux requirements](/docs/enterprise/linux#requirements).
+  [Linux requirements](/docs/enterprise/install/linux#requirements).
 - Root on the host: every recipe runs as root.
-- Your administrator config. See [Where the config lives](/docs/enterprise/configuration#where-the-config-lives)
-  and [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
+- Your administrator config. See [Where the config lives](/docs/enterprise/configure/configuration#where-the-config-lives)
+  and [Choose the agents to protect](/docs/enterprise/configure/configuration#choose-the-agents-to-protect).
   The default config protects no agent.
 
 ## Get and verify the release
@@ -666,14 +666,14 @@ read -rs KEY && printf '%s' "$KEY" | sudo /opt/defenseclaw/bin/defenseclaw-gatew
 ```
 
 To upgrade, install the newer package the same way and run `ensure` again. To go
-back a version, see [Roll back](/docs/enterprise/lifecycle#roll-back).
+back a version, see [Roll back](/docs/enterprise/operate/lifecycle#roll-back).
 
 ## Payload archive instead of the package
 
 Hosts without dpkg or rpm can use the `.tar.gz` payload. Extract it as root into a
 root-only folder on a filesystem that allows execution (CIS hosts mount `/tmp` and
 `/var/tmp` `noexec`) and run `ensure` with `--payload` pointing at the folder that
-holds `defenseclaw-gateway`; see [Linux](/docs/enterprise/linux#install). On such a
+holds `defenseclaw-gateway`; see [Linux](/docs/enterprise/install/linux#install). On such a
 host, drop `--from-package` from the converge command. A host installed from the
 package refuses a payload upgrade with `package_owned_binaries`: keep each host on
 one channel.
@@ -705,7 +705,7 @@ The warning names both.
 
 The deployment also runs `verify` daily through `defenseclaw-enterprise-verify.timer`.
 See [Detection](/docs/enterprise/mdm#detection) and
-[Status and verify](/docs/enterprise/operations#status-and-verify).
+[Status and verify](/docs/enterprise/operate/operations#status-and-verify).
 
 ## Uninstall
 
@@ -718,7 +718,7 @@ binaries; to remove those too, run the kit's
 (`apt-get purge defenseclaw-enterprise`) also deletes what a failed uninstall left
 behind. What each form removes is in [Uninstall](/docs/enterprise/mdm#uninstall); to
 keep the machine state for a reinstall, see
-[Uninstall](/docs/enterprise/lifecycle#uninstall). Delete `/etc/mdm/defenseclaw`
+[Uninstall](/docs/enterprise/operate/lifecycle#uninstall). Delete `/etc/mdm/defenseclaw`
 when you no longer need the staged config and key.
 
 ## Exit codes
@@ -726,7 +726,7 @@ when you no longer need the staged config and key.
 | Code | Meaning | What the recipes do |
 | --- | --- | --- |
 | `0` | Success, or nothing to do | Report a change only when the result has `"noop": false` |
-| `1` | The action failed and rolled back, or the config does not validate (`config_invalid`) | Fail the run; read `errors[].code` in the result and see [Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes) |
+| `1` | The action failed and rolled back, or the config does not validate (`config_invalid`) | Fail the run; read `errors[].code` in the result and see [Lifecycle error codes](/docs/troubleshooting/enterprise#lifecycle-error-codes) |
 | `2` | Invalid arguments, such as a relative `--config` path | Fail the run; fix the command |
 | `75` | Another lifecycle run holds the lock | Retry after a delay |
 

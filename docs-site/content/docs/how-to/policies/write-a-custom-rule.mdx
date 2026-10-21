@@ -41,7 +41,7 @@ Before you start: DefenseClaw is initialized (`defenseclaw init`). The paths bel
        tags: [credential, payments, file-sensitive]
    ```
 
-   `expression` matches the parsed command and path facts; it joins the path to its command by `id`. `pattern` is the required regex fallback for calls the gateway cannot fully parse. A fallback match is recorded but does not block. The rule supplies the title and severity; the block and alert levels pick the action. Field names are in the [CEL authoring reference](/docs/reference/cel/authoring).
+   `expression` matches the parsed command and path facts; it joins the path to its command by `id`. `pattern` is the required regex fallback for calls the gateway cannot fully parse. A fallback match is recorded but does not block. The rule supplies the title and severity; the block and alert levels pick the action. Field names are in the [CEL authoring reference](/docs/reference/policy/cel/authoring).
 
 3. Validate the whole pack. This runs offline and does not touch the gateway.
 
@@ -99,4 +99,4 @@ defenseclaw guardrail use-pack default
 
 This also removes the pin for `my-org`.
 
-Next: [validate a pack in CI](/docs/how-to/policies/validate-a-rule-pack), [regex patterns for the fallback](/docs/reference/regex-cookbook), [pinned pack edits](/docs/reference/rules#change-a-pinned-pack).
+Next: [validate a pack in CI](/docs/how-to/policies/validate-a-rule-pack), [regex patterns for the fallback](/docs/reference/policy/regex-cookbook), [pinned pack edits](/docs/reference/policy/rules#change-a-pinned-pack).
