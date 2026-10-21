@@ -34,7 +34,7 @@ Every rule pack has three lists in `suppressions.yaml`:
 
    `--finding` is matched against the whole finding ID, so `JUDGE-PII-.*` matches every PII finding. `--entity` is matched against the text the judge reported; leave it out to match every value. `--reason` is required. Add `--connector X` or `--profile P` to narrow the scope.
 
-2. Check it.
+2. Check it worked.
 
    ```bash
    defenseclaw config get guardrail.rules.suppressions
@@ -78,4 +78,4 @@ tool_suppressions:
 
 All shipped entries are in the [recipe catalog](/docs/reference/policy/rule-recipes).
 
-Next: [what the judge does](/docs/reference/policy/detection#llm-judge), [policy creator](/docs/how-to/policies/build-a-policy-in-the-browser).
+Next: [give a group its own policy](/docs/how-to/policies/give-a-group-its-own-policy), [what the judge does](/docs/reference/policy/detection#llm-judge).
