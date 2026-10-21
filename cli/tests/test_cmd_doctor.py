@@ -1592,6 +1592,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                                     "type": "command",
                                     "bash": os.path.join(tmp, ".defenseclaw", "hooks", "copilot-hook.sh")
                                     + f" --event {event}",
+                                    "timeoutSec": 30,
                                 }
                             ]
                             for event in ("preToolUse", "permissionRequest")
