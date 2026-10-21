@@ -10,8 +10,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
@@ -44,7 +42,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		targetID = "unknown"
 	}
 
-	activityID := uuid.New().String()
+	activityID := observability.NewTimeOrderedID()
 	runID := in.RunID
 	if runID == "" {
 		runID = currentRunID()
@@ -65,7 +63,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	}
 	summaryBlob, _ := json.Marshal(summary)
 
-	auditID := uuid.New().String()
+	auditID := observability.NewTimeOrderedID()
 	// v7 clean break: AgentInstanceID is per-session (unset for
 	// activity/mutation events that have no session anchor);
 	// SidecarInstanceID carries the process UUID.

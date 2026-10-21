@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -297,7 +296,7 @@ func observeIdentity(ctx context.Context, emitter sidecarRuntimeEmitter, subject
 		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			observability.TimeOrderedOccurrenceIDs,
 		)
 		if buildErr != nil {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}

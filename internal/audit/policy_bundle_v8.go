@@ -25,8 +25,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/google/uuid"
-
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -297,7 +295,7 @@ func policyBundleMetric(
 			}
 			builder, err := observability.NewFamilyBuilder(
 				observability.ClockFunc(func() time.Time { return at.UTC() }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if err != nil {
 				return observability.Record{}, err

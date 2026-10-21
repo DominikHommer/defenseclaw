@@ -22,7 +22,6 @@ import (
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -1102,7 +1101,7 @@ func aiDiscoveryV8EmitEnvelope(ctx context.Context, snapshot observabilityruntim
 }
 
 func aiDiscoveryV8Builder() (*observability.FamilyBuilder, error) {
-	return observability.NewFamilyBuilder(observability.ClockFunc(func() time.Time { return time.Now().UTC() }), observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }))
+	return observability.NewFamilyBuilder(observability.ClockFunc(func() time.Time { return time.Now().UTC() }), observability.TimeOrderedOccurrenceIDs)
 }
 
 func aiDiscoveryV8Optional(value string) observability.Optional[string] {
