@@ -636,11 +636,13 @@ func ownerSourcesFor(goos string) string {
 // eventOwner is the one account the events of processes named, and mixed
 // reports that they named more than one. The account an event names is that
 // of the process instance that produced it, so unlike an owner looked up by
-// pid it is never a later holder's.
+// pid it is never a later holder's. Only the session's root says who owns
+// it: a descendant's event can name the account a runas or setuid child
+// runs as, so it is left out (GAP-1401).
 func eventOwner(processes []procRef) (user, sid string, mixed bool) {
 	for _, process := range processes {
 		switch {
-		case process.SID == "":
+		case process.Descendant, process.SID == "":
 		case sid == "":
 			user, sid = process.User, process.SID
 		case !strings.EqualFold(sid, process.SID):

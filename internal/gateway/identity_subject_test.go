@@ -252,6 +252,11 @@ func TestDiscoverySignalCarriesInventoryIdentity(t *testing.T) {
 		}, true
 	}
 	t.Cleanup(func() { managedHookPeerDirectory = original })
+	// The signal names the uid's own account (GAP-1233).
+	name := userScopedIdentityName(self)
+	if name == "" {
+		t.Skip("the test account has no name in the account database")
+	}
 	capture := &endpointInventoryCapture{}
 	report := inventory.AIDiscoveryReport{
 		Summary: inventory.AIDiscoverySummary{
@@ -261,6 +266,7 @@ func TestDiscoverySignalCarriesInventoryIdentity(t *testing.T) {
 		Signals: []inventory.AISignal{{
 			SignalID: "model-identity", SignatureID: "local-model", Category: inventory.SignalLocalModel,
 			Confidence: .9, State: inventory.AIStateNew, SupportedConnector: "claudecode", UserID: self,
+			UserName: name,
 		}},
 	}
 	if err := (&aiDiscoveryV8Adapter{runtime: capture}).EmitReport(t.Context(), report, nil); err != nil {

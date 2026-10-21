@@ -208,7 +208,7 @@ func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, 
 				return &config.V8SemanticError{
 					Path:    "$.observability.destinations",
 					Summary: fmt.Sprintf("destination %q writes %s, but %v", destination.Name, path, err),
-					Action:  "grant that account Modify on the folder for its files, or set rotation compress to false on the destination",
+					Action:  "grant that account Modify on the existing file (or let it inherit the folder permissions), or set rotation compress to false on the destination",
 				}
 			}
 		}

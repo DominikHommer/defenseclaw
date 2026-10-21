@@ -219,6 +219,31 @@ func TestASessionChildNeverNamesTheSessionOwner(t *testing.T) {
 	}
 }
 
+// GAP-1401: on Windows the session root's own reference carries no SID while
+// a runas child's creation event names another account. The child's SID
+// does not become the session owner; the root's own SID still does.
+func TestASessionChildSIDNeverNamesTheSessionOwner(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	root := procRef{PID: 4100, Start: base, Name: "claude.exe", At: base.Add(2 * time.Second)}
+	child := agentchain.Observation{
+		PID: 4200, Start: base.Add(time.Second), Name: "cmd.exe", At: base.Add(2 * time.Second),
+		User: `DCFC-WIN2-RS1\bob`, SID: bobSID,
+	}
+	processes, _ := sessionOwnerEvidence(root, []agentchain.Observation{child})
+	got := resolverFor(ownerTestLookups(), nil, base).resolve(processes, nil)
+	if got.SID == bobSID || got.Attribution == AttributionProcessOwner {
+		t.Fatalf("resolve = %+v, want the child's account kept off the session", got)
+	}
+	rootEvent := agentchain.Observation{PID: root.PID, Start: root.Start, Name: root.Name, At: root.At,
+		User: `DCLAB\alice`, SID: aliceSID}
+	processes, _ = sessionOwnerEvidence(root, []agentchain.Observation{child, rootEvent})
+	if got := resolverFor(ownerTestLookups(), nil, base).resolve(processes, nil); got.SID != aliceSID ||
+		got.Attribution != AttributionProcessOwner {
+		t.Fatalf("resolve = %+v, want the root's own account %s", got, aliceSID)
+	}
+}
+
 // GAP-1465: a POSIX shell the polls saw as alice's execs an agent in place
 // and exits before the next poll. The exec names alice, so the book keeps
 // her as the owner; an exec that names another account still hands the pid on.
