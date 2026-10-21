@@ -201,6 +201,18 @@ func TestR104IndirectFileReadStaysWithinProject(t *testing.T) {
 	if content, ok := readIndirectSource("local.sh", cwd); !ok || content != "echo marker >> alias\n" {
 		t.Fatalf("local source read = %q, known=%v", content, ok)
 	}
+	if err := os.MkdirAll(filepath.Join(cwd, "sub", "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "sub", "actual.sh"), []byte("echo nested\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("sub", "nested"), filepath.Join(cwd, "dirlink")); err != nil {
+		t.Fatal(err)
+	}
+	if content, ok := readIndirectSource("dirlink/../actual.sh", cwd); !ok || content != "echo nested\n" {
+		t.Fatalf("linked directory source read = %q, known=%v", content, ok)
+	}
 }
 
 func TestR104DirectoryExecutionOperands(t *testing.T) {

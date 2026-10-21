@@ -20,10 +20,13 @@ func readIndirectSource(name, cwd string) (string, bool) {
 	if !filepath.IsAbs(cwd) || name == "" || strings.ContainsAny(name, "\x00\r\n") {
 		return "", false
 	}
-	path := OperandPath(name, cwd)
-	relative, err := filepath.Rel(cwd, path)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", false
+	relative := name
+	if filepath.IsAbs(name) {
+		prefix := filepath.Clean(cwd) + string(filepath.Separator)
+		if !strings.HasPrefix(name, prefix) {
+			return "", false
+		}
+		relative = strings.TrimPrefix(name, prefix)
 	}
 	root, err := os.OpenRoot(cwd)
 	if err != nil {
