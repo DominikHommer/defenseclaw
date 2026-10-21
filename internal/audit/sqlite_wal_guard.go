@@ -63,7 +63,7 @@ var (
 
 // walForcedCatchUpFactor: past this many times the limit the catch-up no
 // longer waits for walIdleWindow without a commit; it still takes the writer
-// only when no hook holds it and still gives it back at walCatchUpCap.
+// only when no hook holds it and still gives it back at its hold limit.
 const walForcedCatchUpFactor = 2
 
 // The writer phase of a pass. walIdleWindow is how long the store must go
@@ -78,6 +78,33 @@ var (
 	walWriterAcquireWait = 5 * time.Millisecond
 	walCatchUpCap        = 100 * time.Millisecond
 )
+
+// walCatchUpHoldMax is the longest a catch-up may hold the writer after a slow
+// sync of the database file (walCatchUpHold). It is zero outside Windows,
+// where every catch-up keeps walCatchUpCap. A variable so tests can change it.
+var walCatchUpHoldMax = walCatchUpHoldMaxDefault
+
+// walCatchUpHold is how long a catch-up may hold the writer when the pass's
+// last sync of the database file off the writer took sync.
+//
+// The copy under the writer reaches the end of the log only if it also syncs
+// the pages it wrote before a hook commits again. Linux and macOS write a
+// file's dirty pages in parallel, so that sync fits in walCatchUpCap. Windows
+// FlushFileBuffers writes them one at a time: on a network disk each random
+// 4 KiB page costs about a millisecond (1,000 random pages took 1.7 s on a
+// GitHub Windows runner's C: drive, 40 ms on Linux), and a 10 calls/s hook
+// flood dirties about that many pages a second. The sync never fit the cap,
+// SQLite never restarted the log, and the WAL grew by about 1 GB a minute to
+// 17-23 GB until the flood stopped (rel-1-0-3 GAP-0136, GAP-0320, GAP-0325).
+// The copy under the writer writes about the pages the hooks committed during
+// the last sync and then syncs them, so on Windows the hold is twice that sync
+// plus walCatchUpCap, at most walCatchUpHoldMax.
+func walCatchUpHold(sync time.Duration) time.Duration {
+	if walCatchUpHoldMax <= walCatchUpCap {
+		return walCatchUpCap
+	}
+	return min(max(2*sync+walCatchUpCap, walCatchUpCap), walCatchUpHoldMax)
+}
 
 // Test seams: walCopyPhaseHook runs inside each copy pass on the dedicated
 // connection, after the pass read the commit counter, walSyncPhaseHook before
@@ -107,9 +134,14 @@ type WALCheckpoint struct {
 	// it until giving it back; zero when it did not take it.
 	WriterHeld time.Duration
 	// WriterDeferred is true when the log needed the writer phase but the pass
-	// found no idle gap for it, or the catch-up reached walCatchUpCap and gave
-	// the writer back before the copy reached the end of the log.
+	// found no idle gap for it, or the catch-up reached its hold limit
+	// (WriterLimit) and gave the writer back before the copy reached the end
+	// of the log.
 	WriterDeferred bool
+	// WriterLimit is the longest the pass let a catch-up hold the writer:
+	// walCatchUpCap, or on Windows up to walCatchUpHoldMax after a slow sync
+	// (walCatchUpHold). Zero when the pass ran no catch-up.
+	WriterLimit time.Duration
 	// Syncs is how many times the pass synced the database file off the
 	// writer before a catch-up, and SyncLongest the longest of those syncs.
 	Syncs       int
@@ -148,9 +180,10 @@ type WALCheckpoint struct {
 //     pages of the last round to write and sync. Then it waits for an idle
 //     gap (no commit for walIdleWindow and the writer free) and holds the
 //     writer only while one more PASSIVE copy on the checkpoint connection
-//     reaches the end. It gives the writer back at walCatchUpCap whether or
-//     not that copy finished; an unfinished copy goes on without the writer
-//     and the next pass tries again.
+//     reaches the end. It gives the writer back at walCatchUpCap (on Windows
+//     at walCatchUpHold of the last sync) whether or not that copy finished;
+//     an unfinished copy goes on without the writer and the next pass tries
+//     again.
 //   - A fully copied log whose file is larger than walIdleTrimBytes (or whose
 //     log is over the limit) is cut to zero bytes with a TRUNCATE checkpoint
 //     on the writer when the hooks are not flooding the store: nothing was
@@ -219,6 +252,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	// Sync the pages the copies left, off the writer, and copy and sync again
 	// while the hooks write more during a sync than the copy under the writer
 	// can write and sync within walCatchUpCap (rel-1-0-3 GAP-0247, GAP-0136).
+	var lastSync time.Duration
 	for round := 0; ; round++ {
 		began := time.Now()
 		if walSyncPhaseHook != nil {
@@ -228,6 +262,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 			return result, fmt.Errorf("audit: sync the database file before the WAL catch-up: %w", err)
 		}
 		took := time.Since(began)
+		lastSync = took
 		result.Syncs++
 		result.SyncLongest = max(result.SyncLongest, took)
 		if took <= walSettledSync || round == walSettleRounds {
@@ -251,7 +286,8 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	if logBytes > walForcedCatchUpFactor*limitBytes {
 		window = 0
 	}
-	result.Restarted, result.WriterHeld, result.WriterDeferred, err = s.catchUpWALOnIdleWriter(ctx, db, window)
+	result.WriterLimit = walCatchUpHold(lastSync)
+	result.Restarted, result.WriterHeld, result.WriterDeferred, err = s.catchUpWALOnIdleWriter(ctx, db, window, result.WriterLimit)
 	return result, err
 }
 
@@ -350,10 +386,11 @@ func (s *Store) takeIdleWriter(ctx context.Context, db *sql.DB, since int64, win
 
 // catchUpWALOnIdleWriter holds the writer connection in an idle gap while one
 // PASSIVE copy on the checkpoint connection reaches the end of the log, and
-// gives it back when the copy finishes or at walCatchUpCap, whichever comes
-// first. It reports whether the copy left the whole log copied and synced,
-// how long it held the writer, and whether it deferred (no gap, or the cap).
-func (s *Store) catchUpWALOnIdleWriter(ctx context.Context, db *sql.DB, window time.Duration) (complete bool, held time.Duration, deferred bool, err error) {
+// gives it back when the copy finishes or at limit (walCatchUpHold),
+// whichever comes first. It reports whether the copy left the whole log
+// copied and synced, how long it held the writer, and whether it deferred (no
+// gap, or the limit).
+func (s *Store) catchUpWALOnIdleWriter(ctx context.Context, db *sql.DB, window, limit time.Duration) (complete bool, held time.Duration, deferred bool, err error) {
 	since, err := walDataVersion(ctx, db)
 	if err != nil {
 		return false, 0, false, fmt.Errorf("audit: read the SQLite commit counter: %w", err)
@@ -363,7 +400,7 @@ func (s *Store) catchUpWALOnIdleWriter(ctx context.Context, db *sql.DB, window t
 		return false, 0, err == nil, err
 	}
 	acquired := time.Now()
-	holdCtx, cancelHold := context.WithTimeout(ctx, walCatchUpCap)
+	holdCtx, cancelHold := context.WithTimeout(ctx, limit)
 	defer cancelHold()
 	done := make(chan walCopyResult, 1)
 	go func() {
@@ -373,7 +410,7 @@ func (s *Store) catchUpWALOnIdleWriter(ctx context.Context, db *sql.DB, window t
 		ckpt, err := s.copyWAL(ctx, db, nil)
 		done <- walCopyResult{ckpt: ckpt, err: err}
 	}()
-	timer := time.NewTimer(walCatchUpCap)
+	timer := time.NewTimer(limit)
 	defer timer.Stop()
 	var outcome walCopyResult
 	capped := false
