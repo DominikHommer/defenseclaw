@@ -65,8 +65,34 @@ not_older() {
             exit 0
         }'
 }
+# owner_mode PATH: the owner's uid and the permission bits (octal) of PATH
+# itself, not of a symlink's target.
+owner_mode() { stat -c '%u %a' "$1" 2>/dev/null; }
 root_owned() {
-    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1" 2>/dev/null)" = 0 ]
+    [ -f "$1" ] && [ ! -L "$1" ] && ro_info=$(owner_mode "$1") && [ "${ro_info%% *}" = 0 ]
+}
+# trusted PATH: PATH is a regular file, not a symlink, and it and every
+# folder above it, as the kernel resolves them, belong to root and no group
+# or other account can write them (an ACL that lets another account write
+# shows in the group bits, which are then its mask). Only root can then have
+# changed what the package scripts run as root. An owner or mode that cannot
+# be read is not trusted.
+trusted() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    t_dir=$(cd -P -- "${1%/*}/" 2>/dev/null && pwd -P) || return 1
+    t_path=${t_dir%/}/${1##*/}
+    while :; do
+        t_info=$(owner_mode "$t_path") || return 1
+        case $t_info in
+            "0 "[0-7]*) t_mode=${t_info#0 } ;;
+            *) return 1 ;;
+        esac
+        case $t_mode in *[!0-7]*) return 1 ;; esac
+        [ $((0$t_mode & 022)) -eq 0 ] || return 1
+        [ "$t_path" != / ] || return 0
+        t_path=${t_path%/*}
+        [ -n "$t_path" ] || t_path=/
+    done
 }
 # The installed gateway answers the floor check when its binary carries
 # floor_check_marker (1.0.4 on; looked for without running it, so a gateway
@@ -75,7 +101,9 @@ root_owned() {
 # binaries), the root-only copy an uninstall kept in the lifecycle folder
 # does. Only a gateway that was read and has no marker is an older one: a
 # gateway that cannot be read, and a gateway with the marker or a kept copy
-# that is not a root-owned file (or whose owner cannot be read), leave the
+# that is not a root-owned file only root can change (trusted: another
+# account cannot write it or a folder above it), or whose owner or mode
+# cannot be read, leave the
 # floor unchecked unless the other one answers, and every install is refused.
 floor_check_marker=defenseclaw-package-floor-check/1
 kept="$state/floor-check"
@@ -85,10 +113,10 @@ if [ -e "$gateway" ] || [ -L "$gateway" ]; then
     grep -qaF "$floor_check_marker" "$gateway" 2>/dev/null
     case $? in
     0)
-        if root_owned "$gateway"; then
+        if trusted "$gateway"; then
             checker=$gateway
         else
-            unchecked="$gateway has the floor check, but it is not a root-owned file or its owner could not be read"
+            unchecked="$gateway has the floor check, but it is not a root-owned file that only root can change (it, or a folder above it, can be written by another account), or its owner or mode could not be read"
         fi
         ;;
     1) ;; # a gateway before 1.0.4: it has no floor check
@@ -96,11 +124,11 @@ if [ -e "$gateway" ] || [ -L "$gateway" ]; then
     esac
 fi
 if [ -z "$checker" ]; then
-    if [ ! -L "$kept" ] && root_owned "$kept/defenseclaw-gateway"; then
+    if [ ! -L "$kept" ] && trusted "$kept/defenseclaw-gateway"; then
         checker="$kept/defenseclaw-gateway"
         unchecked=
     elif [ -L "$kept" ] || [ -e "$kept/defenseclaw-gateway" ] || [ -L "$kept/defenseclaw-gateway" ]; then
-        unchecked="$kept/defenseclaw-gateway, the gateway an uninstall kept for the floor check, is not a root-owned file in a folder that is not a symlink, or its owner could not be read"
+        unchecked="$kept/defenseclaw-gateway, the gateway an uninstall kept for the floor check, is not a root-owned file that only root can change, in a folder that is not a symlink (it, or a folder above it, can be written by another account), or its owner or mode could not be read"
     fi
 fi
 
@@ -123,7 +151,7 @@ check() {
             exit 1
         fi
     elif [ -n "$unchecked" ]; then
-        echo "defenseclaw-enterprise: refusing to install $incoming: the release floor of the confirmed signed policy bundle could not be checked: $unchecked. Restore it as a readable, root-owned file and install again. Nothing was changed." >&2
+        echo "defenseclaw-enterprise: refusing to install $incoming: the release floor of the confirmed signed policy bundle could not be checked: $unchecked. Restore it as a readable, root-owned file that only root can write, in folders only root can write, and install again. Nothing was changed." >&2
         exit 1
     fi
     [ "$installed" != "-" ] || return 0

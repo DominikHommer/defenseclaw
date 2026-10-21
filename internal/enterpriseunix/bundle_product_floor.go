@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
@@ -37,8 +38,12 @@ var confirmedBundleProductFloor = func(s *enterprisebundle.Store) (string, error
 // BundleProductFloorRefusal refuses installing DefenseClaw version on a
 // device that takes signed bundles (its trust anchors are installed) when
 // the confirmed bundle needs a later release, or when that floor cannot be
-// read. The administrator's rollback marker and --allow-downgrade do not
-// lift it: a bundle signed with a lower --min-product-version does.
+// read. It places the version as the bundle verifier does
+// (enterprisebundle.CheckProductVersion): a version that is not a release
+// (dev, 1.0.4.1, 1.0.x) never meets a floor, though the lifecycle's own
+// order puts dev above every release. The administrator's rollback marker
+// and --allow-downgrade do not lift it: a bundle signed with a lower
+// --min-product-version does.
 func (e *Env) BundleProductFloorRefusal(version string) error {
 	if _, err := os.Lstat(e.bundleAnchorsPath()); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -50,10 +55,33 @@ func (e *Env) BundleProductFloorRefusal(version string) error {
 	if err != nil {
 		return &codedError{code: codeProductFloor, err: fmt.Errorf("cannot read the release floor of the confirmed policy bundle: %w", err)}
 	}
-	if floor != "" && compareProductVersions(version, floor) < 0 {
-		return &codedError{code: codeProductFloor, err: fmt.Errorf("the confirmed signed policy bundle needs DefenseClaw %s or later, and this is %s; to go back, deliver a bundle signed with a lower --min-product-version first", floor, version)}
+	if floor == "" {
+		return nil
+	}
+	candidate := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	if !enterprisebundle.IsReleaseVersion(candidate) {
+		if len(candidate) > 64 {
+			candidate = candidate[:64] + "..."
+		}
+		return &codedError{code: codeProductFloor, err: fmt.Errorf("the confirmed signed policy bundle needs DefenseClaw %s or later, and %q is not a release version, so it cannot meet that floor; install a release at or above %s, or deliver a bundle signed without --min-product-version first", floor, candidate, floor)}
+	}
+	if enterprisebundle.CheckProductVersion(floor, candidate) != nil {
+		return &codedError{code: codeProductFloor, err: fmt.Errorf("the confirmed signed policy bundle needs DefenseClaw %s or later, and this is %s; to go back, deliver a bundle signed with a lower --min-product-version first", floor, candidate)}
 	}
 	return nil
+}
+
+// bundleFloorApplies reports whether a run that installs version over record
+// must pass the confirmed bundle's release floor: every install without a
+// record (a --keep-state uninstall removes the record but keeps the trust
+// anchors and the confirmed bundle, so a reinstall resumes under that
+// bundle), every version change, up or down (a version that is not a
+// release orders above every release, so an upgrade by that order proves
+// nothing), and every run whose version is not a release, because that
+// string does not tell which code it names.
+func bundleFloorApplies(record *Deployment, version string) bool {
+	return record == nil || version != strings.TrimPrefix(strings.TrimSpace(record.ProductVersion), "v") ||
+		!enterprisebundle.IsReleaseVersion(version)
 }
 
 // floorCheckerPath is the root-only copy of the deployed gateway a non-purge

@@ -169,8 +169,35 @@ package_version="@DC_PKG_VERSION@"
 record="$state/deployment.json"
 marker="$state/allow-downgrade"
 gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
+# owner_mode PATH: the owner's uid and the permission bits (octal) of PATH
+# itself, not of a symlink's target.
+owner_mode() { stat -f '%u %Lp' "$1" 2>/dev/null; }
 root_owned() {
-    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -f %u "$1" 2>/dev/null)" = 0 ]
+    [ -f "$1" ] && [ ! -L "$1" ] && ro_info=$(owner_mode "$1") && [ "${ro_info%% *}" = 0 ]
+}
+# trusted PATH: PATH is a regular file, not a symlink, and it and every
+# folder above it, as the kernel resolves them, belong to root, and neither
+# their mode nor an access control entry lets another account write them.
+# Only root can then have changed what the package scripts run as root. An
+# owner, mode or access control list that cannot be read is not trusted.
+trusted() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    t_dir=$(cd -P -- "${1%/*}/" 2>/dev/null && pwd -P) || return 1
+    t_path=${t_dir%/}/${1##*/}
+    while :; do
+        t_info=$(owner_mode "$t_path") || return 1
+        case $t_info in
+            "0 "[0-7]*) t_mode=${t_info#0 } ;;
+            *) return 1 ;;
+        esac
+        case $t_mode in *[!0-7]*) return 1 ;; esac
+        [ $((0$t_mode & 022)) -eq 0 ] || return 1
+        t_acl=$(ls -lde "$t_path" 2>/dev/null) || return 1
+        ! printf '%s\n' "$t_acl" | sed 1d | grep -Eq ' allow .*(write|append|add_|delete|chown)' || return 1
+        [ "$t_path" != / ] || return 0
+        t_path=${t_path%/*}
+        [ -n "$t_path" ] || t_path=/
+    done
 }
 installed=
 if root_owned "$record"; then
@@ -181,7 +208,8 @@ fi
 # or an administrator reads. The result reports the running deployment as
 # its own status sees it (GAP-1428: a fixed document said every service was
 # down). The fixed document stays the fallback for an installed gateway that
-# cannot answer, or is not a root-owned file (it is not run).
+# cannot answer, or is not a root-owned file only root can change (trusted;
+# it is not run).
 refuse() {
     code=$1 message=$2
     echo "$message" >&2
@@ -190,7 +218,7 @@ refuse() {
     error="{\"code\":\"$code\",\"message\":\"$message\"}"
     present=true
     [ -n "$installed" ] || present=false
-    if ! { [ -x "$gateway" ] && root_owned "$gateway" && "$gateway" enterprise macos status --json 2>/dev/null | sed \
+    if ! { [ -x "$gateway" ] && trusted "$gateway" && "$gateway" enterprise macos status --json 2>/dev/null | sed \
         -e 's/^  "ok": [a-z]*,$/  "ok": false,/' \
         -e 's/^  "action": "[a-z-]*",$/  "action": "ensure",/' \
         -e 's/^  "noop": [a-z]*,$/  "noop": false,/' \
@@ -217,7 +245,9 @@ refuse() {
 # failed after removing the binaries), the root-only copy that uninstall kept
 # in the lifecycle folder answers. Only a gateway that was read and has no
 # marker is an older one: a gateway that cannot be read, and a gateway with
-# the marker or a kept copy that is not a root-owned file (or whose owner
+# the marker or a kept copy that is not a root-owned file only root can
+# change (trusted: another account cannot write it or a folder above it, by
+# mode or access control entry), or whose owner or mode
 # cannot be read), leave the floor unchecked unless the other one answers,
 # and the install is refused. Only exit 0 lets the install go on: exit 3
 # is the refusal, and any other result (execution denied, killed, crashed)
@@ -230,10 +260,10 @@ if [ -e "$gateway" ] || [ -L "$gateway" ]; then
     grep -qaF "$floor_check_marker" "$gateway" 2>/dev/null
     case $? in
     0)
-        if root_owned "$gateway"; then
+        if trusted "$gateway"; then
             checker=$gateway
         else
-            unchecked="$gateway has the floor check, but it is not a root-owned file or its owner could not be read"
+            unchecked="$gateway has the floor check, but it is not a root-owned file that only root can change (it, or a folder above it, can be written by another account), or its owner or mode could not be read"
         fi
         ;;
     1) ;; # a gateway before 1.0.4: it has no floor check
@@ -241,11 +271,11 @@ if [ -e "$gateway" ] || [ -L "$gateway" ]; then
     esac
 fi
 if [ -z "$checker" ]; then
-    if [ ! -L "$kept" ] && root_owned "$kept/defenseclaw-gateway"; then
+    if [ ! -L "$kept" ] && trusted "$kept/defenseclaw-gateway"; then
         checker="$kept/defenseclaw-gateway"
         unchecked=
     elif [ -L "$kept" ] || [ -e "$kept/defenseclaw-gateway" ] || [ -L "$kept/defenseclaw-gateway" ]; then
-        unchecked="$kept/defenseclaw-gateway, the gateway an uninstall kept for the floor check, is not a root-owned file in a folder that is not a symlink, or its owner could not be read"
+        unchecked="$kept/defenseclaw-gateway, the gateway an uninstall kept for the floor check, is not a root-owned file that only root can change, in a folder that is not a symlink (it, or a folder above it, can be written by another account), or its owner or mode could not be read"
     fi
 fi
 if [ -n "$checker" ]; then
@@ -257,7 +287,7 @@ if [ -n "$checker" ]; then
         refuse product_floor_refused "Refusing to install DefenseClaw $package_version: $floor_msg Nothing was changed."
     fi
 elif [ -n "$unchecked" ]; then
-    refuse product_floor_refused "Refusing to install DefenseClaw $package_version: The release floor of the confirmed signed policy bundle could not be checked: $unchecked. Restore it as a readable, root-owned file and install again. Nothing was changed."
+    refuse product_floor_refused "Refusing to install DefenseClaw $package_version: The release floor of the confirmed signed policy bundle could not be checked: $unchecked. Restore it as a readable, root-owned file that only root can write, in folders only root can write, and install again. Nothing was changed."
 fi
 if [ -n "$installed" ] && ! [ -f "$marker" ] && ! awk -v a="$package_version" -v b="$installed" '
     function norm(v) { sub(/^v/, "", v); sub(/\+.*/, "", v); return v }

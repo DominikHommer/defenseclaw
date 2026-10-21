@@ -867,6 +867,53 @@ def _write_stub(bin_dir: Path, name: str, body: str) -> None:
     stub.chmod(0o755)
 
 
+def _stat_stub(host: "_Host", entries: dict[Path | str, str] | None = None) -> None:
+    """stat for the package scripts: `stat -c|-f FORMAT PATH` prints FORMAT with
+    %u, %a and %Lp taken from PATH's entry ("uid mode", "uid" alone, or "" for a
+    path stat cannot read). Every other path is root's, writable by root only.
+    A path is matched as written and with its folder resolved, as the trust
+    check walks it."""
+    keys: dict[str, str] = {}
+    for path, entry in (entries or {}).items():
+        path = Path(path)
+        keys[str(path)] = entry
+        keys[str(path.parent.resolve() / path.name)] = entry
+    cases = "".join(f"    '{path}') e='{entry}' ;;\n" for path, entry in keys.items())
+    _write_stub(
+        host.bin,
+        "stat",
+        f"""for p; do :; done
+case $p in
+{cases}    *) e='0 755' ;;
+esac
+[ -n "$e" ] || {{ echo "stat: cannot statx '$p'" >&2; exit 1; }}
+uid=${{e%% *}} mode=${{e#"$uid"}} mode=${{mode# }}
+printf '%s\\n' "$2" | sed -e "s/%u/$uid/g" -e "s/%Lp/$mode/g" -e "s/%a/$mode/g"
+""",
+    )
+
+
+def _ls_stub(host: "_Host", allows_write: tuple[Path | str, ...] = ()) -> None:
+    """ls for the macOS pkg preinstall: `ls -lde PATH` lists a deny entry (which
+    does not let anyone write), or an entry that lets another account write
+    for a path in allows_write; any other use is the real ls."""
+    paths = {str(Path(p)) for p in allows_write} | {str(Path(p).parent.resolve() / Path(p).name) for p in allows_write}
+    cases = "".join(f"        '{path}') echo ' 1: user:other allow add_file,add_subdirectory,delete_child' ;;\n" for path in sorted(paths))
+    _write_stub(
+        host.bin,
+        "ls",
+        f"""if [ "$1" = -lde ]; then
+    echo "drwxr-xr-x  2 root  wheel  64 Oct 21 12:00 $2"
+    echo ' 0: group:everyone deny delete'
+    case $2 in
+{cases}    esac
+    exit 0
+fi
+exec /bin/ls "$@"
+""",
+    )
+
+
 def _rooted(text: str, replacements: dict[str, str]) -> str:
     for old, new in replacements.items():
         assert old in text, old
@@ -1123,7 +1170,7 @@ def test_linux_preinstall_refuses_a_downgrade_without_the_rollback_marker(tmp_pa
     host = _Host(tmp_path)
     host.state.mkdir()
     (host.state / "deployment.json").write_text('{\n  "product_version": "1.0.7101-SNAPSHOT-37ba9cdbb"\n}\n', encoding="utf-8")
-    _write_stub(host.bin, "stat", "echo 0")  # the record and the marker are root-owned
+    _stat_stub(host)  # the record and the marker are root-owned
     rooting = {
         "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
         "/run/systemd/system": str(host.run_systemd),
@@ -1161,7 +1208,7 @@ def test_linux_preinstall_refuses_a_package_below_the_bundle_release_floor(
     host.state.mkdir()
     (host.state / "deployment.json").write_text('{\n  "product_version": "1.0.6"\n}\n', encoding="utf-8")
     (host.state / "allow-downgrade").write_text("", encoding="utf-8")
-    _write_stub(host.bin, "stat", "echo 0")
+    _stat_stub(host)
     rooting = {
         "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
         "gateway=/opt/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
@@ -1352,7 +1399,7 @@ def test_linux_apt_hook_refuses_a_downgrade_below_the_bundle_release_floor(
     host = _Host(tmp_path, gateway_rc=rc, floor_check=True)
     host.state.mkdir()
     (host.state / "allow-downgrade").write_text("", encoding="utf-8")
-    _write_stub(host.bin, "stat", "echo 0")  # the gateway is root-owned
+    _stat_stub(host)  # the gateway is root-owned and only root can write it
     script = _rooted(
         (LINUX / "apt-downgrade-guard.sh").read_text(encoding="utf-8"),
         {
@@ -1424,7 +1471,8 @@ def _macos_pkg_preinstall(host: _Host, version: str) -> str:
     builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
     match = re.search(r"cat >\"\$SCRIPTS/preinstall\" <<'EOF'\n(.*?)\nEOF\n", builder, re.DOTALL)
     assert match, "the pkg preinstall heredoc was not found"
-    _write_stub(host.bin, "stat", "echo 0")  # the record and marker are root-owned
+    _stat_stub(host)  # the record, the marker and the gateway are root's
+    _ls_stub(host)
     return _rooted(
         match.group(1) + "\n",
         {
@@ -1560,18 +1608,21 @@ def _floor_checker_case(tmp_path: Path, kind: str, rc: int, checker: str) -> tup
     target.mkdir()
     _write_stub(target, "defenseclaw-gateway", f"""echo "checker $*" >>'{host.log}'
 exit {rc}""")
-    owner = "case \"$3\" in *floor-check*) echo 501 ;; *) echo 0 ;; esac" if checker == "not-root" else "echo 0"
-    return host, _run_floor_script(host, kind, owner)
+    entries = {target / "defenseclaw-gateway": "501 755"} if checker == "not-root" else None
+    return host, _run_floor_script(host, kind, entries)
 
 
-def _run_floor_script(host: _Host, kind: str, owner: str = "echo 0") -> subprocess.CompletedProcess[str]:
+def _run_floor_script(
+    host: _Host, kind: str, entries: dict[Path | str, str] | None = None, acl_writable: tuple[Path, ...] = ()
+) -> subprocess.CompletedProcess[str]:
     """Run the macOS pkg preinstall, the Linux preinstall or the apt hook for 1.0.5."""
     tmp_path = host.tmp
     if kind == "macos":
-        script = _macos_pkg_preinstall(host, "1.0.5")  # writes its own stat stub
-        _write_stub(host.bin, "stat", owner)
+        script = _macos_pkg_preinstall(host, "1.0.5")  # writes its own stat and ls stubs
+        _stat_stub(host, entries)
+        _ls_stub(host, acl_writable)
         return host.run(script)
-    _write_stub(host.bin, "stat", owner)
+    _stat_stub(host, entries)
     if kind == "linux":
         rooting = {
             "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
@@ -1751,13 +1802,9 @@ exec '{real}' "$@"
         _write_stub(host.state / "floor-check", "defenseclaw-gateway", f"""echo "checker $*" >>'{host.log}'
 exit {kept_rc}""")
     owner = {"not-root": "501", "owner-unreadable": "", "older-owner-unreadable": ""}.get(failure)
-    stat = "echo 0"
-    if owner is not None:
-        # The gateway's owner: stat prints another uid, or fails with no output.
-        fail = f"echo {owner}; exit 0" if owner else "echo 'stat: cannot stat' >&2; exit 1"
-        stat = f"""for a in "$@"; do [ "$a" = '{gateway}' ] && {{ {fail}; }}; done
-echo 0"""
-    result = _run_floor_script(host, kind, stat)
+    # The gateway's owner: stat prints another uid, or fails with no output.
+    entries = None if owner is None else {gateway: f"{owner} 755" if owner else ""}
+    result = _run_floor_script(host, kind, entries)
     calls = host.calls()
     # That gateway is not asked for the floor, and one that is not a
     # root-owned file is not run as root at all (not for a status either).
@@ -1778,6 +1825,119 @@ echo 0"""
         document = json.loads((host.state / "last-package-result.json").read_text(encoding="utf-8"))
         assert [e["code"] for e in document["errors"]] == ["product_floor_refused"]
         _validate_lifecycle_result(document)
+
+
+_WRITABLE_CHECKER_CASES = [
+    "file-group-writable",
+    "file-other-writable",
+    "file-mode-unreadable",
+    "folder-writable",
+    "folder-group-writable",
+    "folder-not-root",
+    "folder-unreadable",
+    "ancestor-writable",
+    "root-folder-writable",
+    "symlinked-folder-writable",
+    "acl-allows-write",
+]
+
+
+def _writable_checker_host(tmp_path: Path, where: str, how: str) -> tuple[_Host, dict[Path | str, str], tuple[Path, ...]]:
+    """A floor checker (the installed 1.0.4+ gateway, or the copy uninstall
+    kept) that exits 0 if run, which another account can change as `how` says."""
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    if how == "symlinked-folder-writable":
+        # The checker's folder is reached through a symlink; the folder it
+        # resolves to is the one another account can write.
+        real = tmp_path / "real"
+        real.mkdir()
+        if where == "installed":
+            host.gateway.unlink()
+            (tmp_path / "link").symlink_to(real)
+            host.gateway = tmp_path / "link" / "defenseclaw-gateway"
+        else:
+            host.state.rmdir()
+            host.state.symlink_to(real)
+    if where == "installed":
+        checker = host.gateway
+        _floor_checker_stub(checker, host.log, "ok", marker=True)
+    else:
+        host.gateway.unlink()
+        (host.state / "floor-check").mkdir()
+        checker = host.state / "floor-check" / "defenseclaw-gateway"
+        _floor_checker_stub(checker, host.log, "ok", marker=False)
+    folder = checker.parent
+    entries: dict[Path | str, str] = {
+        "file-group-writable": {checker: "0 775"},
+        "file-other-writable": {checker: "0 757"},
+        "file-mode-unreadable": {checker: "0"},
+        "folder-writable": {folder: "0 777"},
+        "folder-group-writable": {folder: "0 775"},
+        "folder-not-root": {folder: "501 755"},
+        "folder-unreadable": {folder: ""},
+        "ancestor-writable": {tmp_path: "0 1777"},
+        "root-folder-writable": {"/": "0 777"},
+        "symlinked-folder-writable": {tmp_path / "real": "0 777"},
+        "acl-allows-write": {},
+    }[how]
+    acl = (folder,) if how == "acl-allows-write" else ()
+    return host, entries, acl
+
+
+# The package scripts run the floor checker as root. Before, they asked only
+# that it be a root-owned file, so an account that could write the file or a
+# folder above it could replace a root-owned checker's code and keep the
+# marker, and the Linux preinstall, the apt hook and the macOS pkg preinstall
+# ran it as root. Each now runs a checker only when it and every folder above
+# it, as resolved, belong to root and no other account can write them (and,
+# on macOS, no access control entry lets one); otherwise the floor is
+# unchecked and the install is refused, without running it (the macOS refusal
+# does not ask it for a status either).
+@pytest.mark.parametrize("kind", ["macos", "linux", "apt"])
+@pytest.mark.parametrize("where", ["installed", "kept"])
+@pytest.mark.parametrize("how", _WRITABLE_CHECKER_CASES)
+def test_package_scripts_never_run_a_floor_checker_another_account_can_write(
+    tmp_path: Path, kind: str, where: str, how: str
+) -> None:
+    if how == "acl-allows-write" and kind != "macos":
+        pytest.skip("a Linux ACL that grants write shows in the group bits (folder-group-writable)")
+    host, entries, acl = _writable_checker_host(tmp_path, where, how)
+    result = _run_floor_script(host, kind, entries, acl)
+    assert not [c for c in host.calls() if c.startswith("run ")], host.calls()
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "could not be checked" in result.stderr and "only root can" in result.stderr, result.stderr
+    assert "Nothing was changed" in result.stderr
+    assert host.calls() == [], host.calls()
+    if kind == "macos":
+        document = json.loads((host.state / "last-package-result.json").read_text(encoding="utf-8"))
+        assert [e["code"] for e in document["errors"]] == ["product_floor_refused"]
+        _validate_lifecycle_result(document)
+
+
+# A root-only kept copy still answers for an installed gateway that another
+# account can write (that gateway is not run), and the same checker runs when
+# only root can change it.
+@pytest.mark.parametrize("kind", ["macos", "linux", "apt"])
+@pytest.mark.parametrize("kept_rc", [0, 3])
+def test_package_scripts_ask_a_root_only_kept_copy_for_a_writable_gateway(tmp_path: Path, kind: str, kept_rc: int) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    _floor_checker_stub(host.gateway, host.log, "ok", marker=True)
+    (host.state / "floor-check").mkdir()
+    _write_stub(host.state / "floor-check", "defenseclaw-gateway", f"""echo "checker $*" >>'{host.log}'
+exit {kept_rc}""")
+    result = _run_floor_script(host, kind, {host.gateway: "0 777"})
+    assert not [c for c in host.calls() if c.startswith("run ")], host.calls()
+    assert [c for c in host.calls() if c.startswith("checker ")] == ["checker enterprise bundle floor-check --product-version 1.0.5"]
+    assert (result.returncode == 1) == (kept_rc == 3), (result.stdout, result.stderr)
+    (tmp_path / "trusted").mkdir()
+    trusted_host = _Host(tmp_path / "trusted")
+    trusted_host.state.mkdir()
+    _floor_checker_stub(trusted_host.gateway, trusted_host.log, "ok", marker=True)
+    ok = _run_floor_script(trusted_host, kind)
+    assert ok.returncode == 0, (ok.stdout, ok.stderr)
+    assert [c for c in trusted_host.calls() if c.startswith("run ")] == ["run enterprise bundle floor-check --product-version 1.0.5"]
 
 
 def test_package_scripts_look_for_the_gateway_floor_check_marker() -> None:
