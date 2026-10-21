@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -308,5 +309,53 @@ func TestRulePackValidateSecureClientTextMatchesMain(t *testing.T) {
 	want := "valid rule pack: 2 files, 3 rules, digest " + strings.Repeat("a", 64) + "\n"
 	if output.String() != want {
 		t.Fatalf("Secure Client validation = %q, want %q", output.String(), want)
+	}
+}
+
+// A valid pack with more detection-only rules than the validate-pack bridge
+// accepts warnings for keeps its JSON result within that limit: the last
+// warning counts the rules it does not name.
+func TestRulePackValidateJSONBoundsItsWarnings(t *testing.T) {
+	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
+	previousOutput, previousErr := rulePackValidateCmd.OutOrStdout(), rulePackValidateCmd.ErrOrStderr()
+	previousProblem := rulePackServiceReadProblemFn
+	t.Cleanup(func() {
+		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
+		rulePackValidateCmd.SetOut(previousOutput)
+		rulePackValidateCmd.SetErr(previousErr)
+		rulePackServiceReadProblemFn = previousProblem
+	})
+	rulePackServiceReadProblemFn = func(context.Context, string) string { return "" }
+	directory := t.TempDir()
+	if err := os.Mkdir(filepath.Join(directory, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const count = maxRulePackWireWarnings + 44
+	var rules strings.Builder
+	rules.WriteString("version: 1\ncategory: command\nrules:\n")
+	for i := range count {
+		rules.WriteString("  - id: CUSTOMER-MARKER-" + strconv.Itoa(1000+i) + "\n    tool_call_only: true\n    pattern: marker" +
+			strconv.Itoa(i) + "\n    title: Marker\n    severity: HIGH\n    confidence: 0.9\n    tags: [test]\n")
+	}
+	if err := os.WriteFile(filepath.Join(directory, "rules", "customer.yaml"), []byte(rules.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rulePackValidateDir, rulePackValidateJSON = directory, true
+	output := &strings.Builder{}
+	rulePackValidateCmd.SetOut(output)
+	rulePackValidateCmd.SetErr(&strings.Builder{})
+	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	var response rulePackWireResponse
+	if err := json.Unmarshal([]byte(output.String()), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Valid || len(response.Warnings) != maxRulePackWireWarnings {
+		t.Fatalf("valid %t with %d warnings, want valid with %d", response.Valid, len(response.Warnings), maxRulePackWireWarnings)
+	}
+	if last := response.Warnings[len(response.Warnings)-1]; !strings.HasPrefix(last, "45 more customer rules") ||
+		!strings.Contains(last, "detection-only") {
+		t.Fatalf("last warning = %q, want the count of the rules not named", last)
 	}
 }

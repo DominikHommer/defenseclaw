@@ -4,7 +4,13 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -107,5 +113,54 @@ func TestProxyRoutesWithTheRequestGenerationProviders(t *testing.T) {
 	}
 	if registry := (&ChatRequest{}).providerRegistry(); registry == nil || registry.Providers[0].Domains[0] != "llm-b.acme.example" {
 		t.Fatalf("unpinned request registry = %+v", registry)
+	}
+}
+
+// GAP-1294: a fetch-intercepted request (X-DC-Target-URL) is raw-forwarded
+// with the provider registry of the generation it pinned too: provider
+// inference, headers and request_overrides, not the registry published
+// since.
+func TestRawForwardUsesTheRequestGenerationProviders(t *testing.T) {
+	forwarded := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		forwarded <- body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"c1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+	// The process-wide registry has the host under a provider without overrides.
+	registerRawForwardProviderDomain(t, upstream.URL, "openai")
+	allowRawForwardPrivateTargets(t)
+	u, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := &Generation{N: 1, Config: &config.Config{}, Providers: &generationProviders{Providers: []configs.Provider{{
+		Name: "acme-vllm", Domains: []string{u.Hostname()},
+		RequestOverrides: map[string]interface{}{"metadata": map[string]interface{}{"generation": "pinned"}},
+	}}}}
+	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "observe")
+	proxy.generationSource = func() *Generation { return pinned }
+	body := mustJSON(t, map[string]interface{}{
+		"model": "m", "messages": []map[string]interface{}{{"role": "user", "content": "hello"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", upstream.URL)
+	req.Header.Set("X-AI-Auth", "Bearer sk-test")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	proxy.handleChatCompletion(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	select {
+	case got := <-forwarded:
+		if !strings.Contains(string(got), `"generation":"pinned"`) {
+			t.Fatalf("forwarded body %s lacks the pinned generation's request_overrides", got)
+		}
+	default:
+		t.Fatal("the request was not forwarded")
 	}
 }

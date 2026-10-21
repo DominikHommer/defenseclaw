@@ -35,6 +35,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 
 	"github.com/fsnotify/fsnotify"
 
@@ -359,7 +360,7 @@ func (m *ConfigManager) getEnvConfigPath() string {
 // keep applying. A file whose migration fails is refused.
 func loadRuntimeConfigCandidate(source string, raw []byte) (*config.Config, error) {
 	legacyV8 := config.NeedsMigrationV9(raw)
-	migrated, err := config.MigrateV8InMemory(source, raw, guardrail.RulePackDigest)
+	migrated, exportKey, err := config.MigrateV8InMemoryCandidate(source, raw, guardrail.RulePackDigest)
 	if err != nil {
 		// Refused: the previous generation keeps running. As raw v8 the file
 		// would drop its data.json admission and audit.db block/allow policy.
@@ -370,7 +371,37 @@ func loadRuntimeConfigCandidate(source string, raw []byte) (*config.Config, erro
 		return nil, err
 	}
 	candidate.RuntimeV8RulePackRebase = legacyV8 && !candidate.SecureClientIntegration()
+	bindCandidateKeyExport(candidate, exportKey)
 	return candidate, nil
+}
+
+// candidateKeyExports holds, for a candidate loaded from a config_version 8
+// file, the export of the inline scanner key its in-memory migration moved
+// to a variable (config.MigrateV8InMemoryCandidate). A reload runs it only
+// when it activates the candidate, so a rejected candidate never changes
+// the key the running scanners read. Keys are weak: an entry goes with its
+// configuration.
+var candidateKeyExports sync.Map // weak.Pointer[config.Config] -> func()
+
+func bindCandidateKeyExport(cfg *config.Config, export func()) {
+	if cfg == nil || export == nil {
+		return
+	}
+	key := weak.Make(cfg)
+	if _, loaded := candidateKeyExports.Swap(key, export); !loaded {
+		runtime.AddCleanup(cfg, func(key weak.Pointer[config.Config]) { candidateKeyExports.Delete(key) }, key)
+	}
+}
+
+// takeCandidateKeyExport removes and returns what bindCandidateKeyExport
+// recorded for cfg; a no-op when there is none.
+func takeCandidateKeyExport(cfg *config.Config) func() {
+	if cfg != nil {
+		if export, ok := candidateKeyExports.LoadAndDelete(weak.Make(cfg)); ok {
+			return export.(func())
+		}
+	}
+	return func() {}
 }
 
 func newConfigManagerWithSnapshot(
@@ -815,8 +846,14 @@ func (a *assetWatches) failedFoldersChanged() bool {
 	return changed
 }
 
+// maxAssetFingerprintFileBytes bounds how much of one file the polling
+// fingerprint reads.
+const maxAssetFingerprintFileBytes = 8 << 20
+
 // assetFolderFingerprint digests the names, sizes, modes and modification
-// times of a folder's entries ("" when it cannot be read).
+// times of a folder's entries and the contents of its files, so an edit
+// that keeps a file's size and modification time changes it too ("" when
+// the folder cannot be read).
 func assetFolderFingerprint(dir string) string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -830,8 +867,25 @@ func assetFolderFingerprint(dir string) string {
 			continue
 		}
 		fmt.Fprintf(sum, "%s\x00%d\x00%d\x00%d\x00", entry.Name(), info.Size(), info.Mode(), info.ModTime().UnixNano())
+		if info.Mode().IsRegular() {
+			hashAssetFileContents(sum, filepath.Join(dir, entry.Name()))
+		}
 	}
 	return fmt.Sprintf("%x", sum.Sum(nil))
+}
+
+// hashAssetFileContents writes the first maxAssetFingerprintFileBytes of
+// the file at path to sum, or a marker when it cannot be read.
+func hashAssetFileContents(sum io.Writer, path string) {
+	file, err := os.Open(path)
+	if err != nil {
+		fmt.Fprint(sum, "?\x00")
+		return
+	}
+	defer file.Close()
+	if _, err := io.Copy(sum, io.LimitReader(file, maxAssetFingerprintFileBytes)); err != nil {
+		fmt.Fprint(sum, "?\x00")
+	}
 }
 
 // sync watches exactly want. A watched folder that is gone lost its watch
@@ -1054,6 +1108,8 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 
 	oldCfg := m.Current()
 	next, source, err := m.loadStableCandidate(ctx)
+	// The candidate's inline scanner key applies only once it is accepted.
+	exportCandidateKey := takeCandidateKeyExport(next)
 	if err != nil {
 		m.rejected = true
 		m.permissionRetry = errors.Is(err, os.ErrPermission)
@@ -1219,6 +1275,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		diff.Changed = []string{configDiffAssets}
 	}
 	if len(diff.Changed) == 0 {
+		exportCandidateKey()
 		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
 		// A bundle can advance its persistent generation while keeping
@@ -1269,6 +1326,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		// state; otherwise they stay until an unrelated config write.
 		m.rejected = false
 		m.rejectedAssets.Store(nil)
+		exportCandidateKey()
 		clearGenerationBuildError()
 		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
@@ -1308,6 +1366,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	m.rejectedAssets.Store(nil)
 	gen := m.gen.Add(1)
 	m.current.Store(cloneConfig(next))
+	exportCandidateKey()
 	recordHandEdit(ctx, next, m.path, source.raw)
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil {
 		m.v8PlanDigest = source.compiledV8.Plan.Digest()

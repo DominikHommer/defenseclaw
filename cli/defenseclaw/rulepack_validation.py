@@ -52,6 +52,8 @@ _SUMMARY_COUNT_FIELDS: Final = (
 _SUMMARY_DIGEST_FIELDS: Final = ("digest", "files_digest")
 _SUMMARY_FIELDS: Final = frozenset((*_SUMMARY_COUNT_FIELDS, *_SUMMARY_DIGEST_FIELDS))
 _ERROR_FIELDS: Final = frozenset({"path", "code", "reason"})
+# The gateway sends at most this many warnings and counts the rest in the
+# last one (maxRulePackWireWarnings in internal/cli/rulepack.go).
 _MAX_WARNINGS: Final = 256
 _MAX_WARNING_CHARS: Final = 512
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")

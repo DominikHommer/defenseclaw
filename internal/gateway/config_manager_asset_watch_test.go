@@ -161,3 +161,38 @@ func TestAssetFolderThatCannotBeWatchedIsReportedAndPolled(t *testing.T) {
 		t.Fatalf("config health = %s after the watch recovered, want running", state)
 	}
 }
+
+// The polling fallback of a folder that cannot be watched sees a policy
+// file replaced with other bytes of the same size, mode and modification
+// time.
+func TestAssetFolderFingerprintSeesASameSizeEditThatKeepsItsModTime(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rules.yaml")
+	if err := os.WriteFile(path, []byte("severity: HIGH\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watches := &assetWatches{failed: map[string]string{dir: assetFolderFingerprint(dir)}}
+	if err := os.WriteFile(path, []byte("severity: LOW_\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || after.Mode() != before.Mode() {
+		t.Fatalf("the replacement changed the file metadata: %v -> %v", before, after)
+	}
+	if !watches.failedFoldersChanged() {
+		t.Fatal("the polling fallback missed a same-size edit that kept the modification time")
+	}
+	if watches.failedFoldersChanged() {
+		t.Fatal("an unchanged folder reported a change")
+	}
+}

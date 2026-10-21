@@ -3164,6 +3164,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 		}
 	}
+	// Both forwarding branches below route with the provider registry of
+	// the generation the request pinned (GAP-1294).
+	req.providers = requestProviderRegistry(r.Context())
 	emitPendingRoutedPrompt := func(ctx context.Context) string {
 		if !pendingRoutedPrompt {
 			return promptID
@@ -3176,7 +3179,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 		_, selectedPromptProvider := p.llmSystemAndProvider(req.Model)
 		if req.TargetURL != "" {
-			if inferred := inferProviderFromURL(rawForwardUpstreamURL(req.TargetURL, r.URL.RequestURI())); inferred != "" {
+			if inferred := inferProviderFromRegistry(rawForwardUpstreamURL(req.TargetURL, r.URL.RequestURI()), req.providers); inferred != "" {
 				selectedPromptProvider = inferred
 			}
 		}
@@ -3249,7 +3252,6 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			fmt.Fprintf(os.Stderr, "[routing] routed provider error: %v\n", err)
 		}
 	} else {
-		req.providers = requestProviderRegistry(r.Context())
 		upstream = p.resolveProviderFn(&req)
 	}
 	if upstream == nil {
@@ -5719,7 +5721,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 	}
 
 	upstreamURL := rawForwardUpstreamURL(targetOrigin, r.URL.RequestURI())
-	providerName := inferProviderFromURL(upstreamURL)
+	providerName := inferProviderFromRegistry(upstreamURL, req.providers)
 	if selected := strings.TrimSpace(routedProvider); selected != "" {
 		providerName = selected
 	}
@@ -5759,7 +5761,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 	if len(req.RawBody) > 0 {
 		forwardBody = req.RawBody
 	}
-	forwardBody = applyProviderRequestOverrides(forwardBody, upstreamURL)
+	forwardBody = applyProviderRequestOverrides(forwardBody, upstreamURL, req.providers)
 
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
 	if err != nil {
@@ -6549,8 +6551,11 @@ func parseRawForwardSSEPayload(payload string) (string, []rawForwardToolCallDelt
 	return out.String(), toolCallDeltas, finishReasons
 }
 
-func applyProviderRequestOverrides(body []byte, targetURL string) []byte {
-	overrides := providerRequestOverridesForTarget(targetURL)
+// applyProviderRequestOverrides merges the request_overrides of the
+// provider targetURL belongs to in registry (nil: the process-wide one)
+// into body.
+func applyProviderRequestOverrides(body []byte, targetURL string, registry *configs.ProvidersConfig) []byte {
+	overrides := providerRequestOverridesForTarget(targetURL, registry)
 	if len(overrides) == 0 {
 		return body
 	}
@@ -6569,18 +6574,20 @@ func applyProviderRequestOverrides(body []byte, targetURL string) []byte {
 	return out
 }
 
-func providerRequestOverridesForTarget(targetURL string) map[string]interface{} {
-	providerName := inferProviderFromURL(targetURL)
+func providerRequestOverridesForTarget(targetURL string, registry *configs.ProvidersConfig) map[string]interface{} {
+	providerName := inferProviderFromRegistry(targetURL, registry)
 	if providerName == "" {
 		return nil
 	}
 
-	cfg, _, _ := providerRegistrySnapshot()
-	if cfg == nil {
+	if registry == nil {
+		registry, _, _ = providerRegistrySnapshot()
+	}
+	if registry == nil {
 		return nil
 	}
 
-	for _, provider := range cfg.Providers {
+	for _, provider := range registry.Providers {
 		if strings.EqualFold(provider.Name, providerName) {
 			return provider.RequestOverrides
 		}

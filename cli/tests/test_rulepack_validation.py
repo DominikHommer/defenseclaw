@@ -591,3 +591,28 @@ def test_malformed_warnings_are_a_protocol_error(warnings: object) -> None:
         pytest.raises(rulepack_validation.RulePackValidationBridgeError),
     ):
         rulepack_validation.validate_rule_pack("/tmp/pack")
+
+
+def test_warnings_up_to_the_gateway_bound_are_accepted() -> None:
+    warnings = [f"customer rule R-{index} uses tool_call_only without an expression" for index in range(256)]
+    payload = {
+        "wire_version": 1,
+        "kind": "validation",
+        "valid": True,
+        "summary": _summary(),
+        "warnings": warnings,
+    }
+    with (
+        patch.object(
+            rulepack_validation,
+            "resolve_trusted_gateway_binary",
+            return_value="gateway",
+        ),
+        patch.object(
+            rulepack_validation.subprocess,
+            "run",
+            return_value=_completed(payload),
+        ),
+    ):
+        result = rulepack_validation.validate_rule_pack("/tmp/pack")
+    assert result.valid and len(result.warnings) == 256

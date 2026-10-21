@@ -638,16 +638,32 @@ func v8RegularFile(path string) bool {
 // pack keeps its original path and pin here; the runtime rebases the loaded
 // pack in memory after verifying that pin.
 func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir string) (string, error)) ([]byte, error) {
+	migrated, exportKey, err := MigrateV8InMemoryCandidate(configFile, raw, rulePackDigest)
+	if err != nil {
+		return migrated, err
+	}
+	exportKey()
+	return migrated, nil
+}
+
+// MigrateV8InMemoryCandidate is MigrateV8InMemory for a load that may still
+// be refused after it (a gateway reload): it does not touch the process
+// environment. exportKey places the inline scanner key the way
+// MigrateV8InMemory does; the caller runs it once the configuration is
+// accepted, so a refused one never changes the key the running scanners
+// read. exportKey is never nil.
+func MigrateV8InMemoryCandidate(configFile string, raw []byte, rulePackDigest func(dir string) (string, error)) (migrated []byte, exportKey func(), err error) {
+	noKey := func() {}
 	if !NeedsMigrationV9(raw) {
-		return raw, nil
+		return raw, noKey, nil
 	}
 	var doc yaml.Node
 	if yaml.Unmarshal(raw, &doc) != nil {
-		return raw, nil
+		return raw, noKey, nil
 	}
 	root := v8DocumentRoot(&doc)
 	if root == nil || root.Kind != yaml.MappingNode || v9SecureClientDocument(root) {
-		return raw, nil
+		return raw, noKey, nil
 	}
 	dataDir := migrationDataDir(configFile, root)
 	policyDir, dataJSON := V8PolicyDataJSON(yamlScalarValue(v8YAMLMapValue(root, "policy_dir")))
@@ -671,7 +687,7 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 	}
 	result, err := MigrateV9(context.Background(), in)
 	if err != nil {
-		return raw, err
+		return raw, noKey, err
 	}
 	// The v8 file still holds the inline key; the v9 document names its
 	// variable instead, so the variable carries the key for this process
@@ -679,8 +695,8 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 	// in the environment or .env wins, as it does for any api_key_env; a
 	// value an earlier in-memory load set is replaced, so a rotated inline
 	// key applies on reload (GAP-0995).
-	exportInMemoryKey(result.EnvKey, result.EnvValue)
-	return result.Migrated, nil
+	key, value := result.EnvKey, result.EnvValue
+	return result.Migrated, func() { exportInMemoryKey(key, value) }, nil
 }
 
 // inMemoryExportedKeys holds the value each environment variable got from
@@ -1222,16 +1238,28 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (writt
 	// A file outside the data home stays too: the installer's rollback copy
 	// does not cover it, so renaming it would leave a rolled-back 1.0.0 gateway
 	// without its policy data (see leftOutsideRollbackCopy).
-	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && !m.in.Managed && !m.leftOutsideRollbackCopy(dj) {
+	dj := strings.TrimSpace(m.in.DataJSONPath)
+	// planned is where the data.json the migration planned from is now:
+	// renamed first, so the bytes checked below are the ones retired.
+	planned := dj
+	if dj != "" && !m.in.Managed && !m.leftOutsideRollbackCopy(dj) {
 		if _, statErr := os.Stat(dj); statErr == nil {
-			if m.dataJSON.dataJSONChanged(dj) {
-				m.note("%s changed while the migration ran, so it was left in place: compare it with config.yaml, then run defenseclaw migrate again", dj)
-			} else if err := os.Rename(dj, dj+DataJSONMigratedSuffix); err != nil {
+			if err := os.Rename(dj, dj+DataJSONMigratedSuffix); err != nil {
 				m.note("could not rename %s: %v", dj, err)
 			} else {
-				written = append(written, dj+DataJSONMigratedSuffix)
+				planned = dj + DataJSONMigratedSuffix
 			}
 		}
+	}
+	if m.dataJSON.dataJSONChanged(planned) {
+		// An edit made while config.yaml was written is in neither the v9
+		// config nor anything a later run reads once config.yaml is v9: put
+		// the v8 config back so the next run migrates it (GAP-1148).
+		committed = false
+		return m.undoDataJSONDrift(txn, current, migrated, mode, dj, planned, written)
+	}
+	if planned != dj {
+		written = append(written, planned)
 	}
 	refreshErr := m.refreshRegoModules(&written)
 	if m.providersOverlay != "" && !m.leftOutsideRollbackCopy(m.providersOverlay) {
@@ -1261,6 +1289,29 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (writt
 		return written, err
 	}
 	return written, refreshErr
+}
+
+// undoDataJSONDrift puts the config_version 8 config.yaml back after a
+// commit whose data.json (dj, now at planned) changed meanwhile, and
+// returns the commit's error. A data.json it renamed goes back unless one
+// was written at dj since. The caller's deferred undo then takes the moved
+// scanner key back out of .env and leaves audit.db as it was.
+func (m *v9Migrator) undoDataJSONDrift(txn *cfgtxn.Txn, source, migrated []byte, mode os.FileMode,
+	dj, planned string, written []string) ([]string, error) {
+	if planned != dj {
+		if _, err := os.Lstat(dj); !errors.Is(err, fs.ErrNotExist) {
+			m.note("%s was written again while the migration ran; the file it planned from is %s", dj, planned)
+			written = append(written, planned)
+		} else if err := os.Rename(planned, dj); err != nil {
+			m.note("could not put %s back to %s: %v", planned, dj, err)
+			written = append(written, planned)
+		}
+	}
+	if _, err := txn.Commit(migrated, source, true, mode, cfgtxn.Writer{Actor: m.record.Actor, Reason: "config_version 9 migration undone"}); err != nil {
+		return written, fmt.Errorf("config: %s changed while the config_version 9 migration ran, and config.yaml could not be put back to config_version 8 (%v): compare %s with config.yaml", dj, err, dj)
+	}
+	written = slices.DeleteFunc(written, func(path string) bool { return path == m.configPath })
+	return written, fmt.Errorf("config: %s changed while the config_version 9 migration ran, so config.yaml was left at config_version 8; run it again", dj)
 }
 
 // migrationStamp names the copies a migration keeps beside an earlier one's
