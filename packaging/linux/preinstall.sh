@@ -102,14 +102,21 @@ not_older() {
 # A device that takes signed policy bundles must not run a release below the
 # one its confirmed bundle requires (min_product_version), even for a
 # deliberate rollback: a bundle signed with a lower floor lifts it. The
-# installed gateway reads the floor; exit 3 is its refusal, and a gateway
-# without the check (before 1.0.4) leaves the install alone.
+# installed gateway reads the floor. Once it is gone (uninstall --keep-state
+# and then the package removal, or an uninstall that failed after removing
+# the binaries), the root-only copy that uninstall kept in the lifecycle
+# folder answers. Exit 3 is the refusal; a gateway without the check (before
+# 1.0.4) leaves the install alone.
 gateway=/opt/defenseclaw/bin/defenseclaw-gateway
+checker=$gateway
+if ! { root_owned "$checker" && [ -x "$checker" ]; }; then
+    checker="$state/floor-check/defenseclaw-gateway"
+fi
 case "$package_version" in
     @*@) ;;
     *)
-        if root_owned "$gateway" && [ -x "$gateway" ]; then
-            floor_msg=$("$gateway" enterprise bundle floor-check --product-version "$package_version" 2>&1 >/dev/null)
+        if [ ! -L "$state/floor-check" ] && root_owned "$checker" && [ -x "$checker" ]; then
+            floor_msg=$("$checker" enterprise bundle floor-check --product-version "$package_version" 2>&1 >/dev/null)
             if [ $? -eq 3 ]; then
                 echo "defenseclaw-enterprise: refusing to install $package_version: ${floor_msg#Error: } Nothing was changed." >&2
                 exit 1

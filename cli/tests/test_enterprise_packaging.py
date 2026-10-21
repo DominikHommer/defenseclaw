@@ -1256,6 +1256,14 @@ def test_linux_postinstall_does_nothing_after_a_refused_removal(tmp_path: Path, 
         ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", False, False, 1),
         ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", False, True, 1),
         ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", True, False, 0),
+        # The product versions decide, not apt's direction: a higher epoch
+        # makes an older release an apt upgrade, and a lower one the reverse.
+        ("defenseclaw-enterprise 1.0.46 < 1:1.0.45 f.deb", False, False, 1),
+        ("defenseclaw-enterprise 1.0.46 < 1:1.0.45 f.deb", True, False, 0),
+        ("defenseclaw-enterprise 1:1.0.46 < 2:1.0.45~rc.1 f.deb", False, False, 1),
+        ("defenseclaw-enterprise 1:1.0.45 > 1.0.46 f.deb", False, False, 0),
+        ("defenseclaw-enterprise 1.0.46 = 1.0.46 **CONFIGURE**", False, False, 0),
+        ("defenseclaw-enterprise - < 1.0.45 f.deb", False, False, 0),
     ],
 )
 def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
@@ -1310,6 +1318,14 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
         ("defenseclaw-enterprise 1.0.6 > 1:1.0.5 f.deb", "1.0.5", 3, 1),
         ("defenseclaw-enterprise 1.0.6 > 1.0.5 f.deb", "1.0.5", 1, 0),
         ("defenseclaw-enterprise 1.0.6 > 1.0.5 f.deb", "1.0.5", 0, 0),
+        # Whatever apt's direction (a higher epoch makes 1.0.5 an apt
+        # upgrade), and for every install action, as the preinstall checks.
+        ("defenseclaw-enterprise 1.0.6 < 1:1.0.5 f.deb", "1.0.5", 3, 1),
+        ("defenseclaw-enterprise 1.0.6 < 1:1.0.5 f.deb", "1.0.5", 0, 0),
+        ("defenseclaw-enterprise 1.0.4 < 1.0.6 f.deb", "1.0.6", 3, 1),
+        ("defenseclaw-enterprise 1.0.4 < 1.0.6 f.deb", "1.0.6", 0, 0),
+        ("defenseclaw-enterprise 1.0.6 = 1.0.6 f.deb", "1.0.6", 3, 1),
+        ("defenseclaw-enterprise - < 1.0.5 f.deb", "1.0.5", 3, 1),
     ],
 )
 def test_linux_apt_hook_refuses_a_downgrade_below_the_bundle_release_floor(
@@ -1318,6 +1334,7 @@ def test_linux_apt_hook_refuses_a_downgrade_below_the_bundle_release_floor(
     host = _Host(tmp_path, gateway_rc=rc)
     host.state.mkdir()
     (host.state / "allow-downgrade").write_text("", encoding="utf-8")
+    _write_stub(host.bin, "stat", "echo 0")  # the gateway is root-owned
     script = _rooted(
         (LINUX / "apt-downgrade-guard.sh").read_text(encoding="utf-8"),
         {
@@ -1503,6 +1520,85 @@ def test_macos_pkg_preinstall_refuses_below_the_bundle_release_floor(
     assert [e["code"] for e in document["errors"]] == ["product_floor_refused"]
     assert document["installed"] is record and document["installed_version"] == ("1.0.6" if record else "")
     _validate_lifecycle_result(document)
+
+
+# After uninstall --keep-state (or an uninstall that failed after removing the
+# binaries) the installed gateway is gone, but the trust anchors and the
+# confirmed bundle stay. Each package script then asks the root-only copy of
+# the gateway that uninstall kept in the lifecycle folder (floor-check/), before
+# any file is replaced; a copy that is not root-owned, or a floor-check folder
+# that is a symlink, is not asked.
+def _floor_checker_case(tmp_path: Path, kind: str, rc: int, checker: str) -> tuple[_Host, subprocess.CompletedProcess[str]]:
+    host = _Host(tmp_path)
+    host.gateway.unlink()  # removed with the deployment's binaries
+    host.state.mkdir()
+    kept = host.state / "floor-check"
+    target = kept
+    if checker == "symlink":
+        target = tmp_path / "elsewhere"
+        kept.symlink_to(target)
+    target.mkdir()
+    _write_stub(target, "defenseclaw-gateway", f"""echo "checker $*" >>'{host.log}'
+exit {rc}""")
+    owner = "case \"$3\" in *floor-check*) echo 501 ;; *) echo 0 ;; esac" if checker == "not-root" else "echo 0"
+    if kind == "macos":
+        script = _macos_pkg_preinstall(host, "1.0.5")  # writes its own stat stub
+        _write_stub(host.bin, "stat", owner)
+        return host, host.run(script)
+    _write_stub(host.bin, "stat", owner)
+    if kind == "linux":
+        rooting = {
+            "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+            "gateway=/opt/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
+            "/run/systemd/system": str(host.run_systemd),
+            "/run/defenseclaw-enterprise-apply-path.held": str(tmp_path / "held"),
+        }
+        script = _rooted((LINUX / "preinstall.sh").read_text(encoding="utf-8"), rooting)
+        return host, host.run(script.replace("@DC_PKG_VERSION@", "1.0.5"), "1")
+    # The apt hook of a package whose binaries are gone; the rollback marker
+    # leaves only the floor to decide.
+    (host.state / "allow-downgrade").write_text("", encoding="utf-8")
+    script = _rooted(
+        (LINUX / "apt-downgrade-guard.sh").read_text(encoding="utf-8"),
+        {
+            "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+            "gateway=/opt/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
+        },
+    )
+    path = tmp_path / "guard.sh"
+    path.write_text(script, encoding="utf-8")
+    return host, subprocess.run(
+        ["sh", str(path)],
+        input="VERSION 2\nAPT::Architecture=amd64\n\ndefenseclaw-enterprise 1.0.6 > 1.0.5 f.deb\n",
+        env={"PATH": f"{host.bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+@pytest.mark.parametrize("kind", ["macos", "linux", "apt"])
+@pytest.mark.parametrize(
+    ("rc", "checker", "asked", "refused"),
+    [(3, "root", True, True), (0, "root", True, False), (1, "root", True, False), (3, "not-root", False, False), (3, "symlink", False, False)],
+)
+def test_package_scripts_ask_the_kept_floor_checker_when_the_gateway_is_gone(
+    tmp_path: Path, kind: str, rc: int, checker: str, asked: bool, refused: bool
+) -> None:
+    host, result = _floor_checker_case(tmp_path, kind, rc, checker)
+    floor_calls = [c for c in host.calls() if "floor-check" in c]
+    assert floor_calls == (["checker enterprise bundle floor-check --product-version 1.0.5"] if asked else []), host.calls()
+    assert (result.returncode == 1) == refused, (result.stdout, result.stderr)
+    if not refused:
+        return
+    assert "Nothing was changed" in result.stderr
+    # Refused before any file changed: no other tool ran.
+    assert [c for c in host.calls() if not c.startswith("checker ")] == []
+    if kind == "macos":
+        document = json.loads((host.state / "last-package-result.json").read_text(encoding="utf-8"))
+        assert [e["code"] for e in document["errors"]] == ["product_floor_refused"]
+        assert document["installed"] is False
+        _validate_lifecycle_result(document)
 
 
 def _shell_function(text: str, name: str) -> str:

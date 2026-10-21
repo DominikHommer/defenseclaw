@@ -16,9 +16,13 @@
 # apt sends the "VERSION 2" protocol on stdin (see apt.conf(5)): the
 # configuration, a blank line, then one line per package action:
 #   name old-version direction new-version action
-# A deliberate rollback creates the root-owned marker first. The hook leaves
-# it in place: the older package's preinstall checks it as well, and its
-# postinstall applies the package with --allow-downgrade and deletes it.
+# The hook decides on the product versions, not on apt's direction: a deb
+# version with a higher epoch (1:1.0.2) is an apt upgrade over 1.0.4 but an
+# older DefenseClaw, and a package from before 1.0.4 has no floor check of
+# its own. A deliberate rollback creates the root-owned marker first. The
+# hook leaves it in place: the older package's preinstall checks it as well,
+# and its postinstall applies the package with --allow-downgrade and deletes
+# it.
 
 set -u
 state=/var/lib/defenseclaw-enterprise
@@ -26,12 +30,10 @@ gateway=/opt/defenseclaw/bin/defenseclaw-gateway
 config=/etc/defenseclaw/config.yaml
 previous_config=/etc/defenseclaw/config.yaml.v8.bak
 
-change=$(awk 'body && $1 == "defenseclaw-enterprise" && $3 == ">" && $4 != "-" { print $2, $4; exit } $0 == "" { body = 1 }')
-[ -n "$change" ] || exit 0
-# shellcheck disable=SC2086 # two version strings without blanks
-set -- $change
-installed=$1
-incoming=$2
+# Every action that unpacks or configures defenseclaw-enterprise, whatever
+# its direction; a removal (new version "-") installs nothing.
+changes=$(awk 'body && $1 == "defenseclaw-enterprise" && $4 != "-" { print $2, $4 } $0 == "" { body = 1 }')
+[ -n "$changes" ] || exit 0
 
 # The product version of a deb version: no epoch, and the prerelease back
 # behind "-" (the deb writes 1.0.4-rc.1 as 1.0.4~rc.1). A prerelease is older
@@ -63,30 +65,57 @@ not_older() {
             exit 0
         }'
 }
-to=$(product "$incoming")
-not_older "$to" "$(product "$installed")" && exit 0
+root_owned() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1" 2>/dev/null)" = 0 ]
+}
+# The installed gateway answers the floor check; without it (removed by
+# hand, or an uninstall that failed after removing the binaries), the
+# root-only copy an uninstall kept in the lifecycle folder does.
+checker=$gateway
+if ! { root_owned "$checker" && [ -x "$checker" ]; }; then
+    checker="$state/floor-check/defenseclaw-gateway"
+fi
 
-# The rollback marker does not lift the release floor of a confirmed signed
-# policy bundle (min_product_version); exit 3 is the gateway's refusal.
-if [ -x "$gateway" ]; then
-    floor_msg=$("$gateway" enterprise bundle floor-check --product-version "$to" 2>&1 >/dev/null)
-    if [ $? -eq 3 ]; then
-        echo "defenseclaw-enterprise: refusing to downgrade to $incoming: ${floor_msg#Error: } Nothing was changed." >&2
-        exit 1
+# check INSTALLED INCOMING: refuse (exit 1) or return.
+check() {
+    installed=$1
+    incoming=$2
+    to=$(product "$incoming")
+    # The rollback marker does not lift the release floor of a confirmed
+    # signed policy bundle (min_product_version), and no apt direction does:
+    # every incoming version is checked, as the package preinstall does.
+    # Exit 3 is the gateway's refusal.
+    if [ ! -L "$state/floor-check" ] && root_owned "$checker" && [ -x "$checker" ]; then
+        floor_msg=$("$checker" enterprise bundle floor-check --product-version "$to" 2>&1 >/dev/null)
+        if [ $? -eq 3 ]; then
+            echo "defenseclaw-enterprise: refusing to install $incoming: ${floor_msg#Error: } Nothing was changed." >&2
+            exit 1
+        fi
     fi
-fi
+    [ "$installed" != "-" ] || return 0
+    not_older "$to" "$(product "$installed")" && return 0
 
-marker=$state/allow-downgrade
-if [ -f "$marker" ] && [ ! -L "$marker" ]; then
-    # Leave the marker: the older package's preinstall checks it too, and its
-    # postinstall applies the package with --allow-downgrade and deletes it.
-    exit 0
-fi
-echo "defenseclaw-enterprise: $installed is installed; refusing to downgrade to $incoming. The older release may not read the current config. Nothing was changed." >&2
-echo "  For a deliberate rollback create the marker first: sudo touch $marker" >&2
-if [ -f "$previous_config" ]; then
-    config=$previous_config
-fi
-echo "  Then install the older package; its postinstall applies it." >&2
-echo "  If it refuses the config, run: sudo $gateway enterprise linux ensure --from-package --allow-downgrade --config $config" >&2
-exit 1
+    marker=$state/allow-downgrade
+    if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+        # Leave the marker: the older package's preinstall checks it too, and
+        # its postinstall applies the package with --allow-downgrade and
+        # deletes it.
+        return 0
+    fi
+    echo "defenseclaw-enterprise: $installed is installed; refusing to downgrade to $incoming. The older release may not read the current config. Nothing was changed." >&2
+    echo "  For a deliberate rollback create the marker first: sudo touch $marker" >&2
+    if [ -f "$previous_config" ]; then
+        config=$previous_config
+    fi
+    echo "  Then install the older package; its postinstall applies it." >&2
+    echo "  If it refuses the config, run: sudo $gateway enterprise linux ensure --from-package --allow-downgrade --config $config" >&2
+    exit 1
+}
+
+# A here-document, not a pipe: the loop runs in this shell, so a refusal in
+# check exits the hook.
+while read -r installed incoming; do
+    check "$installed" "$incoming"
+done <<EOF
+$changes
+EOF
