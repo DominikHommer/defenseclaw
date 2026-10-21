@@ -141,11 +141,12 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return nil
 	}
 	change, err := changeWindowsSecret(cmd, action, opts)
+	defer change.reservation.Release()
 	if ev, ok := secretChangeEvent(action, opts.name, change.changed, secretFailureCode(err, windowsSecretExitInvalid), err, false); ok {
 		// The success document (secret-result.schema.json) has no warnings.
 		layout, layoutErr := windowsSecretLayout()
 		if layoutErr == nil {
-			layoutErr = recordWindowsChange(layout, ev)
+			layoutErr = recordWindowsChange(layout, change.reservation, ev)
 		}
 		warnChangeUnrecorded(cmd.ErrOrStderr(), layoutErr)
 	}
@@ -218,6 +219,9 @@ type windowsSecretChange struct {
 	noop      bool
 	// changed is set when the run wrote or removed the credential.
 	changed bool
+	// reservation holds room for the change event from before the change
+	// until the caller writes the event (or releases it).
+	reservation *enterprisestatus.ChangeReservation
 }
 
 // changeWindowsSecret stores or removes the credential and restarts the
@@ -289,23 +293,27 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	}
 	defer store.close()
 	// A change this computer could not audit is not made: the spool must
-	// take its change event before the credential is written or removed.
-	if err := windowsChangeSpoolReady(layout); err != nil {
+	// hold room for its change event before the credential is written or
+	// removed, until the event is written. A concurrent command cannot take
+	// that room in between.
+	reservation, err := reserveWindowsChange(layout, enterprisestatus.ChangeKindSecret, action, opts.name)
+	if err != nil {
 		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 			fmt.Errorf("cannot record the credential change: %w", err))
 	}
+	change := windowsSecretChange{reservation: reservation}
 	unchanged := false
 	if action == "set" {
 		unchanged = keepIdenticalWindowsSecret(store, opts.name, value)
 		if !unchanged {
 			if err := writeWindowsSecret(store, opts.name, value); err != nil {
-				return windowsSecretChange{}, secretFailed("change_failed", windowsSecretExitFailure, err)
+				return change, secretFailed("change_failed", windowsSecretExitFailure, err)
 			}
 		}
 	} else {
 		unchanged = !windowsSecretStored(layout.SecretsDir, opts.name)
 		if err := removeWindowsSecret(layout, store, opts.name); err != nil {
-			return windowsSecretChange{}, err
+			return change, err
 		}
 	}
 	store.close()
@@ -316,10 +324,11 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		if unchanged {
 			done = "was already stored"
 		}
-		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
+		return change, secretFailed("restart_failed", windowsSecretExitFailure,
 			fmt.Errorf("credential %s %s, but restarting the gateway failed: %w", opts.name, done, err))
 	}
-	return windowsSecretChange{restarted: restarted, noop: unchanged && !restarted, changed: !unchanged}, nil
+	change.restarted, change.noop, change.changed = restarted, unchanged && !restarted, !unchanged
+	return change, nil
 }
 
 // keepIdenticalWindowsSecret reports whether credential name already holds

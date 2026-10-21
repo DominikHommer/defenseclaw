@@ -52,8 +52,8 @@ func shrinkChangeSpool(t *testing.T, reported, pending int) {
 func TestChangeSpoolRemovesOnlyReportedEvents(t *testing.T) {
 	shrinkChangeSpool(t, 4, 100)
 	dataDir := t.TempDir()
-	spool := ChangeSpool{Dir: filepath.Join(t.TempDir(), ChangeEventsDirName),
-		Reported: func(id string) bool { return ChangeReported(dataDir, id) }}
+	spool := newTestSpool(t)
+	spool.Reported = func(id string) bool { return ChangeReported(dataDir, id) }
 	ids := writeSpoolEvents(t, spool, 6)
 	if got := ListChangeEventIDs(spool.Dir); len(got) != 6 {
 		t.Fatalf("unreported events were removed: %d of 6 left", len(got))
@@ -80,14 +80,14 @@ func TestChangeSpoolRemovesOnlyReportedEvents(t *testing.T) {
 	}
 }
 
-// With the most unreported events the spool holds, Ready and Write refuse
+// With the most unreported events the spool holds, Reserve and Write refuse
 // (ErrChangeSpoolFull) and nothing is written or removed.
 func TestChangeSpoolRefusesWhenFullOfUnreportedEvents(t *testing.T) {
 	shrinkChangeSpool(t, 2, 3)
-	spool := ChangeSpool{Dir: filepath.Join(t.TempDir(), ChangeEventsDirName)}
+	spool := newTestSpool(t)
 	writeSpoolEvents(t, spool, 3)
-	if err := spool.Ready(); !errors.Is(err, ErrChangeSpoolFull) {
-		t.Fatalf("Ready on a full spool: %v", err)
+	if _, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "otlp-token"); !errors.Is(err, ErrChangeSpoolFull) {
+		t.Fatalf("Reserve on a full spool: %v", err)
 	}
 	ev, err := NewChangeEvent(ChangeKindSecret, ChangeActionRemove, ChangeApplied, "")
 	if err != nil {

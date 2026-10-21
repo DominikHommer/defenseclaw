@@ -82,13 +82,13 @@ func TestUnixSecretChangesLeaveOneChangeEventEach(t *testing.T) {
 	}
 	ok := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "linux", "1.0.4")
 	ok.OK = true
-	recordUnixSecretChange("set", "splunk-hec-token", false, ok, nil)   // stored
-	recordUnixSecretChange("set", "splunk-hec-token", true, ok, nil)    // the stored value: nothing
-	recordUnixSecretChange("remove", "absent-token", false, ok, nil)    // nothing to remove
-	recordUnixSecretChange("remove", "splunk-hec-token", true, ok, nil) // removed
+	recordUnixSecretChange(nil, "set", "splunk-hec-token", false, ok, nil)   // stored
+	recordUnixSecretChange(nil, "set", "splunk-hec-token", true, ok, nil)    // the stored value: nothing
+	recordUnixSecretChange(nil, "remove", "absent-token", false, ok, nil)    // nothing to remove
+	recordUnixSecretChange(nil, "remove", "splunk-hec-token", true, ok, nil) // removed
 	failed := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "linux", "1.0.4")
 	failed.AddError("apply_failed", "the ensure failed")
-	recordUnixSecretChange("set", "otlp-token", false, failed, nil)
+	recordUnixSecretChange(nil, "set", "otlp-token", false, failed, nil)
 
 	events, raw := spoolEvents(t, root, layout)
 	if len(events) != 4 {
@@ -125,7 +125,7 @@ func TestUnixSecretChangeNeedsRoot(t *testing.T) {
 	}
 	ok := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "linux", "1.0.4")
 	ok.OK = true
-	recordUnixSecretChange("set", "splunk-hec-token", false, ok, nil)
+	recordUnixSecretChange(nil, "set", "splunk-hec-token", false, ok, nil)
 	if events, _ := spoolEvents(t, root, layout); len(events) != 0 {
 		t.Fatalf("a standard account recorded %+v", events)
 	}
@@ -194,7 +194,61 @@ func TestUnixSecretChangeThatCannotBeRecordedIsRefused(t *testing.T) {
 	}
 	ok := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "linux", "1.0.4")
 	ok.OK = true
-	if err := recordUnixSecretChange("remove", "splunk-hec-token", true, ok, nil); err == nil {
+	if err := recordUnixSecretChange(nil, "remove", "splunk-hec-token", true, ok, nil); err == nil {
 		t.Fatal("a change event that could not be written was not reported")
+	}
+}
+
+// While another credential command holds the last place in the spool
+// (between its check and its event), secret set is refused before the
+// credential is written, and the other command still records its change.
+// Before reservations both commands passed the check; the second changed
+// the credential and could not record it.
+func TestUnixSecretSetRefusedWhileAnotherChangeHoldsTheLastPlace(t *testing.T) {
+	root, layout := stubSecretChangeEnv(t)
+	env, err := newUnixLifecycleEnv(enterpriseunix.CurrentGOOS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, enterprisestatus.ChangeEventsDir(layout.ConfigDir))
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// enterprisestatus.maxPendingChangeEvents unreported events, less the
+	// held place.
+	for i := 0; i < 4096-1; i++ {
+		ev, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionRemove,
+			enterprisestatus.ChangeApplied, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ev.EventID+".json"), []byte("{}\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	held, err := env.ReserveChange(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionRemove, "otlp-token")
+	if err != nil {
+		t.Fatalf("reserve the last place: %v", err)
+	}
+	defer held.Release()
+	cmd := newEnterpriseSecretCommand("set", "")
+	stderr := &bytes.Buffer{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(stderr)
+	cmd.SetIn(strings.NewReader("known-credential-value-6620\n"))
+	opts := enterpriseSecretOptions{name: "splunk-hec-token", fromStdin: true}
+	if err := runEnterpriseSecret(cmd, "set", &opts); err == nil || !strings.Contains(err.Error(), "cannot record the credential change") {
+		t.Fatalf("set with no room left: %v", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(root, layout.SecretsDir, "splunk-hec-token")); statErr == nil {
+		t.Fatal("the credential was written with no room left for its change event")
+	}
+	ok := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "linux", "1.0.4")
+	ok.OK = true
+	if err := recordUnixSecretChange(held, "remove", "otlp-token", true, ok, nil); err != nil {
+		t.Fatalf("the command that held the place could not record its change: %v", err)
+	}
+	if got := len(enterprisestatus.ListChangeEventIDs(dir)); got != 4096 {
+		t.Fatalf("spool holds %d events, want 4096", got)
 	}
 }

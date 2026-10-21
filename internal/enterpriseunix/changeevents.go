@@ -33,9 +33,9 @@ import (
 // change spool (<etc>/bundles/change-events), which the gateway reports as
 // an audit event. The folder is 0750 and each event 0640, owned by root
 // with the service account's group, so the gateway reads them and no other
-// account does. Only root records. A command calls ChangeSpoolReady before
-// it changes anything and reports a failure here in its result
-// (change_unrecorded).
+// account does. Only root records. This is for a refusal; a command
+// reserves room (ReserveChange) before it changes anything and reports a
+// failure to write the event in its result (change_unrecorded).
 func (e *Env) RecordChange(ev enterprisestatus.ChangeEvent) error {
 	spool, err := e.changeSpool()
 	if err != nil {
@@ -44,14 +44,16 @@ func (e *Env) RecordChange(ev enterprisestatus.ChangeEvent) error {
 	return spool.Write(ev)
 }
 
-// ChangeSpoolReady checks that the change spool can take the event of a
-// change about to be made (enterprisestatus.ChangeSpool.Ready).
-func (e *Env) ChangeSpoolReady() error {
+// ReserveChange reserves room in the change spool for the event of a
+// change about to be made (enterprisestatus.ChangeSpool.Reserve): kind and
+// action, and name for a credential. The command writes its outcome
+// through the reservation, or releases it when it changed nothing.
+func (e *Env) ReserveChange(kind, action, name string) (*enterprisestatus.ChangeReservation, error) {
 	spool, err := e.changeSpool()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return spool.Ready()
+	return spool.Reserve(kind, action, name)
 }
 
 func (e *Env) changeSpool() (enterprisestatus.ChangeSpool, error) {
@@ -64,9 +66,16 @@ func (e *Env) changeSpool() (enterprisestatus.ChangeSpool, error) {
 	if err != nil {
 		return enterprisestatus.ChangeSpool{}, err
 	}
+	// The spool lock and the reservations live in the root-only lifecycle
+	// directory, beside lifecycle.lock.
+	stateDir := e.P(e.Layout.LifecycleDir)
+	if err := e.ensureDir(stateDir, 0o700, rootOwner()); err != nil {
+		return enterprisestatus.ChangeSpool{}, err
+	}
 	dataDir := e.P(e.Layout.DataDir)
 	return enterprisestatus.ChangeSpool{
 		Dir:      dir,
+		StateDir: stateDir,
 		Reported: func(id string) bool { return enterprisestatus.ChangeReported(dataDir, id) },
 		Prepare:  func(dir string) error { return e.ensureDir(dir, 0o750, owner) },
 		Publish: func(path string) error {
@@ -100,10 +109,10 @@ func (e *Env) changeSpoolOwner(dir string) (fileOwner, error) {
 
 // recordAnchorsChange records what InstallBundleAnchors did: an applied
 // install with the new and the previous hash and the key ids it added and
-// removed, or a refused or failed one with its code. A byte-identical
-// install wrote nothing and records nothing; so does a caller that is not
-// root.
-func (e *Env) recordAnchorsChange(out *AnchorsInstall, err error) error {
+// removed, or a refused or failed one with its code, through reservation
+// when the install reserved room. A byte-identical install wrote nothing
+// and records nothing; so does a caller that is not root.
+func (e *Env) recordAnchorsChange(reservation *enterprisestatus.ChangeReservation, out *AnchorsInstall, err error) error {
 	if e.Geteuid() != 0 || out == nil {
 		return nil
 	}
@@ -130,6 +139,9 @@ func (e *Env) recordAnchorsChange(out *AnchorsInstall, err error) error {
 			}
 		}
 		ev.KeyIDsAdded, ev.KeyIDsRemoved = enterprisestatus.ChangedKeyIDs(out.previousKeyIDs, next)
+	}
+	if reservation != nil {
+		return reservation.Write(ev)
 	}
 	return e.RecordChange(ev)
 }
