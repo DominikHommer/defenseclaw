@@ -156,3 +156,45 @@ func TestUnixSecretSetChangeEventCarriesNoValue(t *testing.T) {
 		t.Fatalf("the change event carries the value:\n%s", raw)
 	}
 }
+
+// blockChangeSpool puts a file where the change spool belongs, so no change
+// event can be written.
+func blockChangeSpool(t *testing.T, root string, layout managed.StandaloneLayout) {
+	t.Helper()
+	dir := filepath.Join(root, enterprisestatus.ChangeEventsDir(layout.ConfigDir))
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A secret set the device could not record is refused before the value is
+// read, and a refusal that cannot be recorded says so on stderr
+// (change_unrecorded) instead of passing silently.
+func TestUnixSecretChangeThatCannotBeRecordedIsRefused(t *testing.T) {
+	root, layout := stubSecretChangeEnv(t)
+	blockChangeSpool(t, root, layout)
+	cmd := newEnterpriseSecretCommand("set", "")
+	stderr := &bytes.Buffer{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(stderr)
+	cmd.SetIn(strings.NewReader("known-credential-value-4410\n"))
+	opts := enterpriseSecretOptions{name: "splunk-hec-token", fromStdin: true}
+	err := runEnterpriseSecret(cmd, "set", &opts)
+	if err == nil || !strings.Contains(err.Error(), "cannot record the credential change") {
+		t.Fatalf("set with no change spool: %v", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(root, layout.SecretsDir, "splunk-hec-token")); statErr == nil {
+		t.Fatal("the credential was written though its change could not be recorded")
+	}
+	if !strings.Contains(stderr.String(), "change_unrecorded") {
+		t.Fatalf("stderr does not report the unrecorded refusal: %q", stderr.String())
+	}
+	ok := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "linux", "1.0.4")
+	ok.OK = true
+	if err := recordUnixSecretChange("remove", "splunk-hec-token", true, ok, nil); err == nil {
+		t.Fatal("a change event that could not be written was not reported")
+	}
+}

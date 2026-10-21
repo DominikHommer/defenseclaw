@@ -64,6 +64,9 @@ type AnchorsInstall struct {
 	// once the install started writing, so a refusal after it is a failure.
 	previousKeyIDs []string
 	attempted      bool
+	// Unrecorded is set when the change event of this install could not be
+	// written: the caller reports it as the warning change_unrecorded.
+	Unrecorded error
 }
 
 // InstallBundleAnchors installs the anchor file src as the device trust
@@ -73,7 +76,9 @@ type AnchorsInstall struct {
 // anchor_restore_failed.
 func (e *Env) InstallBundleAnchors(ctx context.Context, src string) (*AnchorsInstall, error) {
 	out, err := e.installBundleAnchors(ctx, src)
-	e.recordAnchorsChange(out, err)
+	if recordErr := e.recordAnchorsChange(out, err); recordErr != nil && out != nil {
+		out.Unrecorded = recordErr
+	}
 	return out, err
 }
 
@@ -132,6 +137,11 @@ func (e *Env) installBundleAnchors(ctx context.Context, src string) (*AnchorsIns
 	}
 	if err := e.ensureDir(filepath.Dir(dest), 0o755, rootOwner()); err != nil {
 		return refuse(enterprisebundle.CodeStateInvalid, "prepare the trust anchor folder: %v", err)
+	}
+	// An install this device could not audit is not made: the spool must
+	// take its change event before the file is written.
+	if err := e.ChangeSpoolReady(); err != nil {
+		return refuse(enterprisebundle.CodeStateInvalid, "cannot record the trust anchor change: %v", err)
 	}
 	if previous != nil {
 		if old, err := enterprisebundle.DecodeAnchors(previous); err == nil {

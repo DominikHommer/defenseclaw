@@ -17,6 +17,7 @@
 package audit
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -106,5 +107,58 @@ func TestLogConfigChangeRefusesMalformedChanges(t *testing.T) {
 		if err := logger.LogConfigChange(change); err == nil {
 			t.Fatalf("%s: LogConfigChange accepted %+v", name, change)
 		}
+	}
+}
+
+// The gateway marks a change event reported after the audit write; a
+// restart between the two offers it again. The store keeps each change
+// event id once, so the second offer (in the same process or after the
+// restart) writes nothing and succeeds.
+func TestLogConfigChangeRecordsEachChangeOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	change := ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set",
+		Outcome: ConfigChangeApplied, Actor: "os:uid:0:root", SecretName: "splunk-hec-token"}
+	for run, want := range []int{1, 0} {
+		store, err := NewStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Init(); err != nil {
+			t.Fatal(err)
+		}
+		logger := NewLogger(store)
+		runtime := newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary)
+		logger.SetRuntimeV8Emitter(runtime)
+		for offer := 0; offer < 2; offer++ {
+			if err := logger.LogConfigChange(change); err != nil {
+				t.Fatalf("run %d offer %d: %v", run, offer, err)
+			}
+		}
+		if _, records := runtime.snapshot(); len(records) != want {
+			t.Fatalf("run %d emitted %d records, want %d", run, len(records), want)
+		}
+		var rows int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action = ?`,
+			string(ActionConfigSecretChanged)).Scan(&rows); err != nil || rows != 1 {
+			t.Fatalf("run %d: %d stored rows (%v), want 1", run, rows, err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// An audit store that cannot be read is an error, so the gateway offers the
+// change again rather than marking it reported.
+func TestLogConfigChangeFailsWhileTheStoreIsClosed(t *testing.T) {
+	logger := newTestLogger(t)
+	logger.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary))
+	if err := logger.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	change := ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeTrustAnchors, Action: "install",
+		Outcome: ConfigChangeRefused, ReasonCode: "lifecycle_busy", Actor: "os:uid:0:root"}
+	if err := logger.LogConfigChange(change); err == nil {
+		t.Fatal("LogConfigChange succeeded with the audit store closed")
 	}
 }

@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
@@ -212,5 +214,15 @@ func (l *Logger) LogConfigChange(change ConfigChange) error {
 	return l.logActivityImpl(ActivityInput{
 		Actor: actor, Action: action, TargetType: targetType, TargetID: targetID, Reason: reason,
 		After: after, Severity: severity, ConfigChange: &change,
+		OccurrenceID: stableOccurrenceID("config.change", change.EventID),
 	})
 }
+
+// stableOccurrenceID is the audit event id of a producer event with its own
+// durable id (a change event), so the store records it once however often
+// it is offered.
+func stableOccurrenceID(kind, id string) string {
+	return uuid.NewSHA1(stableOccurrenceNamespace, []byte(kind+"\x00"+id)).String()
+}
+
+var stableOccurrenceNamespace = uuid.MustParse("5b1f9a0e-3c2d-5e8f-9a41-0d6c2b7e4f13")

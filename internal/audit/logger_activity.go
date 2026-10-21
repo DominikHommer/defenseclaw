@@ -66,6 +66,16 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	summaryBlob, _ := json.Marshal(summary)
 
 	auditID := uuid.New().String()
+	if in.OccurrenceID != "" {
+		auditID = in.OccurrenceID
+		stored, err := l.store.hasAuditEvent(context.Background(), auditID)
+		if err != nil {
+			return err
+		}
+		if stored {
+			return nil
+		}
+	}
 	// v7 clean break: AgentInstanceID is per-session (unset for
 	// activity/mutation events that have no session anchor);
 	// SidecarInstanceID carries the process UUID.

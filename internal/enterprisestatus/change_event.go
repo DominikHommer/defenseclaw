@@ -41,18 +41,22 @@ import (
 // SYSTEM on Windows) and the gateway service account only; the gateway
 // reports each as one audit event (config.trust_anchors.changed,
 // config.secret.changed, config.secret.change_failed) when it runs, so a
-// change made while it was stopped is reported at its next start. A change
-// event carries hashes, key ids, a credential name and closed codes; it
-// never carries a credential value or a hash of one.
+// change made while it was stopped is reported at its next start. The
+// gateway marks each event it reported under its data directory
+// (ReportedMarkersDirName); the command removes only marked events, so an
+// event is never lost before it is reported. A change event carries
+// hashes, key ids, a credential name and closed codes; it never carries a
+// credential value or a hash of one.
 
 const (
 	// ChangeEventsDirName is the change spool under <etc>/bundles.
 	ChangeEventsDirName = "change-events"
 	// ChangeEventSchemaVersion is the change event schema.
 	ChangeEventSchemaVersion = 1
-	// MaxChangeEvents bounds the spool: a write removes the oldest events
-	// beyond it.
-	MaxChangeEvents = 256
+	// ReportedMarkersDirName is the folder under the gateway data directory
+	// where the gateway marks each bundle receipt and change event it
+	// reported (one file named by each id).
+	ReportedMarkersDirName = "bundle-receipt.reported.d"
 
 	maxChangeEventBytes = 16 << 10
 	maxChangeKeyIDs     = 64
@@ -82,7 +86,29 @@ var (
 	changeKeyIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 	changeSecretPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 	changeActorPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$`)
+
+	// maxReportedChangeEvents is how many reported events the spool keeps:
+	// a write removes the oldest reported events beyond it.
+	maxReportedChangeEvents = 256
+	// maxPendingChangeEvents bounds the events the gateway has not reported:
+	// past it a write is refused (ErrChangeSpoolFull), and no unreported
+	// event is removed to make room.
+	maxPendingChangeEvents = 4096
 )
+
+// ErrChangeSpoolFull refuses a change event while the spool holds
+// maxPendingChangeEvents events the gateway has not reported.
+var ErrChangeSpoolFull = errors.New("the change spool is full of events the gateway has not reported yet; start the gateway so it reports them")
+
+// ChangeReported reports whether the gateway with the data directory
+// dataDir has marked change event id reported.
+func ChangeReported(dataDir, id string) bool {
+	if strings.TrimSpace(dataDir) == "" || !ValidChangeEventID(id) {
+		return false
+	}
+	info, err := os.Lstat(filepath.Join(dataDir, ReportedMarkersDirName, id))
+	return err == nil && info.Mode().IsRegular()
+}
 
 // ChangeEvent is one change-events/<event_id>.json.
 type ChangeEvent struct {
@@ -226,25 +252,23 @@ func ChangedKeyIDs(previous, next []string) (added, removed []string) {
 	return added, removed
 }
 
-// ChangeSpool writes change events. Prepare creates (or repairs) the spool
-// directory with its owner and access, and Publish sets the owner and access
-// of one written file; both are platform hooks. A nil hook does nothing.
+// ChangeSpool writes change events. Reported tells which events the
+// gateway has reported (ChangeReported); nil counts none as reported.
+// Prepare creates (or repairs) the spool directory with its owner and
+// access, and Publish sets the owner and access of one written file; both
+// are platform hooks. A nil hook does nothing.
 type ChangeSpool struct {
-	Dir     string
-	Prepare func(dir string) error
-	Publish func(path string) error
+	Dir      string
+	Reported func(id string) bool
+	Prepare  func(dir string) error
+	Publish  func(path string) error
 }
 
-// Write validates ev and writes it as <Dir>/<event_id>.json, then removes
-// the oldest events beyond MaxChangeEvents.
-func (s ChangeSpool) Write(ev ChangeEvent) error {
-	if err := ev.Validate(); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(ev, "", "  ")
-	if err != nil {
-		return err
-	}
+// Ready prepares the spool directory, removes the oldest reported events
+// beyond maxReportedChangeEvents and checks that one more event fits. A
+// command calls it before it changes anything, so a change it could not
+// record is refused rather than made unaudited.
+func (s ChangeSpool) Ready() error {
 	if s.Prepare != nil {
 		if err := s.Prepare(s.Dir); err != nil {
 			return err
@@ -256,6 +280,21 @@ func (s ChangeSpool) Write(ev ChangeEvent) error {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("change events directory is not a regular directory: %s", s.Dir)
 	}
+	return s.prune()
+}
+
+// Write validates ev and writes it as <Dir>/<event_id>.json (Ready first).
+func (s ChangeSpool) Write(ev ChangeEvent) error {
+	if err := ev.Validate(); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(ev, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := s.Ready(); err != nil {
+		return err
+	}
 	path := filepath.Join(s.Dir, ev.EventID+".json")
 	if err := configwrite.WriteFileDurable(path, append(data, '\n'), 0o640); err != nil {
 		return err
@@ -266,18 +305,33 @@ func (s ChangeSpool) Write(ev ChangeEvent) error {
 			return err
 		}
 	}
-	s.prune()
 	return nil
 }
 
-// prune removes the oldest change events beyond MaxChangeEvents. The ids
-// are ULIDs, so name order is time order.
-func (s ChangeSpool) prune() {
+// prune makes room for one more event: it removes the oldest reported
+// events while the spool holds maxReportedChangeEvents or more, and never
+// an event the gateway has not reported. It returns ErrChangeSpoolFull when
+// maxPendingChangeEvents events wait to be reported. The ids are ULIDs, so
+// name order is time order.
+func (s ChangeSpool) prune() error {
 	ids := ListChangeEventIDs(s.Dir)
-	for len(ids) > MaxChangeEvents {
-		_ = os.Remove(filepath.Join(s.Dir, ids[0]+".json"))
-		ids = ids[1:]
+	var reported []string
+	pending := 0
+	for _, id := range ids {
+		if s.Reported != nil && s.Reported(id) {
+			reported = append(reported, id)
+		} else {
+			pending++
+		}
 	}
+	for total := len(ids); total >= maxReportedChangeEvents && len(reported) > 0; total-- {
+		_ = os.Remove(filepath.Join(s.Dir, reported[0]+".json"))
+		reported = reported[1:]
+	}
+	if pending >= maxPendingChangeEvents {
+		return ErrChangeSpoolFull
+	}
+	return nil
 }
 
 // ListChangeEventIDs lists the change event ids in dir, oldest first. A

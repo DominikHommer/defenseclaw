@@ -30,6 +30,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -378,7 +379,14 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return nil
 	}
 	result, existed, err := changeUnixSecret(cmd, action, opts, caller)
-	recordUnixSecretChange(action, opts.name, existed, result, err)
+	if recordErr := recordUnixSecretChange(action, opts.name, existed, result, err); recordErr != nil {
+		warning := changeUnrecordedWarning(recordErr)
+		if err == nil && result != nil {
+			result.AddWarning(warning.Code, warning.Message)
+		} else {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: %s\n", warning.Code, warning.Message)
+		}
+	}
 	if err != nil {
 		return reportUnixSecretFailure(cmd, action, opts, err, opts.json)
 	}
@@ -395,8 +403,8 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 // for the gateway: an applied change, a failed lifecycle run, or a refusal
 // before it. A set of the stored value and the removal of an absent
 // credential changed nothing and record nothing; a caller that is not root
-// cannot record.
-func recordUnixSecretChange(action, name string, existed bool, result *enterprisestatus.Result, err error) {
+// cannot record. The error is a change event that could not be written.
+func recordUnixSecretChange(action, name string, existed bool, result *enterprisestatus.Result, err error) error {
 	code, attempted := "", false
 	switch {
 	case err != nil:
@@ -406,18 +414,21 @@ func recordUnixSecretChange(action, name string, existed bool, result *enterpris
 		code, attempted = result.Errors[0].Code, true
 		err = errors.New(code)
 	case result == nil:
-		return
+		return nil
 	}
 	changed := (action == "set" && !existed) || (action == "remove" && existed)
 	ev, ok := secretChangeEvent(action, name, changed, code, err, attempted)
 	if !ok {
-		return
+		return nil
 	}
 	env, envErr := newUnixLifecycleEnv(enterpriseunix.CurrentGOOS())
 	if envErr != nil {
-		return
+		return envErr
 	}
-	_ = env.RecordChange(ev)
+	if env.Geteuid() != 0 {
+		return nil
+	}
+	return env.RecordChange(ev)
 }
 
 func runUnixSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) error {
@@ -474,6 +485,12 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	}
 	if action == "set" && opts.fromStdin == (opts.fromFile != "") {
 		return nil, false, lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))
+	}
+	// A change this device could not audit is not made: the spool must take
+	// its change event before the credential is read or written.
+	if err := env.ChangeSpoolReady(); err != nil {
+		return nil, false, secretFailed(string(enterprisebundle.CodeStateInvalid), enterprisestatus.UnixExitFailure,
+			fmt.Errorf("cannot record the credential change: %w", err))
 	}
 	var mutate func(context.Context) error
 	existed := false

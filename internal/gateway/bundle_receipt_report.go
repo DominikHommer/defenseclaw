@@ -77,9 +77,6 @@ type bundleReceiptReporter struct {
 	attempts        int
 	gaugeVersion    uint64
 	seen            map[string]bool
-	// changeAttempts counts refused offers of one change event; after
-	// bundleReceiptRetries it is marked reported and not offered again.
-	changeAttempts map[string]int
 }
 
 // newBundleReceiptReporter returns the reporter of a standalone enterprise
@@ -196,7 +193,12 @@ func (r *bundleReceiptReporter) changeDir() string {
 	return filepath.Join(filepath.Dir(r.receiptPath), enterprisestatus.ChangeEventsDirName)
 }
 
-func (r *bundleReceiptReporter) seenDir() string { return r.markerPath + ".d" }
+// seenDir holds one marker per reported receipt and change event; the
+// change commands read it (enterprisestatus.ChangeReported) to remove only
+// reported events from the change spool.
+func (r *bundleReceiptReporter) seenDir() string {
+	return filepath.Join(filepath.Dir(r.markerPath), enterprisestatus.ReportedMarkersDirName)
+}
 
 // reportableID accepts a receipt id or a change event id as a marker name.
 func reportableID(id string) bool {
@@ -265,7 +267,10 @@ func (r *bundleReceiptReporter) reportSpool() {
 }
 
 // reportChanges emits one audit event per change event not reported yet,
-// oldest first. A file that does not validate is skipped.
+// oldest first. A file that does not validate is skipped. An event is
+// marked reported only once the audit logger recorded it: one it refuses
+// is offered again at every poll, and the logger stores each change event
+// id once, so a marker lost after the audit write cannot report it twice.
 func (r *bundleReceiptReporter) reportChanges() {
 	dir := r.changeDir()
 	for _, id := range enterprisestatus.ListChangeEventIDs(dir) {
@@ -282,14 +287,8 @@ func (r *bundleReceiptReporter) reportChanges() {
 			KeyIDsAdded: ev.KeyIDsAdded, KeyIDsRemoved: ev.KeyIDsRemoved, SecretName: ev.SecretName,
 		})
 		if err != nil {
-			if r.changeAttempts == nil {
-				r.changeAttempts = make(map[string]int)
-			}
-			if r.changeAttempts[id]++; r.changeAttempts[id] < bundleReceiptRetries {
-				continue
-			}
+			continue
 		}
-		delete(r.changeAttempts, id)
 		r.markSeen(id)
 	}
 }

@@ -38,8 +38,13 @@ gateway.
   (actor, `sha256`, `previous_sha256`, key ids added and removed),
   `config.secret.changed` and `config.secret.change_failed` (actor,
   credential name, action, outcome, reason code). A change made while the
-  gateway is stopped is reported when it starts. No event carries a
-  credential value or a hash of one. Byte-identical anchors, a `set` of the
+  gateway is stopped is reported when it starts. An event stays in the
+  spool until the gateway has reported it. A command that cannot record
+  its change (the spool cannot be written, or holds 4096 events the gateway
+  has not reported) refuses it with `state_invalid` before anything is
+  changed; a record that fails after the change is the warning
+  `change_unrecorded`. No event carries a credential value or a hash of
+  one. Byte-identical anchors, a `set` of the
   stored value and a `remove` of an absent credential record nothing. The
   results still carry what the agent needs for its own report: `sha256`,
   `previous_sha256` and `key_ids` from anchors install, `sha256_prefix` from
@@ -1269,9 +1274,11 @@ the read-only commands answer (section 4).
   records the delivery channel (MDM, agent, administrator): the apply cannot
   tell them apart without trusting the caller (2.6).
 - Trust anchor and credential change events reach the audit log only
-  when the gateway runs, and the spool keeps the newest 256 of them; builds
+  when the gateway runs; while it is stopped, 4096 unreported events fill
+  the spool and further changes are refused (`state_invalid`). Builds
   before 1.0.4 record none (section 0). A refusal before the command knows
-  it runs as root (or elevated) records nothing.
+  it runs as root (or elevated), or that the device is managed, records
+  nothing.
 - Windows `bundle apply` and `secret set` / `remove` default to no wait for
   `bundle.lock`; Linux and macOS wait 5 s. Pass `--lock-wait` on every OS.
 - The `identity` block cannot see an SSSD or Open Directory that answers

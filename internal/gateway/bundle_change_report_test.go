@@ -77,9 +77,10 @@ func TestBundleReceiptReporterReportsEachChangeEventOnce(t *testing.T) {
 	}
 }
 
-// A file in the spool that does not validate is never reported, and an
-// audit logger that keeps refusing one event stops being offered it.
-func TestBundleReceiptReporterSkipsBadChangeEvents(t *testing.T) {
+// A file in the spool that does not validate is never reported. An event
+// the audit logger refuses is never marked reported, however often it is
+// refused: it is reported once the logger takes it, and only once.
+func TestBundleReceiptReporterKeepsRefusedChangeEventsUntilRecorded(t *testing.T) {
 	dir := t.TempDir()
 	spool := enterprisestatus.ChangeEventsDir(dir)
 	if err := os.MkdirAll(spool, 0o750); err != nil {
@@ -94,15 +95,30 @@ func TestBundleReceiptReporterSkipsBadChangeEvents(t *testing.T) {
 		markerPath: filepath.Join(dir, bundleReceiptMarkerName), sink: sink, enforcedVersion: func() uint64 { return 0 }}
 	ev := writeTestChangeEvent(t, spool, enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionRemove,
 		enterprisestatus.ChangeApplied, "", func(ev *enterprisestatus.ChangeEvent) { ev.SecretName = "otlp-token" })
-	for i := 0; i < bundleReceiptRetries; i++ {
+	for i := 0; i < 3*bundleReceiptRetries; i++ {
 		reporter.poll(context.Background())
 	}
-	if !reporter.hasSeen(ev.EventID) {
-		t.Fatal("a change event the logger keeps refusing is offered forever")
+	if reporter.hasSeen(ev.EventID) || enterprisestatus.ChangeReported(dir, ev.EventID) {
+		t.Fatal("a change event the audit logger refused was marked reported")
 	}
 	sink.changeErr = nil
 	reporter.poll(context.Background())
-	if len(sink.changes) != 0 {
-		t.Fatalf("changes = %+v, want none: one file is invalid, the other was given up", sink.changes)
+	reporter.poll(context.Background())
+	if len(sink.changes) != 1 || sink.changes[0].EventID != ev.EventID {
+		t.Fatalf("changes = %+v, want the refused event once", sink.changes)
+	}
+	if !enterprisestatus.ChangeReported(dir, ev.EventID) {
+		t.Fatal("the recorded event has no marker the change commands can read")
+	}
+}
+
+// The markers stay where earlier builds wrote them (<data>/bundle-receipt.reported.d),
+// so an upgraded gateway does not report its receipts again and the change
+// commands read the same folder.
+func TestBundleReceiptReporterMarkersFolderIsStable(t *testing.T) {
+	dir := t.TempDir()
+	reporter := &bundleReceiptReporter{markerPath: filepath.Join(dir, bundleReceiptMarkerName)}
+	if got, want := reporter.seenDir(), filepath.Join(dir, bundleReceiptMarkerName)+".d"; got != want {
+		t.Fatalf("markers folder = %s, want %s", got, want)
 	}
 }

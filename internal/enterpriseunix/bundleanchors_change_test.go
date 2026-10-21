@@ -20,10 +20,13 @@ package enterpriseunix
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -128,5 +131,69 @@ func TestInstallBundleAnchorsRecordsNothingWithoutRoot(t *testing.T) {
 	}
 	if got := recordedChanges(t, b.env); len(got) != 0 {
 		t.Fatalf("recorded %+v", got)
+	}
+}
+
+type failingLookupAccounts struct{ AccountManager }
+
+func (failingLookupAccounts) Lookup(context.Context, string) (Account, bool, error) {
+	return Account{}, false, errors.New("getent: the name service did not answer")
+}
+
+// A service account lookup that fails never gives the change spool root's
+// group, which would lock the gateway out of it. The install is refused
+// before the anchor file is written (a change that cannot be recorded is not
+// made), the spool keeps the service group, and the result says the refusal
+// itself could not be recorded.
+func TestInstallBundleAnchorsRefusedWhenTheChangeCannotBeRecorded(t *testing.T) {
+	b, dest := newAnchorsHost(t)
+	b.accounts.accounts[b.env.Layout.ServiceUser] = Account{Name: b.env.Layout.ServiceUser, UID: 991, GID: 988}
+	spool := b.env.P(enterprisestatus.ChangeEventsDir(b.env.Layout.ConfigDir))
+	if err := b.env.ChangeSpoolReady(); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.owners[spool]; got != [2]int{0, 988} {
+		t.Fatalf("spool owner = %v, want root with the service group", got)
+	}
+	before := readFile(t, dest)
+	b.env.Accounts = failingLookupAccounts{b.env.Accounts}
+	src, base := agentAnchors(t, anchorsDoc(t, b, "k1:active", "k9:active"))
+	b.env.Trust = modeTrust(base, b.env.Root)
+	out, err := b.env.InstallBundleAnchors(context.Background(), src)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeStateInvalid || !strings.Contains(err.Error(), "cannot record the trust anchor change") {
+		t.Fatalf("install with an unknown spool owner: %v", err)
+	}
+	if readFile(t, dest) != before {
+		t.Fatal("the anchor file was written though its change could not be recorded")
+	}
+	if got := b.owners[spool]; got != [2]int{0, 988} {
+		t.Fatalf("spool owner = %v after a failed lookup, want root with the service group", got)
+	}
+	if out == nil || out.Unrecorded == nil {
+		t.Fatalf("result %+v does not say the refusal was not recorded", out)
+	}
+	if got := recordedChanges(t, b.env); len(got) != 0 {
+		t.Fatalf("recorded %+v", got)
+	}
+}
+
+// Before the service account exists, an existing spool keeps its group.
+func TestChangeSpoolKeepsItsGroupBeforeTheServiceAccountExists(t *testing.T) {
+	b, _ := newAnchorsHost(t)
+	delete(b.accounts.accounts, b.env.Layout.ServiceUser)
+	spool := b.env.P(enterprisestatus.ChangeEventsDir(b.env.Layout.ConfigDir))
+	if err := os.MkdirAll(spool, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gid := int(info.Sys().(*syscall.Stat_t).Gid)
+	if err := b.env.ChangeSpoolReady(); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.owners[spool]; got != [2]int{0, gid} {
+		t.Fatalf("spool owner = %v, want root with the folder's group %d", got, gid)
 	}
 }

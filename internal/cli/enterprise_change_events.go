@@ -33,6 +33,17 @@ import (
 // config.secret.change_failed). The events below never hold a credential
 // value or a hash of one.
 
+// codeChangeUnrecorded warns that the change event of a run (a change or
+// its refusal) could not be written, so the gateway will not report it.
+// The command checks the spool before it changes anything, so this is a
+// failure between that check and the write.
+const codeChangeUnrecorded = "change_unrecorded"
+
+func changeUnrecordedWarning(err error) enterprisebundle.Warning {
+	return enterprisebundle.Warning{Code: codeChangeUnrecorded,
+		Message: "the audit change event of this run could not be written, so the gateway will not report it: " + err.Error()}
+}
+
 // secretFailureCode is the errors[].code a failed secret command reports:
 // the refusal's own code, invalid_arguments for a usage exit, state_invalid
 // otherwise.
