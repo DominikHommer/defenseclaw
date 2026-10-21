@@ -31,7 +31,7 @@ Human approval (HITL) pauses a risky call and asks you instead of silently allow
      OK Config saved (guardrail.hilt: enabled=true min_severity=HIGH)
    ```
 
-   `--min-severity` takes `low`, `medium`, `high` or `critical`. Add `--connector claudecode` to change one agent only.
+   `--min-severity` takes `low`, `medium`, `high` or `critical`. Add `--connector claudecode` to change one agent only. The running gateway applies the change now; there is no confirmation prompt and no restart.
 
 2. Ask Claude Code to run a command that matches a HIGH rule and sends no data:
 

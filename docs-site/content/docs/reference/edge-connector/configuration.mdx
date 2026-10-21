@@ -101,12 +101,10 @@ The policy compiler (`edge-connector/tools/policy_compiler.py`) needs Python 3 a
 | --- | --- |
 | Raw release tar | Provision Python 3 and PyYAML yourself before the first policy push. |
 | Per-user `install.sh` / `install.ps1` | The bundled Python environment. The compiler is copied only when Fleet is already enabled; `defenseclaw setup edge-connector --source-dir` installs it and enables Fleet after credential setup succeeds. |
-| Managed Linux RPM or DEB | A trusted `/usr/bin/python3` and distro PyYAML, needed only when Fleet is enabled. Install and ensure check this before changing the service. |
-| Managed macOS `.pkg` | PyYAML 6.0.3 inside a trusted Python.org framework interpreter (3.10 to 3.14), root-owned and not group or world-writable. Apple's `/usr/bin/python3` and Homebrew are not used. |
-| Managed Windows standalone Setup | The signed Setup payload carries the compiler and activates it only for authenticated Fleet-enabled config. |
+| Managed Linux RPM or DEB, macOS `.pkg`, Windows Setup | Not carried. Managed artifacts do not include the compiler. |
 | Secure Client profiles on macOS and Windows | Reject Fleet-enabled configuration; they do not ship the compiler. |
 
-Managed Linux and macOS packages carry the compiler as inert source under `<InstallRoot>/share/fleet/` and copy it to `<InstallRoot>/lib/defenseclaw/` only for validated Fleet-enabled config. Fleet-off installs need no Python or PyYAML. The compiler's output is described in [policies](/docs/reference/edge-connector/policies#compile-the-policy).
+Only the per-user archives and the raw release tar carry the Fleet compiler. Managed packages and Setup do not, and a managed host with Fleet off needs no Python or PyYAML. The compiler's output is described in [policies](/docs/reference/edge-connector/policies#compile-the-policy).
 
 ## Tool-to-capability mapping
 

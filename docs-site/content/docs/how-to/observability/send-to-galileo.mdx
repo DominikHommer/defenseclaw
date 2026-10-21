@@ -64,6 +64,8 @@ defenseclaw setup galileo status
 
 `status` shows the endpoint, the signals and how many spans were delivered, rejected or failed. In Galileo, open the project's Log stream and look for the test trace. Filter out DefenseClaw's own checks with `defenseclaw.telemetry.canary: "true"`.
 
+If the API key is missing, `defenseclaw setup galileo status` and `defenseclaw status` exit 1 and name the missing key. `defenseclaw status` then prints `Sidecar: not checked` until you fix the config; `defenseclaw-gateway status` still shows the running gateway.
+
 ## Keep local Grafana and Galileo together
 
 Run `defenseclaw setup local-observability up` and the Galileo setup. They are separate destinations, each with its own queue. A Galileo outage does not stop Grafana, and the reverse.

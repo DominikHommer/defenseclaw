@@ -215,7 +215,7 @@ You pick a model, not a Bifrost key: `gpt-4o-mini` resolves to `openai`, a `clau
 | Where | What | Notes |
 | --- | --- | --- |
 | User-home `.defenseclaw/.env` | Canonical credential store | Atomic tmp+rename writes. POSIX uses `0o600`; Windows uses an owner-private DACL. No comments or metadata. |
-| User-home `.defenseclaw/audit.db` | Action log entry per `keys set` | Records `actor=cli:operator action=config.update target=dotenv:<ENV>` with `before/after = had_value`. The value is **never** logged. |
+| User-home `.defenseclaw/audit.db` | Action log entry per `keys set` | Records `actor=cli:<your user name> action=config-update target=config:dotenv:<ENV>` with `before/after = had_value`. The value is **never** logged. |
 | User-home `.defenseclaw/config.yaml` | The `*_env` references only | The actual secret never enters `config.yaml`. |
 | Process environment | Highest-priority lookup | `export` on macOS/Linux or `$env:NAME = ...` in PowerShell wins over the dotenv copy. Useful for one-shot debugging. |
 

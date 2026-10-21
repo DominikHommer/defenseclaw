@@ -7,7 +7,7 @@ keywords:
   - AI agent audit log
 ---
 
-DefenseClaw sits between your coding agent and what it can do. It answers three questions: what is the agent allowed to install, what is it doing right now, and what did it do. Skills, MCP servers and plugins are scanned before they run. Prompts and tool calls are checked as they happen. Every decision goes to a local audit database and to the destinations you configure.
+DefenseClaw sits between your coding agent and what it can do. It answers three questions: what is the agent allowed to install, what is it doing right now, and what did it do. Skills, MCP servers and plugins are scanned before they run. Prompts and tool calls are checked as they happen, for the events each connector sends; coverage differs by agent (see the [capability matrix](/docs/reference/capability-matrix)). Every decision goes to a local audit database and to the destinations you configure.
 
 ## The three parts
 
@@ -15,7 +15,7 @@ DefenseClaw sits between your coding agent and what it can do. It answers three 
 - **The gateway** (`defenseclaw-gateway`) is a background process that decides and records. It listens on loopback, port 18970 by default.
 - **A connector** per agent: the hooks or plugin that send the agent's prompts and tool calls to the gateway. Some connectors send model traffic through a guardrail proxy instead.
 
-Every decision you make lives in one file, `~/.defenseclaw/config.yaml`. The running gateway applies a change without a restart ([how that works](/docs/reference/source-of-truth)).
+Every decision you make lives in one file, `~/.defenseclaw/config.yaml`. The running gateway applies policy changes without a restart. A few startup settings, such as listener and storage, wait for a restart ([which ones](/docs/reference/source-of-truth)).
 
 <Flow
   direction="TB"

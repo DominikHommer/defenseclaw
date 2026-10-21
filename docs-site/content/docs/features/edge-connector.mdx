@@ -47,7 +47,7 @@ The result is `ALLOW`, `BLOCK`, `WARN` or `PENDING`. The Fleet gateway decides u
 - Tracks multi-step capability patterns, for example fetch from the network then run a shell command.
 - Applies fixed rate limits: 60 tool calls, 30 network requests and 10 physical actuations per minute.
 - Keeps an HMAC-chained audit ring so changes to retained history are detectable.
-- Takes signed policy updates over MQTT with a rollback canary.
+- Takes signed policy updates over MQTT with a rollback canary. Production builds accept HMAC updates only when built with `DCLAW_ALLOW_HMAC_OTA=ON` and given a separate HMAC key.
 
 ## Build profiles
 

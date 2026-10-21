@@ -366,11 +366,13 @@ The scanner uses a versioned signature pack to know what an "AI artifact" looks 
 
 ```bash
 defenseclaw agent signatures list
-defenseclaw agent signatures install ./corp-signatures.yaml
-defenseclaw agent signatures validate ./corp-signatures.yaml
+defenseclaw agent signatures install ./corp-signatures.json
+defenseclaw agent signatures validate ./corp-signatures.json
 defenseclaw agent signatures disable codex
 defenseclaw agent signatures enable codex
 ```
+
+A pack file is JSON, not YAML; `install` and `validate` reject other formats with `invalid JSON`.
 
 `disable` and `enable` take an individual signature ID, not a pack name; use
 `signatures list` to find the ID. The bundled pack covers every connector listed
@@ -581,8 +583,9 @@ ide-plugins` (on a Mac, `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway
 enterprise macos ide-plugins`) prints the managed gateway's inventory as
 JSON, with the `--user`, `--ide`, `--ai-only` and `--cursor` filters. On a
 managed Windows computer, `defenseclaw.exe enterprise windows ide-plugins`
-does the same from an elevated prompt. These commands print the counts of the
-whole machine next to the filtered rows. An answer without an inventory
+does the same from an elevated prompt. The counts describe the rows the filters
+select, so `--ai-only` or an unmatched `--user` can give zero; run the command with no
+filter for the machine total. An answer without an inventory
 carries a `reason`: on a managed computer whose config leaves AI discovery
 off, it says to set `ai_discovery.enabled: true` in the managed config (the
 file Setup, the package or the MDM delivers); `agent discovery enable` is a
@@ -1086,19 +1089,18 @@ whole. `defenseclaw agent discovery runtime permissions --grant` applies both.
 
 **Managed enterprise install — the installer arranges these**
 
-The gateway is deliberately de-privileged here, so with one exception these
-grants do not go to it:
+The gateway is deliberately de-privileged here, so these grants do not go to it:
 
 | Setting | macOS | Linux | Windows |
 | --- | --- | --- | --- |
-| Gateway runs as | root (LaunchDaemon) | unprivileged `defenseclaw`, systemd sandbox | write-restricted LocalSystem with the gateway service SID |
-| Acquisition | direct | **brokered** via `defenseclaw-sensor-helper` | **brokered** via `defenseclaw-sensor-helper` |
-| Who holds the privilege | the gateway | the helper (root) | the helper |
-| Operator still grants | Full Disk Access, via an MDM PPPC profile | nothing — the unit declares its capabilities | Advanced Audit Policy and the command-line policy, via GPO |
+| Gateway runs as | `_defenseclaw` (LaunchDaemon) | unprivileged `defenseclaw`, systemd sandbox | write-restricted LocalSystem with the gateway service SID |
+| Acquisition | **brokered** via `defenseclaw-sensor-helper` | **brokered** via `defenseclaw-sensor-helper` | **brokered** via `defenseclaw-sensor-helper` |
+| Who holds the privilege | the helper (root) | the helper (root) | the helper |
+| Operator still grants | Full Disk Access to the helper, via an MDM PPPC profile | nothing — the unit declares its capabilities | Advanced Audit Policy and the command-line policy, via GPO |
 
-macOS is the exception: its managed gateway already runs as root for an
-unrelated reason, so there is nothing to broker and the only outstanding grant
-is the TCC profile. Linux and Windows use the helper for sensor acquisition.
+On macOS the gateway runs as `_defenseclaw` and the root sensor helper does the
+acquisition; the only outstanding grant is the TCC profile, which names the
+helper. Linux and Windows use the helper the same way.
 On Windows the gateway's LocalSystem token is write-restricted, but reads
 outside user profiles are checked as LocalSystem; it refuses profile paths
 and its scanner children inherit that token.
@@ -1108,9 +1110,8 @@ and its scanner children inherit that token.
 Plane C needs to read the kernel. The gateway is the component least entitled
 to: it is network-facing, so a managed deployment de-privileges it on purpose.
 On Linux it runs as an unprivileged account inside a systemd sandbox; on
-Windows it runs as a dedicated virtual service account. Only the managed macOS
-daemon runs as root, and for an unrelated reason — the cloud auth provider has
-to re-perm its per-machine credential store.
+Windows it runs as a dedicated virtual service account. On managed macOS it runs as `_defenseclaw`. On all three, only the sensor
+helper holds root.
 
 Measured under the shipped Linux unit, a gateway reading directly sees
 **one process and zero connections**. `ProcSubset=pid` removes `/proc/net` and
@@ -1138,9 +1139,7 @@ root process into a general-purpose file reader.
 | Helper network access | none — the unit allows `AF_UNIX`, `AF_NETLINK` and `AF_PACKET` only |
 
 The gateway brokers through the helper only where it was de-privileged *and* a
-helper is therefore installed. It reads directly on a managed macOS host,
-because that gateway is already root and a broker would add a failure mode for
-nothing, and on an unmanaged workstation, where there is no helper to ask and
+helper is therefore installed. It reads directly on an unmanaged workstation, where there is no helper to ask and
 the honest answer is to read what it can and report the shortfall. The choice
 is automatic; there is no setting for it.
 

@@ -66,7 +66,7 @@ defenseclaw guardrail mode action --connector claudecode
 
 This switches only Claude Code to **action** mode, which enforces the rules. Other agents stay in observe. The running gateway applies the mode without a restart.
 
-In action mode, hooks use the global hook fail mode, which is `closed` on a new install: Claude Code's tools are blocked while the gateway is down. To allow and log those calls instead, run `defenseclaw guardrail fail-mode open`. Running `defenseclaw quickstart` again without `--mode` keeps the mode and fail mode each agent already has.
+The hook fail mode is `closed` on a new install, in observe and action mode alike: when the gateway is down, Claude Code's tool calls are blocked, and the first-run report shows `fail mode=closed`. To allow and log those calls instead, run `defenseclaw guardrail fail-mode open`. Running `defenseclaw quickstart` again without `--mode` keeps the mode and fail mode each agent already has.
 
 </Step>
 
