@@ -1118,11 +1118,21 @@ func TestWindowsEnterpriseEnsureProbesCarryNoMutationInputs(t *testing.T) {
 	}
 }
 
+// A compliant ensure runs the recorded Cursor correction once, and only after
+// its Verify accepted the deployment (the repair's rule-pack preflight is
+// TestWindowsEnsureRepairRefusesUnloadableRulePacksBeforeItStops).
 func TestWindowsCompliantEnsureRunsRecordedCursorRepairOnce(t *testing.T) {
 	originalPending, originalElevated := windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated
+	originalTransaction := windowsEnterpriseStandaloneTransactionPending
 	t.Cleanup(func() {
 		windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated = originalPending, originalElevated
+		windowsEnterpriseStandaloneTransactionPending = originalTransaction
 	})
+	stubWindowsEnterpriseRulePackPreflight(t, func(string, string, string) error { return nil })
+	originalBuild := windowsEnterpriseStandaloneRulePackBuild
+	t.Cleanup(func() { windowsEnterpriseStandaloneRulePackBuild = originalBuild })
+	windowsEnterpriseStandaloneRulePackBuild = func(*config.Config) error { return nil }
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
 	windowsEnterpriseIsElevated = func() bool { return true }
 	pending := true
 	windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) { return pending, nil }
@@ -1130,7 +1140,7 @@ func TestWindowsCompliantEnsureRunsRecordedCursorRepairOnce(t *testing.T) {
 		calls []string
 		noop  bool
 	}{
-		{calls: []string{"Status", "Repair"}},
+		{calls: []string{"Status", "Verify", "Repair"}},
 		{calls: []string{"Status", "Verify"}, noop: true},
 	} {
 		replies := make([]map[string]any, 0, len(tc.calls))
@@ -1159,6 +1169,76 @@ func TestWindowsCompliantEnsureRunsRecordedCursorRepairOnce(t *testing.T) {
 			t.Fatalf("ensure result %+v (%v)", result, err)
 		}
 		pending = false
+	}
+}
+
+// Every repair ensure selects restarts the gateway on the installed config,
+// so each one, the recorded Cursor correction included, is refused before
+// anything stops when the gateway cannot load that config's rule packs
+// (GAP-0672): the running gateway keeps its last good policy. Only Status and
+// Verify run, with or without a supplied config.
+func TestWindowsEnsureRepairRefusesUnloadableRulePacksBeforeItStops(t *testing.T) {
+	originalPending, originalElevated := windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated
+	originalBuild, originalTransaction := windowsEnterpriseStandaloneRulePackBuild, windowsEnterpriseStandaloneTransactionPending
+	t.Cleanup(func() {
+		windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated = originalPending, originalElevated
+		windowsEnterpriseStandaloneRulePackBuild, windowsEnterpriseStandaloneTransactionPending = originalBuild, originalTransaction
+	})
+	stubWindowsEnterpriseRulePackPreflight(t, func(string, string, string) error { return nil })
+	windowsEnterpriseStandaloneRulePackBuild = func(*config.Config) error {
+		return errors.New("digest sha256:9760 does not match guardrail.custom_packs.acme.digest")
+	}
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
+	windowsEnterpriseIsElevated = func() bool { return true }
+	for _, tc := range []struct {
+		name          string
+		cursorPending bool
+		verifyFails   bool
+		withConfig    bool
+	}{
+		{name: "recorded Cursor repair", cursorPending: true},
+		{name: "recorded Cursor repair with a supplied config", cursorPending: true, withConfig: true},
+		{name: "failed verify with a recorded Cursor repair", cursorPending: true, verifyFails: true},
+		{name: "failed verify", verifyFails: true},
+		{name: "failed verify with a supplied config", verifyFails: true, withConfig: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) { return tc.cursorPending, nil }
+			verify := installedStatus("verify")
+			if tc.verifyFails {
+				verify["ok"] = false
+				verify["errors"] = []string{"managed ACL is invalid"}
+			}
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), verify}}
+			stub.install(t)
+			var stdout bytes.Buffer
+			command := &cobra.Command{}
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			opts := ensureTestOptions()
+			if !tc.withConfig {
+				opts.configPath, opts.manifestPath = "", ""
+			}
+			err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+			var calls []string
+			for _, call := range stub.calls {
+				calls = append(calls, call[1])
+			}
+			if !reflect.DeepEqual(calls, []string{"Status", "Verify"}) {
+				t.Fatalf("installer calls %v, want Status and Verify only (no Repair)", calls)
+			}
+			if commandExitCode(err) == 0 {
+				t.Fatalf("ensure = %v, want a failed exit", err)
+			}
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.OK || result.Noop || len(result.Errors) != 1 || result.Errors[0].Code != "preflight_failed" ||
+				!strings.Contains(result.Errors[0].Message, "keeps its last good policy") {
+				t.Fatalf("ensure result %+v, want the rule-pack refusal", result)
+			}
+		})
 	}
 }
 

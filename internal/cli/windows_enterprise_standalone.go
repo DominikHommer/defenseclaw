@@ -3226,20 +3226,23 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		result.AddError(windowsEnterpriseMessageCode(planErr.Error(), "ensure_refused"), planErr.Error())
 		return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 	}
-	if plan.Action == "" && windowsEnterpriseIsElevated() {
-		pending, repairErr := windowsEnterpriseCursorMigrationRepairPending()
-		if repairErr != nil {
-			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
-			result.AddError("preflight_failed", "check the recorded Cursor fail-mode repair: "+repairErr.Error())
-			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
-		}
-		if pending {
-			plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "recorded_cursor_fail_mode"}
-		}
-	}
 	if plan.Action == "" {
-		verifyCtx := ctx
+		// A compliant deployment can still owe the one-time Cursor fail-mode
+		// correction the old v9 migration recorded. Its repair is selected
+		// only after Verify accepts the deployment, and it meets the rule-pack
+		// preflight below like any repair, before anything stops.
+		cursorRepairPending := false
 		if windowsEnterpriseIsElevated() {
+			pending, repairErr := windowsEnterpriseCursorMigrationRepairPending()
+			if repairErr != nil {
+				applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+				result.AddError("preflight_failed", "check the recorded Cursor fail-mode repair: "+repairErr.Error())
+				return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+			}
+			cursorRepairPending = pending
+		}
+		verifyCtx := ctx
+		if windowsEnterpriseIsElevated() && !cursorRepairPending {
 			// A compliant deployment runs no retire, so this Verify collects
 			// the old runtime copies a retire left and names each per-user
 			// folder still untrusted (#1105, GAP-0211).
@@ -3251,7 +3254,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
 		_, drifted := windowsEnterpriseHookRuntimeDrift()
-		if windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == "" {
+		verified := windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == ""
+		switch {
+		case verified && cursorRepairPending:
+			plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "recorded_cursor_fail_mode"}
+		case verified:
 			accepted := *verifyReport
 			accepted.OK = true
 			applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
@@ -3270,11 +3277,12 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			result.NoopReason = plan.Reason
 			applyWindowsEnterprisePolicy(ctx, result)
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+		default:
+			// Name the failed check: a compliant-looking host that ensure
+			// repaired said only "ensure_repair: verify_failed" (#1282).
+			plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed",
+				Detail: windowsEnterpriseVerifyFailureDetail(verifyReport, drifted)}
 		}
-		// Name the failed check: a compliant-looking host that ensure
-		// repaired said only "ensure_repair: verify_failed" (#1282).
-		plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed",
-			Detail: windowsEnterpriseVerifyFailureDetail(verifyReport, drifted)}
 	}
 
 	// An upgrade that keeps the installed config: this release's gateway must
@@ -3291,7 +3299,10 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 
 	// A repair restarts the gateway on the installed config: refuse one whose
 	// rule packs the gateway would not load, before anything stops (GAP-0672).
-	if plan.Action == "repair" && plan.Reason == "verify_failed" {
+	// Every repair ensure selects here restarts it (verify_failed and the
+	// recorded Cursor correction alike); a pending transaction is left to its
+	// recovery, which restores the packs the deployment had.
+	if plan.Action == "repair" && plan.Reason != "transaction_pending" {
 		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(opts.configPath); err != nil {
 			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 			result.Errors = []enterprisestatus.Message{}
