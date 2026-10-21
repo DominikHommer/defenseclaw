@@ -426,21 +426,27 @@ or OmniGent before 1.0.4:
   after the upgrade undoes what an older DefenseClaw setup wrote for them:
   OpenHands' `~/.openhands/hooks.json` and its hook script, and OmniGent's
   `~/.omnigent/config.yaml`, its `defenseclaw_omnigent.pth` file and the policy
-  module. It changes a file only when the file is exactly as that setup left
+  module. It also checks every other OmniGent config that may name the module:
+  the file `OMNIGENT_CONFIG` selects and the one under `OMNIGENT_CONFIG_HOME`.
+  It changes a file only when the file is exactly as that setup left
   it: the file goes back to what it was before setup, is removed if setup
   created it, or (the OpenHands hook script) becomes a stub that does nothing.
   If you changed one of these files since, replaced it with a link,
   DefenseClaw has no record of writing it, the copy DefenseClaw saved before
-  its setup already named DefenseClaw, or an OpenHands hook may still run the
-  hook script another way (through a link or a wrapper script), the gateway
-  changes none of them.
+  its setup already named DefenseClaw, an OmniGent config still names the
+  module, or an OpenHands hook may still run the hook script another way, the
+  gateway changes none of them. That includes a hook in the `hooks.json` it
+  would put back, and one it can't follow: a link or wrapper script, a command
+  found on `PATH`, a relative path, or shell syntax such as `$HOME`, `~` or
+  `&&`. Deleting the hook script also clears that step.
   It prints one warning with the steps to remove
   DefenseClaw's entries by hand, and `defenseclaw status` and
   `defenseclaw doctor` show the same steps. When you have done them, run
   `defenseclaw-gateway connector teardown --connector omnigent` (or
   `openhands`) to remove the rest. Your other connectors start either way. If
-  a file can't be written, nothing is changed and the gateway tries again on
-  the next start. The upgrade accepts a `config.yaml` that still lists them.
+  a file can't be written, the changes already made are undone and the gateway
+  tries again on the next start. A file that something else changed in the
+  meantime is kept as it is. The upgrade accepts a `config.yaml` that still lists them.
   Their settings are dropped from `config.yaml`, including a
   telemetry destination whose every route selected only these connectors;
   `defenseclaw migrate` saves that. `defenseclaw uninstall` runs the same

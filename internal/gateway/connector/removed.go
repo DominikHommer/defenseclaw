@@ -35,9 +35,11 @@ package connector
 // written back: a saved copy goes back byte for byte, and one that names
 // DefenseClaw is dropped only when it is exactly what setup itself wrote. The
 // OpenHands hook script becomes the tombstone only when no hooks file can
-// still run it. Writes replace the file itself, never a link's target, and a
-// change that fails, even after its new bytes are in place, is rolled back
-// with the changes before it.
+// still run it, the copies teardown puts back included. Writes replace the
+// file itself, never a link's target, and a change that fails, even after its
+// new bytes are in place, is rolled back with the changes before it. Rollback
+// writes a file back only while it still holds what teardown wrote: a file
+// someone changed since is kept as it is, with the backup records.
 
 import (
 	"bytes"
@@ -50,6 +52,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -400,15 +403,15 @@ func (p *removedCleanupPlan) addUnrecorded(path string, kind removedFileKind) er
 	return nil
 }
 
-// plans reports whether the plan changes path; lists, whether it leaves path
-// for the user.
-func (p *removedCleanupPlan) plans(path string) bool {
+// planned returns the change the plan makes to path; lists reports whether
+// the plan leaves path for the user.
+func (p *removedCleanupPlan) planned(path string) (removedFile, bool) {
 	for _, file := range p.files {
 		if sameManagedTargetPath(file.path, path) {
-			return true
+			return file, true
 		}
 	}
-	return false
+	return removedFile{}, false
 }
 
 func (p *removedCleanupPlan) lists(path string) bool {
@@ -438,7 +441,7 @@ func (p *removedCleanupPlan) apply() error {
 	for i, file := range p.files {
 		if changing, err := file.apply(); err != nil {
 			n := i
-			if changing && file.changed() {
+			if changing {
 				n = i + 1
 			}
 			if rollbackErr := p.rollback(n); rollbackErr != nil {
@@ -472,19 +475,36 @@ func (f removedFile) apply() (changing bool, err error) {
 	return true, nil
 }
 
-// changed reports whether the file no longer holds the bytes the plan read.
-func (f removedFile) changed() bool {
-	data, info, err := readRemovedFile(f.path)
-	return err == nil && (info == nil || !bytes.Equal(data, f.data))
+// published reports whether data and info (a read of the file) are what the
+// change left: the bytes it restored, or no file after a removal.
+func (f removedFile) published(data []byte, info os.FileInfo) bool {
+	if f.restore == nil {
+		return info == nil
+	}
+	return info != nil && bytes.Equal(data, f.restore)
 }
 
-// rollback puts back the first n files as the plan read them.
+// rollback puts back the first n files as the plan read them. A file is
+// written back only while it holds what the change left; one that already
+// holds the bytes the plan read needs nothing. Any other file was changed by
+// someone else since (edited, deleted, recreated, or replaced by a link): it
+// is kept as it is and reported, and the backup records stay, so the next
+// start plans from what is there.
 func (p *removedCleanupPlan) rollback(n int) error {
 	var errs []error
 	for i := n - 1; i >= 0; i-- {
 		file := p.files[i]
-		if err := atomicWriteFileNoFollow(file.path, file.data, file.mode); err != nil {
-			errs = append(errs, fmt.Errorf("could not put back %s: %w", file.path, err))
+		data, info, err := readRemovedFile(file.path)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("did not put back %s: %w; it is kept as it is", file.path, err))
+		case info != nil && bytes.Equal(data, file.data):
+		case !file.published(data, info):
+			errs = append(errs, fmt.Errorf("did not put back %s: it changed after the cleanup wrote it, so it is kept as it is", file.path))
+		default:
+			if err := atomicWriteFileNoFollow(file.path, file.data, file.mode); err != nil {
+				errs = append(errs, fmt.Errorf("could not put back %s: %w", file.path, err))
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -544,57 +564,132 @@ func (c removedOpenHandsConnector) plan(opts SetupOpts) (*removedCleanupPlan, er
 		checked = append(checked, path)
 	}
 	// Last: the script becomes the tombstone only once no hooks file runs it.
-	if err := c.addHookScript(p, opts, c.hooksThatMayRunScript(p, opts, checked)); err != nil {
+	if err := c.addHookScript(p, opts, checked); err != nil {
 		return nil, err
 	}
 	return p, nil
 }
 
-// hooksThatMayRunScript lists the hooks files in paths that the plan neither
-// changes nor leaves for the user, and that may still run the hook script
-// without naming its path: through a link, a wrapper, $HOME or a relative
-// path. A hooks file is proven not to run it when it is gone, is byte for
-// byte the copy setup found before it wrote its hooks, or runs nothing (no
-// string in it but a matcher or a hook type).
-func (c removedOpenHandsConnector) hooksThatMayRunScript(p *removedCleanupPlan, opts SetupOpts, paths []string) []string {
-	record, recordErr := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config"))
-	var out []string
+// removedHooksFile is a hooks file that may still run the hook script once
+// the cleanup is done; restored marks the copy setup found, which the
+// cleanup would put back.
+type removedHooksFile struct {
+	path     string
+	restored bool
+}
+
+// hooksThatMayRunScript lists the hooks files in paths that may still run
+// the hook script (script, read as info) once the plan is done: what the
+// plan leaves in place, and the copy setup found where the plan puts that
+// back. A file the plan leaves for the user is listed already, and one it
+// removes runs nothing. Every command in a hooks file must be ruled out (see
+// removedScriptCheck), the saved copy's included: a copy setup found may run
+// the script through a link or a wrapper too.
+func (c removedOpenHandsConnector) hooksThatMayRunScript(p *removedCleanupPlan, opts SetupOpts, paths []string, script string, info os.FileInfo) []removedHooksFile {
+	check := newRemovedScriptCheck(script, info, opts.DataDir)
+	var out []removedHooksFile
 	for _, path := range paths {
-		if p.plans(path) || p.lists(path) {
+		if p.lists(path) {
 			continue
 		}
-		data, info, err := readRemovedFile(path)
-		if err != nil || info == nil {
+		if file, ok := p.planned(path); ok {
+			if file.restore != nil && check.hooksMayRun(file.restore) {
+				out = append(out, removedHooksFile{path: path, restored: true})
+			}
 			continue
 		}
-		if recordErr == nil && record.Existed && sameManagedTargetPath(record.Path, path) && bytes.Equal(data, record.PristineBytes) {
+		data, found, err := readRemovedFile(path)
+		if err != nil || found == nil {
 			continue
 		}
-		if removedJSONRunsNothing(data) {
-			continue
+		if check.hooksMayRun(data) {
+			out = append(out, removedHooksFile{path: path})
 		}
-		out = append(out, path)
 	}
 	return out
 }
 
-// removedJSONRunsNothing reports whether a hooks file holds no command: it is
-// one JSON document with no non-blank string except a "matcher" or "type"
-// value.
-func removedJSONRunsNothing(data []byte) bool {
+// removedScriptCheck tells whether OpenHands hooks may run DefenseClaw's hook
+// script. It rules a command out only when it can see what the command runs:
+// the command is plain words (no variables, ~, globs, pipes, lists or
+// redirections; quotes are fine), it starts with an absolute path, and every
+// other word is an option, a number or an absolute path. A command found on
+// PATH, a relative path or any shell syntax may run anything, so it may run
+// the script. A path in the command may run the script when it names
+// DefenseClaw or the script, is the script (through links or as a hard link),
+// is a directory that holds the script or names DefenseClaw, or is a file
+// whose bytes name either. A text file (a wrapper) may also run it through
+// the paths it names, checked the same way a few levels deep, and through
+// what the check cannot follow: a relative path or cd, a variable or a
+// command substitution in a path, or a command found on PATH while a PATH
+// directory holds the script.
+type removedScriptCheck struct {
+	script  os.FileInfo
+	needles [][]byte // lower case
+	home    string
+	seen    map[string]bool
+	files   int
+	onPath  *bool
+}
+
+const (
+	removedScriptCheckDepth      = 4
+	removedScriptCheckFiles      = 64
+	removedScriptCheckDirEntries = 10000
+	removedScriptCheckTextLimit  = 1 << 20
+	removedScriptCheckScanLimit  = 512 << 20
+)
+
+var (
+	// removedTextPath finds the absolute paths a wrapper names, ~ and
+	// $HOME ones included (group 1 is the home prefix, group 2 the path).
+	removedTextPath = regexp.MustCompile(`(~|\$HOME|\$\{HOME\})?["']?((?:/[A-Za-z0-9_.+@%,:=-]+)+)`)
+	// removedTextRelative finds a relative ./ or ../ path, a cd, or a path
+	// that starts with a command substitution.
+	removedTextRelative = regexp.MustCompile("(?:^|[\\s;&|(=\"'`])(?:\\.{1,2}/|(?:cd|pushd)\\s)|[)`][\"']?/")
+	// removedTextVariable finds a path that starts with a variable (group 1
+	// is its name; HOME is followed).
+	removedTextVariable = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?!$-])\}?["']?/`)
+)
+
+func newRemovedScriptCheck(script string, info os.FileInfo, dataDir string) *removedScriptCheck {
+	names := []string{"defenseclaw", strings.TrimSuffix(removedOpenHandsHookScript, ".sh")}
+	for _, dir := range []string{dataDir, filepath.Dir(script)} {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		names = append(names, filepath.Clean(dir))
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			names = append(names, resolved)
+		}
+	}
+	check := &removedScriptCheck{script: info, home: homePath(), seen: map[string]bool{}}
+	for _, name := range uniqueNonEmptyStrings(names) {
+		check.needles = append(check.needles, []byte(strings.ToLower(name)))
+	}
+	return check
+}
+
+// hooksMayRun reports whether a hooks file may run the script: a string in it
+// other than a "matcher" or "type" value is a command, and an empty file runs
+// nothing. A file that is not one JSON document may run anything.
+func (c *removedScriptCheck) hooksMayRun(data []byte) bool {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return false
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	var document interface{}
 	if err := decoder.Decode(&document); err != nil {
-		return false
+		return true
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return false
+		return true
 	}
 	var runs func(value interface{}, key string) bool
 	runs = func(value interface{}, key string) bool {
 		switch v := value.(type) {
 		case string:
-			return strings.TrimSpace(v) != "" && key != "matcher" && key != "type"
+			return key != "matcher" && key != "type" && c.commandMayRun(v)
 		case []interface{}:
 			for _, item := range v {
 				if runs(item, key) {
@@ -610,7 +705,241 @@ func removedJSONRunsNothing(data []byte) bool {
 		}
 		return false
 	}
-	return !runs(document, "")
+	return runs(document, "")
+}
+
+func (c *removedScriptCheck) commandMayRun(command string) bool {
+	if strings.TrimSpace(command) == "" {
+		return false
+	}
+	words, ok := removedPlainWords(command)
+	if !ok || len(words) == 0 {
+		return true
+	}
+	for i, word := range words {
+		if c.names([]byte(word)) {
+			return true
+		}
+		path := word
+		if i > 0 {
+			switch {
+			case strings.HasPrefix(word, "-"):
+				_, value, hasValue := strings.Cut(word, "=")
+				if !hasValue || !strings.Contains(value, "/") {
+					continue
+				}
+				path = value
+			case strings.Trim(word, "0123456789") == "":
+				continue
+			}
+		}
+		if !filepath.IsAbs(path) || c.pathMayRun(path, 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// removedPlainWords splits a command made only of plain words: letters,
+// digits and _ . / - + = : , @ %, separated by blanks, with single quotes and
+// with double quotes that hold no $, `, \ or !. Anything else is shell syntax
+// the check cannot follow (ok is false).
+func removedPlainWords(command string) (words []string, ok bool) {
+	var word strings.Builder
+	inWord := false
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		switch {
+		case ch == ' ' || ch == '\t':
+			if inWord {
+				words = append(words, word.String())
+				word.Reset()
+				inWord = false
+			}
+		case ch == '\'' || ch == '"':
+			end := strings.IndexByte(command[i+1:], ch)
+			if end < 0 {
+				return nil, false
+			}
+			quoted := command[i+1 : i+1+end]
+			if ch == '"' && strings.ContainsAny(quoted, "$`\\!") {
+				return nil, false
+			}
+			word.WriteString(quoted)
+			inWord = true
+			i += end + 1
+		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9', strings.IndexByte("_./-+=:,@%", ch) >= 0:
+			word.WriteByte(ch)
+			inWord = true
+		default:
+			return nil, false
+		}
+	}
+	if inWord {
+		words = append(words, word.String())
+	}
+	return words, true
+}
+
+func (c *removedScriptCheck) names(data []byte) bool {
+	lower := bytes.ToLower(data)
+	for _, needle := range c.needles {
+		if bytes.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathMayRun reports whether an absolute path may run the script. Nothing
+// there runs nothing; a path it cannot look at may run anything.
+func (c *removedScriptCheck) pathMayRun(path string, depth int) bool {
+	path = filepath.Clean(path)
+	if c.names([]byte(path)) {
+		return true
+	}
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil || os.SameFile(info, c.script) {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || c.names([]byte(resolved)) {
+		return true
+	}
+	switch {
+	case info.IsDir():
+		return c.dirMayRun(resolved)
+	case info.Mode().IsRegular():
+		return c.fileMayRun(resolved, info, depth)
+	}
+	return false
+}
+
+// dirMayRun reports whether a directory holds the script, or an entry whose
+// name names DefenseClaw or the script.
+func (c *removedScriptCheck) dirMayRun(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) > removedScriptCheckDirEntries {
+		return true
+	}
+	for _, entry := range entries {
+		if c.names([]byte(entry.Name())) {
+			return true
+		}
+	}
+	return c.holdsScript(dir)
+}
+
+// fileMayRun reports whether a regular file may run the script: its bytes
+// name DefenseClaw or the script, or it is a text file that may run it
+// through a path it names.
+func (c *removedScriptCheck) fileMayRun(path string, info os.FileInfo, depth int) bool {
+	if c.seen[path] {
+		return false
+	}
+	c.seen[path] = true
+	c.files++
+	if c.files > removedScriptCheckFiles || info.Size() > removedScriptCheckScanLimit {
+		return true
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer file.Close()
+	overlap := 0
+	for _, needle := range c.needles {
+		if len(needle) > overlap {
+			overlap = len(needle)
+		}
+	}
+	var text, window []byte
+	binary := false
+	chunk := make([]byte, 64<<10)
+	for {
+		n, err := file.Read(chunk)
+		if n > 0 {
+			binary = binary || bytes.IndexByte(chunk[:n], 0) >= 0
+			if !binary && len(text) <= removedScriptCheckTextLimit {
+				text = append(text, chunk[:n]...)
+			}
+			window = append(window, chunk[:n]...)
+			if c.names(window) {
+				return true
+			}
+			if len(window) > overlap {
+				window = append(window[:0], window[len(window)-overlap:]...)
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return true
+		}
+	}
+	if binary {
+		return false
+	}
+	if len(text) > removedScriptCheckTextLimit || removedTextRelative.Match(text) || c.scriptOnPath() {
+		return true
+	}
+	for _, match := range removedTextVariable.FindAllSubmatch(text, -1) {
+		if string(match[1]) != "HOME" {
+			return true
+		}
+	}
+	for _, match := range removedTextPath.FindAllSubmatch(text, -1) {
+		target := string(match[2])
+		if len(match[1]) > 0 {
+			target = filepath.Join(c.home, target)
+		}
+		if depth+1 >= removedScriptCheckDepth || c.pathMayRun(target, depth+1) {
+			return true
+		}
+	}
+	return false
+}
+
+// scriptOnPath reports whether a directory a command may be found in holds
+// the script: the gateway's PATH, ~/bin, ~/.local/bin, /usr/local/bin and
+// /opt/homebrew/bin. A directory it cannot list counts as holding it.
+func (c *removedScriptCheck) scriptOnPath() bool {
+	if c.onPath != nil {
+		return *c.onPath
+	}
+	dirs := append(filepath.SplitList(os.Getenv("PATH")),
+		filepath.Join(c.home, "bin"), filepath.Join(c.home, ".local", "bin"), "/usr/local/bin", "/opt/homebrew/bin")
+	found := false
+	for _, dir := range uniqueNonEmptyStrings(dirs) {
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() || !filepath.IsAbs(dir) {
+			continue
+		}
+		if c.holdsScript(dir) {
+			found = true
+			break
+		}
+	}
+	c.onPath = &found
+	return found
+}
+
+// holdsScript reports whether dir holds the script under any name; a
+// directory it cannot list counts as holding it.
+func (c *removedScriptCheck) holdsScript(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) > removedScriptCheckDirEntries {
+		return true
+	}
+	for _, entry := range entries {
+		if info, err := os.Stat(filepath.Join(dir, entry.Name())); err == nil && os.SameFile(info, c.script) {
+			return true
+		}
+	}
+	return false
 }
 
 // addHookScript plans DefenseClaw's hook script: a script exactly as setup
@@ -618,10 +947,11 @@ func removedJSONRunsNothing(data []byte) bool {
 // tombstone, so an OpenHands conversation that loaded the hook before
 // teardown keeps working. A script DefenseClaw cannot prove it wrote (it
 // changed, there is no digest, or it is a link or not a regular file), or one
-// a hooks file in mayRun may still run, is left for the user with those
-// hooks files, and so is everything else: a tombstone exits 0, so a hook that
-// still ran it would allow everything with no warning.
-func (c removedOpenHandsConnector) addHookScript(p *removedCleanupPlan, opts SetupOpts, mayRun []string) error {
+// a hooks file in checked may still run once the cleanup is done, is left for
+// the user with those hooks files, and so is everything else: a tombstone
+// exits 0, so a hook that still ran it would allow everything with no
+// warning.
+func (c removedOpenHandsConnector) addHookScript(p *removedCleanupPlan, opts SetupOpts, checked []string) error {
 	script := c.hookScript(opts)
 	const step = "delete it once no OpenHands hooks file runs it"
 	data, info, err := readRemovedFile(script)
@@ -634,8 +964,14 @@ func (c removedOpenHandsConnector) addHookScript(p *removedCleanupPlan, opts Set
 	case info == nil, removedOpenHandsTombstone(data):
 		return nil
 	}
-	for _, path := range mayRun {
-		p.leave(path, "DefenseClaw cannot prove that none of its hooks runs "+script+" through a link, a wrapper or another path",
+	mayRun := c.hooksThatMayRunScript(p, opts, checked, script, info)
+	for _, hooks := range mayRun {
+		if hooks.restored {
+			p.leave(hooks.path, "the copy DefenseClaw saved before its setup, which the cleanup puts back, has a hook that may run "+script+" through a link, a wrapper or another path",
+				"remove the hook entries whose command runs "+script+", and every hook that runs it through a link or a wrapper")
+			continue
+		}
+		p.leave(hooks.path, "DefenseClaw cannot prove that none of its hooks runs "+script+" through a link, a wrapper or another path",
 			"remove every hook that runs "+script+", directly or through a link or a wrapper")
 	}
 	entry, err := LoadHookContractLockEntryForMode(opts.DataDir, c.name, opts.ManagedEnterprise)
@@ -730,18 +1066,51 @@ func (removedOmnigentConnector) modulePath(opts SetupOpts) string {
 	return filepath.Join(opts.DataDir, "hooks", removedOmnigentModuleName+".py")
 }
 
-// configPaths are the OmniGent config.yaml files an older release may have
-// patched besides the one its setup backup names: the explicit config home
-// native maintenance passes, else OMNIGENT_CONFIG_HOME and ~/.omnigent.
-func (removedOmnigentConnector) configPaths(opts SetupOpts) []string {
-	if home := strings.TrimSpace(opts.ConfigHome); home != "" && filepath.IsAbs(home) {
-		return []string{filepath.Join(filepath.Clean(home), "config.yaml")}
-	}
+// configPaths are the OmniGent config files an older release may have patched
+// besides the one its setup backup names, and that OmniGent may still read:
+// the explicit config home native maintenance passes, the file
+// OMNIGENT_CONFIG selects (OmniGent reads it before any config home),
+// OMNIGENT_CONFIG_HOME, ~/.omnigent and every config file the hook contract
+// lock says setup wrote. All of them are checked, whichever is given: they are
+// only read, and one that still names the module keeps every file in place.
+func (c removedOmnigentConnector) configPaths(opts SetupOpts) []string {
 	var paths []string
+	if home := strings.TrimSpace(opts.ConfigHome); home != "" && filepath.IsAbs(home) {
+		paths = append(paths, filepath.Join(filepath.Clean(home), "config.yaml"))
+	}
+	paths = append(paths, removedOmnigentExplicitConfig())
 	if home := strings.TrimSpace(os.Getenv("OMNIGENT_CONFIG_HOME")); home != "" && filepath.IsAbs(home) {
 		paths = append(paths, filepath.Join(filepath.Clean(home), "config.yaml"))
 	}
-	return uniqueNonEmptyStrings(append(paths, homePath(".omnigent", "config.yaml")))
+	paths = append(paths, homePath(".omnigent", "config.yaml"))
+	if entry, err := LoadHookContractLockEntryForMode(opts.DataDir, c.name, opts.ManagedEnterprise); err == nil {
+		for _, path := range entry.Locations.HookConfigPaths {
+			switch strings.ToLower(filepath.Ext(path)) {
+			case ".yaml", ".yml":
+				if filepath.IsAbs(path) {
+					paths = append(paths, filepath.Clean(path))
+				}
+			}
+		}
+	}
+	return uniqueNonEmptyStrings(paths)
+}
+
+// removedOmnigentExplicitConfig resolves OMNIGENT_CONFIG the way an older
+// setup did ("" when it is unset): ~/ is the user's home, and a relative path
+// is taken from the working directory.
+func removedOmnigentExplicitConfig() string {
+	explicit := strings.TrimSpace(os.Getenv("OMNIGENT_CONFIG"))
+	switch {
+	case explicit == "":
+		return ""
+	case strings.HasPrefix(explicit, "~/") || strings.HasPrefix(explicit, `~\`):
+		return filepath.Join(homePath(), explicit[2:])
+	}
+	if absolute, err := filepath.Abs(explicit); err == nil {
+		return filepath.Clean(absolute)
+	}
+	return filepath.Clean(explicit)
 }
 
 var removedOmnigentConfigKind = removedFileKind{
