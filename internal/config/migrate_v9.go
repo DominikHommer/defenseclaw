@@ -720,6 +720,17 @@ func UnrebasedRulePacks(configPath string) []string {
 	return record.RulePackRebaseFailures
 }
 
+// ExpressedRulePackRules returns the ExpressedRules of the committed
+// migration recorded next to configPath, acknowledged or not: the rules of
+// a rebased 0.8.x custom pack that got an expression from their literal.
+func ExpressedRulePackRules(configPath string) []string {
+	record, ok := readMigrationRecord(configPath)
+	if !ok || record.Pending {
+		return nil
+	}
+	return record.ExpressedRules
+}
+
 // MigratedFromV8 returns the source digest of the committed config_version
 // 9 migration of a v8 file recorded next to configPath. The gateway uses it
 // to recognise its first start after a 0.8.x upgrade.

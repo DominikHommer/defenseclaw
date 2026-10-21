@@ -363,7 +363,7 @@ func TestConfigMigrateRebasesTheDefaultPackEditedInPlace(t *testing.T) {
 				t.Fatalf("rules/commands.yaml of the 1.0 copy has no %s", tc.id)
 			}
 			rule := commands.Rules[i]
-			if !guardrail.MigratedLiteralRule(rule.Pattern, rule.Expression) {
+			if !guardrail.MigratedLiteralRule(rule.Pattern, rule.Expression, rule.MigratedLiteral) {
 				t.Errorf("%s: expression %q is not the literal form of %q", tc.id, rule.Expression, rule.Pattern)
 			}
 			if tc.id == "CMD-U6-MARKER" && !regexp.MustCompile(rule.Pattern).MatchString("run: echo "+marker) {

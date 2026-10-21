@@ -225,15 +225,19 @@ type RulesFileYAML struct {
 
 // RuleDefYAML is a single detection rule definition in YAML.
 type RuleDefYAML struct {
-	ID           string   `yaml:"id"`
-	Enabled      *bool    `yaml:"enabled,omitempty"`
-	Pattern      string   `yaml:"pattern"`
-	Expression   string   `yaml:"expression,omitempty"`
-	ToolCallOnly bool     `yaml:"tool_call_only,omitempty"`
-	Title        string   `yaml:"title"`
-	Severity     string   `yaml:"severity"`
-	Confidence   float64  `yaml:"confidence"`
-	Tags         []string `yaml:"tags"`
+	ID           string `yaml:"id"`
+	Enabled      *bool  `yaml:"enabled,omitempty"`
+	Pattern      string `yaml:"pattern"`
+	Expression   string `yaml:"expression,omitempty"`
+	ToolCallOnly bool   `yaml:"tool_call_only,omitempty"`
+	// MigratedLiteral marks a rule the 0.8.x upgrade gave an expression
+	// from its literal pattern (MigratedLiteralRule). Only a marked rule
+	// also blocks when its literal is anywhere in a tool call's text.
+	MigratedLiteral bool     `yaml:"migrated_literal,omitempty"`
+	Title           string   `yaml:"title"`
+	Severity        string   `yaml:"severity"`
+	Confidence      float64  `yaml:"confidence"`
+	Tags            []string `yaml:"tags"`
 
 	decoded       bool `yaml:"-"`
 	confidenceSet bool `yaml:"-"`
