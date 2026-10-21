@@ -2179,14 +2179,6 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 	sessionProblem := env.hookSessionRecordsProblem(p.dirs)
 	for _, dir := range p.dirs {
 		path := env.P(dir.Path)
-		if sessionProblem != nil && dir.Path == env.Layout.HookSessionDir {
-			if err := env.invalidateHookSessionRecords(path, dir.Owner); err != nil {
-				return nil, err
-			}
-			if l.reportChanges {
-				l.noteChange("invalidated the protected foreign-hook session records in %s, which another account could change (%v)", dir.Path, sessionProblem)
-			}
-		}
 		if dir.External {
 			if exists(path) {
 				if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.IsDir()) {
@@ -2200,6 +2192,14 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 		}
 		if l.reportChanges && env.metadataDiffers(path, dir.Mode, dir.Owner) {
 			l.noteChange("restored the mode and owner of %s", dir.Path)
+		}
+		if sessionProblem != nil && dir.Path == env.Layout.HookSessionDir {
+			if err := env.invalidateHookSessionRecords(path, dir.Owner); err != nil {
+				return nil, err
+			}
+			if l.reportChanges {
+				l.noteChange("invalidated the protected foreign-hook session records in %s, which another account could change (%v)", dir.Path, sessionProblem)
+			}
 		}
 		if err := env.ensureDir(path, dir.Mode, dir.Owner); err != nil {
 			return nil, err

@@ -294,6 +294,16 @@ func TestPublishedSessionRecordsAreInvalidatedWhereAnotherAccountCouldChangeThem
 	if err := PublishedSessionTreeProblem(filepath.Join(root, "missing"), PublishedSessionTrust{}); err != nil {
 		t.Fatalf("a missing root is no problem: %v", err)
 	}
+	// A root with nothing but a hold has nothing to invalidate.
+	onlyHold := t.TempDir()
+	if err := os.WriteFile(filepath.Join(onlyHold, "x"+foreignHookRemovalHoldSuffix), []byte("{}"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	refused = onlyHold
+	if err := PublishedSessionTreeProblem(onlyHold, PublishedSessionTrust{}); err != nil {
+		t.Fatalf("a root with only a hold is no problem: %v", err)
+	}
+	refused = ""
 
 	release := heldOpenPublishedSessionRecord(t, heldRecord)
 	if err := InvalidatePublishedSessionRecords(root); err != nil {

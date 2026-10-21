@@ -963,24 +963,31 @@ var (
 // guardian revokes its records, and bring it back after), so the lifecycle
 // then invalidates the records (InvalidatePublishedSessionRecords) before
 // it restores the access. The guardian's holds are not checked: they only
-// deny. A missing root is no problem.
+// deny. A missing root, and one that holds nothing but holds, has nothing to
+// invalidate, so it is no problem.
 func PublishedSessionTreeProblem(root string, trust PublishedSessionTrust) error {
-	if _, err := os.Lstat(root); errors.Is(err, fs.ErrNotExist) {
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var records []fs.DirEntry
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), foreignHookRemovalHoldSuffix) || !entry.Type().IsRegular() {
+			records = append(records, entry)
+		}
+	}
+	if len(records) == 0 {
 		return nil
 	}
 	if err := publishedSessionFolderTrust(root, trust, 0); err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return err
-	}
 	checked := 0
-	for _, entry := range entries {
+	for _, entry := range records {
 		path := filepath.Join(root, entry.Name())
-		if strings.HasSuffix(entry.Name(), foreignHookRemovalHoldSuffix) && entry.Type().IsRegular() {
-			continue
-		}
 		if !entry.IsDir() {
 			return fmt.Errorf("%s is not an account folder", path)
 		}
