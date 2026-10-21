@@ -1940,6 +1940,136 @@ exit {kept_rc}""")
     assert [c for c in trusted_host.calls() if c.startswith("run ")] == ["run enterprise bundle floor-check --product-version 1.0.5"]
 
 
+# The floor checker reached through a symlink. Before, the trust check walked
+# only the folders the path resolves to, and the package scripts then ran the
+# path as written: a symlink in a folder another account can write, a symlink
+# that account owns, or a symlink whose target passes through such a folder
+# (none of them on the resolved path) was accepted, and that account could
+# swap the symlink between the check and the run as root. Each script now
+# looks the path up one entry at a time, as the kernel does, refuses unless
+# every folder an entry is found in and every symlink on the way belongs to
+# root and no other account can change it (on macOS, by mode or access
+# control entry), refuses a symlink it cannot read, and runs the file the
+# path resolves to.
+_SYMLINK_CHECKER_REFUSED = [
+    "link-folder-writable",
+    "link-folder-group-writable",
+    "link-folder-not-root",
+    "link-folder-unreadable",
+    "relative-link-folder-writable",
+    "link-not-root",
+    "link-owner-unreadable",
+    "nested-link-folder-writable",
+    "nested-link-not-root",
+    "link-unreadable",
+    "link-folder-acl-allows-write",
+    "link-acl-allows-change",
+]
+_SYMLINK_CHECKER_TRUSTED = ["absolute", "relative", "nested", "dot-dot"]
+
+
+def _symlinked_checker_host(
+    tmp_path: Path, where: str, how: str
+) -> tuple[_Host, Path, dict[Path | str, str], tuple[Path, ...]]:
+    """A floor checker that exits 0, in tmp/real, reached through the symlink
+    tmp/swap/link (the installed gateway tmp/swap/link/defenseclaw-gateway, or
+    the kept copy under the lifecycle folder tmp/swap/link/state). Returns the
+    host, the checker's real path, the stat entries and the ACL-writable paths
+    for `how`."""
+    host = _Host(tmp_path)
+    host.gateway.unlink()
+    real = tmp_path / "real"
+    real.mkdir()
+    swap = tmp_path / "swap"
+    swap.mkdir()
+    link = swap / "link"
+    hop = tmp_path / "hop"
+    if how.startswith("nested") or how == "dot-dot":
+        # link -> tmp/hop/inner -> tmp/real: hop holds the second symlink and
+        # is on neither the written nor the resolved path of the checker.
+        hop.mkdir()
+        (hop / "inner").symlink_to("../real" if how == "dot-dot" else real)
+        link.symlink_to(hop / "inner" if how != "dot-dot" else "../hop/./inner")
+    elif how.startswith("relative"):
+        link.symlink_to("../real")
+    else:
+        link.symlink_to(real)
+    if where == "installed":
+        host.state.mkdir()
+        host.gateway = link / "defenseclaw-gateway"
+        checker = real / "defenseclaw-gateway"
+        marker = True
+    else:
+        (real / "state" / "floor-check").mkdir(parents=True)
+        host.state = link / "state"
+        checker = real / "state" / "floor-check" / "defenseclaw-gateway"
+        marker = False
+    body = f"# {FLOOR_CHECK_MARKER}\n" if marker else ""
+    checker.write_text(f"""#!/bin/sh\n{body}echo "run $0 $*" >>'{host.log}'\nexit 0\n""", encoding="utf-8")
+    checker.chmod(0o755)
+    entries: dict[Path | str, str] = {
+        "link-folder-writable": {swap: "0 777"},
+        "link-folder-group-writable": {swap: "0 775"},
+        "link-folder-not-root": {swap: "501 755"},
+        "link-folder-unreadable": {swap: ""},
+        "relative-link-folder-writable": {swap: "0 777"},
+        "link-not-root": {link: "501"},
+        "link-owner-unreadable": {link: ""},
+        "nested-link-folder-writable": {hop: "0 1777"},
+        "nested-link-not-root": {hop / "inner": "501"},
+    }.get(how, {})
+    acl = {"link-folder-acl-allows-write": (swap,), "link-acl-allows-change": (link,)}.get(how, ())
+    if how == "link-unreadable":
+        real_readlink = subprocess.run(
+            ["sh", "-c", "command -v readlink"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        _write_stub(
+            host.bin,
+            "readlink",
+            f"""for a in "$@"; do [ "$a" = '{link}' ] && {{ echo "readlink: $a: Input/output error" >&2; exit 1; }}; done
+exec '{real_readlink}' "$@"
+""",
+        )
+    return host, checker, entries, acl
+
+
+@pytest.mark.parametrize("kind", ["macos", "linux", "apt"])
+@pytest.mark.parametrize("where", ["installed", "kept"])
+@pytest.mark.parametrize("how", _SYMLINK_CHECKER_REFUSED)
+def test_package_scripts_never_run_a_floor_checker_behind_a_replaceable_symlink(
+    tmp_path: Path, kind: str, where: str, how: str
+) -> None:
+    if how in ("link-folder-acl-allows-write", "link-acl-allows-change") and kind != "macos":
+        pytest.skip("a Linux ACL that grants write shows in the group bits (link-folder-group-writable)")
+    host, _checker, entries, acl = _symlinked_checker_host(tmp_path, where, how)
+    result = _run_floor_script(host, kind, entries, acl)
+    assert host.calls() == [], host.calls()
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "could not be checked" in result.stderr and "only root can" in result.stderr, result.stderr
+    assert "Nothing was changed" in result.stderr
+    if kind == "macos":
+        document = json.loads((host.state / "last-package-result.json").read_text(encoding="utf-8"))
+        assert [e["code"] for e in document["errors"]] == ["product_floor_refused"]
+        _validate_lifecycle_result(document)
+
+
+# A checker reached through symlinks only root can change (an /opt or a
+# lifecycle folder moved to another volume) still answers, and it is run by
+# the path it resolves to, so a symlink changed after the check cannot
+# redirect the run.
+@pytest.mark.parametrize("kind", ["macos", "linux", "apt"])
+@pytest.mark.parametrize("where", ["installed", "kept"])
+@pytest.mark.parametrize("how", _SYMLINK_CHECKER_TRUSTED)
+def test_package_scripts_run_a_root_only_symlinked_floor_checker_by_its_resolved_path(
+    tmp_path: Path, kind: str, where: str, how: str
+) -> None:
+    host, checker, entries, acl = _symlinked_checker_host(tmp_path, where, how)
+    result = _run_floor_script(host, kind, entries, acl)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    runs = [c for c in host.calls() if c.startswith("run ")]
+    assert runs == [f"run {checker.resolve()} enterprise bundle floor-check --product-version 1.0.5"], host.calls()
+
+
 def test_package_scripts_look_for_the_gateway_floor_check_marker() -> None:
     builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
     for text in (
