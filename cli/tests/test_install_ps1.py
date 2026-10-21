@@ -1205,6 +1205,10 @@ def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
     switch = _ps_functions("Switch-InPlace")
     assert "Remove-Aside" not in switch and "Move-Path" not in switch
     assert "it was left as it was" in switch
+    # 1.0.4 review (loop round 2): an independent restore copy is made before
+    # every attempt and handed to Close-SwapGap.
+    assert "Invoke-FileCopy $Destination $restore" in switch
+    assert "Close-SwapGap $New $aside $restore $Destination" in switch
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -1216,7 +1220,7 @@ def test_install_file_never_leaves_the_destination_missing(tmp_path: Path) -> No
 $ErrorActionPreference = 'Stop'
 function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
 function Move-Path([string]$From, [string]$To) {{ throw "rename used: $From" }}
-{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileReplace", "Switch-InPlace")}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileReplace", "Invoke-FileCopy", "Switch-InPlace")}
 Install-File '{source}' '{dest}'
 """
     completed = _run_powershell(script)
@@ -1241,7 +1245,7 @@ $script:missing = 0
 function Start-Sleep {{ }}
 function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
 function Move-Path([string]$From, [string]$To) {{ throw "rename used: $From" }}
-{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace")}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileCopy", "Switch-InPlace")}
 function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
     $script:calls++
     if (-not (Test-Path -LiteralPath $Destination)) {{ $script:missing++ }}
@@ -1269,7 +1273,7 @@ def test_a_replace_that_stops_after_the_backup_rename_finishes_the_swap(tmp_path
     script = f"""
 $ErrorActionPreference = 'Stop'
 function Start-Sleep {{ }}
-{_ps_functions("Get-Sha256", "Move-Path", "Install-File", "Publish-File", "Switch-InPlace", "Invoke-FileMove", "Close-SwapGap")}
+{_ps_functions("Get-Sha256", "Move-Path", "Install-File", "Publish-File", "Switch-InPlace", "Invoke-FileMove", "Invoke-FileCopy", "Close-SwapGap")}
 function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
     [IO.File]::Move($Destination, $Backup)
     throw "Unable to move the replacement file to the file to be replaced."
@@ -1302,7 +1306,7 @@ $script:waits = 0
 function Start-Sleep {{ $script:waits++; if (-not (Test-Path -LiteralPath '{dest}')) {{ $script:missingAtWait++ }} }}
 function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
 function Move-Path([string]$From, [string]$To) {{ throw "a retried rename was used: $From" }}
-{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace", "Close-SwapGap")}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileCopy", "Switch-InPlace", "Close-SwapGap")}
 function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
     $script:replaces++
     if ($script:heldMoves -lt {held_moves}) {{
@@ -1333,3 +1337,77 @@ Write-Output "REPLACES=$script:replaces WAITS=$script:waits MISSING_AT_WAIT=$scr
         assert "FAILED: Could not replace" in out and "it was left as it was" in out, out
         assert dest.read_text(encoding="ascii") == "old"
         assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("held_replaces", [3, 1000])
+@pytest.mark.parametrize("refused", ["new+backup", "new+backup+restore"])
+def test_a_partial_replace_with_the_new_file_and_the_backup_held_puts_the_launcher_back_at_once(
+    tmp_path: Path, held_replaces: int, refused: str
+) -> None:
+    # 1.0.4 review (loop round 2): ReplaceFile renamed the installed launcher
+    # to the backup (error 1177) and a scanner then held both the staged new
+    # file and the backup against a rename, for the whole recovery. The
+    # launcher must still be back before any wait: Close-SwapGap publishes the
+    # independent restore copy, or copies the old file in when the restore
+    # copy is held as well. Every ReplaceFile retry then runs with the
+    # launcher in place.
+    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    source.write_text("new", encoding="ascii")
+    dest.write_text("old", encoding="ascii")
+    restore_clause = " -or $From.EndsWith('.restore')" if refused.endswith("+restore") else ""
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$script:replaces = 0
+$script:refused = 0
+$script:copiesIn = 0
+$script:waits = 0
+$script:missingAtWait = 0
+$script:missingAtReplace = 0
+function Start-Sleep {{ $script:waits++; if (-not (Test-Path -LiteralPath '{dest}')) {{ $script:missingAtWait++ }} }}
+function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
+function Move-Path([string]$From, [string]$To) {{ throw "a retried rename was used: $From" }}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace", "Close-SwapGap")}
+function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
+    $script:replaces++
+    if (-not (Test-Path -LiteralPath $Destination)) {{ $script:missingAtReplace++ }}
+    if ($script:replaces -le {held_replaces}) {{
+        # A held backup cannot be replaced: ReplaceFile fails before it
+        # touches the installed file.
+        if (Test-Path -LiteralPath $Backup) {{ throw "The process cannot access the file because it is being used by another process." }}
+        [IO.File]::Move($Destination, $Backup)
+        throw "Unable to move the replacement file to the file to be replaced."
+    }}
+    # The scanner let go.
+    [IO.File]::Delete($Backup)
+    [IO.File]::Replace($New, $Destination, $Backup, $true)
+}}
+function Invoke-FileMove([string]$From, [string]$To) {{
+    if ($script:replaces -le {held_replaces} -and ($From.EndsWith('.new') -or $From -match '\\.old-[0-9T]+$'{restore_clause})) {{
+        $script:refused++
+        throw "The process cannot access the file because it is being used by another process."
+    }}
+    [IO.File]::Move($From, $To)
+}}
+function Invoke-FileCopy([string]$From, [string]$To) {{
+    if ($To -eq '{dest}') {{ $script:copiesIn++ }}
+    [IO.File]::Copy($From, $To, $false)
+}}
+try {{ Install-File '{source}' '{dest}'; Write-Output 'INSTALLED' }} catch {{ Write-Output "FAILED: $($_.Exception.Message)" }}
+Write-Output "REPLACES=$script:replaces REFUSED=$script:refused COPIES_IN=$script:copiesIn WAITS=$script:waits"
+Write-Output "MISSING_AT_WAIT=$script:missingAtWait MISSING_AT_REPLACE=$script:missingAtReplace"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "MISSING_AT_WAIT=0 MISSING_AT_REPLACE=0" in out and "WAITS=0 " not in out, out
+    refused_moves = 3 if refused.endswith("+restore") else 2
+    assert f"REFUSED={refused_moves} " in out, out
+    assert ("COPIES_IN=1 " if refused.endswith("+restore") else "COPIES_IN=0 ") in out, out
+    if held_replaces == 3:
+        assert "INSTALLED" in out, out
+        assert dest.read_text(encoding="ascii") == "new"
+    else:
+        assert "FAILED: Could not replace" in out and "it was left as it was" in out, out
+        assert dest.read_text(encoding="ascii") == "old"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]

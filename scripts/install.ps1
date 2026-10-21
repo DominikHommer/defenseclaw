@@ -1242,15 +1242,27 @@ function Invoke-FileMove([string]$From, [string]$To) {
     [IO.File]::Move($From, $To)
 }
 
-function Close-SwapGap([string]$New, [string]$Backup, [string]$Destination) {
+function Invoke-FileCopy([string]$From, [string]$To) {
+    [IO.File]::Copy($From, $To, $false)
+}
+
+function Close-SwapGap([string]$New, [string]$Backup, [string]$Restore, [string]$Destination) {
     # ReplaceFile stopped after it renamed the installed file to the backup
     # (ERROR_UNABLE_TO_MOVE_REPLACEMENT_2), so nothing is at $Destination.
     # Put a file back at once: the new one if it moves now, else the old one
-    # (a held new file is never waited on with the path missing). Returns
-    # $true when the new file is in place, $false when the old one is back.
+    # from the backup, else the restore copy Switch-InPlace made before the
+    # swap (a scanner can hold both the new file and the backup against a
+    # rename), else a copy of the old file (a hold against a rename still lets
+    # it be read). No step waits with the path missing. Returns $true when the
+    # new file is in place, $false when the old one is back.
     for ($tries = 0; ; $tries++) {
         if (Test-Path -LiteralPath $New) { try { Invoke-FileMove $New $Destination; return $true } catch { } }
-        if (Test-Path -LiteralPath $Backup) { try { Invoke-FileMove $Backup $Destination; return $false } catch { } }
+        foreach ($old in @($Backup, $Restore)) {
+            if ($old -and (Test-Path -LiteralPath $old)) { try { Invoke-FileMove $old $Destination; return $false } catch { } }
+        }
+        foreach ($old in @($Restore, $Backup)) {
+            if ($old -and (Test-Path -LiteralPath $old)) { try { Invoke-FileCopy $old $Destination; return $false } catch { } }
+        }
         if ($tries -ge 200) { throw "Could not put $Destination back after a partial replace; the installed file is $Backup" }
         Start-Sleep -Milliseconds 50
     }
@@ -1268,25 +1280,38 @@ function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) 
     # file, retry; if it never lets go, fail and leave the installed file in
     # place (the install is then undone) rather than fall back to the rename.
     # A ReplaceFile that stops halfway is closed at once (Close-SwapGap), and
-    # the retries then run with the installed file back in place.
+    # the retries then run with the installed file back in place. The restore
+    # copy, an independent copy of the installed file made before each
+    # attempt, is what Close-SwapGap publishes when a scanner holds both the
+    # new file and the backup. Its name starts like the backup's, so the next
+    # install removes one this run could not.
     $aside = "$Destination.old-" + (Get-Date -Format "yyyyMMddTHHmmssfff")
-    for ($waited = 0; ; $waited++) {
-        try {
-            Invoke-FileReplace $New $Destination $aside
-            Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
-            return
-        } catch {
-            $reason = $_.Exception.Message
+    $restore = "$aside.restore"
+    try {
+        for ($waited = 0; ; $waited++) {
+            if (-not (Test-Path -LiteralPath $restore)) {
+                try { Invoke-FileCopy $Destination $restore } catch { Remove-Item -LiteralPath $restore -Force -ErrorAction SilentlyContinue }
+            }
+            try {
+                Invoke-FileReplace $New $Destination $aside
+                return
+            } catch {
+                $reason = $_.Exception.Message
+            }
+            if (-not (Test-Path -LiteralPath $Destination) -and (Close-SwapGap $New $aside $restore $Destination)) {
+                return
+            }
+            if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
+                Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
+                throw "Could not replace $Destination in place ($reason); it was left as it was"
+            }
+            Start-Sleep -Milliseconds 500
         }
-        if (-not (Test-Path -LiteralPath $Destination) -and (Close-SwapGap $New $aside $Destination)) {
-            Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
-            return
+    } finally {
+        # Keep them when nothing is at $Destination: they are the old file.
+        if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+            foreach ($leftover in @($aside, $restore)) { Remove-Item -LiteralPath $leftover -Force -ErrorAction SilentlyContinue }
         }
-        if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
-            Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
-            throw "Could not replace $Destination in place ($reason); it was left as it was"
-        }
-        Start-Sleep -Milliseconds 500
     }
 }
 

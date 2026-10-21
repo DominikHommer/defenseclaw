@@ -128,7 +128,9 @@ Every other install, including OSS, the standalone enterprise profile and
 MDM-managed standalone hosts, keeps the closed default above.
 
 GitHub Copilot CLI and Antigravity have no fail-closed hook surface: their
-generated hooks stay open even when the effective mode is `closed`. Hermes has
+generated hooks stay open even when the effective mode is `closed`, and
+`guardrail fail-mode closed` saves `closed` for them only as the requested
+value (`guardrail fail-mode` shows them as upstream fail-open). Hermes has
 none of its own either, but on Linux, macOS and Windows its DefenseClaw hook follows the
 effective mode: `closed` (also when no value is set) blocks a tool call while
 the gateway is down or gives an unusable answer. Hermes itself still lets a
@@ -378,6 +380,12 @@ hooks and the OpenCode plugin of a Secure Client deployment ignore the
 variable, and the native Windows hook only tightens. On every other managed
 install the shell hooks ignore it, and the OpenCode plugin and the native
 Windows hook only tighten.
+
+The shared `inspect-*.sh` scripts serve every connector of one data
+directory, and `DEFENSECLAW_CONNECTOR` only picks the connector they report
+as. They run open only when every connector recorded there is open: one
+connector set to `closed` closes them for all, also after an upgrade that
+kept an older global `open`.
 
 Environment keys are case-insensitive on Windows. Do not define multiple
 case-variants with different values.

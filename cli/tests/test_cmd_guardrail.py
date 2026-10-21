@@ -1106,7 +1106,10 @@ class PerConnectorFailModeTests(unittest.TestCase):
             cmd_guardrail.fail_mode_cmd, ["--connector", "hermes"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("open (Hermes upstream; failures cannot be made fail-closed)", result.output)
+        self.assertIn(
+            "open (Hermes upstream; failures cannot be made fail-closed; configured provenance: closed)",
+            result.output,
+        )
         self.assertIn("per-connector override", result.output)
 
     def test_set_secure_client_hermes_closed_warns_that_runtime_remains_open(self):
@@ -1142,6 +1145,71 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertNotIn("Hermes will remain fail-open", result.output)
         self.assertIn("will now BLOCK Hermes tool calls", result.output)
         self.assertIn("hook times out", result.output)
+
+    def test_per_connector_closed_for_copilot_and_antigravity_is_provenance_not_a_block(self):
+        # 1.0.4 review (loop round 2): their per-user hooks render open under
+        # closed (no fail-closed hook contract), so the setter must not
+        # promise a block or an exit 2, and the view must say upstream
+        # fail-open, as the unscoped view, status and doctor do (GAP-0336).
+        for connector, label in (("copilot", "GitHub Copilot CLI"), ("antigravity", "Antigravity")):
+            with self.subTest(connector=connector):
+                runner = CliRunner()
+                app = make_multi_ctx({"codex": None, connector: None})
+                with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"):
+                    result = runner.invoke(
+                        cmd_guardrail.fail_mode_cmd,
+                        ["closed", "--connector", connector, "--yes"],
+                        obj=app,
+                    )
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(app.cfg.guardrail.connectors[connector].hook_fail_mode, "closed")
+                self.assertIn(f"{label} will remain fail-open", result.output)
+                self.assertIn("stored only as requested policy provenance", result.output)
+                self.assertIn(f"{label} has no fail-closed hook contract", result.output)
+                self.assertNotIn("BLOCK", result.output)
+                self.assertNotIn("exit 2", result.output)
+
+                result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["--connector", connector], obj=app)
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertIn(
+                    f"open ({label} upstream; failures cannot be made fail-closed; configured provenance: closed)",
+                    result.output,
+                )
+
+    def test_per_connector_closed_for_a_managed_standalone_copilot_still_blocks(self):
+        # Outside Secure Client a managed Copilot blocks through its native
+        # deny, so it is not upstream fail-open there and the block warning
+        # stays.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "copilot": None})
+        app.cfg.managed_outside_secure_client = lambda: True
+        with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"):
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd,
+                ["closed", "--connector", "copilot", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("will now BLOCK GitHub Copilot CLI", result.output)
+        self.assertNotIn("will remain fail-open", result.output)
+
+    def test_bare_closed_names_every_upstream_fail_open_connector(self):
+        # The unscoped setter named only Hermes; Copilot and Antigravity stay
+        # fail-open too.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "copilot": None, "antigravity": None})
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes", "--no-restart"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("BLOCK supported connectors", result.output)
+        self.assertIn("Antigravity, GitHub Copilot CLI remain fail-open.", result.output)
+
+    def test_bare_closed_on_a_copilot_only_install_is_provenance_not_a_block(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="copilot", hook_fail_mode="open")
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes", "--no-restart"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("GitHub Copilot CLI will remain fail-open; closed is stored only", result.output)
+        self.assertNotIn("BLOCK", result.output)
 
     def test_connector_flag_rejected_on_single_connector_install(self):
         runner = CliRunner()
