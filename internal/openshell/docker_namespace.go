@@ -67,7 +67,7 @@ func UserStateHome(getenv func(string) string, home string) string {
 }
 
 // DockerNamespaceInUse reports whether the account's gateway keeps a docker
-// sandbox in namespace: OpenShell's docker driver (0.1.0 to 0.1.3) keeps a
+// sandbox in namespace: OpenShell's docker driver (0.1.0 to 0.1.5) keeps a
 // folder per sandbox of a namespace, from its create to its delete, in
 // <state>/openshell/docker-sandbox-tokens/<namespace>. A folder that cannot
 // be read counts as in use, so the namespace is kept.

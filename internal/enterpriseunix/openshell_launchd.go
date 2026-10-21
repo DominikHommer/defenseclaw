@@ -260,8 +260,8 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 				state.Pending[key] = old
 			}
 		}
-		if statusErr != nil || status.Running > 0 {
-			count := status.Running
+		if statusErr != nil || status.busy() > 0 {
+			count := status.busy()
 			if statusErr != nil {
 				count = -1
 			}

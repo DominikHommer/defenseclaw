@@ -337,7 +337,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		// installs works, and setup offers the upgrade once its gateway is
 		// usable (settleGateway, which may start it first).
 		var err error
-		if rep, err = a.settleGateway(ctx, rep, assume); err != nil {
+		if rep, err = a.settleGateway(ctx, rep, assume, true); err != nil {
 			return err
 		}
 		if c := rep.Get(openshell.CheckIDCLI); c != nil && c.Status == openshell.StatusWarn {
@@ -347,7 +347,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		}
 	}
 	var err error
-	if rep, err = a.settleGateway(ctx, rep, assume); err != nil {
+	if rep, err = a.settleGateway(ctx, rep, assume, false); err != nil {
 		return err
 	}
 	if unmanaged = rep.GatewayUnmanaged(); unmanaged {
@@ -766,13 +766,18 @@ var gatewayStops = []string{openshell.CheckIDCLI, openshell.CheckIDRegistration,
 // does. A gateway service that is installed but stopped comes before the
 // registration and the gateway: its gateway does not answer, and one that
 // never started has not written the client certificates a registration
-// takes.
-func gatewayStop(rep *openshell.DoctorReport) *openshell.Check {
+// takes. Before the in-place upgrade (beforeUpgrade), a Gateway check that
+// fails only because its release runs no sandbox
+// (DoctorReport.OpenShellUpgradeNeeded) is the upgrade's to fix.
+func gatewayStop(rep *openshell.DoctorReport, beforeUpgrade bool) *openshell.Check {
 	order := gatewayStops
 	if svc := rep.Service; svc != nil && svc.Installed && !svc.Active {
 		order = []string{openshell.CheckIDCLI, openshell.CheckIDGatewayService, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion}
 	}
 	for _, id := range order {
+		if id == openshell.CheckIDGatewayVersion && beforeUpgrade && rep.OpenShellUpgradeNeeded() && rep.OpenShellUpgradeAvailable() {
+			continue
+		}
 		if failed(rep, id) {
 			return rep.Get(id)
 		}
@@ -786,10 +791,10 @@ func gatewayStop(rep *openshell.DoctorReport) *openshell.Check {
 // service, and registers a gateway that never was): setup offers it, as
 // `doctor --fix` does, and checks again. It returns the doctor report of
 // the machine as it is then.
-func (a *App) settleGateway(ctx context.Context, rep *openshell.DoctorReport, assume bool) (*openshell.DoctorReport, error) {
+func (a *App) settleGateway(ctx context.Context, rep *openshell.DoctorReport, assume, beforeUpgrade bool) (*openshell.DoctorReport, error) {
 	tried := map[string]bool{}
 	for {
-		c := gatewayStop(rep)
+		c := gatewayStop(rep, beforeUpgrade)
 		if c == nil {
 			return rep, nil
 		}
@@ -830,15 +835,19 @@ func (a *App) installerHow() string {
 // offerOpenShellUpgrade offers a supported OpenShell older than the
 // release DefenseClaw installs, whose CLI check (cli) warns, the in-place
 // upgrade (DoctorReport.OpenShellUpgradeAvailable). The question's default
-// is no, so --yes and --non-interactive keep the installed release, which
-// goes on working; --install-openshell upgrades it. NVIDIA's installer
+// is no, as the install's, so --yes and --non-interactive keep the
+// installed release; --install-openshell upgrades it. A kept release older
+// than openshell.SandboxMin runs no sandbox, so setup then stops on the
+// Gateway check, with the upgrade as its fix (the hosts DefenseClaw 1.0.0
+// to 1.0.3 set up on 0.1.1 to 0.1.3). NVIDIA's installer
 // restarts the gateway once it has installed the release, of every owner:
 // on the docker driver that drops the connections of the running
 // sandboxes, after Docker pulls the release's supervisor images; on the
 // MicroVM driver it would stop them without a flush, so while one runs
 // the upgrade is not offered, and openshell.PrepareUpgrade checks again
 // before the script. A refused upgrade ran nothing: setup warns and goes
-// on with the release installed. An OpenShell installed another way is
+// on with the release installed (to that Gateway check). An OpenShell
+// installed another way is
 // its user's to upgrade: the check's fix says how. It returns the doctor
 // report of the machine as it is then.
 func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *openshell.DoctorReport, cli openshell.Check) (*openshell.DoctorReport, error) {

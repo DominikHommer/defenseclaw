@@ -458,6 +458,62 @@ func upgradableReport(edit func(*openshell.DoctorReport)) func(context.Context, 
 	})
 }
 
+// TestSetupNeedsTheUpgradeOnAReleaseThatRunsNoSandbox: on the OpenShell
+// 0.1.1 to 0.1.4 that DefenseClaw 1.0.0 to 1.0.3 left, the daemon runs no
+// sandbox (openshell.SandboxMin, NVIDIA/OpenShell#4494), so the Gateway
+// check fails. That failure does not stop setup before the in-place upgrade
+// it offers; a kept release stops it after, on that check, with the upgrade
+// as the way on, and --install-openshell finishes on the upgraded release.
+func TestSetupNeedsTheUpgradeOnAReleaseThatRunsNoSandbox(t *testing.T) {
+	v, _ := openshell.ParseVersion("0.1.1")
+	old := upgradableReport(func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDGatewayVersion)
+		c.Status, c.Detail = openshell.StatusFail, (&openshell.ErrSandboxRelease{Found: v}).Error()
+		c.Fix = &openshell.Fix{Summary: "upgrade OpenShell to " + openshell.InstallerVersion + " in place", Command: "defenseclaw sandbox setup --install-openshell"}
+	})
+	for _, tc := range []struct {
+		name     string
+		o        SetupOptions
+		upgraded bool
+	}{
+		{"--yes keeps it and stops on the Gateway check", SetupOptions{Yes: true}, false},
+		{"--install-openshell upgrades it", SetupOptions{NonInteractive: true, InstallOpenShell: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := setupApp(t, "", "", true)
+			useGateway(ta)
+			inst := &fakeInstaller{}
+			ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+				if inst.upgraded {
+					return hostReport(nil)(ctx, d)
+				}
+				return old(ctx, d)
+			}
+			ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+				inst.consent = consent
+				return inst
+			}
+			o := tc.o
+			o.SkipImages, o.NoWrappers = true, true
+			err := ta.Setup(bg, o)
+			if inst.upgraded != tc.upgraded || inst.ran {
+				t.Fatalf("upgraded %v (installed %v), want %v\n%s", inst.upgraded, inst.ran, tc.upgraded, ta.output())
+			}
+			if tc.upgraded {
+				ta.ok(t, err)
+				has(t, ta.output(), "OpenShell upgraded to "+openshell.InstallerVersion)
+				lacks(t, ta.output(), "runs no DefenseClaw sandbox")
+				return
+			}
+			wantErr(t, err, "the OpenShell gateway is not usable yet (Gateway version)")
+			// The upgrade was offered (and kept) before setup stopped.
+			has(t, ta.output(), "OpenShell 0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" fixes a supervisor bug",
+				"✗ Gateway version: OpenShell 0.1.1 runs no DefenseClaw sandbox: before "+openshell.SandboxMin,
+				"→ upgrade OpenShell to "+openshell.InstallerVersion+" in place: defenseclaw sandbox setup --install-openshell")
+		})
+	}
+}
+
 // TestSetupOffersTheUpgrade: OpenShell 0.1.1 works, so setup asks before
 // it upgrades it in place (no by default, which --yes and -n take) and
 // says what the upgrade fixes and how to run it later; --install-openshell

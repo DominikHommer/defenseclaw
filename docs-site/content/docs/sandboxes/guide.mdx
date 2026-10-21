@@ -197,9 +197,9 @@ What setup does, in order:
    the fix. On a Mac whose gateway does not run the MicroVM driver yet, the
    missing Landlock of Docker Desktop's VM does not stop setup: step 3
    offers the MicroVM driver, whose sandboxes do not use that VM.
-2. **Installs OpenShell 0.1.3** when it is missing or too old and you agree
-   (on OpenShell 0.1.1 or 0.1.2, which still work, it offers the upgrade instead:
-   see [upgrade OpenShell](#upgrade-openshell)).
+2. **Installs OpenShell 0.1.5** when it is missing or too old and you agree
+   (on OpenShell 0.1.1 to 0.1.4, which run no sandbox any more, it offers the
+   upgrade in place instead: see [upgrade OpenShell](#upgrade-openshell)).
    NVIDIA's installer script is checked against a pinned SHA-256 before it
    runs. An early 0.0.x runtime cannot be upgraded in place, so setup first
    asks whether you backed it up and cleaned it up. On a Mac it installs the
@@ -303,7 +303,7 @@ What setup does, in order:
 | Flag | Effect |
 | --- | --- |
 | `--harness NAME` | A harness to set up; repeat it for more. It is added to `openshell.harnesses`, which keeps the harnesses set up before. Default: the harnesses in `openshell.harnesses`, else Claude Code and Codex. |
-| `--install-openshell` | Install OpenShell without asking, or upgrade OpenShell 0.1.1 or 0.1.2 to 0.1.3 in place (which restarts the gateway). |
+| `--install-openshell` | Install OpenShell without asking, or upgrade OpenShell 0.1.1 to 0.1.4 to 0.1.5 in place (which restarts the gateway). Sandboxes need 0.1.5. |
 | `--no-mounts` | Leave bind mounts off (Linux): no Claude Code or Codex sandbox can start, and other harnesses run on a copy. A Mac always works on a copy. |
 | `--wrappers` / `--no-wrappers` | Install the shell wrappers without asking, or never offer them. |
 | `--upstream-telemetry` | Keep OpenShell's anonymous usage telemetry on. A Mac gateway that no Homebrew service runs keeps it on either way. |
@@ -1826,7 +1826,7 @@ defenseclaw sandbox doctor
   ✓ OpenShell telemetry        OpenShell usage telemetry is off
   ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
   ✓ Sandbox egress port        127.0.0.1:18972 is served by the DefenseClaw daemon
-  ✓ DefenseClaw daemon         connected to OpenShell 0.1.3 gateway openshell; ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
+  ✓ DefenseClaw daemon         connected to OpenShell 0.1.5 gateway openshell; ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
   ✓ Sandbox hooks              the hooks of 1 running sandbox reach DefenseClaw (ingress 127.0.0.1:18971)
   ⚠ Harness images             not built yet: codex (the first run builds it, which takes a while)
     → build the images now: defenseclaw sandbox image build codex
@@ -1950,8 +1950,10 @@ nothing where a supported OpenShell CLI is already installed.
 
 - **Older than 0.1.1, or missing:** setup offers the install, which upgrades
   it.
-- **0.1.1 or 0.1.2:** it works, and the **OpenShell CLI** check warns; setup offers
-  the upgrade to 0.1.3 in place (see [upgrade OpenShell](#upgrade-openshell)).
+- **0.1.1 to 0.1.4:** DefenseClaw still lists, stops, deletes and pulls from
+  its sandboxes, but creates and starts none. The **Gateway** check fails and
+  setup offers the upgrade to 0.1.5 in place (see
+  [upgrade OpenShell](#upgrade-openshell)).
 - **Newer than DefenseClaw drives:** setup does not downgrade it. The
   **OpenShell CLI** fix is to remove it first.
 - **Installed, but a Gateway, Gateway service, registration or mTLS check
@@ -1965,34 +1967,50 @@ nothing where a supported OpenShell CLI is already installed.
 
 ### Upgrade OpenShell
 
-**You see:** ``⚠ OpenShell CLI 0.1.1 at /usr/bin/openshell; OpenShell 0.1.3
-fixes a supervisor bug that can stall a sandbox's first connection (0.1.2),
-cuts the CPU an idle sandbox uses (0.1.2) and ships the MicroVM driver
-already signed for Apple's Hypervisor (0.1.3)``, or the same for 0.1.2. The machine stays ready for sandboxes.
+**You see:** ``✗ Gateway: OpenShell 0.1.3 runs no DefenseClaw sandbox:
+before 0.1.5 its network broker let a sandbox's connections bypass the
+sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494);
+upgrade OpenShell to 0.1.5 in place``, or the same for 0.1.1, 0.1.2 or
+0.1.4. A prerelease of 0.1.5 (`0.1.5-pre.3`) gets ``OpenShell 0.1.5-pre.3 is
+a prerelease, which runs no DefenseClaw sandbox``: NVIDIA cut the first
+prereleases before the fix. `defenseclaw sandbox run` and `start` refuse with
+the same words, and setup stops on it. When the CLI is already 0.1.5 but the
+old gateway still answers (an upgrade that left it running), the check adds
+``the CLI installed here is OpenShell 0.1.5``, and its fix restarts the
+gateway service so that it runs the 0.1.5 gateway.
 
-**Why:** DefenseClaw installs OpenShell 0.1.3 and still drives 0.1.1 and
-0.1.2. In 0.1.1 a sandbox's first request through the egress proxy, or a hook
-call, can stall until the client's own timeout, and every idle sandbox uses
-about 2% of a CPU core; 0.1.2 fixes both. 0.1.3 ships the MicroVM driver
-already signed for Apple's Hypervisor.
+**Why:** DefenseClaw installs OpenShell 0.1.5 and creates or starts sandboxes
+only on 0.1.5 or later. Before 0.1.5 the supervisor's network broker fell
+through to a plain connect, bind, listen or send when it could not inspect a
+socket, so a sandbox's traffic could bypass its policy. DefenseClaw still
+drives 0.1.1 to 0.1.4 for everything else, so the sandboxes on such a host
+keep their work: list, stop, delete and pull from them, then upgrade. 0.1.5
+also flushes a MicroVM's disk before a stop, and stops a sandbox in
+OpenShell's error state (after Docker restarted, for one), so that
+`defenseclaw sandbox stop` and `start` bring it back instead of a delete.
 
 **Do this:** run `defenseclaw sandbox setup` and answer yes to ``Upgrade
-OpenShell 0.1.1 to 0.1.3 in place with NVIDIA's installer?``, or run
+OpenShell 0.1.3 to 0.1.5 in place with NVIDIA's installer?``, or run
 `defenseclaw sandbox setup --install-openshell`. The question's default is
-no, so `--yes` and `--non-interactive` keep the release you have. In the TUI, turn
-**Install OpenShell** on: it stays off for an upgrade. On a Mac, first stop
-the running sandboxes with `defenseclaw sandbox stop <name>`.
+no, as for the install, so `--yes` and `--non-interactive` do not upgrade, and
+setup then stops on the **Gateway** check. In the TUI, turn **Install
+OpenShell** on: it stays off for an upgrade. On the MicroVM driver, first stop
+the running sandboxes with `defenseclaw sandbox stop <name>`. After the
+upgrade, stop and start each sandbox that kept running through it: until it
+stops, it runs the old release's supervisor, and DefenseClaw says so
+(``⚠ <name>'s session started on OpenShell 0.1.3``) in the activity feed and
+in `defenseclaw sandbox status <name>`.
 
 What the upgrade does:
 
-- NVIDIA's pinned installer installs the 0.1.3 package (with `sudo`) on
+- NVIDIA's pinned installer installs the 0.1.5 package (with `sudo`) on
   Linux, or reinstalls the `nvidia/openshell` Homebrew formula on a Mac.
   Only then, after its downloads, does it restart the gateway, which affects
   every sandbox on it, of every owner; setup names the running ones first.
 - On the docker driver the running sandboxes keep running and lose their
-  connections. The restarted gateway needs the 0.1.3 supervisor images
-  (`ghcr.io/nvidia/openshell/supervisor:0.1.3` and
-  `ghcr.io/nvidia/openshell/sandbox:0.1.3`) before it starts, so Docker pulls
+  connections. The restarted gateway needs the 0.1.5 supervisor images
+  (`ghcr.io/nvidia/openshell/supervisor:0.1.5` and
+  `ghcr.io/nvidia/openshell/sandbox:0.1.5`) before it starts, so Docker pulls
   them before the installer runs. When Docker cannot reach `ghcr.io`, setup
   says so and keeps the release you have, and nothing is changed. Images that
   `[openshell.drivers.docker]` in `gateway.toml` replaces
@@ -2005,12 +2023,17 @@ What the upgrade does:
   `defenseclaw sandbox stop <name>` flushes a sandbox's disk and stops it,
   and `defenseclaw sandbox start <name>` starts it again after the upgrade.
 - OpenShell's patch releases do not intentionally break its stable
-  interfaces, so docker sandboxes made on 0.1.1 or 0.1.2 should start on 0.1.3. The
+  interfaces, so docker sandboxes made on 0.1.1 to 0.1.4 should start on 0.1.5. The
   MicroVM driver is experimental upstream and makes no such promise.
-- On a Mac the first start of each harness image prepares its MicroVM disk
-  again (about a minute and 5 GB). The disks the older release prepared stay in
+- On the MicroVM driver the first start of each harness image prepares its
+  MicroVM disk again (about a minute and 5 GB): the driver keeps one per
+  release. The disks the older release prepared stay in
   `~/.local/state/openshell/vm-driver/images` until
-  `defenseclaw sandbox image prune` removes them.
+  `defenseclaw sandbox image prune` removes them. From 0.1.4 the driver names
+  them by a hash of the image ID; DefenseClaw finds both kinds.
+- 0.1.5 names the supervisor's OCSF log files `openshell-ocsf.*.jsonl`
+  instead of `openshell-ocsf.*.log`. DefenseClaw does not read them; update a
+  collector of your own that does.
 - From 0.1.3 the gateway lets a client without a certificate finish the
   TLS handshake, because its sandbox supervisors authenticate with tokens,
   and refuses that client's API calls. Before it enables bind mounts
@@ -2195,7 +2218,8 @@ which runs NVIDIA's installer and sets up the service.
 | ``OpenShell refuses this conversation's requests, to the model and to DefenseClaw's hooks: the conversation holds a sandbox credential placeholder …`` (the feed, `sandbox status` row **Conversation**, the TUI), where the harness shows `API Error: 403 A credential placeholder in the request body cannot be forwarded` and the hooks fail closed | The conversation printed a placeholder (an `env` or `printenv` output shows them), and the harness sends its conversation with every request, which OpenShell refuses to forward. The key, the sandbox token and DefenseClaw are fine: end the session and start a new conversation with `defenseclaw sandbox connect <name>`, without `--continue`. |
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |
 | ``sandbox <name> does not run as DefenseClaw prepared it; DefenseClaw deleted it`` (a run or create), or ``…; DefenseClaw stopped it again (its work is kept)`` (a start) | The check after ready found the sandbox other than DefenseClaw prepared it, on any compute driver, and the reason follows the message: the workload runs as another uid or holds capabilities, a hook, launcher or managed-settings file is missing, changed, not root-owned or writable, or (Linux) a per-run settings file is not on a read-only mount. Nothing of the sandbox kept running, unless a start's message ends ``DefenseClaw could not stop the sandbox again, so it is still running: stop it with `defenseclaw sandbox stop <name>` ``: the stop failed too, so the sandbox still runs. Stop it with `defenseclaw sandbox stop <name>` first. Rebuild the harness image (`defenseclaw sandbox image build <harness> --force`) and run again; on a Mac, a uid mismatch is fixed by `defenseclaw sandbox doctor --fix`. If it repeats, keep the reason for a bug report. |
-| ``<name> is in OpenShell's error state`` (start, stop or connect), or the session ended with ``<name>'s container stopped under the session`` (or ``<name> does not answer, though OpenShell still reads it as running``, when Docker is still coming back) | The sandbox's container stopped while it ran (a Docker restart stops every one, or the workload failed), and OpenShell holds it in its error state, where it can be neither stopped nor started. `defenseclaw sandbox doctor` names it under **Sandbox hooks**. Delete it and run again: `defenseclaw sandbox delete <name> --keep-snapshot` keeps a mounted project's undo point (the folder keeps its changes); a copy's work that was not pulled cannot be read any more. |
+| ``<name> is in OpenShell's error state`` (start, stop or connect), or the session ended with ``<name>'s container stopped under the session`` (or ``<name> does not answer, though OpenShell still reads it as running``, when Docker is still coming back) | The sandbox's container stopped while it ran (a Docker restart stops every one, or the workload failed), and OpenShell holds it in its error state. `defenseclaw sandbox doctor` names it under **Sandbox hooks**. Fix what stopped it (start Docker again, for one), then `defenseclaw sandbox stop <name>` and `defenseclaw sandbox start <name>`, which keep the sandbox and its work. |
+| ``<name> is in OpenShell's error state: ProvisioningTimedOut`` (or `ImagePreparationTimedOut`), or a stop refused with ``sandbox provisioning timed out; retry start after timeout cleanup completes`` | OpenShell gave up provisioning the sandbox (a large image or a slow pull can pass its deadline) and refuses to stop it while its own cleanup reclaims what it started. Do not stop it: wait a minute, then `defenseclaw sandbox start <name>`, which provisions it again. A start that says ``provisioning timeout cleanup is still pending`` is tried again a little later. On OpenShell older than 0.1.5, upgrade first (`defenseclaw sandbox setup --install-openshell`), then wait and start the same way, with no stop. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. DefenseClaw also refuses system folders, shared roots such as `/tmp`, credential folders such as `~/.ssh`, and agent homes such as `~/.claude` and `~/.codex`, whose settings and hooks run on your machine. |
 | `undo cannot look inside tools in …: the session took read permission away` | Make the folder readable (`chmod u+rwx tools`), review what is in it, and run undo again. |
 | `… cannot be mounted live: …; run with --copy to work on a copy` | Add `--copy`. |

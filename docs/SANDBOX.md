@@ -3241,12 +3241,14 @@ nothing of the vm driver, but the names of its caches carry the release
 
 - OpenShell `>=0.1.1 <0.2.0`, checked against the CLI and the gateway. The
   installer code (`openshell.Installer`) runs the upstream installer from the
-  v0.1.3 tag (`InstallerVersion`) only after checking it against a pinned
+  v0.1.5 tag (`InstallerVersion`) only after checking it against a pinned
   SHA-256 for that tag; the release comes from `OPENSHELL_VERSION`.
   Releases before 0.0.37 must be cleaned up
   with the old CLI first; later ones upgrade in place. A supported release
-  older than `InstallerVersion` (0.1.3) still works: the doctor's
-  `openshell-cli` check warns, and setup upgrades it in place only with
+  older than `InstallerVersion` (0.1.5) is still driven (list, stop, delete,
+  pull), but runs no sandbox before `SandboxMin` (0.1.5, its prereleases
+  included): the doctor's `openshell-cli` check warns, its **Gateway** check
+  fails, and setup upgrades it in place only with
   consent (`Installer.Upgrade`: `--install-openshell`, or yes to its
   question, whose default is no). NVIDIA's script restarts the gateway only
   after its downloads and the package's (formula's) install, so

@@ -86,7 +86,7 @@ const renderedHeader = "# Written by the DefenseClaw enterprise lifecycle from e
 // and, each time its gateway starts, force-removes every supervisor, staging
 // and identity container of that namespace and every channel volume of it
 // whose sandbox has no container (reconcile_runtime_resources_at_startup,
-// OpenShell 0.1.1 to 0.1.3), whichever account's gateway made them. Every
+// OpenShell 0.1.1 to 0.1.5), whichever account's gateway made them. Every
 // account's gateway on a host shares one Docker engine. With the default
 // namespace a managed account's gateway start removed the supervisors of
 // another account's running sandboxes (a per-user gateway the account

@@ -8,6 +8,25 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.4
+
+### Changed
+
+- **OpenShell 0.1.5.** `defenseclaw sandbox setup` and the managed `install: setup` mode now install NVIDIA OpenShell 0.1.5 (installer script and release tarballs pinned by SHA-256). What 0.1.5 also brings: a MicroVM flushes its disk before a stop, and a sandbox in OpenShell's error state (after a Docker restart, for one) can be stopped and started again, so the feed, the stop and start errors, `sandbox doctor` and the session messages now say `defenseclaw sandbox stop NAME` and `start NAME` instead of a delete. A sandbox whose provisioning timed out (`ProvisioningTimedOut`, `ImagePreparationTimedOut`), whose stop OpenShell refuses, is told to wait for OpenShell's cleanup and start again with no stop. The supervisor's OCSF log files are named `openshell-ocsf.*.jsonl` from 0.1.5; DefenseClaw does not read them. The first MicroVM start of each image after the upgrade prepares its disk again (about a minute and 5 GB); `sandbox image prune` removes the older release's disks.
+
+### Security
+
+- **Sandboxes run only on OpenShell 0.1.5 or later.** Before 0.1.5 the supervisor's network broker fell through to the native connect, bind, listen or send when it could not inspect a socket descriptor, so a sandbox's traffic could bypass its policy (NVIDIA/OpenShell#4494). DefenseClaw now creates and starts no sandbox on an older gateway; it still connects to OpenShell 0.1.1 to 0.1.4 to list, stop, delete and pull from the sandboxes there, so a host DefenseClaw 1.0.0 to 1.0.3 left on one keeps their work. The doctor's **Gateway** check fails there with the in-place upgrade as its fix, `sandbox setup` offers that upgrade and stops on the check when it is declined, and `--install-openshell` runs it. A sandbox that keeps running through the upgrade keeps the old supervisor: the feed (a HIGH `old_supervisor` finding) and `sandbox status` name it until it stops and starts. Managed `install: setup` hosts pinned to an older release (the `"0.1.3"` of 1.0.3) install 0.1.5 instead, each account switching once none of its sandboxes runs; in `prerequisite` mode an installed release older than 0.1.5 is a failed `ensure` row. A prerelease of 0.1.5 counts as older (0.1.5-pre.1 to pre.3 predate the fix), however it is reported (gateway, `--version`, rpm or deb version). A 0.1.5 CLI whose older gateway still answers fails the **Gateway** check too, with the gateway restart as its fix, instead of a version-skew warning that let setup finish. The automatic switch of a managed account (the pin move included), and a sandbox daemon's own gateway stop and pending restart, wait for every sandbox that may still hold compute: one still starting or stopping, or a MicroVM in OpenShell's error state, which nothing can flush before the gateway stops.
+
+### Fixed
+
+- **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
+
+### Removed
+
+- The OpenShell 0.1.3 tarball pins: the managed `install: setup` mode installs 0.1.5 for that pin (see Security), so they were unreachable.
+- The managed `install: setup` mode no longer re-signs the macOS MicroVM driver ad hoc with Apple's hypervisor entitlement: every release it can install (0.1.5) ships the driver signed with it, so the shim never ran.
+
 ## [Unreleased] — 1.0.3
 
 ### Upgrade note for 1.0.3

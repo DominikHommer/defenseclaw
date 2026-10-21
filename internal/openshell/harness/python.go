@@ -127,8 +127,10 @@ const pyPeerNameShimName = "defenseclaw_peername"
 // socket it holds as connected (it says ENOTCONN otherwise, and the kernel
 // never answers EOPNOTSUPP for an inet socket), so the shim answers that
 // one error with the unspecified address of the socket's family, the peer
-// being unknown; every other answer is the kernel's. Drop it with the
-// OpenShell pin that carries #4150.
+// being unknown; every other answer is the kernel's. #4150 is in 0.1.3, and
+// no sandbox starts before openshell.SandboxMin (0.1.5) any more: drop the
+// shim (and workloadPythonRun's) after a live check of a Python harness on
+// a kernel before 5.19 (RHEL 9).
 const pyPeerNameShim = `"""DefenseClaw: TLS for a sandboxed Python harness on Linux before 5.19.
 
 OpenShell 0.1 answers getpeername() on a connection it relays with

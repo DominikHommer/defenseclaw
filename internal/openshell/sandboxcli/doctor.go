@@ -261,6 +261,22 @@ type statusProbe struct {
 	check   openshell.Check
 }
 
+// isAre is " is" for one name, " are" for more.
+func isAre(names []string) string {
+	if len(names) == 1 {
+		return " is"
+	}
+	return " are"
+}
+
+// itsTheir is "its" for one name, "their" for more.
+func itsTheir(names []string) string {
+	if len(names) == 1 {
+		return "its"
+	}
+	return "their"
+}
+
 // hooksCheck reports the sandboxes whose current session's hooks do not
 // reach DefenseClaw, with the daemon's reason for each.
 func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
@@ -275,14 +291,16 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Status, c.Detail = openshell.StatusWarn, "could not list the sandboxes: "+apiError(err).Error()
 		return c
 	}
-	var bad, stopped, stoppedSilent, errored []string
+	var bad, stopped, stoppedSilent, errored, timedOut []string
 	running := 0
 	// A sandbox of the compute driver the gateway ran before a switch is in
 	// OpenShell's error state because the gateway cannot run it, not because a
-	// container stopped or Docker restarted (GAP-0455).
-	liveDriver := ""
+	// container stopped or Docker restarted (GAP-0455). A gateway older than
+	// openshell.SandboxMin can neither stop nor start a sandbox in that state.
+	liveDriver, oldGateway := "", false
 	if st, serr := api.Status(ctx); serr == nil && st.Gateway != nil {
 		liveDriver = st.Gateway.Driver
+		oldGateway = !openshell.RunsSandboxes(st.Gateway.Version)
 	}
 	otherDriver := otherDriverSandboxes(list, liveDriver)
 	otherDriverNames := map[string]bool{}
@@ -293,7 +311,11 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		if sb.Phase == "ready" {
 			running++
 		}
-		if sb.Phase == "error" && !otherDriverNames[sb.Name] {
+		switch {
+		case sb.Phase != "error" || otherDriverNames[sb.Name]:
+		case openshell.ProvisioningTimedOut(sb.PhaseReason):
+			timedOut = append(timedOut, sb.Name)
+		default:
 			errored = append(errored, sb.Name)
 		}
 		if sb.Phase != "ready" && sb.Phase != "error" && sb.Hooks.Silent && sb.Hooks.OnSilence == "stop" {
@@ -315,17 +337,42 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Status = openshell.StatusFail
 		c.Detail = "hooks do not reach the ingress " + firstNonEmpty(ingress, "(unknown)") + ", so every tool call fails closed: " + strings.Join(bad, "; ")
 		c.Fix = &openshell.Fix{Summary: "fix the cause above, then start the session again"}
-	case len(errored) > 0:
+	case len(errored) > 0 || len(timedOut) > 0:
 		// A sandbox OpenShell lost (its container stopped: a Docker
-		// restart) can be neither stopped nor started (GAP-0278).
+		// restart) stops and starts again; one whose provisioning timed out
+		// starts again without a stop, which OpenShell refuses for it
+		// (NVIDIA/OpenShell#4231, GAP-0278).
 		c.Status = openshell.StatusWarn
-		verb := " is in"
-		if len(errored) > 1 {
-			verb = " are in"
+		var details, fixes []string
+		if len(errored) > 0 {
+			details = append(details, strings.Join(errored, ", ")+isAre(errored)+" in OpenShell's error state (the container stopped: Docker restarted, or the workload failed)")
+			fixes = append(fixes, "fix what stopped "+itThem(errored)+", then `"+CommandName+" stop NAME` and `"+CommandName+
+				" start NAME`, which keep the sandbox and its work")
 		}
-		c.Detail = strings.Join(errored, ", ") + verb + " OpenShell's error state (the container stopped: Docker restarted, or the workload failed), " +
-			"where OpenShell can neither stop nor start " + itThem(errored)
-		c.Fix = &openshell.Fix{Summary: "delete " + itThem(errored) + " (`" + CommandName + " delete NAME --keep-snapshot` keeps a mounted project's undo point) and run again"}
+		if len(timedOut) > 0 {
+			details = append(details, strings.Join(timedOut, ", ")+isAre(timedOut)+" in OpenShell's error state because "+
+				itsTheir(timedOut)+" provisioning timed out")
+			fixes = append(fixes, "for "+strings.Join(timedOut, ", ")+", wait a minute for OpenShell's cleanup, then `"+CommandName+
+				" start NAME` with no stop: OpenShell refuses to stop a sandbox whose provisioning timed out")
+		}
+		c.Detail = strings.Join(details, "; ")
+		c.Fix = &openshell.Fix{Summary: strings.Join(fixes, "; ")}
+		if oldGateway {
+			// The upgrade first; after it, the way on of the upgraded
+			// gateway, which still refuses to stop a sandbox whose
+			// provisioning timed out.
+			c.Detail += ", where this OpenShell can neither stop nor start " + itThem(append(slices.Clone(errored), timedOut...))
+			var after []string
+			if len(errored) > 0 {
+				after = append(after, "`"+CommandName+" stop NAME` and `"+CommandName+" start NAME` for "+strings.Join(errored, ", ")+
+					", which keep the sandbox and its work")
+			}
+			if len(timedOut) > 0 {
+				after = append(after, "for "+strings.Join(timedOut, ", ")+" wait a minute for OpenShell's cleanup, then `"+CommandName+
+					" start NAME` with no stop: OpenShell "+openshell.SandboxMin+" refuses to stop a sandbox whose provisioning timed out")
+			}
+			c.Fix = &openshell.Fix{Summary: "upgrade OpenShell to " + openshell.InstallerVersion + " (see Gateway), then " + strings.Join(after, "; ")}
+		}
 	case len(stoppedSilent) > 0:
 		c.Status = openshell.StatusWarn
 		c.Detail = strings.Join(stoppedSilent, ", ") + " stopped after its harness worked without hooks reaching DefenseClaw (hooks.on_silence: stop); no sandbox work runs now"
