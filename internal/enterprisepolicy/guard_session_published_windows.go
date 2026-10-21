@@ -35,12 +35,13 @@ const (
 	publishedSessionServiceAccess  = "0x1301bf"
 )
 
-// publishedSessionDirSDDL is the protected DACL of one account's folder:
-// SYSTEM and Administrators full control, the gateway service (this
-// process's token user) modify, the account read, all inherited by the
-// records.
+// publishedSessionDirSDDL is the owner and protected DACL of one account's
+// folder: owned by the gateway service (this process's token user, so a
+// later publish recognizes its own folder), SYSTEM and Administrators full
+// control, the gateway service modify, the account read, all inherited by
+// the records.
 func publishedSessionDirSDDL(service, account *windows.SID) string {
-	return "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;" + publishedSessionServiceAccess + ";;;" + service.String() +
+	return "O:" + service.String() + "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;" + publishedSessionServiceAccess + ";;;" + service.String() +
 		")(A;OICI;" + publishedSessionUserReadAccess + ";;;" + account.String() + ")"
 }
 
@@ -86,7 +87,7 @@ func publishedSessionPrepare(root, dir, identity string) error {
 		if err != nil {
 			return err
 		}
-		if publishedSessionRealDir(dir) == nil && publishedSessionOwnedBy(dir, service) {
+		if publishedSessionRealDir(dir) == nil && publishedSessionOwnedByTrusted(dir, service) {
 			return nil
 		}
 		if err := os.RemoveAll(dir); err != nil {
@@ -107,7 +108,9 @@ func publishedSessionRealDir(path string) error {
 	return winpath.RejectReparseChain(path)
 }
 
-func publishedSessionOwnedBy(path string, owner *windows.SID) bool {
+// publishedSessionOwnedByTrusted reports a folder owned by the gateway
+// service, Administrators or SYSTEM.
+func publishedSessionOwnedByTrusted(path string, service *windows.SID) bool {
 	extended, err := winpath.Extended(path)
 	if err != nil {
 		return false
@@ -117,7 +120,8 @@ func publishedSessionOwnedBy(path string, owner *windows.SID) bool {
 		return false
 	}
 	current, _, err := descriptor.Owner()
-	return err == nil && current != nil && current.Equals(owner)
+	return err == nil && current != nil && (current.Equals(service) ||
+		current.IsWellKnown(windows.WinBuiltinAdministratorsSid) || current.IsWellKnown(windows.WinLocalSystemSid))
 }
 
 // ValidatePublishedSessionPath checks a protected session record before the

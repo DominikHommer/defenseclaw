@@ -32,7 +32,7 @@ func TestPublishedSessionDirSDDLGrantsOnlyTheAccountRead(t *testing.T) {
 	service, _ := windows.StringToSid("S-1-5-80-1-2-3-4-5")
 	account, _ := windows.StringToSid("S-1-5-21-1111-2222-3333-1001")
 	sddl := publishedSessionDirSDDL(service, account)
-	if !strings.HasPrefix(sddl, "D:P(") || strings.Contains(sddl, ";BU)") || strings.Contains(sddl, ";WD)") ||
+	if !strings.HasPrefix(sddl, "O:S-1-5-80-1-2-3-4-5D:P(") || strings.Contains(sddl, ";BU)") || strings.Contains(sddl, ";WD)") ||
 		!strings.Contains(sddl, "(A;OICI;0x1200a9;;;S-1-5-21-1111-2222-3333-1001)") ||
 		!strings.Contains(sddl, "(A;OICI;0x1301bf;;;S-1-5-80-1-2-3-4-5)") {
 		t.Fatalf("unexpected DACL %s", sddl)
