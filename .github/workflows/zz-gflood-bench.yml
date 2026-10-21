@@ -14,11 +14,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest, v: A-hold800, holdmax: "", settle: "", settled: "", nosync: "" }
-          - { os: windows-latest, v: B-hold800-settle8, holdmax: "", settle: "8", settled: "50", nosync: "" }
-          - { os: windows-latest, v: C-ckpt-nosync, holdmax: "", settle: "", settled: "", nosync: "1" }
-          - { os: windows-latest, v: E-hold1500-settle8, holdmax: "1500", settle: "8", settled: "50", nosync: "" }
-          - { os: ubuntu-latest, v: A-linux, holdmax: "", settle: "", settled: "", nosync: "" }
+          - { os: windows-latest, v: A-D-drive, holdmax: "", settle: "", settled: "", nosync: "", cap: "", nopresync: "", fraction: "", ddrive: "1" }
+          - { os: windows-latest, v: F-settle0-hold800, holdmax: "", settle: "0", settled: "", nosync: "", cap: "", nopresync: "", fraction: "", ddrive: "" }
+          - { os: windows-latest, v: G-nopresync-cap800, holdmax: "", settle: "", settled: "", nosync: "", cap: "800", nopresync: "1", fraction: "", ddrive: "" }
+          - { os: windows-latest, v: H-from64MiB, holdmax: "", settle: "", settled: "", nosync: "", cap: "", nopresync: "", fraction: "4", ddrive: "" }
+          - { os: windows-latest, v: A-repeat, holdmax: "", settle: "", settled: "", nosync: "", cap: "", nopresync: "", fraction: "", ddrive: "" }
     name: probe ${{ matrix.os }} ${{ matrix.v }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
@@ -39,6 +39,11 @@ jobs:
           GFLOOD_SETTLE: ${{ matrix.settle }}
           GFLOOD_SETTLED_MS: ${{ matrix.settled }}
           GFLOOD_CKPT_NOSYNC: ${{ matrix.nosync }}
+          GFLOOD_CAP_MS: ${{ matrix.cap }}
+          GFLOOD_NOPRESYNC: ${{ matrix.nopresync }}
+          GFLOOD_FRACTION: ${{ matrix.fraction }}
+          GFLOOD_DDRIVE: ${{ matrix.ddrive }}
         run: |
           nproc 2>/dev/null || echo "$NUMBER_OF_PROCESSORS"
+          if [ "$GFLOOD_DDRIVE" = 1 ]; then export TMP="$RUNNER_TEMP" TEMP="$RUNNER_TEMP"; fi
           go test -count=1 -timeout 45m -run '^TestHookFloodProbe$' -v ./internal/gateway/ 2>&1 | grep -E "minute|WAL|PASS|FAIL|sent|drained|flat|ok " || true

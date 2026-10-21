@@ -11,7 +11,12 @@ import (
 	"time"
 )
 
+var gfloodNoPresync = os.Getenv("GFLOOD_NOPRESYNC") == "1"
+
 func init() {
+	if n, err := strconv.Atoi(os.Getenv("GFLOOD_FRACTION")); err == nil {
+		walCatchUpFraction = int64(n)
+	}
 	if n, err := strconv.Atoi(os.Getenv("GFLOOD_CAP_MS")); err == nil {
 		walCatchUpCap = time.Duration(n) * time.Millisecond
 	}

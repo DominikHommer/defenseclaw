@@ -50,7 +50,7 @@ var walTrickleFrames = 2048
 // walCatchUpFraction: the pass starts to bring the log to its end once the
 // log passes limit/walCatchUpFraction, so a pass or two that finds no idle
 // gap still leaves it under the limit.
-const walCatchUpFraction = 2
+var walCatchUpFraction int64 = 2
 
 // walSettleRounds bounds the extra copy-and-sync rounds before a catch-up,
 // and walSettledSync is the sync time that ends them: a sync that fast left
@@ -512,6 +512,9 @@ func (s *Store) checkpointWALOnWriter(ctx context.Context, conn *sql.Conn, budge
 // handle (read-write on every platform), so a later checkpoint's sync has
 // only its own pages left.
 func (s *Store) syncDatabaseFile() error {
+	if gfloodNoPresync {
+		return nil
+	}
 	if s.dbPathGuard == nil || s.dbPathGuard.inMemory || s.dbPathGuard.pinned == nil {
 		return nil
 	}
