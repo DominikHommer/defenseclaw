@@ -272,11 +272,6 @@ guardrail:
   detection_strategy_completion: regex_only  # default for tool results and completions; regex_judge also sends them to the judge
   detection_strategy_tool_call: ""   # per-lane override; empty -> detection_strategy
 
-  cisco:
-    endpoint: ""
-    api_key_env: CISCO_AI_DEFENSE_API_KEY
-    timeout_ms: 5000
-
   # judge.llm omitted: the judge inherits the top-level llm block.
   judge:
     enabled: false
@@ -364,7 +359,7 @@ webhooks:
     type: slack
     enabled: true
     url: https://hooks.slack.com/services/T000/B000/XXX
-    secret_env: ""             # optional HMAC for `type: generic`
+    # secret_env: WEBHOOK_HMAC_KEY   # optional HMAC key variable, for type: generic
     min_severity: HIGH
 ```
 

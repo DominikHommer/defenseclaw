@@ -187,7 +187,13 @@ func newEnterpriseBundleVerifyCommand() *cobra.Command {
 signature, manifest, tenant, device group and platform, version floor,
 minimum product version, files[] hashes, inline secrets, secret references,
 the config validator and the effective policy digest. On a standalone managed
-device it also checks that every required credential is present.`,
+device it also checks that every required credential is present.
+
+A bundle must have a version above both floors: the min_version of the trust
+anchors and the last confirmed bundle version. A standard account cannot read
+the confirmed state, so verify then warns floor_unchecked and checks only the
+anchor floor; apply checks again as root. A bundle signed by a key the anchors
+list as retired or revoked is refused.`,
 		Args:         bundleNoArgs,
 		SilenceUsage: true,
 		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},

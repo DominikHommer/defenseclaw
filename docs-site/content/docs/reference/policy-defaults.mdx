@@ -181,6 +181,6 @@ defenseclaw setup guardrail --rule-pack default --no-human-approval
 defenseclaw policy activate default
 ```
 
-To reset user state, copy `~/.defenseclaw` somewhere first (`reset` creates no archive), then run `defenseclaw reset` and `defenseclaw quickstart`. The runtime and installed plugin are kept. On Windows copy `%USERPROFILE%\.defenseclaw` with `Copy-Item -Recurse`. A managed install resets through its [lifecycle commands](/docs/enterprise/lifecycle).
+To reset user state, copy `~/.defenseclaw` somewhere first (`reset` creates no archive), then run `defenseclaw reset` and `defenseclaw quickstart --connector <name>` (for example `claudecode`). Bare `defenseclaw quickstart` works only when one agent is installed; with several it exits with "Multiple connectors detected" and asks for `--connector`. The runtime and installed plugin are kept. On Windows copy `%USERPROFILE%\.defenseclaw` with `Copy-Item -Recurse`. A managed install resets through its [lifecycle commands](/docs/enterprise/lifecycle).
 
 See also: [thresholds](/docs/reference/thresholds), [rules](/docs/reference/rules), [configuration](/docs/reference/configuration).

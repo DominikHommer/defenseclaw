@@ -134,6 +134,8 @@ first install. Deliver three apps, in this order:
    base app as its dependency (**Automatically install: Yes**). Upload the
    generated `detect-bundle.ps1` as its custom detection rule.
 
+Until the bundle app installs, the computer enforces the base app's policy. Keep the base config's rules the same as the bundle's (the packager checks this) so that window does not change what is blocked. See [Install order with a signed bundle](/docs/enterprise/mdm#install-order-with-a-signed-bundle).
+
 ```powershell
 ./New-DefenseClawIntunePackage.ps1 `
   -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `

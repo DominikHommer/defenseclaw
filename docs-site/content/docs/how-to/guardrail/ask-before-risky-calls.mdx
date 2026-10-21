@@ -26,12 +26,16 @@ Human approval (HITL) pauses a risky call and asks you instead of silently allow
    ```
 
    ```text
-     Updating HILT: enabled=false → true, min_severity=HIGH → HIGH
+     Updating HILT for active connectors:
+         - Claude Code (claudecode): enabled=false → true, min_severity=HIGH → HIGH
+         - Codex (codex): enabled=false → true, min_severity=HIGH → HIGH
 
      Proceed? [Y/n]: y
-     ✓ Config saved (guardrail.hilt: enabled=true min_severity=HIGH)
+     ✓ Config saved (2 connector HILT overrides updated)
      ✓ The running gateway applies it now.
    ```
+
+   The list names every agent you have set up, so yours will differ. Without a terminal (a pipe or a script) the command refuses to run until you add `--yes`.
 
    `--min-severity` takes `low`, `medium`, `high` or `critical`. Add `--connector claudecode` to change one agent only. Add `--yes` to skip the prompt in a script. The running gateway applies the change without a restart.
 

@@ -50,7 +50,11 @@ ensure transaction. The policy in force keeps enforcing until the gateway
 reports the new policy; a failed or interrupted apply keeps or puts back the
 last good bundle. Every apply ends in a receipt (bundle status). A repeated
 apply of the current bundle is a no-op (already_applied). --inbox applies the
-highest version in <etc>/bundles/inbox and removes the processed files.
+highest version in <etc>/bundles/inbox and removes the processed files; every
+lower inbox version gets a receipt that ends failed with superseded.
+If the current-version directory is damaged, ensure and repair keep the
+installed config, warn bundle_state_unreadable and still repair the host:
+deliver a new signed bundle to replace it.
 --defer-restart refuses a bundle whose config change restarts the gateway
 before anything changes (restart_deferred, exit 75, Windows 1618): the
 restart_prediction of bundle verify. --delivery-id records an opaque caller id (1 to 128 of A-Z a-z 0-9 . _ : -)
