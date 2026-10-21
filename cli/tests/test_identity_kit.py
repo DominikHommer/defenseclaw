@@ -1117,6 +1117,8 @@ def test_okta_check_requires_signon_coverage_for_requested_identities(
         def must(self, method, path):
             return {"id": "policy1", "name": "LDAP policy"}
         def get_all(self, path):
+            if path.startswith("/api/v1/users/"):
+                return []  # the named user is in no group
             return [{"name": "other user", "status": "ACTIVE", "priority": 0,
                      "conditions": {"people": {"users": {"include": ["other"]}}},
                      "actions": {"appSignOn": {"access": "ALLOW",
