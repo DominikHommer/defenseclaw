@@ -188,6 +188,9 @@ type guardrailProfileSet struct {
 	// groupSIDs holds the SIDs of the assignment group names on standalone
 	// Windows, where groups match on SIDs only (GAP-0860); nil elsewhere.
 	groupSIDs *profileGroupSIDs
+	// agentBridge links agents entries written for 1.0.3 identities to the
+	// identities their accounts have now (profileAgent).
+	agentBridge profileAgentBridge
 }
 
 // newGuardrailProfileSet derives every profile of cfg and preloads their rule
@@ -577,7 +580,7 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 			agent = strings.TrimSpace(id)
 		}
 	}
-	decision := set.match(subject, source, profileRequestConnector(ctx), agent)
+	decision := set.match(subject, source, profileRequestConnector(ctx), set.profileAgent(agent))
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
 		if derived, ok := set.profiles[decision.Name]; ok {
@@ -1720,7 +1723,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if source == "" {
 		agent = ""
 	}
-	decision := set.match(subject, source, connectorName, agent)
+	decision := set.match(subject, source, connectorName, set.profileAgent(agent))
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match
