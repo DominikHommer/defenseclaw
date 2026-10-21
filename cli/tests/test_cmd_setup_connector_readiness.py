@@ -995,7 +995,7 @@ def test_readiness_requires_the_rendered_windows_mode_to_match_the_lock(
     entry["hook_fail_mode"] = "closed"
     _patch_registration_ready(monkeypatch, entry)
     monkeypatch.setattr(fail_mode, "_is_windows", lambda: True)
-    monkeypatch.setattr(fail_mode, "_native_deny_registration_freshness", lambda *_args: None)
+    monkeypatch.setattr(fail_mode, "_native_deny_registration_freshness", lambda *_args: None, raising=False)
     hooks = tmp_path / "hooks"
     hooks.mkdir(exist_ok=True)
     if rendered is not None:

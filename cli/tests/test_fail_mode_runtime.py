@@ -1498,7 +1498,7 @@ def test_doctor_mode_fails_a_windows_hook_rendered_open_or_without_a_mode(
     cfg.plugin_dirs = lambda connector=None: []
     cfg.mcp_servers = lambda connector=None, **_: []
     monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: True)
-    monkeypatch.setattr(fail_mode_runtime, "_native_deny_registration_freshness", lambda *_args: None)
+    monkeypatch.setattr(fail_mode_runtime, "_native_deny_registration_freshness", lambda *_args: None, raising=False)
     _register_native_deny_hook(monkeypatch, cfg, home, "copilot")
     if sidecar is not None:
         (Path(cfg.data_dir) / "hooks" / ".hookcfg").write_text(
