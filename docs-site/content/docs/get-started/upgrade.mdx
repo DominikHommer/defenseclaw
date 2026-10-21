@@ -412,7 +412,8 @@ installs the policy.
 
 ## Renamed and removed connectors
 
-This applies only if you used Windsurf or Gemini CLI before 1.0:
+This applies only if you used Windsurf or Gemini CLI before 1.0, or OpenHands
+or OmniGent before 1.0.4:
 
 - **Windsurf is now Devin.** The upgrade moves your `windsurf` settings to the
   [`devin` connector](/docs/connectors/devin) and replaces the old hooks. You
@@ -421,6 +422,14 @@ This applies only if you used Windsurf or Gemini CLI before 1.0:
   instead. Remove DefenseClaw's hooks from Gemini CLI's settings once (the
   steps are below). If Gemini CLI was your only connector, the upgrade stops
   before it changes anything until you remove it.
+- **OpenHands and OmniGent were removed in 1.0.4.** The first gateway start
+  after the upgrade removes DefenseClaw's hooks from OpenHands
+  (`~/.openhands/hooks.json`) and its policy from OmniGent (the
+  `defenseclaw_omnigent_policy` entries in `~/.omnigent/config.yaml`, the
+  policy module and its `.pth` file). Hooks and policies from other tools stay,
+  and both agents keep working without DefenseClaw. Their settings are dropped
+  from `config.yaml`; `defenseclaw migrate` saves that. `defenseclaw uninstall`
+  removes the same files. You don't need to do anything.
 
 <Accordions type="multiple">
 

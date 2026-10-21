@@ -439,15 +439,13 @@ func (c *hookOnlyConnector) HookCapabilities(opts SetupOpts) HookCapability {
 }
 
 // HookProfile implements HookProfileProvider for the generic hook-only
-// process-environment trace exporter with connector-scoped header auth; the
-// connector deliberately does not persist those variables or mutate a shell
-// profile. Copilot upstream documents an optional OTel exporter, but
-// DefenseClaw does not configure or certify that surface. Cursor, Hermes,
+// connectors, which are all hook-only: Copilot upstream documents an
+// optional OTel exporter, but DefenseClaw does not configure or certify
+// that surface.
 //
 // SupportsTraceparent is true for the entire generic family: every
-// shipped hook script (cursor-hook.sh,
-// hermes-hook.sh, copilot-hook.sh,
-// _hardening.sh and
+// shipped hook script (cursor-hook.sh, hermes-hook.sh, copilot-hook.sh;
+// see internal/gateway/connector/hooks/) sources _hardening.sh and
 // invokes defenseclaw_extract_trace_context to forward the W3C
 // traceparent / tracestate headers from DEFENSECLAW_TRACEPARENT
 // (or TRACEPARENT / OTEL_TRACEPARENT). The pre-v6 era was when
@@ -1088,9 +1086,6 @@ func prepareHermesLifecycleDataDir(opts SetupOpts) error {
 	return ensureManagedBackupDirRestricted(opts.DataDir)
 }
 
-// exporter to a connector-scoped credential without leaving a live token after
-// a failed hook installation. A pre-existing or explicitly supplied token is
-// retained because it may belong to an earlier successful registration.
 func (c *hookOnlyConnector) setup(ctx context.Context, opts SetupOpts, hermesConfigPath string) error {
 	_ = ctx
 	if c.name == "hermes" {
@@ -5179,18 +5174,6 @@ func pruneNewlyEmptyHookEntries(before, after map[string]interface{}) {
 			}
 		}
 	}
-}
-
-func matcherOnlyHookGroup(group map[string]interface{}) bool {
-	if _, ok := group["matcher"]; !ok {
-		return false
-	}
-	for key := range group {
-		if key != "matcher" && key != "hooks" {
-			return false
-		}
-	}
-	return true
 }
 
 // removeHookScriptReferencesLegacy is main's JSON hook cleanup. Secure

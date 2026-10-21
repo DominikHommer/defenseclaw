@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -363,6 +364,10 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 		variable = "OPENCODE_CONFIG_DIR"
 	case "hermes":
 		variable = "HERMES_HOME"
+	case "openhands", "omnigent":
+		// until 1.1: teardown-only cleanup of a removed connector reads the
+		// home native Setup bound from SetupOpts.ConfigHome.
+		return func() {}, nil
 	default:
 		return nil, fmt.Errorf("explicit config home is unsupported for connector %q", connectorName)
 	}
@@ -491,6 +496,17 @@ func resolveConnectorOptsFor(dataDir, name string) connector.SetupOpts {
 	return opts
 }
 
+// reconcileSupportedConnectors are the connectors whose selected refresh
+// native Setup runs; any other connector is refused before it changes
+// anything.
+var reconcileSupportedConnectors = []string{
+	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "opencode",
+}
+
+func reconcileSupportedConnector(name string) bool {
+	return slices.Contains(reconcileSupportedConnectors, name)
+}
+
 func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	dataDir := resolveConnectorDataDir()
 	if dataDir == "" {
@@ -509,6 +525,9 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	conn, ok := reg.Get(name)
 	if !ok {
 		return fmt.Errorf("connector reconcile: unknown connector %q", name)
+	}
+	if !reconcileSupportedConnector(name) {
+		return fmt.Errorf("connector reconcile: selected refresh is supported only for %s", strings.Join(reconcileSupportedConnectors, ", "))
 	}
 	if warning, supportErr := connector.CheckPlatformSupportOnHost(name); supportErr != nil {
 		return fmt.Errorf("connector reconcile %s: %w", name, supportErr)
