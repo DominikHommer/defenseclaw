@@ -12321,6 +12321,42 @@ def _remove_connector(
         click.echo("  Aborted; no changes made.")
         return True
 
+    if match in {"opencode", "amp"}:
+        from defenseclaw.commands.cmd_doctor import _managed_plugin_drift
+        from defenseclaw.connector_paths import connector_config_files
+
+        try:
+            candidates = connector_config_files(match)
+            receipt = os.path.join(cfg.data_dir, "connector_backups", match, "config.json")
+            existed, body, _generation = _capture_protected_setup_file(
+                receipt, _SETUP_CONFIG_MAX_BYTES, "plugin backup", trust_windows_administrators=True,
+            )
+            if existed:
+                record = _json.loads(body)
+                if (
+                    not isinstance(record, dict) or type(record.get("version")) is not int or record["version"] != 1
+                    or record.get("connector") != match or record.get("logical_name") != "config"
+                    or type(record.get("existed")) is not bool
+                    or not isinstance(record.get("path"), str) or not os.path.isabs(record["path"])
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("post_sha256") or ""))
+                ):
+                    raise ValueError("invalid plugin backup identity")
+                candidates.append(record["path"])
+            for path in set(candidates):
+                try:
+                    os.lstat(path)
+                except FileNotFoundError:
+                    continue
+                if problem := _managed_plugin_drift(cfg, path, match):
+                    raise ValueError(problem)
+        except (OSError, ValueError) as exc:
+            ux.echo(
+                f"  ✗ Cannot remove {match}: its plugin teardown is unverified ({exc}). "
+                f"Preserve your edits, then run `defenseclaw setup {match} --yes --restart` "
+                "and retry removal. No configuration was saved.", err=True,
+            )
+            return False
+
     setup_snapshot: _SetupConfigSnapshot | None = None
     runtime_rollback = _windows_runtime_rollback(restart)
     if runtime_rollback:

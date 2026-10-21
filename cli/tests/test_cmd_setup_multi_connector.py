@@ -34,7 +34,6 @@ import hashlib
 import io
 import json
 import os
-import shlex
 import stat
 import sys
 import unittest
@@ -50,7 +49,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from click.testing import CliRunner
 
 pytestmark = pytest.mark.supported_connector_host
-from defenseclaw.agent_selection import SetupAgentSelection
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import (
     _configured_connector_set,
@@ -1545,6 +1543,26 @@ class TestRemoveConnector(unittest.TestCase):
                 self.assertEqual(self._effective_policy(survivor), expected_policy)
 
     # D3=A: --restart bounces the gateway so boot-time set-diff teardown runs.
+    def test_remove_modified_opencode_refuses_before_config_save(self):
+        self._seed_map("codex", "opencode")
+        plugin = os.path.join(self.tmp_dir, "defenseclaw.js")
+        original = b"// defenseclaw-managed-plugin v1\n// operator edit\n"
+        with open(plugin, "wb") as stream:
+            stream.write(original)
+        with (
+            patch("defenseclaw.connector_paths.connector_config_files", return_value=[plugin]),
+            self._no_restart_bounce() as bounce,
+            patch.object(self.app.cfg, "save") as save,
+        ):
+            result = _invoke(["remove", "opencode", "--yes"], self.app)
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertIn("defenseclaw setup opencode --yes --restart", result.output)
+        save.assert_not_called()
+        bounce.assert_not_called()
+        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "opencode"})
+        with open(plugin, "rb") as stream:
+            self.assertEqual(stream.read(), original)
+
     def test_remove_restart_bounces_gateway(self):
         self._seed_map("codex", "cursor")
         with self._no_restart_bounce() as bounce:

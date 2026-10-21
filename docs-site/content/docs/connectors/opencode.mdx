@@ -64,7 +64,7 @@ It is the only file setup writes. It holds a connector-scoped token and is limit
 defenseclaw guardrail disable --connector opencode --yes
 ```
 
-This keeps OpenCode's settings. Turn it back on with `defenseclaw guardrail enable --connector opencode`. To remove the connector, run `defenseclaw setup remove opencode --yes` (add `--force` if it is the last one). Teardown keeps a plugin file you modified. Restart OpenCode afterwards.
+This keeps OpenCode's settings. Turn it back on with `defenseclaw guardrail enable --connector opencode`. To remove the connector, run `defenseclaw setup remove opencode --yes` (add `--force` if it is the last one). If you modified the plugin, removal refuses before saving configuration. Preserve your edits, run `defenseclaw setup opencode --yes --restart` to restore the managed plugin, then retry removal. Restart OpenCode afterwards.
 
 ## Details
 

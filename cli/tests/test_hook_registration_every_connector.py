@@ -143,7 +143,7 @@ def _quickstart_problem(cfg, connector: str) -> str:
 def _doctor_rows(cfg, connector: str, monkeypatch) -> list[dict[str, Any]]:
     # The OpenCode row also checks the custody receipt Setup leaves in the data
     # directory, which this fixture does not have; that is not registration.
-    monkeypatch.setattr(cmd_doctor, "_opencode_managed_plugin_drift", lambda *_a, **_k: "")
+    monkeypatch.setattr(cmd_doctor, "_managed_plugin_drift", lambda *_a, **_k: "")
     r = cmd_doctor._DoctorResult(passive=True)
     cmd_doctor._check_connector_hooks(cfg, connector, r)
     rows = list(r.checks)

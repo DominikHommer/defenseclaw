@@ -7048,17 +7048,17 @@ def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
     return any(m and m in data for m in markers)
 
 
-def _opencode_managed_plugin_drift(cfg, path: str) -> str:
-    """Return an integrity failure for OpenCode's user-scoped bridge, if any."""
+def _managed_plugin_drift(cfg, path: str, connector: str = "opencode") -> str:
+    """Return an integrity failure for a user-scoped plugin bridge, if any."""
 
     data_dir = str(getattr(cfg, "data_dir", "") or "")
-    backup_path = os.path.join(data_dir, "connector_backups", "opencode", "config.json")
+    backup_path = os.path.join(data_dir, "connector_backups", connector, "config.json")
     try:
         with open(backup_path, encoding="utf-8") as fh:
             record = json.load(fh)
     except (OSError, UnicodeError, json.JSONDecodeError):
         return f"managed backup evidence is missing or unreadable: {backup_path}"
-    if record.get("connector") != "opencode" or record.get("logical_name") != "config":
+    if not isinstance(record, dict) or record.get("connector") != connector or record.get("logical_name") != "config":
         return f"managed backup identity is invalid: {backup_path}"
     recorded_path = str(record.get("path") or "")
     if not recorded_path or os.path.normcase(os.path.abspath(recorded_path)) != os.path.normcase(os.path.abspath(path)):
@@ -7078,7 +7078,7 @@ def _opencode_managed_plugin_drift(cfg, path: str) -> str:
     if hashlib.sha256(body).hexdigest() != expected:
         return (
             "managed plugin drift detected; run "
-            "`defenseclaw setup opencode --yes --restart` to reconcile"
+            f"`defenseclaw setup {connector} --yes --restart` to reconcile"
         )
     return ""
 
@@ -7198,6 +7198,14 @@ def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
     if not token:
         return None, "authenticated gateway token is unavailable", True
     trust = _trusted_gateway_listener(cfg)
+    # A fork can briefly expose a second holder of the listening descriptor.
+    # Re-prove the entire identity/endpoint binding; ambiguity itself never
+    # authorizes the authenticated request. Persistent ambiguity stays closed.
+    for _ in range(2):
+        if trust.code != "ambiguous_listener":
+            break
+        time.sleep(0.05)
+        trust = _trusted_gateway_listener(cfg)
     if not trust.trusted and trust.code == "missing":
         return None, "the gateway is not running", False
     if not trust.trusted:
@@ -8343,7 +8351,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     probe_runtime=not r.passive,
                 )
             elif connector == "opencode":
-                if drift := _opencode_managed_plugin_drift(cfg, path):
+                if drift := _managed_plugin_drift(cfg, path):
                     _emit("fail", label, drift, r=r)
                 else:
                     status, runtime_detail = _opencode_load_heartbeat_status(cfg)

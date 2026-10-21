@@ -236,7 +236,7 @@ def _patch_amp_readiness_leaves(monkeypatch, cfg: SimpleNamespace, entry: dict[s
     monkeypatch.setattr(agent_selection, "setup_agent_lock_executable_invariant", lambda *_args: "")
     monkeypatch.setattr(cmd_doctor, "_hook_health_paths_from_lock", lambda *_args: [config_path])
     monkeypatch.setattr(cmd_doctor, "_hook_runtime_paths_from_lock", lambda *_args: runtime_paths)
-    monkeypatch.setattr(cmd_doctor, "_opencode_managed_plugin_drift", lambda *_args: "")
+    monkeypatch.setattr(cmd_doctor, "_managed_plugin_drift", lambda *_args: "")
 
 
 def test_slow_real_dispatch_is_bounded_and_cannot_publish_late(monkeypatch, tmp_path: Path) -> None:
