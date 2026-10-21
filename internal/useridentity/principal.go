@@ -230,6 +230,23 @@ func (f AccountFilter) Matches(id, name string) bool {
 	return len(f.ids) == 0 && id != "" && f.removed != nil && f.removed(id)
 }
 
+// NamesakesUnknownError refuses a bare account name while the host cannot
+// tell whether a directory account shares it: realmd did not answer and no
+// other source names the joined domains, so the directory twin of a local
+// account cannot be looked up (GAP-1131). The administrator names the
+// account by its qualified name or its uid.
+type NamesakesUnknownError struct {
+	Name string
+	Err  error
+}
+
+func (e *NamesakesUnknownError) Error() string {
+	return fmt.Sprintf("cannot tell whether a directory account is also named %q: the joined domains are unknown (%v); "+
+		"name the account by its qualified name (user@domain or DOMAIN\\name) or its uid", e.Name, e.Err)
+}
+
+func (e *NamesakesUnknownError) Unwrap() error { return e.Err }
+
 // AccountRef names one account of an AmbiguousAccountError.
 type AccountRef struct {
 	ID   string `json:"user_id"`

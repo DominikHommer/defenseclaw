@@ -32,7 +32,7 @@ func TestSameNameAccountsFindsTheDirectoryTwin(t *testing.T) {
 		"passwd dcad-o4ud@dclab.test": {stdout: []byte("dcad-o4ud@dclab.test:*:94403993:94400513::/home/dcad-o4ud@dclab.test:/bin/bash\n")},
 	}})
 	local := Account{Name: "dcad-o4ud", UID: 1008}
-	twins := SameNameAccounts(context.Background(), r, local)
+	twins, _ := SameNameAccounts(context.Background(), r, local)
 	if len(twins) != 1 || twins[0].UID != 94403993 {
 		t.Fatalf("twins of the local account = %+v", twins)
 	}

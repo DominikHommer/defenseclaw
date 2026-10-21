@@ -52,7 +52,31 @@ const (
 	// across every profile set: the OS never abandons a stalled lookup, so
 	// reloads must not pile them up.
 	profileGroupSIDLookupsMax = 256
+	// profileGroupSIDLocalLookupsMax bounds the lookups of this computer's
+	// own groups (.\name, COMPUTER\name, BUILTIN\name) apart from the rest.
+	// The LSA answers those from the local account database, so lookups a
+	// stalled domain controller holds cannot use up their slots, and a
+	// reload that assigns a local group still resolves it (GAP-1261).
+	profileGroupSIDLocalLookupsMax = 64
 )
+
+// profileGroupLocalDomain is this computer's name, the domain of its own
+// accounts and groups ("" where unknown). It is set on Windows.
+var profileGroupLocalDomain = func() string { return "" }
+
+// profileGroupLocalName reports whether an assignment group name names a
+// group of this computer.
+func profileGroupLocalName(name string) bool {
+	domain, _, qualified := strings.Cut(strings.TrimSpace(name), `\`)
+	if !qualified {
+		return false
+	}
+	if domain == "." || strings.EqualFold(domain, "BUILTIN") {
+		return true
+	}
+	computer := strings.TrimSpace(profileGroupLocalDomain())
+	return computer != "" && strings.EqualFold(domain, computer)
+}
 
 // errProfileGroupUnknown is the answer of profileGroupSIDLookup for a name
 // that maps to no group.
@@ -73,23 +97,32 @@ type profileGroupSIDLookupCall struct {
 var profileGroupSIDLookups = struct {
 	sync.Mutex
 	calls map[string]*profileGroupSIDLookupCall
+	// local counts the calls in flight for groups of this computer.
+	local int
 }{calls: map[string]*profileGroupSIDLookupCall{}}
 
 // startProfileGroupSIDLookup returns the lookup in flight for name, starting
-// one if none is; nil when profileGroupSIDLookupsMax lookups are outstanding.
+// one if none is; nil when the lane of name is full: profileGroupSIDLookupsMax
+// lookups of directory names, or profileGroupSIDLocalLookupsMax of this
+// computer's groups, are outstanding.
 func startProfileGroupSIDLookup(lookup func(string) (string, error), name string) *profileGroupSIDLookupCall {
 	key := foldKey(name)
+	local := profileGroupLocalName(name)
 	lookups := &profileGroupSIDLookups
 	lookups.Lock()
 	defer lookups.Unlock()
 	if call, ok := lookups.calls[key]; ok {
 		return call
 	}
-	if len(lookups.calls) >= profileGroupSIDLookupsMax {
+	if local && lookups.local >= profileGroupSIDLocalLookupsMax ||
+		!local && len(lookups.calls)-lookups.local >= profileGroupSIDLookupsMax {
 		return nil
 	}
 	call := &profileGroupSIDLookupCall{done: make(chan struct{})}
 	lookups.calls[key] = call
+	if local {
+		lookups.local++
+	}
 	go func() {
 		sid, err := lookup(name)
 		call.sid, call.err = strings.ToUpper(strings.TrimSpace(sid)), err
@@ -98,6 +131,9 @@ func startProfileGroupSIDLookup(lookup func(string) (string, error), name string
 		}
 		lookups.Lock()
 		delete(lookups.calls, key)
+		if local {
+			lookups.local--
+		}
 		lookups.Unlock()
 		close(call.done)
 	}()
@@ -314,6 +350,9 @@ func (s *profileGroupSIDs) sid(name string) (string, bool) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.inflight.Load() > 0 {
+		s.absorbLocked(time.Now())
+	}
 	entry, ok := s.entries[foldKey(norm.NFC.String(strings.TrimSpace(name)))]
 	if !ok || entry.sid == "" {
 		return "", false
@@ -329,13 +368,20 @@ func (s *profileGroupSIDs) matchKey(key [sha256.Size]byte) [sha256.Size]byte {
 }
 
 // warnings names each assignment group that has no SID, other than a group
-// the host does not know, which unknownGroupWarnings reports.
+// the host does not know, which unknownGroupWarnings reports. Lookups that
+// finished since the last request are taken in first: status and doctor
+// kept naming a group as unresolved after its lookup had answered, until a
+// hook call took the answer in (GAP-1142).
 func (s *profileGroupSIDs) warnings(assignments []config.ProfileAssignment) []string {
-	if s == nil || s.unresolved.Load() == 0 {
+	if s == nil || s.unresolved.Load() == 0 && s.inflight.Load() == 0 {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.absorbLocked(time.Now())
+	if s.unresolved.Load() == 0 {
+		return nil
+	}
 	var out []string
 	for i, assignment := range assignments {
 		for _, group := range assignment.Match.Groups {

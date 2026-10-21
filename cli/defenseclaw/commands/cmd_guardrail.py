@@ -5349,8 +5349,8 @@ def _age_text(seconds) -> str:
 
 
 # How long explain waits for the gateway. The gateway looks the user up in the
-# directory before it answers, and that lookup is bounded at 20 s (and the
-# account lookup before it at 10 s), so the client waits longer than both.
+# directory before it answers, waiting at most 12 s for that lookup (and 10 s
+# for the account lookup before it), so the client waits longer than both.
 PROFILE_EXPLAIN_TIMEOUT_SECONDS = 35
 
 
@@ -5409,8 +5409,14 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
         notice = gateway_reload_notice(app.cfg)
         ux.subhead(notice or "Start it with: defenseclaw-gateway start", indent="  ")
         raise SystemExit(1) from None
+    # The gateway answers 200 with lookup_error for an account it could not
+    # name (a typo, or a bare name two accounts share); the answer is still
+    # printed, and the command fails (GAP-1239).
+    unresolved = bool(result.get("lookup_error")) and not (result.get("subject") or {}).get("user_id")
     if json_out:
         click.echo(json.dumps(result, indent=2, sort_keys=True))
+        if unresolved:
+            raise SystemExit(1)
         return
     ux.section("Guardrail profile resolution", indent="  ")
     # The answer is the gateway's, which may still run an earlier generation
@@ -5470,6 +5476,8 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
             f"rule_pack={effective.get('rule_pack_dir') or 'default'}"
         )
     click.echo()
+    if unresolved:
+        raise SystemExit(1)
 
 
 # Register `defenseclaw guardrail judge` (hook-lane judge gate). The

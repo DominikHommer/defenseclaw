@@ -43,7 +43,7 @@ func QualifiedUserName(context.Context, Resolver, string) string  { return "" }
 
 // SameNameAccounts finds no twins on macOS: Open Directory resolves a short
 // name to one account.
-func SameNameAccounts(context.Context, Resolver, Account) []Account { return nil }
+func SameNameAccounts(context.Context, Resolver, Account) ([]Account, error) { return nil, nil }
 
 const (
 	darwinDSCL   = "/usr/bin/dscl"

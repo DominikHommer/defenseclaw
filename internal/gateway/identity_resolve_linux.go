@@ -17,12 +17,13 @@ import (
 
 // peerDirectoryLookupTimeout bounds one background resolution (the getent
 // calls), well beyond the hot-path budget a waiting request uses. A cold SSSD
-// names a group in about 30 ms, so an account in 400 groups needs up to twelve
-// seconds when SSSD answers one lookup at a time; a lookup that still runs
-// out fails as a whole and is retried (GAP-0138). `guardrail profile
-// explain` starts this lookup through the cache and waits for it at most
-// identityExplainWait; a lookup still running then is cached when it ends.
-const peerDirectoryLookupTimeout = 20 * time.Second
+// names a group in about 30 ms, one lookup at a time, so the bound grows with
+// the largest membership DefenseClaw names (unixidentity.DirectoryLookupBudget,
+// GAP-1247); a lookup that still runs out fails as a whole and is retried
+// (GAP-0138). `guardrail profile explain` starts this lookup through the
+// cache and waits for it at most identityExplainWait; a lookup still running
+// then is cached when it ends.
+var peerDirectoryLookupTimeout = unixidentity.DirectoryLookupBudget()
 
 // resolvePeerDirectoryFacts resolves a verified uid's facts through NSS and
 // merges the guardian's identity spool record for it.

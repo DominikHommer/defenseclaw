@@ -442,10 +442,13 @@ func (c *managedHookPeerHomeCache) lookup(uid int) string {
 	return home
 }
 
-// lookupName returns the caller's sanitized account name, or "".
 // cachedHolder returns the uid and name of the account whose cached
 // directory facts were last used under name (compared without regard to
-// case) or under the uid name spells.
+// case) or under the uid name spells. A name no holder was used under may
+// still be another accepted spelling of one holder's account, which its
+// cached facts confirm (cachedFactsSpell): its UPN or principal, or
+// DOMAIN\name and name@domain of its own domain, so every spelling explain
+// accepts finds the facts the hooks apply during an outage (GAP-0551).
 func (c *managedHookPeerHomeCache) cachedHolder(name string) (int, string, bool) {
 	name = strings.TrimSpace(name)
 	holders := c.liveHolders()
@@ -465,7 +468,46 @@ func (c *managedHookPeerHomeCache) cachedHolder(name string) (int, string, bool)
 			foundUID, foundName = uid, holder.name
 		}
 	}
+	if foundName != "" || !useridentity.QualifiedAccountName(name) {
+		return foundUID, foundName, foundName != ""
+	}
+	for uid, holder := range holders {
+		if holder.name == "" {
+			continue
+		}
+		facts, _, served := c.directoryCache().peek(strconv.Itoa(uid))
+		if !served || !cachedFactsSpell(name, holder.name, facts) {
+			continue
+		}
+		if foundName != "" {
+			return 0, "", false
+		}
+		foundUID, foundName = uid, holder.name
+	}
 	return foundUID, foundName, foundName != ""
+}
+
+// cachedFactsSpell reports whether name, a qualified account name, is a
+// spelling of the account held as holder with facts: its UPN or principal,
+// or its bare name qualified with a domain its facts name (DNS domain,
+// NetBIOS domain or realm).
+func cachedFactsSpell(name, holder string, facts useridentity.DirectoryFacts) bool {
+	for _, principal := range []string{facts.UPN, facts.Principal} {
+		if principal != "" && useridentity.EqualFold(principal, name) {
+			return true
+		}
+	}
+	bare, domain := useridentity.SplitQualifiedName(name)
+	holderBare, _ := useridentity.SplitQualifiedName(holder)
+	if domain == "" || !useridentity.EqualFold(bare, holderBare) {
+		return false
+	}
+	for _, own := range []string{facts.Domain, facts.AccountDomain, facts.Realm} {
+		if own != "" && useridentity.EqualFold(own, domain) {
+			return true
+		}
+	}
+	return false
 }
 
 // cachedNamesakes lists other verified uids last held under a bare name.
@@ -542,6 +584,7 @@ func (c *managedHookPeerHomeCache) liveHolders() map[int]managedHookPeerHolder {
 	return holders
 }
 
+// lookupName returns the caller's sanitized account name, or "".
 func (c *managedHookPeerHomeCache) lookupName(uid int) string {
 	account, ok := c.account(uid)
 	if !ok {

@@ -63,6 +63,54 @@ def test_signon_uses_first_matching_rule(monkeypatch):
     assert report.problems == 1
 
 
+def _group_signon_report(monkeypatch, rules, user_groups):
+    monkeypatch.setattr(okta, "find_group", lambda client, name: {"id": "G1"})
+
+    class Client:
+        def must(self, method, path, body=None):
+            return {"id": "policy", "name": "policy"}
+
+        def get_all(self, path):
+            if path.startswith("/api/v1/users/"):
+                return [{"id": gid} for gid in user_groups.get(path.split("/")[4], [])]
+            return rules
+
+    report = okta.Report(False)
+    okta.check_signon_policy(Client(), report, {"_links": {"accessPolicy": {"href": "/policy"}}}, None, ["engineering"])
+    return report
+
+
+PASSWORD = {"type": "ASSURANCE", "factorMode": "1FA", "constraints": [{"knowledge": {"types": ["password"]}}]}
+
+
+def test_group_coverage_accounts_for_an_earlier_user_deny(monkeypatch):
+    """GAP-1166: a member's own deny is not hidden by the group's later allow."""
+    rules = [
+        {"name": "deny U1", "status": "ACTIVE", "priority": 1,
+         "conditions": {"people": {"users": {"include": ["U1"]}}},
+         "actions": {"appSignOn": {"access": "DENY"}}},
+        {"name": "group allow", "status": "ACTIVE", "priority": 2,
+         "conditions": {"people": {"groups": {"include": ["G1"]}}},
+         "actions": {"appSignOn": {"access": "ALLOW", "verificationMethod": PASSWORD}}},
+    ]
+    assert _group_signon_report(monkeypatch, rules, {"U1": ["G1"]}).problems == 1
+    # A denied user who is not a member leaves the group covered.
+    assert _group_signon_report(monkeypatch, rules, {"U1": ["G9"]}).problems == 0
+
+
+def test_group_coverage_accounts_for_excluded_groups(monkeypatch):
+    """GAP-1164: an allow that excludes another group covers the group only in part."""
+    rules = [
+        {"name": "group allow", "status": "ACTIVE", "priority": 1,
+         "conditions": {"people": {"groups": {"include": ["G1"], "exclude": ["G2"]}}},
+         "actions": {"appSignOn": {"access": "ALLOW", "verificationMethod": PASSWORD}}},
+    ]
+    report = _group_signon_report(monkeypatch, rules, {})
+    assert report.problems == 1
+    rules[0]["conditions"]["people"]["groups"]["exclude"] = []
+    assert _group_signon_report(monkeypatch, rules, {}).problems == 0
+
+
 def test_signon_refuses_policy_assigned_to_another_app(monkeypatch):
     monkeypatch.setattr(okta, "find_ldap_app", lambda client: {"id": "ldap"})
     monkeypatch.setattr(okta, "find_user", lambda client, login: {"id": "bind"})
