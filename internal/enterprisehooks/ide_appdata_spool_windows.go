@@ -21,7 +21,8 @@ import (
 
 // windowsIDEAppDataRescan is how long a published record is kept before the
 // account's IDEs are read again; windowsIDEAppDataBudget bounds the reads of
-// one cycle, the rest keep their records until a later cycle.
+// one cycle, the oldest records first (scanIDEAppDataDue); the rest keep
+// their records until a later cycle.
 const (
 	windowsIDEAppDataRescan = 5 * time.Minute
 	windowsIDEAppDataBudget = 20 * time.Second
@@ -56,6 +57,8 @@ func WriteWindowsIDEAppDataSpool(dir string, manifest Manifest, setOwnership fun
 	}
 	keep := map[string]bool{}
 	deadline := time.Now().Add(windowsIDEAppDataBudget)
+	var due []ideAppDataDue
+	records := map[string]IDEAppDataSpoolRecord{}
 	for _, target := range inventoryDACLGrantTargets(manifest) {
 		key := strings.ToUpper(strings.TrimSpace(target.SID))
 		home := filepath.Clean(strings.TrimSpace(target.UserHome))
@@ -83,29 +86,34 @@ func WriteWindowsIDEAppDataSpool(dir string, manifest Manifest, setOwnership fun
 			keep[strings.ToLower(name)] = true
 			continue
 		}
-		if now.After(deadline) {
-			keep[strings.ToLower(name)] = sameFolders
-			continue
+		item := ideAppDataDue{name: name}
+		if sameFolders {
+			item.published = previous.UpdatedAt
 		}
-		record := IDEAppDataSpoolRecord{
+		due = append(due, item)
+		records[name] = IDEAppDataSpoolRecord{
 			Version: IDEAppDataSpoolRecordVersion, Key: key, Home: home,
-			RoamingAppData: roaming, LocalAppData: local, UpdatedAt: now.UTC(),
-			Installs: ideplugins.Scan(home, "windows", ideplugins.Limits{RoamingAppData: roaming, LocalAppData: local}),
+			RoamingAppData: roaming, LocalAppData: local,
 		}
+	}
+	scanned := scanIDEAppDataDue(due, func() bool { return time.Now().After(deadline) }, func(item ideAppDataDue) bool {
+		record := records[item.name]
+		record.UpdatedAt = time.Now().UTC()
+		record.Installs = ideplugins.Scan(record.Home, "windows", ideplugins.Limits{RoamingAppData: record.RoamingAppData, LocalAppData: record.LocalAppData})
 		data, err := json.Marshal(record)
 		if err == nil && len(data) > maxIDEAppDataSpoolRecordBytes {
 			err = fmt.Errorf("the IDE inventory exceeds %d bytes", maxIDEAppDataSpoolRecordBytes)
 		}
 		if err == nil {
-			err = writeSpoolBytes(dir, name, ".ide-appdata-*", data, setOwnership)
+			err = writeSpoolBytes(dir, item.name, ".ide-appdata-*", data, setOwnership)
 		}
-		if err != nil {
-			if logf != nil {
-				logf("[hook-enumerator] WARN publish the IDE inventory of redirected AppData for %s: %v", key, err)
-			}
-			continue
+		if err != nil && logf != nil {
+			logf("[hook-enumerator] WARN publish the IDE inventory of redirected AppData for %s: %v", record.Key, err)
 		}
-		keep[strings.ToLower(name)] = true
+		return err == nil
+	})
+	for name, kept := range scanned {
+		keep[strings.ToLower(name)] = kept
 	}
 	if entries, err := os.ReadDir(dir); err == nil {
 		for _, entry := range entries {

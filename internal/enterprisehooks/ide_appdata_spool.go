@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -186,4 +187,35 @@ func isASCIIDriveLetter(b byte) bool {
 // platform.
 func windowsCleanPath(p string) string {
 	return strings.ReplaceAll(path.Clean(strings.ReplaceAll(p, `\`, "/")), "/", `\`)
+}
+
+// ideAppDataDue is a profile whose record a cycle reads again: name is its
+// spool file, published the time of its current record, zero when it has
+// none.
+type ideAppDataDue struct {
+	name      string
+	published time.Time
+}
+
+// scanIDEAppDataDue reads the due profiles, the one without a record first
+// and then the oldest record first, until spent reports the cycle's budget
+// used. publish reads and writes one profile's record and reports whether
+// it wrote it. It returns, by name, whether each due profile keeps a
+// record: one it published, or one not read in this cycle that has a
+// current record. Reading the oldest first lets the budget reach every
+// profile in turn; in the manifest's order, the first profiles took it
+// every time they were due again and the last ones were never read
+// (GAP-1249).
+func scanIDEAppDataDue(due []ideAppDataDue, spent func() bool, publish func(ideAppDataDue) bool) map[string]bool {
+	ordered := append([]ideAppDataDue(nil), due...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].published.Before(ordered[j].published) })
+	keep := make(map[string]bool, len(ordered))
+	for _, item := range ordered {
+		if spent() {
+			keep[item.name] = !item.published.IsZero()
+			continue
+		}
+		keep[item.name] = publish(item)
+	}
+	return keep
 }
