@@ -228,6 +228,12 @@ type Options struct {
 	// (openshell.LockSandboxStart): it fails with openshell.ErrGatewayBusy
 	// while one of them runs. Nil holds none.
 	StartLock func() (unlock func(), err error)
+	// MigrateBootstrap moves the Docker bootstrap that an OpenShell before
+	// 0.1.5 left for the sandbox of an OpenShell id to the format 0.1.5
+	// reads (openshell.MigrateDockerBootstrap), and names the files it
+	// rewrote. A start on a docker gateway runs it first (GAP-0300). Nil
+	// moves none.
+	MigrateBootstrap func(sandboxID string) ([]string, error)
 	// ManagedAccount marks a managed computer's per-user sandbox daemon: a
 	// user service the organization installs, which starts at login. What a
 	// failure tells the user to do names signing in again, never a command

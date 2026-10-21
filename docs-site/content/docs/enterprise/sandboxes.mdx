@@ -243,12 +243,14 @@ not written to disk. So the switch goes ahead only once OpenShell itself
 reports every MicroVM of the user stopped, deleting, or gone (its VM process
 exited), however long that takes. Elapsed time does not count, and neither
 does a stop request that OpenShell did not carry out. The status check comes
-first, so right before it stops the user's units the lifecycle checks again
-as the user, holding the user's OpenShell lifecycle lock until the units are
-stopped (`defenseclaw-gateway sandbox-daemon drain`): while it holds the lock
-the user's DefenseClaw starts no sandbox, and a sandbox that started since the
+first, so right before it stops the user's gateway the lifecycle stops the
+user's sandbox daemon and its socket (a daemon an older DefenseClaw started
+before the upgrade takes no lifecycle lock), then checks again as the user,
+holding the user's OpenShell lifecycle lock until the units are stopped
+(`defenseclaw-gateway sandbox-daemon drain`): while it holds the lock the
+user's DefenseClaw starts no sandbox, and a sandbox that started since the
 status check, or a MicroVM process of the user's that runs, keeps the switch
-waiting. A gateway the check cannot read waits too, unless no MicroVM runs as
+waiting. The next `defenseclaw sandbox` command starts the daemon again. A gateway the check cannot read waits too, unless no MicroVM runs as
 the user.
 
 The user stops a running sandbox with `defenseclaw sandbox stop`, which

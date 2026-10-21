@@ -2060,9 +2060,16 @@ What the upgrade does:
   the healthy gateway, DefenseClaw creates and starts no sandbox.
 - `defenseclaw sandbox stop` of a MicroVM whose workload completed or failed
   says that OpenShell left it as it was, and prints the commands that stop it.
-- OpenShell's patch releases do not intentionally break its stable
-  interfaces, so docker sandboxes made on 0.1.1 to 0.1.4 should start on 0.1.5. The
-  MicroVM driver is experimental upstream and makes no such promise.
+- A docker sandbox made on 0.1.1 to 0.1.4 keeps its work, but OpenShell
+  0.1.5 cannot read the bootstrap the older docker driver kept for it (in
+  `~/.local/state/openshell/docker-sandbox-tokens`): its start fails with
+  ``unknown field `outer_fence` ``, and the gateway's own start of it after
+  the restart leaves it in OpenShell's error state. `defenseclaw sandbox
+  start <name>` (and `connect` or `pull`, which start a stopped sandbox)
+  first rewrites that bootstrap the way 0.1.5 writes it, then starts the
+  sandbox with its work. One in the error state: `defenseclaw sandbox stop
+  <name>`, then `start`. An `openshell sandbox start` of your own does not
+  rewrite it. The MicroVM driver writes its bootstrap at every start.
 - On the MicroVM driver the first start of each harness image prepares its
   MicroVM disk again (about a minute and 5 GB): the driver keeps one per
   release. The disks the older release prepared stay in
