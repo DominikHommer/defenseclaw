@@ -11,14 +11,18 @@ import (
 // A '#' that is code in some interpreter must not hide a later writer call.
 func TestLiteralCodePositionHashToken(t *testing.T) {
 	cases := []struct {
-		code string
-		want bool
+		language string
+		code     string
+		want     bool
 	}{
-		{`class A{#p=1}; require("fs").appendFileSync("out.txt","k")`, true},
-		{`$#a; open(F, ">>", "out.txt")`, true},
-		{`x.#y; require("fs").writeFileSync("out.txt","k")`, true},
-		{"# open(\"out.txt\",\"w\")\nprint(1)", false},
-		{"print(1)  # open(\"out.txt\",\"w\")", false},
+		{"node", `class A{#p=1}; require("fs").appendFileSync("out.txt","k")`, true},
+		{"perl", `$#a; open(F, ">>", "out.txt")`, true},
+		{"perl", `s#a#b#; open(F, ">>", "out.txt")`, true},
+		{"perl", `#open(F, ">>", "out.txt")`, false},
+		{"node", `x.#y; require("fs").writeFileSync("out.txt","k")`, true},
+		{"python", "# open(\"out.txt\",\"w\")\nprint(1)", false},
+		{"python", "print(1)  # open(\"out.txt\",\"w\")", false},
+		{"python", "#open(\"out.txt\",\"w\")", false},
 	}
 	for _, tc := range cases {
 		marker := "appendFileSync"
@@ -28,7 +32,7 @@ func TestLiteralCodePositionHashToken(t *testing.T) {
 				marker = "writeFileSync"
 			}
 		}
-		if got := literalCodePosition(tc.code, strings.Index(tc.code, marker)); got != tc.want {
+		if got := literalCodePosition(tc.code, strings.Index(tc.code, marker), tc.language); got != tc.want {
 			t.Errorf("literalCodePosition(%q) = %v, want %v", tc.code, got, tc.want)
 		}
 	}

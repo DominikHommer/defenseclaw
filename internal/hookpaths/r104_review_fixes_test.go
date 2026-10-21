@@ -69,9 +69,14 @@ func TestR104CalledFunctionLiteralWriter(t *testing.T) {
 	}
 	for _, command := range []string{
 		`f() { python3 -c 'open("alias","a").write("marker")'; }; echo ok`,
+		`f() { python3 -c 'open("alias","a").write("marker")'; echo marker > alias; }; g() { f; }; echo ok`,
+		`f() { python3 -c 'open("alias","a").write("marker")'; }; echo f`,
 	} {
 		if got := LiteralWriteOperands(command, cwd, home); slices.Contains(got, alias) {
 			t.Fatalf("uncalled function %q produced a write operand: %q", command, got)
+		}
+		if got, _, _ := ShellWriteOperands(command, cwd, home); slices.Contains(got, alias) {
+			t.Fatalf("uncalled function %q produced a redirect operand: %q", command, got)
 		}
 	}
 }

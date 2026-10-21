@@ -91,7 +91,7 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 	// A definition runs nothing. A body is read once, where it is defined,
 	// when the command may call it (GAP-1430). Expanding each call instead
 	// costs time exponential in the call nesting.
-	called := calledFunctions(file)
+	called := calledFunctions(file, home)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
 			return declaration.Name != nil && called[declaration.Name.Value]
@@ -119,44 +119,71 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 	return operands, true, dynamic
 }
 
-// calledFunctions marks each function the command may call: its name appears
-// as a word, or as a token inside a word, anywhere except its own definition
-// header. This over-approximates the shell's calls (a nested shell, trap or
-// redefinition may run the name), and it is linear in the command.
-func calledFunctions(file *syntax.File) map[string]bool {
-	names := map[string]bool{}
-	headers := map[*syntax.Lit]bool{}
+// calledFunctions walks executable top-level calls, then reachable bodies.
+// A body's call sites do not make it reachable on their own. Each definition
+// is visited once, including duplicate definitions of the same name.
+func calledFunctions(file *syntax.File, home string) map[string]bool {
+	definitions := map[string][]*syntax.Stmt{}
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction && declaration.Name != nil {
-			names[declaration.Name.Value] = false
-			headers[declaration.Name] = true
+		if declaration, ok := node.(*syntax.FuncDecl); ok && declaration.Name != nil {
+			definitions[declaration.Name.Value] = append(definitions[declaration.Name.Value], declaration.Body)
 		}
 		return true
 	})
-	if len(names) == 0 {
-		return names
+	called := make(map[string]bool, len(definitions))
+	if len(definitions) == 0 {
+		return called
 	}
-	mark := func(text string) {
-		for _, token := range strings.FieldsFunc(text, func(r rune) bool {
-			return unicode.IsSpace(r) || strings.ContainsRune(";&|()<>'\"`{}=$\\", r)
-		}) {
-			if _, defined := names[token]; defined {
-				names[token] = true
-			}
+	queue := make([]string, 0, len(definitions))
+	allMarked := false
+	mark := func(name string) {
+		if len(definitions[name]) > 0 && !called[name] {
+			called[name] = true
+			queue = append(queue, name)
 		}
 	}
-	syntax.Walk(file, func(node syntax.Node) bool {
-		switch node := node.(type) {
-		case *syntax.Lit:
-			if !headers[node] {
-				mark(node.Value)
+	boundName, boundValue := boundedProgramAssignment(file, home)
+	scan := func(node syntax.Node) bool {
+		if _, definition := node.(*syntax.FuncDecl); definition {
+			return false
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		name, static := StaticWord(call.Args[0], home)
+		if !static && simpleShellParameter(call.Args[0]) == boundName && boundName != "" {
+			name, static = boundValue, true
+		}
+		if !static {
+			// A dynamic command word can name any of the defined functions.
+			if !allMarked {
+				for defined := range definitions {
+					mark(defined)
+				}
+				allMarked = true
 			}
-		case *syntax.SglQuoted:
-			mark(node.Value)
+			return true
+		}
+		mark(name)
+		if name == "eval" {
+			for _, arg := range call.Args[1:] {
+				if value, ok := StaticWord(arg, home); ok {
+					mark(strings.TrimSpace(value))
+				}
+			}
 		}
 		return true
-	})
-	return names
+	}
+	syntax.Walk(file, scan)
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		for _, body := range definitions[name] {
+			syntax.Walk(body, scan)
+		}
+	}
+	return called
 }
 
 // OperandPath preserves dot-dot in the command operand until link resolution.

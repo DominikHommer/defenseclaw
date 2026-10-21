@@ -29,6 +29,7 @@ var (
 	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"]`)
 	trustedPathlibWriteText              = regexp.MustCompile(`\bp\.write_text\s*\(`)
 	trustedPathlibSafeReassignment       = regexp.MustCompile(`^\s*;\s*p\s*=\s*(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*;\s*$`)
+	trustedPythonSimpleChdir             = regexp.MustCompile(`^os\.chdir\s*\(\s*(?:Path\.home\(\)\s*/\s*['"]\.ssh['"]|['"][^'"\\]*['"])\s*\)$`)
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
@@ -173,14 +174,14 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 		return command.Argv[1] == "-c" && facts.ActiveHome != "" &&
 			(trustedPathlibAuthorizedKeysWriteProof(command.Argv[2], facts.ActiveHome, facts.CWD) ||
 				trustedPythonPathAuthorizedKeysWriteProof(command.Argv[2]) ||
-				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome))
+				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, "python"))
 	case "perl":
 		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
 			(trustedPerlAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome))
+				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, "perl"))
 	case "ruby", "node":
 		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
-			trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome)
+			trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, command.Program)
 	default:
 		return false
 	}
@@ -188,15 +189,16 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 
 func trustedPathlibAuthorizedKeysWriteProof(code, home, cwd string) bool {
 	for _, assignment := range trustedPathlibAuthorizedKeysWrite.FindAllStringIndex(code, -1) {
-		if !interpreterCodePosition(code, assignment[0]) {
+		if !interpreterCodePosition(code, assignment[0], "python") {
 			continue
 		}
 		for _, write := range trustedPathlibWriteText.FindAllStringIndex(code, -1) {
-			if write[0] < assignment[1] || !interpreterCodePosition(code, write[0]) {
+			if write[0] < assignment[1] || !interpreterCodePosition(code, write[0], "python") {
 				continue
 			}
 			between := code[assignment[1]:write[0]]
 			if safe := trustedPathlibSafeReassignment.FindStringSubmatch(between); len(safe) == 2 &&
+				trustedPythonPathStablePrefix(code[:assignment[0]], filepath.IsAbs(safe[1])) &&
 				trustedOrdinaryPathReassignment(safe[1], home, cwd) {
 				continue
 			}
@@ -208,11 +210,31 @@ func trustedPathlibAuthorizedKeysWriteProof(code, home, cwd string) bool {
 
 func trustedPythonPathAuthorizedKeysWriteProof(code string) bool {
 	for _, match := range trustedPythonPathAuthorizedKeysWrite.FindAllStringIndex(code, -1) {
-		if interpreterCodePosition(code, match[0]) {
+		if interpreterCodePosition(code, match[0], "python") {
 			return true
 		}
 	}
 	return false
+}
+
+// A relative Path is resolved when write_text runs, and any Path can be
+// redirected by an in-process link or rename. Only imports may precede this
+// narrow waiver. A simple chdir is also safe for an absolute reassignment.
+func trustedPythonPathStablePrefix(prefix string, absolute bool) bool {
+	for _, statement := range strings.Split(prefix, ";") {
+		statement = strings.TrimSpace(statement)
+		if statement == "" {
+			continue
+		}
+		switch statement {
+		case "from pathlib import Path", "import pathlib", "import os", "from os import path":
+		default:
+			if !absolute || !trustedPythonSimpleChdir.MatchString(statement) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func trustedOrdinaryPathReassignment(name, home, cwd string) bool {
@@ -449,13 +471,13 @@ func trustedAuthorizedKeysRedirectText(input actionfacts.Input, target string) b
 		homeResolvedTwinProves(inner, parsed, sshAuthorizedKeysCommandPrerequisite)
 }
 
-func trustedInterpreterAuthorizedKeysWrite(code, activeHome string) bool {
+func trustedInterpreterAuthorizedKeysWrite(code, activeHome, language string) bool {
 	if len(code) == 0 || len(code) > 16<<10 ||
 		!trustedAuthorizedKeysPathInText(code, activeHome) {
 		return false
 	}
 	for _, location := range trustedInterpreterOpenCall.FindAllStringIndex(code, -1) {
-		if !interpreterCodePosition(code, location[0]) {
+		if !interpreterCodePosition(code, location[0], language) {
 			continue
 		}
 		call, ok := boundedInterpreterCall(code, location[1]-1)
@@ -473,7 +495,7 @@ func trustedInterpreterAuthorizedKeysWrite(code, activeHome string) bool {
 		}
 	}
 	for _, location := range trustedInterpreterWriteCall.FindAllStringIndex(code, -1) {
-		if !interpreterCodePosition(code, location[0]) {
+		if !interpreterCodePosition(code, location[0], language) {
 			continue
 		}
 		if call, ok := boundedInterpreterCall(code, location[1]-1); ok {
@@ -525,9 +547,10 @@ func interpreterCallArgs(call string) []string {
 	return append(args, strings.TrimSpace(call[start:len(call)-1]))
 }
 
-func interpreterCodePosition(code string, position int) bool {
+func interpreterCodePosition(code string, position int, language string) bool {
 	var quote byte
 	comment := false
+	perlHashDelimiters := 0
 	for i := 0; i < position; i++ {
 		c := code[i]
 		if comment {
@@ -545,11 +568,32 @@ func interpreterCodePosition(code string, position int) bool {
 			}
 		} else if c == '\'' || c == '"' {
 			quote = c
-		} else if c == '#' && interpreterCommentStart(code, i) {
-			comment = true
+		} else if c == '#' {
+			if language == "perl" && perlHashDelimiters > 0 {
+				perlHashDelimiters--
+			} else if language == "perl" && interpreterPerlHashRegexpStart(code, i) > 0 {
+				perlHashDelimiters = interpreterPerlHashRegexpStart(code, i)
+			} else if interpreterCommentStart(code, i, language) {
+				comment = true
+			}
 		}
 	}
 	return quote == 0 && !comment
+}
+
+func interpreterPerlHashRegexpStart(code string, i int) int {
+	for _, operator := range []string{"s", "m", "qr", "tr", "y"} {
+		start := i - len(operator)
+		if start < 0 || code[start:i] != operator ||
+			start > 0 && !strings.ContainsRune(" \t\n;=~(", rune(code[start-1])) {
+			continue
+		}
+		if operator == "m" || operator == "qr" {
+			return 1
+		}
+		return 2
+	}
+	return 0
 }
 
 func trustedAuthorizedKeysPathInText(text, activeHome string) bool {
@@ -1597,13 +1641,13 @@ func trustedNestedAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts
 	return false
 }
 
-// A '#' starts a comment only as its own token: at the start of the code or
-// after whitespace or ';', and followed by whitespace or the end. Other
-// spellings ($#name, .#field, s#a#b#) are code in some interpreter, so they
-// never hide a later write.
-func interpreterCommentStart(code string, i int) bool {
-	if i > 0 && !strings.ContainsRune(" \t\n;", rune(code[i-1])) {
+func interpreterCommentStart(code string, i int, language string) bool {
+	switch language {
+	case "python", "ruby":
+		return true
+	case "perl":
+		return i == 0 || code[i-1] != '$'
+	default:
 		return false
 	}
-	return i+1 == len(code) || strings.ContainsRune(" \t\r\n", rune(code[i+1]))
 }
