@@ -4846,10 +4846,11 @@ function Revoke-DefenseClawStateAncestorTraverse {
 # It cannot list the directory or read anything below it (GAP-0578).
 $script:VendorDirectoryUsersRights = [Security.AccessControl.FileSystemRights](0x1200a0)
 
-# The entry DefenseClaw adds carries those rights plus read-extended-
-# attributes on the directory itself, so an uninstall can tell it from an
-# identical entry an administrator had set, which it must keep (GAP-0867).
-$script:VendorDirectoryUsersGrantRights = [Security.AccessControl.FileSystemRights](0x1200a8)
+# Which of those rights Setup added to the vendor directory's Users entry,
+# recorded in the protected lifecycle directory. An uninstall gives back
+# only those, so an entry an administrator had set (with any rights) stays
+# as it was (GAP-0867, review loop round 2).
+$script:VendorUsersReadGrantLeaf = 'vendor-users-read-grant.json'
 
 # The SID of this computer's own account domain (its SAM), read once, or ''
 # when it cannot be read.
@@ -4976,13 +4977,95 @@ function Test-DefenseClawStandaloneVendorUsersRead {
     return (($granted -band $required) -eq $required)
 }
 
+# The explicit Users allow entries on the vendor directory alone: the entry
+# AddAccessRule merges a this-folder Users grant into.
+function Get-DefenseClawVendorUsersThisFolderRules {
+    param([Parameter(Mandatory)][Security.AccessControl.DirectorySecurity]$Security)
+    return @($Security.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]$_.IdentityReference.Value -ceq $script:UsersSID -and
+                $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                $_.InheritanceFlags -eq [Security.AccessControl.InheritanceFlags]::None -and
+                $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None
+            })
+}
+
+function Get-DefenseClawVendorUsersReadGrantPath {
+    return [IO.Path]::Combine(
+        [string](Get-DefenseClawProfileRoots -EnterpriseProfile Standalone).LifecycleDirectory,
+        $script:VendorUsersReadGrantLeaf
+    )
+}
+
+# The rights Setup recorded adding to Path's Users entry, or 0 when it
+# recorded none for Path. A record that cannot be read counts as none, so
+# nothing is taken away on its word.
+function Get-DefenseClawVendorUsersReadGrant {
+    param([Parameter(Mandatory)][string]$Path)
+    $recordPath = Get-DefenseClawVendorUsersReadGrantPath
+    if (-not [IO.File]::Exists($recordPath)) {
+        return [int64]0
+    }
+    try {
+        Assert-DefenseClawNoReparsePath -Path $recordPath
+        $record = [IO.File]::ReadAllText($recordPath) |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json -ErrorAction Stop
+        if ([string]$record.sid -cne $script:UsersSID -or
+            -not [string]::Equals(
+                [IO.Path]::GetFullPath([string]$record.path).TrimEnd('\'),
+                [IO.Path]::GetFullPath($Path).TrimEnd('\'),
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            return [int64]0
+        }
+        return ([int64]$record.added_rights -band [int64]$script:VendorDirectoryUsersRights)
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Warning "the vendor directory grant record is unreadable, so its Users entry is kept: $($_.Exception.Message)"
+        return [int64]0
+    }
+}
+
+function Set-DefenseClawVendorUsersReadGrant {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int64]$AddedRights
+    )
+    $recordPath = Get-DefenseClawVendorUsersReadGrantPath
+    $directory = [IO.Path]::GetDirectoryName($recordPath)
+    if (-not [IO.Directory]::Exists($directory)) {
+        Initialize-DefenseClawManagedRoot `
+            -Path $directory `
+            -Label 'lifecycle lock directory' `
+            -RequiredBase $script:ProgramData
+    }
+    Write-DefenseClawProtectedTextAtomic `
+        -Value ([ordered]@{
+                schema_version = 1
+                path = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+                sid = $script:UsersSID
+                added_rights = $AddedRights
+            } | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 2) `
+        -Path $recordPath `
+        -RequiredRoot $directory
+}
+
+function Remove-DefenseClawVendorUsersReadGrant {
+    $recordPath = Get-DefenseClawVendorUsersReadGrantPath
+    if ([IO.File]::Exists($recordPath)) {
+        [IO.File]::Delete($recordPath)
+    }
+}
+
 # A vendor directory that already existed (another Cisco product created it
 # with SYSTEM and Administrators only) left every enrolled user's hook
 # failing closed with enterprise_machine_policy_summary_untrusted while
 # Setup, verify and repair reported success (GAP-0578). Install and repair
-# add one entry for Users with exactly these rights, on that directory alone
-# and not inherited; owner and every other entry are preserved. Nothing is
-# added when users can already check the directory.
+# give Users these rights on that directory alone, not inherited; owner and
+# every other entry are preserved. Nothing is added when users can already
+# check the directory. Only the rights the directory's Users entry lacked
+# are recorded as added, before the entry is written, so an uninstall never
+# takes away rights an administrator had set (Revoke-DefenseClawStandaloneVendorUsersRead).
 function Grant-DefenseClawStandaloneVendorUsersRead {
     param([Parameter(Mandatory)][string]$Path)
     if (Test-DefenseClawStandaloneVendorUsersRead -Path $Path) {
@@ -4991,46 +5074,79 @@ function Grant-DefenseClawStandaloneVendorUsersRead {
     Assert-DefenseClawNoReparsePath -Path $Path
     Assert-DefenseClawTrustedAncestor -Path $Path
     $security = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+    $present = [int64]0
+    foreach ($rule in @(Get-DefenseClawVendorUsersThisFolderRules -Security $security)) {
+        $present = $present -bor ([int64]$rule.FileSystemRights -band 0xffffffffL)
+    }
+    $added = [int64]$script:VendorDirectoryUsersRights -band (-bnot $present)
+    if ($added -eq 0) {
+        return
+    }
+    $recorded = Get-DefenseClawVendorUsersReadGrant -Path $Path
+    Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights ($recorded -bor $added)
     [void]$security.AddAccessRule(
         [Security.AccessControl.FileSystemAccessRule]::new(
             [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
-            $script:VendorDirectoryUsersGrantRights,
+            $script:VendorDirectoryUsersRights,
             [Security.AccessControl.InheritanceFlags]::None,
             [Security.AccessControl.PropagationFlags]::None,
             [Security.AccessControl.AccessControlType]::Allow
         )
     )
-    Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+    try {
+        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+    }
+    catch {
+        if ($recorded -eq 0) {
+            Remove-DefenseClawVendorUsersReadGrant
+        }
+        else {
+            Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights $recorded
+        }
+        throw
+    }
 }
 
-# Gives back the entry Grant-DefenseClawStandaloneVendorUsersRead added (its
-# exact rights, not inherited), when the gateway gives back its own. An
-# entry with only VendorDirectoryUsersRights is an administrator's, or one an
-# earlier release added and cannot be told apart from one; it stays (it
-# grants only the check of that one directory).
+# Gives back the rights Grant-DefenseClawStandaloneVendorUsersRead recorded
+# adding, when the gateway gives back its own. The Users entry keeps every
+# other right, so an entry an administrator had set (or one an earlier
+# release added, which recorded nothing) stays as it was; it grants only the
+# check of that one directory. Then the record goes, whatever it said, so a
+# purge leaves no lifecycle folder behind for it.
 function Revoke-DefenseClawStandaloneVendorUsersRead {
     param([Parameter(Mandatory)][string]$Path)
-    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Container)) {
-        return
+    $added = Get-DefenseClawVendorUsersReadGrant -Path $Path
+    if ($added -ne 0 -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Container)) {
+        Assert-DefenseClawNoReparsePath -Path $Path
+        Assert-DefenseClawTrustedAncestor -Path $Path
+        $security = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+        $changed = $false
+        foreach ($rule in @(Get-DefenseClawVendorUsersThisFolderRules -Security $security)) {
+            $rights = [int64]$rule.FileSystemRights -band 0xffffffffL
+            if (($rights -band $added) -eq 0) {
+                continue
+            }
+            [void]$security.RemoveAccessRuleSpecific($rule)
+            $kept = $rights -band (-bnot $added)
+            if ($kept -ne 0) {
+                [void]$security.AddAccessRule(
+                    [Security.AccessControl.FileSystemAccessRule]::new(
+                        [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
+                        [Security.AccessControl.FileSystemRights][int]$kept,
+                        [Security.AccessControl.InheritanceFlags]::None,
+                        [Security.AccessControl.PropagationFlags]::None,
+                        [Security.AccessControl.AccessControlType]::Allow
+                    )
+                )
+            }
+            $changed = $true
+        }
+        if ($changed) {
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+        }
     }
-    Assert-DefenseClawNoReparsePath -Path $Path
-    Assert-DefenseClawTrustedAncestor -Path $Path
-    $security = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
-    $ours = @($security.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) |
-            Microsoft.PowerShell.Core\Where-Object {
-                [string]$_.IdentityReference.Value -ceq $script:UsersSID -and
-                $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
-                $_.InheritanceFlags -eq [Security.AccessControl.InheritanceFlags]::None -and
-                $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None -and
-                ([int64]$_.FileSystemRights -band 0xffffffffL) -eq [int64]$script:VendorDirectoryUsersGrantRights
-            })
-    if ($ours.Count -eq 0) {
-        return
-    }
-    foreach ($rule in $ours) {
-        [void]$security.RemoveAccessRuleSpecific($rule)
-    }
-    Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+    Remove-DefenseClawVendorUsersReadGrant
 }
 
 function Initialize-DefenseClawManagedRoot {
@@ -26527,24 +26643,31 @@ function Ensure-DefenseClawSelfUninstallHelper {
     $expectedHash = Get-DefenseClawTextSHA256 -Value $content
     if (Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $Layout.SelfUninstallHelperPath) {
-        if (-not [string]::IsNullOrWhiteSpace(
-                [string]$Receipt.helper_sha256
-            ) -and
-            [string]$Receipt.helper_sha256 -cne $expectedHash) {
-            # The finalizer of a deferred InstallRoot retirement (or the usual
-            # one, when this run defers) keeps the content it was started with.
-            $otherHash = Get-DefenseClawTextSHA256 -Value (
-                Get-DefenseClawSelfUninstallHelperContent `
-                    -Layout $Layout `
-                    -Receipt $Receipt `
-                    -DeferredRetirement:(-not $DeferredRetirement)
-            )
-            if ([string]$Receipt.helper_sha256 -cne $otherHash) {
-                throw 'existing self-uninstall finalizer belongs to different protected receipt content'
-            }
-            $expectedHash = $otherHash
+        # An existing finalizer keeps the content it was written with: the
+        # usual one, or the one of a deferred InstallRoot retirement (or the
+        # usual one, when this run defers). A receipt with no hash is one
+        # whose run stopped after it wrote the finalizer and before it
+        # recorded the hash (Set-DefenseClawSelfUninstallReceiptHelper); the
+        # finalizer's own bytes then say which of the two exact variants of
+        # this receipt it is, and that hash is recorded (GAP-0149 review,
+        # loop round 2). Anything else is refused.
+        $otherHash = Get-DefenseClawTextSHA256 -Value (
+            Get-DefenseClawSelfUninstallHelperContent `
+                -Layout $Layout `
+                -Receipt $Receipt `
+                -DeferredRetirement:(-not $DeferredRetirement)
+        )
+        if ([string]::IsNullOrWhiteSpace([string]$Receipt.helper_sha256)) {
+            Assert-DefenseClawNoReparsePath -Path $Layout.SelfUninstallHelperPath
+            $Receipt.helper_sha256 = (
+                Microsoft.PowerShell.Utility\Get-FileHash `
+                    -LiteralPath $Layout.SelfUninstallHelperPath `
+                    -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
         }
-        $Receipt.helper_sha256 = $expectedHash
+        if (@($expectedHash, $otherHash) -cnotcontains [string]$Receipt.helper_sha256) {
+            throw 'existing self-uninstall finalizer belongs to different protected receipt content'
+        }
         return Assert-DefenseClawSelfUninstallHelper `
             -Layout $Layout `
             -Receipt $Receipt
@@ -27742,6 +27865,7 @@ function Complete-DefenseClawDeferredSelfUninstallRetirement {
             if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $retiredRoot) {
                 throw 'deferred self-uninstall retirement found both canonical and retired InstallRoot'
             }
+            Assert-DefenseClawInstallRootNameReserved -InstallRoot $Layout.InstallRoot
             try {
                 [IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)
             }
@@ -28745,6 +28869,84 @@ function Test-DefenseClawInstallRootInUseException {
     return $false
 }
 
+# Retiring InstallRoot renames it aside, which frees its name in the parent
+# folder. An account that can create an entry there (a folder, a junction or
+# a file) could take that name while it is free; then nothing can put
+# InstallRoot back, and a recovery finds both trees and stops (GAP-0149
+# review, loop round 2). Returns why another account could, or '' when only
+# SYSTEM, Administrators, TrustedInstaller and the administrator running
+# this can: the folder's owner, and every allow entry that applies to the
+# folder itself and grants a create, delete or permission right. A deny
+# entry is never counted as taking such a right away.
+$script:InstallRootParentChangeRights = [int64](
+    [int64][Security.AccessControl.FileSystemRights]::CreateFiles -bor
+    [int64][Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+    [int64][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+    [int64][Security.AccessControl.FileSystemRights]::Delete -bor
+    [int64][Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+    [int64][Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+    0x50000000L
+)
+
+function Get-DefenseClawUntrustedFolderCreator {
+    param([Parameter(Mandatory)][string]$Path)
+    $trusted = @(
+        $script:SystemSID,
+        $script:AdministratorsSID,
+        $script:TrustedInstallerSID,
+        [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    )
+    $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+    $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
+        [Security.AccessControl.AccessControlSections]::Access
+    )
+    if ([string]::IsNullOrWhiteSpace($accessSDDL) -or
+        -not $accessSDDL.StartsWith('D:', [StringComparison]::OrdinalIgnoreCase) -or
+        $accessSDDL.IndexOf('NO_ACCESS_CONTROL', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return 'it has no access list, so every account has full access to it'
+    }
+    $owner = [string]$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($trusted -notcontains $owner) {
+        return "its owner $owner can change its access list"
+    }
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)) {
+            continue
+        }
+        $sid = [string]$rule.IdentityReference.Value
+        # CREATOR OWNER applies only to what is created below the folder,
+        # and OWNER RIGHTS is its owner, checked above.
+        if ($trusted -contains $sid -or $sid -in @('S-1-3-0', 'S-1-3-4')) {
+            continue
+        }
+        $rights = [int64]$rule.FileSystemRights -band 0xffffffffL
+        if (($rights -band $script:InstallRootParentChangeRights) -ne 0) {
+            return ('{0} holds rights 0x{1:x} on it' -f $sid, $rights)
+        }
+    }
+    return ''
+}
+
+function Assert-DefenseClawInstallRootNameReserved {
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    $parent = [IO.Path]::GetDirectoryName(
+        [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+    )
+    if ([string]::IsNullOrWhiteSpace($parent)) {
+        throw "InstallRoot has no parent folder: $InstallRoot"
+    }
+    Assert-DefenseClawNoReparsePath -Path $parent
+    $reason = Get-DefenseClawUntrustedFolderCreator -Path $parent
+    if (-not [string]::IsNullOrEmpty($reason)) {
+        throw (
+            "InstallRoot is not renamed aside: an account that is not an administrator could take its name in $parent " +
+            "while it is free ($reason). Remove that access, so that only SYSTEM, Administrators and TrustedInstaller " +
+            "can create entries in $parent, and run the uninstall again"
+        )
+    }
+}
+
 function Move-DefenseClawInstallRootForRetirement {
     <#
         Renames InstallRoot aside for the self-uninstall finalizer. Windows
@@ -28753,12 +28955,15 @@ function Move-DefenseClawInstallRootForRetirement {
         bin\ made the committed uninstall fail 1603 with "Access to the path
         is denied" (GAP-0149). Each hook process lives for a moment, so the
         rename is retried for a bounded time; only a holder that outlasts it
-        still fails, with the existing retry guidance.
+        still fails, with the existing retry guidance. A parent folder that
+        another account can create entries in is refused first
+        (Assert-DefenseClawInstallRootNameReserved).
     #>
     param(
         [Parameter(Mandatory)][string]$Source,
         [Parameter(Mandatory)][string]$Destination
     )
+    Assert-DefenseClawInstallRootNameReserved -InstallRoot $Source
     $clock = [Diagnostics.Stopwatch]::StartNew()
     while ($true) {
         try {
@@ -28776,38 +28981,11 @@ function Move-DefenseClawInstallRootForRetirement {
     }
 }
 
-# The committed uninstall renames InstallRoot aside after its tombstone; a
-# program that held a file there past the retry window (an antivirus scan, an
-# agent's hook) failed it with 1603 and the services already gone. So the
-# uninstall first renames InstallRoot aside and back before it commits: that
-# holder now fails it here, where rollback restores everything. A crash
-# between the two renames is recovered from the receipt (the retired tree
-# is moved back).
-function Assert-DefenseClawInstallRootRetirable {
-    param(
-        [Parameter(Mandatory)][string]$Source,
-        [Parameter(Mandatory)][string]$Destination
-    )
-    try {
-        Move-DefenseClawInstallRootForRetirement -Source $Source -Destination $Destination
-    }
-    catch {
-        throw (
-            "InstallRoot cannot be renamed aside, so the uninstall stopped before it removed anything: $Source. " +
-            'A program still holds a file in it (an agent running the DefenseClaw hook, or an antivirus scan). ' +
-            "Close it and run the uninstall again: $($_.Exception.Message)"
-        )
-    }
-    [IO.Directory]::Move($Destination, $Source)
-    Assert-DefenseClawNoReparsePath -Path $Source
-}
-
-# Renames InstallRoot aside after the uninstall committed. The pre-commit
-# probe proves the rename then, but a program can open a file in InstallRoot
-# after it (an antivirus scan, an administrator's window) and hold it past
-# the retry window; that failed the committed uninstall with 1603 and the
-# services already removed. Such a holder now defers the retirement to the
-# detached finalizer (Start-DefenseClawDeferredSelfUninstallRetirement),
+# Renames InstallRoot aside after the uninstall committed. A program can
+# hold a file in InstallRoot past the retry window (an antivirus scan, an
+# administrator's window); that failed the committed uninstall with 1603 and
+# the services already removed. Such a holder now defers the retirement to
+# the detached finalizer (Start-DefenseClawDeferredSelfUninstallRetirement),
 # which finishes it once the program lets go (GAP-0149 review, loop round
 # 1). Returns '' when InstallRoot was retired, or the holder's error when the
 # retirement is deferred; any other failure is thrown.
@@ -33453,6 +33631,15 @@ function Invoke-DefenseClawUninstallLifecycle {
             Get-DefenseClawSelfUninstallCallerIdentity `
                 -Layout $Layout `
                 -CallerPID $SelfUninstallCallerPID
+        # A self-uninstall renames InstallRoot aside after its commit. Stop
+        # here, before anything changed, when another account could take the
+        # freed name (GAP-0149 review, loop round 2).
+        try {
+            Assert-DefenseClawInstallRootNameReserved -InstallRoot $Layout.InstallRoot
+        }
+        catch {
+            throw "The uninstall stopped before it removed anything: $($_.Exception.Message)"
+        }
     }
     $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
     $snapshot = $null
@@ -33639,9 +33826,6 @@ function Invoke-DefenseClawUninstallLifecycle {
                 -LiteralPath $retiredRoot) {
                 throw 'fresh self-uninstall retirement sibling unexpectedly exists'
             }
-            Assert-DefenseClawInstallRootRetirable `
-                -Source $Layout.InstallRoot `
-                -Destination $retiredRoot
         }
         Complete-DefenseClawTransaction -SnapshotPath $snapshot -Layout $Layout
     }

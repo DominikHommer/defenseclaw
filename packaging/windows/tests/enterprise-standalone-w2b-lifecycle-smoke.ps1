@@ -9,14 +9,18 @@
 # purge removes the lifecycle lock gets a new protected one (GAP-1076), and
 # the vendor directory check and grant handle an administrator's own entry,
 # INTERACTIVE-only grants and group denies (GAP-0867, GAP-1439, GAP-1142).
-# Review fixes: the uninstall proves the InstallRoot rename before it
-# commits, a full standalone purge keeps a selector shared with another
+# Review fixes: a full standalone purge keeps a selector shared with another
 # deployment and works under the selector lock, and a deny for an account
 # that is not enrolled or no longer exists does not block the vendor check.
 # Loop round 1: a deny for a domain SID the lookup cannot map still counts
 # (only this computer's own SAM proves a SID retired), and a program that
-# opens a file in InstallRoot after the pre-commit probe defers the
-# retirement to the finalizer instead of failing the committed uninstall.
+# holds a file in InstallRoot after the commit defers the retirement to the
+# finalizer instead of failing the committed uninstall.
+# Loop round 2: no InstallRoot rename runs where another account could
+# create an entry in its parent folder (and the pre-commit rename probe is
+# gone), a recovery takes the finalizer of a run that stopped before it
+# recorded the finalizer's hash, and an uninstall gives back only the vendor
+# directory rights Setup recorded adding.
 # Runs elevated in a disposable directory; no service or machine root is
 # touched.
 
@@ -146,68 +150,133 @@ $stream.Dispose()
                 }
             }
 
-            # Review of GAP-0149: the uninstall renames InstallRoot aside and
-            # back before it commits. A free InstallRoot ends up in place; a
-            # holder that outlasts the window stops the uninstall there, with
-            # InstallRoot in place and nothing retired.
-            $probe = [IO.Path]::Combine($Root, 'probe-install')
-            $probeRetired = [IO.Path]::Combine($Root, 'probe-install-retired')
-            $probeBinary = [IO.Path]::Combine($probe, 'bin', 'defenseclaw-hook.exe')
-            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($probeBinary))
-            [IO.File]::WriteAllText($probeBinary, 'stand-in')
-            try {
-                Assert-DefenseClawInstallRootRetirable -Source $probe -Destination $probeRetired
-                if (-not [IO.File]::Exists($probeBinary) -or [IO.Directory]::Exists($probeRetired)) {
-                    $failures.Add('the pre-commit retirement probe did not put InstallRoot back')
+            # Loop round 2: renaming InstallRoot aside frees its name, so no
+            # rename runs where another account could create an entry in the
+            # parent folder (a junction or a folder at that name, or a file):
+            # nothing could put InstallRoot back, and a recovery would find
+            # both trees. Each such parent is refused with InstallRoot in
+            # place and nothing retired; an administrator-only parent, one
+            # whose create rights are inherit-only or CREATOR OWNER, and one
+            # with read for Users are renamed.
+            function Set-TestFolderSddl([string]$Path, [string]$Sddl) {
+                [void][IO.Directory]::CreateDirectory($Path)
+                $security = [Security.AccessControl.DirectorySecurity]::new()
+                $security.SetSecurityDescriptorSddlForm($Sddl, [Security.AccessControl.AccessControlSections]::All)
+                Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $security
+            }
+            $adminOnly = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+            $openParent = [IO.Path]::Combine($Root, 'open-parent')
+            $openInstall = [IO.Path]::Combine($openParent, 'DefenseClaw')
+            $openRetired = [IO.Path]::Combine($openParent, 'DefenseClaw.retired')
+            $openBinary = [IO.Path]::Combine($openInstall, 'bin', 'defenseclaw-hook.exe')
+            $refused = [ordered]@{
+                'Users create folders' = '(A;;0x100004;;;BU)'
+                'Users create files' = '(A;;0x100002;;;BU)'
+                'Authenticated Users generic write' = '(A;;GW;;;AU)'
+                'Everyone change permissions' = '(A;;0x140000;;;WD)'
+                'Users delete children' = '(A;;0x100040;;;BU)'
+                'an unmapped domain group create folders' = '(A;;0x100004;;;S-1-5-21-1000-2000-3000-1234)'
+            }
+            foreach ($case in $refused.GetEnumerator()) {
+                Set-TestFolderSddl $openParent ($adminOnly + $case.Value)
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($openBinary))
+                [IO.File]::WriteAllText($openBinary, 'stand-in')
+                foreach ($step in @('rename', 'committed')) {
+                    try {
+                        if ($step -ceq 'rename') {
+                            Move-DefenseClawInstallRootForRetirement -Source $openInstall -Destination $openRetired
+                        }
+                        else {
+                            [void](Invoke-DefenseClawCommittedInstallRootRetirement -Source $openInstall -Destination $openRetired)
+                        }
+                        $failures.Add("the $step retirement renamed InstallRoot while $($case.Key) in its parent")
+                    }
+                    catch {
+                        if ($_.Exception.Message -notlike '*not renamed aside*' -or -not [IO.File]::Exists($openBinary) -or
+                            [IO.Directory]::Exists($openRetired)) {
+                            $failures.Add("the $step retirement with $($case.Key) in the parent: $($_.Exception.Message)")
+                        }
+                    }
+                }
+                if ([IO.Directory]::Exists($openRetired)) {
+                    [IO.Directory]::Move($openRetired, $openInstall)
                 }
             }
-            catch {
-                $failures.Add("the pre-commit retirement probe failed on a free InstallRoot: $($_.Exception.Message)")
+            $accepted = [ordered]@{
+                'administrators only' = ''
+                'inherit-only Users create' = '(A;OICIIO;0x100006;;;BU)'
+                'CREATOR OWNER full' = '(A;OICIIO;GA;;;CO)'
+                'Users read and traverse' = '(A;;0x1200a9;;;BU)'
             }
-            $script:InstallRootRetirementRetryMilliseconds = 1000
-            $holder = Start-TestHolder -Path $probeBinary -Mode Read -HoldMilliseconds 8000
-            try {
-                Assert-DefenseClawInstallRootRetirable -Source $probe -Destination $probeRetired
-                $failures.Add('the pre-commit retirement probe passed while a program held InstallRoot')
-            }
-            catch {
-                if ($_.Exception.Message -notlike '*stopped before it removed anything*' -or
-                    -not [IO.File]::Exists($probeBinary) -or [IO.Directory]::Exists($probeRetired)) {
-                    $failures.Add("the held InstallRoot probe: $($_.Exception.Message)")
+            foreach ($case in $accepted.GetEnumerator()) {
+                Set-TestFolderSddl $openParent ($adminOnly + $case.Value)
+                try {
+                    Move-DefenseClawInstallRootForRetirement -Source $openInstall -Destination $openRetired
+                    if ([IO.Directory]::Exists($openInstall) -or -not [IO.Directory]::Exists($openRetired)) {
+                        $failures.Add("InstallRoot was not retired with a parent of $($case.Key)")
+                    }
+                    [IO.Directory]::Move($openRetired, $openInstall)
+                }
+                catch {
+                    $failures.Add("a parent of $($case.Key) refused the retirement: $($_.Exception.Message)")
                 }
             }
-            finally {
-                [void]$holder.WaitForExit(30000)
+            # Every retirement rename checks the parent first: the bounded
+            # rename, the committed one (through it) and the deferred
+            # finalizer's; the uninstall checks it before its transaction, so
+            # a self-uninstall stops before it removes anything. The
+            # pre-commit rename probe (aside and back) is gone.
+            $functions = @{}
+            foreach ($node in @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $true))) {
+                $functions[$node.Name] = $node
             }
-            $probeCalls = @($calls | Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq 'Assert-DefenseClawInstallRootRetirable' })
+            if ($functions.ContainsKey('Assert-DefenseClawInstallRootRetirable')) {
+                $failures.Add('the pre-commit InstallRoot rename probe is still defined')
+            }
+            function Get-TestCallOffsets([string]$Function, [string]$Command) {
+                return @(@($functions[$Function].FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] }, $true)) |
+                        Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq $Command } |
+                        Microsoft.PowerShell.Core\ForEach-Object { $_.Extent.StartOffset })
+            }
+            $moveCheck = @(Get-TestCallOffsets 'Move-DefenseClawInstallRootForRetirement' 'Assert-DefenseClawInstallRootNameReserved')
+            $deferredCheck = @(Get-TestCallOffsets 'Complete-DefenseClawDeferredSelfUninstallRetirement' 'Assert-DefenseClawInstallRootNameReserved')
+            $deferredMove = @($functions['Complete-DefenseClawDeferredSelfUninstallRetirement'].FindAll({
+                        param($node)
+                        $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and [string]$node.Member -ceq 'Move'
+                    }, $true) | Microsoft.PowerShell.Core\ForEach-Object { $_.Extent.StartOffset })
+            $uninstallCheck = @($calls | Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq 'Assert-DefenseClawInstallRootNameReserved' })
+            if ($moveCheck.Count -ne 1 -or $deferredCheck.Count -ne 1 -or $deferredMove.Count -ne 1 -or
+                $deferredCheck[0] -ge $deferredMove[0] -or $uninstallCheck.Count -ne 1 -or
+                $uninstallCheck[0].Extent.StartOffset -ge $transaction[0].Extent.StartOffset) {
+                $failures.Add('an InstallRoot retirement rename runs without the parent check, or the uninstall checks it after its transaction started')
+            }
+            if (@($ast.FindAll({
+                            param($node)
+                            $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Assert-DefenseClawInstallRootRetirable'
+                        }, $true)).Count -ne 0) {
+                $failures.Add('the module still calls the removed rename probe')
+            }
             $commit = @($calls | Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq 'Complete-DefenseClawTransaction' })
-            if ($probeCalls.Count -ne 1 -or $commit.Count -lt 1 -or
-                $probeCalls[0].Extent.StartOffset -le $transaction[0].Extent.StartOffset -or
-                $probeCalls[0].Extent.StartOffset -ge $commit[0].Extent.StartOffset) {
-                $failures.Add('the InstallRoot retirement probe does not run inside the uninstall transaction before its commit')
-            }
 
-            # Loop round 1: a program that opens a file in InstallRoot after
-            # the probe passed, and holds it past the retry window, no longer
-            # fails the committed retirement: it is deferred, with InstallRoot
-            # in place. A free InstallRoot is retired, and a missing one is
-            # still an error.
+            # Loop round 1: a program that opens a file in InstallRoot and
+            # holds it past the retry window no longer fails the committed
+            # retirement: it is deferred, with InstallRoot in place. A free
+            # InstallRoot is retired, and a missing one is still an error.
             $late = [IO.Path]::Combine($Root, 'late-install')
             $lateRetired = [IO.Path]::Combine($Root, 'late-install-retired')
             $lateBinary = [IO.Path]::Combine($late, 'bin', 'defenseclaw-hook.exe')
             [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($lateBinary))
             [IO.File]::WriteAllText($lateBinary, 'stand-in')
             $script:InstallRootRetirementRetryMilliseconds = 1000
-            Assert-DefenseClawInstallRootRetirable -Source $late -Destination $lateRetired
             $holder = Start-TestHolder -Path $lateBinary -Mode Read -HoldMilliseconds 8000
             try {
                 $deferred = Invoke-DefenseClawCommittedInstallRootRetirement -Source $late -Destination $lateRetired
                 if ([string]::IsNullOrEmpty($deferred) -or -not [IO.File]::Exists($lateBinary) -or [IO.Directory]::Exists($lateRetired)) {
-                    $failures.Add("a holder that opened InstallRoot after the probe was not deferred: '$deferred'")
+                    $failures.Add("a holder of a file in InstallRoot was not deferred: '$deferred'")
                 }
             }
             catch {
-                $failures.Add("a holder that opened InstallRoot after the probe failed the committed retirement: $($_.Exception.Message)")
+                $failures.Add("a holder of a file in InstallRoot failed the committed retirement: $($_.Exception.Message)")
             }
             finally {
                 [void]$holder.WaitForExit(30000)
@@ -373,6 +442,28 @@ $stream.Dispose()
                 finally {
                     [void]$holder.WaitForExit(30000)
                 }
+                # Loop round 2: the finalizer does not rename InstallRoot in a
+                # parent another account can create entries in.
+                $openDeferLayout = @{
+                    InstallRoot = $openInstall
+                    LifecycleLockDirectory = $lockLayout.LifecycleLockDirectory
+                    LifecycleLockPath = $lockLayout.LifecycleLockPath
+                }
+                Set-TestFolderSddl $openParent ($adminOnly + '(A;;0x100004;;;BU)')
+                New-TestDeferredRoot
+                $script:TestDeferredReceipt.retired_install_root = $openRetired
+                try {
+                    [void](Complete-DefenseClawDeferredSelfUninstallRetirement -Layout $openDeferLayout -Receipt $script:TestDeferredReceipt -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -RetryIntervalMilliseconds 200)
+                    $failures.Add('the deferred retirement renamed InstallRoot in a parent Users can create folders in')
+                }
+                catch {
+                    if ($_.Exception.Message -notlike '*not renamed aside*' -or -not [IO.File]::Exists($openBinary) -or
+                        [IO.Directory]::Exists($openRetired) -or $script:TestDeferredCommits -ne 0) {
+                        $failures.Add("the deferred retirement with an open parent: $($_.Exception.Message)")
+                    }
+                }
+                Set-TestFolderSddl $openParent $adminOnly
+                $script:TestDeferredReceipt.retired_install_root = $deferRetired
                 $script:TestDeferredReceipt.phase = 'committed_install_retirement'
                 if ((Complete-DefenseClawDeferredSelfUninstallRetirement -Layout $deferLayout -Receipt $script:TestDeferredReceipt -Deadline ([DateTime]::UtcNow.AddSeconds(5))) -cne 'not_deferred' -or
                     -not [IO.File]::Exists($deferBinary)) {
@@ -390,6 +481,97 @@ $stream.Dispose()
                 }
             }
 
+            # Loop round 2: a run that stopped after it wrote the finalizer
+            # of a deferred retirement and before it recorded its hash leaves
+            # a prepared receipt with no hash. The next Uninstall's recovery
+            # (the usual finalizer variant) takes that finalizer, as one of
+            # the receipt's two exact variants, and records its hash; a
+            # finalizer of other content, or one that does not match a
+            # recorded hash, is still refused.
+            $crashLayout = @{
+                LifecycleLockDirectory = $lockLayout.LifecycleLockDirectory
+                SelfUninstallReceiptPath = [IO.Path]::Combine($lockLayout.LifecycleLockDirectory, 'self-uninstall-' + ('0' * 64) + '.json')
+                SelfUninstallHelperPath = [IO.Path]::Combine($lockLayout.LifecycleLockDirectory, 'self-uninstall-finalizer-w2b.ps1')
+                SelfUninstallEnvironmentRoot = [IO.Path]::Combine($lockLayout.LifecycleLockDirectory, 'self-uninstall-environment-w2b')
+            }
+            function New-TestCrashReceipt([string]$HelperHash = '') {
+                return [pscustomobject]@{
+                    phase = 'prepared_install_retirement'
+                    install_root = 'C:\Program Files\Cisco\DefenseClaw'
+                    retired_install_root = 'C:\Program Files\Cisco\DefenseClaw.retired-0'
+                    retired_module_sha256 = ('0' * 64)
+                    helper_sha256 = $HelperHash
+                }
+            }
+            $crashStubbed = @('Get-DefenseClawSelfUninstallReceipt', 'Write-DefenseClawJsonAtomic')
+            $savedCrashFunctions = @{}
+            foreach ($name in $crashStubbed) {
+                $savedCrashFunctions[$name] = (Microsoft.PowerShell.Management\Get-Item -LiteralPath "function:$name").ScriptBlock
+            }
+            $script:TestCrashReceipt = New-TestCrashReceipt
+            try {
+                function script:Get-DefenseClawSelfUninstallReceipt { param($Layout, $GatewayServiceName, $GuardianServiceName, [switch]$Required) return $script:TestCrashReceipt }
+                function script:Write-DefenseClawJsonAtomic { param($Value, $Path) throw 'w2b test: the run stops before it writes the receipt' }
+                try {
+                    [void](Set-DefenseClawSelfUninstallReceiptHelper -Layout $crashLayout -GatewayServiceName 'a' -GuardianServiceName 'b')
+                    $failures.Add('the crash stand-in did not stop the receipt write')
+                }
+                catch {
+                    if ($_.Exception.Message -notlike '*stops before it writes the receipt*') {
+                        $failures.Add("the deferred finalizer write failed: $($_.Exception.Message)")
+                    }
+                }
+            }
+            finally {
+                foreach ($name in $crashStubbed) {
+                    Microsoft.PowerShell.Management\Set-Item -Path "function:script:$name" -Value $savedCrashFunctions[$name]
+                }
+            }
+            $usualHash = Get-DefenseClawTextSHA256 -Value (Get-DefenseClawSelfUninstallHelperContent -Layout $crashLayout -Receipt (New-TestCrashReceipt))
+            $deferredHash = Get-DefenseClawTextSHA256 -Value (Get-DefenseClawSelfUninstallHelperContent -Layout $crashLayout -Receipt (New-TestCrashReceipt) -DeferredRetirement)
+            if (-not [IO.File]::Exists($crashLayout.SelfUninstallHelperPath) -or
+                (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $crashLayout.SelfUninstallHelperPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $deferredHash) {
+                $failures.Add('the crash stand-in did not leave the deferred finalizer')
+            }
+            foreach ($variant in @('usual', 'deferred')) {
+                $recovered = New-TestCrashReceipt
+                try {
+                    [void](Ensure-DefenseClawSelfUninstallHelper -Layout $crashLayout -Receipt $recovered -DeferredRetirement:($variant -ceq 'deferred'))
+                    if ([string]$recovered.helper_sha256 -cne $deferredHash) {
+                        $failures.Add("the $variant recovery recorded '$($recovered.helper_sha256)', not the existing deferred finalizer's hash")
+                    }
+                }
+                catch {
+                    $failures.Add("the $variant recovery refused the deferred finalizer of a receipt with no hash: $($_.Exception.Message)")
+                }
+            }
+            try {
+                [void](Ensure-DefenseClawSelfUninstallHelper -Layout $crashLayout -Receipt (New-TestCrashReceipt -HelperHash $usualHash))
+                $failures.Add('a deferred finalizer passed for a receipt that recorded the usual one')
+            }
+            catch {
+                if ($_.Exception.Message -notlike '*hash does not match its receipt*') {
+                    $failures.Add("a finalizer that does not match its recorded hash: $($_.Exception.Message)")
+                }
+            }
+            [IO.File]::WriteAllText($crashLayout.SelfUninstallHelperPath, '# another finalizer')
+            try {
+                [void](Ensure-DefenseClawSelfUninstallHelper -Layout $crashLayout -Receipt (New-TestCrashReceipt))
+                $failures.Add('a finalizer of other content passed for a receipt with no hash')
+            }
+            catch {
+                if ($_.Exception.Message -notlike '*different protected receipt content*') {
+                    $failures.Add("a finalizer of other content: $($_.Exception.Message)")
+                }
+            }
+            [IO.File]::Delete($crashLayout.SelfUninstallHelperPath)
+            $recovered = New-TestCrashReceipt
+            [void](Ensure-DefenseClawSelfUninstallHelper -Layout $crashLayout -Receipt $recovered)
+            if ([string]$recovered.helper_sha256 -cne $usualHash) {
+                $failures.Add('a receipt with no hash and no finalizer did not get the usual finalizer')
+            }
+            [IO.File]::Delete($crashLayout.SelfUninstallHelperPath)
+
             # GAP-0867: an administrator's identical Users entry survives
             # install and uninstall.
             function Set-TestDirectorySddl([string]$Path, [string]$Sddl) {
@@ -405,6 +587,58 @@ $stream.Dispose()
             Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
             if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before) {
                 $failures.Add("uninstall removed the administrator's own Users entry from the vendor directory")
+            }
+            # Review loop round 2: Setup records which rights it added, and
+            # an uninstall gives back only those. An administrator's entry
+            # with any rights (the 0x1200a8 one included) stays exactly;
+            # one Setup completed keeps the administrator's rights; one Setup
+            # created goes, with its record. A record for another folder, or
+            # an unreadable one, takes nothing away.
+            $grantRecord = Get-DefenseClawVendorUsersReadGrantPath
+            Remove-DefenseClawVendorUsersReadGrant
+            foreach ($existing in @('(A;;0x1200a8;;;BU)', '(A;;0x1200a9;;;BU)', '(A;;FA;;;BU)')) {
+                Set-TestDirectorySddl $vendor ('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)' + $existing)
+                $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
+                Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+                Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
+                if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before -or [IO.File]::Exists($grantRecord)) {
+                    $failures.Add("uninstall changed an administrator's Users entry $existing on the vendor directory")
+                }
+            }
+            Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x120080;;;BU)'
+            $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) -or
+                (Get-DefenseClawVendorUsersReadGrant -Path $vendor) -ne 0x20) {
+                $failures.Add("Setup did not complete an administrator's partial Users entry, or did not record only what it added")
+            }
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before -or [IO.File]::Exists($grantRecord)) {
+                $failures.Add("uninstall took the administrator's own rights with Setup's: $((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl)")
+            }
+            Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+            $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) -or
+                (Get-DefenseClawVendorUsersReadGrant -Path $vendor) -ne 0x1200a0) {
+                $failures.Add('Setup did not record the Users entry it created')
+            }
+            Set-DefenseClawVendorUsersReadGrant -Path ([IO.Path]::Combine($Root, 'other-vendor')) -AddedRights 0x1200a0
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) -or [IO.File]::Exists($grantRecord)) {
+                $failures.Add('a grant record for another folder took the vendor entry away, or stayed')
+            }
+            Set-DefenseClawVendorUsersReadGrant -Path $vendor -AddedRights 0x1200a0
+            [IO.File]::WriteAllText($grantRecord, '{ not json')
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor 3>$null
+            if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) -or [IO.File]::Exists($grantRecord)) {
+                $failures.Add('an unreadable grant record took the vendor entry away, or stayed')
+            }
+            Set-DefenseClawVendorUsersReadGrant -Path $vendor -AddedRights 0x1200a0
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before -or [IO.File]::Exists($grantRecord)) {
+                $failures.Add('uninstall did not give back the Users entry Setup created')
             }
             # GAP-1439: INTERACTIVE alone is not every enrolled token.
             Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a0;;;IU)'
@@ -482,6 +716,9 @@ $stream.Dispose()
                     $failures.Add('a deny entry for an enrolled user was not detected')
                 }
             }
+            # That deny names this account: drop it, so the scratch tree can
+            # be listed and removed.
+            Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
 
             # Review of GAP-1158: the full standalone purge (the committed
             # cleanup's selector step, then the orphaned-state step) keeps a
