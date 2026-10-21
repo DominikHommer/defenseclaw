@@ -30,7 +30,6 @@ var (
 	trustedPathlibAuthorizedKeysAssign   = regexp.MustCompile(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];`)
 	trustedPathlibWriteText              = regexp.MustCompile(`\bp\.write_text\(`)
 	trustedPathlibReassign               = regexp.MustCompile(`\bp\s*:?=[^=]|\bfor\s+p\s+in\b|\bas\s+p\b`)
-	trustedPythonDynamicCode             = regexp.MustCompile(`\b(?:exec\w*|eval|compile|getattr|globals|locals|vars|__dict__|__import__|__builtins__|builtins|importlib|runpy|subprocess|system|popen|spawn\w*|pty|marshal|pickle|ctypes|interact|InteractiveInterpreter|InteractiveConsole)\b`)
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
@@ -175,10 +174,10 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 		if command.Argv[1] != "-c" || facts.ActiveHome == "" {
 			return false
 		}
-		code := trustedPythonExecutedText(command.Argv[2])
-		return trustedPathlibAuthorizedKeysWrite(code) ||
-			trustedPythonPathAuthorizedKeysWrite.MatchString(code) ||
-			trustedInterpreterAuthorizedKeysWrite(code, facts.ActiveHome)
+		text, calls := trustedPythonExecutedViews(command.Argv[2])
+		return trustedPathlibAuthorizedKeysWrite(text, calls) ||
+			trustedPythonPathExpandWrite(text, calls) ||
+			trustedInterpreterAuthorizedKeysWrite(text, facts.ActiveHome)
 	case "perl":
 		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
 			(trustedPerlAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
@@ -191,28 +190,54 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	}
 }
 
-// trustedPythonExecutedText is Python -c code with its comments and inert
-// triple-quoted strings blanked: a docstring that spells a write executes
-// nothing (GAP-1199); an f-string field runs and is kept. Code whose executed
-// text may run a string (exec, eval, compile, getattr, subprocess, ...) is
-// kept whole, so such a string still proves its write; the same words in a
-// comment or a docstring run nothing.
-func trustedPythonExecutedText(code string) string {
-	masked := guardrail.MaskPythonCommentsAndDocstrings(code)
-	if trustedPythonDynamicCode.MatchString(masked) {
-		return code
+// trustedPythonExecutedViews returns two views of Python -c code, both with
+// the offsets of code. text has its comments and inert triple-quoted strings
+// blanked (a docstring that spells a write executes nothing, GAP-1199): a
+// path operand is read there. calls has the text of every string blanked,
+// f-string fields kept (guardrail.MaskPythonStrings): a write call must start
+// there, since a call spelled in a string or in the literal text of an
+// f-string is data. When the code that runs may turn a string into code or
+// read one (guardrail.PythonStringsMayRun: exec, a child process, a file it
+// writes, its docstrings, ...), both views are the code whole, so such a
+// string still proves its write. An unused import runs nothing.
+func trustedPythonExecutedViews(code string) (text, calls string) {
+	calls = guardrail.MaskPythonStrings(code)
+	if guardrail.PythonStringsMayRun(calls) {
+		return code, code
 	}
-	return masked
+	return guardrail.MaskPythonCommentsAndDocstrings(code), calls
+}
+
+// trustedPythonCodeAt reports whether text[i] is code in calls.
+func trustedPythonCodeAt(text, calls string, i int) bool {
+	return i >= 0 && i < len(text) && len(calls) == len(text) && calls[i] == text[i]
 }
 
 // trustedPathlibAuthorizedKeysWrite proves p = Path.home() / ".ssh" /
 // "authorized_keys"; ... p.write_text(...) only when p is not bound again
-// before the write (GAP-1299).
-func trustedPathlibAuthorizedKeysWrite(code string) bool {
-	for _, assign := range trustedPathlibAuthorizedKeysAssign.FindAllStringIndex(code, -1) {
-		rest := code[assign[1]:]
+// before the write (GAP-1299). Both start in code (calls).
+func trustedPathlibAuthorizedKeysWrite(text, calls string) bool {
+	if len(calls) != len(text) {
+		return false
+	}
+	for _, assign := range trustedPathlibAuthorizedKeysAssign.FindAllStringIndex(text, -1) {
+		if !trustedPythonCodeAt(text, calls, assign[0]) {
+			continue
+		}
+		rest := calls[assign[1]:]
 		write := trustedPathlibWriteText.FindStringIndex(rest)
 		if write != nil && !trustedPathlibReassign.MatchString(rest[:write[0]]) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedPythonPathExpandWrite proves
+// Path("~/.ssh/authorized_keys").expanduser().write_text(...) in code.
+func trustedPythonPathExpandWrite(text, calls string) bool {
+	for _, hit := range trustedPythonPathAuthorizedKeysWrite.FindAllStringIndex(text, -1) {
+		if trustedPythonCodeAt(text, calls, hit[0]) {
 			return true
 		}
 	}

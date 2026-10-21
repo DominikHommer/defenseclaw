@@ -168,6 +168,14 @@ func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
 		{"#!/bin/sh\ntrue <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\nprintf '%s\\n' done\n", false},
 		{"#!/bin/sh\nmkdir -p /tmp/acme <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
 		{"#!/bin/sh\ncat /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		// A reader with a file operand ignores stdin; one that names stdin reads it.
+		{"#!/bin/sh\ngrep acme /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		{"#!/bin/sh\ngrep -n -e acme /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		{"#!/bin/sh\nhead -n 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		{"#!/bin/sh\ngrep acme > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ngrep acme /dev/stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncat /dev/stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\nhead -n 1 > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		// A ':' heredoc comment block leaves the parse partial: never enforced.
 		{"#!/bin/sh\n: <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\nprintf '%s\\n' done\n", false},
 	} {

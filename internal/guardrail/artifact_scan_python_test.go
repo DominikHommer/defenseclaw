@@ -4,6 +4,7 @@
 package guardrail
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -48,6 +49,96 @@ func TestMaskPythonCommentsAndDocstringsKeepsExecutedText(t *testing.T) {
 		}
 		if got := strings.Contains(masked, write); got != tc.visible {
 			t.Errorf("%s: %q masked to %q: write visible=%t, want %t", tc.name, tc.source, masked, got, tc.visible)
+		}
+	}
+}
+
+// MaskPythonStrings leaves only the code that runs: the text of every string
+// is blanked, f-string fields are kept with their own strings blanked.
+func TestMaskPythonStringsKeepsOnlyCode(t *testing.T) {
+	const write = "p.write_text("
+	for _, tc := range []struct {
+		name, source string
+		visible      bool
+	}{
+		{"code", `p.write_text("k")`, true},
+		{"string", `print("p.write_text(1)")`, false},
+		{"one-line f-string text", `print(f"p.write_text(42)")`, false},
+		{"one-line f-string field", `print(f"{p.write_text('k')}")`, true},
+		{"string in a field", `print(f"{'p.write_text(1)'}")`, false},
+		{"nested f-string text", `print(f"{f'p.write_text(1) {x}'}")`, false},
+		{"docstring", `"""p.write_text(1)"""`, false},
+		{"comment", "x = 1 # p.write_text(1)", false},
+		{"bytes", `b"p.write_text(1)"`, false},
+		{"unclosed string", `print("p.write_text(1)`, true},
+	} {
+		masked := MaskPythonStrings(tc.source)
+		if len(masked) != len(tc.source) {
+			t.Fatalf("%s: masked length %d, want %d", tc.name, len(masked), len(tc.source))
+		}
+		if got := strings.Contains(masked, write); got != tc.visible {
+			t.Errorf("%s: %q masked to %q: write visible=%t, want %t", tc.name, tc.source, masked, got, tc.visible)
+		}
+	}
+}
+
+// Code may run a string only through a sink it names in code; an import no
+// name of which is used runs nothing.
+func TestPythonStringsMayRun(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		want   bool
+	}{
+		{`import subprocess; """x"""; print("ok")`, false},
+		{"import subprocess as sp, ctypes\nfrom os import system as run, popen\nprint('ok')", false},
+		{`if x: import subprocess`, false},
+		{"from importlib import (util,\n    machinery)", false},
+		{`print("exec subprocess")`, false},
+		{`# exec`, false},
+		{`f"exec {x}"`, false},
+		{`import subprocess; subprocess.run(["true"])`, true},
+		{`import subprocess as sp; sp.run(["true"])`, true},
+		{`from subprocess import run; f = run`, true},
+		{`from subprocess import *`, true},
+		{`from subprocess import run,`, true},
+		{`exec("x")`, true},
+		{`f"{eval('x')}"`, true},
+		{`import os; os.posix_spawn("/bin/true", [], {})`, true},
+		{`import timeit; timeit.timeit("x")`, true},
+		{`exec(__doc__)`, true},
+		{`print(__doc__)`, true},
+		{`import sys; print(sys.orig_argv)`, true},
+		{`open("m.py", "w").write("x"); import m`, true},
+		{`import sys; sys.modules["subprocess"]`, true},
+		{`().__class__.__base__.__subclasses__()`, true},
+		{`import pty`, false},
+		{`import pty; pty.spawn("sh")`, true},
+	} {
+		if got := PythonStringsMayRun(MaskPythonStrings(tc.source)); got != tc.want {
+			t.Errorf("PythonStringsMayRun(%q) = %t, want %t", tc.source, got, tc.want)
+		}
+	}
+}
+
+// A write call spelled in a string, or in the literal text of an f-string,
+// writes nothing; a path in a string that a call in code writes still does.
+func TestPythonPathWriteMatchNeedsAWriteCallInCode(t *testing.T) {
+	rule := regexp.MustCompile(`authorized_keys`)
+	for _, tc := range []struct {
+		name, source string
+		want         bool
+	}{
+		{"assigned then written", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\np.write_text(\"k\")\n", true},
+		{"open append", "open('/home/a/.ssh/authorized_keys', 'a').write('k')\n", true},
+		{"f-string field open", "print(f\"{open('/home/a/.ssh/authorized_keys', 'a')}\")\n", true},
+		{"exec of a string", "exec(\"open('/home/a/.ssh/authorized_keys', 'a').write('k')\")\n", true},
+		{"f-string text", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"p.write_text(42)\")\n", false},
+		{"string text", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n", false},
+		{"printed open", "print(\"open('/home/a/.ssh/authorized_keys', 'a')\")\n", false},
+		{"printed Path write", "print(\"Path('/home/a/.ssh/authorized_keys').write_text('k')\")\n", false},
+	} {
+		if got := pythonPathWriteMatch(rule, tc.source) != nil; got != tc.want {
+			t.Errorf("%s: pythonPathWriteMatch(%q) = %t, want %t", tc.name, tc.source, got, tc.want)
 		}
 	}
 }

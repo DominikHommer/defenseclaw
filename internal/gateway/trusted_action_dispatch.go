@@ -626,10 +626,71 @@ var stdinIgnoringPrograms = map[string]bool{
 	"uname": true, "whoami": true, "id": true, "hostname": true,
 }
 
+// stdinFileReader is the option grammar of a program that reads its file
+// operands, and stdin only when it has none or one names stdin.
+type stdinFileReader struct {
+	flags   string // short options without an argument
+	args    string // short options that take one
+	pattern bool   // the first operand is a pattern, unless patternArgs gave one
+	// patternArgs are the short options whose argument is a pattern (grep -e).
+	patternArgs string
+	// long maps a long option to whether it takes the next word as its
+	// argument; true for the pattern options of longPattern.
+	long        map[string]bool
+	longPattern map[string]bool
+	anyFlag     bool // every option is a flag without an argument (cat)
+}
+
+var checksumReader = stdinFileReader{flags: "btcwz",
+	long: map[string]bool{"binary": false, "text": false, "check": false, "tag": false,
+		"quiet": false, "status": false, "strict": false, "warn": false, "zero": false, "ignore-missing": false}}
+
+var grepReader = stdinFileReader{
+	flags: "EFGPiyvwxcLloqsbHhnTZzrRaIUuVJOSpM", args: "efmABCdD",
+	pattern: true, patternArgs: "ef",
+	long: map[string]bool{
+		"extended-regexp": false, "fixed-strings": false, "basic-regexp": false, "perl-regexp": false,
+		"ignore-case": false, "no-ignore-case": false, "invert-match": false, "word-regexp": false,
+		"line-regexp": false, "count": false, "files-with-matches": false, "files-without-match": false,
+		"only-matching": false, "quiet": false, "silent": false, "no-messages": false, "byte-offset": false,
+		"with-filename": false, "no-filename": false, "line-number": false, "initial-tab": false,
+		"null": false, "null-data": false, "text": false, "recursive": false, "dereference-recursive": false,
+		"color": false, "colour": false, "regexp": true, "file": true, "max-count": true,
+		"after-context": true, "before-context": true, "context": true, "label": true,
+	},
+	longPattern: map[string]bool{"regexp": true, "file": true},
+}
+
+// stdinFileReaders are the programs whose heredoc is unread when they have a
+// file operand. A program whose script may run a command or name stdin in
+// its own syntax (sed's e and r, awk's getline and system) is not here.
+var stdinFileReaders = map[string]stdinFileReader{
+	"cat":       {anyFlag: true},
+	"tac":       {flags: "br", args: "s"},
+	"nl":        {flags: "p", args: "bdfhilnsvw"},
+	"head":      {flags: "qvz", args: "nc"},
+	"tail":      {flags: "fFqvzr", args: "ncsb"},
+	"wc":        {flags: "clmwL"},
+	"sort":      {flags: "bdfghiMnRrVcCmsuz", args: "ktoST"},
+	"uniq":      {flags: "cdDiuz", args: "fsw"},
+	"cut":       {flags: "nswz", args: "bcdf"},
+	"grep":      grepReader,
+	"egrep":     grepReader,
+	"fgrep":     grepReader,
+	"md5sum":    checksumReader,
+	"sha1sum":   checksumReader,
+	"sha224sum": checksumReader,
+	"sha256sum": checksumReader,
+	"sha384sum": checksumReader,
+	"sha512sum": checksumReader,
+	"b2sum":     checksumReader,
+}
+
 // literalStdinUnread reports whether command, fed a quoted heredoc, is known
-// never to read it: a program of stdinIgnoringPrograms, or cat with file
-// operands and no "-" one. A wrapper, an argument the parse did not resolve,
-// or any other program may read it (fail closed).
+// never to read it: a program of stdinIgnoringPrograms, or a reader of
+// stdinFileReaders with a file operand and no word that names stdin. A
+// wrapper, an argument the parse did not resolve, an option the grammar does
+// not know, or any other program may read it (fail closed).
 func literalStdinUnread(command actionfacts.CommandFact) bool {
 	if len(command.Wrappers) != 0 || !command.ArgvComplete || len(command.Argv) == 0 {
 		return false
@@ -637,22 +698,69 @@ func literalStdinUnread(command actionfacts.CommandFact) bool {
 	if stdinIgnoringPrograms[command.Program] {
 		return true
 	}
-	if command.Program != "cat" {
+	reader, ok := stdinFileReaders[command.Program]
+	if !ok {
 		return false
 	}
-	operands, options := 0, true
 	for _, arg := range command.Argv[1:] {
-		switch {
-		case options && arg == "--":
-			options = false
-		case arg == "-":
+		if namesStdin(arg) {
 			return false
-		case options && strings.HasPrefix(arg, "-"):
-		default:
-			operands++
 		}
 	}
+	operands, patternGiven, options := 0, false, true
+	args := command.Argv[1:]
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case !options || !strings.HasPrefix(arg, "-"):
+			operands++
+		case arg == "--":
+			options = false
+		case reader.anyFlag:
+		case strings.HasPrefix(arg, "--"):
+			name, _, attached := strings.Cut(arg[2:], "=")
+			takesArg, known := reader.long[name]
+			if !known {
+				return false
+			}
+			if reader.longPattern[name] {
+				patternGiven = true
+			}
+			if takesArg && !attached {
+				i++
+			}
+		default:
+			for j := 1; j < len(arg); j++ {
+				switch letter := arg[j]; {
+				case strings.IndexByte(reader.flags, letter) >= 0:
+					continue
+				case strings.IndexByte(reader.args, letter) >= 0:
+					if strings.IndexByte(reader.patternArgs, letter) >= 0 {
+						patternGiven = true
+					}
+					if j == len(arg)-1 {
+						i++ // the argument is the next word
+					}
+				default:
+					return false
+				}
+				break
+			}
+		}
+	}
+	if reader.pattern && !patternGiven {
+		operands--
+	}
 	return operands > 0
+}
+
+// namesStdin reports whether word may name stdin as a file: "-", an option
+// whose value is "-" (--file=-, -f-), or a /dev or /proc file descriptor path.
+func namesStdin(word string) bool {
+	return word == "-" || strings.HasSuffix(word, "=-") ||
+		len(word) > 2 && word[0] == '-' && word[1] != '-' && strings.HasSuffix(word, "-") ||
+		strings.Contains(word, "/dev/stdin") || strings.Contains(word, "/dev/fd/") ||
+		strings.Contains(word, "/proc/")
 }
 
 // appendJSONStrings appends every string of the JSON value raw, object keys
