@@ -272,6 +272,10 @@ def has_content_edit(row):
     return row["status"] != "modified" or not edits or any(line.strip() for line in edits)
 
 
+def dependency_change(row, spec):
+    return any(dependency_path(path, spec) for path in (row["filename"], row.get("previous_filename", "")))
+
+
 def priority(row, spec):
     paths = [row["filename"], row.get("previous_filename", "")]
     if any(
@@ -457,7 +461,7 @@ def schema_contract(value, names=False):
 
 def impact(changes, selected, spec, review=None):
     """Private triage, independent of broad selection and public digest eligibility."""
-    runtime = {c["path"] for c in changes if dependency_path(c["path"], spec)}
+    runtime = {row["filename"] for row in selected if dependency_change(row, spec)}
     complete = len(changes) == len(selected) and all(row.get("patch") for row in selected)
     kind, reason = "unknown", "No supported contradiction established; not a compatibility verdict."
     if (
@@ -476,7 +480,7 @@ def impact(changes, selected, spec, review=None):
         )
     ):
         kind, reason = "routine_change", "Only non-runtime or schema-annotation changes within the inspected scope."
-    if review and review["risk"] in ("routine_change", "suspected_conflict"):
+    if kind != "routine_change" and review and review["risk"] in ("routine_change", "suspected_conflict"):
         grounded, covered = bool(review.get("comparisons")), set()
         for row in review.get("comparisons", []):
             change = next(c for c in changes if c["path"] == row["upstream_file"])
@@ -486,7 +490,7 @@ def impact(changes, selected, spec, review=None):
             grounded &= bool(row.get("applicability") and row.get("counterevidence"))
             edits = list(difflib.unified_diff(change["before"].splitlines(), change["after"].splitlines()))
             grounded &= any(
-                line[1:].strip() and line[1:].strip() in row.get(side + "_quote", "")
+                re.search(r"[A-Za-z_]\w{2,}", line[1:]) and line[1:].strip() in row.get(side + "_quote", "")
                 for side, sign in (("before", "-"), ("after", "+"))
                 for line in edits
                 if line.startswith(sign) and not line.startswith(("---", "+++"))
@@ -541,7 +545,12 @@ def inspect_pr(pr, spec, requirements, root, fetch=request, ai=False):
         "decision": "static_conflict" if proven else "review_required" if selected else "informational",
         "coverage": f"partial: {len(changes)}/{len(selected)} relevant files; unsupported behavior requires review",
     }
-    if ai and selected and not proven and any(dependency_path(c["path"], spec) for c in changes):
+    if (
+        ai
+        and not proven
+        and any(dependency_change(row, spec) for row in selected[:10])
+        and any(c["before"] != c["after"] for c in changes)
+    ):
         packet = {
             "requirements": requirements,
             "local": context,
@@ -577,12 +586,7 @@ def inspect_pr(pr, spec, requirements, root, fetch=request, ai=False):
         if proven
         else impact(changes, selected, spec, result.get("ai_review"))
     )
-    notification_paths = [
-        row["filename"]
-        for row in selected
-        if has_content_edit(row)
-        and any(dependency_path(path, spec) for path in (row["filename"], row.get("previous_filename", "")))
-    ]
+    notification_paths = [row["filename"] for row in selected if has_content_edit(row) and dependency_change(row, spec)]
     return result, notice(spec["name"], pr, notification_paths)
 
 
@@ -761,6 +765,8 @@ def main(argv=None):
                 limit=args.limit,
             )
             save(args.output / "private-report.json", private)
+            if any("AI unavailable" in row["coverage"] for row in private):
+                print("::warning::AI unavailable; static scanning only. Check model credentials privately.")
             validate_bundle(bundle, config)
             save(args.output / "public/bundle.json", bundle)
             print(json.dumps({"processed": len(private), "coverage_gaps": bundle["gaps"], "notice": NOTICE}))

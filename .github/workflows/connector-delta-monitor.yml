@@ -15,12 +15,6 @@ on:
         description: Send contributor notices (also requires the repository notification switch)
         type: boolean
         default: false
-      eval_public_key:
-        description: Temporary manual evaluation encryption public key
-        type: string
-      eval_recipient:
-        description: Temporary manual evaluation public key fingerprint
-        type: string
 permissions:
   contents: read
   actions: read
@@ -28,71 +22,6 @@ concurrency:
   group: connector-delta-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  evaluation:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.eval_public_key != '' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: fc6794381d703a27671d534a91f865cbef5d09ae
-          path: integration
-          persist-credentials: false
-      - name: Read-only live impact evaluation; private output only
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CONNECTOR_DELTA_BEDROCK_API_KEY: ${{ secrets.BIFROST_API_KEY }}
-        run: |
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          from scripts import connector_delta_monitor as m
-          config = m.load(m.CONFIG)
-          rows = []
-          diagnostics = []
-          original = m.urllib.request.build_opener
-          def diagnostic_opener(*args, **kwargs):
-              opener = original(*args, **kwargs)
-              call = opener.open
-              def opened(request, **options):
-                  try:
-                      return call(request, **options)
-                  except m.urllib.error.HTTPError as error:
-                      if 'bedrock-runtime' in request.full_url:
-                          diagnostics.append({'status':error.code,'error':error.read(3000).decode('utf-8',errors='replace')})
-                      raise
-                  except OSError as error:
-                      diagnostics.append({'error_type':type(error).__name__})
-                      raise
-              opener.open = opened
-              return opener
-          m.urllib.request.build_opener = diagnostic_opener
-          for name, number in [('codex', n) for n in (15252,38947,20522,22268,55456,24962,49379,33926,35194)] + [('claudecode', n) for n in (98083,98080)]:
-              bundle, report = m.analyze(config, Path('integration'), {'schema_version':1,'cursors':{}}, ai=True, only=(name,number))
-              rows.append({'connector':name,'number':number,'gaps':bundle['gaps'],'report':report})
-          m.save(Path(os.environ['RUNNER_TEMP'])/'impact-eval.json', {'results':rows,'diagnostics':diagnostics})
-          print('Evaluation complete; detailed output is encrypted, not logged.')
-          PY
-      - name: Encrypt findings for local review
-        env:
-          EVAL_PUBLIC_KEY: ${{ inputs.eval_public_key }}
-          EVAL_RECIPIENT: ${{ inputs.eval_recipient }}
-        run: |
-          set -euo pipefail
-          test "${#EVAL_PUBLIC_KEY}" -lt 10000
-          [[ "$EVAL_RECIPIENT" =~ ^[A-F0-9]{40}$ ]]
-          mkdir -m 700 "$RUNNER_TEMP/monitor-keyring"
-          printf '%s' "$EVAL_PUBLIC_KEY" | gpg --batch --homedir "$RUNNER_TEMP/monitor-keyring" --import
-          gpg --batch --yes --homedir "$RUNNER_TEMP/monitor-keyring" --trust-model always --recipient "$EVAL_RECIPIENT" --output "$RUNNER_TEMP/impact-eval.gpg" --encrypt "$RUNNER_TEMP/impact-eval.json"
-      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
-        with:
-          name: connector-impact-eval
-          path: ${{ runner.temp }}/impact-eval.gpg
-          retention-days: 1
-          if-no-files-found: error
   test:
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
     runs-on: ubuntu-latest
