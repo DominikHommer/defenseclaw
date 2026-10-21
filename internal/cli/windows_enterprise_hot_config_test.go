@@ -39,6 +39,7 @@ type hotConfigHost struct {
 	digestCalls   int
 	adoptAfter    int
 	refreshes     int
+	stops         int
 	bundleID      string
 	bundleVersion uint64
 }
@@ -83,8 +84,9 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	validateSeam, writeSeam := windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite
 	timeoutSeam, restartTimeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll
 	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
-	reloadSeam := windowsEnterpriseHotBundleReload
+	reloadSeam, failClosedSeam := windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigFailClosed
 	t.Cleanup(func() {
+		windowsEnterpriseHotConfigFailClosed = failClosedSeam
 		windowsEnterpriseHotConfigRefreshTargets = refreshSeam
 		windowsEnterpriseIsElevated = elevatedSeam
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock = layoutSeam, lockSeam
@@ -105,6 +107,8 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		return nil
 	}
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { return nil }
+	// No test stops a real gateway service: an unproven undo is counted.
+	windowsEnterpriseHotConfigFailClosed = func() error { host.stops++; return nil }
 	custodySeam := windowsEnterpriseInstalledCLICustody
 	t.Cleanup(func() { windowsEnterpriseInstalledCLICustody = custodySeam })
 	// The installed CLI stands for an administrator-only image.

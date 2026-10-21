@@ -581,10 +581,13 @@ $stream.Dispose()
                 Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $security
             }
             $vendor = [IO.Path]::Combine($Root, 'vendor')
+            # The StateRoot of the deployment scope each grant is for.
+            $productionScope = [IO.Path]::Combine($Root, 'scope-production')
+            [void][IO.Directory]::CreateDirectory($productionScope)
             Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a0;;;BU)'
             $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
-            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
-            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
             if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before) {
                 $failures.Add("uninstall removed the administrator's own Users entry from the vendor directory")
             }
@@ -599,46 +602,103 @@ $stream.Dispose()
             foreach ($existing in @('(A;;0x1200a8;;;BU)', '(A;;0x1200a9;;;BU)', '(A;;FA;;;BU)')) {
                 Set-TestDirectorySddl $vendor ('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)' + $existing)
                 $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
-                Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
-                Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
+                Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+                Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
                 if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before -or [IO.File]::Exists($grantRecord)) {
                     $failures.Add("uninstall changed an administrator's Users entry $existing on the vendor directory")
                 }
             }
             Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x120080;;;BU)'
             $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
-            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
             if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) -or
                 (Get-DefenseClawVendorUsersReadGrant -Path $vendor) -ne 0x20) {
                 $failures.Add("Setup did not complete an administrator's partial Users entry, or did not record only what it added")
             }
-            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
             if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before -or [IO.File]::Exists($grantRecord)) {
                 $failures.Add("uninstall took the administrator's own rights with Setup's: $((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl)")
             }
             Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
             $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
-            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
-            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
             if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) -or
                 (Get-DefenseClawVendorUsersReadGrant -Path $vendor) -ne 0x1200a0) {
                 $failures.Add('Setup did not record the Users entry it created')
             }
-            Set-DefenseClawVendorUsersReadGrant -Path ([IO.Path]::Combine($Root, 'other-vendor')) -AddedRights 0x1200a0
-            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            Set-DefenseClawVendorUsersReadGrant -Path ([IO.Path]::Combine($Root, 'other-vendor')) -AddedRights 0x1200a0 -Scopes @($productionScope)
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
             if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) -or [IO.File]::Exists($grantRecord)) {
                 $failures.Add('a grant record for another folder took the vendor entry away, or stayed')
             }
-            Set-DefenseClawVendorUsersReadGrant -Path $vendor -AddedRights 0x1200a0
+            Set-DefenseClawVendorUsersReadGrant -Path $vendor -AddedRights 0x1200a0 -Scopes @($productionScope)
             [IO.File]::WriteAllText($grantRecord, '{ not json')
-            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor 3>$null
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope 3>$null
             if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) -or [IO.File]::Exists($grantRecord)) {
                 $failures.Add('an unreadable grant record took the vendor entry away, or stayed')
             }
-            Set-DefenseClawVendorUsersReadGrant -Path $vendor -AddedRights 0x1200a0
-            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            Set-DefenseClawVendorUsersReadGrant -Path $vendor -AddedRights 0x1200a0 -Scopes @($productionScope)
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
             if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before -or [IO.File]::Exists($grantRecord)) {
                 $failures.Add('uninstall did not give back the Users entry Setup created')
+            }
+            # Review loop round 3: production and certification scopes share
+            # the vendor directory and its grant record. A certification
+            # rollback or uninstall keeps the rights production Setup added,
+            # whether or not the certification install recorded that it
+            # relies on them; a production uninstall keeps them for a
+            # certification scope that is still installed; the last scope
+            # to go gives them back; and a scope whose StateRoot is gone
+            # (removed without an uninstall) no longer holds them.
+            $certificationScope = [IO.Path]::Combine($Root, 'scope-certification')
+            [void][IO.Directory]::CreateDirectory($certificationScope)
+            function Test-TestGrantScopes([string[]]$Want) {
+                $got = @(Get-DefenseClawVendorUsersReadGrantScopes -Path $vendor)
+                return ($got.Count -eq $Want.Count -and
+                    @($Want | Microsoft.PowerShell.Core\Where-Object { $got -contains [IO.Path]::GetFullPath($_).TrimEnd('\') }).Count -eq $Want.Count)
+            }
+            Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+            $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            $granted = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
+            # The rollback of a certification install that found the rights.
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $certificationScope
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $granted -or
+                -not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) -or -not (Test-TestGrantScopes @($productionScope))) {
+                $failures.Add('a certification rollback took away the vendor rights production Setup added')
+            }
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $certificationScope
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $granted -or
+                -not (Test-TestGrantScopes @($productionScope, $certificationScope))) {
+                $failures.Add('a certification install over production changed the vendor entry or did not record that it relies on it')
+            }
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $certificationScope
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $granted -or
+                -not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) -or -not (Test-TestGrantScopes @($productionScope))) {
+                $failures.Add('a certification uninstall took away the vendor rights production Setup added')
+            }
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before -or [IO.File]::Exists($grantRecord)) {
+                $failures.Add('the uninstall of the last scope did not give back the vendor entry and its record')
+            }
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $certificationScope
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $granted -or
+                -not (Test-TestGrantScopes @($certificationScope))) {
+                $failures.Add('a production uninstall took away the vendor rights an installed certification scope relies on')
+            }
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $certificationScope
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before -or [IO.File]::Exists($grantRecord)) {
+                $failures.Add('the certification uninstall, the last scope, did not give back the vendor entry')
+            }
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $certificationScope
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            [IO.Directory]::Delete($certificationScope)
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before -or [IO.File]::Exists($grantRecord)) {
+                $failures.Add('a scope whose StateRoot is gone kept the vendor entry')
             }
             # GAP-1439: INTERACTIVE alone is not every enrolled token.
             Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a0;;;IU)'
@@ -701,7 +761,7 @@ $stream.Dispose()
                 $failures.Add('a deny entry for a retired account blocked the users check')
             }
             Set-TestDirectorySddl $vendor ('O:BAG:BAD:P' + $retiredDeny + '(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
-            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
             if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor)) {
                 $failures.Add('the vendor grant did not converge beside a deny for a retired account')
             }
