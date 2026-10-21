@@ -187,3 +187,41 @@ func TestManagedCodexBindingErrorUsesShellWording(t *testing.T) {
 		t.Fatalf("binding log %q: %v", data, err)
 	}
 }
+
+// A managed Codex Stop hook with a binding error (malformed stdin or a
+// mismatched hook_event_name) keeps the neutral Stop rule: blocking Stop
+// keeps Codex running and repeats the failing hook. The diagnostic keeps
+// the binding-error wording and the row is logged once.
+func TestManagedCodexStopBindingErrorKeepsTheNeutralStopRule(t *testing.T) {
+	for name, payload := range map[string]string{
+		"malformed":  `{`,
+		"mismatched": `{"hook_event_name":"PreToolUse"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			logHome := filepath.Join(t.TempDir(), ".defenseclaw")
+			r := run(t, "codex", ok(`{"action":"block"}`), func(opts *Options) {
+				opts.FailureLogHome = logHome
+				opts.ManagedEnterprise = true
+				opts.ManagedStandalone = true
+				opts.ExplainUnenrolledAccount = true
+				opts.FailMode = "closed"
+				opts.Event = "Stop"
+				opts.Stdin = strings.NewReader(payload)
+			})
+			if blocked(r) || r.rt.requests != 0 || !strings.Contains(r.stderr, "codex hook binding error") {
+				t.Fatalf("Stop binding error was not answered with the neutral allow: %+v", r)
+			}
+			data, err := os.ReadFile(filepath.Join(logHome, "logs", "hook-failures.jsonl"))
+			if err != nil || bytes.Count(data, []byte{'\n'}) != 1 {
+				t.Fatalf("binding log %q: %v", data, err)
+			}
+			var row map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(data), &row); err != nil {
+				t.Fatal(err)
+			}
+			if row["category"] != "response" || !strings.Contains(fmt.Sprint(row["reason"]), "codex hook binding error") {
+				t.Fatalf("unexpected binding row: %v", row)
+			}
+		})
+	}
+}

@@ -72,9 +72,8 @@ var (
 		}
 		return deployment.State == winpath.EnterpriseDeploymentInstalled, nil
 	}
-	windowsSecretIsElevated         = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
-	windowsSecretRestartGateway     = restartWindowsStandaloneGateway
-	windowsSecretGatewayLoadedValue = windowsGatewayLoadedSecretValue
+	windowsSecretIsElevated     = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
+	windowsSecretRestartGateway = restartWindowsStandaloneGateway
 	// windowsSecretLockBundleStore, windowsSecretLifecycleLockPath and
 	// windowsSecretLifecycleLock are the two locks set and remove take.
 	windowsSecretLockBundleStore   = lockWindowsBundleStoreWithin
@@ -201,16 +200,21 @@ func runWindowsSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) e
 	return nil
 }
 
-// changeWindowsSecret stores or removes the credential and restarts the
-// gateway so it reads the change. Arguments and the value are checked
-// before any lock is taken; the change and the restart run under both
-// locks (lockWindowsSecretChange). It reports whether the gateway was
-// restarted.
+// windowsSecretChange is the outcome of a set or remove: whether the gateway
+// was restarted, and whether set found the exact value already stored with
+// no running gateway to restart (noop).
 type windowsSecretChange struct {
 	restarted bool
 	noop      bool
 }
 
+// changeWindowsSecret stores or removes the credential and restarts the
+// gateway so it reads the change. Arguments and the value are checked
+// before any lock is taken; the change and the restart run under both
+// locks (lockWindowsSecretChange). A set of the exact stored bytes is not
+// rewritten, but a running gateway still restarts: nothing proves which
+// value the running process loaded (it may have started while the file was
+// unreadable, and an ACL repair or a preserved timestamp leaves no trace).
 func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions) (windowsSecretChange, error) {
 	if err := windowsSecretElevation(action, opts); err != nil {
 		return windowsSecretChange{}, err
@@ -272,30 +276,17 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	defer store.close()
+	unchanged := false
 	if action == "set" {
+		// The gateway reader normalizes whitespace, so the value it accepts
+		// and the exact stored bytes must both match.
 		stored, _, readErr := managed.ResolveServiceCredentialAs(opts.name, store.dir, windowsSecretGatewayAccount)
-		storedPath := filepath.Join(store.dir, opts.name)
-		switch {
-		case readErr == nil && bytes.Equal(stored, value):
-			// The gateway reader normalizes whitespace. A no-op needs exact
-			// stored bytes, not merely the same value after normalization.
-			raw, err := os.ReadFile(storedPath)
-			if err == nil && bytes.Equal(raw, value) {
-				if windowsSecretGatewayLoadedValue(storedPath) {
-					return windowsSecretChange{noop: true}, nil
-				}
-				// A running gateway that predates the credential still needs a
-				// restart after an earlier restart failed. Keep the file intact.
-				store.close()
-				restarted, err := windowsSecretRestartGateway()
-				if err != nil {
-					return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure, fmt.Errorf("credential %s was already stored, but restarting the gateway failed: %w", opts.name, err))
-				}
-				return windowsSecretChange{restarted: restarted}, nil
+		raw, rawErr := os.ReadFile(filepath.Join(store.dir, opts.name))
+		unchanged = readErr == nil && rawErr == nil && bytes.Equal(stored, value) && bytes.Equal(raw, value)
+		if !unchanged {
+			if err := writeWindowsSecret(store, opts.name, value); err != nil {
+				return windowsSecretChange{}, secretFailed("change_failed", windowsSecretExitFailure, err)
 			}
-		}
-		if err := writeWindowsSecret(store, opts.name, value); err != nil {
-			return windowsSecretChange{}, secretFailed("change_failed", windowsSecretExitFailure, err)
 		}
 	} else if err := removeWindowsSecret(layout, store, opts.name); err != nil {
 		return windowsSecretChange{}, err
@@ -304,10 +295,14 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	// The gateway reads credentials when it starts; apply the change now.
 	restarted, err := windowsSecretRestartGateway()
 	if err != nil {
+		done := windowsSecretChanged(action)
+		if unchanged {
+			done = "was already stored"
+		}
 		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
-			fmt.Errorf("credential %s %s, but restarting the gateway failed: %w", opts.name, windowsSecretChanged(action), err))
+			fmt.Errorf("credential %s %s, but restarting the gateway failed: %w", opts.name, done, err))
 	}
-	return windowsSecretChange{restarted: restarted}, nil
+	return windowsSecretChange{restarted: restarted, noop: unchanged && !restarted}, nil
 }
 
 // requireWindowsSecretDeployment refuses not_installed (1603) unless a
@@ -723,46 +718,6 @@ func windowsSecretStatus(dir string) ([]windowsSecretState, error) {
 	}
 	sort.Slice(states, func(i, j int) bool { return states[i].Name < states[j].Name })
 	return states, nil
-}
-
-// windowsGatewayLoadedSecretValue only permits the no-op when the gateway is
-// stopped (its next start reads the file), or its current process started
-// after the stored credential was written. Any uncertainty retries restart.
-func windowsGatewayLoadedSecretValue(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	manager, err := mgr.Connect()
-	if err != nil {
-		return false
-	}
-	defer manager.Disconnect()
-	service, err := manager.OpenService(managed.StandaloneWindowsGatewaySvc)
-	if err != nil {
-		return false
-	}
-	defer service.Close()
-	status, err := service.Query()
-	if err != nil {
-		return false
-	}
-	if status.State == svc.Stopped {
-		return true
-	}
-	if status.State != svc.Running || status.ProcessId == 0 {
-		return false
-	}
-	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, status.ProcessId)
-	if err != nil {
-		return false
-	}
-	defer windows.CloseHandle(process)
-	var creation, exited, kernel, user windows.Filetime
-	if err := windows.GetProcessTimes(process, &creation, &exited, &kernel, &user); err != nil {
-		return false
-	}
-	return creation.Nanoseconds() > info.ModTime().UnixNano()
 }
 
 // restartWindowsStandaloneGateway restarts the gateway service when it is

@@ -2219,11 +2219,17 @@ func responseFailureReason(reason string) string {
 // failManagedCodexBinding keeps the shell hook's binding-error wording in
 // Codex's native denial body. A mismatched registered event is an integrity
 // refusal, including when the administrator allows outages to fail open.
+// A registered Stop event still gets the neutral Stop rule, as in
+// failResponse: blocking Stop keeps Codex running and repeats the failing
+// hook (#1140).
 func failManagedCodexBinding(opts Options, sp spec, reason string) int {
+	reason = "codex hook binding error: " + reason
+	if failClosedStopEvent(opts, sp) {
+		return allowFailClosedStop(opts, sp, reason, "response")
+	}
 	logHookFailure(opts, sp, reason, "response", "closed", true)
-	text := "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": codex hook binding error: " + reason
-	fmt.Fprintln(opts.Stderr, "defenseclaw: codex hook binding error: "+reason)
-	return emitCodexBlock(opts, text)
+	fmt.Fprintln(opts.Stderr, "defenseclaw: "+reason)
+	return emitCodexBlock(opts, "DefenseClaw blocked this "+hookEventSubject(opts.Event)+": "+reason)
 }
 
 // invalidManagedCopilotBindingReason is the hook-failure reason of a managed

@@ -454,8 +454,10 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 	return buildHookOptionsForRuntime(connector, event, apiAddr, failMode, false)
 }
 
+// managedHookFailureLogHome is the invoking user's diagnostic directory for
+// managed hook failure rows (managedHookUserProfileDir).
 func managedHookFailureLogHome() string {
-	home, err := os.UserHomeDir()
+	home, err := managedHookUserProfileDir()
 	if err != nil || home == "" {
 		return ""
 	}
