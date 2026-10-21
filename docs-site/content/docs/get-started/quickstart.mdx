@@ -7,11 +7,11 @@ keywords:
   - DefenseClaw first block
 ---
 
-This guide takes you from nothing to a blocked tool call in about five minutes. It uses Claude Code. For another agent, replace `claudecode` with its connector name: `codex`, `copilot`, `cursor`, `devin`, `antigravity`, `kiro`, `opencode`, `amp` or `hermes`. The [support matrix](/docs/get-started/support-matrix) shows which agents can block on your OS.
+Install DefenseClaw, guard one agent and watch a test command get blocked, in about five minutes. This uses Claude Code. For another agent, replace `claudecode` with its connector name (`codex`, `copilot`, `cursor`, `devin`, `antigravity`, `kiro`, `opencode`, `amp` or `hermes`). The [support matrix](/docs/get-started/support-matrix) shows which agents can block on your OS.
 
 The block comes from a one-rule test pack that matches only `echo defenseclaw-demo-marker`. Agents refuse the destructive commands the default rules target, so a harmless marker is the reliable way to see a block.
 
-## Block a tool call in seven steps
+## Block a tool call
 
 <Steps>
 
@@ -21,7 +21,7 @@ The block comes from a one-rule test pack that matches only `echo defenseclaw-de
 
 <include>../../snippets/install-commands.mdx</include>
 
-On a first install the installer asks which agent to guard: type `claudecode` (or its number). It ends with the next command, `defenseclaw init --connector claudecode`. Requirements and the other install options are on [Install](/docs/get-started/install).
+The installer asks which agent to guard: type `claudecode`. Requirements and options are on [Install](/docs/get-started/install).
 
 </Step>
 
@@ -33,26 +33,13 @@ On a first install the installer asks which agent to guard: type `claudecode` (o
 defenseclaw init --connector claudecode
 ```
 
-Press Enter through the prompts. `init` sets up Claude Code in **observe** mode: DefenseClaw logs what the agent does and blocks nothing yet. At **Select connector(s) for action enforcement**, leave the box unchecked. Plain `defenseclaw init` sets up every agent it finds. `init` ends by starting the gateway and printing a report like this. The sample was captured with `--skip-gateway`, so its Sidecar row says not started; yours says started:
+Press Enter through the prompts. Claude Code starts in **observe** mode: DefenseClaw logs what the agent does and blocks nothing yet. At **Select connector(s) for action enforcement**, leave the box unchecked. `init` starts the gateway and prints a report like this (this sample used `--skip-gateway`, so its Sidecar row says not started; yours says started):
 
 <include>../../snippets/first-run-report.mdx</include>
 
-`✓` is done and `-` is optional or skipped. You need no LLM key and no Cisco AI Defense key for this guide. If the report says `partial`, it names what needs attention, for example an agent that is not installed; `defenseclaw doctor` explains the rest. Every option is in the [init and quickstart reference](/docs/reference/commands/first-run).
+`✓` is done and `-` is optional or skipped. You need no LLM key for this guide. If the report says `partial`, it names what needs attention; `defenseclaw doctor` explains the rest. Options are in the [init reference](/docs/reference/commands/first-run).
 
-</Step>
-
-<Step>
-
-### Check that it is watching
-
-Open Claude Code and ask it something that uses a tool, such as "list the files in this directory". If Claude Code was already running, quit and reopen it first so it loads the new hooks. Then look at what DefenseClaw recorded:
-
-```bash
-defenseclaw status    # the guarded agents, their modes and recent activity
-defenseclaw tui       # the live dashboard: alerts, audit and logs
-```
-
-New events show up within a second or two. If nothing does, run `defenseclaw doctor`.
+Quit and reopen Claude Code so it loads the hooks, ask it to list the files in the directory, then run `defenseclaw status`. The agent, its mode and the new events appear within a second or two.
 
 </Step>
 
@@ -64,9 +51,7 @@ New events show up within a second or two. If nothing does, run `defenseclaw doc
 defenseclaw guardrail mode action --connector claudecode
 ```
 
-This switches only Claude Code to **action** mode, which enforces the rules. Other agents stay in observe. The running gateway applies the mode without a restart.
-
-The hook fail mode is `closed` on a new install, in observe and action mode alike: when the gateway is down, Claude Code's tool calls are blocked, and the first-run report shows `fail mode=closed`. To allow and log those calls instead, run `defenseclaw guardrail fail-mode open`. Running `defenseclaw quickstart` again without `--mode` keeps the mode and fail mode each agent already has.
+This switches only Claude Code to **action** mode, which enforces the rules. The running gateway applies it without a restart. The hook fail mode is `closed` on a new install: if the gateway is down, tool calls are blocked ([fail modes](/docs/reference/configuration/fail-modes)).
 
 </Step>
 
@@ -132,7 +117,7 @@ defenseclaw guardrail use-pack first-guardrail --connector claudecode
 
 </Tabs>
 
-The copy keeps every default rule. `use-pack` validates the pack, pins its digest in `guardrail.custom_packs.first-guardrail` and switches Claude Code to it. The gateway loads the pack on its next reload; nothing restarts.
+The copy keeps every default rule. `use-pack` pins the pack's digest in `guardrail.custom_packs.first-guardrail` and switches Claude Code to it. Nothing restarts.
 
 </Step>
 
@@ -154,7 +139,7 @@ In another terminal, list the latest alerts:
 defenseclaw alerts --limit 5
 ```
 
-The block is the newest row: severity `CRITICAL`, action `scan-finding`, target `PreToolUse`. `defenseclaw alerts --show 1` prints the whole record:
+The block is the newest row. `defenseclaw alerts --show 1` prints the whole record:
 
 ```text
 Alert #1
@@ -167,7 +152,7 @@ Alert #1
   Scanner:   hook-rules
 ```
 
-The same alert is in the **Alerts** panel of `defenseclaw tui` (press `2`):
+The same alert is in the **Alerts** panel of `defenseclaw tui` (press `2`).
 
 ![The Alerts panel of defenseclaw tui showing one CRITICAL scan-finding alert for claudecode:PreToolUse with rule DEMO-MARKER-BLOCK](/images/get-started/tui-alerts-demo-block.png)
 
@@ -182,7 +167,7 @@ defenseclaw guardrail use-pack --clear --connector claudecode   # back to the de
 defenseclaw guardrail mode --clear --connector claudecode       # back to observe
 ```
 
-Then delete the `first-guardrail` folder under `~/.defenseclaw/policies/guardrail/`. Keep Claude Code in action mode instead if you want it to enforce the default rules from now on.
+Delete the `first-guardrail` folder under `~/.defenseclaw/policies/guardrail/`. Skip the second command to keep enforcing the default rules.
 
 </Step>
 
@@ -192,7 +177,7 @@ Then delete the `first-guardrail` folder under `~/.defenseclaw/policies/guardrai
 
 - The agent was open before `init`: quit and reopen it.
 - `defenseclaw doctor` shows a failing hook or gateway row: see [Troubleshooting](/docs/troubleshooting).
-- The agent is still in observe mode: run `defenseclaw guardrail status`.
+- Still in observe mode: run `defenseclaw guardrail status`.
 
 ## Next
 
