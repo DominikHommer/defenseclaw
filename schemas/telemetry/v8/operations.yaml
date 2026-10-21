@@ -13012,7 +13012,7 @@ groups:
     route_selector: true
     compatibility_profiles:
     - local-observability-v1
-- id: metric.defenseclaw.sandbox.managed.provisional_resolutions
+- id: metric.defenseclaw.sandbox.managed.provisional
   type: metric
   brief: Provisional managed sandbox resolutions (registered on the offline floor, or resolved once the directory lookup answered), by result, guardrail profile, driver and harness connector; no user or sandbox label.
   stability: stable
@@ -13029,7 +13029,7 @@ groups:
     requirement_level: recommended
   body_fields: []
   metric:
-    instrument_name: defenseclaw.sandbox.managed.provisional_resolutions
+    instrument_name: defenseclaw.sandbox.managed.provisional
     instrument_type: counter
     value_type: int64
     unit: '{resolution}'

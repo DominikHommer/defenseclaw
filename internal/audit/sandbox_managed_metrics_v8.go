@@ -22,7 +22,7 @@ import (
 
 // The managed sandbox counters are the fleet view of the managed sandbox
 // records: defenseclaw.sandbox.managed.refusals, .asks, .foreign_items,
-// .provisional_resolutions and .drift. Each is a companion of its record and
+// .provisional and .drift. Each is a companion of its record and
 // moves only when the record is admitted. Their labels are the guardrail
 // profile name, the sandbox driver, the harness connector and one closed
 // code; the host OS is the os.type resource attribute every record carries.
@@ -37,7 +37,7 @@ const (
 )
 
 // Values of defenseclaw.metric.result on
-// defenseclaw.sandbox.managed.provisional_resolutions: a registration held
+// defenseclaw.sandbox.managed.provisional: a registration held
 // to the offline floor while the directory lookup is pending (provisional),
 // a provisional registration whose lookup has resolved (resolved), and
 // either of them when the policy could not be built or applied (failed).
@@ -121,9 +121,9 @@ func newSandboxManagedForeignMetric(event Event, labels sandboxManagedLabels, ki
 }
 
 func newSandboxManagedProvisionalMetric(event Event, labels sandboxManagedLabels, result string) []RuntimeV8GeneratedMetric {
-	return []RuntimeV8GeneratedMetric{sandboxManagedMetric(event, labels, observability.TelemetryInstrumentDefenseClawSandboxManagedProvisionalResolutions,
+	return []RuntimeV8GeneratedMetric{sandboxManagedMetric(event, labels, observability.TelemetryInstrumentDefenseClawSandboxManagedProvisional,
 		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
-			return builder.BuildMetricDefenseClawSandboxManagedProvisionalResolutions(observability.MetricDefenseClawSandboxManagedProvisionalResolutionsInput{
+			return builder.BuildMetricDefenseClawSandboxManagedProvisional(observability.MetricDefenseClawSandboxManagedProvisionalInput{
 				Envelope: envelope, Value: 1, DefenseClawMetricResult: observability.Present(result),
 				DefenseClawGuardrailProfileName: labels.profile, DefenseClawSandboxDriver: labels.driver,
 				DefenseClawConnectorSource: labels.conn,
@@ -142,7 +142,7 @@ func newSandboxManagedDriftMetric(event Event, labels sandboxManagedLabels, fiel
 		})}
 }
 
-// sandboxProvisionalResolution is the provisional_resolutions result of a
+// sandboxProvisionalResolution is the defenseclaw.sandbox.managed.provisional result of a
 // policy resolution, "" when the registration was not provisional.
 func sandboxProvisionalResolution(managed SandboxManaged, failed bool) string {
 	if managed.Provisional == nil || !*managed.Provisional {

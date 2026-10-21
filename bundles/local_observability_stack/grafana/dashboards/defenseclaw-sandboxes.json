@@ -1245,7 +1245,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum(increase(defenseclaw_sandbox_managed_provisional_resolutions_total{deployment_environment_name=~\"$environment\", host_name=~\"$host\", os_type=~\"$os\", driver=~\"$driver\", profile=~\"$profile\"}[$__rate_interval]))",
+          "expr": "sum(increase(defenseclaw_sandbox_managed_provisional_total{deployment_environment_name=~\"$environment\", host_name=~\"$host\", os_type=~\"$os\", driver=~\"$driver\", profile=~\"$profile\"}[$__rate_interval]))",
           "refId": "D",
           "legendFormat": "provisional resolutions",
           "range": true

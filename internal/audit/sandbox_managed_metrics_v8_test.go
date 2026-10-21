@@ -30,7 +30,7 @@ var sandboxManagedInstruments = []string{
 	observability.TelemetryInstrumentDefenseClawSandboxManagedRefusals,
 	observability.TelemetryInstrumentDefenseClawSandboxManagedAsks,
 	observability.TelemetryInstrumentDefenseClawSandboxManagedForeignItems,
-	observability.TelemetryInstrumentDefenseClawSandboxManagedProvisionalResolutions,
+	observability.TelemetryInstrumentDefenseClawSandboxManagedProvisional,
 	observability.TelemetryInstrumentDefenseClawSandboxManagedDrift,
 }
 
@@ -99,11 +99,11 @@ func TestSandboxManagedRecordsMoveTheirFleetCounter(t *testing.T) {
 			with(map[string]any{"defenseclaw.metric.kind": "container", "defenseclaw.sandbox.managed.action": "alert"},
 				"defenseclaw.sandbox.driver", "defenseclaw.connector.source")},
 		{"resolved on the offline floor", SandboxPolicyResolvedEvent{Sandbox: floor, Subject: subject, Reason: "offline_floor"},
-			observability.TelemetryInstrumentDefenseClawSandboxManagedProvisionalResolutions,
+			observability.TelemetryInstrumentDefenseClawSandboxManagedProvisional,
 			with(map[string]any{"defenseclaw.metric.result": "provisional"})},
 		{"resolved, not provisional", SandboxPolicyResolvedEvent{Sandbox: identity, Subject: subject}, "", nil},
 		{"provisional lookup resolved", SandboxPolicyRematchedEvent{Sandbox: identity, Subject: subject, Reason: SandboxRematchLookupResolved},
-			observability.TelemetryInstrumentDefenseClawSandboxManagedProvisionalResolutions,
+			observability.TelemetryInstrumentDefenseClawSandboxManagedProvisional,
 			with(map[string]any{"defenseclaw.metric.result": "resolved"})},
 		{"generation re-match", SandboxPolicyRematchedEvent{Sandbox: identity, Subject: subject, Reason: SandboxRematchGeneration}, "", nil},
 		{"settings drift", SandboxSettingsDriftEvent{Sandbox: managedOnly, Subject: subject, Field: "compute_driver"},
