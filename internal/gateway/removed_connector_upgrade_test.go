@@ -17,9 +17,9 @@ import (
 )
 
 // until 1.1: the first gateway start after an upgrade from a release that
-// set up OpenHands removes its hooks instead of only forgetting the
-// connector, so OpenHands does not keep calling a hook route that no longer
-// exists.
+// set up OpenHands puts its hooks.json back the way that setup found it,
+// instead of only forgetting the connector, so OpenHands does not keep
+// calling a hook route that no longer exists.
 func TestUpgradeTearsDownTheRemovedOpenHandsConnector(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("OpenHands was never set up on Windows")
@@ -33,18 +33,11 @@ func TestUpgradeTearsDownTheRemovedOpenHandsConnector(t *testing.T) {
 	dataDir := filepath.Join(home, ".defenseclaw")
 	script := filepath.Join(dataDir, "hooks", "openhands-hook.sh")
 	hooksPath := filepath.Join(home, ".openhands", "hooks.json")
-	for path, body := range map[string]string{
-		script: "#!/bin/sh\n# defenseclaw-managed-hook v1\n",
-		hooksPath: `{"pre_tool_use":[{"matcher":"*","hooks":[{"type":"command","command":"` + script + `"}]},` +
-			`{"matcher":"*","hooks":[{"type":"command","command":"/usr/local/bin/audit-hook"}]}]}`,
-	} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
+	operator := `{"pre_tool_use":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/local/bin/audit-hook"}]}]}`
+	writeRetiredFile(t, script, "#!/bin/sh\n# defenseclaw-managed-hook v1\n")
+	writeRetiredSetupRecord(t, dataDir, "openhands", "config", hooksPath, []byte(operator),
+		`{"pre_tool_use":[{"matcher":"*","hooks":[{"type":"command","command":"`+script+`"}]},`+
+			`{"matcher":"*","hooks":[{"type":"command","command":"/usr/local/bin/audit-hook"}]}]}`)
 	if err := connector.SaveActiveConnector(dataDir, "openhands"); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +50,10 @@ func TestUpgradeTearsDownTheRemovedOpenHandsConnector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), script) || !strings.Contains(string(data), "/usr/local/bin/audit-hook") {
-		t.Fatalf("OpenHands hooks after the upgrade = %s", data)
+	if string(data) != operator {
+		t.Fatalf("OpenHands hooks after the upgrade = %s, want %s", data, operator)
+	}
+	if body, err := os.ReadFile(script); err != nil || !strings.Contains(string(body), "disabled tombstone") {
+		t.Fatalf("hook script after the upgrade = %q, %v; want the disabled tombstone", body, err)
 	}
 }

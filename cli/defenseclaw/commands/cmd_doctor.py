@@ -11836,6 +11836,7 @@ def doctor(
     # config patches are still on disk. This is a global filesystem sweep
     # (not per-active-connector), so it runs once against the install.
     _check_connector_residue(cfg, active_connector, r)
+    _check_removed_connector_cleanup(cfg, r)
     _check_orphaned_hook_entries(cfg, active_connector, r)
     # Surface a dead-end asset_policy.plugin.registry_required flag, which can
     # only ever deny (no plugin-registry pipeline exists in v1) and silently
@@ -14917,6 +14918,32 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
         "'defenseclaw uninstall --keep-openclaw' for a manual sweep."
     )
     _emit("warn", "Connector residue", detail, r=r)
+
+
+def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
+    """until 1.1: files the removed OpenHands or OmniGent teardown left for the user.
+
+    The gateway changes such a file only when it is exactly as an older
+    DefenseClaw setup wrote it. Otherwise it changes nothing and records the
+    steps to finish by hand (``defenseclaw.removed_connectors``). A host
+    without such a record prints no row.
+    """
+    from defenseclaw.removed_connectors import pending_cleanup
+
+    for pending in pending_cleanup(str(getattr(cfg, "data_dir", "") or "")):
+        label = f"Removed connector [{pending.label}]"
+        if pending.error:
+            _emit("warn", label, pending.error, r=r, remediation=pending.finish)
+            continue
+        steps = "; ".join(f"{item.path} ({item.reason}): {item.step}" for item in pending.items)
+        _emit(
+            "warn",
+            label,
+            "removed in DefenseClaw 1.0.4; its cleanup changed nothing because these files are not "
+            f"exactly as DefenseClaw wrote them: {steps}",
+            r=r,
+            remediation=f"do those steps, then run {pending.finish}",
+        )
 
 
 def _check_orphaned_hook_entries(cfg, active: str, r: _DoctorResult) -> None:

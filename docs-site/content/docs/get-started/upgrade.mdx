@@ -423,20 +423,22 @@ or OmniGent before 1.0.4:
   steps are below). If Gemini CLI was your only connector, the upgrade stops
   before it changes anything until you remove it.
 - **OpenHands and OmniGent were removed in 1.0.4.** The first gateway start
-  after the upgrade removes DefenseClaw's hooks from OpenHands
-  (`~/.openhands/hooks.json`) and its policy from OmniGent (the
-  `defenseclaw_omnigent_policy` entries in `~/.omnigent/config.yaml`, the
-  policy module and DefenseClaw's line in its `.pth` file). Hooks and policies
-  from other tools stay. A policy module you edited stays too: a warning names
-  it, and OmniGent no longer loads it. Both agents keep working without
-  DefenseClaw. If the gateway can't clean one of these files (it isn't
-  writable, it isn't valid YAML, a key in it is set twice, or YAML merge keys
-  pull the policy in), it leaves the policy module and the `.pth` line in
-  place, names the file in the gateway log, and tries again on every start;
-  fix the file and restart the gateway. Their
-  settings are dropped from `config.yaml`, including a telemetry destination
-  whose every route selected only these connectors; `defenseclaw migrate`
-  saves that. `defenseclaw uninstall` removes the same files.
+  after the upgrade undoes what an older DefenseClaw setup wrote for them:
+  OpenHands' `~/.openhands/hooks.json`, and OmniGent's `~/.omnigent/config.yaml`,
+  its `defenseclaw_omnigent.pth` file and the policy module. It changes a file
+  only when the file is exactly as that setup left it: the file goes back to
+  what it was before setup, or is removed if setup created it. If you changed
+  one of these files since, or DefenseClaw has no record of writing it, the
+  gateway changes none of them. It prints one warning with the steps to remove
+  DefenseClaw's entries by hand, and `defenseclaw status` and
+  `defenseclaw doctor` show the same steps. When you have done them, run
+  `defenseclaw-gateway connector teardown --connector omnigent` (or
+  `openhands`) to remove the rest. Your other connectors start either way. If
+  a file can't be written, nothing is changed and the gateway tries again on
+  the next start. Their settings are dropped from `config.yaml`, including a
+  telemetry destination whose every route selected only these connectors;
+  `defenseclaw migrate` saves that. `defenseclaw uninstall` runs the same
+  cleanup.
 
 <Accordions type="multiple">
 

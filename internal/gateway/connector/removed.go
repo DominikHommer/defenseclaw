@@ -19,14 +19,24 @@ package connector
 // until 1.1: DefenseClaw 1.0.4 removed the OpenHands and OmniGent connectors
 // (#1182). A host that an older release set up still has their hooks or
 // policy module, which point at a gateway route that no longer exists. These
-// teardown-only connectors remove exactly what that release wrote, so the
-// upgrade (gateway boot), `defenseclaw uninstall` and native Windows Setup
-// leave the agent working without DefenseClaw. Delete this file in 1.1.
+// teardown-only connectors undo what that release wrote, so the upgrade
+// (gateway boot), `defenseclaw uninstall` and native Windows Setup leave the
+// agent working without DefenseClaw. Delete this file in 1.1.
+//
+// Teardown changes a file only when it can prove the file is DefenseClaw's as
+// it is now: its bytes are exactly what the older setup wrote (the hash in its
+// backup record). Such a file is put back the way setup found it, or removed
+// when setup created it. Any other file that still names DefenseClaw (the
+// user changed it, there is no record, or it cannot be read) is left byte for
+// byte, and then nothing at all is changed: the steps to finish by hand are
+// recorded, which status and doctor show, and printed once. Nothing is parsed
+// and written back.
 
 import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -43,6 +53,10 @@ const (
 	removedOpenHandsHookScript = "openhands-hook.sh"
 	removedOmnigentID          = "omnigent"
 	removedOmnigentModuleName  = "defenseclaw_omnigent_policy"
+	// removedCleanupDir holds one record per removed connector whose
+	// teardown left files for the user to clean up by hand. The Python CLI
+	// (defenseclaw/removed_connectors.py) reads it for status and doctor.
+	removedCleanupDir = "removed_connector_cleanup"
 )
 
 // removedConnector returns the teardown-only connector for a removed
@@ -107,6 +121,324 @@ func (c removedConnectorBase) removeCredentials(dataDir string) error {
 	return errors.Join(errs...)
 }
 
+// removedPlanner lists what a removed connector's teardown would change.
+type removedPlanner func(SetupOpts) (*removedCleanupPlan, error)
+
+// teardown runs plan. With every file provably DefenseClaw's it makes all the
+// changes or none (a failure rolls back and is returned, so the next start
+// retries), drops the backup records named by logicals, runs finish, revokes
+// the credentials and clears an earlier manual-cleanup record. Otherwise it
+// changes nothing, records the manual steps and prints them once.
+func (c removedConnectorBase) teardown(opts SetupOpts, plan removedPlanner, logicals []string, finish func() error) error {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return fmt.Errorf("%s cleanup: empty data directory", c.name)
+	}
+	p, err := plan(opts)
+	if err != nil {
+		return fmt.Errorf("%s cleanup: %w", c.name, err)
+	}
+	if len(p.manual) > 0 {
+		return c.leaveForManualCleanup(opts.DataDir, p.manual)
+	}
+	if err := p.apply(); err != nil {
+		return fmt.Errorf("%s cleanup: %w; the next start tries again", c.name, err)
+	}
+	for _, logical := range logicals {
+		discardManagedFileBackup(opts.DataDir, c.name, logical)
+	}
+	if finish != nil {
+		if err := finish(); err != nil {
+			return fmt.Errorf("%s cleanup: %w", c.name, err)
+		}
+	}
+	if err := c.removeCredentials(opts.DataDir); err != nil {
+		return err
+	}
+	if err := os.Remove(removedCleanupRecordPath(opts.DataDir, c.name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s cleanup: %w", c.name, err)
+	}
+	return nil
+}
+
+// verifyClean fails while plan would still change a file, or while a file
+// left for manual cleanup is not in the recorded steps.
+func (c removedConnectorBase) verifyClean(opts SetupOpts, plan removedPlanner) error {
+	p, err := plan(opts)
+	if err != nil {
+		return fmt.Errorf("%s cleanup: %w", c.name, err)
+	}
+	if len(p.manual) > 0 {
+		recorded := loadRemovedCleanupRecord(opts.DataDir, c.name)
+		for _, item := range p.manual {
+			if !recorded.lists(item.Path) {
+				return fmt.Errorf("%s cleanup incomplete: %s still names DefenseClaw (%s), and no manual cleanup step was recorded for it", c.name, item.Path, item.Reason)
+			}
+		}
+		return nil
+	}
+	if len(p.files) > 0 {
+		return fmt.Errorf("%s cleanup incomplete: %s is still as DefenseClaw wrote it", c.name, p.files[0].path)
+	}
+	return nil
+}
+
+// --- Manual cleanup record ---
+
+// removedConnectorNotices receives the one warning a teardown prints when it
+// leaves files for manual cleanup.
+var removedConnectorNotices io.Writer = os.Stderr
+
+type removedCleanupItem struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+	Step   string `json:"step"`
+}
+
+type removedCleanupRecord struct {
+	Version   int                  `json:"version"`
+	Connector string               `json:"connector"`
+	Label     string               `json:"label"`
+	Items     []removedCleanupItem `json:"items"`
+	// Finish is the command that removes the rest once the steps are done.
+	Finish string `json:"finish"`
+}
+
+func removedCleanupRecordPath(dataDir, connectorName string) string {
+	return filepath.Join(dataDir, removedCleanupDir, connectorName+".json")
+}
+
+func loadRemovedCleanupRecord(dataDir, connectorName string) removedCleanupRecord {
+	var record removedCleanupRecord
+	if data, err := os.ReadFile(removedCleanupRecordPath(dataDir, connectorName)); err == nil {
+		_ = json.Unmarshal(data, &record)
+	}
+	return record
+}
+
+func (r removedCleanupRecord) lists(path string) bool {
+	for _, item := range r.Items {
+		if sameManagedTargetPath(item.Path, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c removedConnectorBase) leaveForManualCleanup(dataDir string, items []removedCleanupItem) error {
+	record := removedCleanupRecord{
+		Version:   1,
+		Connector: c.name,
+		Label:     c.label,
+		Items:     items,
+		Finish:    "defenseclaw-gateway connector teardown --connector " + c.name,
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := removedCleanupRecordPath(dataDir, c.name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("%s cleanup: record the manual steps: %w", c.name, err)
+	}
+	if err := atomicWriteFile(path, append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("%s cleanup: record the manual steps: %w", c.name, err)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "[%s] WARNING: the %s connector was removed in DefenseClaw 1.0.4, but its cleanup changed nothing: these files are not exactly as DefenseClaw wrote them, so they are yours to finish.\n", c.name, c.label)
+	for _, item := range items {
+		fmt.Fprintf(&b, "  - %s (%s): %s\n", item.Path, item.Reason, item.Step)
+	}
+	fmt.Fprintf(&b, "  Then run `%s` to remove the rest. `defenseclaw doctor` lists these steps.\n", record.Finish)
+	fmt.Fprint(removedConnectorNotices, b.String())
+	return nil
+}
+
+// --- Plan ---
+
+// removedCleanupPlan is what a teardown would do: files it can prove are
+// DefenseClaw's, in the order it changes them, and files it must leave for
+// the user.
+type removedCleanupPlan struct {
+	files  []removedFile
+	manual []removedCleanupItem
+}
+
+// removedFile is a file whose bytes are exactly what an older setup wrote.
+type removedFile struct {
+	path string
+	data []byte // the bytes the plan read: checked again before the change and written back on rollback
+	mode os.FileMode
+	// restore holds the bytes setup found (written with restoreMode); nil
+	// removes the file.
+	restore     []byte
+	restoreMode os.FileMode
+}
+
+// removedFileKind says how to read one kind of file an older release wrote.
+type removedFileKind struct {
+	// names reports whether bytes still hold DefenseClaw's entry. An error
+	// means teardown cannot tell, which counts as naming it.
+	names func([]byte) (bool, error)
+	// ownedFile: the whole file is DefenseClaw's (the policy module, its
+	// .pth file). When the copy setup found holds DefenseClaw's entry too
+	// (an earlier setup, GAP-1926), such a file is removed; the agent's own
+	// config is left for the user instead.
+	ownedFile bool
+	// step says how to remove DefenseClaw's entry by hand.
+	step string
+}
+
+func (p *removedCleanupPlan) leave(path, reason, step string) {
+	p.manual = append(p.manual, removedCleanupItem{Path: path, Reason: reason, Step: step})
+}
+
+// errRemovedNotRegular marks a path that is not a regular file.
+var errRemovedNotRegular = errors.New("not a regular file")
+
+// readRemovedFile reads a regular file without following a symlink; a
+// missing file returns nil data and nil info.
+func readRemovedFile(path string) ([]byte, os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, info, errRemovedNotRegular
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, nil
+	}
+	return data, info, err
+}
+
+// addRecorded plans the file a setup backup record names and returns its
+// path ("" without a record).
+func (p *removedCleanupPlan) addRecorded(dataDir, connectorName, logical string, kind removedFileKind) (string, error) {
+	recordPath := managedFileBackupPath(dataDir, connectorName, logical)
+	record, err := loadManagedFileBackupPath(recordPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", recordPath, err)
+	}
+	path, err := validateManagedFileBackupTarget(record, connectorName, logical, record.Path)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", recordPath, err)
+	}
+	data, info, err := readRemovedFile(path)
+	switch {
+	case errors.Is(err, errRemovedNotRegular):
+		p.leave(path, "it is not a regular file", kind.step)
+		return path, nil
+	case err != nil:
+		return path, err
+	case info == nil:
+		return path, nil
+	case record.PostSHA256 == "" || sha256Hex(data) != record.PostSHA256:
+		p.addFound(path, data, kind, "it changed after DefenseClaw wrote it")
+		return path, nil
+	}
+	file := removedFile{path: path, data: data, mode: info.Mode().Perm()}
+	if record.Existed {
+		names, err := kind.names(record.PristineBytes)
+		switch {
+		case (err != nil || names) && kind.ownedFile:
+		case err != nil || names:
+			p.leave(path, "the copy DefenseClaw saved before its setup names DefenseClaw too", kind.step)
+			return path, nil
+		default:
+			file.restore = record.PristineBytes
+			if file.restore == nil {
+				file.restore = []byte{}
+			}
+			file.restoreMode = os.FileMode(record.Mode)
+			if file.restoreMode == 0 {
+				file.restoreMode = 0o600
+			}
+		}
+	}
+	p.files = append(p.files, file)
+	return path, nil
+}
+
+// addUnrecorded plans a file no backup record names: it is left for the user
+// when it still names DefenseClaw.
+func (p *removedCleanupPlan) addUnrecorded(path string, kind removedFileKind) error {
+	data, info, err := readRemovedFile(path)
+	switch {
+	case errors.Is(err, errRemovedNotRegular):
+		p.leave(path, "it is not a regular file", kind.step)
+		return nil
+	case err != nil:
+		return err
+	case info == nil:
+		return nil
+	}
+	p.addFound(path, data, kind, "DefenseClaw has no record of writing it")
+	return nil
+}
+
+func (p *removedCleanupPlan) addFound(path string, data []byte, kind removedFileKind, reason string) {
+	names, err := kind.names(data)
+	switch {
+	case err != nil:
+		p.leave(path, fmt.Sprintf("DefenseClaw cannot tell whether it still names DefenseClaw: %v", err), kind.step)
+	case names:
+		p.leave(path, reason, kind.step)
+	}
+}
+
+// apply makes every planned change or none: a change that fails, or a file
+// that changed since the plan read it, rolls back the changes already made.
+func (p *removedCleanupPlan) apply() error {
+	for i, file := range p.files {
+		if err := file.apply(); err != nil {
+			if rollbackErr := p.rollback(i); rollbackErr != nil {
+				return errors.Join(err, rollbackErr)
+			}
+			return fmt.Errorf("%w; nothing was changed", err)
+		}
+	}
+	return nil
+}
+
+func (f removedFile) apply() error {
+	data, info, err := readRemovedFile(f.path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", f.path, err)
+	}
+	if info == nil || !bytes.Equal(data, f.data) {
+		return fmt.Errorf("%s changed during cleanup", f.path)
+	}
+	if f.restore == nil {
+		if err := os.Remove(f.path); err != nil {
+			return fmt.Errorf("remove %s: %w", f.path, err)
+		}
+		return nil
+	}
+	if err := atomicWriteFile(f.path, f.restore, f.restoreMode); err != nil {
+		return newManagedRestoreError(f.path, err)
+	}
+	return nil
+}
+
+// rollback puts back the first n files as the plan read them.
+func (p *removedCleanupPlan) rollback(n int) error {
+	var errs []error
+	for i := n - 1; i >= 0; i-- {
+		file := p.files[i]
+		if err := atomicWriteFile(file.path, file.data, file.mode); err != nil {
+			errs = append(errs, fmt.Errorf("could not put back %s: %w", file.path, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // --- OpenHands ---
 
 type removedOpenHandsConnector struct{ removedConnectorBase }
@@ -115,147 +447,102 @@ func (removedOpenHandsConnector) hookScript(opts SetupOpts) string {
 	return filepath.Join(opts.DataDir, "hooks", removedOpenHandsHookScript)
 }
 
-// hooksPaths are the hooks.json files an older release may have written:
-// the one its setup backup names (a pinned workspace too), the explicit
-// config home native maintenance passes, and the user-global default.
-func (c removedOpenHandsConnector) hooksPaths(opts SetupOpts) []string {
-	var paths []string
+// hooksPaths are the hooks.json files an older release may have written
+// besides the one its setup backup names: the explicit config home native
+// maintenance passes, else the user-global default.
+func (removedOpenHandsConnector) hooksPaths(opts SetupOpts) []string {
 	if home := strings.TrimSpace(opts.ConfigHome); home != "" && filepath.IsAbs(home) {
-		paths = append(paths, filepath.Join(filepath.Clean(home), "hooks.json"))
-	} else {
-		paths = append(paths, homePath(".openhands", "hooks.json"))
+		return []string{filepath.Join(filepath.Clean(home), "hooks.json")}
 	}
-	paths = append([]string{managedFileBackupTargetPath(opts.DataDir, c.name, "config", "")}, paths...)
-	return uniqueNonEmptyStrings(paths)
+	return []string{homePath(".openhands", "hooks.json")}
 }
 
-// Teardown restores the hooks.json an older release backed up when it is
-// unchanged since then, and in every case removes DefenseClaw's hook entries
-// (a backup taken after a rollback holds them too, GAP-1926). Hooks from
-// other tools stay. The hook script becomes the disabled tombstone, so an
-// OpenHands conversation that loaded it before teardown keeps working.
-func (c removedOpenHandsConnector) Teardown(_ context.Context, opts SetupOpts) error {
-	if strings.TrimSpace(opts.DataDir) == "" {
-		return errors.New("openhands cleanup: empty data directory")
-	}
+func (c removedOpenHandsConnector) plan(opts SetupOpts) (*removedCleanupPlan, error) {
 	script := c.hookScript(opts)
-	var errs []error
-	backupTarget := managedFileBackupTargetPath(opts.DataDir, c.name, "config", "")
-	if backupTarget != "" {
-		if _, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", backupTarget); err != nil {
-			errs = append(errs, fmt.Errorf("openhands cleanup: %s", restoreBackupFailure(err)))
-		}
+	kind := removedFileKind{
+		names: func(data []byte) (bool, error) { return removedJSONNames(data, script) },
+		step:  "remove the hook entries whose command runs " + script,
 	}
-	for _, path := range c.hooksPaths(opts) {
-		if err := removeRemovedOpenHandsHooks(path, script); err != nil {
-			errs = append(errs, fmt.Errorf("openhands cleanup %s: %w", path, err))
-		}
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	if err := c.VerifyClean(opts); err != nil {
-		return err
-	}
-	discardManagedFileBackup(opts.DataDir, c.name, "config")
-	if _, err := os.Lstat(script); err == nil {
-		if err := writeDisabledHookTombstone(opts, removedOpenHandsHookScript, "OpenHands"); err != nil {
-			return fmt.Errorf("openhands cleanup: disabled hook tombstone: %w", err)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("openhands cleanup: inspect %s: %w", script, err)
-	}
-	record := filepath.Join(opts.DataDir, "hooks", hookConfigSidecarName+"."+c.name)
-	if err := os.Remove(record); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("openhands cleanup: remove %s: %w", record, err)
-	}
-	return c.removeCredentials(opts.DataDir)
-}
-
-// VerifyClean fails while an OpenHands hooks file still runs DefenseClaw's
-// hook script.
-func (c removedOpenHandsConnector) VerifyClean(opts SetupOpts) error {
-	script := c.hookScript(opts)
-	for _, path := range c.hooksPaths(opts) {
-		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		cfg, err := readJSONObject(path)
-		if err != nil {
-			return fmt.Errorf("openhands cleanup could not read %s: %w", path, err)
-		}
-		if containsHookScript(cfg, script) {
-			return fmt.Errorf("openhands cleanup incomplete: %s still runs %s", path, script)
-		}
-	}
-	return nil
-}
-
-// removeRemovedOpenHandsHooks removes DefenseClaw's command hooks from an
-// OpenHands hooks.json ({"pre_tool_use": [{"matcher": "*", "hooks": [...]}],
-// ...}) and the matcher groups that held only them. A missing file stays
-// missing; a file without DefenseClaw's hooks is not rewritten.
-func removeRemovedOpenHandsHooks(path, hookScript string) error {
-	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	cfg, err := readJSONObject(path)
+	p := &removedCleanupPlan{}
+	recorded, err := p.addRecorded(opts.DataDir, c.name, "config", kind)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if !containsHookScript(cfg, hookScript) {
-		return nil
-	}
-	pruned, _ := removeHookScriptReferences(cfg, hookScript).(map[string]interface{})
-	if pruned == nil {
-		pruned = map[string]interface{}{}
-	}
-	pruneEmptiedMatcherGroups(cfg, pruned)
-	return writeJSONObject(path, pruned)
-}
-
-// pruneEmptiedMatcherGroups removes a matcher group whose hook list the
-// cleanup emptied, and an event whose groups all went. Groups that were
-// already empty, and groups with other fields, are the operator's and stay.
-func pruneEmptiedMatcherGroups(before, after map[string]interface{}) {
-	for event, raw := range after {
-		groups, ok := raw.([]interface{})
-		oldGroups, oldOK := before[event].([]interface{})
-		if !ok || !oldOK {
+	for _, path := range c.hooksPaths(opts) {
+		if recorded != "" && sameManagedTargetPath(path, recorded) {
 			continue
 		}
-		remaining := make([]interface{}, 0, len(groups))
-		for i, item := range groups {
-			group, groupOK := item.(map[string]interface{})
-			if groupOK && i < len(oldGroups) {
-				if oldGroup, ok := oldGroups[i].(map[string]interface{}); ok {
-					oldHooks, oldOK := oldGroup["hooks"].([]interface{})
-					newHooks, newOK := group["hooks"].([]interface{})
-					if oldOK && newOK && len(oldHooks) > 0 && len(newHooks) == 0 && matcherOnlyHookGroup(group) {
-						continue
-					}
-				}
-			}
-			remaining = append(remaining, item)
-		}
-		if len(oldGroups) > 0 && len(remaining) == 0 {
-			delete(after, event)
-		} else {
-			after[event] = remaining
+		if err := p.addUnrecorded(path, kind); err != nil {
+			return nil, err
 		}
 	}
+	return p, nil
 }
 
-func matcherOnlyHookGroup(group map[string]interface{}) bool {
-	if _, ok := group["matcher"]; !ok {
-		return false
+// Teardown puts back the hooks.json an older release's setup found when the
+// file is exactly as setup left it (see the file comment). Once no hooks file
+// runs DefenseClaw's hook script, that script becomes the disabled tombstone,
+// so an OpenHands conversation that loaded it before teardown keeps working.
+// While a hooks file still runs it, the script stays as it is.
+func (c removedOpenHandsConnector) Teardown(_ context.Context, opts SetupOpts) error {
+	return c.teardown(opts, c.plan, []string{"config"}, func() error {
+		script := c.hookScript(opts)
+		if _, err := os.Lstat(script); err == nil {
+			if err := writeDisabledHookTombstone(opts, removedOpenHandsHookScript, "OpenHands"); err != nil {
+				return fmt.Errorf("disabled hook tombstone: %w", err)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect %s: %w", script, err)
+		}
+		record := filepath.Join(opts.DataDir, "hooks", hookConfigSidecarName+"."+c.name)
+		if err := os.Remove(record); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove %s: %w", record, err)
+		}
+		return nil
+	})
+}
+
+// VerifyClean fails while a hooks file is still as DefenseClaw wrote it, or
+// still runs DefenseClaw's hook script without a recorded manual step.
+func (c removedOpenHandsConnector) VerifyClean(opts SetupOpts) error {
+	return c.verifyClean(opts, c.plan)
+}
+
+// removedJSONNames reports whether a decoded JSON document has needle in a
+// key or string value; JSON that does not decode is an error.
+func removedJSONNames(data []byte, needle string) (bool, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return false, nil
 	}
-	for key := range group {
-		if key != "matcher" && key != "hooks" {
-			return false
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var document interface{}
+	if err := decoder.Decode(&document); err != nil {
+		return false, fmt.Errorf("not valid JSON: %w", err)
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return false, errors.New("not valid JSON: data after the document")
+	}
+	return jsonValueNames(document, needle), nil
+}
+
+func jsonValueNames(value interface{}, needle string) bool {
+	switch v := value.(type) {
+	case string:
+		return strings.Contains(v, needle)
+	case []interface{}:
+		for _, item := range v {
+			if jsonValueNames(item, needle) {
+				return true
+			}
+		}
+	case map[string]interface{}:
+		for key, item := range v {
+			if strings.Contains(key, needle) || jsonValueNames(item, needle) {
+				return true
+			}
 		}
 	}
-	return true
+	return false
 }
 
 // --- OmniGent ---
@@ -267,451 +554,120 @@ func (removedOmnigentConnector) modulePath(opts SetupOpts) string {
 }
 
 // configPaths are the OmniGent config.yaml files an older release may have
-// patched: the one its setup backup names, the explicit config home native
-// maintenance passes (else OMNIGENT_CONFIG_HOME), and ~/.omnigent.
-func (c removedOmnigentConnector) configPaths(opts SetupOpts) []string {
-	paths := []string{managedFileBackupTargetPath(opts.DataDir, c.name, "config", "")}
+// patched besides the one its setup backup names: the explicit config home
+// native maintenance passes, else OMNIGENT_CONFIG_HOME and ~/.omnigent.
+func (removedOmnigentConnector) configPaths(opts SetupOpts) []string {
 	if home := strings.TrimSpace(opts.ConfigHome); home != "" && filepath.IsAbs(home) {
-		return uniqueNonEmptyStrings(append(paths, filepath.Join(filepath.Clean(home), "config.yaml")))
+		return []string{filepath.Join(filepath.Clean(home), "config.yaml")}
 	}
+	var paths []string
 	if home := strings.TrimSpace(os.Getenv("OMNIGENT_CONFIG_HOME")); home != "" && filepath.IsAbs(home) {
 		paths = append(paths, filepath.Join(filepath.Clean(home), "config.yaml"))
 	}
 	return uniqueNonEmptyStrings(append(paths, homePath(".omnigent", "config.yaml")))
 }
 
-// Teardown cleans config.yaml first, then the .pth file, then the policy
-// module, so nothing OmniGent can still load is taken away from under it.
-// A config.yaml unchanged since setup gets the file setup found back (unless
-// those bytes name DefenseClaw's module themselves); otherwise only
-// DefenseClaw's policy entries are removed. Until every config.yaml is clean
-// and verified, the .pth file, the module, every backup and the token stay:
-// a restarted OmniGent can still import a policy its config names, and the
-// next run retries. Then the .pth file is restored, or loses only the line
-// naming DefenseClaw's hook directory, and the module goes only when its
-// bytes are provably DefenseClaw's (inspectModule); a module the user
-// changed stays and is reported, because nothing loads it once config.yaml
-// and the .pth file no longer name it.
-func (c removedOmnigentConnector) Teardown(_ context.Context, opts SetupOpts) error {
-	if strings.TrimSpace(opts.DataDir) == "" {
-		return errors.New("omnigent cleanup: empty data directory")
-	}
-	// The paths come from the backup records, read before a restore
-	// removes them.
-	configs := c.configPaths(opts)
-	pth := managedFileBackupTargetPath(opts.DataDir, c.name, "pth", "")
-	var errs []error
-	if err := c.restoreConfigBackup(opts); err != nil {
-		errs = append(errs, fmt.Errorf("omnigent cleanup config: %w", err))
-	}
-	for _, path := range configs {
-		if err := removeRemovedOmnigentConfigEntries(path); err != nil {
-			errs = append(errs, fmt.Errorf("omnigent cleanup %s: %w", path, err))
-		}
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	if err := verifyRemovedOmnigentConfigs(configs); err != nil {
-		return err
-	}
-	if pth != "" {
-		if _, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "pth", pth); err != nil {
-			return fmt.Errorf("omnigent cleanup pth: %s", restoreBackupFailure(err))
-		}
-		if err := removeRemovedOmnigentImportPath(pth, filepath.Dir(c.modulePath(opts))); err != nil {
-			return fmt.Errorf("omnigent cleanup: %w", err)
-		}
-	}
-	if err := c.removeModule(opts); err != nil {
-		return fmt.Errorf("omnigent cleanup: %w", err)
-	}
-	if err := c.VerifyClean(opts); err != nil {
-		return err
-	}
-	// The module record stays while a module the user changed is kept, so
-	// the next run still knows those bytes are not DefenseClaw's.
-	for _, logical := range []string{"config", "pth"} {
-		discardManagedFileBackup(opts.DataDir, c.name, logical)
-	}
-	return c.removeCredentials(opts.DataDir)
+var removedOmnigentConfigKind = removedFileKind{
+	names: removedOmnigentConfigNames,
+	step: "remove " + removedOmnigentModuleName + " from policy_modules, and the policy whose handler starts with " +
+		removedOmnigentModuleName + ".",
 }
 
-// restoreConfigBackup puts back the config.yaml setup found when the file is
-// unchanged since setup wrote it. A backup whose own bytes load DefenseClaw's
-// policy (one taken after an earlier setup, GAP-1926), or cannot be
-// classified, is not restored: the restore drops the record that names a
-// config outside the default paths, so a later failure would lose track of
-// it. Cleanup edits that file in place instead.
-func (c removedOmnigentConnector) restoreConfigBackup(opts SetupOpts) error {
-	path := managedFileBackupTargetPath(opts.DataDir, c.name, "config", "")
-	if path == "" {
-		return nil
-	}
-	if record, err := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config")); err == nil && record.Existed {
-		config, err := classifyRemovedOmnigentConfig(record.PristineBytes)
-		if err != nil || (config != nil && config.loadsPolicy()) {
-			return nil
-		}
-	}
-	if _, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", path); err != nil {
-		return errors.New(restoreBackupFailure(err))
-	}
-	return nil
+// The policy module lives in DefenseClaw's hook directory under DefenseClaw's
+// name, so any bytes there are DefenseClaw's module.
+var removedOmnigentModuleKind = removedFileKind{
+	names:     func([]byte) (bool, error) { return true, nil },
+	ownedFile: true,
+	step:      "delete it once config.yaml no longer names " + removedOmnigentModuleName,
 }
 
-// VerifyClean fails while an OmniGent config still loads DefenseClaw's
-// policy (by the rule cleanup removes it) or cannot be classified,
-// DefenseClaw's own policy module remains, or the recorded .pth file still
-// puts DefenseClaw's hook directory on OmniGent's import path. A policy,
-// module or import line that belongs to someone else is not DefenseClaw's
-// state and does not fail it.
-func (c removedOmnigentConnector) VerifyClean(opts SetupOpts) error {
-	if err := verifyRemovedOmnigentConfigs(c.configPaths(opts)); err != nil {
-		return err
-	}
-	module, err := c.inspectModule(opts)
-	if err != nil {
-		return fmt.Errorf("omnigent cleanup: %w", err)
-	}
-	if module.owned {
-		return fmt.Errorf("omnigent cleanup incomplete: %s remains", module.path)
-	}
-	if pth := managedFileBackupTargetPath(opts.DataDir, c.name, "pth", ""); pth != "" {
-		names, err := removedOmnigentImportPathNamesHooks(pth, filepath.Dir(c.modulePath(opts)))
-		if err != nil {
-			return fmt.Errorf("omnigent cleanup: %w", err)
-		}
-		if names {
-			return fmt.Errorf("omnigent cleanup incomplete: %s still names DefenseClaw's hook directory", pth)
-		}
-	}
-	return nil
-}
-
-// verifyRemovedOmnigentConfigs fails while one of paths still loads
-// DefenseClaw's policy or cannot be classified.
-func verifyRemovedOmnigentConfigs(paths []string) error {
-	for _, path := range paths {
-		loads, err := removedOmnigentConfigLoadsPolicy(path)
-		if err != nil {
-			return fmt.Errorf("omnigent cleanup could not read %s: %w", path, err)
-		}
-		if loads {
-			return fmt.Errorf("omnigent cleanup incomplete: %s still loads DefenseClaw's policy", path)
-		}
-	}
-	return nil
-}
-
-// removedOmnigentPolicyMarker is the first line of every policy module an
-// older release rendered (0.8.x and 1.0.x).
-const removedOmnigentPolicyMarker = "# defenseclaw-managed-policy v1"
-
-// removedConnectorNotices receives what a removed connector's teardown keeps
-// on purpose because it holds the user's changes.
-var removedConnectorNotices io.Writer = os.Stderr
-
-// removedOmnigentModule is the policy module teardown found.
-type removedOmnigentModule struct {
-	path   string
-	record *managedFileBackup
-	data   []byte
-	exists bool
-	// owned: the current bytes are DefenseClaw's, so teardown may remove
-	// them (or put back the file setup replaced).
-	owned bool
-	// pristine: the file is the one setup found before it wrote the
-	// module, so it was never DefenseClaw's.
-	pristine bool
-}
-
-// inspectModule finds the policy module and decides whose bytes it holds.
-// They are DefenseClaw's when they are what the backup record says setup
-// last wrote, or, when no write was recorded, when the file is in
-// DefenseClaw's own hook directory and starts with the rendered module's
-// marker. A module that changed after the recorded write holds the user's
-// edits and is not DefenseClaw's.
-func (c removedOmnigentConnector) inspectModule(opts SetupOpts) (removedOmnigentModule, error) {
-	own := c.modulePath(opts)
-	module := removedOmnigentModule{path: own}
-	recordPath := managedFileBackupPath(opts.DataDir, c.name, "module")
-	record, err := loadManagedFileBackupPath(recordPath)
-	switch {
-	case err == nil:
-		path, err := validateManagedFileBackupTarget(record, c.name, "module", record.Path)
-		if err != nil {
-			return module, fmt.Errorf("module backup %s: %w", recordPath, err)
-		}
-		module.path, module.record = path, &record
-	case !errors.Is(err, os.ErrNotExist):
-		return module, fmt.Errorf("module backup %s: %w", recordPath, err)
-	}
-	data, info, err := readManagedTarget(module.path)
-	if err != nil || info == nil {
-		return module, err
-	}
-	module.data, module.exists = data, true
-	sum := sha256Hex(data)
-	rendered := sameManagedTargetPath(module.path, own) && removedOmnigentRenderedModule(data)
-	switch {
-	case module.record != nil && module.record.PostSHA256 != "":
-		switch {
-		case sum == module.record.PostSHA256:
-			module.owned = true
-		case module.record.Existed && sum == module.record.PristineSHA256:
-			// The file setup found is back. It is DefenseClaw's only
-			// when it is itself an older rendering in the hook directory.
-			module.pristine, module.owned = true, rendered
-		}
-	case module.record != nil && module.record.Existed && sum == module.record.PristineSHA256:
-		module.pristine, module.owned = true, rendered
-	default:
-		// No recorded write to compare against.
-		module.owned = rendered
-	}
-	return module, nil
-}
-
-func removedOmnigentRenderedModule(data []byte) bool {
-	first, _, _ := strings.Cut(string(data), "\n")
-	return strings.TrimSpace(first) == removedOmnigentPolicyMarker
-}
-
-// removeModule removes DefenseClaw's policy module, or puts back the file
-// setup replaced when that file was not itself DefenseClaw's. A module the
-// user changed is kept, with its record, and reported.
-func (c removedOmnigentConnector) removeModule(opts SetupOpts) error {
-	module, err := c.inspectModule(opts)
-	if err != nil {
-		return err
-	}
-	switch {
-	case !module.exists:
-	case module.owned:
-		if r := module.record; r != nil && r.Existed && !module.pristine && !removedOmnigentRenderedModule(r.PristineBytes) {
-			mode := os.FileMode(r.Mode)
-			if mode == 0 {
-				mode = 0o600
+func removedOmnigentImportPathKind(hookDir string) removedFileKind {
+	return removedFileKind{
+		names: func(data []byte) (bool, error) {
+			for _, line := range strings.Split(string(data), "\n") {
+				if entry := strings.TrimSpace(line); entry != "" && sameManagedTargetPath(entry, hookDir) {
+					return true, nil
+				}
 			}
-			if err := atomicWriteFile(module.path, r.PristineBytes, mode); err != nil {
-				return newManagedRestoreError(module.path, err)
-			}
-		} else if err := os.Remove(module.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove %s: %w", module.path, err)
-		}
-	case module.pristine:
-		// The user's own file, as setup found it: nothing to keep a record for.
-	case module.record == nil:
-		// Not DefenseClaw's rendering and no record of a DefenseClaw write:
-		// a file DefenseClaw never wrote (or the user's module that an
-		// earlier teardown put back) is left alone.
-		return nil
-	default:
-		fmt.Fprintf(removedConnectorNotices,
-			"[omnigent] kept %s: it changed after DefenseClaw wrote it, so it may hold your edits. OmniGent no longer loads it; delete it if you do not need it.\n",
-			module.path)
-		return nil
+			return false, nil
+		},
+		ownedFile: true,
+		step:      "delete the line " + hookDir + " once config.yaml no longer names " + removedOmnigentModuleName,
 	}
-	discardManagedFileBackup(opts.DataDir, c.name, "module")
-	return nil
 }
 
-// removeRemovedOmnigentImportPath removes the line naming DefenseClaw's hook
-// directory from a .pth file an older release wrote. Other lines are the
-// user's and stay; a file left without entries is removed.
-func removeRemovedOmnigentImportPath(path, hookDir string) error {
-	data, info, err := readManagedTarget(path)
-	if err != nil || info == nil {
-		return err
-	}
-	var kept []string
-	removed, entries := false, false
-	for _, line := range strings.SplitAfter(string(data), "\n") {
-		if removedOmnigentImportLine(line, hookDir) {
-			removed = true
-			continue
-		}
-		kept = append(kept, line)
-		entries = entries || strings.TrimSpace(line) != ""
-	}
-	if !removed {
-		return nil
-	}
-	if !entries {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove %s: %w", path, err)
-		}
-		return nil
-	}
-	return atomicWriteFile(path, []byte(strings.Join(kept, "")), info.Mode().Perm())
-}
-
-// removedOmnigentImportPathNamesHooks reports whether a .pth file still puts
-// DefenseClaw's hook directory on the import path.
-func removedOmnigentImportPathNamesHooks(path, hookDir string) (bool, error) {
-	data, info, err := readManagedTarget(path)
-	if err != nil || info == nil {
-		return false, err
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if removedOmnigentImportLine(line, hookDir) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func removedOmnigentImportLine(line, hookDir string) bool {
-	entry := strings.TrimSpace(line)
-	return entry != "" && sameManagedTargetPath(entry, hookDir)
-}
-
-// removedOmnigentConfigLoadsPolicy reports whether an OmniGent config still
-// names DefenseClaw's module or policy, by the rule cleanup removes them:
-// the parsed policy_modules entry, and a policy whose handler is in
-// DefenseClaw's module, followed through YAML aliases and merge keys.
-// Comments, other modules and another tool's policy under DefenseClaw's old
-// key do not count. YAML that does not parse, and a config naming the module
-// that does not load as plain YAML (a key set twice), is an error: what
-// OmniGent reads from it is unknown.
-func removedOmnigentConfigLoadsPolicy(path string) (bool, error) {
-	config, err := readRemovedOmnigentConfig(path)
-	if err != nil || config == nil {
-		return false, err
-	}
-	return config.loadsPolicy(), nil
-}
-
-// removedOmnigentConfig is a parsed OmniGent config: the node tree cleanup
-// edits, and the value OmniGent's YAML loader sees (aliases and merge keys
-// resolved).
-type removedOmnigentConfig struct {
-	document *yaml.Node
-	value    interface{}
-}
-
-// loadsPolicy applies both readings of a parsed config: the decoded value,
-// and the node rule cleanup uses. It consumes the node tree.
-func (c *removedOmnigentConfig) loadsPolicy() bool {
-	return removedOmnigentValueLoadsPolicy(c.value) || pruneRemovedOmnigentConfig(c.document.Content[0])
-}
-
-// removeRemovedOmnigentConfigEntries removes DefenseClaw's module from
-// policy_modules and every policy whose handler is in DefenseClaw's module
-// from policies; every other key and entry stays. An alias left naming a
-// removed anchor is replaced by a copy of what it named, and the result must
-// parse, load and no longer load DefenseClaw's policy before it replaces the
-// file. A config that does not load as plain YAML is left as it is.
-func removeRemovedOmnigentConfigEntries(path string) error {
-	config, err := readRemovedOmnigentConfig(path)
-	if err != nil || config == nil {
-		return err
-	}
-	if !pruneRemovedOmnigentConfig(config.document.Content[0]) {
-		if removedOmnigentValueLoadsPolicy(config.value) {
-			return fmt.Errorf("%s %s", path, removedOmnigentUneditable)
-		}
-		return nil
-	}
-	if err := expandDanglingYAMLAliases(config.document); err != nil {
-		return fmt.Errorf("%s: %w; remove DefenseClaw's entries by hand", path, err)
-	}
-	updated, err := yaml.Marshal(config.document)
-	if err != nil {
-		return err
-	}
-	check, err := parseRemovedOmnigentConfig(updated)
-	if err != nil {
-		return fmt.Errorf("%s: the cleaned config would not load (%v); remove DefenseClaw's entries by hand", path, err)
-	}
-	if check == nil {
-		return fmt.Errorf("%s: the cleaned config would not be a mapping; remove DefenseClaw's entries by hand", path)
-	}
-	if check.loadsPolicy() {
-		return fmt.Errorf("%s %s", path, removedOmnigentUneditable)
-	}
-	return atomicWriteFile(path, updated, 0o600)
-}
-
-const removedOmnigentUneditable = "still loads DefenseClaw's policy in a way cleanup cannot edit safely (a YAML merge key or a !!binary value); remove DefenseClaw's entries by hand"
-
-// readRemovedOmnigentConfig reads and classifies an OmniGent config file
-// (classifyRemovedOmnigentConfig); a missing file returns nil.
-func readRemovedOmnigentConfig(path string) (*removedOmnigentConfig, error) {
-	data, err := readHookConfigFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+// plan lists config.yaml first, then the .pth file, then the module: changes
+// are made in that order, so OmniGent is never left with a config that names
+// a module it cannot import.
+func (c removedOmnigentConnector) plan(opts SetupOpts) (*removedCleanupPlan, error) {
+	p := &removedCleanupPlan{}
+	recorded, err := p.addRecorded(opts.DataDir, c.name, "config", removedOmnigentConfigKind)
 	if err != nil {
 		return nil, err
 	}
-	config, err := classifyRemovedOmnigentConfig(data)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	for _, path := range c.configPaths(opts) {
+		if recorded != "" && sameManagedTargetPath(path, recorded) {
+			continue
+		}
+		if err := p.addUnrecorded(path, removedOmnigentConfigKind); err != nil {
+			return nil, err
+		}
 	}
-	return config, nil
+	own := c.modulePath(opts)
+	if _, err := p.addRecorded(opts.DataDir, c.name, "pth", removedOmnigentImportPathKind(filepath.Dir(own))); err != nil {
+		return nil, err
+	}
+	module, err := p.addRecorded(opts.DataDir, c.name, "module", removedOmnigentModuleKind)
+	if err != nil {
+		return nil, err
+	}
+	if module == "" || !sameManagedTargetPath(module, own) {
+		if err := p.addUnrecorded(own, removedOmnigentModuleKind); err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
 }
 
-// classifyRemovedOmnigentConfig parses config.yaml bytes. Empty YAML, and
-// YAML that never names DefenseClaw's module, return nil: nothing in it is
-// DefenseClaw's. The name is looked for in what OmniGent's YAML loader reads
-// (decoded keys, values and tags), not only in the raw bytes: a
-// double-quoted escape ("\x70", "\u0070", an escaped line break) or a
-// !!binary scalar spells it without the literal text, and every document in
-// the file is searched. YAML that does not parse is an error, not "someone
-// else's": cleanup cannot tell what OmniGent would read from it, so the
-// module, the import path and the token stay until the file is fixed
-// (OmniGent cannot load it either).
-func classifyRemovedOmnigentConfig(data []byte) (*removedOmnigentConfig, error) {
-	documents, err := parseRemovedOmnigentYAML(data)
-	if err != nil {
-		return nil, fmt.Errorf("parse YAML: %w; cleanup cannot tell whether it loads DefenseClaw's policy, so fix the file (OmniGent cannot load it either)", err)
-	}
-	names := strings.Contains(string(data), removedOmnigentModuleName)
-	for _, document := range documents {
-		names = names || yamlNodeNames(document, removedOmnigentModuleName)
-	}
-	if !names {
-		return nil, nil
-	}
-	return decodeRemovedOmnigentDocuments(documents)
+// Teardown puts back config.yaml and the .pth file the way an older
+// release's setup found them, and removes its policy module, when each is
+// exactly as setup left it (see the file comment).
+func (c removedOmnigentConnector) Teardown(_ context.Context, opts SetupOpts) error {
+	return c.teardown(opts, c.plan, []string{"config", "pth", "module"}, nil)
 }
 
-// parseRemovedOmnigentYAML parses every YAML document in config.yaml bytes.
-func parseRemovedOmnigentYAML(data []byte) ([]*yaml.Node, error) {
+// VerifyClean fails while a file is still as DefenseClaw wrote it, or still
+// names DefenseClaw without a recorded manual step.
+func (c removedOmnigentConnector) VerifyClean(opts SetupOpts) error {
+	return c.verifyClean(opts, c.plan)
+}
+
+// removedOmnigentConfigNames reports whether OmniGent config.yaml bytes name
+// DefenseClaw's module in what a YAML loader reads: a decoded key, value or
+// tag in any document, including a !!binary value and a double-quoted escape
+// that spells the name without its literal text. Comments do not count. YAML
+// that does not parse is an error: what OmniGent reads from it is unknown.
+// The file is only read, never rewritten.
+func removedOmnigentConfigNames(data []byte) (bool, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	var documents []*yaml.Node
 	for {
 		var document yaml.Node
 		err := decoder.Decode(&document)
 		if errors.Is(err, io.EOF) {
-			return documents, nil
+			return false, nil
 		}
 		if err != nil {
-			return nil, err
+			return false, fmt.Errorf("not valid YAML: %w", err)
 		}
-		documents = append(documents, &document)
+		if yamlNodeNames(&document, removedOmnigentModuleName) {
+			return true, nil
+		}
 	}
-}
-
-// decodeRemovedOmnigentDocuments checks the one document a config holds (no
-// document returns nil). A config with more than one is refused: OmniGent's
-// loader reads a single document, and which one it would use (or whether it
-// refuses the file) is not cleanup's to guess.
-func decodeRemovedOmnigentDocuments(documents []*yaml.Node) (*removedOmnigentConfig, error) {
-	switch len(documents) {
-	case 0:
-		return nil, nil
-	case 1:
-		return decodeRemovedOmnigentDocument(documents[0])
-	}
-	return nil, errors.New("holds more than one YAML document; cleanup cannot tell which one OmniGent reads, so remove DefenseClaw's entries by hand")
 }
 
 // yamlNodeNames reports whether a parsed YAML tree spells name in a decoded
 // scalar (key or value), in a !!binary scalar's decoded bytes, or in a tag.
-// Aliases are not followed: the nodes they name are in the tree.
+// Aliases need no following: the nodes they name are in the tree.
 func yamlNodeNames(node *yaml.Node, name string) bool {
 	if node == nil {
 		return false
@@ -731,272 +687,4 @@ func yamlNodeNames(node *yaml.Node, name string) bool {
 		}
 	}
 	return false
-}
-
-// parseRemovedOmnigentConfig parses and checks config.yaml bytes
-// (decodeRemovedOmnigentDocuments).
-func parseRemovedOmnigentConfig(data []byte) (*removedOmnigentConfig, error) {
-	documents, err := parseRemovedOmnigentYAML(data)
-	if err != nil {
-		return nil, err
-	}
-	return decodeRemovedOmnigentDocuments(documents)
-}
-
-// decodeRemovedOmnigentDocument checks a parsed config.yaml: a document whose
-// only child is the top-level mapping, plus its decoded value; empty YAML
-// returns nil. The document must also decode. A key set twice in one mapping (a
-// policy's handler or merge key, a policy name, policies or policy_modules)
-// does not: which copy OmniGent uses is up to its YAML loader, so cleanup
-// could drop a policy whose effective handler is another tool's, or pass one
-// that still loads DefenseClaw's. Such a config is refused, not guessed at,
-// and teardown keeps its state until the file is fixed.
-func decodeRemovedOmnigentDocument(document *yaml.Node) (*removedOmnigentConfig, error) {
-	if len(document.Content) == 0 {
-		return nil, nil
-	}
-	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
-		return nil, errors.New("expected a mapping")
-	}
-	var value interface{}
-	if err := document.Decode(&value); err != nil {
-		return nil, fmt.Errorf("%w; cleanup cannot tell which entry OmniGent uses (a key set twice?), so remove DefenseClaw's entries by hand", err)
-	}
-	return &removedOmnigentConfig{document: document, value: value}, nil
-}
-
-// pruneRemovedOmnigentConfig removes DefenseClaw's entries from a parsed
-// config mapping and reports whether there were any. Values are followed
-// through YAML aliases: a list or policies mapping that is an alias is edited
-// where its anchor is.
-func pruneRemovedOmnigentConfig(root *yaml.Node) bool {
-	changed := false
-	for i := 0; i+1 < len(root.Content); i += 2 {
-		key, value := resolveYAMLAlias(root.Content[i]), resolveYAMLAlias(root.Content[i+1])
-		if key == nil || value == nil {
-			continue
-		}
-		drop := false
-		switch key.Value {
-		case "policy_modules":
-			switch value.Kind {
-			case yaml.ScalarNode:
-				drop = removedOmnigentModuleEntry(value)
-			case yaml.SequenceNode:
-				kept := value.Content[:0]
-				removed := false
-				for _, module := range value.Content {
-					if removedOmnigentModuleEntry(module) {
-						removed = true
-						continue
-					}
-					kept = append(kept, module)
-				}
-				value.Content = kept
-				if removed {
-					changed = true
-					drop = len(kept) == 0
-				}
-			}
-		case "policies":
-			if value.Kind != yaml.MappingNode {
-				continue
-			}
-			before := len(value.Content)
-			for j := 0; j+1 < len(value.Content); j += 2 {
-				if removedOmnigentOwnedPolicy(value.Content[j+1]) {
-					value.Content = append(value.Content[:j], value.Content[j+2:]...)
-					j -= 2
-				}
-			}
-			if len(value.Content) != before {
-				changed = true
-				drop = len(value.Content) == 0
-			}
-		}
-		if drop {
-			root.Content = append(root.Content[:i], root.Content[i+2:]...)
-			i -= 2
-			changed = true
-		}
-	}
-	return changed
-}
-
-// removedOmnigentModuleEntry reports whether a policy_modules entry, followed
-// through an alias, names DefenseClaw's module.
-func removedOmnigentModuleEntry(node *yaml.Node) bool {
-	node = resolveYAMLAlias(node)
-	return node != nil && node.Kind == yaml.ScalarNode && node.Value == removedOmnigentModuleName
-}
-
-// removedOmnigentOwnedPolicy reports whether a policy entry's handler is in
-// DefenseClaw's module (older releases wrote
-// defenseclaw_guardrail: {handler: defenseclaw_omnigent_policy.defenseclaw_policy}).
-// The policy's key does not decide it: another tool's handler under that key
-// is that tool's, and DefenseClaw's handler under another key still loads
-// DefenseClaw's module. The entry and its handler are followed through
-// aliases; an entry without its own handler takes the first one its merge
-// keys (<<) bring in, as a YAML loader does.
-func removedOmnigentOwnedPolicy(entry *yaml.Node) bool {
-	handler, _ := removedOmnigentPolicyHandler(entry, 0)
-	return strings.HasPrefix(strings.TrimSpace(handler), removedOmnigentModuleName+".")
-}
-
-// removedOmnigentPolicyHandler returns the handler a policy mapping sets
-// itself, or else the one of the first merge source that sets one, and
-// whether one is set ("" when it is not a scalar). The mapping holds each key
-// once: parseRemovedOmnigentConfig refuses a config with a key set twice.
-func removedOmnigentPolicyHandler(entry *yaml.Node, depth int) (string, bool) {
-	entry = resolveYAMLAlias(entry)
-	if entry == nil || entry.Kind != yaml.MappingNode || depth > maxYAMLAliasDepth {
-		return "", false
-	}
-	var merges []*yaml.Node
-	for k := 0; k+1 < len(entry.Content); k += 2 {
-		key, value := resolveYAMLAlias(entry.Content[k]), resolveYAMLAlias(entry.Content[k+1])
-		if key == nil || value == nil || key.Kind != yaml.ScalarNode {
-			continue
-		}
-		switch {
-		case key.ShortTag() == "!!merge":
-			if value.Kind == yaml.SequenceNode {
-				merges = append(merges, value.Content...)
-			} else {
-				merges = append(merges, value)
-			}
-		case key.Value == "handler":
-			if value.Kind != yaml.ScalarNode {
-				return "", true
-			}
-			return value.Value, true
-		}
-	}
-	for _, source := range merges {
-		if handler, ok := removedOmnigentPolicyHandler(source, depth+1); ok {
-			return handler, true
-		}
-	}
-	return "", false
-}
-
-// removedOmnigentValueLoadsPolicy reports whether a decoded config (aliases
-// and merge keys already resolved) names DefenseClaw's module in
-// policy_modules or a policy handler in it.
-func removedOmnigentValueLoadsPolicy(value interface{}) bool {
-	root := yamlStringKeyed(value)
-	switch modules := root["policy_modules"].(type) {
-	case string:
-		if modules == removedOmnigentModuleName {
-			return true
-		}
-	case []interface{}:
-		for _, module := range modules {
-			if name, ok := module.(string); ok && name == removedOmnigentModuleName {
-				return true
-			}
-		}
-	}
-	for _, policy := range yamlStringKeyed(root["policies"]) {
-		handler, ok := yamlStringKeyed(policy)["handler"].(string)
-		if ok && strings.HasPrefix(strings.TrimSpace(handler), removedOmnigentModuleName+".") {
-			return true
-		}
-	}
-	return false
-}
-
-// yamlStringKeyed returns a decoded YAML mapping by its string keys, or nil.
-func yamlStringKeyed(value interface{}) map[string]interface{} {
-	switch m := value.(type) {
-	case map[string]interface{}:
-		return m
-	case map[interface{}]interface{}:
-		out := make(map[string]interface{}, len(m))
-		for key, item := range m {
-			if name, ok := key.(string); ok {
-				out[name] = item
-			}
-		}
-		return out
-	}
-	return nil
-}
-
-// maxYAMLAliasDepth bounds alias and merge chains (a YAML alias may name a
-// node that holds itself).
-const maxYAMLAliasDepth = 64
-
-// resolveYAMLAlias follows aliases to the node they name.
-func resolveYAMLAlias(node *yaml.Node) *yaml.Node {
-	for depth := 0; node != nil && node.Kind == yaml.AliasNode; depth++ {
-		if depth > maxYAMLAliasDepth {
-			return nil
-		}
-		node = node.Alias
-	}
-	return node
-}
-
-// expandDanglingYAMLAliases replaces each alias whose anchor was removed
-// from document by a copy of the node it named, so the marshaled YAML
-// defines every alias it uses. Copies drop their anchors; an alias inside a
-// copy is expanded the same way on the next pass.
-func expandDanglingYAMLAliases(document *yaml.Node) error {
-	for pass := 0; pass < maxYAMLAliasDepth; pass++ {
-		present := map[*yaml.Node]bool{}
-		var mark func(*yaml.Node)
-		mark = func(node *yaml.Node) {
-			if node == nil || present[node] {
-				return
-			}
-			present[node] = true
-			if node.Kind != yaml.AliasNode {
-				for _, child := range node.Content {
-					mark(child)
-				}
-			}
-		}
-		mark(document)
-		expanded := false
-		var expand func(*yaml.Node)
-		expand = func(node *yaml.Node) {
-			if node == nil {
-				return
-			}
-			if node.Kind != yaml.AliasNode {
-				for _, child := range node.Content {
-					expand(child)
-				}
-				return
-			}
-			if node.Alias == nil || present[node.Alias] {
-				return
-			}
-			replacement := copyYAMLNodeWithoutAnchors(node.Alias)
-			replacement.HeadComment, replacement.LineComment, replacement.FootComment = node.HeadComment, node.LineComment, node.FootComment
-			*node = *replacement
-			expanded = true
-		}
-		expand(document)
-		if !expanded {
-			return nil
-		}
-	}
-	return errors.New("YAML aliases left by the cleanup do not resolve")
-}
-
-// copyYAMLNodeWithoutAnchors deep-copies node without its anchors; aliases
-// inside it are copied as aliases.
-func copyYAMLNodeWithoutAnchors(node *yaml.Node) *yaml.Node {
-	out := *node
-	out.Anchor = ""
-	if node.Kind == yaml.AliasNode {
-		return &out
-	}
-	out.Content = make([]*yaml.Node, len(node.Content))
-	for i, child := range node.Content {
-		out.Content[i] = copyYAMLNodeWithoutAnchors(child)
-	}
-	return &out
 }

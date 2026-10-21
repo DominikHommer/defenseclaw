@@ -385,6 +385,7 @@ def status(app: AppContext, as_json: bool) -> None:
         )
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
+    _print_removed_connector_cleanup(cfg)
     ux.echo()
 
     if _host_is_windows():
@@ -572,6 +573,19 @@ def status(app: AppContext, as_json: bool) -> None:
         hint(first_hint, "Subsystems:    defenseclaw-gateway status")
     if config_problems:
         raise SystemExit(1)
+
+
+def _print_removed_connector_cleanup(cfg) -> None:
+    """until 1.1: name a removed connector whose files wait for manual cleanup."""
+    from defenseclaw.removed_connectors import pending_cleanup
+
+    for pending in pending_cleanup(str(getattr(cfg, "data_dir", "") or "")):
+        what = pending.error or f"{len(pending.items)} file(s) to clean up by hand"
+        _status_row(
+            "Cleanup",
+            ux._style(f"{pending.label} was removed in 1.0.4; {what}", fg="yellow")
+            + ux.dim(" (steps: defenseclaw doctor)"),
+        )
 
 
 def _live_gateway_pid(cfg) -> int:
@@ -1801,6 +1815,11 @@ def _status_payload(app) -> dict:
             "scanners": _scanner_status_map(cfg),
         }
     )
+    from defenseclaw.removed_connectors import pending_cleanup
+
+    if pending := [item.as_json() for item in pending_cleanup(str(cfg.data_dir or ""))]:
+        # until 1.1: files the removed OpenHands/OmniGent teardown left.
+        payload["removed_connector_cleanup"] = pending
 
     if app.store:
         try:
