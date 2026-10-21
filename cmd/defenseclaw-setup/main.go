@@ -271,6 +271,7 @@ type installState struct {
 	DevinExecutable        string            `json:"devin_executable,omitempty"`
 	AntigravityConfigDir   string            `json:"antigravity_config_dir,omitempty"`
 	OpenCodeConfigDir      string            `json:"opencode_config_dir,omitempty"`
+	OmnigentConfigHome     string            `json:"omnigent_config_home,omitempty"` // until 1.1: read only, to tear down a 1.0.x OmniGent install; never written
 	HermesHome             string            `json:"hermes_home,omitempty"`
 	UnsignedLocalArtifact  bool              `json:"unsigned_local_artifact"`
 	ReleaseSigningRequired bool              `json:"release_signing_required"`
@@ -454,18 +455,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	if hadInstall && oldState == nil {
 		return 1, fmt.Errorf("refusing to replace an existing directory without valid DefenseClaw installer state: %s", installRoot)
 	}
-	if oldState != nil {
-		if !opts.ConnectorSet && validConnector(oldState.Connector) {
-			opts.Connector = oldState.Connector
-			opts.PreserveConnectorConfiguration = !opts.ModeSet
-		}
-		if !opts.ModeSet && validMode(oldState.Mode) {
-			opts.Mode = oldState.Mode
-		}
-		if opts.Action == "upgrade" && opts.FromVersion == "" {
-			opts.FromVersion = oldState.Version
-		}
-	}
+	opts = applyExistingInstallSelection(opts, oldState)
 	// Every install/repair/upgrade refreshes either the explicit selection or the
 	// existing owned connector roster. Existing data alone is not evidence that
 	// hooks are configured: it also covers legacy and data-preserving installs.
@@ -1022,11 +1012,34 @@ func configuredInstallServices(wanted serviceState, dataRoot string) (serviceSta
 	return wanted, nil
 }
 
+// applyExistingInstallSelection carries an existing installation's connector
+// and mode into a repair, upgrade or reinstall that did not choose them.
+func applyExistingInstallSelection(opts options, oldState *installState) options {
+	if oldState == nil {
+		return opts
+	}
+	if !opts.ConnectorSet && validConnector(oldState.Connector) {
+		opts.Connector = oldState.Connector
+		opts.PreserveConnectorConfiguration = !opts.ModeSet
+	} else if !opts.ConnectorSet && isRetiredNativeConnector(oldState.Connector) {
+		// until 1.1: a removed connector is never carried forward. The
+		// transaction tears it down as a previous connector instead.
+		opts.Connector = "none"
+	}
+	if !opts.ModeSet && validMode(oldState.Mode) {
+		opts.Mode = oldState.Mode
+	}
+	if opts.Action == "upgrade" && opts.FromVersion == "" {
+		opts.FromVersion = oldState.Version
+	}
+	return opts
+}
+
 func connectorsForNativeUninstall(state *installState, dataRoot string) ([]string, error) {
 	seen := map[string]bool{}
 	connectors := make([]string, 0, len(nativeLifecycleConnectorNames))
 	add := func(name string) {
-		if validConnector(name) && name != "none" && !seen[name] {
+		if validPreviousConnector(name) && name != "none" && !seen[name] {
 			seen[name] = true
 			connectors = append(connectors, name)
 		}
@@ -1075,6 +1088,13 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) ([]strin
 	}
 	if pathExists(filepath.Join(dataRoot, "connector_backups", "opencode", "config.json")) {
 		add("opencode")
+	}
+	// until 1.1: the managed backups a 1.0.x OmniGent install left.
+	for _, logicalName := range []string{"config", "module", "pth"} {
+		if pathExists(filepath.Join(dataRoot, "connector_backups", "omnigent", logicalName+".json")) {
+			add("omnigent")
+			break
+		}
 	}
 	if pathExists(filepath.Join(dataRoot, "connector_backups", "hermes", "config.yaml.json")) {
 		add("hermes")
@@ -1142,7 +1162,7 @@ func readNativeConfiguredConnectors(dataRoot string) ([]string, error) {
 	seen := map[string]bool{}
 	add := func(value string) {
 		name := normalizeConnector(strings.TrimSpace(value))
-		if name != "none" && validConnector(name) {
+		if name != "none" && validPreviousConnector(name) {
 			seen[name] = true
 		}
 	}
@@ -1415,6 +1435,10 @@ func connectorLifecycleConfigHome(env []string, connectorName string) (string, e
 		variable = "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME"
 	case "opencode":
 		variable = "OPENCODE_CONFIG_DIR"
+	case "omnigent":
+		// until 1.1: teardown and verify only (the gateway refuses setup and
+		// reconcile for a removed connector).
+		variable = "OMNIGENT_CONFIG_HOME"
 	case "hermes":
 		variable = "HERMES_HOME"
 	default:
@@ -1461,6 +1485,20 @@ func samePath(a, b string) bool {
 
 func validConnector(value string) bool {
 	return value == "none" || isNativeLifecycleConnector(value)
+}
+
+// isRetiredNativeConnector reports a connector a 1.0.x native install could
+// configure that this release removed (OmniGent, #1182). until 1.1: Setup
+// still reads it from install state, rosters and backups, and tears it down
+// and verifies it, but never selects, initializes or reconciles it.
+func isRetiredNativeConnector(value string) bool {
+	return value == "omnigent"
+}
+
+// validPreviousConnector accepts a connector Setup may find in an existing
+// installation: a supported one or, until 1.1, a removed one to tear down.
+func validPreviousConnector(value string) bool {
+	return validConnector(value) || isRetiredNativeConnector(value)
 }
 
 var nativeLifecycleConnectorNames = []string{

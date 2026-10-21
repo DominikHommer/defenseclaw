@@ -1041,6 +1041,9 @@ func applyInteractiveInstallDefaults(opts options, state *installState, autoStar
 	}
 	if !opts.ConnectorSet && validConnector(state.Connector) {
 		opts.Connector = state.Connector
+	} else if !opts.ConnectorSet && isRetiredNativeConnector(state.Connector) {
+		// until 1.1: never offer a removed connector as the selection.
+		opts.Connector = "none"
 	}
 	if !opts.ModeSet && validMode(state.Mode) {
 		opts.Mode = state.Mode
