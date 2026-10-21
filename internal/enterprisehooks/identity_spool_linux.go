@@ -164,9 +164,20 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 		return IdentitySpoolRecord{}, err
 	}
 	record := IdentitySpoolRecord{Key: strconv.Itoa(account.UID), User: nss.Name, UpdatedAt: now, AccountSID: facts.AccountSID}
+	// The gateway lays the record only over the facts of the account whose
+	// incarnation it names: a uid handed to another account of the same
+	// name keeps its key and name (review of GAP-0551).
+	incarnation, incarnationKnown := resolver.AccountIncarnation(account.UID, nss.Name)
+	if incarnationKnown {
+		record.AccountIncarnation = incarnation
+	}
 	if facts.Source != useridentity.SourceSSSD && facts.Source != useridentity.SourceWinbind {
 		record.Facts = facts
 		return record, nil
+	}
+	if !incarnationKnown {
+		record.Facts = facts
+		return record, fmt.Errorf("cannot tell which account holds uid %d (the NSS service that answers it, or the SID SSSD holds for it)", account.UID)
 	}
 	if facts.Source == useridentity.SourceSSSD {
 		callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)

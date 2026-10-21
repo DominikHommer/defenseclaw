@@ -80,3 +80,17 @@ var agentIdentityAccountName = func(identity string) string {
 	}
 	return managedHookPeerHomes.lastName(uid)
 }
+
+// agentIdentityIncarnation is the account incarnation a uid's agent identity
+// is keyed on besides its account name (managedHookPeerHomeCache.agentIncarnation):
+// "" for the first account this gateway saw hold the uid. Tests replace it.
+var agentIdentityIncarnation = func(identity string) string {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return ""
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return ""
+	}
+	return managedHookPeerHomes.agentIncarnation(uid)
+}

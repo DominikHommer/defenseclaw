@@ -57,6 +57,15 @@ type Inputs struct {
 	// SID is never reused, so a SID's account is ignored and a renamed
 	// Windows account keeps its IDs.
 	Account string
+	// Incarnation names, when set, which account held UserID under Account:
+	// the gateway's token of it (the SID SSSD holds for the uid, the NSS
+	// service that answers it, the macOS record). A uid handed from one
+	// account to another of the same bare name and home, in another domain
+	// or deleted and created again, derives other IDs for each, so neither
+	// gets the other's guardrail profile or history. It is set only for an
+	// account other than the first one the gateway saw hold the uid, so the
+	// IDs derived before it was known stay as they were.
+	Incarnation string
 }
 
 // AgentID returns "agt-" plus the first 16 hex digits of the namespaced
@@ -90,6 +99,9 @@ func agentID(in Inputs, withDomain bool) string {
 		parts = append(parts, AccountKey(in.Account))
 		if domain := AccountDomain(in.Account); withDomain && domain != "" {
 			parts = append(parts, domain)
+		}
+		if incarnation := clean(in.Incarnation); incarnation != "" {
+			parts = append(parts, "incarnation:"+incarnation)
 		}
 	}
 	return AgentIDPrefix + digest16(agentNamespace, parts...)

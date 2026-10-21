@@ -97,7 +97,8 @@ func TestNSSCompatListsItsServices(t *testing.T) {
 	t.Cleanup(func() { localPasswdPath, nsswitchPath = oldPasswd, oldNSS })
 	dir := t.TempDir()
 	localPasswdPath, nsswitchPath = filepath.Join(dir, "passwd"), filepath.Join(dir, "nsswitch.conf")
-	for path, data := range map[string]string{localPasswdPath: "root:x:0:0::/root:/bin/sh\n", nsswitchPath: content} {
+	// compat asks passwd_compat for the + lines of /etc/passwd.
+	for path, data := range map[string]string{localPasswdPath: "root:x:0:0::/root:/bin/sh\n+::::::\n", nsswitchPath: content} {
 		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -217,6 +218,11 @@ func TestSameNameAccountsEmptyRealmdAnswer(t *testing.T) {
 	}
 	t.Run("winbind", func(t *testing.T) {
 		sameNameHost(t, empty, "", "passwd: files winbind\n")
+		previousSamba, previousTrusts := sambaConfPath, winbindTrustedDomains
+		t.Cleanup(func() { sambaConfPath, winbindTrustedDomains = previousSamba, previousTrusts })
+		sambaConfPath = filepath.Join(t.TempDir(), "smb.conf")
+		writeTestFile(t, sambaConfPath, "[global]\nworkgroup = CORP\n")
+		winbindTrustedDomains = func(context.Context) ([]string, error) { return nil, errors.New("winbindd is not running") }
 		var unknown *useridentity.NamesakesUnknownError
 		if twins, err := SameNameAccounts(context.Background(), r, local); len(twins) != 0 || !errors.As(err, &unknown) {
 			t.Fatalf("twins = %+v, %v; want the bare name refused", twins, err)
@@ -283,7 +289,10 @@ func TestLocalAccountGroupsFailWhenTheDirectoryDoesNotAnswer(t *testing.T) {
 		})
 	}
 	t.Run("a directory that holds no such member", func(t *testing.T) {
-		quiet := map[string]commandResult{"passwd 1001": {stdout: localLine}, "passwd alice": {stdout: localLine}}
+		quiet := map[string]commandResult{
+			"passwd 1001": {stdout: localLine}, "passwd alice": {stdout: localLine},
+			"-s ldap initgroups alice": {stdout: []byte("alice\n")}, "-s ldap group": {stdout: []byte("ldap-users:*:9000:\n")},
+		}
 		r := newFakeNSS(&fakeRun{results: quiet})
 		facts, err := r.DirectoryFactsForUID(1001, time.Now())
 		if err != nil || !reflect.DeepEqual(facts.Groups, []string{"5100", "local-team"}) {
