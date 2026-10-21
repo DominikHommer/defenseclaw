@@ -111,3 +111,52 @@ func TestPublishedSessionRecordHeldOpenWithoutDeleteSharingIsStillRevoked(t *tes
 		t.Fatalf("a withdrawn answer of a held record must deny: %+v %v", got, err)
 	}
 }
+
+// Review P1 (GAP-0352), on a real Windows file: a held record whose deny
+// marker cannot be created (a full volume) is still revoked. Its
+// modification time is set through an attributes-only handle, which the
+// reader's sharing mode does not refuse, and the hook refuses the expired
+// record.
+func TestPublishedSessionRecordHeldOpenIsRevokedWithoutItsMarker(t *testing.T) {
+	root := t.TempDir()
+	identity := publishedSessionTestIdentity(t)
+	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "windows:b:1:100"}
+	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
+	if !ok {
+		t.Fatal("no record path")
+	}
+	previousCreate := publishedSessionCreate
+	publishedSessionCreate = func(name string) (*os.File, error) {
+		return nil, &os.PathError{Op: "open", Path: name, Err: windows.ERROR_DISK_FULL}
+	}
+	t.Cleanup(func() { publishedSessionCreate = previousCreate })
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No sharing at all: the strictest hold a reader can take.
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	if err := RemovePublishedForeignHookSessions(root, identity, []string{"copilot"}); err != nil {
+		t.Fatalf("the expired record is a revocation: %v", err)
+	}
+	if _, err := os.Lstat(publishedSessionDenyPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("no marker can exist: %v", err)
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		t.Fatal(err)
+	}
+	if modified := time.Unix(0, info.LastWriteTime.Nanoseconds()); modified.After(publishedSessionRevokedTime.Add(time.Second)) {
+		t.Fatalf("the held record must be expired, modified %v", modified)
+	}
+	if got, err := CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll); err == nil && !got.Deny {
+		t.Fatalf("the expired held record must not prove the allow: %+v", got)
+	}
+}

@@ -62,10 +62,19 @@ import (
 // Revoking a record must not depend on deleting or replacing it: on
 // Windows the account may hold its record open for reading without delete
 // sharing, which refuses both. So a block, a guardian removal or a
-// withdrawn answer that cannot delete a record writes the record's deny
-// marker (<record>.deny) instead: a new file, which no reader can hold open
-// before it exists. While a marker exists the hook denies the call whatever
-// the record says; only a later allow that replaced the record removes it.
+// withdrawn answer that cannot delete a record overrides it twice, so that
+// no single write decides: it sets the record's modification time to
+// publishedSessionRevokedTime (metadata only: it needs no free space, and a
+// reader's sharing mode does not refuse it), which the hook reads as
+// expired, and it writes the record's deny marker (<record>.deny), a new
+// file that carries the gateway's reason. While a marker exists the hook
+// denies the call whatever the record says; only a later allow that
+// replaced the record clears both.
+//
+// The hook accepts only a record of its agent process, never a session
+// record alone: an agent started during the outage may resume the session
+// ID of an earlier one. And it accepts no answer older than
+// publishedSessionMaxAge.
 
 const (
 	// publishedSessionVersion is the record schema.
@@ -80,14 +89,31 @@ const (
 	// publishedSessionDenySuffix replaces a record's .json for its deny
 	// marker.
 	publishedSessionDenySuffix = ".deny"
+	// publishedSessionMaxAge is the oldest answer the hook accepts, by the
+	// record's time and its modification time: the gateway's own session
+	// records last as long.
+	publishedSessionMaxAge = sessionRecordTTL
+	// foreignHookRemovalHoldSuffix follows an account's folder name for the
+	// removals the guardian holds for it (ForeignHookRemovalHoldPath).
+	foreignHookRemovalHoldSuffix = ".hold"
 )
 
-// publishedSessionRename replaces a record and publishedSessionRemove
-// deletes one (replaceable in tests, which stand in for a Windows reader
-// that holds a record open without delete sharing).
+// publishedSessionRevokedTime is the modification time a revocation gives a
+// record it cannot delete: far older than publishedSessionMaxAge.
+var publishedSessionRevokedTime = time.Unix(0, 0).UTC()
+
+// publishedSessionRename replaces a record, publishedSessionRemove deletes
+// one, publishedSessionExpire sets its modification time to
+// publishedSessionRevokedTime and publishedSessionCreate creates a deny
+// marker (replaceable in tests, which stand in for a Windows reader that
+// holds a record open without delete sharing, and for a full volume).
 var (
 	publishedSessionRename = os.Rename
 	publishedSessionRemove = os.Remove
+	publishedSessionExpire = expirePublishedSessionRecord
+	publishedSessionCreate = func(name string) (*os.File, error) {
+		return os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	}
 )
 
 // ErrPublishedSessionUnavailable is a protected session record that does
@@ -338,17 +364,21 @@ func WithdrawPublishedForeignHookSession(root, identity string, key SessionKey) 
 // agent process or session unblocked. It deletes the record; when that
 // fails (on Windows a reader that holds the record open without delete
 // sharing refuses the deletion, and refused the replacement before it), it
-// writes the record's deny marker, which the hook checks after it read the
-// record. record (blocked) is the marker's content.
+// expires the record (publishedSessionExpire) and writes its deny marker,
+// both of which the hook checks after it read the record. Either one
+// revokes, so a full volume that refuses the marker does not leave the
+// allow standing. record (blocked) is the marker's content.
 func revokePublishedSessionRecord(path string, record PublishedSessionRecord) error {
 	err := publishedSessionRemove(path)
 	if err == nil || errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	if markErr := writePublishedSessionDenyMarker(path, record); markErr != nil {
-		return errors.Join(err, markErr)
+	expireErr := publishedSessionExpire(path)
+	markErr := writePublishedSessionDenyMarker(path, record)
+	if expireErr == nil || errors.Is(expireErr, fs.ErrNotExist) || markErr == nil {
+		return nil
 	}
-	return nil
+	return errors.Join(err, expireErr, markErr)
 }
 
 // writePublishedSessionDenyMarker creates the deny marker of the record at
@@ -370,7 +400,7 @@ func writePublishedSessionDenyMarker(path string, record PublishedSessionRecord)
 	if err != nil {
 		return err
 	}
-	file, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	file, err := publishedSessionCreate(marker)
 	if err != nil {
 		if _, statErr := os.Lstat(marker); statErr == nil {
 			return nil
@@ -385,26 +415,35 @@ func writePublishedSessionDenyMarker(path string, record PublishedSessionRecord)
 
 // CheckPublishedForeignHookSession decides a guarded call during a gateway
 // outage from the protected record of identity under root. It returns the
-// scan's decision when a trusted record proves the agent process (or, when
-// the process cannot be named, the session) not blocked and no record or
-// deny marker blocks it, a denial with the gateway's reason when one blocks
-// it,
-// and ErrPublishedSessionUnavailable when the record proves neither. trust
-// checks a record path and every folder above it (ValidatePublishedSessionPath
-// in production).
+// scan's decision when a trusted record of the agent process proves it not
+// blocked, no record or deny marker blocks it, and every record it read is
+// still in place and fresh (publishedSessionMaxAge); a denial with the
+// gateway's reason when a record or marker blocks it; and
+// ErrPublishedSessionUnavailable otherwise. A session record alone never
+// proves an allow: an agent process the hook cannot name may be one that
+// started during the outage and resumed the session ID. trust checks a
+// record path and every folder above it (ValidatePublishedSessionPath in
+// production).
 func CheckPublishedForeignHookSession(root, identity string, key SessionKey, decision GuardDecision, trust func(path string) error) (GuardDecision, error) {
 	name := strings.TrimSpace(key.Connector)
 	dir, ok := PublishedSessionIdentityDir(root, identity)
 	if !ok || !key.valid() || !publishedSessionConnector(name) || trust == nil {
 		return decision, ErrPublishedSessionUnavailable
 	}
+	now := time.Now()
 	proven := false
+	type readRecord struct {
+		path string
+		info os.FileInfo
+		at   time.Time
+	}
+	var read []readRecord
 	for _, entry := range []struct{ kind, id string }{{sessionKindProcess, key.Process}, {sessionKindSession, key.Session}} {
 		if entry.id == "" {
 			continue
 		}
 		path := publishedSessionPath(dir, name, entry.kind, entry.id)
-		record, exists, err := readPublishedSessionRecord(path, trust)
+		record, info, exists, err := readPublishedSessionRecord(path, trust)
 		if err != nil {
 			return decision, fmt.Errorf("%w: %v", ErrPublishedSessionUnavailable, err)
 		}
@@ -414,15 +453,18 @@ func CheckPublishedForeignHookSession(root, identity string, key SessionKey, dec
 		if record.Version != publishedSessionVersion || record.Connector != name || record.Kind != entry.kind || record.ID != entry.id {
 			return decision, fmt.Errorf("%w: %s does not belong to this agent session", ErrPublishedSessionUnavailable, path)
 		}
-		if _, err := time.Parse(time.RFC3339, record.At); err != nil {
+		at, err := time.Parse(time.RFC3339, record.At)
+		if err != nil {
 			return decision, fmt.Errorf("%w: %s has no valid time", ErrPublishedSessionUnavailable, path)
 		}
 		if record.Blocked {
 			return publishedBlockDecision(decision, name, record), nil
 		}
-		// The process record is the proof when the process is named: the
-		// gateway carries a block of the process to every session it runs.
-		if entry.kind == sessionKindProcess || key.Process == "" {
+		read = append(read, readRecord{path, info, at})
+		// Only the process record is proof: the gateway carries a block of
+		// the process to every session it runs, and an agent process is
+		// never another one.
+		if entry.kind == sessionKindProcess {
 			proven = true
 		}
 	}
@@ -445,7 +487,23 @@ func CheckPublishedForeignHookSession(root, identity string, key SessionKey, dec
 	if !proven {
 		return decision, ErrPublishedSessionUnavailable
 	}
+	// Last, every record read must still be the same file, and fresh: a
+	// revocation that could not delete a record expired it before it
+	// returned, so a record read before that is overruled here too.
+	for _, entry := range read {
+		info, err := os.Lstat(entry.path)
+		if err != nil || !os.SameFile(entry.info, info) || !publishedSessionFresh(info.ModTime(), entry.at, now) ||
+			!publishedSessionFresh(entry.info.ModTime(), entry.at, now) {
+			return decision, fmt.Errorf("%w: %s was revoked, replaced or expired", ErrPublishedSessionUnavailable, entry.path)
+		}
+	}
 	return decision, nil
+}
+
+// publishedSessionFresh reports an answer the gateway gave, and a record it
+// wrote, no longer than publishedSessionMaxAge ago.
+func publishedSessionFresh(modified, at, now time.Time) bool {
+	return now.Sub(modified) <= publishedSessionMaxAge && now.Sub(at) <= publishedSessionMaxAge
 }
 
 // readPublishedSessionDenyMarker reports whether the record at path has a
@@ -459,7 +517,7 @@ func readPublishedSessionDenyMarker(path, connectorName, kind, id string, trust 
 	} else if err != nil {
 		return PublishedSessionRecord{}, false, err
 	}
-	record, _, err := readPublishedSessionRecord(marker, trust)
+	record, _, _, err := readPublishedSessionRecord(marker, trust)
 	if err != nil || record.Version != publishedSessionVersion || record.Connector != connectorName || record.Kind != kind || record.ID != id {
 		return PublishedSessionRecord{}, true, nil
 	}
@@ -505,36 +563,41 @@ func clipPublishedReason(reason string) string {
 }
 
 // readPublishedSessionRecord reads one record after trust accepted it and
-// every folder above it. A missing record does not exist; anything else
-// that cannot be checked, read or decoded is an error.
-func readPublishedSessionRecord(path string, trust func(string) error) (PublishedSessionRecord, bool, error) {
-	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+// every folder above it, with the file information of the record it read.
+// A missing record does not exist; anything else that cannot be checked,
+// read or decoded is an error.
+func readPublishedSessionRecord(path string, trust func(string) error) (PublishedSessionRecord, os.FileInfo, bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
 		// The folders above must be trusted for "missing" to mean missing;
 		// either way the record proves nothing.
-		return PublishedSessionRecord{}, false, nil
+		return PublishedSessionRecord{}, nil, false, nil
 	} else if err != nil {
-		return PublishedSessionRecord{}, true, err
+		return PublishedSessionRecord{}, nil, true, err
 	}
+	// SameFile reads the Windows file ID on first use, by path: read it now,
+	// while the path still names the record this information describes.
+	_ = os.SameFile(info, info)
 	if err := trust(path); err != nil {
-		return PublishedSessionRecord{}, true, err
+		return PublishedSessionRecord{}, nil, true, err
 	}
 	data, exists, err := readGuardFileLimit(path, publishedSessionRecordLimit)
 	if err != nil {
-		return PublishedSessionRecord{}, true, err
+		return PublishedSessionRecord{}, nil, true, err
 	}
 	if !exists {
-		return PublishedSessionRecord{}, false, nil
+		return PublishedSessionRecord{}, nil, false, nil
 	}
 	var record PublishedSessionRecord
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&record); err != nil {
-		return PublishedSessionRecord{}, true, fmt.Errorf("%s: %w", path, err)
+		return PublishedSessionRecord{}, nil, true, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return PublishedSessionRecord{}, true, fmt.Errorf("%s: trailing content", path)
+		return PublishedSessionRecord{}, nil, true, fmt.Errorf("%s: trailing content", path)
 	}
-	return record, true, nil
+	return record, info, true, nil
 }
 
 // writePublishedSessionRecord replaces one record atomically in its folder.
@@ -630,7 +693,9 @@ func prunePublishedSessionRecords(dir string, now time.Time) {
 			continue
 		}
 		if now.Sub(info.ModTime()) > sessionRecordTTL {
-			_ = os.Remove(path)
+			// A reader may hold it open; then it stays expired, and its
+			// marker stays too.
+			_ = publishedSessionRemove(path)
 			continue
 		}
 		kept = append(kept, aged{path, info.ModTime()})
@@ -640,6 +705,67 @@ func prunePublishedSessionRecords(dir string, now time.Time) {
 	}
 	sort.Slice(kept, func(i, j int) bool { return kept[i].mod.Before(kept[j].mod) })
 	for _, entry := range kept[:len(kept)-publishedSessionDirLimit] {
-		_ = os.Remove(entry.path)
+		if publishedSessionRemove(entry.path) != nil {
+			_ = publishedSessionExpire(entry.path)
+		}
 	}
+}
+
+// ForeignHookRemovalHoldPath is the file in which the guardian holds the
+// removals of identity that it could not write to its removal ledger
+// (enterprisepolicy.ForeignHookRemovalsFile): <root>/<account folder>.hold,
+// next to the account's protected session records, which a standard user
+// cannot write (on Linux it is on the /run tmpfs, apart from the ledger's
+// volume).
+func ForeignHookRemovalHoldPath(root, identity string) (string, bool) {
+	dir, ok := PublishedSessionIdentityDir(root, identity)
+	if !ok {
+		return "", false
+	}
+	return dir + foreignHookRemovalHoldSuffix, true
+}
+
+// ReadForeignHookRemovalHold returns the removals the guardian holds for
+// identity under root (ForeignHookRemovalHoldPath), with the hold file's
+// information (nil when there is none). The gateway denies with them as
+// with the removal ledger, so a removal the guardian could not write to the
+// ledger still denies the agent processes that started before it, and no
+// allow is published for them. A hold that is not a regular file or does
+// not parse is an error, which denies the call like an unreadable ledger.
+func ReadForeignHookRemovalHold(root, identity string) ([]ForeignHookRemoval, os.FileInfo, error) {
+	path, ok := ForeignHookRemovalHoldPath(root, identity)
+	if !ok {
+		return nil, nil, nil
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	// SameFile reads the Windows file ID on first use, by path.
+	_ = os.SameFile(info, info)
+	if !info.Mode().IsRegular() {
+		return nil, info, fmt.Errorf("foreign-hook removal hold %s is not a regular file", path)
+	}
+	data, exists, err := readGuardFileLimit(path, ForeignHookRemovalsMaxBytes)
+	if err != nil {
+		return nil, info, err
+	}
+	if !exists {
+		return nil, nil, nil
+	}
+	removals, err := ParseForeignHookRemovals(data)
+	if err != nil {
+		return nil, info, fmt.Errorf("foreign-hook removal hold %s: %w", path, err)
+	}
+	canonical, _ := connector.CanonicalUserScopedIdentity(identity)
+	out := make([]ForeignHookRemoval, 0, len(removals))
+	for _, removal := range removals {
+		if held, ok := connector.CanonicalUserScopedIdentity(removal.Identity); ok && held == canonical {
+			out = append(out, removal)
+		}
+	}
+	return out, info, nil
 }

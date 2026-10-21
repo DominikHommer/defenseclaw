@@ -49,16 +49,20 @@ guard finds blocks in every fail mode too.
 
 The foreign-hook guard checks each call against the agent session's hook
 record, which the gateway keeps (GitHub Copilot, Cursor, Devin, OpenCode, Amp
-and Hermes on a standalone host with `foreign_hooks: remove`). After every
+and Hermes on a standalone host with `foreign_hooks: remove`; on Windows, Amp
+keeps its record under the account's home instead, and the rest of this
+section does not apply to it). After every
 check the gateway also writes its answer into a protected record that only
 that account can read and only the gateway service can change. During an
 outage under `open`, a guarded call runs only when that record shows the
 gateway did not block the agent process. These calls stay blocked:
 
 - a session the gateway blocked (it may still run the hook it loaded);
-- an agent that started while the gateway was down (no record yet);
-- a record that is missing, cannot be read or parsed, or that a user
-  account could change;
+- an agent that started while the gateway was down (no record yet), and an
+  agent process DefenseClaw cannot name (a session record alone is not
+  enough: a new agent can resume an old session);
+- a record that is missing, cannot be read or parsed, is older than 7 days,
+  or that a user account could change, including through a folder above it;
 - every guarded call under `closed` or an unset fail mode.
 
 On a managed standalone host `open` applies only to an outage: the gateway

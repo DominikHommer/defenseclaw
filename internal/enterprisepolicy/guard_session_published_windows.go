@@ -47,7 +47,10 @@ func publishedSessionDirSDDL(service, account *windows.SID) string {
 
 // publishedSessionPrepare makes dir, below the folder the SYSTEM lifecycle
 // created (root), a folder this gateway created with the protected
-// per-account DACL. A folder this process does not own is replaced.
+// per-account DACL. A folder this process does not own is replaced. A root
+// that Administrators, SYSTEM or this gateway do not own is refused: its
+// owner could move a record folder away and put it back after a
+// revocation.
 func publishedSessionPrepare(root, dir, identity string) error {
 	if err := publishedSessionRealDir(root); err != nil {
 		return fmt.Errorf("protected session record root %s: %w", root, err)
@@ -61,6 +64,9 @@ func publishedSessionPrepare(root, dir, identity string) error {
 		return err
 	}
 	service := user.User.Sid
+	if !publishedSessionOwnedByTrusted(root, service) {
+		return fmt.Errorf("protected session record root %s is not owned by Administrators, SYSTEM or the gateway", root)
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		_, err := os.Lstat(dir)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -127,7 +133,38 @@ func publishedSessionOwnedByTrusted(path string, service *windows.SID) bool {
 // ValidatePublishedSessionPath checks a protected session record before the
 // hook reads it: the record and every folder above it are on a fixed NTFS
 // drive, no reparse point, and no account but SYSTEM, Administrators,
-// TrustedInstaller and the gateway service can write them.
+// TrustedInstaller and the gateway service can write them. Every verdict is
+// fatal, the shared Cisco folder included, and the account's folder and the
+// record root get the record's own strict mask: the account must not be
+// able to move a record folder away and bring it back after a revocation.
+// A record the check refuses blocks.
 func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) error {
-	return managed.ValidateTrustedServiceRuntimeFilePath(path, "protected foreign-hook session record", trust.ServiceAccount)
+	return managed.ValidateStrictServiceRuntimeFilePath(path, "protected foreign-hook session record", trust.ServiceAccount, publishedSessionNamedDirs)
+}
+
+// publishedSessionNamedDirs are the folders above a record that DefenseClaw
+// creates with a protected DACL: the account's folder and the record root.
+const publishedSessionNamedDirs = 2
+
+// expirePublishedSessionRecord sets the modification time of the record at
+// path to publishedSessionRevokedTime (revokePublishedSessionRecord). It
+// opens the record for its attributes only, which no sharing mode of a
+// reader refuses, and without following a reparse point.
+func expirePublishedSessionRecord(path string) error {
+	pointer, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(pointer, windows.FILE_WRITE_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			return fs.ErrNotExist
+		}
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	revoked := windows.NsecToFiletime(publishedSessionRevokedTime.UnixNano())
+	return windows.SetFileTime(handle, nil, &revoked, &revoked)
 }

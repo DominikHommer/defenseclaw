@@ -29,6 +29,20 @@ import (
 // account) is what keeps other accounts out.
 func publishedSessionFileMode(file *os.File) error { return file.Chmod(0o644) }
 
+// expirePublishedSessionRecord sets the modification time of the record at
+// path to publishedSessionRevokedTime (revokePublishedSessionRecord). Only a
+// regular file is changed: the record folder is the gateway's own.
+func expirePublishedSessionRecord(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	return os.Chtimes(path, publishedSessionRevokedTime, publishedSessionRevokedTime)
+}
+
 // publishedSessionGrantReader gives uid read and search on the per-user
 // folder dir (replaceable in tests, which cannot change access lists).
 var publishedSessionGrantReader = grantPublishedSessionReader

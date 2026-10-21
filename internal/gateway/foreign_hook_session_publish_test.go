@@ -130,6 +130,94 @@ func TestForeignHookSessionGatewayWithdrawsAnAllowWhoseRemovalLedgerChanged(t *t
 	step("still no ledger", server.aliceToken, allow, nil, 3)
 }
 
+// Review P2 (GAP-0352): a removal the guardian could not write to its
+// ledger is held next to the account's protected records. The gateway
+// denies with it as with the ledger, so the next exchange of an agent
+// process that started before the removal publishes a block, not the allow
+// the guardian revoked. A process that started after it is allowed, another
+// account is not affected, a hold that does not parse denies, and an allow
+// answered while the guardian wrote or removed the hold is withdrawn.
+func TestForeignHookSessionGatewayDeniesWithTheGuardiansHeldRemovals(t *testing.T) {
+	type published struct {
+		identity, process string
+		deny              bool
+	}
+	var writes []published
+	var guardian func()
+	root := t.TempDir()
+	server := newForeignHookPublishTestServer(t, root, func(_, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, _ time.Time) error {
+		writes = append(writes, published{identity, key.Process, decision.Deny})
+		if guardian != nil {
+			guardian()
+			guardian = nil
+		}
+		return nil
+	})
+	early, late := runtime.GOOS+":b:1:100", runtime.GOOS+":b:1:300"
+	holdPath, ok := enterprisepolicy.ForeignHookRemovalHoldPath(root, server.alice)
+	if !ok {
+		t.Fatal("no hold path")
+	}
+	writeHold := func() {
+		t.Helper()
+		now := time.Now().UTC()
+		data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
+			Identity: server.alice, Connector: "claudecode", Path: "/home/alice/.claude/settings.json",
+			At: now.Format(time.RFC3339), Mark: runtime.GOOS + ":b:200",
+		}}, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(holdPath+".tmp", data, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(holdPath+".tmp", holdPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allow := func(process string) map[string]any {
+		return map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": process}, "decision": map[string]any{"deny": false}}
+	}
+	expect := func(name string, want []published, withdrawn int) {
+		t.Helper()
+		if len(writes) != len(want) {
+			t.Fatalf("%s: published %+v, want %+v", name, writes, want)
+		}
+		for i := range want {
+			if writes[i] != want[i] {
+				t.Fatalf("%s: publish %d = %+v, want %+v", name, i, writes[i], want[i])
+			}
+		}
+		if len(server.withdrawn) != withdrawn {
+			t.Fatalf("%s: withdrawn %v, want %d", name, server.withdrawn, withdrawn)
+		}
+		writes = nil
+	}
+	writeHold()
+	server.call(server.aliceToken, allow(early))
+	server.call(server.aliceToken, allow(late))
+	server.call(server.bobToken, allow(early))
+	expect("held removal", []published{{server.alice, early, true}, {server.alice, late, false}, {server.bob, early, false}}, 0)
+
+	if err := os.WriteFile(holdPath, []byte(`{"version":1`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	server.call(server.aliceToken, allow(late))
+	expect("a hold that does not parse", []published{{server.alice, late, true}}, 0)
+
+	if err := os.Remove(holdPath); err != nil {
+		t.Fatal(err)
+	}
+	guardian = writeHold
+	server.call(server.aliceToken, allow(late))
+	expect("the guardian writes the hold", []published{{server.alice, late, false}}, 1)
+	guardian = func() { _ = os.Remove(holdPath) }
+	server.call(server.aliceToken, allow(late))
+	expect("the guardian removes the hold", []published{{server.alice, late, false}}, 2)
+	server.call(server.aliceToken, allow(late))
+	expect("no hold", []published{{server.alice, late, false}}, 2)
+}
+
 // foreignHookPublishTestServer is a standalone user-scoped gateway with two
 // enrolled accounts whose protected-record writes go to publish.
 type foreignHookPublishTestServer struct {

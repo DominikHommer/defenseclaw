@@ -24,7 +24,7 @@ func trustAll(string) error { return nil }
 
 // GAP-0352: the gateway's answer for every session exchange is written to
 // the protected record, and during an outage only a record that proves the
-// agent process (or, unnamed, the session) not blocked lets a call go on.
+// agent process not blocked lets a call go on.
 func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 	withoutPublishedSessionACL(t)
 	root := t.TempDir()
@@ -121,17 +121,207 @@ func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 	if got, err := check(opencode, trustAll); err != nil || got.Deny {
 		t.Fatalf("another connector's record must stay: %+v %v", got, err)
 	}
-	// A process that cannot be named is proven by its session record alone;
-	// a named one needs its own record.
+	// Review P2: a session record alone proves nothing. An agent process the
+	// hook cannot name may be one that started during the outage and
+	// resumed the session ID, and a named one needs its own record.
 	unnamed := SessionKey{Connector: "copilot", Session: "u-1"}
 	if err := PublishForeignHookSessionDecision(root, identity, unnamed, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := check(unnamed, trustAll); err != nil || got.Deny {
-		t.Fatalf("an unnamed process with a clean session record must be proven: %+v %v", got, err)
+	if got, err := check(unnamed, trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) || got.Deny {
+		t.Fatalf("an unnamed process must not be proven by a clean session record: %+v %v", got, err)
 	}
 	if _, err := check(SessionKey{Connector: "copilot", Session: "u-1", Process: "linux:b:3:100"}, trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
 		t.Fatalf("a named process without its own record must not be proven by the session: %v", err)
+	}
+}
+
+// Review P2 (GAP-0352): an answer older than publishedSessionMaxAge, by the
+// record's time or its modification time, proves nothing, and neither does
+// a record that was deleted, replaced or expired after the hook read it.
+func TestPublishedForeignHookSessionRefusesAStaleOrChangedAnswer(t *testing.T) {
+	withoutPublishedSessionACL(t)
+	root := t.TempDir()
+	identity := publishedSessionTestIdentity(t)
+	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
+	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
+	if !ok {
+		t.Fatal("no record path")
+	}
+	sessionPath, _ := PublishedSessionRecordPath(root, identity, "copilot", sessionKindSession, key.Session)
+	check := func(trust func(string) error) (GuardDecision, error) {
+		t.Helper()
+		return CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trust)
+	}
+	allow := func(at time.Time) {
+		t.Helper()
+		if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allow(time.Now())
+	if got, err := check(trustAll); err != nil || got.Deny {
+		t.Fatalf("a fresh allow must prove the process unblocked: %+v %v", got, err)
+	}
+	old := time.Now().Add(-publishedSessionMaxAge - time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := check(trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
+		t.Fatalf("a record older than the limit must prove nothing: %v", err)
+	}
+	allow(old)
+	if _, err := check(trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
+		t.Fatalf("an answer older than the limit must prove nothing: %v", err)
+	}
+	// Between the read of the process record and the end of the check (the
+	// session record's trust check runs in between).
+	for name, change := range map[string]func(){
+		"deleted": func() { _ = os.Remove(path) },
+		"expired": func() { _ = publishedSessionExpire(path) },
+		"replaced": func() {
+			data, _ := os.ReadFile(path)
+			_ = os.WriteFile(path+".new", data, 0o644)
+			_ = os.Rename(path+".new", path)
+		},
+	} {
+		allow(time.Now())
+		changed := false
+		_, err := check(func(p string) error {
+			if p == sessionPath && !changed {
+				changed = true
+				change()
+			}
+			return nil
+		})
+		if !changed || !errors.Is(err, ErrPublishedSessionUnavailable) {
+			t.Fatalf("%s after the read: the record must prove nothing (changed=%v): %v", name, changed, err)
+		}
+	}
+}
+
+// Review P1 (GAP-0352): a revocation of a record that can be neither
+// deleted nor replaced (a Windows reader holds it open) must not depend on
+// creating the deny marker: on a full volume that fails too. The record is
+// expired in place, which needs no space, and the hook refuses it. Only when
+// every override fails is the revocation an error.
+func TestPublishedForeignHookSessionRevocationSurvivesAMarkerThatCannotBeCreated(t *testing.T) {
+	withoutPublishedSessionACL(t)
+	root := t.TempDir()
+	identity := publishedSessionTestIdentity(t)
+	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
+	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
+	if !ok {
+		t.Fatal("no record path")
+	}
+	check := func() (GuardDecision, error) {
+		t.Helper()
+		return CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll)
+	}
+	allow := func() {
+		t.Helper()
+		if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := check(); err != nil || got.Deny {
+			t.Fatalf("the allow must prove the process unblocked: %+v %v", got, err)
+		}
+	}
+	full := errors.New("there is not enough space on the disk")
+	previousCreate := publishedSessionCreate
+	publishedSessionCreate = func(name string) (*os.File, error) { return nil, &os.PathError{Op: "open", Path: name, Err: full} }
+	t.Cleanup(func() { publishedSessionCreate = previousCreate })
+	revocations := map[string]func() error{
+		"block": func() error {
+			_ = PublishForeignHookSessionDecision(root, identity, key, GuardDecision{Deny: true, Reason: foreignHookBlockedPrefix + " x"}, time.Now())
+			return nil
+		},
+		"guardian removal": func() error { return RemovePublishedForeignHookSessions(root, identity, []string{"copilot"}) },
+		"withdrawal":       func() error { return WithdrawPublishedForeignHookSession(root, identity, key) },
+	}
+	for name, revoke := range revocations {
+		allow()
+		release := heldOpenPublishedSessionRecord(t, path)
+		if err := revoke(); err != nil {
+			t.Fatalf("%s: an expired record is a revocation, not an error: %v", name, err)
+		}
+		if _, err := os.Lstat(publishedSessionDenyPath(path)); !os.IsNotExist(err) {
+			t.Fatalf("%s: no marker can exist on a full volume: %v", name, err)
+		}
+		// The block also wrote the session record (not held), which denies;
+		// the others leave the expired process record, which proves nothing.
+		if got, err := check(); err == nil && !got.Deny {
+			t.Fatalf("%s: the held record must stop proving the allow: %+v", name, got)
+		}
+		// The prune keeps a held, expired record (it cannot delete it) and it
+		// keeps refusing it.
+		prunePublishedSessionRecords(filepath.Dir(path), time.Now())
+		if got, err := check(); err == nil && !got.Deny {
+			t.Fatalf("%s: the pruned held record must still prove nothing: %+v", name, got)
+		}
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("%s: the prune cannot delete the held record: %v", name, err)
+		}
+		release()
+	}
+	// An allow that replaces the record proves the process again.
+	allow()
+
+	// Every override fails: the revocation reports it.
+	release := heldOpenPublishedSessionRecord(t, path)
+	defer release()
+	previousExpire := publishedSessionExpire
+	publishedSessionExpire = func(string) error { return errors.New("the volume is read-only") }
+	t.Cleanup(func() { publishedSessionExpire = previousExpire })
+	if err := RemovePublishedForeignHookSessions(root, identity, []string{"copilot"}); err == nil {
+		t.Fatal("a revocation that changed nothing must report it")
+	}
+}
+
+// Review P2 (GAP-0352): the removals the guardian could not write to its
+// ledger are held next to the account's records; the gateway reads only
+// that account's entries, and a hold that is not a regular file or does
+// not parse is an error, which denies.
+func TestForeignHookRemovalHoldRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	identity := publishedSessionTestIdentity(t)
+	if removals, info, err := ReadForeignHookRemovalHold(root, identity); err != nil || removals != nil || info != nil {
+		t.Fatalf("no hold must hold nothing: %v %v %v", removals, info, err)
+	}
+	path, ok := ForeignHookRemovalHoldPath(root, identity)
+	dir, _ := PublishedSessionIdentityDir(root, identity)
+	if !ok || path != dir+".hold" {
+		t.Fatalf("hold path %q, want next to %q", path, dir)
+	}
+	now := time.Now().UTC()
+	data, err := EncodeForeignHookRemovals(nil, []ForeignHookRemoval{
+		{Identity: identity, Connector: "copilot", Path: "/home/a/.copilot/hooks/x.json", At: now.Format(time.RFC3339), Mark: "linux:b:200"},
+		{Identity: publishedSessionOtherIdentity(identity), Connector: "copilot", Path: "/home/b/x.json", At: now.Format(time.RFC3339), Mark: "linux:b:200"},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	removals, info, err := ReadForeignHookRemovalHold(root, identity)
+	if err != nil || info == nil || len(removals) != 1 || removals[0].Path != "/home/a/.copilot/hooks/x.json" {
+		t.Fatalf("the hold must give this account's removal only: %+v %v %v", removals, info, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":1,"removals":[`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadForeignHookRemovalHold(root, identity); err == nil {
+		t.Fatal("a hold that does not parse must be an error")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadForeignHookRemovalHold(root, identity); err == nil {
+		t.Fatal("a hold that is not a regular file must be an error")
 	}
 }
 

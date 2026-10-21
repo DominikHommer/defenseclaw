@@ -249,6 +249,22 @@ func TestForeignHookGuardOpenOutageFollowsTheProtectedSessionRecord(t *testing.T
 		}
 		hookForeignGuardExchange = openOutage
 		allowed("the proven process again")
+
+		// Review P2: an agent process the hook cannot name is not proven by a
+		// clean session record (it may have started during the outage and
+		// resumed the session ID), and a record older than the limit proves
+		// nothing.
+		records.write(t, connector, "s", "s-1", false, "")
+		fixture.process = ""
+		blocked("an unnamed agent process with a clean session record")
+		fixture.process = process
+		old := time.Now().Add(-8 * 24 * time.Hour)
+		if err := os.Chtimes(processRecord, old, old); err != nil {
+			t.Fatal(err)
+		}
+		blocked("a record older than the limit")
+		records.write(t, connector, "p", process, false, "")
+		allowed("a fresh record")
 	}
 
 	// An unapproved hook the scan finds blocks with its own reason, record
