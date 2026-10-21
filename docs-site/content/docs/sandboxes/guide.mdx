@@ -145,11 +145,10 @@ share, and then the others by the names `--harness` takes:
   Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):
     Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓
     Codex (codex)         model credential ~/.codex/auth.json ✓
-  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands
+  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, opencode
 ```
 
-The setup output still names OpenHands and OmniGent, but both harnesses are
-deprecated. Do not select them for new sandbox runs.
+
 
 On a Mac the gateway questions differ: instead of the mounts question,
 setup asks whether to run sandboxes in OpenShell MicroVMs (the default
@@ -348,8 +347,6 @@ drop a harness from it, edit `openshell.harnesses` in `config.yaml`.
 | OpenCode | `opencode` | user | Verified |
 | Kiro CLI | `kiro` | user | Verified in Kiro's scripted mode. A real model through `KIRO_API_KEY` or a login is unverified. |
 | Hermes Agent | `hermes` | user | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
-| OpenHands | `openhands` | user | Deprecated. |
-| OmniGent | `omnigent` | managed | Deprecated. |
 | Antigravity | `antigravity` (or `agy`) | user | Verified with a mock Gemini API. A `GEMINI_API_KEY` against Google and a Google sign-in are not tested live. |
 | Cursor Agent | `cursor-agent` | managed | Unverified: the Cursor Agent CLI needs a Cursor account before its first turn, and no mock can stand in for it. |
 | Amp | `amp` | user | Unverified: every Amp run needs an Amp account API key (`AMP_API_KEY`). |

@@ -562,7 +562,6 @@ func hasNativeMCPReader(connectorName string) bool {
 		"kiro",
 		"devin",
 		"copilot",
-		"openhands",
 		"opencode",
 		"amp",
 		"antigravity":
@@ -635,8 +634,6 @@ func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.M
 		}
 	case "copilot":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".copilot/mcp-config.json")
-	case "openhands":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".openhands/mcp.json")
 	case "zeptoclaw":
 		// zeptoclaw's own config is JSON with mcpServers at top level;
 		// mcp.json is a legacy fallback location some installs use.

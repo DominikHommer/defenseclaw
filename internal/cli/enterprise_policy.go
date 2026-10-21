@@ -512,7 +512,6 @@ func enterprisePolicyAuditDBPath() string {
 }
 
 // enterprisePolicyRowUnguarded reports whether state is a per-user agent
-// that no foreign-hook guard covers (OpenHands, Antigravity, OmniGent, Kiro,
 // Hermes on Windows): its foreign_hooks setting is not enforced and its
 // foreign entries are not counted.
 func enterprisePolicyRowUnguarded(report enterprisePolicyReport, state enterprisepolicy.State) bool {

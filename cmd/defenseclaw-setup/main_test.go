@@ -307,7 +307,7 @@ func TestParseArgsDeferredCleanupQuietRestartContract(t *testing.T) {
 }
 
 func TestParseArgsQuietPropertyMatrix(t *testing.T) {
-	for _, connector := range []string{"none", "amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "omnigent", "opencode"} {
+	for _, connector := range []string{"none", "amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "opencode"} {
 		for _, mode := range []string{"observe", "action"} {
 			for _, start := range []string{"0", "1"} {
 				t.Run(connector+"/"+mode+"/start-"+start, func(t *testing.T) {
@@ -392,7 +392,7 @@ func TestNoRestartStillRestartsPreviouslyRunningOwnedServices(t *testing.T) {
 }
 
 func TestConfiguredConnectorRequiresPersistentGateway(t *testing.T) {
-	for _, connectorName := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "omnigent", "opencode"} {
+	for _, connectorName := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "opencode"} {
 		wanted := requestedServices(options{Connector: connectorName}, serviceState{})
 		if !wanted.Gateway {
 			t.Fatalf("connector %s did not require gateway startup", connectorName)
@@ -895,40 +895,6 @@ func TestConnectorsForNativeUninstallUsesDurableBackups(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"codex", "claudecode"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("connectors = %v, want %v", got, want)
-	}
-}
-
-func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
-	dataRoot := t.TempDir()
-	markers := []string{
-		filepath.Join("connector_backups", "antigravity", "hooks.json.json"),
-		filepath.Join("connector_backups", "amp", "config.json"),
-		filepath.Join("connector_backups", "codex", "config.toml.json"),
-		filepath.Join("connector_backups", "claudecode", "settings.json.json"),
-		filepath.Join("connector_backups", "copilot", "config.json"),
-		filepath.Join("connector_backups", "cursor", "hooks.json.json"),
-		filepath.Join("connector_backups", "devin", "config.json"),
-		filepath.Join("connector_backups", "opencode", "config.json"),
-		filepath.Join("connector_backups", "omnigent", "config.json"),
-		filepath.Join("connector_backups", "hermes", "config.yaml.json"),
-	}
-	for _, marker := range markers {
-		path := filepath.Join(dataRoot, marker)
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	got, err := connectorsForNativeUninstall(&installState{Connector: "none"}, dataRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"codex", "claudecode", "amp", "copilot", "cursor", "devin", "antigravity", "opencode", "omnigent", "hermes"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("connectors = %v, want %v", got, want)
 	}

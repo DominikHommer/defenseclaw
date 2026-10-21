@@ -803,8 +803,8 @@ def _asset_rule_matches(
         constrained = True
         # Compare connector-name-insensitively (case + hyphen/underscore
         # aliases) so an asset rule keyed on a documented alias such as
-        # "open-hands" still matches the registry-canonical active connector
-        # "openhands". A literal lower-case compare silently failed to fire
+        # "claude-code" still matches the registry-canonical active connector
+        # "claudecode". A literal lower-case compare silently failed to fire
         # the rule, letting a server through that policy meant to block.
         if connector_paths.normalize(str(rule.connector)) != connector_paths.normalize(connector):
             return False

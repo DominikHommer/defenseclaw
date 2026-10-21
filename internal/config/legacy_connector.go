@@ -255,11 +255,23 @@ func migrateObservabilityV8LegacyConnectors(source *ObservabilityV8Source) {
 		return
 	}
 	migrateLegacyConnectorMap(source.Connectors)
+	// until 1.1: discard removed connector blocks from 0.8.x sources.
+	dropRetiredKeys(source.Connectors)
 	for d := range source.Destinations {
-		for r := range source.Destinations[d].Routes {
-			if selector := source.Destinations[d].Routes[r].Selector; selector != nil {
+		routes := source.Destinations[d].Routes[:0]
+		for _, route := range source.Destinations[d].Routes {
+			if selector := route.Selector; selector != nil {
 				migrateLegacyConnectorList(&selector.Connectors)
+				// until 1.1: a route for only removed connectors must not
+				// become a route for every connector when its list empties.
+				original := len(selector.Connectors)
+				selector.Connectors, _ = dropRetiredNames(selector.Connectors)
+				if original > 0 && len(selector.Connectors) == 0 {
+					continue
+				}
 			}
+			routes = append(routes, route)
 		}
+		source.Destinations[d].Routes = routes
 	}
 }

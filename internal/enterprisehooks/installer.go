@@ -597,7 +597,6 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				}
 				return errors.Join(failures...)
 			}
-			// OpenHands on macOS admits only a protected, setup-selected
 			// executable: record the user's own image before setup.
 			if err := selectManagedAgentExecutable(home, dataDir, conn.Name(), &setupOpts); err != nil {
 				return err
@@ -1492,7 +1491,6 @@ func hookContractsIncompatible(previous, current connector.HookContractLockEntry
 	}
 	previousID := strings.TrimSpace(previous.ContractID)
 	currentID := strings.TrimSpace(current.ContractID)
-	// A connector whose hooks are not version-gated (Kiro, OpenHands) has no
 	// contract to verify; it stays compatible while it keeps the not-gated
 	// status and contract it was installed with. Without this every install
 	// after the first, and every verify, would select open delivery and

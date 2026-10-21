@@ -30,7 +30,6 @@ CONNECTORS = (
     "hermes",
     "kiro",
     "opencode",
-    "openhands",
 )
 DEPLOYMENTS = {
     "per-user": ("", "", "closed"),

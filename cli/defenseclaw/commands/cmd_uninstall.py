@@ -138,13 +138,7 @@ _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
         os.path.join("connector_backups", "hermes", "shell-hooks-allowlist.json.json"),
         os.path.join("connector_backups", "hermes", "config.json"),
     ),
-    "omnigent": (
-        os.path.join("connector_backups", "omnigent", "config.json"),
-        os.path.join("connector_backups", "omnigent", "module.json"),
-        os.path.join("connector_backups", "omnigent", "pth.json"),
-    ),
     "opencode": (os.path.join("connector_backups", "opencode", "config.json"),),
-    "openhands": (os.path.join("connector_backups", "openhands", "config.json"),),
     "devin": (os.path.join("connector_backups", "devin", "config.json"),),
     # A retired connector ID's setup backup still selects gateway teardown,
     # which Go resolves through connector.RetiredConnector.

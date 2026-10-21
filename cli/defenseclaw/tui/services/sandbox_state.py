@@ -316,9 +316,7 @@ SANDBOX_HARNESS_SPECS: tuple[tuple[str, str, str], ...] = (
     ("devin", "Devin CLI", "devin"),
     ("hermes", "Hermes Agent", "hermes"),
     ("kiro", "Kiro CLI", "kiro-cli-chat"),
-    ("omnigent", "OmniGent", "omnigent"),
     ("opencode", "OpenCode", "opencode"),
-    ("openhands", "OpenHands", "openhands"),
 )
 # sandboxcli.defaultHarnesses: the harnesses when openshell.harnesses is empty.
 DEFAULT_SANDBOX_HARNESSES: tuple[str, ...] = ("claudecode", "codex")
@@ -336,7 +334,6 @@ def resolve_harness(name: str) -> str:
     """
     text = name.strip().lower()
     canonical = {"claude-code": "claudecode", "claude_code": "claudecode"}.get(text, text)
-    canonical = {"open-hands": "openhands", "open_hands": "openhands"}.get(canonical, canonical)
     if canonical in HARNESSES:
         return canonical
     for harness, (command, display) in HARNESSES.items():

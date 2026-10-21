@@ -4844,7 +4844,6 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// Direct-upstream short-circuit. Hook/policy-native connectors never bind
 	// the proxy listener: Setup has already installed their lifecycle bridge
 	// and telemetry, and action-mode enforcement is returned through that
-	// native surface (hooks or OmniGent's custom policy API).
 	//
 	// We still construct the GuardrailProxy above and call Setup
 	// before this gate so:
@@ -4873,12 +4872,6 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			surface = "agent_lifecycle_hooks"
 			if enforcementEnabled {
 				summary = "hook enforcement (no proxy binding)"
-			}
-			if conn.Name() == "omnigent" {
-				surface = "omnigent_policy_api"
-				if enforcementEnabled {
-					summary = "policy enforcement (no proxy binding)"
-				}
 			}
 			return policyMode, enforcementEnabled, summary, surface
 		}
@@ -6835,7 +6828,6 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             gateway.host at a real upstream
 //	                             (LAN IP, FQDN, etc.); they want
 //	                             fleet integration alongside hooks.
-//	hermes / cursor / copilot / openhands
 //	                           → SKIP. These connectors are local
 //	                             hook/native-telemetry surfaces in
 //	                             this PR and do not use the OpenClaw

@@ -28,7 +28,6 @@ func TestManagedShellHooksIgnoreInheritedFailMode(t *testing.T) {
 		{NewDevinConnector(), "devin-hook.sh"},
 		{NewHermesConnector(), "hermes-hook.sh"},
 		{NewAntigravityConnector(), "antigravity-hook.sh"},
-		{NewOpenHandsConnector(), "openhands-hook.sh"},
 		{NewCodexConnector(), "codex-hook.sh"},
 	} {
 		for _, managed := range []bool{true, false} {

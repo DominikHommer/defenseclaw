@@ -23,7 +23,7 @@ import (
 )
 
 var windowsSupportedConnectorNames = []string{
-	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "omnigent", "opencode",
+	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode",
 }
 
 var windowsPreviewConnectorNames = []string{}
@@ -32,7 +32,6 @@ var windowsNotCertifiedConnectorNames = []string{}
 
 var windowsUnsupportedConnectorNames = []string{
 	"openclaw",
-	"openhands",
 	"zeptoclaw",
 }
 
@@ -92,7 +91,7 @@ func TestProxyConnectorsRemainTopologyOnly(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("proxyConnectors=%v, want %v", got, want)
 	}
-	for _, name := range []string{"openhands", "omnigent", "hermes"} {
+	for _, name := range []string{"hermes"} {
 		if IsProxyConnector(name) {
 			t.Errorf("IsProxyConnector(%q)=true, want false", name)
 		}
@@ -141,41 +140,6 @@ func TestConnectorSupportOnOS(t *testing.T) {
 
 	if got := ConnectorSupportOnOS("plugin-example", "windows").Status; got != PlatformNotCertified {
 		t.Fatalf("unknown plugin status=%q, want not_certified", got)
-	}
-}
-
-func TestValidateConnectorSupportedOnOS(t *testing.T) {
-	for _, name := range []string{"copilot", "antigravity", "hermes"} {
-		if err := validateConnectorSupportedOnOS(name, "windows"); err != nil {
-			t.Fatalf("supported connector %s should remain available: %v", name, err)
-		}
-	}
-	err := validateConnectorSupportedOnOS("openhands", "windows")
-	if err == nil || !strings.Contains(err.Error(), "requires WSL") {
-		t.Fatalf("expected clear OpenHands Windows rejection, got %v", err)
-	}
-}
-
-func TestCheckPlatformSupportPreservesOperatorWording(t *testing.T) {
-	warning, err := CheckPlatformSupport("cursor", "windows")
-	if err != nil || warning != "" {
-		t.Fatalf("supported Cursor result warning=%q err=%v", warning, err)
-	}
-
-	for _, name := range []string{"copilot", "antigravity", "hermes"} {
-		warning, err = CheckPlatformSupport(name, "windows")
-		if err != nil || warning != "" {
-			t.Fatalf("supported %s result warning=%q err=%v", name, warning, err)
-		}
-	}
-
-	warning, err = CheckPlatformSupport("openhands", "windows")
-	if warning != "" {
-		t.Fatalf("unsupported warning = %q, want empty", warning)
-	}
-	wantError := "connector \"openhands\" is not supported on windows: " + windowsConnectorSupport["openhands"].Reason
-	if err == nil || err.Error() != wantError {
-		t.Fatalf("unsupported error = %v, want %q", err, wantError)
 	}
 }
 

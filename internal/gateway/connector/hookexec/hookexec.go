@@ -2355,9 +2355,6 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 	case "devin":
 		fmt.Fprintln(opts.Stdout, devinBlockText(reason))
 		return sp.unreachableStrict.exit
-	case "openhands":
-		fmt.Fprintln(opts.Stdout, `{"decision":"deny","reason":`+message+`}`)
-		return sp.unreachableStrict.exit
 	case "opencode":
 		fmt.Fprintln(opts.Stdout, openCodeDenyBody(reason))
 		return sp.unreachableStrict.exit
@@ -3286,7 +3283,6 @@ func compactField(m map[string]json.RawMessage, field string) string {
 }
 
 // decodeDecision pulls the `decision` string from an already-compact JSON
-// object (the connector's hook_output) for the OpenHands deny/block path.
 func decodeDecision(output string) string {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(output), &m); err != nil {

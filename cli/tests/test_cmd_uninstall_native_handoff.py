@@ -80,7 +80,6 @@ def _install_state(local_app_data: Path, profile: Path) -> dict[str, object]:
         "release_signing_required": True,
         "toolchain": {"go": "go1.25.0"},
         "installed_at_utc": "2026-07-28T12:00:00Z",
-        "omnigent_config_home": str(profile / ".omnigent"),
         "hermes_home": str(local_app_data / "hermes"),
         "devin_config_dir": str(profile / "AppData" / "Roaming" / "devin"),
         "devin_executable": str(local_app_data / "devin" / "cli" / "bin" / "devin.exe"),
@@ -691,7 +690,7 @@ def test_prepare_accepts_explicitly_absent_legacy_transaction_identity(
     assert _prepare_from_tree(local_app_data, profile) is not None
 
 
-@pytest.mark.parametrize("connector", ["hermes", "omnigent"])
+@pytest.mark.parametrize("connector", ["hermes", ])
 def test_prepare_accepts_current_native_connector_identities(
     tmp_path: Path,
     connector: str,

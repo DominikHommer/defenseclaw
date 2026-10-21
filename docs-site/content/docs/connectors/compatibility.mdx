@@ -46,11 +46,9 @@ rollout holds. Existing policy defaults are unchanged.
 | <ConnectorLabel id="devin" /> | `3000.4.25`; on Linux also `3000.11.3` | `devin-hooks-v1` / `v7` (8 events) | prompt, tool_call, tool_result |
 | <ConnectorLabel id="copilot" /> | `>=1.0.18, <1.0.76` | `copilot-hooks-v1` / `v7` (13 events) | prompt, tool_call, tool_result |
 | <ConnectorLabel id="copilot" /> | `>=1.0.76` | `copilot-hooks-v2` / `v7` (14 events) | prompt, tool_call, tool_result |
-| <ConnectorLabel id="openhands" /> | `>=1.12.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="antigravity" /> | `>=1.1.8` | `antigravity-hooks-v2` / `v8` | tool_call, event_content |
 | <ConnectorLabel id="opencode" /> | `>=1.18.10, <1.19.0` | `opencode-hooks-v1` / `v7` | tool_call, tool_result |
 | <ConnectorLabel id="amp" /> | `>=0.0.1785334225` | `amp-plugin-v1` / `v2` (plugin contract) | prompt, tool_call, tool_result, event_content |
-| <ConnectorLabel id="omnigent" /> | `>=0.7.0, <0.14.0` | `omnigent-custom-policy-v1` / `v1` | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="kiro" /> | not gated per user (see below) | native hooks on both Kiro hook surfaces, plus the optional ACP contract | prompt, tool_call, tool_result; ACP adds permission, filesystem, terminal |
 
 **Kiro.** Per-user installs are not version-gated. Kiro IDE and
@@ -85,9 +83,8 @@ it knows otherwise:
   Setup keeps the mode you asked for, and doctor and setup show an
   informational line: "untested newer version: ... no known problems".
   A version between two exact pins of one contract counts too, so Devin
-  3000.10.x (the CLI Devin Desktop 3.10 bundles) runs this way on Linux, where
-  3000.11.3 is also pinned. OmniGent 0.15.0, and Devin 3000.11.3 on macOS and
-  Windows, run this way until their hook contracts are measured on those builds.
+  3000.10.x (the CLI Devin Desktop 3.10 bundles) runs this way on Linux until
+  its hook contract is measured on those builds.
 - **Floors stay.** A version below the lowest tested version, a version in a
   gap between tested ranges, and a build that carries the same version as an
   exact-build pin but not its build ID (such as Cursor's Agent build) have no
@@ -130,9 +127,7 @@ or source review:
   `hermes-hooks-v1` and `2026.8.31` to `2026.9.24` select `hermes-hooks-v2`.
   An earlier date has no contract, and a later one is an untested newer
   version.
-- **OpenHands.** Starts at `1.12.0`, source-reviewed against `1.16.0`.
 - **OpenCode.** Source-reviewed for `>=1.18.10, <1.19.0`, pinned at `1.18.33`.
-- **OmniGent.** Reviewed for `>=0.7.0, <0.14.0`.
 - **Antigravity (`agy`).** Starts at `1.1.8`; the OpenShell sandbox image
   installs agy `1.2.12`.
 

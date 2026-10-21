@@ -116,8 +116,8 @@ var refusedHomeTrees = []string{
 // Devin Desktop still reads its pre-rename folders (legacyconnector).
 var harnessHomeTrees = append([]string{
 	".claude", ".codex", ".cursor", ".copilot", ".gemini",
-	".devin", ".amp", ".opencode", ".hermes", ".openhands",
-	".kiro", ".omnigent", ".openclaw", ".agents",
+	".devin", ".amp", ".opencode", ".hermes",
+	".kiro", ".openclaw", ".agents",
 	".local/share/opencode", ".local/share/amp",
 }, legacyconnector.InventoryDotDirs...)
 

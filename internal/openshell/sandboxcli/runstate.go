@@ -442,9 +442,6 @@ func launchOptionsSplit(spec *harness.Spec, args []string) (kept []string, unkep
 	if len(args) == 0 || printMode(spec, args) {
 		return nil, "", nil
 	}
-	if keepsEveryArg(spec) {
-		return slices.Clone(args), "", nil
-	}
 	var out []string
 	operand := false
 	for i := 0; i < len(args); i++ {
@@ -504,13 +501,8 @@ func launchOptionsSplit(spec *harness.Spec, args []string) (kept []string, unkep
 }
 
 // keepsEveryArg reports whether every word of spec's interactive command
-// line is a launch setting: `omnigent run [AGENT]` takes the agent (a YAML
 // file or directory) as its one operand, with options before or after it,
 // and a first message only through -p, a one-prompt run.
-func keepsEveryArg(spec *harness.Spec) bool {
-	return spec.Name == "omnigent"
-}
-
 // launchOperand reports whether word, a harness argument that is not an
 // option, is launch configuration a later session needs again rather than
 // a prompt or a one-off subcommand: OpenCode's project directory

@@ -1174,7 +1174,7 @@ var reviewFloor = []string{
 	"**/" + legacyconnector.InventoryDotDirs[0] + "/**", "." + legacyconnector.VendorToken + "rules",
 	"**/.kiro/**", "**/.amazonq/**", "**/.continue/**", "**/.roo/**", ".roomodes",
 	".clinerules", "**/.clinerules/**", "**/.opencode/**", "opencode.json", "opencode.jsonc", ".aider.conf.yml",
-	"**/.devin/**", "**/.openhands/**", "**/.omnigent/**",
+	"**/.devin/**",
 	".github/copilot-instructions.md", ".github/instructions/**", ".github/prompts/**", ".github/chatmodes/**",
 	".github/hooks/**", ".github/copilot/**",
 	"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb",

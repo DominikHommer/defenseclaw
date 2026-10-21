@@ -75,7 +75,6 @@ the details for its Windows tab.
 | Devin | `%APPDATA%\devin\config.json`; with a workspace, `<workspace>\.devin\hooks.v1.json` |
 | Hermes | `%LOCALAPPDATA%\hermes\config.yaml` (or `%HERMES_HOME%`) |
 | Kiro | `<project>\.kiro\hooks\defenseclaw.json` |
-| OmniGent | `%USERPROFILE%\.omnigent\config.yaml` (or `%OMNIGENT_CONFIG_HOME%`) |
 | OpenCode | `%USERPROFILE%\.config\opencode\plugins\defenseclaw.js` (or `%OPENCODE_CONFIG_DIR%`) |
 
 The Amp and OpenCode plugin files carry a connector credential: never print or
@@ -84,14 +83,8 @@ repair, upgrade, and uninstall use that folder later.
 
 ## Supported path overrides
 
-Claude Code, Codex, GitHub Copilot CLI, Hermes, OmniGent, and OpenCode let you
-move their configuration folder with `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
-`COPILOT_HOME`, `HERMES_HOME`, `OMNIGENT_CONFIG_HOME`, and
-`OPENCODE_CONFIG_DIR`. Set them to absolute native Windows paths before you
-install DefenseClaw or set up the connector. Setup checks and remembers them,
-and refuses a path that goes through a symbolic link or junction. Amp,
-Antigravity, Cursor, and Devin have no such variable; DefenseClaw uses their
-fixed paths in the table above.
+Set them to absolute native Windows paths before you install DefenseClaw or set up the connector. Setup checks and remembers them, and refuses a path that goes through a symbolic link or junction. Amp, Antigravity, Cursor, and Devin have no such variable; DefenseClaw uses their fixed paths in the table above.
+
 
 <Tabs items={['PowerShell', 'cmd']}>
   <Tab value="PowerShell">
@@ -101,7 +94,6 @@ $env:CODEX_HOME = "D:\Agent Profiles\Codex"
 $env:CLAUDE_CONFIG_DIR = "D:\Agent Profiles\Claude"
 $env:COPILOT_HOME = "D:\Agent Profiles\Copilot"
 $env:OPENCODE_CONFIG_DIR = "D:\Agent Profiles\OpenCode"
-$env:OMNIGENT_CONFIG_HOME = "D:\Agent Profiles\OmniGent"
 $env:HERMES_HOME = "D:\Agent Profiles\Hermes"
 ```
 
@@ -113,7 +105,6 @@ set "CODEX_HOME=D:\Agent Profiles\Codex"
 set "CLAUDE_CONFIG_DIR=D:\Agent Profiles\Claude"
 set "COPILOT_HOME=D:\Agent Profiles\Copilot"
 set "OPENCODE_CONFIG_DIR=D:\Agent Profiles\OpenCode"
-set "OMNIGENT_CONFIG_HOME=D:\Agent Profiles\OmniGent"
 set "HERMES_HOME=D:\Agent Profiles\Hermes"
 ```
 

@@ -113,14 +113,8 @@ is not reported. So does a Copilot CLI below its 1.0.18 floor (for example
 `/etc/github-copilot/policy.d`. See
 [Vendor limits](/docs/enterprise/machine-policy#vendor-limits).
 
-A per-user agent that a user runs without installing it is not found
-either. OpenHands before 1.12.0 does not load DefenseClaw's hooks, and a
-user can start one straight from the uv cache
-(`uvx --from openhands==1.11.0 openhands`), whose tool calls then run with
-no DefenseClaw decision and no audit record. Status and verify check only the enrolled OpenHands
-and its default hook file, so they keep reporting the user ready. Only
-application control that allows approved agent versions closes it; see
-[Residual risks](/docs/enterprise/threat-model#residual-risks).
+A per-user agent that a user runs without installing it is not found either. Only application control that allows approved agent versions closes it; see [Residual risks](/docs/enterprise/threat-model#residual-risks).
+
 
 ## Agents that cannot be enrolled
 

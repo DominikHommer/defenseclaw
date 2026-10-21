@@ -11,7 +11,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -226,131 +225,6 @@ func TestEnterpriseHookWorkerUnverifiedJSONIsRemoveOnly(t *testing.T) {
 	}
 	if strings.Contains(string(got), "unverified") {
 		t.Fatalf("successful Remove emitted an unverified field: %s", got)
-	}
-}
-
-func TestEnterpriseHookWorkerMatcherCoversInstallAndRemovalByConnector(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("the per-user installer requires a non-root test account")
-	}
-	registry := connector.NewDefaultRegistry()
-	// Proxy connectors are setup-only and Install refuses them before any
-	// per-user hook config is written.
-	setupOnly := map[string]bool{"openclaw": true, "zeptoclaw": true}
-	versions := map[string]string{
-		"amp": "0.0.1785334225", "codex": "codex-cli 0.142.0",
-		"claudecode": "2.1.187 (Claude Code)", "opencode": "1.18.33",
-		"kiro": "kiro-cli 2.24.1", "openhands": "1.16.0",
-		"antigravity": "1.2.11", "omnigent": "omnigent 0.7.0",
-		"hermes": "0.21.3", "cursor": "cursor 3.19.13",
-		"devin": "3000.4.25", "copilot": "GitHub Copilot CLI 1.0.76",
-	}
-	seed := map[string]struct{ path, data string }{
-		"hermes":      {".hermes/config.yaml", "{}\n"},
-		"openhands":   {".openhands/hooks.json", "{}\n"},
-		"antigravity": {".gemini/config/hooks.json", "{}\n"},
-		"omnigent":    {".omnigent/config.yaml", "server: https://example.test\npolicy_modules: []\n"},
-		"devin":       {".config/devin/config.json", "{}\n"},
-	}
-	for _, name := range registry.Names() {
-		t.Run(name, func(t *testing.T) {
-			if setupOnly[name] {
-				t.Skip("proxy connector: per-user Install is setup-only")
-			}
-			home := t.TempDir()
-			if err := os.Chmod(home, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("HOME", home)
-			t.Setenv("XDG_CONFIG_HOME", "")
-			t.Setenv("OPENCODE_CONFIG_DIR", "")
-			t.Setenv("CODEX_HOME", "")
-			if name == "kiro" || name == "copilot" || name == "openhands" {
-				enterprisehooks.SetStandaloneUnix(true)
-				t.Cleanup(func() { enterprisehooks.SetStandaloneUnix(false) })
-			}
-			if name == "openhands" && runtime.GOOS == "darwin" {
-				// Standalone Install records this image before macOS OpenHands admission.
-				executable := filepath.Join(home, ".local", "bin", "openhands")
-				if err := os.MkdirAll(filepath.Dir(executable), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(executable, []byte("#!/bin/sh\necho 'OpenHands CLI 1.16.0'\n"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if name == "kiro" {
-				if err := os.MkdirAll(filepath.Join(home, ".kiro", "hooks"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if name == "copilot" {
-				if err := os.MkdirAll(filepath.Join(home, ".copilot", "hooks"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if name == "omnigent" {
-				previousSite := connector.OmnigentSitePackagesPathOverride
-				connector.OmnigentSitePackagesPathOverride = filepath.Join(home, ".local", "lib", "python", "site-packages")
-				t.Cleanup(func() { connector.OmnigentSitePackagesPathOverride = previousSite })
-			}
-			if fixture, ok := seed[name]; ok {
-				path := filepath.Join(home, fixture.path)
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, []byte(fixture.data), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			opts := enterprisehooks.InstallOptions{
-				ConnectorName: name, UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(),
-				APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000",
-				APIToken: strings.Repeat("a", 64), OTLPPathToken: strings.Repeat("b", 64),
-				GuardrailMode: "action", HookFailMode: "closed", AgentVersion: versions[name],
-				Registry: registry,
-			}
-			if _, err := enterprisehooks.Install(context.Background(), opts); err != nil {
-				t.Fatalf("Install(%s) in a fresh user home: %v", name, err)
-			}
-			conn, ok := registry.Get(name)
-			if !ok {
-				t.Fatalf("connector %s left the registry", name)
-			}
-			setupOpts := connector.SetupOpts{DataDir: filepath.Join(home, ".defenseclaw"),
-				ManagedEnterprise: true, AgentVersion: opts.AgentVersion}
-			var paths []string
-			if err := connector.WithUserHomeDir(home, func() error {
-				paths = connector.CleanupConfigPathsForConnector(conn, setupOpts)
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			if len(paths) == 0 {
-				t.Fatal("connector exposed no cleanup config path")
-			}
-			matched := false
-			for _, path := range paths {
-				data, err := os.ReadFile(path)
-				if errors.Is(err, os.ErrNotExist) {
-					continue
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				line, _ := enterpriseHookWorkerConfigReferenceLine(data, "")
-				matched = matched || line != 0
-			}
-			if !matched {
-				t.Fatalf("matcher missed installed %s entries in %v", name, paths)
-			}
-			if err := enterprisehooks.RemoveUserHooks(context.Background(), opts); err != nil {
-				t.Fatalf("RemoveUserHooks(%s): %v", name, err)
-			}
-			if remaining := enterpriseHookWorkerRemainingConfigReference(home, setupOpts.DataDir, paths); remaining != "" {
-				t.Fatalf("matcher kept removed %s entries: %s", name, remaining)
-			}
-		})
 	}
 }
 

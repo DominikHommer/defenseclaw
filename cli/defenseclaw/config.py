@@ -2590,9 +2590,9 @@ class GuardrailConfig:
         uniformly fall through to the global value. Lookup is
         connector-name-insensitive: an exact key hit is the fast path,
         otherwise keys are compared after ``connector_paths.normalize`` so
-        a request for the canonical name (e.g. ``"openhands"``) resolves an
+        a request for the canonical name (e.g. ``"claudecode"``) resolves an
         override written with different case or a hyphen/underscore alias
-        (e.g. ``"OpenHands"``, ``"open-hands"``). Mirrors
+        (e.g. ``"Claude-Code"``, ``"claude_code"``). Mirrors
         ``GuardrailConfig.connectorOverride`` in Go.
         """
         if not connector or not self.connectors:
@@ -2778,7 +2778,7 @@ class GuardrailConfig:
             if not name.strip():
                 raise ValueError("guardrail.connectors: empty connector name is not allowed")
             # Reject two distinct keys that canonicalize to the same connector
-            # (e.g. "claude-code" + "claudecode", or "OpenHands" + "openhands").
+            # (e.g. "claude-code" + "claudecode").
             # connector_override()/active_connectors() resolve keys through
             # connector_paths.normalize, so a duplicate would make per-connector
             # lookups and the active-connector roster ambiguous. Mirrors the Go
@@ -3944,8 +3944,6 @@ def _validate_connector_name_list(path: str, names: list[str]) -> None:
 
 def _normalize_connector_key(name: str | None) -> str:
     n = (name or "").strip().lower()
-    if n in {"open-hands", "open_hands"}:
-        return "openhands"
     if n in {"claude-code", "claude_code"}:
         return "claudecode"
     return n
@@ -4518,6 +4516,7 @@ class Config:
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
+        _drop_retired_connector_settings(existing)
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
@@ -7216,6 +7215,85 @@ def _default_policy_dir(cfg_file: str, data_dir: str) -> str:
     return os.path.join(data_dir, "policies")
 
 
+def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
+    """Until 1.1, accept old rosters and discard removed connector settings."""
+
+    retired = {"openhands", "omnigent", "open-hands", "open_hands"}
+    changed = False
+
+    def only_retired(names: Any) -> bool:
+        return isinstance(names, list) and bool(names) and all(
+            isinstance(name, str) and name.strip().lower() in retired for name in names
+        )
+
+    application = raw.get("application_protection")
+    openshell = raw.get("openshell")
+    admin = openshell.get("admin") if isinstance(openshell, dict) else None
+    guardrail_source = raw.get("guardrail")
+    profiles = guardrail_source.get("profiles") if isinstance(guardrail_source, dict) else None
+    assignments = guardrail_source.get("profile_assignments") if isinstance(guardrail_source, dict) else None
+    disable_application = isinstance(application, dict) and only_retired(application.get("include_connectors"))
+    disable_openshell = isinstance(openshell, dict) and only_retired(openshell.get("harnesses"))
+    disable_admin = isinstance(admin, dict) and only_retired(admin.get("allowed_harnesses"))
+    disable_profiles = {
+        name for name, profile in profiles.items()
+        if isinstance(profile, dict) and isinstance(profile.get("sandbox"), dict)
+        and only_retired(profile["sandbox"].get("allowed_harnesses"))
+    } if isinstance(profiles, dict) else set()
+    drop_assignments = {
+        id(assignment) for assignment in assignments
+        if isinstance(assignment, dict) and isinstance(assignment.get("match"), dict)
+        and only_retired(assignment["match"].get("connectors"))
+        and not any(value for key, value in assignment["match"].items() if key != "connectors")
+    } if isinstance(assignments, list) else set()
+
+    def clean(value: Any) -> None:
+        nonlocal changed
+        if isinstance(value, dict):
+            for key in list(value):
+                if isinstance(key, str) and key.strip().lower() in retired:
+                    del value[key]
+                    changed = True
+                else:
+                    clean(value[key])
+        elif isinstance(value, list):
+            for item in list(value):
+                if isinstance(item, str) and item.strip().lower() in retired:
+                    value.remove(item)
+                    changed = True
+                else:
+                    clean(item)
+
+    clean(raw)
+    # until 1.1: empty allow-lists mean "all", so keep retired-only lists restrictive.
+    if disable_application:
+        application["enabled"] = False
+    if disable_openshell:
+        openshell["enabled"] = False
+    if disable_admin:
+        admin["allowed"] = False
+    if isinstance(profiles, dict):
+        for name in disable_profiles:
+            profiles[name]["sandbox"]["allowed"] = False
+    if isinstance(assignments, list) and drop_assignments:
+        assignments[:] = [assignment for assignment in assignments if id(assignment) not in drop_assignments]
+    guardrail = raw.get("guardrail")
+    if isinstance(guardrail, dict):
+        if str(guardrail.get("connector", "")).strip().lower() in retired:
+            remaining = guardrail.get("connectors")
+            guardrail["connector"] = sorted(remaining)[0] if isinstance(remaining, dict) and remaining else ""
+            changed = True
+    claw = raw.get("claw")
+    if isinstance(claw, dict) and str(claw.get("mode", "")).strip().lower() in retired:
+        claw["mode"] = ""
+        changed = True
+    if changed:
+        logging.warning(
+            "until 1.1: removed OpenHands/OmniGent connector settings from loaded config; "
+            "run defenseclaw migrate"
+        )
+
+
 def load(
     *,
     data_dir: str | os.PathLike[str] | None = None,
@@ -7253,6 +7331,7 @@ def load(
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
+    _drop_retired_connector_settings(raw)
     if without_guardrail_profiles:
         raw = _without_guardrail_profiles(raw)
 

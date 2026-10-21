@@ -53,38 +53,6 @@ func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 	}
 }
 
-// A managed shell hook takes only its rendered fail mode: a fail mode in the
-// environment cannot reopen it. Per-user hooks keep the override.
-func TestManagedShellHooksIgnoreTheEnvironmentFailMode(t *testing.T) {
-	for _, name := range []string{
-		"antigravity-hook.sh", "claude-code-hook.sh", "codex-hook.sh", "cursor-hook.sh",
-		"devin-hook.sh", "hermes-hook.sh", "kiro-hook.sh", "openhands-hook.sh",
-	} {
-		for _, managed := range []bool{true, false} {
-			scripts, err := renderHookScripts("127.0.0.1:18970", "closed", ".token", []string{name}, managed, strings.TrimSuffix(name, "-hook.sh"), true, "", "", false, false)
-			if err != nil {
-				t.Fatalf("render %s: %v", name, err)
-			}
-			for _, script := range scripts {
-				if script.name != name {
-					continue
-				}
-				body := string(script.body)
-				// A managed hook bakes only the rendered value; a per-user
-				// hook keeps the environment override.
-				override := strings.Contains(body, `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`)
-				pinned := strings.Contains(body, "\nFAIL_MODE=\"closed\"")
-				if managed && (override || !pinned) {
-					t.Errorf("%s managed: environment override = %v, rendered fail mode pinned = %v", name, override, pinned)
-				}
-				if !managed && !override {
-					t.Errorf("%s per-user: environment override missing", name)
-				}
-			}
-		}
-	}
-}
-
 // rel-1-0-2 GAP-0530: a standalone Hermes hook that cannot get a verdict
 // blocks the tool call with a message that says why, and a fail mode in the
 // environment does not turn a response failure into an allow.

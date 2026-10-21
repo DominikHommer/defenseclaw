@@ -31,7 +31,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
-	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -524,38 +523,6 @@ func TestImageBuildWarnsOfTheMicroVMDisk(t *testing.T) {
 	}
 }
 
-// The doctor's image check lists every harness built for this user, not
-// only the configured ones, and counts no image Docker no longer has
-// (KR-F9, MAC-OSH-OH-6).
-func TestDoctorImagesCoverEveryBuiltHarness(t *testing.T) {
-	ta := newTestApp(t, "")
-	ta.HostDoctor = hostReport(nil)
-	ready := func(connector, version string) image.Record {
-		r := readyImages(ta)[0]
-		r.Tag, r.Connector, r.HarnessVersion = "defenseclaw/sandbox:"+connector, connector, version
-		return r
-	}
-	ta.images.recs = []image.Record{ready("claudecode", "2.1.156"), ready("codex", "0.146.0"), ready("kiro", "2.24.1"), ready("openhands", "1.16.0")}
-	ta.images.gone = map[string]bool{"defenseclaw/sandbox:codex": true, "defenseclaw/sandbox:openhands": true}
-	c := ta.runDoctor(bg).Get(CheckIDImages)
-	if c == nil || c.Status != "warn" || c.Detail != "not built yet: codex (the first run builds it, which takes a while); hook-verified: claudecode 2.1.156, kiro 2.24.1" {
-		t.Fatalf("images check = %+v", c)
-	}
-	ta.images.gone = nil
-	if c := ta.runDoctor(bg).Get(CheckIDImages); c.Status != "pass" || c.Detail != "hook-verified: claudecode 2.1.156, codex 0.146.0, kiro 2.24.1, openhands 1.16.0" {
-		t.Fatalf("images check = %+v", c)
-	}
-	// GAP-0320: after an upgrade, a harness with an image of the earlier
-	// build only is not "not built yet".
-	old := ready("codex", "0.146.0")
-	old.DefenseClawVersion = "earlier-build"
-	ta.images.recs = []image.Record{ready("claudecode", "2.1.156"), old}
-	if c := ta.runDoctor(bg).Get(CheckIDImages); c.Status != "warn" ||
-		!strings.HasPrefix(c.Detail, "built by an earlier DefenseClaw build only: codex (the next run builds it for this one") {
-		t.Fatalf("images check = %+v", c)
-	}
-}
-
 // On a MicroVM gateway the doctor's image check covers every built
 // harness too, counting only its images for the MicroVM driver, and names
 // one whose MicroVM check settled nothing with the command that checks it
@@ -630,40 +597,5 @@ func TestImageBuildWithoutBuildKitNamesNoBuildLog(t *testing.T) {
 	}
 	if data, err := os.ReadFile(logPath); err != nil || string(data) != "the last build\n" {
 		t.Fatalf("build log after a build that wrote nothing = %q, %v", data, err)
-	}
-}
-
-// FIN-B-2: a harness_versions pin refused before docker runs (no reviewed
-// hook contract for sandboxes, not an exact release, a docker without
-// BuildKit) says only why: no "Building …" line, no build, no build log
-// named, and the last build's log stays.
-func TestImageBuildRefusedBeforeDockerRunsSaysOnlyWhy(t *testing.T) {
-	contract := harness.CheckContract("omnigent", "0.12.0")
-	_, release := harness.Hermes.InstallSteps("0.0.0-nonexistent")
-	for name, refusal := range map[string]error{
-		"contract":      fmt.Errorf("openshell image: %w", contract),
-		"exact release": fmt.Errorf("openshell image: %w", release),
-		"BuildKit":      fmt.Errorf("openshell image: docker build defenseclaw/sandbox:hermes-x-u1000: %w", image.ErrNoBuildKit),
-	} {
-		t.Run(name, func(t *testing.T) {
-			ta := newTestApp(t, "")
-			logPath := filepath.Join(ta.dataDir(), "logs", "sandbox-image-hermes.log")
-			writeFile(t, logPath, "the last build\n")
-			ta.images.preflightErr = refusal
-			err := ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"hermes"}})
-			if want := "Hermes Agent image: " + refusal.Error(); err == nil || err.Error() != want {
-				t.Fatalf("ImageBuild error = %v, want %s", err, want)
-			}
-			if out := ta.output(); strings.Contains(out, "Building") || len(ta.images.built) != 0 {
-				t.Fatalf("a refused build started (built %v):\n%s", ta.images.built, out)
-			}
-			if data, err := os.ReadFile(logPath); err != nil || string(data) != "the last build\n" {
-				t.Fatalf("build log after a refusal = %q, %v", data, err)
-			}
-		})
-	}
-	if contract == nil || !strings.Contains(contract.Error(), "harness version has no reviewed hook contract for sandboxes: omnigent 0.12.0") ||
-		release == nil || !strings.Contains(release.Error(), `version "0.0.0-nonexistent" is not an exact release`) {
-		t.Fatalf("refusals: %v; %v", contract, release)
 	}
 }

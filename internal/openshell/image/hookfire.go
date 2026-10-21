@@ -112,11 +112,8 @@ var requiredHookEvents = map[string][]string{
 	"devin":  {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
 	"hermes": {"on_session_start", "pre_llm_call", "pre_tool_call", "post_tool_call", "on_session_end"},
 	"kiro":   {"userPromptSubmit", "preToolUse", "postToolUse", "stop"},
-	// OmniGent's policy phases request, llm_request, tool_call, tool_result
 	// and response.
-	"omnigent":  {"UserPromptSubmit", "BeforeModel", "PreToolUse", "PostToolUse", "AfterAgentResponse"},
-	"opencode":  {"defenseclaw.plugin.loaded", "tool.execute.before", "tool.execute.after"},
-	"openhands": {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
+	"opencode": {"defenseclaw.plugin.loaded", "tool.execute.before", "tool.execute.after"},
 }
 
 // HookFireOptions configure a hook-fire probe. The zero value runs the
@@ -243,19 +240,11 @@ var builtinMockLaunch = map[string]func(baseURL string) (map[string]string, []st
 			},
 			[]string{"--provider", connector.HermesSandboxProviderName, "-m", "mock-model"}
 	},
-	"openhands": func(baseURL string) (map[string]string, []string) {
-		return map[string]string{"LLM_MODEL": "openai/mock-model", "LLM_BASE_URL": baseURL + "/v1", "LLM_API_KEY": "sk-dcprobe-0123456789abcdefghij"},
-			[]string{"--override-with-envs"}
-	},
 	"antigravity": func(baseURL string) (map[string]string, []string) {
 		return map[string]string{"GEMINI_API_KEY": "dcprobe-0123456789abcdefghij", "GOOGLE_GEMINI_BASE_URL": baseURL}, nil
 	},
 	// The image's sandbox agent on the openai-agents harness (Responses);
 	// an unpinned model would route to Databricks.
-	"omnigent": func(baseURL string) (map[string]string, []string) {
-		return map[string]string{"OPENAI_API_KEY": "sk-dcprobe-0123456789abcdefghij", "OPENAI_BASE_URL": baseURL + "/v1"},
-			[]string{connector.OmnigentSandboxAgentPath, "--model", "mock-model"}
-	},
 }
 
 // scriptedMock drives a harness that replays scripted model responses from a
@@ -358,11 +347,6 @@ var hookSinkAdapters = map[string]hookSinkAdapter{
 	"hermes": {preTool: "pre_tool_call", hookOutput: func(reason string) interface{} {
 		return map[string]string{"decision": "block", "reason": reason}
 	}},
-	// OmniGent's policy bridge maps the top-level action to DENY itself.
-	"omnigent": {preTool: "PreToolUse"},
-	"openhands": {preTool: "PreToolUse", hookOutput: func(reason string) interface{} {
-		return map[string]string{"decision": "deny", "reason": reason}
-	}},
 }
 
 // preToolEvent is the event whose tool input the block scenario matches.
@@ -376,8 +360,6 @@ func (a hookSinkAdapter) preToolEvent() string {
 // hookEventName reads the event a hook request reports: the out-of-band
 // event header the Codex hook (X-DefenseClaw-Hook-Event), the Copilot hook
 // (whose native payload has no event field) and the Antigravity hook send,
-// else the payload's hook_event_name (Claude Code, Codex, Hermes, OmniGent)
-// or event_type (OpenHands).
 func hookEventName(r *http.Request, payload map[string]json.RawMessage) string {
 	for _, header := range []string{"X-DefenseClaw-Hook-Event", "X-DefenseClaw-Copilot-Event", "X-DefenseClaw-Antigravity-Event"} {
 		if name := r.Header.Get(header); name != "" {
@@ -502,12 +484,9 @@ type interactiveLaunch struct {
 
 // interactiveLaunches are the harnesses the probe also starts on a
 // terminal, because their TUI does what their headless mode never does:
-// OmniGent's first-launch theme picker runs only when a terminal is attached
 // and wrote the image's root-owned configuration, which ended every session
 // before the REPL started.
-var interactiveLaunches = map[string]interactiveLaunch{
-	"omnigent": {quit: "/exit"},
-}
+var interactiveLaunches = map[string]interactiveLaunch{}
 
 // interactiveDoneText is the part of the built-in mock's closing text for
 // the allow prompt the pty driver waits for.

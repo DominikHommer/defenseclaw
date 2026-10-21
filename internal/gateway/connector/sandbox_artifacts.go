@@ -170,7 +170,6 @@ type SandboxArtifactProvider interface {
 // with sandbox-only contracts resolves against those instead: one whose host
 // hooks are not version-gated (Kiro), as an overlay image always pins a
 // reviewed harness build, and one whose sandbox needs a narrower range than
-// its host (OmniGent). A version the host contract accepts and the sandbox
 // refuses gets the sandbox's reason. Overlay images pin reviewed builds, so
 // sandbox resolution keeps exact-range matching.
 func ResolveSandboxHookContract(connectorName, agentVersion string) HookContractResolution {
@@ -191,15 +190,12 @@ func ResolveSandboxHookContract(connectorName, agentVersion string) HookContract
 // host hooks are not version-gated or whose sandbox needs a narrower range.
 // Each connector keeps its contracts in its own <connector>_sandbox.go file.
 var sandboxOnlyHookContractsByConnector = map[string]func() []HookContract{
-	"kiro":     kiroSandboxHookContracts,
-	"omnigent": omnigentSandboxHookContracts,
+	"kiro": kiroSandboxHookContracts,
 }
 
 // sandboxOnlyRefusals say why a sandbox refuses a version its connector's
 // host contract accepts.
-var sandboxOnlyRefusals = map[string]string{
-	"omnigent": omnigentSandboxRefusal,
-}
+var sandboxOnlyRefusals = map[string]string{}
 
 // sandboxOnlyHookContracts returns fresh copies of connector's sandbox-only
 // hook contracts (none for most connectors).
@@ -232,7 +228,6 @@ var sandboxHookScriptsByConnector = map[string][]string{
 	"devin":       {"devin-hook.sh"},
 	"hermes":      {"hermes-hook.sh"},
 	"kiro":        {"kiro-hook.sh"},
-	"openhands":   {"openhands-hook.sh"},
 }
 
 // sandboxHookHostOnlyMarkers must never survive into a rendered sandbox

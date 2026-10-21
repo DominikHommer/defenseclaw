@@ -24,9 +24,9 @@ asset_policy:
   skill:
     default: deny
   connectors:
-    open-hands:
+    claude-code:
       mode: action
-    open_hands:
+    claude_code:
       mode: observe
 `)
 	_, err := LoadRuntimeV8InspectionCandidateFromBytes(filepath.Join(t.TempDir(), "config.yaml"), raw)
@@ -331,32 +331,6 @@ func TestEvaluateAssetPolicyRegistryRequiredEmptyWarnFallsThrough(t *testing.T) 
 }
 
 func boolPtr(b bool) *bool { return &b }
-
-// TestEffectiveModePerConnector covers inherit-on-empty + override +
-// alias-insensitive resolution for the per-connector mode (OTHER-7).
-func TestEffectiveModePerConnector(t *testing.T) {
-	ap := &AssetPolicyConfig{
-		Mode: AssetPolicyModeObserve,
-		Connectors: map[string]PerConnectorAssetPolicy{
-			"codex":      {Mode: AssetPolicyModeAction},
-			"open-hands": {Mode: AssetPolicyModeAction},
-		},
-	}
-	if got := ap.EffectiveMode("codex"); got != AssetPolicyModeAction {
-		t.Errorf("EffectiveMode(codex) = %q, want action", got)
-	}
-	if got := ap.EffectiveMode("hermes"); got != AssetPolicyModeObserve {
-		t.Errorf("EffectiveMode(hermes) = %q, want observe (inherit)", got)
-	}
-	if got := ap.EffectiveMode(""); got != AssetPolicyModeObserve {
-		t.Errorf("EffectiveMode(\"\") = %q, want observe (global)", got)
-	}
-	// Alias-insensitive: override keyed on "open-hands" applies to canonical
-	// "openhands" (normalizeConnectorKey parity with Python).
-	if got := ap.EffectiveMode("openhands"); got != AssetPolicyModeAction {
-		t.Errorf("EffectiveMode(openhands) = %q, want action via alias", got)
-	}
-}
 
 // TestAssetPolicyForOverlaysPerConnectorScalars proves the per-type scalar
 // overlay: a connector with registry_required=true blocks (empty registry +

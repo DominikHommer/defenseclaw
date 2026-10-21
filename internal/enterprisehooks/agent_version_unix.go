@@ -92,8 +92,6 @@ var unixAgentProbes = map[string]unixAgentProbe{
 	"amp":        {npmPackages: []string{"@ampcode/cli"}, binaries: []string{"amp"}},
 	"devin":      {binaries: []string{"devin"}},
 	"hermes":     {binaries: []string{"hermes"}, stateEnv: "HERMES_HOME", stamp: ".hermes/hermes-agent/install-stamp.json"},
-	"openhands":  {binaries: []string{"openhands"}, uvTool: [2]string{"openhands", "openhands"}},
-	"omnigent":   {binaries: []string{"omnigent"}, uvTool: [2]string{"omnigent", "omnigent"}},
 	// "antigravity" is the IDE launcher, a desktop surface that is never
 	// run (DiscoverUnixAgentSurfaces).
 	"antigravity": {binaries: []string{"agy"}},
@@ -553,7 +551,6 @@ func unixMachineAgentBinDirs() []string {
 }
 
 // readUVToolVersion reads the version of distribution dist from the default
-// `uv tool install` environment of tool under home (OpenHands needs about
 // 11 s to answer --version, beyond the probe timeout).
 func readUVToolVersion(home, tool, dist string) string {
 	pattern := filepath.Join(home, ".local", "share", "uv", "tools", tool, "lib", "python*", "site-packages", dist+"-*.dist-info")

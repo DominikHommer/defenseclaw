@@ -2352,64 +2352,12 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-    def test_multi_connector_omnigent_hint_reports_gateway_ready_policy_unverified(
-        self,
-        _mock_restart,
-        _mock_wait,
-        _mock_api,
-        mock_subhead,
-    ):
-        from defenseclaw.commands.cmd_setup import _restart_services
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_services(
-                tmpdir,
-                connector=None,
-                connectors=["codex", "omnigent"],
-                wait_for_connector_ready=True,
-            )
-
-        messages = [call.args[0] for call in mock_subhead.call_args_list]
-        self.assertTrue(any("DefenseClaw gateway registration is ready" in message for message in messages))
-        self.assertTrue(any("loaded policy generation" in message for message in messages))
-        self.assertTrue(any("unverified pending reload/restart" in message for message in messages))
-        self.assertTrue(all("enforcement via" not in message for message in messages))
 
     @patch("defenseclaw.commands.cmd_setup.ux.subhead")
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-    def test_multi_connector_restart_without_readiness_gate_names_only_omnigent(
-        self,
-        _mock_restart,
-        mock_subhead,
-    ):
-        # GAP-2630: `agent discovery enable` restarts without a readiness
-        # wait; the roster must not read "registration is not verified".
-        from defenseclaw.commands.cmd_setup import _restart_services
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_services(tmpdir, connector="codex", connectors=["codex", "claudecode", "omnigent"])
-
-        messages = [call.args[0] for call in mock_subhead.call_args_list]
-        self.assertTrue(all("not verified" not in message for message in messages))
-        self.assertTrue(any("enforcement via" in message for message in messages))
-        self.assertTrue(any(m.startswith("OmniGent:") and "defenseclaw doctor" in m for m in messages))
 
     @patch("defenseclaw.commands.cmd_setup.ux.subhead")
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-    def test_omnigent_hint_without_readiness_gate_does_not_claim_gateway_ready(
-        self,
-        _mock_restart,
-        mock_subhead,
-    ):
-        from defenseclaw.commands.cmd_setup import _restart_services
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_services(tmpdir, connector="omnigent")
-
-        messages = [call.args[0] for call in mock_subhead.call_args_list]
-        self.assertTrue(any("gateway registration is not verified" in message for message in messages))
-        self.assertTrue(all("gateway registration is ready" not in message for message in messages))
-        self.assertTrue(all("enforcement via" not in message for message in messages))
 
     @patch("defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=True)
@@ -2533,8 +2481,8 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 return value
 
             for requested in (
-                ["claudecode", "codex", "cursor", "omnigent"],
-                ["claudecode", "codex", "cursor", "omnigent", "opencode"],
+                ["claudecode", "codex", "cursor", ],
+                ["claudecode", "codex", "cursor",  "opencode"],
             ):
                 with self.subTest(requested=requested):
                     clock = Clock()
@@ -2686,7 +2634,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             def sleep(self, _seconds):
                 self.now += 10.0
 
-        expected = ["claudecode", "codex", "cursor", "omnigent", "opencode"]
+        expected = ["claudecode", "codex", "cursor",  "opencode"]
         baseline = {name: f"old-{name}" for name in expected}
         clock = Clock()
 
@@ -2769,7 +2717,6 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             "codex",
             "copilot",
             "devin",
-            "omnigent",
             "opencode",
         ]
         clock = SimpleNamespace(now=0.0)
@@ -2823,7 +2770,6 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             "codex",
             "copilot",
             "devin",
-            "omnigent",
             "opencode",
         ]
         clock = SimpleNamespace(now=0.0)

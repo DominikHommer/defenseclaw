@@ -57,11 +57,9 @@ until a connector enforces. Hover or press **Pause** to study a frame; press
     { type: 'dim', text: '    6. Cursor                 — user hooks with event-scoped deny + bounded local inventory' },
     { type: 'dim', text: '    7. Devin                  — Devin CLI and Devin Desktop (Devin Local) hooks + documented local MCP, skill, rule, and agent discovery' },
     { type: 'dim', text: '    8. GitHub Copilot CLI     — ~/.copilot/hooks command hooks by default; optional .github/hooks workspace override' },
-    { type: 'dim', text: '    9. OpenHands              — ~/.openhands/hooks.json command hooks by default; optional repo-local override' },
     { type: 'dim', text: '    10. Antigravity            — five lifecycle hooks in ~/.gemini/config/hooks.json; only PreToolUse has documented native ask and deny responses' },
     { type: 'dim', text: '    11. OpenCode               — auto-loaded JS bridge with tool.execute.before blocking; bounded native local skills, plugins, agents, instructions, tools, and commands' },
     { type: 'dim', text: '    12. Amp                    — system TypeScript policy plugin with synchronous tool.call allow/confirm/block verdicts' },
-    { type: 'dim', text: '    13. OmniGent               — custom Python policy bridge with ALLOW/ASK/DENY and optional native OTLP' },
     { type: 'dim', text: '    14. Kiro                   — Kiro IDE or CLI connector; they share the same hooks, with optional ACP' },
     { type: 'prompt', text: '  Selection [4]: ', reply: '3', pauseMs: 1100 },
     { type: 'spacer' },
@@ -149,7 +147,7 @@ to use in scripts.
 
 | Prompt (default) | Flag, or how to script it |
 | --- | --- |
-| **Which agent framework are you using?** *(first setup only; suggests an agent it finds)* | `--connector` / `--agent`: `claudecode`, `codex`, `cursor`, `devin`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `amp`, `omnigent`, `kiro`, `openclaw`, `zeptoclaw`. |
+| **Which agent framework are you using?** *(first setup only; suggests an agent it finds)* | `--connector` / `--agent`: `claudecode`, `codex`, `cursor`, `devin`, `copilot`, `hermes`, `antigravity`, `opencode`, `amp`, `kiro`, `openclaw`, `zeptoclaw`. |
 | **Enable guardrail?** *(Y)* | Implied by running setup. `--disable` turns the guardrail off. |
 | **Select mode** *(observe on first setup, then the current mode)* | `--mode observe\|action`. `observe` records; `action` enforces. |
 | **Select hook fail mode** *(current setting; asked on first setup or when the mode changes)* | No flag on `setup guardrail`. Use `defenseclaw setup <connector> --fail-mode open\|closed`, `defenseclaw init --fail-mode`, or `defenseclaw guardrail fail-mode open\|closed` afterwards. |
@@ -316,7 +314,7 @@ The table follows `defenseclaw setup guardrail --help`.
   type={{
     "--connector / --agent": {
       type: "connector name",
-      description: "Agent connector to configure: claudecode, codex, cursor, devin, copilot, hermes, openhands, antigravity, opencode, amp, omnigent, kiro, openclaw or zeptoclaw. It decides how traffic is intercepted, how tool calls are inspected and which subprocess policy applies.",
+ description: "Agent connector to configure: claudecode, codex, cursor, devin, copilot, hermes, antigravity, opencode, amp, kiro, openclaw or zeptoclaw. It decides how traffic is intercepted, how tool calls are inspected and which subprocess policy applies.",
     },
     "--mode": {
       type: "observe|action",

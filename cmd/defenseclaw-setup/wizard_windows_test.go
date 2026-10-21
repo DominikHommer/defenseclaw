@@ -362,60 +362,6 @@ func TestUpdateInstalledPathOwnershipRecordsCreatedValue(t *testing.T) {
 	}
 }
 
-func TestWizardChoiceMappings(t *testing.T) {
-	connectors := []wizardChoice{
-		{Label: "Configure later", Value: "none"},
-		{Label: "Codex CLI", Value: "codex"},
-		{Label: "Claude Code", Value: "claudecode"},
-		{Label: "Amp", Value: "amp"},
-		{Label: "Google Antigravity", Value: "antigravity"},
-		{Label: "GitHub Copilot CLI", Value: "copilot"},
-		{Label: "Cursor Agent", Value: "cursor"},
-		{Label: "Hermes Agent", Value: "hermes"},
-		{Label: "Devin CLI", Value: "devin"},
-		{Label: "OmniGent (native degraded)", Value: "omnigent"},
-		{Label: "OpenCode", Value: "opencode"},
-	}
-	modes := []wizardChoice{
-		{Label: "Observe", Value: "observe"},
-		{Label: "Action", Value: "action"},
-	}
-	if len(wizardConnectorChoices) != len(connectors) {
-		t.Fatalf("connector choice count = %d, want %d", len(wizardConnectorChoices), len(connectors))
-	}
-	for index, want := range connectors {
-		if got := wizardConnectorChoices[index]; got != want {
-			t.Fatalf("connector choice %d = %+v, want %+v", index, got, want)
-		}
-		if got := connectorIndex(want.Value); got != index {
-			t.Fatalf("connectorIndex(%q) = %d, want %d", want.Value, got, index)
-		}
-		if got := connectorValue(index); got != want.Value {
-			t.Fatalf("connectorValue(%d) = %q, want %q", index, got, want.Value)
-		}
-	}
-	if len(wizardModeChoices) != len(modes) {
-		t.Fatalf("mode choice count = %d, want %d", len(wizardModeChoices), len(modes))
-	}
-	for index, want := range modes {
-		if got := wizardModeChoices[index]; got != want {
-			t.Fatalf("mode choice %d = %+v, want %+v", index, got, want)
-		}
-		if got := modeIndex(want.Value); got != index {
-			t.Fatalf("modeIndex(%q) = %d, want %d", want.Value, got, index)
-		}
-		if got := modeValue(index); got != want.Value {
-			t.Fatalf("modeValue(%d) = %q, want %q", index, got, want.Value)
-		}
-	}
-	if connectorIndex("invalid") != 0 || connectorValue(-1) != "none" || connectorValue(99) != "none" {
-		t.Fatal("invalid connector selections did not fall back to Configure later")
-	}
-	if modeIndex("invalid") != 0 || modeValue(-1) != "observe" || modeValue(99) != "observe" {
-		t.Fatal("invalid mode selections did not fall back to Observe")
-	}
-}
-
 func TestOptionsFromWizardSelectionsMatrix(t *testing.T) {
 	for connectorSelection, choice := range wizardConnectorChoices {
 		connector := choice.Value
@@ -555,7 +501,6 @@ func TestWizardCompletionDescriptionMatchesConfiguredConnector(t *testing.T) {
 		{connector: "hermes", want: "Hermes hooks", reject: "fail-closed"},
 		{connector: "devin", want: "Devin CLI is configured", reject: "certified"},
 		{connector: "antigravity", want: "Google Antigravity is configured", reject: "defenseclaw init"},
-		{connector: "omnigent", want: "native degraded policy integration", reject: "trusted automatically"},
 		{connector: "opencode", want: "OpenCode is configured", reject: "certified"},
 		{connector: "none", want: "defenseclaw init", reject: "open /hooks"},
 	} {

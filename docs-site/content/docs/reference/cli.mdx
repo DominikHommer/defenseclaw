@@ -3,7 +3,6 @@ title: CLI commands
 description: The defenseclaw and defenseclaw-gateway commands, grouped by what you are trying to do — first run, doctor, setup, guardrail, policy, configuration (config set, get, migrate), asset block and allow lists, scanning, audit, gateway control, upgrade, uninstall.
 keywords:
   - DefenseClaw CLI commands
-  - defenseclaw setup
   - defenseclaw config set
   - defenseclaw config get
   - defenseclaw config migrate
@@ -23,8 +22,7 @@ This page groups the commands by task and covers every command group. It shows t
 <Callout title="Command availability is platform-specific">
 A registered command or connector alias is not, by itself, a native Windows
 support claim. Native Windows supports Amp plus Codex, Claude Code, Cursor,
-Devin, GitHub Copilot CLI, Antigravity, OpenCode, Hermes, Kiro, and OmniGent.
-OpenHands, OpenClaw, and ZeptoClaw remain unavailable there. Some
+Devin, GitHub Copilot CLI, Antigravity, OpenCode, Hermes, Kiro.
 commands require optional configuration or are unavailable there. Use the
 [connector platform table](/docs/connectors#platform-support) for availability
 and each connector page for native Windows setup and quirks.
@@ -352,13 +350,11 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup devin` | Native Devin CLI hook alias; defaults to observe, while `--mode action` can block only on the four documented block-capable events. |
 | `defenseclaw setup copilot` | Hook setup alias for GitHub Copilot CLI; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup hermes` | Hook setup alias for Hermes; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup openhands` | Hook setup alias for OpenHands on supported non-Windows platforms; it is unsupported in the native Windows release. Defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`); defaults to observe, pass `--mode action` to block hook-side. Native ask and deny are documented only for `PreToolUse`; no permission-bypass override is claimed. |
 | `defenseclaw setup opencode` | Hook setup alias for OpenCode; writes the auto-loaded bridge plugin. Defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup acp` | Find ACP agents an editor is launching unguarded and route them through `defenseclaw-acp`. Reuses the per-pair `acp setup` transaction and points the operator's existing entry at the guard, so no unmediated duplicate is left behind. Defaults to observe; `--activate` selects action. Alias of `defenseclaw acp adopt`. |
 | `defenseclaw setup kiro` | Native hook alias for Kiro IDE and Kiro CLI; defaults to observe, pass `--mode action` to block hook-side. The `.kiro/hooks` surface (Kiro IDE and `kiro-cli --v3`) vetoes `PreToolUse`, and `UserPromptSubmit` in Kiro IDE (kiro-cli 2.24.1 `--v3` still sends a blocked prompt to the model); the CLI 2.x agent config vetoes `PreToolUse` only. ACP is optional and configured separately with `defenseclaw acp setup --agent kiro`. |
 | `defenseclaw setup amp` | Direct-to-upstream system-policy setup for Amp; writes the TypeScript plugin. Defaults to observe; pass `--mode action` for synchronous `tool.call` execution gating and model-bound `tool.result` output gating. Native confirmation is available only in the active foreground thread; background confirmation falls back to safe rejection or withholding. |
-| `defenseclaw setup omnigent` | Hook setup alias for OmniGent; installs the custom Python policy bridge. Defaults to observe, pass `--mode action` for ALLOW/ASK/DENY enforcement. |
 | `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector); unsupported in the native Windows release. |
 | `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector); unsupported in the native Windows release. |
 | `defenseclaw setup local-observability up\|down\|status\|logs\|url\|env\|reset` | Bring up the bundled Prom/Loki/Tempo/Grafana stack, tear it down, show its readiness, tail its logs (`--service`, `--follow`), print the Grafana and backend URLs or the environment that points a gateway at it, or `reset` it (stop it and delete its stored metrics, logs, and traces). `up --password` requires the managed Grafana credential; `up --no-password` explicitly selects anonymous Admin on managed loopback. New stacks default to password and previously used anonymous stacks retain their mode. `down` keeps the data volumes; `down --disable-config` also turns off the `local-observability` destination. |
@@ -926,7 +922,6 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | `defenseclaw-gateway config migrate [--dry-run] [--json] [--ack] [--config FILE] [--data-dir DIR] [--to 9]` | The migration that `defenseclaw config migrate` and `defenseclaw migrate` run: moves `policies/rego/data.json`, the `*_actions` keys, `rule_pack_dir`, the v8 scanner keys, `update_check` and, on a per-user install, the operator block and allow entries of `audit.db` into `config.yaml`. See [Upgrade](#upgrade). |
 | `defenseclaw-gateway provenance show` | Print the config schema version, content hash, generation, and binary version. |
 | `defenseclaw-gateway connector reconcile\|verify\|teardown\|list-backups [--connector X] [--json]` | Low-level lifecycle for one connector, outside the `setup` flow: refresh its installed registration, check it left no residual state, remove its config patches, or list its pristine backups. Without `--connector` it uses the active connector. `defenseclaw uninstall` uses these. |
-| `defenseclaw-gateway connector launch --connector openhands` | Launch the OpenHands executable that setup selected and sealed, with scoped native telemetry. |
 
 ## TUI
 

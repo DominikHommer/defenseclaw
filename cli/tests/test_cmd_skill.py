@@ -3374,30 +3374,6 @@ class TestSkillListMultiConnectorDefault(SkillCommandTestBase):
         self.assertEqual(devin_scan["target"], devin_target)
         self.assertEqual(devin_scan["total_findings"], 7)
 
-    @patch(
-        "defenseclaw.commands.cmd_skill._list_openclaw_skills_full",
-        return_value={"skills": []},
-    )
-    def test_scan_history_phantom_does_not_leak_to_no_root_connector(self, _mock_list):
-        devin_root = os.path.join(self.tmp_dir, "devin", "skills")
-        os.makedirs(os.path.join(devin_root, "codeguard"))
-        self.app.cfg.active_connectors = lambda: ["devin", "omnigent"]  # type: ignore[method-assign]
-        self.app.cfg.skill_dirs = lambda connector=None: (  # type: ignore[method-assign]
-            [devin_root] if connector == "devin" else []
-        )
-        self.app.store.insert_scan_result(
-            str(uuid.uuid4()), "skill-scanner",
-            os.path.join(devin_root, "codeguard"),
-            datetime.now(timezone.utc), 400, 3, "MEDIUM", "{}",
-        )
-
-        result = self.invoke(["list", "--json"])
-
-        self.assertEqual(result.exit_code, 0, result.output)
-        groups = {group["connector"]: group["skills"] for group in json.loads(result.output)}
-        self.assertEqual(groups["devin"][0]["name"], "codeguard")
-        self.assertEqual(groups["devin"][0]["source"], "scan-history")
-        self.assertEqual(groups["omnigent"], [])
 
     @unittest.skipUnless(os.name == "nt", "Windows path casing semantics")
     @patch(

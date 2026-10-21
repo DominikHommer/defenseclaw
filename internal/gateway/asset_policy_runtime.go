@@ -1989,7 +1989,6 @@ func runtimeAssetCanEnforce(event string) bool {
 		return true
 	}
 	// Generic hook-only connectors (hermes, cursor, devin,
-	// copilot, openhands) use varied case/spacing for the same semantic events
 	// (preToolUse, pre_tool_call, beforeMCPExecution, beforeShellExecution,
 	// pre_run_command, premcptooluse, ...). Reusing the canonical
 	// tool-inspection set keeps the asset-policy enforcement gate

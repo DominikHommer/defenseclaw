@@ -28,7 +28,6 @@ import (
 )
 
 // selectManagedAgentExecutable binds a connector whose setup admits only a
-// protected, setup-selected agent executable (OpenHands on macOS) to the
 // target user's own image. The per-user install runs as that user, hashes
 // the image and records it in the protected agent_selection.json receipt
 // that the connector's executable admission and hook-contract publication
@@ -36,7 +35,6 @@ import (
 // the image is still refused by the connector's digest check. Connectors
 // without protected executable admission, and callers that already chose
 // an executable, are left unchanged. Only the standalone profile selects:
-// the Secure Client macOS guardian keeps its earlier OpenHands behavior.
 func selectManagedAgentExecutable(home, dataDir, connectorName string, setupOpts *connector.SetupOpts) error {
 	if setupOpts == nil || !standaloneProfileProcess() || !connector.ProtectedSetupSelectionConnector(connectorName) ||
 		strings.TrimSpace(setupOpts.AgentExecutable) != "" {

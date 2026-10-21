@@ -88,7 +88,6 @@ var connectorSaveOpenCodeLock = connector.SaveFreshHookContractLockEntry
 var connectorSaveAmpLock = connector.SaveFreshHookContractLockEntry
 var connectorEnsureHookAPIToken = connector.EnsureHookAPIToken
 var connectorVerifyRootPersistentPreRun = rootPersistentPreRunE
-var connectorLaunchOpenHands = connector.LaunchOpenHandsWithNativeOTLP
 var connectorCheckPlatformSupportOnHost = connector.CheckPlatformSupportOnHost
 
 var connectorTeardownCmd = &cobra.Command{
@@ -171,26 +170,6 @@ mutations. It does not restart the gateway and does not setup peer connectors.`,
 	RunE: runConnectorReconcile,
 }
 
-var connectorLaunchCmd = &cobra.Command{
-	Use:   "launch -- [openhands arguments...]",
-	Short: "Launch the protected OpenHands executable with scoped native telemetry",
-	// OpenHands is not a supported connector on Windows (GAP-1719).
-	Hidden: runtime.GOOS == "windows",
-	Long: `Launch the exact OpenHands executable selected and sealed by setup.
-
-This Darwin-only boundary revalidates the protected executable and hook
-registration, loads the owner-only OpenHands OTLP credential, and supplies it
-only in the child process environment. The credential is never printed or
-placed in the command arguments. Put -- before OpenHands flags.`,
-	// A launch client can coexist with the running gateway. Loading a second
-	// audit store would create the same WAL/SHM ownership hazard as status.
-	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-		return loadGatewayCommandConfigFor(cmd)
-	},
-	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
-	RunE:              runConnectorLaunch,
-}
-
 var connectorListBackupsCmd = &cobra.Command{
 	Use:   "list-backups",
 	Short: "List pristine connector backups stored under the data directory",
@@ -262,7 +241,6 @@ func init() {
 	connectorCmd.AddCommand(connectorPruneOrphansCmd)
 	connectorCmd.AddCommand(connectorVerifyCmd)
 	connectorCmd.AddCommand(connectorReconcileCmd)
-	connectorCmd.AddCommand(connectorLaunchCmd)
 	connectorCmd.AddCommand(connectorListBackupsCmd)
 
 	rootCmd.AddCommand(connectorCmd)
@@ -383,8 +361,6 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 		return func() {}, nil
 	case "opencode":
 		variable = "OPENCODE_CONFIG_DIR"
-	case "omnigent":
-		variable = "OMNIGENT_CONFIG_HOME"
 	case "hermes":
 		variable = "HERMES_HOME"
 	default:
@@ -515,37 +491,6 @@ func resolveConnectorOptsFor(dataDir, name string) connector.SetupOpts {
 	return opts
 }
 
-func runConnectorLaunch(cmd *cobra.Command, args []string) error {
-	if connectorFlagJSON {
-		return errors.New("connector launch does not support --json because stdout and stderr belong to OpenHands")
-	}
-	dataDir := resolveConnectorDataDir()
-	if dataDir == "" {
-		return errors.New("connector launch: no data directory configured")
-	}
-	name := resolveActiveConnectorName(dataDir)
-	if name != "openhands" {
-		return fmt.Errorf("connector launch supports only the protected OpenHands boundary, got %q", name)
-	}
-	if _, err := connectorCheckPlatformSupportOnHost(name); err != nil {
-		return fmt.Errorf("connector launch openhands: %w", err)
-	}
-	opts := resolveConnectorOpts(dataDir)
-	opts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, name)
-	opts.AgentExecutable = connector.LoadCachedAgentExecutable(dataDir, name)
-	if err := connectorLaunchOpenHands(
-		cmd.Context(),
-		opts,
-		append([]string(nil), args...),
-		cmd.InOrStdin(),
-		cmd.OutOrStdout(),
-		cmd.ErrOrStderr(),
-	); err != nil {
-		return fmt.Errorf("connector launch openhands: %w", err)
-	}
-	return nil
-}
-
 func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	dataDir := resolveConnectorDataDir()
 	if dataDir == "" {
@@ -564,11 +509,6 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	conn, ok := reg.Get(name)
 	if !ok {
 		return fmt.Errorf("connector reconcile: unknown connector %q", name)
-	}
-	if name != "amp" && name != "antigravity" && name != "claudecode" && name != "codex" &&
-		name != "copilot" && name != "cursor" && name != "hermes" && name != "omnigent" &&
-		name != "opencode" && name != "devin" {
-		return fmt.Errorf("connector reconcile: selected refresh is supported only for amp, antigravity, claudecode, codex, copilot, cursor, devin, hermes, omnigent, and opencode")
 	}
 	if warning, supportErr := connector.CheckPlatformSupportOnHost(name); supportErr != nil {
 		return fmt.Errorf("connector reconcile %s: %w", name, supportErr)

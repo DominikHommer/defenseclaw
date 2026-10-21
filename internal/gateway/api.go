@@ -1905,7 +1905,6 @@ func sameRuntimeDataDir(left, right string) bool {
 //	  "connector":  "codex" | "claudecode" | "openclaw" | "zeptoclaw",
 //	  "mode":       "guardrail" | "observability", // legacy data-path field
 //	  "policy_mode": "observe" | "action",
-//	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks" | "omnigent_policy_api",
 //	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
 //	  "proxy_intercept": true | false,
 //	}
@@ -1982,7 +1981,6 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 	// DefenseClaw proxy" in the same output whose Guardrail subsystem said
 	// "proxy_port: closed" and "the local guardrail proxy is not in the LLM
 	// data path". The list below now contributes only the telemetry channels
-	// and OmniGent's policy-API surface, which are genuinely per-connector.
 	if !connectorProxyBindsByName(name) {
 		mode = "observability"
 		intercept = false
@@ -1998,14 +1996,9 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "devin", "copilot", "openhands",
+	case "hermes", "cursor", "devin", "copilot",
 		"antigravity", "opencode", "amp", "kiro":
 		telemetry = []string{"hooks"}
-	case "omnigent":
-		// OmniGent enforces through its own policy API rather than the
-		// shared lifecycle-hook bridge, so it keeps a distinct surface.
-		surface = "omnigent_policy_api"
-		telemetry = []string{"policy-api"}
 	default:
 		// openclaw / zeptoclaw / unknown: enforcement is the only
 		// supported mode today. Hooks are wired by the connector;

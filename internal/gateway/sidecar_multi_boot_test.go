@@ -1215,7 +1215,7 @@ func TestReconcileOrphanedConnectorRegistrationCleansRetiredDesktopBeforeRequest
 			if err := connector.SaveFreshHookContractLockEntry(dataDir, entry); err != nil {
 				t.Fatalf("stage retired lock: %v", err)
 			}
-			priorRoster := []string{"claudecode", "codex", "cursor", "omnigent"}
+			priorRoster := []string{"claudecode", "codex", "cursor"}
 			if err := connector.SaveActiveConnectors(dataDir, priorRoster); err != nil {
 				t.Fatalf("stage prior active roster: %v", err)
 			}
@@ -1298,7 +1298,7 @@ func TestReconcileOrphanedConnectorRegistrationFailureRestoresExactActiveState(t
 			); err != nil {
 				t.Fatal(err)
 			}
-			priorRoster := []string{"claudecode", "codex", "cursor", "omnigent"}
+			priorRoster := []string{"claudecode", "codex", "cursor"}
 			if err := connector.SaveActiveConnectors(dataDir, priorRoster); err != nil {
 				t.Fatal(err)
 			}
@@ -1405,7 +1405,7 @@ func TestReconcileOrphanedConnectorRegistrationRequiresProtectedActiveAuthority(
 				context.Background(),
 				registry,
 				dataDir,
-				[]string{"claudecode", "codex", "copilot", "cursor", "omnigent"},
+				[]string{"claudecode", "codex", "copilot", "cursor"},
 				orphanConnectorReconcileOps{
 					resolveOpts: func(connector.Connector) (connector.SetupOpts, error) { return opts, nil },
 					clearLock: func(dataDir, name string) error {
@@ -2311,16 +2311,6 @@ func TestConnectorSetupTokensProxyKeepsMasterOutOfScopedSidecar(t *testing.T) {
 	}
 	if !tokens.hookTokenScoped || tokens.hookToken == "" || tokens.hookToken == "gateway-master" {
 		t.Fatalf("proxy hook token = %+v, want distinct connector-scoped credential", tokens)
-	}
-}
-
-func TestConnectorSetupTokensOmnigentGetsScopedToken(t *testing.T) {
-	tokens, err := connectorSetupTokensFor(testenv.PrivateTempDir(t), connector.NewOmnigentConnector(), "gateway-master", false)
-	if err != nil {
-		t.Fatalf("connectorSetupTokensFor omnigent: %v", err)
-	}
-	if !tokens.hookTokenScoped || tokens.connectorToken == "" || tokens.connectorToken == "gateway-master" {
-		t.Fatalf("OmniGent tokens = %+v, want connector-scoped policy credential", tokens)
 	}
 }
 

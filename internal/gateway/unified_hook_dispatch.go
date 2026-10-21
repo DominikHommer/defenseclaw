@@ -150,7 +150,6 @@ func (a *APIServer) hookProfileProvider(name string) (connector.HookProfileProvi
 // workspace directory stays empty: the sandbox's project is not a host
 // workspace the connector may configure. The contract resolves for Linux,
 // which every sandbox runs, so host-OS contract adjustments (such as the
-// macOS-only OpenHands native OTLP lane) never apply to a sandboxed harness.
 func sandboxSetupOpts(a *APIServer, binding sandboxauth.Binding) connector.SetupOpts {
 	return connector.SetupOpts{
 		DataDir:        a.configDataDir(),

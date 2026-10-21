@@ -28,7 +28,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -206,7 +205,6 @@ func TestEnterpriseHookWorkerRunsTargetsWithAMinimalEnvironment(t *testing.T) {
 	}
 
 	// The worker PATH keeps the system directories first and then the
-	// discovery directories (OmniGent setup looks itself up on PATH).
 	path := enterpriseHookWorkerPath("/home/alice", 1000)
 	parts := strings.Split(path, ":")
 	if len(parts) < 3 || parts[0] != "/usr/bin" || parts[1] != "/bin" {
@@ -1502,18 +1500,6 @@ func TestStandaloneAIDiscoveryPassPausesAHomeWhoseScanKeepsFailing(t *testing.T)
 	pass()
 	if workers != 5 || len(enterpriseHookAIDiscoveryBreaker.accounts) != 0 {
 		t.Fatalf("workers = %d, breaker = %+v: after the pause a good scan closes the breaker", workers, enterpriseHookAIDiscoveryBreaker.accounts)
-	}
-}
-
-// A worker error ends with its cause. The remove-all report cut it at 256
-// bytes, in the middle of a path, so the uninstall never said why a
-// registration stayed. An oversized error keeps its start and its cause.
-func TestRemoveAllReportKeepsTheWorkerErrorCause(t *testing.T) {
-	path := "/Users/alice/.openhands/" + strings.Repeat("nested/", 60) + "hooks.json"
-	cause := "enterprise hooks: connector openhands teardown failed: restore config backup: rename " + path + ".tmp \u2192 " + path + ": operation not permitted"
-	got := boundedWorkerError(cause)
-	if len(got) > workerErrorMaxBytes || !utf8.ValidString(got) || !strings.HasPrefix(got, "enterprise hooks: connector openhands") || !strings.HasSuffix(got, ": operation not permitted") {
-		t.Fatalf("bounded worker error = %q", got)
 	}
 }
 

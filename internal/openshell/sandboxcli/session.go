@@ -391,7 +391,7 @@ func (s *session) beginSession(ctx context.Context) func() {
 // is not overdue. (The Codex TUI too, but its OTLP export from the start
 // proves the path; see telemetryReached.)
 var promptFirst = map[string]bool{
-	"kiro": true, "hermes": true, "antigravity": true, "openhands": true, "omnigent": true, "copilot": true,
+	"kiro": true, "hermes": true, "antigravity": true, "copilot": true,
 }
 
 // watchNotices follows the sandbox during the session and announces what
@@ -1617,10 +1617,7 @@ var continueArgs = map[string]string{
 	"copilot":    "--continue",
 	"kiro":       "--resume",
 	"hermes":     "--continue",
-	"openhands":  "--resume --last",
-	// OmniGent's run --continue picks the sandbox agent's latest
 	// conversation.
-	"omnigent": "--continue",
 	// agy's -c (a Go flag) reopens the folder's latest conversation, as
 	// its own "Resume with -c" says.
 	"antigravity": "-c",
@@ -1636,12 +1633,10 @@ var ownResumeHint = map[string]string{
 	"claudecode": "claude --resume",
 	"codex":      "codex resume",
 	// OpenCode's exit screen: "Continue  opencode -s ses_<id>".
-	"opencode":  "opencode -s",
-	"copilot":   "copilot --resume",
-	"kiro":      "kiro-cli --resume-id",
-	"hermes":    "hermes --resume",
-	"openhands": "openhands --resume",
-	"omnigent":  "omnigent run",
+	"opencode": "opencode -s",
+	"copilot":  "copilot --resume",
+	"kiro":     "kiro-cli --resume-id",
+	"hermes":   "hermes --resume",
 	// agy: "Resume with -c (or command below): agy --conversation=<id>".
 	"antigravity": "agy --conversation",
 }

@@ -44,11 +44,8 @@ The six are independent — you can run any subset. Most teams start with `defen
 defenseclaw agent discover
 ```
 
-That's it. The CLI walks the known connector paths (OpenClaw, ZeptoClaw,
-Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI,
-OpenHands, Antigravity, Hermes, OpenCode, Amp, Kiro, OmniGent), checks for config files
-and binaries, probes versions under the configured trusted-prefix policy, and
-prints a table of what's installed.
+That's it. The CLI walks the known connector paths (OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, Antigravity, Hermes, OpenCode, Amp, Kiro), checks for config files and binaries, probes versions under the configured trusted-prefix policy, and prints a table of what's installed.
+
 
 Add `--json` for machine-readable output. Sanitized telemetry emission is
 best-effort and **enabled by default**; use `--no-emit-otel` for a strictly
@@ -89,7 +86,7 @@ The continuous scanner in the gateway classifies every signal into one of the wi
 
 | Category | What it surfaces |
 | --- | --- |
-| `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, Kiro, OmniGent |
+| `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, Antigravity, Hermes, OpenCode, Amp, Kiro |
 | `ai_cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
 | `active_process` | Running processes whose name matches a catalog entry — agent CLIs, local model servers such as Ollama or vLLM, and AI desktop apps |
 | `editor_extension` | AI extensions and plugins in VS Code and its forks, JetBrains IDEs, Visual Studio, Zed and Vim/Neovim. The full list of every plugin, AI or not, is the [IDE plugin inventory](#ide-plugin-inventory) |

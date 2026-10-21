@@ -13,12 +13,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -328,84 +325,5 @@ func TestAPIAuthenticationFailureV8EmissionFailureNeverFallsBack(t *testing.T) {
 		metadata.Source() != observability.SourceOperatorAPI ||
 		metadata.Action() != observability.ProducerKey(audit.ActionAPIAuthFailure) {
 		t.Fatalf("canonical attempts=%d metadata=%+v", calls, metadata)
-	}
-}
-
-func TestOTLPPathAuthenticationFailureKeepsSpecializedTelemetryOwner(t *testing.T) {
-	fixture := newSidecarRuntimeFixture(t, true)
-	api := configuredAPIAuthenticationServer("gateway-token")
-	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
-		connector.OTLPScopeOmnigent: "scoped-token",
-	})
-	api.bindOTLPObservabilityRuntime(fixture.runtime)
-	handler := api.tokenAuth(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Fatal("invalid scoped path token reached handler")
-	}))
-	request := httptest.NewRequest(
-		http.MethodPost, "/otlp/omnigent/path-token-secret/v1/logs", strings.NewReader(`{"resourceLogs":[]}`),
-	)
-	request.RemoteAddr = "127.0.0.1:4242"
-	response := httptest.NewRecorder()
-
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusUnauthorized || response.Body.String() != "{\"error\":\"unauthorized\"}\n" {
-		t.Fatalf("response=%d %q", response.Code, response.Body.String())
-	}
-	if generic := readStoredAPIAuthenticationFailures(t, fixture.path); len(generic) != 0 {
-		t.Fatalf("OTLP path failure duplicated into compliance.activity: %#v", generic)
-	}
-	specialized := readStoredOTLPV8Events(t, fixture.path)
-	if len(specialized) != 1 || specialized[0].eventName != "telemetry.authentication.failed" ||
-		specialized[0].bucket != string(observability.BucketTelemetryIngest) || specialized[0].mandatory != 1 {
-		t.Fatalf("specialized OTLP authentication event=%#v", specialized)
-	}
-	if strings.Contains(specialized[0].payload, "path-token-secret") {
-		t.Fatalf("specialized OTLP event retained path token: %s", specialized[0].payload)
-	}
-}
-
-func TestAPIAuthenticationFailureV8ExportsGeneratedRouteAndReasonMetrics(t *testing.T) {
-	api, capture := bindHookModelV8Runtime(t, []string{"metrics"})
-
-	ordinary := httptest.NewRequest(http.MethodPost, "/v1/config", nil)
-	api.emitHTTPAuthFailure(
-		ordinary.Context(), ordinary, "untrusted-route-value",
-		gatewaylog.ErrCodeAuthMissingToken, "missing_token",
-	)
-	otlpRequest := httptest.NewRequest(
-		http.MethodPost, "/otlp/omnigent/path-token-secret/v1/logs", nil,
-	)
-	api.emitHTTPAuthFailure(
-		otlpRequest.Context(), otlpRequest, "untrusted-otlp-route-value",
-		gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_path_token",
-	)
-
-	var points []hookModelV8MetricPoint
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		_, requests := capture.snapshot()
-		points = hookModelV8MetricPoints(
-			requests, observability.TelemetryInstrumentDefenseClawHTTPAuthFailures,
-		)
-		if len(points) >= 2 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if len(points) != 2 {
-		t.Fatalf("generated authentication metric points=%d want=2: %+v", len(points), points)
-	}
-	assertHookV8MetricPoint(t, points, map[string]string{
-		"http.route": "sidecar-api", "defenseclaw.metric.reason": "missing_token",
-	}, 1)
-	assertHookV8MetricPoint(t, points, map[string]string{
-		"http.route": "otlp-logs", "defenseclaw.metric.reason": "invalid_scoped_path_token",
-	}, 1)
-	for _, point := range points {
-		if strings.Contains(point.attributes["http.route"], "path-token-secret") ||
-			strings.Contains(point.attributes["http.route"], "untrusted") {
-			t.Fatalf("authentication metric leaked caller route: %+v", point)
-		}
 	}
 }

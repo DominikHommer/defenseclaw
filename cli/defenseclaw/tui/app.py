@@ -15650,32 +15650,6 @@ def _gateway_snapshot_detail(snapshot: HealthSnapshot, state: str) -> str:
     return ""
 
 
-def _project_omnigent_effective_readiness(
-    config: object,
-    snapshot: HealthSnapshot,
-) -> HealthSnapshot:
-    """Apply Status's passive OmniGent readiness to TUI presentation state."""
-
-    from defenseclaw.commands.cmd_status import _omnigent_effective_runtime_state
-
-    projected: dict[str, str] = {}
-
-    def _project(connector: ConnectorHealth | None) -> ConnectorHealth | None:
-        if connector is None or connector.name.strip().lower() != "omnigent":
-            return connector
-        if connector.state not in projected:
-            projected[connector.state], _detail = _omnigent_effective_runtime_state(
-                config,
-                connector.state,
-            )
-        state = projected[connector.state]
-        return connector if state == connector.state else replace(connector, state=state)
-
-    return replace(
-        snapshot,
-        connector=_project(snapshot.connector),
-        connectors=tuple(_project(connector) for connector in snapshot.connectors),
-    )
 
 
 _GATEWAY_STARTUP_GRACE_SECONDS = 90
@@ -15820,7 +15794,6 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
             policy_generation=_coerce_int(policy.get("generation")),
             policy_digest=_coerce_str(policy.get("effective_digest")),
         )
-    snapshot = _project_omnigent_effective_readiness(config, snapshot)
     state = _gateway_state_from_snapshot(snapshot)
     detail = _gateway_snapshot_detail(snapshot, state)
     return GatewayHealthResult(state, detail, snapshot)
@@ -17191,7 +17164,7 @@ def _enforcement_label(cfg: OverviewConfig | None) -> str:
         return f"not configured ({mode})"
     if connector in {"openclaw", "zeptoclaw"}:
         return f"{connector} proxy guardrail ({mode})"
-    surface = "policy plugin" if connector == "amp" else ("policy" if connector == "omnigent" else "hook")
+    surface = "policy plugin" if connector == "amp" else "hook"
     posture = "enforcement" if mode == "action" else "observability"
     return f"{connector} {surface} {posture} ({mode})"
 

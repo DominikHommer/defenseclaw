@@ -93,7 +93,7 @@ _INSTALL_STATE_OPTIONAL_FIELDS = frozenset(
         "devin_executable",
         "antigravity_config_dir",
         "opencode_config_dir",
-        "omnigent_config_home",
+        "omnigent_config_home",  # until 1.1: strip this key from old native install state.
         "hermes_home",
         "transaction_id",
     }
@@ -479,7 +479,6 @@ def _validate_install_state(
             "devin",
             "hermes",
             "kiro",
-            "omnigent",
             "opencode",
             "none",
         }

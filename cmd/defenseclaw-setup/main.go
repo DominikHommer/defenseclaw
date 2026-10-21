@@ -190,7 +190,6 @@ type options struct {
 	DevinExecutable      string
 	AntigravityConfigDir string
 	OpenCodeConfigDir    string
-	OmnigentConfigHome   string
 	HermesHome           string
 	// PreserveConnectorConfiguration is internal transaction intent, never a
 	// command-line property. Servicing an existing install without an explicit
@@ -272,7 +271,6 @@ type installState struct {
 	DevinExecutable        string            `json:"devin_executable,omitempty"`
 	AntigravityConfigDir   string            `json:"antigravity_config_dir,omitempty"`
 	OpenCodeConfigDir      string            `json:"opencode_config_dir,omitempty"`
-	OmnigentConfigHome     string            `json:"omnigent_config_home,omitempty"`
 	HermesHome             string            `json:"hermes_home,omitempty"`
 	UnsignedLocalArtifact  bool              `json:"unsigned_local_artifact"`
 	ReleaseSigningRequired bool              `json:"release_signing_required"`
@@ -542,7 +540,6 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	opts.DevinExecutable = transaction.DevinExecutable
 	opts.AntigravityConfigDir = transaction.AntigravityConfigDir
 	opts.OpenCodeConfigDir = transaction.OpenCodeConfigDir
-	opts.OmnigentConfigHome = transaction.OmnigentConfigHome
 	opts.HermesHome = transaction.HermesHome
 	stagingNeed, err := stagingSpaceNeeded(payload)
 	if err != nil {
@@ -1079,12 +1076,6 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) ([]strin
 	if pathExists(filepath.Join(dataRoot, "connector_backups", "opencode", "config.json")) {
 		add("opencode")
 	}
-	for _, logicalName := range []string{"config", "module", "pth"} {
-		if pathExists(filepath.Join(dataRoot, "connector_backups", "omnigent", logicalName+".json")) {
-			add("omnigent")
-			break
-		}
-	}
 	if pathExists(filepath.Join(dataRoot, "connector_backups", "hermes", "config.yaml.json")) {
 		add("hermes")
 	}
@@ -1424,8 +1415,6 @@ func connectorLifecycleConfigHome(env []string, connectorName string) (string, e
 		variable = "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME"
 	case "opencode":
 		variable = "OPENCODE_CONFIG_DIR"
-	case "omnigent":
-		variable = "OMNIGENT_CONFIG_HOME"
 	case "hermes":
 		variable = "HERMES_HOME"
 	default:
@@ -1483,7 +1472,6 @@ var nativeLifecycleConnectorNames = []string{
 	"cursor",
 	"devin",
 	"hermes",
-	"omnigent",
 	"opencode",
 }
 
@@ -1770,7 +1758,6 @@ func stageInstallTree(ctx context.Context, payload loadedPayload, staging, insta
 		DevinExecutable:        opts.DevinExecutable,
 		AntigravityConfigDir:   opts.AntigravityConfigDir,
 		OpenCodeConfigDir:      opts.OpenCodeConfigDir,
-		OmnigentConfigHome:     opts.OmnigentConfigHome,
 		HermesHome:             opts.HermesHome,
 		UnsignedLocalArtifact:  payload.Manifest.Unsigned,
 		ReleaseSigningRequired: true,
@@ -2889,7 +2876,7 @@ func parseArgs(args []string) (options, error) {
 		return opts, errors.New("only per-user INSTALLSCOPE=user is supported by this installer")
 	}
 	if !validConnector(opts.Connector) {
-		return opts, fmt.Errorf("invalid CONNECTOR %q; expected amp, antigravity, codex, claudecode, copilot, cursor, devin, hermes, omnigent, opencode, or none", opts.Connector)
+		return opts, fmt.Errorf("invalid CONNECTOR %q; expected amp, antigravity, codex, claudecode, copilot, cursor, devin, hermes, opencode, or none", opts.Connector)
 	}
 	if opts.Mode != "observe" && opts.Mode != "action" {
 		return opts, fmt.Errorf("invalid MODE %q; expected observe or action", opts.Mode)
@@ -2946,15 +2933,13 @@ func normalizeConnector(value string) string {
 		return "antigravity"
 	case "opencode", "open-code":
 		return "opencode"
-	case "omnigent":
-		return "omnigent"
 	default:
 		return strings.ToLower(value)
 	}
 }
 
 func printUsage() {
-	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=amp|antigravity|codex|claudecode|copilot|cursor|devin|hermes|omnigent|opencode|none] [MODE=observe|action] [STARTGATEWAY=1] | /verify")
+	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=amp|antigravity|codex|claudecode|copilot|cursor|devin|hermes|opencode|none] [MODE=observe|action] [STARTGATEWAY=1] | /verify")
 	fmt.Println("Maintenance: DefenseClawSetup-x64.exe /repair | /upgrade | /uninstall [DELETEUSERDATA=1]")
 }
 

@@ -122,7 +122,7 @@ Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gatewa
   Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):
     Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓
     Codex (codex)         model credential ~/.codex/auth.json ✓
-  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands
+ Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, opencode
   ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml
 Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N]
 Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]
@@ -206,7 +206,7 @@ real run (on 0.1.2 setup now also offers the upgrade to 0.1.3):
     { type: 'out', text: "  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):" },
     { type: 'out', text: "    Claude Code (claude)  model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
     { type: 'out', text: "    Codex (codex)         model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
-    { type: 'out', text: "  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands" },
+ { type: 'out', text: " Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, opencode" },
     { type: 'ok', text: "  ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml" },
     { type: 'prompt', text: "Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N] ", reply: "", pauseMs: 600 },
     { type: 'prompt', text: "Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n] ", reply: "", pauseMs: 600 },
@@ -553,7 +553,7 @@ machine.
 | `the DefenseClaw daemon started before you joined the docker group`, or a run fails with `permission denied` on `/var/run/docker.sock` | The daemon keeps the groups it started with. Restart it so it picks up the `docker` group: `defenseclaw-gateway restart`. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. |
 | Inside a sandbox, every `make` recipe fails with `make: <command>: Operation not permitted` (`Error 127`), and so do node-gyp builds | The sandbox runs an image built before DefenseClaw's `make` wrapper (see [what is in the sandbox image](/docs/sandboxes/guide#what-is-in-the-sandbox-image)), or the agent ran `/usr/bin/make` by its full path. Delete the sandbox and run again, which builds the current image, and run `make` by name. |
-| Inside a sandbox on a kernel older than 5.19 (RHEL 9 runs 5.14), a Python program fails every HTTPS request with `[Errno 95] Operation not supported` | OpenShell 0.1 can't tell a program on those kernels whom its connection goes to, and Python's `ssl` module asks before every handshake. DefenseClaw works around it in the Python harnesses (Hermes Agent, OpenHands, OmniGent) and in the image's own Python: `python3`, `pip` and the virtual environments you make with them. A Python you download inside the sandbox, for example with `uv python install`, keeps failing until an OpenShell release after 0.1.2 fixes it: use the image's `python3`, or `uv pip`, which is not affected. |
+| Inside a sandbox on a kernel older than 5.19 (RHEL 9 runs 5.14), a Python program fails every HTTPS request with `[Errno 95] Operation not supported` | OpenShell 0.1 can't tell a program on those kernels whom its connection goes to, and Python's `ssl` module asks before every handshake. DefenseClaw works around it in the Python harnesses (Hermes Agent) and in the image's own Python: `python3`, `pip` and the virtual environments you make with them. A Python you download inside the sandbox, for example with `uv python install`, keeps failing until an OpenShell release after 0.1.2 fixes it: use the image's `python3`, or `uv pip`, which is not affected. |
 
 The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
 guide covers the rest.

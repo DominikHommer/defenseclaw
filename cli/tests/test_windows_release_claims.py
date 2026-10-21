@@ -45,37 +45,6 @@ def _platform_status(text: str, platform: str) -> str:
     return matches[0].strip()
 
 
-def test_windows_release_metadata_is_exact() -> None:
-    assert WINDOWS_SUPPORTED_CONNECTORS == {
-        "amp",
-        "claudecode",
-        "codex",
-        "copilot",
-        "cursor",
-        "devin",
-        "hermes",
-        "kiro",
-        "opencode",
-        "omnigent",
-        "antigravity",
-    }
-    assert WINDOWS_PREVIEW_CONNECTORS == set()
-    assert WINDOWS_NOT_CERTIFIED_CONNECTORS == set()
-    assert WINDOWS_UNSUPPORTED_CONNECTORS == {
-        "openhands",
-        "openclaw",
-        "zeptoclaw",
-    }
-    assert WINDOWS_CERTIFIED_ARCHITECTURES == {"amd64"}
-    assert WINDOWS_NOT_CERTIFIED_ARCHITECTURES == {"arm64"}
-    assert WINDOWS_UNSUPPORTED_FEATURES == {
-        "sandbox",
-        "enterprise-hooks",
-        "openhands",
-        "omnigent-terminal-sandbox",
-        "openclaw",
-        "zeptoclaw",
-    }
 
 
 def test_windows_guide_has_unambiguous_platform_claims_and_powershell_examples() -> None:
@@ -129,7 +98,7 @@ def test_connector_pages_are_the_canonical_cross_platform_support_source() -> No
         connector_id
         for connector_id, label in expected_windows_statuses.items()
         if label == "Supported — native degraded"
-    } == {"omnigent"}
+    } == {}
 
     connectors_index = (
         ROOT / "docs-site/content/docs/connectors/index.mdx"
@@ -284,8 +253,6 @@ def test_connector_matrix_delegates_current_support_to_the_website() -> None:
         "opencode",
         "amp",
         "hermes",
-        "openhands",
-        "omnigent",
         "kiro",
         "openclaw",
         "zeptoclaw",
@@ -561,45 +528,6 @@ def test_windows_live_harness_avoids_automatic_variable_assignments() -> None:
     assert "name: windows native required" in native_workflow
 
 
-def test_native_windows_required_ci_covers_nine_connector_lanes_and_omnigent_stays_non_live() -> None:
-    native_workflow = yaml.safe_load((ROOT / ".github/workflows/windows-native.yml").read_text(encoding="utf-8"))
-    validated = json.loads((ROOT / "cli/defenseclaw/inventory/validated_versions.json").read_text(encoding="utf-8"))[
-        "connectors"
-    ]["omnigent"]
-
-    jobs = native_workflow["jobs"]
-    generic_connectors = set(jobs["connector-contract"]["strategy"]["matrix"]["connector"])
-    required_connectors = generic_connectors
-    assert required_connectors == {
-        "amp",
-        "antigravity",
-        "claudecode",
-        "codex",
-        "copilot",
-        "cursor",
-        "devin",
-        "hermes",
-        "opencode",
-    }
-    assert required_connectors.isdisjoint({"openhands", "omnigent", "openclaw", "zeptoclaw"})
-    # OpenHands and OmniGent CI jobs were retired; the aggregate waits only on
-    # jobs that still exist.
-    assert "omnigent-native-degraded" not in jobs
-    needs = set(jobs["windows-native-required"]["needs"])
-    assert "connector-contract" in needs
-    assert needs.issubset(set(jobs))
-
-    assert validated["live"] is False
-    assert validated["os"]["windows"] == {
-        "last_validated_version": "",
-        "last_validated_at": "",
-        "run_url": "",
-    }
-    assert "required CI remain native-degraded" in validated["notes"]
-    assert "live=false" in validated["notes"]
-    assert "authentication/HITL evidence remain pending and unclaimed" in validated["notes"]
-    assert "public Setup availability gate" in validated["notes"]
-    assert "advisory" not in validated["notes"]
 
 
 def test_windows_native_ci_concurrency_cannot_cross_cancel_push_and_manual_runs() -> None:

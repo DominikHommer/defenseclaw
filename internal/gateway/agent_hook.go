@@ -2542,15 +2542,10 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 		strings.EqualFold(strings.TrimSpace(toolName), "execute_bash") {
 		return "shell"
 	}
-	// OmniGent's os_env shell tool (an agent's os_env block registers
 	// sys_os_shell, {"command": "..."}; the DefenseClaw OpenShell sandbox
 	// agent uses it) is the same shell shape under another name. Unmapped,
 	// its commands parse to no command facts and a CRITICAL command finding
 	// stays an unproven candidate that allows.
-	if strings.EqualFold(strings.TrimSpace(connectorName), "omnigent") &&
-		strings.EqualFold(strings.TrimSpace(toolName), "sys_os_shell") {
-		return "shell"
-	}
 	// Text sent to a running process is judged as shell input (see
 	// agentHookTrustedActionArgs): agy's send_command_input as run_command
 	// input, Hermes' process tool (write, submit) as a shell command.
@@ -2566,14 +2561,11 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 }
 
 // agentHookTrustedActionArgs selects the arguments the trusted-action parser
-// sees. OpenHands' terminal tool and agy's run_command report execution
 // controls and model labels next to the command;
-// connector.OpenHandsTrustedShellArgs and connector.AntigravityTrustedShellArgs
 // project them onto the plain shell shape when that is exact (as
 // connector.AmpBashTrustedShellArgs does for Amp's Bash "cmd"), and
 // connector.TrustedShellArgs takes the working directory and control
 // arguments out of the other harnesses' shell tools. Text a tool sends to a
-// running process (OpenHands terminal input, agy send_command_input, Hermes
 // process write and submit) is projected the same way, so it is judged as
 // shell input rather than not at all. The recorded ToolArgs never change.
 //
@@ -2585,10 +2577,6 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 // was ambiguous.
 func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMessage) (projected json.RawMessage, cwd string) {
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
-	case "openhands":
-		if out, ok := connector.OpenHandsTrustedShellArgs(toolName, args); ok {
-			return out, ""
-		}
 	case "antigravity":
 		if out, dir, ok := connector.AntigravityTrustedShellArgs(toolName, args); ok {
 			return out, dir
@@ -3004,7 +2992,6 @@ func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookC
 
 // confirmWithoutAskAgent names the agent when the standalone enterprise
 // profile blocks a confirmation instead of downgrading it to an alert: a tool
-// call on Hermes or OpenHands, whose hooks can neither ask the user nor show
 // a notice while the call runs, so the call would run unseen although the
 // organization's rule asked for a person's approval. It returns "" otherwise.
 func confirmWithoutAskAgent(connectorName, rawAction, mode, event string) string {
@@ -3014,8 +3001,6 @@ func confirmWithoutAskAgent(connectorName, rawAction, mode, event string) string
 	switch {
 	case connectorName == "hermes" && canonicalEvent(event) == "pretoolcall":
 		return "Hermes"
-	case connectorName == "openhands" && canonicalEvent(event) == "pretooluse":
-		return "OpenHands"
 	}
 	return ""
 }
@@ -3128,13 +3113,6 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 		}
 	case "copilot":
 		return copilotHookOutput(req.HookEventName, action, rawAction, reason, additional)
-	case "openhands":
-		if action == "block" {
-			return map[string]interface{}{"decision": "deny", "reason": reason}
-		}
-		if (action == "alert" || rawAction == "confirm") && additional != "" {
-			return map[string]interface{}{"additionalContext": additional}
-		}
 	case "opencode":
 		if action == "block" {
 			return map[string]interface{}{"decision": "deny", "reason": reason}

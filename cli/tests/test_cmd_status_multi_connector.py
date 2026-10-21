@@ -321,31 +321,7 @@ class TestPrintAgentsLiveCounters(unittest.TestCase):
         self.assertIn("source=automatic", out)
         self.assertIn("requests: 2", out)
 
-    def test_omnigent_running_adapter_is_degraded_when_effective_policy_is_unverified(self):
-        health = {"connectors": [{"name": "omnigent", "state": "running", "requests": 0}]}
-        cfg = _cfg(["omnigent"], modes={"omnigent": "action"})
-        with patch(
-            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-            return_value=("warn", "server record is stale; effective policy config is unverified"),
-        ):
-            out = _render_live(cfg, health)
 
-        self.assertIn("DEGRADED", out)
-        self.assertNotIn("RUNNING", out)
-        self.assertIn("effective policy config is unverified", out)
-
-    def test_omnigent_verified_native_degraded_policy_remains_running(self):
-        health = {"connectors": [{"name": "omnigent", "state": "running", "requests": 0}]}
-        cfg = _cfg(["omnigent"], modes={"omnigent": "action"})
-        with patch(
-            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-            return_value=("pass", "live effective config verified through --config"),
-        ):
-            out = _render_live(cfg, health)
-
-        self.assertIn("RUNNING", out)
-        self.assertNotIn("DEGRADED", out)
-        self.assertIn("live effective config verified", out)
 
     def test_opencode_running_requires_fresh_current_generation_heartbeat(self):
         now = datetime.now(timezone.utc)
@@ -527,84 +503,6 @@ class TestOpenCodeRuntimeTruth(unittest.TestCase):
         self.assertIn("gateway status is unavailable", detail)
 
 
-class TestOmnigentJsonReadinessParity(unittest.TestCase):
-    def test_manual_plural_roster_degrades_stale_pid_and_preserves_opencode_truth(self):
-        now = datetime.now(timezone.utc)
-        health = {
-            "started_at": (now - timedelta(hours=1)).isoformat(),
-            "connectors": [
-                {"name": "omnigent", "state": "running", "source": "manual"},
-                {
-                    "name": "opencode",
-                    "state": "running",
-                    "source": "manual",
-                    "load_heartbeat_at": now.isoformat(),
-                },
-            ],
-        }
-        cfg = _cfg(["omnigent", "opencode"])
-        detail = "server record is stale; effective policy config is unverified"
-        with patch(
-            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-            return_value=("warn", detail),
-        ) as readiness:
-            rows = cmd_status._connector_roster(cfg, health=health)
-
-        by_name = {row["name"]: row for row in rows}
-        self.assertEqual(by_name["omnigent"]["state"], "degraded")
-        self.assertEqual(by_name["omnigent"]["readiness_detail"], detail)
-        self.assertEqual(by_name["omnigent"]["source"], "manual")
-        self.assertEqual(by_name["opencode"]["state"], "running")
-        self.assertIn("authenticated load heartbeat is fresh", by_name["opencode"]["runtime_detail"])
-        readiness.assert_called_once_with(cfg)
-
-    def test_automatic_singular_roster_degrades_live_config_mismatch(self):
-        health = {
-            "connector": {
-                "name": "omnigent",
-                "state": "running",
-                "source": "automatic",
-            }
-        }
-        cfg = _cfg([])
-        detail = "live --config selects C:\\other\\config.yaml, not managed C:\\managed\\config.yaml"
-        with patch(
-            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-            return_value=("fail", detail),
-        ):
-            rows = cmd_status._connector_roster(cfg, health=health)
-
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["name"], "omnigent")
-        self.assertEqual(rows[0]["source"], "automatic")
-        self.assertEqual(rows[0]["state"], "degraded")
-        self.assertEqual(rows[0]["readiness_detail"], detail)
-
-    def test_verified_runtime_remains_running_in_json_roster(self):
-        health = {"connectors": [{"name": "omnigent", "state": "running"}]}
-        cfg = _cfg(["omnigent"])
-        detail = "live effective config verified through --config"
-        with patch(
-            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-            return_value=("pass", detail),
-        ):
-            rows = cmd_status._connector_roster(cfg, health=health)
-
-        self.assertEqual(rows[0]["state"], "running")
-        self.assertEqual(rows[0]["readiness_detail"], detail)
-
-    def test_unavailable_readiness_is_degraded_without_failing_status(self):
-        with patch(
-            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-            side_effect=OSError("evidence unavailable"),
-        ):
-            state, detail = cmd_status._omnigent_effective_runtime_state(
-                _cfg(["omnigent"]),
-                "running",
-            )
-
-        self.assertEqual(state, "degraded")
-        self.assertIn("policy readiness unavailable", detail)
 
 
 class TestStatusRuntimeProcessIdentity(unittest.TestCase):

@@ -1314,40 +1314,6 @@ class RenderPlanConnectorTests(unittest.TestCase):
 
         self.assertEqual(got, expected)
 
-    def test_backup_roster_covers_all_native_lifecycle_connectors_and_legacy_receipts(self):
-        native_connectors = {
-            "amp",
-            "antigravity",
-            "claudecode",
-            "codex",
-            "copilot",
-            "cursor",
-            "hermes",
-            "omnigent",
-            "opencode",
-            legacy_connector.RETIRED_DESKTOP_ID,
-        }
-        self.assertLessEqual(native_connectors, set(cmd_uninstall._CONNECTOR_BACKUP_MARKERS))
-        self.assertIn(
-            os.path.join("connector_backups", "cursor", "config.json"),
-            cmd_uninstall._CONNECTOR_BACKUP_MARKERS["cursor"],
-        )
-        self.assertIn(
-            os.path.join("connector_backups", "cursor", "hooks.json.json"),
-            cmd_uninstall._CONNECTOR_BACKUP_MARKERS["cursor"],
-        )
-        self.assertIn(
-            os.path.join("connector_backups", "antigravity", "config.json"),
-            cmd_uninstall._CONNECTOR_BACKUP_MARKERS["antigravity"],
-        )
-        self.assertEqual(
-            set(cmd_uninstall._CONNECTOR_BACKUP_MARKERS["omnigent"]),
-            {
-                os.path.join("connector_backups", "omnigent", "config.json"),
-                os.path.join("connector_backups", "omnigent", "module.json"),
-                os.path.join("connector_backups", "omnigent", "pth.json"),
-            },
-        )
 
 
 class ConnectorTeardownDispatchTests(unittest.TestCase):

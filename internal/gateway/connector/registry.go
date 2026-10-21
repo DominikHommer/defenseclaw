@@ -194,11 +194,9 @@ func newBuiltinConnectors() []Connector {
 		NewCursorConnector(),
 		NewDevinConnector(),
 		NewCopilotConnector(),
-		NewOpenHandsConnector(),
 		NewAntigravityConnector(),
 		NewOpenCodeConnector(),
 		NewAMPConnector(),
-		NewOmnigentConnector(),
 		NewKiroConnector(),
 	}
 }

@@ -7,119 +7,15 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
-
-// The standalone guardian renders every per-user target over the hook
-// socket with credentials bound to the target's uid, never the
-// connector-scoped credential every user of the connector would share (the
-// fixture fails the test if that minter runs).
-func TestStandaloneReconcileRendersPerUserCredentialsOverTheHookSocket(t *testing.T) {
-	uid, gid := os.Getuid(), os.Getgid()
-	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
-	f := newStandaloneFixture(t, resolver)
-	alice := f.home(t, "alice", 0o700)
-	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice}
-	f.writeManifest(t,
-		enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"},
-		enterprisehooks.ManifestTarget{User: "alice", Connector: "openhands"},
-	)
-	keyID := strings.Repeat("c", 64)
-	origKeyID := enterpriseHookCredentialKeyID
-	t.Cleanup(func() { enterpriseHookCredentialKeyID = origKeyID })
-	enterpriseHookCredentialKeyID = func(string) (string, error) { return keyID, nil }
-	run, err := runEnterpriseHookReconcileOnce(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	requireLedgerOrStateTrust(t, run.StateErr)
-	if run.Failures != 0 {
-		t.Fatalf("rows = %+v", run.Rows)
-	}
-	// Each run publishes what it did to every target and which key it
-	// rendered from. A first install is not a verification; the next run
-	// verifies the installed hooks without repairing them.
-	var previousID string
-	for pass, wantVerified := range []bool{false, true} {
-		if pass > 0 {
-			if run, err = runEnterpriseHookReconcileOnce(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-		}
-		data, err := os.ReadFile(filepath.Join(f.authDir, managed.HookGuardianCredentialAttestationFile))
-		if err != nil {
-			t.Fatal(err)
-		}
-		attestation, err := enterprisehooks.ParseCredentialAttestation(data)
-		if err != nil || !attestation.Current() || attestation.KeyID != keyID || attestation.ID == previousID || len(attestation.Targets) != 2 ||
-			attestation.OperationID != "" || attestation.Phase != "" {
-			t.Fatalf("pass %d: attestation = %+v %v", pass, attestation, err)
-		}
-		// It is bound to the authorization ledger the same run published,
-		// and to none when the run's state did not persist (as a non-root
-		// test, the state file fails its trust check).
-		ledger, err := os.ReadFile(filepath.Join(f.authDir, managed.HookGuardianAuthorizationFile))
-		if err != nil || attestation.BoundTo(ledger) != (run.StateErr == nil) || (run.StateErr != nil && attestation.AuthorizationSHA256 != "") {
-			t.Fatalf("pass %d: attestation binding = %q with state error %v (%v)", pass, attestation.AuthorizationSHA256, run.StateErr, err)
-		}
-		previousID = attestation.ID
-		for _, target := range attestation.Targets {
-			// Each names the credential it was rendered with, so readiness
-			// and a rotation can check it against the key.
-			if target.State != enterprisehooks.CredentialTargetCurrent || !target.Credentials || target.UID != uid || target.Verified != wantVerified ||
-				target.CredentialID != connector.UserScopedCredentialKeyID("hook-"+target.Connector+"-"+strconv.Itoa(uid)) {
-				t.Fatalf("pass %d: target = %+v", pass, target)
-			}
-		}
-	}
-	// A run while a credential rotation holds the guardian's record names
-	// that rotation's operation and phase, so the rotation takes no other
-	// run as proof.
-	record, _ := json.Marshal(enterprisehooks.CredentialTransaction{
-		Version: enterprisehooks.CredentialTransactionVersion, OperationID: strings.Repeat("0", 32), Phase: enterprisehooks.CredentialPhaseRollback,
-		ManifestSHA256: strings.Repeat("d", 64), PreviousKeyID: strings.Repeat("a", 64), NextKeyID: strings.Repeat("b", 64),
-	})
-	if err := os.WriteFile(filepath.Join(f.authDir, managed.HookGuardianCredentialTransactionFile), record, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runEnterpriseHookReconcileOnce(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	data, _ := os.ReadFile(filepath.Join(f.authDir, managed.HookGuardianCredentialAttestationFile))
-	if attestation, err := enterprisehooks.ParseCredentialAttestation(data); err != nil ||
-		attestation.OperationID != strings.Repeat("0", 32) || attestation.Phase != enterprisehooks.CredentialPhaseRollback {
-		t.Fatalf("a run under a rotation does not name it: %+v %v", attestation, err)
-	}
-	identity := strconv.Itoa(uid)
-	targets := f.workerTargets()
-	for _, name := range []string{"codex", "openhands"} {
-		target, ok := targets[name+"@"+alice]
-		if !ok {
-			t.Fatalf("%s: no worker target", name)
-		}
-		options := target.Options
-		if options.APIToken != "hook-"+name+"-"+identity || options.OTLPPathToken != "otlp-"+name+"-"+identity {
-			t.Fatalf("%s: credentials are not bound to uid %s: %q %q", name, identity, options.APIToken, options.OTLPPathToken)
-		}
-		if options.HookCredentialIdentity != identity {
-			t.Fatalf("%s: credential identity = %q, want %q", name, options.HookCredentialIdentity, identity)
-		}
-		if options.ManagedHookSocket != "/run/defenseclaw-hook/hook.sock" || options.ManagedServiceUID != 995 {
-			t.Fatalf("%s: transport = %q/%d, want the hook socket", name, options.ManagedHookSocket, options.ManagedServiceUID)
-		}
-	}
-}
 
 // Without the hook socket there is no transport a per-user hook may use:
 // the row fails instead of being rendered for loopback TCP.
