@@ -35,10 +35,13 @@ export default defineConfig({
     // components in components/diagram/*. SVG is baked directly into
     // the static HTML so crawlers, screen readers, and slow connections
     // all get the same rendered output as the operator on the page.
+    // GitHub's light and dark themes: no italics, AA-contrast token colours
+    // on both backgrounds, and the same palette as the landing demo
+    // (components/feature-demo), so every code surface matches.
     rehypeCodeOptions: {
       themes: {
-        light: 'catppuccin-latte',
-        dark: 'catppuccin-mocha',
+        light: 'github-light',
+        dark: 'github-dark',
       },
     },
   },

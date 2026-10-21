@@ -2,19 +2,26 @@ import Link from 'next/link';
 import { Building2 } from 'lucide-react';
 import { SoftwareApplicationSchema } from '@/components/structured-data';
 import { DefenseClawDemo } from '@/components/feature-demo';
-import { FirstBlockRunbook } from '@/components/install/first-block-runbook';
+import { FirstBlockRunbook, HeroInstall } from '@/components/install';
 import { ConnectorGrid, ConnectorLegend } from '@/components/home/connector-grid';
+import { DocMap } from '@/components/home/doc-map';
 import { EnterpriseBand } from '@/components/home/enterprise-band';
 import { FeatureGrid } from '@/components/home/feature-grid';
 import { AGENT_COUNT, agentSummary } from '@/components/home/home-data';
 import styles from '@/components/home/home.module.css';
+import { resolveDocPage } from '@/lib/sections';
 
+// Walkthroughs, by slug. They live under how-to/ once the docs carry a
+// How-to section, under stories/ before that; a missing one is skipped.
 const STORIES = [
-  { href: '/docs/stories/observe-claude-code', title: 'Stop Claude Code from running a destructive command', body: 'Prove the action never reaches the disk.' },
-  { href: '/docs/stories/prompt-injection-codex', title: 'Catch a prompt injection on Codex', body: 'Combine deterministic rules with an optional judge.' },
-  { href: '/docs/stories/hitl-approvals', title: 'Approve risky tool calls before they fire', body: 'Pause HIGH findings and return the operator’s decision.' },
-  { href: '/docs/stories/local-observability', title: 'Pin local observability in under 60 seconds', body: 'Follow one event through metrics, logs, traces, and audit.' },
-];
+  { slug: 'observe-claude-code', title: 'Stop Claude Code from running a destructive command', body: 'Prove the action never reaches the disk.' },
+  { slug: 'prompt-injection-codex', title: 'Catch a prompt injection on Codex', body: 'Combine deterministic rules with an optional judge.' },
+  { slug: 'hitl-approvals', title: 'Approve risky tool calls before they fire', body: 'Pause HIGH findings and return the operator’s decision.' },
+  { slug: 'local-observability', title: 'Pin local observability in under 60 seconds', body: 'Follow one event through metrics, logs, traces, and audit.' },
+].flatMap((story) => {
+  const href = resolveDocPage([`how-to/${story.slug}`, `stories/${story.slug}`]);
+  return href ? [{ ...story, href }] : [];
+});
 
 export default function HomePage() {
   return (
@@ -36,13 +43,16 @@ export default function HomePage() {
               Open source from Cisco AI Defense. Scan skills and MCP servers, block risky tool calls and keep an
               audit trail for {agentSummary()}, on macOS, Linux and Windows.
             </p>
-            <FirstBlockRunbook className={styles.heroRunbook} />
-            <p className={styles.heroAfter}>
-              Release archives, the macOS menu-bar app and checksum steps are on the{' '}
-              <Link href="/docs/get-started/download">Download page</Link>.
-            </p>
+            <HeroInstall className={styles.heroInstall} />
           </div>
-          <div className={styles.heroDemo}>
+          <DocMap className={styles.heroMap} />
+        </div>
+      </section>
+
+      <section className={styles.section} aria-labelledby="runbook-heading">
+        <div className={`editorial-shell ${styles.startGrid}`}>
+          <FirstBlockRunbook />
+          <div className={styles.startDemo}>
             <DefenseClawDemo scenario="policy-decision-trace" />
           </div>
         </div>
@@ -72,23 +82,25 @@ export default function HomePage() {
 
       <EnterpriseBand />
 
-      <section className={styles.section} aria-labelledby="stories-heading">
-        <div className={`editorial-shell ${styles.storiesGrid}`}>
-          <SectionIntro title="See the decision in context" id="stories-heading" stacked>
-            Walkthroughs that connect configuration to the interception point, the outcome and the audit evidence.
-          </SectionIntro>
-          <ul className={styles.stories}>
-            {STORIES.map((story) => (
-              <li key={story.href}>
-                <Link href={story.href}>
-                  <strong>{story.title}</strong>
-                  <span>{story.body}</span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </section>
+      {STORIES.length > 0 ? (
+        <section className={styles.section} aria-labelledby="stories-heading">
+          <div className={`editorial-shell ${styles.storiesGrid}`}>
+            <SectionIntro title="See the decision in context" id="stories-heading" stacked>
+              Walkthroughs that connect configuration to the interception point, the outcome and the audit evidence.
+            </SectionIntro>
+            <ul className={styles.stories}>
+              {STORIES.map((story) => (
+                <li key={story.href}>
+                  <Link href={story.href}>
+                    <strong>{story.title}</strong>
+                    <span>{story.body}</span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      ) : null}
 
       <section className={styles.closing} aria-labelledby="closing-heading">
         <div className={`editorial-shell ${styles.closingGrid}`}>

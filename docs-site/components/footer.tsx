@@ -1,10 +1,11 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { site, basePath } from '@/lib/site';
+import { docSections } from '@/lib/sections';
 
-// Site footer for the home layout. Columns follow the same reader path
-// as the top navigation (get started, download, check support, roll
-// out to a fleet), then the community surfaces. Internal links go
+// Site footer for the home layout. The first column is the docs sections
+// (lib/sections.ts, the same list as the navbar); then getting started,
+// agents, rolling out to a fleet, and the community surfaces. Internal links go
 // through next/link so the GitHub Pages basePath is applied; external
 // links are plain anchors.
 
@@ -21,31 +22,27 @@ interface FooterColumn {
 
 const columns: FooterColumn[] = [
   {
+    title: 'Documentation',
+    links: docSections.map((section) => ({ text: section.title, href: section.href, external: section.file })),
+  },
+  {
     title: 'Get started',
     links: [
       { text: 'What is DefenseClaw', href: '/docs/get-started/what-is-defenseclaw' },
       { text: 'Quickstart', href: '/docs/get-started/quickstart' },
-      { text: 'Install', href: '/docs/get-started/install' },
-      { text: 'First run', href: '/docs/get-started/first-run' },
-      { text: 'Upgrade', href: '/docs/get-started/upgrade' },
-    ],
-  },
-  {
-    title: 'Download',
-    links: [
       { text: 'Install commands', href: '/docs/get-started/download' },
       { text: 'Windows guide', href: '/docs/get-started/windows' },
-      { text: 'Command builder', href: '/docs/command-generator' },
+      { text: 'Upgrade', href: '/docs/get-started/upgrade' },
       { text: 'Releases', href: `${site.repo.url}/releases`, external: true },
     ],
   },
   {
-    title: 'Support matrix',
+    title: 'Agents',
     links: [
-      { text: 'Connectors by OS', href: '/docs/support-matrix' },
       { text: 'Connectors', href: '/docs/connectors' },
+      { text: 'Support matrix', href: '/docs/support-matrix' },
       { text: 'Version compatibility', href: '/docs/connectors/compatibility' },
-      { text: 'Capability matrix', href: '/docs/connectors/capability-matrix' },
+      { text: 'Command builder', href: '/docs/command-generator' },
     ],
   },
   {
@@ -98,7 +95,7 @@ export function Footer() {
         <nav aria-label="Footer" className="grid grid-cols-2 gap-x-6 gap-y-8 sm:grid-cols-3 lg:grid-cols-5">
           {columns.map((column) => (
             <div key={column.title}>
-              <h2 className="site-footer-heading mb-3 text-xs font-semibold uppercase tracking-[0.08em] text-fd-foreground">
+              <h2 className="site-footer-heading mb-3 text-sm font-semibold text-fd-foreground">
                 {column.title}
               </h2>
               <ul className="flex flex-col gap-2 text-sm">

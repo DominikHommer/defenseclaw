@@ -2,18 +2,23 @@ import type { BaseLayoutProps } from 'fumadocs-ui/layouts/shared';
 import type { DocsLayoutProps } from 'fumadocs-ui/layouts/docs';
 import Image from 'next/image';
 import {
+  Bot,
   BookOpen,
   Building2,
   Download,
   Grid3x3,
-  Plug,
+  LifeBuoy,
+  Library,
   Rocket,
   SquareTerminal,
   WandSparkles,
   Wrench,
 } from 'lucide-react';
+import type { ReactNode } from 'react';
+import type { LinkItemType } from 'fumadocs-ui/layouts/shared';
 import { source } from '@/lib/source';
 import { site, basePath } from '@/lib/site';
+import { docSection, featureLinks, type DocLink } from '@/lib/sections';
 import RepoStats from '@/components/repo-stats';
 
 // Shared base options used by both the docs and home layouts. Keeps
@@ -46,75 +51,13 @@ export const baseOptions: BaseLayoutProps = {
     ),
     url: '/',
   },
-  // Primary navigation, left to right, follows the reader's path: get
-  // started, download, pick a connector, check what works on which OS,
-  // roll out to a fleet. The interactive tools sit in one menu so the
-  // bar stays short. Icons show in the docs sidebar and the mobile menu;
-  // the desktop home bar renders the text only.
+  // Primary navigation follows the docs sections (lib/sections.ts): Get
+  // started, Features, How-to, Troubleshooting, Reference, then Enterprise.
+  // A section that has no page in this build is left out. Appendix, For
+  // agents, Download and the browser tools sit under More so the bar stays
+  // on one line. Icons show in the mobile menu; the desktop bar renders text.
   links: [
-    {
-      type: 'main',
-      text: 'Get started',
-      icon: <Rocket />,
-      url: '/docs/get-started/quickstart',
-      active: 'url',
-    },
-    {
-      type: 'main',
-      text: 'Download',
-      icon: <Download />,
-      url: '/docs/get-started/download',
-      active: 'url',
-    },
-    {
-      type: 'main',
-      text: 'Connectors',
-      icon: <Plug />,
-      url: '/docs/connectors',
-      active: 'nested-url',
-    },
-    {
-      type: 'main',
-      text: 'Support matrix',
-      icon: <Grid3x3 />,
-      url: '/docs/support-matrix',
-      active: 'url',
-    },
-    {
-      type: 'main',
-      text: 'Enterprise',
-      icon: <Building2 />,
-      url: '/docs/enterprise',
-      active: 'nested-url',
-    },
-    {
-      type: 'menu',
-      text: 'Tools',
-      icon: <Wrench />,
-      items: [
-        {
-          text: 'Command builder',
-          description: 'Build a non-interactive setup command.',
-          icon: <SquareTerminal />,
-          url: '/docs/command-generator',
-          active: 'url',
-        },
-        {
-          text: 'Policy creator',
-          description: 'Author and evaluate a policy in the browser.',
-          icon: <WandSparkles />,
-          url: '/docs/policies/creator',
-          active: 'url',
-        },
-        {
-          text: 'Stories',
-          description: 'Step-by-step walkthroughs of common protections.',
-          icon: <BookOpen />,
-          url: '/docs/stories',
-          active: 'nested-url',
-        },
-      ],
-    },
+    ...primaryLinks(),
     // Secondary nav anchors the project to its sibling community
     // surfaces. Order is intentional: parent-org → Discord → repo
     // stats → repo. Keeping the GitHub identity (stats pills + icon)
@@ -184,13 +127,46 @@ export const baseOptions: BaseLayoutProps = {
   ],
 };
 
+function sectionLink(title: string, icon: ReactNode, label = title): LinkItemType[] {
+  const section = docSection(title);
+  if (!section) return [];
+  return [{ type: 'main', text: label, icon, url: section.href, active: 'nested-url' }];
+}
+
+function menuItem(link: DocLink, icon: ReactNode) {
+  const base = { text: link.title, description: link.description, url: link.href, ...(icon ? { icon } : {}) };
+  return link.file ? { ...base, external: true } : { ...base, active: 'nested-url' as const };
+}
+
+function primaryLinks(): LinkItemType[] {
+  const features = featureLinks.map((link) => menuItem(link, null));
+  const more = [
+    docSection('Appendix') ? menuItem(docSection('Appendix')!, <Library />) : null,
+    docSection('For agents') ? menuItem(docSection('For agents')!, <Bot />) : null,
+    { text: 'Download', description: 'Install commands and release files for every OS.', icon: <Download />, url: '/docs/get-started/download', active: 'url' as const },
+    { text: 'Support matrix', description: 'Which agent works on which OS.', icon: <Grid3x3 />, url: '/docs/support-matrix', active: 'url' as const },
+    { text: 'Command builder', description: 'Build a non-interactive setup command.', icon: <SquareTerminal />, url: '/docs/command-generator', active: 'url' as const },
+    { text: 'Policy creator', description: 'Write and test a policy in the browser.', icon: <WandSparkles />, url: '/docs/policies/creator', active: 'url' as const },
+  ].filter((item) => item !== null);
+
+  return [
+    ...sectionLink('Get started', <Rocket />),
+    ...(features.length ? [{ type: 'menu' as const, text: 'Features', icon: <BookOpen />, items: features }] : []),
+    ...sectionLink('How-to guides', <BookOpen />, 'How-to'),
+    ...sectionLink('Troubleshooting', <LifeBuoy />),
+    ...sectionLink('Reference', <Library />),
+    { type: 'main', text: 'Enterprise', icon: <Building2 />, url: '/docs/enterprise', active: 'nested-url' },
+    { type: 'menu', text: 'More', icon: <Wrench />, items: more },
+  ];
+}
+
 // DocsLayoutProps takes the same nav block but adds the source tree
 // — the docs sidebar derives every entry from `meta.json` files
 // under content/docs/, so authoring a new page is just dropping an
 // MDX file and listing it in the local meta.
 //
 // The docs sidebar keeps only the icon links (Cisco AI Defense, Discord,
-// GitHub), which render in its footer. Every main link and the Tools
+// GitHub), which render in its footer. Every main link and the More
 // menu already has a home in the page tree below, so listing them above
 // the tree showed each destination twice. The `custom` repo-stats pill
 // also stays on the home navbar only, where it sits left of the GitHub

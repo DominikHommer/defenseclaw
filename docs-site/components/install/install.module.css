@@ -13,7 +13,9 @@
   display: flex;
   align-items: stretch;
   min-width: 0;
+  overflow: hidden;
   border: 1px solid #0b1318;
+  border-radius: 8px;
   background: var(--cmd-bg);
   color: var(--cmd-ink);
 }
@@ -129,7 +131,9 @@
 
 .switcher {
   display: inline-flex;
+  overflow: hidden;
   border: 1px solid var(--editorial-rule);
+  border-radius: 6px;
   background: var(--editorial-paper);
 }
 
@@ -162,11 +166,11 @@
 .switcherButton:focus-visible {
   position: relative;
   outline: 2px solid var(--editorial-blue);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 /* ── Landing runbook: install, set up, block ───────────────────────────── */
-/* The page's one install surface and its one loud element: a terminal-dark
+/* The three commands from install to the first block, in one terminal-dark
  * panel in both themes. Rows share the panel; the commands lose their own box. */
 
 .runbook {
@@ -176,8 +180,9 @@
   --rb-muted: #a3b4bf;
   --rb-accent: #7fd0f0;
   min-width: 0;
+  overflow: hidden;
   border: 1px solid var(--rb-bg);
-  border-top: 3px solid var(--brand-cisco);
+  border-radius: 12px;
   background: var(--rb-bg);
   color: var(--rb-ink);
 }
@@ -185,7 +190,6 @@
 :global(.dark) .runbook {
   --rb-bg: #0a0f13;
   border-color: var(--editorial-rule);
-  border-top-color: var(--brand-cisco);
 }
 
 .runbookHead {
@@ -319,6 +323,142 @@
   color: var(--rb-ink);
 }
 
+
+/* ── Landing hero install ──────────────────────────────────────────────── */
+/* The landing page's one loud element: the install command set large on a
+ * terminal-dark slab, with the OS choice on the slab's top edge. */
+
+.heroInstall {
+  --hi-bg: #0b1318;
+  --hi-head: #131e26;
+  --hi-rule: rgb(255 255 255 / 0.12);
+  --hi-ink: #f2f6f8;
+  --hi-muted: #a3b4bf;
+  --hi-accent: #7fd0f0;
+  min-width: 0;
+}
+
+.heroInstallHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem 1rem;
+  padding: 0.55rem 0.55rem 0.55rem 1.25rem;
+  border: 1px solid var(--hi-bg);
+  border-bottom: 1px solid var(--hi-rule);
+  border-radius: 12px 12px 0 0;
+  background: var(--hi-head);
+}
+
+:global(.dark) .heroInstallHead {
+  border-color: var(--editorial-rule);
+  border-bottom-color: var(--hi-rule);
+}
+
+.heroInstallTitle {
+  margin: 0;
+  color: var(--hi-ink);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.heroInstall .heroInstallOs {
+  border-color: var(--hi-rule);
+  background: transparent;
+}
+
+.heroInstall .heroInstallOs .switcherButton {
+  min-height: 2.5rem;
+  border-right-color: var(--hi-rule);
+  color: var(--hi-muted);
+}
+
+.heroInstall .heroInstallOs .switcherButton:hover {
+  color: var(--hi-ink);
+}
+
+.heroInstall .heroInstallOs .switcherButton[aria-pressed='true'] {
+  background: var(--hi-ink);
+  color: var(--hi-bg);
+}
+
+.heroInstall .heroInstallOs .switcherButton:focus-visible {
+  outline-color: var(--hi-accent);
+}
+
+.heroInstall .heroInstallCmd {
+  border-top: 0;
+  border-radius: 0 0 12px 12px;
+  box-shadow: 0 28px 50px -36px rgb(4 22 33 / 0.55);
+}
+
+:global(.dark) .heroInstall .heroInstallCmd {
+  border-color: var(--editorial-rule);
+  box-shadow: none;
+}
+
+.heroInstall .heroInstallCmd .commandText {
+  padding-block: 1.3rem;
+  padding-left: calc(1.25rem + var(--prompt-w, 0ch));
+  font-size: 0.875rem;
+  line-height: 1.65;
+}
+
+.heroInstall .heroInstallCmd .copy {
+  min-width: 5.25rem;
+  color: var(--hi-ink);
+  font-size: 0.875rem;
+}
+
+.heroInstallNext {
+  margin: 1.1rem 0 0;
+  color: var(--editorial-muted);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+}
+
+.heroInstallNext code {
+  padding: 0.12em 0.4em;
+  border: 1px solid var(--editorial-rule);
+  border-radius: 4px;
+  background: var(--editorial-soft);
+  color: var(--editorial-ink);
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.86em;
+  font-variant-ligatures: none;
+}
+
+.heroInstallLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 1.75rem;
+  margin: 0.35rem 0 0;
+}
+
+.heroInstallLinks a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--editorial-blue);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--editorial-blue) 45%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
+}
+
+.heroInstallLinks a:hover {
+  text-decoration-color: currentColor;
+}
+
+.heroInstallLinks a:focus-visible {
+  outline: 2px solid var(--editorial-blue);
+  outline-offset: 2px;
+}
+
 /* ── OS tabs on MDX pages ──────────────────────────────────────────────── */
 
 .osTabs {
@@ -351,6 +491,19 @@
   .commandLg .commandText,
   .runbook .runbookCmd .commandText {
     font-size: 0.76rem;
+  }
+
+  .heroInstall .heroInstallCmd .commandText {
+    padding-block: 1rem;
+    font-size: 0.82rem;
+  }
+
+  .heroInstall .heroInstallCmd .copy {
+    min-width: 2.75rem;
+  }
+
+  .heroInstallHead {
+    padding-left: 1rem;
   }
 
   .commandLg .copyText {
