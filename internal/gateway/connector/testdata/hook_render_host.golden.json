@@ -7,8 +7,8 @@
     },
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 107,
-      "sha256": "75955e0b84132089a7b3df360c9b62dd285bba3b08a9d1e2564fda0e36f3472e"
+      "size": 165,
+      "sha256": "e0fd158bf6ff110140f3a96b8b5ff8a84032e9cde1d473a9647dc961a84a8b5b"
     },
     ".hookcfg.antigravity": {
       "mode": "-rw-------",
@@ -96,8 +96,8 @@
   "claudecode/managed=0/scoped=0/fail=closed": {
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 106,
-      "sha256": "2581e7cb773273546088a64230bf74cc56ec8943205e8c4dabf1fb2fd036c209"
+      "size": 163,
+      "sha256": "a44b19132a3ae28128f5fba5f78dec35caf7846e701223efd78fc5778fa4820f"
     },
     ".hookcfg.claudecode": {
       "mode": "-rw-------",
@@ -143,8 +143,8 @@
   "claudecode/managed=0/scoped=0/fail=open": {
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 104,
-      "sha256": "14bc6ffd2b8e580a82e395dbcf4e1d0923ddf86ceb0dd0070da10cc2ca052b1c"
+      "size": 161,
+      "sha256": "bfccd501b1ea250e9b6b39a5e9cc488800b43e772bf57ade38b523abac5b1412"
     },
     ".hookcfg.claudecode": {
       "mode": "-rw-------",
@@ -195,8 +195,8 @@
     },
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 106,
-      "sha256": "2581e7cb773273546088a64230bf74cc56ec8943205e8c4dabf1fb2fd036c209"
+      "size": 163,
+      "sha256": "a44b19132a3ae28128f5fba5f78dec35caf7846e701223efd78fc5778fa4820f"
     },
     ".hookcfg.claudecode": {
       "mode": "-rw-------",
@@ -242,8 +242,8 @@
     },
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 104,
-      "sha256": "14bc6ffd2b8e580a82e395dbcf4e1d0923ddf86ceb0dd0070da10cc2ca052b1c"
+      "size": 161,
+      "sha256": "bfccd501b1ea250e9b6b39a5e9cc488800b43e772bf57ade38b523abac5b1412"
     },
     ".hookcfg.claudecode": {
       "mode": "-rw-------",
@@ -472,8 +472,8 @@
   "codex/managed=0/scoped=0/fail=closed": {
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 101,
-      "sha256": "477ec4cf0404aa1c703c81617685df548bc7fa46c9d30bb836c41ad0ab8359c7"
+      "size": 153,
+      "sha256": "81cc2981c2ff33ee37f412e67ee51c1d85272474f8b396adac5055f6a5ef1637"
     },
     ".hookcfg.codex": {
       "mode": "-rw-------",
@@ -519,8 +519,8 @@
   "codex/managed=0/scoped=0/fail=open": {
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 99,
-      "sha256": "6b475aa4399fe004c93d8fd166721341a591f168767673e3208614bb2290a850"
+      "size": 151,
+      "sha256": "94faf28512e16bb2780ffa57a500eeb654c1e9c8794a1512a27c858cfb61f7d4"
     },
     ".hookcfg.codex": {
       "mode": "-rw-------",
@@ -571,8 +571,8 @@
     },
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 101,
-      "sha256": "477ec4cf0404aa1c703c81617685df548bc7fa46c9d30bb836c41ad0ab8359c7"
+      "size": 153,
+      "sha256": "81cc2981c2ff33ee37f412e67ee51c1d85272474f8b396adac5055f6a5ef1637"
     },
     ".hookcfg.codex": {
       "mode": "-rw-------",
@@ -618,8 +618,8 @@
     },
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 99,
-      "sha256": "6b475aa4399fe004c93d8fd166721341a591f168767673e3208614bb2290a850"
+      "size": 151,
+      "sha256": "94faf28512e16bb2780ffa57a500eeb654c1e9c8794a1512a27c858cfb61f7d4"
     },
     ".hookcfg.codex": {
       "mode": "-rw-------",
@@ -853,8 +853,8 @@
     },
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 103,
-      "sha256": "b532a7e71296c4840f2d8505ab92a73e83eacf6843230779084242f00e9d86ac"
+      "size": 157,
+      "sha256": "a4c605d9ac5a2c8d753bb726767513f3e2d512fa0e3b856034be660712c03504"
     },
     ".hookcfg.copilot": {
       "mode": "-rw-------",
@@ -947,8 +947,8 @@
     },
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 102,
-      "sha256": "9b89295580f9c3ffa31c408c6e57ba7fd06330b566c193de5d4b50c292ce5451"
+      "size": 155,
+      "sha256": "047222c700138926da4834a89002b42873b9a328eff149a92995e706b8fb1cd4"
     },
     ".hookcfg.cursor": {
       "mode": "-rw-------",
@@ -1041,8 +1041,8 @@
     },
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 101,
-      "sha256": "73c8722c988c750ed3f31d5c4798b0634b1643e0856c126ff84497d35c646ac1"
+      "size": 153,
+      "sha256": "2c608e6bcfc3cdc59f67a9dece00324fec771ae409181dff26031f3d21ad4b91"
     },
     ".hookcfg.devin": {
       "mode": "-rw-------",
@@ -1191,8 +1191,8 @@
     },
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 102,
-      "sha256": "f5c49c4f0b84da957b5a0be6b97e20f75442569ade4f852db14f2e41d025605c"
+      "size": 155,
+      "sha256": "07da7769afcb4e776447f31ed0b160c1d0d0a469b41dfa32a912655d4fe379be"
     },
     ".hookcfg.hermes": {
       "mode": "-rw-------",
@@ -1285,8 +1285,8 @@
     },
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 100,
-      "sha256": "2c3dd02f81d45d35bae9915ad08db8512f67c74db8b051f91964d53263f6ed3e"
+      "size": 151,
+      "sha256": "ab5806869cfcc6e6825de1f201568552713d8232547b0b48cad68a6d04816916"
     },
     ".hookcfg.kiro": {
       "mode": "-rw-------",
@@ -1553,8 +1553,8 @@
     },
     ".hookcfg": {
       "mode": "-rw-------",
-      "size": 105,
-      "sha256": "46e797986697f41a82c39736d14779f2e714b86ef49972394d7f86b8f718cb8d"
+      "size": 161,
+      "sha256": "b9718158976b3834a8b21fb9f18982ef657286f3d357bd819fa0c41aed331071"
     },
     ".hookcfg.openhands": {
       "mode": "-rw-------",
