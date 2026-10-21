@@ -431,7 +431,9 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         cfg = self._cfg()
         cfg.guardrail.effective_mode.return_value = "action"
         r = _DoctorResult()
-        _check_connector_inventory(cfg, "codex", r)
+        # A rendered closed hook; a hook with no readable mode fails the row.
+        with patch("defenseclaw.fail_mode.rendered_fail_mode", return_value="closed"):
+            _check_connector_inventory(cfg, "codex", r)
         labels = {c["label"]: c for c in r.checks}
         self.assertIn("Mode", labels)
         self.assertEqual(

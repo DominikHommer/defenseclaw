@@ -1410,7 +1410,9 @@ class DoctorHookReachabilityTests(unittest.TestCase):
         ]
         cfg: dict = {}
         for event in events:
-            handler = {"type": "command", "command": hook_script_path, "timeout": 30}
+            # Setup binds each event as the hook's argument (Antigravity's
+            # input names no event).
+            handler = {"type": "command", "command": f"{hook_script_path} {event}", "timeout": 30}
             entries = (
                 [{"matcher": "*", "hooks": [handler]}]
                 if event in {"PreToolUse", "PostToolUse"}
@@ -1585,12 +1587,14 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                     {
                         "version": 1,
                         "hooks": {
-                            "PreToolUse": [
+                            event: [
                                 {
                                     "type": "command",
-                                    "bash": os.path.join(tmp, ".defenseclaw", "hooks", "copilot-hook.sh"),
+                                    "bash": os.path.join(tmp, ".defenseclaw", "hooks", "copilot-hook.sh")
+                                    + f" --event {event}",
                                 }
                             ]
+                            for event in ("preToolUse", "permissionRequest")
                         },
                     },
                     fh,

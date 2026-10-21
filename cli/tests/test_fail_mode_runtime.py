@@ -1467,7 +1467,7 @@ def test_a_registration_that_loses_its_event_binding_is_drift_and_fails_doctor(
         ({"version": 2, "fail_modes": {}, "legacy_fail_mode": "Open"}, "open", True),
         ({"version": "2", "fail_modes": {"copilot": "open"}}, None, False),
         ("DEFENSECLAW_FAIL_MODE=closed\nDEFENSECLAW_FAIL_MODE=open\n", "open", True),
-        ("export DEFENSECLAW_FAIL_MODE_COPILOT='OPEN'\n", "open", True),
+        (f"export {fail_mode_runtime._native_hook_sidecar_key('copilot')}='OPEN'\n", "open", True),
         ('DEFENSECLAW_FAIL_MODE="closed"\n', "closed", True),
     ],
 )
