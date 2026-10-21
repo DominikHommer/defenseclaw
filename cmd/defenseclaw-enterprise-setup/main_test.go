@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,9 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 )
 
 func TestParseEnterpriseSetupInstallContract(t *testing.T) {
@@ -37,9 +41,30 @@ func TestParseEnterpriseSetupInstallContract(t *testing.T) {
 	}
 }
 
+func TestParseEnterpriseSetupDefaultsEmptyInstallToDeferredConfiguration(t *testing.T) {
+	opts, help, err := parseEnterpriseSetupOptions([]string{
+		"/install",
+		"/quiet",
+		"DEFERREDCONFIG=1",
+	})
+	if err != nil || help {
+		t.Fatalf("parse deferred install: help=%v err=%v", help, err)
+	}
+	if !opts.DeferredConfig || opts.Config != "" || opts.Manifest != "" {
+		t.Fatalf("deferred install = %+v", opts)
+	}
+
+	opts, help, err = parseEnterpriseSetupOptions([]string{"/install"})
+	if err != nil || help || !opts.DeferredConfig {
+		t.Fatalf("implicit deferred install: opts=%+v help=%v err=%v", opts, help, err)
+	}
+}
+
 func TestParseEnterpriseSetupRejectsUnsafeScopeCombinations(t *testing.T) {
 	tests := [][]string{
 		{"/install", "--config", "config.yaml"},
+		{"/install", "--manifest", "targets.yaml"},
+		{"/install", "--deferred-config", "--config", "config.yaml", "--manifest", "targets.yaml"},
 		{"/status", "--no-start"},
 		{"/repair", "--purge"},
 		{"/install", "--config", "config.yaml", "--manifest", "targets.yaml", "--allow-unsigned"},
@@ -94,6 +119,27 @@ func TestParseEnterpriseSetupShorthandAcceptsModeAndConnector(t *testing.T) {
 	}
 }
 
+// The Secure Client Setup also manages GitHub Copilot (the CLI and the GitHub
+// Copilot app); the standalone shorthand keeps its three connectors.
+func TestParseEnterpriseSetupShorthandAcceptsCopilotOnSecureClient(t *testing.T) {
+	opts, help, err := parseEnterpriseSetupOptions([]string{
+		"/install",
+		"MODE=action",
+		"CONNECTOR=codex,claudecode,cursor,copilot",
+	})
+	if err != nil || help || opts.Connector != "codex,claudecode,cursor,copilot" {
+		t.Fatalf("Secure Client Copilot shorthand install: opts=%+v help=%v err=%v", opts, help, err)
+	}
+	_, _, err = parseStandaloneEnterpriseSetupOptions([]string{
+		"/install",
+		"MODE=action",
+		"CONNECTOR=codex,copilot",
+	})
+	if err == nil || !strings.Contains(err.Error(), "supported: codex, claudecode, cursor.") {
+		t.Fatalf("standalone Copilot shorthand error = %v, want the three-connector refusal", err)
+	}
+}
+
 // TestParseEnterpriseSetupShorthandRejectsBadGrammar covers the
 // mutual-exclusion and pairing invariants the shorthand enforces.
 func TestParseEnterpriseSetupShorthandRejectsBadGrammar(t *testing.T) {
@@ -113,12 +159,126 @@ func TestParseEnterpriseSetupShorthandRejectsBadGrammar(t *testing.T) {
 	}
 }
 
+// TestPlaceholderBuildFailsClosedWithoutEnterprisePayload asserts the
+// runtime refuses to install when the outer EXE has no
+// setuppayload trailer at its tail. Under `go test` the running
+// binary is the test executable, which has no trailer — so the
+// setuppayload.ErrTrailerMissing path is exercised. The failure
+// message points the operator at DefenseClawAssembler.exe.
 func TestPlaceholderBuildFailsClosedWithoutEnterprisePayload(t *testing.T) {
 	_, err := loadEmbeddedEnterprisePayload()
-	if err == nil ||
-		!strings.Contains(err.Error(), "packaging-windows-enterprise-installer") ||
-		!strings.Contains(err.Error(), "packaging-windows-avc-buildkit") {
+	if err == nil || !strings.Contains(err.Error(), "DefenseClawAssembler.exe") {
 		t.Fatalf("loadEmbeddedEnterprisePayload() error = %v", err)
+	}
+}
+
+// #1281: the Setup stages only the payload its own image was built with. A
+// trailer read from a different file (any flavor) is refused before
+// anything is staged, and an image with no binding takes no standalone
+// payload.
+func TestEnterprisePayloadMustMatchTheImageBinding(t *testing.T) {
+	trailer := func(t *testing.T, payloadFS fstest.MapFS) setuppayload.ReadResult {
+		t.Helper()
+		result := setuppayload.ReadResult{Manifest: payloadFS["payload/manifest.json"].Data}
+		for name, file := range payloadFS {
+			if name != "payload/manifest.json" {
+				result.Entries = append(result.Entries, setuppayload.Entry{Name: strings.TrimPrefix(name, "payload/"), Contents: file.Data})
+			}
+		}
+		return result
+	}
+	binding := func(manifest enterprisePayloadManifest) string {
+		digests := map[string]string{}
+		for _, file := range manifest.Files {
+			digests[file.Name] = file.SHA256
+		}
+		return setuppayload.PayloadBinding(setuppayload.PayloadIdentity{
+			DistributionFlavor: manifest.DistributionFlavor,
+			Version:            manifest.Version,
+			SourceCommit:       manifest.SourceCommit,
+		}, digests)
+	}
+	built, builtManifest := newEnterprisePayloadFixtureForFlavor(t, true, true)
+	stamp := binding(builtManifest)
+	if _, err := loadBoundEnterprisePayload(trailer(t, built), stamp); err != nil {
+		t.Fatalf("the image's own payload was refused: %v", err)
+	}
+	if _, err := loadBoundEnterprisePayload(trailer(t, built), strings.ToUpper(stamp)); err != nil {
+		t.Fatalf("an upper-case binding was refused: %v", err)
+	}
+
+	// A different payload: one file swapped for other bytes.
+	swapped, swappedManifest := newEnterprisePayloadFixtureForFlavor(t, true, true)
+	marker := []byte("swapped-file marker")
+	digest := sha256.Sum256(marker)
+	swapped["payload/defenseclaw.exe"] = &fstest.MapFile{Data: marker, Mode: 0o444}
+	for index, file := range swappedManifest.Files {
+		if file.Name == "defenseclaw.exe" {
+			swappedManifest.Files[index].SHA256, swappedManifest.Files[index].Size = hex.EncodeToString(digest[:]), int64(len(marker))
+		}
+	}
+	writeEnterprisePayloadManifest(t, swapped, swappedManifest)
+	if _, err := loadEnterprisePayload(swapped); err != nil {
+		t.Fatalf("fixture: the swapped payload is not otherwise valid: %v", err)
+	}
+	// The same payload bytes under another manifest identity: a replacement
+	// trailer that changes only the version (which the lifecycle compares
+	// and records) or the source commit.
+	relabeled := func(t *testing.T, change func(*enterprisePayloadManifest)) fstest.MapFS {
+		t.Helper()
+		payloadFS := fstest.MapFS{}
+		for name, file := range built {
+			payloadFS[name] = &fstest.MapFile{Data: append([]byte(nil), file.Data...), Mode: file.Mode}
+		}
+		manifest := builtManifest
+		manifest.Files = append([]enterprisePayloadManifestFile(nil), builtManifest.Files...)
+		change(&manifest)
+		writeEnterprisePayloadManifest(t, payloadFS, manifest)
+		if _, err := loadEnterprisePayload(payloadFS); err != nil {
+			t.Fatalf("fixture: the relabeled payload is not otherwise valid: %v", err)
+		}
+		return payloadFS
+	}
+	for name, other := range map[string]fstest.MapFS{
+		"swapped file": swapped,
+		"version only": relabeled(t, func(manifest *enterprisePayloadManifest) { manifest.Version = "99.0.0" }),
+		"source commit only": relabeled(t, func(manifest *enterprisePayloadManifest) {
+			manifest.SourceCommit = strings.Repeat("e", 40)
+		}),
+		"signed flavor": func() fstest.MapFS {
+			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+			return payloadFS
+		}(),
+		"Secure Client": func() fstest.MapFS {
+			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, false)
+			return payloadFS
+		}(),
+		"Secure Client u": func() fstest.MapFS {
+			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, true, false)
+			return payloadFS
+		}(),
+	} {
+		if _, err := loadBoundEnterprisePayload(trailer(t, other), stamp); err == nil || !strings.Contains(err.Error(), "nothing was staged") {
+			t.Errorf("%s: a payload the image was not built with was accepted (err %v)", name, err)
+		}
+	}
+
+	// No binding: no standalone payload, the Secure Client flavors as before.
+	if _, err := loadBoundEnterprisePayload(trailer(t, built), ""); err == nil || !strings.Contains(err.Error(), "no payload binding") {
+		t.Fatalf("an unstamped image took a standalone payload (err %v)", err)
+	}
+	secureClient, _ := newEnterprisePayloadFixtureForFlavor(t, false, false)
+	if _, err := loadBoundEnterprisePayload(trailer(t, secureClient), ""); err != nil {
+		t.Fatalf("an unstamped image refused the Secure Client payload: %v", err)
+	}
+}
+
+func TestStampedSetupImageIsTheStandaloneSetup(t *testing.T) {
+	previous := standalonePayloadBinding
+	t.Cleanup(func() { standalonePayloadBinding = previous })
+	standalonePayloadBinding = strings.Repeat("ab", 32)
+	if !embeddedEnterpriseSetupStandalone() {
+		t.Fatal("a stamped image must parse its command line as the standalone Setup")
 	}
 }
 
@@ -319,9 +479,37 @@ func TestRunEnterpriseSetupHelpMatchesEmbeddedFlavor(t *testing.T) {
 	var secureClient bytes.Buffer
 	writeEnterpriseSetupUsage(&secureClient)
 	if want := enterpriseSetupArtifactName + " --action <install|reconcile|repair|status|uninstall|upgrade|verify> [options]\n" +
-		"Install requires --config <config.yaml> and --manifest <targets.yaml>.\n" +
+		"Install takes --config <config.yaml> and --manifest <targets.yaml> together; with neither, it stages a disabled deployment that a later Repair with both files activates.\n" +
 		"Production paths and service names are fixed by the enterprise lifecycle.\n"; secureClient.String() != want {
 		t.Fatalf("Secure Client usage = %q", secureClient.String())
+	}
+}
+
+// GAP-0353: the standalone Setup printed the Secure Client Setup name and
+// --action flags for /?, and "unexpected positional argument BOGUS=1" for an
+// unknown property, while windows.mdx documents /ensure NAME=value.
+func TestStandaloneSetupUsageAndErrorsSpeakTheDocumentedSyntax(t *testing.T) {
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	var usage, stderr bytes.Buffer
+	if code := runEnterpriseSetup([]string{"/?"}, &usage, &stderr); code != 0 {
+		t.Fatalf("help exit=%d", code)
+	}
+	for _, want := range []string{standaloneSetupArtifactName + " /ensure [NAME=value ...]", "CONFIG=", "MANIFEST=", "JSON=1", "NOSTART=1",
+		"PURGE=1", "TIMEOUTSECONDS=", "ALLOWEDSIGNERS=", "ATTESTCLAUDEEFFECTIVEPOLICY=1"} {
+		if !strings.Contains(usage.String(), want) {
+			t.Errorf("standalone usage lacks %q:\n%s", want, usage.String())
+		}
+	}
+	if strings.Contains(usage.String(), enterpriseSetupArtifactName) || strings.Contains(usage.String(), "--action") {
+		t.Errorf("standalone usage names the Secure Client Setup or --action:\n%s", usage.String())
+	}
+	var stdout bytes.Buffer
+	stderr.Reset()
+	runEnterpriseSetup([]string{"/ensure", "BOGUS=1", "JSON=0"}, &stdout, &stderr)
+	if got := stderr.String(); !strings.HasPrefix(got, standaloneSetupArtifactName+": unknown property BOGUS; run ") || !strings.Contains(got, " /? ") {
+		t.Fatalf("unknown property error = %q", got)
 	}
 }
 
@@ -451,5 +639,178 @@ func TestRunEnterpriseSetupReportsBadCommandLinesByFlavor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// GAP-0920, GAP-1041: the standalone Setup takes FORCE=1 with /uninstall, the
+// last resort for a transaction no run can recover, and refuses it with
+// another action; the Secure Client Setup has no such property.
+func TestStandaloneSetupForceIsAnUninstallProperty(t *testing.T) {
+	opts, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/uninstall", "FORCE=1", "JSON=1"}, true)
+	if err != nil || !opts.Force || opts.Action != "uninstall" {
+		t.Fatalf("standalone /uninstall FORCE=1: opts %+v, err %v", opts, err)
+	}
+	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/ensure", "FORCE=1"}, true); err == nil {
+		t.Fatal("FORCE=1 with /ensure was accepted")
+	}
+	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/uninstall", "FORCE=1"}, false); err == nil {
+		t.Fatal("the Secure Client Setup accepted FORCE=1")
+	}
+}
+
+// BUNDLE= and TRUSTANCHORS= are standalone /ensure properties; the signed
+// bundle carries the config, so BUNDLE= with CONFIG= is invalid arguments,
+// and the Secure Client Setup does not know them.
+func TestStandaloneSetupBundleIsAnEnsureProperty(t *testing.T) {
+	opts, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `TrustAnchors=C:\b\a.json`, "REFUSECAPABILITYLOSS=1", "JSON=1"}, true)
+	if err != nil || opts.Bundle != `C:\b\v7.dcbundle` || opts.TrustAnchors != `C:\b\a.json` || !opts.RefuseCapabilityLoss {
+		t.Fatalf("standalone /ensure BUNDLE=: opts %+v, err %v", opts, err)
+	}
+	for _, arguments := range [][]string{
+		{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `CONFIG=C:\c.yaml`},
+		{"/repair", `BUNDLE=C:\b\v7.dcbundle`},
+		{"/status", `TRUSTANCHORS=C:\b\a.json`},
+		{"/ensure", "REFUSECAPABILITYLOSS=1"},
+	} {
+		if _, _, err := parseEnterpriseSetupOptionsForFlavor(arguments, true); err == nil {
+			t.Errorf("standalone %v was accepted", arguments)
+		}
+	}
+	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/install", "--config=a", "--manifest=b", `BUNDLE=C:\b\v7.dcbundle`}, false); err == nil {
+		t.Fatal("the Secure Client Setup accepted BUNDLE=")
+	}
+}
+
+// #1288: anchors with an unsigned CONFIG= (or the --mode shorthand, which
+// renders one) is refused before anything is staged, exit 1639, with the
+// bundle_required code the lifecycle and the Unix kit use, not
+// invalid_arguments.
+func TestStandaloneSetupRefusesTrustAnchorsWithConfigAsBundleRequired(t *testing.T) {
+	if setupCodeBundleRequired != string(enterprisebundle.CodeBundleRequired) {
+		t.Fatalf("Setup code %q drifted from %q", setupCodeBundleRequired, enterprisebundle.CodeBundleRequired)
+	}
+	for _, arguments := range [][]string{
+		{"/ensure", `TRUSTANCHORS=C:\b\a.json`, `CONFIG=C:\c.yaml`},
+		{"/ensure", `CONFIG=C:\c.yaml`, `trust-anchors=C:\b\a.json`},
+		{"/ensure", `TRUSTANCHORS=C:\b\a.json`, "--mode=action", "--connector=codex"},
+	} {
+		_, _, err := parseStandaloneEnterpriseSetupOptions(arguments)
+		var bundleRequired enterpriseSetupBundleRequired
+		if !errors.As(err, &bundleRequired) {
+			t.Errorf("standalone %v: err %v, want a bundle_required refusal", arguments, err)
+		}
+	}
+	if _, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `TRUSTANCHORS=C:\b\a.json`}); err != nil {
+		t.Fatalf("BUNDLE= with TRUSTANCHORS= was refused: %v", err)
+	}
+	if _, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", `TRUSTANCHORS=C:\b\a.json`}); err != nil {
+		t.Fatalf("TRUSTANCHORS= alone was refused: %v", err)
+	}
+
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	original := enterpriseSetupPayloadLoader
+	t.Cleanup(func() { enterpriseSetupPayloadLoader = original })
+	payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+	loads := 0
+	enterpriseSetupPayloadLoader = func() (enterprisePayload, error) { loads++; return loadEnterprisePayload(payloadFS) }
+	var stdout, stderr bytes.Buffer
+	code := runEnterpriseSetup([]string{"/ensure", `TRUSTANCHORS=C:\b\a.json`, `CONFIG=C:\c.yaml`, "JSON=1"}, &stdout, &stderr)
+	var result struct {
+		Action   string `json:"action"`
+		OK       bool   `json:"ok"`
+		ExitCode int    `json:"exit_code"`
+		Errors   []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || code != enterpriseInvalidArgsExitCode ||
+		result.OK || result.Action != "ensure" || result.ExitCode != code ||
+		len(result.Errors) != 1 || result.Errors[0].Code != "bundle_required" || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q parse=%v", code, stdout.String(), stderr.String(), err)
+	}
+	// The refusal came from the command line: the payload was read only to
+	// pick the exit code, and the lifecycle never ran.
+	if loads != 1 {
+		t.Fatalf("payload loads = %d, want 1 (exit-code lookup only)", loads)
+	}
+}
+
+// GAP-0562: with JSON=1 the standalone Setup reports a refusal of its own in
+// the lifecycle's schema-2 shape (code, message, exit_code 1639), so an MDM
+// reads one shape whoever refused; the Secure Client Setup keeps schema 1.
+func TestStandaloneSetupNormalizationFailurePreservesJSON(t *testing.T) {
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	original := enterpriseSetupPayloadLoader
+	t.Cleanup(func() { enterpriseSetupPayloadLoader = original })
+	payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+	enterpriseSetupPayloadLoader = func() (enterprisePayload, error) { return loadEnterprisePayload(payloadFS) }
+	var stdout, stderr bytes.Buffer
+	code := runEnterpriseSetup([]string{"/ensure", "BOGUS=1", "JSON=1"}, &stdout, &stderr)
+	var result struct {
+		SchemaVersion int    `json:"schema_version"`
+		Action        string `json:"action"`
+		ExitCode      int    `json:"exit_code"`
+		Errors        []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || code != enterpriseInvalidArgsExitCode ||
+		result.SchemaVersion != 2 || result.Action != "ensure" || result.ExitCode != code ||
+		len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q parse=%v", code, stdout.String(), stderr.String(), err)
+	}
+}
+
+func TestStandaloneSetupFailureUsesTheLifecycleResultShape(t *testing.T) {
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true}
+	refusal := enterpriseSetupInvalidArguments{errors.New("the config C:\\stage\\config.yaml is not protected")}
+	var stdout, stderr bytes.Buffer
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts, refusal, enterpriseInvalidArgsExitCode)
+	var result struct {
+		SchemaVersion int    `json:"schema_version"`
+		Action        string `json:"action"`
+		ExitCode      int    `json:"exit_code"`
+		Errors        []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.SchemaVersion != 2 || result.Action != "ensure" ||
+		result.ExitCode != enterpriseInvalidArgsExitCode || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
+		result.Errors[0].Message != refusal.Error() {
+		t.Fatalf("standalone failure = %s (%v)", stdout.String(), err)
+	}
+	stdout.Reset()
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, false, enterpriseSetupArtifactName, opts, refusal, enterpriseFailureExitCode)
+	if !strings.HasPrefix(stdout.String(), `{"schema_version":1,`) {
+		t.Fatalf("Secure Client failure shape changed: %s", stdout.String())
+	}
+}
+
+// GAP-0509: a run Setup stopped at TIMEOUTSECONDS can leave a transaction
+// pending with the services stopped; its result says so and names the
+// LocalSystem /ensure that recovers it, with the longest limit: leaving
+// TIMEOUTSECONDS out keeps the default the run hit (GAP-1063).
+func TestStandaloneSetupTimeoutNamesTheRecovery(t *testing.T) {
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true, Config: `C:\stage\config.yaml`, LifecycleTimeout: time.Minute}
+	var stdout, stderr bytes.Buffer
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts,
+		standaloneEnterpriseSetupTimeout(opts, context.DeadlineExceeded), enterpriseFailureExitCode)
+	var result struct {
+		ExitCode int `json:"exit_code"`
+		Errors   []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.ExitCode != enterpriseFailureExitCode ||
+		len(result.Errors) != 1 || result.Errors[0].Code != "lifecycle_timeout" ||
+		!strings.Contains(result.Errors[0].Message, `as LocalSystem with /ensure CONFIG=C:\stage\config.yaml JSON=1 TIMEOUTSECONDS=7200`) ||
+		!strings.Contains(result.Errors[0].Message, "TIMEOUTSECONDS=60") || strings.Contains(result.Errors[0].Message, "leaving TIMEOUTSECONDS out") {
+		t.Fatalf("timeout result = %s (%v)", stdout.String(), err)
 	}
 }

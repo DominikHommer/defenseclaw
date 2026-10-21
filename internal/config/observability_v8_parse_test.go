@@ -293,13 +293,9 @@ func TestParseCompileObservabilityV8FreezesNormalizedEffectiveFilePaths(t *testi
 	if err := os.Symlink(realDirectory, aliasDirectory); err != nil {
 		t.Skipf("symlinks are unavailable: %v", err)
 	}
+	// A relative path is under data_dir, not the working directory (GAP-0005).
 	relativeJSONL := filepath.Join("testdata", "future-observability-v8.jsonl")
-	relativeJSONLAbsolute, err := normalizeObservabilityV8FilePath(
-		"observability.destinations[0].path", relativeJSONL,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	relativeJSONLAbsolute := filepath.Join(directory, relativeJSONL)
 	raw := "config_version: 8\ndata_dir: " + directory + "\nobservability:\n" +
 		"  local:\n    path: " + filepath.Join(aliasDirectory, "audit.db") +
 		"\n    judge_bodies_path: " + filepath.Join(realDirectory, "judge.db") +
@@ -343,7 +339,7 @@ func TestObservabilityV8FileValidationAllowsSharedReadOnlyCA(t *testing.T) {
 		{Name: "one", Kind: ObservabilityV8DestinationHTTPJSONL, TLS: ObservabilityV8TLSSource{CACert: caPath}},
 		{Name: "two", Kind: ObservabilityV8DestinationOTLP, TLS: ObservabilityV8TLSSource{CACert: caPath}},
 	}}
-	if err := validateObservabilityV8FilePaths(source, nil); err != nil {
+	if _, err := validateObservabilityV8FilePaths(source, nil, true, false); err != nil {
 		t.Fatalf("shared read-only CA was treated as a writable collision: %v", err)
 	}
 }
@@ -533,4 +529,129 @@ func semanticV8CauseContains(err error, substring string) bool {
 		}
 	}
 	return false
+}
+
+// GAP-1105: the managed status summary names each destination with its
+// effective redaction profile, and it needs no secret value.
+func TestSummarizeObservabilityV8DestinationsReportsEffectiveProfiles(t *testing.T) {
+	raw := []byte(`config_version: 8
+data_dir: /tmp/defenseclaw
+observability:
+  destinations:
+    - name: remote
+      kind: otlp
+      endpoint: https://otel.example.test
+      headers:
+        Authorization: {env: UNSET_SUMMARY_TOKEN}
+      send:
+        signals: [logs, traces]
+        buckets: ["*"]
+        redaction_profile: strict
+`)
+	summaries, err := SummarizeObservabilityV8Destinations("config.yaml", raw, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]ObservabilityV8DestinationSummary{}
+	for _, summary := range summaries {
+		byName[summary.Name] = summary
+	}
+	remote := byName["remote"]
+	if remote.Kind != ObservabilityV8DestinationOTLP || !remote.Enabled || len(remote.Signals) != 2 ||
+		strings.Join(remote.RedactionProfiles, ",") != "strict" {
+		t.Fatalf("remote summary = %+v, want an enabled otlp destination with logs, traces under strict", remote)
+	}
+	if _, ok := byName[ObservabilityV8LocalDestinationName]; !ok {
+		t.Fatalf("summaries %+v leave out the local-sqlite destination", summaries)
+	}
+}
+
+// compileObservabilityV8JSONLAt compiles a config with one jsonl destination
+// at jsonlPath and, when localPath is set, the audit database there.
+func compileObservabilityV8JSONLAt(dataDir, localPath, jsonlPath string) (*ObservabilityV8CompiledConfig, error) {
+	raw := "config_version: 8\ndata_dir: " + dataDir + "\nobservability:\n"
+	if localPath != "" {
+		raw += "  local:\n    path: " + localPath + "\n"
+	}
+	raw += "  destinations:\n    - name: rv13\n      kind: jsonl\n      path: " + jsonlPath + "\n"
+	return ParseCompileObservabilityV8("config.yaml", []byte(raw), ObservabilityV8CompileOptions{})
+}
+
+// assertObservabilityV8DeniedJSONLWarns checks that a jsonl destination behind
+// a denied folder compiles with one warning naming it, while the audit
+// database behind that folder stays a config error (GAP-1265).
+func assertObservabilityV8DeniedJSONLWarns(t *testing.T, dataDir, deniedFolder string) {
+	t.Helper()
+	jsonlPath := filepath.Join(deniedFolder, "out", "events.jsonl")
+	compiled, err := compileObservabilityV8JSONLAt(dataDir, "", jsonlPath)
+	if err != nil {
+		t.Fatalf("jsonl destination behind a denied folder: %v", err)
+	}
+	if len(compiled.PathWarnings) != 1 ||
+		compiled.PathWarnings[0].Path != "observability.destinations[0].path" ||
+		!strings.Contains(compiled.PathWarnings[0].Summary, jsonlPath) {
+		t.Fatalf("path warnings = %#v", compiled.PathWarnings)
+	}
+	_, err = compileObservabilityV8JSONLAt(dataDir, filepath.Join(deniedFolder, "audit.db"), filepath.Join(dataDir, "events.jsonl"))
+	var pathError *V8ConfigPathError
+	if !errors.As(err, &pathError) || pathError.Path != "observability.local.path" {
+		t.Fatalf("audit database behind a denied folder = %v, want a config path error", err)
+	}
+}
+
+// A store path written with ~ or relative to data_dir names the same file in
+// the gateway (started in data_dir) and in status and doctor (started
+// anywhere): it used to resolve against each process's working directory
+// (GAP-0005).
+func TestParseCompileObservabilityV8ResolvesStorePathsAgainstHomeAndDataDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dataDir := filepath.Join(t.TempDir(), "data")
+	t.Chdir(t.TempDir())
+	for _, tc := range []struct {
+		name, written, want string
+	}{
+		{name: "tilde", written: "~/.defenseclaw/events.jsonl", want: filepath.Join(home, ".defenseclaw", "events.jsonl")},
+		{name: "relative", written: "events.jsonl", want: filepath.Join(dataDir, "events.jsonl")},
+		{name: "absolute", written: filepath.Join(home, "abs.jsonl"), want: filepath.Join(home, "abs.jsonl")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := "config_version: 8\ndata_dir: " + dataDir + "\nobservability:\n  local:\n" +
+				"    path: ~/.defenseclaw/audit.db\n    judge_bodies_path: judge.db\n" +
+				"  destinations:\n    - {name: events, kind: jsonl, path: '" + tc.written + "'}\n"
+			compiled, err := ParseCompileObservabilityV8("config.yaml", []byte(raw), ObservabilityV8CompileOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot := compiled.Plan.Snapshot()
+			if want := filepath.Join(home, ".defenseclaw", "audit.db"); snapshot.Local.Path != want {
+				t.Fatalf("local.path = %q, want %q", snapshot.Local.Path, want)
+			}
+			if want := filepath.Join(dataDir, "judge.db"); snapshot.Local.JudgeBodiesPath != want {
+				t.Fatalf("local.judge_bodies_path = %q, want %q", snapshot.Local.JudgeBodiesPath, want)
+			}
+			destination, ok := compiled.Plan.Destination("events")
+			if !ok || destination.Transport.Path != tc.want {
+				t.Fatalf("jsonl path = %q, want %q", destination.Transport.Path, tc.want)
+			}
+		})
+	}
+}
+
+func TestObservabilityV8ExpandHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	for written, want := range map[string]string{
+		"~":           home,
+		"~/a.jsonl":   filepath.Join(home, "a.jsonl"),
+		"~other/a":    "~other/a",
+		"a/~/b":       "a/~/b",
+		"/abs/a.json": "/abs/a.json",
+	} {
+		if got := observabilityV8ExpandHome(written); got != want {
+			t.Errorf("observabilityV8ExpandHome(%q) = %q, want %q", written, got, want)
+		}
+	}
 }

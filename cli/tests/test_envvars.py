@@ -120,7 +120,10 @@ class RegistryStructureTests(unittest.TestCase):
                 mock.patch.object(envvars_module, "__file__", str(module)),
                 mock.patch.dict(os.environ, {"DEFENSECLAW_REPO_ROOT": ""}),
             ):
-                self.assertEqual(envvars_module._registry_path(), bundled)
+                self.assertEqual(
+                    envvars_module._registry_path().resolve(),
+                    bundled.resolve(),
+                )
 
     def test_new_windows_envvar_contract_is_pinned(self) -> None:
         expected_registry = {
@@ -266,8 +269,8 @@ class RegistryStructureTests(unittest.TestCase):
             if e.name == "MIGRATION_DEFENSECLAW_HOME":
                 continue
             self.assertTrue(
-                e.name.startswith("DEFENSECLAW_"),
-                f"{e.name} must start with DEFENSECLAW_",
+                e.name.startswith("DEFENSECLAW_") or e.name.startswith("DCLAW_"),
+                f"{e.name} must start with DEFENSECLAW_ or DCLAW_",
             )
 
     def test_high_impact_security_optouts_surface_in_doctor(self) -> None:
@@ -421,6 +424,42 @@ class IsActiveReadsOsEnvironTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DEFENSECLAW_DISABLE_REDACTION", None)
             self.assertFalse(sv.is_active())
+
+
+class ManagedRegistryOverrideTests(unittest.TestCase):
+    """GAP-1292: on a managed standalone host DEFENSECLAW_REPO_ROOT cannot
+    pick the registry, and a registry that fails to load fails closed."""
+
+    def test_managed_host_ignores_repo_root_override_and_fails_closed(self) -> None:
+        from defenseclaw.registries import ssrf
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "internal" / "envvars" / "registry.json"
+            bad.parent.mkdir(parents=True)
+            bad.write_text("not json", encoding="utf-8")
+            config = Path(tmp) / "config.yaml"
+            env = {
+                "DEFENSECLAW_CONFIG": str(config),
+                "DEFENSECLAW_REPO_ROOT": tmp,
+                "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "10.0.0.5",
+                "DEFENSECLAW_DEPLOYMENT_MODE": "",
+                "DEFENSECLAW_ENTERPRISE_PROFILE": "",
+            }
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(envvars_module, "_cached", None),
+                mock.patch("defenseclaw.config_writer.machine_managed_standalone", return_value=False),
+            ):
+                config.write_text("deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n")
+                self.assertNotEqual(envvars_module._registry_path(), bad)
+                self.assertIsNone(envvars_module.lookup("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"))
+                self.assertEqual(ssrf._allowed_private_ips(), frozenset())
+                with mock.patch.object(envvars_module, "load_registry", side_effect=ValueError("bad")):
+                    self.assertEqual(envvars_module.managed_policy("X"), envvars_module.MANAGED_IGNORE)
+                # A per-user host keeps the override and reads the variable raw.
+                config.write_text("")
+                self.assertEqual(envvars_module._registry_path(), bad)
+                self.assertEqual(envvars_module.lookup("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"), "10.0.0.5")
 
 
 if __name__ == "__main__":

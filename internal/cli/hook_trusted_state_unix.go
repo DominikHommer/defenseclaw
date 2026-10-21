@@ -6,12 +6,17 @@
 package cli
 
 import (
+	"context"
 	"errors"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
@@ -27,11 +32,11 @@ import (
 // flags or files: the gateway address, the hook socket and the gateway
 // service uid the listener must run as.
 //
-// A hook invoked with --enterprise-managed is a no-op only after an
-// administrator removed DefenseClaw: the descriptor is gone AND no
-// DefenseClaw-owned vendor machine policy still names the hook for this
-// connector. A descriptor that is missing while that policy remains, or a
-// descriptor that fails its trust checks, fails closed.
+// A hook invoked with --enterprise-managed fails closed when its descriptor
+// is missing, even if vendor machine policy has already been removed. Agent
+// sessions may retain a hook registration through uninstall or rollback.
+// Stop and session-end events keep their neutral allow to avoid agent loops.
+// A descriptor that fails its trust checks also fails closed.
 //
 // The hook socket is the only transport. A descriptor that names no hook
 // socket also fails closed: there is no loopback TCP fallback, because
@@ -42,6 +47,51 @@ const (
 	standaloneRuntimeReasonDescriptorMissing = "enterprise_managed_runtime_descriptor_missing"
 	standaloneRuntimeReasonHookSocketMissing = "enterprise_managed_hook_socket_missing"
 )
+
+// standaloneHookInUserNamespace reports a hook that runs in a Linux user
+// namespace other than the host's (its uid_map is not the identity map).
+var standaloneHookInUserNamespace = func() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	data, err := os.ReadFile("/proc/self/uid_map")
+	if err != nil {
+		return false
+	}
+	fields := strings.Fields(string(data))
+	return len(fields) != 3 || fields[0] != "0" || fields[1] != "0" || fields[2] != "4294967295"
+}
+
+// reportStandaloneHookRefusal tells the gateway, over the hook socket, that
+// this hook refused its agent, so the refusal is in the audit log and the
+// gateway log as a refused unenrolled account is (GAP-0923). From a private
+// user namespace the listener's owner cannot be checked (it reads as the
+// overflow uid), so the report carries only the connector and the reason;
+// it is best effort and bounded.
+var reportStandaloneHookRefusal = func(socket, connectorName, reason string) {
+	if strings.TrimSpace(socket) == "" {
+		return
+	}
+	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "unix", socket)
+		},
+	}}
+	request, err := http.NewRequest(http.MethodPost, "http://defenseclaw-hook/api/v1/inspect/tool", strings.NewReader("{}"))
+	if err != nil {
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-DefenseClaw-Connector", connectorName)
+	request.Header.Set(hookexec.ClientRefusalHeader, reason)
+	response, err := client.Do(request)
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	_ = response.Body.Close()
+}
 
 // Test seams.
 var (
@@ -75,7 +125,10 @@ func NativeConnectorHookNoop([]string) bool { return false }
 // the managed runtime from the root-owned descriptor.
 func implicitEnterpriseManagedHook() bool { return false }
 
-func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
+// prepareEnterpriseManagedHookRuntime loads the Unix managed runtime and
+// returns false because Unix has no launcher tombstone. A missing descriptor
+// remains a fail-closed invocation even after machine policy is removed.
+func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	layout, err := managed.StandaloneLayoutFor(standaloneHookGOOS)
 	var loaded *managed.RuntimeDescriptor
@@ -83,7 +136,6 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 		loaded, err = standaloneRuntimeDescriptorLoad(layout.DescriptorPath)
 	}
 	reason := ""
-	noop := false
 	secureClientHost := false
 	switch {
 	case err == nil && loaded != nil && strings.TrimSpace(loaded.HookSocket) == "":
@@ -96,13 +148,16 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 			// historical fail-closed result for --enterprise-managed.
 			reason = standaloneRuntimeReasonInvalid
 			secureClientHost = true
-		case standaloneMachinePolicyPresent(standaloneHookGOOS, connectorName):
-			reason = standaloneRuntimeReasonDescriptorMissing
 		default:
-			noop = true
+			reason = standaloneRuntimeReasonDescriptorMissing
 		}
 	default:
 		reason = standaloneRuntimeReasonInvalid
+		if standaloneHookInUserNamespace() {
+			// The root-owned files read as owned by the overflow uid here,
+			// so they fail their checks; say why (GAP-0923).
+			reason = hookexec.ManagedUserNamespaceReason
+		}
 	}
 	standaloneHookRuntime.Lock()
 	standaloneHookRuntime.prepared = true
@@ -111,17 +166,30 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 	standaloneHookRuntime.descriptor = loaded
 	standaloneHookRuntime.reason = reason
 	standaloneHookRuntime.secureClientHost = secureClientHost
-	if noop || reason != "" {
+	if reason != "" {
 		standaloneHookRuntime.descriptor = nil
 	}
 	standaloneHookRuntime.Unlock()
-	return noop
+	return false
 }
 
 func enterpriseManagedHookRuntimeForceClosed() bool {
 	standaloneHookRuntime.Lock()
 	defer standaloneHookRuntime.Unlock()
 	return standaloneHookRuntime.prepared && standaloneHookRuntime.reason != ""
+}
+
+// enterpriseManagedHookRuntimeFailMode is the fail mode the root-owned runtime
+// descriptor records for the prepared connector (RuntimeDescriptor.HookFailMode):
+// open only when the administrator's config chose open for it, and closed
+// otherwise and whenever the runtime failed its checks.
+func enterpriseManagedHookRuntimeFailMode() string {
+	standaloneHookRuntime.Lock()
+	defer standaloneHookRuntime.Unlock()
+	if !standaloneHookRuntime.prepared || standaloneHookRuntime.reason != "" || standaloneHookRuntime.descriptor == nil {
+		return "closed"
+	}
+	return standaloneHookRuntime.descriptor.HookFailMode(standaloneHookRuntime.connector)
 }
 
 func enterpriseManagedHookRuntimeFailureReason() string {
@@ -131,11 +199,6 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 		return ""
 	}
 	return standaloneHookRuntime.reason
-}
-
-func enterpriseManagedHookRuntimeEndpoint(connectorName string) (string, string, bool) {
-	addr, service, _, ok := enterpriseManagedHookRuntimeConnection(connectorName)
-	return addr, service, ok
 }
 
 // enterpriseManagedHookRuntimeConnection returns the descriptor's gateway
@@ -177,6 +240,9 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	if opts.ManagedRuntimeFailure != "" {
 		if prepared && failed && !secureClientHost {
 			opts.ManagedStandalone = true
+			if opts.ManagedRuntimeFailure == hookexec.ManagedUserNamespaceReason {
+				reportStandaloneHookRefusal(layout.HookSocketPath, connectorName, opts.ManagedRuntimeFailure)
+			}
 		}
 		return
 	}
@@ -187,6 +253,9 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	opts.ManagedStandalone = true
 	opts.ManagedServiceUID = descriptor.ServiceUID
 	opts.ManagedUnixSocket = descriptor.HookSocket
+	// opts.FailMode and StrictAvailability are the descriptor's
+	// (enterpriseManagedHookRuntimeFailMode): closed and strict unless the
+	// administrator's config chose open for this connector.
 	// An inherited generic gateway token never authenticates a managed hook.
 	opts.Token = ""
 	if opts.MaxBody <= 0 || opts.MaxBody > 1<<20 {
@@ -199,19 +268,6 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	// the hook socket authenticates this process by uid.
 	opts.Home = layout.ConfigDir
 	opts.HookDir = filepath.Join(layout.ConfigDir, "hooks")
-}
-
-// standaloneMachinePolicyPresent reports whether DefenseClaw-owned vendor
-// machine policy may still name the managed hook for connectorName. It is
-// the machine-policy publisher's own owned-entry detection
-// (enterprisepolicy targets), leniently extended to drifted entries and
-// unreadable files so an uninstall leftover fails closed.
-func standaloneMachinePolicyPresent(goos, connectorName string) bool {
-	opts, ok := standaloneMachinePolicyOptions(goos)
-	if !ok {
-		return false
-	}
-	return enterprisepolicy.MachinePolicyMayRemain(opts, connectorName)
 }
 
 // defaultStandaloneMachinePolicyOptions resolves the machine policy paths

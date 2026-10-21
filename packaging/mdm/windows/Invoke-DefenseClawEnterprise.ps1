@@ -21,7 +21,9 @@
          of the signer certificate; Cisco or your own re-signing certificate);
       3. takes the administrator config and the optional credential from an
          administrator-only file or standard input, never from the command
-         line, and stages them in the same folder;
+         line, and stages them in the same folder; or, instead of a config,
+         a signed policy bundle (-BundlePath) and its trust anchors
+         (-TrustAnchorPath, administrator-only);
       4. runs Setup /ensure (install, upgrade, repair or a true no-op) or,
          without -SetupPath, the installed CLI, and prints the lifecycle
          result (packaging/mdm/contract/lifecycle-result.schema.json);
@@ -39,6 +41,16 @@
         -Sha256 3f0c...e1 -ConfigPath D:\stage\config.yaml
 
 .EXAMPLE
+    pwsh -NoProfile -File Invoke-DefenseClawEnterprise.ps1 -SetupPath D:\stage\DefenseClawSetup-Enterprise-Standalone-x64.exe `
+        -Sha256 3f0c...e1 -BundlePath D:\stage\policy-v7.dcbundle -TrustAnchorPath D:\stage\bundle-anchors.json
+
+    Applies a signed policy bundle on an installed computer (Setup /ensure
+    BUNDLE= TRUSTANCHORS=). The bundle carries the config, so -BundlePath is
+    not combined with -ConfigPath. The bundle may come from any folder: the
+    lifecycle verifies its own copy. The trust anchor file must be
+    administrator-only, like a config.
+
+.EXAMPLE
     Get-Content key.txt | pwsh -NoProfile -File Invoke-DefenseClawEnterprise.ps1 -SetupPath ... -Sha256 ... `
         -ConfigPath ... -SecretName ai-defense-api-key -SecretFromStdin
 #>
@@ -51,6 +63,9 @@ param(
     [string[]]$AllowedSigners = @(),
     [string]$ConfigPath = '',
     [switch]$ConfigFromStdin,
+    [string]$BundlePath = '',
+    [string]$TrustAnchorPath = '',
+	[switch]$RefuseCapabilityLoss,
     [string]$SecretName = '',
     [string]$SecretPath = '',
     [switch]$SecretFromStdin,
@@ -234,6 +249,7 @@ function Invoke-DefenseClawNative {
     }
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $info
+    $elapsed = [System.Diagnostics.Stopwatch]::StartNew()
     [void]$process.Start()
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
@@ -244,10 +260,29 @@ function Invoke-DefenseClawNative {
     }
     $process.StandardInput.Close()
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        # End the CLI and its PowerShell child before reporting the timeout.
+        # Process.Kill() alone leaves the child holding the lifecycle lock.
+        try {
+            $killInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $killInfo.FileName = [System.IO.Path]::Combine([System.Environment]::SystemDirectory, 'taskkill.exe')
+            $killInfo.Arguments = "/PID $($process.Id) /T /F"
+            $killInfo.UseShellExecute = $false
+            $killInfo.CreateNoWindow = $true
+            $killInfo.RedirectStandardOutput = $true
+            $killInfo.RedirectStandardError = $true
+            $killer = [System.Diagnostics.Process]::Start($killInfo)
+            if (-not $killer.WaitForExit(10000)) { $killer.Kill() }
+            $killer.Dispose()
+        } catch { $null = $_ }
         try { $process.Kill() } catch { $null = $_ }
+        [void]$process.WaitForExit(5000)
         throw "native_timeout: $FilePath did not finish within $TimeoutSeconds seconds"
     }
-    $process.WaitForExit()
+    $remaining = [Math]::Max(0, $TimeoutSeconds * 1000 - [int]$elapsed.ElapsedMilliseconds)
+    if (-not [System.Threading.Tasks.Task]::WaitAll(
+            [System.Threading.Tasks.Task[]]@($stdout, $stderr), $remaining)) {
+        throw "native_timeout: $FilePath output did not close within $TimeoutSeconds seconds"
+    }
     return New-Object -TypeName PSObject -Property @{
         ExitCode = $process.ExitCode; StdOut = $stdout.Result; StdErr = $stderr.Result
     }
@@ -292,6 +327,8 @@ $script:ExitBusy = 1618
 $script:ExitInvalid = 1639
 $script:MaxConfigBytes = 1MB
 $script:MaxSecretBytes = 16KB
+$script:MaxBundleBytes = 4MB
+$script:MaxAnchorBytes = 256KB
 $script:Staging = $null
 $script:LogPath = $null
 $script:ResultAction = 'ensure'
@@ -330,9 +367,10 @@ function Initialize-WrapperLog {
     try {
         if (-not (Test-Path -LiteralPath $directory)) {
             # Same descriptor the lifecycle uses: SYSTEM and Administrators
-            # write, users read.
+            # write, Administrators and Event Log Readers read. The results
+            # name other accounts, so standard users may not read them.
             $security = [System.Security.AccessControl.DirectorySecurity]::new()
-            $security.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)')
+            $security.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-32-573)')
             [System.IO.FileSystemAclExtensions]::Create([System.IO.DirectoryInfo]::new($directory), $security)
         }
         if (Test-DefenseClawAdminOnlyItem -Path $directory) {
@@ -450,6 +488,36 @@ function Test-WrapperAdminOnlyAncestors {
     return $true
 }
 
+function Get-WrapperUntrustedInputFix {
+    # Names the accounts that own or can change an input the admin-only check
+    # refused. The source folder may hold unrelated application data, so the
+    # wrapper never recommends changing its ACLs (GAP-1175).
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $sids = [System.Collections.Generic.List[string]]::new()
+    $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($script:DefenseClawAdminSids -notcontains $owner) {
+        $sids.Add($owner)
+    }
+    # The rights Test-DefenseClawAdminOnlyItem refuses.
+    $dangerous = [int64](0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000)
+    foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        $sid = $rule.IdentityReference.Value
+        if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+        if (($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
+        if ($script:DefenseClawAdminSids -contains $sid -or $sids.Contains($sid)) { continue }
+        if (([int64]$rule.FileSystemRights -band $dangerous) -ne 0) { $sids.Add($sid) }
+    }
+    $accounts = foreach ($sid in $sids) {
+        try {
+            ([System.Security.Principal.SecurityIdentifier]::new($sid)).Translate([System.Security.Principal.NTAccount]).Value
+        } catch {
+            $sid
+        }
+    }
+    return [pscustomobject]@{ Accounts = @($accounts) }
+}
+
 function Copy-WrapperInput {
     # Copies a bounded input into staging. Config and credentials must come
     # from an administrator-only location because nothing verifies them
@@ -464,7 +532,13 @@ function Copy-WrapperInput {
         Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' "$Label is not a regular file: $Source"
     }
     if ($RequireAdminOnly -and -not (Test-DefenseClawAdminOnlyItem -Path $Source)) {
-        Exit-Wrapper $script:ExitFailure 'mdm_untrusted_input' "$Label is writable by a non-administrator: $Source"
+        $message = "$Label is writable by a non-administrator: $Source"
+        $fix = try { Get-WrapperUntrustedInputFix -Path $Source } catch { $null }
+        if ($null -ne $fix) {
+            if ($fix.Accounts.Count -gt 0) { $message += ' (' + ($fix.Accounts -join ', ') + ' can change it)' }
+        }
+        $message += '. Nothing was changed. Stage a trusted copy in a new administrator-only folder dedicated to DefenseClaw, then run the wrapper again with that path'
+        Exit-Wrapper $script:ExitFailure 'mdm_untrusted_input' $message
     }
     if ($RequireAdminOnly -and -not (Test-WrapperAdminOnlyAncestors -Path $Source)) {
         Exit-Wrapper $script:ExitFailure 'mdm_untrusted_input' "a folder above $Label can be renamed, deleted or re-permissioned by a non-administrator, or is a link: $Source; stage it in an administrator-only folder"
@@ -550,7 +624,8 @@ function Write-LifecycleResult {
     }
     if ($code -eq 0) { $code = $script:ExitFailure }
     $stderr = ConvertTo-WrapperPublicText -Text ([string]$Run.StdErr) -Staged $script:StagedConfig -Public $ConfigPath
-    $detail = if ($null -ne $document -and $document.PSObject.Properties['error']) { [string]$document.error } else { (($text + ' ' + $stderr).Trim()) }
+    $stderr = [regex]::Replace($stderr, '(?m)^DC_LIFECYCLE_PHASE: [^\r\n]*(?:\r?\n)?', '')
+    $detail = if ($null -ne $document -and $document.PSObject.Properties['error']) { [string]$document.error } else { (($stderr + ' ' + $text).Trim()) }
     if ($detail.Length -gt 2048) { $detail = $detail.Substring(0, 2048) }
     $json = ConvertTo-DefenseClawResultJson -Action $script:ResultAction -ExitCode $code -Code 'mdm_lifecycle_no_result' -Message "$Label printed no lifecycle result: $detail"
     [Console]::Out.WriteLine($json)
@@ -596,7 +671,13 @@ if ($SecretName) {
 } elseif ($SecretPath -or $SecretFromStdin) {
     Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' 'a secret value needs -SecretName'
 }
-if ($normalizedAction -ne 'ensure' -and ($ConfigPath -or $ConfigFromStdin -or $SecretName)) {
+if ($BundlePath -and ($ConfigPath -or $ConfigFromStdin)) {
+    Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' '-BundlePath cannot be combined with -ConfigPath or -ConfigFromStdin: the signed bundle carries the config'
+}
+if ($RefuseCapabilityLoss -and -not $BundlePath) {
+	Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' '-RefuseCapabilityLoss requires -BundlePath'
+}
+if ($normalizedAction -ne 'ensure' -and ($ConfigPath -or $ConfigFromStdin -or $SecretName -or $BundlePath -or $TrustAnchorPath)) {
     Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' "-Action $Action is read-only and takes no config or secret"
 }
 if ($ProductVersion -and $ProductVersion -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?$') {
@@ -619,6 +700,18 @@ if ($ConfigFromStdin) {
     Copy-WrapperInput -Source $ConfigPath -Destination $config -Limit $script:MaxConfigBytes -Label 'config' -RequireAdminOnly
 }
 $script:StagedConfig = $config
+$bundle = ''
+if ($BundlePath) {
+    # Signed and hash-checked by the lifecycle on its own copy, so it may
+    # come from any folder.
+    $bundle = Join-Path $staging 'policy.dcbundle'
+    Copy-WrapperInput -Source $BundlePath -Destination $bundle -Limit $script:MaxBundleBytes -Label 'bundle'
+}
+$anchors = ''
+if ($TrustAnchorPath) {
+    $anchors = Join-Path $staging 'bundle-anchors.json'
+    Copy-WrapperInput -Source $TrustAnchorPath -Destination $anchors -Limit $script:MaxAnchorBytes -Label 'trust anchors' -RequireAdminOnly
+}
 $secret = ''
 if ($SecretName) {
     $secret = Join-Path $staging 'secret'
@@ -640,6 +733,9 @@ try {
         # '/' + $normalizedAction, 'JSON=1' is one string "/ensure JSON=1".
         $arguments = @(('/' + $normalizedAction), 'JSON=1')
         if ($config) { $arguments += "CONFIG=$config" }
+        if ($bundle) { $arguments += "BUNDLE=$bundle" }
+        if ($anchors) { $arguments += "TRUSTANCHORS=$anchors" }
+		if ($RefuseCapabilityLoss) { $arguments += 'REFUSECAPABILITYLOSS=1' }
         if ($script:Signers.Count -gt 0) { $arguments += ('ALLOWEDSIGNERS=' + ($script:Signers -join ',')) }
         $run = Invoke-DefenseClawNative -FilePath $stagedSetup -ArgumentList $arguments
         $exitCode = Write-LifecycleResult -Run $run -Label 'Setup'
@@ -650,6 +746,9 @@ try {
         }
         $arguments = @('enterprise', 'windows', $normalizedAction, '--profile', 'standalone', '--json')
         if ($config) { $arguments += @('--config', $config) }
+        if ($bundle) { $arguments += @('--bundle', $bundle) }
+        if ($anchors) { $arguments += @('--trust-anchors', $anchors) }
+		if ($RefuseCapabilityLoss) { $arguments += '--refuse-capability-loss' }
         if ($ProductVersion) { $arguments += @('--product-version', $ProductVersion.TrimStart('v')) }
         $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -ArgumentList $arguments
         $exitCode = Write-LifecycleResult -Run $run -Label 'defenseclaw.exe'

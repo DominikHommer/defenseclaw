@@ -3,14 +3,15 @@
 # build-managed-windows-bundle.sh
 #
 # Cross-build the managed-enterprise Windows Setup build kit on macOS/Linux
-# and hand it to AVC's signing pipeline. Under the AVC-approved handoff
-# (docs/WINDOWS-AVC-PACKAGING-HANDOFF.md), AVC — not DefenseClaw — signs
-# both the inner payload files and the outer Setup EXE; DefenseClaw only
-# emits an unsigned build kit AVC drops into its pipeline.
+# and hand it to AVC's signing pipeline. Under the standalone-assembler
+# handoff AVC's Windows CI no longer needs Go — DefenseClaw prebuilds
+# BOTH the unsigned outer Setup EXE and a native windows-amd64
+# DefenseClawAssembler.exe, ships them in the kit, and AVC's runner
+# invokes the assembler (a single verb) between its two signtool sign
+# steps. AVC still signs both the inner payload files (step 1) and the
+# assembled outer Setup EXE (step 3).
 #
-# Primary output: ${DIST_DIR}/windows-enterprise-buildkit-${VERSION}/,
-# whose contents match the handoff doc byte-for-byte. See
-# docs/specs/002-windows-avc-packaging/design.md for the full flow.
+# Primary output: ${DIST_DIR}/windows-enterprise-buildkit-${VERSION}/.
 #
 # Also emits the release-shaped defenseclaw-${VERSION}-windows-amd64.zip +
 # gateway-source-commit.txt that scripts/build-windows-installer.ps1
@@ -29,20 +30,27 @@
 #   5. Stamp VERSIONINFO / icon on all three PE binaries via
 #      `go run ./internal/tools/windowsresources -target windows_amd64 ...`
 #      (Windows verifies via the Win32 VersionInfo API at install time).
-#   6. Assemble the AVC-facing kit: payload/ (6 unsigned inner files),
-#      source/ (trimmed via `go list -deps`), source/vendor/
-#      (`go mod vendor`), packaging/scripts/lib/ (assemble + trust
-#      helpers), shipped assemble.{sh|ps1} at the kit root, and a
-#      payload-metadata.json + README-AVC.md.
-#   7. Also assemble the release-shaped gateway zip.
-#   8. Restore the snapshot in an EXIT trap whether the build succeeded or
+#   6. Cross-build DefenseClawSetup-Enterprise-x64.exe.unsigned (the
+#      prebuilt outer EXE with NO payload embedded — the assembler
+#      appends the signed payload as a trailer at AVC-time) and
+#      DefenseClawAssembler.exe (the native windows-amd64 tool AVC's CI
+#      runs). Both are deterministic under -trimpath + SOURCE_DATE_EPOCH.
+#   7. Assemble the AVC-facing kit: payload/ (8 unsigned inner files),
+#      DefenseClawSetup-Enterprise-x64.exe.unsigned + DefenseClawAssembler.exe
+#      at the kit root, packaging/scripts/lib/finalize.{sh,ps1} (post-sign
+#      helper — unchanged), a payload-metadata.json + README-AVC.md.
+#   8. Also assemble the release-shaped gateway zip (backward-compat).
+#   9. Restore the snapshot in an EXIT trap whether the build succeeded or
 #      failed, so the OSS working tree stays untouched.
 #
 # What this script deliberately does NOT do:
 #   - It does not sign anything. Both signing rounds (inner + outer)
-#     are AVC's step 1 and step 3 per the handoff doc.
+#     are AVC's step 1 and step 3 per the handoff.
 #   - It does not run under a Windows shell. The AVC-side pipeline is
 #     where the Windows-capable runner is required (for signtool).
+#   - It does not ship Go source, vendor/, or the shell assemblers to
+#     AVC. The standalone assembler removed that requirement — AVC no
+#     longer needs Go.
 #
 # Args:
 #   --ref <git-ref>       ai-common ref to build against (default: develop)
@@ -51,19 +59,19 @@
 #   --version <v>         defenseclaw release version (required)
 #   --dist-dir <p>        output directory for the gateway zip (default: dist)
 #   --script-host <s>     bash|pwsh — which assemble.* to ship in the kit
-#                         (spec 002 REQ-08; default: bash)
+#                         (the kit ships exactly one; default: bash)
 #   --allow-unsigned      developer-only mode: build kit AND run
 #                         assemble.sh --allow-unsigned inline, landing a
 #                         runnable but unsigned Setup EXE under
 #                         dist/windows-enterprise-buildkit-<v>-unsigned/out/
-#                         (spec 002 REQ-14; refuses non-disposable scopes
+#                         (separate output dir; refuses non-disposable scopes
 #                         at runtime via cmd/defenseclaw-enterprise-setup)
 #   -h|--help             show this header and exit
 #
-# AVC-facing kit (spec 002 §2.3.A1): every invocation also emits
+# AVC-facing kit: every invocation also emits
 #     ${DIST_DIR}/windows-enterprise-buildkit-${VERSION}/
 # whose contents match docs/WINDOWS-AVC-PACKAGING-HANDOFF.md. AVC signs
-# the six inner files under payload/, runs the shipped
+# the eight inner files under payload/, runs the shipped
 # assemble.{sh|ps1}, then signs the resulting outer Setup EXE.
 #
 # Environment overrides (all optional):
@@ -79,6 +87,12 @@ KEEP="false"
 VERSION=""
 DIST_DIR="dist"
 SCRIPT_HOST="bash"
+# SCRIPT_HOST_EXPLICIT tracks whether the caller actually passed
+# --script-host, so the deprecation warning below can fire on any
+# explicit value — including `bash` (previously the default) and `pwsh`
+# (the case CI is most likely still passing to pick up the PowerShell
+# shell assembler that the Go assembler replaced).
+SCRIPT_HOST_EXPLICIT="false"
 ALLOW_UNSIGNED="false"
 
 usage() {
@@ -95,7 +109,7 @@ while [[ $# -gt 0 ]]; do
     --keep)            KEEP="true"; shift;;
     --version)         VERSION="${2:?}"; shift 2;;
     --dist-dir)        DIST_DIR="${2:?}"; shift 2;;
-    --script-host)     SCRIPT_HOST="${2:?}"; shift 2;;
+    --script-host)     SCRIPT_HOST="${2:?}"; SCRIPT_HOST_EXPLICIT="true"; shift 2;;
     --allow-unsigned)  ALLOW_UNSIGNED="true"; shift;;
     -h|--help)         usage 0;;
     *) echo "unknown flag: $1" >&2; usage 64;;
@@ -264,14 +278,18 @@ SENSOR_HELPER_EXE="${STAGE_DIR}/defenseclaw-sensor-helper.exe"
 ACP_EXE="${STAGE_DIR}/defenseclaw-acp.exe"
 # main.commit defaults to "unknown", which the enterprise Setup builder's
 # Assert-DefenseClawBinaryIdentity rejects. Stamp the exact HEAD sha we
-# derived above so identity verification passes.
-LDFLAGS_GATEWAY="-s -w -buildid=defenseclaw-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
-LDFLAGS_HOOK="-s -w -buildid=defenseclaw-hook-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
-LDFLAGS_BROKER="-s -w -buildid=defenseclaw-cmid-broker-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
+# derived above so identity verification passes. main.date is the commit's
+# UTC time, so a rebuild of the same commit stamps the same value; without it
+# `defenseclaw-gateway --version` showed an unknown build time (#1249).
+SOURCE_DATE="$(TZ=UTC git -C "${REPO_ROOT}" show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)"
+STAMP="-X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT} -X main.date=${SOURCE_DATE}"
+LDFLAGS_GATEWAY="-s -w -buildid=defenseclaw-${VERSION}-windows-amd64 ${STAMP}"
+LDFLAGS_HOOK="-s -w -buildid=defenseclaw-hook-${VERSION}-windows-amd64 -H=windowsgui ${STAMP}"
+LDFLAGS_BROKER="-s -w -buildid=defenseclaw-cmid-broker-${VERSION}-windows-amd64 -H=windowsgui ${STAMP}"
 # -H=windowsgui for the same reason the broker uses it: this runs under the
 # SCM with no console, and a console subsystem binary flashes a window.
-LDFLAGS_SENSOR_HELPER="-s -w -buildid=defenseclaw-sensor-helper-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
-LDFLAGS_ACP="-s -w -buildid=defenseclaw-acp-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
+LDFLAGS_SENSOR_HELPER="-s -w -buildid=defenseclaw-sensor-helper-${VERSION}-windows-amd64 -H=windowsgui ${STAMP}"
+LDFLAGS_ACP="-s -w -buildid=defenseclaw-acp-${VERSION}-windows-amd64 ${STAMP}"
 ICON_PATH="${REPO_ROOT}/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
 
 echo "==> building defenseclaw-gateway.exe (windows/amd64 tags=cmid)"
@@ -324,13 +342,93 @@ echo "==> stamping defenseclaw-sensor-helper.exe VERSIONINFO / icon"
     -target windows_amd64 -executable "${SENSOR_HELPER_EXE}" \
     -component sensor-helper -version "${VERSION}" -icon "${ICON_PATH}" )
 
-# ---- assemble the AVC-facing build kit (spec 002 §2.3.A1) -------------
+# ---- verify the cmid overlay actually linked into each binary ---------
 #
-# See docs/WINDOWS-AVC-PACKAGING-HANDOFF.md for the AVC-side contract
-# and docs/specs/002-windows-avc-packaging/design.md § Data flow for
-# the DefenseClaw-side flow. The kit is deterministic across macOS/
-# Linux hosts on the same source commit (spec 001 primitives + the
-# reproducibility CI gate keep both runners in step).
+# If the overlay cp (line 265) silently no-op'd, the overlay source was
+# itself a stub, or `go build` picked up a stale cache without the
+# Register() init, the resulting binary ships with `cloudreg.Registered()`
+# returning false. On AVC CI the broker then exits with service-specific
+# error 1 ("Incorrect function"), the install fails, and the only
+# diagnostic is a `stage=provider-registration success=false` line in the
+# broker log. The 06102026 handoff kit shipped exactly this failure mode.
+#
+# The real overlay imports github.com/cisco-aispg/ai-common/cmid; Go
+# embeds that module path in the binary (reflection / panic traces) even
+# with -trimpath. Zero occurrences = overlay did not link, which fails
+# fast here instead of surviving to AVC's signing pipeline.
+for binary_path in "${GATEWAY_EXE}" "${HOOK_EXE}" "${BROKER_EXE}"; do
+    # grep -ao returns exit 1 on zero matches, which under `set -euo
+    # pipefail` kills the script before the diagnostic branch below
+    # runs. Wrap the matcher in `|| true` so pipefail sees success and
+    # wc -l still reports 0 for a stub-linked binary - the ensuing
+    # `if ... -eq 0` is what emits the useful "cmid overlay did not
+    # link" message. Keeps the hard-fail intent; just surfaces WHY.
+    overlay_hits="$({ grep -ao 'cisco-aispg' "${binary_path}" 2>/dev/null || true; } | wc -l | tr -d ' ')"
+    if [[ "${overlay_hits}" -eq 0 ]]; then
+        echo "build-managed-windows-bundle: ${binary_path} has 0 cisco-aispg symbols; cmid overlay did not link" >&2
+        echo "    expected the private overlay from ${OVERLAY_PATH} to compile in via -tags cmid" >&2
+        echo "    a stub-linked broker fails on AVC CI with provider-registration success=false" >&2
+        exit 1
+    fi
+    echo "==> ${binary_path}: ${overlay_hits} cisco-aispg symbols (cmid overlay linked)"
+done
+
+# ---- cross-build the prebuilt outer Setup EXE + assembler EXE ----------
+#
+# DefenseClaw prebuilds BOTH the unsigned outer Setup EXE (with NO
+# payload embedded — //go:embed is gone) and a native windows-amd64
+# DefenseClawAssembler.exe that AVC invokes to bind the signed payload
+# onto the outer EXE as a setuppayload trailer.
+#
+# Reproducibility still applies — SOURCE_DATE_EPOCH + -trimpath +
+# -buildid pin the outputs across independent runs, and the
+# assembler's TestReproducibilityByteIdentical proves the trailer
+# append itself is deterministic.
+#
+# The prebuilt Setup EXE lands in STAGE_DIR alongside the payload
+# binaries; the assembler EXE follows the same layout.
+SETUP_EXE_UNSIGNED="${STAGE_DIR}/DefenseClawSetup-Enterprise-x64.exe.unsigned"
+ASSEMBLER_EXE="${STAGE_DIR}/DefenseClawAssembler.exe"
+# Neither cmd/defenseclaw-enterprise-setup nor cmd/windows-avc-assembler
+# declares main.version or main.commit — go's linker silently ignores
+# a -X targeting a nonexistent variable, so the payload EXEs' pattern
+# (LDFLAGS_GATEWAY / _HOOK / _BROKER above) doesn't transfer here.
+# The setup EXE gets its stamp from the windowsresources tool run
+# directly below; the assembler receives version/commit through its
+# -Version / -SourceCommit CLI flags. Leaving -buildid so the Go
+# reproducibility recipe still pins output identity.
+LDFLAGS_SETUP="-s -w -buildid=defenseclaw-enterprise-setup-${VERSION}-windows-amd64"
+LDFLAGS_ASSEMBLER="-s -w -buildid=defenseclaw-assembler-${VERSION}-windows-amd64"
+
+# SOURCE_DATE_EPOCH must be set BEFORE the go build so -trimpath's
+# stripped build-time paths + the toolchain's own timestamp emissions
+# resolve to the commit epoch. Two independent bundler runs against the
+# same source commit thus produce byte-identical outputs.
+SOURCE_COMMIT_EPOCH="$(git -C "${REPO_ROOT}" show -s --format=%ct HEAD)"
+export SOURCE_DATE_EPOCH="${SOURCE_COMMIT_EPOCH}"
+
+echo "==> building DefenseClawSetup-Enterprise-x64.exe.unsigned (windows/amd64)"
+( cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+    go build -trimpath -buildvcs=false \
+    -ldflags "${LDFLAGS_SETUP}" \
+    -o "${SETUP_EXE_UNSIGNED}" ./cmd/defenseclaw-enterprise-setup )
+
+echo "==> stamping DefenseClawSetup-Enterprise-x64.exe.unsigned VERSIONINFO / icon"
+( cd "${REPO_ROOT}" && go run ./internal/tools/windowsresources \
+    -target windows_amd64 -executable "${SETUP_EXE_UNSIGNED}" \
+    -component enterprise-setup -version "${VERSION}" -icon "${ICON_PATH}" )
+
+echo "==> building DefenseClawAssembler.exe (windows/amd64)"
+( cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+    go build -trimpath -buildvcs=false \
+    -ldflags "${LDFLAGS_ASSEMBLER}" \
+    -o "${ASSEMBLER_EXE}" ./cmd/windows-avc-assembler )
+
+# ---- assemble the AVC-facing build kit --------------------------------
+#
+# The kit is a single flat directory AVC's CI mounts, then invokes
+# DefenseClawAssembler.exe against ./payload + the prebuilt outer EXE.
+# Deterministic across macOS/Linux hosts on the same source commit.
 
 mkdir -p "${DIST_DIR}"
 DIST_ABS="$(cd "${DIST_DIR}" && pwd)"
@@ -344,7 +442,7 @@ else
 fi
 KIT_DIR="${DIST_ABS}/${KIT_NAME}"
 rm -rf "${KIT_DIR}"
-mkdir -p "${KIT_DIR}/payload" "${KIT_DIR}/source" "${KIT_DIR}/packaging/scripts/lib"
+mkdir -p "${KIT_DIR}/payload" "${KIT_DIR}/packaging/scripts/lib"
 
 # ---- kit/payload: the seven files AVC signs (or leaves unsigned in
 #                   --allow-unsigned mode) ------------------------------
@@ -353,7 +451,7 @@ echo "==> staging kit payload"
 # what we tell emit-payload-metadata (--expected-filenames arg) and
 # it is the same set of names we stage under payload/. Keeping the
 # list in one variable prevents drift between the staged payload and
-# the audit trail in payload-metadata.json (CR spec-002:PRRT_kwDORuAK-s6af8iw).
+# the audit trail in payload-metadata.json.
 # The runtime's requiredPayloadFiles in cmd/defenseclaw-enterprise-setup/main.go
 # and the assemble.{sh,ps1} EXPECTED_PAYLOAD arrays must all agree —
 # scripts/check-assemble-parity.sh enforces the two assembler ends.
@@ -395,135 +493,37 @@ for _name in "${EXPECTED_PAYLOAD_NAMES[@]}"; do
     fi
 done
 
-# ---- kit/source: the trimmed Go source tree AVC's `go build` needs
-#                  (spec 002 REQ-04 + REQ-05 + REQ-06). We trim via
-#                  `go list -deps` over the two commands AVC needs to
-#                  build inside the kit: the outer Setup and the
-#                  emitter that assemble.sh invokes via `go run`.
-echo "==> resolving trimmed import graph (go list -deps)"
-# The list must run under the OVERLAY-APPLIED tree so cmid packages
-# resolve. Include both the outer Setup command AND the emitter — the
-# emitter builds during assemble.sh stage 0 via `go run`, so its
-# dependency closure has to ship inside the kit too.
+# ---- kit root: prebuilt outer Setup EXE + assembler EXE ---------------
 #
-# GOOS=windows GOARCH=amd64 is load-bearing: without it, `go list`
-# runs with the host GOOS (macOS/Linux in local --allow-unsigned mode)
-# and its build constraints skip every //go:build windows file. That
-# hides the imports platform_windows.go (managed, processutil,
-# winpath) declares, and the kit's trimmed source tree ends up
-# missing them. AVC's Windows runners already resolve with the right
-# GOOS by default; this fixes the local dev loop.
-TRIM_PKGS=$(
-  cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 go list -deps \
-    ./cmd/defenseclaw-enterprise-setup/... \
-    ./cmd/windows-repro-manifest/... \
-  | grep -E '^github\.com/defenseclaw/defenseclaw($|/)' \
-  | sed 's|^github\.com/defenseclaw/defenseclaw/||;s|^github\.com/defenseclaw/defenseclaw$|.|'
-)
-# TRIM_PKGS is a newline-separated list of import-path suffixes rooted
-# at the module root. Copy each package's directory (non-recursive so
-# we don't accidentally pull in sibling packages that go list didn't
-# reach). The resulting tree preserves the module layout so
-# `go build -mod=vendor` inside the kit resolves without patch-ups.
-echo "==> copying trimmed import graph into kit/source"
-while IFS= read -r pkg; do
-  [[ -z "${pkg}" ]] && continue
-  if [[ "${pkg}" == "." ]]; then
-    # Root-level go files (rare; safety fallback).
-    dst="${KIT_DIR}/source"
-    src="${REPO_ROOT}"
-  else
-    dst="${KIT_DIR}/source/${pkg}"
-    src="${REPO_ROOT}/${pkg}"
-  fi
-  if [[ ! -d "${src}" ]]; then
-    echo "build-managed-windows-bundle: trim missing dir: ${src}" >&2
-    exit 1
-  fi
-  mkdir -p "${dst}"
-  # -R would recurse into sibling subpackages; use find -maxdepth 1
-  # to copy only the package's own files (matches go's package boundary).
-  find "${src}" -mindepth 1 -maxdepth 1 -type f \
-    \( -name '*.go' -o -name 'embed.*' -o -name '*.tmpl' \
-       -o -name '*.json' -o -name '*.yaml' -o -name '*.txt' \
-       -o -name '*.pem' -o -name '*.crt' -o -name '*.mod' \
-       -o -name '*.sum' -o -name 'LICENSE*' -o -name 'NOTICE*' \) \
-    -exec cp {} "${dst}/" \;
-done <<<"${TRIM_PKGS}"
+# The kit ships the two prebuilt EXEs at its root so the AVC runbook
+# is a four-verb flow (signtool → assembler → signtool → finalize).
+# No source/, no vendor/, no shell assembler.
+echo "==> staging prebuilt outer Setup EXE + DefenseClawAssembler.exe into kit"
+cp "${SETUP_EXE_UNSIGNED}" "${KIT_DIR}/DefenseClawSetup-Enterprise-x64.exe.unsigned"
+cp "${ASSEMBLER_EXE}"      "${KIT_DIR}/DefenseClawAssembler.exe"
 
-# The two payload embed dir + testdata dirs the compiler reads via
-# //go:embed need to be present even if go list -deps didn't tag them.
-# The enterprise-setup's payload/ directory ships EMPTY into the kit;
-# assemble.sh populates it with signed inner files before running
-# `go build`, so //go:embed picks them up. Similarly the
-# windows-repro-manifest's testdata dir is empty in production.
-mkdir -p "${KIT_DIR}/source/cmd/defenseclaw-enterprise-setup/payload"
-touch    "${KIT_DIR}/source/cmd/defenseclaw-enterprise-setup/payload/.keep"
-
-# ---- kit/source/vendor + go.mod/go.sum ---------------------------------
-#
-# `go mod vendor` writes to a `vendor/` dir under GOMOD's directory.
-# We deliberately keep OSS working trees untouched (see the header
-# comment "the OSS working tree stays untouched"). Before touching
-# vendor:
-#   - If ${REPO_ROOT}/vendor already exists, REFUSE to run so a
-#     `go mod vendor` (which overwrites) followed by our `mv` (which
-#     removes) does not destroy a pre-existing vendor tree the caller
-#     may have staged for a different purpose.
-#   - Otherwise, run go mod vendor at REPO_ROOT, mv it into the kit,
-#     and rely on restore_overlay's EXIT trap to leave a clean tree.
-# See CR spec-002:PRRT_kwDORuAK-s6af8io.
-# -e follows symlinks (catches a linked vendor tree); -L catches
-# dangling symlinks that -e would miss. `go mod vendor` would replace
-# any of those three shapes with a fresh directory, and the mv would
-# then remove it from the working tree. See CR spec-002:PRRT_kwDORuAK-s6ahACI.
-if [[ -e "${REPO_ROOT}/vendor" || -L "${REPO_ROOT}/vendor" ]]; then
-  echo "build-managed-windows-bundle: refusing to run — ${REPO_ROOT}/vendor already exists." >&2
-  echo "  The bundler needs to run 'go mod vendor' and then move the result" >&2
-  echo "  into the AVC kit. Moving an already-populated vendor tree (or a" >&2
-  echo "  vendor symlink, or a stale vendor file) would destroy work you" >&2
-  echo "  may not have committed. Delete or move ${REPO_ROOT}/vendor" >&2
-  echo "  first, then rerun." >&2
-  exit 1
-fi
-
-echo "==> writing kit/source/vendor via go mod vendor"
-( cd "${REPO_ROOT}" && go mod vendor -e ) || {
-  echo "build-managed-windows-bundle: go mod vendor failed" >&2
-  exit 1
-}
-# Move (not copy) the vendor tree — a 150+ MB copy inside dist/ isn't
-# reversible without another mv, so bundle it once. The snapshot in
-# OVERLAY_SNAPSHOT_DIR has the pre-overlay go.mod/go.sum for EXIT
-# restore; because the refuse-if-exists guard above ran, moving vendor
-# out never destroys OSS-side work.
-rm -rf "${KIT_DIR}/source/vendor"
-mv "${REPO_ROOT}/vendor" "${KIT_DIR}/source/vendor"
-cp "${REPO_ROOT}/go.mod" "${KIT_DIR}/source/go.mod"
-cp "${REPO_ROOT}/go.sum" "${KIT_DIR}/source/go.sum"
-
-# ---- kit/packaging/scripts/lib: assemble + lib helpers ----------------
-echo "==> copying assemble + lib helpers into kit"
+# ---- kit/packaging/scripts/lib: finalize.* only -----------------------
+# The standalone assembler retires assemble.{sh,ps1}, repro-flags.{sh,ps1},
+# and assert-cisco-signature.{sh,ps1} from the AVC-facing kit — the
+# assembler EXE folds those responsibilities in. finalize.{sh,ps1}
+# stays because it runs AFTER AVC's step-3 signtool sign to compute
+# the signed EXE's SHA-256 and patch the provenance sidecar; that
+# post-sign work is out of scope for the assembler.
+echo "==> copying finalize helpers into kit"
 LIB_SRC="${REPO_ROOT}/packaging/scripts/lib"
 LIB_DST="${KIT_DIR}/packaging/scripts/lib"
-# repro-flags is required regardless of script host — both variants of
-# the assembler source it. Trust helpers ship as a pair (sh+ps1) so
-# either shell host has what it needs.
-cp "${LIB_SRC}/repro-flags.sh"                "${LIB_DST}/repro-flags.sh"
-cp "${LIB_SRC}/repro-flags.ps1"               "${LIB_DST}/repro-flags.ps1"
-cp "${LIB_SRC}/assert-cisco-signature.sh"     "${LIB_DST}/assert-cisco-signature.sh"
-cp "${LIB_SRC}/assert-cisco-signature.ps1"    "${LIB_DST}/assert-cisco-signature.ps1"
 cp "${LIB_SRC}/finalize.sh"                   "${LIB_DST}/finalize.sh"
 cp "${LIB_SRC}/finalize.ps1"                  "${LIB_DST}/finalize.ps1"
 
-# The shipped assemble.* is chosen by --script-host. Ships at the kit
-# root because AVC's runbook calls it as `./assemble.sh` — no lib/
-# prefix. Only one is shipped so AVC has a single verb to invoke.
-if [[ "${SCRIPT_HOST}" == "pwsh" ]]; then
-  cp "${LIB_SRC}/assemble.ps1" "${KIT_DIR}/assemble.ps1"
-else
-  cp "${LIB_SRC}/assemble.sh"  "${KIT_DIR}/assemble.sh"
-  chmod +x "${KIT_DIR}/assemble.sh"
+# Deprecated flag: --script-host was used to pick between bash and
+# PowerShell shell assemblers. The standalone assembler EXE is the
+# only assembler AVC runs now. `SCRIPT_HOST_EXPLICIT` is set by the
+# CLI parser only when the caller actually passed --script-host, so
+# we warn on any explicit value (`bash` was the previous default;
+# `pwsh` was the case CI most likely to be passing to pick up the
+# PowerShell assembler that no longer ships in the kit).
+if [[ "${SCRIPT_HOST_EXPLICIT}" == "true" ]]; then
+  echo "build-managed-windows-bundle: --script-host $SCRIPT_HOST ignored (deprecated; assembler EXE is used unconditionally)" >&2
 fi
 
 # ---- kit/payload-metadata.json + README-AVC.md ------------------------
@@ -552,97 +552,140 @@ trap 'restore_overlay; rm -rf "${STAGE_DIR}" "${EMITTER_TMP}"' EXIT
   --expected-filenames "$(IFS=,; echo "${EXPECTED_PAYLOAD_NAMES[*]}")" \
   --out "${KIT_DIR}/payload-metadata.json"
 
-# ---- kit/README-AVC.md (~40-line runbook) -----------------------------
-if [[ "${SCRIPT_HOST}" == "pwsh" ]]; then
-  ASSEMBLE_INVOCATION='pwsh -File assemble.ps1 -SourceCommit <sha> -Version '"${VERSION}"' -CmidPseudoVersion '"${CMID_VERSION}"
-  FINALIZE_INVOCATION='pwsh -File packaging/scripts/lib/finalize.ps1 -SetupExe <path> -Provenance <path>'
-else
-  ASSEMBLE_INVOCATION="./assemble.sh --source-commit <sha> --version ${VERSION} --cmid-pseudo-version ${CMID_VERSION}"
-  FINALIZE_INVOCATION='./packaging/scripts/lib/finalize.sh --setup-exe <path> --provenance <path>'
-fi
-
+# ---- kit/README-AVC.md — four-verb runbook (signtool → assembler → signtool → finalize)
 cat > "${KIT_DIR}/README-AVC.md" <<EOF
 # DefenseClaw Windows managed-enterprise Setup — AVC build kit ${VERSION}
 
-Reference contract: **docs/WINDOWS-AVC-PACKAGING-HANDOFF.md** (in the
-DefenseClaw source tree). This kit implements that handoff verbatim.
+## What AVC runs
 
-## What AVC runs (three verbs)
+    1. signtool sign  payload\\DefenseClawEnterprise.psm1
+       signtool sign  payload\\*.exe
+       Set-AuthenticodeSignature -FilePath payload\\install-enterprise.ps1 ...
 
-    1. signtool sign  payload/DefenseClawEnterprise.psm1
-       signtool sign  payload/*.exe
-       Set-AuthenticodeSignature -FilePath payload/install-enterprise.ps1 ...
+    2. .\\DefenseClawAssembler.exe \`
+         -PayloadDir .\\payload \`
+         -SetupExeUnsigned .\\DefenseClawSetup-Enterprise-x64.exe.unsigned \`
+         -SourceCommit ${SOURCE_COMMIT} \`
+         -Version ${VERSION} \`
+         -Out .\\out \`
+         -SigningType <DEV|PROD> \`
+         -ExpectedSignerSha256 <64-hex-char SHA-256 fingerprint>
 
-    2. export SOURCE_DATE_EPOCH=<the commit's UTC unix seconds>
-       ${ASSEMBLE_INVOCATION}
+       -SigningType PROD          — Get-AuthenticodeSignature must return
+                                   Status = Valid on every payload.
+       -SigningType DEV           — additionally accepts UnknownError only
+                                   when StatusMessage matches the host-
+                                   localized CERT_E_CHAINING (0x800B010A)
+                                   message — i.e. Authenticode returned
+                                   "chain does not reach a trusted root"
+                                   for a DEV cert whose CA is not in the
+                                   runner's trust store. Every other
+                                   status message (revoked, expired,
+                                   HashMismatch, etc.) stays fatal.
+       -ExpectedSignerSha256      — bare 64-char SHA-256 hex; colons and
+                                   whitespace are tolerated and stripped.
+                                   Compared byte-exact (case-insensitive)
+                                   against SignerCertificate.GetCertHashString(SHA256).
 
-    3. signtool sign  out/DefenseClawSetup-Enterprise-x64.exe
+    3. signtool sign  out\\DefenseClawSetup-Enterprise-x64.exe
+
+    4. pwsh -File packaging\\scripts\\lib\\finalize.ps1 \`
+         -SetupExe out\\DefenseClawSetup-Enterprise-x64.exe \`
+         -Provenance out\\DefenseClawSetup-Enterprise-x64.exe.provenance.json
 
 Final artefacts AVC ships back:
-  - out/DefenseClawSetup-Enterprise-x64.exe          (signed)
-  - out/DefenseClawSetup-Enterprise-x64.exe.sha256   (SHA-256 sidecar)
-  - out/DefenseClawSetup-Enterprise-x64.exe.provenance.json
+  - out\\DefenseClawSetup-Enterprise-x64.exe          (signed)
+  - out\\DefenseClawSetup-Enterprise-x64.exe.sha256   (SHA-256 sidecar)
+  - out\\DefenseClawSetup-Enterprise-x64.exe.provenance.json
 
 The \`.sha256\` sidecar and the \`setup_sha256\` field inside
-provenance.json are the SHA-256 of the SIGNED outer EXE, computed
-after step 3. AVC can compute them inside their signtool wrapper OR
-invoke the optional in-kit helper:
-
-    ${FINALIZE_INVOCATION}
-
-Either path is fine — the DefenseClaw contract only cares that
+provenance.json are the SHA-256 of the SIGNED outer EXE, computed by
+finalize.ps1 after step 3 signtool sign. AVC's pipeline may compute
+them inline instead — the DefenseClaw contract only cares that
 \`setup_sha256\` matches the shipped EXE's hash by the time the artefact
 reaches release engineering.
+
+## Install / Uninstall — smoke-test the signed Setup EXE
+
+Both commands need an **elevated PowerShell** prompt (Run as
+Administrator). Signed builds install into the production paths
+(\`%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\\` and
+\`%ProgramData%\\...\\DefenseClaw\\\`) and use the fixed service names
+\`DefenseClawGateway\`, \`DefenseClawHookGuardian\`, \`DefenseClawHookEnumerator\`,
+and \`DefenseClawCMIDBroker\`.
+
+Do NOT pass \`--allow-unsigned\` or any cert-scope flags
+(\`--install-root\`, \`--state-root\`, \`--gateway-service-name\`,
+\`--guardian-service-name\`, \`--certification-codex-home\`) — the
+signed binary refuses them with exit 1603.
+
+### Install (action mode, all three connectors)
+
+    .\\DefenseClawSetup-Enterprise-x64.exe --action install \`
+        --mode action \`
+        --connector codex,claudecode,cursor \`
+        --json
+
+### Uninstall (always with --purge)
+
+    .\\DefenseClawSetup-Enterprise-x64.exe --action uninstall \`
+        --purge \`
+        --json
+
+### Verify install
+
+    Get-Service DefenseClawGateway, DefenseClawHookGuardian, DefenseClawHookEnumerator, DefenseClawCMIDBroker |
+        Format-Table Name, Status, StartType
+    Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18970/healthz |
+        Select-Object -ExpandProperty Content
+    .\\DefenseClawSetup-Enterprise-x64.exe --action status --json |
+        ConvertFrom-Json | Format-List
+
+## What this kit deliberately does NOT ship
+
+- No Go source tree.  DefenseClaw prebuilds the outer Setup EXE.
+- No \`go build\` step. AVC's runner never invokes Go.
+- No shell assembler. DefenseClawAssembler.exe replaces both
+                       assemble.sh and assemble.ps1 from earlier kits.
 
 ## Facts about this kit
 
 - Source commit:            ${SOURCE_COMMIT}
 - DefenseClaw version:      ${VERSION}
 - CMID pseudo-version:      ${CMID_VERSION}
-- Script host in kit:       ${SCRIPT_HOST}
-- Offline \`go build\`:     kit/source/vendor is complete; no network
-                             access needed at build time.
-- Go toolchain expected:    matches GOTOOLCHAIN in
-                             kit/packaging/scripts/lib/repro-flags.sh
-                             (out-of-band pin per spec 001).
 - Reproducibility invariant: two AVC-runner runs of the same kit
                              against byte-identical signed payload
                              MUST produce byte-identical outer Setup
-                             EXEs (spec 001 REQ-07 gate).
+                             EXEs. The assembler's
+                             TestReproducibilityByteIdentical locks
+                             this in on the DefenseClaw side.
 
 ## Questions
 
-Route any AVC-side environmental issues (missing tools, unexpected go
-version, network policy) to the DefenseClaw packaging team. Any
-change to this kit's structure requires an amendment to
-WINDOWS-AVC-PACKAGING-HANDOFF.md in the DefenseClaw source tree —
-this file is generated, do not edit it.
+Route any AVC-side environmental issues (missing tools, unexpected
+network policy) to the DefenseClaw packaging team. This file is
+generated by the bundler — do not edit it directly.
 EOF
 
 # ---- --allow-unsigned local-loop mode ---------------------------------
-# Runs assemble.sh --allow-unsigned inline against the (unsigned)
-# payload we just staged, landing a runnable DefenseClawSetup-
-# Enterprise-x64.exe under ${KIT_DIR}/out/ so a developer can iterate
-# without any AVC engagement. The emitted manifest.json + provenance.json
-# both carry "unsigned": true; the runtime hash gate at
-# stageEnterprisePayload then requires --allow-unsigned +
-# --certification-codex-home at install time (see
-# cmd/defenseclaw-enterprise-setup/platform_windows.go:59-64).
+# Runs the assembler inline (via `go run` since we're on macOS/Linux
+# here and cannot invoke the windows-amd64 DefenseClawAssembler.exe
+# directly) against the unsigned payload we just staged, landing a
+# runnable DefenseClawSetup-Enterprise-x64.exe under ${KIT_DIR}/out/
+# so a developer can iterate without any AVC engagement. The emitted
+# manifest.json (inside the trailer) + provenance.json both carry
+# "unsigned": true; the runtime hash gate at stageEnterprisePayload
+# then requires --allow-unsigned + --certification-codex-home at
+# install time (see cmd/defenseclaw-enterprise-setup/platform_windows.go:59-64).
 if [[ "${ALLOW_UNSIGNED}" == "true" ]]; then
-  echo "==> running assemble.sh --allow-unsigned inline"
-  export SOURCE_DATE_EPOCH="${SOURCE_COMMIT_EPOCH:-$(git -C "${REPO_ROOT}" show -s --format=%ct HEAD)}"
-  # The kit-shipped assemble.sh lives at ${KIT_DIR}/assemble.sh (bash
-  # script host). If the user passed --script-host pwsh we still use
-  # the bash helper for the inline path since we're on macOS/Linux
-  # here — pwsh isn't guaranteed on a DefenseClaw developer's laptop.
-  ( cd "${KIT_DIR}" && bash "${LIB_SRC}/assemble.sh" \
-      --payload-dir "./payload" \
-      --source-dir  "./source" \
-      --out-dir     "./out" \
-      --source-commit "${SOURCE_COMMIT}" \
-      --version "${VERSION}" \
-      --cmid-pseudo-version "${CMID_VERSION}" \
-      --allow-unsigned )
+  echo "==> running windows-avc-assembler -AllowUnsigned inline"
+  ( cd "${REPO_ROOT}" && go run ./cmd/windows-avc-assembler \
+      -PayloadDir "${KIT_DIR}/payload" \
+      -SetupExeUnsigned "${KIT_DIR}/DefenseClawSetup-Enterprise-x64.exe.unsigned" \
+      -SourceCommit "${SOURCE_COMMIT}" \
+      -Version "${VERSION}" \
+      -Out "${KIT_DIR}/out" \
+      -AllowUnsigned )
 fi
 
 rm -rf "${EMITTER_TMP}"
@@ -698,10 +741,12 @@ if [[ "${ALLOW_UNSIGNED}" == "true" ]]; then
   echo "runtime hash gate that refuses non-disposable scopes."
 else
   echo ""
-  echo "Hand ${KIT_DIR} (or a tar of it) to AVC per"
-  echo "docs/WINDOWS-AVC-PACKAGING-HANDOFF.md. AVC will:"
-  echo "  1. signtool sign      payload/*.{exe,ps1,psm1}"
-  echo "  2. ./assemble.sh      (or pwsh -File assemble.ps1)"
-  echo "  3. signtool sign      out/DefenseClawSetup-Enterprise-x64.exe"
+  echo "Hand ${KIT_DIR} (or a zip of it) to AVC. AVC will:"
+  echo "  1. signtool sign               payload\\*.{exe,ps1,psm1}"
+  echo "  2. .\\DefenseClawAssembler.exe -SigningType <DEV|PROD> -ExpectedSignerSha256 <hex>"
+  echo "  3. signtool sign               out\\DefenseClawSetup-Enterprise-x64.exe"
+  echo "  4. pwsh -File packaging\\scripts\\lib\\finalize.ps1 ..."
+  echo ""
+  echo "See README-AVC.md inside the kit for the full assembler flag surface."
 fi
 echo ""

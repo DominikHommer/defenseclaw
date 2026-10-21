@@ -28,14 +28,25 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// Free space the MicroVM driver's state directory needs: the first start
-// of each image prepares a MicroVM disk of about 5 GB there.
+// Free space the MicroVM driver's state directory needs. A first start
+// temporarily uses 9-11 GiB on the host, including disk preparation.
 const (
-	VMDiskFailBytes = 6 << 30
-	VMDiskWarnBytes = 12 << 30
+	VMDiskFirstStartBytes = 11 << 30
+	VMDiskFailBytes       = 12 << 30
+	VMDiskWarnBytes       = 22 << 30
 )
+
+// EnterprisePlatformName is the enterprise subcommand for a Go OS name.
+func EnterprisePlatformName(goos string) string {
+	if goos == "darwin" {
+		return "macos"
+	}
+	return goos
+}
 
 // Homebrew commands that prepare a Mac for the MicroVM driver.
 const (
@@ -66,11 +77,16 @@ const hypervisorEntitlement = "com.apple.security.hypervisor"
 // MicroVMHost is what OpenShell's MicroVM (vm) driver needs on a Mac, as
 // doctor found it.
 type MicroVMHost struct {
+	managed bool
 	// E2fsprogs is the directory the driver finds mke2fs and debugfs in;
 	// empty when it finds none. OnPath names a copy only the shell's PATH
 	// has, which the driver under launchd may not see.
 	E2fsprogs string `json:"e2fsprogs,omitempty"`
 	OnPath    string `json:"e2fsprogs_on_path,omitempty"`
+	// OwnBrewPrefix is the Homebrew prefix when it is a per-user one,
+	// which the driver does not search for e2fsprogs (empty for
+	// /opt/homebrew and /usr/local).
+	OwnBrewPrefix string `json:"homebrew_prefix,omitempty"`
 	// DriverBinary is the openshell-driver-vm the gateway starts; empty
 	// when none was found.
 	DriverBinary string `json:"driver_binary,omitempty"`
@@ -94,14 +110,51 @@ type MicroVMHost struct {
 	// Recommended is what DefenseClaw sets up every MicroVM with, within
 	// the organization's openshell.admin.max_resources.
 	Recommended VMResources `json:"recommended"`
+	// KVM says why /dev/kvm cannot be opened for reading and writing by
+	// this user (Linux; empty: it can, or this is a Mac).
+	KVM string `json:"kvm_problem,omitempty"`
+	// ServiceUMask is the umask the gateway service runs with, as systemd
+	// reports it (Linux; empty: not known), and UMaskTooStrict says that it
+	// hides directories from the guest (UMaskTooStrict).
+	ServiceUMask   string `json:"service_umask,omitempty"`
+	UMaskTooStrict bool   `json:"service_umask_too_strict,omitempty"`
+	// StateDir is the driver's state directory, and StaleCache the
+	// directories of its cache built under a gateway umask stricter than
+	// 0022, which no MicroVM prepared from them survives (Linux).
+	StateDir   string   `json:"state_dir,omitempty"`
+	StaleCache []string `json:"stale_cache,omitempty"`
+	// Linux marks a Linux host, whose needs are not a Mac's; kvmFix is the
+	// way on from a KVM problem.
+	Linux  bool `json:"linux,omitempty"`
+	kvmFix *Fix
 }
+
+// KVMUsable reports a Linux host where a MicroVM can start as far as KVM
+// goes: it can offer the MicroVM driver.
+func (m *MicroVMHost) KVMUsable() bool { return m != nil && m.Linux && m.KVM == "" }
 
 // Problems are what keeps the driver from starting a MicroVM here.
 func (m *MicroVMHost) Problems() []string {
+	if m.Linux {
+		var out []string
+		if m.KVM != "" {
+			out = append(out, m.KVM)
+		}
+		return append(out, m.toolProblems()...)
+	}
 	var out []string
 	if m.E2fsprogs == "" {
-		out = append(out, "e2fsprogs is not installed where the MicroVM driver looks for it, Homebrew's keg (opt/e2fsprogs under /opt/homebrew or /usr/local): "+
-			"the driver formats every MicroVM's disks with its mke2fs and debugfs")
+		problem := "e2fsprogs is not installed where the MicroVM driver looks for it"
+		if m.managed {
+			problem += ": a managed computer uses the administrator's enterprise.openshell.e2fsprogs_dir, your own ~/.local/opt/e2fsprogs/sbin build, or the package fallback"
+		} else {
+			problem += ", Homebrew's keg (opt/e2fsprogs under /opt/homebrew or /usr/local): " +
+				"the driver formats every MicroVM's disks with its mke2fs and debugfs"
+			if m.OwnBrewPrefix != "" {
+				problem += "; it does not look in your Homebrew at " + m.OwnBrewPrefix
+			}
+		}
+		out = append(out, problem)
 	}
 	switch {
 	case m.DriverBinary == "" && !m.DriverRunning:
@@ -112,13 +165,18 @@ func (m *MicroVMHost) Problems() []string {
 	return out
 }
 
-// macChecks makes, once, the machine checks of a Mac, which depend on the
+// macChecks makes, once, the machine checks of a Mac (on Linux
+// linuxMicroVMChecks adjusts the ones made before), which depend on the
 // compute driver: on vm sandboxes run in OpenShell MicroVMs, with their
 // own kernel and disks; on docker they run on the kernel of the Linux VM
 // Docker runs in. They go where the Landlock check would, in the order
 // the check list gives.
 func (r *doctorRun) macChecks(ctx context.Context) {
-	if r.GOOS == "linux" || r.machineDone {
+	if r.GOOS == "linux" {
+		r.linuxMicroVMChecks(ctx)
+		return
+	}
+	if r.machineDone {
 		return
 	}
 	r.machineDone = true
@@ -149,10 +207,16 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 		// What a switch to MicroVMs needs is checked when the doctor
 		// offers one.
 		vmDriver := Check{ID: CheckIDVMDriver, Title: "MicroVM driver", Status: StatusSkip, Detail: "the gateway runs the docker driver"}
+		skip := "the gateway runs the docker driver (a switch to MicroVMs sets it)"
+		if r.config == nil && r.running.Name == "" {
+			// Neither its configuration nor the gateway says which driver
+			// it runs: docker is only the default (GAP-0191).
+			skip = "the gateway's compute driver is " + r.configUnknown()
+			vmDriver.Detail = skip
+		}
 		if landlock.Status != StatusPass {
 			vmDriver = r.vmDriverCheck(ctx)
 		}
-		skip := "the gateway runs the docker driver (a switch to MicroVMs sets it)"
 		checks = []Check{landlock, docker, r.buildKit, hostNet, sharing, vmDriver,
 			{ID: CheckIDVMIdentity, Title: "MicroVM sandbox user", Status: StatusSkip, Detail: skip},
 			{ID: CheckIDVMResources, Title: "MicroVM resources", Status: StatusSkip, Detail: skip}, disk}
@@ -179,24 +243,59 @@ func mootWithoutLandlock(c Check, microVMs string) Check {
 // changed.
 var dockerDesktopSharing = []string{"/Users", "/Volumes", "/private", "/tmp", "/var/folders"}
 
+// HookFireProbeDir is the private directory under the user cache
+// directory (~/Library/Caches/defenseclaw/hookfire on a Mac) that the
+// hook-fire probe of an image build mounts a MicroVM /etc/hosts and
+// /etc/resolv.conf from (image.Builder, GAP-0037): a container engine that
+// shares the home directory sees it. "" without a cache directory.
+func HookFireProbeDir() string {
+	cache, err := os.UserCacheDir()
+	if err != nil || !filepath.IsAbs(cache) {
+		return ""
+	}
+	return filepath.Join(cache, "defenseclaw", "hookfire")
+}
+
 // vmFileSharingCheck is the Docker file sharing check of a gateway on the
 // MicroVM driver. Its sandboxes mount no host folders, but the hook-fire
 // probe that checks every image built for them runs the harness in a
-// Docker container with a MicroVM's /etc/hosts and /etc/resolv.conf,
-// which it mounts from the system temp directory (image.Builder.TempDir):
-// Docker Desktop shares it by default (/var/folders, the user's $TMPDIR,
-// and /tmp). Unshared, every image stays unchecked for a MicroVM, which
-// the gateway then refuses to boot.
+// Docker container with a MicroVM /etc/hosts and /etc/resolv.conf, which
+// it mounts from HookFireProbeDir (Doctor.TempDir), under the home
+// directory. Unshared, every image stays unchecked for a MicroVM, which the
+// gateway then refuses to boot. On a Mac every engine runs containers in a
+// Linux VM: Docker Desktop shares what its settings name (/Users among its
+// defaults), Colima and OrbStack the home directory by default (GAP-0402).
 func (r *doctorRun) vmFileSharingCheck() Check {
 	c := Check{ID: CheckIDDockerFileSharing, Title: checkTitles[CheckIDDockerFileSharing]}
-	tmp := filepath.Clean(r.TempDir())
 	what := " (the hook-fire probe of an image build mounts a MicroVM's /etc/hosts from there; sandboxes mount nothing)"
+	dir := r.TempDir()
 	switch {
 	case !r.docker:
 		c.Status, c.Detail = StatusSkip, "the Docker daemon is not available"
 		return c
-	case !r.desktop:
+	case !r.desktop && r.GOOS != "darwin":
 		c.Status, c.Detail = StatusSkip, "bind mounts come straight from the host filesystem"
+		return c
+	case dir == "":
+		c.Status, c.Detail = StatusWarn, "no cache directory for the hook-fire probe of an image build (HOME is not set)"
+		c.Fix = &Fix{Summary: "run DefenseClaw with HOME set to your home directory"}
+		return c
+	}
+	dir = filepath.Clean(dir)
+	resolved, _ := filepath.EvalSymlinks(dir)
+	under := func(shared []string) bool {
+		return sharedDir(shared, dir) || (resolved != "" && sharedDir(shared, resolved))
+	}
+	if !r.desktop {
+		// Colima, OrbStack and other engines on a Mac: their VM sees the
+		// home directory by default; what else it sees is their own
+		// configuration, which DefenseClaw does not read.
+		if home, _ := r.HomeDir(); filepath.IsAbs(home) && under([]string{home}) {
+			c.Status, c.Detail = StatusPass, dir+" is under your home directory, which Colima and OrbStack share with the VM they run containers in by default"+what
+			return c
+		}
+		c.Status, c.Detail = StatusWarn, dir+" is outside your home directory, and the VM this Docker engine runs containers in may not see it"+what
+		c.Fix = &Fix{Summary: "share " + dir + " with the VM of your Docker engine (Colima: add it under mounts in ~/.colima/default/colima.yaml, then `colima restart`)"}
 		return c
 	}
 	dd, err := r.DockerDesktop()
@@ -207,27 +306,33 @@ func (r *doctorRun) vmFileSharingCheck() Check {
 		if err != nil {
 			c.Detail += ": " + err.Error()
 		}
-		c.Fix = &Fix{Summary: "make sure " + tmp + " is under a shared directory (Docker Desktop → Settings → Resources → File sharing)"}
+		c.Fix = &Fix{Summary: "make sure " + dir + " is under a shared directory (Docker Desktop → Settings → Resources → File sharing)"}
 		return c
 	case dd.FileSharing != nil:
 		shared = dd.FileSharing
 	}
-	resolved, _ := filepath.EvalSymlinks(tmp)
-	if sharedDir(shared, tmp) || (resolved != "" && sharedDir(shared, resolved)) {
-		c.Status, c.Detail = StatusPass, tmp+" is shared with Docker Desktop"+what
+	if under(shared) {
+		c.Status, c.Detail = StatusPass, dir+" is shared with Docker Desktop"+what
 		return c
 	}
 	c.Status = StatusFail
-	c.Detail = tmp + " is not shared with Docker Desktop, so the hook-fire probe cannot run an image with a MicroVM's name resolution and the gateway refuses every image" + what
-	c.Fix = &Fix{Summary: "add " + tmp + " in Docker Desktop → Settings → Resources → File sharing (it is shared by default: /var/folders and /tmp)"}
+	c.Detail = dir + " is not shared with Docker Desktop, so the hook-fire probe cannot run an image with a MicroVM's name resolution and the gateway refuses every image" + what
+	c.Fix = &Fix{Summary: "add " + dir + " (or your home directory) in Docker Desktop → Settings → Resources → File sharing (/Users is shared by default)"}
 	return c
 }
 
 // microVMHost finds what the MicroVM driver needs on this Mac.
 func (r *doctorRun) microVMHost(ctx context.Context) *MicroVMHost {
-	m := &MicroVMHost{Identity: VMIdentity{UID: int64(r.Geteuid()), GID: int64(r.Getegid())},
+	m := &MicroVMHost{managed: r.Gateway.managedHost(), Identity: VMIdentity{UID: int64(r.Geteuid()), GID: int64(r.Getegid())},
 		Recommended: RecommendedVMResources(r.HostMemory()).Within(r.MaxCPUMillis, r.MaxMemoryBytes)}
-	m.E2fsprogs = e2fsprogsIn(r.E2fsprogsDirs)
+	if m.managed {
+		m.E2fsprogs = r.managedE2fsprogs()
+	} else {
+		m.E2fsprogs = e2fsprogsIn(r.E2fsprogsDirs)
+	}
+	if prefix := r.brewPrefix(); driverSkipsHomebrew(prefix, r.E2fsprogsDirs) {
+		m.OwnBrewPrefix = prefix
+	}
 	if m.E2fsprogs == "" {
 		mke2fs, err1 := r.LookPath("mke2fs")
 		_, err2 := r.LookPath("debugfs")
@@ -256,11 +361,74 @@ func (r *doctorRun) microVMHost(ctx context.Context) *MicroVMHost {
 // mkfs.ext4 name) and debugfs.
 func e2fsprogsIn(dirs []string) string {
 	for _, dir := range dirs {
-		if (executable(filepath.Join(dir, "mke2fs")) || executable(filepath.Join(dir, "mkfs.ext4"))) && executable(filepath.Join(dir, "debugfs")) {
+		if hasE2fsprogs(dir) {
 			return dir
 		}
 	}
 	return ""
+}
+
+func hasE2fsprogs(dir string) bool {
+	return (executable(filepath.Join(dir, "mke2fs")) || executable(filepath.Join(dir, "mkfs.ext4"))) && executable(filepath.Join(dir, "debugfs"))
+}
+
+// managedE2fsprogs uses the exact folder decision of the managed gateway
+// exec shim, including the administrator's authoritative setting and never
+// a Homebrew keg (GAP-0004).
+func (r *doctorRun) managedE2fsprogs() string {
+	home, _ := r.HomeDir()
+	adminDir := ""
+	if r.AdminE2fsprogsKnown {
+		adminDir = r.AdminE2fsprogsDir
+	}
+	dir, _ := ManagedE2fsprogsToolDir(adminDir, home, os.Getuid(), r.trustManagedE2fsprogs)
+	return dir
+}
+
+func (d *Doctor) trustManagedE2fsprogs(path string, file bool) error {
+	if file {
+		trust := d.TrustedE2fsprogsFile
+		if trust == nil {
+			trust = managed.ValidateTrustedFilePath
+		}
+		return trust(path, "e2fsprogs tool")
+	}
+	trust := d.TrustedE2fsprogsDir
+	if trust == nil {
+		trust = managed.ValidateTrustedRuntimeDir
+	}
+	return trust(path, "e2fsprogs")
+}
+
+// ManagedE2fsprogsCheck reports the managed Mac gateway's actual e2fsprogs
+// folder. It is called after the daemon identifies the managed VM driver;
+// Doctor.Run omits host checks on managed computers.
+func (d *Doctor) ManagedE2fsprogsCheck() Check {
+	d.defaults()
+	c := Check{ID: CheckIDManagedE2fsprogs, Title: "e2fsprogs", Status: StatusFail}
+	if !d.AdminE2fsprogsKnown {
+		c.Detail = "the managed gateway did not answer its e2fsprogs_dir settings; cannot verify which folder its exec shim uses"
+		c.Fix = &Fix{Summary: "ask your administrator to restore the managed gateway settings service, then run sandbox doctor again"}
+		return c
+	}
+	home, _ := d.HomeDir()
+	dir, problem := ManagedE2fsprogsToolDir(d.AdminE2fsprogsDir, home, os.Getuid(),
+		d.trustManagedE2fsprogs)
+	if dir != "" {
+		c.Status, c.Detail = StatusPass, "the managed gateway uses e2fsprogs in "+dir
+		return c
+	}
+	c.Detail = problem
+	fix := "ask your administrator to repair the package's e2fsprogs or install mke2fs and debugfs side by side and set enterprise.openshell.e2fsprogs_dir; an account build in ~/.local/opt/e2fsprogs/sbin also works when the setting is unset"
+	if strings.Contains(problem, "holds no mke2fs and debugfs") {
+		fix = "ask your administrator to install e2fsprogs into the configured install prefix or the folder that holds both tools"
+	} else if strings.Contains(problem, "not trusted") {
+		fix = "ask your administrator to make the e2fsprogs directory and both tools root-owned, without symlinks or group/other write access; enterprise.openshell.e2fsprogs_dir may name the install prefix or the folder that holds both tools"
+	} else if strings.Contains(problem, "cannot be traversed") || strings.Contains(problem, "cannot be executed") {
+		fix = "ask your administrator to make the e2fsprogs directory and its ancestors traversable and both tools executable by sandbox accounts (chmod o+x); enterprise.openshell.e2fsprogs_dir may name the install prefix or the folder that holds both tools"
+	}
+	c.Fix = &Fix{Summary: fix}
+	return c
 }
 
 func executable(p string) bool {
@@ -304,7 +472,7 @@ func (r *doctorRun) findVMDriver(ctx context.Context) string {
 			return p
 		}
 	}
-	if r.running.Name != DriverVM || r.GOOS != "darwin" {
+	if r.running.Name != DriverVM {
 		return ""
 	}
 	parent := 0
@@ -319,6 +487,20 @@ func (r *doctorRun) findVMDriver(ctx context.Context) string {
 		return p.path
 	}
 	return ""
+}
+
+// ManagedMicroVMFix is what a user of a managed computer does about a MicroVM
+// driver that lacks something: ask the administrator, who sets
+// enterprise.openshell. It names no Homebrew command, which a standard user
+// of a managed computer cannot run.
+func ManagedMicroVMFix(m *MicroVMHost, unsigned bool) string {
+	switch {
+	case m.E2fsprogs == "":
+		return "ask your administrator to repair the managed package's e2fsprogs or set enterprise.openshell.e2fsprogs_dir (or build it yourself into ~/.local/opt/e2fsprogs)"
+	case unsigned:
+		return "ask your administrator for an OpenShell whose MicroVM driver is signed for Apple's Hypervisor (OpenShell 0.1.3 ships it signed), or for enterprise.openshell.install: setup"
+	}
+	return "ask your administrator to install OpenShell (enterprise.openshell.install)"
 }
 
 // VMDriverSigningFix is what to do about a MicroVM driver outside the
@@ -400,12 +582,13 @@ func (r *doctorRun) vmDriverCheck(ctx context.Context) Check {
 	problems := m.Problems()
 	var cmds []string
 	var steps []func(context.Context) error
-	if m.E2fsprogs == "" {
-		cmds, steps = append(cmds, InstallE2fsprogsCommand), append(steps, func(ctx context.Context) error { return brew(ctx, r.Runner, "install", "e2fsprogs") })
+	managed := r.Gateway.managedHost()
+	if m.E2fsprogs == "" && m.OwnBrewPrefix == "" && !managed {
+		cmds, steps = append(cmds, InstallE2fsprogsCommand), append(steps, func(ctx context.Context) error { return brewTerminal(ctx, r.Runner, "install", "e2fsprogs") })
 	}
 	// The formula's post-install step signs the formula's driver only.
 	unsigned := m.DriverBinary != "" && !m.HypervisorSigned && m.SignatureUnknown == ""
-	if unsigned && m.DriverFromFormula {
+	if unsigned && m.DriverFromFormula && !managed {
 		cmds, steps = append(cmds, ResignVMDriverCommand), append(steps, func(ctx context.Context) error { return brew(ctx, r.Runner, "postinstall", GatewayFormula) })
 	}
 	switch {
@@ -422,6 +605,10 @@ func (r *doctorRun) vmDriverCheck(ctx context.Context) Check {
 		c.Detail = fmt.Sprintf("e2fsprogs in %s; %s signed for Apple's Hypervisor", m.E2fsprogs, m.DriverBinary)
 	}
 	switch {
+	case managed && (m.E2fsprogs == "" || unsigned || (m.DriverBinary == "" && !m.DriverRunning)):
+		// No Homebrew on a managed host (spec D4, D5): the administrator
+		// provides it.
+		c.Fix = &Fix{Summary: ManagedMicroVMFix(m, unsigned)}
 	case len(steps) > 0:
 		c.Fix = &Fix{Summary: "install what the MicroVM driver needs with Homebrew", Command: strings.Join(cmds, " && "), Automatic: true,
 			Apply: func(ctx context.Context) error {
@@ -432,6 +619,8 @@ func (r *doctorRun) vmDriverCheck(ctx context.Context) Check {
 				}
 				return nil
 			}}
+	case m.E2fsprogs == "" && m.OwnBrewPrefix != "":
+		c.Fix = &Fix{Summary: E2fsprogsOwnPrefixFix(m.OwnBrewPrefix)}
 	case unsigned:
 		c.Fix = &Fix{Summary: VMDriverSigningFix(m.DriverBinary)}
 	case m.DriverBinary == "" && !m.DriverRunning:
@@ -460,6 +649,17 @@ func (r *doctorRun) foreignImages(ctx context.Context) []string {
 		}
 	}
 	return out
+}
+
+// brewTerminal runs a Homebrew command the user consented to attached to
+// the terminal, so that a long install shows Homebrew's own progress (a
+// Homebrew without bottles for its prefix builds from source for many
+// minutes, and captured output left the user looking at one line).
+func brewTerminal(ctx context.Context, run Runner, args ...string) error {
+	if err := run.Run(ctx, Command{Name: "brew", Args: args}); err != nil {
+		return fmt.Errorf("brew %s: %w", strings.Join(args, " "), err)
+	}
+	return nil
 }
 
 // brew runs a Homebrew command the user consented to.
@@ -601,11 +801,17 @@ func (r *doctorRun) vmDiskCheck() Check {
 		return c
 	}
 	c.Detail = fmt.Sprintf("%s free under %s", humanBytes(free), dir)
-	if n, size := preparedDisks(filepath.Join(dir, "images")); n > 0 {
-		c.Detail += fmt.Sprintf("; OpenShell keeps %s there (%s), and `%s` removes those of the images it removes",
+	if n, size := preparedDisks(filepath.Join(dir, "images"), false); n > 0 {
+		c.Detail += fmt.Sprintf("; OpenShell keeps %s there (%s), and `%s` removes those of the images it removes and those an earlier OpenShell release prepared",
 			plural(n, "MicroVM disk prepared from an image", "MicroVM disks prepared from images"), humanBytes(size), pruneCommand)
 	}
-	fix := &Fix{Summary: "free space on this volume: the first start of each harness image prepares a MicroVM disk of about 5 GB in " + dir +
+	if n, size := preparedDisks(filepath.Join(dir, "images"), true); n > 0 {
+		// A first start that failed or was cancelled leaves its own
+		// (GAP-0218).
+		c.Detail += fmt.Sprintf("; %s take %s (a start under way, or one that failed: `%s` removes those unchanged for 15 minutes)",
+			plural(n, "half-prepared MicroVM disk", "half-prepared MicroVM disks"), humanBytes(size), pruneCommand)
+	}
+	fix := &Fix{Summary: "free space on this volume: the first start of each harness image uses about 11 GiB while preparing a MicroVM disk in " + dir +
 		"; prune removes DefenseClaw's superseded harness images and the MicroVM disks prepared from them " +
 		"(a backup or indexing app that holds a removed file open keeps its space until it lets go: `lsof +L1` lists them)",
 		Command: pruneCommand}
@@ -635,14 +841,15 @@ const PreparedDiskPrefix = "sandbox-prepared-rootfs-"
 
 // preparedDisks counts the root disks the driver prepared from images under
 // dir (PreparedDiskPrefix) and the disk they take (allocated, not their
-// larger sparse size).
-func preparedDisks(dir string) (n int, size uint64) {
+// larger sparse size); with staging, the half-prepared ones (.staging
+// directories) instead.
+func preparedDisks(dir string, staging bool) (n int, size uint64) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, 0
 	}
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), PreparedDiskPrefix) || strings.Contains(e.Name(), ".staging") {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), PreparedDiskPrefix) || strings.Contains(e.Name(), ".staging") != staging {
 			continue
 		}
 		n++

@@ -254,6 +254,7 @@ export default function PolicyCreator() {
   function handleRestartQuickStart() {
     if (!confirmRestart(answers)) return;
     setAnswers(defaultAnswers());
+    setPolicy(policyFromPreset('default'));
     setArrivedFromQuickStart(false);
     setTab('quick-start');
     if (typeof window !== 'undefined') {
@@ -645,7 +646,6 @@ function confirmRestart(answers: Answers): boolean {
   const hasAnswers =
     answers.block.size > 0 ||
     answers.allow.size > 0 ||
-    answers.firstPartyExtra.length > 0 ||
     answers.domainsExtra.length > 0 ||
     Object.values(answers.sinks).some((s) => s.enabled && s.url) ||
     answers.posture !== 'default' ||

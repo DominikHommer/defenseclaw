@@ -191,11 +191,11 @@ type ApprovalRequestRecord struct {
 // outer event wins when both report the same dimension; validation rejects
 // malformed values later instead of inventing replacements.
 func (p ApprovalRequestPayload) CorrelationContext() ApprovalCorrelationPayload {
-	result := p.ApprovalCorrelationPayload.normalized()
+	result := p.normalized()
 	if p.Request == nil {
 		return result
 	}
-	return result.withFallback(p.Request.ApprovalCorrelationPayload.normalized())
+	return result.withFallback(p.Request.normalized())
 }
 
 func (p ApprovalCorrelationPayload) normalized() ApprovalCorrelationPayload {
@@ -303,10 +303,9 @@ type SkillsUpdateParams struct {
 	Enabled  bool   `json:"enabled"`
 }
 
-// ConfigPatchParams is the legacy params for config.patch RPC (path/value style).
-// Note: OpenClaw's config.patch actually expects { raw, baseHash } — see
-// ConfigPatchRawParams. This struct is kept for the PatchConfig helper but
-// will fail against real OpenClaw gateways.
+// ConfigPatchParams is the path/value form of the config.patch RPC that
+// BlockMCPServer sends. OpenClaw's config.patch expects the raw merge form
+// (ConfigPatchRawParams).
 type ConfigPatchParams struct {
 	Path  string      `json:"path"`
 	Value interface{} `json:"value"`

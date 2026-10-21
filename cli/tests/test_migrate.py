@@ -46,7 +46,17 @@ def _write_config(data_dir: Path, body: str) -> Path:
 
 
 @pytest.fixture()
-def recorded(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def v8_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the target to config_version 8 so a test sees only the 0.x chain
+    and the framework (the 8 -> 9 step is test_v8_config_runs_the_go_v9_step)."""
+    from defenseclaw import config as config_module
+
+    monkeypatch.setattr(config_module, "CURRENT_CONFIG_VERSION", 8)
+    monkeypatch.setattr(migrations, "CONFIG_MIGRATIONS", {})
+
+
+@pytest.fixture()
+def recorded(monkeypatch: pytest.MonkeyPatch, v8_target: None) -> list[str]:
     """Replace the frozen 0.x chain with recording steps."""
 
     calls: list[str] = []
@@ -86,12 +96,12 @@ def test_current_config_is_a_no_op(data_dir: Path, recorded: list[str]) -> None:
 
 
 def test_config_from_a_newer_release_is_refused(data_dir: Path) -> None:
-    config = _write_config(data_dir, "config_version: 9\n")
+    config = _write_config(data_dir, "config_version: 10\n")
 
     with pytest.raises(ConfigTooNewError):
         migrate(str(data_dir), check=True)
 
-    assert config.read_text(encoding="utf-8") == "config_version: 9\n"
+    assert config.read_text(encoding="utf-8") == "config_version: 10\n"
 
 
 def test_v7_import_runs_only_steps_after_the_previous_version(data_dir: Path, recorded: list[str]) -> None:
@@ -164,6 +174,51 @@ def test_check_converts_a_scratch_copy_with_the_staged_gateway(
     assert not Path(str(seen["scratch"])).exists()
 
 
+def test_check_refuses_a_config_the_staged_gateway_would_refuse(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """GAP-0158: a stale custom_packs pin ends the upgrade check, before the installer swaps anything."""
+    from defenseclaw import config_inspect
+
+    _write_config(data_dir, "config_version: 9\n")
+    seen: list[str | None] = []
+
+    def validate(operation, *, gateway_binary=None, **_kwargs):
+        seen.append(gateway_binary)
+        raise config_inspect.ConfigInspectError(
+            "candidate",
+            field_path="$.guardrail",
+            reason='[config_semantic_invalid] config rule pack "p0m": digest sha256:ab does not match '
+            "guardrail.custom_packs.p0m.digest; fix the reference, then retry",
+        )
+
+    monkeypatch.setattr(config_inspect, "inspect_v8_config", validate)
+
+    migrate(str(data_dir), check=True)
+    assert seen == []
+    with pytest.raises(MigrationError, match=r"would refuse your configuration: guardrail: digest sha256:ab does not match guardrail\.custom_packs\.p0m\.digest"):
+        migrate(str(data_dir), check=True, gateway_binary="/staged/defenseclaw-gateway")
+    assert seen == ["/staged/defenseclaw-gateway"]
+
+
+def test_v8_update_check_preflight_uses_migrated_document(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _write_config(data_dir, "config_version: 8\nupdate_check: false\n")
+    seen = []
+
+    def preview(path: str, _gateway: str) -> None:
+        seen.append(path)
+
+    def reject_original(*_args) -> None:
+        pytest.fail("the staged validator must not inspect unmigrated v8 keys")
+
+    monkeypatch.setattr(migrations, "_preview_config_v9", preview)
+    monkeypatch.setattr(migrations, "_check_staged_gateway_accepts", reject_original)
+    result = migrate(str(data_dir), check=True, gateway_binary="/staged/defenseclaw-gateway")
+
+    assert result.applied == ["config_version 8 → 9"]
+    assert seen == [str(config)]
+
+
 def test_failing_step_names_itself(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_config(data_dir, "config_version: 7\n")
 
@@ -176,10 +231,125 @@ def test_failing_step_names_itself(data_dir: Path, monkeypatch: pytest.MonkeyPat
         migrate(str(data_dir), from_version="0.8.4")
 
 
+def test_v8_config_runs_the_go_v9_step(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw import config_inspect
+
+    config = _write_config(data_dir, "config_version: 8\nobservability: {}\n")
+    calls: list[str] = []
+
+    def go_migrate(*, config_path: str, **_kwargs):
+        calls.append(config_path)
+        Path(config_path).write_text("config_version: 9\nobservability: {}\n", encoding="utf-8")
+        moved = [{"to": "update.check"}, {"to": "asset_policy.mcp.denied", "value": "bad-mcp"}]
+        record = {
+            "moved": moved,
+            "conflicts": [],
+            "detection_only_rules": ["ACME-A", "ACME-B", "CUSTOM-CMD-SUDO"],
+            "expressed_rules": ["CUSTOM-CMD-RM-RF", "ACME-LIT"],
+            "renamed_rules": ["CMD-RM-RF -> CUSTOM-CMD-RM-RF", "CMD-SUDO -> CUSTOM-CMD-SUDO"],
+            "rule_file_merges": ["/p/acme-1.0: rules/b.yaml (category \"acme\") merged into rules/a.yaml; 2 rule(s) kept"],
+        }
+        (data_dir / "migration-v9.json").write_text(json.dumps(record), encoding="utf-8")
+        return {"migrated": True, "record": record}
+
+    # GAP-1340: the servers a scan refuses to start are named; the bare
+    # launchers with a package and URL entries are not.
+    from types import SimpleNamespace
+
+    from defenseclaw import config as config_module
+    from defenseclaw.config import MCPServerEntry
+
+    servers = {
+        "claudecode": [
+            MCPServerEntry(name="u33a-mcp", command="/usr/bin/true"),
+            MCPServerEntry(name="rel", command="./srv.sh"),
+            MCPServerEntry(name="binsrv", command="bin/srv"),
+            MCPServerEntry(name="win", command="C:\\tools\\srv.exe"),
+            MCPServerEntry(name="pathnpx", command="/opt/homebrew/bin/npx", args=["-y", "pkg"]),
+            MCPServerEntry(name="launcher", command="npx", args=["-y", "pkg"]),
+            MCPServerEntry(name="bare-uvx", command="uvx", args=["pkg"]),
+            MCPServerEntry(name="web", url="https://mcp.example.com/mcp"),
+            MCPServerEntry(name="bad-mcp", command="/usr/bin/false"),
+        ],
+        "codex": [MCPServerEntry(name="u33a-mcp", command="/usr/bin/true")],
+    }
+    cfg = SimpleNamespace(
+        active_connectors=lambda: ["claudecode", "codex"],
+        mcp_servers=lambda connector: servers[connector],
+        gateway=SimpleNamespace(watcher=SimpleNamespace(mcp=SimpleNamespace(take_action=True))),
+    )
+    monkeypatch.setattr(config_module, "load", lambda **_kwargs: cfg)
+    monkeypatch.setattr(config_inspect, "migrate_config_v9", go_migrate)
+    monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
+
+    result = migrate(str(data_dir), from_version="1.0.0")
+
+    assert calls == [str(config)]
+    assert result.applied == ["config_version 8 → 9"]
+    assert result.to_config_version == 9
+    out = capsys.readouterr().out
+    # GAP-1225: the upgrade names the custom rules that stopped blocking tool calls.
+    assert "3 custom rule(s) now detection-only for tool calls: ACME-A, ACME-B, CUSTOM-CMD-SUDO" in out
+    # GAP-1314: an edited built-in is named by both IDs, with what it does now.
+    assert "3 rule(s) of your custom pack changed by the 1.0 upgrade" in out
+    assert (
+        "CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x (its "
+        "severity decides block or alert) when the text of a tool call holds its literal" in out
+    )
+    # GAP-1478: a literal rule blocks its literal anywhere in the call, as on 0.8.x.
+    assert "ACME-LIT: enforced as on 0.8.x (its severity decides block or alert) when the text of a tool call" in out
+    assert "CUSTOM-CMD-SUDO (your edited CMD-SUDO; CMD-SUDO is the shipped 1.0 rule): detection-only" in out
+    # GAP-1339: the summary says which rule files of one category were merged.
+    assert 'rule pack /p/acme-1.0: rules/b.yaml (category "acme") merged into rules/a.yaml; 2 rule(s) kept' in out
+    # GAP-1227: the summary names the MCP servers the upgrade keeps blocked.
+    assert "MCP servers that stay blocked (asset_policy.mcp.denied): bad-mcp" in out
+    expected = [
+        ("u33a-mcp", "claudecode"), ("rel", "claudecode"), ("binsrv", "claudecode"),
+        ("win", "claudecode"), ("pathnpx", "claudecode"), ("u33a-mcp", "codex"),
+    ]
+    assert "MCP servers that can no longer be scanned (6)" in out
+    named = re.findall(r"^\s*\S+ +(\S+) \((\w+)\): command ", out, re.MULTILINE)
+    assert named == expected
+    rows = json.loads((data_dir / "migration-v9.json").read_text(encoding="utf-8"))["unscannable_mcp"]
+    assert [(row["name"], row["connector"]) for row in rows] == expected
+    assert rows[0]["runtime_effect"].startswith("still runs, without a scan")
+    assert rows[0]["fix"] == (
+        "defenseclaw mcp set u33a-mcp --command npx --args <package> --connector claudecode (or --url <url>)"
+    )
+    assert rows[4]["fix"] == "defenseclaw mcp set pathnpx --command npx --args '[\"-y\", \"pkg\"]' --connector claudecode"
+
+    from defenseclaw.commands import cmd_doctor
+
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_unscannable_mcp(cfg, {"unscannable_mcp": rows}, result)
+    warned = [(c["label"], c["remediation"]) for c in result.checks if c["status"] == "warn"]
+    assert [label for label, _ in warned] == [f"MCP server {name} ({connector})" for name, connector in expected]
+    assert warned[0][1] == rows[0]["fix"]
+
+
+def test_secure_client_config_stays_on_v8_without_a_migration(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw import config_inspect
+
+    body = "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\nobservability: {}\n"
+    config = _write_config(data_dir, body)
+    monkeypatch.setattr(
+        config_inspect, "migrate_config_v9", lambda **_kwargs: pytest.fail("a Secure Client config must not run the 8 -> 9 step")
+    )
+    monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
+
+    result = migrate(str(data_dir), from_version="1.0.0")
+
+    assert result.applied == []
+    assert result.to_config_version == 8
+    assert config.read_text(encoding="utf-8") == body
+
+
 def test_config_migrations_bump_the_version_line(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from defenseclaw import config as config_module
 
-    config = _write_config(data_dir, "# operator comment\nconfig_version: 8\nguardrail:\n  enabled: true\n")
+    config = _write_config(data_dir, "# operator comment\nconfig_version: 8\nguardrail:\n  mode: observe\n")
     seen: list[int] = []
     monkeypatch.setattr(config_module, "CURRENT_CONFIG_VERSION", 9)
     monkeypatch.setattr(migrations, "CONFIG_MIGRATIONS", {8: lambda ctx: seen.append(8)})
@@ -189,7 +359,7 @@ def test_config_migrations_bump_the_version_line(data_dir: Path, monkeypatch: py
 
     assert seen == [8]
     assert result.to_config_version == 9
-    assert config.read_text(encoding="utf-8") == "# operator comment\nconfig_version: 9\nguardrail:\n  enabled: true\n"
+    assert config.read_text(encoding="utf-8") == "# operator comment\nconfig_version: 9\nguardrail:\n  mode: observe\n"
 
 
 def test_missing_config_migration_step_is_an_error(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -203,7 +373,7 @@ def test_missing_config_migration_step_is_an_error(data_dir: Path, monkeypatch: 
         migrate(str(data_dir))
 
 
-def test_openclaw_home_comes_from_the_config(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_openclaw_home_comes_from_the_config(data_dir: Path, monkeypatch: pytest.MonkeyPatch, v8_target: None) -> None:
     _write_config(data_dir, "config_version: 7\nclaw:\n  home_dir: /srv/openclaw\n")
     homes: list[str] = []
     monkeypatch.setattr(
@@ -221,7 +391,7 @@ def test_openclaw_home_comes_from_the_config(data_dir: Path, monkeypatch: pytest
     assert homes == ["/srv/openclaw"]
 
 
-def test_installed_observability_bundle_is_refreshed(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_installed_observability_bundle_is_refreshed(data_dir: Path, monkeypatch: pytest.MonkeyPatch, v8_target: None) -> None:
     from defenseclaw import bundle_refresh
 
     _write_config(data_dir, "config_version: 8\n")
@@ -244,7 +414,7 @@ def test_installed_observability_bundle_is_refreshed(data_dir: Path, monkeypatch
     assert calls[0][0] == str(data_dir)
 
 
-def test_bundle_refresh_failure_only_warns(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bundle_refresh_failure_only_warns(data_dir: Path, monkeypatch: pytest.MonkeyPatch, v8_target: None) -> None:
     from defenseclaw import bundle_refresh
 
     _write_config(data_dir, "config_version: 8\n")
@@ -269,10 +439,10 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
     unknown = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir)])
     assert unknown.exit_code == 1
 
-    done = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--yes", "--json"])
+    done = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--json"])
     assert done.exit_code == 0, done.output
     payload = json.loads(done.stdout)
-    assert "→ step 0.8.5" in done.stderr
+    assert "step 0.8.5" in done.stderr
     assert payload["applied"] == ["0.x import 0.8.5: step 0.8.5"]
     assert payload["from_config_version"] == 7
     assert payload["changed"] is True
@@ -280,17 +450,40 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
 
 
 def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[str]) -> None:
-    # 0.8.x sealed the global fail mode into observe-mode hooks.
-    _write_config(data_dir, "config_version: 8\nguardrail:\n  mode: observe\n  hook_fail_mode: closed\n")
+    # 0.8.x sealed the global fail mode into observe-mode hooks. From 1.0.3
+    # an observe-mode hook follows the global closed outside Secure Client,
+    # so the upgrade keeps it closed and says nothing about fail-open.
+    _write_config(data_dir, "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: closed\n")
     lock = {"connectors": {"claudecode": {"hook_fail_mode": "closed"}, "codex": {"hook_fail_mode": "open"}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
+
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4"])
+
+    assert result.exit_code == 0, result.output
+    assert "now fail open" not in result.output
+    assert "codex" not in result.output
+
+    # GAP-0276: a reinstall of a current config migrates nothing and says nothing.
+    again = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir)])
+    assert again.exit_code == 0, again.output
+    assert "Configuration is current" in again.output
+    assert "fail open" not in again.output
+
+
+def test_upgrade_cursor_action_does_not_report_observe_fail_open(data_dir: Path, recorded: list[str]) -> None:
+    _write_config(
+        data_dir,
+        "config_version: 8\nguardrail:\n  mode: action\n  connector: cursor\n"
+        "  hook_fail_mode: open\n  connectors:\n    cursor:\n"
+        "      mode: action\n      hook_fail_mode: open\n",
+    )
+    lock = {"connectors": {"cursor": {"hook_fail_mode": "closed"}}}
     (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
 
     result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir)])
 
     assert result.exit_code == 0, result.output
-    assert "claudecode hooks now fail open" in result.output
-    assert "defenseclaw setup claudecode --mode action" in result.output
-    assert "codex" not in result.output
+    assert "cursor hooks now fail open" not in result.output
 
 
 def test_a_pre_v8_config_always_gets_the_v8_conversion(data_dir: Path, recorded: list[str]) -> None:
@@ -381,6 +574,42 @@ def test_windows_agent_selection_keeps_the_agents_it_found(data_dir: Path, monke
     assert "run 'defenseclaw setup hermes'" in out
 
 
+def test_0x_windows_hook_credentials_get_a_private_dacl(tmp_path: Path, monkeypatch) -> None:
+    # GAP-0364: 0.8.10 left hook credentials with an inherited DACL, which
+    # setup rotate-token refused after the upgrade, naming no file. Only a
+    # file nobody untrusted can read is sealed; an exposed one is left.
+    import click
+    from defenseclaw import file_permissions
+    from defenseclaw.commands import cmd_setup
+
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    for name in (".hook-openclaw.token", ".otlp-codex.token", ".hook-exposed.token", ".hook-ok.token", ".hookcfg.lock"):
+        (hooks / name).write_text("x", encoding="utf-8")
+    exposed = str(hooks / ".hook-exposed.token")
+
+    def custody(path, *, allow_inheritable=False):
+        name = os.path.basename(path)
+        if name == ".hook-ok.token" or (allow_inheritable and name != ".hook-exposed.token"):
+            return None
+        return "ACL grants read access to untrusted SID S-1-5-32-545" if allow_inheritable else "Windows DACL is inheritable"
+
+    sealed: list[str] = []
+    monkeypatch.setattr(file_permissions, "windows_acl_custody_confidentiality_error", custody)
+    monkeypatch.setattr(file_permissions, "protect_private_file", lambda path: sealed.append(os.path.basename(path)))
+    monkeypatch.setattr(os, "name", "nt")
+
+    migrations._seal_windows_hook_credentials(str(tmp_path))
+
+    assert sealed == [".hook-openclaw.token", ".otlp-codex.token"]
+    monkeypatch.setattr(cmd_setup, "windows_acl_custody_confidentiality_error", custody)
+    monkeypatch.setattr(cmd_setup, "reject_reparse_path", lambda _path: None)
+    with pytest.raises(click.ClickException) as refused:
+        cmd_setup._rotate_token_hook_metadata(exposed)
+    assert f"The connector hook credential {exposed} is not private (Windows DACL is inheritable)" in refused.value.message
+    assert f'icacls "{exposed}" /inheritance:r' in refused.value.message
+
+
 def test_v8_preflight_converts_without_the_retired_0_5_0_keys(data_dir: Path, monkeypatch) -> None:
     body = b"config_version: 7\nguardrail:\n  mode: observe\n  codex_enforcement_enabled: true\n  claudecode_enforcement_enabled: false\n"
     # Bytes, so Windows does not translate the newlines.
@@ -459,7 +688,7 @@ def test_cli_check_lists_pending_steps_as_pending(data_dir: Path, recorded: list
     assert text.exit_code == 0, text.output
     assert "1 migration step(s) pending (config_version 7 -> 8)" in text.stdout
     # GAP-1500: human output shows the step in user terms, no "0.x import" id.
-    assert "→ step 0.8.5" in text.stdout
+    assert "step 0.8.5" in text.stdout
     assert "0.x import" not in text.stdout
     assert "✓" not in text.stdout
 
@@ -471,7 +700,7 @@ def test_cli_check_lists_pending_steps_as_pending(data_dir: Path, recorded: list
     assert config.read_text(encoding="utf-8") == "config_version: 7\n"
 
 
-def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path) -> None:
+def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path, v8_target: None) -> None:
     # GAP-1449: --from-version banana is a usage error, not "current", rc 0.
     _write_config(data_dir, "config_version: 8\n")
     result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check", "--from-version", "banana"])
@@ -479,3 +708,158 @@ def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path) -> Non
     assert "not a release version" in result.output
     ok = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check", "--from-version", "1.0.1.dev3"])
     assert ok.exit_code == 0, ok.output
+
+
+# GAP-0163: a legacy custom-providers.json next to a config_version 9 file.
+
+
+def _legacy_overlay(data_dir: Path, payload: dict) -> Path:
+    path = data_dir / "custom-providers.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("config", "overlay", "pending"),
+    [
+        ("config_version: 9\n", {"providers": [{"name": "acme-gw", "domains": ["alt.acme.test"]}]}, True),
+        ("config_version: 9\n", {"providers": [], "ollama_ports": [11500]}, True),
+        ("config_version: 9\n", {"_derived_from": "sha256:x", "providers": [{"name": "acme-gw"}]}, False),
+        ("config_version: 9\n", {"providers": [{"name": "acme-gw", "request_overrides": {"x": 1}}]}, False),
+        ("config_version: 9\ndeployment_mode: managed_enterprise\n", {"providers": [{"name": "acme-gw"}]}, False),
+        ("config_version: 9\n", {"providers": []}, False),
+    ],
+)
+def test_a_v9_config_with_a_legacy_provider_overlay_has_the_fold_step_pending(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, config: str, overlay: dict, pending: bool
+) -> None:
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(migrations, "_connector_roster_pending", lambda *_args: False)
+    _write_config(data_dir, config)
+    _legacy_overlay(data_dir, overlay)
+
+    result = migrate(str(data_dir), check=True)
+
+    assert (migrations._PROVIDERS_FOLD_STEP_NAME in result.applied) is pending
+
+
+def test_the_fold_step_warns_and_changes_nothing_when_fields_disagree(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw import config_inspect
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(migrations, "_connector_roster_pending", lambda *_args: False)
+    monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_guardrail_profiles", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_rego_policies", lambda *_args: None)
+    config = _write_config(data_dir, "config_version: 9\n")
+    overlay = _legacy_overlay(data_dir, {"providers": [{"name": "acme-gw", "base_url": "https://legacy.test"}]})
+    refusal = (
+        f"{overlay} was not folded into config.yaml: config.yaml and the file set different values for "
+        "acme-gw (base_url: config.yaml's value is in use). Neither file was changed"
+    )
+    calls: list[str] = []
+
+    def go_migrate(*, config_path: str, dry_run: bool = False, ack: bool = False, gateway_binary=None) -> dict:
+        calls.append(config_path)
+        return {"migrated": False, "dry_run": False, "written": [], "record": {"from_version": 9},
+                "providers_fold": {"overlay": str(overlay), "refused": refusal,
+                                   "conflicts": [{"provider": "acme-gw", "fields": ["base_url"],
+                                                  "in_use": {"base_url": "config.yaml"}}]}}
+
+    monkeypatch.setattr(config_inspect, "migrate_config_v9", go_migrate)
+
+    result = migrate(str(data_dir))
+
+    assert calls == [str(config)]
+    assert result.applied == [migrations._PROVIDERS_FOLD_STEP_NAME]
+    out = capsys.readouterr().out
+    assert "acme-gw (base_url: config.yaml's value is in use)" in out
+    assert "Neither file was changed" in out
+    assert "moved provider(s)" not in out
+
+
+def test_the_fold_step_reports_the_providers_config_yaml_took(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw import config_inspect
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(migrations, "_connector_roster_pending", lambda *_args: False)
+    monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_guardrail_profiles", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_rego_policies", lambda *_args: None)
+    _write_config(data_dir, "config_version: 9\n")
+    overlay = _legacy_overlay(data_dir, {"providers": [{"name": "acme-gw", "domains": ["alt.acme.test"]}]})
+    retired = f"{overlay}.migrated-v9"
+    monkeypatch.setattr(
+        config_inspect,
+        "migrate_config_v9",
+        lambda **_kwargs: {"migrated": False, "dry_run": False, "written": [retired], "record": {"from_version": 9},
+                           "providers_fold": {"overlay": str(overlay), "folded": ["acme-gw"], "retired": retired,
+                                              "headers_after_fold": [{"provider": "openai",
+                                                                      "fields": ["extra_headers.X-Team"]}]}},
+    )
+
+    result = migrate(str(data_dir))
+
+    assert result.changed
+    out = capsys.readouterr().out
+    assert f"moved provider(s) acme-gw from {overlay} into config.yaml llm_providers.custom" in out
+    assert retired in out
+    # GAP-0184: the headers sent from now on are named, never their values.
+    assert "the gateway now also sends openai (extra_headers.X-Team)" in out
+
+
+# GAP-0137: a downgrade set openshell.trusted_ca_bundle aside (upgrade_shim);
+# this release puts it back unless config.yaml sets it again, and keeps the
+# keys of a later release for that release.
+def _set_aside_record(data_dir: Path, keys: dict) -> Path:
+    from defenseclaw.upgrade_shim import SET_ASIDE_FILE
+
+    path = data_dir / SET_ASIDE_FILE
+    path.write_text(json.dumps({"version": 1, "for": "1.0.2", "keys": keys}), encoding="utf-8")
+    return path
+
+
+def test_migrate_puts_back_the_keys_a_downgrade_set_aside(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import yaml
+
+    for name in ("_refresh_local_observability_bundle", "_refresh_guardrail_profiles", "_refresh_rego_policies"):
+        monkeypatch.setattr(migrations, name, lambda *_args: None)
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(data_dir, {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem"})
+
+    migrate(str(data_dir))
+
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["openshell"]["trusted_ca_bundle"] == "~/proxy-root-ca.pem"
+    assert not record.exists()
+
+
+def test_set_aside_keys_keep_a_value_set_again_and_a_later_release_key(data_dir: Path) -> None:
+    import yaml
+
+    config = _write_config(data_dir, "config_version: 9\nopenshell:\n  trusted_ca_bundle: /etc/corp/root.pem\n")
+    record = _set_aside_record(
+        data_dir, {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem", "openshell.future_key": True}
+    )
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["openshell"] == {"trusted_ca_bundle": "/etc/corp/root.pem"}
+    assert json.loads(record.read_text(encoding="utf-8"))["keys"] == {"openshell.future_key": True}
+
+
+def test_set_aside_key_that_cannot_be_put_back_is_named_with_its_command(
+    data_dir: Path, capsys: pytest.CaptureFixture
+) -> None:
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(data_dir, {"openshell.trusted_ca_bundle": "relative.pem"})
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    assert config.read_text(encoding="utf-8") == "config_version: 9\n"
+    assert record.exists()
+    captured = capsys.readouterr()
+    assert "defenseclaw config set openshell.trusted_ca_bundle relative.pem" in captured.out + captured.err

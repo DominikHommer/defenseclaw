@@ -169,6 +169,98 @@ func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvide
 	}, 1)
 }
 
+func TestFinalizedBlockPersistsAuditAndActiveAlertBeforeNotification(t *testing.T) {
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	dispatcher, notifications := newWiringDispatcher()
+	api := &APIServer{store: fixture.store, logger: fixture.logger}
+	api.SetNotifier(dispatcher)
+	fixture.sidecar.setAPIServer(api)
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
+		t.Context(), fixture.configPath, fixture.raw,
+	)
+	if err != nil || !bound {
+		t.Fatalf("observability bootstrap bound=%t error=%v", bound, err)
+	}
+
+	ctx := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
+		RequestID: "request-finalized-block",
+		SessionID: "session-finalized-block",
+		PolicyID:  "policy-finalized-block",
+	})
+	req := agentHookRequest{
+		ConnectorName: "cursor",
+		HookEventName: "beforeShellExecution",
+		SessionID:     "session-finalized-block",
+		ToolName:      "shell",
+	}
+	resp := agentHookResponse{
+		Action:            "block",
+		RawAction:         "block",
+		aiDefenseEnforced: true,
+		// NONE proves severity cannot suppress an enforced block's Active Alert.
+		Severity:     "NONE",
+		Reason:       "AI Defense blocked the request",
+		SourceReason: "AI Defense blocked the request",
+		Mode:         "action",
+		EvaluationID: "evaluation-finalized-block",
+		RuleIDs:      []string{"aid-policy-block"},
+	}
+
+	finalization := api.finalizeAgentHook(
+		ctx, "cursor", req, resp, nil, []byte(`{"hook_event_name":"beforeShellExecution"}`),
+		time.Millisecond, false, nil,
+	)
+	if !finalization.Enforced || !finalization.EnforcementPersisted || !finalization.AuditPersisted {
+		t.Fatalf("finalization=%+v, want enforced block with both records persisted", finalization)
+	}
+	counts, err := fixture.store.GetCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Alerts != 1 {
+		t.Fatalf("Active Alerts before notification = %d, want 1", counts.Alerts)
+	}
+	events, err := fixture.store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectorAuditRows := 0
+	for _, event := range events {
+		if event.Action == string(audit.ActionConnectorHook) {
+			connectorAuditRows++
+		}
+	}
+	if connectorAuditRows != 1 {
+		t.Fatalf("connector-hook audit rows before notification = %d, want 1", connectorAuditRows)
+	}
+
+	api.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
+	if got := notifications.WaitFor(t, 1); len(got) != 1 {
+		t.Fatalf("notifications = %d, want 1", len(got))
+	}
+}
+
+func TestHookFinalizationNotificationGate(t *testing.T) {
+	tests := []struct {
+		name   string
+		result hookFinalizationResult
+		want   bool
+	}{
+		{name: "ordinary audit persisted", result: hookFinalizationResult{AuditPersisted: true}, want: true},
+		{name: "ordinary audit missing", result: hookFinalizationResult{}, want: false},
+		{name: "block both persisted", result: hookFinalizationResult{AuditPersisted: true, EnforcementPersisted: true, Enforced: true}, want: true},
+		{name: "block connector audit missing", result: hookFinalizationResult{EnforcementPersisted: true, Enforced: true}, want: false},
+		{name: "block active alert missing", result: hookFinalizationResult{AuditPersisted: true, Enforced: true}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.result.notificationReady(); got != test.want {
+				t.Fatalf("notificationReady() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestHookDecisionSharesSessionStartExecutionIdentityRealShape(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
 	payload := map[string]interface{}{
@@ -456,6 +548,43 @@ func TestHookDecisionV8CarriesSandboxBindingCorrelation(t *testing.T) {
 	}
 }
 
+// GAP-0317: the decision of a hook admitted under a registration (relayed by
+// the user's daemon or sent to the hook socket with the registration header)
+// names the registration, the effective sandbox policy, the person's keyed
+// pseudonym and the OpenShell provision, as the managed sandbox records do.
+func TestHookDecisionV8CarriesRegistrationManagedStamps(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
+	reg := managedTelemetryTestRegistration()
+	ctx := withSandboxRelayRegistration(context.Background(), reg)
+	ctx = audit.ContextWithEnvelope(ctx, audit.CorrelationEnvelope{SessionID: "session-reg-1", SandboxID: reg.SandboxID, SandboxName: reg.SandboxName})
+	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: "session-reg-1", ToolName: "Bash"}
+	resp := agentHookResponse{Action: "block", RawAction: "block", Severity: "CRITICAL", Mode: "action"}
+	api.emitHookDecisionObservabilityV8(ctx, req, resp, HookAuditEnvelope{Enforced: true, ElapsedMs: 3}, false)
+	eventuallyTrue(t, func() bool { return len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 1 })
+	var wire struct {
+		Body map[string]interface{} `json:"body"`
+	}
+	logs := hookModelV8CapturedLogs(capture.logSnapshot())
+	if len(logs) != 1 || json.Unmarshal([]byte(logs[0].Body.GetStringValue()), &wire) != nil {
+		t.Fatalf("generated hook decision logs=%d, want one with a JSON body", len(logs))
+	}
+	for key, want := range map[string]interface{}{
+		"defenseclaw.sandbox.registration.id":    reg.ID,
+		"defenseclaw.subject.key":                reg.SubjectKey,
+		"defenseclaw.sandbox.policy.digest":      reg.EffectiveDigest,
+		"defenseclaw.sandbox.policy.generation":  float64(reg.Generation),
+		"defenseclaw.sandbox.policy.provisional": false,
+		"defenseclaw.openshell.version":          reg.OpenShell,
+		"defenseclaw.openshell.install_mode":     reg.InstallMode,
+		"defenseclaw.sandbox.driver":             reg.Driver,
+		"defenseclaw.sandbox.name":               reg.SandboxName,
+	} {
+		if got := wire.Body[key]; got != want {
+			t.Errorf("hook decision %s = %v, want %v", key, got, want)
+		}
+	}
+}
+
 func TestHookDecisionV8SandboxOmitsUnregisteredShapes(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
@@ -468,7 +597,7 @@ func TestHookDecisionV8SandboxOmitsUnregisteredShapes(t *testing.T) {
 		{"free text is dropped", audit.CorrelationEnvelope{SandboxID: "has space", SandboxName: "-leading-dash"}, "", ""},
 		{"name over the registered bound is dropped", audit.CorrelationEnvelope{SandboxID: "sbx-2", SandboxName: "dc-" + strings.Repeat("a", 126)}, "sbx-2", ""},
 	} {
-		id, name := hookDecisionV8Sandbox(tc.envelope)
+		id, name := hookV8Sandbox(tc.envelope)
 		if got, ok := id.Get(); ok != (tc.wantID != "") || got != tc.wantID {
 			t.Errorf("%s: sandbox id=(%q,%v) want %q", tc.name, got, ok, tc.wantID)
 		}

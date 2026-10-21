@@ -21,6 +21,7 @@ package hookexec
 import (
 	"errors"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -31,3 +32,17 @@ func connectionRefused(err error) bool {
 	// portable errors retain the same classification as other platforms.
 	return errors.Is(err, windows.WSAECONNREFUSED) || errors.Is(err, syscall.ECONNREFUSED)
 }
+
+// connectionReset reports a connection the peer closed under a request, as
+// a gateway service that exits does.
+func connectionReset(err error) bool {
+	return errors.Is(err, windows.WSAECONNRESET) || errors.Is(err, windows.WSAECONNABORTED) ||
+		errors.Is(err, syscall.ECONNRESET)
+}
+
+// hookDialTimeout outlasts the refusal Windows reports for a loopback port
+// nobody listens on: it retries the SYN and returns WSAECONNREFUSED after
+// about 2 s (2076 ms on Windows Server 2025). A 2 s dial timeout won that
+// race, so a stopped per-user gateway read as a timeout and the hook never
+// ran its cold start (GAP-0377).
+const hookDialTimeout = 4 * time.Second

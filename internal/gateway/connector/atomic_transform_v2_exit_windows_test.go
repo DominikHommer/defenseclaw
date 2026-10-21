@@ -898,6 +898,9 @@ func TestAtomicTransformV2BoundProtocolLockResistsAliasesAndRename(t *testing.T)
 			}
 		}
 		lockPointer, pointerErr := windows.UTF16PtrFromString(lockPath)
+		if pointerErr != nil {
+			return pointerErr
+		}
 		deleteHandle, deleteErr := windows.CreateFile(
 			lockPointer, windows.DELETE,
 			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
@@ -1884,7 +1887,7 @@ func prepareAtomicTransformV21177FixtureForTest(
 	}
 	txn, err := beginAtomicTransformV2(
 		path, path, preparedStateDir, snapshot,
-		atomicTransformResult{Data: []byte("new-1177")}, 0o600,
+		atomicTransformResult{Data: []byte("new-1177")}, 0o600, atomicTransformV2Options{},
 	)
 	if err != nil {
 		t.Fatal(err)

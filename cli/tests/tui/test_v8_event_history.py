@@ -304,6 +304,34 @@ def test_alert_reader_and_panel_keep_warning_findings_in_all_view() -> None:
     assert "warning-finding" in {event.id for event in events}
 
 
+def test_alert_reader_lists_a_legacy_finding_action_filed_as_a_compat_row() -> None:
+    store = _store()
+    store.db.execute("ALTER TABLE audit_events ADD COLUMN target TEXT")  # the gateway's own table has it
+    store.db.executemany(
+        """INSERT INTO audit_events (
+               id, timestamp, bucket, event_name, source, signal, severity,
+               action, actor, details, connector, redaction_profile,
+               payload_json, projected_record_json, target
+           ) VALUES (
+               ?, '2026-07-11T00:00:01Z', 'security.finding',
+               'legacy.audit.tool.result.pii.alert', 'gateway', 'logs', ?,
+               'tool-result-pii-alert', 'gateway', 'tool=Bash severity=HIGH entities=1',
+               'codex', 'default', '{}', '{}', 'Bash'
+           )""",
+        [("compat-high", "HIGH"), ("compat-info", "INFO")],
+    )
+    store.db.commit()
+
+    rows = V8EventHistoryReader(store).load_alerts(500)
+    events = alerts_from_v8_history(rows)
+
+    assert "compat-high" in {row.id for row in rows}
+    assert "compat-high" in {event.id for event in events}
+    assert "compat-info" not in {row.id for row in rows}
+    # GAP-0217: the Alerts Target column and the Overview card name the tool, not the event name.
+    assert {event.id: event.target for event in events}["compat-high"] == "Bash"
+
+
 def test_alert_reader_keeps_only_explicit_non_allow_legacy_hooks() -> None:
     store = _store()
     store.db.executemany(
@@ -482,3 +510,40 @@ def test_alert_reader_prioritizes_actionable_findings_before_bounded_limit() -> 
     _history, shared_alerts = reader.load_views(500, 500)
     assert len(shared_alerts) == 500
     assert "older-important" in {row.id for row in shared_alerts}
+
+
+def test_reader_orders_activity_alerts_and_mutations_by_exact_instant() -> None:
+    store = _store()
+    db = store.db
+    db.execute("ALTER TABLE audit_events ADD COLUMN retention_timestamp_unix_nano INTEGER")
+    db.execute("UPDATE audit_events SET retention_timestamp_unix_nano = 0")
+    for suffix, stamp, instant in (
+        ("short", "2026-10-13T12:00:00.12345Z", 1),
+        ("long", "2026-10-13T12:00:00.123451Z", 2),
+        ("tie-first", "2026-10-13T12:00:01Z", 3),
+        ("tie-second", "2026-10-13T12:00:01Z", 3),
+        ("offset", "2026-10-13T14:00:02+02:00", 4),
+    ):
+        for prefix, bucket, event_name, action, severity in (
+            ("activity", "compliance.activity", "config.change.applied", "config.change", "INFO"),
+            ("alert", "security.finding", "finding.observed", "finding.observed", "HIGH"),
+        ):
+            db.execute(
+                """INSERT INTO audit_events
+                   (id, timestamp, retention_timestamp_unix_nano, bucket, event_name,
+                    source, signal, severity, action, actor, details, redaction_profile,
+                    payload_json, projected_record_json)
+                   VALUES (?, ?, ?, ?, ?, 'gateway', 'logs', ?, ?, 'operator',
+                           'test', 'none', ?, '{}')""",
+                (f"{prefix}-{suffix}", stamp, instant, bucket, event_name,
+                 severity, action, json.dumps({"defenseclaw.finding.rule_id": "RULE"})),
+            )
+    db.commit()
+    reader = V8EventHistoryReader(store)
+    expected = ["offset", "tie-second", "tie-first", "long", "short"]
+    assert [row.id for row in reader.load_mutations(5)] == [f"activity-{item}" for item in expected]
+    assert [row.id for row in reader.load_alerts(5)] == [f"alert-{item}" for item in expected]
+    history, alerts, mutations = reader.load_views_and_mutations(10, 5, 5)
+    assert [row.id for row in alerts] == [f"alert-{item}" for item in expected]
+    assert [row.id for row in mutations] == [f"activity-{item}" for item in expected]
+    assert history[0].id in {"activity-offset", "alert-offset"}

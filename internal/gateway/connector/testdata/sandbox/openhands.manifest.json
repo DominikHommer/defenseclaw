@@ -34,44 +34,44 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 56443,
-      "sha256": "d50aa6b7196ba810cfa9433bc74e08dce5549ad7aaf3b953601f72df0f9d49ed"
+      "size": 83805,
+      "sha256": "e224a2f7c787c30b5a561a04c7c6e30608257dc9abd8fc9a5c9cbf8f578c5a07"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 8119,
-      "sha256": "649402885e0ffcbe20a7e80d3daf3fb8aaad8ae2bc21e868f5f8b110765b84ec"
+      "size": 12549,
+      "sha256": "0012d90e6c0a4c12a0d191b4a19ac0335ae6f3dd9f22aa5b7673eecb707326b5"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6080,
-      "sha256": "4c902812d62c0e6aa34c9456ca928e3d2220acc200b76b91cf9256d75bf20281"
+      "size": 6861,
+      "sha256": "f1b428263702a2d7749f86acf6b7ea724736423ae2dd12a057fa4e2ed767c5a5"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5348,
-      "sha256": "162409810ca283d72527a14334c8c4ce300d0d8c06d7302af49b6f0ab37c4e30"
+      "size": 6052,
+      "sha256": "ab5941c3b232a0036a15b62cc80b3fd2719d38452724ac9782741ca578186093"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5598,
-      "sha256": "99f265bac62bba2eabdcf8391712d62c1689b6cf10aca16778eac3f94fcd23e1"
+      "size": 6480,
+      "sha256": "ff67d1373012ee50405e711cfb8a1179c0bcb88cb669d376e932f7f43e734e16"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6037,
-      "sha256": "96c592062cfbbf9ff0adf9fcd128eba826e7885c3fc19bbe62a540cb996950ce"
+      "size": 6829,
+      "sha256": "c94720100a3f588497a2f5b293c40fce8eb05a0f9557e2c6fa04a27131a7091f"
     },
     "/usr/local/lib/defenseclaw/hooks/openhands-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6347,
-      "sha256": "0cf0cca95e0202a1bad44217d1f6eb383b1482baa5bfd58e072bd720fe04bae5"
+      "size": 6373,
+      "sha256": "e99926727f4bfbf92c22fd249c0149207319e38b2ddeb1d48c1e4584fde4653f"
     },
     "/usr/local/lib/defenseclaw/openhands/hooks.json": {
       "mode": "-rw-r--r--",

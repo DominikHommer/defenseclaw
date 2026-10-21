@@ -21,24 +21,24 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // unixLifecycleOptions are the flags of `enterprise linux|macos <action>`.
 type unixLifecycleOptions struct {
-	payload              string
-	fromPackage          bool
-	config               string
-	noStart              bool
-	adoptExisting        bool
-	allowDowngrade       bool
-	purge                bool
-	removeServiceAccount bool
-	keepState            bool
-	keepServiceAccount   bool
-	productVersion       string
-	reason               string
-	lockWait             time.Duration
-	json                 bool
+	payload            string
+	fromPackage        bool
+	config             string
+	noStart            bool
+	adoptExisting      bool
+	allowDowngrade     bool
+	purge              bool
+	keepState          bool
+	keepServiceAccount bool
+	productVersion     string
+	reason             string
+	lockWait           time.Duration
+	json               bool
 }
 
 // enterpriseSecretOptions are the flags of `enterprise secret <action>`.
@@ -48,7 +48,8 @@ type enterpriseSecretOptions struct {
 	fromFile  string
 	json      bool
 	// lockWait is how long set and remove wait for another lifecycle run
-	// (Linux and macOS).
+	// (Linux and macOS) or for a policy bundle run to release bundle.lock
+	// (Windows).
 	lockWait time.Duration
 }
 
@@ -64,6 +65,9 @@ deployment reads:
 
   - the Cisco AI Defense API key named by
     enterprise.inspection.ai_defense.credential;
+  - the API key of the LLM judge and the skill, MCP and plugin scanners
+    named by enterprise.inspection.llm.credential (they never read
+    llm.api_key_env or the service environment);
   - observability destination credentials named by a header value
     {credential: NAME} (otlp, http_jsonl), token_credential (splunk_hec)
     or bearer_credential (http_jsonl).
@@ -111,14 +115,31 @@ arguments, 75 another lifecycle run holds the lock.`,
 		"rotate-credentials": "Rotate the per-user credential key, moving every user before the new key takes effect",
 		"status":             "Report the deployment state (read-only)",
 		"verify":             "Verify every file, permission, service and readiness check (read-only)",
-		"uninstall":          "Stop and remove the deployment, its machine state and every account's hooks (each account keeps ~/.defenseclaw); --purge removes everything",
+		"uninstall":          "Stop and remove the deployment, its machine state and every account's hooks (each account keeps ~/.defenseclaw and its sandboxes, and the gateway keeps its registrations of those sandboxes); --purge removes everything",
 	}
 	for _, action := range []string{"install", "upgrade", "repair", "ensure", "reconcile", "rotate-credentials", "status", "verify", "uninstall"} {
 		group.AddCommand(newUnixLifecycleCommand(name, action, summaries[action]))
 	}
 	group.AddCommand(newUnixDiscoveryCommand(name))
+	group.AddCommand(newEnterpriseIdentityViewCommands(name)...)
+	if name == "linux" {
+		group.AddCommand(newUnixTetragonCommand())
+	}
+	// `enterprise <os> policy`, as the other administrator views are spelled
+	// (GAP-0201, GAP-0240).
+	policy, _, _, _ := newEnterprisePolicyGroup(name)
+	group.AddCommand(policy)
 	return group
 }
+
+// sandboxRowsHelp documents the sandbox rows of status and verify.
+const sandboxRowsHelp = "\n\nWhen sandboxes are on (openshell.enabled), the services list also has the sandbox rows: the install mode and driver, " +
+	"each prerequisite that mode needs (OpenShell, its MicroVM driver, e2fsprogs, Docker or /dev/kvm) as ok or missing with what to run, " +
+	"the docker or kvm group membership of the users that run sandboxes, the OpenShell users installed themselves (setup mode: user-installed, unmanaged), " +
+	"and the changes waiting for a user's sandboxes to stop (pending). A missing prerequisite is a warning, openshell_prerequisite_missing: " +
+	"DefenseClaw itself is healthy, and the gateway refuses the sandbox runs of users until it is fixed. On Linux, with driver vm or auto and " +
+	"driver_fallback docker, the docker fallback has its own rows (fallback ...), and a missing MicroVM prerequisite while the fallback is ready " +
+	"is the warning openshell_driver_fallback: users get docker sandboxes with every profile floor unchanged."
 
 // lockWaitUsage documents --lock-wait on every action that takes the
 // lifecycle lock.
@@ -196,6 +217,9 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	case "status":
 		cmd.Long = summary + ".\n\nRun as root, status first waits up to 5s for another lifecycle run to finish. If that run is still going, it reports the installed version, checks nothing else and exits 75 (lifecycle_busy)."
 	}
+	if action == "status" || action == "verify" {
+		cmd.Long += sandboxRowsHelp
+	}
 	// An unknown flag or a malformed value fails before RunE; the documented
 	// exit code for it is invalid arguments, not cobra's generic 1.
 	cmd.SetFlagErrorFunc(lifecycleFlagError)
@@ -216,16 +240,32 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		}
 		addLockWaitFlag(flags, &opts.lockWait)
 	case "uninstall":
-		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, its per-user binaries in ~/.local/bin and DefenseClaw's entries in its uv cache ~/.cache/uv (after stopping its per-user gateway); the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
-		flags.BoolVar(&opts.keepState, "keep-state", false, "keep the machine state (config, secrets, gateway and guardian state, logs, lifecycle state) and the service account, so a reinstall resumes with them; without it uninstall removes all of it")
+		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, its per-user binaries in ~/.local/bin and DefenseClaw's entries in its uv cache ~/.cache/uv (after stopping its per-user gateway); an account's own DefenseClaw install from before the enrollment is moved to ~/.defenseclaw-backup-<UTC time> in its home first; the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
+		flags.BoolVar(&opts.keepState, "keep-state", false, unixKeepStateUsage(platform))
 		flags.BoolVar(&opts.keepServiceAccount, "keep-service-account", false, "keep the gateway service account, which uninstall deletes otherwise")
-		flags.BoolVar(&opts.removeServiceAccount, "remove-service-account", false, "delete the gateway service account (the default now; kept for older scripts)")
 		addLockWaitFlag(flags, &opts.lockWait)
 	case "reconcile", "rotate-credentials":
 		addLockWaitFlag(flags, &opts.lockWait)
 	}
 	flags.BoolVar(&opts.json, "json", false, "print the lifecycle result as JSON")
 	return cmd
+}
+
+// unixKeepStateUsage is the uninstall --keep-state help. It names the paths
+// of the sandbox state a plain uninstall keeps, as the uninstall summary
+// does (GAP-0067).
+func unixKeepStateUsage(platform string) string {
+	goos := "linux"
+	if platform == "macos" {
+		goos = "darwin"
+	}
+	kept := "the gateway's sandbox registrations, their key and the lifecycle's sandbox setup record"
+	if layout, err := managed.StandaloneLayoutFor(goos); err == nil {
+		store, key, record := layout.KeptSandboxStatePaths()
+		kept = "the gateway's sandbox registrations (" + store + "), their key (" + key + ") and the lifecycle's sandbox setup record (" + record + ")"
+	}
+	return "keep the config, secrets, gateway and guardian state, logs and the service account, so a reinstall resumes with them (the deployment record goes either way); without it uninstall removes that state except " +
+		kept + " while an account keeps sandboxes; --purge removes those too"
 }
 
 // invalidLifecycleArguments labels err with the lifecycle's invalid-arguments
@@ -257,32 +297,58 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 		},
 	}
 	if action != "status" {
-		cmd.Flags().StringVar(&opts.name, "name", "", "credential name (lowercase letters, digits and dashes)")
+		cmd.Flags().StringVar(&opts.name, "name", "", "credential name (1-63 lowercase letters, digits or dashes; starts with a letter or digit)")
+		cmd.Flags().Lookup("name").Annotations = map[string][]string{
+			secureClientUsageAnnotation: {"credential name (lowercase letters, digits and dashes)"},
+		}
 		_ = cmd.MarkFlagRequired("name")
 	}
 	if action == "set" {
 		cmd.Flags().BoolVar(&opts.fromStdin, "from-stdin", false, "read the value from standard input")
 		cmd.Flags().StringVar(&opts.fromFile, "from-file", "", "read the value from this file")
 	}
-	if action != "status" && runtime.GOOS != "windows" {
+	if action != "status" {
 		addLockWaitFlag(cmd.Flags(), &opts.lockWait)
+		if runtime.GOOS == "windows" {
+			cmd.Flags().Lookup("lock-wait").Usage = windowsSecretLockWaitUsage
+		}
 	}
 	cmd.Flags().BoolVar(&opts.json, "json", false, "print JSON")
-	if runtime.GOOS != "windows" {
-		// An unknown flag, a malformed value, a stray argument or a missing
-		// --name is invalid arguments: exit 2 with the usage line and the
-		// --help pointer, as on enterprise linux|macos (GAP-2095).
-		cmd.SetFlagErrorFunc(lifecycleFlagError)
-		cmd.Args = lifecycleNoArgs
-		cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
-			if err := cmd.ValidateRequiredFlags(); err != nil {
-				return lifecycleFlagError(cmd, err)
-			}
-			return nil
+	// An unknown flag, a malformed value, a stray argument or a missing
+	// --name is invalid arguments: exit 2 (Windows 1639) with the usage line
+	// and the --help pointer, as on enterprise linux|macos (GAP-2095).
+	// Windows set, remove and status also print their --json failure
+	// document.
+	flagError := func(c *cobra.Command, err error) error {
+		err = lifecycleFlagError(c, err)
+		if enterpriseSecretArgumentRefusal != nil {
+			return enterpriseSecretArgumentRefusal(c, action, opts, err)
 		}
+		return err
+	}
+	cmd.SetFlagErrorFunc(flagError)
+	cmd.Args = func(c *cobra.Command, args []string) error {
+		if err := strayArgumentError(c, args); err != nil {
+			return flagError(c, err)
+		}
+		return nil
+	}
+	cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
+		if err := cmd.ValidateRequiredFlags(); err != nil {
+			return flagError(cmd, err)
+		}
+		return nil
 	}
 	return cmd
 }
+
+// windowsSecretLockWaitUsage is --lock-wait of Windows `secret set|remove`.
+const windowsSecretLockWaitUsage = "wait up to this long for a policy bundle run to release bundle.lock (default: no wait, at most 15m) before exiting 1618; the installer's lifecycle.lock is waited for up to 30s either way"
+
+// enterpriseSecretArgumentRefusal reports an argument error of `enterprise
+// secret` the way the platform documents it: Windows prints the --json
+// failure document (enterprise_secret_windows.go); nil elsewhere.
+var enterpriseSecretArgumentRefusal func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error
 
 func init() {
 	enterpriseSecretCmd.AddCommand(

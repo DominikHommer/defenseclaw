@@ -82,7 +82,7 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 	hookForeignGuardAccountHome = func() string { return fixture.home }
 	hookForeignGuardEnvHomes = func() []string { return nil }
 	hookForeignGuardAgentProcess = func() string { return fixture.process }
-	hookForeignGuardExchange = func(_ string, _ string, _ time.Time, exchange enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	hookForeignGuardExchange = func(_ string, _ string, _, _ time.Time, exchange enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 		if exchange.Key.Session == "" && exchange.Key.Process == "" {
 			return exchange.Decision, nil
 		}
@@ -448,9 +448,18 @@ func TestStandaloneForeignHookGuardBinaryOnlyForStandalonePlugins(t *testing.T) 
 			t.Fatalf("%s on %s: guard binary %q", name, runtime.GOOS, binary)
 		}
 	}
+	// Every connector's Linux and macOS shell hook gets the admin hook binary
+	// for the session facts, guard or not (GAP-0194); Windows renders none.
+	if binary := standaloneManagedHookBinary(); (runtime.GOOS == "windows") != (binary == "") ||
+		(binary != "" && !filepath.IsAbs(binary)) {
+		t.Fatalf("the standalone profile's session facts binary on %s: %q", runtime.GOOS, binary)
+	}
 	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, Enterprise: config.EnterpriseConfig{Profile: managed.ProfileSecureClient}}
 	if binary := standaloneForeignHookGuardBinary("amp"); binary != "" {
 		t.Fatalf("the Secure Client profile must not render the guard: %q", binary)
+	}
+	if binary := standaloneManagedHookBinary(); binary != "" {
+		t.Fatalf("the Secure Client profile must not name a session facts binary: %q", binary)
 	}
 	cfg = nil
 	if binary := standaloneForeignHookGuardBinary("opencode"); binary != "" {
@@ -502,7 +511,7 @@ func TestForeignHookCheckAmpOnWindowsKeepsTheSessionLocally(t *testing.T) {
 	fixture.summary.Connectors["amp"] = enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove, Guard: true}
 	previousGOOS, previousExchange := hookForeignGuardGOOS, hookForeignGuardExchange
 	hookForeignGuardGOOS = "windows"
-	hookForeignGuardExchange = func(string, string, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 		return enterprisepolicy.GuardDecision{}, errors.New("standalone hook runtime unavailable")
 	}
 	t.Cleanup(func() { hookForeignGuardGOOS, hookForeignGuardExchange = previousGOOS, previousExchange })

@@ -22,7 +22,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +34,7 @@ import (
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -135,6 +139,10 @@ type Event struct {
 	StepIdx     int    `json:"step_idx,omitempty"`
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
+	// RulePackDirInEnvelope marks a Secure Client hook row, whose directory
+	// rides in the structured envelope and the raw column as on main, not in
+	// a path-class record field (issue #1092).
+	RulePackDirInEnvelope bool `json:"-"`
 
 	// SandboxID and SandboxName attribute an event to the OpenShell
 	// sandbox whose request produced it. They are filled from the
@@ -216,6 +224,10 @@ type Store struct {
 	dbPath      string
 	dbPathGuard *preparedAuditDatabasePath
 
+	// secureClientSchema keeps the tables, columns and indexes main creates
+	// (WithSecureClientSchema).
+	secureClientSchema bool
+
 	// lifecycleMu serializes initialization/close and lets mandatory v8
 	// event-history transactions pin a ready store until commit or rollback.
 	lifecycleMu sync.RWMutex
@@ -226,9 +238,25 @@ type Store struct {
 	// checkpoints. It is opened on first use and closed with the store.
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
+	// walGuardMu guards the checkpoint connection's data_version as of the
+	// previous WAL guard pass (CheckpointWALIfLarge).
+	walGuardMu      sync.Mutex
+	walGuardSeen    bool
+	walGuardVersion int64
+	// walPressure is true while the last WAL guard pass left the log over
+	// its limit; background writers wait for it (awaitWALHeadroom).
+	walPressure atomic.Bool
+
+	// plannerStatsRows is the history size at the last ANALYZE
+	// (RefreshPlannerStatistics).
+	plannerStatsRows atomic.Int64
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
+
+	// progress receives the one-line notes Init writes while it applies
+	// migrations. nil means os.Stderr, which is gateway.log in the daemon.
+	progress io.Writer
 
 	// findingLifecycleMu serializes the one mutable state projection and its
 	// process-local up/down-counter baselines. SQLite serializes these writers
@@ -236,6 +264,23 @@ type Store struct {
 	// publishing two current-state baselines after a runtime restart/reload.
 	findingLifecycleMu      sync.Mutex
 	findingGaugeInitialized map[string]struct{}
+}
+
+// SetMigrationProgress sends the notes Init writes while it applies
+// migrations ("[audit] applying migration N: ...") to w instead of stderr.
+// The daemon keeps stderr, which is its time-stamped gateway.log; the
+// launcher and one-shot commands pass io.Discard, so an upgrade's installer
+// output does not carry an internal description per migration (GAP-0153).
+// Call it before Init.
+func (s *Store) SetMigrationProgress(w io.Writer) {
+	s.progress = w
+}
+
+func (s *Store) migrationProgress() io.Writer {
+	if s.progress != nil {
+		return s.progress
+	}
+	return os.Stderr
 }
 
 // SQLiteBusyObservabilityV8 is the generated metric capability used by audit,
@@ -282,10 +327,13 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //     returning SQLITE_BUSY, absorbing the
 //     vast majority of write contention.
 //   - wal_autocheckpoint=0      disables SQLite's connection-local commit
-//     hook. DefenseClaw checkpoints through the serialized Store connection
-//     in health and retention maintenance; running a second checkpoint from
+//     hook. DefenseClaw copies the log on a dedicated checkpoint connection
+//     (the WAL guard, health and retention maintenance); running a checkpoint from
 //     inside a commit can race a retiring sidecar process over the shared WAL
 //     mapping and terminate the gateway with SIGBUS.
+//   - journal_size_limit=64MiB  cuts the WAL file back to 64 MiB when a
+//     writer restarts the log, so a burst does not keep its disk space
+//     (rel-1-0-2:GAP-0709; see CheckpointWALIfLarge).
 //   - synchronous=NORMAL        the sweet spot for WAL: durable
 //     across crashes (loses only the last
 //     transaction on power loss) while ~3x
@@ -295,9 +343,9 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //   - temp_store=MEMORY         spill temp tables to RAM instead of
 //     disk; eliminates a common contention
 //     source on writes that allocate temp.
-//   - mmap_size=268435456       map up to 256 MB of the DB into the
-//     process address space for read-heavy
-//     queries (audit views, exports).
+//   - mmap_size                 map up to 256 MB of the DB into the
+//     process address space for read-heavy queries (audit views, exports),
+//     except on Windows (auditMmapSizeBytes).
 //   - foreign_keys=ON           defenseclaw relies on the FK between
 //     findings and scan_results; turning
 //     this off at the DSN level would be a
@@ -309,8 +357,9 @@ type auditIntegerPragma struct {
 }
 
 var auditMandatoryIntegerPragmas = [...]auditIntegerPragma{
-	{name: "busy_timeout", dsnValue: "5000", want: 5000},
+	{name: "busy_timeout", dsnValue: strconv.Itoa(auditBusyTimeoutMillis), want: auditBusyTimeoutMillis},
 	{name: "wal_autocheckpoint", dsnValue: "0", want: 0},
+	{name: "journal_size_limit", dsnValue: strconv.Itoa(auditWALJournalSizeLimitBytes), want: auditWALJournalSizeLimitBytes},
 	{name: "synchronous", dsnValue: "NORMAL", want: 1},
 	{name: "cache_size", dsnValue: "-20000", want: -20000},
 	{name: "temp_store", dsnValue: "MEMORY", want: 2},
@@ -325,8 +374,25 @@ func buildAuditPragmas() string {
 	for _, pragma := range auditMandatoryIntegerPragmas {
 		fmt.Fprintf(&result, "&_pragma=%s(%s)", pragma.name, pragma.dsnValue)
 	}
-	result.WriteString("&_pragma=mmap_size(268435456)")
+	fmt.Fprintf(&result, "&_pragma=mmap_size(%d)", auditMmapSizeBytes())
 	return result.String()
+}
+
+// auditMmapSizeBytes is the mmap_size of every audit connection: 256 MiB,
+// and 0 on Windows. On Windows a FlushFileBuffers of the memory-mapped
+// audit.db cost about as much with a few dirty pages as with many and grew
+// with the database: 120 ms at about 100 MB and 500 ms at 1.2 GB under a
+// 10 calls/s hook flood, while the same sync of the WAL file, which SQLite
+// does not map, took about 10 ms at 30 GB. The checkpoint that lets SQLite
+// restart the log ends with that database sync, so it never fit in the WAL
+// guard's hold of the writer, the log was never restarted and the WAL file
+// grew past 12 GB (rel-1-0-3 GAP-0247, GAP-0136). Windows reads the pages
+// through the file cache instead.
+func auditMmapSizeBytes() int64 {
+	if runtime.GOOS == "windows" {
+		return 0
+	}
+	return 256 << 20
 }
 
 // openSQLite opens a SQLite connection with the audit-tier hardening
@@ -344,7 +410,11 @@ func buildAuditPragmas() string {
 // becomes a problem, we can introduce a separate read-only pool
 // without touching this hot path.
 func openSQLite(dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", dbPath+auditPragmas)
+	return openSQLiteWithPragmas(dbPath, auditPragmas)
+}
+
+func openSQLiteWithPragmas(dbPath, pragmas string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", dbPath+pragmas)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open db %s: %w", dbPath, err)
 	}
@@ -354,12 +424,30 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-func NewStore(dbPath string) (*Store, error) {
-	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
+func NewStore(dbPath string, opts ...StoreOption) (*Store, error) {
+	return newStoreWithHooks(dbPath, auditDBPathHooks{}, opts...)
+}
+
+func newStoreWithHooks(dbPath string, hooks auditDBPathHooks, opts ...StoreOption) (*Store, error) {
+	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, hooks)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db, dbPath: identity, dbPathGuard: pathGuard}, nil
+	store := &Store{db: db, dbPath: identity, dbPathGuard: pathGuard}
+	for _, opt := range opts {
+		opt(store)
+	}
+	return store, nil
+}
+
+// StoreOption configures a Store when it is opened.
+type StoreOption func(*Store)
+
+// WithSecureClientSchema keeps audit.db identical to main's on a Secure
+// Client host: the indexes no query reads stay (#1092, GAP-0253). Every
+// opener on such a host sets it.
+func WithSecureClientSchema() StoreOption {
+	return func(s *Store) { s.secureClientSchema = true }
 }
 
 // sqliteCoded is the structural interface implemented by the
@@ -1780,80 +1868,12 @@ var migrations = []migration{
 		apply:       migrateFindingLifecycleState,
 	},
 	{
-		description: "guardrails: bind bounded chain enforcement to opaque resource lineage",
-		apply:       migrateToolChainLineageState,
-	},
-	{
-		description: "guardrails: bind transformed artifact chains to opaque derived lineage",
-		apply:       migrateToolChainDerivedLineageState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to nine result slots",
-		apply:       migrateToolChainExpandedCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to ten result slots",
-		apply:       migrateToolChainTenSlotCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to eleven result slots",
-		apply:       migrateToolChainElevenSlotCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to twelve result slots",
-		apply:       migrateToolChainTwelveSlotCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to thirteen result slots",
-		apply:       migrateToolChainThirteenSlotCatalogState,
-	},
-	{
-		description: "guardrails: widen bounded chain masks and add result slots fourteen through seventeen",
-		apply:       migrateToolChainFourteenSlotWideMaskState,
-	},
-	{
-		description: "guardrails: add staged reverse-shell persistence result slot eighteen",
-		apply:       migrateToolChainEighteenSlotWideMaskState,
-	},
-	{
-		description: "guardrails: add result slots nineteen and twenty with bounded exact-value lineage",
-		apply:       migrateToolChainTwentySlotValueLineageState,
-	},
-	{
-		description: "guardrails: reserve append-only bounded chain mask capacity",
-		apply:       migrateToolChainAppendOnlyMaskCapacity,
-	},
-	{
 		description: "guardrails: bind pending SQL value sources to authoritative results",
 		apply:       migrateToolChainSQLValueSourceState,
 	},
 	{
-		description: "guardrails: add result slot twenty-one for bounded SQL value persistence",
-		apply:       migrateToolChainTwentyOneSlotSQLPersistenceState,
-	},
-	{
-		description: "guardrails: add result slot twenty-two for compromised credential authentication",
-		apply:       migrateToolChainTwentyTwoSlotCredentialAuthenticationState,
-	},
-	{
 		description: "guardrails: bind pending credential sources to authoritative results",
 		apply:       migrateToolChainReturnedCredentialSourceState,
-	},
-	{
-		description: "guardrails: add result slot twenty-three for AD CS certificate impersonation",
-		apply:       migrateToolChainTwentyThreeSlotADCSState,
-	},
-	{
-		description: "guardrails: add result slot twenty-four for S4U ticket secretsdump",
-		apply:       migrateToolChainTwentyFourSlotS4UState,
-	},
-	{
-		description: "guardrails: add result slot twenty-five for policy-gated SQLite read-delete",
-		apply:       migrateToolChainTwentyFiveSlotSQLiteReadDeleteState,
-	},
-	{
-		description: "guardrails: add result slot twenty-six for exact file-email lineage",
-		apply:       migrateToolChainTwentySixSlotFileEmailState,
 	},
 }
 
@@ -1869,6 +1889,54 @@ func tableExists(ex dbExecer, table string) (bool, error) {
 		return false, fmt.Errorf("audit: sqlite_master lookup for %q: %w", table, err)
 	}
 	return count > 0, nil
+}
+
+// unreadAuditIndexes are audit_events indexes no query reads. Every hook
+// writes several audit rows, and each index is another B-tree page per row in
+// the write-ahead log (GAP-0246, B-26), so a store outside Secure Client drops
+// them after the migrations, which still create them as main does. The schema
+// version does not move, so an older binary opened on the store after a
+// rollback runs without them.
+//
+// The readers of audit_events (the Go store, retention, export and alert
+// projection, the Python CLI and TUI, the evidence scripts) filter, join or
+// sort on id, timestamp, retention_timestamp_unix_nano, action, severity,
+// bucket, event_name, run_id, request_id, session_id, evaluation_id and
+// enforcement_action_id; their indexes stay. No reader filters on the columns
+// below: the session lifecycle lookup (connector, session_id, agent_id) uses
+// idx_audit_session_id, the scan-target join drives from the row id, and the
+// TUI filters connectors in memory. The last two are created by the Python
+// CLI, which no longer creates them (cli/defenseclaw/db.py); the gateway drops
+// what an older CLI left.
+var unreadAuditIndexes = []struct{ name, create string }{
+	{"idx_audit_policy_id", `CREATE INDEX IF NOT EXISTS idx_audit_policy_id ON audit_events(policy_id)`},
+	{"idx_audit_tool_name", `CREATE INDEX IF NOT EXISTS idx_audit_tool_name ON audit_events(tool_name)`},
+	{"idx_audit_generation", `CREATE INDEX IF NOT EXISTS idx_audit_generation ON audit_events(generation)`},
+	{"idx_audit_sidecar_instance_id", `CREATE INDEX IF NOT EXISTS idx_audit_sidecar_instance_id ON audit_events(sidecar_instance_id)`},
+	{"idx_audit_finding_id", `CREATE INDEX IF NOT EXISTS idx_audit_finding_id ON audit_events(finding_id)`},
+	{"idx_audit_trace_id", `CREATE INDEX IF NOT EXISTS idx_audit_trace_id ON audit_events(trace_id)`},
+	{"idx_audit_turn_id", `CREATE INDEX IF NOT EXISTS idx_audit_turn_id ON audit_events(turn_id)`},
+	{"idx_audit_agent_id", `CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_events(agent_id)`},
+	{"idx_audit_agent_instance_id", `CREATE INDEX IF NOT EXISTS idx_audit_agent_instance_id ON audit_events(agent_instance_id)`},
+	{"idx_audit_scan_id", `CREATE INDEX IF NOT EXISTS idx_audit_scan_id ON audit_events(scan_id)`},
+	{"idx_audit_source_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_source_timestamp ON audit_events(source, timestamp)`},
+	{"idx_audit_connector", `CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)`},
+	{"idx_audit_action_connector_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp ON audit_events(action, connector, timestamp DESC)`},
+}
+
+// trimUnreadAuditIndexes drops the unread indexes, or on a Secure Client
+// store makes sure they exist, so its schema stays main's.
+func (s *Store) trimUnreadAuditIndexes() error {
+	for _, index := range unreadAuditIndexes {
+		statement := "DROP INDEX IF EXISTS " + index.name
+		if s.secureClientSchema {
+			statement = index.create
+		}
+		if _, err := s.db.Exec(statement); err != nil {
+			return fmt.Errorf("audit: index %s: %w", index.name, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Init() error {
@@ -1912,11 +1980,16 @@ func (s *Store) Init() error {
 	for i := current; i < len(migrations); i++ {
 		m := migrations[i]
 		ver := i + 1
-		fmt.Fprintf(os.Stderr, "[audit] applying migration %d: %s\n", ver, m.description)
+		fmt.Fprintf(s.migrationProgress(), "[audit] applying migration %d: %s\n", ver, m.description)
 		if err := s.applyMigration(ver, m); err != nil {
 			return err
 		}
 		purgedHistory = purgedHistory || (current > 0 && m.description == historicalEvidencePurgeMigrationDescription)
+	}
+	// Before the reclaim below, so the dropped indexes' pages are reclaimed
+	// with the purged history.
+	if err := s.trimUnreadAuditIndexes(); err != nil {
+		return err
 	}
 	if purgedHistory {
 		s.reclaimPurgedHistory()
@@ -2026,6 +2099,30 @@ func (s *Store) DatabasePath() string {
 		return ""
 	}
 	return s.dbPath
+}
+
+// DatabaseFileReplaced reports whether the database path no longer names
+// the file this store opened: it was deleted or replaced while the gateway
+// ran. SQLite keeps writing to the open, unlinked file, so every new audit
+// record is lost until the gateway opens the store again (GAP-0325).
+func (s *Store) DatabaseFileReplaced() bool {
+	if s == nil {
+		return false
+	}
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.closed || s.dbPathGuard == nil || s.dbPathGuard.inMemory || s.dbPathGuard.pinned == nil {
+		return false
+	}
+	pinned, err := s.dbPathGuard.pinned.Stat()
+	if err != nil {
+		return false
+	}
+	current, err := os.Lstat(s.dbPathGuard.path)
+	if os.IsNotExist(err) {
+		return true
+	}
+	return err == nil && !os.SameFile(pinned, current)
 }
 
 // acquireReady pins the store against Close for one mandatory v8 transaction.
@@ -2463,7 +2560,7 @@ func (s *Store) ListActivityEvents(limit int) ([]ActivityEventRow, error) {
 			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
 			COALESCE(schema_version,0), COALESCE(content_hash,''), COALESCE(generation,0),
 			COALESCE(binary_version,''), COALESCE(agent_id,''), COALESCE(sidecar_instance_id,'')
-		FROM activity_events ORDER BY timestamp DESC LIMIT ?`, limit)
+		FROM activity_events ORDER BY `+s.timeOrderForTable("activity_events", "", true)+` LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list activity events: %w", err)
 	}
@@ -2978,7 +3075,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 		        schema_version, content_hash, generation, binary_version,
 		        agent_id, sidecar_instance_id,
 		        connector, step_idx, enforced, rule_pack_dir
-		 FROM audit_events ORDER BY timestamp DESC LIMIT ?`, limit,
+		 FROM audit_events ORDER BY `+s.auditEventsNewestFirst()+` LIMIT ?`, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list events: %w", err)
@@ -2996,11 +3093,50 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	return events, rows.Err()
 }
 
-// scanAuditEventRow centralises the column-scan logic for ListEvents
-// and ListEventsByTarget so the Observability Phase 6 columns
-// (session_id, turn_id, agent_name, agent_instance_id, policy_id,
-// destination_app, tool_name, tool_id) only have to be threaded
-// through the struct in a single place.
+// auditEventsNewestFirst is the ORDER BY of ListEvents: newest first by the
+// exact instant the retention trigger parses from the timestamp text, then
+// insert order. The RFC3339Nano text itself does not sort in time order: it
+// drops trailing zeros (".12345Z" sorts after ".123451Z") and keeps the zone
+// offset, so macOS microsecond clocks listed sandbox phases out of order
+// (rel-1-0-2:GAP-0484). A read-only store over a database from before the
+// v8 retention migration (an unmigrated 0.8.x store; kept while 0.8.x
+// upgrades are supported) has no such column and sorts by julianday instead.
+func (s *Store) auditEventsNewestFirst() string {
+	return s.auditEventsNewestFirstForAlias("")
+}
+
+func (s *Store) auditEventsNewestFirstForAlias(alias string) string {
+	if alias != "" {
+		alias += "."
+	}
+	if ok, err := hasColumnDB(s.db, "audit_events", "retention_timestamp_unix_nano"); err == nil && ok {
+		return alias + "retention_timestamp_unix_nano DESC, " + alias + "rowid DESC"
+	}
+	return "julianday(" + alias + "timestamp) DESC, " + alias + "rowid DESC"
+}
+
+// timeOrderForTable uses the exact timestamp filled by the retention migration.
+// The date fallback keeps read-only access to older audit databases working.
+func (s *Store) timeOrderForTable(table, alias string, newest bool) string {
+	direction := " DESC"
+	if !newest {
+		direction = " ASC"
+	}
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	instant := "julianday(" + prefix + "timestamp)"
+	if ok, err := hasColumnDB(s.db, table, "retention_timestamp_unix_nano"); err == nil && ok {
+		instant = prefix + "retention_timestamp_unix_nano"
+	}
+	return instant + direction + ", " + prefix + "rowid" + direction
+}
+
+// scanAuditEventRow holds the column-scan logic of ListEvents so the
+// Observability Phase 6 columns (session_id, turn_id, agent_name,
+// agent_instance_id, policy_id, destination_app, tool_name, tool_id) are
+// threaded through the struct in a single place.
 func scanAuditEventRow(rows rowScanner) (Event, error) {
 	var e Event
 	var (
@@ -3078,9 +3214,8 @@ func scanAuditEventRow(rows rowScanner) (Event, error) {
 	return e, nil
 }
 
-// rowScanner lets scanAuditEventRow accept *sql.Rows from either
-// ListEvents or ListEventsByTarget without importing database/sql at
-// the call site.
+// rowScanner lets scanAuditEventRow accept *sql.Rows without importing
+// database/sql at the call site.
 type rowScanner interface {
 	Scan(dest ...interface{}) error
 }
@@ -3490,6 +3625,32 @@ const alertNonAllowOutcomeSQL = `'alert','ask','block','blocked','confirm','deny
 	'fail','failed','failure','quarantine','quarantined','reject','rejected',
 	'revoked','terminated','timed_out'`
 
+// SandboxEgressCodeHarnessFetch is the decision code of a refused request a
+// sandbox's harness makes on its own and does without (OpenCode's model
+// catalog, the Codex tip download). The refusal is expected: it is audited
+// at INFO, but no alert (GAP-0130). Mirrors
+// ALERT_AUDIT_ONLY_DECISION_CODES in cli/defenseclaw/alert_semantics.py.
+const SandboxEgressCodeHarnessFetch = "SANDBOX_EGRESS_HARNESS_FETCH"
+
+// SandboxEgressCodeLookupRefused is the decision code of OpenShell's refusal
+// of a sandbox's name lookup. OpenShell judges the connection that follows
+// on its own, and that denial is the alert; the lookup is audited at INFO
+// (GAP-0134).
+const SandboxEgressCodeLookupRefused = "SANDBOX_EGRESS_LOOKUP_REFUSED"
+
+// auditOnlyEgressCode reports a decision code of a refusal that is audited
+// only: no alert, no defenseclaw.egress.events point and no blocked count on
+// the Sandboxes dashboard.
+func auditOnlyEgressCode(code string) bool {
+	return code == SandboxEgressCodeHarnessFetch || code == SandboxEgressCodeLookupRefused
+}
+
+// auditOnlyEgressSQL keeps the refusals that are audited only off the alert
+// queue.
+const auditOnlyEgressSQL = `COALESCE(CASE WHEN json_valid(COALESCE(event.payload_json,''))
+		THEN json_extract(event.payload_json, '$."defenseclaw.network.decision_code"') END, '')
+		NOT IN ('` + SandboxEgressCodeHarnessFetch + `','` + SandboxEgressCodeLookupRefused + `')`
+
 func canonicalAlertOutcomeSQL() string {
 	return `LOWER(COALESCE(
 		CASE WHEN json_valid(COALESCE(event.payload_json,''))
@@ -3548,6 +3709,10 @@ func connectorEnforcedAlertSQL() string {
 	)`
 }
 
+// alertEligibilitySQL is the one alert-queue predicate. The legacy finding
+// actions are alerts when their severity is real, whether an older gateway
+// wrote them without a bucket or a current one files them under
+// security.finding with a legacy.audit.* event name (GAP-0187).
 func alertEligibilitySQL(legacyActionPlaceholders string) string {
 	findingTagsPath := `$."defenseclaw.finding.tags"`
 	canonicalOutcome := canonicalAlertOutcomeSQL()
@@ -3589,21 +3754,27 @@ func alertEligibilitySQL(legacyActionPlaceholders string) string {
 		OR (
 			event.bucket IN ('enforcement.action','network.egress')
 			AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
+			AND ` + auditOnlyEgressSQL + `
 		)
 		OR (
 			event.bucket IN ('platform.health','diagnostic')
 			AND UPPER(COALESCE(event.severity,'')) IN ('CRITICAL','HIGH','ERROR')
 		)
 		OR (
-			event.bucket IS NULL
+			event.action IN (` + legacyActionPlaceholders + `)
+			AND UPPER(COALESCE(event.severity,'')) IN
+				('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
 			AND (
-				(
-					event.action IN (` + legacyActionPlaceholders + `)
-					AND UPPER(COALESCE(event.severity,'')) IN
-						('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
+				event.bucket IS NULL
+				OR (
+					event.bucket = 'security.finding'
+					AND event.event_name LIKE 'legacy.audit.%'
 				)
-				OR ` + legacyExplicit + `
 			)
+		)
+		OR (
+			event.bucket IS NULL
+			AND ` + legacyExplicit + `
 		)
 	)`
 }
@@ -3631,6 +3802,48 @@ func alertEffectiveSeveritySQL() string {
 		WHEN event.bucket IS NULL AND ` + legacyExplicit + ` THEN 'HIGH'
 		ELSE 'INFO'
 	END`
+}
+
+// AIDHookEnforcementProducer is the authenticated provenance stamped on the
+// durable enforcement companion when Cisco AI Defense supplied the block that
+// the connector actually enforced. Kept as a shared constant so downstream
+// projections that WANT to filter for the AID lane specifically can still do
+// so; the Active-Alert count itself is provenance-agnostic (see the SQL
+// below).
+const AIDHookEnforcementProducer = "gateway.hook.aid.enforcement"
+
+// HookDecisionMetricsProducer is the authenticated provenance stamped on the
+// durable enforcement companion when a connector hook enforced a block whose
+// origin was not the AID cloud lane (local ordered rules, MCP/asset policy,
+// judge, panic fallback). Kept as a shared constant so the gateway emitters,
+// the audit projection, and downstream consumers agree on the string.
+const HookDecisionMetricsProducer = "gateway.hook.decision.metrics"
+
+// activeConnectorHookBlockSQL identifies the durable enforcement companion
+// emitted after a connector hook actually applies a block. This restores the
+// 26.7.3 semantics: any enforced connector-hook block counts as an Active
+// Alert, regardless of whether AID or a local ordered rule / MCP-asset policy
+// / judge / panic-fallback originated the verdict. Managed-enterprise
+// deployments frequently enforce through local rule packs, and gating the
+// alert on a single actor string silently pinned the count at 0 for those
+// scenarios. Severity, findings, advisory outcomes, health events, and legacy
+// hook summaries without enforced=1 remain deliberately irrelevant.
+func activeConnectorHookBlockSQL() string {
+	canonicalOutcome := canonicalAlertOutcomeSQL()
+	return `(
+		event.bucket = 'enforcement.action'
+		AND event.event_name = 'enforcement.block.applied'
+		AND event.source = 'connector'
+		AND COALESCE(event.enforced, 0) = 1
+		AND ` + canonicalOutcome + ` IN ('block','blocked')
+	)`
+}
+
+// activeAIDHookBlockSQL retains the historical name for callers that already
+// spell the alert predicate this way; the underlying set is the 26.7.3-parity
+// "any enforced connector-hook block" projection.
+func activeAIDHookBlockSQL() string {
+	return activeConnectorHookBlockSQL()
 }
 
 // SelectAlertAcknowledgementTargets returns a stable alert-ID ordering and
@@ -3772,7 +3985,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 			 SELECT 1 FROM alert_acknowledgement_projection AS projection
 			 WHERE projection.alert_id = event.id
 		 )
-		 ORDER BY event.timestamp DESC LIMIT ?`
+		 ORDER BY ` + s.auditEventsNewestFirstForAlias("event") + ` LIMIT ?`
 	args := make([]any, 0, len(legacyActions)+1)
 	for _, action := range legacyActions {
 		args = append(args, action)
@@ -3813,39 +4026,6 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	return events, rows.Err()
 }
 
-// ListEventsByTarget returns recent audit events for a given target path.
-func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, structured_json, severity,
-		        run_id, trace_id, request_id,
-		        session_id, turn_id, agent_name, agent_instance_id, policy_id,
-		        destination_app, tool_name, tool_id,
-		        schema_version, content_hash, generation, binary_version,
-		        agent_id, sidecar_instance_id,
-		        connector, step_idx, enforced, rule_pack_dir
-		 FROM audit_events
-		 WHERE target = ?
-		 ORDER BY timestamp DESC LIMIT ?`, target, limit,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("audit: list events by target: %w", err)
-	}
-	defer rows.Close()
-
-	var events []Event
-	for rows.Next() {
-		e, err := scanAuditEventRow(rows)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, e)
-	}
-	return events, rows.Err()
-}
-
 // ListFindingsByRunID returns findings from the scan whose ID matches the run_id.
 func (s *Store) ListFindingsByRunID(runID string) ([]FindingRow, error) {
 	if runID == "" {
@@ -3860,7 +4040,7 @@ func (s *Store) ListScanResults(limit int) ([]ScanResultRow, error) {
 	}
 	rows, err := s.queryDB(context.Background(), "audit",
 		`SELECT id, scanner, target, timestamp, duration_ms, finding_count, max_severity
-		 FROM scan_results ORDER BY timestamp DESC LIMIT ?`, limit,
+		 FROM scan_results ORDER BY `+s.timeOrderForTable("scan_results", "", true)+` LIMIT ?`, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list scan results: %w", err)
@@ -4072,16 +4252,18 @@ type LatestScanInfo struct {
 
 func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, error) {
 	rows, err := s.queryDB(context.Background(), "audit", `
-		SELECT sr.id, sr.target, sr.timestamp, sr.finding_count, sr.max_severity, sr.raw_json
-		FROM scan_results sr
-		INNER JOIN (
-			SELECT target, MAX(timestamp) as max_ts
-			FROM scan_results
-			WHERE scanner = ? AND COALESCE(exit_code, 0) = 0 AND COALESCE(error, '') = ''
-			GROUP BY target
-		) latest ON sr.target = latest.target AND sr.timestamp = latest.max_ts
-		WHERE sr.scanner = ? AND COALESCE(sr.exit_code, 0) = 0 AND COALESCE(sr.error, '') = ''
-	`, scannerName, scannerName)
+		SELECT id, target, timestamp, finding_count, max_severity, raw_json
+		FROM (
+			SELECT sr.id, sr.target, sr.timestamp, sr.finding_count,
+				sr.max_severity, sr.raw_json,
+				ROW_NUMBER() OVER (
+					PARTITION BY sr.target ORDER BY `+s.timeOrderForTable("scan_results", "sr", true)+`
+				) AS dc_rank
+			FROM scan_results sr
+			WHERE sr.scanner = ? AND COALESCE(sr.exit_code, 0) = 0
+				AND COALESCE(sr.error, '') = ''
+		)
+		WHERE dc_rank = 1`, scannerName)
 	if err != nil {
 		return nil, fmt.Errorf("audit: latest scans by scanner: %w", err)
 	}
@@ -4220,6 +4402,18 @@ func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes
 	)
 	if err != nil {
 		return fmt.Errorf("audit: set target snapshot: %w", err)
+	}
+	return nil
+}
+
+// DeleteTargetSnapshot drops the rescan baseline of a target that left its
+// path, so a later copy at that path is a new install, not an unchanged one.
+func (s *Store) DeleteTargetSnapshot(targetType, targetPath string) error {
+	if _, err := s.execDB(context.Background(), "audit",
+		`DELETE FROM target_snapshots WHERE target_type = ? AND target_path = ?`,
+		targetType, targetPath,
+	); err != nil {
+		return fmt.Errorf("audit: delete target snapshot: %w", err)
 	}
 	return nil
 }
@@ -4378,7 +4572,7 @@ func currentRunID() string {
 	if v := gatewaylog.ProcessRunID(); v != "" {
 		return v
 	}
-	return strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
+	return strings.TrimSpace(envvars.Getenv("DEFENSECLAW_RUN_ID"))
 }
 
 // processAgentInstanceID holds the per-process agent instance ID that

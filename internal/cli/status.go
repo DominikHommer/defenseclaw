@@ -61,6 +61,9 @@ The sidecar must be running for this command to work.`,
 	// On a standalone managed host an administrator's status reads the
 	// managed deployment without extra environment variables.
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		if err := managedStandardUserGatewayRefusal(); err != nil {
+			return err
+		}
 		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 		gatewayStatusConfigProblem = nil
 		err := loadGatewayCommandConfigFor(cmd)
@@ -303,9 +306,10 @@ func gatewayStatusConfigLoadError(err error) error {
 	}
 	if problem, ok := configSchemaProblem(err); ok {
 		return fmt.Errorf("failed to load config: %s. %s Fix the file (check it with: defenseclaw config validate)",
-			problem, state)
+			strings.TrimRight(problem, ". "), state)
 	}
-	return fmt.Errorf("%w. %s Fix the file (check it with: defenseclaw config validate)", err, state)
+	return fmt.Errorf("%s. %s Fix the file (check it with: defenseclaw config validate)",
+		strings.TrimRight(err.Error(), ". "), state)
 }
 
 func printGatewayStatusBanner() {
@@ -504,19 +508,34 @@ func printMovedCorruptAuditStores(cfg *config.Config, since time.Time) {
 			moved = append(moved, store)
 		}
 	}
+	moved = audit.ReportedMovedCorruptStores(moved)
 	if len(moved) == 0 {
 		return
 	}
 	newest := moved[len(moved)-1]
 	fmt.Println()
-	Warn(fmt.Sprintf("The audit store was corrupt and was moved to %s on %s; %s",
-		newest.Path, newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
-	recoverHint := "Recover older audit records with: sqlite3 " + newest.Path + " .recover"
-	if _, err := exec.LookPath("sqlite3"); err != nil {
-		recoverHint += " (sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html)"
+	if newest.PreCutover {
+		// Not lost history: 1.0 does not carry 0.x history over (GAP-1222).
+		OK(fmt.Sprintf("The audit store DefenseClaw 0.x wrote could not be upgraded and is kept as an archive in %s%s (since %s); %s",
+			newest.Path, newest.SidecarDescription(), newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
+		printMovedAuditStoreRecoveryHint(newest.Path)
+		Subhead("Delete the archive and its -wal, -shm and -journal files when you no longer need them.")
+		return
 	}
-	Subhead(recoverHint)
-	Subhead("Delete the moved file and its -wal/-shm files when they are no longer needed.")
+	Warn(fmt.Sprintf("The audit store was corrupt and was moved to %s%s on %s; %s",
+		newest.Path, newest.SidecarDescription(), newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
+	printMovedAuditStoreRecoveryHint(newest.Path)
+	Subhead("Delete the moved file and its -wal, -shm and -journal files when they are no longer needed.")
+}
+
+// printMovedAuditStoreRecoveryHint says to recover from a copy of the
+// archived set, never from the archive itself (rel-1-0-2:GAP-0647). The hint
+// ends with a command, so the sqlite3 note goes on its own line first.
+func printMovedAuditStoreRecoveryHint(archive string) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		Subhead("sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html")
+	}
+	Subhead(audit.ArchiveRecoveryHint(archive))
 }
 
 // lastGatewayExitError returns the error a per-user gateway printed as the
@@ -1057,6 +1076,47 @@ func printSubsystems(snap *gateway.HealthSnapshot) {
 	if snap.Sandbox != nil {
 		printSubsystem("Sandbox", *snap.Sandbox)
 	}
+	if line := kernelSensorStatusLine(snap); line != "" {
+		fmt.Printf("  %s%s\n\n", Style("Kernel sensor: ", "fg=bright_black", "bold"), asciiText(line))
+	}
+}
+
+// kernelSensorStatusLine is the managed Linux sensor helper's kernel sensor
+// and kernel controls in one line, from /health
+// ai_runtime.details.planes.c.backend; "" when the gateway reports no
+// backend (every host but a managed Linux one).
+func kernelSensorStatusLine(snap *gateway.HealthSnapshot) string {
+	planes, _ := snap.AIRuntime.Details["planes"].(map[string]interface{})
+	planeC, _ := planes["c"].(map[string]interface{})
+	raw, ok := planeC["backend"]
+	if !ok {
+		return ""
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return ""
+	}
+	var backend enterpriseRuntimeBackend
+	if json.Unmarshal(data, &backend) != nil {
+		return ""
+	}
+	sensor := "cn_proc and fanotify (Tetragon not used: " + tetragonFallback(backend.FallbackReason) + ")"
+	if strings.EqualFold(backend.Kind, "tetragon") {
+		version := strings.TrimSpace(backend.Version)
+		if version != "" && version[0] >= '0' && version[0] <= '9' {
+			version = "v" + version
+		}
+		sensor = strings.TrimSpace("Tetragon " + version)
+		if backend.Mode != "" {
+			sensor += " (" + backend.Mode + ")"
+		}
+	}
+	for _, line := range backend.lines() {
+		if controls, ok := strings.CutPrefix(line, "kernel controls: "); ok {
+			sensor += "; kernel controls: " + controls
+		}
+	}
+	return sensor
 }
 
 func fleetUplinkUnused(snap *gateway.HealthSnapshot) bool {

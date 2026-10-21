@@ -156,7 +156,9 @@ func resolveWindowsRuntimeOnlyTarget(opts InstallOptions) (windowsGenericManaged
 	if !windowsStandaloneRuntimeOnlyInstall(name) {
 		return target, "", fmt.Errorf("enterprise hooks: connector %q is not a Windows machine policy runtime connector", name)
 	}
-	target.setup.HookFailMode = "closed"
+	// The administrator's configured delivery mode: explicit open or closed;
+	// unset is closed, and open under Secure Client (#1163).
+	target.setup.HookFailMode = canonicalHookFailMode(target.setup.HookFailMode)
 	policyPath, err := windowsRuntimeOnlyPolicyPath(name)
 	if err != nil {
 		return target, "", err
@@ -178,7 +180,7 @@ func installWindowsRuntimeOnlyManagedResult(
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	target, policyPath, err := resolveWindowsRuntimeOnlyTarget(opts)
@@ -199,8 +201,12 @@ func installWindowsRuntimeOnlyManagedResult(
 	var lockEntry connector.HookContractLockEntry
 	var lockUpdatedAt, entryUpdatedAt string
 	var generation WindowsManagedRuntimeGenerationPublication
-	if err := ensureWindowsStandaloneHookRuntimeAncestorReadable(); err != nil {
-		return InstallResult{}, err
+	if windowsPerUserRuntimeStandalone() {
+		// Secure Client keeps the enrollment in Copilot's machine folder,
+		// whose ancestors the policy.d drop-in already needs user-readable.
+		if err := ensureWindowsStandaloneHookRuntimeAncestorReadable(); err != nil {
+			return InstallResult{}, err
+		}
 	}
 	err = connector.WithUserHomeDir(target.home, func() error {
 		return windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
@@ -238,7 +244,7 @@ func installWindowsRuntimeOnlyManagedResult(
 				return fail(fmt.Errorf("enterprise hooks: create %s managed runtime: %w", name, createErr))
 			}
 			if err := connector.ReconcileManagedNativeHookRuntime(
-				target.dataDir, target.setup.APIAddr, name, target.setup.HookAPIToken,
+				target.dataDir, target.setup.APIAddr, name, target.setup.HookAPIToken, target.setup.HookFailMode,
 			); err != nil {
 				return fail(fmt.Errorf("enterprise hooks: write %s managed runtime: %w", name, err))
 			}
@@ -255,7 +261,7 @@ func installWindowsRuntimeOnlyManagedResult(
 			if err != nil {
 				return fail(fmt.Errorf("enterprise hooks: digest %s managed runtime: %w", name, err))
 			}
-			lockEntry.HookFailMode = "closed"
+			lockEntry.HookFailMode = target.setup.HookFailMode
 			lockEntry.HookScriptDigests = nil
 			lockEntry.Locations = connector.ConnectorLocations{HookConfigPaths: []string{policyPath}}
 			if err := connector.SaveRecoveredHookContractLockEntryForMode(
@@ -315,7 +321,7 @@ func verifyWindowsRuntimeOnlyManagedResult(
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	target, policyPath, err := resolveWindowsRuntimeOnlyTarget(opts)
@@ -356,7 +362,7 @@ func verifyWindowsRuntimeOnlyUserRuntime(target windowsGenericManagedTarget, pol
 	if err := verifyWindowsUserRuntime(windowsRuntimeOnlyPaths(target.dataDir, name), target.sid); err != nil {
 		return err
 	}
-	if err := connector.ValidateManagedNativeHookRuntime(target.dataDir, target.setup.APIAddr, name); err != nil {
+	if err := connector.ValidateManagedNativeHookRuntime(target.dataDir, target.setup.APIAddr, name, target.setup.HookFailMode); err != nil {
 		return fmt.Errorf("enterprise hooks: %s managed runtime is invalid: %w", name, err)
 	}
 	tokenPath, err := connector.HookTokenFilePath(filepath.Join(target.dataDir, "hooks"), name)
@@ -377,7 +383,7 @@ func verifyWindowsRuntimeOnlyUserRuntime(target windowsGenericManagedTarget, pol
 	if lock.Connector != name || len(lock.Locations.HookConfigPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], policyPath) ||
 		len(lock.Locations.HookScriptPaths) != 0 ||
-		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
+		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), target.setup.HookFailMode) {
 		return fmt.Errorf("enterprise hooks: %s managed hook contract does not identify only its machine policy", name)
 	}
 	return nil

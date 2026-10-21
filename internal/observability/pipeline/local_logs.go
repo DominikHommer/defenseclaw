@@ -15,7 +15,10 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	v8redaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
@@ -76,6 +79,9 @@ const (
 type Error struct {
 	code         ErrorCode
 	contextCause error
+	// sqliteClass is the coarse SQLite class of a failed local write; the
+	// driver error itself never leaves this package.
+	sqliteClass audit.EventHistorySQLiteClass
 }
 
 func (err *Error) Error() string {
@@ -90,6 +96,14 @@ func (err *Error) Code() ErrorCode {
 		return ""
 	}
 	return err.code
+}
+
+// SQLiteClass is the coarse SQLite class of an ErrorLocalWrite, or "".
+func (err *Error) SQLiteClass() audit.EventHistorySQLiteClass {
+	if err == nil {
+		return ""
+	}
+	return err.sqliteClass
 }
 
 func (err *Error) Is(target error) bool {
@@ -127,6 +141,29 @@ func (failure OptionalFailure) DestinationKind() config.ObservabilityV8Destinati
 func (failure OptionalFailure) RouteName() string         { return failure.routeName }
 func (failure OptionalFailure) RouteIndex() int           { return failure.routeIndex }
 func (failure OptionalFailure) Code() OptionalFailureCode { return failure.code }
+
+// NewManagedOptionalFailureOutcomeForTest builds the outcome shape this pipeline
+// produces when a record's managed AI Defense projection cannot be built: the
+// record was never queued for that destination, no optional work was scheduled,
+// and Emit nevertheless returns a nil error because the managed route is an
+// optional projection.
+//
+// Exported purely so callers in other packages can test their handling of that
+// shape. Every field of LocalLogOutcome and OptionalFailure is deliberately
+// unexported, so this is the only way to reproduce it outside this package, and
+// a caller that treats a nil error as proof of managed delivery has no way to
+// notice the difference without it.
+func NewManagedOptionalFailureOutcomeForTest(code OptionalFailureCode) LocalLogOutcome {
+	return LocalLogOutcome{
+		admission:   router.AdmissionDrop,
+		managedOnly: true,
+		optionalFailure: []OptionalFailure{{
+			destinationName: config.ObservabilityV8ManagedAIDDestinationName,
+			destinationKind: config.ObservabilityV8DestinationOTLP,
+			code:            code,
+		}},
+	}
+}
 
 // ProjectedDeliveryIdentity is the complete bounded, non-content identity
 // retained beside one optional projection. It is derived only from the
@@ -373,18 +410,64 @@ func (pipeline *LocalLogPipeline) process(
 	originDestination string,
 	exportOnWriteFailure bool,
 ) (LocalLogOutcome, error) {
+	prepared, outcome, admitted, err := pipeline.prepare(ctx, metadata, builder)
+	if err != nil || !admitted {
+		return outcome, err
+	}
+	sinkPolicy := legacyredaction.SinkPolicyFromContext(ctx)
+	if err := pipeline.appender.AppendContext(ctx, prepared.record.Clone(), prepared.projection); err != nil {
+		// A raw `err` value here may wrap BeginTx / commit / health strings
+		// that leak backend state past the pipeline's bounded projection.
+		// Emit the fixed classification only; the wrapped cause stays inside
+		// `boundedPipelineError` where the pipeline redacts it.
+		fmt.Fprintf(os.Stderr,
+			"[obs-pipeline] appender.AppendContext failed bucket=%s event=%s signal=%s connector=%s error=%s\n",
+			prepared.record.Bucket(), prepared.record.EventName(), prepared.record.Signal(), prepared.record.Connector(), ErrorLocalWrite)
+		writeErr := boundedPipelineError(ErrorLocalWrite, err)
+		if !exportOnWriteFailure || writeErr.contextCause != nil {
+			return LocalLogOutcome{}, writeErr
+		}
+		// The local store failed (disk full, read-only): still hand back the
+		// remote projections of this gateway's own record with the error, so
+		// the caller can export them and the decision and the outage stay
+		// visible remotely (GAP-1536). Imported records stay SQLite-first.
+		pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, originDestination)
+		return outcome, writeErr
+	}
+	outcome.localPersisted = true
+	if localOnly {
+		return outcome, nil
+	}
+	pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, originDestination)
+	return outcome, nil
+}
+
+// preparedLocalLog is an admitted occurrence ready for the local append.
+type preparedLocalLog struct {
+	record     observability.Record
+	projection v8redaction.Projection
+	optional   []router.Delivery
+}
+
+// prepare evaluates collection once and builds the record and its local
+// projection. A dropped occurrence returns its outcome with admitted false.
+func (pipeline *LocalLogPipeline) prepare(
+	ctx context.Context,
+	metadata router.Metadata,
+	builder router.RecordBuilder,
+) (preparedLocalLog, LocalLogOutcome, bool, error) {
 	if pipeline == nil || pipeline.evaluator == nil || pipeline.projector == nil ||
 		pipeline.appender == nil || pipeline.failures == nil {
-		return LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
+		return preparedLocalLog{}, LocalLogOutcome{}, false, &Error{code: ErrorInvalidDependency}
 	}
 	if ctx == nil {
-		return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
+		return preparedLocalLog{}, LocalLogOutcome{}, false, &Error{code: ErrorInvalidInput}
 	}
 	if err := ctx.Err(); err != nil {
-		return LocalLogOutcome{}, &Error{code: ErrorContextDone, contextCause: err}
+		return preparedLocalLog{}, LocalLogOutcome{}, false, &Error{code: ErrorContextDone, contextCause: err}
 	}
 	if metadata.Identity().Signal != observability.SignalLogs {
-		return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
+		return preparedLocalLog{}, LocalLogOutcome{}, false, &Error{code: ErrorInvalidInput}
 	}
 
 	safeBuilder := func(admission router.Admission) (observability.Record, error) {
@@ -401,29 +484,28 @@ func (pipeline *LocalLogPipeline) process(
 	if err != nil {
 		var buildFailure *recordBuildFailure
 		if errors.As(err, &buildFailure) {
-			return LocalLogOutcome{}, &Error{code: ErrorRecordBuild}
+			return preparedLocalLog{}, LocalLogOutcome{}, false, &Error{code: ErrorRecordBuild}
 		}
-		return LocalLogOutcome{}, &Error{code: ErrorEvaluation}
+		return preparedLocalLog{}, LocalLogOutcome{}, false, &Error{code: ErrorEvaluation}
 	}
 	outcome := LocalLogOutcome{admission: result.Admission()}
 	if result.Admission() == router.AdmissionDrop {
-		return outcome, nil
+		return preparedLocalLog{}, outcome, false, nil
 	}
 	record, ok := result.Record()
 	if !ok || record.Signal() != observability.SignalLogs {
-		return LocalLogOutcome{}, &Error{code: ErrorEvaluation}
+		return preparedLocalLog{}, LocalLogOutcome{}, false, &Error{code: ErrorEvaluation}
 	}
 
 	local, optional, ok := splitLocalDelivery(result.Deliveries(), result.Admission())
 	if !ok {
-		return LocalLogOutcome{}, &Error{code: ErrorLocalDelivery}
+		return preparedLocalLog{}, LocalLogOutcome{}, false, &Error{code: ErrorLocalDelivery}
 	}
-	sinkPolicy := legacyredaction.SinkPolicyFromContext(ctx)
 	localProfile, ok := pipeline.resolveProjectionProfile(
-		v8redaction.ProfileName(local.RedactionProfile), sinkPolicy,
+		v8redaction.ProfileName(local.RedactionProfile), legacyredaction.SinkPolicyFromContext(ctx),
 	)
 	if !ok {
-		return LocalLogOutcome{}, &Error{code: ErrorLocalProfile}
+		return preparedLocalLog{}, LocalLogOutcome{}, false, &Error{code: ErrorLocalProfile}
 	}
 	localProjection, _, err := pipeline.projector.Project(record, localProfile)
 	if err != nil {
@@ -431,28 +513,90 @@ func (pipeline *LocalLogPipeline) process(
 			ctx, record, localProfile.Name(), boundedProjectionFailure(err),
 		)
 		if failureErr != nil {
-			return LocalLogOutcome{}, failureErr
+			return preparedLocalLog{}, LocalLogOutcome{}, false, failureErr
 		}
-		return LocalLogOutcome{}, &Error{code: ErrorLocalProjection}
+		return preparedLocalLog{}, LocalLogOutcome{}, false, &Error{code: ErrorLocalProjection}
 	}
-	if err := pipeline.appender.AppendContext(ctx, record.Clone(), localProjection); err != nil {
+	return preparedLocalLog{record: record, projection: localProjection, optional: optional}, outcome, true, nil
+}
+
+// LocalEventBatchAppender commits several records in one transaction, all or
+// none.
+type LocalEventBatchAppender interface {
+	AppendBatchContext(context.Context, []observability.Record, []v8redaction.Projection) error
+}
+
+// AtomicBatchItem is one occurrence of ProcessAtomicBatch.
+type AtomicBatchItem struct {
+	Metadata router.Metadata
+	Builder  router.RecordBuilder
+}
+
+// ProcessAtomicBatch is Process for a bounded group of related occurrences of
+// this gateway whose local rows commit in one transaction (GAP-0246). Items
+// are evaluated, built and projected in order; the first failure stops the
+// batch, and the items before it are still committed together. The outcomes
+// describe those items. When the commit fails nothing is persisted, and the
+// remote projections of the records come back with the error, as Process
+// returns them. An appender without batch support persists each item as
+// Process does.
+func (pipeline *LocalLogPipeline) ProcessAtomicBatch(
+	ctx context.Context,
+	items []AtomicBatchItem,
+) ([]LocalLogOutcome, error) {
+	if pipeline == nil {
+		return nil, &Error{code: ErrorInvalidDependency}
+	}
+	outcomes := make([]LocalLogOutcome, 0, len(items))
+	batcher, ok := pipeline.appender.(LocalEventBatchAppender)
+	if !ok {
+		for _, item := range items {
+			outcome, err := pipeline.Process(ctx, item.Metadata, item.Builder)
+			outcomes = append(outcomes, outcome)
+			if err != nil {
+				return outcomes, err
+			}
+		}
+		return outcomes, nil
+	}
+	var prepared []preparedLocalLog
+	var at []int
+	var stopErr error
+	for _, item := range items {
+		ready, outcome, admitted, err := pipeline.prepare(ctx, item.Metadata, item.Builder)
+		if err != nil {
+			stopErr = err
+			break
+		}
+		outcomes = append(outcomes, outcome)
+		if admitted {
+			prepared = append(prepared, ready)
+			at = append(at, len(outcomes)-1)
+		}
+	}
+	if len(prepared) == 0 {
+		return outcomes, stopErr
+	}
+	records := make([]observability.Record, len(prepared))
+	projections := make([]v8redaction.Projection, len(prepared))
+	for index, ready := range prepared {
+		records[index], projections[index] = ready.record.Clone(), ready.projection
+	}
+	sinkPolicy := legacyredaction.SinkPolicyFromContext(ctx)
+	if err := batcher.AppendBatchContext(ctx, records, projections); err != nil {
 		writeErr := boundedPipelineError(ErrorLocalWrite, err)
-		if !exportOnWriteFailure || writeErr.contextCause != nil {
-			return LocalLogOutcome{}, writeErr
+		if writeErr.contextCause == nil {
+			for index, ready := range prepared {
+				pipeline.projectOptional(&outcomes[at[index]], ready.record, ready.optional, sinkPolicy, "")
+			}
 		}
-		// The local store failed (disk full, read-only): still hand back the
-		// remote projections of this gateway's own record with the error, so
-		// the caller can export them and the decision and the outage stay
-		// visible remotely (GAP-1536). Imported records stay SQLite-first.
-		pipeline.projectOptional(&outcome, record, optional, sinkPolicy, originDestination)
-		return outcome, writeErr
+		return outcomes, writeErr
 	}
-	outcome.localPersisted = true
-	if localOnly {
-		return outcome, nil
+	for index, ready := range prepared {
+		outcomes[at[index]].localPersisted = true
+		pipeline.projectOptional(&outcomes[at[index]], ready.record, ready.optional, sinkPolicy, "")
 	}
-	pipeline.projectOptional(&outcome, record, optional, sinkPolicy, originDestination)
-	return outcome, nil
+	return outcomes, stopErr
 }
 
 // ProjectCommitted builds the optional-destination work for a record that its
@@ -527,17 +671,11 @@ func (pipeline *LocalLogPipeline) resolveProjectionProfile(
 	if pipeline == nil {
 		return v8redaction.Profile{}, false
 	}
-	profileName := configured
-	switch policy {
-	case legacyredaction.SinkPolicyDefault:
-	case legacyredaction.SinkPolicyRaw:
-		profileName = v8redaction.ProfileNone
-	case legacyredaction.SinkPolicyRedact:
-		profileName = v8redaction.ProfileSensitive
-	default:
+	profile, ok := pipeline.catalog.Resolve(configured)
+	if !ok {
 		return v8redaction.Profile{}, false
 	}
-	return pipeline.catalog.Resolve(profileName)
+	return v8redaction.ResolveSinkPolicyProfile(profile, policy)
 }
 
 func (pipeline *LocalLogPipeline) persistLocalProjectionFailure(
@@ -565,7 +703,9 @@ func (pipeline *LocalLogPipeline) persistLocalProjectionFailure(
 	if !ok {
 		return &Error{code: ErrorFailureRecord}
 	}
-	localProfile, ok := pipeline.catalog.Resolve(profileName)
+	localProfile, ok := pipeline.resolveProjectionProfile(
+		profileName, legacyredaction.SinkPolicyFromContext(ctx),
+	)
 	if !ok {
 		return &Error{code: ErrorFailureRecord}
 	}
@@ -581,6 +721,9 @@ func (pipeline *LocalLogPipeline) persistLocalProjectionFailure(
 
 func boundedPipelineError(code ErrorCode, err error) *Error {
 	result := &Error{code: code}
+	if code == ErrorLocalWrite {
+		result.sqliteClass = audit.ClassifyEventHistoryWriteFailure(err)
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		result.contextCause = context.Canceled

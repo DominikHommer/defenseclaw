@@ -6,7 +6,10 @@
 package hookexec
 
 import (
+	"errors"
+	"fmt"
 	"io"
+	"math/bits"
 	"net"
 	"net/http"
 	"os"
@@ -39,8 +42,8 @@ func TestManagedEnterpriseTransportRejectsForeignListenerBeforeHTTPBytes(t *test
 		"application/json",
 		strings.NewReader(`{"secret":"must-not-leak"}`),
 	)
-	if err == nil || !strings.Contains(err.Error(), errManagedGatewayPeerUnverified.Error()) {
-		t.Fatalf("foreign listener error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), errManagedGatewayPeerUnverified.Error()) || !errors.Is(err, errManagedGatewayPortHeld) {
+		t.Fatalf("foreign listener error = %v, want a peer failure that names the held port (GAP-1029)", err)
 	}
 	if got := <-bytesRead; len(got) != 0 {
 		t.Fatalf("foreign listener received %d request bytes: %q", len(got), got)
@@ -254,3 +257,108 @@ type managedTransportTestError struct {
 }
 
 func (e *managedTransportTestError) Error() string { return e.message }
+
+// GAP-0155: a gateway service that runs but does not listen yet (it is
+// starting, or stopping) is tried again at once: the hook reads the listen
+// table instead of a connect that Windows answers only after about 2 s.
+func TestManagedEnterpriseTransportDoesNotDialAPortNobodyListensOn(t *testing.T) {
+	managedTransportTestMu.Lock()
+	defer managedTransportTestMu.Unlock()
+
+	listener := listenManagedTransportTest(t)
+	addr := listener.Addr().String()
+	_ = listener.Close()
+	restoreManagedTransportSeams(t,
+		func(string) (uint32, error) { return 101, nil },
+		func(net.Conn) (uint32, error) { return 101, nil },
+	)
+	client, err := managedEnterpriseHTTPClient(5*time.Second, addr, "DefenseClawGateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err = client.Post("http://"+addr+"/api/v1/hook", "application/json", strings.NewReader(`{}`))
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("the try took %s, want the listen table read instead of a connect", elapsed)
+	}
+	if !errors.Is(err, errManagedGatewayNotRunning) || !gatewayRestartShaped(err) {
+		t.Fatalf("err = %v, want a restart-shaped not-running error", err)
+	}
+}
+
+func TestTCPTableListensOn(t *testing.T) {
+	port := uint16(18970)
+	wirePort := uint32(bits.ReverseBytes16(port))
+	loopback := uint32(127) | 1<<24
+	rows := []mibTCPRowOwnerPID{
+		{State: mibTCPStateEstab, LocalAddr: loopback, LocalPort: wirePort},
+		{State: mibTCPStateListen, LocalAddr: loopback, LocalPort: uint32(bits.ReverseBytes16(port + 1))},
+	}
+	if tcpTableListensOn(rows, [4]byte{127, 0, 0, 1}, port) {
+		t.Fatal("an established row or another port counted as a listener")
+	}
+	rows = append(rows, mibTCPRowOwnerPID{State: mibTCPStateListen, LocalAddr: 0, LocalPort: wirePort})
+	if !tcpTableListensOn(rows, [4]byte{127, 0, 0, 1}, port) {
+		t.Fatal("a listener on every address was not found")
+	}
+	if !tcpTableListensOn([]mibTCPRowOwnerPID{{State: mibTCPStateListen, LocalAddr: loopback, LocalPort: wirePort}}, [4]byte{127, 0, 0, 1}, port) {
+		t.Fatal("a loopback listener was not found")
+	}
+}
+
+// A stopped gateway service is an outage only when nothing listens on its
+// port: another process on the port, or a listen table that cannot be read,
+// is an integrity failure that no fail mode lets through.
+func TestStoppedManagedGatewayServiceWithAPortListenerIsNotAnOutage(t *testing.T) {
+	managedTransportTestMu.Lock()
+	defer managedTransportTestMu.Unlock()
+
+	listener := listenManagedTransportTest(t)
+	defer listener.Close()
+	bytesRead := acceptManagedTransportBytes(t, listener)
+	addr := listener.Addr().String()
+	stopped := func(string) (uint32, error) {
+		return 0, fmt.Errorf("%w (state=1 pid=0)", errManagedGatewayNotRunning)
+	}
+	restoreManagedTransportSeams(t, stopped, func(net.Conn) (uint32, error) { return 202, nil })
+	previousListening := managedEnterpriseListening
+	t.Cleanup(func() { managedEnterpriseListening = previousListening })
+	open := Options{ManagedEnterprise: true, ManagedStandalone: true, FailMode: "open"}
+
+	for _, tc := range []struct {
+		name       string
+		listening  bool
+		known      bool
+		notRunning bool
+		portHeld   bool
+	}{
+		{name: "another process holds the port", listening: true, known: true, portHeld: true},
+		{name: "listen table unreadable", known: false},
+		{name: "nothing listens", known: true, notRunning: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			managedEnterpriseListening = func(string) (bool, bool) { return tc.listening, tc.known }
+			client, err := managedEnterpriseHTTPClient(time.Second, addr, "DefenseClawGateway")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.Post("http://"+addr+"/api/v1/hook", "application/json", strings.NewReader(`{"secret":"must-not-leak"}`))
+			if err == nil || !errors.Is(err, errManagedGatewayPeerUnverified) {
+				t.Fatalf("err = %v, want a peer failure", err)
+			}
+			if got := errors.Is(err, errManagedGatewayNotRunning); got != tc.notRunning {
+				t.Fatalf("not running = %v, want %v (err %v)", got, tc.notRunning, err)
+			}
+			if got := errors.Is(err, errManagedGatewayPortHeld); got != tc.portHeld {
+				t.Fatalf("port held = %v, want %v (err %v)", got, tc.portHeld, err)
+			}
+			if got := ManagedOutageFailsOpen(open, err); got != tc.notRunning {
+				t.Fatalf("ManagedOutageFailsOpen = %v, want %v (err %v)", got, tc.notRunning, err)
+			}
+		})
+	}
+	_ = listener.Close()
+	if got := <-bytesRead; len(got) != 0 {
+		t.Fatalf("the listener received %d request bytes: %q", len(got), got)
+	}
+}

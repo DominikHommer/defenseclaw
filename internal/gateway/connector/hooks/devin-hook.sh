@@ -31,11 +31,18 @@ unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 {{if .Managed}}
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
-DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
+{{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+_DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
+{{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  # A registered closed hook cannot treat missing local state as retirement.
+  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+    echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
+    exit 2
+  fi
   exit 0
 fi
 {{end}}
@@ -74,7 +81,11 @@ readonly FAIL_MODE
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{if and .Managed (not .SecureClientDelivery)}}# Managed hooks outside an authenticated Secure Client deployment use the
+# installer-owned delivery policy; an inherited DEFENSECLAW_FAIL_MODE cannot
+# weaken an explicitly closed managed hook. Secure Client hooks keep the
+# environment override (#1163).
+FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 {{end}}DEFENSECLAW_HOOK_CONNECTOR="devin"
 DEFENSECLAW_HOOK_NAME="devin-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
@@ -92,6 +103,7 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
+  defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" transport
   defenseclaw_log_hook_failure devin devin-hook "$1" transport "$FAIL_MODE"
   echo "defenseclaw: sandbox ingress unreachable, blocking devin tool (sandbox hooks fail closed): $1" >&2
   printf 'DefenseClaw hook failed closed\n'
@@ -99,6 +111,7 @@ fail_unreachable() {
 }
 
 fail_response() {
+  defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" response
   defenseclaw_log_hook_failure devin devin-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: devin hook error, blocking devin tool (sandbox hooks fail closed): $1" >&2
   printf 'DefenseClaw hook failed closed\n'
@@ -122,14 +135,19 @@ if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   if [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
     IFS= read -r DEFENSECLAW_GATEWAY_TOKEN < "${HOOK_DIR}/{{.TokenFile}}" || true
   fi
-  export DEFENSECLAW_GATEWAY_TOKEN
 elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
   . "${HOOK_DIR}/{{.TokenFile}}"
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+# Only the private copy is used from here on: no child process (curl, jq, the
+# cold-started gateway) inherits the bearer in its environment.
+unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" transport
+  fi
   defenseclaw_log_hook_failure devin devin-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "devin hook" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
@@ -140,6 +158,8 @@ fail_unreachable() {
 }
 
 fail_response() {
+  [ "$FAIL_MODE" = "open" ] ||
+    defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" response
   defenseclaw_log_hook_failure devin devin-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: devin hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
@@ -151,7 +171,12 @@ fail_response() {
 {{end}}
 {{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
-  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+{{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
+  # would end the curl config line defenseclaw_gateway_post writes it to.
+  case "${API_TOKEN}" in
+    *$'\n'*|*$'\r'*) fail_response "invalid gateway token" ;;
+  esac
+{{end}}  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 TRACE_HEADER_ARGS=()
 if command -v mapfile >/dev/null 2>&1; then
@@ -179,26 +204,29 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/devin/hook" "$PAYLOAD" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
-  fail_unreachable "sandbox ingress unreachable"
+  fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
 }{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
   fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
 fi
-# A refused connection means this account's gateway is not running (after
-# a reboot, for example): start it once and retry. See
-# defenseclaw_gateway_cold_start in _hardening.sh.
+# A refused or dropped connection means this account's gateway is
+# restarting or not running (after a reboot, for example): send the call
+# again for up to 3 seconds, starting the gateway after a refusal. See
+# defenseclaw_await_gateway in _hardening.sh.
+# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
+# payload on descriptors, never on its command line.
 defenseclaw_hook_post() {
-  curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/devin/hook" \
+  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/devin/hook" 10 "$PAYLOAD" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: devin-hook/1.0" \
     "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
     "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
-    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-    --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} --max-time 10 -d "$PAYLOAD" 2>/dev/null
+    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"{{if .HookSocketTransportSH}} \
+    --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
-  RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
-}{{end}}
+  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"
+}
+defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 
 # devin_block ends a block. Devin shows an exit-2 hook's stdout verbatim
 # ("Tool rejected: <stdout>") rather than parsing it, so the block prints its
@@ -222,7 +250,10 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-{{if .Sandbox}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{if or .Sandbox (not .SecureClient)}}{{/* Every DefenseClaw verdict names its action: an empty or unknown one is no
+verdict, never an allow (a sandbox workload may have shaped it; a hook in fail
+mode closed blocks on it, open lets the call run: rel-1-0-3 GAP-0037, GAP-0153;
+a Secure Client render keeps its own contract). */}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 case "$ACTION" in

@@ -467,8 +467,34 @@ try {
         [void]$closeJob.Invoke($null, @($emptyJob))
     }
     . $harness -NoRun
+    $liveClaudeGuardView = ${function:Get-ClaudeCodeLauncherGuardExecView}
     . $workflowRunPathHelper
     . $nativeHarness -WorkspaceRoot $root -StateRoot (Join-Path $temp 'synthetic-native') -NoRun
+    # GAP-1091: both Claude Code registration checks read the exact generated
+    # cmd.exe launcher guard as its exec form and nothing else.
+    $guardLauncher = 'C:\Users\dc user\AppData\Local\DefenseClaw\HookRuntime\defenseclaw-hook.exe'
+    $guardSentence = @(('DefenseClaw blocked this: its Claude Code hook launcher is missing. ' +
+        'Run the DefenseClaw installer again to repair it.') -split ' ')
+    $guardArgs = @('/d', '/c', 'if', 'exist', $guardLauncher, '(', $guardLauncher, 'hook', '--connector',
+        'claudecode', ')', 'else', '(', 'echo') + $guardSentence + @('1>&2', '&', 'exit', '/b', '2', ')')
+    $guardProcessor = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $editedGuardArgs = @($guardArgs); $editedGuardArgs[-2] = '0'
+    foreach ($guardView in @($liveClaudeGuardView, ${function:Get-ClaudeCodeLauncherGuardExecView})) {
+        $exact = & $guardView ([pscustomobject]@{ type = 'command'; command = $guardProcessor; args = $guardArgs } |
+            ConvertTo-Json -Depth 4 | ConvertFrom-Json)
+        Assert-True ([string]$exact.command -ceq $guardLauncher -and
+            (@($exact.args) -join ' ') -ceq 'hook --connector claudecode') `
+            'Claude Code registration checks read the exact cmd.exe launcher guard as its exec form'
+        foreach ($other in @(
+            [pscustomobject]@{ command = $guardProcessor; args = $editedGuardArgs },
+            [pscustomobject]@{ command = $guardProcessor; args = @('/d', '/c', 'if', 'exist', $guardLauncher, '(', 'C:\Tools\other.exe', 'hook', ')', 'else', '(', 'echo', 'x', ')') },
+            [pscustomobject]@{ command = 'C:\Tools\cmd.exe'; args = $guardArgs },
+            [pscustomobject]@{ command = $guardProcessor; args = @('/d', '/c', 'echo', 'hook', '--connector', 'claudecode') }
+        )) {
+            Assert-True ([object]::ReferenceEquals((& $guardView $other), $other)) `
+                'Claude Code registration checks do not read an edited guard or another cmd.exe handler as DefenseClaw'
+        }
+    }
     $missingOptionalCleanupFields = '{"status":"pending-reboot"}' |
         ConvertFrom-Json -ErrorAction Stop
     foreach ($propertyName in @(
@@ -1048,6 +1074,105 @@ $payload = [ordered]@{
         $extraEventRejected = $true
     }
     Assert-True $extraEventRejected 'Copilot live harness rejects unreviewed extra events'
+
+    foreach ($code in @(2, 32, 33)) {
+        $cause = [IO.IOException]::new('synthetic transient file access', (-2147024896 + $code))
+        Assert-True (Test-AmpPluginSelfHealReadRetry $cause) `
+            "Amp self-heal retries Win32 file access error $code"
+        $wrapped = [Reflection.TargetInvocationException]::new($cause)
+        Assert-True (Test-AmpPluginSelfHealReadRetry $wrapped) `
+            "Amp self-heal unwraps method invocation errors for Win32 error $code"
+    }
+    foreach ($cause in @(
+        [IO.IOException]::new('synthetic access denied', -2147024891),
+        [IO.IOException]::new('synthetic unrelated I/O failure'),
+        [UnauthorizedAccessException]::new('synthetic access denied'),
+        [ArgumentException]::new('synthetic malformed path')
+    )) {
+        Assert-True (-not (Test-AmpPluginSelfHealReadRetry $cause)) `
+            'Amp self-heal does not hide permission, path or unrelated I/O errors'
+    }
+    foreach ($scenario in @('released-lock', 'persistent-lock', 'wrong-bytes', 'missing-file', 'acl-rejected')) {
+        # Scoped doubles accelerate the unchanged polling budget. Use a real
+        # Windows FileShare.None handle rather than mocking ReadAllBytes so
+        # this reproduces the .NET method-invocation wrapper seen in CI.
+        & {
+            $Connector = 'amp'
+            $fixturePluginPath = Join-Path $temp "amp-self-heal-$scenario.ts"
+            $expectedBytes = [Text.Encoding]::UTF8.GetBytes('synthetic managed plugin')
+            [IO.File]::WriteAllBytes($fixturePluginPath, $expectedBytes)
+            $poll = [pscustomobject]@{
+                Attempts = 0
+                Handle = $null
+                ACLChecks = 0
+                Successes = 0
+            }
+            function Start-Sleep {
+                param([int]$Milliseconds)
+                Assert-True ($Milliseconds -eq 250) 'Amp self-heal retains its polling interval'
+                $poll.Attempts++
+                if ($poll.Attempts -eq 1 -and $scenario -ne 'missing-file') {
+                    $restoredBytes = if ($scenario -eq 'wrong-bytes') {
+                        [Text.Encoding]::UTF8.GetBytes('wrong plugin bytes')
+                    } else { $expectedBytes }
+                    [IO.File]::WriteAllBytes($fixturePluginPath, $restoredBytes)
+                    if ($scenario -in @('released-lock', 'persistent-lock')) {
+                        $poll.Handle = [IO.File]::Open(
+                            $fixturePluginPath, [IO.FileMode]::Open,
+                            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None
+                        )
+                    }
+                } elseif ($poll.Attempts -eq 2 -and $scenario -eq 'released-lock') {
+                    $poll.Handle.Dispose()
+                    $poll.Handle = $null
+                }
+            }
+            function Assert-AmpPluginPrivateACL {
+                param([string]$PluginPath)
+                Assert-True ($PluginPath -ceq $fixturePluginPath) 'Amp self-heal verifies the restored plugin ACL'
+                $poll.ACLChecks++
+                if ($scenario -eq 'acl-rejected') { throw 'synthetic untrusted plugin ACL' }
+            }
+            function Write-Result {
+                param([string]$Name, [string]$Status, [string]$Detail)
+                Assert-True ($Name -ceq 'amp:self-heal' -and $Status -ceq 'pass') `
+                    'Amp self-heal reports success only after verification'
+                $poll.Successes++
+            }
+            $failure = $null
+            try {
+                Assert-AmpPluginSelfHeal $fixturePluginPath $expectedBytes
+            } catch {
+                $failure = $_
+            } finally {
+                if ($null -ne $poll.Handle) { $poll.Handle.Dispose() }
+            }
+            if ($scenario -eq 'released-lock') {
+                Assert-True ($null -eq $failure -and $poll.Attempts -eq 2 -and
+                    $poll.ACLChecks -eq 1 -and $poll.Successes -eq 1) `
+                    'Amp self-heal retries a real sharing violation then verifies exact bytes and ACL'
+            } elseif ($scenario -eq 'acl-rejected') {
+                Assert-True ($null -ne $failure -and
+                    $failure.Exception.Message -ceq 'synthetic untrusted plugin ACL' -and
+                    $poll.Attempts -eq 1 -and $poll.ACLChecks -eq 1 -and
+                    $poll.Successes -eq 0) `
+                    'Amp self-heal still rejects correct bytes with an untrusted ACL'
+            } else {
+                $expectedState = switch ($scenario) {
+                    'persistent-lock' { 'transient-read-error' }
+                    'wrong-bytes' { 'content-mismatch' }
+                    'missing-file' { 'missing' }
+                }
+                Assert-True ($null -ne $failure -and
+                    $failure.Exception.Message -match 'within 20 seconds' -and
+                    $failure.Exception.Message.EndsWith("(last state: $expectedState)") -and
+                    $poll.Attempts -eq 80 -and $poll.ACLChecks -eq 0 -and
+                    $poll.Successes -eq 0) `
+                    "Amp self-heal rejects $scenario within the unchanged polling budget"
+            }
+        }
+    }
+
     $ampBlockFixturePath = Join-Path $ampGoldenRoot 'pre_tool_block.json'
     $ampBlockFixtureText = [IO.File]::ReadAllText($ampBlockFixturePath)
     $ampBlockFixture = $ampBlockFixtureText | ConvertFrom-Json -ErrorAction Stop
@@ -2647,7 +2772,7 @@ threading.Event().wait()
     )
     $requiredContractConnectors = @(
         'amp', 'antigravity', 'claudecode', 'codex', 'copilot',
-        'cursor', 'devin', 'hermes', 'omnigent', 'opencode'
+        'cursor', 'devin', 'hermes', 'opencode'
     )
     $excludedContractConnectors = @(
         'openhands', 'openclaw', 'zeptoclaw'
@@ -2657,19 +2782,12 @@ threading.Event().wait()
     } else {
         @()
     }
-    $omniGentJob = [regex]::Match(
-        $nativeWorkflowText,
-        '(?ms)^  omnigent-native-degraded:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
-    ).Value
     $actualContractConnectors = @($genericContractConnectors)
-    if (-not [string]::IsNullOrWhiteSpace($omniGentJob)) {
-        $actualContractConnectors += 'omnigent'
-    }
     Assert-True (
         $actualContractConnectors.Count -eq $requiredContractConnectors.Count -and
         ($actualContractConnectors | Sort-Object) -join ',' -ceq
             ($requiredContractConnectors | Sort-Object) -join ','
-    ) 'required Windows contract coverage is exactly the ten deterministic packaged connector lanes'
+    ) 'required Windows contract coverage is exactly the nine deterministic packaged connector lanes'
     Assert-True (@($excludedContractConnectors | Where-Object {
         $actualContractConnectors -ccontains $_
     }).Count -eq 0) 'packaged coverage excludes deprecated or unsupported connectors'
@@ -2693,8 +2811,7 @@ threading.Event().wait()
         $nativeWorkflowText,
         '(?ms)^  windows-native-required:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
     ).Value
-    Assert-True ($requiredFanInJob -match '(?m)^\s{6}- connector-contract\s*$' -and
-        $requiredFanInJob -match '(?m)^\s{6}- omnigent-native-degraded\s*$') `
+    Assert-True ($requiredFanInJob -match '(?m)^\s{6}- connector-contract\s*$') `
         'required Windows aggregate depends on every deterministic packaged connector contract'
     $invokeHookFunction = [regex]::Match(
         $harnessText,
@@ -2713,7 +2830,7 @@ threading.Event().wait()
         $invokeHookFunction -notmatch 'Start-Sleep -Milliseconds 800') `
         'hook evidence uses session, event, and tool-scoped bounded polling instead of a fixed 800ms delay'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
-    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'packaged-acceptance', 'connector-contract', 'omnigent-native-degraded')) {
+    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'package-verify', 'packaged-acceptance', 'connector-contract')) {
         Assert-True ($nativeWorkflowText -match "(?m)^\s{6}- $([regex]::Escape($job))\s*$") "aggregate depends on $job"
         $requiredJob = [regex]::Match(
             $nativeWorkflowText,
@@ -2722,9 +2839,6 @@ threading.Event().wait()
         Assert-True ($requiredJob -notmatch 'continue-on-error') "required Windows job $job is not advisory"
     }
     Assert-True ($nativeWorkflowText -match '(?s)windows-native-required:.*?if: \$\{\{ always\(\) \}\}.*?result -ne ''success''') 'aggregate fails skipped or failed dependencies'
-    Assert-True ($omniGentJob -notmatch '(?m)^\s{4}if:' -and
-        $omniGentJob -notmatch '(?m)^\s{4}continue-on-error:') `
-        'OmniGent native-degraded contract is unconditional and non-advisory'
     Assert-True ($nativeWorkflowText -notmatch 'shell:\s*bash') 'dedicated Windows workflow never selects Bash'
     Assert-True ($nativeWorkflowText -notmatch 'secrets\.') 'dedicated deterministic workflow consumes no secrets'
     Assert-True ([regex]::Matches(
@@ -2736,9 +2850,9 @@ threading.Event().wait()
         "-Leaf ('py-' + `$env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + `$env:PYTHON_SHARD)",
         '-Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell',
         '-Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist',
+        '-Leaf pkv -DiagnosticsLeaf windows-native-diagnostics-package-verify -ArtifactLeaf windows-native-dist',
         '-Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist',
-        "-Leaf ('ct-' + `$env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + `$env:CONNECTOR) -ArtifactLeaf windows-native-dist",
-        '-Leaf omnigent -DiagnosticsLeaf windows-native-diagnostics-omnigent -ArtifactLeaf windows-native-dist'
+        "-Leaf ('ct-' + `$env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + `$env:CONNECTOR) -ArtifactLeaf windows-native-dist"
     )) {
         Assert-True ($nativeWorkflowText.Contains($leafContract)) `
             "native Windows workflow preserves isolated path contract: $leafContract"
@@ -2786,6 +2900,23 @@ threading.Event().wait()
         [regex]::Matches($nativeHarnessText, 'Test-PathWithin \$root \$approvedStateBase').Count -eq 1 -and
         [regex]::Matches($wizardHarnessText, 'Test-PathWithin \$state \$_').Count -eq 1) `
         'setup cleanup and wizard gates require strict descendants while general state validation can recheck its exact approved root'
+    $wizardObservation = [regex]::Match(
+        $wizardHarnessText,
+        '(?s)function Get-WizardObservation\b.*?(?=\r?\n\$connectorIndices = )'
+    ).Value
+    $observedPathProbe = [regex]::Match(
+        $wizardHarnessText,
+        '(?s)function Test-ObservedPath\b.*?(?=\r?\n\r?\nfunction )'
+    ).Value
+    $deniedProbe = & {
+        function Test-Path { $false; throw [UnauthorizedAccessException]::new('Access to the path is denied.') }
+        . ([scriptblock]::Create($observedPathProbe))
+        Test-ObservedPath 'C:\setup-temp\payload\manifest.json' Leaf
+    }
+    Assert-True ($wizardObservation -match 'Test-ObservedPath' -and
+        $wizardObservation -notmatch 'Test-Path ' -and
+        $deniedProbe -is [bool] -and -not $deniedProbe) `
+        'wizard observer treats a path Setup is deleting (access denied) as absent instead of failing the run'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Go DACL regressions explicitly') 'native Windows workflow has a required Go DACL regression step'
     foreach ($testName in @(
         'TestWriteWindowsRemovesInheritedUnauthorizedWriter',
@@ -2825,7 +2956,9 @@ threading.Event().wait()
         $nativeWorkflowText -match '''TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout''' -and
         $nativeWorkflowText -match 'foreach \(\$isolatedTest in \$connectorIsolatedTests\)' -and
         $nativeWorkflowText -match '''-run'', \(''\^'' \+ \[regex\]::Escape\(\$isolatedTest\) \+ ''\$''\), ''\./internal/gateway/connector''' -and
-        $nativeWorkflowText -match '\$_ -ne ''github\.com/defenseclaw/defenseclaw/internal/gateway'' -and\s+\$_ -ne ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector''' -and
+        $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway'',' -and
+        $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector'',' -and
+        $nativeWorkflowText -match '''--timings'', ''scripts/test-timings/go-windows\.json''' -and
         $nativeWorkflowText -match '\$remainingArguments = @\(') `
         'full native Go suite bounds gateway and connector selectors across sequential processes, isolates native lifecycle regressions, serializes gateway tests with process-global capture state, and separately selects every remaining package'
     Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
@@ -2846,8 +2979,8 @@ threading.Event().wait()
         'native process harness parses Go JSON only on failure, bounds collection, and reports the focused summary instead of the full JSON stream'
     Assert-True ($nativeWorkflowText -match 'Validate registered Windows Codex and Claude hook commands') 'native Windows workflow has a required Doctor hook-command step'
     Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests/test_cmd_doctor_windows_hooks\.py', '-q'") 'Doctor validates registered Windows hook commands explicitly'
-    Assert-True ($nativeWorkflowText -match 'shard: \[1, 2, 3, 4, 5, 6, 7, 8\]' -and
-        $nativeWorkflowText -match '''scripts/python_test_shards\.py'', ''--shard-count'', ''8'', ''--shard-index'', \[string\]\$shardIndex' -and
+    Assert-True ($nativeWorkflowText -match 'shard: \[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12\]' -and
+        $nativeWorkflowText -match '''scripts/python_test_shards\.py'', ''--shard-count'', ''12'', ''--shard-index'', \[string\]\$shardIndex' -and
         $nativeWorkflowText -match '\$shardSelectionArgs \+= @\(''--exclude'', \$telemetryFile\)' -and
         $nativeWorkflowText -match 'pytest-shard-\{0\}-files\.log' -and
         $nativeWorkflowText -match 'selected no ordinary test files' -and
@@ -2855,7 +2988,7 @@ threading.Event().wait()
         $nativeWorkflowText -match 'pytest-shard-\{0\}-ordinary\.log' -and
         $nativeWorkflowText -notmatch 'WINDOWS_TUI_MODE' -and
         $nativeWorkflowText -notmatch 'test_app_shell') `
-        'Windows Python suite balances every test file, the TUI suite included, across eight size-weighted shards'
+        'Windows Python suite balances every test file, the TUI suite included, across twelve time-weighted shards'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Local Splunk certification regressions') 'native Windows workflow has a required Local Splunk regression step'
     Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
     Assert-True ($nativeHarnessText -match 'function Initialize-WindowsNativeTestEnvironment' -and
@@ -2916,9 +3049,11 @@ threading.Event().wait()
         $interactiveInstallDefaults -match '(?s)state == nil.*?return opts.*?opts\.Action = "repair"') `
         'plain interactive reruns route valid existing installs to roster-preserving repair while fresh installs retain the selector'
     Assert-True ($nativeHarnessText -match "Invoke-WizardConfigureLaterAcceptance" -and
-        $nativeHarnessText -match "(?s)Invoke-WizardConnectorAcceptance.*?'codex' 'observe'.*?Invoke-WizardConnectorAcceptance.*?'claudecode' 'action'.*?Invoke-WizardConnectorAcceptance.*?'amp' 'action'" -and
-        $nativeHarnessText -match "foreach \(\`$wizardConnector in @\('copilot', 'cursor'\)\)") `
-        'setup acceptance performs Configure Later, reference mode installs, and the established additive connector wizard lifecycle samples'
+        $nativeHarnessText -match "(?s)Part = 'wizard-1'; Connector = 'codex'; Mode = 'observe'.*?Part = 'wizard-2'; Connector = 'claudecode'; Mode = 'action'.*?Part = 'wizard-2'; Connector = 'amp'; Mode = 'action'.*?Part = 'wizard-3'; Connector = 'copilot'; Mode = 'observe'.*?Part = 'wizard-3'; Connector = 'cursor'; Mode = 'observe'" -and
+        $nativeHarnessText -match '\$fixtureSearchPath \$userPathBefore \$wizardCell\.Connector \$wizardCell\.Mode' -and
+        $nativeWorkflowText -match 'part: \[wizard-1, wizard-2, wizard-3, lifecycle\]' -and
+        $nativeWorkflowText -match '-SetupAcceptancePart \$\{\{ matrix\.part \}\}') `
+        'setup acceptance performs Configure Later, reference mode installs, and the established additive connector wizard lifecycle samples, split across every CI part'
     $antigravitySupportedAvailability = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Assert-PackagedAntigravitySupportedAvailability\b.*?(?=\r?\nfunction )'
@@ -3038,9 +3173,9 @@ threading.Event().wait()
         '(?s)function Set-WizardCodexLegacyNonWaitingHook\b.*?(?=\r?\nfunction )'
     ).Value
     Assert-True ($legacyLauncherFixture -match '\$bridge = Get-AwaitedHookBridge \$script' -and
-        $legacyLauncherFixture -match '\$bridge\.Invocation \+ ''; exit \$LASTEXITCODE''' -and
-        $legacyLauncherFixture -notmatch 'argumentLiterals') `
-        'legacy Codex launcher fixture preserves current event and hook-contract bindings'
+        $legacyLauncherFixture -match '"& \$legacyFile hook --connector codex; exit `\$LASTEXITCODE"' -and
+        $legacyLauncherFixture -notmatch '--event|--hook-contract|argumentLiterals|Invocation') `
+        'legacy Codex launcher fixture is the non-waiting call 0.8.x released, with no event or hook contract'
     $legacyWatchdogStop = $legacyLauncherAcceptance.IndexOf("@('watchdog', 'stop')", [StringComparison]::Ordinal)
     $legacyGatewayStop = $legacyLauncherAcceptance.IndexOf("@('stop')", [StringComparison]::Ordinal)
     $legacyFixture = $legacyLauncherAcceptance.IndexOf('Set-WizardCodexLegacyNonWaitingHook', [StringComparison]::Ordinal)
@@ -3106,21 +3241,6 @@ threading.Event().wait()
         $connectorContractJob -notmatch 'retried' -and
         $connectorContractJob -match 'Upload diagnostics on failure\r?\n        if: \$\{\{ failure\(\) \|\| cancelled\(\) \}\}') `
         'every connector contract runs once; a telemetry failure fails the job instead of being retried'
-    Assert-True ($omniGentJob -match '(?s)invoke-windows-setup-standard-user-ci\.ps1.*?-Mode omnigent-native-degraded.*?-DiagnosticsRoot \$env:DC_DIAGNOSTICS' -and
-        $standardUserCIText -match "'omnigent-native-degraded'" -and
-        $standardUserCIText -match 'test-omnigent-windows-native\.ps1' -and
-        $standardUserCIText -match 'SpecialFolder\]::LocalApplicationData' -and
-        $standardUserCIText -match 'Join-Path \$localAppData ''DefenseClaw-CI\\uv-input''' -and
-        $standardUserCIText -match 'Join-Path \$localAppData ''DefenseClaw-CI\\omnigent-native-degraded''' -and
-        $standardUserCIText -match 'Set-DisposableProtectedDirectoryAcl \$state \$identity\.User' -and
-        $standardUserCIText -match '(?s)Set-DisposableProtectedDirectoryAcl \$state \$identity\.User.*?-UseAdministratorsForCleanup' -and
-        $standardUserCIText -match '(?s)Set-DisposableProtectedDirectoryAcl \$uvRoot \$identity\.User.*?-UseAdministratorsForCleanup' -and
-        $standardUserCIText -match 'Assert-DisposableChildAcl \$uvRoot \$identity\.User' -and
-        $standardUserCIText -match '(?s)Set-DisposableProtectedDirectoryAcl \$omnigentState \$identity\.User.*?-UseAdministratorsForCleanup' -and
-        $standardUserCIText -match 'Assert-DisposableChildAcl \$omnigentState \$identity\.User' -and
-        $standardUserCIText -match 'standard-user OmniGent uv copy does not match its authenticated input' -and
-        $standardUserCIText -match '(?s)-StateRoot \$omnigentState -ArtifactRoot \$artifacts.*?-UvPath \$uvPath') `
-        'hosted OmniGent packaged lifecycle runs as a disposable real standard user'
     Assert-True ($nativeWorkflowText -notmatch '-Operation acceptance\b' -and
         $nativeHarnessText -notmatch "'acceptance' \{ Invoke-Acceptance \}" -and
         $nativeWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
@@ -4719,9 +4839,9 @@ threading.Event().wait()
             $wizardHookContract.Contains($marker)) `
             "Windows setup and wizard contracts require the Amp plugin marker: $marker"
     }
-    Assert-True ($doctorSetupContract -match '\$expectedAmpFailMode\s*=\s*if\s*\(\$script:LastSetupMode\s*-eq\s*''action''\)\s*\{\s*''closed''\s*\}\s*else\s*\{\s*''open''\s*\}' -and
+    Assert-True ($doctorSetupContract -match '\$expectedAmpFailMode\s*=\s*''closed''' -and
         $doctorSetupContract -match 'const DC_FAIL_MODE: string = .*expectedAmpFailMode') `
-        'Amp setup validator binds the generated plugin fail mode to the requested setup posture'
+        'Amp setup validator expects the closed fail mode an unset Setup posture resolves to outside Secure Client'
     Assert-True ($doctorSetupContract -match "\`$Connector -eq 'devin'" -and
         $doctorSetupContract -match 'Get-DevinWindowsHookCommand \$devinCommand ''setup-created Devin PreToolUse''') `
         'Devin setup validation verifies its POSIX-quoted direct native launcher'
@@ -4751,7 +4871,6 @@ threading.Event().wait()
         $doctorContract.Contains('Assert-AmpScopedTokenPluginContract')) `
         'both Windows doctor contracts invoke the Amp scoped-token boundary validator'
     foreach ($marker in @(
-        'const DC_FAIL_MODE: string = "closed"',
         'const DC_TIMEOUT_MS = 10000',
         'new AbortController()'
     )) {
@@ -4759,6 +4878,12 @@ threading.Event().wait()
             $wizardHookValidation.Contains($marker)) `
             "Windows contracts require the Amp fail-safe marker: $marker"
     }
+    Assert-True ($doctorContract.Contains('[string]$ExpectedFailMode = ''closed''') -and
+        $doctorContract.Contains('''const DC_FAIL_MODE: string = "'' + $ExpectedFailMode + ''"''') -and
+        $harnessText.Contains('Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed') -and
+        $harnessText.Contains('Assert-DoctorWindowsHookRegistration -ExpectedFailMode open') -and
+        $wizardHookContract.Contains('const DC_FAIL_MODE: string = "closed"')) `
+        'Windows Amp contracts verify the closed default and independently exercise explicit open policy'
     $ampNativeHookPattern = 'defenseclaw-hook(?:\.exe|\.cmd)'
     $ampCompatibilityPattern = '\bwsl\b|\bbash\b|\bchmod\b'
     $hasAmpShellRejectionContract = {
@@ -4805,6 +4930,7 @@ threading.Event().wait()
     Assert-True ($ampSelfHealContract -match 'Remove-Item -LiteralPath \$PluginPath' -and
         $ampSelfHealContract -match '\$attempt -lt 80' -and
         $ampSelfHealContract -match 'Start-Sleep -Milliseconds 250' -and
+        $ampSelfHealContract -match 'Test-AmpPluginSelfHealReadRetry \$_\.Exception' -and
         $ampSelfHealContract -match 'ToBase64String\(\$ExpectedBytes\)' -and
         $ampSelfHealContract -match 'Assert-AmpPluginPrivateACL \$PluginPath') `
         'Amp Windows contract deletes and verifies byte-exact, ACL-safe self-healing within 20 seconds'
@@ -4914,8 +5040,8 @@ threading.Event().wait()
         'OpenCode setup loads the managed plugin while convergence is waiting and cleans up a failed setup child'
     Assert-True ($gatewayHookReadiness -match "'--connector', 'hermes', '--event', 'pre_tool_call'" -and
         $gatewayHookReadiness -match '\$probeID ''pre_tool_call''' -and
-        $gatewayHookReadiness -match 'canonical fail-open allow decision') `
-        'Hermes readiness uses its official event name and forced fail-open effective posture'
+        $gatewayHookReadiness -match 'canonical allow decision') `
+        'Hermes readiness uses its official event name and a canonical allow decision'
     Assert-True ($gatewayHookReadiness -match '\$toolDecision\.action -cne ''allow''' -and
         $gatewayHookReadiness -match '\$toolDecision\.raw_action -cne ''allow''' -and
         $gatewayHookReadiness -match '\$toolDecision\.would_block') `

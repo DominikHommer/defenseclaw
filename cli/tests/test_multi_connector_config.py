@@ -142,14 +142,14 @@ class TestEffectiveResolvers(unittest.TestCase):
             mode="observe",
             hook_fail_mode="open",
             block_message="global-msg",
-            rule_pack_dir="/global/rules",
+            rule_pack="strict",
             hilt=HILTConfig(enabled=False, min_severity="HIGH"),
             connectors={
                 "codex": PerConnectorGuardrailConfig(
                     mode="action",
                     hook_fail_mode="closed",
                     block_message="codex-msg",
-                    rule_pack_dir="/codex/rules",
+                    rule_pack="permissive",
                     hilt=HILTConfig(enabled=True, min_severity="LOW"),
                 ),
                 "empty": PerConnectorGuardrailConfig(),
@@ -161,16 +161,26 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_mode("codex"), "action")
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
         self.assertEqual(g.effective_block_message("codex"), "codex-msg")
-        self.assertEqual(g.effective_rule_pack_dir("codex"), "/codex/rules")
+        self.assertEqual(g.effective_rule_pack("codex"), "permissive")
         self.assertTrue(g.effective_hilt("codex").enabled)
         self.assertEqual(g.effective_hilt("codex").min_severity, "LOW")
+
+    def test_cursor_fail_mode_tracks_mode_despite_stored_open(self):
+        g = GuardrailConfig(
+            mode="observe",
+            hook_fail_mode="open",
+            connectors={"cursor": PerConnectorGuardrailConfig(hook_fail_mode="open")},
+        )
+        self.assertEqual(g.effective_hook_fail_mode("cursor"), "open")
+        g.connectors["cursor"].mode = "action"
+        self.assertEqual(g.effective_hook_fail_mode("cursor"), "closed")
 
     def test_empty_block_inherits_global(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("empty"), "observe")
         self.assertEqual(g.effective_hook_fail_mode("empty"), "open")
         self.assertEqual(g.effective_block_message("empty"), "global-msg")
-        self.assertEqual(g.effective_rule_pack_dir("empty"), "/global/rules")
+        self.assertEqual(g.effective_rule_pack("empty"), "strict")
         self.assertFalse(g.effective_hilt("empty").enabled)
         self.assertEqual(g.effective_hilt("empty").min_severity, "HIGH")
 
@@ -179,10 +189,41 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_mode("nope"), "observe")
         self.assertEqual(g.effective_hook_fail_mode(""), "open")
 
+    def test_config_version_9_rule_pack_resolves_and_a_global_selection_clears_it(self):
+        from defenseclaw.commands.cmd_setup import _apply_rule_pack_selection
+        from defenseclaw.config import Config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("strict", "permissive"):
+                os.makedirs(os.path.join(tmp, "guardrail", name))
+            cfg = Config(
+                policy_dir=tmp,
+                guardrail=GuardrailConfig(
+                    rule_pack="strict",
+                    connectors={
+                        "codex": PerConnectorGuardrailConfig(rule_pack="permissive"),
+                        "claudecode": PerConnectorGuardrailConfig(),
+                    },
+                ),
+            )
+            g = cfg.guardrail
+            self.assertEqual(g.effective_rule_pack_dir("codex"), os.path.join(tmp, "guardrail", "permissive"))
+            self.assertEqual(g.effective_rule_pack_dir("claudecode"), os.path.join(tmp, "guardrail", "strict"))
+            # A global selection clears every connector's pack, v9 key included.
+            _apply_rule_pack_selection(g, "strict", connector=None)
+            self.assertEqual(g.connectors["codex"].rule_pack, "")
+            self.assertEqual(g.effective_rule_pack_dir("codex"), os.path.join(tmp, "guardrail", "strict"))
+
     def test_safe_fallbacks_when_unset(self):
-        g = GuardrailConfig(mode="", hook_fail_mode="", rule_pack_dir="")
+        g = GuardrailConfig(mode="", hook_fail_mode="")
         self.assertEqual(g.effective_mode(""), "observe")
+        # Outside Secure Client a fail mode that is not set is closed, in
+        # observe mode too (mirrors Go EffectiveHookFailModeForConnector).
+        self.assertEqual(g.effective_hook_fail_mode(""), "closed")
+        # Under Secure Client an unset fail mode is open (#1163).
+        g._secure_client = True
         self.assertEqual(g.effective_hook_fail_mode(""), "open")
+        g._secure_client = False
         self.assertEqual(g.effective_block_message(""), "")
         self.assertEqual(g.effective_rule_pack_dir(""), "")
 
@@ -196,7 +237,115 @@ class TestEffectiveResolvers(unittest.TestCase):
             },
         )
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
+        # The global value applies in observe mode outside Secure Client.
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
+        g.hook_fail_mode = "open"
         self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
+        # Under Secure Client an explicit value wins too: the global closed
+        # closes a connector without its own value, and an unset global is
+        # open (#1163).
+        g.hook_fail_mode = "closed"
+        g._secure_client = True
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
+        g.hook_fail_mode = ""
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
+
+    def _load_hook_fail_mode(
+        self, document: str, connector: str, *, pins: dict[str, str] | None = None
+    ) -> str:
+        import tempfile
+        from unittest import mock
+
+        from defenseclaw import config as config_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "config.yaml"), "w", encoding="utf-8") as fh:
+                fh.write(document)
+            env = {"DEFENSECLAW_HOME": tmp, **(pins or {})}
+            with mock.patch.dict(os.environ, env), mock.patch(
+                "defenseclaw.config_writer.machine_managed_standalone", return_value=False
+            ):
+                for pin in ("DEFENSECLAW_DEPLOYMENT_MODE", "DEFENSECLAW_ENTERPRISE_PROFILE"):
+                    if pin not in env:
+                        os.environ.pop(pin, None)
+                cfg = config_module.load(data_dir=tmp)
+                return cfg.guardrail.effective_hook_fail_mode(connector)
+
+    def test_secure_client_unset_hook_fail_mode_is_open(self):
+        # #1163 (owner rule: hooks fail open under Secure Client): an unset
+        # fail mode loads as open for every connector, Codex and Claude Code
+        # included, in observe and action mode alike, and an explicit closed
+        # (global or per connector) is always kept, as in Go.
+        base = "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise: {profile: secure_client}\n"
+        for mode in ("observe", "action"):
+            for connector in ("amp", "codex", "claudecode"):
+                with self.subTest(mode=mode, policy="unset", connector=connector):
+                    doc = base + f"guardrail: {{mode: {mode}}}\n"
+                    self.assertEqual(self._load_hook_fail_mode(doc, connector), "open")
+            with self.subTest(mode=mode, policy="closed"):
+                doc = base + f"guardrail: {{mode: {mode}, hook_fail_mode: closed}}\n"
+                self.assertEqual(self._load_hook_fail_mode(doc, "amp"), "closed")
+            with self.subTest(mode=mode, policy="override-closed"):
+                doc = base + (
+                    f"guardrail: {{mode: {mode}, connectors: {{amp: {{hook_fail_mode: closed}}}}}}\n"
+                )
+                self.assertEqual(self._load_hook_fail_mode(doc, "amp"), "closed")
+
+    def test_missing_enterprise_profile_uses_platform_default_and_pin(self):
+        # Observe mode tells the profiles apart: only Secure Client keeps an
+        # observe-mode connector without a value of its own open.
+        base = "config_version: 8\ndeployment_mode: managed_enterprise\nguardrail: {mode: observe}\n"
+        for platform, expected in (("linux", "closed"), ("win32", "open"), ("darwin", "open")):
+            with self.subTest(platform=platform), patch("defenseclaw.config_writer.sys.platform", platform):
+                self.assertEqual(self._load_hook_fail_mode(base, "amp"), expected)
+                self.assertEqual(
+                    self._load_hook_fail_mode(base, "amp", pins={"DEFENSECLAW_ENTERPRISE_PROFILE": "standalone"}),
+                    "closed",
+                )
+                if platform != "linux":  # Secure Client is unavailable on Linux.
+                    self.assertEqual(
+                        self._load_hook_fail_mode(base, "amp", pins={"DEFENSECLAW_ENTERPRISE_PROFILE": "secure_client"}),
+                        "open",
+                    )
+
+    def test_managed_environment_pin_selects_profile_without_document_mode(self):
+        doc = "config_version: 8\nguardrail: {mode: observe}\n"
+        for profile, expected in (("secure_client", "open"), ("standalone", "closed")):
+            with self.subTest(profile=profile):
+                self.assertEqual(
+                    self._load_hook_fail_mode(
+                        doc,
+                        "amp",
+                        pins={
+                            "DEFENSECLAW_DEPLOYMENT_MODE": "managed_enterprise",
+                            "DEFENSECLAW_ENTERPRISE_PROFILE": profile,
+                        },
+                    ),
+                    expected,
+                )
+
+    def test_non_secure_client_keeps_fail_closed_default(self):
+        # OSS and the standalone enterprise profile keep main's fail-closed
+        # default: unset resolves closed in action mode. On the standalone
+        # profile the administrator's explicit automatic-protection open wins
+        # (owner decision 2026-10-20).
+        oss = "guardrail: {mode: action}\n"
+        standalone = (
+            "config_version: 8\ndeployment_mode: managed_enterprise\n"
+            "enterprise: {profile: standalone}\nguardrail: {mode: action}\n"
+        )
+        overlay = "application_protection: {enabled: true, guardrail: {hook_fail_mode: open}}\n"
+        for doc, extra, expected in (
+            (oss, "", "closed"),
+            (oss, overlay, "closed"),
+            (standalone, "", "closed"),
+            (standalone, overlay, "open"),
+        ):
+            with self.subTest(doc=doc, overlay=extra):
+                self.assertEqual(self._load_hook_fail_mode(doc + extra, "codex"), expected)
 
     def test_empty_map_equals_absent(self):
         with_empty = GuardrailConfig(mode="action", connectors={})
@@ -349,15 +498,6 @@ class TestMergeConnectors(unittest.TestCase):
         # antigravity has an explicit hilt block (min_severity upper-cased)
         self.assertIsNotNone(gc.connectors["antigravity"].hilt)
         self.assertEqual(gc.connectors["antigravity"].hilt.min_severity, "LOW")
-
-    def test_hitl_alias_in_connector(self):
-        gc = _merge_guardrail(
-            {"connectors": {"codex": {"hitl": {"enabled": True}}}},
-            "/tmp",
-        )
-        self.assertIsNotNone(gc.connectors["codex"].hilt)
-        self.assertTrue(gc.connectors["codex"].hilt.enabled)
-
 
 class TestLoadAndRoundTrip(unittest.TestCase):
     def test_load_rejects_invalid_connector_mode(self):

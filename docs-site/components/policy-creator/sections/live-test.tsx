@@ -38,9 +38,6 @@ type Source = 'scenario' | 'custom' | 'corpus';
 const DOMAIN_OPTIONS: Array<{ value: Domain; label: string; hint?: string }> = [
   { value: 'admission', label: 'admission' },
   { value: 'guardrail', label: 'guardrail' },
-  { value: 'firewall', label: 'firewall' },
-  { value: 'audit', label: 'audit' },
-  { value: 'skill_actions', label: 'skill_actions' },
 ];
 
 const SOURCE_OPTIONS: Array<{ value: Source; label: string }> = [
@@ -321,6 +318,9 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
   const expected = scenario?.expectedVerdict;
   const matchesExpected =
     source === 'scenario' && expected != null && verdict === expected;
+  const observeHint = domain === 'guardrail' && data.guardrail.mode === 'observe'
+    ? 'The preview runs in observe mode; switch Guardrail mode to action to see enforcement.'
+    : null;
 
   return (
     // Outer shell keeps the title pinned; body scrolls. min-h-0 is
@@ -423,6 +423,7 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
           domain={domain}
           results={corpusResults}
           running={corpusRunning}
+          observeHint={observeHint}
         />
       ) : source === 'scenario' ? (
         <div className="flex flex-col gap-2">
@@ -461,6 +462,12 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
         </div>
       )}
 
+      {domain === 'admission' && (
+        <p className="text-[11px] text-fd-muted-foreground">
+          Live Test cannot verify shipped CodeGuard or DefenseClaw plugin content. It evaluates those names without the built-in first-party scan bypass; the gateway checks the installed content.
+        </p>
+      )}
+
       {source !== 'corpus' && (
       <div className="rounded-md border border-fd-border bg-fd-background p-3">
         <div className="flex items-center justify-between gap-2">
@@ -484,7 +491,7 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
           >
             {matchesExpected
               ? `Matches expected verdict (${expected}).`
-              : `Differs from expected verdict (${expected}). Tweak the relevant section to align.`}
+              : `Differs from expected verdict (${expected}). ${observeHint ?? 'Tweak the relevant section to align.'}`}
           </p>
         )}
         {source === 'custom' && available && !error && (
@@ -512,6 +519,7 @@ function CorpusReplay({
   domain,
   results,
   running,
+  observeHint,
 }: {
   domain: Scenario['domain'];
   results: Array<{
@@ -524,6 +532,7 @@ function CorpusReplay({
     errored: boolean;
   }>;
   running: boolean;
+  observeHint: string | null;
 }) {
   if (results.length === 0) {
     return (
@@ -584,6 +593,7 @@ function CorpusReplay({
               <div className="mt-1 text-[10px] text-fd-muted-foreground">
                 expected <code className="font-mono">{r.expected}</code>
                 {r.reason && <> · {r.reason}</>}
+                {observeHint && <> · {observeHint}</>}
               </div>
             )}
             {r.errored && r.reason && (

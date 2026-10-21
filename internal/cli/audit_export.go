@@ -9,8 +9,10 @@ import (
 	"container/heap"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"regexp"
 	"sort"
@@ -22,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -35,6 +38,7 @@ var (
 	auditExportUntil           string
 	auditExportNewest          bool
 	auditExportForce           bool
+	auditExportDB              string
 )
 
 var auditCmd = &cobra.Command{
@@ -96,10 +100,10 @@ func openManagedAuditStoreReadOnly(path string) (*audit.Store, error) {
 	return store, nil
 }
 
-var auditExportCmd = &cobra.Command{
-	Use:   "export",
-	Short: "Export audit_events as JSONL (v7 schema)",
-	Long: `Write one JSON object per line. Each audit row is validated against
+// auditExportLongIntro is the help text main and this build share; --db
+// and its paragraph are new, so a Secure Client computer drops the flag and
+// keeps the help of main (issue #1092, GAP-0270).
+const auditExportLongIntro = `Write one JSON object per line. Each audit row is validated against
 schemas/audit-event.json before it is written. Configuration changes and
 operator actions are audit rows too (action config-update and others).
 --include-activity appends the rows of the activity_events table, which
@@ -118,9 +122,23 @@ On a Windows host with a standalone managed deployment, run it from an
 elevated Administrator prompt (or as LocalSystem): it then reads the managed
 deployment's configuration and audit log.
 
-Examples:
+`
+
+const auditExportExamples = `Examples:
   defenseclaw-gateway audit export --since 30m
-  defenseclaw-gateway audit export --connector claudecode --limit 50 --newest`,
+  defenseclaw-gateway audit export --connector claudecode --limit 50 --newest`
+
+var auditExportCmd = &cobra.Command{
+	Use:   "export",
+	Short: "Export audit_events as JSONL (v7 schema)",
+	Long: auditExportLongIntro + `--db reads another audit database instead of the configured one, with no
+configuration needed. After defenseclaw rollback, the install you left keeps
+its audit log in ~/.defenseclaw/previous/data/audit.db (previous\data\audit.db
+on Windows), and this reads it; each install shows only its own window.
+
+` + auditExportExamples + `
+  defenseclaw-gateway audit export --db ~/.defenseclaw/previous/data/audit.db`,
+	Annotations: map[string]string{secureClientLongAnnotation: auditExportLongIntro + auditExportExamples},
 	// Export only reads audit.db. It loads the configuration without opening
 	// the audit store: the store opens read-write and, on a managed host,
 	// only as the gateway service, so an administrator could never export.
@@ -137,6 +155,27 @@ Examples:
 // managed runtime file check the other audit commands apply before the
 // export reads it.
 func auditExportPersistentPreRunE(cmd *cobra.Command, _ []string) error {
+	if auditExportDB != "" {
+		// A database named by path needs no configuration and is opened
+		// read-only below. Administrators can inspect a retained copy after
+		// managed decommission without touching the active deployment.
+		if auditExportManagedHost() {
+			if !auditExportCallerIsAdministrator() {
+				return withExitCode(&managedViewRefusal{
+					code:    "elevation_required",
+					message: windowsManagedStandardUserViewAnswer("the audit log", "audit export -o <file>"),
+				}, enterprisestatus.WindowsExitAccessDenied)
+			}
+			return nil
+		}
+		_, _, deploymentErr := managedStandaloneAdminDeployment()
+		if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) || deploymentErr == nil {
+			if _, admin := managedStandaloneAdminCaller(nil); !admin && managedHostCallerUID() != 0 {
+				return errors.New("audit export --db on a managed deployment requires root or the gateway service account")
+			}
+		}
+		return nil
+	}
 	if err := prepareManagedAuditExportEnvironment(); err != nil {
 		return err
 	}
@@ -173,6 +212,8 @@ func init() {
 	auditExportCmd.Flags().BoolVar(&auditExportNewest, "newest", false, "With --limit, keep the newest matching rows instead of the oldest (still written oldest first)")
 	auditExportCmd.Flags().BoolVar(&auditExportForce, "force", false, "Overwrite the --output file if it already exists")
 	auditExportCmd.Flags().StringVar(&auditExportConnector, "connector", "", "Only export rows attributed to this connector (matches the authoritative connector column, then structured.connector, then the details connector= field). Activity rows are omitted when set.")
+	auditExportCmd.Flags().StringVar(&auditExportDB, "db", "", "Read this audit database instead of the configured one, for example the install a rollback left in ~/.defenseclaw/previous/data/audit.db")
+	_ = auditExportCmd.Flags().SetAnnotation("db", secureClientAbsentAnnotation, []string{"true"})
 
 	auditCmd.AddCommand(auditExportCmd)
 	rootCmd.AddCommand(auditCmd)
@@ -202,9 +243,46 @@ func isKnownAuditAction(s string) bool {
 	return false
 }
 
+// checkAuditExportDB says why --db cannot be exported: a missing path, a
+// file this account may not read (another account's data directory is
+// 0700) or a path that is not a file. Each used to read "is not an audit
+// database file", which sent a user who lacked access looking for a
+// corrupt database (GAP-0008).
+func checkAuditExportDB(path string) error {
+	denied := func() error {
+		return fmt.Errorf("audit export: cannot read --db %s: permission denied; "+
+			"another account's audit database can be read only by that account or an administrator", path)
+	}
+	info, err := os.Stat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("audit export: --db %s does not exist", path)
+	case errors.Is(err, fs.ErrPermission):
+		return denied()
+	case err != nil:
+		return fmt.Errorf("audit export: cannot read --db %s: %w", path, err)
+	case !info.Mode().IsRegular():
+		return fmt.Errorf("audit export: --db %s is not an audit database file", path)
+	}
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrPermission) {
+		return denied()
+	}
+	if err != nil {
+		return fmt.Errorf("audit export: cannot read --db %s: %w", path, err)
+	}
+	return f.Close()
+}
+
 func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
-	if cfg == nil {
-		return fmt.Errorf("audit export: config not loaded")
+	auditPath := auditExportDB
+	if auditPath == "" {
+		if cfg == nil {
+			return fmt.Errorf("audit export: config not loaded")
+		}
+		auditPath = cfg.AuditDB
+	} else if err := checkAuditExportDB(auditPath); err != nil {
+		return err
 	}
 	// A bad --since/--until is a usage error (exit 2, GAP-2110), checked
 	// before the database is opened or an -o file is created.
@@ -215,7 +293,7 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	version.SetBinaryVersion(appVersion)
 	prov := version.Current()
 
-	db, err := audit.OpenReadOnlyDB(cfg.AuditDB)
+	db, err := audit.OpenReadOnlyDB(auditPath)
 	if err != nil {
 		return fmt.Errorf("audit export: open db: %w", err)
 	}
@@ -279,11 +357,12 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	if ok, _ := columnExists(db, "audit_events", "event_name"); ok {
 		eventNameCol = "event_name"
 	}
+	hasExactTime, _ := columnExists(db, "audit_events", "retention_timestamp_unix_nano")
 	q := `SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id,
 session_id, trace_id, agent_id, agent_name, agent_instance_id, sidecar_instance_id,
 schema_version, content_hash, generation, binary_version,
 destination_app, tool_name, tool_id, policy_id, connector, ` + eventNameCol + `
-FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
+FROM audit_events` + where + ` ORDER BY ` + window.orderBy(hasExactTime)
 	// When a connector or time filter is active the cap must apply to
 	// *matching* rows, so we filter in Go and bound the count there.
 	// Without one we push LIMIT into SQL (cheaper, unchanged behavior).
@@ -489,11 +568,15 @@ func (w auditExportWindow) keepsNewest() bool { return w.newest && w.limit > 0 }
 
 // orderBy is the SQL order: newest first while collecting the newest rows,
 // oldest first otherwise.
-func (w auditExportWindow) orderBy() string {
-	if w.keepsNewest() {
-		return "timestamp DESC, rowid DESC"
+func (w auditExportWindow) orderBy(hasExactTime bool) string {
+	instant := "julianday(timestamp)"
+	if hasExactTime {
+		instant = "retention_timestamp_unix_nano"
 	}
-	return "timestamp ASC"
+	if w.keepsNewest() {
+		return instant + " DESC, rowid DESC"
+	}
+	return instant + " ASC, rowid ASC"
 }
 
 // sqlPredicate is a coarse, index-friendly prefilter on the timestamp
@@ -697,8 +780,9 @@ func exportAuditEventsFallback(db *sql.DB, out io.Writer, prov version.Provenanc
 
 func exportAuditEventsFallbackWindow(db *sql.DB, out io.Writer, prov version.Provenance, connFilter string, window auditExportWindow) error {
 	where, args := window.sqlPredicate()
+	hasExactTime, _ := columnExists(db, "audit_events", "retention_timestamp_unix_nano")
 	rows, err := db.Query(`SELECT id, timestamp, action, target, actor, details, severity, run_id FROM audit_events`+
-		where+` ORDER BY `+window.orderBy(), args...)
+		where+` ORDER BY `+window.orderBy(hasExactTime), args...)
 	if err != nil {
 		return fmt.Errorf("audit export: %w", err)
 	}
@@ -769,6 +853,11 @@ func buildAuditEventLine(
 	actionOut, detailsOut := strings.TrimSpace(action), details
 	if !v8Action {
 		actionOut, detailsOut = normalizeAuditAction(action, details)
+	} else if eventName == "config.change.applied" && actionOut == string(audit.ActionConfigUpdate) {
+		// LogActivity stores the historical operation as config-update and
+		// the canonical event identity separately. Export the canonical event
+		// as its action so audit queries can find the applied bundle.
+		actionOut = eventName
 	}
 	sev := normalizeSeverity(severity)
 	act := strings.TrimSpace(actor)
@@ -950,6 +1039,13 @@ func validateAuditEventMap(ev map[string]any, v8Action bool) error {
 	return nil
 }
 
+func activityExportTimeOrder(db *sql.DB) string {
+	if exists, err := columnExists(db, "activity_events", "retention_timestamp_unix_nano"); err == nil && exists {
+		return "retention_timestamp_unix_nano ASC, rowid ASC"
+	}
+	return "julianday(timestamp) ASC, rowid ASC"
+}
+
 func exportActivityLines(db *sql.DB, out io.Writer, prov version.Provenance, window auditExportWindow) error {
 	exists, err := tableExists(db, "activity_events")
 	if err != nil || !exists {
@@ -959,7 +1055,7 @@ func exportActivityLines(db *sql.DB, out io.Writer, prov version.Provenance, win
 	rows, err := db.Query(`
 SELECT timestamp, actor, action, target_type, target_id, reason,
        before_json, after_json, diff_json, version_from, version_to
-FROM activity_events`+where+` ORDER BY timestamp ASC`, args...)
+FROM activity_events`+where+` ORDER BY `+activityExportTimeOrder(db), args...)
 	if err != nil {
 		return fmt.Errorf("audit export: activity query: %w", err)
 	}

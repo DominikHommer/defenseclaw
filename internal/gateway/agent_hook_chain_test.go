@@ -2399,7 +2399,7 @@ func TestSafeApplyAgentHookToolChainsPreservesOriginalOnPanicBeforeCommit(t *tes
 	for _, original := range []agentHookResponse{
 		{
 			Action: "allow", RawAction: "allow", Severity: "NONE",
-			Reason: "standalone allow", Mode: "action",
+			Reason: "standalone allow", Mode: "action", SuppressNotification: true,
 		},
 		{
 			Action: "block", RawAction: "block", Severity: "CRITICAL",
@@ -2415,6 +2415,7 @@ func TestSafeApplyAgentHookToolChainsPreservesOriginalOnPanicBeforeCommit(t *tes
 			if got.Action != original.Action || got.RawAction != original.RawAction ||
 				got.Reason != original.Reason ||
 				got.EvaluationID != original.EvaluationID ||
+				got.SuppressNotification != original.SuppressNotification ||
 				!slices.Equal(got.Findings, original.Findings) ||
 				!slices.Equal(got.RuleIDs, original.RuleIDs) {
 				t.Fatalf(
@@ -2483,7 +2484,7 @@ func TestSafeApplyAgentHookToolChainsDoesNotInventDenyForDetectionOnlyChainOnPan
 	}
 	original := agentHookResponse{
 		Action: "allow", RawAction: "allow", Severity: "NONE",
-		Reason: "standalone allow", Mode: "action",
+		Reason: "standalone allow", Mode: "action", SuppressNotification: true,
 	}
 
 	discoveryCapture := &toolChainHookCapture{}
@@ -2565,16 +2566,4 @@ func assertToolChainStep(
 	if got := projection.EnforcementStepMask&bit != 0; got != enforced {
 		t.Fatalf("projection %+v enforcement=%v, want %v", projection, got, enforced)
 	}
-}
-
-func cloneHookMap(input map[string]interface{}) map[string]interface{} {
-	out := make(map[string]interface{}, len(input))
-	for key, value := range input {
-		if child, ok := value.(map[string]interface{}); ok {
-			out[key] = cloneHookMap(child)
-			continue
-		}
-		out[key] = value
-	}
-	return out
 }

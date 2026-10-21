@@ -20,6 +20,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -199,6 +200,19 @@ func ValidateWindowsManagedRuntimeAdminFile(path string) error {
 	return validateWindowsTargetsManifestObject(path, false)
 }
 
+// ProtectWindowsManagedRuntimeAdminFile stamps an existing file with the exact
+// two-ACE AdminFile SDDL (Administrators owner+group, protected DACL granting
+// SYSTEM + Administrators FULL). This is the writer counterpart to
+// ValidateWindowsManagedRuntimeAdminFile; use it for installer-only lifecycle
+// receipts whose readers are always elevated (no service-read ACE needed).
+// Combining a mismatched writer (which had granted an extra service-read ACE)
+// with this validator's strict two-ACE expectation was the root cause of the
+// "hook guardian manifest DACL has 3 ACEs, want 2" uninstall regression on
+// managed_enterprise Windows.
+func ProtectWindowsManagedRuntimeAdminFile(path string) error {
+	return protectWindowsTargetsManifestObject(path, false)
+}
+
 // PlanWindowsManagedRuntimeRoots resolves and de-duplicates every enabled
 // manifest row without mutating a profile. Existing roots are accepted only
 // if they already have the exact target-owner/seven-ACE contract, and their
@@ -275,11 +289,14 @@ func planWindowsManagedRuntimeRoots(
 	// Only a standalone install plan re-protects a folder a standalone purge
 	// kept; a validation plan never changes a folder.
 	adoptPurgeKept := !validation && windowsEnterpriseStandaloneProcess()
+	// An install plan, in either profile, gives a folder whose only drift is
+	// another product's read-only grant the canonical DACL again.
+	restampReadOnly := !validation
 	deferredOnly := windowsManagedRuntimeDeferredOnlyRoots(manifest)
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
 		for _, target := range targets {
 			key := windowsManagedRuntimeRootKey(target.sid.String(), target.home)
-			root, inspectErr := planWindowsManagedRuntimeRoot(target, pendingAllowed && deferredOnly[key], adoptPurgeKept)
+			root, inspectErr := planWindowsManagedRuntimeRoot(target, pendingAllowed && deferredOnly[key], adoptPurgeKept, restampReadOnly)
 			if inspectErr != nil {
 				return inspectErr
 			}
@@ -673,15 +690,17 @@ var windowsManagedRuntimeCleanupConnectors = map[string]windowsManagedRuntimeCle
 		backups:    []string{"hooks.json.json"},
 		generation: true,
 	},
+	// Devin and Hermes also keep the last known good copy of the agent
+	// config and its restore notice beside its backup record (GAP-0588).
 	"devin": {
 		hooks:      windowsManagedRuntimeRuntimeLeaves("devin", append([]string{"devin-hook.sh"}, windowsManagedRuntimeSharedHookScripts...)...),
-		backups:    []string{"config.json"},
+		backups:    append([]string{"config.json"}, connector.AgentConfigBackupLeaves("devin")...),
 		generation: true,
 	},
 	"hermes": {
 		root:       []string{".hermes-lifecycle.lock", "agent_selection.json", "agent_selection.json.lock"},
 		hooks:      windowsManagedRuntimeRuntimeLeaves("hermes", append([]string{"hermes-hook.sh", "hermes-direct-native-state.json"}, windowsManagedRuntimeSharedHookScripts...)...),
-		backups:    []string{"config.yaml.json", "shell-hooks-allowlist.json.json"},
+		backups:    append([]string{"config.yaml.json", "shell-hooks-allowlist.json.json"}, connector.AgentConfigBackupLeaves("hermes")...),
 		generation: true,
 	},
 	"kiro": {
@@ -746,6 +765,103 @@ func resolveWindowsManagedRuntimeTarget(userHome, rawSID, rawDataDir string) (wi
 	return windowsManagedRuntimeTarget{home: home, data: dataDir, sid: target}, nil
 }
 
+// PreflightWindowsManagedRuntimeRoots inspects, without changing anything,
+// the .defenseclaw folder of every enabled manifest target the way the
+// standalone install plan does, and returns the refusal the plan would
+// return for the first folder it would not take: one DefenseClaw did not
+// create, such as the data folder a per-user install left. The install
+// found it only after minutes of work, and a run that got further committed
+// and then failed on it (GAP-0741). A folder the plan takes over (one a
+// standalone purge kept, or one the account created itself before
+// enrollment) passes.
+func PreflightWindowsManagedRuntimeRoots(manifest Manifest) error {
+	if err := windowsManagedRuntimeSetupAuthorize(); err != nil {
+		return err
+	}
+	targets, err := resolveWindowsManagedRuntimeTargets(manifest)
+	if err != nil {
+		return err
+	}
+	return windowsManagedRuntimeSetupPrivilege(func() error {
+		for _, target := range targets {
+			if err := inspectWindowsManagedRuntimeRoot(target); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// inspectWindowsManagedRuntimeRoot is the read-only half of
+// planWindowsManagedRuntimeRoot for a standalone install plan.
+func inspectWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) error {
+	parent, err := openWindowsManagedRuntimeProfile(target)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(parent)
+	final, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess(), false)
+	if windowsManagedRuntimeRootMissing(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
+	}
+	defer windows.CloseHandle(final)
+	if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+		return err
+	}
+	err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+	if err == nil || windowsManagedRuntimePurgeKeptAdoptable(final, target) || windowsManagedRuntimeAccountCreatedBaseline(final, target) {
+		return nil
+	}
+	return fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
+}
+
+// windowsPerUserInstallLeftovers are the entries a per-user DefenseClaw
+// install keeps in %USERPROFILE%\.defenseclaw (its config, audit database,
+// Python environment and installer state) and the managed runtime never
+// writes there.
+var windowsPerUserInstallLeftovers = []string{"config.yaml", "audit.db", ".venv", "installer"}
+
+// windowsPerUserInstallLeftover names the first per-user install entry in
+// dataDir, or "".
+func windowsPerUserInstallLeftover(dataDir string) string {
+	for _, name := range windowsPerUserInstallLeftovers {
+		if _, err := os.Lstat(filepath.Join(dataDir, name)); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
+// refuseWindowsPerUserInstallFolder refuses the data folder of a per-user
+// 1.0 install. It carries the same private DACL as a managed one, so the DACL
+// checks took it over and the install enrolled the account (GAP-1047, and
+// GAP-1434 for an explicit install); what it holds tells it apart.
+func refuseWindowsPerUserInstallFolder(target windowsManagedRuntimeTarget) error {
+	if leftover := windowsPerUserInstallLeftover(target.data); leftover != "" {
+		return fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %s holds %s, which a per-user DefenseClaw install leaves", target.data, leftover)
+	}
+	return nil
+}
+
+// windowsManagedRuntimePurgeKeptAdoptable reports the folder shape
+// adoptWindowsManagedRuntimePurgeKeptRoot takes over: owned by the target
+// account, with the owner-private DACL a standalone purge leaves.
+func windowsManagedRuntimePurgeKeptAdoptable(final windows.Handle, target windowsManagedRuntimeTarget) bool {
+	descriptor, err := windows.GetSecurityInfo(final, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil || !owner.Equals(target.sid) {
+		return false
+	}
+	relaxed, err := windowsSetupRelaxedDirectoryDACL(descriptor)
+	return err == nil && relaxed
+}
+
 // windowsManagedRuntimeAccountCreatedBaseline reports whether the opened
 // data directory is one the account created itself before enrollment
 // (windowsAccountCreatedDataDir), which the guardian adopts at enrollment.
@@ -763,8 +879,11 @@ func windowsManagedRuntimeAccountCreatedBaseline(final windows.Handle, target wi
 // absent data directory, or one the account created itself before enrollment,
 // is planned pending instead of absent or refused. With adoptPurgeKept (a
 // standalone install plan), a data directory left by a standalone uninstall
-// with purge is given the canonical DACL again and planned canonical.
-func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAllowed, adoptPurgeKept bool) (WindowsManagedRuntimeRootPlan, error) {
+// with purge is given the canonical DACL again and planned canonical. With
+// restampReadOnly (an install plan), a canonical data directory that also
+// carries read-only grants of another product (Codex's sandbox group) is
+// given the exact canonical DACL again, after the per-user install refusal.
+func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAllowed, adoptPurgeKept, restampReadOnly bool) (WindowsManagedRuntimeRootPlan, error) {
 	parent, err := openWindowsManagedRuntimeProfile(target)
 	if err != nil {
 		return WindowsManagedRuntimeRootPlan{}, err
@@ -785,13 +904,44 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 		return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
 	} else {
 		defer windows.CloseHandle(final)
+		// A standalone install plan, explicit or after the ensure preflight,
+		// never takes over a per-user install folder (GAP-1434).
+		if adoptPurgeKept {
+			if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+				return WindowsManagedRuntimeRootPlan{}, err
+			}
+		}
 		err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
 		if err != nil && adoptPurgeKept {
 			adopted, adoptErr := adoptWindowsManagedRuntimePurgeKeptRoot(parent, final, target)
 			if adoptErr != nil {
 				return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: restore the managed DACL on the folder a purge kept: %w", adoptErr)
 			}
+			if !adopted {
+				// A folder the account created itself before enrollment (the
+				// refused hook of an unenrolled account writes one) holds no
+				// per-user product. The guardian takes it over at sign-in; a
+				// fresh install takes it over here instead of failing for
+				// every account on the machine (GAP-0416).
+				adopted, adoptErr = adoptWindowsManagedRuntimeAccountCreatedRoot(parent, final, target)
+				if adoptErr != nil {
+					return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: take over the folder the account created: %w", adoptErr)
+				}
+			}
 			if adopted {
+				err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+			}
+		}
+		if err == nil && restampReadOnly {
+			removed, restampErr := restampWindowsManagedRuntimeReadOnlyGrants(parent, final, target)
+			if restampErr != nil {
+				return WindowsManagedRuntimeRootPlan{}, restampErr
+			}
+			if len(removed) > 0 {
+				fmt.Fprintf(os.Stderr,
+					"[enterprise-hooks] warning: %s carried read-only grants of another product; "+
+						"the canonical managed DACL was restored and these grants were removed: %s\n",
+					target.data, strings.Join(removed, ", "))
 				err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
 			}
 		}
@@ -820,6 +970,71 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 	}
 	root.MarkerSID = marker.String()
 	return root, nil
+}
+
+// windowsManagedRuntimeRootReadOnlyGrants returns the principals of the
+// read-only extra grants on the data directory behind handle, which must
+// otherwise carry the exact canonical DACL and be owned by the target.
+func windowsManagedRuntimeRootReadOnlyGrants(handle windows.Handle, target windowsManagedRuntimeTarget) ([]*windows.SID, error) {
+	if err := validateWindowsGuardianACLHandle(handle, target.sid, true, true, false); err != nil {
+		return nil, err
+	}
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, err
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return nil, fmt.Errorf("enterprise hooks: %s has a null or unreadable DACL", target.data)
+	}
+	return inspectWindowsUserPathProtectionACL(target.data, descriptor, dacl, target.sid, true, true)
+}
+
+// restampWindowsManagedRuntimeReadOnlyGrants gives the canonical protected
+// DACL back to a target-owned data directory whose DACL is canonical except
+// for read-only grants of other principals (windowsReadOnlyExtraACE). The
+// folder is first refused if a per-user install left it
+// (refuseWindowsPerUserInstallFolder). The DACL changes through a second
+// no-follow handle bound to the same inode, re-inspected before the write,
+// and only the DACL is written. It returns the removed principals, or none
+// when the folder had no such grant. With
+// DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 the validator already refused
+// such a folder, so nothing reaches here.
+func restampWindowsManagedRuntimeReadOnlyGrants(parent, final windows.Handle, target windowsManagedRuntimeTarget) ([]string, error) {
+	extras, err := windowsManagedRuntimeRootReadOnlyGrants(final, target)
+	if err != nil || len(extras) == 0 {
+		return nil, err
+	}
+	if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+		return nil, err
+	}
+	identity, err := windowsManagedRuntimeHandleIdentity(final, true)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess()|windows.WRITE_DAC, false)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: reopen %s to remove read-only grants: %w", target.data, err)
+	}
+	defer windows.CloseHandle(writer)
+	if got, err := windowsManagedRuntimeHandleIdentity(writer, true); err != nil || got != identity {
+		return nil, errors.Join(err, fmt.Errorf("enterprise hooks: %s changed while it was inspected", target.data))
+	}
+	extras, err = windowsManagedRuntimeRootReadOnlyGrants(writer, target)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: %s changed while it was inspected: %w", target.data, err)
+	}
+	if len(extras) == 0 {
+		return nil, nil
+	}
+	acl, err := windowsUserPathProtectionACL(target.sid, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := setWindowsObjectDACLNoPropagation(writer, acl, true); err != nil {
+		return nil, fmt.Errorf("enterprise hooks: restore the canonical DACL on %s: %w", target.data, err)
+	}
+	return windowsSIDDisplayNames(extras), nil
 }
 
 // adoptWindowsManagedRuntimePurgeKeptRoot restores the canonical DACL on a
@@ -866,6 +1081,45 @@ func adoptWindowsManagedRuntimePurgeKeptRoot(parent, final windows.Handle, targe
 	}
 	if _, err := windowsRecoverSetupRelaxedHookDirectory(target.data, target.sid); err != nil && !windowsManagedRuntimeRootMissing(err) {
 		return true, err
+	}
+	return true, nil
+}
+
+// adoptWindowsManagedRuntimeAccountCreatedRoot gives the canonical DACL to a
+// data directory the account created itself before it was enrolled
+// (windowsAccountCreatedDataDir: owned by the account, an inherited DACL, no
+// hooks folder, a small plain tree the account owns). It is the install-plan
+// counterpart of the guardian adoption (adoptWindowsAccountCreatedDataDir). A
+// folder a per-user install left has a hooks folder and is still refused.
+func adoptWindowsManagedRuntimeAccountCreatedRoot(parent, final windows.Handle, target windowsManagedRuntimeTarget) (bool, error) {
+	if !windowsManagedRuntimeAccountCreatedBaseline(final, target) {
+		return false, nil
+	}
+	identity, err := windowsManagedRuntimeHandleIdentity(final, true)
+	if err != nil {
+		return false, err
+	}
+	writer, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess()|windows.WRITE_DAC, false)
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(writer)
+	if got, err := windowsManagedRuntimeHandleIdentity(writer, true); err != nil || got != identity {
+		return false, errors.Join(err, fmt.Errorf("enterprise hooks: %s changed while it was inspected", target.data))
+	}
+	descriptor, err := windows.GetSecurityInfo(writer, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	if ok, err := windowsAccountCreatedDataDirDescriptor(descriptor, target.sid); err != nil || !ok {
+		return false, errors.Join(err, fmt.Errorf("enterprise hooks: %s changed while it was inspected", target.data))
+	}
+	acl, err := windowsUserPathProtectionACL(target.sid, true)
+	if err != nil {
+		return false, err
+	}
+	if err := setWindowsObjectDACLNoPropagation(writer, acl, true); err != nil {
+		return false, err
 	}
 	return true, nil
 }
@@ -1990,7 +2244,6 @@ func removeWindowsManagedRuntimeRootContents(
 		if err := setWindowsManagedRuntimeMarkerSecurity(root, target.sid, marker); err != nil {
 			return err
 		}
-		rootMarker = true
 	}
 	if err := validateWindowsManagedRuntimeCleanupMarkerHandle(root, target.sid, marker); err != nil {
 		return fmt.Errorf("enterprise hooks: managed runtime root quarantine changed: %w", err)

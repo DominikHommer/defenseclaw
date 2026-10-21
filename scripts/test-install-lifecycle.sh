@@ -18,7 +18,7 @@
 # End-to-end install/upgrade/rollback test for scripts/install.sh.
 #
 #   scripts/test-install-lifecycle.sh --assets DIR [--previous-assets DIR]
-#       [--lanes "fresh upgrade-previous upgrade-0.8.10 handoff drills macos-app"] [--keep]
+#       [--lanes "fresh upgrade-previous sandbox-rollback upgrade-0.8.10 handoff drills macos-app"] [--keep]
 #
 # upgrade-0.X.Y upgrades from any published 0.x release (upgrade-0.8.4 imports
 # a pre-v8 configuration).
@@ -102,17 +102,8 @@ install_candidate() { bash "$1/install.sh" --local "$1" --yes; }
 # The documented one-liner pipes install.sh into bash; the script arrives on stdin.
 install_candidate_piped() { cat "$1/install.sh" | bash -s -- --local "$1" --yes; }
 
-# install_legacy: install LEGACY_VERSION with its own installer. Releases before
-# 0.8.5 published it only in the source tree.
-install_legacy() {
-    local installer="${ROOT}/install-${LEGACY_VERSION}.sh"
-    [[ -f "${installer}" ]] || curl -fsSL -o "${installer}" \
-        "https://github.com/cisco-ai-defense/defenseclaw/releases/download/${LEGACY_VERSION}/install.sh" \
-        || curl -fsSL -o "${installer}" \
-        "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${LEGACY_VERSION}/scripts/install.sh"
-    # The 0.8.4 installer refuses to run without cosign on PATH.
-    VERSION="${LEGACY_VERSION}" with_cosign bash "${installer}" --yes --no-openclaw
-}
+# Keep the legacy install step separately testable without running a release.
+source "$(dirname "${BASH_SOURCE[0]}")/lib/install-legacy-lifecycle.sh"
 
 # init_and_start: create a config, move the gateway to a free port, start it.
 # Callers run it under "must", where errexit is off, so every step returns.
@@ -187,12 +178,36 @@ installer_copies() {
         | wc -l | tr -d ' '
 }
 
+fleet_enabled_in_lane() {
+    [[ -f "${DC_HOME}/config.yaml" ]] || return 1
+    "${DC_HOME}/.venv/bin/python" -I - "${DC_HOME}/config.yaml" <<'PY'
+import sys
+import yaml
+with open(sys.argv[1], encoding="utf-8") as stream:
+    config = yaml.safe_load(stream)
+sys.exit(0 if isinstance(config, dict) and isinstance(config.get("fleet"), dict) and config["fleet"].get("enabled") is True else 1)
+PY
+}
+
 assert_versions() {
-    local want="$1" cli gateway
+    local want="$1" cli gateway archive entry arch
     cli="$(version_of "$("${HOME}/.local/bin/defenseclaw" --version 2>/dev/null)")"
     gateway="$(version_of "$("${HOME}/.local/bin/defenseclaw-gateway" --version 2>/dev/null)")"
     [[ "${cli}" == "${want}" && "${gateway}" == "${want}" ]] \
         || fail "expected ${want}, got cli=${cli:-none} gateway=${gateway:-none}"
+    if [[ "${want}" == "${TARGET}" ]]; then
+        if fleet_enabled_in_lane; then
+            [[ -f "${DC_HOME}/installer/policy_compiler.py" ]] || fail "Fleet-on upgrade did not install its compiler"
+            case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; *) arch=arm64 ;; esac
+            archive="${ASSETS}/defenseclaw-${TARGET}-$(uname -s | tr '[:upper:]' '[:lower:]')-${arch}.tar.gz"
+            entry="$(tar -tzf "${archive}" | awk '/(^|\/)edge-connector\/tools\/policy_compiler.py$/ {print; exit}')"
+            [[ -n "${entry}" ]] || fail "Fleet-on archive has no policy compiler"
+            tar -xOzf "${archive}" "${entry}" | cmp - "${DC_HOME}/installer/policy_compiler.py" \
+                || fail "Fleet-on compiler differs from the release archive"
+        else
+            [[ ! -e "${DC_HOME}/installer/policy_compiler.py" ]] || fail "Fleet-off core install unexpectedly activated the Fleet compiler"
+        fi
+    fi
 }
 
 assert_healthy() {
@@ -235,6 +250,77 @@ lane_fresh() {
     stop_lane
 }
 
+# plant_orphaned_claude_hooks: Claude Code hook entries of DefenseClaw for a
+# connector this install does not configure, whose hook script it does not
+# have, next to the user's own entry: what a rollback left (GAP-0009).
+plant_orphaned_claude_hooks() {
+    mkdir -p "${HOME}/.claude"
+    printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"%s/hooks/claude-code-hook.sh || { rc=$?; exit 2; }"}]},{"hooks":[{"type":"command","command":"/opt/operator/prompt-check.sh"}]}]}}\n' \
+        "${DC_HOME}" > "${HOME}/.claude/settings.json"
+}
+
+assert_no_orphaned_claude_hooks() {
+    local settings="${HOME}/.claude/settings.json"
+    grep -q "/opt/operator/prompt-check.sh" "${settings}" || fail "$1 removed the user's own Claude Code hook"
+    ! grep -q "${DC_HOME}/hooks/claude-code-hook.sh" "${settings}" \
+        || fail "$1 left DefenseClaw hook entries of a connector that is not configured (GAP-0009)"
+}
+
+# plant_orphaned_opencode_plugin: DefenseClaw's OpenCode plugin for this data
+# directory, whose credential the install does not have, next to the user's
+# own plugin: what a rollback left of 'setup opencode' (GAP-0009). OpenCode
+# then refused every tool call.
+plant_orphaned_opencode_plugin() {
+    local plugins="${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}/plugins"
+    mkdir -p "${plugins}" && chmod 700 "${plugins}"
+    printf '// defenseclaw-managed-plugin v7\nconst DC_TOKEN_FILE = "%s/hooks/.hook-opencode.token";\n' "${DC_HOME}" > "${plugins}/defenseclaw.js"
+    printf 'export const Operator = async () => ({});\n' > "${plugins}/operator.js"
+    chmod 600 "${plugins}/defenseclaw.js" "${plugins}/operator.js"
+}
+
+assert_no_orphaned_opencode_plugin() {
+    local plugins="${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}/plugins"
+    [[ -f "${plugins}/operator.js" ]] || fail "$1 removed the user's own OpenCode plugin"
+    [[ ! -e "${plugins}/defenseclaw.js" ]] \
+        || fail "$1 left the DefenseClaw OpenCode plugin of a connector that is not configured (GAP-0009)"
+}
+
+lane_fleet_opt_in() {
+    enter_lane fleet-opt-in
+    log "fleet-opt-in: core install leaves Fleet compiler inactive"
+    must install_candidate "${ASSETS}" || return 1
+    assert_versions "${TARGET}"
+    must init_and_start || return 1
+    stop_lane
+    "${DC_HOME}/.venv/bin/python" -I - "${DC_HOME}/config.yaml" <<'PY' || return 1
+import sys
+import yaml
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    config = yaml.safe_load(stream)
+config.setdefault("fleet", {})["enabled"] = True
+with open(path, "w", encoding="utf-8") as stream:
+    yaml.safe_dump(config, stream, sort_keys=False)
+PY
+    log "fleet-opt-in: re-install provisions the version-matched compiler"
+    must install_candidate "${ASSETS}" || return 1
+    assert_versions "${TARGET}"
+    "${DC_HOME}/.venv/bin/python" -I - "${DC_HOME}/config.yaml" <<'PY' || return 1
+import sys
+import yaml
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    config = yaml.safe_load(stream)
+config["fleet"]["enabled"] = False
+with open(path, "w", encoding="utf-8") as stream:
+    yaml.safe_dump(config, stream, sort_keys=False)
+PY
+    log "fleet-opt-in: disabling Fleet removes its active compiler"
+    must install_candidate "${ASSETS}" || return 1
+    assert_versions "${TARGET}"
+    stop_lane
+}
+
 # upgrade_lane NAME FROM_VERSION INSTALL_FN: install FROM, upgrade to the
 # candidate, roll back, roll forward.
 upgrade_lane() {
@@ -244,11 +330,20 @@ upgrade_lane() {
     must "${installer}" || return 1
     must init_and_start || return 1
     assert_versions "${from}"
+    if [[ "${name}" == upgrade-previous ]]; then
+        # A host a rollback by an earlier release already left broken.
+        plant_orphaned_claude_hooks
+        plant_orphaned_opencode_plugin
+    fi
     log "${name}: upgrade ${from} -> ${TARGET}"
     must install_candidate "${ASSETS}" || return 1
     assert_versions "${TARGET}"
     assert_healthy
     assert_data_kept
+    if [[ "${name}" == upgrade-previous ]]; then
+        assert_no_orphaned_claude_hooks "the upgrade"
+        assert_no_orphaned_opencode_plugin "the upgrade"
+    fi
     [[ "$(cat "${DC_HOME}/previous/VERSION" 2>/dev/null)" == "${from}" ]] || fail "previous/VERSION is not ${from}"
     if [[ "${name}" == upgrade-previous && "$(id -u)" != 0 ]]; then
         log "${name}: a rollback that cannot restore the previous install puts the current one back"
@@ -266,9 +361,18 @@ upgrade_lane() {
     log "${name}: defenseclaw rollback"
     local copies
     copies="$(installer_copies)"
+    # A connector set up after the upgrade, which ${from} does not configure.
+    if [[ "${name}" == upgrade-previous ]]; then
+        plant_orphaned_claude_hooks
+        plant_orphaned_opencode_plugin
+    fi
     must "${HOME}/.local/bin/defenseclaw" rollback --yes || return 1
     [[ "$(installer_copies)" == "${copies}" ]] || fail "defenseclaw rollback left its installer copy in ${TMPDIR:-/tmp}"
     assert_versions "${from}"
+    if [[ "${name}" == upgrade-previous ]]; then
+        assert_no_orphaned_claude_hooks "the rollback"
+        assert_no_orphaned_opencode_plugin "the rollback"
+    fi
     assert_healthy
     assert_data_kept
     if [[ "${name}" == upgrade-previous ]]; then
@@ -305,6 +409,61 @@ upgrade_lane() {
 }
 
 install_previous() { install_candidate "${PREVIOUS_ASSETS}"; }
+
+# plant_sandbox_setup: what 'sandbox setup' and a running sandbox leave in the
+# data dir: sandboxes on in config.yaml and the sandbox state. No OpenShell is
+# needed: the gateway opens the sandbox ingress for it and reports OpenShell
+# itself through its health.
+plant_sandbox_setup() {
+    "${DC_HOME}/.venv/bin/python" -I - "${DC_HOME}/config.yaml" <<'PY' || return 1
+import sys, yaml
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    config = yaml.safe_load(stream)
+config.setdefault("openshell", {}).update({"enabled": True, "harnesses": ["codex"]})
+with open(path, "w", encoding="utf-8") as stream:
+    yaml.safe_dump(config, stream, sort_keys=False)
+PY
+    mkdir -p "${DC_HOME}/sandboxes" && echo lifecycle-sandbox > "${DC_HOME}/sandboxes/lifecycle-marker.txt"
+}
+
+assert_sandbox_setup_kept() {
+    local enabled
+    enabled="$("${DC_HOME}/.venv/bin/python" -I -c 'import sys, yaml; print((yaml.safe_load(open(sys.argv[1])).get("openshell") or {}).get("enabled"))' "${DC_HOME}/config.yaml")"
+    [[ "${enabled}" == True ]] || fail "$1 turned sandboxes off (openshell.enabled: ${enabled:-unset}, GAP-0483)"
+    [[ "$(cat "${DC_HOME}/sandboxes/lifecycle-marker.txt" 2>/dev/null)" == lifecycle-sandbox ]] \
+        || fail "$1 lost the sandbox state (GAP-0483)"
+}
+
+# rel-1-0-2:GAP-0483: sandboxes set up after the upgrade keep running through
+# 'defenseclaw rollback' and the next 'defenseclaw upgrade'. Both brought back
+# data from before the setup: sandboxes off, every hook of a running sandbox
+# blocked as "gateway unreachable". Needs a previous release of 1.0.1 or later.
+lane_sandbox_rollback() {
+    local from="$1"
+    enter_lane sandbox-rollback
+    log "sandbox-rollback: install ${from}, upgrade to ${TARGET}, set up sandboxes"
+    must install_previous || return 1
+    must init_and_start || return 1
+    must install_candidate "${ASSETS}" || return 1
+    assert_versions "${TARGET}"
+    must plant_sandbox_setup || return 1
+    log "sandbox-rollback: defenseclaw rollback keeps the sandbox setup"
+    must "${HOME}/.local/bin/defenseclaw" rollback --yes || return 1
+    assert_versions "${from}"
+    assert_healthy
+    assert_data_kept
+    assert_sandbox_setup_kept "the rollback"
+    [[ "$(cat "${DC_HOME}/previous/data/sandboxes/lifecycle-marker.txt" 2>/dev/null)" == lifecycle-sandbox ]] \
+        || fail "the rollback took the sandbox state out of previous/, which a roll forward brings back"
+    log "sandbox-rollback: the next upgrade keeps it too"
+    must install_candidate "${ASSETS}" || return 1
+    assert_versions "${TARGET}"
+    assert_healthy
+    assert_data_kept
+    assert_sandbox_setup_kept "the upgrade after the rollback"
+    stop_lane
+}
 
 lane_handoff() {
     enter_lane handoff
@@ -373,8 +532,12 @@ lane_drills() {
     stage="${ROOT}/broken-stage"
     rm -rf "${stage}"; mkdir -p "${stage}"
     tar -xzf "${broken}/${archive}" -C "${stage}"
-    printf '#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version %s" ;; *) exit 1 ;; esac\n' "${TARGET}" \
-        > "${stage}/defenseclaw-gateway"
+    # Every other command goes to the real gateway, so the staged check, which
+    # runs the staged gateway's config validator (GAP-0158), passes and the
+    # drill reaches the swap.
+    mv "${stage}/defenseclaw-gateway" "${ROOT}/real-gateway"
+    printf '#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version %s" ;; start) exit 1 ;; *) exec "%s" "$@" ;; esac\n' \
+        "${TARGET}" "${ROOT}/real-gateway" > "${stage}/defenseclaw-gateway"
     chmod 755 "${stage}/defenseclaw-gateway"
     COPYFILE_DISABLE=1 tar -czf "${broken}/${archive}" -C "${stage}" .
     rechecksum "${broken}"
@@ -472,10 +635,15 @@ trap cleanup EXIT
 for lane in ${LANES}; do
     case "${lane}" in
         fresh) lane_fresh || true ;;
+        fleet-opt-in) lane_fleet_opt_in || true ;;
         upgrade-previous)
             [[ -n "${PREVIOUS_ASSETS}" ]] || { echo "upgrade-previous needs --previous-assets" >&2; exit 2; }
             prev="$(version_of "$(basename "$(ls "${PREVIOUS_ASSETS}"/defenseclaw-*-py3-none-any.whl | head -1)")")"
             upgrade_lane upgrade-previous "${prev}" install_previous || true ;;
+        sandbox-rollback)
+            [[ -n "${PREVIOUS_ASSETS}" ]] || { echo "sandbox-rollback needs --previous-assets" >&2; exit 2; }
+            prev="$(version_of "$(basename "$(ls "${PREVIOUS_ASSETS}"/defenseclaw-*-py3-none-any.whl | head -1)")")"
+            lane_sandbox_rollback "${prev}" || true ;;
         upgrade-0.*)
             LEGACY_VERSION="${lane#upgrade-}"
             upgrade_lane "${lane}" "${LEGACY_VERSION}" install_legacy || true

@@ -29,9 +29,11 @@ Windows (PowerShell):
 irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
 ```
 
-On a first install the installer asks which agent to guard (the default is
-`codex`). When it finishes, run `defenseclaw init` to configure DefenseClaw (see the
-[quickstart](/docs/get-started/quickstart)). To pick an agent during the install, pass options: on
+On a first install the installer asks which agent to guard (a number or a name;
+the default is `codex`). When it finishes, run the command it prints,
+`defenseclaw init --connector <agent>`, to set up that agent (see the
+[quickstart](/docs/get-started/quickstart)); plain `defenseclaw init` sets up
+every agent it finds. To set the agent up during the install, pass options: on
 macOS/Linux, end the command above with `bash -s -- --connector codex --quickstart`
 instead of `bash`; on Windows, run
 
@@ -61,7 +63,20 @@ which runs the latest release's installer for you.
 | `--quickstart-mode MODE` / `-QuickstartMode MODE` | `observe` or `action` for that quickstart (implies `--quickstart`) |
 | `-NoPersistPath` | Windows only: do not change the user `PATH` in the registry |
 | `-CosignPath FILE` | Windows only: the `cosign` to check the release signature with |
-| `--sandbox` | macOS/Linux only: deprecated, has no effect |
+
+`--local` and `-Local` require a nonempty directory argument. An empty value
+is a usage error (exit `2`).
+
+To install from a mirror instead of GitHub, set `DEFENSECLAW_REPO` to the
+mirror's base URL for that command, for example
+`curl -LsSf <install.sh URL> | DEFENSECLAW_REPO=https://mirror.example.com/defenseclaw bash`.
+A first install has no `config.yaml` yet, so the variable is the only way to
+name a mirror; once DefenseClaw is set up, `update.source` in `config.yaml`
+does the same for `defenseclaw upgrade`
+([Upgrade](/docs/get-started/upgrade#install-from-a-mirror)). The mirror only
+changes where the files come from. The installer still checks the release
+signature against the official release identity, so a mirror's downloads are
+refused unless `cosign` 2.0 or later is installed.
 
 The installers exit with one of these codes (`install.ps1` when run as a file;
 `irm | iex` reports a failure as an error instead):
@@ -70,6 +85,7 @@ The installers exit with one of these codes (`install.ps1` when run as a file;
 | --- | --- |
 | `0` | DefenseClaw is installed. |
 | `1` | DefenseClaw was not installed. An upgrade puts the previous install back. |
+| `2` | Nothing was changed: an option or value the installer does not know, such as a misspelled flag or a connector name that is not on the list. Options that take a value also accept the `--name=value` form. |
 | `3` | DefenseClaw is installed, but a connector needs attention before it is guarded again. Run `defenseclaw doctor`. |
 | `4` | DefenseClaw is installed, but the first-run quickstart failed. The installer prints what failed and the `defenseclaw quickstart ...` command to run again once it is fixed. |
 
@@ -97,6 +113,8 @@ Installing as `root` is supported but discouraged — DefenseClaw is per-user by
 
 Agent-specific dependencies and quirks live on the
 [connector pages](/docs/connectors#platform-support).
+
+The shell inspect hooks need `jq` or `python3`. If neither is installed, they block every checked call (or, with an explicit per-user open, let it go ahead with a notice).
 
 ## What's bundled (LLM backends)
 
@@ -177,6 +195,7 @@ and Python 3.10-3.13 from python.org.
       <File name="… (the CLI's Python environment)" />
     </Folder>
     <File name="config.yaml" />
+    <File name="config.generation.json" />
     <File name="audit.db" />
     <File name="device.key" />
     <Folder name="hooks" defaultOpen>
@@ -205,8 +224,18 @@ and Python 3.10-3.13 from python.org.
   </Folder>
 </Files>
 
-`config.yaml`, `audit.db` and `device.key` are created by `defenseclaw init` or
-`quickstart`, and the hook scripts by setting up an agent. The installer keeps
+On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper`. Only the
+opt-in [sandbox kernel feed](/docs/sandboxes/linux#kernel-feed-tetragon) uses
+it, and `defenseclaw uninstall --binaries` removes it with the rest. macOS
+installs do not keep it.
+
+`config.yaml`, `config.generation.json` (the record of the last config write),
+`audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`,
+and the hook scripts by setting up an agent. Only `config.yaml` is policy: the
+hook scripts are derived from it. An upgrade from 0.x also leaves
+`config.yaml.v8.bak` and `migration-v9.json` next to it; see
+[Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9). The full tree
+is in [Configuration](/docs/reference/configuration#on-disk-layout). The installer keeps
 `installer/` (the installer that performed the current install, used by
 `defenseclaw rollback`), `previous/` (the install the last upgrade replaced)
 and `logs/`. When the installer installs `uv` for you, `uv` and `uvx` are in
@@ -232,10 +261,25 @@ It starts when you run `defenseclaw quickstart`, `defenseclaw setup`, or
 `defenseclaw-gateway start`. The install adds no systemd unit, LaunchAgent, or
 login item. Instead, when the gateway is not running (after a reboot or a
 sign-out that ended your processes), the next agent hook call starts it with
-`defenseclaw-gateway start` and then sends its request. This applies to the
-shell hooks of Claude Code, Codex, Cursor, GitHub Copilot, Devin, Hermes, Kiro,
-OpenHands, and Antigravity. The OpenCode and Amp plugins and the OmniGent
-policy do not start it.
+`defenseclaw-gateway start` in the background and sends its request again
+while it starts. This applies to the shell hooks of Claude Code, Codex,
+Cursor, GitHub Copilot, Devin, Hermes, Kiro, OpenHands, and Antigravity. The
+OpenCode and Amp plugins and the OmniGent policy do not start it.
+
+A hook call that meets a gateway restart (`defenseclaw-gateway restart`, an
+upgrade, or the start above) is sent again for up to about 3 seconds after the
+hook started, so a short restart is answered by the gateway that comes up,
+from its policy. A restart or outage that lasts longer ends the call within
+those 3 seconds with `gateway restarting or not running` instead of holding it
+until the gateway is back: a fail-closed hook blocks it, never allows it. The
+same holds for the per-user hooks on Windows. On Windows a per-user hook for
+a tool call also waits at most about 3.5 seconds for the gateway's decision and
+then applies its fail mode (`gateway did not answer in time`); a call the
+gateway is checking with Cisco AI Defense or the LLM judge gets up to about
+4 seconds. During
+an install or upgrade, which stops the gateway and starts it again, the shell
+hooks treat the stop as a restart and say that an install or upgrade is
+under way, not that the gateway was stopped.
 
 A hook does not start the gateway:
 
@@ -245,13 +289,21 @@ A hook does not start the gateway:
 - for 60 seconds after a hook start failed (see `~/.defenseclaw/gateway.log`);
 - when `DEFENSECLAW_GATEWAY_AUTOSTART=0` is set in the agent's environment.
 
-While the gateway is not running, fail-closed hooks (the action profile) block
-agent calls, and fail-open hooks (the observe default) let them through with a
-`gateway unreachable` line on stderr. On Windows a hook also starts a stopped
+While the gateway is not running, fail-closed hooks block agent calls, in
+observe mode too, and only hooks you set to `hook_fail_mode: open` let them
+through with a `gateway unreachable` line on stderr (see
+[Fail modes](/docs/reference/fail-modes#which-value-applies)). On Windows a hook also starts a stopped
 gateway; see [Windows install lifecycle](/docs/get-started/windows/install-lifecycle#startup-behavior).
 
+When the watchdog runs (`gateway.watchdog.enabled`) and the gateway process
+stops on its own (a crash, or `kill -9`), the watchdog starts it again after
+`gateway.watchdog.debounce` failed health checks, under the same rules as a
+hook start. That covers an account with no connector hooks, whose IDE and agent
+inventory would otherwise stay dark until someone ran `defenseclaw-gateway
+start`.
+
 A gateway that is running but does not answer (frozen or hung) is not
-restarted by a hook. The hook's line says the gateway did not answer and names
+restarted by a hook or by the watchdog. The hook's line says the gateway did not answer and names
 the next step: check `defenseclaw-gateway status`, or run
 `defenseclaw-gateway restart`.
 
@@ -270,6 +322,7 @@ Doctor verifies:
 | Audit database and device key | The audit database is intact, has the tables it needs and has room to grow; the device key and its provenance record are intact. |
 | Components and connectors | The CLI and gateway versions match, and each agent you set up runs a version DefenseClaw supports. |
 | Gateway | The running gateway is the one DefenseClaw started, answers its health check, and accepts the local API token. |
+| Policy and config migration | The **Policy** row: the gateway applies the policy that `config.yaml` and the assets it names compute to, and `config.yaml` was not edited outside the writer. The **Config migration** row appears after an upgrade from 0.x until you read the migration record. |
 | Guardrail, scanners and credentials | Enabled services are reachable, the scanner programs run, and configured keys are present. Doctor never prints a secret. |
 | Observability | Each configured destination is reachable and delivering. The local SQLite history keeps working when a destination fails. |
 
@@ -323,11 +376,71 @@ changes stay. Use `--all` and `--binaries` to remove everything. On macOS and
 Linux, `--binaries` removes `defenseclaw`, `defenseclaw-gateway`,
 `defenseclaw-acp` and the scanner launchers (`skill-scanner`,
 `skill-scanner-api`, `skill-scanner-pre-commit`, `mcp-scanner`,
-`mcp-scanner-api` and `litellm`) from `~/.local/bin`.
+`mcp-scanner-api` and `litellm`) from `~/.local/bin`, and the `uv` and `uvx`
+an installer added there while they are unchanged; with `--all`, what that uv
+downloaded goes too. The 0.8.x installer kept no record of the uv, the uv
+cache (`~/.cache/uv`) or the `~/.sigstore` folder it added, and it used a uv
+you already had, so the upgrade from 0.8.x records them only when all of this
+shows that installer put them there:
 
-Uninstall also removes DefenseClaw's OpenShell sandboxes and images. When
-Docker or OpenShell is gone or broken, add `--skip-sandbox-teardown` to leave
-them, and remove them later with `defenseclaw-gateway sandbox teardown`.
+- uv's install receipt (`~/.config/uv/uv-receipt.json`) names `~/.local/bin`,
+  only `uv` and `uvx`, and the uv version that `~/.local/bin/uv` reports and
+  that made the 0.8.x Python environment, and was written at most ten minutes
+  before that environment.
+- `uv` and `uvx` are your own regular files, not links.
+- Nothing in `~/.cache/uv` is older than the receipt, every package in it was
+  downloaded after the 0.8.x Python environment was made and is one that
+  environment holds (DefenseClaw among them), and uv has no tools installed.
+- For `~/.sigstore`: it holds only the public Sigstore cache, unused since,
+  and no `cosign` is on your `PATH`.
+
+`uninstall --all --binaries` then removes the recorded `uv` and `uvx` while
+they are unchanged, `~/.cache/uv` when nothing in it changed since the
+upgrade, `~/.sigstore` only when the 0.8.x installer's cache is still untouched,
+and `~/.config/uv` when it holds only that receipt. uv's Python
+folder (`~/.local/share/uv/python`) always stays, since other tools can use
+it. When the evidence is missing, or you updated or replaced `uv` since, the
+uninstall plan and its result name what stays (`uv`, `uvx`, `~/.cache/uv`,
+`~/.config/uv`) as not recorded as installed by DefenseClaw: remove them
+yourself if DefenseClaw added them.
+
+When sandbox state is present, uninstall also removes DefenseClaw's OpenShell
+sandboxes and images (on Linux and macOS; there are none on Windows). If
+teardown fails with `--all` or `--binaries`, rerun uninstall with
+`--skip-sandbox-teardown` and without `--all` or `--binaries`
+to keep the data needed for later teardown. Once Docker and OpenShell
+work again, run `defenseclaw-gateway sandbox teardown`, then uninstall again.
+Before stopping a live-mounted sandbox, review its
+changes (`defenseclaw sandbox review NAME`) or undo them
+(`defenseclaw sandbox undo NAME`). Work its agent already wrote in your folder
+stays unless you undo it; the plan names those sandboxes.
+
+A per-user uninstall for an account that never set up sandboxes completes
+without a teardown override. Its sandbox directory is absent or holds only
+empty lock files and empty folders, no OpenShell state or user gateway config
+sits beside them, and no OpenShell sandbox setting or wrapper is enabled.
+Neither `uninstall` nor `reset` reads the sandbox list or runs teardown then.
+Sandbox records, snapshots, non-empty files, links or unreadable entries in
+that directory still trigger teardown, as do enabled OpenShell settings. An
+empty lock file alongside OpenShell state or a user gateway config does too.
+
+A running sandbox stops uninstall before any change. Pull copy-mode work or
+review mount-mode changes, then stop the sandbox and retry. To stop and delete
+running sandboxes with the teardown, pass `--stop-sandboxes`; copy-mode work
+that has not been pulled back is lost.
+
+This list check applies only when sandbox teardown is planned. If the sandbox
+list cannot be read, `uninstall` and `reset` also stop before
+any change because teardown could delete a sandbox that still runs. Check
+with `defenseclaw sandbox list` (start the gateway first if prompted), pull
+back work or stop the sandboxes you want to keep, then retry; or use
+`--stop-sandboxes` to let teardown stop and delete them. The `error`,
+`stopping`, `creating` and `deleting` phases count as running; only
+`stopped`, `completed`, `deleted` and `missing` do not.
+
+Close your agent sessions first. One that stays open goes on without
+DefenseClaw: its hooks fail and nothing checks its tool calls. The plan and
+the end of the uninstall both say so.
 
 ## Next
 

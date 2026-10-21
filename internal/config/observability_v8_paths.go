@@ -11,22 +11,101 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 )
 
+// observabilityV8EvalSymlinks is filepath.EvalSymlinks; tests replace it to
+// deny a folder where the test account cannot (root, Windows).
+var observabilityV8EvalSymlinks = filepath.EvalSymlinks
+
 type observabilityV8FileRole struct {
 	name     string
 	path     string
 	writable bool
+	// deferrable marks a jsonl destination file. The gateway prepares that
+	// destination in a deferred state when it cannot reach the file yet, so
+	// a folder this account may not traverse is a warning for it, not a
+	// config error (GAP-1265). Every other role stays fatal.
+	deferrable bool
 }
 
-func validateObservabilityV8FilePaths(source *ObservabilityV8Source, configuredFiles []string) error {
+// resolveObservabilityV8StorePaths gives the files the gateway writes
+// (observability.local.path, observability.local.judge_bodies_path and each
+// jsonl destination path) one meaning in every process. A leading ~ is the
+// account's home folder, and a relative path is under data_dir, as the
+// Python CLI reads observability.local.path. They used to resolve against
+// each process's working directory: the gateway, started in data_dir, wrote
+// ~/.defenseclaw/x.jsonl to ~/.defenseclaw/~/.defenseclaw/x.jsonl, while
+// status and doctor, run from the home folder, named ~/~/.defenseclaw/x.jsonl
+// (GAP-0005). A path with a parent segment is left as written, so the
+// validation below still refuses it.
+func resolveObservabilityV8StorePaths(source *ObservabilityV8Source, dataDir string) {
+	resolve := func(value *string) {
+		path := *value
+		if strings.TrimSpace(path) == "" || observabilityV8HasParentSegment(path) {
+			return
+		}
+		path = observabilityV8ExpandHome(path)
+		if !filepath.IsAbs(path) && dataDir != "" {
+			path = filepath.Join(dataDir, path)
+		}
+		*value = path
+	}
+	resolve(&source.Local.Path)
+	resolve(&source.Local.JudgeBodiesPath)
+	for index := range source.Destinations {
+		if source.Destinations[index].Kind == ObservabilityV8DestinationJSONL {
+			resolve(&source.Destinations[index].Path)
+		}
+	}
+}
+
+// observabilityV8ExpandHome expands a leading "~", "~/" (or "~\" on
+// Windows) to the account's home folder. Other paths, and "~user" forms, are
+// returned unchanged.
+func observabilityV8ExpandHome(path string) string {
+	rest, ok := "", path == "~"
+	for _, prefix := range []string{"~/", `~\`} {
+		if prefix == `~\` && runtime.GOOS != "windows" {
+			continue
+		}
+		if strings.HasPrefix(path, prefix) {
+			rest, ok = path[len(prefix):], true
+		}
+	}
+	if !ok {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	return filepath.Join(home, rest)
+}
+
+// validateObservabilityV8FilePaths checks that the configured file roles
+// resolve to distinct files. It returns a warning, not an error, for a jsonl
+// destination path whose folders this account is denied: that path is
+// compared by its literal name, as a path whose folders do not exist yet is.
+// deferJSONL is false for a Secure Client source, which keeps main's startup
+// refusal.
+// tolerateDenied (an offline bundle sign or verify, which checks a target
+// device's paths and may run as any account) compares every role this account
+// may not inspect by its name, without a warning; the gateway checks the
+// files when it starts as the service account.
+func validateObservabilityV8FilePaths(
+	source *ObservabilityV8Source,
+	configuredFiles []string,
+	deferJSONL, tolerateDenied bool,
+) ([]ObservabilityV8Warning, error) {
 	if source == nil {
-		return nil
+		return nil, nil
 	}
 	roles := []observabilityV8FileRole{
 		{name: "observability.local.path", path: source.Local.Path, writable: true},
@@ -35,7 +114,8 @@ func validateObservabilityV8FilePaths(source *ObservabilityV8Source, configuredF
 	for index, destination := range source.Destinations {
 		if destination.Kind == ObservabilityV8DestinationJSONL {
 			roles = append(roles, observabilityV8FileRole{
-				name: fmt.Sprintf("observability.destinations[%d].path", index), path: destination.Path, writable: true,
+				name: fmt.Sprintf("observability.destinations[%d].path", index), path: destination.Path,
+				writable: true, deferrable: deferJSONL,
 			})
 		}
 		if destination.TLS.CACert != "" {
@@ -54,28 +134,39 @@ func validateObservabilityV8FilePaths(source *ObservabilityV8Source, configuredF
 		info       os.FileInfo
 	}
 	normalized := make([]normalizedRole, 0, len(roles))
+	var warnings []ObservabilityV8Warning
 	for _, role := range roles {
 		if strings.TrimSpace(role.path) == "" {
 			continue
 		}
 		if observabilityV8HasParentSegment(role.path) {
-			return fmt.Errorf("%s: parent path segments are not allowed", role.name)
+			return nil, fmt.Errorf("%s: parent path segments are not allowed", role.name)
 		}
 		absolute, err := filepath.Abs(filepath.Clean(role.path))
 		if err != nil {
-			return fmt.Errorf("%s: cannot normalize configured path", role.name)
+			return nil, fmt.Errorf("%s: cannot normalize configured path", role.name)
 		}
 		// Both failures below describe the filesystem, not the document, so the
 		// cause is kept rather than reported as a semantic error.
-		resolved, err := observabilityV8ResolveExistingPathPrefix(absolute)
+		tolerate := role.deferrable || tolerateDenied
+		resolved, denied, err := observabilityV8ResolveExistingPathPrefix(absolute, tolerate)
 		if err != nil {
-			return newV8ConfigPathError(role.name, absolute, err)
+			return nil, newV8ConfigPathError(role.name, absolute, err)
 		}
 		var info os.FileInfo
 		if candidate, err := os.Stat(resolved); err == nil {
 			info = candidate
+		} else if tolerate && errors.Is(err, fs.ErrPermission) {
+			denied = err
 		} else if !os.IsNotExist(err) {
-			return newV8ConfigPathError(role.name, resolved, err)
+			return nil, newV8ConfigPathError(role.name, resolved, err)
+		}
+		if denied != nil && role.deferrable {
+			warnings = append(warnings, ObservabilityV8Warning{
+				Code: "destination_path_inaccessible", Path: role.name,
+				Summary: fmt.Sprintf("cannot inspect %s (%v); the gateway starts without this destination "+
+					"and retries the file on every delivery", absolute, denied),
+			})
 		}
 		normalized = append(normalized, normalizedRole{observabilityV8FileRole: role, normalized: resolved, info: info})
 	}
@@ -87,7 +178,7 @@ func validateObservabilityV8FilePaths(source *ObservabilityV8Source, configuredF
 				aliases = os.SameFile(normalized[left].info, normalized[right].info)
 			}
 			if aliases && (normalized[left].writable || normalized[right].writable) {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"%s and %s: configured file roles must resolve to distinct files",
 					normalized[left].name,
 					normalized[right].name,
@@ -95,7 +186,7 @@ func validateObservabilityV8FilePaths(source *ObservabilityV8Source, configuredF
 			}
 		}
 	}
-	return nil
+	return warnings, nil
 }
 
 // normalizeObservabilityV8EffectiveFilePaths freezes every configured runtime
@@ -154,23 +245,35 @@ func normalizeObservabilityV8FilePath(name, value string) (string, error) {
 	return absolute, nil
 }
 
-func observabilityV8ResolveExistingPathPrefix(absolute string) (string, error) {
+// observabilityV8ResolveExistingPathPrefix resolves the links of the longest
+// existing prefix of absolute and appends the rest literally. With
+// tolerateDenied, a prefix this account may not inspect is treated like a
+// missing one and the first such failure is returned as denied; any other
+// failure (I/O, too many links, a file used as a folder) is returned as err.
+func observabilityV8ResolveExistingPathPrefix(absolute string, tolerateDenied bool) (string, error, error) {
 	candidate := absolute
 	var suffix []string
+	var denied error
 	for {
-		resolved, err := filepath.EvalSymlinks(candidate)
+		resolved, err := observabilityV8EvalSymlinks(candidate)
 		if err == nil {
 			for index := len(suffix) - 1; index >= 0; index-- {
 				resolved = filepath.Join(resolved, suffix[index])
 			}
-			return filepath.Clean(resolved), nil
+			return filepath.Clean(resolved), denied, nil
 		}
-		if !os.IsNotExist(err) {
-			return "", err
+		switch {
+		case os.IsNotExist(err):
+		case tolerateDenied && errors.Is(err, fs.ErrPermission):
+			if denied == nil {
+				denied = err
+			}
+		default:
+			return "", nil, err
 		}
 		parent := filepath.Dir(candidate)
 		if parent == candidate {
-			return filepath.Clean(absolute), nil
+			return filepath.Clean(absolute), denied, nil
 		}
 		suffix = append(suffix, filepath.Base(candidate))
 		candidate = parent

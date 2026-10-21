@@ -38,6 +38,42 @@ func TestParseLocalPasswdAndDSCL(t *testing.T) {
 	if dscl["alice"] != 501 || dscl["nobody"] != -2 || dscl["_www"] != 70 || len(dscl) != 3 {
 		t.Fatalf("parseDSCLLocalAccounts = %v", dscl)
 	}
+	// GAP-0496: a bound Mac's mobile accounts sit in the local node with the
+	// directory node they came from; they are directory accounts.
+	nodes := parseDSCLOriginalNodes("ent-bob     /Active Directory/DCLAB/dclab.test\nent-ldap /LDAPv3/ldap.example.test\n" +
+		"ent-kept /Local/Default\nbroken\n")
+	if len(nodes) != 2 || nodes["ent-bob"] != "/Active Directory/DCLAB/dclab.test" || nodes["ent-ldap"] != "/LDAPv3/ldap.example.test" {
+		t.Fatalf("parseDSCLOriginalNodes = %v", nodes)
+	}
+	groups := parseLocalGroups("wheel:x:10:root\n+nisgroup:::\ndc-sbx-contractors:x:2501:ent-hank\nbroken\nwheel:x:11:\n")
+	if len(groups) != 2 || groups["wheel"] != 10 || groups["dc-sbx-contractors"] != 2501 {
+		t.Fatalf("parseLocalGroups = %v", groups)
+	}
+}
+
+// GAP-0669: the gateway's macOS account stamp lists each local account's
+// uid, GeneratedUID, home and primary group, so an account deleted and
+// created again under the same name and uid is seen as another account.
+func TestParseDSCLAccountRecords(t *testing.T) {
+	records := mergeDSCLAccountRecords(
+		parseDSCLAttribute("_www 70\nalice   501\nnobody -2\nbad 5 6\n\n"),
+		parseDSCLAttribute("alice  8C1F-AAAA\n_www FFFFEEEE-0046\nnobody\n"),
+		parseDSCLAttribute("alice  /Users/alice smith\n_www\t/Library/WebServer\n"),
+		parseDSCLAttribute("alice 20\n_www 70\nnobody -2\n"),
+	)
+	want := map[string]LocalAccountRecord{
+		"alice":  {UID: 501, RecordID: "8C1F-AAAA", Home: "/Users/alice smith", PrimaryGID: "20"},
+		"_www":   {UID: 70, RecordID: "FFFFEEEE-0046", Home: "/Library/WebServer", PrimaryGID: "70"},
+		"nobody": {UID: -2, PrimaryGID: "-2"},
+	}
+	if len(records) != len(want) {
+		t.Fatalf("records = %+v, want %+v", records, want)
+	}
+	for name, record := range want {
+		if records[name] != record {
+			t.Fatalf("records[%q] = %+v, want %+v", name, records[name], record)
+		}
+	}
 }
 
 // macOS: the enumerator assumed every Mac may be bound to a directory, so a

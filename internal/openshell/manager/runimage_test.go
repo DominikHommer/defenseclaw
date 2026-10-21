@@ -276,9 +276,8 @@ func TestCreateOnVMRefusesAnImageThatCannotStartInAMicroVM(t *testing.T) {
 		{"cannot resolve localhost", problem, "", "OpenCode cannot start in an OpenShell MicroVM (the vm driver this gateway runs)",
 			problem + ". A gateway on the docker driver (Linux), whose sandboxes get Docker's /etc/hosts, runs OpenCode; to check the image again: " + recheck},
 		{"settled nothing", "", inconclusive, unchecked,
-			"was run with a MicroVM's name resolution, which settled nothing: " + inconclusive + "; check it again: " + recheck + " (a run without --no-build checks it first, too)"},
-		{"never probed", "", "", unchecked, "was not checked with a MicroVM's name resolution (OpenShell 0.1.1 gives a MicroVM an empty /etc/hosts); " +
-			"check it: " + recheck},
+			"run " + recheck + " to check it again (a run without --no-build checks it first, too); its image "},
+		{"never probed", "", "", unchecked, "run " + recheck + " to check it; its image "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newVMEnv(t, nil)
@@ -287,7 +286,9 @@ func TestCreateOnVMRefusesAnImageThatCannotStartInAMicroVM(t *testing.T) {
 			e.images.rec.MicroVMVerified, e.images.rec.MicroVMProblem, e.images.rec.MicroVMInconclusive = false, tc.problem, tc.inconclusive
 			_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-no", Harness: "opencode", Copy: true})
 			apiErr := wantCode(t, err, sandboxapi.CodeImageUnavailable)
-			if apiErr.Message != tc.message || !strings.Contains(apiErr.Detail, tc.detail) || !strings.Contains(apiErr.Detail, recheck) {
+			// Unless the harness cannot start at all, the command that checks the image again comes first (GAP-0274).
+			if apiErr.Message != tc.message || !strings.Contains(apiErr.Detail, tc.detail) || !strings.Contains(apiErr.Detail, recheck) ||
+				(tc.problem == "" && !strings.HasPrefix(apiErr.Detail, "run "+recheck)) {
 				t.Fatalf("refusal = %+v", apiErr)
 			}
 			if n := e.fake.Calls(openshelltest.MethodCreateSandbox); n != 0 || len(e.images.runCalls()) != 0 {
@@ -590,15 +591,34 @@ func TestStartOnVMComparesTheBakedRunConfig(t *testing.T) {
 	}
 }
 
+// GAP-0179: the first start after the person withdraws a personal MCP
+// server that a MicroVM sandbox's image was baked with is refused, and the
+// record still names what the image carries until a start succeeds.
+func TestStartOnVMRefusesAWithdrawnImportedMCPServer(t *testing.T) {
+	e := newVMEnv(t, nil)
+	e.m.opts.MCP = &fakeMCP{entries: []config.MCPServerEntry{{Name: "personal", Command: "npx"}}}
+	e.create(sandboxapi.CreateRequest{Name: "vm-mcp", Copy: true})
+	if rec := readRecord(t, e, "vm-mcp"); rec.MCP == nil || !slices.Contains(rec.MCP.Imported, "personal") {
+		t.Fatalf("create did not import the personal server: %+v", rec.MCP)
+	}
+	e.stopBox("vm-mcp")
+	withdrawn := &fakeMCP{}
+	e.m.opts.MCP = withdrawn
+	for i := range 2 {
+		_, err := e.m.Start(t.Context(), "vm-mcp", sandboxapi.StartRequest{})
+		if apiErr := wantCode(t, err, sandboxapi.CodePolicyViolation); !strings.Contains(apiErr.Message, "baked into its image") {
+			t.Fatalf("start %d after the server was withdrawn = %+v", i+1, apiErr)
+		}
+	}
+	if len(withdrawn.calls) != 2 {
+		t.Fatalf("each start reads the current MCP servers: %d reads", len(withdrawn.calls))
+	}
+}
+
 // On docker a start that rewrites the run files records their new digests,
-// so the session's workload check compares with what was just written
-// (here with the check turned on, as it will be for docker).
+// so the session's workload check compares with what was just written.
 func TestStartOnDockerRecordsTheRewrittenDigests(t *testing.T) {
 	e := newEnv(t, nil)
-	checked, _ := openshell.LookupDriver("docker")
-	checked.SkipWorkloadCheck = false
-	e.gw.Driver = checked
-	e.fake.HandleExec(e.workloadChecks(nil, nil))
 	e.create(sandboxapi.CreateRequest{Name: "dk-yolo", Yolo: true})
 	before := readRecord(t, e, "dk-yolo")
 	e.stopBox("dk-yolo")
@@ -642,7 +662,7 @@ func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
 	disk(e)
 	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-full", Copy: true})
 	if !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) || !strings.Contains(err.Error(), "not enough free disk space for this sandbox's first start: "+
-		"the MicroVM driver prepares a disk of about 5.0 GiB from its image in "+cache+", where 2.0 GiB is free and at least 6.0 GiB is needed") {
+		"the MicroVM driver's first start uses about 11.0 GiB while preparing a disk from its image in "+cache+", where 2.0 GiB is free and at least 12.0 GiB is needed") {
 		t.Fatalf("create on a full disk = %v", err)
 	}
 	if _, err := e.m.Get(t.Context(), "vm-full"); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
@@ -660,6 +680,16 @@ func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
 		t.Fatalf("Explain of a prepared posture = %+v, %v", ex, err)
 	}
 	e.create(sandboxapi.CreateRequest{Name: "vm-cached", Copy: true, Project: e.otherProject("other")})
+	// After an in-place upgrade the gateway prepares its own disk: the one
+	// OpenShell 0.1.1 prepared counts for neither.
+	e.fake.SetRelease(openshell.InstallerVersion)
+	e.gw.Version = openshell.InstallerVersion
+	if ex, err := e.m.Explain(t.Context(), sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true, Project: e.project}); err != nil || !ex.VMFirstBoot {
+		t.Fatalf("Explain on the upgraded gateway = %+v, %v", ex, err)
+	}
+	if _, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-upgraded", Copy: true, Project: e.otherProject("upgraded")}); !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) {
+		t.Fatalf("create on the upgraded gateway's full disk = %v", err)
+	}
 
 	d := newEnv(t, nil)
 	disk(d)

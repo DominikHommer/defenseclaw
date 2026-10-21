@@ -226,7 +226,7 @@ class BootstrapEnvTests(unittest.TestCase):
         cfg.gateway.port = 18789
         seen_ports = []
 
-        def fake_setup(app, save_config):
+        def fake_setup(app, save_config, workspace_dir=None):
             seen_ports.append(app.cfg.gateway.port)
             return True, []
 
@@ -289,7 +289,7 @@ class BootstrapEnvTests(unittest.TestCase):
         os.makedirs(hooks_dir)
         with open(os.path.join(hooks_dir, "defenseclaw.json"), "w", encoding="utf-8") as fh:
             fh.write("{}\n")
-        with patch("defenseclaw.bootstrap.connector_home", return_value=os.path.join(self._tmp.name, ".kiro")):
+        with patch("defenseclaw.connector_paths.connector_home", return_value=os.path.join(self._tmp.name, ".kiro")):
             found = _connector_readiness(cfg, "kiro")
             os.remove(os.path.join(hooks_dir, "defenseclaw.json"))
             missing = _connector_readiness(cfg, "kiro")
@@ -905,23 +905,6 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         self.assertEqual(len(recorder), 1, "exactly one subprocess invocation expected on drift")
         self.assertEqual(recorder[0][1], "restart", "must call `defenseclaw-gateway restart`, not `start`")
 
-    def test_hook_fail_mode_change_restarts_without_roster_drift(self):
-        # GAP-1551: quickstart --fail-mode open on a running gateway with the
-        # same roster must restart it so the hooks are rewritten fail-open.
-        from defenseclaw.bootstrap import _start_gateway_structured
-
-        self.cfg.guardrail.connector = "openclaw"
-        self._write_pid_file()
-        self._write_active_connector("openclaw")
-
-        recorder: list = []
-        with self._patch_subprocess(recorder, returncode=0):
-            result = _start_gateway_structured(self.cfg, hook_fail_mode_changed=True)
-
-        self.assertEqual(result.status, "pass")
-        self.assertEqual(result.detail, "restarted to apply the new hook fail mode")
-        self.assertEqual([cmd[1] for cmd in recorder], ["restart"])
-
     def test_drift_restart_failure_surfaces_warn_with_remediation(self):
         from defenseclaw.bootstrap import _start_gateway_structured
 
@@ -1250,11 +1233,13 @@ def test_devin_readiness_uses_pinned_workspace_hook_not_ambient_home(
     hooks.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(Path, "home", lambda: ambient)
 
-    cfg = SimpleNamespace(claw=SimpleNamespace(workspace_dir=str(workspace)))
+    from defenseclaw.config import default_config
+
+    cfg = default_config()
+    cfg.claw.workspace_dir = str(workspace)
     result = _connector_readiness(cfg, "devin")
 
     assert result.status == "pass"
-
 
 
 def test_devin_readiness_without_workspace_checks_user_global_hooks(
@@ -1262,11 +1247,14 @@ def test_devin_readiness_without_workspace_checks_user_global_hooks(
 ) -> None:
     """MAC-U3-08: init told every user to pin a Devin workspace, which
     re-scopes all connectors; Devin is guarded by its user-global hooks."""
-    from defenseclaw import bootstrap
+    from defenseclaw import connector_paths
 
     config = tmp_path / "config.json"
-    monkeypatch.setattr(bootstrap, "devin_user_config_path", lambda: str(config))
-    cfg = SimpleNamespace(claw=SimpleNamespace(workspace_dir=""))
+    monkeypatch.setattr(connector_paths, "devin_user_config_path", lambda: str(config))
+    from defenseclaw.config import default_config
+
+    cfg = default_config()
+    cfg.claw.workspace_dir = ""
 
     config.write_text('{"theme": "dark"}', encoding="utf-8")
     missing = _connector_readiness(cfg, "devin")
@@ -1585,3 +1573,22 @@ def test_init_waits_past_the_windows_gateway_readiness_wait():
         src = inspect.getsource(fn)
         assert "timeout=_GATEWAY_START_TIMEOUT" in src
         assert "timeout=15" not in src and "timeout=30" not in src
+
+
+
+def test_agent_installation_not_inferred_from_generated_codex_config(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from defenseclaw import bootstrap
+
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    (tmp_path / "config.toml").write_text("# generated hook config")
+    monkeypatch.setattr(
+        bootstrap.agent_discovery,
+        "discover_agents",
+        lambda **kwargs: SimpleNamespace(agents={"codex": SimpleNamespace(installed=False)}),
+    )
+    step = bootstrap._agent_installation_readiness(cfg, "codex")
+    assert step.status == "warn"
+    assert "not installed" in step.detail
+    assert "setup codex" in step.next_command

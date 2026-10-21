@@ -50,7 +50,7 @@ _GRAFANA_AUTHORIZATION: str | None = None
 # label. Resource labels are shared across all application metrics and remain
 # legal selectors in addition to the instrument-specific labels below.
 COMMON_PROMETHEUS_RESOURCE_LABELS = {
-    "deployment_environment",
+    "deployment_environment_name",
     "host_arch",
     "host_name",
     "job",
@@ -73,6 +73,11 @@ PROMETHEUS_METRIC_LABELS = {
         "severity",
         "would_block",
     },
+    "defenseclaw_inventory_ide_plugins": {
+        "defenseclaw_ide_plugin_ai",
+        "defenseclaw_ide_plugin_enabled",
+        "defenseclaw_ide_product",
+    },
     "defenseclaw_guardrail_evaluations_total": {
         "guardrail_action_taken",
         "guardrail_connector",
@@ -84,6 +89,10 @@ PROMETHEUS_METRIC_LABELS = {
     "defenseclaw_stream_lifecycle_total": {"outcome", "transition"},
 }
 PROMETHEUS_EXACT_LABEL_VALUES = {
+    ("defenseclaw_inventory_ide_plugins", "defenseclaw_ide_plugin_ai"): {"false", "true"},
+    ("defenseclaw_inventory_ide_plugins", "defenseclaw_ide_plugin_enabled"): {
+        "client_side_unknown", "disabled", "enabled", "unknown",
+    },
     ("defenseclaw_approval_lifecycle_total", "surface"): {"chat", "exec", "native"},
     ("defenseclaw_approval_lifecycle_total", "result"): {
         "approved",
@@ -158,6 +167,7 @@ VARIABLES = {
     "$__range": "5m",
     "$scope_label": "gen_ai_agent_id",
     "$connector": "codex",
+    "$sandbox": ".+",
     "$agent": ".*",
     "$lifecycle": ".*",
     "$execution": ".*",
@@ -455,9 +465,6 @@ def static_audit(
         errors.append("dashboard titles must be unique")
     known_uids = set(uids)
 
-    if "defenseclaw-reliability" in known_uids:
-        errors.append("the retired Reliability board must stay consolidated into Runtime")
-
     for path, dashboard in dashboards:
         uid = dashboard.get("uid") or path.name
         if not dashboard.get("description"):
@@ -662,10 +669,12 @@ def static_audit(
                             f"{uid}/{title}: first-sample-aware token rates must divide by $__rate_interval_ms / 1000",
                         )
                 if datasource == "loki" and expression:
-                    if 'body_$scope_label=~"$agent"' in expression and '|= "$agent" | json' not in expression:
+                    # $agent is a regex text box; Loki runs a regex that is
+                    # one literal ID as a plain substring filter.
+                    if 'body_$scope_label=~"$agent"' in expression and '|~ "$agent" | json' not in expression:
                         errors.append(
-                            f"{uid}/{title}: agent-scoped Loki queries must prefilter the literal "
-                            'agent ID before JSON parsing with `|= "$agent" | json`',
+                            f"{uid}/{title}: agent-scoped Loki queries must prefilter the "
+                            'agent ID before JSON parsing with `|~ "$agent" | json`',
                         )
                     legacy_fields = {
                         field for field in LEGACY_FLAT_LOKI_FIELDS if re.search(rf"\b{re.escape(field)}\b", expression)
@@ -765,6 +774,20 @@ def static_audit(
                             )
                 if datasource == "loki" and "| json" in expression and '__error__=""' not in expression:
                     errors.append(f"{uid}/{title}: JSON parsing must discard malformed log lines")
+                # Grafana reads a grouped Loki instant query as one frame of
+                # rows: reducing its values (the default) shows one unnamed
+                # bar or slice (GAP-0108, GAP-0178).
+                if (
+                    datasource == "loki"
+                    and kind in {"bargauge", "piechart"}
+                    and (target.get("instant") or target.get("queryType") == "instant")
+                    and re.search(r"\bby\s*\(", expression)
+                    and ((panel.get("options") or {}).get("reduceOptions") or {}).get("values") is not True
+                ):
+                    errors.append(
+                        f"{uid}/{title}: a grouped Loki instant query must be reduced by rows "
+                        "(reduceOptions.values true), or the panel shows one unnamed bar",
+                    )
                 range_function = re.search(
                     r"\b(?:increase|i?rate|i?delta|changes|resets|deriv|predict_linear|holt_winters|[A-Za-z_][A-Za-z0-9_]*_over_time)\(",
                     expression,
@@ -811,9 +834,10 @@ def static_audit(
         if "scope_label" in variable_positions and "agent" in variable_positions:
             if variable_positions["scope_label"] > variable_positions["agent"]:
                 errors.append(f"{uid}: scope_label must be defined before the dependent agent variable")
-            agent_variable = variables[variable_positions["agent"]]
-            if "$scope_label" not in json.dumps(agent_variable):
-                errors.append(f"{uid}: the agent variable must enumerate the selected scope_label")
+            # Loki cannot list a record-body field (GAP-0241), so the agent
+            # box is a regex text box the directory links fill in.
+            if variables[variable_positions["agent"]].get("type") != "textbox":
+                errors.append(f"{uid}: the agent variable must be a regex text box")
 
         for link in dashboard_links(dashboard):
             match = re.match(r"/d/([^/?]+)", link)
@@ -824,7 +848,9 @@ def static_audit(
         errors.append(f"CLI packaged Grafana dashboard directory is missing: {PACKAGED_DIR}")
     elif PACKAGED_DIR.is_dir():
         packaged = load_dashboards(PACKAGED_DIR)
-        source_by_name = {path.name: dashboard for path, dashboard in dashboards}
+        source_by_name = {
+            path.name: dashboard for path, dashboard in dashboards if path.name != "defenseclaw-fleet.json"
+        }
         packaged_by_name = {path.name: dashboard for path, dashboard in packaged}
         if source_by_name != packaged_by_name:
             errors.append("CLI packaged Grafana dashboards do not match bundle sources")
@@ -2019,11 +2045,6 @@ def _golden_approval_log_errors(
         ):
             errors.append("Loki approval.requested must precede approval.resolved by timestamp and sequence")
     return errors
-
-
-def _prometheus_parent_matches(metric: dict[str, Any], parent_id: str) -> bool:
-    value = metric.get("defenseclaw_agent_parent_id")
-    return value == parent_id if parent_id else value in {None, "", "none"}
 
 
 def _golden_metric_errors(

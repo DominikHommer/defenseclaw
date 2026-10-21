@@ -13,6 +13,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -36,7 +38,13 @@ import (
 
 // newUnixLifecycleEnv is a seam for CLI tests.
 var newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
-	return enterpriseunix.NewEnv(goos, appVersion)
+	env, err := enterpriseunix.NewEnv(goos, appVersion)
+	if env != nil {
+		// Every changing run verifies signed bundles (the apply trigger
+		// processes the bundle inbox).
+		env.BundleDigester = bundleDigester
+	}
+	return env, err
 }
 
 func platformGOOS(platform string) string {
@@ -89,20 +97,22 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 		defer stop()
 	}
 	result := enterpriseunix.Run(ctx, env, enterpriseunix.Options{
-		Action:               action,
-		PayloadDir:           opts.payload,
-		FromPackage:          opts.fromPackage,
-		ConfigFile:           opts.config,
-		NoStart:              opts.noStart,
-		AdoptExisting:        opts.adoptExisting,
-		AllowDowngrade:       opts.allowDowngrade,
-		Purge:                opts.purge,
-		RemoveServiceAccount: opts.removeServiceAccount,
-		KeepState:            opts.keepState,
-		KeepServiceAccount:   opts.keepServiceAccount,
-		ProductVersion:       opts.productVersion,
-		Reason:               opts.reason,
+		Action:             action,
+		PayloadDir:         opts.payload,
+		FromPackage:        opts.fromPackage,
+		ConfigFile:         opts.config,
+		NoStart:            opts.noStart,
+		AdoptExisting:      opts.adoptExisting,
+		AllowDowngrade:     opts.allowDowngrade,
+		Purge:              opts.purge,
+		KeepState:          opts.keepState,
+		KeepServiceAccount: opts.keepServiceAccount,
+		ProductVersion:     opts.productVersion,
+		Reason:             opts.reason,
 	})
+	if lifecycleResultHasError(result, "not_root") {
+		reportManagedCommandRefusal("enterprise "+platform+" "+action, "not_root")
+	}
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}
@@ -160,8 +170,11 @@ func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairComman
 	}
 	message := fmt.Sprintf("%s failed; see the %s listed above", result.Action, countNoun(len(result.Errors), "problem"))
 	// A status that found another run in progress checked nothing, so
-	// repair is not the next step (GAP-2246).
+	// repair is not the next step (GAP-2246). Nor is it for a gateway whose
+	// config the installed binary refuses: repair applies the same config
+	// again, and the config_refused error above names the fix.
 	if repairCommand != "" && result.Installed && !lifecycleResultHasError(result, "lifecycle_busy") &&
+		!lifecycleResultHasError(result, "config_refused") && !repairCannotFixProblems(result) &&
 		(result.Action == enterpriseunix.ActionVerify || result.Action == enterpriseunix.ActionStatus) {
 		target := "them"
 		if len(result.Errors) == 1 {
@@ -174,6 +187,7 @@ func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairComman
 
 func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON bool) error {
 	if asJSON {
+		result.PreserveNotRootDeploymentState = secureClientHost()
 		encoder := json.NewEncoder(w)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(result)
@@ -208,6 +222,9 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	for _, change := range result.Changes {
 		fmt.Fprintf(w, "  - %s\n", change)
 	}
+	if result.Action == enterpriseunix.ActionRotateCredentials && result.Noop && result.NoopReason == enterpriseunix.NoopNoCredentials {
+		fmt.Fprintln(w, "  no enrolled user holds a DefenseClaw credential yet: hooks use the hook socket, and the guardian creates the per-user key when it first gives a user one (agent telemetry, an in-agent plugin or ACP)")
+	}
 	if result.Action == enterpriseunix.ActionRepair && result.OK {
 		if len(result.Changes) == 0 {
 			fmt.Fprintln(w, "  nothing to repair")
@@ -231,6 +248,15 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		for _, service := range result.Services {
 			fmt.Fprintf(w, "  %-46s %s\n", service.Name, service.State)
 		}
+		enterprisestatus.WriteDestinations(w, result.Destinations)
+	}
+	// The policy the lifecycle left in place (absent under Secure Client):
+	// an administrator reading the text must see the generation and digest.
+	if result.Policy != nil {
+		fmt.Fprintf(w, "  %s\n", result.PolicyLine())
+	}
+	if result.Bundle != nil && result.Bundle.SessionsRestartRequired != nil {
+		enterprisestatus.WriteSessionEntries(w, *result.Bundle.SessionsRestartRequired)
 	}
 	// A busy status checked nothing else, but still reports the recorded
 	// deployment's version, as the docs say (GAP-2409).
@@ -248,6 +274,28 @@ func lifecycleResultHasWarning(result *enterprisestatus.Result, code string) boo
 		}
 	}
 	return false
+}
+
+// repairCannotFixProblems reports whether every error of result is one
+// repair does not fix: a config problem (no connector enabled, a rejected
+// config.yaml), whose line says to change config.yaml and run ensure
+// (GAP-0265), or a file the administrator owns.
+func repairCannotFixProblems(result *enterprisestatus.Result) bool {
+	configProblems := map[string]bool{}
+	for _, warning := range result.Warnings {
+		if warning.Code == "no_connectors_enabled" || warning.Code == "config_rejected" {
+			configProblems[warning.Message] = true
+		}
+	}
+	for _, e := range result.Errors {
+		// A file the administrator owns (ownership: verify_only) is fixed by
+		// deploying the export the problem names; repair never writes it
+		// (GAP-0918).
+		if !configProblems[e.Message] && !strings.Contains(e.Message, "missing_defenseclaw_hooks:") {
+			return false
+		}
+	}
+	return len(result.Errors) > 0
 }
 
 // lifecycleResultHasError reports whether result carries an error with code.
@@ -273,71 +321,128 @@ func lifecycleErrorSummary(result *enterprisestatus.Result) string {
 	return result.Action + " failed: " + joinMessages(parts)
 }
 
+func init() {
+	// With --json every Linux and macOS secret verb prints one JSON
+	// document on stdout, a flag error too (mgmt-agent-api GAP-0031).
+	enterpriseSecretArgumentRefusal = func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error {
+		return reportUnixSecretFailure(cmd, action, opts, err, opts.json || secretArgsRequestJSON(secretRawArgs()))
+	}
+}
+
+// reportUnixSecretFailure prints the secret-result failure document of a
+// secret command that failed before the lifecycle ran.
+func reportUnixSecretFailure(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error, asJSON bool) error {
+	return reportSecretFailure(cmd, action, opts, err, asJSON, enterprisestatus.UnixExitFailure, enterprisestatus.UnixExitInvalidArgs)
+}
+
+// runEnterpriseSecret implements `enterprise secret` on Linux and macOS.
+// set and remove print lifecycle result v2 once the lifecycle ran; a
+// failure before it (argument, flag, privilege, value or read errors) prints
+// the secret-result failure document with --json, never an empty stdout:
+// an agent stopped while secret set read its stdin got only "credential is
+// empty" on stderr (mgmt-agent-api GAP-0031).
 func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions) error {
+	// The caller is taken before stdin is read: a parent that exits while
+	// this command reads the value, or waits for the lock, stores nothing.
+	caller := secretCallerPID()
+	if action == "status" {
+		if err := runUnixSecretStatus(cmd, opts); err != nil {
+			return reportUnixSecretFailure(cmd, action, opts, err, opts.json)
+		}
+		return nil
+	}
+	result, existed, err := changeUnixSecret(cmd, action, opts, caller)
+	if err != nil {
+		return reportUnixSecretFailure(cmd, action, opts, err, opts.json)
+	}
+	if !opts.json {
+		result = describeSecretChange(result, action, opts.name, existed)
+	}
+	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
+		return err
+	}
+	return lifecycleFailure(result, opts.json, "")
+}
+
+func runUnixSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) error {
 	goos := enterpriseunix.CurrentGOOS()
 	env, err := newUnixLifecycleEnv(goos)
 	if err != nil {
 		return withExitCode(err, enterprisestatus.UnixExitFailure)
 	}
-	if action != "status" && env.Geteuid() != 0 {
-		return withExitCode(errors.New("run this command as root"), enterprisestatus.UnixExitFailure)
+	states, err := env.SecretStatus()
+	if errors.Is(err, fs.ErrPermission) {
+		// The credentials directory is root-only (or root and the service
+		// account): a standard account cannot list it.
+		return secretFailed("not_root", enterprisestatus.UnixExitFailure, fmt.Errorf("listing the protected credentials requires administrator rights; run: sudo %s enterprise secret status",
+			filepath.Join(env.Layout.BinDir, "defenseclaw-gateway")))
+	}
+	if err != nil {
+		return withExitCode(err, enterprisestatus.UnixExitFailure)
+	}
+	if opts.json {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"schema_version": 1, "secrets": states})
+	}
+	if len(states) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "no protected credentials")
+	}
+	for _, state := range states {
+		fmt.Fprintf(cmd.OutOrStdout(), "%-32s sha256:%s… mode %s modified %s\n", state.Name, state.SHA256Prefix, state.Mode, state.ModifiedAt)
+	}
+	return nil
+}
+
+// changeUnixSecret checks the arguments, reads the value and runs the
+// write or removal and the ensure under one lifecycle lock. An error is a
+// failure before the lifecycle ran; the result can still be a failure.
+func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, caller int) (*enterprisestatus.Result, bool, error) {
+	goos := enterpriseunix.CurrentGOOS()
+	env, err := newUnixLifecycleEnv(goos)
+	if err != nil {
+		return nil, false, withExitCode(err, enterprisestatus.UnixExitFailure)
+	}
+	if env.Geteuid() != 0 {
+		return nil, false, secretFailed("not_root", enterprisestatus.UnixExitFailure, errors.New("run this command as root"))
 	}
 	if err := checkLockWait(cmd, opts.lockWait); err != nil {
-		return err
+		return nil, false, err
 	}
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait
-	}
-	switch action {
-	case "status":
-		states, err := env.SecretStatus()
-		if errors.Is(err, fs.ErrPermission) {
-			// The credentials directory is root-only (or root and the
-			// service account): a standard account cannot list it.
-			return withExitCode(fmt.Errorf("listing the protected credentials requires administrator rights; run: sudo %s enterprise secret status",
-				filepath.Join(env.Layout.BinDir, "defenseclaw-gateway")), enterprisestatus.UnixExitFailure)
-		}
-		if err != nil {
-			return withExitCode(err, enterprisestatus.UnixExitFailure)
-		}
-		if opts.json {
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"schema_version": 1, "secrets": states})
-		}
-		if len(states) == 0 {
-			fmt.Fprintln(cmd.OutOrStdout(), "no protected credentials")
-		}
-		for _, state := range states {
-			fmt.Fprintf(cmd.OutOrStdout(), "%-32s sha256:%s… mode %s modified %s\n", state.Name, state.SHA256Prefix, state.Mode, state.ModifiedAt)
-		}
-		return nil
 	}
 	// Argument errors are refused like a malformed flag, with the usage line
 	// and exit 2, before the value is read or the lifecycle lock is taken
 	// (GAP-2146, GAP-2147).
 	if !managed.ValidCredentialName(opts.name) {
-		return lifecycleFlagError(cmd, fmt.Errorf("--name takes lowercase letters, digits and dashes, not %q", opts.name))
+		return nil, false, lifecycleFlagError(cmd, fmt.Errorf("--name takes lowercase letters, digits and dashes, not %q", opts.name))
 	}
 	if action == "set" && opts.fromStdin == (opts.fromFile != "") {
-		return lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))
+		return nil, false, lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))
 	}
 	var mutate func(context.Context) error
 	existed := false
 	switch action {
 	case "set":
-		var source io.Reader = cmd.InOrStdin()
+		var value []byte
 		if opts.fromFile != "" {
+			if err := enterpriseunix.TrustedSecretSource(opts.fromFile); err != nil {
+				return nil, false, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+			}
 			file, err := os.Open(opts.fromFile)
 			if err != nil {
-				return withExitCode(err, enterprisestatus.UnixExitFailure)
+				return nil, false, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure, err)
 			}
 			defer file.Close()
-			source = file
-		}
-		value, err := enterpriseunix.ReadSecretValue(source)
-		if err != nil {
-			return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+			if value, err = enterpriseunix.ReadSecretValue(file); err != nil {
+				return nil, false, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+			}
+		} else if value, err = readUnixSecretStdin(cmd.InOrStdin(), caller); err != nil {
+			return nil, false, err
 		}
 		mutate = func(ctx context.Context) error {
+			if err := secretCallerGone(caller, secretCallerPID()); err != nil {
+				return err
+			}
 			// An identical value is not rewritten, so the output can say
 			// the credential already holds it (GAP-2373).
 			stored, readErr := os.ReadFile(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
@@ -356,13 +461,116 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	// Write and apply under one lifecycle lock. The apply watcher the write
 	// wakes then finds the change already applied instead of racing it.
 	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret", Mutate: mutate})
-	if !opts.json {
-		result = describeSecretChange(result, action, opts.name, existed)
+	return result, existed, nil
+}
+
+// codeSecretChangeFailed is the code of a write or removal that did not
+// happen, as the lifecycle reports a failed protected-state change.
+const codeSecretChangeFailed = "change_failed"
+
+// secretCallerPID is the parent of this process. A seam for tests.
+var secretCallerPID = os.Getppid
+
+// secretStdinWait bounds how long secret set waits for its value on stdin.
+// A management agent writes the value and closes stdin right after it
+// starts the command; a sender that stopped (SIGSTOP) or that left stdin
+// open without writing hung the command forever (mgmt-agent-api GAP-0040).
+var secretStdinWait = 60 * time.Second
+
+// secretCallerSettle is how long secret set watches its parent after stdin
+// ended without a complete line. A process that exits closes its end of the
+// pipe before the kernel makes init the parent of its children (macOS shows
+// it every time), so the end of stdin arrives while the parent still looks
+// alive (mgmt-agent-api GAP-0040). A value ended by a newline does not wait.
+var secretCallerSettle = time.Second
+
+// secretCallerPoll is how often secret set looks at its parent while it
+// waits for the value or for a parent that exited to show.
+const secretCallerPoll = 10 * time.Millisecond
+
+// errSecretSenderExited is the change_failed message of a secret set whose
+// caller exited before it sent the whole value.
+var errSecretSenderExited = errors.New("the process that started this command exited before it sent the credential, so the credential was not stored; run the command again")
+
+// readUnixSecretStdin reads the value of secret set --from-stdin. It is
+// change_failed (exit 1: nothing stored, the agent sends the value again in
+// a new run) when the sender went away before it sent a complete value:
+// stdin ended without a complete line, or failed, and the parent exited;
+// the parent exited while stdin stayed open; or no value ended within
+// secretStdinWait. A value that ended (with or without a newline) while the
+// parent stayed is checked as given: empty, multi-line or oversized is
+// invalid_arguments (exit 2), as is a read error.
+func readUnixSecretStdin(source io.Reader, caller int) ([]byte, error) {
+	type delivery struct {
+		data []byte
+		err  error
 	}
-	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
-		return err
+	done := make(chan delivery, 1)
+	go func() {
+		// Left blocked on a stdin that never ends: the command exits
+		// after it reports the timeout.
+		data, err := enterpriseunix.ReadSecretBytes(source)
+		done <- delivery{data, err}
+	}()
+	deadline := time.NewTimer(secretStdinWait)
+	defer deadline.Stop()
+	poll := time.NewTicker(secretCallerPoll)
+	defer poll.Stop()
+	var got delivery
+	for waiting := true; waiting; {
+		select {
+		case got = <-done:
+			waiting = false
+		case <-poll.C:
+			// A process the agent started can hold stdin open after the
+			// agent exited.
+			if secretCallerPID() != caller {
+				return nil, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure, errSecretSenderExited)
+			}
+		case <-deadline.C:
+			return nil, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure,
+				fmt.Errorf("no credential arrived on stdin within %s (the process that started this command stopped sending and did not close stdin), so the credential was not stored; run the command again, write the value and close stdin", secretStdinWait))
+		}
 	}
-	return lifecycleFailure(result, opts.json, "")
+	if got.err != nil || !bytes.HasSuffix(got.data, []byte("\n")) {
+		if secretCallerExitsWithin(caller, secretCallerSettle) {
+			return nil, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure, errSecretSenderExited)
+		}
+	}
+	if got.err != nil {
+		return nil, withExitCode(got.err, enterprisestatus.UnixExitInvalidArgs)
+	}
+	value, err := enterpriseunix.ParseSecretValue(got.data)
+	if err != nil {
+		return nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+	}
+	return value, nil
+}
+
+// secretCallerExitsWithin reports whether the parent of this process stops
+// being caller within settle.
+func secretCallerExitsWithin(caller int, settle time.Duration) bool {
+	deadline := time.Now().Add(settle)
+	for {
+		if secretCallerPID() != caller {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(secretCallerPoll)
+	}
+}
+
+// secretCallerGone refuses to store a credential once the process that ran
+// `secret set` has exited while the command waited for the lifecycle lock:
+// an MDM agent that killed its wrapper reported the run as failed, and the
+// orphaned command stored the key minutes later anyway (GAP-0632).
+func secretCallerGone(started, now int) error {
+	if started == now {
+		return nil
+	}
+	return errors.New("the process that started this command exited while it waited for the lifecycle lock, so the credential was not stored; run the command again")
 }
 
 // describeSecretChange labels a secret set or remove result with the command

@@ -237,25 +237,11 @@ export interface AllowCard {
   id: string;
   title: string;
   description: string;
-  /** Tool name regex added to tool_suppressions. */
-  toolPattern?: string;
-  /** Finding IDs the tool suppression silences. */
-  suppressFindings?: string[];
   /** Domains added to firewall.allowed_domains. */
   domains?: string[];
-  /** First-party allow-list entries (target_name globs). */
-  firstParty?: string[];
-  cookbookHref?: string;
 }
 
 export const ALLOW_CARDS: AllowCard[] = [
-  {
-    id: 'first_party_plugins',
-    title: 'First-party plugins (your org\u2019s code)',
-    description:
-      'Skills and MCP servers shipped by your organization should never get blocked. Add the org/* glob below; matches bypass admission scans.',
-    firstParty: ['cisco-ai-defense/*'],
-  },
   {
     id: 'internal_domains',
     title: 'Internal domains (corp network)',
@@ -337,17 +323,6 @@ export const SINK_CARDS: SinkCard[] = [
       'Write structured JSON events to stdout. Useful for container deployments where journald or a log shipper picks them up.',
   },
   {
-    id: 'splunk',
-    title: 'Splunk HEC',
-    description:
-      'Forward block/alert events to Splunk\u2019s HTTP Event Collector. Token is read from the env var you provide \u2014 never hardcoded.',
-    type: 'generic',
-    configFields: [
-      { key: 'url', label: 'HEC URL', placeholder: 'https://splunk.example.com:8088/services/collector/event' },
-      { key: 'secret_env', label: 'Token env var', placeholder: 'SPLUNK_HEC_TOKEN' },
-    ],
-  },
-  {
     id: 'slack',
     title: 'Slack webhook',
     description:
@@ -383,9 +358,6 @@ export interface Answers {
   posture: PostureId;
   block: Set<string>;
   allow: Set<string>;
-  /** Free-form first-party allow-list globs the user added beyond the
-   *  defaults in `first_party_plugins`. One per line in the input. */
-  firstPartyExtra: string[];
   /** Free-form additional firewall allow domains. */
   domainsExtra: string[];
   response: ResponseId;
@@ -405,7 +377,6 @@ export function defaultAnswers(): Answers {
     posture: 'default',
     block: new Set<string>(),
     allow: new Set<string>(),
-    firstPartyExtra: [],
     domainsExtra: [],
     response: 'alert',
     sinks,
@@ -419,7 +390,6 @@ export interface SerializedAnswers {
   posture: PostureId;
   block: string[];
   allow: string[];
-  firstPartyExtra: string[];
   domainsExtra: string[];
   response: ResponseId;
   sinks: Record<string, SinkAnswer>;
@@ -430,7 +400,6 @@ export function serializeAnswers(a: Answers): SerializedAnswers {
     posture: a.posture,
     block: Array.from(a.block),
     allow: Array.from(a.allow),
-    firstPartyExtra: [...a.firstPartyExtra],
     domainsExtra: [...a.domainsExtra],
     response: a.response,
     sinks: { ...a.sinks },
@@ -444,8 +413,8 @@ export function deserializeAnswers(raw: unknown): Answers {
   return {
     posture: (r.posture ?? base.posture) as PostureId,
     block: new Set<string>(Array.isArray(r.block) ? r.block : []),
-    allow: new Set<string>(Array.isArray(r.allow) ? r.allow : []),
-    firstPartyExtra: Array.isArray(r.firstPartyExtra) ? r.firstPartyExtra : [],
+    allow: new Set<string>(Array.isArray(r.allow)
+      ? r.allow.filter((id) => ALLOW_CARDS.some((card) => card.id === id)) : []),
     domainsExtra: Array.isArray(r.domainsExtra) ? r.domainsExtra : [],
     response: (r.response ?? base.response) as ResponseId,
     sinks: { ...base.sinks, ...(r.sinks ?? {}) },

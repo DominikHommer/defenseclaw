@@ -191,6 +191,40 @@ _SPLUNK_BRIDGE_PRESERVE: tuple[str, ...] = (
 _SPLUNK_BRIDGE_DEST_REL: str = "splunk-bridge"
 
 
+def ensure_splunk_bridge_container_access(dest: str) -> list[str]:
+    """Make the bridge's bind-mounted Splunk assets readable by the container.
+
+    docker-compose.local.yml mounts ``splunk/`` (``default.yml``, the
+    ansible plays and the app the bridge packages from it) read-only, and
+    the container reads it as non-root users. A package extracted under a
+    private umask leaves those files 0600, so the container could not read
+    ``default.yml`` and restarted without end (GAP-0341; the app tarball
+    keeps the source modes too). As for the local observability stack, the
+    enclosing data directory stays 0700; ``splunk/`` holds no secret (the
+    HEC token and password come from ``env/.env``, which this never
+    touches): directories 0755, files in a ``bin`` folder and ``*.sh``
+    0755, other files 0644. Links are left alone.
+    """
+    errors: list[str] = []
+    root = os.path.join(dest, "splunk")
+    if os.name == "nt" or os.path.islink(root) or not os.path.isdir(root):
+        return errors
+    for current, _dirs, files in os.walk(root, followlinks=False):
+        targets = [(current, 0o755)]
+        for name in files:
+            path = os.path.join(current, name)
+            if os.path.islink(path) or not os.path.isfile(path):
+                continue
+            executable = name.endswith(".sh") or os.path.basename(current) == "bin"
+            targets.append((path, 0o755 if executable else 0o644))
+        for path, mode in targets:
+            try:
+                os.chmod(path, mode)
+            except OSError as exc:
+                errors.append(f"chmod {os.path.relpath(path, dest)}: {exc}")
+    return errors
+
+
 def refresh_splunk_bridge(data_dir: str) -> RefreshResult:
     """Refresh ``~/.defenseclaw/splunk-bridge/`` from the bundled source.
 
@@ -225,6 +259,7 @@ def refresh_splunk_bridge(data_dir: str) -> RefreshResult:
                 os.chmod(bridge_bin, 0o755)
             except OSError as exc:
                 result.errors.append(f"chmod splunk-claw-bridge: {exc}")
+        result.errors.extend(ensure_splunk_bridge_container_access(dest))
         result.refreshed = True
         result.refreshed_paths.append("(initial seed)")
         return result
@@ -245,6 +280,7 @@ def refresh_splunk_bridge(data_dir: str) -> RefreshResult:
             os.chmod(bridge_bin, 0o755)
         except OSError as exc:
             result.errors.append(f"chmod splunk-claw-bridge: {exc}")
+    result.errors.extend(ensure_splunk_bridge_container_access(dest))
 
     return result
 
@@ -271,8 +307,18 @@ _LOCAL_OBSERVABILITY_OPERATOR_PATHS: tuple[str, ...] = (
 # dashboards survive upgrades; explicit tombstones let us remove only retired
 # DefenseClaw assets without turning refresh into a destructive directory
 # mirror.
+_FLEET_TEMPLATE_PATHS: tuple[str, ...] = (
+    "docker-compose.fleet.yml",
+    "prometheus/examples/fleet.yml",
+    "grafana/dashboards/defenseclaw-fleet.json",
+)
 _LOCAL_OBSERVABILITY_RETIRED_PATHS: tuple[str, ...] = ("grafana/dashboards/defenseclaw-reliability.json",)
 _LOCAL_OBSERVABILITY_RETIRED_SHA256: dict[str, frozenset[str]] = {
+    "docker-compose.fleet.yml": frozenset({"064c52a51e34d1eecad79a3aa1c227d3c4eeff084ad905ab2eb15d23eaf558ca"}),
+    "prometheus/examples/fleet.yml": frozenset({"ab61cbb6140b630af054e351acc213bff2e7b64fd4f5b0ff7532829db7b66075"}),
+    "grafana/dashboards/defenseclaw-fleet.json": frozenset(
+        {"f91450a43b59eb832501779fd9bb33fb6f644760de397dd34156e98213f7c202"}
+    ),
     "grafana/dashboards/defenseclaw-reliability.json": frozenset(
         {
             "4993c6ca65313823a410df84778531c377eec217b2947f2e78d083b18437aae5",
@@ -336,9 +382,11 @@ _LOCAL_OBSERVABILITY_DASHBOARD_UIDS: tuple[str, ...] = (
     "defenseclaw-connectors",
     "defenseclaw-findings",
     "defenseclaw-hitl",
+    "defenseclaw-identity",
     "defenseclaw-overview",
     "defenseclaw-policy-decisions",
     "defenseclaw-runtime",
+    "defenseclaw-sandboxes",
     "defenseclaw-scanners",
     "defenseclaw-security",
     "defenseclaw-traffic",
@@ -445,10 +493,13 @@ def refresh_local_observability_stack(
     result.errors = errors
     result.refreshed = bool(refreshed)
 
-    if refresh_config:
+    retired_paths = _LOCAL_OBSERVABILITY_RETIRED_PATHS if refresh_config else ()
+    if not _fleet_enabled_for_bundle(Path(data_dir)):
+        retired_paths += tuple(path for path in _FLEET_TEMPLATE_PATHS if not (bundle / path).exists())
+    if retired_paths:
         removed, removal_errors = _remove_retired_paths(
             Path(dest),
-            _LOCAL_OBSERVABILITY_RETIRED_PATHS,
+            retired_paths,
         )
         result.refreshed_paths.extend(f"{path} (removed)" for path in removed)
         result.errors.extend(removal_errors)
@@ -490,7 +541,7 @@ def upgrade_local_observability_stack(
     source = bundled_local_observability_dir().absolute()
     target = _build_local_observability_manifest(source, bundle_version)
     prior = _read_installed_bundle_manifest(destination)
-    managed_retired = _managed_retired_paths(destination)
+    managed_retired = _managed_retired_paths(destination, source, _fleet_enabled_for_bundle(data_root))
     _preflight_upgrade_destination(destination, target, managed_retired)
 
     was_running = _strict_compose_project_running(LOCAL_OBSERVABILITY_COMPOSE_PROJECT)
@@ -885,7 +936,11 @@ def _validate_dashboard_inventory(source: Path, paths: set[str]) -> tuple[str, .
             raise LocalObservabilityUpgradeError("target_dashboard_invalid", "manifest")
         uids.append(uid)
     observed = tuple(sorted(uids))
-    if observed != _LOCAL_OBSERVABILITY_DASHBOARD_UIDS:
+    # The optional Fleet dashboard is installed only with the separate Fleet assets.
+    if observed not in (
+        _LOCAL_OBSERVABILITY_DASHBOARD_UIDS,
+        tuple(sorted((*_LOCAL_OBSERVABILITY_DASHBOARD_UIDS, "defenseclaw-fleet"))),
+    ):
         raise LocalObservabilityUpgradeError("target_dashboard_inventory_mismatch", "manifest")
     return observed
 
@@ -983,7 +1038,24 @@ def _read_installed_bundle_manifest(destination: Path) -> _BundleManifest | None
         raise LocalObservabilityUpgradeError("installed_manifest_invalid", "preflight") from exc
 
 
-def _managed_retired_paths(destination: Path) -> set[str]:
+def _fleet_enabled_for_bundle(data_root: Path) -> bool:
+    """Preserve optional templates unless config explicitly leaves Fleet off."""
+    try:
+        config_path = data_root / "config.yaml"
+        if not config_path.exists():
+            return False
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            return True
+        fleet = config.get("fleet")
+        if fleet is None:
+            return False
+        return not isinstance(fleet, dict) or fleet.get("enabled", False) is not False
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return True
+
+
+def _managed_retired_paths(destination: Path, source: Path, fleet_enabled: bool) -> set[str]:
     """Return only retired files whose bytes match a reviewed shipped asset.
 
     A destination-only file at a retired DefenseClaw filename is still an
@@ -993,6 +1065,8 @@ def _managed_retired_paths(destination: Path) -> set[str]:
 
     managed: set[str] = set()
     for relative, historical_digests in _LOCAL_OBSERVABILITY_RETIRED_SHA256.items():
+        if relative in _FLEET_TEMPLATE_PATHS and (fleet_enabled or (source / relative).exists()):
+            continue
         path = destination / relative
         if not path.exists() or path.is_symlink():
             continue
@@ -1276,120 +1350,6 @@ def _activate_local_observability_manifest(
         named_volumes=target.named_volumes,
         manifest_sha256=target.sha256,
     )
-
-
-def _restore_local_observability_activation_backup(
-    destination: Path,
-    backup_managed: Path,
-    managed_paths: set[str],
-    existing_paths: set[str],
-    old_digests: dict[str, str],
-    old_modes: dict[str, int],
-) -> None:
-    """Restore the transaction's exact managed-file inventory."""
-
-    if os.name != "posix":
-        _restore_local_observability_activation_backup_by_path(
-            destination,
-            backup_managed,
-            managed_paths,
-            existing_paths,
-            old_digests,
-            old_modes,
-        )
-        return
-
-    root_descriptor = _open_rollback_root_descriptor(destination)
-    try:
-        backup_root_descriptor = _open_rollback_root_descriptor(backup_managed)
-        try:
-            for relative in sorted(managed_paths):
-                parts = _rollback_path_parts(relative)
-                parent_descriptor = _open_rollback_parent(
-                    root_descriptor,
-                    parts[:-1],
-                    create=relative in existing_paths,
-                )
-                if parent_descriptor is None:
-                    continue
-                try:
-                    if relative in existing_paths:
-                        backup_parent_descriptor = _open_rollback_parent(
-                            backup_root_descriptor,
-                            parts[:-1],
-                            create=False,
-                        )
-                        if backup_parent_descriptor is None:
-                            raise OSError("backup member missing")
-                        try:
-                            _restore_rollback_file_at(
-                                backup_parent_descriptor,
-                                parts[-1],
-                                parent_descriptor,
-                                parts[-1],
-                                old_modes[relative],
-                                old_digests[relative],
-                            )
-                        finally:
-                            os.close(backup_parent_descriptor)
-                    else:
-                        _remove_rollback_file_at(parent_descriptor, parts[-1])
-                finally:
-                    os.close(parent_descriptor)
-        finally:
-            os.close(backup_root_descriptor)
-    finally:
-        os.close(root_descriptor)
-
-
-def _restore_local_observability_activation_backup_by_path(
-    destination: Path,
-    backup_managed: Path,
-    managed_paths: set[str],
-    existing_paths: set[str],
-    old_digests: dict[str, str],
-    old_modes: dict[str, int],
-) -> None:
-    """Fail closed around symlinks and reparse points without POSIX dirfds."""
-
-    root_chain = [(destination, _rollback_directory_info(destination))]
-    backup_root_chain = [(backup_managed, _rollback_directory_info(backup_managed))]
-    for relative in sorted(managed_paths):
-        parts = _rollback_path_parts(relative)
-        parent_chain = _open_rollback_parent_by_path(
-            root_chain,
-            parts[:-1],
-            create=relative in existing_paths,
-        )
-        if parent_chain is None:
-            continue
-        destination_path = parent_chain[-1][0] / parts[-1]
-        if relative in existing_paths:
-            backup_parent_chain = _open_rollback_parent_by_path(
-                backup_root_chain,
-                parts[:-1],
-                create=False,
-            )
-            if backup_parent_chain is None:
-                raise OSError("backup member missing")
-            _restore_rollback_file_by_path(
-                backup_parent_chain[-1][0] / parts[-1],
-                backup_parent_chain,
-                destination_path,
-                parent_chain,
-                old_modes[relative],
-                old_digests[relative],
-            )
-        else:
-            destination_info = _rollback_file_info(destination_path, missing_ok=True)
-            if destination_info is None:
-                continue
-            _revalidate_rollback_directory_chain(parent_chain)
-            _revalidate_rollback_file(destination_path, destination_info)
-            destination_path.unlink()
-            _revalidate_rollback_directory_chain(parent_chain)
-            if _rollback_file_info(destination_path, missing_ok=True) is not None:
-                raise OSError("local observability rollback managed file reappeared")
 
 
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
@@ -1949,19 +1909,6 @@ def _restore_windows_rollback_file_by_path(
                 _fsync_directory(temporary_path.parent)
             except OSError:
                 pass
-
-
-def _remove_rollback_file_at(parent_descriptor: int, destination_name: str) -> None:
-    """Durably unlink one target-created managed entry without following it."""
-
-    try:
-        info = os.stat(destination_name, dir_fd=parent_descriptor, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    if stat.S_ISDIR(info.st_mode):
-        raise OSError("unexpected directory at managed file path")
-    os.unlink(destination_name, dir_fd=parent_descriptor)
-    os.fsync(parent_descriptor)
 
 
 def _sha256_descriptor(descriptor: int) -> str:

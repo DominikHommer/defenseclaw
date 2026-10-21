@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -448,7 +449,170 @@ func loadManagedFileBackupPath(path string) (managedFileBackup, error) {
 	if b.Version != managedBackupVersion {
 		return b, fmt.Errorf("unsupported managed backup version %d", b.Version)
 	}
+	if moved, ok := managedBackupTargetAfterHomeMove(path, b.Path); ok {
+		b.Path = moved
+	}
 	return b, nil
+}
+
+// managedBackupTargetAfterHomeMove maps a record captured before the account
+// home moved (a rename with usermod -m, or a directory service that changed
+// the home path) onto the same file under the current home. Without it every
+// setup, gateway start and uninstall stopped at "managed backup target
+// mismatch" and no product command could repair the install (GAP-0543).
+//
+// The mapping only applies when the record itself lives under the current
+// home, the captured target is outside it, the old root of the captured
+// target no longer exists at all, and the same relative file exists under
+// the current home. An account moved by copying its home and then emptying
+// the old folder (rsync, then deleting what it held) keeps the old home as an
+// empty folder; that empty folder is the old root too (GAP-0633). Restore
+// still compares the hash of the file with the one setup recorded before it
+// writes anything.
+func managedBackupTargetAfterHomeMove(recordPath, captured string) (string, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" || strings.TrimSpace(captured) == "" {
+		return "", false
+	}
+	home = filepath.Clean(home)
+	captured = filepath.Clean(captured)
+	record, err := filepath.Abs(recordPath)
+	if err != nil || !filepath.IsAbs(captured) || !managedPathWithin(record, home) || managedPathWithin(captured, home) {
+		return "", false
+	}
+	if previous := boundManagedBackupPreviousHome(); previous != "" {
+		// The per-user cleanup of a re-homed account names the home the
+		// account had. A receipt copied from it belongs to this home's copy
+		// of the file, whether or not the old home still exists: following
+		// it into the other home removed that home's plugin and then the
+		// copied receipt, even when this home's copy was kept for an edit
+		// (rel-1-0-3 GAP-0200).
+		if candidate, ok := managedBackupTargetUnderPreviousHome(home, previous, captured); ok {
+			return candidate, true
+		}
+	}
+	missing := shallowestMissingAncestor(captured)
+	if missing == "" {
+		return "", false
+	}
+	if candidate, ok := managedBackupTargetUnder(home, missing, captured); ok {
+		return candidate, true
+	}
+	if parent := filepath.Dir(missing); parent != filepath.Dir(parent) && emptyDirectory(parent) {
+		return managedBackupTargetUnder(home, parent, captured)
+	}
+	return "", false
+}
+
+// managedBackupTargetUnder maps captured below oldRoot onto the same file
+// under home, when that file exists and neither root holds the other.
+func managedBackupTargetUnder(home, oldRoot, captured string) (string, bool) {
+	if managedPathWithin(home, oldRoot) || managedPathWithin(oldRoot, home) {
+		return "", false
+	}
+	rel, err := filepath.Rel(oldRoot, captured)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return "", false
+	}
+	candidate := filepath.Join(home, rel)
+	if _, err := os.Lstat(candidate); err != nil {
+		return "", false
+	}
+	return candidate, true
+}
+
+// managedBackupTargetUnderPreviousHome maps captured below the previous home
+// onto the same path below home. Unlike managedBackupTargetUnder the file
+// need not exist: a copy the user deleted leaves nothing to restore, and
+// the receipt must still not lead out of this home.
+func managedBackupTargetUnderPreviousHome(home, previous, captured string) (string, bool) {
+	previous = filepath.Clean(previous)
+	if !filepath.IsAbs(previous) || managedPathWithin(home, previous) || managedPathWithin(previous, home) {
+		return "", false
+	}
+	rel, err := filepath.Rel(previous, captured)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return filepath.Join(home, rel), true
+}
+
+var managedBackupPreviousHome struct {
+	sync.RWMutex
+	home string
+}
+
+// BindManagedBackupPreviousHome makes receipts that name a file below home,
+// the account's previous home, name the same file in the current home until
+// the returned function is called. The per-user worker binds it for the
+// cleanup of a re-homed account, so a receipt copied with the home acts on
+// that home's copy only and never on the other home. An empty home binds
+// nothing.
+func BindManagedBackupPreviousHome(home string) func() {
+	home = strings.TrimSpace(home)
+	managedBackupPreviousHome.Lock()
+	previous := managedBackupPreviousHome.home
+	if home != "" {
+		managedBackupPreviousHome.home = filepath.Clean(home)
+	}
+	managedBackupPreviousHome.Unlock()
+	return func() {
+		managedBackupPreviousHome.Lock()
+		managedBackupPreviousHome.home = previous
+		managedBackupPreviousHome.Unlock()
+	}
+}
+
+func boundManagedBackupPreviousHome() string {
+	managedBackupPreviousHome.RLock()
+	defer managedBackupPreviousHome.RUnlock()
+	return managedBackupPreviousHome.home
+}
+
+// emptyDirectory reports whether path is a directory (not a link to one)
+// that holds no entry.
+func emptyDirectory(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) == 0
+}
+
+// shallowestMissingAncestor returns the first directory on the way down to
+// path that does not exist (the old home when an account home moved), or ""
+// when every parent of path exists.
+func shallowestMissingAncestor(path string) string {
+	var chain []string
+	for current := path; ; {
+		chain = append(chain, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	for i := len(chain) - 1; i > 0; i-- {
+		if _, err := os.Lstat(chain[i]); err != nil {
+			if os.IsNotExist(err) {
+				return chain[i]
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+func managedPathWithin(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		rel = strings.ToLower(rel)
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func writeManagedFileBackup(path string, b managedFileBackup) error {

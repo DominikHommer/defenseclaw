@@ -24,6 +24,7 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -351,6 +352,7 @@ func resolveWindowsManagedRuntimeGenerationPlatform(
 			HookExecutable:             bundle.HookExecutable,
 			GatewayAddr:                bundle.GatewayAddr,
 			GatewayServiceName:         bundle.GatewayServiceName,
+			FailMode:                   bundle.FailMode,
 			GenerationID:               bundle.GenerationID,
 			BundleSHA256:               entry.BundleSHA256,
 			HookContractID:             bundle.HookContractID,
@@ -643,6 +645,167 @@ func verifyWindowsManagedRuntimeSelectorTargetAbsentPlatform(
 	)
 }
 
+// windowsMachinePolicyRegisteredSIDs lists, upper-cased, the SIDs
+// connectorName's primary machine policy (the Claude Code policy target set,
+// the Codex requirements registry, the Cursor policy target set) registers:
+// the same check the hook makes before it reads the runtime selector.
+// Replaceable in tests.
+var windowsMachinePolicyRegisteredSIDs = func(connectorName, hookExecutable string) (map[string]bool, error) {
+	var registered []string
+	switch connectorName {
+	case "claudecode":
+		targets, active, err := ReadWindowsClaudeManagedPolicyTargets()
+		if err != nil || !active {
+			return nil, err
+		}
+		registered = targets
+	case "codex":
+		registry, err := connector.ResolveWindowsCodexManagedRuntimeRegistry(hookExecutable)
+		if err != nil || !registry.Active {
+			return nil, err
+		}
+		for _, target := range registry.Targets {
+			registered = append(registered, target.SID)
+		}
+	case "cursor":
+		targets, active, err := ReadWindowsCursorManagedPolicyTargets()
+		if err != nil || !active {
+			return nil, err
+		}
+		for _, target := range targets {
+			registered = append(registered, target.SID)
+		}
+	default:
+		return nil, fmt.Errorf("enterprise hooks: %q has no primary machine policy", connectorName)
+	}
+	out := make(map[string]bool, len(registered))
+	for _, sid := range registered {
+		out[strings.ToUpper(strings.TrimSpace(sid))] = true
+	}
+	return out, nil
+}
+
+// RetireWindowsUnregisteredRuntimeSelections removes this deployment's Claude
+// Code, Codex and Cursor runtime selections for SIDs their primary machine
+// policy no longer registers (GAP-0262). Revocation (a disabled connector, a
+// removed user, `enterprise hooks uninstall`) narrows only the primary policy,
+// so the selection stayed behind, and once the SID was enrolled again its
+// deferred pending proof refused it: "already has a selected runtime without
+// protected Guardian authorization". Such a selection is inert, since the hook
+// refuses an unregistered SID before it reads the selector. The policy is read
+// once per connector per pass; only a SID it does not register is re-checked
+// under its runtime transaction lock, which a secure install holds from
+// selection through registration (GAP-0271: one lock and one policy read per
+// selection made every pass cost about 600 policy reads at 200 users). A selection made with another hook
+// executable belongs to another deployment and stays for the pending proof to
+// refuse, unless that hook executable is gone: then the deployment was
+// uninstalled without purge, and a reinstall into another folder could never
+// enroll the user over its selection (GAP-0273), so it is retired too. The
+// selection's bundle is retired best effort: without the
+// selection it is unreachable, and generation GC collects what is left.
+// Standalone only; Secure Client keeps its selections as before.
+func RetireWindowsUnregisteredRuntimeSelections() error {
+	if !windowsEnterpriseStandaloneProcess() {
+		return nil
+	}
+	hookExecutable, err := windowsEnterpriseHookExecutable()
+	if err != nil {
+		return err
+	}
+	hookExecutable = filepath.Clean(hookExecutable)
+	var errs []error
+	for _, name := range []string{"claudecode", "codex", "cursor"} {
+		selector, _, exists, err := readWindowsManagedRuntimeSelector(name, true)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s runtime selector: %w", name, err))
+			continue
+		}
+		if !exists {
+			continue
+		}
+		var registered map[string]bool
+		read := false
+		for _, entry := range selector.Targets {
+			if entry.HookExecutable != hookExecutable {
+				if windowsRuntimeSelectionHookGone(entry.HookExecutable) {
+					if err := retireWindowsOrphanedRuntimeSelection(name, entry); err != nil {
+						errs = append(errs, fmt.Errorf("%s runtime selection of %s left by %s: %w", name, entry.SID, entry.HookExecutable, err))
+					}
+				}
+				continue
+			}
+			if !read {
+				if registered, err = windowsMachinePolicyRegisteredSIDs(name, hookExecutable); err != nil {
+					errs = append(errs, fmt.Errorf("%s machine policy: %w", name, err))
+					break
+				}
+				read = true
+			}
+			if registered[strings.ToUpper(entry.SID)] {
+				continue
+			}
+			if err := retireWindowsUnregisteredRuntimeSelection(name, entry.SID, hookExecutable); err != nil {
+				errs = append(errs, fmt.Errorf("%s runtime selection of %s: %w", name, entry.SID, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// windowsRuntimeSelectionHookGone reports a selection whose hook executable no
+// longer exists: nothing can read the selection any more.
+func windowsRuntimeSelectionHookGone(hookExecutable string) bool {
+	_, err := os.Lstat(hookExecutable)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// retireWindowsOrphanedRuntimeSelection removes a selection an uninstalled
+// deployment left, re-checked under the user's runtime transaction lock.
+func retireWindowsOrphanedRuntimeSelection(connectorName string, entry windowsManagedRuntimeSelectorTarget) error {
+	unlock, err := lockWindowsUserRuntimeTransaction(entry.SID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if !windowsRuntimeSelectionHookGone(entry.HookExecutable) {
+		return nil
+	}
+	commit, err := RemoveWindowsManagedRuntimeGenerationEnrollment(WindowsManagedRuntimeGenerationRemovalOptions{
+		Connector:                connectorName,
+		TargetSID:                entry.SID,
+		HookExecutable:           entry.HookExecutable,
+		PrimaryEnrollmentRemoved: true,
+	})
+	if err != nil {
+		return err
+	}
+	_ = commit.Finalize()
+	return nil
+}
+
+func retireWindowsUnregisteredRuntimeSelection(connectorName, sid, hookExecutable string) error {
+	unlock, err := lockWindowsUserRuntimeTransaction(sid)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	registered, err := windowsMachinePolicyRegisteredSIDs(connectorName, hookExecutable)
+	if err != nil || registered[strings.ToUpper(sid)] {
+		return err
+	}
+	commit, err := RemoveWindowsManagedRuntimeGenerationEnrollment(WindowsManagedRuntimeGenerationRemovalOptions{
+		Connector:                connectorName,
+		TargetSID:                sid,
+		HookExecutable:           hookExecutable,
+		PrimaryEnrollmentRemoved: true,
+	})
+	if err != nil {
+		return err
+	}
+	_ = commit.Finalize()
+	return nil
+}
+
 func restoreWindowsManagedRuntimeSelectorTargetCASPlatform(
 	opts WindowsManagedRuntimeSelectorRestoreOptions,
 ) error {
@@ -913,10 +1076,7 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		true,
 	); err != nil {
 		if !windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target) {
-			return 0, fmt.Errorf(
-				"enterprise hooks: managed runtime generation directory is untrusted: %w",
-				err,
-			)
+			return 0, fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
 		accountCreated = true
 	}
@@ -951,10 +1111,7 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			true,
 			true,
 		); err != nil {
-			return fmt.Errorf(
-				"enterprise hooks: managed runtime generation directory is untrusted: %w",
-				err,
-			)
+			return fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
 
 		hookDir := filepath.Join(validated.DataDir, "hooks")
@@ -1040,15 +1197,63 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 		return entry, nil, err
 	}
 	if bundle.GenerationID != generationID || bundle.Connector != opts.Connector ||
-		bundle.TargetSID != opts.TargetSID || bundle.DataDir != opts.DataDir ||
+		bundle.TargetSID != opts.TargetSID {
+		// Connector + TargetSID + GenerationID mismatch is structural
+		// (caller asked for the wrong bundle). Stays fatal.
+		return entry, nil, fmt.Errorf(
+			"enterprise hooks: refusing to collect a managed runtime bundle with a foreign identity: %s: "+
+				"it names another connector, account or generation than its file name and this deployment do",
+			path,
+		)
+	}
+	if bundle.DataDir != opts.DataDir ||
 		!sameWindowsEnterprisePath(bundle.DataDir, opts.DataDir) ||
 		bundle.HookExecutable != opts.HookExecutable ||
 		!sameWindowsEnterprisePath(bundle.HookExecutable, opts.HookExecutable) {
-		return entry, nil, fmt.Errorf(
-			"enterprise hooks: refusing to collect a managed runtime bundle with a foreign identity: %s: "+
-				"it names another connector, account, data folder or hook binary than its file name and this deployment do",
-			path,
-		)
+		// Strict mode preserves refuse-on-drift at the GC path too: a
+		// hardened deployment must NOT silently retire an unselected
+		// bundle whose paths do not match the current install. This
+		// path (loadUnselectedWindowsManagedRuntimeBundle, called by
+		// GC) is separate from the selector-removal validator, so the
+		// strict-mode gate added there needs its mirror here.
+		if windowsEnterpriseStandaloneProcess() {
+			// The standalone profile keeps main's refusal: the bulldoze
+			// reclaim below (#1068) is a Secure Client recovery.
+			return entry, nil, fmt.Errorf(
+				"enterprise hooks: refusing to collect a managed runtime bundle with a foreign identity: %s: "+
+					"it names another connector, account, data folder or hook binary than its file name and this deployment do",
+				path,
+			)
+		}
+		if managed.TrustStrictAncestors() {
+			return entry, nil, fmt.Errorf(
+				"enterprise hooks: refusing to collect managed runtime "+
+					"bundle for %s/%s/%s - bundle DataDir=%q HookExecutable=%q "+
+					"does not match current install DataDir=%q HookExecutable=%q",
+				opts.Connector, opts.TargetSID, generationID,
+				bundle.DataDir, bundle.HookExecutable,
+				opts.DataDir, opts.HookExecutable,
+			)
+		}
+		// Bulldoze: a bundle whose Connector + TargetSID + GenerationID
+		// identify it as ours but whose DataDir / HookExecutable point at
+		// a prior scoped install's layout is an orphan from an unsigned
+		// certification cycle. Log a diagnostic and overwrite the in-
+		// memory bundle fields with the current install's canonical
+		// values. The caller is loadUnselectedWindowsManagedRuntimeBundle,
+		// used by GC: once the corrected-identity bundle is validated,
+		// the GC flow DELETES the on-disk bundle at the current DataDir
+		// (no on-disk rewrite). Install's regenerate path writes a fresh
+		// bundle separately when it next publishes a selector entry.
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] reclaiming identity-drifted managed runtime bundle "+
+				"for %s/%s/%s: bundle DataDir=%q HookExecutable=%q, current "+
+				"install DataDir=%q HookExecutable=%q\n",
+			opts.Connector, opts.TargetSID, generationID,
+			bundle.DataDir, bundle.HookExecutable,
+			opts.DataDir, opts.HookExecutable)
+		bundle.DataDir = opts.DataDir
+		bundle.HookExecutable = opts.HookExecutable
 	}
 	desired := WindowsManagedRuntimeGenerationDesired{
 		Connector:                  bundle.Connector,
@@ -1057,6 +1262,7 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 		HookExecutable:             bundle.HookExecutable,
 		GatewayAddr:                bundle.GatewayAddr,
 		GatewayServiceName:         bundle.GatewayServiceName,
+		FailMode:                   bundle.FailMode,
 		ScopedToken:                bundle.ScopedToken,
 		HookContractID:             bundle.HookContractID,
 		HookContractLockUpdatedAt:  bundle.HookContractLockUpdatedAt,
@@ -1088,6 +1294,10 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 func validateWindowsManagedRuntimeGenerationDesired(
 	desired WindowsManagedRuntimeGenerationDesired,
 ) (WindowsManagedRuntimeGenerationDesired, *windows.SID, error) {
+	if desired.FailMode != "" && desired.FailMode != "open" && desired.FailMode != "closed" {
+		return desired, nil, errors.New("enterprise hooks: managed runtime fail mode is invalid")
+	}
+	desired.FailMode = canonicalHookFailMode(desired.FailMode)
 	target, err := validateWindowsManagedRuntimeGenerationIdentity(desired)
 	if err != nil {
 		return desired, nil, err
@@ -1493,10 +1703,7 @@ func validateWindowsManagedRuntimeGenerationRoots(dataDir string, target *window
 	hookDir := filepath.Join(dataDir, "hooks")
 	for _, path := range []string{dataDir, hookDir} {
 		if err := validateWindowsUserPathElement(path, target, true, true, true); err != nil {
-			return fmt.Errorf(
-				"enterprise hooks: managed runtime generation directory is untrusted: %w",
-				err,
-			)
+			return fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
 	}
 	return nil
@@ -1584,7 +1791,7 @@ func windowsManagedRuntimeBundleFromDesired(
 		HookExecutable:             desired.HookExecutable,
 		GatewayAddr:                desired.GatewayAddr,
 		GatewayServiceName:         desired.GatewayServiceName,
-		FailMode:                   "closed",
+		FailMode:                   windowsManagedGenerationFailMode([]string{desired.FailMode}),
 		ScopedToken:                desired.ScopedToken,
 		HookContractID:             desired.HookContractID,
 		HookContractLockUpdatedAt:  desired.HookContractLockUpdatedAt,
@@ -1645,6 +1852,7 @@ func validateWindowsManagedRuntimeBundleAgainstSelector(
 		HookExecutable:             bundle.HookExecutable,
 		GatewayAddr:                bundle.GatewayAddr,
 		GatewayServiceName:         bundle.GatewayServiceName,
+		FailMode:                   bundle.FailMode,
 		ScopedToken:                bundle.ScopedToken,
 		HookContractID:             bundle.HookContractID,
 		HookContractLockUpdatedAt:  bundle.HookContractLockUpdatedAt,
@@ -1667,7 +1875,7 @@ func windowsManagedRuntimeBundleMatchesSelectorIdentity(
 		sameWindowsEnterprisePath(bundle.HookExecutable, entry.HookExecutable) && bundle.HookExecutable == entry.HookExecutable &&
 		bundle.GatewayAddr == entry.GatewayAddr &&
 		bundle.GatewayServiceName == entry.GatewayServiceName &&
-		bundle.FailMode == "closed"
+		(bundle.FailMode == "closed" || bundle.FailMode == "open")
 }
 
 func windowsManagedRuntimeBundleMatchesDesired(
@@ -1679,7 +1887,7 @@ func windowsManagedRuntimeBundleMatchesDesired(
 		bundle.HookExecutable == desired.HookExecutable &&
 		bundle.GatewayAddr == desired.GatewayAddr &&
 		bundle.GatewayServiceName == desired.GatewayServiceName &&
-		bundle.FailMode == "closed" &&
+		bundle.FailMode == windowsManagedGenerationFailMode([]string{desired.FailMode}) &&
 		subtle.ConstantTimeCompare([]byte(bundle.ScopedToken), []byte(desired.ScopedToken)) == 1 &&
 		bundle.HookContractID == desired.HookContractID &&
 		// The lock timestamp is audit metadata for the shared, multi-connector
@@ -1975,18 +2183,78 @@ func validateWindowsManagedRuntimeSelectorTargetAgainstRemoval(
 	entry windowsManagedRuntimeSelectorTarget,
 	opts WindowsManagedRuntimeGenerationRemovalOptions,
 ) error {
-	if entry.Connector != opts.Connector || entry.SID != opts.TargetSID ||
-		entry.HookExecutable != opts.HookExecutable ||
-		!sameWindowsEnterprisePath(entry.HookExecutable, opts.HookExecutable) {
+	if entry.Connector != opts.Connector || entry.SID != opts.TargetSID {
+		// Connector/SID mismatch is structural - the caller asked to
+		// remove the wrong entry. Keep fatal.
 		return errors.New(
 			"enterprise hooks: refusing to remove a managed runtime selector entry owned by another deployment",
 		)
 	}
+	if windowsEnterpriseStandaloneProcess() {
+		// The standalone profile keeps main's refusal: the bulldoze reclaim
+		// below (#1068) is a Secure Client recovery. A selection another
+		// deployment left behind is reported as a mismatched selected
+		// runtime, not silently retired.
+		if entry.HookExecutable != opts.HookExecutable ||
+			!sameWindowsEnterprisePath(entry.HookExecutable, opts.HookExecutable) {
+			return errors.New(
+				"enterprise hooks: refusing to remove a managed runtime selector entry owned by another deployment",
+			)
+		}
+		if opts.DataDir != "" && (entry.DataDir != opts.DataDir ||
+			!sameWindowsEnterprisePath(entry.DataDir, opts.DataDir)) {
+			return errors.New(
+				"enterprise hooks: refusing to remove a managed runtime selector entry with a different data directory",
+			)
+		}
+		return nil
+	}
+	strict := managed.TrustStrictAncestors()
+	if entry.HookExecutable != opts.HookExecutable ||
+		!sameWindowsEnterprisePath(entry.HookExecutable, opts.HookExecutable) {
+		if strict {
+			// Strict mode preserves refuse-on-drift: a hardened deployment
+			// MUST fail removal when the stored selector entry's hook
+			// executable path does not match the current install. Silently
+			// retiring it masks tampering with the hook-launcher binding.
+			return fmt.Errorf(
+				"enterprise hooks: refusing to remove managed runtime selector "+
+					"for %s/%s - stored HookExecutable %q does not match current %q",
+				opts.Connector, opts.TargetSID,
+				entry.HookExecutable, opts.HookExecutable,
+			)
+		}
+		// Bulldoze: the entry has a stale HookExecutable path (prior
+		// unsigned-certification install at a different scoped InstallRoot
+		// left a runtime selector pointing at its now-dead bin/
+		// defenseclaw-hook.exe). The connector+SID match confirms the
+		// entry is ours by role; allow the removal so the install reconcile
+		// can retire the orphan entry and publish a fresh one.
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] reclaiming stale managed runtime selector for "+
+				"%s/%s: entry HookExecutable=%q, current install's HookExecutable=%q\n",
+			opts.Connector, opts.TargetSID,
+			entry.HookExecutable, opts.HookExecutable)
+	}
 	if opts.DataDir != "" && (entry.DataDir != opts.DataDir ||
 		!sameWindowsEnterprisePath(entry.DataDir, opts.DataDir)) {
-		return errors.New(
-			"enterprise hooks: refusing to remove a managed runtime selector entry with a different data directory",
-		)
+		if strict {
+			return fmt.Errorf(
+				"enterprise hooks: refusing to remove managed runtime selector "+
+					"for %s/%s - stored DataDir %q does not match current %q",
+				opts.Connector, opts.TargetSID,
+				entry.DataDir, opts.DataDir,
+			)
+		}
+		// Bulldoze: same posture as the HookExecutable mismatch above. A
+		// stale DataDir from a prior install's per-user runtime path does
+		// not block removal; the install reconcile replaces it with the
+		// current scope's DataDir.
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] reclaiming stale managed runtime selector for "+
+				"%s/%s: entry DataDir=%q, current install's DataDir=%q\n",
+			opts.Connector, opts.TargetSID,
+			entry.DataDir, opts.DataDir)
 	}
 	return nil
 }

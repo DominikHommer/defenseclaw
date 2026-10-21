@@ -28,7 +28,7 @@ enum MenuBarState {
 
 enum PanelID: String, CaseIterable, Identifiable {
     case overview, alerts, logs, audit, activity
-    case skills, mcps, plugins, tools
+    case skills, mcps, plugins, tools, policies
     case inventory, aiDiscovery, aiRuntime, registries
     case setup
     case sandboxes
@@ -46,6 +46,7 @@ enum PanelID: String, CaseIterable, Identifiable {
         case .mcps: "MCPs"
         case .plugins: "Plugins"
         case .tools: "Tools"
+        case .policies: "Policies"
         case .inventory: "Inventory"
         case .aiDiscovery: "AI Discovery"
         case .aiRuntime: "Runtime"
@@ -66,6 +67,7 @@ enum PanelID: String, CaseIterable, Identifiable {
         case .mcps: "server.rack"
         case .plugins: "puzzlepiece.extension"
         case .tools: "wrench.and.screwdriver"
+        case .policies: "list.bullet.rectangle.portrait"
         case .inventory: "shippingbox"
         case .aiDiscovery: "sparkle.magnifyingglass"
         case .aiRuntime: "waveform.path.ecg"
@@ -248,6 +250,8 @@ final class AppState {
 
     // Alerts state
     var unackedAlerts: [AlertRow] = []
+    /// A failed canonical alert refresh leaves the last good rows visible.
+    var alertLoadError: String?
     var dismissedIDs: Set<String> = []
     var overviewEnforcementMetrics = OverviewEnforcementMetrics()
     /// Last `alerts acknowledge` failure, surfaced in the popover/panel.
@@ -287,6 +291,9 @@ final class AppState {
     var sessionTotalScans = 0
     /// True while a background diagnose probe is running (⇧⌘D).
     var diagnoseRunning = false
+    /// Reserves installation rebinding and mutating commands during a runtime replacement.
+    private(set) var runtimeUpgradeRunID: UUID?
+
     var alertPanelRequest: AlertPanelRequest?
     var auditPresetRequest: String?
     var logPanelRequest: LogPanelRequest?
@@ -329,6 +336,9 @@ final class AppState {
         let runner = CLIRunner(context: installationContext)
         cli = runner
         activity = CommandActivityStore(runner: runner)
+        AppDelegate.sandboxNotificationHandler = { [weak self] action, info in
+            self?.handleSandboxNotification(action: action, userInfo: info)
+        }
     }
 
     var menuBarState: MenuBarState {
@@ -380,7 +390,8 @@ final class AppState {
         )
     }
 
-    private func bindSelectedInstallation(resolved requested: InstallationContext? = nil) async {
+    private func bindSelectedInstallation(resolved requested: InstallationContext? = nil, upgradeRunID: UUID? = nil) async {
+        guard runtimeUpgradeRunID == nil || runtimeUpgradeRunID == upgradeRunID else { return }
         let initialTarget = requested ?? selectedInstallationContext()
         if installationBindInProgress {
             // Last request wins, but every caller waits until the serialized
@@ -471,11 +482,17 @@ final class AppState {
         !installationBindInProgress && generation == installationGeneration
     }
 
+    /// Inspection reads must stop when their installation is rebound.
+    func sandboxInspectionMayRead(generation: Int) -> Bool {
+        installationSnapshotIsCurrent(generation) && runtimeUpgradeRunID == nil
+    }
+
     /// No state derived from one config/data root may survive a path switch.
     /// App preferences, navigation, self-update state, and Activity history
     /// intentionally remain process-wide.
     private func resetInstallationScopedState() {
         installedRuntimeVersion = nil
+        alertLoadError = nil
         runtimeSetupCommands = nil
         runtimeDiscoveryCommands = nil
         runtimeVersionError = nil
@@ -664,7 +681,7 @@ final class AppState {
     }
 
     func pulse() async {
-        guard !installationBindInProgress else { return }
+        guard !installationBindInProgress, runtimeUpgradeRunID == nil else { return }
         let selected = selectedInstallationContext()
         if selected != installationContext {
             guard selected.hasSamePaths(as: installationContext)
@@ -836,12 +853,24 @@ final class AppState {
                 && ((branch == "passthrough" && $0.looksLikeLLM) || branch == "shape")
         }.count
 
+        var canonicalRows: [AuditEvent]?
+        if installedRuntimeVersion?.hasPrefix("1.") == true {
+            let result = await cli.run(arguments: ["alerts", "--json", "--limit", "500"], mutation: false)
+            guard installationSnapshotIsCurrent(generation) else { return }
+            guard result.succeeded, let parsed = RuntimeV1Alerts.parse(result.output) else {
+                alertLoadError = "The runtime alert list could not be refreshed. Previously loaded alerts may be stale; retry Refresh or review runtime diagnostics."
+                return
+            }
+            canonicalRows = parsed
+        }
+        alertLoadError = nil
         var rows: [AlertRow] = queue.map { .audit($0) }
         rows += blocks.map { .scan($0) }
         rows += egress.suffix(100).filter {
             let decision = $0.decision.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return (decision != "allow" && decision != "allowed") || $0.looksLikeLLM
         }.map { .egress($0) }
+        if let canonicalRows { rows = canonicalRows.map { .audit($0) } }
         rows.sort { $0.timestamp > $1.timestamp }
 
         let fresh = rows.filter { !dismissedIDs.contains($0.id) }
@@ -877,7 +906,7 @@ final class AppState {
         // Publish only on real row changes so Table does not re-diff mid-gesture.
         // These adjacent assignments contain no suspension point, preventing a
         // frame where the badge and the detailed alert list disagree.
-        if fresh.map(\.id) != unackedAlerts.map(\.id) {
+        if fresh != unackedAlerts {
             unackedAlerts = fresh
         }
         overviewEnforcementMetrics = nextMetrics
@@ -900,6 +929,9 @@ final class AppState {
         suggestedNextAction: String = "",
         refreshOnSuccess: Bool = false
     ) async -> CLIResult {
+        if let upgradeID = runtimeUpgradeRunID, upgradeID != runID, mutation {
+            return CLIResult(exitCode: 75, output: "A runtime upgrade is in progress. Wait for it to finish before making other changes.")
+        }
         guard !(mutation && installationBindInProgress) else {
             return CLIResult(
                 exitCode: 75,

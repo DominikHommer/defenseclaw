@@ -238,6 +238,49 @@ func TestHookContractResolution(t *testing.T) {
 // newer than every tested range is compatible with the newest contract, a
 // known-broken entry and exact-range (Secure Client) mode refuse it, and an
 // agent update to a compatible version is admitted instead of drifting.
+// GAP-0151: Hermes versions map to a contract by release or, for a git
+// install that prints only its release date, by the date tag of that
+// release. A version below the hermes-hooks-v1 floor, a date before its first
+// release, or a date between the two contracts has no contract; a date or
+// release after the newest one is an untested newer version on the
+// standalone profile (exact gating keeps it unknown).
+func TestHermesHookContractResolvesReleasesAndReleaseDates(t *testing.T) {
+	for _, tc := range []struct {
+		version, contract string
+		untested          bool
+	}{
+		{version: "0.18.0"},
+		{version: "Hermes Agent v0.18.0 (2026.5.1)"},
+		{version: "2026.5.1"},
+		{version: "2026.7.7"},
+		{version: "2026.8.29"},
+		{version: "vunknown"},
+		{version: "0.19.0", contract: "hermes-hooks-v1"},
+		{version: "2026.7.20", contract: "hermes-hooks-v1"},
+		{version: "2026.8.27", contract: "hermes-hooks-v1"},
+		{version: "2026.8.31", contract: "hermes-hooks-v2"},
+		{version: "2026.9.24", contract: "hermes-hooks-v2"},
+		{version: "0.21.5+4977.g12e4d3e", contract: "hermes-hooks-v2"},
+		{version: "2026.10.2", contract: "hermes-hooks-v2", untested: true},
+		{version: "0.99.0", contract: "hermes-hooks-v2", untested: true},
+	} {
+		got := resolveHookContractForOSMode("hermes", tc.version, "linux", false)
+		if tc.contract == "" {
+			if got.Status != HookCompatibilityUnknown || got.Contract.ContractID != "" {
+				t.Errorf("%q = %s %q (%s), want no contract", tc.version, got.Status, got.Contract.ContractID, got.Reason)
+			}
+			continue
+		}
+		if got.Status != HookCompatibilityKnown || got.Contract.ContractID != tc.contract || got.UntestedVersion != tc.untested {
+			t.Errorf("%q = %s %q untested=%t (%s), want %s untested=%t", tc.version, got.Status, got.Contract.ContractID, got.UntestedVersion, got.Reason, tc.contract, tc.untested)
+		}
+		strict := resolveHookContractForOSMode("hermes", tc.version, "linux", true)
+		if tc.untested && (strict.Status != HookCompatibilityUnknown || strict.Contract.ContractID != "") {
+			t.Errorf("strict %q = %s %q, want no contract", tc.version, strict.Status, strict.Contract.ContractID)
+		}
+	}
+}
+
 func TestUntestedNewerVersionPolicy(t *testing.T) {
 	got := ResolveHookContract("hermes", "Hermes Agent v0.30.1")
 	if got.Status != HookCompatibilityKnown || !got.UntestedVersion || got.Contract.ContractID != "hermes-hooks-v2" ||
@@ -538,6 +581,40 @@ func TestHookContractNeedsActionOverride(t *testing.T) {
 	}
 }
 
+func TestBestEffortHookContractUsesDefaultUnionWithoutClaimingCompatibility(t *testing.T) {
+	resolution := ResolveHookContract("codex", "codex nightly")
+	if resolution.Status != HookCompatibilityUnknown {
+		t.Fatalf("Status=%q want %q", resolution.Status, HookCompatibilityUnknown)
+	}
+	fallback := BestEffortHookContract(resolution)
+	if fallback.ContractID != "codex-hooks-v4" || !fallback.DefaultForUnversioned {
+		t.Fatalf("fallback=%+v, want reviewed Codex default", fallback)
+	}
+
+	events := make(map[string]struct{}, len(fallback.Events))
+	for _, event := range fallback.Events {
+		events[event] = struct{}{}
+	}
+	for _, contract := range KnownHookContracts("codex") {
+		for _, event := range contract.Events {
+			if _, ok := events[event]; !ok {
+				t.Fatalf("best-effort contract omitted %s from %s", event, contract.ContractID)
+			}
+		}
+	}
+
+	profile := NewCodexConnector().HookProfile(SetupOpts{
+		AgentVersion:   "codex nightly",
+		HookContractID: fallback.ContractID,
+	})
+	if profile.CompatibilityStatus != HookCompatibilityUnknown {
+		t.Fatalf("fallback profile compatibility=%q, want unknown", profile.CompatibilityStatus)
+	}
+	if profile.ContractID != fallback.ContractID {
+		t.Fatalf("fallback profile contract=%q want %q", profile.ContractID, fallback.ContractID)
+	}
+}
+
 func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	reg := NewDefaultRegistry()
 	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
@@ -691,24 +768,32 @@ func TestOmniGentSandboxStartsAt0130(t *testing.T) {
 	}
 }
 
-// TestContentEnvelopeKeyDeclarations pins every connector to the official
-// top-level payload shape. The generic decoder must never open an undeclared
-// sub-object, including an inferred Hermes extra envelope.
-func TestContentEnvelopeKeyDeclarations(t *testing.T) {
+// TestContentEnvelopeDeclarations pins the one connector whose hook content
+// is nested: Hermes puts every hook argument but tool_name, tool_input,
+// session_id, cwd and profile under extra (GAP-0898). Every other connector
+// is flat, so the decoder never opens a sub-object for it.
+func TestContentEnvelopeDeclarations(t *testing.T) {
 	for name, contracts := range builtinHookContracts {
 		for _, contract := range contracts {
-			if contract.ContentEnvelopeKey != "" {
-				t.Errorf("%s %s ContentEnvelopeKey=%q want empty", name, contract.ContractID, contract.ContentEnvelopeKey)
+			want := ContentEnvelope{}
+			if name == "hermes" {
+				want = hermesContentEnvelope()
+			}
+			if !reflect.DeepEqual(contract.ContentEnvelope.clone(), want) {
+				t.Errorf("%s %s ContentEnvelope=%+v want %+v", name, contract.ContractID, contract.ContentEnvelope, want)
 			}
 		}
 	}
 	hermes := NewHermesConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970"})
-	if hermes.ContentEnvelopeKey != "" {
-		t.Fatalf("hermes profile ContentEnvelopeKey=%q want empty", hermes.ContentEnvelopeKey)
+	if got := hermes.ContentEnvelope.Field("pre_llm_call"); hermes.ContentEnvelope.Key != "extra" || got != "user_message" {
+		t.Fatalf("hermes profile envelope=%+v, pre_llm_call field %q", hermes.ContentEnvelope, got)
+	}
+	if got := hermes.ContentEnvelope.Field("pre_tool_call"); got != "" {
+		t.Fatalf("hermes pre_tool_call envelope field=%q want none", got)
 	}
 	cursor := NewCursorConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970"})
-	if cursor.ContentEnvelopeKey != "" {
-		t.Fatalf("cursor profile ContentEnvelopeKey=%q want empty", cursor.ContentEnvelopeKey)
+	if cursor.ContentEnvelope.Key != "" {
+		t.Fatalf("cursor profile ContentEnvelope=%+v want zero", cursor.ContentEnvelope)
 	}
 }
 
@@ -743,9 +828,12 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		AIDSurfaces             []string                            `json:"aid_surfaces"`
 		SupportsTraceparent     bool                                `json:"supports_traceparent"`
 		NativeOTLP              bool                                `json:"native_otlp"`
-		ContentEnvelopeKey      string                              `json:"content_envelope_key"`
-		ToolCallLifecycle       ToolCallLifecycleContract           `json:"tool_call_lifecycle"`
-		Capabilities            struct {
+		ContentEnvelope         struct {
+			Key    string            `json:"key"`
+			Fields map[string]string `json:"fields"`
+		} `json:"content_envelope"`
+		ToolCallLifecycle ToolCallLifecycleContract `json:"tool_call_lifecycle"`
+		Capabilities      struct {
 			CanBlock           bool     `json:"can_block"`
 			CanAskNative       bool     `json:"can_ask_native"`
 			AskEvents          []string `json:"ask_events"`
@@ -933,8 +1021,8 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			if manifestContract.NativeOTLP != runtime.NativeOTLP {
 				t.Fatalf("%s native_otlp=%v want %v", runtime.ContractID, manifestContract.NativeOTLP, runtime.NativeOTLP)
 			}
-			if manifestContract.ContentEnvelopeKey != runtime.ContentEnvelopeKey {
-				t.Fatalf("%s content_envelope_key=%q want %q", runtime.ContractID, manifestContract.ContentEnvelopeKey, runtime.ContentEnvelopeKey)
+			if got := (ContentEnvelope{Key: manifestContract.ContentEnvelope.Key, Fields: manifestContract.ContentEnvelope.Fields}); !reflect.DeepEqual(got.clone(), runtime.ContentEnvelope.clone()) {
+				t.Fatalf("%s content_envelope=%+v want %+v", runtime.ContractID, got, runtime.ContentEnvelope)
 			}
 			if !reflect.DeepEqual(manifestContract.ToolCallLifecycle, runtime.ToolCallLifecycle) {
 				t.Fatalf("%s tool_call_lifecycle manifest/runtime drift:\nmanifest=%+v\nruntime=%+v", runtime.ContractID, manifestContract.ToolCallLifecycle, runtime.ToolCallLifecycle)
@@ -1565,6 +1653,7 @@ func TestManagedHookContractLockRecoveryReproducesProtectedBytes(t *testing.T) {
 		"127.0.0.1:18970",
 		"codex",
 		"scoped-test-token",
+		"closed",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -2315,6 +2404,14 @@ func TestHookContractDriftExcludesGeneratedArtifactChanges(t *testing.T) {
 	if !HookContractLockDrifted(previous, current) {
 		t.Fatal("agent version changes must remain lock drift")
 	}
+
+	t.Run("an OpenClaw upgrade or downgrade is no drift (GAP-0225)", func(t *testing.T) {
+		older := HookContractLockEntry{Connector: "openclaw", RawAgentVersion: "OpenClaw 2026.6.8 (844f405)", NormalizedAgentVersion: "2026.6.8"}
+		newer := HookContractLockEntry{Connector: "openclaw", RawAgentVersion: "OpenClaw 2026.9.8 (fc23bc8)", NormalizedAgentVersion: "2026.9.8"}
+		if HookContractCompatibilityDrifted(older, newer) || HookContractCompatibilityDrifted(newer, older) {
+			t.Fatal("a proxy connector has no hook contract to drift from")
+		}
+	})
 
 	t.Run("Amp relative release age is presentation-only", func(t *testing.T) {
 		previous := HookContractLockEntry{
@@ -3408,5 +3505,29 @@ func TestHookContractGitBuildVersion(t *testing.T) {
 	}
 	if got := ResolveHookContract("hermes", "Hermes Agent v0.21.5+4977"); got.UntestedVersion || got.NormalizedVersion != "0.21.5" {
 		t.Fatalf("hermes release = %+v", got)
+	}
+}
+
+// The best-effort union keeps the default's ContractID, so it must not pull in
+// events of a contract gated above the default's range: an unversioned Claude
+// Code setup renders exactly the v1 matrix a pin of claudecode-hooks-v1
+// verifies (no v2-only DirectoryAdded).
+func TestBestEffortHookContractExcludesNewerGatedContracts(t *testing.T) {
+	fallback := BestEffortHookContract(ResolveHookContract("claudecode", ""))
+	pinned, ok := hookContractByID("claudecode", fallback.ContractID)
+	if !ok || fallback.ContractID != "claudecode-hooks-v1" {
+		t.Fatalf("fallback=%s registered=%t, want claudecode-hooks-v1", fallback.ContractID, ok)
+	}
+	if strings.Join(fallback.Events, ",") != strings.Join(pinned.Events, ",") {
+		t.Fatalf("unversioned events=%v, want the pinned v1 events %v", fallback.Events, pinned.Events)
+	}
+	for _, event := range fallback.Events {
+		if event == "DirectoryAdded" {
+			t.Fatal("unversioned Claude Code contract includes v2-only DirectoryAdded")
+		}
+	}
+	groups, err := claudeCodeHookGroupsForSetup(SetupOpts{})
+	if err != nil || len(groups) != len(hookGroups) {
+		t.Fatalf("unversioned setup groups=%d err=%v, want %d", len(groups), err, len(hookGroups))
 	}
 }

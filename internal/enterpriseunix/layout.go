@@ -14,11 +14,13 @@ package enterpriseunix
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -33,6 +35,12 @@ const (
 
 var requiredBinaries = []string{binGateway, binHook, binSensorHelper}
 var optionalBinaries = []string{binACP}
+
+// compilerInstallPath is shared by the package and payload channels so the
+// gateway finds its compiler under its own installation prefix.
+func compilerInstallPath(l managed.StandaloneLayout) string {
+	return filepath.Join(l.InstallRoot, "lib", "defenseclaw", compilerFileName)
+}
 
 // desiredDir is a directory the lifecycle owns or must be able to rely on.
 type desiredDir struct {
@@ -81,6 +89,8 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 			{Path: l.VendorPolicyDir, Mode: 0o755, Owner: root},
 			{Path: openCodePluginDir(l), Mode: 0o755, Owner: root},
 			{Path: l.ConfigDir, Mode: 0o755, Owner: root},
+			{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName), Mode: 0o755, Owner: root},
+			{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName, bundleInboxDirName), Mode: 0o700, Owner: root},
 			{Path: l.PolicyDir, Mode: 0o750, Owner: rootService},
 			{Path: l.SecretsDir, Mode: secretsMode, Owner: secretsOwner},
 			{Path: filepath.Dir(l.ManifestPath), Mode: 0o750, Owner: rootService},
@@ -100,10 +110,15 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 		{Path: l.VendorPolicyDir, Mode: 0o755, Owner: root},
 		{Path: openCodePluginDir(l), Mode: 0o755, Owner: root},
 		{Path: l.ConfigDir, Mode: 0o755, Owner: root},
+		{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName), Mode: 0o755, Owner: root},
+		{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName, bundleInboxDirName), Mode: 0o700, Owner: root},
 		{Path: l.PolicyDir, Mode: 0o750, Owner: rootService},
 		{Path: l.SecretsDir, Mode: secretsMode, Owner: secretsOwner},
 		{Path: filepath.Dir(l.ManifestPath), Mode: 0o750, Owner: rootService},
 		{Path: l.DataDir, Mode: 0o700, Owner: service}, // the device identity key requires a private directory
+		// The ACP enrollment records. The hook enumerator unit can write
+		// only paths that exist when it starts (GAP-0697).
+		{Path: filepath.Join(l.DataDir, "acp"), Mode: 0o700, Owner: service},
 		{Path: l.GuardianAuthDir, Mode: 0o750, Owner: rootService},
 		{Path: l.LifecycleDir, Mode: 0o700, Owner: root},
 		{Path: l.LogDir, Mode: 0o750, Owner: service},
@@ -210,6 +225,20 @@ var legacyLinuxUnits = []string{
 	"defenseclaw-enterprise-test.service",
 }
 
+// packageTmpfilesOverride turns off the package's tmpfiles.d entries after
+// an uninstall that removed the service account but left the package
+// installed (systemd-tmpfiles reads a file in /etc instead of the one with
+// the same name in /usr/lib). The next install and the package removal
+// delete it.
+const (
+	packageTmpfilesOverride       = "/etc/tmpfiles.d/defenseclaw.conf"
+	packageTmpfilesOverrideMarker = "# defenseclaw-uninstall-override"
+	packageTmpfilesOverrideText   = packageTmpfilesOverrideMarker + "\n" +
+		"# Written by `defenseclaw-gateway enterprise linux uninstall`: the defenseclaw\n" +
+		"# account is removed, so the package's /usr/lib/tmpfiles.d/defenseclaw.conf\n" +
+		"# stays off until the next install, which removes this file.\n"
+)
+
 // tmpfilesInstallPath and sysusersInstallPath depend on the channel: the
 // package owns /usr/lib, the payload channel writes /etc.
 func tmpfilesInstallPath(channel string) string {
@@ -262,7 +291,7 @@ func (e *Env) unmanagedLeftovers(services ServiceManager, channel string) []stri
 			// State this lifecycle kept on a non-purge uninstall.
 			continue
 		}
-		if entries, err := os.ReadDir(e.P(dir)); err == nil && len(entries) > 0 {
+		if holdsState(e.P(dir)) {
 			candidates = append(candidates, dir)
 		}
 	}
@@ -289,6 +318,27 @@ func (e *Env) unmanagedLeftovers(services ServiceManager, channel string) []stri
 		}
 	}
 	sort.Strings(found)
+	return found
+}
+
+// holdsState reports whether dir holds anything but empty directories.
+// The tmpfiles.d entry of the rpm and deb creates empty state directories
+// (such as /var/lib/defenseclaw/acp) before the postinstall ensure runs;
+// they hold no machine state, so they must not trip the adoption guard.
+// Any file, symlink or unreadable entry counts as state.
+func holdsState(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			found = path != dir
+			return filepath.SkipAll
+		}
+		if !d.IsDir() {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
 	return found
 }
 

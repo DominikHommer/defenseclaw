@@ -11,6 +11,7 @@ import (
 	"os"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -81,7 +82,22 @@ func validateJudgeBodyPlatformTrust(path string, _ os.FileInfo, directory, prote
 		return fmt.Errorf("judge_body: inspect Windows owner: %w", err)
 	}
 	if !judgeBodyWindowsTrustedPrincipal(owner) {
-		return fmt.Errorf("judge_body: Windows owner %s is not trusted", judgeBodyWindowsSID(owner))
+		// AIFW-34262 ancestor-advisory (matches audit_db_path_windows.go): a
+		// permission-shaped verdict on a path under
+		// managed.PlatformInstallerOwnedPath is downgraded to a
+		// managed_trust_ancestor_advisory warning when protectChildren=false
+		// (ancestor of the judge-body store). Leaves and non-installer-
+		// owned paths stay fatal; managed.TrustStrictAncestorsEnv=1 forces
+		// fatality.
+		verdict := managed.NewTrustVerdict(
+			"judge_body: Windows owner %s is not trusted", judgeBodyWindowsSID(owner),
+		)
+		advisory := !protectChildren && managed.PlatformInstallerOwnedPath(path)
+		if err := managed.RelaxAncestorTrustVerdict(
+			advisory, path, "judge body owner", verdict,
+		); err != nil {
+			return err
+		}
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
@@ -207,16 +223,8 @@ func judgeBodyPlatformPathNeedsHardening(path string) (bool, error) {
 	if gatewayServiceSID == nil {
 		return false, nil
 	}
-	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || currentUser == nil || currentUser.User.Sid == nil {
-		return false, fmt.Errorf("judge_body: resolve current Windows user for managed DACL validation: %w", err)
-	}
-	if !currentUser.User.Sid.Equals(gatewayServiceSID) {
-		return false, fmt.Errorf(
-			"judge_body: managed gateway token SID %s does not match pinned service SID %s",
-			judgeBodyWindowsSID(currentUser.User.Sid),
-			judgeBodyWindowsSID(gatewayServiceSID),
-		)
+	if err := requireAuditDBWindowsGatewayToken(gatewayServiceSID); err != nil {
+		return false, fmt.Errorf("judge_body: %w", err)
 	}
 	canonical, err := auditDBWindowsManagedRuntimeFileCanonical(sd, gatewayServiceSID)
 	if err != nil {
@@ -263,10 +271,25 @@ func rejectUntrustedJudgeBodyWindowsWriteACEs(path string, dacl *windows.ACL, di
 			continue
 		}
 		if !judgeBodyWindowsTrustedPrincipal(sid) {
-			return fmt.Errorf(
+			// AIFW-34262 ancestor-advisory (matches
+			// audit_db_path_windows.go): a foreign-principal ACE on a path
+			// under managed.PlatformInstallerOwnedPath is permission-shaped.
+			// When protectChildren=false (ancestor of the judge-body store)
+			// the verdict is downgraded to a managed_trust_ancestor_advisory
+			// warning. Leaves and non-installer-owned paths stay fatal;
+			// managed.TrustStrictAncestorsEnv=1 restores fatality. Structural
+			// failures (unsupported ACE type at line ~270, API errors)
+			// remain fatal via the earlier returns above.
+			verdict := managed.NewTrustVerdict(
 				"judge_body: untrusted Windows principal %s has access mask 0x%x that can expose or modify judge-body storage on %s",
 				judgeBodyWindowsSID(sid), uint32(ace.Mask), path,
 			)
+			advisory := !protectChildren && managed.PlatformInstallerOwnedPath(path)
+			if err := managed.RelaxAncestorTrustVerdict(
+				advisory, path, "judge body DACL", verdict,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -310,8 +333,10 @@ func judgeBodyWindowsTrustedPrincipal(sid *windows.SID) bool {
 	if sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) || sid.IsWellKnown(windows.WinLocalSystemSid) {
 		return true
 	}
-	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err == nil && currentUser != nil && currentUser.User.Sid != nil && sid.Equals(currentUser.User.Sid) {
+	// The process's own owner identity: the token user, or the gateway service
+	// SID for the LocalSystem gateway, which writes these files as that SID.
+	current, err := auditDBWindowsCurrentProcessOwnerSID()
+	if err == nil && current != nil && sid.Equals(current) {
 		return true
 	}
 	trustedInstaller, err := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")

@@ -51,7 +51,7 @@ type StandaloneLayout struct {
 	SecretsDir      string // AI Defense / judge credentials
 	ManifestPath    string // guardian target manifest (enumerator output)
 	DescriptorPath  string // public, non-secret runtime descriptor for hooks
-	LifecycleDir    string // transaction state, snapshots, preimages, lock
+	LifecycleDir    string // transaction state, snapshots, preimages, persistent lock
 
 	// Service-owned runtime state.
 	DataDir         string // gateway state (audit DB, runtime tokens)
@@ -78,6 +78,24 @@ type StandaloneLayout struct {
 // StandaloneLayoutFor returns the unix standalone layout for goos
 // ("linux" or "darwin"). Use StandaloneWindowsLayout for Windows, which
 // resolves the protected machine roots at runtime.
+// The sandbox state a non-purge uninstall of a Linux or macOS deployment
+// keeps while an account keeps sandboxes: the gateway's sandbox registration
+// store and its correlation key below DataDir, and the lifecycle's root-only
+// record of the sandbox setup below LifecycleDir.
+const (
+	StandaloneSandboxStoreDirName    = "sandbox"
+	StandaloneCorrelationKeyFileName = "redaction-correlation.key"
+	StandaloneKeptOpenShellStateFile = "openshell-state.kept.json"
+)
+
+// KeptSandboxStatePaths are the paths of that state in a Linux or macOS
+// layout.
+func (l StandaloneLayout) KeptSandboxStatePaths() (store, key, record string) {
+	return path.Join(l.DataDir, StandaloneSandboxStoreDirName),
+		path.Join(l.DataDir, StandaloneCorrelationKeyFileName),
+		path.Join(l.LifecycleDir, StandaloneKeptOpenShellStateFile)
+}
+
 func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 	switch goos {
 	case "linux":
@@ -172,6 +190,19 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 		APIAddr:         StandaloneAPIAddr,
 	}, nil
 }
+
+// StandaloneWindowsScannerRuntimeDirForRoot is where the standalone Windows
+// lifecycle installs the scanner runtime (defenseclaw-scanners.exe and the
+// Python runtime it unpacks): its own administrator-owned root beside the
+// state root, so the lifecycle's retained-runtime and install-tree checks
+// never walk its thousands of files. Only LocalSystem and Administrators
+// write it; the gateway service reads and runs it.
+func StandaloneWindowsScannerRuntimeDirForRoot(programData string) string {
+	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\DefenseClaw-ScannerRuntime`
+}
+
+// StandaloneWindowsScannerRuntimeName is the scanner runtime executable.
+const StandaloneWindowsScannerRuntimeName = "defenseclaw-scanners.exe"
 
 // StandaloneSecretsDirForConfig derives the protected secrets directory from
 // the trusted managed config path, so certification roots and production

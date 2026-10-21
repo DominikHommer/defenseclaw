@@ -16,7 +16,10 @@ package enterprisestatus
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"slices"
 	"sort"
+	"strings"
 )
 
 // SchemaVersion is the lifecycle result schema. Version 1 is the Secure
@@ -45,7 +48,7 @@ const (
 // Service is one managed service or unit.
 type Service struct {
 	Name      string `json:"name"`
-	Kind      string `json:"kind"` // gateway, guardian, enumerator, sensor_helper, socket, timer, path
+	Kind      string `json:"kind"` // gateway, guardian, enumerator, sensor_helper, socket, timer, path, sandbox
 	State     string `json:"state"`
 	StartMode string `json:"start_mode,omitempty"`
 	PID       int    `json:"pid,omitempty"`
@@ -64,7 +67,27 @@ type Readiness struct {
 // Inspection reports who decides verdicts.
 type Inspection struct {
 	Local     string `json:"local"`      // active, disabled
-	AIDefense string `json:"ai_defense"` // disabled, ok, unavailable:<code>
+	AIDefense string `json:"ai_defense"` // disabled, ok, unknown, unavailable:<code>
+}
+
+// CodeAIDefenseUnavailable warns that enabled Cisco AI Defense inspection is
+// failing, for example with a rejected key (unavailable:auth_failed).
+const CodeAIDefenseUnavailable = "ai_defense_unavailable"
+
+// AddAIDefenseWarning warns when Inspection.AIDefense is unavailable:<code>.
+// Not an error: the local policy engine keeps deciding, but the cloud
+// inspection the administrator enabled is not running.
+func (r *Result) AddAIDefenseWarning() {
+	if !strings.HasPrefix(r.Inspection.AIDefense, "unavailable") {
+		return
+	}
+	fix := "Check the enterprise.inspection.ai_defense credential and network access"
+	if r.Inspection.AIDefense == "unavailable:auth_failed" {
+		fix = "Cisco AI Defense rejected the stored API key (HTTP 401 or 403): store a valid key under the " +
+			"credential enterprise.inspection.ai_defense.credential names, with `enterprise secret set`"
+	}
+	r.AddWarning(CodeAIDefenseUnavailable, "Cisco AI Defense inspection is enabled but reports "+
+		r.Inspection.AIDefense+"; the local policy engine keeps deciding. "+fix)
 }
 
 // MachinePolicyState is the per-connector machine policy report.
@@ -118,6 +141,20 @@ type Message struct {
 	Message string `json:"message"`
 }
 
+// Destination is one observability destination the installed config.yaml
+// compiles to, as status reports it (GAP-1105).
+type Destination struct {
+	Name    string   `json:"name"`
+	Kind    string   `json:"kind"`
+	Enabled bool     `json:"enabled"`
+	Preset  string   `json:"preset,omitempty"`
+	Signals []string `json:"signals"`
+	// RedactionProfiles are the distinct effective profiles of the
+	// destination's send routes; empty for a destination that sends only
+	// metrics.
+	RedactionProfiles []string `json:"redaction_profiles"`
+}
+
 // Result is the lifecycle result document.
 type Result struct {
 	SchemaVersion      int                           `json:"schema_version"`
@@ -128,6 +165,7 @@ type Result struct {
 	Profile            string                        `json:"profile"`
 	Platform           string                        `json:"platform"`
 	ProductVersion     string                        `json:"product_version"`
+	FloorSource        string                        `json:"floor_source,omitempty"`
 	InstalledVersion   string                        `json:"installed_version,omitempty"`
 	Installed          bool                          `json:"installed"`
 	TransactionPending bool                          `json:"transaction_pending"`
@@ -147,8 +185,214 @@ type Result struct {
 	// nothing to repair.
 	Changes        []string     `json:"changes,omitempty"`
 	APIPortHolders []PortHolder `json:"api_port_holders,omitempty"`
-	LogPath        string       `json:"log_path,omitempty"`
-	ExitCode       int          `json:"exit_code"`
+	// Policy is the effective policy state; nil (omitted) under the Secure
+	// Client integration and when the gateway did not report it.
+	Policy *PolicyState `json:"policy,omitempty"`
+	// Bundle is the signed policy bundle state of a standalone device in
+	// bundle mode: the last receipt that reached staging and the bundle that
+	// enforces; nil (omitted) when neither exists.
+	Bundle      *BundleState   `json:"bundle,omitempty"`
+	LastRefusal *BundleRefusal `json:"last_refusal,omitempty"`
+	// Scanners is the standalone Windows scanner runtime (skill, MCP and
+	// plugin scanners); nil (omitted) everywhere else.
+	Scanners *ScannerRuntime `json:"scanners,omitempty"`
+	// Destinations lists, for status, the observability destinations of the
+	// installed config.yaml with their effective redaction profiles, from the
+	// compiler `defenseclaw observability plan` uses (GAP-1105).
+	Destinations []Destination `json:"destinations,omitempty"`
+	// Connectors, OpenShell and Identity are the status v2 blocks of status
+	// and verify on the standalone profile (connector_block.go,
+	// openshell_block.go, identity_block.go); nil (omitted) elsewhere.
+	Connectors map[string]ConnectorState `json:"connectors,omitempty"`
+	OpenShell  *OpenShellCapability      `json:"openshell,omitempty"`
+	Identity   *IdentityHealth           `json:"identity,omitempty"`
+	LogPath    string                    `json:"log_path,omitempty"`
+	ExitCode   int                       `json:"exit_code"`
+	// ConfigRefused marks a run that refused the submitted config before it
+	// changed anything: the policy, services and advisories it reports are
+	// the running deployment's. Text output only (GAP-0564).
+	ConfigRefused bool `json:"-"`
+	// PreserveNotRootDeploymentState retains the pre-1.0 Secure Client JSON
+	// shape for an unelevated macOS lifecycle command.
+	PreserveNotRootDeploymentState bool `json:"-"`
+}
+
+// ScannerRuntime reports the scanners a standalone Windows deployment runs.
+type ScannerRuntime struct {
+	// State: ready, not_prepared (installed but not unpacked), untrusted
+	// (not the executable the payload trust policy admitted, so not run),
+	// missing.
+	State string `json:"state"`
+	// Versions of the pinned components (skill-scanner, mcp-scanner,
+	// litellm, python, ...).
+	Versions map[string]string `json:"versions,omitempty"`
+	// Policy is scanners.skill_scanner.policy; JudgeModel the resolved
+	// scanner LLM judge model ("" when no judge is configured).
+	Policy     string `json:"policy,omitempty"`
+	JudgeModel string `json:"judge_model,omitempty"`
+	// Problem names the unpacked file that is missing or changed when a
+	// prepared runtime is damaged (State not_prepared).
+	Problem string `json:"problem,omitempty"`
+}
+
+// PolicyState reports the effective policy a lifecycle step left in place.
+type PolicyState struct {
+	// EffectiveDigest is effective_policy_digest computed from the
+	// committed config and its assets ("sha256:<hex>").
+	EffectiveDigest string `json:"effective_digest"`
+	// ConfigGeneration is config_generation from config.generation.json.
+	ConfigGeneration uint64 `json:"config_generation"`
+	// Applied is true when the gateway reports the same digest.
+	Applied bool `json:"applied"`
+	// GatewayReportedDigest is the digest /health reported; empty when the
+	// gateway was not reachable.
+	GatewayReportedDigest string `json:"gateway_reported_digest,omitempty"`
+	// LastReloadError is policy.last_reload_error from /health: why the
+	// gateway rejected its last reload. While it is set the gateway enforces
+	// an older policy than the installed config, so Applied is false.
+	LastReloadError string `json:"last_reload_error,omitempty"`
+	// ConfigUnrecorded is true when config.yaml was changed outside the
+	// lifecycle: its generation is not the one config.generation.json
+	// records, and the running gateway may already enforce it.
+	ConfigUnrecorded bool `json:"config_unrecorded,omitempty"`
+}
+
+// Bundle receipt states (management plane spec P1 section 7). A receipt
+// moves received, verified, staged, applied, confirmed; failed (with an
+// error code) ends it from any state before confirmed.
+const (
+	BundleReceived  = "received"
+	BundleVerified  = "verified"
+	BundleStaged    = "staged"
+	BundleApplied   = "applied"
+	BundleConfirmed = "confirmed"
+	BundleFailed    = "failed"
+)
+
+// BundleState is the result v2 "bundle" block: the last receipt (the
+// newest bundle the device received and how far it got) and the confirmed
+// bundle that enforces. ConfigGeneration is the persistent config
+// generation of config.generation.json, not the gateway policy generation
+// that restarts at 1 with the gateway.
+type BundleState struct {
+	// ReceiptID names the receipt this block reports: the file name of its
+	// public receipt (<etc>/bundles/receipt-events/<receipt_id>.json) that a
+	// management agent forwards. A repeated delivery of the current bundle
+	// discards its own receipt, so the block names the confirmed one.
+	ReceiptID string `json:"receipt_id,omitempty"`
+	// DeliveryID is the --delivery-id of the delivery that receipt records
+	// (absent without it); a repeat names the confirmed receipt, so it is
+	// that delivery id, not the repeat one.
+	DeliveryID       string   `json:"delivery_id,omitempty"`
+	BundleID         string   `json:"bundle_id"`
+	DisabledByBundle []string `json:"disabled_by_bundle,omitempty"`
+	WarningCodes     []string `json:"warning_codes,omitempty"`
+	Version          uint64   `json:"version"`
+	State            string   `json:"state"`
+	// SessionsRestartRequired is a live scan. A confirmed receipt proves the
+	// gateway applied the policy; coverage_complete also requires its count
+	// to be zero because already-running agents can retain earlier hooks.
+	SessionsRestartRequired *SessionRestartStatus `json:"sessions_restart_required,omitempty"`
+	// ErrorCode is the bundle error code of a failed receipt.
+	ErrorCode string `json:"error_code,omitempty"`
+	// EffectivePolicyDigest is the digest the receipt recorded: the staged
+	// config computes to it, and a confirmed receipt is enforced with it.
+	EffectivePolicyDigest string `json:"effective_policy_digest,omitempty"`
+	ConfigGeneration      uint64 `json:"config_generation,omitempty"`
+	// AppliedAt and ConfirmedAt are RFC 3339 UTC.
+	AppliedAt       string `json:"applied_at,omitempty"`
+	ConfirmedAt     string `json:"confirmed_at,omitempty"`
+	Restart         bool   `json:"restart,omitempty"`
+	RestartRequired bool   `json:"restart_required,omitempty"`
+	// CurrentBundleID and CurrentVersion name the confirmed bundle that
+	// enforces when this receipt is not its confirmed receipt: a newer
+	// bundle pending or failed (the last good bundle keeps enforcing), or
+	// the enforcing bundle delivered again.
+	CurrentBundleID string `json:"current_bundle_id,omitempty"`
+	CurrentVersion  uint64 `json:"current_version,omitempty"`
+}
+
+// ShortDigest is "sha256:" and the first 12 hex digits of a digest, or "none".
+func ShortDigest(digest string) string {
+	if digest == "" {
+		return "none"
+	}
+	if len(digest) > len("sha256:")+12 {
+		return digest[:len("sha256:")+12]
+	}
+	return digest
+}
+
+// Line is the one human-readable line status, verify and ensure print for the
+// policy: the config generation, the effective digest and whether the gateway
+// enforces it. The same facts are in --json under "policy".
+func (p *PolicyState) Line() string {
+	line := fmt.Sprintf("policy: config generation %d, effective digest %s", p.ConfigGeneration, ShortDigest(p.EffectiveDigest))
+	switch {
+	case p.LastReloadError != "":
+		line += "; the gateway rejected its last reload (" + p.LastReloadError + ") and keeps enforcing the policy it last built"
+	case p.Applied:
+		line += "; applied by the gateway"
+	case p.GatewayReportedDigest == "":
+		line += "; the gateway did not report a policy, so it is not confirmed as applied"
+	default:
+		line += "; the gateway reports " + ShortDigest(p.GatewayReportedDigest) + " and applies this one on its next reload"
+	}
+	if p.ConfigUnrecorded {
+		line += "; config.yaml was changed outside the lifecycle"
+	}
+	return line
+}
+
+// RunningDeploymentPrefix starts each warning of a run that refused the
+// submitted config before it changed anything: the warning is the running
+// deployment's, not the refused file's (GAP-0564, #1201).
+const RunningDeploymentPrefix = "running deployment (the refused config changed nothing): "
+
+// LabelRunningDeployment marks r as a run that refused the submitted config
+// (ConfigRefused) and labels each warning from index from on as the running
+// deployment's, except those whose code is in keep: they describe the
+// refused request itself. A warning already labelled stays as it is.
+func (r *Result) LabelRunningDeployment(from int, keep ...string) {
+	if r == nil {
+		return
+	}
+	r.ConfigRefused = true
+	for i := max(from, 0); i < len(r.Warnings); i++ {
+		if slices.Contains(keep, r.Warnings[i].Code) || strings.HasPrefix(r.Warnings[i].Message, RunningDeploymentPrefix) {
+			continue
+		}
+		r.Warnings[i].Message = RunningDeploymentPrefix + r.Warnings[i].Message
+	}
+}
+
+// PolicyLine is Policy.Line(), labelled as the running deployment's when the
+// run refused the submitted config (ConfigRefused); "" without a policy.
+func (r *Result) PolicyLine() string {
+	if r == nil || r.Policy == nil {
+		return ""
+	}
+	line := r.Policy.Line()
+	if r.ConfigRefused {
+		line = "running policy (the refused config changed nothing)" + strings.TrimPrefix(line, "policy")
+	}
+	return line
+}
+
+// PolicyStateFileName is the lifecycle state file holding the last applied
+// policy state (PolicyStateRecord), next to deployment.json.
+const PolicyStateFileName = "policy-state.json"
+
+// PolicyStateRecord is policy-state.json.
+type PolicyStateRecord struct {
+	EffectiveDigest  string `json:"effective_digest"`
+	ConfigGeneration uint64 `json:"config_generation"`
+	// AppliedAt is RFC 3339 UTC.
+	AppliedAt string `json:"applied_at"`
+	// BundleID and BundleVersion name the signed policy bundle whose config
+	// computes to EffectiveDigest; absent without bundles.
+	BundleID      string `json:"bundle_id,omitempty"`
+	BundleVersion uint64 `json:"bundle_version,omitempty"`
 }
 
 // New returns a result with the schema version and empty collections set,
@@ -180,8 +424,19 @@ func (r *Result) AddWarning(code, message string) {
 // Finish sets OK from the error list and the exit code for goos, then
 // returns the code. failureCode overrides the generic failure code when a
 // more specific one applies (busy, invalid arguments).
+//
+// A result with an error is never security_complete: Windows verify
+// reported security_complete:true next to the error that the guardian could
+// not verify an enrolled target's hooks, so a script that read the flag
+// was told the host was protected (GAP-0664).
 func (r *Result) Finish(goos string, failureCode int) int {
+	if r.Bundle != nil && r.Bundle.SessionsRestartRequired != nil && r.Bundle.SessionsRestartRequired.Count > 0 {
+		r.CoverageComplete, r.SecurityComplete = false, false
+	}
 	r.OK = len(r.Errors) == 0
+	if !r.OK {
+		r.SecurityComplete = false
+	}
 	switch {
 	case r.OK:
 		r.ExitCode = ExitOK
@@ -211,6 +466,28 @@ func InvalidArgsExitCode(goos string) int {
 	return UnixExitInvalidArgs
 }
 
+// notRootCode is the refusal of a Linux or macOS action run without root.
+const notRootCode = "not_root"
+
+// deploymentStateFields report the deployment. A not_root result checked
+// nothing (a standard user cannot read the root-only deployment record), so
+// it leaves them out instead of reporting installed: false, no services and
+// every readiness flag false, which a script that ignores the error code read
+// as "not installed" (GAP-0279).
+var deploymentStateFields = []string{
+	"installed", "installed_version", "transaction_pending", "services", "readiness", "inspection", "machine_policy", "enrollment",
+	"destinations", "connectors", "openshell", "identity",
+}
+
+func (r Result) refusedNotRoot() bool {
+	for _, e := range r.Errors {
+		if e.Code == notRootCode {
+			return true
+		}
+	}
+	return false
+}
+
 // MarshalJSON renders services in a stable order.
 func (r Result) MarshalJSON() ([]byte, error) {
 	type plain Result
@@ -233,6 +510,20 @@ func (r Result) MarshalJSON() ([]byte, error) {
 	encoder := json.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(sorted); err != nil {
+		return nil, err
+	}
+	if !r.refusedNotRoot() || r.PreserveNotRootDeploymentState {
+		return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &fields); err != nil {
+		return nil, err
+	}
+	for _, name := range deploymentStateFields {
+		delete(fields, name)
+	}
+	buf.Reset()
+	if err := encoder.Encode(fields); err != nil {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil

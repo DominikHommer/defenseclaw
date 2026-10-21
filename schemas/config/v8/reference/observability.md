@@ -41,7 +41,6 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.trace_policy.sampler` | string | `"parentbased_always_on"` | `always_on, always_off, traceidratio, parentbased_always_on, parentbased_always_off, parentbased_traceidratio` |  |
 | `observability.trace_policy.sampler_arg` | string |  |  |  |
 | `observability.trace_policy.semantic_profile` | constant | `"defenseclaw-genai-rich-v1"` | `"defenseclaw-genai-rich-v1"` |  |
-| `observability.trace_policy.compatibility_aliases` | boolean | `true` |  |  |
 | `observability.trace_policy.limits` | object |  |  |  |
 | `observability.trace_policy.limits.max_attributes_per_span` | integer | `128` |  |  |
 | `observability.trace_policy.limits.max_events_per_span` | integer | `64` |  |  |
@@ -96,7 +95,7 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.local` | object |  |  |  |
 | `observability.local.path` | string |  |  | Defaults dynamically to <data_dir>/audit.db. |
 | `observability.local.judge_bodies_path` | string |  |  | Defaults dynamically to <data_dir>/judge_bodies.db. |
-| `observability.local.retention_days` | integer | `7` |  | Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff after startup readiness and every six hours. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration. |
+| `observability.local.retention_days` | integer | `7` |  | Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff after startup readiness and every six hours. The same window bounds AI discovery scan history in <data_dir>/inventory.db, which the gateway prunes about hourly (always keeping the latest scan) and compacts. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the audit database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration. |
 | `observability.destinations` | array |  |  |  |
 | `observability.destinations[].name` | constraint |  |  | Required. |
 | `observability.destinations[].kind` | constant |  | `"jsonl"` | Required. |

@@ -12,6 +12,7 @@ from unittest.mock import Mock
 
 import pytest
 from defenseclaw import config as config_module
+from defenseclaw import file_permissions
 from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_version
 from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
 from defenseclaw.file_permissions import UnsafePathError
@@ -39,6 +40,7 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
         "DEFENSECLAW_DAEMON",
         "DEFENSECLAW_DISABLE_REDACTION",
+        "DEFENSECLAW_DEPLOYMENT_MODE",
         "DEFENSECLAW_ENTERPRISE_PROFILE",
         "CLAUDE_CONFIG_DIR",
         "SSL_CERT_FILE",
@@ -65,6 +67,7 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         b"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1\n"
         b"DEFENSECLAW_DAEMON=1\n"
         b"DEFENSECLAW_DISABLE_REDACTION=1\n"
+        b"DEFENSECLAW_DEPLOYMENT_MODE=oss\n"
         b"DEFENSECLAW_ENTERPRISE_PROFILE=standalone\n"
         b"CLAUDE_CONFIG_DIR=/tmp/attacker-claude-home\n"
         b"SSL_CERT_FILE=/tmp/attacker-ca.pem\n"
@@ -85,6 +88,26 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         assert name not in os.environ
 
 
+def test_dotenv_control_keys_are_named_with_their_replacement_not_on_every_command(
+    caplog: pytest.LogCaptureFixture,
+    tmp_path,
+) -> None:
+    # GAP-0387: every command warned "ignored unsafe process-control key" with
+    # no fix, and the upgrade never said fail-open hooks were now fail-closed.
+    (tmp_path / ".env").write_bytes(b"DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1\n")
+
+    with caplog.at_level("WARNING"):
+        config_module._load_dotenv_into_os(os.fspath(tmp_path))
+    keys = config_module.ignored_dotenv_control_keys(os.fspath(tmp_path))
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_ignored_dotenv_keys(SimpleNamespace(data_dir=os.fspath(tmp_path)), result)
+
+    assert "process-control" not in caplog.text
+    assert keys[0] == "DEFENSECLAW_FAIL_MODE (set it in config.yaml instead: defenseclaw guardrail fail-mode open)"
+    assert keys[1].startswith("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT (") and "defenseclaw-gateway restart" in keys[1]
+    assert [row["status"] for row in result.checks] == ["warn"]
+
+
 def test_python_dotenv_loader_warns_when_safe_read_is_refused(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -101,6 +124,61 @@ def test_python_dotenv_loader_warns_when_safe_read_is_refused(
 
     assert "ignoring unreadable or unsafe dotenv" in caplog.text
     assert os.fspath(tmp_path / ".env") in caplog.text
+
+
+def test_doctor_reports_unreadable_dotenv_and_keeps_other_checks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_bytes(b"DEFENSECLAW_GATEWAY_TOKEN=placeholder\n")
+    dotenv.chmod(0o600)
+    safe_read = cmd_doctor.read_regular_file_no_follow
+
+    def refuse_dotenv(path, *, max_bytes):
+        if os.fspath(path) == os.fspath(dotenv):
+            raise PermissionError(13, "access denied")
+        return safe_read(path, max_bytes=max_bytes)
+
+    monkeypatch.setattr(cmd_doctor, "read_regular_file_no_follow", refuse_dotenv)
+    if os.name == "nt":
+        # chmod does not define the Windows DACL; model a private file so this
+        # case tests an unreadable dotenv rather than an exposed one.
+        monkeypatch.setattr(file_permissions, "windows_acl_confidentiality_error", lambda _path: None)
+    result = cmd_doctor._DoctorResult()
+    cfg = SimpleNamespace(data_dir=os.fspath(tmp_path))
+    cmd_doctor._check_private_file_exposure(cfg, result)
+
+    assert len(result.checks) == 1
+    row = result.checks[0]
+    assert row["status"] == "warn" and row["label"] == "Private files"
+    assert os.fspath(dotenv) in row["detail"]
+    assert "restore this account's read access" in row["remediation"]
+    assert "placeholder" not in str(row)
+
+
+def test_doctor_still_fails_exposed_dotenv_when_safe_read_rejects_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_bytes(b"x" * 10)
+    dotenv.chmod(0o644)
+    monkeypatch.setattr(
+        cmd_doctor, "read_regular_file_no_follow",
+        Mock(side_effect=UnsafePathError("sensitive file exceeds read limit")),
+    )
+    if os.name == "nt":
+        # POSIX mode bits cannot express Windows read exposure.
+        monkeypatch.setattr(
+            file_permissions,
+            "windows_acl_confidentiality_error",
+            lambda path: "another account can read" if os.fspath(path) == os.fspath(dotenv) else None,
+        )
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_private_file_exposure(SimpleNamespace(data_dir=os.fspath(tmp_path)), result)
+    assert result.checks[0]["status"] == "fail"
+    assert (
+        "unsafe Windows ACL" if os.name == "nt" else "mode 0644"
+    ) in result.checks[0]["detail"]
 
 
 def test_empty_data_dir_never_consumes_cwd_gateway_state(

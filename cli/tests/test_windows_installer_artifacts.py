@@ -819,6 +819,62 @@ def test_native_windows_workflow_builds_distinct_hook_launcher() -> None:
     assert "HookRuntime launcher exceeds the unsigned 8 MiB size ceiling" in workflow
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows file sharing semantics")
+def test_native_ci_install_state_write_waits_for_a_read_only_sharer(tmp_path: Path) -> None:
+    # GAP-1511: a packaged process validating install-state.json holds it with
+    # FILE_SHARE_READ only; the harness edit must wait instead of failing.
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell 7 is required for the sharing-violation fixture")
+    source = WINDOWS_NATIVE_CI.read_text(encoding="utf-8")
+    helper = re.search(r"(?ms)^function Set-ContentWithSharingRetry\b.*?(?=^function |\Z)", source)
+    assert helper, "missing PowerShell function Set-ContentWithSharingRetry"
+    state = tmp_path / "install-state.json"
+    state.write_text("{}", encoding="utf-8")
+    holder = (
+        "$h = [IO.File]::Open($env:DC_TEST_STATE, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read); "
+        '[IO.File]::WriteAllText($env:DC_TEST_READY, "ready"); Start-Sleep -Milliseconds 750; $h.Dispose()'
+    )
+    harness = tmp_path / "sharing-retry.ps1"
+    harness.write_text(
+        '$ErrorActionPreference = "Stop"\n'
+        f"{helper.group(0)}\n"
+        "$start = [Diagnostics.ProcessStartInfo]::new($env:DC_TEST_PWSH)\n"
+        'foreach ($a in @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $env:DC_TEST_HOLDER)) {\n'
+        "    $start.ArgumentList.Add($a)\n"
+        "}\n"
+        "$process = [Diagnostics.Process]::Start($start)\n"
+        "$deadline = [DateTime]::UtcNow.AddSeconds(60)\n"
+        "while (-not (Test-Path -LiteralPath $env:DC_TEST_READY)) {\n"
+        '    if ([DateTime]::UtcNow -gt $deadline) { throw "read-only sharer did not start" }\n'
+        "    Start-Sleep -Milliseconds 20\n"
+        "}\n"
+        "$blocked = $false\n"
+        "try { Set-Content -LiteralPath $env:DC_TEST_STATE -Value x -Encoding UTF8 -ErrorAction Stop } catch { $blocked = $true }\n"
+        'if (-not $blocked) { throw "read-only sharer did not deny write sharing" }\n'
+        'Set-ContentWithSharingRetry -LiteralPath $env:DC_TEST_STATE -Value (@{ version = "0.8.0" } | ConvertTo-Json)\n'
+        "$process.WaitForExit()\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.update(
+        DC_TEST_PWSH=pwsh,
+        DC_TEST_HOLDER=holder,
+        DC_TEST_STATE=str(state),
+        DC_TEST_READY=str(tmp_path / "ready"),
+    )
+    result = subprocess.run(
+        [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(state.read_text(encoding="utf-8-sig")) == {"version": "0.8.0"}
+
+
 def test_native_windows_artifact_builder_supports_acp_resource_component() -> None:
     harness = WINDOWS_NATIVE_CI.read_text(encoding="utf-8-sig")
     assert "[ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup', 'acp-guard')]" in harness
@@ -873,6 +929,13 @@ def test_offline_chain_and_timeout_helpers_are_strictly_bounded() -> None:
     assert "$process.WaitForExit($remaining)" in identity
     assert "$drainTask.Wait($remaining)" in identity
     assert "$process.WaitForExit()" not in identity
+
+
+def test_binary_identity_accepts_the_gateway_management_contract_member() -> None:
+    # The gateway's --version-json names the management agent contract it
+    # implements; the build-time identity check must not refuse that member.
+    identity = BINARY_IDENTITY_PS1.read_text(encoding="utf-8")
+    assert "$allowed = @($required + 'built' + 'management_contract')" in identity
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows process identity")

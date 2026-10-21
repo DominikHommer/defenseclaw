@@ -38,7 +38,6 @@ const (
 	CorrelationProfileOpenClawV1    CorrelationProfileVersion = "openclaw-correlation-v1"
 	CorrelationProfileZeptoClawV1   CorrelationProfileVersion = "zeptoclaw-correlation-v1"
 	CorrelationProfileClaudeCodeV1  CorrelationProfileVersion = "claudecode-correlation-v1"
-	CorrelationProfileCodexV1       CorrelationProfileVersion = "codex-correlation-v1"
 	CorrelationProfileCodexV2       CorrelationProfileVersion = "codex-correlation-v2"
 	CorrelationProfileHermesV1      CorrelationProfileVersion = "hermes-correlation-v1"
 	CorrelationProfileCursorV1      CorrelationProfileVersion = "cursor-correlation-v1"
@@ -1080,7 +1079,7 @@ func (s CorrelationSpec) Validate() error {
 		default:
 			return fmt.Errorf("unknown correlation surface %q", surface)
 		}
-		if len(bindings) == 0 && !(surface == CorrelationSurfaceNativeOTLP && s.NativeTelemetry.BindingMode == NativeTelemetryBindingsExporterOnly) {
+		if len(bindings) == 0 && (surface != CorrelationSurfaceNativeOTLP || s.NativeTelemetry.BindingMode != NativeTelemetryBindingsExporterOnly) {
 			return fmt.Errorf("correlation surface %q has no reviewed bindings", surface)
 		}
 	}

@@ -96,6 +96,23 @@ try {
                     }
                 }
             }
+            function Test-SecureClientTreeDrift([string]$Label, [hashtable]$Layout, [string]$Pattern) {
+                $prior = [Environment]::GetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', 'Process')
+                try {
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', '1', 'Process')
+                    Test-Refused "$Label (strict)" { Assert-DefenseClawManagedInstallTree -Layout $Layout } $Pattern
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', $null, 'Process')
+                    try {
+                        Assert-DefenseClawManagedInstallTree -Layout $Layout 3>$null
+                    }
+                    catch {
+                        $failures.Add("${Label}: bulldoze posture refused: $($_.Exception.Message)")
+                    }
+                }
+                finally {
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', $prior, 'Process')
+                }
+            }
             function Test-Accepted([string]$Label, [hashtable]$Layout) {
                 try {
                     Assert-DefenseClawManagedInstallTree -Layout $Layout
@@ -157,6 +174,248 @@ try {
             # Removal with nothing installed is a no-op.
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $layout
 
+            # GAP-0270: a 1.0.2 standalone install left lib\defenseclaw for
+            # the Fleet compiler this release no longer installs. Uninstall
+            # accepts the two directories only while they are empty, and a
+            # Fleet-off upgrade removes them. Any content stays refused and
+            # the retire deletes nothing but the old compiler.
+            function Get-RetiredLib([hashtable]$Layout) {
+                return [IO.Path]::Combine($Layout.InstallRoot, 'lib')
+            }
+            $absent = New-TestLayout 'retired-absent'
+            Test-Accepted 'tree without the retired lib directories' $absent
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $absent
+            if (-not [IO.File]::Exists($absent.GatewayPath)) {
+                $failures.Add('the retire with no lib tree touched bin')
+            }
+
+            $empty = New-TestLayout 'retired-empty'
+            $emptyLib = Get-RetiredLib $empty
+            $emptyChild = [IO.Path]::Combine($emptyLib, 'defenseclaw')
+            [void][IO.Directory]::CreateDirectory($emptyChild)
+            Test-Accepted 'tree with the empty retired lib\defenseclaw' $empty
+            try {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $empty
+            }
+            catch {
+                $failures.Add("standalone uninstall refused the empty retired lib tree: $($_.Exception.Message)")
+            }
+            [IO.Directory]::Delete($emptyChild)
+            Test-Accepted 'tree with only the empty retired lib' $empty
+            [void][IO.Directory]::CreateDirectory($emptyChild)
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $empty
+            if ([IO.Directory]::Exists($emptyLib)) {
+                $failures.Add('the Fleet-off retire left the empty lib tree')
+            }
+            if (-not [IO.File]::Exists($empty.GatewayPath)) {
+                $failures.Add('the Fleet-off retire touched bin')
+            }
+            Test-Accepted 'tree after the Fleet-off retire' $empty
+
+            $compiler = New-TestLayout 'retired-compiler'
+            $compilerChild = [IO.Path]::Combine((Get-RetiredLib $compiler), 'defenseclaw')
+            [void][IO.Directory]::CreateDirectory($compilerChild)
+            [IO.File]::WriteAllText([IO.Path]::Combine($compilerChild, 'policy_compiler.py'), 'print("compiler")')
+            Test-Refused 'retired lib\defenseclaw holding the old compiler (walk)' {
+                Assert-DefenseClawManagedInstallTree -Layout $compiler
+            } 'unexpected (file|directory) from managed install root'
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $compiler
+            if ([IO.Directory]::Exists((Get-RetiredLib $compiler))) {
+                $failures.Add('the Fleet-off retire left the compiler or its lib tree')
+            }
+            Test-Accepted 'tree after retiring the old compiler' $compiler
+
+            $kept = New-TestLayout 'retired-nonempty'
+            $keptChild = [IO.Path]::Combine((Get-RetiredLib $kept), 'defenseclaw')
+            [void][IO.Directory]::CreateDirectory($keptChild)
+            $keptCompiler = [IO.Path]::Combine($keptChild, 'policy_compiler.py')
+            $keptOther = [IO.Path]::Combine($keptChild, 'other.py')
+            [IO.File]::WriteAllText($keptCompiler, 'print("compiler")')
+            [IO.File]::WriteAllText($keptOther, 'print("unexpected")')
+            Test-Refused 'non-empty retired lib\defenseclaw (uninstall)' {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $kept
+            } 'unexpected (file|directory) from managed install root: .*The uninstall stopped before it changed anything'
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $kept
+            if ([IO.File]::Exists($keptCompiler)) {
+                $failures.Add('the Fleet-off retire kept the old compiler beside other content')
+            }
+            if (-not [IO.File]::Exists($keptOther)) {
+                $failures.Add('the Fleet-off retire removed content DefenseClaw did not install')
+            }
+            Test-Refused 'non-empty retired lib\defenseclaw after the retire (walk)' {
+                Assert-DefenseClawManagedInstallTree -Layout $kept
+            } 'unexpected (file|directory) from managed install root'
+
+            $sibling = New-TestLayout 'retired-sibling'
+            $siblingDirectory = [IO.Path]::Combine((Get-RetiredLib $sibling), 'other')
+            [void][IO.Directory]::CreateDirectory($siblingDirectory)
+            Test-Refused 'unknown directory under the retired lib (walk)' {
+                Assert-DefenseClawManagedInstallTree -Layout $sibling
+            } 'unexpected directory from managed install root'
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $sibling
+            if (-not [IO.Directory]::Exists($siblingDirectory)) {
+                $failures.Add('the Fleet-off retire removed an unknown directory under lib')
+            }
+
+            $linked = New-TestLayout 'retired-linked'
+            [void][IO.Directory]::CreateDirectory((Get-RetiredLib $linked))
+            $linkedTarget = [IO.Path]::Combine($Root, 'outside-lib')
+            [void][IO.Directory]::CreateDirectory($linkedTarget)
+            [IO.File]::WriteAllText([IO.Path]::Combine($linkedTarget, 'policy_compiler.py'), 'print("outside")')
+            if (New-TestLink ([IO.Path]::Combine((Get-RetiredLib $linked), 'defenseclaw')) $linkedTarget) {
+                # The walk's recorded-compiler check (GAP-0274) refuses the
+                # link before the walk reaches lib.
+                Test-Refused 'linked retired lib\defenseclaw (walk)' {
+                    Assert-DefenseClawManagedInstallTree -Layout $linked
+                } 'reparse point'
+                Test-Refused 'linked retired lib\defenseclaw (retire)' {
+                    Remove-DefenseClawRetiredStandaloneCompiler -Layout $linked
+                } 'reparse point'
+                if (-not [IO.File]::Exists([IO.Path]::Combine($linkedTarget, 'policy_compiler.py'))) {
+                    $failures.Add('the Fleet-off retire followed a link out of the install tree')
+                }
+            }
+
+            # GAP-0274: a Fleet-enabled 1.0.2 host keeps the compiler it
+            # installed. Setup carries none, so an upgrade keeps the recorded
+            # compiler in place, unchanged, and records the same hash; the
+            # uninstall accepts and removes it only while it matches its
+            # record and refuses a changed one before anything changes. Fleet
+            # off still retires it with its directories (GAP-0270).
+            $script:SmokeMetadata = $null
+            function script:Get-DefenseClawDeploymentMetadata {
+                param([hashtable]$Layout, [switch]$Required)
+                return $script:SmokeMetadata
+            }
+            function New-FleetLayout([string]$Name) {
+                $layout = New-TestLayout $Name
+                foreach ($entry in @(
+                    @('ACPPath', 'bin', 'defenseclaw-acp.exe'),
+                    @('HookPath', 'bin', 'defenseclaw-hook.exe'),
+                    @('SensorHelperPath', 'bin', 'defenseclaw-sensor-helper.exe'),
+                    @('InstallerPath', 'libexec', 'install-enterprise.ps1'),
+                    @('ModulePath', 'libexec', 'DefenseClawEnterprise.psm1')
+                )) {
+                    $path = [IO.Path]::Combine($layout.InstallRoot, $entry[1], $entry[2])
+                    [IO.File]::WriteAllText($path, "stand-in $($entry[2])")
+                    $layout[$entry[0]] = $path
+                }
+                $layout['CLIPath'] = [IO.Path]::Combine($layout.BinDirectory, 'defenseclaw.exe')
+                $layout['Profile'] = 'Standalone'
+                $layout['BrokerEnabled'] = $false
+                $layout['MetadataPath'] = [IO.Path]::Combine($Root, $Name, 'deployment.json')
+                $layout['CompilerLibDirectory'] = [IO.Path]::Combine($layout.InstallRoot, 'lib')
+                $layout['CompilerDirectory'] = [IO.Path]::Combine($layout.InstallRoot, 'lib', 'defenseclaw')
+                $layout['CompilerPath'] = [IO.Path]::Combine($layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
+                [void][IO.Directory]::CreateDirectory($layout.CompilerDirectory)
+                [IO.File]::WriteAllText($layout.CompilerPath, 'print("1.0.2 compiler")')
+                return $layout
+            }
+            function New-FleetMetadata([hashtable]$Layout, [switch]$WithoutCompiler) {
+                $hashes = [ordered]@{}
+                foreach ($entry in @(
+                    @('gateway', $Layout.GatewayPath),
+                    @('compiler', $Layout.CompilerPath),
+                    @('acp', $Layout.ACPPath),
+                    @('hook', $Layout.HookPath),
+                    @('sensor_helper', $Layout.SensorHelperPath),
+                    @('installer', $Layout.InstallerPath),
+                    @('module', $Layout.ModulePath)
+                )) {
+                    if ($WithoutCompiler -and $entry[0] -ceq 'compiler') {
+                        continue
+                    }
+                    $hashes[$entry[0]] = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $entry[1] -Algorithm SHA256).Hash.ToLowerInvariant()
+                }
+                return [pscustomobject]@{ hashes = [pscustomobject]$hashes }
+            }
+            function Get-CompilerHash([hashtable]$Layout) {
+                return (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.CompilerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            # Setup replaces every payload artifact; it has no compiler.
+            $setupReplaces = @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module', 'cli')
+
+            # Fleet-on upgrade: the recorded compiler is kept and still matches.
+            $fleetOn = New-FleetLayout 'fleet-on'
+            $script:SmokeMetadata = New-FleetMetadata $fleetOn
+            $recordedCompiler = [string]$script:SmokeMetadata.hashes.compiler
+            $keptPath = Get-DefenseClawRecordedStandaloneCompilerPath -Layout $fleetOn
+            if (-not [string]::Equals($keptPath, [IO.Path]::GetFullPath($fleetOn.CompilerPath), [StringComparison]::OrdinalIgnoreCase)) {
+                $failures.Add("Fleet-on upgrade did not keep the recorded compiler: '$keptPath'")
+            }
+            if ((Get-DefenseClawArtifactPath -Layout $fleetOn -Name compiler) -ne $fleetOn.CompilerPath) {
+                $failures.Add('the recorded compiler hash does not map to the kept compiler')
+            }
+            try {
+                Assert-DefenseClawRecordedArtifactHashes -Metadata $script:SmokeMetadata -Layout $fleetOn -ReplacedArtifacts $setupReplaces -Action Upgrade
+            }
+            catch {
+                $failures.Add("Fleet-on upgrade refused the recorded compiler: $($_.Exception.Message)")
+            }
+            if ((Get-CompilerHash $fleetOn) -cne $recordedCompiler) {
+                $failures.Add('the Fleet-on upgrade checks changed the kept compiler')
+            }
+            # Fleet-on uninstall with the matching compiler: accepted, and the
+            # retired-tree allow-list removes it with its directories.
+            Test-Accepted 'Fleet-on tree with the recorded compiler' $fleetOn
+            try {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $fleetOn
+                Assert-DefenseClawRecordedArtifactHashes -Metadata $script:SmokeMetadata -Layout $fleetOn -Action Uninstall
+            }
+            catch {
+                $failures.Add("Fleet-on uninstall refused the recorded compiler: $($_.Exception.Message)")
+            }
+            $retiredAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist -Layout $fleetOn -RetiredRoot $fleetOn.InstallRoot
+            if ([IO.Path]::GetFullPath($fleetOn.CompilerPath) -notin $retiredAllowlist.files -or
+                [IO.Path]::GetFullPath($fleetOn.CompilerDirectory) -notin $retiredAllowlist.directories -or
+                [IO.Path]::GetFullPath($fleetOn.CompilerLibDirectory) -notin $retiredAllowlist.directories) {
+                $failures.Add('the retired install tree does not remove the kept compiler and its directories')
+            }
+
+            # Fleet-on with a changed compiler: Setup, the upgrade gate and the
+            # uninstall all refuse, and nothing is removed.
+            [IO.File]::AppendAllText($fleetOn.CompilerPath, "`nprint('changed')")
+            Test-Refused 'changed compiler (Setup keep check)' {
+                Get-DefenseClawRecordedStandaloneCompilerPath -Layout $fleetOn
+            } 'does not match the hash deployment metadata records for it: .*nothing was changed$'
+            Test-Refused 'changed compiler (upgrade gate)' {
+                Assert-DefenseClawRecordedArtifactHashes -Metadata $script:SmokeMetadata -Layout $fleetOn -ReplacedArtifacts $setupReplaces -Action Upgrade
+            } 'Upgrade refuses unrecorded artifact hash drift: compiler'
+            Test-Refused 'changed compiler (uninstall)' {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $fleetOn
+            } 'does not match the hash deployment metadata records for it: .*nothing was changed$'
+            Test-Refused 'changed compiler (uninstall hash gate)' {
+                Assert-DefenseClawRecordedArtifactHashes -Metadata $script:SmokeMetadata -Layout $fleetOn -Action Uninstall
+            } 'Uninstall refuses unrecorded artifact hash drift: compiler'
+            if (-not [IO.File]::Exists($fleetOn.CompilerPath)) {
+                $failures.Add('a refused uninstall removed the changed compiler')
+            }
+
+            # A compiler with no record is not kept, and the uninstall refuses it.
+            $unrecorded = New-FleetLayout 'fleet-unrecorded'
+            $script:SmokeMetadata = New-FleetMetadata $unrecorded -WithoutCompiler
+            if (-not [string]::IsNullOrEmpty((Get-DefenseClawRecordedStandaloneCompilerPath -Layout $unrecorded))) {
+                $failures.Add('a compiler with no record was kept')
+            }
+            Test-Refused 'unrecorded compiler (uninstall)' {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $unrecorded
+            } 'unexpected (file|directory) from managed install root: .*The uninstall stopped before it changed anything'
+
+            # Fleet off: unchanged, the retire removes even a recorded
+            # compiler with its directories and leaves the rest.
+            $fleetOff = New-FleetLayout 'fleet-off'
+            $script:SmokeMetadata = New-FleetMetadata $fleetOff
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $fleetOff
+            if ([IO.Directory]::Exists($fleetOff.CompilerLibDirectory)) {
+                $failures.Add('the Fleet-off retire kept the recorded compiler or its lib tree')
+            }
+            if (-not [IO.File]::Exists($fleetOff.GatewayPath) -or -not [IO.File]::Exists($fleetOff.ModulePath)) {
+                $failures.Add('the Fleet-off retire touched other artifacts')
+            }
+            $script:SmokeMetadata = New-FleetMetadata $fleetOff -WithoutCompiler
+            Test-Accepted 'tree after the Fleet-off retire of a recorded compiler' $fleetOff
+            $script:SmokeMetadata = $null
+
             # Anything other than the exact leaves stays refused, and a
             # refused removal deletes nothing.
             $extra = New-TestLayout 'extra-ipc'
@@ -175,6 +434,88 @@ try {
                 if (-not [IO.File]::Exists($kept)) {
                     $failures.Add("refused removal still deleted content: $kept")
                 }
+            }
+
+            # GAP-0743, GAP-0772: Windows renames but does not delete a
+            # program that is running, so the copy File.Replace keeps of a
+            # running defenseclaw-acp.exe stays. The upgrade still succeeds,
+            # the copy is deleted at the next restart, and the uninstall
+            # sweep removes what an earlier upgrade left.
+            $restartDeletes = [Collections.Generic.List[string]]::new()
+            function Request-DefenseClawDeleteAtRestart {
+                param([string]$Path)
+                $restartDeletes.Add($Path)
+            }
+            $busy = New-TestLayout 'busy'
+            $guard = [IO.Path]::Combine($busy.BinDirectory, 'defenseclaw-acp.exe')
+            [IO.File]::Copy([IO.Path]::Combine([Environment]::SystemDirectory, 'PING.EXE'), $guard)
+            $busy.ACPPath = $guard
+            $newer = [IO.Path]::Combine($Root, 'newer-guard.exe')
+            [IO.File]::WriteAllText($newer, 'newer guard')
+            $running = Microsoft.PowerShell.Management\Start-Process `
+                -FilePath $guard `
+                -ArgumentList @('-n', '120', '127.0.0.1') `
+                -WindowStyle Hidden `
+                -PassThru
+            try {
+                Install-DefenseClawFileAtomic -Source $newer -Destination $guard
+            }
+            catch {
+                $failures.Add("replacing a running program failed: $($_.Exception.Message)")
+            }
+            finally {
+                Microsoft.PowerShell.Management\Stop-Process -Id $running.Id -Force
+                $running.WaitForExit()
+            }
+            if ([IO.File]::ReadAllText($guard) -cne 'newer guard') {
+                $failures.Add('the running program was not replaced')
+            }
+            $copies = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $busy.BinDirectory -Force -Filter 'defenseclaw-acp.exe.backup.*')
+            if ($copies.Count -ne 1 -or $restartDeletes.Count -ne 1 -or $restartDeletes[0] -ne $copies[0].FullName) {
+                $failures.Add("the running program's copy was not left for deletion at restart: $($copies.Count) copies, $($restartDeletes -join ', ')")
+            }
+            Test-Refused 'tree with an earlier upgrade copy (walk)' { Assert-DefenseClawManagedInstallTree -Layout $busy } 'unexpected file'
+
+            # GAP-0852: a handle that shares only read access (as an antivirus
+            # scan holds a file) failed the replacement with a raw sharing
+            # violation. The refusal names the held file and the retry step,
+            # and the file keeps its bytes.
+            $held = New-TestLayout 'held'
+            $heldTarget = [IO.Path]::Combine($held.BinDirectory, 'defenseclaw-hook.exe')
+            [IO.File]::WriteAllText($heldTarget, 'old hook')
+            $heldSource = [IO.Path]::Combine($Root, 'newer-hook.exe')
+            [IO.File]::WriteAllText($heldSource, 'newer hook')
+            $handle = [IO.File]::Open($heldTarget, 'Open', 'Read', 'Read')
+            try {
+                Test-Refused 'replacement of a file another program holds open' {
+                    Install-DefenseClawFileAtomic -Source $heldSource -Destination $heldTarget
+                } ([regex]::Escape("another program holds $heldTarget open") + '.*run Setup again')
+            }
+            finally {
+                $handle.Dispose()
+            }
+            if ([IO.File]::ReadAllText($heldTarget) -cne 'old hook') {
+                $failures.Add('a refused replacement changed the held file')
+            }
+            Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $busy
+            if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $busy.BinDirectory -Force -Filter 'defenseclaw-acp.exe.backup.*').Count -ne 0) {
+                $failures.Add('the uninstall sweep left the earlier upgrade copy')
+            }
+            Test-Accepted 'tree after the uninstall sweep' $busy
+
+            # GAP-1190: a file DefenseClaw did not install (an administrator's
+            # renamed copy of the hook) stops the standalone uninstall before
+            # it changes anything, and the refusal names the file and the step.
+            $renamed = New-TestLayout 'renamed'
+            $away = [IO.Path]::Combine($renamed.BinDirectory, 'defenseclaw-hook.exe.away')
+            [IO.File]::WriteAllText($away, 'renamed hook')
+            Test-Refused 'uninstall with a renamed hook copy' {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $renamed
+            } ('unexpected file from managed install root: .*\\defenseclaw-hook\.exe\.away\. ' +
+                'The uninstall stopped before it changed anything\..* move it out of .*DefenseClaw, ' +
+                'then run the uninstall again$')
+            if (-not [IO.File]::Exists($away)) {
+                $failures.Add('the refused uninstall removed the renamed copy')
             }
 
             $sibling = New-TestLayout 'sibling'
@@ -208,19 +549,120 @@ try {
                 $failures.Add('link target outside the tree was removed')
             }
 
-            # Secure Client keeps its original allow-list: neither ipc nor share
-            # is accepted, and removal is a no-op.
+            # GAP-0942: an editor's ACP thread that runs defenseclaw-acp.exe
+            # from the install folder refuses the uninstall before it changes
+            # anything and names the program, account and parent; a process
+            # seen only once (a hook call) and this lifecycle do not block.
+            $inUse = New-TestLayout 'in-use'
+            $script:SmokeProcessPasses = 0
+            $acp = [IO.Path]::Combine($inUse.BinDirectory, 'defenseclaw-acp.exe')
+            $hook = [IO.Path]::Combine($inUse.BinDirectory, 'defenseclaw-hook.exe')
+            function script:Get-DefenseClawProcessImages {
+                $script:SmokeProcessPasses++
+                [pscustomobject]@{ Id = 4242; Path = $acp; UserName = 'HOST\dcw-w3a1'; Parent = 'zed' }
+                [pscustomobject]@{ Id = [int]$PID; Path = $acp; UserName = ''; Parent = '' }
+                if ($script:SmokeProcessPasses -eq 1) {
+                    [pscustomobject]@{ Id = 4343; Path = $hook; UserName = 'HOST\dcw-w3a2'; Parent = 'claude' }
+                }
+            }
+            $script:InstallTreeUseRecheckMilliseconds = 0
+            Test-Refused 'uninstall with an open ACP thread' {
+                Assert-DefenseClawStandaloneInstallTreeNotInUse -Layout $inUse -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian
+            } '^uninstall_in_use: defenseclaw-acp\.exe \(pid 4242, account HOST\\dcw-w3a1, started by zed\) runs from .*nothing was changed'
+
+            # Secure Client: the AVC IPC directory lives under InstallRoot
+            # (path parity with the Go IPC resolver) and a graceful stop leaves it empty,
+            # so the uninstall inventory accepts that exact directory (release
+            # 26.8.4, #839) but nothing inside it beyond the layout's socket.
+            # share is not accepted, and the standalone removal helpers are
+            # no-ops.
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+            Assert-DefenseClawStandaloneInstallTreeNotInUse -Layout $inUse -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian
             $secureClient = New-TestLayout 'secure-client-ipc'
             [void][IO.Directory]::CreateDirectory($secureClient.ManagedIPCDirectory)
-            Test-Refused 'Secure Client allow-list (ipc)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected directory'
+            Test-Accepted 'Secure Client empty ipc directory' $secureClient
+            $secureClientStray = [IO.Path]::Combine($secureClient.ManagedIPCDirectory, 'stray.txt')
+            [IO.File]::WriteAllText($secureClientStray, 'x')
+            # Release 26.8.4 (#1068) bulldozes Secure Client install-tree
+            # drift: an unexpected item is reported and removed with the tree
+            # unless the strict trust pin is set, which restores the refusal.
+            Test-SecureClientTreeDrift 'Secure Client allow-list (ipc content)' $secureClient 'unexpected file'
+            [IO.File]::Delete($secureClientStray)
             Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $secureClient
             if (-not [IO.Directory]::Exists($secureClient.ManagedIPCDirectory)) {
                 $failures.Add('Secure Client ipc directory was removed by the standalone helper')
             }
+            # A Secure Client layout with the sensor helper admits its exact
+            # socket leaf. Uninstall removes only that leaf after the service
+            # is gone and leaves the ipc directory for the tree removal; a
+            # link at the socket path is still refused.
+            $secureClient = New-TestLayout 'scsock'
+            $secureClient.SensorHelperPath = [IO.Path]::Combine($secureClient.BinDirectory, 'defenseclaw-sensor-helper.exe')
+            [IO.File]::WriteAllText($secureClient.SensorHelperPath, 'stand-in')
+            [void][IO.Directory]::CreateDirectory($secureClient.ManagedIPCDirectory)
+            $sensorSocket = [IO.Path]::Combine($secureClient.ManagedIPCDirectory, 'sensor-helper.sock')
+            if ($BindSocket) {
+                $socket = [Net.Sockets.Socket]::new(
+                    [Net.Sockets.AddressFamily]::Unix,
+                    [Net.Sockets.SocketType]::Stream,
+                    [Net.Sockets.ProtocolType]::Unspecified
+                )
+                $openSockets.Add($socket)
+                $socket.Bind([Net.Sockets.UnixDomainSocketEndPoint]::new($sensorSocket))
+            }
+            else {
+                # Windows PowerShell 5.1, which Setup runs, has no AF_UNIX
+                # endpoint. A PowerShell 7 child binds the socket and exits
+                # without closing it, leaving the reparse file a crashed
+                # service leaves; without pwsh a plain file stands in.
+                $pwsh = Microsoft.PowerShell.Core\Get-Command pwsh -ErrorAction SilentlyContinue
+                if ($null -ne $pwsh) {
+                    & $pwsh.Source -NoProfile -NonInteractive -Command (
+                        "`$s=[Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::Unix,[Net.Sockets.SocketType]::Stream,[Net.Sockets.ProtocolType]::Unspecified); " +
+                        "`$s.Bind([Net.Sockets.UnixDomainSocketEndPoint]::new('$sensorSocket')); [Environment]::Exit(0)"
+                    )
+                }
+                if (-not [IO.File]::Exists($sensorSocket)) {
+                    [IO.File]::WriteAllText($sensorSocket, '')
+                }
+            }
+            Test-Accepted 'Secure Client tree with the sensor helper socket' $secureClient
+            Remove-DefenseClawSecureClientSensorHelperSocket -Layout $secureClient
+            if ([IO.File]::Exists($sensorSocket)) {
+                $failures.Add('Secure Client sensor helper socket survived removal')
+            }
+            if (-not [IO.Directory]::Exists($secureClient.ManagedIPCDirectory)) {
+                $failures.Add('Secure Client ipc directory was removed with the sensor helper socket')
+            }
+            # Removal with no socket is a no-op.
+            Remove-DefenseClawSecureClientSensorHelperSocket -Layout $secureClient
+            $socketTarget = [IO.Path]::Combine($Root, 'outside-socket.txt')
+            [IO.File]::WriteAllText($socketTarget, 'outside')
+            if (New-TestLink $sensorSocket $socketTarget) {
+                Test-Refused 'Secure Client sensor helper socket link' {
+                    Assert-DefenseClawManagedInstallTree -Layout $secureClient
+                } 'reparse point'
+                Test-Refused 'Secure Client sensor helper socket link removal' {
+                    Remove-DefenseClawSecureClientSensorHelperSocket -Layout $secureClient
+                } 'unexpected managed IPC content'
+                if (-not [IO.File]::Exists($socketTarget)) {
+                    $failures.Add('Secure Client socket link removal touched its target')
+                }
+                [IO.File]::Delete($sensorSocket)
+            }
+            if (@(Get-DefenseClawSecureClientSensorHelperSocketLeaves -Layout (New-TestLayout 'scnosock')).Count -ne 0) {
+                $failures.Add('Secure Client layout without the sensor helper reported a socket leaf')
+            }
+            $secureClient = New-TestLayout 'secure-client-lib'
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($secureClient.InstallRoot, 'lib', 'defenseclaw'))
+            Test-Refused 'Secure Client allow-list (retired lib)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected directory'
+            [IO.File]::WriteAllText([IO.Path]::Combine($secureClient.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py'), 'print("compiler")')
+            if (-not [string]::IsNullOrEmpty((Get-DefenseClawRecordedStandaloneCompilerPath -Layout $secureClient))) {
+                $failures.Add('Secure Client kept a Fleet compiler')
+            }
             $secureClient = New-TestLayout 'secure-client-share'
             $secureClientPlugin = New-Plugin $secureClient
-            Test-Refused 'Secure Client allow-list (share)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected directory'
+            Test-SecureClientTreeDrift 'Secure Client allow-list (share)' $secureClient 'unexpected directory'
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $secureClient
             if (-not [IO.File]::Exists($secureClientPlugin)) {
                 $failures.Add('Secure Client share content was removed by the standalone helper')

@@ -59,6 +59,109 @@ try {
             if ($got -ne '') {
                 $failures.Add("Secure Client error changed: '$got'")
             }
+
+            # GAP-0946: a standalone stop that the service process does not
+            # answer ends that process after the stop budget and continues;
+            # Secure Client keeps the plain Stop-Service path (see below).
+            # Windows PowerShell 5.1 loads System.ServiceProcess on first use.
+            [void](Microsoft.PowerShell.Management\Get-Service -Name 'EventLog' -ErrorAction SilentlyContinue)
+            $script:ServiceStopTimeoutSeconds = 1
+            $script:SmokeService = [pscustomobject]@{
+                Status = [ServiceProcess.ServiceControllerStatus]::Running
+                DependentServices = @()
+            }
+            $script:SmokeService | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name Refresh -Value { }
+            $script:SmokeService | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name WaitForStatus -Value {
+                param($Status, $Timeout)
+                throw [System.ServiceProcess.TimeoutException]::new('smoke: the service did not stop')
+            }
+            $script:SmokeEnded = @()
+            $script:SmokeRequestOpen = $false
+            function script:Get-DefenseClawServiceChecked { param([string]$Name) return $script:SmokeService }
+            function script:Get-DefenseClawServiceProcessId { param([string]$Name) return [uint32]4242 }
+            function script:Start-DefenseClawServiceStopRequest {
+                param([string]$Name)
+                $request = [pscustomobject]@{ HasExited = -not $script:SmokeRequestOpen }
+                $request | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($Milliseconds) return $this.HasExited }
+                $request | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name Kill -Value { $this.HasExited = $true }
+                $request | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+                return $request
+            }
+            function script:Stop-DefenseClawUnresponsiveServiceProcess {
+                param([string]$Name)
+                $script:SmokeEnded += $Name
+                $script:SmokeService.Status = [ServiceProcess.ServiceControllerStatus]::Stopped
+            }
+            $hung = 'DefenseClawSmokeHung' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile 'Standalone'
+            try {
+                Stop-DefenseClawService -Name $hung
+            }
+            catch {
+                $failures.Add("a standalone stop of a hung service failed: $($_.Exception.Message)")
+            }
+            if ((@($script:SmokeEnded) -join ',') -ne $hung) {
+                $failures.Add("the hung service's process was not ended once: '$(@($script:SmokeEnded) -join ',')'")
+            }
+            # GAP-1038: Windows ends a process that does not answer the stop
+            # request when that request times out, while the request is still
+            # open; the stop names that process as well and does not end it.
+            $script:SmokeService.Status = [ServiceProcess.ServiceControllerStatus]::Running
+            $script:SmokeService | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name Refresh -Force -Value {
+                $this.Status = [ServiceProcess.ServiceControllerStatus]::Stopped
+            }
+            $script:SmokeEnded = @()
+            $script:SmokeRequestOpen = $true
+            $script:DefenseClawTerminatedServiceProcesses = @()
+            try {
+                Stop-DefenseClawService -Name $hung
+            }
+            catch {
+                $failures.Add("a stop Windows completed failed: $($_.Exception.Message)")
+            }
+            if (@($script:SmokeEnded).Count -ne 0 -or
+                (@($script:DefenseClawTerminatedServiceProcesses) -join ',') -ne "$hung (pid 4242)") {
+                $failures.Add("the process Windows ended was not named once: '$(@($script:DefenseClawTerminatedServiceProcesses) -join ',')'")
+            }
+            $script:DefenseClawTerminatedServiceProcesses = @()
+            $script:SmokeService | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name Refresh -Force -Value { }
+            $script:SmokeService.Status = [ServiceProcess.ServiceControllerStatus]::Running
+            $script:SmokeEnded = @()
+            # Secure Client keeps the release-branch bulldoze posture: a failed
+            # Stop-Service is an advisory warning and the caller proceeds to
+            # delete; only DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 makes it
+            # refuse. It never ends the service process itself.
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile 'SecureClient'
+            $strictEnv = $script:TrustStrictAncestorsEnv
+            $originalStrict = [Environment]::GetEnvironmentVariable($strictEnv, 'Process')
+            try {
+                [Environment]::SetEnvironmentVariable($strictEnv, $null, 'Process')
+                $secureClientWarnings = @()
+                try {
+                    Stop-DefenseClawService -Name $hung -WarningVariable +secureClientWarnings -WarningAction SilentlyContinue
+                }
+                catch {
+                    $failures.Add("a Secure Client stop failure was not advisory: $($_.Exception.Message)")
+                }
+                if (@($secureClientWarnings).Count -lt 1 -or @($script:SmokeEnded).Count -ne 0) {
+                    $failures.Add('Secure Client stop behaviour changed: no advisory warning, or the process was ended')
+                }
+
+                [Environment]::SetEnvironmentVariable($strictEnv, '1', 'Process')
+                $secureClientFailed = $false
+                try {
+                    Stop-DefenseClawService -Name $hung -WarningAction SilentlyContinue
+                }
+                catch {
+                    $secureClientFailed = $true
+                }
+                if (-not $secureClientFailed -or @($script:SmokeEnded).Count -ne 0) {
+                    $failures.Add('Secure Client strict stop behaviour changed: the stop failure did not refuse')
+                }
+            }
+            finally {
+                [Environment]::SetEnvironmentVariable($strictEnv, $originalStrict, 'Process')
+            }
         }
         finally {
             $script:DefenseClawServiceLogOffsets.Remove($log)

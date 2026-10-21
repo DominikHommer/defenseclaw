@@ -74,13 +74,13 @@ type HookContract struct {
 	// structured, stateful tool-call path. Its nested version is independent
 	// of this vendor hook contract's version.
 	ToolCallLifecycle ToolCallLifecycleContract
-	// ContentEnvelopeKey names the single nested payload object this
-	// connector hides inspectable content in (hermes: "extra"). Empty
-	// for flat-payload connectors. See HookProfile.ContentEnvelopeKey
-	// for the generic-decoder semantics and the no-recursive-scan
-	// rationale.
-	ContentEnvelopeKey string
-	Notes              []string
+	// ContentEnvelope names the one nested payload object this connector
+	// puts inspectable content in, and the field inside it for each event
+	// (hermes: "extra"). Zero for flat-payload connectors. See
+	// HookProfile.ContentEnvelope for the decoder semantics and the
+	// no-recursive-scan rationale.
+	ContentEnvelope ContentEnvelope
+	Notes           []string
 }
 
 // HookContractResolution records how a raw agent --version string mapped to a
@@ -568,9 +568,18 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 	}},
 	"hermes": {
+		// A Hermes git install prints no release, only the date of the
+		// release it is on ("Hermes Agent vunknown (2026.9.24)"), and
+		// discovery reads that date. Each pin is the date tag of an
+		// official release in this range (v2026.7.20 is 0.19.0, v2026.8.27
+		// is 0.20.6, read from pyproject.toml at each tag). A date below
+		// the first pin, or between the two contracts' pins, has no
+		// contract; a date after the newest pin of v2 is an untested
+		// newer version (GAP-0151).
 		{
 			Connector:               "hermes",
 			ContractID:              "hermes-hooks-v1",
+			ExactAgentVersions:      []string{"2026.7.20", "2026.7.30", "2026.8.3", "2026.8.13", "2026.8.16", "2026.8.16.2", "2026.8.18", "2026.8.19", "2026.8.27"},
 			MinAgentVersion:         "0.19.0",
 			MaxAgentVersion:         "0.21.0",
 			DefaultForUnversioned:   false,
@@ -627,16 +636,20 @@ var builtinHookContracts = map[string][]HookContract{
 			},
 			SupportsTraceparent: true,
 			ToolCallLifecycle:   hermesToolCallLifecycle(),
+			ContentEnvelope:     hermesContentEnvelope(),
 			Notes: []string{
-				"Covers the identical exact 23-event VALID_HOOKS set verified from official Hermes Agent tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0). The reviewed range is bounded to >=0.19.0,<0.21.0; later versions require new source evidence. Official hook payload fields remain top-level; events whose official schema is not documented remain partial, attributed audit rather than inferred enforcement.",
+				"Covers the identical exact 23-event VALID_HOOKS set verified from official Hermes Agent tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0). The reviewed range is bounded to >=0.19.0,<0.21.0; later versions require new source evidence. Hermes puts tool_name, tool_input, session_id, cwd and profile at the top level and every other hook argument under extra (agent/shell_hooks.py _payload_fields); events whose official schema is not documented remain partial, attributed audit rather than inferred enforcement.",
 				"pre_tool_call is the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. pre_llm_call injects {\"context\":...}; pre_verify accepts {\"action\":\"continue\",\"message\"} to keep the bounded verification loop going. Transform hooks require Python string returns, pre_gateway_dispatch requires skip/rewrite/allow plugin results, and approval/API/Kanban/lifecycle return values are ignored or undocumented by the shell lane, so DefenseClaw audits them without claiming mutation. Confirm verdicts are recorded and alerted without hook output. Non-zero exit codes and hook timeouts only warn upstream, so there is no fail-closed surface; Hermes remains live-smoke pending (https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/hermes/).",
 				"Setup preserves the operator's hooks_auto_accept value and owns only the exact DefenseClaw (event, command) approvals in shell-hooks-allowlist.json. Running Hermes processes cache callbacks, so registration and revocation remain live=false/pending-reload until every affected CLI, gateway, desktop, or service host is reloaded or restarted; Windows teardown leaves an exact direct-native disabled tombstone for stale callbacks.",
 				"The v1 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified.",
 			},
 		},
+		// Release-date pins (see hermes-hooks-v1): v2026.8.31 is 0.21.0
+		// and v2026.9.24 is 0.21.5.
 		{
 			Connector:               "hermes",
 			ContractID:              "hermes-hooks-v2",
+			ExactAgentVersions:      []string{"2026.8.31", "2026.9.7", "2026.9.11", "2026.9.14", "2026.9.21", "2026.9.24"},
 			MinAgentVersion:         "0.21.0",
 			MaxAgentVersion:         "0.22.0",
 			DefaultForUnversioned:   true,
@@ -678,8 +691,9 @@ var builtinHookContracts = map[string][]HookContract{
 			},
 			SupportsTraceparent: true,
 			ToolCallLifecycle:   hermesToolCallLifecycleV2(),
+			ContentEnvelope:     hermesContentEnvelope(),
 			Notes: []string{
-				"Same 23 claimed shell-hook events as hermes-hooks-v1. Official Hermes 0.21.x, rechecked at v0.21.3 (v2026.9.14, commit 345cd2b057a452236de401d3534b8502a7465e8d), added observer-only VALID_HOOKS that DefenseClaw does not register or claim. Official hook payload fields remain top-level.",
+				"Same 23 claimed shell-hook events as hermes-hooks-v1. Official Hermes 0.21.x, rechecked at v0.21.3 (v2026.9.14, commit 345cd2b057a452236de401d3534b8502a7465e8d), added observer-only VALID_HOOKS that DefenseClaw does not register or claim. The payload shape is unchanged: the prompt, tool result and model response are under extra (verified on v0.21.5).",
 				"pre_tool_call remains the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. Exit code 2 now blocks pre_tool_call. Timeouts and spawn errors still fail open unless the hook spec sets fail_closed, so SupportsFailClosed stays false. Bounded to >=0.21.0,<0.22.0.",
 				"Setup preserves the operator's hooks_auto_accept value and owns only the exact DefenseClaw (event, command) approvals in shell-hooks-allowlist.json. Running Hermes processes cache callbacks, so registration and revocation remain live=false/pending-reload until every affected CLI, gateway, desktop, or service host is reloaded or restarted; Windows teardown leaves an exact direct-native disabled tombstone for stale callbacks.",
 				"The v2 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified.",
@@ -827,7 +841,7 @@ var builtinHookContracts = map[string][]HookContract{
 			SupportsTraceparent: true,
 			ToolCallLifecycle:   copilotToolCallLifecycle(),
 			Notes: []string{
-				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification.",
+				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification, except that the Windows Secure Client profile replaces a prompt the guardrail blocks.",
 				"GitHub Copilot CLI 1.0.76 is the conservative reviewed floor for this current 14-event contract.",
 				"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
 				"postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",
@@ -1190,7 +1204,7 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 			NormalizedVersion: "",
 			Status:            HookCompatibilityUnversioned,
 			Reason:            "agent version not probed; using connector default hook contract",
-			Contract:          defaultHookContract(contracts),
+			Contract:          bestEffortHookContract(contracts),
 		}
 	}
 	if gitBuildVersionRE.MatchString(raw) {
@@ -1340,12 +1354,6 @@ func knownBrokenAgentVersion(name, raw, normalized string) (KnownBrokenAgentVers
 	return KnownBrokenAgentVersion{}, false
 }
 
-// KnownBrokenAgentVersions returns the known-broken agent versions of a
-// connector.
-func KnownBrokenAgentVersions(connectorName string) []KnownBrokenAgentVersion {
-	return append([]KnownBrokenAgentVersion(nil), knownBrokenAgentVersions[normalizeConnectorName(connectorName)]...)
-}
-
 func contractMatchesAgentVersion(contract HookContract, raw, normalized string) bool {
 	if len(contract.ExactAgentVersions) != 0 && exactAgentVersionMatch(raw, contract.ExactAgentVersions) {
 		return true
@@ -1380,6 +1388,19 @@ func exactAgentVersionMatch(raw string, expected []string) bool {
 	return false
 }
 
+// BestEffortHookContract returns the reviewed contract DefenseClaw may wire
+// when version evidence is unavailable or unsupported. Runtime and response
+// semantics come from the connector's default_for_unversioned contract, while
+// its event list is the stable union of every registered contract.
+// The compatibility status remains unchanged: callers must not describe this
+// fallback as version-verified.
+func BestEffortHookContract(resolution HookContractResolution) HookContract {
+	if resolution.Status == HookCompatibilityKnown && resolution.Contract.ContractID != "" {
+		return resolution.Contract
+	}
+	return bestEffortHookContract(KnownHookContracts(resolution.Connector))
+}
+
 func defaultHookContract(contracts []HookContract) HookContract {
 	for _, contract := range contracts {
 		if contract.DefaultForUnversioned {
@@ -1387,6 +1408,64 @@ func defaultHookContract(contracts []HookContract) HookContract {
 		}
 	}
 	return contracts[0]
+}
+
+func bestEffortHookContract(contracts []HookContract) HookContract {
+	if len(contracts) == 0 {
+		return HookContract{}
+	}
+	fallback := defaultHookContract(contracts)
+	// Union only contracts the default may stand in for: those not gated
+	// entirely above the default's tested range. A newer contract's events
+	// (Claude Code v2's DirectoryAdded) are unknown to the agents the default
+	// describes, and the union keeps the default's ContractID, so including
+	// them would render a matrix that a pin of that ID rejects (the managed
+	// policy runtime verifier and the v1 guardian expect the v1 event set).
+	eligible := make([]HookContract, 0, len(contracts))
+	for _, contract := range contracts {
+		if !hookContractGatedAbove(contract, fallback) {
+			eligible = append(eligible, contract)
+		}
+	}
+	fallback.Events = unionHookContractStrings(fallback.Events, eligible, func(contract HookContract) []string {
+		return contract.Events
+	})
+	return fallback
+}
+
+// hookContractGatedAbove reports whether contract applies only to agent
+// versions at or above base's exclusive upper bound.
+func hookContractGatedAbove(contract, base HookContract) bool {
+	upper := strings.TrimSpace(base.MaxAgentVersion)
+	lower := strings.TrimSpace(contract.MinAgentVersion)
+	return upper != "" && lower != "" && compareVersion(lower, upper) >= 0
+}
+
+func unionHookContractStrings(
+	preferred []string,
+	contracts []HookContract,
+	values func(HookContract) []string,
+) []string {
+	out := make([]string, 0, len(preferred))
+	seen := make(map[string]struct{}, len(preferred))
+	appendUnique := func(items []string) {
+		for _, item := range items {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if _, exists := seen[item]; exists {
+				continue
+			}
+			seen[item] = struct{}{}
+			out = append(out, item)
+		}
+	}
+	appendUnique(preferred)
+	for _, contract := range contracts {
+		appendUnique(values(contract))
+	}
+	return out
 }
 
 func NormalizeAgentVersion(_ string, raw string) string {
@@ -1439,6 +1518,9 @@ func resolveHookContractForOptions(
 			resolution.Contract = pinned
 		}
 	}
+	if resolution.Status != HookCompatibilityKnown && resolution.Contract.DefaultForUnversioned {
+		resolution.Contract = BestEffortHookContract(resolution)
+	}
 	return resolution
 }
 
@@ -1469,7 +1551,7 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
 	profile.SupportsTraceparent = contract.SupportsTraceparent
 	profile.ResponseFieldName = contract.ResponseFieldName
-	profile.ContentEnvelopeKey = contract.ContentEnvelopeKey
+	profile.ContentEnvelope = contract.ContentEnvelope.clone()
 	profile.ToolCallLifecycle = cloneToolCallLifecycleContract(contract.ToolCallLifecycle)
 	if spec, ok := CorrelationSpecForConnector(profile.Name, contract.ContractID); ok {
 		profile.Correlation = spec
@@ -1550,4 +1632,20 @@ func versionTuple(v string) [3]int {
 		out[i] = n
 	}
 	return out
+}
+
+// hermesContentEnvelope is where Hermes puts hook content. Its shell-hook
+// payload (agent/shell_hooks.py _payload_fields, v0.19-v0.21.5) promotes
+// only tool_name, tool_input (from args), session_id, cwd and profile to
+// the top level; every other hook argument, the prompt included, is under
+// extra. Each event names the one field read: post_llm_call carries both
+// user_message and assistant_response, so a shared key list would read the
+// prompt as the model's response.
+func hermesContentEnvelope() ContentEnvelope {
+	return ContentEnvelope{Key: "extra", Fields: map[string]string{
+		"pre_llm_call":   "user_message",
+		"post_llm_call":  "assistant_response",
+		"post_tool_call": "result",
+		"subagent_stop":  "child_summary",
+	}}
 }

@@ -19,6 +19,7 @@ package openshell
 import (
 	"context"
 	"fmt"
+	pathpkg "path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -28,19 +29,26 @@ import (
 // process is one of the user's processes as ps(1) lists it.
 type process struct {
 	pid, ppid int
-	// path is the executable: macOS's ps prints its full path.
+	// path is the executable's full path.
 	path string
 }
 
-// processes are this user's processes, listed once, when a Mac's checks
-// need them: what runs a gateway Homebrew's service does not run, and
+// processes are this user's processes, listed once, when the checks need
+// them: what runs a gateway Homebrew's service does not run (a Mac), and
 // which MicroVM driver it runs. They are empty when ps cannot list them.
 func (r *doctorRun) processes(ctx context.Context) []process {
 	if r.procsDone {
 		return r.procs
 	}
 	r.procsDone = true
-	out, err := r.Runner.Output(ctx, Command{Name: "ps", Args: []string{"-axww", "-o", "pid=,ppid=,uid=,comm="}, Timeout: 10 * time.Second})
+	// macOS's ps prints an executable's full path as comm; procps prints
+	// only a name there, so on Linux the path is the first word of the
+	// command line.
+	column, linux := "comm=", r.GOOS == "linux"
+	if linux {
+		column = "args="
+	}
+	out, err := r.Runner.Output(ctx, Command{Name: "ps", Args: []string{"-axww", "-o", "pid=,ppid=,uid=," + column}, Timeout: 10 * time.Second})
 	if err != nil {
 		return nil
 	}
@@ -55,6 +63,9 @@ func (r *doctorRun) processes(ctx context.Context) []process {
 		owner, err3 := strconv.Atoi(f[2])
 		// An executable path may hold spaces.
 		path := strings.Join(f[3:], " ")
+		if linux {
+			path = f[3]
+		}
 		if err1 != nil || err2 != nil || err3 != nil || owner != uid || !filepath.IsAbs(path) {
 			continue
 		}
@@ -77,6 +88,19 @@ func findProcess(procs []process, name string, parent int) *process {
 // gatewayProcess is this user's running openshell-gateway, or nil.
 func (r *doctorRun) gatewayProcess(ctx context.Context) *process {
 	return findProcess(r.processes(ctx), GatewayBinary, 0)
+}
+
+// homebrewKegPrefix is the Homebrew prefix whose openshell formula keg
+// holds path (<prefix>/opt/openshell/... or
+// <prefix>/Cellar/openshell/<version>/...), "" when path is in none.
+func homebrewKegPrefix(path string) string {
+	name := pathpkg.Base(GatewayFormula)
+	for d := filepath.Dir(filepath.Clean(path)); d != filepath.Dir(d); d = filepath.Dir(d) {
+		if parent := filepath.Dir(d); filepath.Base(d) == name && (filepath.Base(parent) == "opt" || filepath.Base(parent) == "Cellar") {
+			return filepath.Dir(parent)
+		}
+	}
+	return ""
 }
 
 // launchdLabel is the label of the launchd job, in this user's domain,
@@ -109,7 +133,9 @@ func (r *doctorRun) launchdLabel(ctx context.Context, pid int) string {
 // setup stops there. Either way the fix is unmanagedFix, the user's.
 func (r *doctorRun) unmanagedService(ctx context.Context) {
 	c := r.report.Get(CheckIDGatewayService)
-	if c == nil || r.service == nil || r.service.Installed {
+	// Another account's gateway on the port (checkService) is not one this
+	// account runs another way: the check keeps that refusal (GAP-0390).
+	if c == nil || r.service == nil || r.service.Installed || r.portOther {
 		return
 	}
 	healthy := r.gateway != nil && r.gateway.Healthy
@@ -137,6 +163,16 @@ func (r *doctorRun) unmanagedService(ctx context.Context) {
 	gw := r.gatewayProcess(ctx)
 	if gw == nil {
 		c.Detail = "the gateway answers, but " + notBrew + " runs it (DefenseClaw could not tell what does), so DefenseClaw cannot restart it"
+		return
+	}
+	if keg := homebrewKegPrefix(gw.path); keg != "" && keg != filepath.Clean(r.brewPrefix()) {
+		// The formula of another Homebrew runs it, one of your own that
+		// HOMEBREW_PREFIX and PATH do not name (an ssh session without
+		// its shellenv): its service is not "by hand" (GAP-0391).
+		brew := filepath.Join(keg, "bin", "brew")
+		c.Detail = fmt.Sprintf("%s (process %d) is the %s formula of the Homebrew at %s, but DefenseClaw uses the Homebrew at %s "+
+			"(HOMEBREW_PREFIX, else the brew first on PATH), so it cannot see or restart that service", gw.path, gw.pid, GatewayFormula, keg, r.brewPrefix())
+		c.Fix = &Fix{Summary: "put the Homebrew at " + keg + " first on PATH (or HOMEBREW_PREFIX), then run the command again", Command: "eval \"$(" + brew + " shellenv)\""}
 		return
 	}
 	if label := r.launchdLabel(ctx, gw.pid); label != "" {

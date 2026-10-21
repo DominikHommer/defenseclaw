@@ -103,6 +103,42 @@ func unitDisabled(ctx context.Context, services ServiceManager, unit Unit) bool 
 	return ok && reporter.Disabled(ctx, unit)
 }
 
+// loadedReporter is implemented by service managers whose units can be
+// loaded without running (launchd: a KeepAlive daemon between two runs is
+// "spawn scheduled").
+type loadedReporter interface {
+	Loaded(ctx context.Context, unit Unit) bool
+}
+
+// unitStarted reports a unit the service manager runs, or has loaded to
+// run: what starting it again restores. A refused macOS uninstall put back
+// only the jobs that were "running" when it looked, so a KeepAlive job
+// launchd was about to respawn stayed unloaded (GAP-1520).
+func unitStarted(ctx context.Context, services ServiceManager, unit Unit) bool {
+	if reporter, ok := services.(loadedReporter); ok && reporter.Loaded(ctx, unit) {
+		return true
+	}
+	return services.Active(ctx, unit)
+}
+
+// maskReporter is implemented by service managers whose units can be masked
+// (systemd): a masked unit can be neither enabled nor started.
+type maskReporter interface {
+	Masked(ctx context.Context, unit Unit) bool
+	Unmask(ctx context.Context, unit Unit) error
+}
+
+func unitMasked(ctx context.Context, services ServiceManager, unit Unit) bool {
+	reporter, ok := services.(maskReporter)
+	return ok && reporter.Masked(ctx, unit)
+}
+
+// failedResetter is implemented by service managers that keep a unit's
+// failed state until it is cleared (systemd's reset-failed).
+type failedResetter interface {
+	ResetFailed(ctx context.Context, unit Unit) error
+}
+
 // restarter is implemented by service managers that restart a unit in one
 // job.
 type restarter interface {
@@ -245,6 +281,28 @@ func (m *systemdManager) Stop(ctx context.Context, unit Unit) error {
 	return m.run(ctx, "stop", unit.Name)
 }
 
+// groupStopper is implemented by service managers that can stop several
+// units in one request.
+type groupStopper interface {
+	StopTogether(ctx context.Context, units []Unit) error
+}
+
+// StopTogether stops the units with one systemctl call, which queues every
+// stop job before any of them runs. A socket unit with a stop job queued no
+// longer starts its service on a connection. Stopped one by one, a hook call
+// on the hook socket started the gateway again after its API socket was
+// stopped, and the gateway's Requires= started that socket again: the
+// uninstall left it listening after the package removed its unit file
+// (GAP-0112).
+func (m *systemdManager) StopTogether(ctx context.Context, units []Unit) error {
+	args := make([]string, 0, len(units)+1)
+	args = append(args, "stop")
+	for _, unit := range units {
+		args = append(args, unit.Name)
+	}
+	return m.run(ctx, args...)
+}
+
 func (m *systemdManager) Enable(ctx context.Context, unit Unit) error {
 	return m.run(ctx, "enable", unit.Name)
 }
@@ -303,6 +361,32 @@ func (m *systemdManager) PlannedRestart(ctx context.Context, unit Unit) bool {
 // Enabled reports whether the unit is enabled to start at boot.
 func (m *systemdManager) Enabled(ctx context.Context, unit Unit) bool {
 	return m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "enabled"
+}
+
+// ResetFailed clears a unit's failed state.
+func (m *systemdManager) ResetFailed(ctx context.Context, unit Unit) error {
+	return m.run(ctx, "reset-failed", unit.Name)
+}
+
+// Masked reports a masked unit (systemctl mask), persistent or runtime.
+func (m *systemdManager) Masked(ctx context.Context, unit Unit) bool {
+	return strings.HasPrefix(m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"], "masked")
+}
+
+// Unmask removes a persistent or runtime mask; systemctl reloads the unit
+// files itself.
+func (m *systemdManager) Unmask(ctx context.Context, unit Unit) error {
+	if m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "masked-runtime" {
+		return m.run(ctx, "unmask", "--runtime", unit.Name)
+	}
+	return m.run(ctx, "unmask", unit.Name)
+}
+
+// Disabled reports a unit an administrator disabled (systemctl disable). A
+// socket-activated gateway keeps running after `disable --now`, so only the
+// unit file state shows that it would not start at boot (GAP-0530).
+func (m *systemdManager) Disabled(ctx context.Context, unit Unit) bool {
+	return m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "disabled"
 }
 
 // FragmentPath is the unit file systemd loaded the unit from.
@@ -531,6 +615,12 @@ func (m *launchdManager) Active(ctx context.Context, unit Unit) bool {
 		return status.State != "not_loaded"
 	}
 	return status.State == "running"
+}
+
+// Loaded is true for a job launchd has loaded, running or not.
+func (m *launchdManager) Loaded(ctx context.Context, unit Unit) bool {
+	status, _ := m.Status(ctx, unit)
+	return status.State != "not_loaded"
 }
 
 // PlannedRestart is a KeepAlive daemon whose respawn launchd scheduled

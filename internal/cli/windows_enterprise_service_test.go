@@ -40,6 +40,7 @@ func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 		gatewayServiceName:            "DefenseClawGateway",
 		guardianServiceName:           "DefenseClawHookGuardian",
 		certificationCodexHome:        `C:\certification\codex-home`,
+		bootstrapParent:               `C:\ProgramData\DefenseClaw-Enterprise-Setup-00112233445566778899aabbccddeeff\scratch`,
 		attestAgentApplicationControl: true,
 		attestClaudeEffectivePolicy:   true,
 		noStart:                       true,
@@ -62,6 +63,7 @@ func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 		"-GatewayServiceName", opts.gatewayServiceName,
 		"-GuardianServiceName", opts.guardianServiceName,
 		"-CertificationCodexHome", opts.certificationCodexHome,
+		"-BootstrapParent", opts.bootstrapParent,
 		"-AttestAgentApplicationControl",
 		"-AttestClaudeEffectivePolicy",
 		"-NoStart",
@@ -71,6 +73,17 @@ func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("windowsEnterprisePowerShellArgs = %#v, want %#v", got, want)
 	}
+}
+
+func TestWindowsStandalonePolicyCompilerIsForwarded(t *testing.T) {
+	opts := &windowsEnterpriseLifecycleOptions{policyCompiler: `C:\stage\policy_compiler.py`}
+	args := windowsEnterprisePowerShellArgs("upgrade", opts)
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-PolicyCompiler" && args[i+1] == opts.policyCompiler {
+			return
+		}
+	}
+	t.Fatalf("PowerShell upgrade omitted compiler source: %q", args)
 }
 
 func TestWindowsEnterpriseLifecycleSecurityOptionsAreActionScoped(t *testing.T) {
@@ -272,6 +285,50 @@ func TestWindowsEnterprisePowerShellArgsPurgeIsExplicit(t *testing.T) {
 	got = windowsEnterprisePowerShellArgs("status", &windowsEnterpriseLifecycleOptions{})
 	if !reflect.DeepEqual(got, []string{"-Action", "Status"}) {
 		t.Fatalf("status args = %#v", got)
+	}
+}
+
+// The outer signed DefenseClawSetup EXE forwards a protected admin-only
+// %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch path here so
+// install-enterprise.ps1's one-shot bootstrap directory does not land under
+// C:\Windows\Temp. On Azure-AD-joined hosts, C:\Windows\Temp carries an
+// inherited Allow ACE for the interactive AAD principal (S-1-12-1-...) that
+// includes replacement rights; the module's later trusted-ancestor walk on
+// rendered YAML content rejects it. Assert the value round-trips as
+// -BootstrapParent for all actions (status is a read-only lifecycle where
+// the bootstrap dir is still created for its isolated PowerShell execution
+// environment, so the parameter must be forwarded there too).
+func TestWindowsEnterprisePowerShellArgsBootstrapParentRoundTripsForAllActions(t *testing.T) {
+	const scratch = `C:\ProgramData\DefenseClaw-Enterprise-Setup-00112233445566778899aabbccddeeff\scratch`
+	for _, action := range []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall"} {
+		t.Run(action, func(t *testing.T) {
+			opts := &windowsEnterpriseLifecycleOptions{bootstrapParent: scratch}
+			got := windowsEnterprisePowerShellArgs(action, opts)
+			foundIndex := -1
+			for index := 0; index < len(got)-1; index++ {
+				if got[index] == "-BootstrapParent" {
+					foundIndex = index
+					break
+				}
+			}
+			if foundIndex < 0 {
+				t.Fatalf("%s: -BootstrapParent missing from args: %#v", action, got)
+			}
+			if got[foundIndex+1] != scratch {
+				t.Fatalf("%s: -BootstrapParent value = %q, want %q", action, got[foundIndex+1], scratch)
+			}
+		})
+	}
+}
+
+// Empty bootstrapParent must NOT emit the flag so direct callers preserve
+// their existing C:\Windows\Temp fallback behavior.
+func TestWindowsEnterprisePowerShellArgsBootstrapParentOmittedWhenEmpty(t *testing.T) {
+	got := windowsEnterprisePowerShellArgs("status", &windowsEnterpriseLifecycleOptions{})
+	for _, arg := range got {
+		if arg == "-BootstrapParent" {
+			t.Fatalf("empty bootstrapParent unexpectedly emitted -BootstrapParent: %#v", got)
+		}
 	}
 }
 
@@ -1456,6 +1513,25 @@ func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupAcceptsARemovedFolder(t
 	}
 }
 
+func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupRetriesLockedFile(t *testing.T) {
+	ops := deterministicWindowsEnterpriseTempOps(t)
+	removeCalls := 0
+	ops.removeAll = func(string) error {
+		removeCalls++
+		if removeCalls == 1 {
+			return &os.PathError{Op: "RemoveAll", Err: windows.ERROR_SHARING_VIOLATION}
+		}
+		return nil
+	}
+	_, cleanup, err := prepareWindowsEnterprisePowerShellTempWithOps(ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanup(); err != nil || removeCalls != 2 {
+		t.Fatalf("cleanup after locked file = %v, RemoveAll calls = %d", err, removeCalls)
+	}
+}
+
 func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupRefusesValidationDrift(t *testing.T) {
 	validateCalls := 0
 	removeAllCalled := false
@@ -1794,6 +1870,29 @@ func TestSetTemporaryEnvironmentRestoresUnsetAndExistingValues(t *testing.T) {
 	}
 	if _, ok := os.LookupEnv(unset); ok {
 		t.Fatal("previously unset environment variable remained set")
+	}
+}
+
+// The QA shorthand adds GitHub Copilot on Secure Client only.
+func TestWindowsEnterpriseShorthandAcceptsCopilotOnlyForSecureClient(t *testing.T) {
+	secureClient := &windowsEnterpriseLifecycleOptions{
+		mode: "action", connector: "codex,copilot", resolvedProfile: managed.ProfileSecureClient,
+	}
+	if err := validateWindowsEnterpriseLifecycleSecurityOptions(nil, "install", secureClient); err != nil {
+		t.Fatalf("Secure Client install with Copilot: %v", err)
+	}
+	standalone := &windowsEnterpriseLifecycleOptions{
+		mode: "action", connector: "codex,copilot", resolvedProfile: managed.ProfileStandalone,
+	}
+	err := validateWindowsEnterpriseLifecycleSecurityOptions(nil, "install", standalone)
+	if err == nil || !strings.Contains(err.Error(), "supported: codex, claudecode, cursor.") {
+		t.Fatalf("standalone install with Copilot error = %v, want the three-connector refusal", err)
+	}
+	devin := &windowsEnterpriseLifecycleOptions{
+		mode: "action", connector: "devin", resolvedProfile: managed.ProfileSecureClient,
+	}
+	if err := validateWindowsEnterpriseLifecycleSecurityOptions(nil, "install", devin); err == nil {
+		t.Fatal("Secure Client accepted devin in the QA shorthand")
 	}
 }
 

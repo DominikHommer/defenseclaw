@@ -317,7 +317,7 @@ func stripAMPJSONCComments(data []byte) []byte {
 		}
 		if current == '/' && index+1 < len(data) && data[index+1] == '*' {
 			index += 2
-			for index+1 < len(data) && !(data[index] == '*' && data[index+1] == '/') {
+			for index+1 < len(data) && (data[index] != '*' || data[index+1] != '/') {
 				index++
 			}
 			if index+1 < len(data) {

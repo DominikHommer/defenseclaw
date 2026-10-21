@@ -28,7 +28,6 @@ import yaml
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.config import (
-    DEFAULT_SANDBOX_HOME,
     OPENSHELL_LOCKABLE_KEYS,
     OPENSHELL_PROFILES,
     Config,
@@ -67,6 +66,7 @@ _FULL_SECTION = {
     "yolo": False,
     "llm": "bedrock",
     "keep_headless": True,
+    "trusted_ca_bundle": "/etc/defenseclaw/corp-root-ca.pem",
     "workdir": {
         "mode": "copy",
         "masks": [".env*"],
@@ -133,7 +133,6 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.token_delivery, "provider")
         self.assertEqual(oc.llm, "auto")
         self.assertFalse(oc.keep_headless)
-        self.assertEqual(oc.sandbox_home, DEFAULT_SANDBOX_HOME)
         # Pack-governed keys stay unset so the selected pack supplies them.
         self.assertEqual(oc.pack, "")
         self.assertEqual(oc.profile, "")
@@ -166,6 +165,7 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertIs(oc.yolo, False)
         self.assertEqual(oc.llm, "bedrock")
         self.assertTrue(oc.keep_headless)
+        self.assertEqual(oc.trusted_ca_bundle, "/etc/defenseclaw/corp-root-ca.pem")
         self.assertEqual(oc.workdir.mode, "copy")
         self.assertEqual(oc.workdir.masks, [".env*"])
         self.assertEqual(oc.workdir.on_exit, "keep")
@@ -293,6 +293,13 @@ class TestOpenShellValidation(unittest.TestCase):
             self.assertFalse(valid_binary(binary), binary)
         self.assertEqual(openshell_error({"openshell": {"binary": "bin/openshell"}})[0], "openshell.binary")
 
+    def test_trusted_ca_bundle_paths(self):
+        for path in ("", "~/certs/corp.pem", "/etc/defenseclaw/corp.pem"):
+            load_validate_v8({"config_version": 8, "openshell": {"trusted_ca_bundle": path}})
+        for path in ("corp.pem", "./corp.pem", "~alice/corp.pem", "~", " /etc/corp.pem", "C:/corp.pem"):
+            with self.assertRaises(V8ConfigError, msg=path):
+                load_validate_v8({"config_version": 8, "openshell": {"trusted_ca_bundle": path}})
+
     def test_pack_dir_paths(self):
         # The schema checks the spelling (TestDefenseClawConfigV8OpenShellValues).
         for pack_dir in ("", "~", "~/packs", "/etc/packs", "C:/packs", "D:\\packs", "\\\\server\\share\\packs"):
@@ -352,6 +359,30 @@ class TestOpenShellValidation(unittest.TestCase):
             self.assertEqual(caught.exception.path, path)
             self.assertEqual(caught.exception.corrective_action, want)
             self.assertNotIn(value, str(caught.exception))
+
+    def test_pattern_one_of_and_type_refusals_name_what_the_field_takes(self):
+        # GAP-0085: block_at (a pattern), an admission action (a oneOf) and a
+        # port (a type) were refused with no allowed values.
+        for document, path, want in (
+            ({"guardrail": {"block_at": "bogus"}}, "$.guardrail.block_at",
+             "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)"),
+            ({"admission": {"skill": {"actions": {"high": "explode"}}}}, "$.admission.skill.actions.high",
+             "use one of block, quarantine, warn, allow or a mapping with file, runtime, install"),
+            ({"gateway": {"api_port": "abc"}}, "$.gateway.api_port", "use a value of type integer"),
+            # GAP-0222: a number typed for a pattern or enum key names the words it takes.
+            ({"guardrail": {"block_at": 12}}, "$.guardrail.block_at",
+             "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)"),
+            ({"guardrail": {"mode": 5}}, "$.guardrail.mode", "use one of observe, action"),
+            # GAP-0760: hilt.min_severity takes the block_at words in any case.
+            ({"guardrail": {"hilt": {"min_severity": "bogus"}}}, "$.guardrail.hilt.min_severity",
+             "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)"),
+        ):
+            with self.assertRaises(V8ConfigError) as caught:
+                load_validate_v8({"config_version": 9, **document})
+            self.assertEqual(caught.exception.path, path)
+            self.assertEqual(caught.exception.corrective_action, want)
+        # The lower case block_at takes is accepted for hilt.min_severity too.
+        load_validate_v8({"config_version": 9, "guardrail": {"hilt": {"min_severity": "high"}}})
 
 
 class TestPolicyConnectors(unittest.TestCase):
@@ -417,13 +448,13 @@ class TestOpenShellSave(unittest.TestCase):
             # Ignored legacy keys survive untouched; unset pack keys are not written.
             self.assertEqual(section["version"], "0.6.2")
             self.assertIs(section["auto_pair"], False)
+            self.assertEqual(section["mode"], "standalone")
             self.assertNotIn("workdir", section)
             self.assertNotIn("import_", section.get("mcp", {}))
 
             reloaded = self._load(tmpdir)
             self.assertIs(reloaded.openshell.mcp.import_, False)
             self.assertEqual(reloaded.openshell.admin.locked, ["profile"])
-            self.assertEqual(reloaded.openshell.mode, "standalone")
 
             # Clearing a tri-state back to "inherit" writes null, which the
             # schema accepts and the loader reads as None.
@@ -438,6 +469,7 @@ class TestOpenShellSave(unittest.TestCase):
             "shorthand IPv4 unblock": lambda oc: setattr(oc.egress, "unblocked", ["127.1"]),
             "relative binary": lambda oc: setattr(oc, "binary", "bin/openshell"),
             "relative pack dir": lambda oc: setattr(oc, "pack_dir", "packs"),
+            "relative trusted CA bundle": lambda oc: setattr(oc, "trusted_ca_bundle", "corp-root-ca.pem"),
             "zero cpu": lambda oc: setattr(oc.resources, "cpu", "0"),
             "equal explicit ports": lambda oc: (setattr(oc, "ingress_port", 19001), setattr(oc, "egress_port", 19001)),
             "derived port collision": lambda oc: (setattr(oc, "enabled", True), setattr(oc, "ingress_port", 18972)),

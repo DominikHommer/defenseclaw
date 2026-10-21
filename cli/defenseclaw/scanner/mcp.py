@@ -38,18 +38,22 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, TypeVar
+from enum import Enum
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
 from defenseclaw.config import (
+    AssetFileRef,
     CiscoAIDefenseConfig,
     InspectLLMConfig,
     LLMConfig,
     MCPScannerConfig,
+    MCPScannerYARAConfig,
     MCPServerEntry,
 )
 from defenseclaw.models import Finding, ScanResult
@@ -61,6 +65,7 @@ from defenseclaw.registries.ssrf import (
     pinned_getaddrinfo,
     resolve_and_pin,
 )
+from defenseclaw.scanner import settings
 from defenseclaw.scanner._llm_env import (
     inject_llm_env,
     litellm_model,
@@ -73,25 +78,47 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 
 
-def _supplemental_yara_analyzers(yara_analyzer_cls: type) -> list[object]:
-    """Load DefenseClaw rules alongside, never instead of, SDK YARA rules."""
+def _supplemental_yara_analyzers(yara_analyzer_cls: type, yara_cfg: MCPScannerYARAConfig | None = None) -> list[object]:
+    """Load DefenseClaw rules alongside, never instead of, SDK YARA rules.
+
+    ``scanners.mcp_scanner.yara`` selects them: the bundled set unless
+    ``include_bundled`` is false, and every ``extra_rules`` file, which loads
+    only from bytes matching its pinned digest (GAP-0071).
+    """
+    analyzers: list[object] = []
+    if yara_cfg is None or yara_cfg.include_bundled is not False:
+        analyzers.extend(_bundled_yara_analyzers(yara_analyzer_cls))
+    if yara_cfg is not None and yara_cfg.extra_rules:
+        analyzers.append(_extra_yara_analyzer(yara_analyzer_cls, yara_cfg.extra_rules))
+    return analyzers
+
+
+def _bundled_yara_analyzers(yara_analyzer_cls: type) -> list[object]:
+    # Every package ships these rules. Without them the scan would not run
+    # the analyzer set it reports, so it has no verdict (GAP-0209).
     rules_dir = bundled_mcp_yara_rules_dir()
     if rules_dir is None:
-        print(
-            "warning: bundled DefenseClaw MCP YARA rules are unavailable; "
-            "continuing with upstream YARA rules",
-            file=sys.stderr,
+        raise MCPScanIncompleteError(
+            "the bundled DefenseClaw MCP YARA rules are missing, so the MCP scan has no verdict; "
+            "repair the DefenseClaw installation"
         )
-        return []
     try:
         return [yara_analyzer_cls(rules_dir=rules_dir)]
     except Exception as exc:
-        print(
-            "warning: bundled DefenseClaw MCP YARA rules could not be loaded; "
-            f"continuing with upstream YARA rules: {exc}",
-            file=sys.stderr,
-        )
-        return []
+        raise MCPScanIncompleteError(
+            "the bundled DefenseClaw MCP YARA rules could not be loaded, so the MCP scan has no verdict; "
+            f"repair the DefenseClaw installation ({type(exc).__name__})"
+        ) from exc
+
+
+def _extra_yara_analyzer(yara_analyzer_cls: type, refs: list[AssetFileRef]) -> object:
+    """Compile the pinned extra rule files; a digest mismatch or a bad rule fails the scan."""
+    with tempfile.TemporaryDirectory(prefix="dc-mcp-yara-") as tmp:
+        for index, ref in enumerate(refs):
+            data = settings.verified_asset_bytes(ref.path, ref.digest)
+            with open(os.path.join(tmp, f"extra-{index}.yar"), "wb") as fh:
+                fh.write(data)
+        return yara_analyzer_cls(rules_dir=tmp)
 
 
 # env vars whose names contain any of these
@@ -295,6 +322,9 @@ class _StdioLaunchPlan:
     args: tuple[str, ...]
     env: dict[str, str]
     launcher: str
+    cwd: str | None = None
+    # The gateway's as-user relay stands in for the server (#1164).
+    relay: bool = False
 
 
 class _ContainedWindowsProcess:
@@ -420,14 +450,24 @@ async def _terminate_contained_windows_process(
 
 
 @contextmanager
-def _contained_mcp_windows_process_factory() -> Iterator[None]:
-    """Scope the official MCP stdio client to DefenseClaw's safe factory."""
+def _contained_mcp_windows_process_factory(started: list[object] | None = None) -> Iterator[None]:
+    """Scope the official MCP stdio client to DefenseClaw's safe factory.
+
+    Each process it starts is appended to ``started``, so a failed scan can
+    report the launcher's exit code.
+    """
     import mcp.client.stdio as mcp_stdio
+
+    async def create(*args: Any, **kwargs: Any) -> _ContainedWindowsProcess:
+        process = await _create_contained_windows_process(*args, **kwargs)
+        if started is not None:
+            started.append(process)
+        return process
 
     with _MCP_WINDOWS_PROCESS_FACTORY_LOCK:
         original_create = mcp_stdio._create_platform_compatible_process
         original_terminate = mcp_stdio._terminate_process_tree
-        mcp_stdio._create_platform_compatible_process = _create_contained_windows_process
+        mcp_stdio._create_platform_compatible_process = create
         mcp_stdio._terminate_process_tree = _terminate_contained_windows_process
         try:
             yield
@@ -495,6 +535,30 @@ def _is_trusted_codex_node_repl(command: str) -> bool:
     return False
 
 
+# GAP-0385: on Windows the npx and uvx launchers are the files npx.cmd and
+# uvx.exe; a command written with the extension names the same launcher and
+# goes through the same trusted-path resolution as the bare name.
+_WINDOWS_LAUNCHER_FILES = {"npx.cmd": "npx", "uvx.exe": "uvx"}
+
+
+def _bare_stdio_launcher(cmd: str) -> str:
+    """The launcher name of a bare stdio command, lower-cased: ``npx.cmd``
+    and ``uvx.exe`` are ``npx`` and ``uvx`` on Windows."""
+    lowered = cmd.strip().lower()
+    if os.name == "nt":
+        return _WINDOWS_LAUNCHER_FILES.get(lowered, lowered)
+    return lowered
+
+
+def _command_base_name(cmd: str) -> str:
+    """The lower-cased file name of a command, without .exe or .cmd."""
+    base = cmd.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+    for suffix in (".exe", ".cmd"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    return base
+
+
 def _stdio_path_command_error(cmd: str) -> str:
     """Refusal text for a stdio command given as a path (GAP-2640).
 
@@ -502,10 +566,7 @@ def _stdio_path_command_error(cmd: str) -> str:
     uvx: it resolves only the bare launcher names from PATH. The text keeps
     "allowlisted stdio launcher" so callers that match on it still work.
     """
-    base = cmd.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
-    for suffix in (".exe", ".cmd"):
-        if base.endswith(suffix):
-            base = base[: -len(suffix)]
+    base = _command_base_name(cmd)
     fix = (
         f"set the command to the bare name {base!r}"
         if base in _SAFE_STDIO_LAUNCHERS
@@ -543,8 +604,15 @@ def _stdio_scan_command_error(command: str, args: list | None) -> str | None:
     # design, so "/opt/homebrew/bin/npx" does not read as "npx is not allowed".
     if "/" in cmd or "\\" in cmd or os.sep in cmd or (os.altsep and os.altsep in cmd):
         return _stdio_path_command_error(cmd)
-    if cmd.lower() not in _SAFE_STDIO_LAUNCHERS:
-        return "command is not an allowlisted stdio launcher (allowed: npx, uvx)"
+    if _bare_stdio_launcher(cmd) not in _SAFE_STDIO_LAUNCHERS:
+        # GAP-0406: never widen what a scan starts. Name the allowlist and the
+        # supported ways to add such a server instead.
+        return (
+            f"command {cmd!r} is not an allowlisted stdio launcher (allowed: npx, uvx): "
+            "a scan starts only npm or PyPI packages through npx or uvx, never another program. "
+            "Start the server with npx or uvx, serve it over HTTP and use its URL, or review it "
+            "and allow that definition with 'defenseclaw mcp allow <name> --command ... --args ...'"
+        )
 
     if not isinstance(argv, (list, tuple)):
         return f"launcher {cmd!r} arguments must be a list"
@@ -579,6 +647,78 @@ def is_safe_stdio_scan_command(command: str, args: list | None) -> bool:
       ``node_repl.exe`` after layout, real-path, owner, and DACL validation.
     """
     return _stdio_scan_command_error(command, args) is None
+
+
+def mcp_scan_refusal(entry: Any) -> str | None:
+    """Why a scan refuses to start a configured MCP server, or None.
+
+    A URL entry is scanned over the network; a local one only through the
+    launcher check above. ``mcp scan``, ``mcp list``, the upgrade notice and
+    doctor all ask this one function, so they name the same servers
+    (GAP-1340).
+    """
+    command = getattr(entry, "command", "") or ""
+    if not command or getattr(entry, "url", ""):
+        return None
+    return _stdio_scan_command_error(command, list(getattr(entry, "args", None) or []))
+
+
+def mcp_scannable_fix(name: str, entry: Any, connector: str = "") -> str:
+    """The ``mcp set`` command that gives a refused server a definition a scan
+    starts: the bare launcher when the command is a path to npx or uvx, else
+    npx with its package, or the server URL (GAP-1340)."""
+    import shlex
+
+    command = (getattr(entry, "command", "") or "").strip()
+    args = [str(a) for a in getattr(entry, "args", None) or []]
+    base = _command_base_name(command)
+    scope = f" --connector {connector}" if connector else ""
+    prefix = f"defenseclaw mcp set {shlex.quote(name)}"
+    if base in _SAFE_STDIO_LAUNCHERS and args and _stdio_scan_command_error(base, args) is None:
+        return f"{prefix} --command {base} --args {shlex.quote(json.dumps(args))}{scope}"
+    return f"{prefix} --command npx --args <package>{scope} (or --url <url>)"
+
+
+def unscannable_mcp_servers(cfg: Any) -> list[dict[str, str]]:
+    """The MCP servers of the configured connectors that a scan refuses to
+    start, with why, what the gateway does with them and the fix.
+
+    The upgrade notice (migration-v9.json ``unscannable_mcp``) and doctor
+    list these (GAP-1340). An entry the agent does not load is left out.
+    """
+    try:
+        connectors = [c for c in cfg.active_connectors() if c]
+    except Exception:  # noqa: BLE001 - no connector configured: nothing to list
+        return []
+    watcher = getattr(getattr(cfg, "gateway", None), "watcher", None)
+    take_action = getattr(getattr(watcher, "mcp", None), "take_action", True)
+    change = (
+        "a new or changed definition fails install admission and is blocked"
+        if take_action
+        else "a new or changed definition fails install admission and is reported, not blocked "
+        "(gateway.watcher.mcp.take_action is off)"
+    )
+    rows: list[dict[str, str]] = []
+    for connector in connectors:
+        try:
+            servers = cfg.mcp_servers(connector)
+        except Exception:  # noqa: BLE001 - an unreadable agent config has nothing to list
+            continue
+        for entry in servers:
+            if getattr(entry, "load_problem", "") or getattr(entry, "disabled", False):
+                continue
+            reason = mcp_scan_refusal(entry)
+            if not reason:
+                continue
+            rows.append({
+                "name": entry.name,
+                "connector": connector,
+                "command": entry.command,
+                "reason": reason,
+                "runtime_effect": f"still runs, without a scan (configured before the upgrade); {change}",
+                "fix": mcp_scannable_fix(entry.name, entry, connector),
+            })
+    return rows
 
 
 def _canonical_windows_file(path: str) -> str:
@@ -629,12 +769,57 @@ def _resolve_trusted_windows_launcher(
 
     from defenseclaw.inventory.agent_discovery import _is_trusted_binary_path
 
-    if not _is_trusted_binary_path(canonical):
+    if not _is_trusted_binary_path(canonical) and not _admin_only_program_files_launcher(canonical):
+        # GAP-0385: name the file and the way to trust its folder. GAP-0779:
+        # trusted-paths is a per-user command, refused on a managed computer.
+        folder = ntpath.dirname(canonical)
         raise MCPStdioLaunchError(
             f"local MCP launcher {launcher!r} resolved to an untrusted Windows path "
-            "or failed owner/DACL validation"
+            f"or failed owner/DACL validation: {canonical}. A scan starts a launcher only from "
+            f"a folder that only administrators can change: install it for all users under "
+            f"Program Files (on a managed computer, the administrator does this), or, on a "
+            f"per-user install where only administrators can change that folder, trust it with: "
+            f"defenseclaw setup trusted-paths add \"{folder}\""
         )
     return canonical
+
+
+# FOLDERID_ProgramFiles and FOLDERID_ProgramFilesX86.
+_WINDOWS_PROGRAM_FILES_FOLDER_IDS = (
+    "905e63b6-c1bf-494e-b29c-65b732d3d21a",
+    "7c5a40ef-a0fb-4bfc-874a-c0f2e0b9fa8e",
+)
+
+
+def _windows_program_files_roots() -> tuple[str, ...]:
+    """Program Files folders, from the Known Folder API, not the environment."""
+    from defenseclaw.inventory import agent_discovery
+
+    roots: list[str] = []
+    for folder_id in _WINDOWS_PROGRAM_FILES_FOLDER_IDS:
+        root = agent_discovery._windows_current_user_known_folder(folder_id)
+        if root and root not in roots:
+            roots.append(root)
+    return tuple(roots)
+
+
+def _admin_only_program_files_launcher(canonical: str) -> bool:
+    """Whether a launcher is installed for all users under Program Files.
+
+    The scanner runtime of a managed Windows computer runs with an allowlisted
+    environment that has no ProgramFiles variable and no per-user trusted
+    paths, so npx.cmd in C:\\Program Files\\nodejs matched no trusted prefix
+    and every npx or uvx server failed closed (GAP-0779). Only administrators
+    can change Program Files; the owner and DACL of the file and of every
+    folder up to it are still checked.
+    """
+    from defenseclaw.inventory import agent_discovery
+
+    return any(
+        agent_discovery._path_is_within(canonical, root)
+        and agent_discovery._windows_acl_chain_is_safe(canonical, root)
+        for root in _windows_program_files_roots()
+    )
 
 
 def _trusted_windows_command_processor(env: dict[str, str]) -> str:
@@ -668,12 +853,50 @@ def _validate_windows_npx_arguments(npx_path: str, args: list[str]) -> None:
             )
 
 
+def _embeddable_interpreter_dir() -> str:
+    """Folder of this interpreter when it is an embeddable CPython, else "".
+
+    An embeddable CPython has a ``python*._pth`` file beside it; the managed
+    Windows scanner runtime is one.
+    """
+    folder = os.path.dirname(os.path.abspath(sys.executable)) if sys.executable else ""
+    try:
+        names = os.listdir(folder) if folder else []
+    except OSError:
+        return ""
+    if any(name.lower().startswith("python") and name.lower().endswith("._pth") for name in names):
+        return folder
+    return ""
+
+
+def _without_scanner_interpreter_on_path(env: dict[str, str]) -> dict[str, str]:
+    """Drop an embeddable scanner interpreter from a launcher's PATH (GAP-0915).
+
+    The managed Windows scanner runtime runs an embeddable CPython and puts
+    its folder first on PATH. uvx took that interpreter for the server's
+    environment, which an embeddable CPython cannot host: the server crashed
+    (0xC0000005) before initialize, printed nothing, and every uvx server was
+    blocked as not scanned. Without it uvx uses a Python installed for all
+    users, or its own.
+    """
+    folder = _embeddable_interpreter_dir()
+    path = env.get("PATH", "")
+    if not folder or not path:
+        return env
+    own = ntpath.normcase(ntpath.normpath(folder))
+    kept = [
+        item for item in path.split(";")
+        if item.strip() and ntpath.normcase(ntpath.normpath(item.strip().strip('"'))) != own
+    ]
+    return {**env, "PATH": ";".join(kept)}
+
+
 def _windows_stdio_launch_plan(entry: MCPServerEntry) -> _StdioLaunchPlan:
     """Resolve a Windows stdio definition to a trusted, injection-safe argv."""
-    env = _safe_subprocess_env(entry.env)
+    env = _without_scanner_interpreter_on_path(_safe_subprocess_env(entry.env))
     args = list(entry.args or [])
     command = (entry.command or "").strip()
-    lowered = command.lower()
+    lowered = _bare_stdio_launcher(command)
 
     if _is_trusted_codex_node_repl(command):
         resolved = _canonical_windows_file(command)
@@ -709,6 +932,35 @@ def _windows_stdio_launch_plan(entry: MCPServerEntry) -> _StdioLaunchPlan:
     )
 
 
+def _as_user_relay_plan(entry: MCPServerEntry, relay: tuple[str, ...]) -> _StdioLaunchPlan:
+    """The launch plan of an enrolled user's server on managed Windows (#1164).
+
+    The scanner keeps running as the gateway; only the server runs as its
+    user. The runtime starts the gateway's relay, which asks the hook
+    enumerator to start the definition it published for that user, in a
+    folder and with a launcher it resolves as the user. The launcher rules
+    still apply to the real definition first: mcp_scan_refusal has passed,
+    and only npx and uvx start this way.
+    """
+    command = (entry.command or "").strip()
+    launcher = _bare_stdio_launcher(command)
+    if launcher not in _SAFE_STDIO_LAUNCHERS:
+        raise MCPStdioLaunchError(
+            f"local MCP command {command!r} of an enrolled user starts only through npx or uvx"
+        )
+    if launcher == "npx":
+        _validate_windows_npx_arguments("npx", list(entry.args or []))
+    executable = relay[0] if relay else ""
+    if not executable or not os.path.isabs(executable) or not os.path.isfile(executable):
+        raise MCPStdioLaunchError("the MCP as-user relay is not an installed executable")
+    env = {
+        key: value
+        for key in ("SYSTEMROOT", "WINDIR")
+        if (value := os.environ.get(key, ""))
+    }
+    return _StdioLaunchPlan(executable, tuple(relay[1:]), env, launcher, relay=True)
+
+
 def _exception_leaves(exc: BaseException) -> Iterator[BaseException]:
     """Yield leaf exceptions without depending on ExceptionGroup on Python 3.10."""
     children = getattr(exc, "exceptions", None)
@@ -729,21 +981,55 @@ def _protocol_error_was_logged(errors: list[tuple[str, str]]) -> bool:
     )
 
 
+def _os_error_text(leaves: list[BaseException]) -> str:
+    """The first OS error as Windows reported it: its type, code and system
+    message, never a path (GAP-0114: "startup failed" alone did not say
+    which call failed or why)."""
+    for item in leaves:
+        if not isinstance(item, OSError) or isinstance(item, ConnectionError):
+            continue
+        code = getattr(item, "winerror", None) or item.errno
+        message = (item.strerror or "").strip()
+        parts = [type(item).__name__]
+        if code:
+            parts.append(f"{'WinError' if getattr(item, 'winerror', None) else 'errno'} {code}")
+        text = " ".join(parts)
+        if message:
+            text += ": " + message[:160]
+        return f" ({text})"
+    return ""
+
+
+def _exit_code_text(code: int) -> str:
+    """An exit code as Windows reports it: NTSTATUS values in hex."""
+    unsigned = code & 0xFFFFFFFF
+    return f"0x{unsigned:08X}" if unsigned >= 0xC0000000 else str(code)
+
+
 def _classify_windows_stdio_error(
     exc: BaseException,
     plan: _StdioLaunchPlan,
     errors: list[tuple[str, str]],
     stderr_size: int,
     timeout_seconds: float,
+    exit_code: int | None = None,
 ) -> MCPStdioLaunchError:
-    """Translate dependency exceptions into stable, secret-safe boundaries."""
+    """Translate dependency exceptions into stable, secret-safe boundaries.
+
+    The launcher's exit code is named when it is known: a server that crashed
+    before initialize printed nothing, and the error said only that it
+    exited (GAP-0915). Its stderr is never part of the error text; the last
+    lines go to this process's stderr (_echo_server_stderr_tail), which the
+    gateway keeps with the failed scan.
+    """
     leaves = list(_exception_leaves(exc))
     leaf_text = " ".join(str(item).lower() for item in leaves)
     stderr_note = (
-        "; launcher stderr was captured and withheld"
+        "; the launcher's last stderr lines are printed above"
         if stderr_size
         else ""
     )
+    exited = "exited" if exit_code is None else f"exited with code {_exit_code_text(exit_code)}"
 
     if _protocol_error_was_logged(errors) or any(
         type(item).__name__ in {"JSONDecodeError", "ValidationError"}
@@ -764,22 +1050,47 @@ def _classify_windows_stdio_error(
         for token in ("connection closed", "endofstream", "brokenresource")
     ):
         return MCPStdioLaunchError(
-            f"MCP stdio launcher {plan.launcher!r} exited before completing "
+            f"MCP stdio launcher {plan.launcher!r} {exited} before completing "
             f"initialize/initialized/tools/list{stderr_note}"
         )
     # ``ConnectionError`` derives from ``OSError``. Check early-exit signals
     # first so the MCP library's canonical closed-stream exception is not
     # mislabeled as a CreateProcess/startup failure.
     if any(isinstance(item, OSError) for item in leaves):
-        stage = "Windows npx wrapper" if plan.launcher == "npx" else "launcher"
+        if plan.relay:
+            stage = "MCP as-user relay"
+        else:
+            stage = "Windows npx wrapper" if plan.launcher == "npx" else "launcher"
         return MCPStdioLaunchError(
             f"{stage} startup failed for MCP stdio launcher {plan.launcher!r}"
-            f"{stderr_note}"
+            f"{_os_error_text(leaves)}{stderr_note}"
         )
     return MCPStdioLaunchError(
         f"MCP stdio protocol failure for launcher {plan.launcher!r} during "
         f"initialize/initialized/tools/list{stderr_note}"
     )
+
+
+def _echo_server_stderr_tail(errlog: Any, launcher: str, max_lines: int = 8) -> None:
+    """Print the last stderr lines of a server that failed to start (GAP-0385).
+
+    On Linux and macOS the server's stderr reaches the terminal directly; on
+    Windows it goes to a temporary file, so a missing folder or an unknown
+    package showed only "exited before completing initialize". The lines go
+    to this process's stderr, not into the error text, which is stored with
+    the scan result and sent to the audit sinks.
+    """
+    try:
+        errlog.flush()
+        raw = errlog.buffer
+        raw.seek(0, os.SEEK_END)
+        end = raw.tell()
+        raw.seek(max(0, end - 4096))
+        lines = [line.rstrip() for line in raw.read(4096).decode("utf-8", "replace").splitlines() if line.strip()]
+    except (OSError, ValueError):
+        return
+    for line in lines[-max_lines:]:
+        print(f"[{launcher} stderr] {line[:300]}", file=sys.stderr)
 
 
 async def _scan_windows_stdio_tools(
@@ -812,19 +1123,29 @@ async def _scan_windows_stdio_tools(
     validate(selected)
 
     stderr_size = 0
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errlog:
+    started: list[object] = []
+    try:
+        errlog_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        # GAP-0114: no writable temporary folder; the server never started.
+        raise MCPStdioLaunchError(
+            "the scanner has no writable temporary folder for the MCP server's stderr, "
+            f"so the server was not started{_os_error_text([exc])}"
+        ) from exc
+    with errlog_file as errlog:
         try:
             with anyio.fail_after(timeout_seconds):
                 params = StdioServerParameters(
                     command=plan.command,
                     args=list(plan.args),
                     env=plan.env,
+                    cwd=plan.cwd,
                 )
                 # Keep transport, session, and all protocol messages in this
                 # task. The child remains attached through tools/list and the
                 # official context manager owns process-tree cleanup.
                 _trace_windows_stdio_lifecycle("transport-opening", launcher=plan.launcher)
-                with _contained_mcp_windows_process_factory():
+                with _contained_mcp_windows_process_factory(started):
                     async with stdio_client(params, errlog=errlog) as (read, write):
                         _trace_windows_stdio_lifecycle("transport-opened", launcher=plan.launcher)
                         async with ClientSession(read, write) as session:
@@ -850,6 +1171,9 @@ async def _scan_windows_stdio_tools(
             errlog.flush()
             stderr_size = errlog.tell()
             setattr(exc, "_defenseclaw_stderr_size", stderr_size)
+            if started:
+                setattr(exc, "_defenseclaw_exit_code", getattr(started[-1], "returncode", None))
+            _echo_server_stderr_tail(errlog, plan.launcher)
             raise
 
     _trace_windows_stdio_lifecycle(
@@ -1015,13 +1339,24 @@ class MCPScannerWrapper:
         cisco_ai_defense: CiscoAIDefenseConfig | None = None,
         *,
         llm: LLMConfig | None = None,
+        secure_client: bool = False,
     ) -> None:
         self.config = config
+        self.secure_client = secure_client
         self.inspect_llm = inspect_llm or InspectLLMConfig()
         self.cisco_ai_defense = cisco_ai_defense or CiscoAIDefenseConfig()
         # ``_llm`` is the canonical internal view. Prefer the explicit
         # ``llm=`` arg; fall back to inspect_llm's translated shape.
         self._llm: LLMConfig = llm if llm is not None else _inspect_to_llm(self.inspect_llm)
+        # Folder a local Windows stdio server starts in. Only the managed
+        # scanner runtime sets it, to the folder the gateway checked
+        # (GAP-1317); otherwise the server starts in this process's folder.
+        self.stdio_cwd = ""
+        # Command the managed Windows scanner runtime starts in place of an
+        # enrolled user's server: the gateway's relay, which the hook
+        # enumerator answers by starting the server as that user (#1164).
+        # Empty everywhere else.
+        self.stdio_relay: tuple[str, ...] = ()
 
     def name(self) -> str:
         return "mcp-scanner"
@@ -1074,9 +1409,7 @@ class MCPScannerWrapper:
         # loopback, link-local and CGNAT blocked unless the operator
         # explicitly opts in with allow_private).
         if is_local:
-            command_error = _stdio_scan_command_error(
-                server_entry.command, server_entry.args
-            )
+            command_error = mcp_scan_refusal(server_entry)
             if command_error:
                 raise ValueError(
                     f"refusing to scan local MCP server {server_entry.name!r}: "
@@ -1153,7 +1486,7 @@ class MCPScannerWrapper:
             endpoint_url=aid.endpoint,
             llm_provider_api_key=llm_api_key,
             llm_model=litellm_model(llm),
-            llm_base_url=llm.base_url,
+            llm_base_url=llm.request_base_url(),
             llm_timeout=llm.effective_timeout(),
             llm_max_retries=llm.effective_max_retries(),
             # The SDK otherwise uses AWS_REGION or us-east-1, not the
@@ -1173,7 +1506,7 @@ class MCPScannerWrapper:
                     file=sys.stderr,
                 )
             else:
-                supplemental_analyzers = _supplemental_yara_analyzers(YaraAnalyzer)
+                supplemental_analyzers = _supplemental_yara_analyzers(YaraAnalyzer, getattr(self.config, "yara", None))
         scanner = MCPSDKScanner(
             sdk_config,
             custom_analyzers=supplemental_analyzers,
@@ -1197,16 +1530,20 @@ class MCPScannerWrapper:
         self._llm_skipped = ""
         start = time.monotonic()
 
-        if is_local:
-            all_findings = self._scan_local(scanner, server_entry, analyzers)
-        elif pinned_target is not None:
-            # Pin the SDK's DNS resolution to the IP we vetted above so a
-            # rebind cannot redirect the connect to an internal address.
-            host, port, ip = pinned_target
-            with pinned_getaddrinfo(host, port, ip):
+        # Settings come from config (sdk_config above); inherited
+        # MCP_SCANNER_* / SKILL_SCANNER_* / VIRUSTOTAL_* / AI_DEFENSE_*
+        # shell variables never reach the SDK or a scanned stdio server.
+        with settings.scanner_env({}, secure_client=self.secure_client):
+            if is_local:
+                all_findings = self._scan_local(scanner, server_entry, analyzers)
+            elif pinned_target is not None:
+                # Pin the SDK's DNS resolution to the IP we vetted above so a
+                # rebind cannot redirect the connect to an internal address.
+                host, port, ip = pinned_target
+                with pinned_getaddrinfo(host, port, ip):
+                    all_findings = self._scan_remote(scanner, target, analyzers)
+            else:
                 all_findings = self._scan_remote(scanner, target, analyzers)
-        else:
-            all_findings = self._scan_remote(scanner, target, analyzers)
 
         elapsed = time.monotonic() - start
         result = self._convert(all_findings, target, elapsed)
@@ -1217,38 +1554,22 @@ class MCPScannerWrapper:
     def _parse_analyzers(self, analyzer_enum_cls: type) -> list | None:
         """Resolve configured analyzer names into SDK enum values.
 
-        Selection is *readiness-driven* via the ``"auto"`` sentinel. ``auto``
-        means "run YARA always, and add the LLM analyzer only when a
-        model and its required authentication are available for this scanner".
-        Local providers need no key, and Bedrock may use its AWS credential
-        chain. This lets the unified LLM lane be default-on without making a
-        missing optional credential fail the entire scan. With
-        ``MCPScannerConfig.analyzers`` and the Go parity default set to auto, every
-        scan picks YARA+LLM when the LLM lane is usable and YARA-only otherwise.
-
-        An explicit comma-separated list (``yara`` / ``yara,llm,api`` / …)
-        is honoured verbatim as a local-only escape hatch — ``yara`` keeps
-        a scan YARA-only even when a model is configured. An empty value
-        preserves the legacy "let the SDK run every analyzer" meaning
-        (``None``) so deliberately blanking the field is not silently
-        narrowed.
+        ``auto`` (also ``""`` and an empty list) is readiness-driven: YARA
+        always, plus the LLM analyzer when a model and its authentication are
+        available, so a missing optional credential never fails the scan.
+        An explicit list is honoured as given; ``auto`` inside a list stands
+        for YARA (:func:`settings.normalize_mcp_analyzers`), so the
+        ``auto,llm`` the v8 setup wizard wrote no longer drops YARA.
         """
         cfg = self.config
-        raw = (cfg.analyzers or "").strip()
-        if not raw:
-            return None
-
         analyzer_map = {e.value: e for e in analyzer_enum_cls}
-
-        if raw.lower() == "auto":
+        names = settings.normalize_mcp_analyzers(cfg.analyzers)
+        if not names:
             return self._auto_analyzers(analyzer_map)
 
         valid_names = sorted(analyzer_map.keys())
         analyzers = []
-        for name in raw.split(","):
-            name = name.strip().lower()
-            if not name:
-                continue
+        for name in names:
             if name in analyzer_map:
                 analyzers.append(analyzer_map[name])
             else:
@@ -1258,11 +1579,10 @@ class MCPScannerWrapper:
                 )
         if not analyzers:
             print(
-                f"warning: no valid analyzers after parsing "
-                f"{cfg.analyzers!r}, falling back to all analyzers",
+                f"warning: no valid analyzers in {cfg.analyzers!r}; using the auto set",
                 file=sys.stderr,
             )
-            return None
+            return self._auto_analyzers(analyzer_map)
         return analyzers
 
     def _auto_analyzers(self, analyzer_map: dict) -> list | None:
@@ -1299,7 +1619,12 @@ class MCPScannerWrapper:
         """Scan local stdio with the platform-appropriate SDK adapter."""
 
         if os.name == "nt":
-            plan = _windows_stdio_launch_plan(entry)
+            if self.stdio_relay:
+                plan = _as_user_relay_plan(entry, self.stdio_relay)
+            else:
+                plan = _windows_stdio_launch_plan(entry)
+                if self.stdio_cwd:
+                    plan = replace(plan, cwd=self.stdio_cwd)
             errors: list[tuple[str, str]] = []
             try:
                 with _capture_sdk_error_logs(errors):
@@ -1322,7 +1647,15 @@ class MCPScannerWrapper:
                     errors,
                     stderr_size,
                     _STDIO_SCAN_TIMEOUT_SECONDS,
+                    getattr(exc, "_defenseclaw_exit_code", None),
                 ) from exc
+            _raise_if_analysis_incomplete(entry.name, errors, results, scanner)
+            llm_errors = [
+                m for (name, m) in errors
+                if _is_llm_backend_error(name, m, self._llm) or str(m or "").lstrip().startswith("LLM analysis failed")
+            ]
+            if llm_errors:
+                self._warn_llm_skipped(entry.name, llm_errors[0])
 
             all_findings: list[object] = []
             for tool_result in results:
@@ -1392,6 +1725,7 @@ class MCPScannerWrapper:
                     f"scan failed for local server {entry.name!r} "
                     f"({entry.command}): {other_errors[0]}"
                 )
+            _raise_if_analysis_incomplete(entry.name, errors, list(results or []), scanner)
 
             all_findings: list[object] = []
             for tr in results:
@@ -1414,6 +1748,7 @@ class MCPScannerWrapper:
         errors: list[tuple[str, str]] = []
         with _capture_sdk_error_logs(errors):
             findings = self._scan_remote_uncaptured(scanner, target, analyzers)
+        _raise_if_analysis_incomplete(target, errors, [], scanner)
         llm_errors = [m for (name, m) in errors if _is_llm_backend_error(name, m, self._llm)]
         if llm_errors:
             self._warn_llm_skipped(target, llm_errors[0])
@@ -1555,6 +1890,62 @@ class MCPScannerWrapper:
             findings=findings,
             duration=timedelta(seconds=elapsed),
         )
+
+
+class MCPScanIncompleteError(RuntimeError):
+    """An analyzer did not inspect every tool, so the scan has no verdict."""
+
+
+# The upstream scanner (mcpscanner ``Scanner._analyze_tool`` and its prompt,
+# resource and instruction siblings) logs an analyzer that raised and goes
+# on: that tool then reports no findings from it, which read as clean. The
+# LLM analyzer is the exception the scan already degrades on with a warning
+# (``_warn_llm_skipped``). The labels never copy the logged text, which can
+# carry server-controlled tool names.
+_ANALYZER_FAILURE_LOGS = (
+    ("API analysis failed", "the Cisco AI Defense API analyzer"),
+    ("YARA analysis failed", "the YARA analyzer"),
+    ("Readiness analysis failed", "the readiness analyzer"),
+    ("Custom analyzer ", "the DefenseClaw YARA rules"),
+)
+
+
+def _analysis_gap(errors: list[tuple[str, str]], results: list[object], scanner: object) -> str:
+    """Why the analyzers did not inspect every tool, or "" when they did."""
+    for _logger, message in errors:
+        text = str(message or "").lstrip()
+        for prefix, label in _ANALYZER_FAILURE_LOGS:
+            if text.startswith(prefix):
+                return f"{label} failed on a tool of the server"
+    custom = getattr(scanner, "get_custom_analyzers", None)
+    expected = [getattr(a, "name", "") for a in (custom() if callable(custom) else [])]
+    expected = [name for name in expected if isinstance(name, str) and name]
+    for result in results:
+        ran = getattr(result, "analyzers", None)
+        if not isinstance(ran, list):
+            continue
+        # The SDK lists the selected analyzers (enum members) and then the
+        # name of each custom analyzer that ran; a custom analyzer may share
+        # an enum member's value ("yara"), so only plain names count.
+        ran_custom = Counter(a for a in ran if isinstance(a, str) and not isinstance(a, Enum))
+        if Counter(expected) - ran_custom:
+            return "the DefenseClaw YARA rules did not run on a tool of the server"
+    return ""
+
+
+def _raise_if_analysis_incomplete(
+    target: str, errors: list[tuple[str, str]], results: list[object], scanner: object,
+) -> None:
+    """Fail a scan whose analyzers did not inspect every tool (GAP-0209).
+
+    A clean verdict must mean every configured analyzer read every tool
+    description; an analyzer that failed silently would otherwise admit a
+    server nothing inspected. The scan fails, and the gateway blocks the
+    server as not scanned (fail closed).
+    """
+    gap = _analysis_gap(errors, results, scanner)
+    if gap:
+        raise MCPScanIncompleteError(f"the scan of MCP server {target!r} is incomplete, so it has no verdict: {gap}")
 
 
 def _extract_findings(tool_result: object) -> list[object]:

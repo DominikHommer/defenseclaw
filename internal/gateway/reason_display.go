@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -37,7 +38,7 @@ func trustedBuiltInMatchReason(reason string) bool {
 	if !ok || body == "" {
 		return false
 	}
-	labels := strings.Split(body, ", ")
+	labels := splitMatchLabels(body)
 	if len(labels) == 0 || len(labels) > 5 {
 		return false
 	}
@@ -47,6 +48,27 @@ func trustedBuiltInMatchReason(reason string) bool {
 		}
 	}
 	return true
+}
+
+// matchLabelStart opens every "<rule-id>:<title>" label of a matched reason.
+var matchLabelStart = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:`)
+
+// splitMatchLabels splits the body of a "matched: " reason into its labels.
+// Labels are joined with ", ", and a rule title may hold ", " too ("P0 marker,
+// off by default (high)"), so a piece that does not open with a rule ID and a
+// colon continues the label before it. A title that happens to look like a
+// label start splits early; its label then matches no known rule and the
+// message keeps the bare rule ID.
+func splitMatchLabels(body string) []string {
+	var labels []string
+	for _, piece := range strings.Split(body, ", ") {
+		if n := len(labels); n > 0 && !matchLabelStart.MatchString(piece) {
+			labels[n-1] += ", " + piece
+			continue
+		}
+		labels = append(labels, piece)
+	}
+	return labels
 }
 
 func trustedBuiltInFindingLabel(label string) bool {
@@ -158,9 +180,17 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
 		return displayReason
 	}
+	if action == "block" {
+		if sentence := agentMCPAdmissionPendingSentence(sourceReason); sentence != "" {
+			return sentence
+		}
+	}
 	subject := agentBlockListSubject(sourceReason)
 	if subject == "" {
 		subject = agentAssetPolicySubject(sourceReason)
+	}
+	if subject == "" {
+		subject = agentMCPAdmissionSubject(sourceReason)
 	}
 	if subject == "" {
 		subject = agentJudgeSubject(sourceReason)
@@ -326,6 +356,39 @@ var agentAssetPolicyKeys = []string{
 // may show the agent: the asset name the agent itself asked for, or an enum.
 var agentAssetPolicyValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`)
 
+// agentAssetPolicyNamePattern is the shape of an asset_name the agent may be
+// shown: the plain shape, with letters, marks and digits of any script, so a
+// denied skill named "epa-café" reads as a sentence like an ASCII one instead
+// of the redacted key=value reason (GAP-0572). Spaces, quotes, controls and
+// format characters still fail the match and stay redacted.
+var agentAssetPolicyNamePattern = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{M}\p{N}._:@/-]{0,127}$`)
+
+// Only the fixed runtime-disable template and known admission verdict kinds
+// may become an agent sentence. Scanner errors and finding titles can contain
+// untrusted text, so the subject names their category without copying them.
+var agentMCPAdmissionPattern = regexp.MustCompile(`^mcp server "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" is disabled because its install admission rejected it \(([^\r\n]{1,512})\); asset_policy\.mode does not apply to admission verdicts$`)
+var agentMCPFindingPattern = regexp.MustCompile(`^auto-block: watch detected (LOW|MEDIUM|HIGH|CRITICAL) findings \(scanner=[A-Za-z0-9._-]{1,64}\)(?:: [^\r\n]{1,512})?(?:; rescan retained block)?$`)
+
+func agentMCPAdmissionSubject(reason string) string {
+	m := agentMCPAdmissionPattern.FindStringSubmatch(reason)
+	if m == nil {
+		return ""
+	}
+	var verdict string
+	switch {
+	case strings.HasPrefix(m[2], "scanner failure (fail-closed): ") && len(m[2]) > len("scanner failure (fail-closed): "):
+		verdict = "scanner failure (fail-closed)"
+	case agentMCPFindingPattern.MatchString(m[2]):
+		verdict = "blocking scan findings"
+	default:
+		return ""
+	}
+	return "MCP server " + m[1] + " is disabled because its install admission rejected it (" + verdict + ")"
+}
+
+// reasonDisplayGOOS is the OS the reason is worded for; tests replace it.
+var reasonDisplayGOOS = runtime.GOOS
+
 // agentAssetPolicySubject words an asset-policy block reason
 // (assetPolicyResponseReason: "ASSET-POLICY reason_code=... asset_name=...")
 // for the agent ("MCP server github is not in the approved registry"), or
@@ -333,23 +396,19 @@ var agentAssetPolicyValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:
 // broken hook and hid the server name (GAP-2423). Every field must be a known
 // key with a plain value; anything else stays redacted.
 func agentAssetPolicySubject(reason string) string {
-	fields := strings.Split(reason, " ")
-	if len(fields) < 2 || fields[0] != "ASSET-POLICY" {
+	values, ok := agentAssetPolicyFields(reason)
+	if !ok {
 		return ""
-	}
-	values := make(map[string]string, len(fields)-1)
-	for _, field := range fields[1:] {
-		key, value, ok := strings.Cut(field, "=")
-		if !ok || !slices.Contains(agentAssetPolicyKeys, key) || !agentAssetPolicyValuePattern.MatchString(value) {
-			return ""
-		}
-		values[key] = value
 	}
 	kind, name := agentAssetPolicyKinds[values["asset_type"]], values["asset_name"]
 	if kind == "" || name == "" {
 		return ""
 	}
 	switch values["reason_code"] {
+	case "mcp-admission-pending":
+		if values["asset_type"] == "mcp" {
+			return kind + " " + name + " is not scanned yet; try the call again in about a minute"
+		}
 	case "not-in-approved-registry":
 		return kind + " " + name + " is not in the approved registry"
 	case "registry-required-but-empty":
@@ -358,8 +417,62 @@ func agentAssetPolicySubject(reason string) string {
 		return kind + " " + name + " is denied by the default asset policy"
 	case "admin-deny":
 		return kind + " " + name + " is denied by asset policy"
+	case "runtime-disable":
+		// A disabled or quarantined asset: say so in words, not with the
+		// registry fields of the record (GAP-0362).
+		if values["asset_type"] == "skill" {
+			// A standard user of a standalone enterprise Windows computer
+			// has no `defenseclaw skill info`: the managed install ships no
+			// per-user CLI there, and the managed state is administrator
+			// only (GAP-0758). Secure Client (managedEnterpriseActive)
+			// never reaches this function: agentVerdictReason and
+			// notificationDisplayReason keep its pinned wording.
+			if standaloneEnterpriseActive.Load() && reasonDisplayGOOS == "windows" {
+				return "skill " + name + " is disabled by security policy; your administrator can tell you why"
+			}
+			return "skill " + name + " is disabled by security policy; `defenseclaw skill info " + name + "` shows why"
+		}
+		return kind + " " + name + " is disabled by security policy"
 	}
 	return ""
+}
+
+// agentAssetPolicyFields are the fields of an asset-policy reason
+// (assetPolicyResponseReason), when every field is a known key with a plain
+// value; anything else stays redacted.
+func agentAssetPolicyFields(reason string) (map[string]string, bool) {
+	fields := strings.Split(reason, " ")
+	if len(fields) < 2 || fields[0] != "ASSET-POLICY" {
+		return nil, false
+	}
+	values := make(map[string]string, len(fields)-1)
+	for _, field := range fields[1:] {
+		key, value, ok := strings.Cut(field, "=")
+		pattern := agentAssetPolicyValuePattern
+		if key == "asset_name" {
+			pattern = agentAssetPolicyNamePattern
+		}
+		if !ok || !slices.Contains(agentAssetPolicyKeys, key) || !pattern.MatchString(value) {
+			return nil, false
+		}
+		values[key] = value
+	}
+	return values, true
+}
+
+// agentMCPAdmissionPendingSentence words the refusal of a tool call to an MCP
+// server whose install admission has not finished (GAP-0112) as a wait: the
+// scan is running and the same call can be tried again in about a minute.
+// The block sentence says the opposite ("Do not retry it"), and the raw
+// key=value reason read like a registry error (GAP-0210). "" for any other
+// reason.
+func agentMCPAdmissionPendingSentence(reason string) string {
+	values, ok := agentAssetPolicyFields(reason)
+	if !ok || values["reason_code"] != "mcp-admission-pending" || values["asset_type"] != "mcp" || values["asset_name"] == "" {
+		return ""
+	}
+	return "DefenseClaw is still scanning MCP server " + values["asset_name"] + ", so its tools are blocked until the scan finishes. " +
+		"Try the same call again in about a minute. If the scan rejects the server, its calls stay blocked."
 }
 
 // agentOrderedRulePrefix starts the note an ordered tool-call chain match
@@ -427,7 +540,7 @@ func agentMatchedRules(reason string) string {
 	for i, part := range strings.Split(reason, "; ") {
 		switch {
 		case i == 0 && strings.HasPrefix(part, builtInMatchReasonPrefix):
-			for _, label := range strings.Split(strings.TrimPrefix(part, builtInMatchReasonPrefix), ", ") {
+			for _, label := range splitMatchLabels(strings.TrimPrefix(part, builtInMatchReasonPrefix)) {
 				id, title, found := strings.Cut(label, ":")
 				if !found {
 					continue

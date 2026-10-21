@@ -48,6 +48,45 @@ func TestParseVersionAcceptsReportedShapes(t *testing.T) {
 	}
 }
 
+// TestInstallerPin: setup installs InstallerVersion with the script of its
+// tag, whose digest is pinned, from inside the supported window; the advice names it.
+func TestInstallerPin(t *testing.T) {
+	if InstallerVersion != "0.1.3" || InstallerTag != "v"+InstallerVersion ||
+		InstallerURL != "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.3/install.sh" ||
+		InstallerSHA256 != "b8daa915e766564f0473b76ed4e012fff9723c1ac98007b3f85ba20f59442d28" {
+		t.Fatalf("installer pin = %s %s %s", InstallerTag, InstallerURL, InstallerSHA256)
+	}
+	if v := mustParse(InstallerVersion); CheckSupported(v) != nil || v.Compare(mustParse(SupportedMin)) < 0 {
+		t.Fatalf("InstallerVersion %s is outside >=%s <%s", InstallerVersion, SupportedMin, SupportedBelow)
+	}
+	for v, want := range map[string]string{"0.0.40": "upgrade it in place to " + InstallerVersion, "0.0.16": "then install " + InstallerVersion} {
+		if err := CheckSupported(mustParse(v)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", v, err, want)
+		}
+	}
+}
+
+// #1224: the MicroVM driver archive of each Linux architecture has its
+// digest compiled in for InstallerVersion, and the doctor's install command
+// checks it against that digest, without fetching a checksum file.
+func TestVMDriverDigestsArePinnedForTheInstallerRelease(t *testing.T) {
+	want := map[string]string{
+		"amd64": "22593640c6179eb87413ab099832fbd133d3a6a4979904d27679e7da6d80a0cb",
+		"arm64": "4426ee0992989060eb5987ad7072feb3eb6aecf5a628ad0284c3d7ad5f39974b",
+	}
+	for goarch, digest := range want {
+		archive := vmDriverArchive(goarch)
+		if got := TarballPins[InstallerVersion][archive]; archive == "" || got != digest {
+			t.Errorf("%s: pinned digest of %q for %s = %q, want %q", goarch, archive, InstallerVersion, got, digest)
+		}
+		fix := InstallVMDriverFix(goarch)
+		if fix == nil || !strings.Contains(fix.Command, "echo '"+digest+"  "+archive+"' | sha256sum -c -") ||
+			strings.Contains(fix.Command, "checksums") || !strings.Contains(fix.Command, TarballBaseURL+InstallerTag+"/"+archive) {
+			t.Errorf("%s: install command %q does not check the pinned digest", goarch, fix.Command)
+		}
+	}
+}
+
 func TestCheckSupportedWindow(t *testing.T) {
 	// The advice matches what Installer does: clean up before 0.0.37,
 	// upgrade in place from 0.0.37 on.

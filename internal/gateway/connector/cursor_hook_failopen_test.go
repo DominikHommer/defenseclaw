@@ -165,6 +165,14 @@ func TestCursorHook_FailClosedOnUnreachableEmitsDeny(t *testing.T) {
 		t.Fatalf("expected exit 2 (fail-closed), got %v; stderr=%s", err, stderr)
 	}
 	assertDenyEnvelope(t, stdout)
+	if !strings.Contains(stdout, "run defenseclaw-gateway start") {
+		t.Fatalf("deny did not give the operator a gateway recovery command: %s", stdout)
+	}
+	prompt, _, promptErr := runCursorHookWithInput(t, "127.0.0.1:1", "closed", true,
+		`{"hook_event_name":"beforeSubmitPrompt"}`)
+	if promptErr == nil || !strings.Contains(prompt, "run defenseclaw-gateway start") {
+		t.Fatalf("prompt deny did not give the operator a gateway recovery command: %s (%v)", prompt, promptErr)
+	}
 }
 
 func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
@@ -172,7 +180,7 @@ func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
 		t.Skip("shell scripts not supported on windows")
 	}
 	dir := t.TempDir()
-	if err := writeHookScriptsCommonWithFailMode(dir, "127.0.0.1:1", "tok-test", "closed", []string{"cursor-hook.sh"}); err != nil {
+	if err := writeHookScriptsCommonWithFailMode(dir, "127.0.0.1:1", "tok-test", "open", []string{"cursor-hook.sh"}); err != nil {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
 	}
 	dcHome := t.TempDir()
@@ -183,8 +191,7 @@ func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
 	cmd := exec.Command("bash", filepath.Join(dir, "cursor-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"beforeShellExecution"}`)
 	// Sanitize inherited DEFENSECLAW_* so a leaked FAIL_MODE / strict
-	// override from the dev shell cannot flip .disabled's fail-open
-	// path into a spurious block.
+	// override from the dev shell cannot alter the explicit open path.
 	cmd.Env = append(sanitizedTestEnv(),
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,

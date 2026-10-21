@@ -22,12 +22,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -79,13 +81,13 @@ type EnumerateOptions struct {
 	// without a discovered agent version does not auto-hook the
 	// user; the admin promotes it explicitly).
 	//
-	// Callers that want to force a from-scratch generation (e.g. F1
+	// Callers that want to force a from-scratch generation (e.g. a
 	// targeted-uninstall regeneration after the target user's rows
 	// have been removed) leave this empty.
 	ExistingManifestPath string
 
 	// ExcludeSIDs is a list of SID strings to drop from the output.
-	// Used by spec 005 F1 targeted-uninstall to regenerate the
+	// Used by the targeted uninstall to regenerate the
 	// manifest with a specific user excluded, without doing per-row
 	// surgery on the on-disk file.
 	ExcludeSIDs []string
@@ -132,37 +134,43 @@ type EnumerateOptions struct {
 	// ReportUnprotected receives each agent the standalone enumerator found
 	// installed for an eligible profile but could not enroll.
 	ReportUnprotected func(UnprotectedAgent)
+	// ReportExcluded receives each profile the standalone enrollment
+	// excludes (exclude_users or exclude_groups), with its SID and home, so
+	// the cycle can take the gateway's inventory read access off it
+	// (GAP-1024).
+	ReportExcluded func(ManifestTarget)
+	// RunningAgents names, by account SID and connector, an agent session
+	// the cycle saw running (a label such as "codex (pid 4242)"). The
+	// standalone enumerator reports, through ReportUnprotected, a running
+	// agent of an enabled connector that no row enrolls and no other report
+	// names: an install discovery cannot read is then never a silent gap
+	// while status and verify say security_complete (GAP-0226).
+	RunningAgents map[string]map[string]string
 }
 
-// EnumerateWindows walks the local user profile registry, filters per
-// spec 005 REQ-08 + REQ-11, and produces a Manifest matching the
+// EnumerateWindows walks the local user profile registry (ProfileList),
+// keeps only interactive-user profiles, and produces a Manifest matching the
 // shape the hook-guardian's LoadManifest already accepts.
 //
 // Filter chain (each step drops the profile with a logf line if opts.Logger is set):
 //
 //  1. SID must be a syntactically-valid Windows SID string.
-//  2. SID must be an interactive-user SID: `S-1-5-21-…` (NT
-//     AUTHORITY, SECURITY_NT_NON_UNIQUE base RID) with at least 5
-//     sub-authorities so the SID names a specific user (the trailing
-//     RID), not the bare domain (`S-1-5-21-A-B-C` has 4 sub-auths
-//     and is rejected). Refuses well-known SIDs (Everyone S-1-1-0,
-//     Anonymous S-1-5-7, SYSTEM S-1-5-18, Authenticated Users
-//     S-1-5-11, BUILTIN S-1-5-32-*, NT SERVICE S-1-5-80-*, etc.) by
-//     construction. Belt-and-braces on top of the CLI-input filter
-//     at spec 005 REQ-15. The standalone profile applies
-//     winpath.IsInteractiveUserSID, which also admits Microsoft Entra
-//     ID users (`S-1-12-1-a-b-c-d`); the Secure Client profile keeps
-//     the S-1-5-21 filter exactly.
+//  2. SID must be an interactive-user SID: either `S-1-5-21-…` (local
+//     or domain user) or `S-1-12-1-…` (Microsoft Entra ID user).
+//     Refuses well-known SIDs (Everyone S-1-1-0, Anonymous S-1-5-7,
+//     SYSTEM S-1-5-18, Authenticated Users S-1-5-11, BUILTIN
+//     S-1-5-32-*, NT SERVICE S-1-5-80-*, etc.) by construction.
+//     Belt-and-braces on top of the CLI's target-SID validation.
 //  3. ProfileImagePath registry value must resolve to an absolute
 //     path under the local filesystem.
 //  4. Home directory must exist as a real directory (not a reparse
 //     point, junction, or symlink; `winpath.RejectReparseChain`
-//     walks the ancestor chain up to the volume root — a junction
-//     anywhere in the path is refused).
+//     checks from the volume root down and refuses an ancestor before
+//     reading anything below it).
 //  5. `opts.ExcludeSIDs`: any SID listed here is dropped. Used by
-//     spec 005 F1's targeted uninstall.
+//     the targeted uninstall.
 //
-// Deduplication (REQ-10): if two profiles have the same SID (e.g. a
+// Deduplication: if two profiles have the same SID (e.g. a
 // re-created account whose registry entry conflicts with a stale
 // row), the enumerator prefers the one whose `ProfileImagePath`
 // mtime is newer.
@@ -201,7 +209,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err
 	}
-	connectors := effectiveWindowsHookConnectors(cfg)
+	connectors := EffectiveWindowsHookConnectors(cfg)
 	if len(connectors) == 0 {
 		// No enabled hook-based connector → no per-user rows to
 		// emit. Return an empty (but valid) manifest so the atomic
@@ -254,18 +262,45 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		}
 		groups.pruneCache(listed)
 	}
+	running := map[string]map[string]string{}
+	for sid, agents := range opts.RunningAgents {
+		if canon := canonicalManifestTargetSID(sid); canon != "" {
+			for conn, label := range agents {
+				if running[canon] == nil {
+					running[canon] = map[string]string{}
+				}
+				running[canon][strings.ToLower(strings.TrimSpace(conn))] = label
+			}
+		}
+	}
+	// The accounts whose running agents a profile pass below judged (or left
+	// alone by the admin's choice). A running agent of any other account is
+	// reported after the loop, so it never drops out of the record.
+	judged := map[string]bool{}
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for _, profile := range profiles {
 		// Fast-fail per row so a wedged cycle never runs to
-		// completion after ctx has been cancelled — spec 005
-		// REQ-19's 60 s cycle ceiling depends on this loop
-		// noticing the deadline. See CR
-		// spec-005:PRRT_kwDORuAK-s6atyfD.
+		// completion after ctx has been cancelled — the 60 s
+		// cycle ceiling depends on this loop noticing the
+		// deadline.
 		if err := ctx.Err(); err != nil {
 			return Manifest{}, err
 		}
 		if _, skip := exclude[canonicalManifestTargetSID(profile.SID)]; skip {
 			logfSafely(opts.Logger, profile.SID, "excluded by caller (targeted uninstall)")
+			judged[canonicalManifestTargetSID(profile.SID)] = true
+			continue
+		}
+		if standalone && windowsDeletedLocalAccount(profile.SID, lookupAccount) {
+			// A deleted local account whose profile folder could not be
+			// removed (a hive another process still holds) kept its rows: the
+			// guardian could never repair them, status failed and every
+			// later Setup /ensure stopped at the activation evidence. No one
+			// can sign in as it, so its rows are revoked now (GAP-0430). An
+			// agent process that outlives the account is not judged here: it
+			// is reported with its owner unknown after the loop (GAP-0556).
+			logfSafely(opts.Logger, profile.SID,
+				"the local account no longer exists; its rows are revoked although its profile folder remains")
 			continue
 		}
 		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
@@ -276,6 +311,10 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		}
 		if decision == windowsEnrollmentExcluded {
 			logfSafely(opts.Logger, profile.SID, reason)
+			judged[canonicalManifestTargetSID(profile.SID)] = true
+			if opts.ReportExcluded != nil {
+				opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
+			}
 			continue
 		}
 		if decision != windowsEnrollmentEnrolled {
@@ -287,6 +326,26 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			user:          filepath.Base(filepath.Clean(profile.Home)),
 			report:        opts.ReportUnprotected,
 		}
+		if standalone && !sessionActive && len(running[canonicalManifestTargetSID(profile.SID)]) == 0 &&
+			windowsDisabledLocalAccount(profile.SID, lookupAccount) {
+			// A disabled account cannot start a new session, but an existing
+			// session can still run its agents. Suppress the stale warning
+			// only after the account has signed out (GAP-1034) and no agent
+			// process of it is left running (a scheduled task outlives the
+			// sign-out, GAP-0556).
+			logfSafely(opts.Logger, profile.SID,
+				"the local account is disabled and has no active session; its installed agents are not reported as unprotected")
+			rowContext.report = nil
+		}
+		// The connectors this profile got a row or a report for, so a
+		// running agent of any other enabled connector is reported below.
+		covered := map[string]bool{}
+		if report := rowContext.report; report != nil {
+			rowContext.report = func(agent UnprotectedAgent) {
+				covered[strings.ToLower(strings.TrimSpace(agent.Connector))] = true
+				report(agent)
+			}
+		}
 		for _, conn := range connectors {
 			_, known := previous[previousManifestKey(profile.SID, conn)]
 			// An exempt user gets no new per-user connector rows, but keeps the
@@ -294,6 +353,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			// its hook registration stays in the user's own agent config and
 			// fails closed as unregistered.
 			if decision == windowsEnrollmentExempt && !windowsStandaloneMachinePolicyConnector(conn) && !known {
+				covered[conn] = true
 				continue
 			}
 			dataDir := filepath.Join(filepath.Clean(profile.Home), ".defenseclaw")
@@ -324,8 +384,16 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				// skip.
 				continue
 			}
+			covered[conn] = true
 			targets = append(targets, row)
 		}
+		judged[canonicalManifestTargetSID(profile.SID)] = true
+		if standalone {
+			reportUnenrolledRunningAgents(profile, connectors, running[canonicalManifestTargetSID(profile.SID)], covered, decision, reason, rowContext)
+		}
+	}
+	if standalone {
+		reportRunningAgentsOfUnknownOwners(running, judged, connectors, opts.ReportUnprotected)
 	}
 
 	sort.Slice(targets, func(i, j int) bool {
@@ -338,6 +406,83 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	return Manifest{Version: 1, Targets: targets}, nil
 }
 
+// reportUnenrolledRunningAgents reports each agent session running for the
+// profile whose connector is enabled but got no row and no other report this
+// cycle: DefenseClaw found no install of it under the profile that it can
+// read, so nothing enrolls the account and its tool calls are not decided by
+// DefenseClaw.
+func reportUnenrolledRunningAgents(
+	profile windowsUserProfile,
+	connectors []string,
+	running map[string]string,
+	covered map[string]bool,
+	decision windowsEnrollmentDecision,
+	decisionReason string,
+	rowContext windowsStandaloneRowContext,
+) {
+	if len(running) == 0 || rowContext.report == nil {
+		return
+	}
+	for _, conn := range connectors {
+		label := strings.TrimSpace(running[conn])
+		if label == "" || covered[conn] {
+			continue
+		}
+		row := ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home), Connector: conn}
+		reason := fmt.Sprintf("%s runs for this account, but no %s install DefenseClaw can read was found in this profile; %s",
+			label, conn, windowsStandaloneInstallFix(conn))
+		if decision == windowsEnrollmentUndecided {
+			reason = fmt.Sprintf("%s runs for this account and its enrollment is pending: %s", label, decisionReason)
+		}
+		rowContext.unprotected(&row, "", reason)
+	}
+}
+
+// windowsUnknownOwnerUser names the owner of a running agent whose account
+// SID names no account a profile pass judged.
+const windowsUnknownOwnerUser = "unknown"
+
+// reportRunningAgentsOfUnknownOwners reports each running agent of an enabled
+// connector whose interactive-user SID no profile pass judged: the account was
+// deleted while the process kept running (its rows are revoked, GAP-0430), or
+// no listed profile belongs to it. No row enrolls such an account, so the
+// agent is recorded as unprotected with the owner unknown on every cycle the
+// process is seen, and it drops out only when the process exits (GAP-0556).
+// Service and other well-known SIDs are not user agent sessions.
+func reportRunningAgentsOfUnknownOwners(running map[string]map[string]string, judged map[string]bool, connectors []string, report func(UnprotectedAgent)) {
+	if report == nil || len(running) == 0 {
+		return
+	}
+	sids := make([]string, 0, len(running))
+	for sid := range running {
+		if judged[sid] {
+			continue
+		}
+		parsed, err := windows.StringToSid(sid)
+		if err != nil || !sidIsInteractiveUser(parsed) {
+			continue
+		}
+		sids = append(sids, sid)
+	}
+	sort.Strings(sids)
+	for _, sid := range sids {
+		for _, conn := range connectors {
+			label := strings.TrimSpace(running[sid][conn])
+			if label == "" {
+				continue
+			}
+			report(UnprotectedAgent{
+				User:      windowsUnknownOwnerUser,
+				SID:       sid,
+				Connector: conn,
+				Code:      UnprotectedCodeAgentUnprotected,
+				Reason: fmt.Sprintf("%s runs as this SID, but it names no account DefenseClaw enrolls (the account was deleted while the process kept running, or no user profile is listed for it), so no row enrolls it and DefenseClaw does not decide its tool calls; it counts as unprotected until the process exits",
+					label),
+			})
+		}
+	}
+}
+
 // WriteTargetsManifestAtomic serialises `m` to YAML, compares it
 // byte-for-byte to the on-disk file at `path`, and — if the two
 // differ — writes the serialised bytes through a protected staging file and
@@ -346,7 +491,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 //
 // Returns `changed=false, err=nil` when the on-disk file is
 // byte-identical to the newly-serialised manifest. This is the
-// no-op-no-write invariant from spec 005 REQ-05: without it, every
+// no-op-no-write invariant: without it, every
 // 5-min interval tick on a stable box would fsnotify-wake the
 // guardian and force it to re-reconcile identical rows (288
 // wakes/day on a stable 50-user fleet).
@@ -373,7 +518,7 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if err := windowsTargetsManifestAncestorTrust(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: validate hook guardian manifest parent ancestry: %w", err)
 	}
-	if err := validateWindowsTargetsManifestObject(dir, true); err != nil {
+	if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: validate protected hook guardian manifest parent: %w", err)
 	}
 
@@ -386,7 +531,31 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if _, statErr := os.Lstat(path); statErr == nil {
 		destinationExists = true
 		if err := validateWindowsTargetsManifestObject(path, false); err != nil {
-			return false, fmt.Errorf("enterprise hooks: validate existing hook guardian manifest: %w", err)
+			// Bulldoze: an existing manifest with a non-canonical owner or
+			// DACL (left behind by a prior unsigned certification install
+			// whose scoped guardian wrote it under a different token) must
+			// be re-protected before the reconcile cycle gives up. Call
+			// the authenticated protect helper (which has SeTakeOwnership /
+			// SeRestore privilege from the LocalSystem guardian token) to
+			// transfer ownership to Administrators and stamp the exact
+			// AdminFile DACL. If the second validate still fails after
+			// repair, propagate the original error.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] hook guardian manifest %s failed canonical "+
+					"validation (%v); re-stamping before replace\n",
+				path, err)
+			if protectErr := windowsTargetsManifestProtect(path, false); protectErr != nil {
+				return false, fmt.Errorf(
+					"enterprise hooks: validate existing hook guardian manifest: %w (repair also failed: %v)",
+					err, protectErr,
+				)
+			}
+			if revalidateErr := validateWindowsTargetsManifestObject(path, false); revalidateErr != nil {
+				return false, fmt.Errorf(
+					"enterprise hooks: validate existing hook guardian manifest: %w (after repair: %v)",
+					err, revalidateErr,
+				)
+			}
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return false, fmt.Errorf("enterprise hooks: inspect existing manifest %s: %w", path, statErr)
@@ -442,7 +611,7 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if err := windowsTargetsManifestAncestorTrust(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: revalidate hook guardian manifest parent ancestry: %w", err)
 	}
-	if err := validateWindowsTargetsManifestObject(dir, true); err != nil {
+	if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: revalidate protected hook guardian manifest parent: %w", err)
 	}
 	// A destination can appear between the initial absence check and staging.
@@ -461,6 +630,37 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 		return true, fmt.Errorf("enterprise hooks: validate published hook guardian manifest %s: %w", path, err)
 	}
 	return true, nil
+}
+
+// ensureWindowsTargetsManifestParentProtected is deliberately repair-on-drift,
+// not stamp-on-every-tick. AVC may replace the DefenseClaw-owned parent ACL
+// after installation; the LocalSystem enumerator can restore the exact
+// AdminDirectory contract after first proving the ancestry and object shape.
+// The no-op manifest path therefore remains a true no-write operation.
+func ensureWindowsTargetsManifestParentProtected(path string) error {
+	driftErr := validateWindowsTargetsManifestObject(path, true)
+	if driftErr == nil {
+		return nil
+	}
+
+	if err := windowsTargetsManifestProtect(path, true); err != nil {
+		return fmt.Errorf(
+			"repair protected hook guardian manifest parent: %w",
+			errors.Join(driftErr, err),
+		)
+	}
+
+	// Repair is never taken on trust: the caller previously reached staging only
+	// behind a passing validation, so reconfirm the contract and surface the
+	// original drift when the object still does not satisfy it.
+	if err := validateWindowsTargetsManifestObject(path, true); err != nil {
+		return fmt.Errorf(
+			"repaired hook guardian manifest parent is still unprotected: %w",
+			errors.Join(err, driftErr),
+		)
+	}
+
+	return nil
 }
 
 // marshalTargetsManifest serialises the manifest to YAML with
@@ -551,8 +751,20 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 		return false
 	}
 	key := previousManifestKey(row.SID, row.Connector)
+	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
+	if version == "" && row.Connector == "copilot" {
+		if copilot := windowsSecureClientCopilotVersion(row.UserHome, row.SID); copilot != "" {
+			version, reason = copilot, ""
+		}
+	}
 	if prev, ok := previous[key]; ok {
+		// Secure Client preserves authorization, not stale compatibility
+		// evidence (#1163). Every other profile keeps the recorded version,
+		// so a version change goes through the install's contract gate.
 		row.AgentVersion = prev.AgentVersion
+		if secureClientHookDelivery() {
+			row.AgentVersion = version
+		}
 		row.Enabled = prev.Enabled
 		row.Deferred = prev.Deferred
 		row.User = prev.User
@@ -560,8 +772,10 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 		row.GID = prev.GID
 		return true
 	}
-	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
-	if version == "" {
+	// Secure Client admits an unversioned row on static presence evidence and
+	// installs best-effort hooks for it (#1163); every other profile skips a
+	// user × connector without version evidence.
+	if version == "" && (!secureClientHookDelivery() || !windowsAgentPresence(row.UserHome, row.Connector)) {
 		logfSafely(
 			logf,
 			row.SID,
@@ -577,13 +791,17 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	row.AgentVersion = version
 	row.Enabled = &enabled
 	row.Deferred = false
+	versionEvidence := version
+	if versionEvidence == "" {
+		versionEvidence = "unverified (static presence detected; best-effort hooks)"
+	}
 	logfSafely(
 		logf,
 		row.SID,
 		fmt.Sprintf(
 			"newly-discovered (SID, %s) row auto-authorized at version %s",
 			row.Connector,
-			version,
+			versionEvidence,
 		),
 	)
 	return true
@@ -665,6 +883,11 @@ func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
 		lookup := windowsEnrollmentLookupAccountSID
 		go func() {
 			account, domain, err := lookup(sid)
+			if err == nil {
+				// The sAMAccountName, also while its user is signed in with a
+				// UPN, as the gateway names the account (GAP-0533).
+				account = useridentity.CanonicalWindowsAccountName(sid, account, domain)
+			}
 			done <- result{account, domain, err}
 		}()
 		timer := time.NewTimer(remaining)
@@ -679,6 +902,63 @@ func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
 			return "", "", errors.New("account name lookup timed out")
 		}
 	}
+}
+
+// windowsDeletedLocalAccount reports a local account SID that no longer
+// names an account. A domain or Entra account lookup also fails while its
+// directory is unreachable, so only local accounts are judged, and only by
+// ERROR_NONE_MAPPED (a timeout or a spent budget is not proof).
+func windowsDeletedLocalAccount(sid string, lookup windowsEnrollmentAccountLookup) bool {
+	if !WindowsLocalAccountSID(sid) {
+		return false
+	}
+	_, _, err := lookup(sid)
+	return errors.Is(err, windows.ERROR_NONE_MAPPED)
+}
+
+// windowsUserInfo1 is USER_INFO_1, the NetUserGetInfo level that carries
+// the account flags.
+type windowsUserInfo1 struct {
+	Name        *uint16
+	Password    *uint16
+	PasswordAge uint32
+	Priv        uint32
+	HomeDir     *uint16
+	Comment     *uint16
+	Flags       uint32
+	ScriptPath  *uint16
+}
+
+// windowsUFAccountDisable is UF_ACCOUNTDISABLE.
+const windowsUFAccountDisable = 0x0002
+
+// windowsLocalAccountDisabled reports whether the local account named
+// account is disabled (NetUserGetInfo); tests replace it.
+var windowsLocalAccountDisabled = func(account string) (bool, error) {
+	name, err := windows.UTF16PtrFromString(account)
+	if err != nil {
+		return false, err
+	}
+	var buf *byte
+	if err := windows.NetUserGetInfo(nil, name, 1, &buf); err != nil {
+		return false, err
+	}
+	defer windows.NetApiBufferFree(buf)
+	return (*windowsUserInfo1)(unsafe.Pointer(buf)).Flags&windowsUFAccountDisable != 0, nil
+}
+
+// windowsDisabledLocalAccount reports a local account that exists but is
+// disabled. Only local accounts are judged, and a failed lookup is no proof.
+func windowsDisabledLocalAccount(sid string, lookup windowsEnrollmentAccountLookup) bool {
+	if !WindowsLocalAccountSID(sid) {
+		return false
+	}
+	account, _, err := lookup(sid)
+	if err != nil || strings.TrimSpace(account) == "" {
+		return false
+	}
+	disabled, err := windowsLocalAccountDisabled(account)
+	return err == nil && disabled
 }
 
 // windowsProfileEnrollmentDecision applies enterprise.enrollment to one
@@ -762,7 +1042,7 @@ func previousManifestKey(sid, connector string) string {
 type windowsUserProfile struct {
 	SID  string
 	Home string
-	// HomeMtime disambiguates duplicate-SID rows per REQ-10; the
+	// HomeMtime disambiguates duplicate-SID rows (newest wins); the
 	// registry doesn't have direct time-of-registration for a
 	// profile, but the ProfileImagePath directory's mtime is a
 	// reasonable proxy (it changes whenever the profile is
@@ -770,24 +1050,18 @@ type windowsUserProfile struct {
 	HomeMtime int64
 }
 
-// WindowsStandaloneEligibleProfiles lists the interactive user profiles the
-// standalone profile's enrollment admits, for guardian work that needs no
+// WindowsStandaloneEligibleProfilesFor lists the interactive user profiles
+// the standalone profile's enrollment admits, for guardian work that needs no
 // per-user manifest row: a user whose connectors are all machine policy
 // still gets foreign hooks removed from their user-level config. It applies
-// the same decision EnumerateWindows does (windowsProfileEnrollmentDecision):
-// include_users is additive and filters nothing, excluded profiles are
-// skipped, and exempt profiles are kept because their machine-policy hooks
-// still run the foreign-hook guard. A profile whose name-form entries cannot
-// be evaluated (the account lookup failed) is skipped this pass, so a
-// directory outage never touches a user who may be excluded.
-func WindowsStandaloneEligibleProfiles(ctx context.Context, exclude, exempt []string) ([]TargetCredentials, error) {
-	return WindowsStandaloneEligibleProfilesFor(ctx, EnumerateOptions{ExcludeUsers: exclude, ExemptUsers: exempt})
-}
-
-// WindowsStandaloneEligibleProfilesFor is WindowsStandaloneEligibleProfiles
-// with opts' user lists and group filters, decided as EnumerateWindows
-// decides them. opts.GroupCache is read, never changed: the enumerator is
-// its only writer.
+// the same decision EnumerateWindows does (windowsProfileEnrollmentDecision)
+// with opts' user lists and group filters: include_users is additive and
+// filters nothing, excluded profiles are skipped, and exempt profiles are
+// kept because their machine-policy hooks still run the foreign-hook guard.
+// A profile whose name-form entries cannot be evaluated (the account lookup
+// failed) is skipped this pass, so a directory outage never touches a user
+// who may be excluded. opts.GroupCache is read, never changed: the
+// enumerator is its only writer.
 func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOptions) ([]TargetCredentials, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -839,11 +1113,11 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 // missing/reparse-point home) are dropped with a WARN via logf.
 //
 // Duplicate SIDs are deduplicated in-place — the newest
-// ProfileImagePath mtime wins, per REQ-10.
+// ProfileImagePath mtime wins.
 //
 // ctx bounds the walk: a per-subkey ctx.Err() check ensures a
 // wedged os.Stat on one profile cannot starve the interval-loop's
-// cycle timeout (spec 005 REQ-19).
+// 60 s cycle timeout.
 func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standalone bool) ([]windowsUserProfile, error) {
 	subkeyNames, err := windowsProfileListSubkeyReader()
 	if err != nil {
@@ -860,13 +1134,21 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standa
 			logfSafely(logf, name, fmt.Sprintf("not a syntactically-valid SID: %v", err))
 			continue
 		}
-		if standalone {
-			if !winpath.IsInteractiveUserSID(sid.String(), winpath.InteractiveUserSIDOptions{AllowEntraID: true}) {
-				logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-... or Entra ID S-1-12-1-...); refusing well-known / machine-scoped principals")
-				continue
+		if !sidIsInteractiveUser(sid) {
+			if standalone {
+				logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-… or S-1-12-1-…); refusing well-known / machine-scoped principals")
+			} else {
+				logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-…); refusing well-known / machine-scoped principals")
 			}
-		} else if !sidIsInteractiveUser(sid) {
-			logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-…); refusing well-known / machine-scoped principals")
+			continue
+		}
+		// The Secure Client profile keeps its historical filter: Microsoft
+		// Entra ID principals (S-1-12-1-…) are refused with the pre-
+		// standalone reason text so DART forensics stay stable. The
+		// standalone profile admits them (handled in sidIsInteractiveUser
+		// above).
+		if !standalone && sidIsEntraIDUser(sid) {
+			logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-…)")
 			continue
 		}
 		home, err := windowsProfileImagePathReader(name)
@@ -1013,43 +1295,57 @@ func expandProfileImagePathSystemDrive(profile string) (string, error) {
 	return expanded, nil
 }
 
-// sidIsInteractiveUser reports whether `sid` is an interactive local
-// or domain user SID — i.e. lives under NT AUTHORITY (identifier
-// authority 5) with SubAuthority[0] == SECURITY_NT_NON_UNIQUE (21)
-// and at least 5 sub-authorities so the SID names a specific user
-// (the trailing RID), not the bare domain. A user SID has the shape
-// `S-1-5-21-A-B-C-RID` (five sub-authorities: 21, A, B, C, RID). The
-// bare domain SID without the RID (`S-1-5-21-A-B-C`) has four
-// sub-authorities and MUST be rejected — enumerating a bare domain
-// as an interactive user would emit garbage manifest rows. See
-// CR spec-005:PRRT_kwDORuAK-s6atyfL.
+// sidIsInteractiveUser reports whether `sid` is an interactive local,
+// domain, or Microsoft Entra ID user SID. Local and domain users have
+// the shape `S-1-5-21-A-B-C-RID`; the bare domain SID without the RID
+// (`S-1-5-21-A-B-C`) is rejected. Entra ID users have the canonical
+// shape `S-1-12-1-A-B-C-D`, where A-D encode the account identifier.
+// Classification depends only on SID shape, not administrator group
+// membership or token elevation.
 //
 // Every well-known / machine-scoped principal (SYSTEM S-1-5-18,
 // Authenticated Users S-1-5-11, Everyone S-1-1-0, Anonymous
 // S-1-5-7, BUILTIN S-1-5-32-*, NT SERVICE S-1-5-80-*, LocalService
 // S-1-5-19, NetworkService S-1-5-20, IIS_IUSRS S-1-5-17, etc.) fails
-// the SubAuthority[0] == 21 check.
+// both accepted authority-and-shape checks.
 //
-// Matches spec 005 REQ-11 and — together with the CLI-input
-// validator at spec 005 REQ-15 — provides belt-and-braces coverage.
-// Same discipline as spec 004's `sidIsNTService` (in
+// Together with the CLI's target-SID validator
+// (validateWindowsEnterpriseTargetSID) this provides belt-and-braces
+// coverage. Same discipline as `sidIsNTService` (in
 // internal/ipc/acl_windows.go), inverted: this filter admits ONLY
-// interactive users; spec 004's admitted ONLY NT SERVICE principals.
+// interactive users; that one admits ONLY NT SERVICE principals.
 func sidIsInteractiveUser(sid *windows.SID) bool {
 	if sid == nil {
 		return false
 	}
-	if sid.IdentifierAuthority().Value != [6]byte{0, 0, 0, 0, 0, 5} {
+	authority := sid.IdentifierAuthority().Value
+	switch authority {
+	case [6]byte{0, 0, 0, 0, 0, 5}:
+		const securityNTNonUnique uint32 = 21
+		return sid.SubAuthorityCount() >= 5 && sid.SubAuthority(0) == securityNTNonUnique
+	case [6]byte{0, 0, 0, 0, 0, 12}:
+		const entraIDUserSubAuthority uint32 = 1
+		return sid.SubAuthorityCount() == 5 && sid.SubAuthority(0) == entraIDUserSubAuthority
+	default:
 		return false
 	}
-	const securityNTNonUnique uint32 = 21
-	if sid.SubAuthorityCount() < 5 {
-		return false
-	}
-	return sid.SubAuthority(0) == securityNTNonUnique
 }
 
-// effectiveWindowsHookConnectors returns the connector names for
+// sidIsEntraIDUser reports whether `sid` carries the Microsoft Entra ID
+// user shape `S-1-12-1-A-B-C-D`. The Secure Client profile refuses this
+// shape; the standalone profile admits it.
+func sidIsEntraIDUser(sid *windows.SID) bool {
+	if sid == nil {
+		return false
+	}
+	if sid.IdentifierAuthority().Value != ([6]byte{0, 0, 0, 0, 0, 12}) {
+		return false
+	}
+	const entraIDUserSubAuthority uint32 = 1
+	return sid.SubAuthorityCount() == 5 && sid.SubAuthority(0) == entraIDUserSubAuthority
+}
+
+// EffectiveWindowsHookConnectors returns the connector names for
 // which the enumerator emits per-user rows. Filters the operator-
 // configured connector list down to those the Windows per-user
 // installer actually supports (see `windowsHookConnectors`),
@@ -1072,8 +1368,25 @@ func sidIsInteractiveUser(sid *windows.SID) bool {
 // `guardrail.connector: claudecode` together with
 // `guardrail.connectors.claudecode.enabled: false` emits ZERO
 // per-user rows for claudecode — the disabled map entry is
-// authoritative. See CR spec-005:PRRT_kwDORuAK-s6atyfM.
-func effectiveWindowsHookConnectors(cfg *config.Config) []string {
+// authoritative.
+//
+// The per-user connectors count only in a standalone process (one that
+// carries the profile pin); use EffectiveWindowsStandaloneHookConnectors
+// where the caller already knows the config is a standalone one.
+func EffectiveWindowsHookConnectors(cfg *config.Config) []string {
+	return effectiveWindowsHookConnectors(cfg, windowsEnterpriseStandaloneProcess())
+}
+
+// EffectiveWindowsStandaloneHookConnectors is EffectiveWindowsHookConnectors
+// for a config the caller loaded from the standalone layout. A CLI or Setup
+// lifecycle process does not carry the profile pin, so without this its
+// per-user-only config (opencode, copilot, hermes) counted no connector and
+// verify failed no_connectors_enabled (GAP-1230).
+func EffectiveWindowsStandaloneHookConnectors(cfg *config.Config) []string {
+	return effectiveWindowsHookConnectors(cfg, true)
+}
+
+func effectiveWindowsHookConnectors(cfg *config.Config, standalone bool) []string {
 	seen := make(map[string]struct{})
 	// disabledNames captures every name the operator explicitly
 	// disabled in cfg.Guardrail.Connectors. The scalar-connector
@@ -1089,7 +1402,7 @@ func effectiveWindowsHookConnectors(cfg *config.Config) []string {
 		if trimmed == "" {
 			return
 		}
-		if !windowsEnumeratorHookConnector(trimmed) {
+		if !windowsEnumeratorHookConnector(trimmed, standalone) {
 			return
 		}
 		if explicitlyDisabled {

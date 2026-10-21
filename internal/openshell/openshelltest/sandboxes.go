@@ -198,9 +198,10 @@ func (s *sandboxClient) WaitReady(ctx context.Context, workspace, name string, o
 	s.f.mu.Unlock()
 
 	reason, cond := "ConfigurationAccepted", "True"
-	if state == types.ConfigurationAdmissionRejected {
+	switch state {
+	case types.ConfigurationAdmissionRejected:
 		reason, cond = "ConfigurationRejected", "False"
-	} else if state == types.ConfigurationAdmissionPending {
+	case types.ConfigurationAdmissionPending:
 		reason, cond = "ConfigurationPending", "False"
 	}
 	sb.Status.Conditions = []types.SandboxCondition{

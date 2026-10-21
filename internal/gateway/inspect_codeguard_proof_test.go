@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
-	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -98,15 +97,20 @@ rules:
 			wantRuleID: "CG-EXEC-001",
 		},
 		{
+			// Two target keys cannot be verified: the conflicting-arguments
+			// finding blocks the call (GAP-0678); CodeGuard stays visible and
+			// detection only.
 			name:       "ambiguous write envelope remains visible detection only",
 			args:       json.RawMessage(`{"path":"/tmp/app.py","file_path":"/tmp/other.py","content":"os.system(cmd)"}`),
-			wantAction: guardrailActionAllow,
+			wantAction: guardrailActionBlock,
 			wantRuleID: "CG-EXEC-001",
 		},
 		{
+			// A target key repeated with another value cannot be verified
+			// either (GAP-0678); CodeGuard stays visible and detection only.
 			name:       "duplicate write field remains visible detection only",
 			args:       json.RawMessage(`{"path":"/tmp/app.py","path":"/tmp/other.py","content":"os.system(cmd)"}`),
-			wantAction: guardrailActionAllow,
+			wantAction: guardrailActionBlock,
 			wantRuleID: "CG-EXEC-001",
 		},
 	}
@@ -189,9 +193,7 @@ rules:
 		t.Fatal(err)
 	}
 	api.scannerCfg.Scanners.CodeGuard = rulesDir
-	if err := enforce.NewPolicyEngine(api.store).AllowToolForConnector("write_file", "", "test allow"); err != nil {
-		t.Fatal(err)
-	}
+	allowTool(api.scannerCfg, "write_file", "", "test allow")
 
 	cleanVerdict := inspectCodeGuardProofTestRequest(
 		t,

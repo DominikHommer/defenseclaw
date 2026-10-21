@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -43,8 +44,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const (
@@ -243,7 +246,7 @@ func rotationCleanupRequested(cmd *cobra.Command) bool {
 
 func runStart(cmd *cobra.Command, args []string) error {
 	coldStart := cmd != nil && hookColdStartRequested(cmd.Flags())
-	if coldStart && !hookColdStartSupported {
+	if coldStart && !hookColdStartSupported() {
 		return errHookColdStartUnsupported
 	}
 	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
@@ -261,10 +264,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 	lockWait := gatewayStartLockWait
 	if coldStart {
-		lockWait = hookColdStartLockWait
+		// Many hooks see the same restart at once and each starts the
+		// gateway: only the first takes the lock. The others end at once
+		// (GAP-0143); the start or restart that holds the lock brings the
+		// gateway up, and their hooks keep sending the call to it.
+		lockWait = 0
 	}
 	release, err := acquireGatewayStartLock(dataDir, lockWait)
 	if err != nil {
+		if coldStart {
+			return nil
+		}
 		return err
 	}
 	defer release()
@@ -277,7 +287,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	err = runStartLocked(cmd, args, coldStart)
 	if err != nil && coldStart {
 		if running, _ := daemon.New(dataDir).IsRunning(); !running {
-			recordHookColdStartFailure(dataDir)
+			recordHookColdStartFailure(dataDir, err)
 		}
 	}
 	return err
@@ -307,12 +317,13 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	if err := d.ValidateStartIdentityFiles(); err != nil {
 		return err
 	}
+	bootSource := configSourceDigest(config.ConfigPath())
 	cfg, cfgLoadErr := loadDaemonConfig(cmd)
 	if rotationTransaction && cfgLoadErr != nil {
 		return fmt.Errorf("rotation start requires valid configuration: %w", cfgLoadErr)
 	}
 	if err := daemonConfigLoadError("start", cfgLoadErr); err != nil {
-		return err
+		return startConfigLoadError{err: err}
 	}
 	if rotationTransaction {
 		if err := verifyRotationConfigState(cfg, expectedConnectorState); err != nil {
@@ -337,6 +348,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		Warn(fmt.Sprintf("Gateway sidecar is already running (PID %d)", pid))
 		if note := otherGatewayBinaryNote(d.RecordedExecutable()); note != "" {
 			fmt.Println(note)
+		}
+		if note := movedCLILauncherNote(); note != "" {
+			Warn(note)
 		}
 		if _, healthErr := fetchSidecarHealth(client, sidecarHealthURL(cfg)); healthErr != nil {
 			// GAP-1342: a hung gateway; status and start pointed at each other.
@@ -378,7 +392,14 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		return fmt.Errorf("start daemon: %w%s", err, gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 
-	cfg, cfgErr = loadDaemonConfig(cmd)
+	// The readiness checks need the configuration the daemon reads. Load it
+	// again only when config.yaml changed since the load above, or a rotation
+	// must re-check the committed state: with a large guardrail policy each
+	// load is a full parse and validation (GAP-0264).
+	if rotationTransaction || cfgLoadErr != nil || bootSource == nil ||
+		!bytes.Equal(bootSource, configSourceDigest(config.ConfigPath())) {
+		cfg, cfgErr = loadDaemonConfig(cmd)
+	}
 	if rotationTransaction && cfgErr != nil {
 		return fmt.Errorf("rotation start could not reload committed configuration: %w", cfgErr)
 	}
@@ -435,6 +456,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 	clearGatewayColdStartState(config.DefaultDataPath())
+	removeRunningGatewayToken(config.DefaultDataPath())
 
 	refused, admissionRefused := guardrailHookContractAdmissionRefusal(snap.Guardrail)
 	if admissionRefused {
@@ -446,6 +468,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	}
 	// The name records the move to the second; allow for that rounding.
 	printMovedCorruptAuditStores(cfg, startAttemptedAt.Add(-time.Second))
+	if note := movedCLILauncherNote(); note != "" {
+		Warn(note)
+	}
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())
@@ -519,6 +544,22 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	cfg, cfgErr := loadDaemonConfig(cmd)
+	if cfgErr != nil && !rotationTransaction {
+		var secretErr *config.V8SecretReferenceError
+		if errors.As(cfgErr, &secretErr) && !secretErr.Credential {
+			// Stop needs only the verified listener identity and gateway token.
+			// An unset export destination must not strand a per-user uninstall.
+			cfg, cfgErr = loadShutdownConfigWithoutDestinations(config.ConfigPath())
+			if cfgErr == nil {
+				applyDaemonEndpointOverrides(cfg)
+			}
+		}
+		if cfgErr != nil {
+			// A damaged config cannot supply an authenticated listener, but a
+			// verified PID can still be stopped by the signal fallback.
+			cfg = config.DefaultConfig()
+		}
+	}
 	var running bool
 	var pid int
 	var err error
@@ -560,7 +601,7 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		if watchdogWasRunning && !cfg.Gateway.Watchdog.Enabled {
 			return errors.New("rotation watchdog is running while disabled in configuration")
 		}
-		if err := runWatchdogStop(nil, nil); err != nil {
+		if err := stopWatchdogForGateway(); err != nil {
 			if watchdogWasRunning {
 				if restoreErr := runWatchdogStart(nil, nil); restoreErr != nil {
 					return fmt.Errorf("rotation stop watchdog ownership: %w; restore failed: %v", err, restoreErr)
@@ -571,7 +612,24 @@ func runStop(cmd *cobra.Command, _ []string) error {
 	} else {
 		// Stop watchdog first since it monitors the gateway. Ordinary operator
 		// stop keeps the historical best-effort behavior after identity preflight.
-		_ = runWatchdogStop(nil, nil)
+		_ = stopWatchdogForGateway()
+		if hookColdStartSupported() && !secureClientHost() {
+			// The watchdog can be waiting for an independent cold-start child
+			// when it exits. Wait for that child's start lock before taking the
+			// final running snapshot and publishing the stop marker. A start
+			// that passed its first marker check can otherwise clear a marker
+			// after stop has already returned.
+			release, lockErr := acquireGatewayStartLock(config.DefaultDataPath(), gatewayStartLockWait)
+			if lockErr != nil {
+				return fmt.Errorf("wait for gateway start before stop: %w", lockErr)
+			}
+			defer release()
+			// The child may have started a fresh watchdog while finishing.
+			// With its start lock held, stop that instance before checking
+			// the gateway and writing the final marker.
+			_ = stopWatchdogForGateway()
+			running, pid = d.IsRunning()
+		}
 	}
 
 	// Written before the stop so a hook refused mid-shutdown does not start
@@ -579,13 +637,22 @@ func runStop(cmd *cobra.Command, _ []string) error {
 	markGatewayStopped(config.DefaultDataPath())
 
 	if !running {
+		removeRunningGatewayToken(config.DefaultDataPath())
 		fmt.Println(Dim("Gateway sidecar is not running"))
 		return nil
 	}
 
 	fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
 
-	if err := stopGatewayGracefully(d, cfg, defaultStopTimeout); err != nil {
+	var stopErr error
+	if cfgErr != nil {
+		// With no verified listener configuration, never send a credential to
+		// the default port. The daemon still verifies its PID before signalling.
+		stopErr = d.StopGracefully(defaultStopTimeout, nil)
+	} else {
+		stopErr = stopGatewayGracefully(d, cfg, defaultStopTimeout)
+	}
+	if err := stopErr; err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		if rotationTransaction && watchdogWasRunning {
 			if restoreErr := runWatchdogStart(nil, nil); restoreErr != nil {
@@ -606,6 +673,7 @@ func runStop(cmd *cobra.Command, _ []string) error {
 	}
 
 	fmt.Println(Style("OK", "fg=green", "bold"))
+	removeRunningGatewayToken(config.DefaultDataPath())
 	printHint("Start again:  defenseclaw-gateway start")
 	return nil
 }
@@ -617,7 +685,7 @@ var stopLeftoverWatchdogOnManagedHost = func() {
 	if err != nil || !running {
 		return
 	}
-	if err := runWatchdogStop(nil, nil); err != nil {
+	if err := stopWatchdogForGateway(); err != nil {
 		fmt.Fprintf(os.Stderr, "could not stop this account's watchdog: %v\n", err)
 	}
 }
@@ -739,7 +807,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if running {
 		// Stop the watchdog only after proving the configured listener belongs to
 		// this managed instance; a foreign collision must have no side effects.
-		_ = runWatchdogStop(nil, nil)
+		_ = stopWatchdogForGateway()
 		fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
 		if err := stopGatewayGracefully(d, cfg, defaultStopTimeout); err != nil {
 			fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -795,6 +863,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 	clearGatewayColdStartState(config.DefaultDataPath())
+	removeRunningGatewayToken(config.DefaultDataPath())
 
 	printDaemonStartResult(pid, snap)
 	fmt.Println()
@@ -885,34 +954,34 @@ func requestGatewayShutdown(client *http.Client, cfg *config.Config, token strin
 	return nil
 }
 
-// printSplunkLocalHint prints Splunk Web credentials when the local bridge
-// is configured, so the user knows how to access the dashboards.
+// printSplunkLocalHint prints how to sign in to the local Splunk's web UI,
+// which `setup splunk --logs` sets up, while its credentials are there and
+// the UI answers. The credentials outlive the container (`setup splunk
+// --disable` stops it, and a removed container leaves them), so a started
+// gateway advertised a web UI that nothing served (GAP-0381).
 func printSplunkLocalHint() {
-	dataDir := config.DefaultDataPath()
-
-	// Check bridge env first (written by Python setup splunk --logs)
-	bridgeEnvPath := filepath.Join(dataDir, "splunk-bridge", "env", ".env")
-	bridgeEnv := readDotEnv(bridgeEnvPath)
-	if pw := bridgeEnv["SPLUNK_PASSWORD"]; pw != "" {
-		Section("Splunk Local Mode")
-		fmt.Printf("  %s http://127.0.0.1:8000\n", Style("Web UI:", "fg=bright_black", "bold"))
-		fmt.Printf("  %s admin\n", Style("Username:", "fg=bright_black", "bold"))
-		fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), bridgeEnvPath)
-		return
-	}
-
-	// Fallback: legacy DEFENSECLAW_LOCAL_* keys
-	dotenvPath := filepath.Join(dataDir, ".env")
-	env := readDotEnv(dotenvPath)
-	user := env["DEFENSECLAW_LOCAL_USERNAME"]
-	pass := env["DEFENSECLAW_LOCAL_PASSWORD"]
-	if user == "" || pass == "" {
+	bridgeEnvPath := filepath.Join(config.DefaultDataPath(), "splunk-bridge", "env", ".env")
+	if readDotEnv(bridgeEnvPath)["SPLUNK_PASSWORD"] == "" || !splunkWebAnswers() {
 		return
 	}
 	Section("Splunk Local Mode")
-	fmt.Printf("  %s http://127.0.0.1:8000\n", Style("Web UI:", "fg=bright_black", "bold"))
-	fmt.Printf("  %s %s\n", Style("Username:", "fg=bright_black", "bold"), user)
-	fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), dotenvPath)
+	fmt.Printf("  %s http://%s\n", Style("Web UI:", "fg=bright_black", "bold"), splunkWebAddr)
+	fmt.Printf("  %s admin\n", Style("Username:", "fg=bright_black", "bold"))
+	fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), bridgeEnvPath)
+}
+
+// splunkWebAddr is the local Splunk's web UI, which the container publishes
+// on loopback only.
+const splunkWebAddr = "127.0.0.1:8000"
+
+// splunkWebAnswers reports whether something listens on splunkWebAddr.
+var splunkWebAnswers = func() bool {
+	conn, err := net.DialTimeout("tcp", splunkWebAddr, 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 type daemonReadinessRequirements struct {
@@ -1049,6 +1118,11 @@ func daemonConfigLoadError(verb string, err error) error {
 	if err == nil {
 		return nil
 	}
+	if !secureClientHost() {
+		if _, statErr := os.Stat(config.ConfigPath()); errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("cannot %s the gateway: no config.yaml exists yet; run defenseclaw init first", verb)
+		}
+	}
 	if secretErr := missingObservabilitySecretError(verb, err); secretErr != nil {
 		return secretErr
 	}
@@ -1085,6 +1159,20 @@ func daemonConfigLoadError(verb string, err error) error {
 // emptyConfigProbeBytes matches the Python CLI's _EMPTY_CONFIG_PROBE_BYTES.
 const emptyConfigProbeBytes = 64 << 10
 
+// incompleteConfigProbeBytes bounds the read of a config.yaml that failed to
+// load, to tell a cut-short file from an older or invalid one.
+const incompleteConfigProbeBytes = 4 << 20
+
+var configVersionLine = regexp.MustCompile(`(?m)^config_version[ \t]*:`)
+
+// incompleteConfigFile reports a config.yaml that stops mid-document:
+// DefenseClaw always ends it with a newline, and a file cut short before
+// config_version has none (the Python CLI config_is_incomplete).
+func incompleteConfigFile(raw []byte) bool {
+	return len(raw) > 0 && len(raw) <= incompleteConfigProbeBytes && raw[len(raw)-1] != 0x0a &&
+		!onlyYAMLComments(raw) && !configVersionLine.Match(raw)
+}
+
 // emptyConfigFileMessage reports a config.yaml that exists but holds no
 // settings (0 bytes, blank or comments only) in the Python CLI's words
 // (GAP-1633). The YAML loader calls it a root that must be a mapping and told
@@ -1095,8 +1183,21 @@ func emptyConfigFileMessage(path string) (string, bool) {
 		return "", false
 	}
 	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, emptyConfigProbeBytes+1))
-	if err != nil || len(raw) > emptyConfigProbeBytes || !onlyYAMLComments(raw) {
+	raw, err := io.ReadAll(io.LimitReader(file, incompleteConfigProbeBytes+1))
+	if err != nil {
+		return "", false
+	}
+	if incompleteConfigFile(raw) {
+		// Cut short while it was written: not an older configuration, so
+		// not "run defenseclaw migrate" either (GAP-0482).
+		return fmt.Sprintf(
+			"%s is incomplete: it stops in the middle of the file (as after a crash or a full disk). "+
+				"It is not an older configuration, and nothing was changed. Restore your copy of config.yaml%s, "+
+				"or remove the file and run defenseclaw init.",
+			path, previousConfigHint(filepath.Dir(path)),
+		), true
+	}
+	if len(raw) > emptyConfigProbeBytes || !onlyYAMLComments(raw) {
 		return "", false
 	}
 	return fmt.Sprintf(
@@ -1175,6 +1276,22 @@ func onlyYAMLComments(raw []byte) bool {
 	return true
 }
 
+// configSourceDigest is the SHA-256 of the file at path, or nil when it
+// cannot be read within the config loader's source-size limit.
+func configSourceDigest(path string) []byte {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	hash := sha256.New()
+	n, err := io.Copy(hash, io.LimitReader(file, int64(config.V8YAMLMaxSourceBytes)+1))
+	if err != nil || n > int64(config.V8YAMLMaxSourceBytes) {
+		return nil
+	}
+	return hash.Sum(nil)
+}
+
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
 	// Resolve the daemon management view through the same strict source and
 	// dotenv path as the child. A migrated config can keep destination secrets
@@ -1188,13 +1305,43 @@ func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
 	}
 	// The child receives these as flags, so startup verification must inspect
 	// the same effective endpoint instead of the on-disk defaults.
+	applyDaemonEndpointOverrides(cfg)
+	return cfg, err
+}
+
+func applyDaemonEndpointOverrides(cfg *config.Config) {
 	if sidecarHost != "" {
 		cfg.Gateway.APIBind = sidecarHost
 	}
 	if sidecarPort > 0 {
 		cfg.Gateway.APIPort = sidecarPort
 	}
-	return cfg, err
+}
+
+// loadShutdownConfigWithoutDestinations decodes the same bounded, schema-
+// checked source used by startup, including the supported v8 migration, but
+// does not compile destination credentials. It is called only after strict
+// loading identified a missing destination secret, and only to stop an
+// already verified per-user process. Start and restart stay strict.
+func loadShutdownConfigWithoutDestinations(path string) (*config.Config, error) {
+	raw, err := readConfigV8Source(path)
+	if err != nil {
+		return nil, err
+	}
+	if raw, err = config.MigrateV8InMemory(path, raw, guardrail.RulePackDigest); err != nil {
+		return nil, err
+	}
+	if err := config.ValidateV8SchemaBytes(path, raw); err != nil {
+		return nil, err
+	}
+	candidate, err := config.LoadRuntimeV8FromBytes(path, raw)
+	if err != nil {
+		return nil, err
+	}
+	if !config.CurrentSchemaVersion(candidate.ConfigVersion) {
+		return nil, errors.New("configuration is from an older DefenseClaw; run defenseclaw migrate first")
+	}
+	return candidate, nil
 }
 
 func readDotEnv(path string) map[string]string {
@@ -1235,6 +1382,9 @@ func daemonGatewayToken(cfg *config.Config) string {
 	tokenEnv := ""
 	if cfg != nil {
 		tokenEnv = strings.TrimSpace(cfg.Gateway.TokenEnv)
+		if running := runningGatewayToken(cfg.DataDir); running != "" {
+			return running
+		}
 		if tokenEnv != "" && !daemonEnvironmentKeyEqual(tokenEnv, canonicalTokenEnv) && !daemonEnvironmentKeyEqual(tokenEnv, legacyTokenEnv) {
 			if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" {
 				return token
@@ -1262,6 +1412,51 @@ func daemonGatewayToken(cfg *config.Config) string {
 		return strings.TrimSpace(cfg.Gateway.ResolvedToken())
 	}
 	return ""
+}
+
+const runningGatewayTokenFilename = "gateway_running_token.json"
+
+// runningGatewayToken is an ephemeral, private credential for the process
+// still serving requests after .env changed. Its PID must match the daemon's
+// verified process identity; the new process reads .env after restart.
+func runningGatewayToken(dataDir string) string {
+	if dataDir == "" {
+		return ""
+	}
+	running, pid := daemon.New(dataDir).IsRunning()
+	if !running {
+		return ""
+	}
+	return readRunningGatewayToken(dataDir, pid)
+}
+
+func readRunningGatewayToken(dataDir string, pid int) string {
+	path := filepath.Join(dataDir, runningGatewayTokenFilename)
+	if err := safefile.ValidatePrivateFile(path); err != nil {
+		return ""
+	}
+	data, err := safefile.ReadRegularFileBounded(path, 4096)
+	if err != nil {
+		return ""
+	}
+	var record struct {
+		PID   int    `json:"pid"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil || record.PID <= 0 ||
+		len(record.Token) == 0 || len(record.Token) > 2048 {
+		return ""
+	}
+	if pid != record.PID {
+		return ""
+	}
+	return record.Token
+}
+
+func removeRunningGatewayToken(dataDir string) {
+	if dataDir != "" {
+		_ = os.Remove(filepath.Join(dataDir, runningGatewayTokenFilename))
+	}
 }
 
 func daemonEnvironmentKeyEqual(left, right string) bool {
@@ -1621,10 +1816,10 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 	requirements := daemonReadinessRequirements{
 		guardrailEnabled: configuredGuardrailExpectedRunning(cfg),
 		watcherEnabled:   cfg.Gateway.Watcher.Enabled,
-		// The canonical schema-v8 observability runtime always binds the
-		// sidecar telemetry health source.
-		// Match that runtime state instead of waiting forever for "disabled".
-		telemetryEnabled: cfg.ConfigVersion >= config.ObservabilityV8ConfigVersion,
+		// The canonical observability runtime always binds the sidecar
+		// telemetry health source. Match that runtime state instead of
+		// waiting forever for "disabled".
+		telemetryEnabled: true,
 		routingEnabled:   cfg.Routing.Enabled,
 		startedNotBefore: startedNotBefore,
 		expectedDataDir:  cfg.DataDir,
@@ -2586,6 +2781,7 @@ func telemetryReadinessFailureDetail(details map[string]interface{}) string {
 		"adapter_result_invalid", "adapter_input_invalid", "projection_invalid", "envelope_encode_failed",
 		"envelope_size_invalid", "request_build_failed", "endpoint_prohibited", "resolution_failed",
 		"connection_failed", "request_canceled", "request_timeout", "acknowledgement_lost", "transport_failed",
+		"file_write_failed", "no_space",
 		"http_authentication", "http_retryable", "http_rejected", "hec_ack_invalid",
 		"hec_ack_authentication", "hec_ack_retryable", "hec_ack_rejected")
 	retentionStates := allowed("", "waiting_for_readiness", "healthy", "degraded", "disabled", "stopped")
@@ -2825,4 +3021,63 @@ func otherGatewayBinaryNote(running string) string {
 		return ""
 	}
 	return fmt.Sprintf("It runs %s, not this binary (%s). To switch: 'defenseclaw-gateway stop', then start again.", running, self)
+}
+
+// movedCLILauncherNote says when the defenseclaw command next to this gateway
+// binary no longer runs. install.sh links ~/.local/bin/defenseclaw into
+// ~/.defenseclaw/.venv by absolute path and the venv entry point names its
+// interpreter the same way, so after an account rename or a home move the
+// user only saw "command not found" while this binary, a plain copy, still
+// ran and said nothing (GAP-0732).
+func movedCLILauncherNote() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return movedCLILauncherNoteIn(filepath.Dir(self))
+}
+
+func movedCLILauncherNoteIn(binDir string) string {
+	link := filepath.Join(binDir, "defenseclaw")
+	target, err := os.Readlink(link)
+	if err != nil {
+		return ""
+	}
+	missing := ""
+	if _, err := os.Stat(link); errors.Is(err, os.ErrNotExist) {
+		missing = target
+	} else if interpreter := scriptInterpreter(link); interpreter != "" {
+		if _, err := os.Stat(interpreter); errors.Is(err, os.ErrNotExist) {
+			missing = interpreter
+		}
+	}
+	if missing == "" {
+		return ""
+	}
+	return fmt.Sprintf("The defenseclaw command (%s) does not run: it needs %s, which no longer exists "+
+		"(was this account renamed or its home moved?). Rerun the DefenseClaw installer to repair it.", link, missing)
+}
+
+// scriptInterpreter returns the absolute interpreter a script names on its
+// #! line, or "".
+func scriptInterpreter(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, _ := f.Read(head)
+	line, _, _ := strings.Cut(string(head[:n]), "\n")
+	if !strings.HasPrefix(line, "#!") {
+		return ""
+	}
+	fields := strings.Fields(strings.TrimPrefix(line, "#!"))
+	if len(fields) == 0 || !filepath.IsAbs(fields[0]) {
+		return ""
+	}
+	return fields[0]
 }

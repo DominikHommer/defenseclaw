@@ -18,13 +18,15 @@ package hookexec
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 )
 
-// readCapped reads up to max bytes from r. It returns overflow=true (and an
-// empty payload) when the input exceeds max, mirroring
+// readCapped reads up to max bytes from r. It returns overflow=true (and the
+// first max bytes, which no caller hands on as the payload) when the input
+// exceeds max, mirroring
 // defenseclaw_read_stdin_capped: refuse, don't truncate. A 1-byte probe past
 // the cap detects the overflow without buffering an unbounded body.
 func readCapped(r io.Reader, max int64) (payload []byte, overflow bool, err error) {
@@ -37,7 +39,8 @@ func readCapped(r io.Reader, max int64) (payload []byte, overflow bool, err erro
 		return nil, false, err
 	}
 	if int64(len(data)) > max {
-		return nil, true, nil
+		// The prefix the cap kept: callers read only its leading fields.
+		return data[:max], true, nil
 	}
 	return data, false, nil
 }
@@ -101,12 +104,32 @@ func isTracestateChar(c byte) bool {
 }
 
 // logHookFailure appends one JSON line to Home/logs/hook-failures.jsonl,
-// mirroring defenseclaw_log_hook_failure. Best-effort: any error is ignored so
-// a read-only home or full disk never changes the hook's decision.
-func logHookFailure(opts Options, sp spec, reason, category, failMode string) {
+// when Home exists, mirroring defenseclaw_log_hook_failure. Best-effort: any
+// error is ignored so a read-only home or full disk never changes the hook's
+// decision. blocked is the delivery outcome the caller applies; a connector
+// without a fail-closed contract records what the call got instead
+// (loggedFailMode), so the fail-open report finds the calls that ran.
+func logHookFailure(opts Options, sp spec, reason, category, failMode string, blocked bool) {
+	if sp.failOpenOnly {
+		blocked = loggedFailMode(opts, sp, failMode) == "closed"
+	}
+	outcome := "fail_closed"
+	if !blocked {
+		outcome = "fail_open"
+		// Quote diagnostics so an unexpected transport error cannot forge lines.
+		// Never include request/response bodies or authentication credentials.
+		fmt.Fprintf(opts.Stderr, "defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %q\n", sp.connector, sp.hookName, category, reason)
+	}
 	if opts.Home == "" {
 		return
 	}
+	// Never create the DefenseClaw folder itself for a log line: a managed
+	// hook whose folder was missing recreated it here, and the next event's
+	// hook found a folder and no longer said it was missing (GAP-0154).
+	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
+		return
+	}
+	failMode = loggedFailMode(opts, sp, failMode)
 	logDir := filepath.Join(opts.Home, "logs")
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		return
@@ -118,6 +141,7 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string) {
 		Reason    string `json:"reason"`
 		Category  string `json:"category"`
 		FailMode  string `json:"fail_mode"`
+		Outcome   string `json:"outcome"`
 	}{
 		TS:        opts.Now().UTC().Format("2006-01-02T15:04:05Z"),
 		Connector: sp.connector,
@@ -125,6 +149,7 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string) {
 		Reason:    reason,
 		Category:  category,
 		FailMode:  failMode,
+		Outcome:   outcome,
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {

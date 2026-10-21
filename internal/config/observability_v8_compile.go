@@ -120,7 +120,6 @@ func CompileObservabilityV8(source *ObservabilityV8Source) (*ObservabilityV8Plan
 	}
 	resourceAttributeMap, resourceAttributes, err := compileObservabilityV8ResourceAttributes(
 		source.Resource.Attributes,
-		tracePolicy.CompatibilityAliases,
 	)
 	if err != nil {
 		return nil, err
@@ -258,8 +257,8 @@ func compileObservabilityV8TracePolicy(
 ) (ObservabilityV8EffectiveTracePolicy, error) {
 	result := ObservabilityV8EffectiveTracePolicy{
 		Sampler: observabilityV8DefaultSampler, SemanticProfile: observabilityV8DefaultSemanticProfile,
-		SemanticProfileLock: semanticProfileLock, CompatibilityAliases: true,
-		Limits: ObservabilityV8TraceLimitsSource{MaxAttributesPerSpan: 128, MaxEventsPerSpan: 64, MaxLinksPerSpan: 32, MaxAttributesPerEvent: 32, MaxAttributeValueBytes: 16_384, MaxProjectedSpanBytes: 262_144, MaxStacktraceBytes: 32_768, MaxMessageItems: 128},
+		SemanticProfileLock: semanticProfileLock,
+		Limits:              ObservabilityV8TraceLimitsSource{MaxAttributesPerSpan: 128, MaxEventsPerSpan: 64, MaxLinksPerSpan: 32, MaxAttributesPerEvent: 32, MaxAttributeValueBytes: 16_384, MaxProjectedSpanBytes: 262_144, MaxStacktraceBytes: 32_768, MaxMessageItems: 128},
 	}
 	if source.Sampler != "" {
 		result.Sampler = source.Sampler
@@ -269,9 +268,6 @@ func compileObservabilityV8TracePolicy(
 	}
 	if result.SemanticProfile != observabilityV8DefaultSemanticProfile {
 		return ObservabilityV8EffectiveTracePolicy{}, fmt.Errorf("observability.trace_policy.semantic_profile: unsupported value %q", result.SemanticProfile)
-	}
-	if source.CompatibilityAliases != nil {
-		result.CompatibilityAliases = *source.CompatibilityAliases
 	}
 	result.SamplerArg = source.SamplerArg
 	if err := validateObservabilityV8Sampler(result.Sampler, result.SamplerArg); err != nil {
@@ -1124,6 +1120,12 @@ func compileObservabilityV8PushDefaults(
 	if !httpOnly && result.TLS.InsecureSkipVerify {
 		return fmt.Errorf("%s.tls.insecure_skip_verify: valid only for HTTP push destinations", path)
 	}
+	// The push transport refuses a certificate option on a plain-http endpoint,
+	// and only at gateway start; fail here with the field named instead.
+	if httpOnly && result.TLS.InsecureSkipVerify &&
+		!strings.HasPrefix(strings.ToLower(strings.TrimSpace(result.Endpoint)), "https://") {
+		return fmt.Errorf("%s.tls.insecure_skip_verify: valid only with an https endpoint", path)
+	}
 	if !httpOnly && result.TLS.CACert != "" && !filepath.IsAbs(result.TLS.CACert) {
 		return fmt.Errorf("%s.tls.ca_cert: must be an absolute path", path)
 	}
@@ -1241,8 +1243,13 @@ func validateObservabilityV8ResolvedOTLPEndpoints(
 			if strings.ContainsAny(endpoint, "?#") || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 				return fmt.Errorf("%s: OTLP endpoints must not contain query or fragment data", endpointPath)
 			}
-			if (parsed.Scheme == "http") != observabilityV8TransportTLSInsecure(transport) {
-				return fmt.Errorf("%s: OTLP endpoint scheme and tls.insecure disagree", endpointPath)
+			// The hint avoids a URL scheme: the annotated config error drops a
+			// rule text that contains one (GAP-0081).
+			if insecure := observabilityV8TransportTLSInsecure(transport); (parsed.Scheme == "http") != insecure {
+				if insecure {
+					return fmt.Errorf("%s: OTLP endpoint scheme and tls.insecure disagree (an https endpoint cannot set tls.insecure: true; remove it)", endpointPath)
+				}
+				return fmt.Errorf("%s: OTLP endpoint scheme and tls.insecure disagree (an http endpoint needs tls.insecure: true; otherwise use an https endpoint)", endpointPath)
 			}
 			if (transport.Protocol == "grpc" || transport.Protocol == "grpc/protobuf") && parsed.EscapedPath() != "" && parsed.EscapedPath() != "/" {
 				return fmt.Errorf("%s: gRPC OTLP endpoints must not contain a path", endpointPath)
@@ -1468,10 +1475,7 @@ func observabilityV8ValidHeaderName(value string) bool {
 	}
 	for index := 0; index < len(value); index++ {
 		character := value[index]
-		if !((character >= 'a' && character <= 'z') ||
-			(character >= 'A' && character <= 'Z') ||
-			(character >= '0' && character <= '9') ||
-			strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))) {
+		if (((character < 'a' || character > 'z') && (character < 'A' || character > 'Z')) && (character < '0' || character > '9')) && !(strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))) {
 			return false
 		}
 	}
@@ -1491,8 +1495,7 @@ func observabilityV8ForbiddenTransportHeader(normalized string) bool {
 func observabilityV8ValidGRPCMetadataName(normalized string) bool {
 	for index := 0; index < len(normalized); index++ {
 		character := normalized[index]
-		if !((character >= 'a' && character <= 'z') ||
-			(character >= '0' && character <= '9') || character == '-' || character == '_' || character == '.') {
+		if ((((character < 'a' || character > 'z') && (character < '0' || character > '9')) && character != '-') && character != '_') && character != '.' {
 			return false
 		}
 	}
@@ -1501,7 +1504,6 @@ func observabilityV8ValidGRPCMetadataName(normalized string) bool {
 
 func compileObservabilityV8ResourceAttributes(
 	attributes map[string]string,
-	compatibilityAliases bool,
 ) (map[string]string, observability.TelemetryCustomResourceAttributes, error) {
 	if len(attributes) > ObservabilityV8MaxResourceAttributes {
 		return nil, observability.TelemetryCustomResourceAttributes{}, fmt.Errorf(
@@ -1575,7 +1577,7 @@ func compileObservabilityV8ResourceAttributes(
 		}
 		if observabilityV8ReservedResourceKey(name) && !observabilityV8ConfigurableCoreResourceKey(name) {
 			return nil, observability.TelemetryCustomResourceAttributes{}, fmt.Errorf(
-				"observability.resource.attributes.%s: registered, process-owned, and compatibility-alias keys cannot be configured as custom attributes",
+				"observability.resource.attributes.%s: registered, process-owned, and retired alias keys cannot be configured as custom attributes",
 				name,
 			)
 		}
@@ -1591,7 +1593,7 @@ func compileObservabilityV8ResourceAttributes(
 			custom[name] = value
 		}
 	}
-	sealed, err := observability.NewTelemetryCustomResourceAttributes(custom, compatibilityAliases)
+	sealed, err := observability.NewTelemetryCustomResourceAttributes(custom)
 	if err != nil {
 		// The generated registry owns the runtime contract. Config keeps its
 		// actionable path-specific checks above, and treats any disagreement as a
@@ -1604,19 +1606,16 @@ func compileObservabilityV8ResourceAttributes(
 	return normalizedAttributes, sealed, nil
 }
 
+// validateObservabilityV8ResourceAliasConflicts refuses a config_version 8
+// source that sets deployment.environment (the retired spelling) and
+// deployment.environment.name to different values.
 func validateObservabilityV8ResourceAliasConflicts(attributes map[string]string) error {
-	for _, pair := range [][2]string{
-		{"deployment.environment.name", "deployment.environment"},
-		{"defenseclaw.deployment.mode", "deployment.mode"},
-		{"defenseclaw.device.public_key_fingerprint", "defenseclaw.device.id"},
-	} {
-		canonicalValue, canonical := attributes[pair[0]]
-		legacyValue, legacy := attributes[pair[1]]
-		if canonical && legacy && canonicalValue != legacyValue {
-			return fmt.Errorf(
-				"observability.resource.attributes: conflicting canonical and legacy alias spellings are prohibited",
-			)
-		}
+	canonicalValue, canonical := attributes["deployment.environment.name"]
+	legacyValue, legacy := attributes["deployment.environment"]
+	if canonical && legacy && canonicalValue != legacyValue {
+		return fmt.Errorf(
+			"observability.resource.attributes: conflicting canonical and legacy alias spellings are prohibited",
+		)
 	}
 	return nil
 }
@@ -1635,6 +1634,10 @@ func observabilityV8ReservedResourceKey(name string) bool {
 	return reserved
 }
 
+// observabilityV8ReservedResourceKeys also holds the retired alias spellings
+// (deployment.environment, deployment.mode, defenseclaw.device.id) so a custom
+// attribute cannot bring one back. A config_version 8 source may still set
+// deployment.environment; it is read as deployment.environment.name.
 var observabilityV8ReservedResourceKeys = map[string]struct{}{
 	"service.name": {}, "service.version": {}, "service.namespace": {}, "service.instance.id": {},
 	"deployment.environment.name": {}, "host.name": {}, "host.arch": {}, "os.type": {},
@@ -1740,11 +1743,22 @@ func compileObservabilityV8Warnings(
 				}
 			}
 		}
-		if destination.Transport.TLS != nil && (destination.Transport.TLS.Insecure || destination.Transport.TLS.InsecureSkipVerify) {
+		if destination.Transport.TLS != nil && (destination.Transport.TLS.Insecure || destination.Transport.TLS.InsecureSkipVerify) &&
+			!strings.HasPrefix(strings.ToLower(strings.TrimSpace(destination.Transport.Endpoint)), "http://") {
 			warnings = append(warnings, ObservabilityV8Warning{
 				Code: "tls_verification_disabled", Path: base + ".tls",
 				Summary: "destination transport uses an explicitly unsafe TLS mode",
 			})
+		}
+		if endpoint, err := url.Parse(destination.Transport.Endpoint); err == nil && endpoint.Scheme == "http" {
+			host := endpoint.Hostname()
+			ip := net.ParseIP(host)
+			if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+				warnings = append(warnings, ObservabilityV8Warning{
+					Code: "plaintext_transport", Path: base + ".endpoint",
+					Summary: "destination sends telemetry over plaintext HTTP to a non-loopback endpoint",
+				})
+			}
 		}
 		if destination.Transport.NetworkSafety != nil && destination.Transport.NetworkSafety.AllowPrivateNetworks {
 			warnings = append(warnings, ObservabilityV8Warning{
@@ -1782,7 +1796,6 @@ func compileObservabilityV8Provenance(
 		ObservabilityV8Provenance{Path: "observability.trace_policy.sampler", Origin: originObservabilityV8String(source.TracePolicy.Sampler)},
 		ObservabilityV8Provenance{Path: "observability.trace_policy.semantic_profile", Origin: originObservabilityV8String(source.TracePolicy.SemanticProfile)},
 		ObservabilityV8Provenance{Path: "observability.trace_policy.semantic_profile_lock", Origin: "registry-lock", Source: "schemas/telemetry/v8/registry.yaml", Line: 3, Column: 5},
-		ObservabilityV8Provenance{Path: "observability.trace_policy.compatibility_aliases", Origin: originObservabilityV8Pointer(source.TracePolicy.CompatibilityAliases)},
 		ObservabilityV8Provenance{Path: "observability.trace_policy.limits", Origin: originObservabilityV8TraceLimits(source.TracePolicy.Limits)},
 		ObservabilityV8Provenance{Path: "observability.metric_policy.export_interval_seconds", Origin: originObservabilityV8Int(source.MetricPolicy.ExportIntervalSeconds)},
 		ObservabilityV8Provenance{Path: "observability.metric_policy.temporality", Origin: originObservabilityV8String(source.MetricPolicy.Temporality)},

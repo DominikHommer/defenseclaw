@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -60,6 +61,10 @@ type UnixEnumeratorState struct {
 	// local account; for a directory account it counts only when the
 	// directory is shown to be answering.
 	Sources map[string]string `json:"sources,omitempty"`
+	// ACPMisses and ACPSources are the same for the uid principals of
+	// managed ACP enrollments, keyed by principal (uid:N).
+	ACPMisses  map[string]int    `json:"acp_misses,omitempty"`
+	ACPSources map[string]string `json:"acp_sources,omitempty"`
 }
 
 const (
@@ -172,6 +177,14 @@ type UnixEnumerationReport struct {
 	// machine-policy connectors (no manifest rows). The guardian runs the
 	// per-user foreign-hook cleanup for them.
 	EligibleAccounts []UnixEligibleAccount `json:"-"`
+	// IdentityAccounts are the accounts that pass every enrollment filter
+	// but whose home is untrusted, so they are not enrolled. The guardian
+	// still keeps their identity record (GAP-0714).
+	IdentityAccounts []UnixEligibleAccount `json:"-"`
+	// DirectoryAnswered is set when a directory account resolved in this
+	// cycle, which makes another directory account's "no such user"
+	// definitive.
+	DirectoryAnswered bool `json:"-"`
 }
 
 // UnixEligibleAccount is one enrolled-or-eligible account in the
@@ -420,6 +433,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			directoryAnswered = true
 		}
 	}
+	report.DirectoryAnswered = directoryAnswered
 	definitiveMiss := func(user string) bool {
 		return sources.definitiveMiss(user, directoryAnswered)
 	}
@@ -427,6 +441,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	include := stringSet(enrollment.IncludeUsers)
 	exclude := stringSet(enrollment.ExcludeUsers)
 	exempt := stringSet(enrollment.ExemptUsers)
+	addQualifiedSpellings(ctx, opts.Resolver, exempt)
 
 	var targets []ManifestTarget
 	emitted := map[string]struct{}{}
@@ -499,6 +514,12 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		}
 		check := checkHome(home, account.UID)
 		if check.State == HomeUntrusted {
+			// The mode of a home is the user's to change: it must not
+			// change the identity, and so the profile, the gateway gives
+			// him (GAP-0714).
+			report.IdentityAccounts = append(report.IdentityAccounts, UnixEligibleAccount{
+				User: name, UID: account.UID, GID: account.GID, Home: home,
+			})
 			if _, enrolled := previousUsers[name]; enrolled {
 				// A user must not unenroll themselves by loosening their
 				// own home's mode: keep the rows so the guardian reports
@@ -509,8 +530,18 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			}
 			skip(check.Reason)
 			// Nor may a user hide the agents they run by loosening their
-			// home before they are first enrolled: report them.
-			report.Unprotected = append(report.Unprotected, unixUntrustedHomeAgents(ctx, opts, account, perUser, machinePolicy, check)...)
+			// home before they are first enrolled: report them, or the
+			// account itself when no agent is found, so status and verify
+			// name it (GAP-0646).
+			agents := unixUntrustedHomeAgents(ctx, opts, account, perUser, machinePolicy, check)
+			if len(agents) == 0 {
+				agents = append(agents, UnprotectedAgent{
+					User: name, UID: intPointer(account.UID), Code: UnprotectedCodeHomeUntrusted,
+					Reason: check.Reason + "; DefenseClaw does not enroll this account, so it gets no hooks, IDE " +
+						"inventory or discovery until group and other write are removed from the home",
+				})
+			}
+			report.Unprotected = append(report.Unprotected, agents...)
 			continue
 		}
 		report.Eligible++
@@ -658,11 +689,13 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				if check.State != HomeAvailable {
 					reason = check.Reason
 				} else if UnixAgentInstalledWithoutVersion(reason) {
+					// Without a version no hook contract can be selected, so
+					// the agent has no DefenseClaw hook (GAP-0151).
 					report.Unprotected = append(report.Unprotected, UnprotectedAgent{
 						User:      name,
 						UID:       intPointer(account.UID),
 						Connector: conn,
-						Code:      UnprotectedCodeAgentUnprotected,
+						Code:      UnprotectedCodeHookContractUnverified,
 						Reason:    reason + "; DefenseClaw cannot select a hook contract without a version, so " + consequence,
 					})
 				} else if binary, prefix := outsideDiscovery(conn); binary != "" {
@@ -676,6 +709,22 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 					})
 				}
 				logfSafely(opts.Logger, name, fmt.Sprintf("new (%s, %s) row skipped: %s", name, conn, reason))
+				continue
+			}
+			if refused := unixNewRowVersionRefused(conn, version); refused != "" {
+				consequence := "DefenseClaw installs no hooks for it, so it runs without DefenseClaw hooks"
+				if isMachine {
+					consequence = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)"
+				}
+				report.Unprotected = append(report.Unprotected, UnprotectedAgent{
+					User:      name,
+					UID:       intPointer(account.UID),
+					Connector: conn,
+					Version:   version,
+					Code:      UnprotectedCodeHookContractUnverified,
+					Reason:    refused + "; " + consequence,
+				})
+				logfSafely(opts.Logger, name, fmt.Sprintf("new (%s, %s) row skipped: %s", name, conn, refused))
 				continue
 			}
 			enabled := true
@@ -871,6 +920,9 @@ type UnixRevokeGoneReport struct {
 	// Kept explains, per account, why the rows of an account that did not
 	// resolve stay.
 	Kept []string `json:"kept,omitempty"`
+	// DirectoryAnswered is UnixEnumerationReport.DirectoryAnswered for
+	// this pass.
+	DirectoryAnswered bool `json:"-"`
 }
 
 // RevokeGoneUnixTargets returns the published manifest without the rows of
@@ -943,6 +995,7 @@ func RevokeGoneUnixTargets(ctx context.Context, opts UnixRevokeGoneOptions) (Man
 			report.Kept = append(report.Kept, fmt.Sprintf("%s: the account lookup failed, so its targets stay: %s", user, reason))
 		}
 	}
+	report.DirectoryAnswered = directoryAnswered
 	gone := map[string]struct{}{}
 	for _, user := range users {
 		if _, ok := missing[user]; !ok {
@@ -1093,6 +1146,27 @@ func unixKnownRowVersionRefused(connectorName, from, to string) string {
 		return "" // nothing verified to keep
 	}
 	return fmt.Sprintf("version %s is not verified against a known hook contract", strings.TrimSpace(to))
+}
+
+// unixNewRowVersionRefused explains why a new row must not be enrolled at
+// version: it resolves to no verified hook contract (below every contract's
+// floor, between contracts, known broken, or not a version DefenseClaw can
+// read). Enrolling it rendered the connector's hooks with no contract, and
+// status and verify then reported the agent as covered (GAP-0151). On the
+// standalone profile a version newer than every tested range resolves to the
+// newest contract (an untested newer version) and is enrolled. A connector
+// with a standalone floor instead of a contract (Kiro) is checked by the
+// guardian's install (validateHookContract). Empty when the row is enrolled.
+func unixNewRowVersionRefused(connectorName, version string) string {
+	if standaloneNotGatedAgentFloor(connectorName) != "" {
+		return ""
+	}
+	resolution := resolveHookContract(connectorName, version)
+	switch resolution.Status {
+	case connector.HookCompatibilityKnown, connector.HookCompatibilityNotGated:
+		return ""
+	}
+	return fmt.Sprintf("version %s is not verified against a known hook contract (%s)", strings.TrimSpace(version), resolution.Reason)
 }
 
 // unixRejectedSurfaces reports the surfaces of one (user, connector) that
@@ -1314,6 +1388,19 @@ func loadPreviousUnixRows(path string) (map[string]ManifestTarget, error) {
 	return previous, nil
 }
 
+// UnixMissConfirmed reports whether the enumerator state confirms that the
+// account of a (user, connector) row is gone: it counted a definitive miss
+// for the row, or the account was last seen in the local account database,
+// where "no such user" is definitive. A directory account it could not
+// confirm is not: an unreachable directory gives the same answer (GAP-0593).
+func UnixMissConfirmed(state *UnixEnumeratorState, user, connector string) bool {
+	if state == nil {
+		return false
+	}
+	user = strings.TrimSpace(user)
+	return state.Misses[unixRowKey(user, connector)] > 0 || state.Sources[user] == unixSourceFiles
+}
+
 func unixRowKey(user, conn string) string {
 	user = strings.TrimSpace(user)
 	conn = strings.ToLower(strings.TrimSpace(conn))
@@ -1393,6 +1480,39 @@ func hasKey(set map[string]struct{}, key string) bool {
 	_, ok := set[key]
 	return ok
 }
+
+// addQualifiedSpellings adds to an exempt_users set the account each bare
+// name selects on a host whose directory accounts NSS knows only by their
+// fully qualified name (SSSD use_fully_qualified_names): ent-alice exempts
+// ent-alice@dclab.test, as the gateway exempts its hooks and a users entry
+// selects it (GAP-0494). A bare name NSS answers itself is left alone, so a
+// local account of that name is never traded for a directory one, and a
+// failed lookup adds nothing (the entry keeps its exact meaning this cycle).
+func addQualifiedSpellings(ctx context.Context, r unixidentity.Resolver, set map[string]struct{}) {
+	if r == nil {
+		return
+	}
+	for entry := range set {
+		if strings.ContainsAny(entry, `@\`) || strings.Trim(entry, "0123456789") == "" {
+			continue
+		}
+		if _, err := r.LookupUser(entry); !unixidentity.IsNotFound(err) {
+			continue
+		}
+		qualified := enrollmentQualifiedUserName(ctx, r, entry)
+		if qualified == "" {
+			continue
+		}
+		if account, err := r.LookupUser(qualified); err == nil {
+			set[account.Name] = struct{}{}
+			set[strconv.Itoa(account.UID)] = struct{}{}
+		}
+	}
+}
+
+// enrollmentQualifiedUserName is the spelling NSS takes for a bare account
+// name on a host requiring fully qualified names; tests replace it.
+var enrollmentQualifiedUserName = unixidentity.QualifiedUserName
 
 // MarshalUnixTargetsManifest renders the deterministic manifest bytes.
 func MarshalUnixTargetsManifest(m Manifest) ([]byte, error) {
@@ -1476,9 +1596,13 @@ func WriteUnixTargetsManifestAtomic(path string, m Manifest) (bool, error) {
 }
 
 // validateRootOwnedDirChain requires dir and every ancestor to be a real
-// directory owned by root and not group/other writable.
+// directory owned by root and not group/other writable. A group/other
+// writable ancestor inside the platform installer's tree (/opt/cisco belongs
+// to Cisco Secure Client and is 0775) is an advisory, as in every managed
+// trust walk (AIFW-34262); dir itself stays fatal.
 func validateRootOwnedDirChain(dir string) error {
-	for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
+	leaf := filepath.Clean(dir)
+	for current := leaf; ; current = filepath.Dir(current) {
 		info, err := os.Lstat(current)
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: inspect manifest directory %s: %w", current, err)
@@ -1487,7 +1611,11 @@ func validateRootOwnedDirChain(dir string) error {
 			return fmt.Errorf("enterprise hooks: manifest directory element %s is not a real directory", current)
 		}
 		if info.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("enterprise hooks: manifest directory element %s is group/other writable", current)
+			advisory := current != leaf && managed.PlatformInstallerOwnedPath(current)
+			if err := managed.RelaxAncestorTrustVerdict(advisory, current, "hook guardian manifest",
+				fmt.Errorf("enterprise hooks: manifest directory element %s is group/other writable", current)); err != nil {
+				return err
+			}
 		}
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || (st.Uid != 0 && !unixManifestTestOwnerAllowed(st.Uid)) {
@@ -1542,6 +1670,22 @@ func LoadUnixEnumeratorState(path string) *UnixEnumeratorState {
 				state.Sources = map[string]string{}
 			}
 			state.Sources[user] = source
+		}
+	}
+	for principal, count := range parsed.ACPMisses {
+		if count > 0 && count < 1000 {
+			if state.ACPMisses == nil {
+				state.ACPMisses = map[string]int{}
+			}
+			state.ACPMisses[principal] = count
+		}
+	}
+	for principal, source := range parsed.ACPSources {
+		if principal != "" && (source == unixSourceFiles || source == unixSourceDirectory) {
+			if state.ACPSources == nil {
+				state.ACPSources = map[string]string{}
+			}
+			state.ACPSources[principal] = source
 		}
 	}
 	return state

@@ -28,13 +28,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-// TestSIDIsInteractiveUserAcceptsRealUserSIDs pins the shape spec 005
-// REQ-11 requires: an S-1-5-21-… SID with at least 5 sub-authorities
-// (21, A, B, C, RID) is accepted; anything else is refused. The
-// boundary case (`S-1-5-21-A-B-C`, 4 sub-authorities — the bare
-// domain SID without a trailing RID) MUST be rejected: enumerating a
-// bare domain as an interactive user would emit garbage manifest
-// rows. See CR spec-005:PRRT_kwDORuAK-s6atyfL.
+// TestSIDIsInteractiveUserAcceptsRealUserSIDs pins the supported local,
+// domain, and Microsoft Entra ID user SID shapes. Classification does
+// not depend on administrator privileges.
 func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 	cases := []struct {
 		name string
@@ -43,6 +39,7 @@ func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 	}{
 		{"typical local user (5 sub-auths)", "S-1-5-21-1000-2000-3000-1001", true},
 		{"domain user with high RID (5 sub-auths)", "S-1-5-21-1234567890-987654321-1111111111-4321", true},
+		{"Microsoft Entra ID user (5 sub-auths)", "S-1-12-1-1111111111-2222222222-3333333333-4000000000", true},
 		// Exact 5-sub-authority boundary — smallest legal user SID.
 		{"minimum accepted (exactly 5 sub-auths)", "S-1-5-21-0-0-0-500", true},
 		// The bare domain SID (`S-1-5-21-A-B-C`) has 4 sub-auths and
@@ -50,6 +47,7 @@ func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 		// `< 4` check missed.
 		{"bare domain SID (4 sub-auths)", "S-1-5-21-1000-2000-3000", false},
 		{"NT AUTHORITY too short (1 sub-auth)", "S-1-5-21", false},
+		{"truncated Microsoft Entra ID SID", "S-1-12-1-1111111111-2222222222-3333333333", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,8 +62,8 @@ func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 	}
 }
 
-// TestSIDIsInteractiveUserRejectsWellKnown pins REQ-11's exclusion
-// list. Every principal listed here is a well-known SID the CLI /
+// TestSIDIsInteractiveUserRejectsWellKnown pins the interactive-user
+// filter's exclusion list. Every principal listed here is a well-known SID the CLI /
 // enumerator MUST refuse — accepting any of them would let a
 // misconfigured install rewrite the machine's SYSTEM / BUILTIN /
 // NT SERVICE hook wiring, which is nonsensical (those principals
@@ -158,7 +156,7 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 			want: []string{"codex"},
 		},
 		{
-			// CR spec-005:PRRT_kwDORuAK-s6atyfM regression:
+			// Regression:
 			// a disabled map entry MUST beat the scalar
 			// re-declaration. A config that names claudecode
 			// both as the scalar Connector AND as an explicitly
@@ -190,7 +188,7 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := effectiveWindowsHookConnectors(tc.cfg)
+			got := EffectiveWindowsHookConnectors(tc.cfg)
 			if len(got) != len(tc.want) {
 				t.Fatalf("length mismatch: got %v (len=%d), want %v (len=%d)", got, len(got), tc.want, len(tc.want))
 			}
@@ -309,7 +307,7 @@ func TestValidateWindowsTargetsManifestObjectRejectsGenericSplitDirectoryDACL(t 
 	}
 }
 
-// TestWriteTargetsManifestAtomicNoOpNoWrite pins spec 005 REQ-05: a
+// TestWriteTargetsManifestAtomicNoOpNoWrite pins the no-op-no-write rule: a
 // byte-identical manifest must not touch the on-disk file. This is
 // the CORE property that prevents guardian fsnotify wakes every 5-min
 // tick on a stable box. If regressions land here, the test-fixture's
@@ -513,13 +511,47 @@ func TestWriteTargetsManifestAtomicRejectsHardLinkedDestination(t *testing.T) {
 }
 
 // TestApplyPreviousRowStatePreservesAgentVersion asserts the
-// AgentVersion + Enabled + Deferred preservation invariant spec
-// 005 REQ-08's design says: a row that already exists in the file
+// AgentVersion + Enabled + Deferred preservation invariant: a row that already exists in the file
 // keeps its agent_version + enabled state across enumeration
 // cycles. A NEW row is auto-authorized at the per-user CLI's
 // discovered version (macOS parity) — or dropped entirely if no
 // per-user CLI is present.
-func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
+func TestApplyPreviousRowStateRefreshesVersionAndPreservesAuthorization(t *testing.T) {
+	// Secure Client follows the discovered version (#1163).
+	setStandaloneProfileForTest(t, false)
+	enabled := true
+	previous := map[string]ManifestTarget{
+		previousManifestKey("S-1-5-21-1000-2000-3000-1001", "codex"): {
+			SID:          "S-1-5-21-1000-2000-3000-1001",
+			Connector:    "codex",
+			AgentVersion: "0.145.0",
+			Enabled:      &enabled,
+			Deferred:     true,
+		},
+	}
+
+	// Match: preserve AgentVersion + Enabled + Deferred.
+	matched := ManifestTarget{
+		SID:       "s-1-5-21-1000-2000-3000-1001", // deliberate case
+		Connector: "codex",
+	}
+	if !applyPreviousRowState(&matched, previous, nil) {
+		t.Fatal("existing-row emission signal: want true, got false")
+	}
+	if matched.AgentVersion != "" {
+		t.Fatalf("stale version survived unavailable discovery: %q", matched.AgentVersion)
+	}
+	if matched.Enabled == nil || !*matched.Enabled {
+		t.Fatal("existing-row Enabled=true not preserved")
+	}
+	if !matched.Deferred {
+		t.Fatal("existing-row Deferred=true not preserved")
+	}
+}
+
+func TestApplyPreviousRowStatePreservesAgentVersionOutsideSecureClient(t *testing.T) {
+	// Outside Secure Client the recorded version is kept (origin/main).
+	setStandaloneProfileForTest(t, true)
 	enabled := true
 	previous := map[string]ManifestTarget{
 		previousManifestKey("S-1-5-21-1000-2000-3000-1001", "codex"): {
@@ -577,6 +609,62 @@ func TestApplyPreviousRowStateAutoAuthorizesNewRowWithDiscoverableCLI(t *testing
 	}
 	if fresh.Deferred {
 		t.Fatal("new row Deferred: want false")
+	}
+}
+
+func TestApplyPreviousRowStateCursorHomeStateWithoutVersion(t *testing.T) {
+	// Presence-only admission is the Secure Client fallback (#1163).
+	setStandaloneProfileForTest(t, false)
+	isolateWindowsCursorMachineVersion(t)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".cursor", "extensions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The executable is outside all known installation roots. Home state is
+	// sufficient to discover a target, but must not invent a version.
+	fresh := ManifestTarget{
+		SID:       "S-1-5-21-9999-8888-7777-1001",
+		UserHome:  home,
+		Connector: "cursor",
+	}
+	if !applyPreviousRowState(&fresh, nil, nil) {
+		t.Fatal("Cursor home-state target was dropped without version metadata")
+	}
+	if fresh.AgentVersion != "" || !fresh.IsEnabled() || fresh.Deferred {
+		t.Fatalf("unexpected target disposition: version=%q enabled=%t deferred=%t", fresh.AgentVersion, fresh.IsEnabled(), fresh.Deferred)
+	}
+
+	disabled := false
+	previous := map[string]ManifestTarget{
+		previousManifestKey(fresh.SID, fresh.Connector): {
+			SID: fresh.SID, Connector: fresh.Connector,
+			AgentVersion: "3.21.16", Enabled: &disabled, Deferred: true,
+		},
+	}
+	if !applyPreviousRowState(&fresh, previous, nil) {
+		t.Fatal("existing Cursor target was dropped")
+	}
+	if fresh.AgentVersion != "" || fresh.IsEnabled() || !fresh.Deferred {
+		t.Fatal("home-state discovery changed prior authorization or retained stale version evidence")
+	}
+}
+
+// Outside Secure Client a newly discovered target without version evidence
+// is dropped even when the profile shows the agent is present.
+func TestApplyPreviousRowStateDropsCursorHomeStateWithoutVersionOutsideSecureClient(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	isolateWindowsCursorMachineVersion(t)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".cursor", "extensions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fresh := ManifestTarget{
+		SID:       "S-1-5-21-9999-8888-7777-1001",
+		UserHome:  home,
+		Connector: "cursor",
+	}
+	if applyPreviousRowState(&fresh, nil, nil) {
+		t.Fatalf("unversioned Cursor target was admitted outside Secure Client: %+v", fresh)
 	}
 }
 
@@ -678,7 +766,7 @@ func TestEnumerateWindowsEmptyConnectorsReturnsEmptyManifest(t *testing.T) {
 }
 
 // TestEnumerateWindowsHonoursCancelledContext asserts the cycle-
-// timeout invariant CR spec-005:PRRT_kwDORuAK-s6atyfD asks for: a
+// timeout invariant: a
 // ctx that's already cancelled returns immediately without touching
 // the registry / filesystem. Belt-and-braces on top of the per-row
 // ctx.Err() checks; a cancelled ctx at ENTRY must never proceed.
@@ -971,4 +1059,140 @@ func TestEnumerateWindowsStandaloneKeepsRowsWhenTheAccountNameIsUnavailable(t *t
 			t.Fatalf("a directory-name exclusion must still apply during a lookup failure, got %d", got)
 		}
 	})
+}
+
+// TestEnsureWindowsTargetsManifestParentProtectedRepairsDrift pins the
+// repair-on-drift contract: a healthy parent is never rewritten, a drifted
+// parent is restored to the AdminDirectory contract, and the caller only
+// proceeds once the repaired object actually validates.
+func TestEnsureWindowsTargetsManifestParentProtectedRepairsDrift(t *testing.T) {
+	t.Run("healthy parent is not rewritten", func(t *testing.T) {
+		dir := prepareWindowsTargetsManifestTestDirectory(t)
+		originalProtect := windowsTargetsManifestProtect
+		windowsTargetsManifestProtect = func(string, bool) error {
+			t.Fatal("healthy parent triggered an ACL write")
+			return nil
+		}
+		t.Cleanup(func() { windowsTargetsManifestProtect = originalProtect })
+		if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
+			t.Fatalf("healthy parent: %v", err)
+		}
+	})
+
+	t.Run("drifted parent is restored", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := validateWindowsTargetsManifestObject(dir, true); err == nil {
+			t.Skip("temp directory already satisfies the AdminDirectory contract")
+		}
+		if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
+			t.Fatalf("repair drifted parent: %v", err)
+		}
+		if err := validateWindowsTargetsManifestObject(dir, true); err != nil {
+			t.Fatalf("repaired parent still invalid: %v", err)
+		}
+	})
+
+	t.Run("repair failure reports the drift cause", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := validateWindowsTargetsManifestObject(dir, true); err == nil {
+			t.Skip("temp directory already satisfies the AdminDirectory contract")
+		}
+		originalProtect := windowsTargetsManifestProtect
+		windowsTargetsManifestProtect = func(string, bool) error {
+			return errors.New("injected parent ACL failure")
+		}
+		t.Cleanup(func() { windowsTargetsManifestProtect = originalProtect })
+		err := ensureWindowsTargetsManifestParentProtected(dir)
+		if err == nil {
+			t.Fatal("repair failure: err = nil, want error")
+		}
+		if !strings.Contains(err.Error(), "injected parent ACL failure") {
+			t.Fatalf("repair failure lost the write error: %v", err)
+		}
+		if !strings.Contains(err.Error(), "noncanonical") &&
+			!strings.Contains(err.Error(), "not protected") {
+			t.Fatalf("repair failure lost the drift cause: %v", err)
+		}
+	})
+
+	t.Run("silent no-op repair still fails validation", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := validateWindowsTargetsManifestObject(dir, true); err == nil {
+			t.Skip("temp directory already satisfies the AdminDirectory contract")
+		}
+		originalProtect := windowsTargetsManifestProtect
+		windowsTargetsManifestProtect = func(string, bool) error { return nil }
+		t.Cleanup(func() { windowsTargetsManifestProtect = originalProtect })
+		err := ensureWindowsTargetsManifestParentProtected(dir)
+		if err == nil {
+			t.Fatal("no-op repair: err = nil, want error")
+		}
+		if !strings.Contains(err.Error(), "still unprotected") {
+			t.Fatalf("no-op repair: err = %v, want a still-unprotected verdict", err)
+		}
+	})
+}
+
+// GAP-1034: a disabled local account with no active session cannot run
+// its installed agent. An existing session remains able to run it even after
+// the account is disabled, so missing enrollment must still be reported.
+func TestEnumerateWindowsDisabledLocalAccountIsNotReportedUnprotected(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	previousDomain, previousDisabled := windowsMachineAccountDomainSID, windowsLocalAccountDisabled
+	t.Cleanup(func() { windowsMachineAccountDomainSID, windowsLocalAccountDisabled = previousDomain, previousDisabled })
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".local", "bin", "claude.exe"), []byte("MZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	for _, tc := range []struct {
+		disabled      bool
+		sessionActive bool
+		wantReported  int
+	}{
+		{disabled: true, sessionActive: false, wantReported: 0},
+		{disabled: false, sessionActive: false, wantReported: 1},
+		{disabled: true, sessionActive: true, wantReported: 1},
+	} {
+		windowsLocalAccountDisabled = func(string) (bool, error) { return tc.disabled, nil }
+		sessions := map[string][]string{}
+		if tc.sessionActive {
+			sessions[testLocalUserSID] = []string{}
+		}
+		stubActiveSessions(t, sessions)
+		var reported []UnprotectedAgent
+		if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+			ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(reported) != tc.wantReported {
+			t.Fatalf("disabled=%v sessionActive=%v: reported %+v, want %d", tc.disabled, tc.sessionActive, reported, tc.wantReported)
+		}
+	}
+}
+
+// GAP-0430: a deleted local account (LookupAccountSid says ERROR_NONE_MAPPED)
+// is revoked even when its profile folder remains; a domain account whose
+// lookup fails, or a lookup that timed out, is not judged deleted.
+func TestWindowsDeletedLocalAccountNeedsANoneMappedLocalSID(t *testing.T) {
+	previous := windowsMachineAccountDomainSID
+	t.Cleanup(func() { windowsMachineAccountDomainSID = previous })
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	local := testMachineDomainSID + "-1182"
+	noneMapped := func(string) (string, string, error) { return "", "", windows.ERROR_NONE_MAPPED }
+	timedOut := func(string) (string, string, error) { return "", "", errors.New("account name lookup timed out") }
+	if !windowsDeletedLocalAccount(local, noneMapped) {
+		t.Fatal("a deleted local account was not judged deleted")
+	}
+	if windowsDeletedLocalAccount(local, timedOut) {
+		t.Fatal("a timed-out lookup was judged a deleted account")
+	}
+	if windowsDeletedLocalAccount("S-1-5-21-111-222-333-1104", noneMapped) {
+		t.Fatal("a domain account was judged deleted")
+	}
 }

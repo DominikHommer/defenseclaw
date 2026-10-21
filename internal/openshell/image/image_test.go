@@ -247,6 +247,119 @@ func TestDockerfileShape(t *testing.T) {
 	}
 }
 
+// #1238: every image installs the python3 and python shims that run the
+// workload venv's interpreter (harness.WorkloadPythonShimStep), after the
+// harness's own install steps and before DefenseClaw's files, in the
+// directory that leads the harness's PATH and that the hooks' baked PATH
+// leaves out.
+func TestDockerfileInstallsThePythonShim(t *testing.T) {
+	step := harness.WorkloadPythonShimStep()
+	for _, h := range []*harness.Spec{harness.ClaudeCode, harness.Codex} {
+		c := mustContext(t, testSpec(h))
+		df := string(c.Dockerfile)
+		run := "# " + step.Comment + "\nRUN " + step.Run + "\n"
+		at := strings.Index(df, run)
+		if at < 0 || strings.Count(df, run) != 1 {
+			t.Fatalf("%s: the Dockerfile does not install the python shim once:\n%s", h.Name, df)
+		}
+		steps, err := h.InstallSteps(c.HarnessVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if last := steps[len(steps)-1]; strings.Index(df, "RUN "+last.Run+"\n") > at {
+			t.Errorf("%s: the shim comes before the harness's install steps", h.Name)
+		}
+		if copyAt := strings.Index(df, "\nCOPY "); copyAt < at {
+			t.Errorf("%s: the shim comes after DefenseClaw's files", h.Name)
+		}
+	}
+	if !strings.Contains(step.Run, "dir="+"'"+harness.WorkloadPythonShimDir+"'") || !strings.HasPrefix(harness.LauncherSystemPATH, harness.WorkloadPythonShimDir+":") {
+		t.Fatalf("the shims are not in the directory that leads the harness's PATH (%s)", harness.LauncherSystemPATH)
+	}
+	if slices.Contains(strings.Split(connector.SandboxHookPATH, ":"), harness.WorkloadPythonShimDir) {
+		t.Fatalf("the hooks' baked PATH %s finds the workload's python3", connector.SandboxHookPATH)
+	}
+	if hardening := renderedHardening(t); !strings.Contains(hardening, `DEFENSECLAW_BAKED_HOOK_PATH="`+connector.SandboxHookPATH+`"`) {
+		t.Fatalf("the sandbox _hardening.sh does not bake %s", connector.SandboxHookPATH)
+	}
+}
+
+// renderedHardening is the _hardening.sh a Claude Code image carries.
+func renderedHardening(t *testing.T) string {
+	t.Helper()
+	c := mustContext(t, testSpec(harness.ClaudeCode))
+	for _, f := range c.ImageFiles {
+		if strings.HasSuffix(f.Path, "/_hardening.sh") {
+			return string(f.Data)
+		}
+	}
+	t.Fatal("no _hardening.sh in the image")
+	return ""
+}
+
+// GAP-0030: the image names the run-as uid, so whoami works in the sandbox:
+// the base image's sandbox user takes the uid and gid unless an entry has
+// them already, and a second run changes nothing.
+func TestRunAsUserStepNamesTheUID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the step runs in the Linux image; it uses GNU sed")
+	}
+	dir := t.TempDir()
+	passwd, group := filepath.Join(dir, "passwd"), filepath.Join(dir, "group")
+	for p, data := range map[string]string{
+		passwd: "root:x:0:0:root:/root:/bin/bash\nsandbox:x:998:998:Sandbox:/home/sandbox:/bin/bash\n",
+		group:  "root:x:0:\nsandbox:x:998:\n",
+	} {
+		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if out, err := exec.Command("sh", "-c", runAsUserStep(1005, 1005, passwd, group)).CombinedOutput(); err != nil {
+			t.Fatalf("step: %v %s", err, out)
+		}
+	}
+	gotP, _ := os.ReadFile(passwd)
+	gotG, _ := os.ReadFile(group)
+	if !strings.HasPrefix(string(gotP), "sandbox:x:1005:1005:Sandbox:/sandbox:/bin/bash\n") || !strings.HasPrefix(string(gotG), "sandbox:x:1005:\n") {
+		t.Fatalf("passwd = %q, group = %q", gotP, gotG)
+	}
+
+	// GAP-0113: a Mac's primary gid 20 is dialout in the base image, and
+	// id printed gid=20(dialout). The sandbox group takes the gid and comes
+	// first, so the name is sandbox; a second run changes nothing.
+	for p, data := range map[string]string{
+		passwd: "root:x:0:0:root:/root:/bin/bash\nsandbox:x:998:998:Sandbox:/home/sandbox:/bin/bash\n",
+		group:  "root:x:0:\ndialout:x:20:\nsandbox:x:998:\n",
+	} {
+		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if out, err := exec.Command("sh", "-c", runAsUserStep(503, 20, passwd, group)).CombinedOutput(); err != nil {
+			t.Fatalf("step: %v %s", err, out)
+		}
+	}
+	gotG, _ = os.ReadFile(group)
+	if string(gotG) != "sandbox:x:20:\nroot:x:0:\ndialout:x:20:\n" {
+		t.Fatalf("group = %q", gotG)
+	}
+
+	// A custom base may already assign the host uid to another account.
+	// The workload must resolve that uid and home to sandbox.
+	if err := os.WriteFile(passwd, []byte("root:x:0:0:root:/root:/bin/bash\nubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\nsandbox:x:998:998:Sandbox:/home/sandbox:/bin/bash\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("sh", "-c", runAsUserStep(1000, 1000, passwd, group)).CombinedOutput(); err != nil {
+		t.Fatalf("step with existing uid: %v %s", err, out)
+	}
+	gotP, _ = os.ReadFile(passwd)
+	if !strings.HasPrefix(string(gotP), "sandbox:x:1000:1000:Sandbox:/sandbox:/bin/bash\n") {
+		t.Fatalf("passwd = %q", gotP)
+	}
+}
+
 // TestDockerfileAnswersLocalhost pins AG-MAC-F1: an image for the MicroVM
 // driver resolves localhost without /etc/hosts, which a MicroVM boots
 // empty. The pinned nss-myhostname .deb of the build architecture is

@@ -95,8 +95,7 @@ on the launch directory are reported as unverified.
 
 The table highlights convenience options rather than the complete alias
 surface. The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`,
-approval, block-message, add/replace, workspace, and rule-pack-directory
-options. See the [quick-alias reference](/docs/guardrail/aliases); use
+approval, block-message, add/replace, and workspace options. See the [quick-alias reference](/docs/guardrail/aliases); use
 [full guardrail setup](/docs/guardrail) for scanner, detection-strategy,
 and judge-provider configuration.
 
@@ -118,12 +117,12 @@ The alias defaults Hermes to observe mode and can join an existing hook-connecto
 defenseclaw setup hermes
 ```
 
-Confirms once, stages the hooks block and exact allowlist approvals, and restarts
-the DefenseClaw gateway. Reload each Hermes host before expecting the callbacks
+Interactive setup asks for the mode, whether to add to or replace an existing
+connector roster, and whether to add an LLM judge. It stages the hooks block
+and exact allowlist approvals, then restarts the DefenseClaw gateway. Reload each Hermes host before expecting the callbacks
 to be live. Findings flow to mandatory SQLite event history and the TUI;
 configured v8 destinations receive only the buckets/signals their routes
-select. No traffic is intercepted and no requests are blocked. Pass `--yes` to
-skip the confirmation in CI.
+select. No traffic is intercepted and no requests are blocked. For scripted setup, pass `--yes --mode observe` (or `--mode action`).
 
 </Tab>
 
@@ -173,10 +172,26 @@ pre-tool-call hook blocks only when DefenseClaw returns valid synchronous
 Hermes block JSON. A `confirm` result is recorded and alerted but
 returns no hook output because Hermes has no native ask/approve or general
 message response; the TUI can review the audit event but cannot resume the
-call. The standalone enterprise profile blocks it instead (see above). A requested global/per-connector
-`fail_mode: closed`, strict availability, timeout, nonzero exit, malformed
-output, auth failure, or gateway outage cannot create Hermes enforcement and
-remains fail-open.
+call. The standalone enterprise profile blocks it instead (see above). On
+Linux, macOS and Windows the hook follows the effective fail mode: with `closed`, the
+default when no `hook_fail_mode` is set, a gateway outage, an auth failure or
+an unusable gateway answer blocks the tool call with Hermes' block answer and
+names the next step, such as `defenseclaw-gateway start`; only an explicit
+`open` lets it run. Hermes itself still runs the call when the hook times out
+or cannot start. With `open`, a call that ran unchecked is recorded in
+`~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports it as a
+`guardrail-degraded` alert when it starts again. On a managed standalone host
+(Linux, macOS and Windows) the administrator-owned Hermes hook is stricter: it
+blocks a `pre_tool_call` DefenseClaw cannot check (the gateway service is not
+running, its answer cannot be used, or the call is too large to inspect). The
+block text says why and what to do next, for example "DefenseClaw blocked this
+tool call: the DefenseClaw gateway service is not running on this computer. Try
+again in a moment; if this continues, ask your administrator ...". Hermes shows
+no hook text itself: the text goes to the model as the tool's error, and the
+model words the reply, so the reply may shorten it. Each block is a
+`fail_mode: closed` line in the user's `hook-failures.jsonl`; the gateway is
+down while it happens, so its audit history shows the service stopping and
+starting, not each blocked call.
 
 </Tab>
 
@@ -229,6 +244,10 @@ copies remain ordinary scanable skills.
 
 <HookEventsList connector="hermes" />
 
+Hermes has no hook that can stop a prompt, so a prompt rule doesn't block
+here: a matching prompt reaches the model. Tool-call rules still block
+([capability matrix](/docs/connectors/capability-matrix)).
+
 <Callout>
 Hermes can block only `pre_tool_call` through valid synchronous JSON, inject
 context at `pre_llm_call`, and continue its bounded verification loop at
@@ -245,9 +264,6 @@ in the standalone enterprise profile, which blocks a confirmed `pre_tool_call`.
 Registration is not claimed live until Hermes reload evidence exists; Doctor
 reports the staged state as unhealthy/pending reload.
 </Callout>
-
-The official-source record and full cross-surface matrix are in
-[`docs/research/HERMES-NATIVE-WINDOWS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/research/HERMES-NATIVE-WINDOWS.md).
 
 ## OpenShell sandbox
 
@@ -324,6 +340,13 @@ only in the image; nothing on your host changes.
     `defenseclaw-bedrock-mantle-openai-<region>`, through the image's managed
     `defenseclaw` provider (`--provider defenseclaw -m <model>`)
   - `defenseclaw-anthropic`, through Hermes' built-in `anthropic` provider
+- **Model limit.** The image's pinned Hermes Agent 0.19.0 sends `max_tokens`
+  for models it does not know. The Bedrock `gpt-5.6-luna` model refuses it
+  (HTTP 400, `unsupported_parameter`) and accepts `max_completion_tokens`, so
+  a sandboxed Hermes cannot complete a call on that model, while Hermes 0.21
+  on the host can. This is the harness version's request shape, not a
+  DefenseClaw or OpenShell block. Use another model of the profile in the
+  sandbox, or run Hermes on the host.
 - **Launch flags.** Skip-permissions mode adds `--yolo`. A run with `--safe`
   drops `--yolo` and every prefix Hermes accepts for it. A headless run is
   `hermes chat -q <prompt> -Q`; pass `-- chat -q "TEXT"` to `sandbox run`
@@ -341,7 +364,10 @@ only in the image; nothing on your host changes.
   it, and while the agent runs it interrupts the agent. The sandbox is
   kept; `defenseclaw sandbox connect <name>` starts Hermes in it again.
 - **Other traffic.** Apart from the model, Hermes reaches only `models.dev`
-  at start (its model metadata, which has no setting to turn off). The
+  at start and hourly (its model metadata, which has no setting to turn
+  off). `sandbox destinations` lists it as Hermes Agent's own, not shadow
+  AI, and a pack that refuses it does so quietly (audited, not a blocked
+  site): Hermes then uses its cached copy or built-in defaults. The
   image marks the install the way Hermes' own image does (an
   `.install_method` of `docker` next to the code), so Hermes neither checks
   `pypi.org` for updates nor prints its "pip installs are no longer an

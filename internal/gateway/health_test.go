@@ -515,6 +515,12 @@ func TestObservabilityV8HealthRejectsStaleFailureAcrossReload(t *testing.T) {
 	if rows[0]["failure"] != nil || rows[0]["generation"] != uint64(9) {
 		t.Fatalf("stale transition contaminated successor: %+v", rows[0])
 	}
+	// A record the destination skips by design is not a failure (GAP-0078).
+	health.observeObservabilityV8Failure("reload-safe", 9, "unsupported_shape", now.Add(3*time.Hour))
+	rows = health.Snapshot().Telemetry.Details["destinations"].([]map[string]interface{})
+	if rows[0]["failure"] != nil {
+		t.Fatalf("a by-design skip was shown as a destination failure: %+v", rows[0])
+	}
 }
 
 func eventHistoryTransition(
@@ -910,8 +916,8 @@ func stringContains(value, fragment string) bool {
 	return false
 }
 
-// TestSetEnumeratorPublishesSubsystem pins the wire contract spec 005
-// Workstream D introduces: SidecarHealth.Enumerator is nil until
+// TestSetEnumeratorPublishesSubsystem pins the wire contract:
+// SidecarHealth.Enumerator is nil until
 // SetEnumerator is called, then holds the last-published state +
 // LastError + Details verbatim. Snapshot() must surface the field
 // in the JSON payload so a Cisco Secure Client IPC consumer can
@@ -1003,8 +1009,8 @@ func TestSetEnumeratorJSONShape(t *testing.T) {
 	}
 }
 
-// TestSetEnumeratorDeepCopiesDetails is the regression pin CR
-// spec-005:PRRT_kwDORuAK-s6atyfQ asks for: mutating the caller's
+// TestSetEnumeratorDeepCopiesDetails is the regression pin for
+// boundary copies: mutating the caller's
 // input map after SetEnumerator MUST NOT mutate the stored
 // subsystem health; mutating the Snapshot()-returned pointer's
 // Details map MUST NOT mutate the stored subsystem health either.

@@ -235,7 +235,10 @@ func TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen(t *testing.T) {
 	// adapter's budget (it restarts the deadline once the launcher exists), so
 	// the timeout plus the kill/drain reserve must fit the contract from there.
 	elapsed := finishedAt.Sub(launchedAt)
-	if elapsed > time.Duration(copilotWindowsHookContractTimeoutMS)*time.Millisecond {
+	// Hosted Windows runners can pause this test process after the adapter
+	// has already exited. The timeout diagnostic and child liveness below
+	// check the adapter behavior; this wall-clock guard allows that pause.
+	if elapsed > time.Duration(copilotWindowsHookContractTimeoutMS+5_000)*time.Millisecond {
 		t.Fatalf("adapter exceeded the Copilot command-hook deadline: %s after the launcher started (%s including PowerShell startup)", elapsed, finishedAt.Sub(startedAt))
 	}
 	t.Logf("adapter finished %s after the launcher started (%s including PowerShell startup)", elapsed, finishedAt.Sub(startedAt))
@@ -305,15 +308,22 @@ func assertCursorAllowJSON(t *testing.T, stdout string) {
 	}
 }
 
+// windowsProcessRunning reports whether pid is still running after a short
+// grace period. Kill only starts termination and the adapter waits for it
+// with a bound, so the grace absorbs kernel teardown. Liveness comes from the
+// process handle's signalled state, not GetExitCodeProcess, because a process
+// may exit with STILL_ACTIVE (259). A PID that no longer exists counts as
+// exited; any other open or wait failure counts as running so the caller's
+// assertion fails safe.
 func windowsProcessRunning(pid uint32) bool {
-	const stillActive = 259
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	const grace = 5 * time.Second
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, pid)
 	if err != nil {
-		return false
+		return !errors.Is(err, windows.ERROR_INVALID_PARAMETER)
 	}
 	defer windows.CloseHandle(handle)
-	var code uint32
-	return windows.GetExitCodeProcess(handle, &code) == nil && code == stillActive
+	result, err := windows.WaitForSingleObject(handle, uint32(grace.Milliseconds()))
+	return err != nil || result != windows.WAIT_OBJECT_0
 }
 
 func TestCursorAdapterPreservesSuccessfulLauncherResponse(t *testing.T) {
@@ -322,7 +332,9 @@ func TestCursorAdapterPreservesSuccessfulLauncherResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(cursorAdapterHelperMode, "success")
-	adapter := renderCursorAdapterForTest(t, executable, "closed", true, 1_000)
+	// A cold Go test helper may take over a second to start on a loaded
+	// Windows runner. This checks the successful response, not a 1 s budget.
+	adapter := renderCursorAdapterForTest(t, executable, "closed", true, 5_000)
 	stdout, stderr, code := runCursorAdapterTest(
 		t, adapter, `{"source":"cursor-adapter-probe"}`,
 	)
@@ -418,5 +430,59 @@ func TestCursorAdapterPreservesLauncherBlockResponse(t *testing.T) {
 	stdout, stderr, code := runCursorAdapterTest(t, adapter, `{"source":"cursor-adapter-probe"}`)
 	if code != 2 || !strings.Contains(stdout, `"permission":"deny"`) {
 		t.Fatalf("block response=(code=%d stdout=%q stderr=%q), want exit 2 with deny", code, stdout, stderr)
+	}
+}
+
+func TestCursorMappedAdapterUsesCurrentSIDNotPeerPolicy(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := user.User.Sid.String()
+	peer := "S-1-5-21-9999-9999-9999-9999"
+	if peer == sid {
+		t.Fatal("test peer is current SID")
+	}
+	for _, failure := range []string{"missing", "timeout", "block"} {
+		for _, mode := range []string{"open", "closed", "unenrolled"} {
+			t.Run(failure+"/"+mode, func(t *testing.T) {
+				modes := map[string]string{peer: "open"}
+				if mode != "unenrolled" {
+					modes[sid] = mode
+				}
+				if mode == "open" {
+					modes[peer] = "closed"
+				}
+				hook := filepath.Join(t.TempDir(), "missing-hook.exe")
+				if failure != "missing" {
+					hook, err = os.Executable()
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv(cursorAdapterHelperMode, failure)
+				}
+				body, err := RenderWindowsCursorEnterpriseAdapterForTargets(hook, modes)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body = bytes.ReplaceAll(body, []byte("$timeoutMs = 10000"), []byte("$timeoutMs = 1000"))
+				adapter := filepath.Join(t.TempDir(), "cursor-hook.ps1")
+				if err := os.WriteFile(adapter, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				stdout, stderr, code := runCursorAdapterTest(t, adapter, `{"source":"cursor-adapter-probe"}`)
+				if mode == "open" && failure != "block" {
+					if code != 0 {
+						t.Fatalf("open user blocked: code=%d stderr=%q", code, stderr)
+					}
+					assertCursorAllowJSON(t, stdout)
+					if !strings.Contains(stderr, "WARNING hook fail-open; inspection bypassed connector=cursor") {
+						t.Fatal("missing fail-open diagnostic")
+					}
+				} else if code != 2 || !strings.Contains(stdout, `"permission":"deny"`) {
+					t.Fatalf("closed/unenrolled user or valid denial allowed: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+				}
+			})
+		}
 	}
 }

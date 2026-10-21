@@ -264,7 +264,12 @@ type HookContractLockEntry struct {
 	DefenseClawVersion     string                   `json:"defenseclaw_version,omitempty"`
 	HookFailMode           string                   `json:"hook_fail_mode,omitempty"`
 	RegistrationPosture    *HookRegistrationPosture `json:"registration_posture,omitempty"`
-	UpdatedAt              string                   `json:"updated_at"`
+	// ManagedGatewayServiceName binds a Windows managed publication to the
+	// exact SCM gateway identity that owns its runtime. It contains no token
+	// material and remains stable across ordinary Guardian reconciles, while a
+	// different certification/production scope necessarily changes it.
+	ManagedGatewayServiceName string `json:"managed_gateway_service_name,omitempty"`
+	UpdatedAt                 string `json:"updated_at"`
 }
 
 // HookRegistrationPosture is the non-secret subset of SetupOpts that can
@@ -400,7 +405,7 @@ func canonicalProtectedConnectorNames(field string, rawNames []string) ([]string
 // file. Callers that need teardown intent must use ConnectorExplicitlyInactive;
 // an empty active set alone never suppresses a connector guard.
 func ReadActiveConnectorState(dataDir string) (names []string, exists bool, err error) {
-	data, err := os.ReadFile(filepath.Join(dataDir, activeConnectorFile))
+	data, err := readConnectorStateFile(filepath.Join(dataDir, activeConnectorFile))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
@@ -425,7 +430,7 @@ func ReadActiveConnectorState(dataDir string) (names []string, exists bool, err 
 // treated as intentional teardown: the hook guard continues to heal in those
 // cases. An explicit active entry wins over a stale inactive entry.
 func ConnectorExplicitlyInactive(dataDir, name string) bool {
-	data, err := os.ReadFile(filepath.Join(dataDir, activeConnectorFile))
+	data, err := readConnectorStateFile(filepath.Join(dataDir, activeConnectorFile))
 	if err != nil {
 		return false
 	}
@@ -484,7 +489,7 @@ func MarkConnectorInactive(dataDir, name string) (restore func() error, err erro
 	want := strings.TrimSpace(name)
 	err = withActiveConnectorStateLock(path, func() error {
 		var readErr error
-		original, readErr = os.ReadFile(path)
+		original, readErr = readConnectorStateFile(path)
 		existed = true
 		if readErr != nil {
 			if !os.IsNotExist(readErr) {
@@ -523,7 +528,7 @@ func MarkConnectorInactive(dataDir, name string) (restore func() error, err erro
 
 	return func() error {
 		return withActiveConnectorStateLock(path, func() error {
-			current, readErr := os.ReadFile(path)
+			current, readErr := readConnectorStateFile(path)
 			if readErr != nil && !os.IsNotExist(readErr) {
 				return readErr
 			}
@@ -560,8 +565,42 @@ func MarkConnectorInactive(dataDir, name string) (restore func() error, err erro
 	}, nil
 }
 
+// A connector state file is published by atomic replacement. On Windows the
+// publisher keeps its renamed handle for a short validation step, and another
+// process (an indexer or antivirus scan) can hold the file briefly too, so a
+// reader waits a bounded time for such a lock before it reports the error
+// (rel-1-0-3 GAP-0300).
+const (
+	connectorStateReadAttempts   = 10
+	connectorStateReadRetryDelay = 100 * time.Millisecond
+)
+
+// connectorStateReadSleep is the wait between attempts; tests replace it.
+var connectorStateReadSleep = time.Sleep
+
+func openConnectorStateFileWithRetry(path string) (*os.File, error) {
+	for attempt := 1; ; attempt++ {
+		file, err := openConnectorStateFile(path)
+		if err == nil || !connectorStateFileBusy(err) || attempt >= connectorStateReadAttempts {
+			return file, err
+		}
+		connectorStateReadSleep(connectorStateReadRetryDelay)
+	}
+}
+
+// readConnectorStateFile is os.ReadFile with the sharing and bounded lock wait
+// of openConnectorStateFileWithRetry.
+func readConnectorStateFile(path string) ([]byte, error) {
+	file, err := openConnectorStateFileWithRetry(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(file)
+}
+
 func loadInactiveConnectorNames(path string) []string {
-	data, err := os.ReadFile(path)
+	data, err := readConnectorStateFile(path)
 	if err != nil {
 		return nil
 	}
@@ -1129,7 +1168,61 @@ func NewHookContractLockEntryForMode(
 		return HookContractLockEntry{}, err
 	}
 	entry.HookScriptDigests = digests
+	if runtime.GOOS == "windows" {
+		serviceName := strings.TrimSpace(os.Getenv(WindowsGatewayServiceNameEnv))
+		if err := ValidateWindowsManagedGatewayServiceName(serviceName); err != nil {
+			return HookContractLockEntry{}, fmt.Errorf(
+				"managed hook contract gateway service identity: %w",
+				err,
+			)
+		}
+		entry.ManagedGatewayServiceName = serviceName
+	}
 	return entry, nil
+}
+
+// ValidateWindowsManagedHookContractGatewayServiceBinding proves that a
+// protected managed hook-contract entry belongs to the exact gateway service
+// scope selected by the authenticated installer environment OR the policy-
+// resolved service name supplied by the caller. This is a post-publication
+// verification check: setup's preflight drift check deliberately does not
+// call it so a legacy entry without the binding remains repairable by an
+// authenticated Install/Repair operation.
+//
+// When `expectedOverride` is non-empty it takes precedence over
+// `WindowsGatewayServiceNameEnv`; runtime processes (Claude policy /
+// enforcement loops) resolve the expected name from the protected policy and
+// pass it here so a worker without the installer environment can still prove
+// the binding matches the active policy.
+func ValidateWindowsManagedHookContractGatewayServiceBinding(
+	entry HookContractLockEntry,
+	expectedOverride ...string,
+) error {
+	expected := ""
+	for _, candidate := range expectedOverride {
+		if value := strings.TrimSpace(candidate); value != "" {
+			expected = value
+			break
+		}
+	}
+	if expected == "" {
+		expected = strings.TrimSpace(os.Getenv(WindowsGatewayServiceNameEnv))
+	}
+	if err := ValidateWindowsManagedGatewayServiceName(expected); err != nil {
+		return fmt.Errorf("current managed gateway service identity: %w", err)
+	}
+	actual := entry.ManagedGatewayServiceName
+	if err := ValidateWindowsManagedGatewayServiceName(actual); err != nil {
+		return fmt.Errorf("persisted managed gateway service identity: %w", err)
+	}
+	if !strings.EqualFold(actual, expected) {
+		return fmt.Errorf(
+			"persisted managed gateway service %q does not match current service %q",
+			actual,
+			expected,
+		)
+	}
+	return nil
 }
 
 func newHookContractLockEntry(
@@ -1224,7 +1317,7 @@ func HookRuntimeRegistrationCurrent(
 		return true, nil
 	}
 	if strings.TrimSpace(opts.DataDir) == "" || !filepath.IsAbs(opts.DataDir) {
-		return false, errors.New("Codex runtime registration requires an absolute data directory")
+		return false, errors.New("Codex runtime registration requires an absolute data directory") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
@@ -1243,7 +1336,7 @@ func HookRuntimeRegistrationCurrent(
 	if runtimeState.Version != 2 {
 		return false, fmt.Errorf("unsupported Codex hook runtime evidence version %d", runtimeState.Version)
 	}
-	wantMode := normalizeHookFailMode(opts.HookFailMode)
+	wantMode := setupHookFailMode(opts)
 	if strings.TrimSpace(runtimeState.GatewayAddr) != strings.TrimSpace(opts.APIAddr) ||
 		runtimeState.FailModes["codex"] != wantMode ||
 		runtimeState.Managed != opts.ManagedEnterprise {
@@ -1290,7 +1383,28 @@ func HookRuntimeRegistrationCurrent(
 	if _, supersedes := supersedingCodexSetupSelection(opts.DataDir, stored); supersedes {
 		return false, ErrSetupSelectionSuperseded
 	}
-	expected := NewHookContractLockEntry(opts, conn, defenseClawVersion)
+	expected, err := NewHookContractLockEntryForMode(
+		opts,
+		conn,
+		defenseClawVersion,
+		opts.ManagedEnterprise && runtime.GOOS == "windows",
+	)
+	if err != nil {
+		return false, fmt.Errorf("build current Codex hook contract: %w", err)
+	}
+	if opts.ManagedEnterprise && runtime.GOOS == "windows" {
+		// A legacy entry from a pre-binding build carries an empty
+		// ManagedGatewayServiceName. Report "not current" (false, nil) so
+		// the caller's authenticated repair path can rewrite the entry with
+		// the current service identity; a hard error here would skip repair
+		// (healLocked only runs on `return false`), leaving the guard stuck.
+		if strings.TrimSpace(stored.ManagedGatewayServiceName) == "" {
+			return false, nil
+		}
+		if err := ValidateWindowsManagedHookContractGatewayServiceBinding(stored); err != nil {
+			return false, fmt.Errorf("verify Codex hook contract gateway binding: %w", err)
+		}
+	}
 	expectedShared := takeSharedHookScriptDigests(expected.HookScriptDigests)
 	removeSharedHookScriptDigests(expected.HookScriptDigests)
 	stored.UpdatedAt = ""
@@ -1391,9 +1505,7 @@ func ResolvedConnectorLocations(opts SetupOpts, conn Connector) ConnectorLocatio
 		caps := hp.HookCapabilities(opts)
 		loc.HookConfigPaths = uniqueNonEmptyStrings(append(loc.HookConfigPaths, caps.ConfigPath))
 	}
-	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
-		loc.HookScriptPaths = append(loc.HookScriptPaths, path)
-	}
+	loc.HookScriptPaths = append(loc.HookScriptPaths, hookRuntimeArtifactPaths(opts, conn)...)
 	loc.HookScriptPaths = uniqueNonEmptyStrings(loc.HookScriptPaths)
 
 	cp, ok := conn.(ConnectorCapabilityProvider)
@@ -1517,6 +1629,12 @@ func cursorHookContractUnchanged(previous, current HookContractLockEntry) bool {
 // should continue to use HookContractLockDrifted.
 func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) bool {
 	if strings.TrimSpace(previous.Connector) == "" {
+		return false
+	}
+	// A proxy connector has no hook contract, so a new agent version in either
+	// direction is no drift: Setup records it in the lock (GAP-0225). Secure
+	// Client resolves contracts strictly and keeps the gate of main.
+	if proxyConnectorsWithoutHookGate[normalizeConnectorName(previous.Connector)] && !StrictHookContractResolution() {
 		return false
 	}
 	if previous.ContractID != "" && current.ContractID != "" && previous.ContractID != current.ContractID {
@@ -1649,10 +1767,12 @@ func managedHookScriptDigests(
 		if pathInsideConnectorDataDir(opts.DataDir, path) {
 			limit = managedHookRuntimeArtifactMaxBytes
 		}
-		digest, exists, err := stableManagedArtifactDigest(
+		digest, exists, err := stableManagedArtifactDigestWith(
 			path,
 			"managed hook runtime artifact",
 			limit,
+			"",
+			managedArtifactDigestMemoWanted(opts.DataDir, path),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("digest managed hook artifact %s: %w", path, err)
@@ -1755,20 +1875,43 @@ func pathInsideConnectorDataDir(dataDir, path string) bool {
 		!strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func stableManagedArtifactDigest(
-	path, label string,
-	maxBytes int64,
-) (string, bool, error) {
-	return stableManagedArtifactDigestForOwner(path, label, maxBytes, "")
-}
-
 func stableManagedArtifactDigestForOwner(
 	path, label string,
 	maxBytes int64,
 	expectedOwnerSID string,
 ) (string, bool, error) {
+	return stableManagedArtifactDigestWith(path, label, maxBytes, expectedOwnerSID, false)
+}
+
+// stableManagedArtifactDigestWith uses the shared ten-minute target memo.
+// A guarded file with a full journal stamp, or an attribute-only stamp with
+// the ten-minute backstop, needs one read. Other files retain the two-pass
+// check against the opened identity (GAP-0438).
+func stableManagedArtifactDigestWith(
+	path, label string,
+	maxBytes int64,
+	expectedOwnerSID string,
+	memoize bool,
+) (string, bool, error) {
+	return stableManagedArtifactDigestWithAge(
+		path, label, maxBytes, expectedOwnerSID, memoize, managedArtifactDigestMaxAge,
+	)
+}
+
+func stableManagedArtifactDigestWithAge(
+	path, label string,
+	maxBytes int64,
+	expectedOwnerSID string,
+	memoize bool,
+	maxAge time.Duration,
+) (string, bool, error) {
 	if maxBytes <= 0 {
 		return "", false, fmt.Errorf("%s has an invalid digest limit", label)
+	}
+	if memoize {
+		lock := managedArtifactDigestPathLock(path)
+		lock.Lock()
+		defer lock.Unlock()
 	}
 	expected, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1783,7 +1926,7 @@ func stableManagedArtifactDigestForOwner(
 	if expected.Size() < 0 || expected.Size() > maxBytes {
 		return "", true, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
 	}
-	file, err := os.Open(path)
+	file, guarded, err := openManagedArtifactForDigest(path, memoize)
 	if err != nil {
 		return "", true, err
 	}
@@ -1801,12 +1944,65 @@ func stableManagedArtifactDigestForOwner(
 	if err := validateManagedSharedHookOpenedFile(file, expectedOwnerSID); err != nil {
 		return "", true, err
 	}
+	var stamp managedArtifactStamp
+	stamped := false
+	attributeOnly := false
+	fullStampAvailable := false
+	if memoize {
+		// A memo hit only takes the stamp. Ending the change epoch here
+		// would itself move the journal number and end every hit.
+		if guarded {
+			seenFull, fullOK := managedArtifactStampOf(file)
+			fullStampAvailable = fullOK
+			if fullOK {
+				if digest, ok := rememberedManagedArtifactDigest(path, seenFull, maxAge, false, true); ok {
+					current, err := os.Lstat(path)
+					if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
+						os.SameFile(opened, current) {
+						return digest, true, nil
+					}
+				}
+			}
+			if seenAttributes, ok := managedArtifactAttributeStampOf(file); ok {
+				seenAttributes.USN = 0
+				if digest, ok := rememberedManagedArtifactDigest(path, seenAttributes, maxAge, true, fullOK); ok {
+					current, err := os.Lstat(path)
+					if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
+						os.SameFile(opened, current) {
+						noticeManagedArtifactDegraded(path)
+						return digest, true, nil
+					}
+				}
+			}
+		}
+		// A full read. It first ends the change epoch of the file on this
+		// deny-write handle, so the next change gets a new journal number
+		// even while another handle stays open, and takes the full stamp
+		// after that. If the journal is unavailable, an attribute-only stamp
+		// under the same guarded handle permits one pass with a backstop.
+		// Without either guarded stamp, the two-pass check remains.
+		forgetManagedArtifactDigest(path)
+		if guarded {
+			if endManagedArtifactChangeEpoch(file) == nil {
+				stamp, stamped = managedArtifactStampOf(file)
+				fullStampAvailable = stamped
+			}
+			if !stamped {
+				stamp, stamped = managedArtifactAttributeStampOf(file)
+				attributeOnly = stamped
+				if stamped {
+					stamp.USN = 0
+					noticeManagedArtifactDegraded(path)
+				}
+			}
+		}
+	}
 	hashOnce := func() ([sha256.Size]byte, int64, error) {
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			return [sha256.Size]byte{}, 0, err
 		}
 		hash := sha256.New()
-		count, err := io.Copy(hash, io.LimitReader(file, maxBytes+1))
+		count, err := managedArtifactDigestRead(hash, file, maxBytes)
 		if err != nil {
 			return [sha256.Size]byte{}, count, err
 		}
@@ -1825,13 +2021,18 @@ func stableManagedArtifactDigestForOwner(
 	if err != nil {
 		return "", true, err
 	}
-	between, err := file.Stat()
-	if err != nil {
-		return "", true, err
-	}
-	second, secondSize, err := hashOnce()
-	if err != nil {
-		return "", true, err
+	var between os.FileInfo
+	var second [sha256.Size]byte
+	var secondSize int64
+	if !stamped {
+		between, err = file.Stat()
+		if err != nil {
+			return "", true, err
+		}
+		second, secondSize, err = hashOnce()
+		if err != nil {
+			return "", true, err
+		}
 	}
 	after, err := file.Stat()
 	if err != nil {
@@ -1845,15 +2046,64 @@ func stableManagedArtifactDigestForOwner(
 		!current.Mode().IsRegular() ||
 		!os.SameFile(opened, current) ||
 		firstSize != opened.Size() ||
-		secondSize != firstSize ||
-		between.Size() != opened.Size() ||
+		(!stamped && (secondSize != firstSize || between.Size() != opened.Size() ||
+			!between.ModTime().Equal(opened.ModTime()) || first != second)) ||
 		after.Size() != opened.Size() ||
-		!between.ModTime().Equal(opened.ModTime()) ||
-		!after.ModTime().Equal(opened.ModTime()) ||
-		first != second {
+		!after.ModTime().Equal(opened.ModTime()) {
 		return "", true, fmt.Errorf("%s changed during bounded digest", label)
 	}
-	return "sha256:" + hex.EncodeToString(first[:]), true, nil
+	remember := stamped
+	if stamped {
+		stampOf := managedArtifactStampOf
+		if attributeOnly {
+			stampOf = managedArtifactAttributeStampOf
+		}
+		later, ok := stampOf(file)
+		if attributeOnly {
+			later.USN = 0
+		}
+		if !ok || later != stamp {
+			if !ok || !managedArtifactStampMovedOnlyInJournal(stamp, later) {
+				return "", true, fmt.Errorf("%s changed during bounded digest", label)
+			}
+			// Only the change-journal number moved: another process ended
+			// the change epoch of the file during this read, as its own full
+			// read of the shared hook binary does (a status or verify call
+			// next to the guardian, GAP-0256). No handle could write the file
+			// while this deny-write handle was open, but the stamp no longer
+			// names this read, so it is not remembered. The two-pass check
+			// that unguarded files get confirms the bytes instead.
+			second, secondSize, err := hashOnce()
+			if err != nil {
+				return "", true, err
+			}
+			final, err := file.Stat()
+			if err != nil {
+				return "", true, err
+			}
+			current, err := os.Lstat(path)
+			if err != nil {
+				return "", true, fmt.Errorf("%s changed after open: %w", label, err)
+			}
+			last, ok := stampOf(file)
+			if attributeOnly {
+				last.USN = 0
+			}
+			if !ok || second != first || secondSize != firstSize ||
+				final.Size() != opened.Size() || !final.ModTime().Equal(opened.ModTime()) ||
+				current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() ||
+				!os.SameFile(opened, current) ||
+				(last != stamp && !managedArtifactStampMovedOnlyInJournal(stamp, last)) {
+				return "", true, fmt.Errorf("%s changed during bounded digest", label)
+			}
+			remember = false
+		}
+	}
+	digest := "sha256:" + hex.EncodeToString(first[:])
+	if remember {
+		rememberManagedArtifactDigest(path, stamp, digest, attributeOnly, fullStampAvailable)
+	}
+	return digest, true, nil
 }
 
 func sharedHookScriptName(name string) bool {
@@ -2177,10 +2427,6 @@ func supersedingProtectedSetupSelection(
 	return agentSelectionEvidence{}, false
 }
 
-func codexSelectionMatchesLock(selection agentSelectionEvidence, entry HookContractLockEntry) bool {
-	return protectedSelectionMatchesLock(selection, entry)
-}
-
 func protectedSelectionMatchesLock(selection agentSelectionEvidence, entry HookContractLockEntry) bool {
 	return strings.TrimSpace(selection.RawVersion) == strings.TrimSpace(entry.RawAgentVersion) &&
 		strings.TrimSpace(selection.NormalizedVersion) == strings.TrimSpace(entry.NormalizedAgentVersion) &&
@@ -2270,7 +2516,7 @@ func readStablePrivateStateFile(dataDir, name string, limit int64) ([]byte, bool
 	if err := hookAPIValidateOwner(path, before); err != nil {
 		return nil, false
 	}
-	file, err := os.Open(path)
+	file, err := openConnectorStateFileWithRetry(path)
 	if err != nil {
 		return nil, false
 	}

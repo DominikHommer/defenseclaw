@@ -120,11 +120,21 @@ type Options struct {
 	// default (sdk, govern).
 	CopilotHarnessPreference string
 	CopilotLocalHarness      string
+	// CopilotCLIPolicyOnly limits the Copilot target to its policy.d drop-in,
+	// which the Copilot CLI and the GitHub Copilot app (it runs the same CLI)
+	// load: no VS Code device policy and no Copilot managed setting. The
+	// Windows Secure Client profile sets it (PublishWindowsSecureClientCopilot).
+	CopilotCLIPolicyOnly bool
 	// CopilotUserHomes are the enrolled accounts' homes (from the
 	// administrator's eligible-accounts record, never a user's
 	// environment). The VS Code managed-hooks lock is written only when
 	// every one of them holds DefenseClaw's current Copilot plugin.
 	CopilotUserHomes []string
+	// CursorFailOpen reports that the administrator's config resolves
+	// Cursor's hook fail mode open (owner decision 2026-10-20): its
+	// machine-policy hooks are registered without failClosed, so Cursor lets
+	// a call through when the hook cannot answer, as the hook itself does.
+	CursorFailOpen bool
 	// SkipTrustChecks disables ancestor ownership checks; only tests set it.
 	SkipTrustChecks bool
 }
@@ -216,8 +226,14 @@ type State struct {
 	// UserFileDrift names enrolled users' DefenseClaw-owned files that are
 	// missing or not current (Copilot's VS Code Local hook file). The hook
 	// guardian rewrites them as the user; until it has, verify fails.
-	UserFileDrift  []string `json:"user_file_drift,omitempty"`
-	LiveVerifiedAt string   `json:"live_verified_at,omitempty"`
+	UserFileDrift []string `json:"user_file_drift,omitempty"`
+	// UserFileForeign names files at DefenseClaw's own per-user paths (the
+	// Copilot plugin) that hold hooks DefenseClaw did not write. The
+	// guardian leaves them in place, and the foreign-hook guard denies that
+	// user's agent calls while they are there, so verify fails on them
+	// (GAP-1232).
+	UserFileForeign []string `json:"user_file_foreign,omitempty"`
+	LiveVerifiedAt  string   `json:"live_verified_at,omitempty"`
 	// VersionFloor is Claude Code's requiredMinimumVersion state (claudecode
 	// only).
 	VersionFloor *VersionFloorState `json:"version_floor,omitempty"`
@@ -239,6 +255,19 @@ func (s State) ToStatus() enterprisestatus.MachinePolicyState {
 
 func (s *State) conflict(format string, args ...any) {
 	s.Conflicts = append(s.Conflicts, fmt.Sprintf(format, args...))
+}
+
+// entryConflict is a conflict about a DefenseClaw entry that is missing,
+// duplicated or changed in a file DefenseClaw publishes (ownership: merge).
+// The next publish rewrites it, so the connector is not in place until then
+// (Drift), and the lifecycle's ensure re-applies instead of reporting up to
+// date while an agent runs without its hook (GAP-0077). Under verify_only
+// DefenseClaw never writes the file, so it stays a plain conflict.
+func (s *State) entryConflict(format string, args ...any) {
+	s.conflict(format, args...)
+	if s.Ownership == config.MachinePolicyOwnershipMerge {
+		s.Drift = true
+	}
 }
 
 func (s *State) detail(format string, args ...any) {
@@ -313,6 +342,14 @@ func RouteFor(connector, goos string) string {
 		return RoutePerUser
 	default:
 		return RouteUnsupported
+	}
+}
+
+// The sandbox advisories name a required_for connector whose hooks this
+// package does not publish through machine policy (GAP-0535).
+func init() {
+	config.SandboxMachinePolicyRoute = func(connector, goos string) bool {
+		return RouteFor(connector, goos) == RouteMachinePolicy
 	}
 }
 

@@ -39,6 +39,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import click
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_status
 from defenseclaw.commands.cmd_status import _print_agents
@@ -59,6 +60,43 @@ def _cfg(actives, *, modes=None, disabled=None):
     cfg.ai_discovery = AIDiscoveryConfig()
     cfg.data_dir = ""
     return cfg
+
+
+def test_json_roster_carries_healthy_manual_hook_state():
+    cfg = _cfg(["codex", "hermes"])
+    health = {"connectors": [
+        {"name": "codex", "state": "running", "source": "manual"},
+        {"name": "hermes", "state": "running", "source": "manual"},
+    ]}
+    with patch.object(cmd_status, "_agent_missing", return_value=False):
+        rows = cmd_status._connector_roster(cfg, health)
+    assert {row["name"]: row.get("state") for row in rows} == {
+        "codex": "running", "hermes": "running"
+    }
+
+
+def test_json_roster_preserves_disabled_manual_state_even_with_stale_health():
+    cfg = _cfg(["codex"], disabled={"codex"})
+    health = {"connectors": [{"name": "codex", "state": "running", "source": "manual"}]}
+    with patch.object(cmd_status, "_agent_missing", return_value=False):
+        rows = cmd_status._connector_roster(cfg, health)
+    assert rows[0]["enabled"] is False
+    assert rows[0]["state"] == "disabled"
+
+
+def test_running_cursor_json_reports_version_from_gateway_lock(tmp_path):
+    cfg = _cfg(["cursor"], modes={"cursor": "action"})
+    cfg.data_dir = str(tmp_path)
+    (tmp_path / "hook_contract_lock.json").write_text(json.dumps({
+        "connectors": {"cursor": {
+            "contract_id": "cursor-hooks-v1",
+            "raw_agent_version": "2026.10.01-14929f9",
+        }}
+    }), encoding="utf-8")
+    health = {"connectors": [{"name": "cursor", "state": "running", "source": "manual"}]}
+    with patch.object(cmd_status, "_agent_missing", return_value=False):
+        rows = cmd_status._connector_roster(cfg, health)
+    assert rows[0]["agent_version"] == "2026.10.01-14929f9"
 
 
 def _render(cfg) -> str:
@@ -94,11 +132,12 @@ class TestPrintAgentsRoster(unittest.TestCase):
         report = {
             "effective": "open",
             "provenance": "process-env",
+            "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
         }
         with patch.object(cmd_status, "_effective_status_fail_mode", return_value=report):
             out = _render(_cfg(["codex"], modes={"codex": "action"}))
 
-        self.assertIn("fail-mode=open", out)
+        self.assertIn("fail-mode=open (observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed", out)
         self.assertIn("provenance=process-env", out)
 
     def test_zero_connectors_shows_no_active(self):
@@ -767,7 +806,8 @@ class TestStatusDbErrorSurfacing(unittest.TestCase):
         self.assertIn("not counted", result.output)
         self.assertIn("defenseclaw alerts", result.output)
         self.assertEqual(
-            self.app.store.get_counts.call_args.kwargs, {"alert_count_seconds": cmd_status._ALERT_COUNT_SECONDS}
+            self.app.store.get_counts.call_args.kwargs,
+            {"alert_count_seconds": cmd_status._ALERT_COUNT_SECONDS, "cfg": self.app.cfg},
         )
 
     def test_healthy_db_shows_counts(self):
@@ -776,6 +816,51 @@ class TestStatusDbErrorSurfacing(unittest.TestCase):
         self.assertIn("Enforcement", result.output)
         self.assertIn("Blocked skills", result.output)
         self.assertNotIn("disk I/O error", result.output)
+
+
+class TestStatusMovedAuditStore(unittest.TestCase):
+    """rel-1-0-3:GAP-0105 and GAP-0106: status said nothing about a corrupt
+    store the gateway moved aside, and a file that only had an archive's name
+    must not take the archive's place."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _invoke(self):
+        with patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None):
+            return CliRunner().invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+    def test_status_names_the_archive_with_the_copy_first_hint(self):
+        from defenseclaw.commands import cmd_doctor
+
+        db = str(self.app.cfg.audit_db)
+        archive = Path(db + ".corrupt-20261018T021344Z-4bfc16b6-f3ca-490f-98a0-71b4f32de5ce")
+        others = [Path(db + ".corrupt-20261018T021344Z"), Path(db + ".corrupt-20261018T021513Z")]
+        for path in (archive, Path(str(archive) + "-wal"), Path(str(archive) + "-shm"), *others):
+            path.write_bytes(b"x")
+        Path(str(archive) + ".carryover.json").write_text(
+            '{"carried_over": 0, "error": "file is not a database"}', encoding="utf-8"
+        )
+
+        result = self._invoke()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        output = " ".join(click.unstyle(result.output).split())
+        self.assertIn(f"moved to {archive} together with its -wal and -shm files on ", output)
+        self.assertIn("0 entries were carried over and earlier blocks no longer apply", output)
+        self.assertIn(cmd_doctor._archive_recovery_hint(archive), output)
+        self.assertIn("write the SQLite header back on the copy, never on the archive", output)
+        self.assertNotIn(f"sqlite3 {archive} .recover", output)
+        for other in others:
+            self.assertNotIn(f"{other} ", output)
+
+    def test_status_is_quiet_without_a_moved_store(self):
+        result = self._invoke()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("moved to", result.output)
 
 
 class TestStatusHeaderAndConfigProblems(unittest.TestCase):
@@ -810,6 +895,8 @@ class TestStatusHeaderAndConfigProblems(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, msg=result.output)
         self.assertIn("1 problem(s)", result.output)
         self.assertIn("Sidecar", result.output)
+        self.assertIn("not checked while config.yaml is invalid", result.output)
+        self.assertNotIn("not running; start it", result.output)
         self.assertIn("Enforcement", result.output)
         as_json = self._invoke(["--json"])
         self.assertEqual(as_json.exit_code, 1, msg=as_json.output)
@@ -928,6 +1015,18 @@ class TestStatusJson(unittest.TestCase):
         by_name = {c["name"]: c for c in doc["connectors"]}
         self.assertEqual(by_name["codex"]["fail_mode"], report)
 
+    def test_json_invalid_config_does_not_query_runtime(self):
+        self.app.config_problems = ["invalid config.yaml"]
+        health = {"policy": {"effective_digest": "runtime-only-digest"}}
+        with patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=health) as fetch:
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        fetch.assert_not_called()
+        doc = json.loads(result.output)
+        self.assertIsNone(doc["sidecar"]["running"])
+        self.assertNotIn("policy", doc)
+
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
         result = self._invoke_json()
@@ -981,7 +1080,10 @@ class TestStatusProfileIdentity(unittest.TestCase):
                         result = runner.invoke(status_cmd, ["--json"], obj=app, catch_exceptions=False)
                 self.assertEqual(human.exit_code, 0, msg=human.output)
                 self.assertEqual(result.exit_code, 0, msg=result.output)
-                self.assertEqual(seen, ["/status", "/status"])
+                self.assertEqual(
+                    [p for p in seen if not p.startswith("/api/v1/fleet/")],
+                    ["/status", "/status"],
+                )
                 self.assertIn("not running", human.output)
                 self.assertNotIn(foreign_marker, human.output)
                 self.assertNotIn(str(ambient_home), human.output)
@@ -1011,7 +1113,10 @@ class TestStatusProfileIdentity(unittest.TestCase):
                     with patch.dict(os.environ, env, clear=False):
                         result = runner.invoke(status_cmd, ["--json"], obj=app, catch_exceptions=False)
                 self.assertEqual(result.exit_code, 0, msg=result.output)
-                self.assertEqual(seen, ["/status"])
+                self.assertEqual(
+                    [p for p in seen if not p.startswith("/api/v1/fleet/")],
+                    ["/status"],
+                )
                 doc = json.loads(result.output)
                 self.assertTrue(doc["sidecar"]["running"])
                 self.assertIn(matching_marker, json.dumps(doc))
@@ -1056,3 +1161,12 @@ def test_status_names_a_connector_whose_setup_failed_at_gateway_start():
     # GAP-1937: the Agents count matches `defenseclaw-gateway status`.
     agents_row = next(line for line in out.splitlines() if "Agents" in line)
     assert "1 active, 1 not running" in agents_row
+
+
+def test_status_marks_missing_claude_binary_as_not_detected(monkeypatch):
+    monkeypatch.setattr(cmd_status.shutil, "which", lambda name: None if name == "claude" else "/bin/true")
+    cfg = _cfg(["claudecode"])
+    out = _render_live(cfg, {"connectors": [{"name": "claudecode", "state": "running"}]})
+    claude_row = next(line for line in out.splitlines() if "Claude Code (claudecode)" in line)
+    assert "not detected" in claude_row.lower()
+    assert "RUNNING" not in claude_row

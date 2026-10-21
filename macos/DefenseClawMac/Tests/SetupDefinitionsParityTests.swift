@@ -103,6 +103,7 @@ struct SetupDefinitionsParityTests {
         seedsDiscoveryFromTheSelectedConfig()
         validatesDiscoveryCLIRanges()
         observabilityNeverEmitsAnUnsupportedConnectorOption()
+        guardrailSetupNeverEmitsTheRetiredVerifyOption()
         includesAmpAcrossSetupSurfaces()
         includesOnlyCanonicalDevinAcrossSetupAndCatalogSurfaces()
         bundledSkillsRemainDiscoveryOnlyAcrossNativeCatalogSurfaces()
@@ -122,6 +123,36 @@ struct SetupDefinitionsParityTests {
         removedStandaloneSandboxWizardStaysHidden()
         sandboxWizardMatchesTheTUIWizard()
         print("Setup definition parity tests passed")
+    }
+
+    private static func acpSetupKeepsEnrollmentScoped() {
+        expect(TUIWizards.acpCommands([:], false) == [["acp", "setup", "--client", "zed", "--agent", "kiro", "--profile", "default"]], "ACP defaults to observing")
+        let values = ["client": "jetbrains", "agent": "copilot", "profile": "strict", "activate": "yes", "managed": "yes", "runtime-data-dir": "/tmp/fixture", "token-file": "/tmp/fixture/acp/jetbrains-copilot.token"]
+        expect(TUIWizards.acpValidation(values) == nil, "managed ACP requires valid paths")
+        expect(TUIWizards.acpCommands(values, false)[0].suffix(5) == ["--managed", "--runtime-data-dir", "/tmp/fixture", "--token-file", "/tmp/fixture/acp/jetbrains-copilot.token"], "ACP enrollment uses a file path rather than a secret argv value")
+        expect(TUIWizards.acpValidation(["managed": "yes"]) != nil, "missing provisioning paths block enrollment")
+        expect(!TUIWizards.acpCommands(["managed": "no", "token-file": "stale"], false)[0].contains("stale"), "unmanaged enrollment drops stale managed fields")
+    }
+
+    private static func sandboxSetupMatchesCurrentMacWorkflow() {
+        let defaults = TUIWizards.sandboxCommands([:], false)
+        expect(defaults == [
+            ["sandbox", "setup", "--non-interactive", "--install-openshell", "--harness", "claudecode", "--harness", "codex", "--no-wrappers", "--skip-images"],
+            ["sandbox", "image", "build", "claudecode", "codex"],
+            ["sandbox", "doctor"]
+        ], "sandbox defaults install prerequisites, configure, build both images, then verify")
+        expect(TUIWizards.sandboxCommands(["action": "doctor", "install-openshell": "yes"], false) == [["sandbox", "doctor"]], "doctor never installs or builds even with stale setup choices")
+        let optedOut = TUIWizards.sandboxCommands(["install-openshell": "no", "harness-codex": "no", "wrappers": "yes", "build-images": "no"], false)
+        expect(optedOut == [["sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--wrappers", "--skip-images"], ["sandbox", "doctor"]], "explicit install and build opt-outs are respected")
+        expect(TUIWizards.sandboxCommands(["telemetry-off": "no"], false)[0].contains("--upstream-telemetry"), "upstream telemetry opt-in reaches the runtime")
+        let codexOnly = TUIWizards.sandboxCommands(["harness-claudecode": "no"], false)
+        expect(codexOnly[1] == ["sandbox", "image", "build", "codex"], "build only selected harnesses")
+        expect(!defaults.flatMap { $0 }.contains("--yes") && !defaults.flatMap { $0 }.contains("--restart-gateway"), "installation consent does not force active sandbox restarts or blanket answers")
+        let wizard = TUIWizards.all.first { $0.id == "sandbox" }!
+        let formDefaults = Dictionary(uniqueKeysWithValues: wizard.fields.map { ($0.key, $0.defaultValue) })
+        expect(TUIWizards.sandboxCommands(formDefaults, true) == defaults, "reviewed defaults match actual execution")
+        expect(TUIWizards.sandboxValidation(["harness-claudecode": "no", "harness-codex": "no"]) != nil, "empty harness selection is rejected")
+        expect(TUIWizards.sandboxValidation(["action": "doctor"]) == nil, "doctor does not require a harness")
     }
 
     private static func emitsOnlyCurrentDiscoveryCLIOptions() {
@@ -223,6 +254,27 @@ struct SetupDefinitionsParityTests {
         expect(!commands[0].contains("--connector"), "global observability CLI has no connector option")
     }
 
+    /// `setup guardrail`, `setup openclaw` and `setup zeptoclaw` no longer take
+    /// --verify / --no-verify (the option did nothing); `defenseclaw doctor` is the check.
+    private static func guardrailSetupNeverEmitsTheRetiredVerifyOption() {
+        let connector = TUIWizards.all.first { $0.id == "connector" }
+        expect(connector?.fields.contains { $0.key == "verify" } == false, "connector wizard has no verify field")
+        for name in ["openclaw", "zeptoclaw"] {
+            let commands = connector?.commandBuilder?(["action": "setup", "connector": name, "verify": "no"], false) ?? []
+            expect(
+                commands.count == 1 && !commands[0].contains("--verify") && !commands[0].contains("--no-verify"),
+                "\(name) setup emits no verify option"
+            )
+        }
+        let aiDefense = TUIWizards.all.first { $0.id == "ai-defense" }
+        let commands = aiDefense?.commandBuilder?(["verify": "no", "skill-scanner": "yes", "restart": "yes"], false) ?? []
+        let guardrail = commands.first { $0.contains("guardrail") } ?? []
+        expect(!guardrail.isEmpty && !guardrail.contains("--verify") && !guardrail.contains("--no-verify"),
+               "AI Defense guardrail setup emits no verify option")
+        let scanner = commands.first { $0.contains("skill-scanner") } ?? []
+        expect(scanner.contains("--no-verify"), "the skill scanner still takes its own verify option")
+    }
+
     private static func includesAmpAcrossSetupSurfaces() {
         expect(TUIWizards.connectors.contains("amp"), "Amp appears in the native connector picker")
         expect(TUIWizards.hookConnectors.contains("amp"), "Amp is treated as a hook connector")
@@ -300,10 +352,6 @@ struct SetupDefinitionsParityTests {
             contentsOf: sourceRoot.appendingPathComponent("DataLayer/CatalogCLI.swift"),
             encoding: .utf8
         )) ?? ""
-        let gateway = (try? String(
-            contentsOf: sourceRoot.appendingPathComponent("DataLayer/GatewayClient.swift"),
-            encoding: .utf8
-        )) ?? ""
         let models = (try? String(
             contentsOf: sourceRoot.appendingPathComponent("DataLayer/Models.swift"),
             encoding: .utf8
@@ -321,8 +369,8 @@ struct SetupDefinitionsParityTests {
                "CLI MCP catalog preserves bundled provenance")
         expect(catalog.contains("if item.bundled"),
                "bundled MCP rows have an Info-only action set")
-        expect(gateway.contains("bundled: (r[\"bundled\"] as? Bool) ?? false"),
-               "gateway MCP catalog preserves bundled provenance")
+        // The gateway MCP catalog client is gone (7f1ab11a0): the app lists
+        // MCP servers through the CLI catalog only (GAP-0121).
     }
 
     private static func localCatalogCoversActiveConnectorCompatibilityRoots() {
@@ -685,8 +733,8 @@ struct SetupDefinitionsParityTests {
         expect(wizard != nil, "the Sandbox wizard is listed")
         expect(wizard?.fields.contains { $0.key == "install-openshell" } == false,
                "the app never runs the sudo installer (it needs a terminal)")
-        expect(wizard?.fields.contains { $0.key.contains("telemetry") || $0.label.contains("telemetry") } == false,
-               "no telemetry question: the Homebrew gateway does not read gateway.env")
+        expect(wizard?.fields.contains { $0.key == "telemetry-off" && $0.defaultValue == "yes" } == true,
+               "the telemetry question: the Homebrew service reads gateway.env")
         expect(wizard?.fields.contains { $0.key.contains("mount") || $0.label.lowercased().contains("mount") } == false,
                "no mounts question: setup runs macOS sandboxes in MicroVMs, which mount no host folders")
         let blurb = wizard?.blurb ?? ""
@@ -701,9 +749,10 @@ struct SetupDefinitionsParityTests {
             "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--harness", "codex", "--no-wrappers",
         ]], "defaults match the TUI wizard")
         expect(TUIWizards.sandboxCommands([
-            "harness-codex": "no", "mounts": "no", "wrappers": "yes", "build-images": "no",
+            "harness-codex": "no", "mounts": "no", "telemetry-off": "no", "wrappers": "yes", "build-images": "no",
         ], false) == [[
-            "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--wrappers", "--skip-images",
+            "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--upstream-telemetry", "--wrappers",
+            "--skip-images",
         ]], "every consent flag, and never --no-mounts")
         expect(TUIWizards.sandboxCommands(["action": "doctor"], false) == [["sandbox", "doctor"]], "doctor action")
         expect(TUIWizards.sandboxValidation(["harness-claudecode": "no", "harness-codex": "no"]) != nil,
@@ -713,8 +762,8 @@ struct SetupDefinitionsParityTests {
                "configured harnesses seed the toggles")
 
         // Every flag the TUI builder can emit is one the app emits too, except
-        // the sudo installer, and the telemetry opt-in and the mounts question
-        // the TUI offers only off macOS.
+        // the sudo installer and the mounts question the TUI offers only off
+        // macOS.
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let python = (try? String(
             contentsOf: testsDirectory.appendingPathComponent("../../../cli/defenseclaw/tui/panels/setup.py"),
@@ -733,9 +782,9 @@ struct SetupDefinitionsParityTests {
             Range(match.range(at: 1), in: body).map { String(body[$0]) }
         })
         let swiftFlags: Set<String> = [
-            "--non-interactive", "--harness", "--wrappers", "--no-wrappers", "--skip-images",
+            "--non-interactive", "--harness", "--upstream-telemetry", "--wrappers", "--no-wrappers", "--skip-images",
         ]
-        expect(tuiFlags == swiftFlags.union(["--install-openshell", "--upstream-telemetry", "--no-mounts"]),
+        expect(tuiFlags == swiftFlags.union(["--install-openshell", "--no-mounts"]),
                "TUI sandbox flags \(tuiFlags.sorted()) differ from the app's")
     }
 

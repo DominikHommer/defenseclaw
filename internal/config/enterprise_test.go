@@ -11,7 +11,10 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -31,8 +34,13 @@ func TestResolveEnterpriseConfigProfiles(t *testing.T) {
 		wantErr string
 	}{
 		{name: "secure client default keeps today's posture", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise"}, want: managed.ProfileSecureClient},
+		{name: "windows secure client rejects unsupported Fleet", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise", Fleet: FleetConfig{Enabled: true}}, wantErr: "fleet.enabled is unsupported for the Secure Client"},
 		{name: "darwin default", goos: "darwin", cfg: Config{DeploymentMode: "managed_enterprise"}, want: managed.ProfileSecureClient},
+		{name: "macos secure client rejects unsupported Fleet", goos: "darwin", cfg: Config{DeploymentMode: "managed_enterprise", Fleet: FleetConfig{Enabled: true}}, wantErr: "fleet.enabled is unsupported for the Secure Client"},
 		{name: "linux default", goos: "linux", cfg: Config{DeploymentMode: "managed_enterprise"}, want: managed.ProfileStandalone},
+		{name: "windows standalone accepts Fleet", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}, Fleet: FleetConfig{Enabled: true}}, want: managed.ProfileStandalone},
+		{name: "macos standalone accepts Fleet", goos: "darwin", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}, Fleet: FleetConfig{Enabled: true}}, want: managed.ProfileStandalone},
+		{name: "per-user Windows accepts Fleet", goos: "windows", cfg: Config{Fleet: FleetConfig{Enabled: true}}, want: ""},
 		{name: "pinned standalone", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}, pinned: "standalone", want: managed.ProfileStandalone},
 		{name: "pinned standalone needs a declared profile on windows", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise"}, pinned: "standalone", wantErr: "enterprise.profile must be set to standalone"},
 		{name: "pinned standalone needs a declared profile on darwin", goos: "darwin", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Inspection: EnterpriseInspectionConfig{AIDefense: EnterpriseAIDefenseConfig{Enabled: true, Credential: "ai-defense-api-key"}}}}, pinned: "standalone", wantErr: "enterprise.profile must be set to standalone"},
@@ -68,6 +76,93 @@ func TestResolveEnterpriseConfigProfiles(t *testing.T) {
 			}
 			if got, want := cfg.DeclaredEnterpriseProfile(), managed.NormalizeEnterpriseProfile(tc.cfg.Enterprise.Profile); managed.IsManagedEnterprise(tc.cfg.DeploymentMode) && got != want {
 				t.Fatalf("DeclaredEnterpriseProfile() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestSecureClientFleetRejectedFromRuntimeConfigSource(t *testing.T) {
+	raw := []byte("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\nfleet:\n  enabled: true\n")
+	for _, tc := range []struct {
+		goos       string
+		configPath string
+		dataDir    string
+	}{
+		{"windows", `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\config.yaml`, `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw`},
+		{"darwin", "/opt/cisco/secureclient/defenseclaw/etc/config.yaml", "/opt/cisco/secureclient/defenseclaw/runtime"},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			_, err := LoadRuntimeV8InspectionCandidateForLayout(tc.configPath, raw, tc.dataDir, tc.goos)
+			if err == nil || !strings.Contains(err.Error(), "fleet.enabled is unsupported for the Secure Client") {
+				t.Fatalf("Secure Client runtime config loader accepted unsupported Fleet: %v", err)
+			}
+		})
+	}
+}
+
+// TestStandaloneFleetSourceTrustOnlyGatesAnOptIn pins DAMAGE-678 A3: the
+// admin-protected path check #678 added to the Windows standalone lifecycle
+// must not refuse a Fleet-off config (a 1.0.1 upgrade from an Intune cache
+// or an admin-made ProgramData folder). A Fleet opt-in still needs it.
+func TestStandaloneFleetSourceTrustOnlyGatesAnOptIn(t *testing.T) {
+	untrusted := errors.New("config source is writable by Users")
+	for _, tc := range []struct {
+		name, raw, wantError string
+		trust                error
+		wantEnabled          bool
+		wantTrustCalled      bool
+	}{
+		{"1.0.1 config, untrusted folder", "config_version: 9\n", "", untrusted, false, false},
+		{"Fleet off, untrusted folder", "config_version: 9\nfleet:\n  enabled: false\n", "", untrusted, false, false},
+		{"Fleet on, untrusted folder", "config_version: 9\nfleet:\n  enabled: true\n", "writable by Users", untrusted, false, true},
+		{"Fleet on, trusted folder", "config_version: 9\nfleet:\n  enabled: true\n", "", nil, true, true},
+		{"Fleet on through an escaped key", "config_version: 9\n\"\\x66leet\": {enabled: true}\n", "writable by Users", untrusted, false, true},
+		{"malformed Fleet", "config_version: 9\nfleet: true\n", "fleet must be a mapping", untrusted, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			enabled, err := StandaloneFleetSourceEnabled("fleet.yaml", []byte(tc.raw), func() error {
+				called = true
+				return tc.trust
+			})
+			if called != tc.wantTrustCalled {
+				t.Fatalf("trust check called = %t, want %t", called, tc.wantTrustCalled)
+			}
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("error = %v, want %q", err, tc.wantError)
+				}
+				return
+			}
+			if err != nil || enabled != tc.wantEnabled {
+				t.Fatalf("enabled = %t, error = %v; want %t", enabled, err, tc.wantEnabled)
+			}
+		})
+	}
+}
+
+func TestFleetEnabledFromSourceForOptionalInstallerPayload(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw, wantError string
+		wantEnabled          bool
+	}{
+		{"omitted", "config_version: 9\n", "", false},
+		{"disabled", "config_version: 8\nfleet:\n  enabled: false\n", "", false},
+		{"enabled", "config_version: 9\nfleet:\n  enabled: true\n", "", true},
+		{"wrong type", "config_version: 9\nfleet:\n  enabled: 'true'\n", "must be a boolean", false},
+		{"duplicate", "config_version: 9\nfleet:\n  enabled: false\n  enabled: true\n", "duplicate", false},
+		{"malformed", "config_version: 8\nfleet: true\n", "fleet must be a mapping", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enabled, err := FleetEnabledFromSource("fleet.yaml", []byte(tc.raw))
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("error = %v, want %q", err, tc.wantError)
+				}
+				return
+			}
+			if err != nil || enabled != tc.wantEnabled {
+				t.Fatalf("enabled = %t, error = %v; want %t", enabled, err, tc.wantEnabled)
 			}
 		})
 	}
@@ -295,8 +390,8 @@ func TestStandaloneDropsSecureClientSurfaces(t *testing.T) {
 		Enterprise:     EnterpriseConfig{Profile: "standalone"},
 		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://us.api.inspect.aidefense.security.cisco.com"},
 	}
-	if standalone.HasManagedAIDLogSink() {
-		t.Fatal("standalone must not require the CMID-authenticated AI Defense sink")
+	if standalone.SecureClientIntegration() {
+		t.Fatal("standalone must not take the Secure Client integration (CMID-authenticated AI Defense sink)")
 	}
 	if standalone.ManagedIPCEnabled() {
 		t.Fatal("standalone has no Secure Client GUI and must not expose IPC")
@@ -305,7 +400,7 @@ func TestStandaloneDropsSecureClientSurfaces(t *testing.T) {
 		DeploymentMode: "managed_enterprise",
 		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://us.api.inspect.aidefense.security.cisco.com"},
 	}
-	if !secureClient.HasManagedAIDLogSink() || !secureClient.ManagedIPCEnabled() {
+	if !secureClient.SecureClientIntegration() || !secureClient.ManagedIPCEnabled() {
 		t.Fatal("Secure Client surfaces must stay enabled for an unprofiled managed config")
 	}
 }
@@ -322,6 +417,34 @@ func TestManagedAIDDestinationSkippedForStandalone(t *testing.T) {
 	}
 }
 
+// A Secure Client plan keeps the retired trace_policy.compatibility_aliases
+// switch of main, so the plan digest every local audit record carries stays
+// the digest of main; a standalone plan does not carry it (issue #1092).
+func TestSecureClientPlanKeepsTheAliasSwitchOfMain(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("the Secure Client profile exists on macOS and Windows only")
+	}
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	for profile, want := range map[string]bool{managed.ProfileSecureClient: true, managed.ProfileStandalone: false} {
+		raw := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: " + profile + "\n"
+		compiled, err := ParseCompileObservabilityV8(filepath.Join(t.TempDir(), "config.yaml"), []byte(raw),
+			ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+		var plan struct {
+			TracePolicy map[string]any `json:"trace_policy"`
+		}
+		if err := json.Unmarshal(compiled.Plan.EffectiveJSON(), &plan); err != nil {
+			t.Fatal(err)
+		}
+		if value, ok := plan.TracePolicy["compatibility_aliases"]; ok != want || (ok && value != true) {
+			t.Fatalf("%s: trace_policy.compatibility_aliases = %v (present %t), want present %t", profile, value, ok, want)
+		}
+	}
+}
+
 func TestStandalonePolicyInputsMustBeAdministratorControlled(t *testing.T) {
 	cfg := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}
 	cfg.PolicyDir = filepath.Join(t.TempDir(), "absent")
@@ -334,6 +457,15 @@ func TestStandalonePolicyInputsMustBeAdministratorControlled(t *testing.T) {
 	cfg.PolicyDir = t.TempDir()
 	if err := validateManagedStandalonePolicyInputs(cfg); err == nil || !strings.Contains(err.Error(), "not administrator-controlled") {
 		t.Fatalf("user-owned policy dir must be rejected, got %v", err)
+	}
+	// A guardrail profile's rule pack gets the same check as the base one.
+	cfg.PolicyDir = filepath.Join(t.TempDir(), "absent")
+	cfg.Guardrail.Profiles = map[string]GuardrailProfile{"contractors": {
+		Connectors: map[string]PerConnectorGuardrailConfig{"codex": {RulePackDir: t.TempDir()}},
+	}}
+	if err := validateManagedStandalonePolicyInputs(cfg); err == nil ||
+		!strings.Contains(err.Error(), "guardrail.profiles.contractors.connectors.codex.rule_pack_dir is not administrator-controlled") {
+		t.Fatalf("user-owned profile rule pack must be rejected, got %v", err)
 	}
 	secureClient := &Config{DeploymentMode: "managed_enterprise", PolicyDir: t.TempDir()}
 	if err := validateManagedStandalonePolicyInputs(secureClient); err != nil {
@@ -348,9 +480,9 @@ func TestStandalonePolicyInputsMustBeAdministratorControlled(t *testing.T) {
 // vendor default pack the lifecycle installs. An explicit rule_pack_dir is
 // kept for the lifecycle to check.
 func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
-	// Outside the layout the implicit pack follows policy_dir. The resolver
-	// joins with the host separator, so the expected paths do too.
-	dataDirPack := filepath.Join("/var/lib/defenseclaw", "policies", "guardrail", "default")
+	// Outside the layout the implicit pack follows policy_dir using the
+	// target platform's separators.
+	dataDirPack := "/var/lib/defenseclaw/policies/guardrail/default"
 	cases := []struct {
 		name    string
 		goos    string
@@ -358,18 +490,32 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 		pack    string
 		profile string
 		want    string
+		// policyCleared: policy_dir names no Rego bundle, so the gateway
+		// uses its built-in policy.
+		policyCleared bool
 	}{
-		{name: "standalone implicit follows policy_dir", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, want: filepath.Join("/opt/defenseclaw/share/policies", "guardrail", "default")},
+		{name: "standalone implicit follows policy_dir", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, want: "/opt/defenseclaw/share/policies/guardrail/default"},
 		{name: "standalone explicit pack is kept", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: "/etc/defenseclaw/policies/guardrail/custom", want: "/etc/defenseclaw/policies/guardrail/custom"},
 		{name: "standalone with data_dir policies is unchanged", goos: "linux", policy: "/var/lib/defenseclaw/policies", pack: dataDirPack, want: dataDirPack},
 		{name: "secure client is unchanged", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileSecureClient, want: dataDirPack},
 		// Nothing stages a pack under a Windows data_dir, so the
 		// implicit default selects the embedded packs.
-		{name: "windows standalone implicit uses the embedded packs", goos: "windows", policy: "/var/lib/defenseclaw/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: ""},
-		{name: "windows standalone implicit follows an administrator policy_dir", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: filepath.Join("/opt/defenseclaw/share/policies", "guardrail", "default")},
+		{name: "windows standalone implicit uses the embedded packs", goos: "windows", policy: "/var/lib/defenseclaw/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: "", policyCleared: true},
+		{name: "windows standalone implicit follows an administrator policy_dir", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.goos == "windows" {
+				if tc.pack == dataDirPack {
+					tc.pack = joinPathForPlatform(tc.goos, "/var/lib/defenseclaw", "policies", "guardrail", "default")
+				}
+				if tc.profile == managed.ProfileSecureClient {
+					tc.want = tc.pack
+				}
+				if tc.name == "windows standalone implicit follows an administrator policy_dir" {
+					tc.want = joinPathForPlatform(tc.goos, tc.policy, "guardrail", "default")
+				}
+			}
 			cfg := Config{DeploymentMode: "managed_enterprise", DataDir: "/var/lib/defenseclaw", PolicyDir: tc.policy}
 			cfg.Guardrail.RulePackDir = tc.pack
 			cfg.Enterprise.Profile = tc.profile
@@ -379,17 +525,20 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 			if cfg.Guardrail.RulePackDir != tc.want {
 				t.Fatalf("rule_pack_dir = %q, want %q", cfg.Guardrail.RulePackDir, tc.want)
 			}
+			if (cfg.PolicyDir == "") != tc.policyCleared {
+				t.Fatalf("policy_dir = %q, want cleared=%t", cfg.PolicyDir, tc.policyCleared)
+			}
 		})
 	}
 
-	if runtime.GOOS == "windows" {
-		t.Skip("the Linux and macOS layout paths are not paths on Windows")
-	}
-	emptyPolicy := t.TempDir()
-	seededPolicy := t.TempDir()
-	seededPack := filepath.Join(seededPolicy, "guardrail", "default")
-	if err := os.MkdirAll(seededPack, 0o755); err != nil {
-		t.Fatal(err)
+	emptyPolicy := "/policy/empty"
+	seededPolicy := "/policy/seeded"
+	seededPack := seededPolicy + "/guardrail/default"
+	exists := func(name string) (bool, error) {
+		if name == seededPack {
+			return true, nil
+		}
+		return false, fs.ErrNotExist
 	}
 	for _, goos := range []string{"linux", "darwin"} {
 		layout, err := managed.StandaloneLayoutFor(goos)
@@ -397,18 +546,18 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 			t.Fatal(err)
 		}
 		vendor := layout.VendorPolicyDir + "/guardrail/default"
-		implicit := filepath.Join(layout.DataDir, "policies", "guardrail", "default")
+		implicit := layout.DataDir + "/policies/guardrail/default"
 		for _, tc := range []struct {
 			name, policy, pack, want string
 			declared                 bool
 		}{
 			{name: "absent admin pack falls back to the vendor pack", policy: emptyPolicy, pack: implicit, want: vendor},
-			{name: "a missing policy_dir folder", policy: filepath.Join(emptyPolicy, "policies"), pack: implicit, want: vendor},
+			{name: "a missing policy_dir folder", policy: emptyPolicy + "/policies", pack: implicit, want: vendor},
 			{name: "an existing admin pack wins", policy: seededPolicy, pack: implicit, want: seededPack},
-			{name: "policy_dir inside data_dir never supplies the pack", policy: filepath.Join(layout.DataDir, "policies"), pack: implicit, want: vendor},
+			{name: "policy_dir inside data_dir never supplies the pack", policy: layout.DataDir + "/policies", pack: implicit, want: vendor},
 			{name: "vendor policy_dir", policy: layout.VendorPolicyDir, pack: implicit, want: vendor},
-			{name: "explicit pack is kept", policy: emptyPolicy, pack: filepath.Join(emptyPolicy, "guardrail", "custom"), want: filepath.Join(emptyPolicy, "guardrail", "custom")},
-			{name: "an explicit pack inside data_dir is kept for the lifecycle to refuse", policy: filepath.Join(layout.DataDir, "policies"), pack: implicit, want: implicit, declared: true},
+			{name: "explicit pack is kept", policy: emptyPolicy, pack: emptyPolicy + "/guardrail/custom", want: emptyPolicy + "/guardrail/custom"},
+			{name: "an explicit pack inside data_dir is kept for the lifecycle to refuse", policy: layout.DataDir + "/policies", pack: implicit, want: implicit, declared: true},
 		} {
 			t.Run(goos+"/"+tc.name, func(t *testing.T) {
 				cfg := Config{
@@ -420,9 +569,7 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 				}
 				cfg.Guardrail.RulePackDir = tc.pack
 				cfg.rulePackDirDeclared = tc.declared
-				if err := resolveEnterpriseConfig(&cfg, goos, ""); err != nil {
-					t.Fatal(err)
-				}
+				standaloneRulePackDefaultWithExists(&cfg, layout.DataDir, goos, exists)
 				if cfg.Guardrail.RulePackDir != tc.want {
 					t.Fatalf("rule_pack_dir = %q, want %q", cfg.Guardrail.RulePackDir, tc.want)
 				}
@@ -431,7 +578,7 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 	}
 	// Secure Client never gets a standalone rule pack default.
 	secureClient := Config{DeploymentMode: "managed_enterprise", ConfigFilePath: "/opt/cisco/defenseclaw/etc/config.yaml", DataDir: "/opt/cisco/defenseclaw/runtime", PolicyDir: emptyPolicy}
-	implicit := filepath.Join("/opt/cisco/defenseclaw/runtime", "policies", "guardrail", "default")
+	implicit := "/opt/cisco/defenseclaw/runtime/policies/guardrail/default"
 	secureClient.Guardrail.RulePackDir = implicit
 	if err := resolveEnterpriseConfig(&secureClient, "darwin", ""); err != nil {
 		t.Fatal(err)
@@ -677,7 +824,7 @@ func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T)
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "config.yaml")
-	body := fmt.Sprintf("deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: %s\nguardrail:\n  rule_pack_dir: %s\n", root, pack)
+	body := fmt.Sprintf("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: %s\nguardrail:\n  rule_pack_dir: %s\n", root, pack)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -690,5 +837,176 @@ func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T)
 	}
 	if cfg.Gateway.APIPort == 0 {
 		t.Fatal("lifecycle recovery load has no gateway API port")
+	}
+}
+
+// GAP-1193: a connector that inherits the global rule pack is not checked
+// again, so a refusal names guardrail.rule_pack_dir, or guardrail.rule_pack
+// when the global pack is selected by name (GAP-0039).
+func TestReferencedRulePackDirsIncludesApplicationProtection(t *testing.T) {
+	cfg := &Config{PolicyDir: "/etc/defenseclaw/policies"}
+	cfg.Guardrail.RulePack = "default"
+	cfg.ApplicationProtection.Enabled = true
+	cfg.ApplicationProtection.Guardrail.RulePack = "strict"
+	cfg.ApplicationProtection.Connectors = map[string]ApplicationProtectionConnectorConfig{
+		"codex": {Guardrail: PerConnectorGuardrailConfig{RulePack: "permissive"}},
+	}
+	dirs := cfg.ReferencedRulePackDirs()
+	for label, want := range map[string]string{
+		"application_protection.guardrail.rule_pack":                  filepath.Join(cfg.PolicyDir, "guardrail", "strict"),
+		"application_protection.connectors.codex.guardrail.rule_pack": filepath.Join(cfg.PolicyDir, "guardrail", "permissive"),
+	} {
+		if got := dirs[label]; got != want {
+			t.Errorf("%s = %q, want %q", label, got, want)
+		}
+	}
+}
+
+func TestRulePackCheckOrderNamesTheGlobalKey(t *testing.T) {
+	got := RulePackCheckOrder(map[string]string{
+		"guardrail.rule_pack_dir":                  "/etc/defenseclaw/policies/guardrail/custom",
+		"guardrail.connectors.amp.rule_pack_dir":   "/etc/defenseclaw/policies/guardrail/custom",
+		"guardrail.connectors.codex.rule_pack_dir": "/etc/defenseclaw/policies/guardrail/codex",
+	})
+	want := []string{"guardrail.rule_pack_dir", "guardrail.connectors.codex.rule_pack_dir"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
+func TestRulePackCheckOrderNamesTheSelectedPack(t *testing.T) {
+	got := RulePackCheckOrder(map[string]string{
+		"guardrail.rule_pack":                      `C:\packs\acme`,
+		"guardrail.connectors.amp.rule_pack_dir":   `C:\packs\acme`,
+		"guardrail.custom_packs.acme.path":         `C:\packs\acme`,
+		"guardrail.connectors.codex.rule_pack_dir": `C:\packs\codex`,
+	})
+	want := "guardrail.rule_pack,guardrail.connectors.codex.rule_pack_dir"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("order = %v, want %s", got, want)
+	}
+}
+
+// TestValidateCandidateRejectsManagedJudgeInlineKey keeps role-specific LLM
+// credentials out of a standalone managed v9 config before a writer commits it.
+func TestValidateCandidateRejectsManagedJudgeInlineKey(t *testing.T) {
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nguardrail:\n  judge:\n    llm:\n      api_key: inline-test-key\nobservability: {}\n")
+	err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw)
+	if err == nil || !strings.Contains(err.Error(), "guardrail.judge.llm.api_key") {
+		t.Fatalf("ValidateCandidate() error = %v, want guardrail.judge.llm.api_key refusal", err)
+	}
+}
+
+func TestManagedStandaloneCandidateLiteralPaths(t *testing.T) {
+	base := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}
+	for _, tc := range []struct {
+		name string
+		set  func(*Config)
+		path string
+	}{
+		{"legacy inspect key", func(c *Config) { c.InspectLLM.APIKey = "example-sensitive-value" }, "inspect_llm.api_key"},
+		{"provider authorization", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"Authorization": "example-sensitive-value"} }, "llm.extra_headers"},
+		{"provider bearer", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"X-Route": "Bearer example-sensitive-value"} }, "llm.extra_headers"},
+		{"judge authorization", func(c *Config) {
+			c.Guardrail.Judge.LLM.ExtraHeaders = map[string]string{"Authorization": "example-sensitive-value"}
+		}, "guardrail.judge.llm.extra_headers"},
+		{"scanner bearer", func(c *Config) {
+			c.Scanners.MCPScanner.LLM.ExtraHeaders = map[string]string{"X-Route": "Bearer example-sensitive-value"}
+		}, "scanners.mcp_scanner.llm.extra_headers"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			tc.set(&cfg)
+			err := ValidateManagedStandaloneLiteralCandidate(&cfg, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.path) ||
+				strings.Contains(err.Error(), "example-sensitive-value") || strings.Contains(err.Error(), "https://example.test/hook") ||
+				!strings.Contains(err.Error(), "{credential: NAME}") {
+				t.Fatalf("validation = %v, want redacted %s refusal with credential guidance", err, tc.path)
+			}
+		})
+	}
+	base.LLM.ExtraHeaders = map[string]string{"X-Route": "region-west"}
+	base.Webhooks = []WebhookConfig{{URL: "https://example.test/hook"}}
+	if err := ValidateManagedStandaloneLiteralCandidate(&base, nil); err != nil {
+		t.Fatalf("benign headers and supported webhook refused: %v", err)
+	}
+}
+
+func TestManagedStandaloneRefusesLiteralDestinationCredentialHeader(t *testing.T) {
+	for _, header := range []string{"Authorization: example-sensitive-value", "X-Route: Bearer example-sensitive-value", `X-Route: "Basic\texample-sensitive-value"`} {
+		raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" +
+			"observability:\n  destinations:\n  - name: archive\n    kind: http_jsonl\n    enabled: true\n" +
+			"    endpoint: https://example.test/events\n    headers:\n      " + header + "\n")
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		_, err := ParseCompileObservabilityV8(path, raw, ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("installed header stopped compiling: %v", err)
+		}
+		err = ValidateCandidate(path, raw)
+		if err == nil || !strings.Contains(err.Error(), "observability.destinations[0].headers") ||
+			strings.Contains(err.Error(), "example-sensitive-value") || !strings.Contains(err.Error(), "{credential: NAME}") {
+			t.Fatalf("header %q: validation = %v", header, err)
+		}
+	}
+}
+
+func TestInstalledManagedV102LiteralsStillLoadAndCompile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), DefaultConfigName)
+	raw := []byte(`config_version: 9
+deployment_mode: managed_enterprise
+enterprise:
+  profile: standalone
+webhooks:
+  - url: https://example.test/hook
+    type: generic
+observability:
+  destinations:
+    - name: archive
+      kind: http_jsonl
+      enabled: false
+      endpoint: https://example.test/events
+      headers:
+        Authorization: provided by administrator
+`)
+	loaded, err := LoadRuntimeV8InspectionCandidateFromBytes(path, raw)
+	if err != nil {
+		t.Fatalf("installed config failed to load: %v", err)
+	}
+	if _, err := ParseCompileObservabilityV8(path, raw, ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()}); err != nil {
+		t.Fatalf("installed config failed to compile: %v", err)
+	}
+	paths := strings.Join(ManagedStandaloneUpgradeAdvisories(loaded, raw), ",")
+	for _, want := range []string{"webhooks[0].url", "observability.destinations[0].headers"} {
+		if !strings.Contains(paths, want) {
+			t.Fatalf("advisories %q omit %q", paths, want)
+		}
+	}
+	if strings.Contains(paths, "provided by administrator") {
+		t.Fatal("advisory exposed a literal value")
+	}
+	if err := ValidateCandidate(path, raw); err == nil || !strings.Contains(err.Error(), "observability.destinations[0].headers") {
+		t.Fatalf("new candidate was not refused at destination header: %v", err)
+	}
+}
+
+func TestManagedStandaloneAcceptsDestinationHeaderReference(t *testing.T) {
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" +
+		"observability:\n  destinations:\n  - name: archive\n    kind: http_jsonl\n    enabled: true\n" +
+		"    endpoint: https://example.test/events\n    headers:\n      Authorization: {env: TEST_DESTINATION_AUTH}\n")
+	_, err := ParseCompileObservabilityV8(filepath.Join(t.TempDir(), "config.yaml"), raw,
+		ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir(), Secrets: ObservabilityV8SecretResolverFunc(func(name string) (string, bool) {
+			return "provided by secret store", name == "TEST_DESTINATION_AUTH"
+		})})
+	if err != nil {
+		t.Fatalf("managed header reference refused: %v", err)
+	}
+}
+
+func TestPerUserLiteralHeadersKeepTheirExistingValidation(t *testing.T) {
+	raw := []byte("config_version: 9\nllm:\n  extra_headers:\n    Authorization: example-sensitive-value\n" +
+		"observability:\n  destinations:\n  - name: archive\n    kind: http_jsonl\n    enabled: false\n" +
+		"    endpoint: https://example.test/events\n    headers:\n      Authorization: example-sensitive-value\n")
+	if err := ValidateCandidate(filepath.Join(t.TempDir(), "config.yaml"), raw); err != nil {
+		t.Fatalf("per-user validation changed: %v", err)
 	}
 }

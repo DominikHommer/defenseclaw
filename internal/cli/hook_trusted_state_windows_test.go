@@ -15,8 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 )
@@ -69,6 +71,7 @@ func stubEnterpriseManagedRuntimeResolver(
 	nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = ""
 	nativeEnterpriseHookRuntimeSnapshot.scopedToken = ""
 	nativeEnterpriseHookRuntimeSnapshot.generationID = ""
+	nativeEnterpriseHookRuntimeSnapshot.failMode = ""
 	nativeEnterpriseHookRuntimeSnapshot.err = nil
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	t.Cleanup(func() {
@@ -84,6 +87,7 @@ func stubEnterpriseManagedRuntimeResolver(
 		nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = ""
 		nativeEnterpriseHookRuntimeSnapshot.scopedToken = ""
 		nativeEnterpriseHookRuntimeSnapshot.generationID = ""
+		nativeEnterpriseHookRuntimeSnapshot.failMode = ""
 		nativeEnterpriseHookRuntimeSnapshot.err = nil
 		nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	})
@@ -203,7 +207,7 @@ func TestBuildHookOptionsEnterpriseManagedUsesInvokingUserRuntime(t *testing.T) 
 			GenerationID:       "0123456789abcdef0123456789abcdef",
 		}, nil
 	})
-	if enterpriseManagedHookRuntimeNoop("claudecode") {
+	if prepareEnterpriseManagedHookRuntime("claudecode") {
 		t.Fatal("registered enterprise runtime was treated as a no-op")
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "", true)
@@ -214,6 +218,29 @@ func TestBuildHookOptionsEnterpriseManagedUsesInvokingUserRuntime(t *testing.T) 
 		*opts.AuthenticatedManagedToken != "authenticated-generation-token" ||
 		opts.FailMode != "closed" {
 		t.Fatalf("enterprise runtime options = %+v", opts)
+	}
+}
+
+func TestForeignHookSessionPreparesWindowsManagedGeneration(t *testing.T) {
+	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+		return enterprisehooks.WindowsManagedHookRuntime{
+			Connector: "opencode", PolicyActive: true, Registered: true,
+			GatewayAddr: "127.0.0.1:1", GatewayServiceName: "DefenseClawGateway",
+			ScopedToken: "fixture-scoped-token", GenerationID: "0123456789abcdef0123456789abcdef",
+		}, nil
+	})
+	if before := buildHookOptionsForRuntime("opencode", "tool.execute.before", "", "closed", true); before.ManagedRuntimeFailure == "" {
+		t.Fatal("test must start without an authenticated Windows generation")
+	}
+	_, err := exchangeForeignHookSession("opencode", "tool.execute.before", time.Now(), time.Now().Add(5*time.Second), enterprisepolicy.SessionExchange{})
+	if err == nil || strings.Contains(err.Error(), "managed hook runtime unavailable") || strings.Contains(err.Error(), "retired") {
+		t.Fatalf("exchange should reach the authenticated transport, got %v", err)
+	}
+	opts := buildHookOptionsForRuntime("opencode", "tool.execute.before", "", "closed", true)
+	if opts.ManagedRuntimeFailure != "" || opts.AuthenticatedManagedToken == nil ||
+		*opts.AuthenticatedManagedToken != "fixture-scoped-token" || opts.APIAddr != "127.0.0.1:1" {
+		t.Fatalf("foreign exchange did not bind authenticated Windows generation: failure=%q tokenBound=%v addr=%q",
+			opts.ManagedRuntimeFailure, opts.AuthenticatedManagedToken != nil, opts.APIAddr)
 	}
 }
 
@@ -251,7 +278,7 @@ func TestBuildHookOptionsEnterpriseManagedRejectsIncompleteAuthenticatedGenerati
 					GenerationID:       tc.generationID,
 				}, nil
 			})
-			if enterpriseManagedHookRuntimeNoop("codex") {
+			if prepareEnterpriseManagedHookRuntime("codex") {
 				t.Fatal("incomplete authenticated generation was treated as a no-op")
 			}
 			opts := buildHookOptionsForRuntime("codex", "BeforeAgent", "", "open", true)
@@ -289,7 +316,7 @@ func TestBuildHookOptionsEnterpriseManagedFailsClosedOnOwnershipError(t *testing
 			PolicyActive: true,
 		}, errors.New("tampered managed ownership state")
 	})
-	if enterpriseManagedHookRuntimeNoop("claudecode") {
+	if prepareEnterpriseManagedHookRuntime("claudecode") {
 		t.Fatal("invalid enterprise runtime was allowed to no-op")
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
@@ -308,7 +335,7 @@ func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T)
 			PolicyActive: true,
 		}, errors.New(enterprisehooks.WindowsManagedSIDUnregisteredReason)
 	})
-	if enterpriseManagedHookRuntimeNoop("claudecode") {
+	if prepareEnterpriseManagedHookRuntime("claudecode") {
 		t.Fatal("unregistered SID was incorrectly treated as a no-op")
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
@@ -330,7 +357,7 @@ func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T)
 				enterprisehooks.ErrWindowsManagedRuntimeGenerationPending,
 			)
 		})
-		if enterpriseManagedHookRuntimeNoop("claudecode") {
+		if prepareEnterpriseManagedHookRuntime("claudecode") {
 			t.Fatal("a registered account without a runtime was treated as a no-op")
 		}
 		opts = buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
@@ -348,6 +375,45 @@ func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T)
 	if code := hookexec.Run(context.Background(), opts); code == 0 ||
 		!strings.Contains(stderr.String(), "this account is not enrolled") || strings.Contains(stderr.String(), "gateway unreachable") {
 		t.Fatalf("pending account: code %d stderr %q, want a block that names the enrollment", code, stderr.String())
+	}
+}
+
+// GAP-0759: a standalone hook whose account's DefenseClaw folder is gone
+// refuses with enterprise_managed_runtime_home_missing, whatever step failed
+// on it (live, the failure did not always unwrap to a missing file); a folder
+// that is there and Secure Client keep enterprise_managed_runtime_state_invalid.
+// Every case fails closed.
+func TestWindowsManagedHookNamesAMissingRuntimeHome(t *testing.T) {
+	previousStandalone := standaloneEnterpriseHookCheck
+	t.Cleanup(func() { standaloneEnterpriseHookCheck = previousStandalone })
+	present := t.TempDir()
+	missing := filepath.Join(t.TempDir(), ".defenseclaw")
+	for _, tc := range []struct {
+		name       string
+		standalone bool
+		home       string
+		err        error
+		want       string
+	}{
+		{"missing folder", true, missing, fmt.Errorf("load bundle: %w", os.ErrNotExist), "enterprise_managed_runtime_home_missing"},
+		{"folder present", true, present, fmt.Errorf("load bundle: %w", os.ErrNotExist), "enterprise_managed_runtime_state_invalid"},
+		{"other failure, folder missing", true, missing, errors.New("selector entry unreadable"), "enterprise_managed_runtime_home_missing"},
+		{"other failure, folder present", true, present, errors.New("bundle hash mismatch"), "enterprise_managed_runtime_state_invalid"},
+		{"Secure Client", false, missing, fmt.Errorf("load bundle: %w", os.ErrNotExist), "enterprise_managed_runtime_state_invalid"},
+	} {
+		standalone := tc.standalone
+		standaloneEnterpriseHookCheck = func(string) bool { return standalone }
+		home, failure := tc.home, tc.err
+		stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+			return enterprisehooks.WindowsManagedHookRuntime{Connector: "claudecode", PolicyActive: true, DataDir: home}, failure
+		})
+		if prepareEnterpriseManagedHookRuntime("claudecode") {
+			t.Fatalf("%s: a failed runtime was treated as a no-op", tc.name)
+		}
+		opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
+		if opts.ManagedRuntimeFailure != tc.want || opts.FailMode != "closed" {
+			t.Fatalf("%s: runtime failure %q fail mode %q, want %q closed", tc.name, opts.ManagedRuntimeFailure, opts.FailMode, tc.want)
+		}
 	}
 }
 
@@ -377,8 +443,12 @@ func TestRecognizedPerUserLauncherWithCachedManagedArgsNoopsAfterTombstone(t *te
 		nativeHookRuntimeSnapshot.Unlock()
 	})
 
-	if !enterpriseManagedHookRuntimeNoop("codex") {
+	if !prepareEnterpriseManagedHookRuntime("codex") {
 		t.Fatal("recognized per-user launcher with clean absent policy plus trusted disabled state did not no-op")
+	}
+	_, err := exchangeForeignHookSession("codex", "PreToolUse", time.Now(), time.Now().Add(time.Second), enterprisepolicy.SessionExchange{})
+	if err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("foreign session exchange with a retired launcher = %v, want an error", err)
 	}
 }
 
@@ -412,7 +482,7 @@ func TestRetainedActiveRuntimeFailsAsUnregisteredBeforeGatewayLookup(t *testing.
 		nativeHookRuntimeSnapshot.Unlock()
 	})
 
-	if enterpriseManagedHookRuntimeNoop("claudecode") {
+	if prepareEnterpriseManagedHookRuntime("claudecode") {
 		t.Fatal("de-enrolled active runtime was incorrectly treated as a no-op")
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
@@ -459,7 +529,7 @@ func TestEnterpriseProgramFilesCommandDoesNotClaimPerUserTombstoneNoop(t *testin
 		nativeHookRuntimeSnapshot.Unlock()
 	})
 
-	if enterpriseManagedHookRuntimeNoop("codex") {
+	if prepareEnterpriseManagedHookRuntime("codex") {
 		t.Fatal("managed-enterprise Program Files command incorrectly inherited the per-user tombstone no-op")
 	}
 }
@@ -472,7 +542,7 @@ func TestCodexManagedActiveMissingStateFailsClosed(t *testing.T) {
 			PolicyActive: true,
 		}, errors.New("active Codex machine requirements are missing protected managed runtime state")
 	})
-	if enterpriseManagedHookRuntimeNoop("codex") {
+	if prepareEnterpriseManagedHookRuntime("codex") {
 		t.Fatal("active Codex policy with missing state was incorrectly treated as a no-op")
 	}
 	opts := buildHookOptionsForRuntime("codex", "BeforeAgent", "", "open", true)

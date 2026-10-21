@@ -101,6 +101,9 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 			run.Rows = append(run.Rows, row)
 		}
 		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
+		if reason := enterpriseHookTargetNoHomeReason(err); reason != "" {
+			pendingReason, err = reason, nil
+		}
 		if err != nil {
 			fail(err)
 			continue
@@ -159,6 +162,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 			ManagedServiceUID:      serviceUID,
 			HookCredentialIdentity: identity,
 			ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
+			ManagedHookBinary:      standaloneManagedHookBinary(),
 		}
 		index := len(run.Rows)
 		run.Rows = append(run.Rows, row)

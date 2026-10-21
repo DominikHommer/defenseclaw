@@ -23,16 +23,17 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
 
 from defenseclaw import ux
-from defenseclaw.config import config_path, legacy_standalone_configured
+from defenseclaw.config import config_path
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed
-from defenseclaw.scanner_binary import resolve_scanner_binary
+from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
 
 # ---------------------------------------------------------------------------
 # Color conventions for `defenseclaw status`
@@ -74,21 +75,22 @@ _STANDALONE_ENTERPRISE_PROFILE = "standalone"
 def _enterprise_profile(cfg) -> str:
     """Return the managed_enterprise profile, or "" for unmanaged installs.
 
-    Mirrors internal/managed/profile.go: the service pin wins, then the
-    config's ``enterprise.profile``, then the per-OS default (standalone on
-    Linux, secure_client elsewhere). Read-only; never raises.
+    Mirrors internal/managed/profile.go: the service pin, then the config's
+    ``enterprise.profile``, then the per-OS default (standalone on Linux,
+    secure_client elsewhere). A pin that contradicts the declared profile is
+    ignored, as Go's StandaloneManagedSource does, so a user-set environment
+    variable cannot reclassify the host. Read-only; never raises.
     """
     if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
         return ""
     pinned = os.environ.get("DEFENSECLAW_ENTERPRISE_PROFILE", "").strip().lower()
-    if pinned:
-        return pinned
     configured = ""
     try:
         import yaml
 
-        with open(config_path()) as handle:
-            raw = yaml.safe_load(handle) or {}
+        from defenseclaw.config import read_config_text
+
+        raw = yaml.safe_load(read_config_text(config_path())) or {}
         enterprise = raw.get("enterprise") if isinstance(raw, dict) else None
         if isinstance(enterprise, dict):
             configured = str(enterprise.get("profile") or "").strip().lower()
@@ -96,6 +98,8 @@ def _enterprise_profile(cfg) -> str:
         configured = ""
     except Exception:  # noqa: BLE001 - status must never fail on a malformed config
         configured = ""
+    if pinned and (not configured or pinned == configured):
+        return pinned
     if configured:
         return configured
     return _default_enterprise_profile()
@@ -288,6 +292,50 @@ def _echo_wrapped(text: str, hang: int) -> None:
     ux.echo(line)
 
 
+def _print_moved_audit_store(db_path: str) -> None:
+    """Say when the gateway moved a corrupt audit store aside, with the
+    copy-first recovery hint, as ``defenseclaw-gateway status`` and doctor do.
+    Otherwise status showed the new, empty store as if nothing had happened
+    (rel-1-0-3:GAP-0105)."""
+    from defenseclaw.commands.cmd_doctor import (
+        _archive_recovery_hint,
+        _archived_sidecars,
+        _is_pre_1_0_archive,
+        _moved_aside_audit_stores,
+        _moved_store_block_allow_summary,
+        _reported_moved_stores,
+    )
+
+    moved = _reported_moved_stores(_moved_aside_audit_stores(db_path))
+    if not moved:
+        return
+    newest = moved[-1]
+    stamp = newest.name[len(Path(db_path).name + ".corrupt-") :][:16]
+    try:
+        when = datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).astimezone()
+        on = f" on {when.isoformat(timespec='seconds')}"
+    except ValueError:
+        on = ""
+    ux.echo()
+    if _is_pre_1_0_archive(newest):
+        ux.ok(
+            f"The audit store DefenseClaw 0.x wrote could not be upgraded and is kept as an archive in "
+            f"{newest}{_archived_sidecars(newest)}{on}; 1.0 starts a new audit history after a 0.x upgrade in "
+            "any case, and block/allow lists live in config.yaml, so they are not affected."
+        )
+        delete = "Delete the archive and its -wal, -shm and -journal files when you no longer need them."
+    else:
+        ux.warn(
+            f"The audit store was corrupt and was moved to {newest}{_archived_sidecars(newest)}{on} by the "
+            f"gateway, which {_moved_store_block_allow_summary(newest)}"
+        )
+        delete = "Delete the moved file and its -wal, -shm and -journal files when they are no longer needed."
+    if shutil.which("sqlite3") is None:
+        ux.subhead("sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html")
+    ux.subhead(_archive_recovery_hint(newest))
+    ux.subhead(delete)
+
+
 @click.command()
 @click.option(
     "--json",
@@ -354,26 +402,21 @@ def status(app: AppContext, as_json: bool) -> None:
     _status_row("Scope", _connector_scope_text(cfg))
     ux.echo()
 
-    # Sandbox. The legacy openshell-sandbox mode was removed; a host that
-    # still carries its config is pointed at the cleanup command.
-    if legacy_standalone_configured(cfg):
-        _status_row(
-            "Sandbox",
-            ux._style("legacy install detected", fg="yellow")
-            + ux.dim(" (run: defenseclaw sandbox legacy-cleanup)"),
-        )
+    if _host_is_windows():
+        # The platform wins over openshell.enabled, which a team config can
+        # carry from Linux or macOS (GAP-0246).
+        note = " (openshell.enabled has no effect here)" if _sandboxes_enabled(cfg) else ""
+        _status_row("Sandbox", ux.dim("not supported on Windows" + note))
     elif _sandboxes_enabled(cfg):
         _status_row("Sandbox", ux._style("on", fg="green") + ux.dim(" (details: defenseclaw sandbox status)"))
-    elif _host_is_windows():
-        _status_row("Sandbox", ux.dim("not supported on Windows"))
     else:
         _status_row("Sandbox", ux.dim("off (set up with: defenseclaw sandbox setup)"))
 
     # Scanners
     ux.section("Scanners")
     scanner_bins = [
-        ("skill-scanner", cfg.scanners.skill_scanner.binary),
-        ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
+        ("skill-scanner", SKILL_SCANNER_BINARY),
+        ("mcp-scanner", MCP_SCANNER_BINARY),
         ("codeguard", "built-in"),
     ]
     for name, binary in scanner_bins:
@@ -384,10 +427,10 @@ def status(app: AppContext, as_json: bool) -> None:
         else:
             ux.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('not found', fg='yellow')}")
 
-    # N3: surface the active policy's scanner action overrides (data.json).
-    # Only `policy show` exposed these before, so `status` was blind to a
-    # policy that, say, downgrades a scanner surface to warn/allow. Empty for a
-    # policy that declares none, so the common case renders nothing.
+    # N3: surface the admission actions config.yaml sets for an asset type
+    # (admission.<type>.actions) when they differ from the built-in policy, so
+    # `status` shows a type that, say, downgrades a severity to warn/allow.
+    # Empty when config.yaml sets none, so the common case renders nothing.
     overrides_summary = _scanner_overrides_summary(cfg)
     if overrides_summary:
         _echo_wrapped(f"    {ux.bold('overrides'.ljust(16))}{ux.dim(overrides_summary)}", 20)
@@ -404,7 +447,7 @@ def status(app: AppContext, as_json: bool) -> None:
         # exit-0 (it is an informational command parsed by the TUI/scripts and
         # should not hard-fail on a transient DB read); the error is visible.
         try:
-            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS)
+            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS, cfg=app.cfg)
         except Exception as exc:  # noqa: BLE001 — surface the error, don't hide it
             counts = None
             db_error = str(exc)
@@ -435,6 +478,8 @@ def status(app: AppContext, as_json: bool) -> None:
         else:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
 
+    _print_moved_audit_store(str(getattr(cfg, "audit_db", "") or ""))
+
     # Canonical v8 collection, routing, redaction, and destination status.
     _print_observability_status(cfg, config_has_problems=bool(config_problems))
 
@@ -455,8 +500,17 @@ def status(app: AppContext, as_json: bool) -> None:
     # live counters from its identity-bound status snapshot). The same code
     # path drives a single-connector install (one row) and a fan-out install
     # (N rows), so the output never branches on connector count.
-    health = _fetch_runtime_bound_health(client, cfg)
-    if health is not None:
+    # Secure Client has historically reported its live accepted state even
+    # when a later on-disk edit is invalid.
+    skip_live_health = bool(config_problems) and profile != "secure_client"
+    health = None if skip_live_health else _fetch_runtime_bound_health(client, cfg)
+    if skip_live_health:
+        _status_row(
+            "Sidecar",
+            ux._style("not checked while config.yaml is invalid; run defenseclaw config validate", fg="yellow"),
+        )
+        _print_agents(cfg, sidecar_down=True)
+    elif health is not None:
         from defenseclaw.commands.cmd_doctor import _gateway_runs_replaced_binary
 
         if _gateway_runs_replaced_binary(cfg):
@@ -469,12 +523,16 @@ def status(app: AppContext, as_json: bool) -> None:
                 "Sidecar",
                 ux._style("running", fg="green") + ux.dim(_sidecar_running_detail(health, bind, cfg.gateway.api_port)),
             )
+        _print_policy(health)
         _print_audit_log_health(cfg, health)
+        _print_agent_identity_ledger(health)
         _print_agents(cfg, health=health)
+        _print_guardrail_profile(cfg)
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health)
         _print_hook_guardian(cfg)
+        _print_fleet_health(cfg, client)
         hint(
             "Dashboard:     defenseclaw alerts",
             "Health check:  defenseclaw doctor",
@@ -516,6 +574,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
+        _print_fleet_health(cfg, client)
         if holder:
             first_hint = (
                 "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
@@ -545,7 +604,7 @@ def _live_gateway_pid(cfg) -> int:
 
 def _format_uptime(ms: object) -> str:
     """``3725000`` → ``1h 2m``; empty for a missing or bad value."""
-    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or ms < 0:
+    if isinstance(ms, bool) or not isinstance(ms, int | float) or ms < 0:
         return ""
     minutes = int(ms // 60000)
     days, rem = divmod(minutes, 1440)
@@ -627,6 +686,18 @@ def _connector_scope_text(cfg) -> str:
     return "global user config"
 
 
+def _print_guardrail_profile(cfg) -> None:
+    """The guardrail profile that decides for this account, when any are set."""
+    from defenseclaw.commands.cmd_guardrail import profile_status_text
+    from defenseclaw.gateway import current_user_guardrail_profile
+
+    result = current_user_guardrail_profile(cfg)
+    if result is not None:
+        _status_row("Profile", profile_status_text(cfg, result))
+        for note in result.get("warnings") or []:
+            ux.warn(str(note))
+
+
 def _guardrail_turned_off(gc) -> bool:
     """Whether ``guardrail.enabled`` is explicitly false in the config."""
     return getattr(gc, "enabled", True) is False
@@ -685,6 +756,7 @@ def _print_agents(
         return
 
     gc = getattr(cfg, "guardrail", None)
+    agent_missing = {c for c in actives if _agent_missing(cfg, c)}
     # ``guardrail.enabled: false`` (``setup guardrail --disable``, or the
     # default ``uninstall``) makes the gateway tear every hook connector
     # down, so none of them enforces (GAP-1312). The OpenClaw row reports the
@@ -709,7 +781,13 @@ def _print_agents(
     disabled_count = len(actives) - enabled_count
     # GAP-1937: a connector whose setup failed at gateway start is not
     # enforced; count it the way `defenseclaw-gateway status` does.
-    not_running_count = sum(1 for c in actives if _is_enabled(c) and c not in health_map and c in not_started)
+    not_running_count = sum(
+        1 for c in actives if _is_enabled(c) and (
+            c == "claudecode" and not shutil.which("claude")
+            or c in agent_missing
+            or c not in health_map and c in not_started
+        )
+    )
     header = f"{enabled_count - not_running_count} active"
     if not_running_count:
         header += f", {not_running_count} not running"
@@ -745,7 +823,8 @@ def _print_agents(
         source = roster.get(conn, {}).get("source", "manual")
         mode = _effective_status_mode(cfg, conn, source)
         fail_mode = _effective_status_fail_mode(cfg, conn)
-        fail_mode_suffix = f" fail-mode={fail_mode['effective']} provenance={fail_mode['provenance']}"
+        fail_mode_note = f" ({fail_mode['note']})" if fail_mode.get("note") else ""
+        fail_mode_suffix = f" fail-mode={fail_mode['effective']}{fail_mode_note} provenance={fail_mode['provenance']}"
         friendly = _friendly_connector_name(conn)
         disclosure = _cursor_priority_conflict_disclosure(conn)
         disclosure_suffix = f" {disclosure}" if disclosure else ""
@@ -763,7 +842,11 @@ def _print_agents(
         if hc:
             runtime_detail = ""
             runtime_state = str(hc.get("state") or "")
-            if conn == "opencode":
+            if conn in agent_missing:
+                # The gateway registers a staged connector, but no agent
+                # runs its hooks (GAP-0513).
+                runtime_state, runtime_detail = "off", _agent_missing_detail(conn)
+            elif conn == "opencode":
                 runtime_state, runtime_detail = _opencode_runtime_truth(
                     hc,
                     gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
@@ -775,6 +858,8 @@ def _print_agents(
                 # The gateway does not dial an OpenClaw gateway that is only
                 # the claw.mode default and is not installed (#958).
                 runtime_state, runtime_detail = "off", "OpenClaw is not installed"
+            elif conn == "claudecode" and not shutil.which("claude"):
+                runtime_state, runtime_detail = "off", "Claude Code is not detected on PATH"
             suffix = _connector_state_verb(runtime_state)
             if runtime_detail:
                 suffix += ux.dim(f" ({runtime_detail})")
@@ -789,7 +874,10 @@ def _print_agents(
             dim_text = ux.dim(
                 f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}{disclosure_suffix}"
             )
-            if conn == "opencode" and not sidecar_down:
+            if conn in agent_missing:
+                suffix = _connector_state_verb("off") + ux.dim(f" ({_agent_missing_detail(conn)})")
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
+            elif conn == "opencode" and not sidecar_down:
                 # With the sidecar stopped the header already says no
                 # connector is enforced; tag none of them (GAP-1871).
                 runtime_state, runtime_detail = _opencode_runtime_truth(
@@ -803,6 +891,9 @@ def _print_agents(
             elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
                 suffix = _connector_state_verb("off") + ux.dim(" (OpenClaw is not installed)")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
+            elif conn == "claudecode" and not shutil.which("claude"):
+                suffix = _connector_state_verb("off") + ux.dim(" (Claude Code is not detected on PATH)")
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn.strip().lower() in not_started:
                 # Setup failed when the gateway started (GAP-1714).
                 suffix = _connector_state_verb("not running") + ux.dim(
@@ -814,20 +905,6 @@ def _print_agents(
                 # A drifted or removed hook registration shows with the
                 # gateway stopped too (GAP-1230).
                 _echo_wrapped(f"                {dim_text}{_hook_runtime_degraded_suffix(cfg, conn)}", 18)
-
-
-def _canonical_data_dir(value) -> str | None:
-    """Return the platform-canonical absolute form of a configured data dir."""
-    try:
-        raw = os.fspath(value)
-    except TypeError:
-        return None
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        return os.path.normcase(os.path.abspath(os.path.normpath(raw)))
-    except (OSError, ValueError):
-        return None
 
 
 def _fetch_runtime_bound_health(client, cfg) -> dict | None:
@@ -871,8 +948,46 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
     health = document.get("health")
     if not isinstance(health, dict):
         return None
+    policy = document.get("policy")
+    if isinstance(policy, dict):
+        # The effective policy the gateway applied, for the Policy row.
+        health = {**health, "policy": policy}
     # The verified runtime PID, for the Sidecar row (GAP-1789).
     return {**health, "pid": trust.pid} if "pid" not in health else health
+
+
+def _policy_status(health: dict | None) -> dict | None:
+    """The applied effective policy from /status, or None when not reported."""
+    from defenseclaw.gateway import policy_reload_rejection
+
+    policy = (health or {}).get("policy")
+    if not isinstance(policy, dict) or not policy.get("effective_digest"):
+        return None
+    return {
+        "effective_digest": policy.get("effective_digest"),
+        "generation": policy.get("generation"),
+        "config_generation": policy.get("config_generation"),
+        "last_reload_error": policy_reload_rejection(policy),
+        "opa_unavailable": policy.get("opa_unavailable") or "",
+    }
+
+
+def _print_policy(health: dict | None) -> None:
+    policy = _policy_status(health)
+    if policy is None:
+        return
+    digest = str(policy["effective_digest"])
+    short = digest[: len("sha256:") + 12] if digest.startswith("sha256:") else digest
+    value = f"generation {policy['generation']}, {short}"
+    if policy["last_reload_error"]:
+        _status_row("Policy", ux._style(f"{value}; the last change was rejected (see defenseclaw doctor)", fg="yellow"))
+        return
+    if policy["opa_unavailable"]:
+        # Applied without the Rego modules, not rejected (GAP-1033).
+        note = "the Rego modules did not load, config.yaml decides (see defenseclaw doctor)"
+        _status_row("Policy", ux._style(f"{value}; {note}", fg="yellow"))
+        return
+    _status_row("Policy", value)
 
 
 def _fetch_health_connectors(
@@ -953,18 +1068,17 @@ def _effective_status_fail_mode(cfg, connector: str) -> dict:
 def _hook_runtime_degraded_suffix(cfg, connector: str) -> str:
     """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)."""
     try:
-        from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, setup_command
+        from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, repair_command
 
         problems = hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""
     if not problems:
         return ""
-    return (
-        " — "
-        + ux._style("DEGRADED", fg="red", bold=True)
-        + ux.dim(f" ({problems[0]}; run `{setup_command(connector)}`)")
-    )
+    step = repair_command(connector, problems[0])
+    if not (step.startswith("run ") or getattr(problems[0], "repair", "")):
+        step = f"run `{step}`"
+    return " — " + ux._style("DEGRADED", fg="red", bold=True) + ux.dim(f" ({problems[0]}; {step})")
 
 
 def _connectors_not_started(health: dict | None) -> set[str]:
@@ -975,6 +1089,32 @@ def _connectors_not_started(health: dict | None) -> set[str]:
     if not isinstance(names, list):
         return set()
     return {name.strip().lower() for name in names if isinstance(name, str) and name.strip()}
+
+
+def _agent_missing(cfg, connector: str) -> bool:
+    """Whether the connector's agent is not installed (GAP-0513).
+
+    The rule of doctor's Connector compatibility row
+    (``doctor_health.connector_agent_missing``), so a connector setup staged
+    for an agent that is not installed is not shown RUNNING or counted
+    active while doctor fails it. Claude Code and OpenClaw keep their own
+    checks (the ``claude`` executable on PATH, the OpenClaw install).
+    """
+    if connector in ("claudecode", "openclaw"):
+        return False
+    try:
+        from defenseclaw.doctor_health import connector_agent_missing
+
+        return connector_agent_missing(str(getattr(cfg, "data_dir", "") or ""), connector)
+    except Exception:  # noqa: BLE001 - status must survive incomplete evidence.
+        return False
+
+
+def _agent_missing_detail(connector: str) -> str:
+    return (
+        f"{_friendly_connector_name(connector)} is not installed, so nothing runs the hooks setup staged; "
+        "install it, then run: defenseclaw agent discover --refresh"
+    )
 
 
 def _connector_state_verb(state: str) -> str:
@@ -1066,7 +1206,7 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
         for row in discovered[:8]:
             conn = str(row.get("connector") or "").strip()
             conf = row.get("confidence")
-            conf_text = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "?"
+            conf_text = f"{float(conf):.2f}" if isinstance(conf, int | float) else "?"
             state_text = str(row.get("state") or "active")
             ux.echo(
                 f"                  {_friendly_connector_name(conn)} ({conn}) — "
@@ -1208,6 +1348,16 @@ def _print_audit_log_health(cfg, health: dict | None) -> None:
         _status_row("Audit log", ux._style(value[0].upper() + value[1:], fg="yellow"))
 
 
+def _print_agent_identity_ledger(health: dict | None) -> None:
+    """Warn when the gateway cannot save agent identities (GAP-0393)."""
+    from defenseclaw.commands.cmd_doctor import agent_identity_ledger_failure
+
+    value = agent_identity_ledger_failure(health)
+    if value:
+        value = value[0].upper() + value[1:] + "; run 'defenseclaw doctor'"
+        _status_row("Agent identities", ux._style(value, fg="yellow"))
+
+
 def _gateway_audit_write_failure(health: dict | None) -> str:
     """The gateway's own report that audit writes fail, in plain words, or "".
 
@@ -1258,6 +1408,14 @@ def _print_llm_judge(health: dict | None) -> None:
     state = str(details.get("judge_state"))
     total = details.get("judge_recent_calls", 0)
     failed = details.get("judge_failed_calls", 0)
+    if state == "unavailable":
+        # The enabled judge could not start (GAP-0383).
+        reason = str(details.get("judge_unavailable_reason") or "it could not start").strip()
+        _status_row(
+            "LLM judge",
+            ux._style(f"not running: {reason}; only the rules decide; run defenseclaw doctor", fg="yellow"),
+        )
+        return
     if state == "ok":
         _status_row("LLM judge", ux._style(f"working (last {total} call(s) completed)", fg="green"))
         return
@@ -1467,39 +1625,37 @@ def _print_native_delivery_status(summary, *, configured: set[str] | None = None
 
 
 def _scanner_overrides_summary(cfg) -> str:
-    """One-line summary of the active policy's scanner action overrides (N3).
-
-    Reads the active policy's synced ``data.json`` (the same file ``policy
-    show`` reads) and formats its ``scanner_overrides`` block, e.g.
-    ``mcp: MEDIUM install=block, file=quarantine | plugin: HIGH ...``. Returns
-    ``""`` when the policy declares none or the file is unreadable, so default
-    installs and missing-policy installs render nothing.
-    """
+    """Summarize v9 admission actions or Secure Client v8 scanner overrides."""
     try:
-        from defenseclaw.enforce.admission import _read_policy_data
+        from defenseclaw.enforce import asset_lists
         from defenseclaw.tui.services.overview_state import (
+            admission_action_overrides,
             format_scanner_overrides_summary,
         )
 
-        data = _read_policy_data(getattr(cfg, "policy_dir", "") or "")
+        if asset_lists.is_secure_client(cfg):
+            from defenseclaw.enforce.admission import _read_policy_data
+
+            data = _read_policy_data(getattr(cfg, "policy_dir", "") or "")
+            if not isinstance(data, dict):
+                return ""
+            flat: list[tuple[str, str, str, str]] = []
+            overrides = data.get("scanner_overrides", {})
+            if isinstance(overrides, dict):
+                for scanner_type, sevs in overrides.items():
+                    if not isinstance(sevs, dict):
+                        continue
+                    for severity, surface_actions in sevs.items():
+                        if not isinstance(surface_actions, dict):
+                            continue
+                        for surface in ("install", "file", "runtime"):
+                            action = surface_actions.get(surface)
+                            if action:
+                                flat.append((str(scanner_type), str(severity), surface, str(action)))
+            return format_scanner_overrides_summary(tuple(flat))
+        return format_scanner_overrides_summary(admission_action_overrides(cfg))
     except Exception:  # noqa: BLE001 — the override line is purely informational.
         return ""
-    if not isinstance(data, dict):
-        return ""
-    overrides = data.get("scanner_overrides", {})
-    flat: list[tuple[str, str, str, str]] = []
-    if isinstance(overrides, dict):
-        for scanner_type, sevs in overrides.items():
-            if not isinstance(sevs, dict):
-                continue
-            for severity, surface_actions in sevs.items():
-                if not isinstance(surface_actions, dict):
-                    continue
-                for surface in ("install", "file", "runtime"):
-                    action = surface_actions.get(surface)
-                    if action:
-                        flat.append((str(scanner_type), str(severity), surface, str(action)))
-    return format_scanner_overrides_summary(tuple(flat))
 
 
 def _scanner_status_map(cfg) -> dict[str, str]:
@@ -1507,8 +1663,8 @@ def _scanner_status_map(cfg) -> dict[str, str]:
     section): ``installed`` / ``not_found`` / ``built-in``."""
     out: dict[str, str] = {}
     for name, binary in (
-        ("skill-scanner", cfg.scanners.skill_scanner.binary),
-        ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
+        ("skill-scanner", SKILL_SCANNER_BINARY),
+        ("mcp-scanner", MCP_SCANNER_BINARY),
         ("codeguard", "built-in"),
     ):
         if binary == "built-in":
@@ -1594,7 +1750,18 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             },
         )
     health_map = _fetch_health_connectors(health=health)
-    if "opencode" in rows:
+    for name, row in rows.items():
+        # The text roster already uses this authenticated runtime state. Keep
+        # the JSON projection in agreement, including manual hook connectors.
+        if row.get("enabled") and name in health_map and health_map[name].get("state"):
+            row["state"] = health_map[name]["state"]
+        elif not row.get("enabled"):
+            row["state"] = "disabled"
+        if row.get("enabled") and _agent_missing(cfg, name):
+            # As the text output: not running while doctor fails it (GAP-0513).
+            row["state"] = "off"
+            row["runtime_detail"] = _agent_missing_detail(name)
+    if "opencode" in rows and rows["opencode"].get("enabled") and "runtime_detail" not in rows["opencode"]:
         runtime_state, runtime_detail = _opencode_runtime_truth(
             health_map.get("opencode"),
             gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
@@ -1602,7 +1769,11 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
         rows["opencode"]["state"] = runtime_state
         rows["opencode"]["runtime_detail"] = runtime_detail
-    if "omnigent" in rows and (omnigent_health := health_map.get("omnigent")) is not None:
+    if (
+        "omnigent" in rows
+        and rows["omnigent"].get("enabled")
+        and (omnigent_health := health_map.get("omnigent")) is not None
+    ):
         runtime_state, readiness_detail = _omnigent_effective_runtime_state(
             cfg,
             str(omnigent_health.get("state") or ""),
@@ -1612,6 +1783,18 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             rows["omnigent"]["readiness_detail"] = readiness_detail
     cursor = rows.get("cursor")
     if cursor is not None:
+        if cursor.get("enabled") and cursor.get("state") == "running":
+            lock_path = Path(str(getattr(cfg, "data_dir", "") or ""), "hook_contract_lock.json")
+            try:
+                if lock_path.stat().st_size <= 4 << 20:
+                    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+                    entry = (lock.get("connectors") or {}).get("cursor")
+                    if isinstance(entry, dict) and entry.get("contract_id"):
+                        version = entry.get("raw_agent_version")
+                        if isinstance(version, str) and version.strip():
+                            cursor["agent_version"] = version.strip()
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         cursor["priority_conflict_detection"] = {
             "status": "unavailable",
             "conflict_inferred": False,
@@ -1645,7 +1828,6 @@ def _status_payload(app) -> dict:
             "sandbox": {
                 "available": False,
                 "enabled": _sandboxes_enabled(cfg),
-                "legacy_standalone": legacy_standalone_configured(cfg),
             },
             "scanners": _scanner_status_map(cfg),
         }
@@ -1653,7 +1835,7 @@ def _status_payload(app) -> dict:
 
     if app.store:
         try:
-            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS)
+            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS, cfg=app.cfg)
         except Exception as exc:  # noqa: BLE001 — surface, don't hide (SU-05)
             payload["enforcement"] = None
             payload["activity"] = None
@@ -1673,27 +1855,123 @@ def _status_payload(app) -> dict:
         payload["enforcement"] = None
         payload["activity"] = None
 
-    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+    config_invalid = bool(getattr(app, "config_problems", None))
+    skip_live_health = config_invalid and profile != "secure_client"
+    health = None
+    client = None
+    if not skip_live_health:
+        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
-    bind = gateway_api_client_host(cfg)
-    try:
-        client = OrchestratorClient(
-            host=bind,
-            port=cfg.gateway.api_port,
-            token=cfg.gateway.resolved_token(),
-        )
-        health = _fetch_runtime_bound_health(client, cfg)
-    except Exception:
-        health = None
-    running = health is not None
-    payload["sidecar"] = {"running": running}
+        bind = gateway_api_client_host(cfg)
+        try:
+            client = OrchestratorClient(
+                host=bind,
+                port=cfg.gateway.api_port,
+                token=cfg.gateway.resolved_token(),
+            )
+            health = _fetch_runtime_bound_health(client, cfg)
+        except Exception:
+            health = None
+    if skip_live_health:
+        payload["sidecar"] = {"running": None, "reason": "not checked while config.yaml is invalid"}
+    else:
+        payload["sidecar"] = {"running": health is not None}
+    if (policy := _policy_status(health)) is not None:
+        payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)
     payload["application_protection"] = _application_protection_status(cfg, health=health)
     payload["semantic_routing"] = _semantic_routing_status(cfg, health=health)
     payload["hook_guardian"] = _hook_guardian_status(cfg)
+    payload["fleet"] = _fleet_health_payload(cfg, client)
     payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()
 
     return payload
+
+
+def _fleet_enabled(cfg) -> bool:
+    # Identity check, as _sandboxes_enabled: a stand-in config is not "on".
+    return getattr(getattr(cfg, "fleet", None), "enabled", False) is True
+
+
+def _fetch_fleet_health(cfg, client) -> dict | None:
+    """GET /api/v1/fleet/health from the gateway; None when unavailable.
+
+    Only a Fleet-enabled config asks: with Fleet off the route does not
+    exist, and a Fleet token sent in place of the gateway token made every
+    status call log an api-auth-failure row (DAMAGE-678 A7).
+    """
+    if client is None or not _fleet_enabled(cfg):
+        return None
+    import os
+
+    try:
+        # The Fleet bearer token, not the gateway token. Loading the config
+        # already merged the data dir's .env into the environment.
+        token_env = getattr(cfg.fleet, "api_token_env", "") or "DCLAW_FLEET_API_TOKEN"
+        fleet_token = os.environ.get(token_env, "").strip()
+        headers = {}
+        if fleet_token:
+            headers["Authorization"] = f"Bearer {fleet_token}"
+
+        resp = client._session.get(
+            f"{client.base_url}/api/v1/fleet/health",
+            timeout=client.timeout,
+            allow_redirects=False,
+            headers=headers,
+        )
+        if resp.status_code in (404, 503):
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            return None
+        # The fleet health endpoint returns {"fleet": {...}, "cache_hits": ..., ...}.
+        # Extract the nested "fleet" object which contains online/offline/total_devices.
+        return data.get("fleet") if "fleet" in data else data
+    except Exception:  # noqa: BLE001 - status is observational; fleet is optional
+        return None
+
+
+def _safe_int(val, default=0):
+    """Convert a value to int, returning *default* on failure."""
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _print_fleet_health(cfg, client) -> None:
+    """Render a Fleet row when Fleet is enabled; nothing otherwise."""
+    if not _fleet_enabled(cfg):
+        return
+    data = _fetch_fleet_health(cfg, client)
+    if data is None:
+        _status_row("Fleet", ux.dim("not configured"))
+        return
+    online = _safe_int(data.get("online", 0))
+    offline = _safe_int(data.get("offline", 0))
+    total = _safe_int(data.get("total_devices", online + offline))
+    if total == 0:
+        _status_row("Fleet", ux.dim("no devices registered"))
+        return
+    online_text = ux._style(f"{online} devices online", fg="green") if online else ux.dim("0 devices online")
+    offline_text = ux._style(f"{offline} offline", fg="yellow") if offline else ux.dim("0 offline")
+    _status_row("Fleet", f"{online_text}, {offline_text}")
+
+
+def _fleet_health_payload(cfg, client) -> dict:
+    """Fleet health as a JSON-friendly dict for ``status --json``."""
+    data = _fetch_fleet_health(cfg, client)
+    if data is None:
+        return {"available": False}
+    return {
+        "available": True,
+        "total_devices": _safe_int(data.get("total_devices", 0)),
+        "online": _safe_int(data.get("online", 0)),
+        "offline": _safe_int(data.get("offline", 0)),
+        "degraded": _safe_int(data.get("degraded", 0)),
+        "lockdown": _safe_int(data.get("lockdown", 0)),
+    }
 
 
 def _sandboxes_enabled(cfg) -> bool:

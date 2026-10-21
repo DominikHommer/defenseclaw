@@ -150,29 +150,60 @@ func (e *Env) linuxPortHolders(port int) []portHolder {
 	return holders
 }
 
+// darwinListenHosts are the lsof local addresses whose listener keeps the
+// gateway from binding 127.0.0.1 (as linuxListenAddrs): the address itself
+// and the wildcards.
+var darwinListenHosts = map[string]bool{"127.0.0.1": true, "*": true, "[::]": true, "[::ffff:127.0.0.1]": true}
+
 // darwinPortHolders asks lsof (as root it sees every process) for the
 // listeners on port.
 func (e *Env) darwinPortHolders(ctx context.Context, port int) []portHolder {
-	result, err := e.Runner.Run(ctx, "lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-Fpu")
+	result, err := e.Runner.Run(ctx, "lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-Fpun")
 	if err != nil && len(result.Stdout) == 0 {
 		return nil
 	}
-	var holders []portHolder
-	for _, line := range strings.Split(string(result.Stdout), "\n") {
+	return parseDarwinPortHolders(string(result.Stdout))
+}
+
+// parseDarwinPortHolders reads `lsof -Fpun`: a p (pid) line per process, its
+// u (uid), and an n (local address:port) line per listening socket. A
+// process listening only on other local addresses (a LAN address) does not
+// keep the gateway from binding 127.0.0.1, and the preflight refused it
+// (GAP-1491); a process lsof names no address for stays a holder.
+func parseDarwinPortHolders(output string) []portHolder {
+	type process struct {
+		holder             portHolder
+		names, conflicting int
+	}
+	var processes []*process
+	for _, line := range strings.Split(output, "\n") {
 		if len(line) < 2 {
-			continue
-		}
-		value, err := strconv.Atoi(line[1:])
-		if err != nil {
 			continue
 		}
 		switch line[0] {
 		case 'p':
-			holders = append(holders, portHolder{PID: value, UID: -1})
-		case 'u':
-			if len(holders) > 0 {
-				holders[len(holders)-1].UID = value
+			if pid, err := strconv.Atoi(line[1:]); err == nil {
+				processes = append(processes, &process{holder: portHolder{PID: pid, UID: -1}})
 			}
+		case 'u':
+			if uid, err := strconv.Atoi(line[1:]); err == nil && len(processes) > 0 {
+				processes[len(processes)-1].holder.UID = uid
+			}
+		case 'n':
+			if len(processes) == 0 {
+				continue
+			}
+			current := processes[len(processes)-1]
+			current.names++
+			if i := strings.LastIndexByte(line, ':'); i > 1 && darwinListenHosts[line[1:i]] {
+				current.conflicting++
+			}
+		}
+	}
+	var holders []portHolder
+	for _, p := range processes {
+		if p.names == 0 || p.conflicting > 0 {
+			holders = append(holders, p.holder)
 		}
 	}
 	return holders
@@ -216,4 +247,62 @@ func (l *lifecycle) portHeldProblem(ctx context.Context, serviceUID int, serving
 		message += "; the gateway serves hooks on its socket and keeps retrying the port"
 	}
 	return message + "; stop that process, then run `" + l.env.lifecycleCommand("repair") + "`"
+}
+
+// codeAPIPortHeld names a transaction refused before it changed anything
+// because another process listens on the gateway API port (GAP-0366).
+const codeAPIPortHeld = "api_port_held"
+
+// apiPortPreflight describes another process listening on the gateway API
+// port before a transaction changes anything, or "". A per-user gateway
+// still running from before the deployment is the usual holder: the socket
+// unit could not listen, so the install changed everything and then rolled
+// back with activation_failed.
+func (l *lifecycle) apiPortPreflight(ctx context.Context, record *Deployment) string {
+	env := l.env
+	if env.GOOS == "linux" && env.Services.Active(ctx, Unit{Name: unitAPISocket, Kind: "socket"}) {
+		// systemd listens on the port, so nothing else can.
+		return ""
+	}
+	serviceUID := -1
+	if record != nil {
+		serviceUID = record.ServiceUID
+	} else if account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser); err == nil && ok {
+		serviceUID = account.UID
+	}
+	foreign := l.foreignAPIPortHolders(ctx, serviceUID)
+	if len(foreign) == 0 {
+		return ""
+	}
+	perUser := map[int]bool{}
+	for _, process := range env.gatewayProcesses(ctx) {
+		perUser[process.PID] = true
+	}
+	var names, pids []string
+	perUserGateway := false
+	for _, holder := range foreign {
+		name := holder.String()
+		if holder.PID > 0 && perUser[holder.PID] {
+			name += ", a per-user DefenseClaw gateway"
+			perUserGateway = true
+		}
+		names = append(names, name)
+		if holder.PID > 0 {
+			pids = append(pids, strconv.Itoa(holder.PID))
+		}
+	}
+	message := fmt.Sprintf("the gateway API port %s is held by %s, so the managed gateway cannot listen on it; nothing was changed. ",
+		env.Layout.APIAddr, strings.Join(names, "; "))
+	stop := "Stop that process or move it to another port"
+	if len(pids) > 0 {
+		stop = "Stop it with `kill " + strings.Join(pids, " ") + "` or move it to another port"
+	}
+	if perUserGateway {
+		stop += ", and have that user remove the per-user install with `defenseclaw uninstall --binaries --yes`"
+	}
+	retry := "run this command again"
+	if l.opts.FromPackage {
+		retry = "run `" + env.lifecycleCommand(ActionEnsure) + " --from-package`"
+	}
+	return message + stop + ", then " + retry
 }

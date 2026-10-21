@@ -127,11 +127,12 @@ func (r *EventRouter) emitApprovalResolutionV8(
 		return eventRouterApprovalFailed
 	}
 	outcome := observability.OutcomeDenied
-	if observation.result == "approved" {
+	switch observation.result {
+	case "approved":
 		outcome = observability.OutcomeApproved
-	} else if observation.result == "cancelled" {
+	case "cancelled":
 		outcome = observability.OutcomeCancelled
-	} else if observation.result == "expired" {
+	case "expired":
 		outcome = observability.OutcomeTimedOut
 	}
 	input := observability.SpanApprovalResolveInput{
@@ -152,7 +153,7 @@ func (r *EventRouter) emitApprovalResolutionV8(
 		DefenseClawTurnID:                 hookModelV8OptionalID(observation.turnID),
 		UserID:                            hookModelV8OptionalID(observation.userID),
 		DefenseClawUserIDKind:             v8UserIDKind(observation.userIDKind),
-		DefenseClawUserName:               hookModelV8OptionalID(observation.userName),
+		DefenseClawUserName:               v8UserName(observation.userName, hookModelV8OptionalID),
 		GenAIConversationID:               hookModelV8OptionalID(observation.sessionID),
 		GenAIAgentID:                      hookModelV8OptionalID(observation.agentID),
 		GenAIAgentName:                    hookModelV8OptionalID(observation.agentName),
@@ -342,7 +343,7 @@ func (r *EventRouter) emitEventRouterApprovalLogV8(
 				DefenseClawOperationID: hookModelV8OptionalID(observation.operationID),
 				DefenseClawRunID:       hookModelV8OptionalID(observation.runID),
 				UserID:                 hookModelV8OptionalID(observation.userID), DefenseClawUserIDKind: v8UserIDKind(observation.userIDKind),
-				DefenseClawUserName: hookModelV8OptionalID(observation.userName),
+				DefenseClawUserName: v8UserName(observation.userName, hookModelV8OptionalID),
 				GenAIConversationID: hookModelV8OptionalID(observation.sessionID),
 				GenAIAgentID:        hookModelV8OptionalID(observation.agentID), GenAIAgentName: hookModelV8OptionalID(observation.agentName),
 				DefenseClawAgentType:              hookModelV8OptionalID(observation.agentType),
@@ -381,7 +382,7 @@ func (r *EventRouter) emitEventRouterApprovalLogV8(
 			DefenseClawOperationID: hookModelV8OptionalID(observation.operationID),
 			DefenseClawRunID:       hookModelV8OptionalID(observation.runID),
 			UserID:                 hookModelV8OptionalID(observation.userID), DefenseClawUserIDKind: v8UserIDKind(observation.userIDKind),
-			DefenseClawUserName: hookModelV8OptionalID(observation.userName),
+			DefenseClawUserName: v8UserName(observation.userName, hookModelV8OptionalID),
 			GenAIConversationID: hookModelV8OptionalID(observation.sessionID),
 			GenAIAgentID:        hookModelV8OptionalID(observation.agentID), GenAIAgentName: hookModelV8OptionalID(observation.agentName),
 			DefenseClawAgentType:              hookModelV8OptionalID(observation.agentType),

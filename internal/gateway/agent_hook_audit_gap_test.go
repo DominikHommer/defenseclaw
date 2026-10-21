@@ -19,18 +19,22 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 )
 
 // TestHookCorrelationSurvivesConcurrentSessionHooks pins that concurrent
@@ -103,14 +107,14 @@ func TestHookVerdictKeepsItsAuditRowWhenCorrelationFails(t *testing.T) {
 	resp := agentHookResponse{Action: "allow", RawAction: "allow", Mode: "action"}
 	unavailable := agentHookRequest{ConnectorName: "codex", HookEventName: "SubagentStart", SessionID: "s-1",
 		SuppressCorrelationEmit: true, CorrelationUnavailable: true}
-	if !api.finalizeAgentHook(context.Background(), "codex", unavailable, resp, nil, []byte(`{}`), time.Millisecond, false, nil) {
+	if !api.finalizeAgentHook(context.Background(), "codex", unavailable, resp, nil, []byte(`{}`), time.Millisecond, false, nil).AuditPersisted {
 		t.Fatal("the audit row of a verdict whose correlation failed was not persisted")
 	}
 	if n := rows(); n != 1 {
 		t.Fatalf("connector-hook rows = %d, want 1", n)
 	}
 	replay := agentHookRequest{ConnectorName: "codex", HookEventName: "SubagentStart", SessionID: "s-1", SuppressCorrelationEmit: true}
-	if api.finalizeAgentHook(context.Background(), "codex", replay, resp, nil, []byte(`{}`), time.Millisecond, false, nil) {
+	if api.finalizeAgentHook(context.Background(), "codex", replay, resp, nil, []byte(`{}`), time.Millisecond, false, nil).AuditPersisted {
 		t.Fatal("an exact replay was audited again")
 	}
 	if n := rows(); n != 1 {
@@ -195,5 +199,123 @@ func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
 	}
 	if audited != 2 {
 		t.Fatalf("connector-hook rows after the grace expired = %d, want 2", audited)
+	}
+}
+
+// GAP-0832: a hook call from an exempt_users account is visible in the audit
+// store: its hook_decision row says defenseclaw.user.enrollment exempt, and
+// an enterprise-exempt-user row is written once per account and connector
+// each ten minutes.
+func TestExemptUserCallsAreInTheAuditStore(t *testing.T) {
+	installCorrelationHMACForTest()
+	installDefaultProfileConnector(t, "claudecode")
+	fixture := newSidecarRuntimeFixture(t, true)
+	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := audit.NewLogger(fixture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints})
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
+	bindHookLifecycleV8(t, api, fixture.runtime)
+
+	peer := managedHookPeer{UID: 516, Name: "dcm-w3i1"}
+	now := time.Now()
+	ctx := withEnterpriseExemptUser(t.Context())
+	if !api.auditEnterpriseExemptUser(ctx, peer, "claudecode", "/api/v1/claudecode/hook", now) ||
+		api.auditEnterpriseExemptUser(ctx, peer, "claudecode", "/api/v1/claudecode/hook", now.Add(time.Minute)) ||
+		!api.auditEnterpriseExemptUser(ctx, peer, "claudecode", "/api/v1/claudecode/hook", now.Add(enterpriseExemptAuditInterval)) {
+		t.Fatal("enterprise-exempt-user rows must be written once per account and connector each interval")
+	}
+	body, err := json.Marshal(map[string]any{
+		"hook_event_name": "PreToolUse", "session_id": "s-exempt", "cwd": t.TempDir(),
+		"tool_name": "Bash", "tool_use_id": "toolu-exempt", "tool_input": map[string]any{"command": "ls"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)).WithContext(ctx)
+	api.handleAgentHook("claudecode").ServeHTTP(httptest.NewRecorder(), request)
+
+	events, err := fixture.store.ListEvents(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exempt := 0
+	for _, ev := range events {
+		if ev.Action == string(audit.ActionEnterpriseExemptUser) {
+			exempt++
+		}
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var raw string
+	if err := database.QueryRow(`SELECT projected_record_json FROM audit_events WHERE event_name = 'hook_decision' ORDER BY rowid DESC LIMIT 1`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if exempt != 2 || !strings.Contains(raw, "defenseclaw.user.enrollment") || !strings.Contains(raw, `"exempt"`) {
+		t.Fatalf("enterprise-exempt-user rows = %d (want 2); hook_decision = %s", exempt, raw)
+	}
+}
+
+// countingLifecycleHistory counts the lifecycle history reads of the hook path.
+type countingLifecycleHistory struct {
+	*observabilityruntime.Runtime
+	reads atomic.Int64
+}
+
+func (history *countingLifecycleHistory) LatestLifecycleProjection(
+	ctx context.Context,
+	query audit.LifecycleProjectionQuery,
+) (audit.LifecycleProjection, bool, error) {
+	history.reads.Add(1)
+	return history.Runtime.LatestLifecycleProjection(ctx, query)
+}
+
+// GAP-0186: under a 10/s flood of one Claude Code session the hook latency
+// grew with the session until every call ran past the hook's deadline. Each
+// hook read the session's lifecycle history from the audit store, a query over
+// every audit row of the session. The hook path reads it once per session.
+func TestHookPathReadsLifecycleHistoryOncePerSession(t *testing.T) {
+	installCorrelationHMACForTest()
+	installDefaultProfileConnector(t, "claudecode")
+	fixture := newSidecarRuntimeFixture(t, true)
+	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := audit.NewLogger(fixture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints})
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
+	history := &countingLifecycleHistory{Runtime: fixture.runtime}
+	bindHookLifecycleV8(t, api, history)
+	cwd := t.TempDir()
+	const hooks = 40
+	for i := range hooks {
+		body, err := json.Marshal(map[string]any{
+			"hook_event_name": "PreToolUse", "session_id": "s-one-long-session", "cwd": cwd,
+			"tool_name": "Bash", "tool_use_id": fmt.Sprintf("toolu-%d", i), "tool_input": map[string]any{"command": "echo ok"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := httptest.NewRecorder()
+		api.handleAgentHook("claudecode").ServeHTTP(recorder,
+			httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("hook %d: status %d: %s", i, recorder.Code, recorder.Body.String())
+		}
+	}
+	if reads := history.reads.Load(); reads != 1 {
+		t.Fatalf("lifecycle history reads for %d hooks of one session = %d, want 1", hooks, reads)
 	}
 }

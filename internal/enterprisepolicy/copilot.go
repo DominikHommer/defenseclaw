@@ -58,12 +58,16 @@ func copilotHandler(opts Options, event string, timeout int) *object {
 		// Copilot evaluates the powershell field itself. The awaited
 		// statements keep the GUI-subsystem hook synchronous and return its
 		// exit code, also when the hook exits at once.
+		// The guard keeps a registration Copilot still holds after
+		// uninstall inert (connector.CopilotRemovedDeploymentGuardPowerShell).
 		handler.set("powershell", strings.Join(append([]string{
 			"$ErrorActionPreference='Stop'",
 			"$env:NoDefaultCurrentDirectoryInExePath='1'",
+			connector.CopilotRemovedDeploymentGuardPowerShell(opts.HookBinary),
 		}, connector.WindowsAwaitedHookStatements(opts.HookBinary, args)...), "; "))
 	} else {
-		handler.set("bash", shellQuote(opts.HookBinary)+" hook --connector copilot --enterprise-managed --event "+shellQuote(event))
+		handler.set("bash", connector.CopilotRemovedDeploymentGuardPOSIX(opts.HookBinary)+
+			shellQuote(opts.HookBinary)+" hook --connector copilot --enterprise-managed --event "+shellQuote(event))
 	}
 	handler.set("timeoutSec", json.Number(fmt.Sprint(timeout)))
 	return handler
@@ -94,7 +98,42 @@ func copilotHandlerIsOwned(opts Options, raw any) bool {
 		return strings.Contains(command, connector.PowerShellQuoteLiteral(opts.HookBinary)) &&
 			strings.Contains(command, "'--enterprise-managed'") && strings.Contains(command, "'copilot'")
 	}
+	// A drop-in a 1.0 pre-release wrote has no removed-deployment guard;
+	// ensure rewrites it.
+	command = strings.TrimPrefix(command, connector.CopilotRemovedDeploymentGuardPOSIX(opts.HookBinary))
 	return strings.HasPrefix(command, shellQuote(opts.HookBinary)+" hook --connector copilot --enterprise-managed --event ")
+}
+
+// copilotHandlerIsIntact reports a DefenseClaw handler whose command is the
+// one DefenseClaw renders for event, byte for byte. Copilot runs the field
+// through a shell, so the prefix match that identifies DefenseClaw's
+// handler also accepted trailing shell text (a redirection and an || true
+// fallback) that discards the hook's deny while verify reported coverage
+// (GAP-1348).
+func copilotHandlerIsIntact(opts Options, event string, raw any) bool {
+	field := "bash"
+	if opts.goos() == "windows" {
+		field = "powershell"
+	}
+	return stringField(raw, "type") == "command" && stringField(raw, field) == stringField(copilotHandler(opts, event, 0), field)
+}
+
+// copilotHandlerTimeout returns the handler's timeoutSec as written, or ""
+// when it is absent. Copilot lets the tool call proceed when a policy hook
+// times out, so a shorter timeout than DefenseClaw publishes leaves calls
+// unchecked while the command still matches (GAP-1406).
+func copilotHandlerTimeout(raw any) string {
+	var value any
+	switch v := raw.(type) {
+	case *object:
+		value = v.values["timeoutSec"]
+	case map[string]any:
+		value = v["timeoutSec"]
+	}
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
 }
 
 func inspectCopilot(opts Options, state *State) error {
@@ -121,6 +160,10 @@ func inspectCopilot(opts Options, state *State) error {
 	}
 	sort.Strings(names)
 	ownedPerEvent := map[string]int{}
+	timeouts := map[string]int{}
+	for _, group := range groups {
+		timeouts[group.Event] = group.Timeout
+	}
 	for _, name := range names {
 		file := joinFor(opts, dir, name)
 		data, exists, err := readPolicyFile(opts, file)
@@ -160,6 +203,19 @@ func inspectCopilot(opts Options, state *State) error {
 				if copilotHandlerIsOwned(opts, handler) {
 					state.OwnedEntries++
 					ownedPerEvent[event]++
+					if !copilotHandlerIsIntact(opts, event, handler) {
+						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s is not the command DefenseClaw publishes, so it may not enforce; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it", file, event)
+					}
+					if _, published := timeouts[event]; !published {
+						// Intact compares the command with the one rendered
+						// for this key, so a DefenseClaw command bound to an
+						// event DefenseClaw does not publish (or to no
+						// Copilot event at all) passed as intact.
+						state.entryConflict("%s: a DefenseClaw policy hook is registered for Copilot event %q, which DefenseClaw does not publish; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites the drop-in without it", file, event)
+					}
+					if want, ok := timeouts[event]; ok && copilotHandlerTimeout(handler) != fmt.Sprint(want) {
+						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s has timeoutSec %q, DefenseClaw publishes %d; Copilot lets the tool call proceed when the hook times out, so deploy the exported value; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it", file, event, copilotHandlerTimeout(handler), want)
+					}
 				} else {
 					state.ForeignEntries++
 				}
@@ -168,7 +224,7 @@ func inspectCopilot(opts Options, state *State) error {
 	}
 	for _, group := range groups {
 		if ownedPerEvent[group.Event] != 1 {
-			state.conflict("Copilot event %s has %d DefenseClaw policy hooks, want exactly one", group.Event, ownedPerEvent[group.Event])
+			state.entryConflict("Copilot event %s has %d DefenseClaw policy hooks, want exactly one", group.Event, ownedPerEvent[group.Event])
 		}
 	}
 	state.detail("Copilot has no managed-only lock: user (~/.copilot), repository (.github/hooks) and Claude-format hooks still run and can return modifiedArgs; the foreign-hook guard applies")
@@ -231,13 +287,9 @@ func (t copilotTarget) Reconcile(opts Options) (State, error) {
 		}
 		state.Changed = changed
 	}
-	if err := vscodeDevicePolicy(opts, &state, policy.Ownership == config.MachinePolicyOwnershipMerge); err != nil {
+	if err := copilotEditorPolicy(opts, &state, policy.Ownership == config.MachinePolicyOwnershipMerge); err != nil {
 		return state, err
 	}
-	if err := copilotManagedSettings(opts, &state, policy.Ownership == config.MachinePolicyOwnershipMerge); err != nil {
-		return state, err
-	}
-	copilotVSCodeStatus(opts, &state)
 	if err := inspectCopilot(opts, &state); err != nil {
 		return state, err
 	}
@@ -262,18 +314,32 @@ func (t copilotTarget) Verify(opts Options) (State, error) {
 		state.Route = RouteUnsupported
 		return state, nil
 	}
-	if err := vscodeDevicePolicy(opts, &state, false); err != nil {
+	if err := copilotEditorPolicy(opts, &state, false); err != nil {
 		return state, err
 	}
-	if err := copilotManagedSettings(opts, &state, false); err != nil {
-		return state, err
-	}
-	copilotVSCodeStatus(opts, &state)
 	if err := inspectCopilot(opts, &state); err != nil {
 		return state, err
 	}
 	state.finish()
 	return state, nil
+}
+
+// copilotEditorPolicy reconciles (write) or inspects the VS Code device
+// policies and Copilot managed settings that govern Copilot in VS Code, and
+// reports the VS Code status. A CLI-only policy (opts.CopilotCLIPolicyOnly)
+// has none.
+func copilotEditorPolicy(opts Options, state *State, write bool) error {
+	if opts.CopilotCLIPolicyOnly {
+		return nil
+	}
+	if err := vscodeDevicePolicy(opts, state, write); err != nil {
+		return err
+	}
+	if err := copilotManagedSettings(opts, state, write); err != nil {
+		return err
+	}
+	copilotVSCodeStatus(opts, state)
+	return nil
 }
 
 func (t copilotTarget) RemoveOwned(opts Options) (State, error) {

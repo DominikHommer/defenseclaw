@@ -67,6 +67,22 @@ $failures = & $module {
         }
     }
 
+    # Native Claude hooks found in a signed-out profile are removed by the
+    # LocalSystem finalize and counted in the same user registration report.
+    $claudeFinalize = (
+        '{"schema_version":4,"action":"finalize","ok":true,' +
+        '"user_registrations_removed":1,' +
+        '"user_registrations_pending":[],"user_registrations_failed":[]}'
+    ) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $claudeResult = Add-DefenseClawUserRegistrationCleanupResult `
+        -Result (New-HarnessResult) `
+        -Layout $standalone `
+        -Finalization $claudeFinalize
+    if ($claudeResult.user_registrations_removed -ne 1 -or
+        @($claudeResult.user_registrations_pending).Count -ne 0) {
+        $failures.Add('signed-out Claude cleanup was not reported')
+    }
+
     # A purge names each account whose per-user data went and each one whose
     # data stayed; both lists carry through.
     $purgeFinalize = (
@@ -86,6 +102,27 @@ $failures = & $module {
     if (@($purgeResult.user_state_remaining).Count -ne 1 -or
         -not ([string]@($purgeResult.user_state_remaining)[0]).EndsWith('access denied')) {
         $failures.Add("remaining accounts were not carried: $(ConvertTo-HarnessJson $purgeResult)")
+    }
+
+    # Each Claude settings file the finalize edited (#1290) and each
+    # DefenseClaw hook command left in one (#1286) carry through.
+    $settingsFinalize = (
+        '{"schema_version":4,"action":"finalize","ok":true,' +
+        '"user_registrations_removed":1,' +
+        '"user_settings_edited":["removed 1 DefenseClaw hook command(s) from C:\\Users\\alice\\.claude\\settings.json"],' +
+        '"user_settings_hooks_left":["C:\\Users\\alice\\.claude\\settings.json: PreToolUse: a hook command naming defenseclaw-hook (arguments not shown)"]}'
+    ) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $settingsResult = Add-DefenseClawUserRegistrationCleanupResult `
+        -Result (New-HarnessResult) `
+        -Layout $standalone `
+        -Finalization $settingsFinalize
+    if (@($settingsResult.user_settings_edited).Count -ne 1 -or
+        -not ([string]@($settingsResult.user_settings_edited)[0]).StartsWith('removed 1 DefenseClaw hook command(s) from ')) {
+        $failures.Add("edited settings files were not carried: $(ConvertTo-HarnessJson $settingsResult)")
+    }
+    if (@($settingsResult.user_settings_hooks_left).Count -ne 1 -or
+        -not ([string]@($settingsResult.user_settings_hooks_left)[0]).EndsWith('PreToolUse: a hook command naming defenseclaw-hook (arguments not shown)')) {
+        $failures.Add("leftover Claude hook commands were not carried: $(ConvertTo-HarnessJson $settingsResult)")
     }
 
     # Helper output ahead of the report, and a finalize without the fields

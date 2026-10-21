@@ -195,7 +195,7 @@ func (r *EventRouter) emitEventRouterToolTerminalV8(observation generatedToolV8O
 		correlationContext = correlated.ctx
 	}
 	outcome, _, _, _ := generatedToolV8Result(observation)
-	logKind := eventRouterToolLogCompleted
+	var logKind eventRouterToolLogKind
 	switch outcome {
 	case observability.OutcomeBlocked:
 		logKind = eventRouterToolLogBlocked
@@ -482,9 +482,10 @@ func eventRouterToolFields(
 ) eventRouterToolLogFields {
 	severity := observability.SeverityInfo
 	level := observability.LogLevelInfo
-	if kind == eventRouterToolLogBlocked {
+	switch kind {
+	case eventRouterToolLogBlocked:
 		severity, level = observability.SeverityHigh, observability.LogLevelWarn
-	} else if kind == eventRouterToolLogFailed {
+	case eventRouterToolLogFailed:
 		severity, level = observability.SeverityHigh, observability.LogLevelError
 	}
 	return eventRouterToolLogFields{

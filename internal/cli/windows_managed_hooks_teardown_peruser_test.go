@@ -16,8 +16,43 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
 )
+
+func TestWindowsClaudeCleanupTransactionUsesCurrentAccountCache(t *testing.T) {
+	cache, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOCALAPPDATA", filepath.Join(t.TempDir(), "foreign-cache"))
+	transactionDir, err := windowsManagedClaudeTransactionDir()
+	if err != nil || transactionDir != filepath.Join(cache, "DefenseClaw", "claude-settings-teardown") {
+		t.Fatalf("transaction directory = %q, %v", transactionDir, err)
+	}
+	settings := filepath.Join(t.TempDir(), "settings.json")
+	launcher := `C:\Users\alice\.local\bin\defenseclaw-hook.exe`
+	raw := []byte(`{"hooks":{"PreToolUse":[{"hooks":[{"command":"C:\\Users\\alice\\.local\\bin\\defenseclaw-hook.exe"},{"command":"other-hook"}]}]}}`)
+	if err := os.WriteFile(settings, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token owner: %v", err)
+	}
+	removed, err := connector.TransformWindowsClaudeSettingsForUninstall(settings, filepath.Join(t.TempDir(), "private-state"), user.User.Sid.String(), func(raw []byte) ([]byte, int, error) {
+		return removeWindowsManagedClaudeCommands(raw, launcher)
+	})
+	if err != nil || removed != 1 {
+		t.Fatalf("cleanup removed %d hooks: %v", removed, err)
+	}
+	after, err := os.ReadFile(settings)
+	if err != nil || strings.Contains(string(after), "defenseclaw-hook.exe") || !strings.Contains(string(after), "other-hook") {
+		t.Fatalf("settings after cleanup = %s, %v", after, err)
+	}
+}
 
 func perUserTeardownManifest(connectorName string) enterprisehooks.Manifest {
 	return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{{
@@ -59,9 +94,128 @@ func TestWindowsManagedHooksTeardownPluginConnectorsHaveNoSelector(t *testing.T)
 
 func boolPointerForTest(value bool) *bool { return &value }
 
+func TestWindowsStandaloneUninstallCleansClaudeSettingsWithoutUserSession(t *testing.T) {
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	runtimeDir := useUserCleanupStateDir(t)
+	manifest := perUserTeardownManifest("claudecode")
+	originalIdentity, originalRemover := enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeSettingsRemover
+	t.Cleanup(func() {
+		enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeSettingsRemover = originalIdentity, originalRemover
+	})
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	calls := 0
+	windowsManagedClaudeSettingsRemover = func(home, sid, state string) (int, []string, error) {
+		calls++
+		if home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID || state != runtimeDir {
+			t.Fatalf("Claude cleanup target %s %s %s", home, sid, state)
+		}
+		return 29, nil, nil
+	}
+	for _, purge := range []string{"0", "1"} {
+		t.Setenv(windowsManagedHooksPurgeUserStateEnv, purge)
+		result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+		if len(result.Removed) != 1 || result.Removed[0] != "claudecode/"+manifest.Targets[0].SID ||
+			len(result.Pending) != 0 || len(result.Failed) != 0 {
+			t.Fatalf("purge=%s cleanup result = %+v", purge, result)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("Claude settings cleanup called %d times", calls)
+	}
+}
+
+// #1290: the cleanup names each Claude settings file it edited and how many
+// commands it removed; #1286: it names each hook left there that still names
+// a DefenseClaw launcher, as the settings transaction found it. The exit
+// stays a success. A cleanup that cannot read or inspect the file is a
+// visible failure, never a silent "nothing left".
+func TestWindowsStandaloneUninstallReportsClaudeSettingsEditsAndLeftovers(t *testing.T) {
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	runtimeDir := useUserCleanupStateDir(t)
+	manifest := perUserTeardownManifest("claudecode")
+	originalIdentity, originalRemover := enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeSettingsRemover
+	t.Cleanup(func() {
+		enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeSettingsRemover = originalIdentity, originalRemover
+	})
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	removed := 2
+	left := []string{"PreToolUse: a hook command naming defenseclaw-hook (arguments not shown)"}
+	var removeErr error
+	windowsManagedClaudeSettingsRemover = func(home, sid, _ string) (int, []string, error) {
+		if home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID {
+			t.Fatalf("settings cleaned for %s %s", home, sid)
+		}
+		return removed, left, removeErr
+	}
+	settings := `C:\Users\alice\.claude\settings.json`
+	result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	if len(result.SettingsEdited) != 1 || result.SettingsEdited[0] != "removed 2 DefenseClaw hook command(s) from "+settings {
+		t.Fatalf("edited = %q", result.SettingsEdited)
+	}
+	if len(result.SettingsLeft) != 1 || result.SettingsLeft[0] != settings+": "+left[0] || len(result.Failed) != 0 {
+		t.Fatalf("left = %q, failed = %q", result.SettingsLeft, result.Failed)
+	}
+
+	// A file with nothing of DefenseClaw's is neither edited nor reported.
+	removed, left = 0, nil
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	if len(result.SettingsEdited) != 0 || len(result.SettingsLeft) != 0 || len(result.Failed) != 0 || len(result.Removed) != 0 {
+		t.Fatalf("untouched settings = %+v", result)
+	}
+
+	// The settings cannot be read or inspected: the account is a named
+	// failure, not a clean result.
+	removeErr = errors.New("access denied")
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	if len(result.Failed) != 1 || !strings.Contains(result.Failed[0], "claudecode/"+manifest.Targets[0].SID) ||
+		!strings.Contains(result.Failed[0], "access denied") || len(result.SettingsLeft) != 0 || len(result.Removed) != 0 {
+		t.Fatalf("unreadable settings = %+v", result)
+	}
+}
+
+func TestWindowsStandaloneAdministratorReportsOnlyRemainingClaudeHook(t *testing.T) {
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	runtimeDir := useUserCleanupStateDir(t)
+	manifest := perUserTeardownManifest("claudecode")
+	originalIdentity, originalSID := enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeCurrentUserSID
+	originalProbe, originalRemover := windowsManagedClaudeRegistrationProbe, windowsManagedClaudeSettingsRemover
+	t.Cleanup(func() {
+		enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeCurrentUserSID = originalIdentity, originalSID
+		windowsManagedClaudeRegistrationProbe, windowsManagedClaudeSettingsRemover = originalProbe, originalRemover
+	})
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return errors.New("not LocalSystem") }
+	windowsManagedClaudeCurrentUserSID = func() (string, error) { return "S-1-5-21-1-2-3-1000", nil }
+	present := false
+	windowsManagedClaudeRegistrationProbe = func(home, sid string) (bool, error) {
+		if home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID {
+			t.Fatalf("probed %s %s", home, sid)
+		}
+		return present, nil
+	}
+	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, []string, error) {
+		t.Fatal("another user's settings were edited")
+		return 0, nil, nil
+	}
+	result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	if len(result.Pending) != 0 || len(result.Failed) != 0 {
+		t.Fatalf("machine-policy-only enrollment = %+v", result)
+	}
+	present = true
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	if len(result.Pending) != 1 || result.Pending[0] != "claudecode/"+manifest.Targets[0].SID || len(result.Failed) != 1 {
+		t.Fatalf("another user's legacy hook = %+v", result)
+	}
+	windowsManagedClaudeCurrentUserSID = func() (string, error) { return manifest.Targets[0].SID, nil }
+	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, []string, error) { return 1, nil, nil }
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	if len(result.Removed) != 1 || len(result.Pending) != 0 || len(result.Failed) != 0 {
+		t.Fatalf("administrator's own legacy hook = %+v", result)
+	}
+}
+
 // Uninstall cleans every per-user registration the guardian made or still
-// owes, as each user; when it cannot act as users at all (an interactive
-// administrator), every registration is reported, never silently skipped.
+// owes, as each user; when an interactive administrator cannot act as another
+// user, every registration still present is reported.
 func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecordedUser(t *testing.T) {
 	dataDir := useUserCleanupStateDir(t)
 	homeA, homeB := filepath.Join(t.TempDir(), "a"), filepath.Join(t.TempDir(), "b")
@@ -152,13 +306,23 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 		!strings.Contains(result.Failed[0], "LocalSystem") {
 		t.Fatalf("non-LocalSystem uninstall: attempted=%v result=%+v", attempted, result)
 	}
+	windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+	if len(result.Pending) != 0 || len(result.Failed) != 0 {
+		t.Fatalf("non-LocalSystem uninstall with no registrations = %+v", result)
+	}
+	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
 
-	// Only the standalone profile's teardown accepts the per-user connectors.
+	// The standalone profile's teardown accepts every per-user connector,
+	// Secure Client's only GitHub Copilot.
 	t.Run("teardown targets", func(t *testing.T) {
 		t.Setenv(managed.EnterpriseProfileEnv, "")
-		if _, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("copilot")); err == nil ||
+		if _, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("devin")); err == nil ||
 			!strings.Contains(err.Error(), "does not support connector") {
-			t.Fatalf("Secure Client teardown accepted copilot: %v", err)
+			t.Fatalf("Secure Client teardown accepted devin: %v", err)
+		}
+		if targets, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("copilot")); err != nil || len(targets) != 1 {
+			t.Fatalf("Secure Client teardown refused copilot: targets=%v err=%v", targets, err)
 		}
 		t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
 		for _, name := range []string{"copilot", "devin", "amp"} {
@@ -192,7 +356,12 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 // the standalone profile; Secure Client finalize never runs it.
 func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testing.T) {
 	original := windowsManagedHooksStandaloneUserRegistrationRemover
-	t.Cleanup(func() { windowsManagedHooksStandaloneUserRegistrationRemover = original })
+	originalACPCopies := windowsManagedHooksStandaloneACPUserCopies
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneUserRegistrationRemover = original
+		windowsManagedHooksStandaloneACPUserCopies = originalACPCopies
+	})
+	windowsManagedHooksStandaloneACPUserCopies = func() ([]enterprisehooks.WindowsACPUserCopy, error) { return nil, nil }
 	calls, pendingSID := 0, userCleanupSIDB
 	windowsManagedHooksStandaloneUserRegistrationRemover = func(
 		_ context.Context,
@@ -439,5 +608,61 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupRevokesInventoryACEsFirst
 	if len(report.UserRegistrationsFailed) != 1 ||
 		!strings.Contains(report.UserRegistrationsFailed[0], "read access on users' agent folders: set DACL: access denied") {
 		t.Fatalf("failed = %v", report.UserRegistrationsFailed)
+	}
+}
+
+// A purge removes the managed ACP folder (token copies and editor contract
+// locks) of every account that still has one, whether it is signed out,
+// revoked or enrolled for ACP only, and names one it could not remove; an
+// uninstall without purge leaves them (GAP-0773).
+func TestWindowsManagedHooksTeardownPurgeRemovesEveryAccountsACPCopies(t *testing.T) {
+	originalRemover := windowsManagedHooksStandaloneUserRegistrationRemover
+	originalCopies, originalACPPurger := windowsManagedHooksStandaloneACPUserCopies, windowsManagedHooksStandaloneACPUserPurger
+	originalIdentity, originalCursor := enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneCursorTombstonePurger
+	originalFloor := windowsManagedHooksStandaloneFloorPurger
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneUserRegistrationRemover = originalRemover
+		windowsManagedHooksStandaloneACPUserCopies, windowsManagedHooksStandaloneACPUserPurger = originalCopies, originalACPPurger
+		enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneCursorTombstonePurger = originalIdentity, originalCursor
+		windowsManagedHooksStandaloneFloorPurger = originalFloor
+	})
+	windowsManagedHooksStandaloneUserRegistrationRemover = func(context.Context, string, enterprisehooks.Manifest) enterpriseHookUserCleanupResult {
+		return enterpriseHookUserCleanupResult{}
+	}
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	windowsManagedHooksStandaloneCursorTombstonePurger = func() error { return nil }
+	windowsManagedHooksStandaloneFloorPurger = func() error { return nil }
+	const signedOut, acpOnly = "S-1-5-21-1-2-3-3908", "S-1-5-21-1-2-3-3911"
+	windowsManagedHooksStandaloneACPUserCopies = func() ([]enterprisehooks.WindowsACPUserCopy, error) {
+		return []enterprisehooks.WindowsACPUserCopy{
+			{SID: signedOut, Home: `C:\Users\dcad-w2w1`},
+			{SID: acpOnly, Home: `C:\Users\odd`},
+		}, nil
+	}
+	var purged []string
+	windowsManagedHooksStandaloneACPUserPurger = func(home, sid string) error {
+		purged = append(purged, sid)
+		if sid == acpOnly {
+			return errors.New("access denied")
+		}
+		return nil
+	}
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	manifest := enterprisehooks.Manifest{Version: 1}
+	var report windowsManagedHooksTeardownReport
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if len(purged) != 0 {
+		t.Fatalf("an uninstall without purge removed ACP copies: %v", purged)
+	}
+	t.Setenv(windowsManagedHooksPurgeUserStateEnv, "1")
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if strings.Join(purged, ",") != signedOut+","+acpOnly {
+		t.Fatalf("purge removed the ACP copies of %v", purged)
+	}
+	if len(report.UserStatePurged) != 1 || report.UserStatePurged[0] != signedOut+`: C:\Users\dcad-w2w1\.defenseclaw\acp` {
+		t.Fatalf("purged = %v", report.UserStatePurged)
+	}
+	if len(report.UserStateRemaining) != 1 || !strings.HasPrefix(report.UserStateRemaining[0], acpOnly+`: C:\Users\odd\.defenseclaw\acp: access denied`) {
+		t.Fatalf("remaining = %v", report.UserStateRemaining)
 	}
 }

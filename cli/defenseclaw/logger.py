@@ -24,8 +24,10 @@ handling, local persistence, route-specific redaction, and destination fanout.
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
+import stat
 from collections.abc import Mapping
 from typing import Any, Protocol
 
@@ -62,7 +64,10 @@ class _GatewayConfigRecorder:
         if gateway is None:
             raise CanonicalObservabilityUnavailableError("gateway configuration is unavailable")
         token_resolver = getattr(gateway, "resolved_token", None)
-        token = self._runtime_token or (token_resolver() if callable(token_resolver) else "")
+        data_dir = str(getattr(self._cfg, "data_dir", "") or "")
+        token = self._runtime_token or _running_gateway_token(data_dir) or (
+            token_resolver() if callable(token_resolver) else ""
+        )
         if not token:
             # A first gateway start may create the canonical token after this
             # CLI process loaded config (for example: init --no-start-gateway,
@@ -99,6 +104,10 @@ class _GatewayConfigRecorder:
             self._emit_with_token(payload, gateway, refreshed)
             self._runtime_token = refreshed
 
+    def keep_token(self, token: str) -> None:
+        """Send the next facts with *token* first (:meth:`Logger.keep_gateway_token`)."""
+        self._runtime_token = token or None
+
     def _emit_with_token(
         self,
         payload: Mapping[str, Any],
@@ -116,7 +125,7 @@ class _GatewayConfigRecorder:
         except requests.RequestException as exc:
             if _is_definite_preconnect_failure(exc):
                 raise CanonicalObservabilityUnavailableError(
-                    "canonical Observability v8 runtime is unavailable"
+                    "the observability runtime is unavailable"
                 ) from exc
             raise
         finally:
@@ -190,6 +199,76 @@ def _gateway_token_from_dotenv(data_dir: str, *, token_env: str) -> str:
     return next((values.get(name, "") for name in candidates if values.get(name)), "")
 
 
+def keep_running_gateway_token(logger: Any, data_dir: str, running: str, saved: str) -> None:
+    """Keep *logger* on *running*, the token the running gateway loaded, when a command saves *saved*.
+
+    A new gateway token takes effect when the gateway starts again. Until
+    then the running gateway accepts only the token it started with, so a
+    command that saved a new token and then sent its own audit event with it
+    got 401 and failed after the change was saved: ``setup openclaw
+    --no-restart`` and ``setup gateway --token`` (GAP-0464), an ``init``
+    re-run or the guided first run adopting the OpenClaw token (GAP-0490).
+    Nothing changes when the tokens match or no gateway runs: a stopped
+    gateway starts on the saved token. Call it before the new token is saved.
+    """
+
+    if not data_dir:
+        return
+    from defenseclaw.process_liveness import pid_alive, read_pid_file
+
+    pid = read_pid_file(os.path.join(data_dir, "gateway.pid"))
+    if pid is None or not pid_alive(pid):
+        return
+    # A second rotation must still authenticate with the value the gateway
+    # loaded before the first rotation. This private, PID-bound handoff is
+    # transient authentication evidence; config.yaml and .env remain the
+    # settings that the next gateway starts with.
+    running = _running_gateway_token(data_dir) or running
+    if not running or running == saved:
+        return
+    from defenseclaw.file_permissions import atomic_write_private_bytes
+
+    record = json.dumps({"pid": pid, "token": running}, separators=(",", ":")).encode()
+    atomic_write_private_bytes(os.path.join(data_dir, "gateway_running_token.json"), record)
+    if read_pid_file(os.path.join(data_dir, "gateway.pid")) != pid:
+        # A concurrent restart made this handoff stale. Its PID check keeps
+        # it from authorizing another process; let the caller re-evaluate.
+        return
+    keep = getattr(logger, "keep_gateway_token", None)
+    if callable(keep):
+        keep(running)
+
+
+def _running_gateway_token(data_dir: str) -> str:
+    """Read only a private handoff bound to the gateway's current PID."""
+    if not data_dir:
+        return ""
+    from defenseclaw.file_permissions import (
+        darwin_acl_confidentiality_error,
+        read_regular_file_no_follow,
+        windows_acl_custody_confidentiality_error,
+    )
+    from defenseclaw.process_liveness import pid_alive, read_pid_file
+
+    pid = read_pid_file(os.path.join(data_dir, "gateway.pid"))
+    if pid is None or not pid_alive(pid):
+        return ""
+    path = os.path.join(data_dir, "gateway_running_token.json")
+    try:
+        info = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077):
+            return ""
+        if darwin_acl_confidentiality_error(path) or windows_acl_custody_confidentiality_error(path):
+            return ""
+        record = json.loads(read_regular_file_no_follow(path, max_bytes=4096))
+    except (OSError, ValueError, TypeError):
+        return ""
+    if not isinstance(record, dict) or record.get("pid") != pid:
+        return ""
+    token = record.get("token")
+    return token if isinstance(token, str) and 0 < len(token) <= 2048 else ""
+
+
 class _NoRuntimeRecorder:
     """Explicit bootstrap/recovery capability: no buffering and no writes."""
 
@@ -219,6 +298,17 @@ class Logger:
         if cfg is None or getattr(cfg, "gateway", None) is None:
             raise CanonicalObservabilityError("gateway configuration is unavailable")
         return cls(_GatewayConfigRecorder(cfg))
+
+    def keep_gateway_token(self, token: str) -> None:
+        """Authenticate this process's facts with *token*, the one the running gateway loaded.
+
+        Call it through :func:`keep_running_gateway_token`. A gateway that
+        restarted on the new token still admits the facts: a 401 retries once
+        with the token saved in the data directory.
+        """
+        keep = getattr(self._recorder, "keep_token", None)
+        if token and callable(keep):
+            keep(token)
 
     @classmethod
     def no_runtime(cls) -> Logger:
@@ -273,7 +363,7 @@ class Logger:
             }
         )
 
-    def log_config_change(self, operation: str, details: str, *, actor: str = "cli:operator") -> None:
+    def log_config_change(self, operation: str, details: str, *, actor: str | None = None) -> None:
         """Record a CLI setting change as an Activity mutation that names it.
 
         ``log_action("config-update", "config", ...)`` reaches the v8 trail
@@ -284,6 +374,10 @@ class Logger:
         field becomes the diff (``mode: observe -> action``).
         """
 
+        if actor is None:
+            from defenseclaw.config_writer import ACTOR_PREFIX_CLI, current_actor
+
+            actor = current_actor(ACTOR_PREFIX_CLI)
         fields: dict[str, str] = {}
         for token in details.split():
             key, sep, value = token.partition("=")
@@ -449,6 +543,14 @@ def _unconfirmed_audit_reason(exc: BaseException) -> str:
             "the gateway could not record it in time, likely because its audit database is busy "
             "or slow; gateway.log has the cause. Try again in a minute"
         )
+    if status == 400:
+        # GAP-0070: the gateway named the fixed reason (never payload text); a 400 is not a busy gateway.
+        reason = _gateway_rejection_reason(exc)
+        detail = f" ({reason})" if reason else ""
+        return (
+            f"the gateway rejected it as an invalid request{detail}; "
+            "the CLI and the gateway may be different versions, check 'defenseclaw doctor'"
+        )
     if isinstance(status, int) and status >= 500:
         # GAP-2381: a 5xx is not always a busy database; the gateway logs the cause.
         return (
@@ -456,6 +558,14 @@ def _unconfirmed_audit_reason(exc: BaseException) -> str:
             "If it names a busy or locked audit database, try again in a minute"
         )
     return "the gateway did not acknowledge it; gateway.log has the cause. Try again in a minute"
+
+
+def _gateway_rejection_reason(exc: BaseException) -> str:
+    try:
+        reason = exc.response.json().get("reason", "")  # type: ignore[attr-defined]
+    except (AttributeError, ValueError):
+        return ""
+    return reason if isinstance(reason, str) and len(reason) <= 80 else ""
 
 
 # Fields the gateway's canonical scan ingress accepts for one finding

@@ -67,12 +67,18 @@ const (
 	ActionToolResult Action = "tool-result"
 
 	// Operator mutations (v7 Activity)
-	ActionConfigUpdate  Action = "config-update"
-	ActionPolicyUpdate  Action = "policy-update"
-	ActionPolicyReload  Action = "policy-reload"
-	ActionAction        Action = "action" // generic action mutation (block/allow list update)
-	ActionAckAlerts     Action = "acknowledge-alerts"
-	ActionDismissAlerts Action = "dismiss-alerts"
+	ActionConfigUpdate Action = "config-update"
+	// ActionConfigBundleReceipt is the terminal receipt (confirmed or
+	// failed) of a signed policy bundle on a standalone managed device
+	// (log.config.bundle.receipt). The gateway emits it from the public
+	// per-receipt public spool the enterprise lifecycle writes; it reports,
+	// never enforces.
+	ActionConfigBundleReceipt Action = "config.bundle.receipt"
+	ActionPolicyUpdate        Action = "policy-update"
+	ActionPolicyReload        Action = "policy-reload"
+	ActionAction              Action = "action" // generic action mutation (block/allow list update)
+	ActionAckAlerts           Action = "acknowledge-alerts"
+	ActionDismissAlerts       Action = "dismiss-alerts"
 
 	// Webhook / notifier
 	ActionWebhookDelivered Action = "webhook-delivered"
@@ -101,14 +107,14 @@ const (
 	ActionOTelIngestTraces    Action = "otel.ingest.traces"
 	ActionOTelIngestMalformed Action = "otel.ingest.malformed"
 	ActionConnectorHook       Action = "connector-hook"
-	// ActionConnectorHookSynthetic identifies a hook audit row that
-	// was synthesized by the gateway from a vendor-specific
-	// telemetry endpoint (today: codex's /api/v1/codex/notify
-	// agent-turn-complete callback). The canonical vendor row
-	// (e.g. codex.notify.agent-turn-complete) is always written
-	// too, so downstream SIEM rules that count "1 codex.notify in
-	// → 1 row out" keep working; this action lets new dashboards
-	// reason about the synthesized event without disturbing them.
+	// ActionConnectorHookSynthetic is the hook audit row 0.8.x synthesized
+	// from a Codex agent-turn-complete notify. Nothing writes it now (the
+	// native Codex Stop hook records the turn end), and audit migration 33
+	// purges the rows 0.x stored. It stays registered for the 0.8.x config
+	// migration: an audit_sinks[].actions filter may name it, and the v7
+	// exporter selection generated from this registry must map it, or a
+	// filter naming only this action fails to migrate. Remove it with the
+	// config_version 7 migration.
 	ActionConnectorHookSynthetic Action = "connector-hook-synthetic"
 	ActionAssetPolicy            Action = "asset-policy"
 
@@ -121,6 +127,12 @@ const (
 	// records the successful re-install.
 	ActionConnectorHookTampered Action = "connector-hook-tampered"
 	ActionConnectorHookRepaired Action = "connector-hook-repaired"
+
+	// ActionEnterpriseExemptUser records that a standalone enterprise hook
+	// call came from an account enterprise.enrollment.exempt_users lists: it
+	// is allowed and inspected but not enrolled. At most one row per account
+	// and connector each ten minutes (GAP-0832).
+	ActionEnterpriseExemptUser Action = "enterprise-exempt-user"
 
 	// Codex notify webhook (agent-turn-complete et al.). The
 	// notify-bridge.sh shim installed by the codex connector POSTs
@@ -148,6 +160,17 @@ const (
 	ActionSandboxPolicy    Action = "sandbox-policy"
 	ActionSandboxHealth    Action = "sandbox-health"
 	ActionSandboxFinding   Action = "sandbox-finding"
+	ActionSandboxActivity  Action = "sandbox-activity"
+	ActionSandboxProcess   Action = "sandbox-process"
+
+	// Managed (identity-based, enterprise) sandbox records. The dotted keys
+	// are the producer keys of sandbox_policy_v8.go: a profile re-match, a
+	// network rule the managed layer did not render, and the refusals and
+	// alerts of the require-sandbox gate, foreign sandboxes and containers
+	// and OpenShell settings drift.
+	ActionSandboxPolicyRematched   Action = "sandbox.policy.rematched"
+	ActionSandboxPolicyForeignRule Action = "sandbox.policy.foreign_rule"
+	ActionSandboxManaged           Action = "sandbox.managed"
 
 	// Sidecar lifecycle and bootstrap instrumentation. These actions
 	// describe gateway-side startup, shutdown, WebSocket connectivity,
@@ -332,6 +355,25 @@ const (
 	ActionToolBlock                Action = "tool-block"
 	ActionToolAllow                Action = "tool-allow"
 	ActionToolUnblock              Action = "tool-unblock"
+
+	// Fleet (Edge Connector IoT device management). These actions track
+	// device registration, heartbeat processing, verdict decisions,
+	// policy pushes, emergency commands, decommissioning, and device
+	// alerts detected by the fleet manager's anomaly monitor.
+	ActionFleetDeviceRegistered                    Action = "fleet.device.registered"
+	ActionFleetDeviceHeartbeat                     Action = "fleet.device.heartbeat"
+	ActionFleetDeviceOffline                       Action = "fleet.device.offline"
+	ActionFleetDeviceDecommission                  Action = "fleet.device.decommission"
+	ActionFleetDeviceCommand                       Action = "fleet.device.command"
+	ActionFleetPolicyPush                          Action = "fleet.policy.push"
+	ActionFleetPolicyEmergency                     Action = "fleet.policy.emergency"
+	ActionFleetThreatIntel                         Action = "fleet.threat_intel.push"
+	ActionFleetAlert                               Action = "fleet.alert"
+	ActionFleetDeviceReregistered                  Action = "fleet.device.reregistered"
+	ActionFleetTokenRotated                        Action = "fleet.token.rotated"
+	ActionFleetDeviceKeyRotated                    Action = "fleet.device.key_rotated"
+	ActionFleetDeviceCredentialProvisionAuthorized Action = "fleet.device.credential_provision_authorized"
+	ActionFleetDeviceDecommissionAuthorized        Action = "fleet.device.decommission_authorized"
 )
 
 // AllActions returns every registered audit action. Used by
@@ -366,6 +408,7 @@ func AllActions() []Action {
 		ActionToolCall,
 		ActionToolResult,
 		ActionConfigUpdate,
+		ActionConfigBundleReceipt,
 		ActionPolicyUpdate,
 		ActionPolicyReload,
 		ActionAction,
@@ -385,6 +428,7 @@ func AllActions() []Action {
 		ActionAssetPolicy,
 		ActionConnectorHookTampered,
 		ActionConnectorHookRepaired,
+		ActionEnterpriseExemptUser,
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,
 		ActionCodexNotifyMalformed,
@@ -395,6 +439,11 @@ func AllActions() []Action {
 		ActionSandboxPolicy,
 		ActionSandboxHealth,
 		ActionSandboxFinding,
+		ActionSandboxActivity,
+		ActionSandboxProcess,
+		ActionSandboxPolicyRematched,
+		ActionSandboxPolicyForeignRule,
+		ActionSandboxManaged,
 		ActionSidecarStart,
 		ActionSidecarStop,
 		ActionSidecarConnected,
@@ -552,6 +601,20 @@ func AllActions() []Action {
 		ActionToolBlock,
 		ActionToolAllow,
 		ActionToolUnblock,
+		ActionFleetDeviceRegistered,
+		ActionFleetDeviceHeartbeat,
+		ActionFleetDeviceOffline,
+		ActionFleetDeviceDecommission,
+		ActionFleetDeviceCommand,
+		ActionFleetPolicyPush,
+		ActionFleetPolicyEmergency,
+		ActionFleetThreatIntel,
+		ActionFleetAlert,
+		ActionFleetDeviceReregistered,
+		ActionFleetTokenRotated,
+		ActionFleetDeviceKeyRotated,
+		ActionFleetDeviceCredentialProvisionAuthorized,
+		ActionFleetDeviceDecommissionAuthorized,
 	}
 }
 

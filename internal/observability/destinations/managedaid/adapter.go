@@ -72,8 +72,11 @@ type Config struct {
 	ContentHash string
 	Timeout     time.Duration
 	Resource    otlp.LogResourceSnapshot
-	Network     push.NetworkOptions
-	Warnings    push.WarningObserver
+	// DeploymentAliases adds deployment.environment and deployment.mode to
+	// the resource (config.ObservabilityV8ManagedAIDDeploymentAliases).
+	DeploymentAliases bool
+	Network           push.NetworkOptions
+	Warnings          push.WarningObserver
 }
 
 // Adapter is synchronous; the common generation dispatcher owns its bounded
@@ -104,7 +107,7 @@ func New(ctx context.Context, source Config, resolver ProviderResolver) (*Adapte
 	if timeout <= 0 || timeout > defaultTimeout {
 		timeout = defaultTimeout
 	}
-	resourceValues, deviceID, hostname, resourceOK := managedResourceSnapshot(source.Resource.Values)
+	resourceValues, deviceID, hostname, resourceOK := managedResourceSnapshot(source.Resource.Values, source.DeploymentAliases)
 	contentHashOK := validManagedContentHash(source.ContentHash)
 	resource := source.Resource
 	if resourceOK {
@@ -358,7 +361,10 @@ func (adapter *Adapter) post(ctx context.Context, body []byte, token string) (in
 		// Transport-level failure info line so an operator tailing
 		// gateway.err.log / gateway.log can see when the AI Defense POST
 		// couldn't complete at all (DNS, TCP, TLS, cancel, deadline).
-		// One line per attempt; low-frequency at the 5 min publish cadence.
+		// One line per attempt; low-frequency because managed_enterprise
+		// inventory publishing is change-gated behind a 30-min full-scan
+		// ceiling, so a steady-state endpoint POSTs only the per-scan liveness
+		// summary plus one complete bundle a day.
 		// The endpoint URL is deliberately redacted to "AI DEFENSE" — the
 		// configured host is release-owned and static across a deployment
 		// so operators don't need it in every log line, and omitting it

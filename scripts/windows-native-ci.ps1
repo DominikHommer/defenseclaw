@@ -20,6 +20,12 @@ param(
     [string]$DiagnosticsRoot = '',
     [ValidateSet('codex', 'claudecode', 'amp', 'copilot', 'cursor', 'devin', 'hermes', 'antigravity', 'opencode')][string]$Connector = 'codex',
     [switch]$AllowCurrentUserSetupAcceptance,
+    # setup-acceptance only: wizard-1 (configure later, codex), wizard-2
+    # (claudecode, amp) and wizard-3 (copilot, cursor) run the wizard
+    # connector cells; lifecycle runs the quiet install through uninstall.
+    # Each part starts from and returns to a clean profile, so CI runs them
+    # on separate runners; 'all' runs every part in order.
+    [ValidateSet('all', 'wizard-1', 'wizard-2', 'wizard-3', 'lifecycle')][string]$SetupAcceptancePart = 'all',
     [switch]$NoRun
 )
 
@@ -1171,6 +1177,7 @@ function Invoke-WindowsNativeProcess {
         [string]$LogPath = '',
         [string]$GoTestFailureSummaryPath = '',
         [string]$WorkingDirectory = '',
+        [switch]$GoTestTimingSummary,
         [switch]$SuppressOutput
     )
     if ($GoTestFailureSummaryPath -and $SuppressOutput) {
@@ -1243,6 +1250,17 @@ function Invoke-WindowsNativeProcess {
         }
         $rawStdout = Read-WindowsNativeOutputTask $stdoutTask
         $rawStderr = Read-WindowsNativeOutputTask $stderrTask
+        if ($GoTestTimingSummary -and -not $SuppressOutput) {
+            # One line per package result from the full go test -json stream
+            # (the console copy below is bounded), for the recorded package
+            # times in scripts/test-timings/go-windows.json.
+            foreach ($packageResult in [regex]::Matches([string]$rawStdout,
+                    '(?m)^\{"Time":"[^"]*","Action":"(pass|fail|skip)","Package":"([^"]+)","Elapsed":([0-9.]+)')) {
+                [Console]::Out.WriteLine(('[go-package-time] {0} {1} {2}' -f
+                    $packageResult.Groups[2].Value, $packageResult.Groups[1].Value, $packageResult.Groups[3].Value))
+            }
+            [Console]::Out.Flush()
+        }
         $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
         $goTestFailureSummary = ''
         if ($GoTestFailureSummaryPath -and
@@ -1606,7 +1624,6 @@ function Stage-PackageData(
     ) `
         -TimeoutSeconds 120 -WorkingDirectory $WorkspaceRoot | Out-Null
     Copy-MatchedFiles (Join-Path $WorkspaceRoot 'policies\rego\*.rego') (Join-Path $data 'policies\rego') '*_test.rego'
-    Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'policies\rego\data.json') -Destination (Join-Path $data 'policies\rego') -Force
     Copy-MatchedFiles (Join-Path $WorkspaceRoot 'policies\*.yaml') (Join-Path $data 'policies')
     foreach ($name in @('default', 'strict', 'permissive')) {
         Copy-Tree (Join-Path $WorkspaceRoot "policies\guardrail\$name") (Join-Path $data "policies\guardrail\$name")
@@ -1644,6 +1661,18 @@ function Stage-PackageData(
     ) -TimeoutSeconds 120 -WorkingDirectory $WorkspaceRoot | Out-Null
     foreach ($name in @('splunk_local_bridge', 'local_observability_stack', 'splunk_o11y_dashboards')) {
         Copy-Tree (Join-Path $WorkspaceRoot "bundles\$name") (Join-Path $data $name)
+    }
+    # As make _bundle-data: the optional Fleet assets stay out of the default
+    # per-user package; they ship in defenseclaw-fleet-assets.tar.gz.
+    foreach ($relative in @(
+        'docker-compose.fleet.yml',
+        'prometheus\examples\fleet.yml',
+        'grafana\dashboards\defenseclaw-fleet.json'
+    )) {
+        $fleetAsset = Join-Path $data "local_observability_stack\$relative"
+        if (Test-Path -LiteralPath $fleetAsset -PathType Leaf) {
+            Remove-Item -LiteralPath $fleetAsset -Force
+        }
     }
     $extensionSource = Join-Path $WorkspaceRoot 'extensions\defenseclaw'
     $extensionIndex = Join-Path $extensionSource 'dist\index.js'
@@ -2201,6 +2230,37 @@ function Get-GatewayIdentity([string]$DataDir) {
 
 function Get-WatchdogIdentity([string]$DataDir) {
     return Get-ManagedProcessIdentity $DataDir 'watchdog.pid'
+}
+
+function Set-ContentWithSharingRetry {
+    # Every packaged DefenseClaw process opens installer\install-state.json
+    # with FILE_SHARE_READ only while it validates it (nativeinstallstate), and
+    # endpoint scanners briefly open fresh files. The product writers retry
+    # such sharing violations (safefile.ReplaceFile); this in-place harness
+    # edit of the same file must tolerate them too (GAP-1511).
+    param(
+        [Parameter(Mandatory)][string]$LiteralPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value,
+        [ValidateRange(1, 100)][int]$MaxAttempts = 40
+    )
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            Set-Content -LiteralPath $LiteralPath -Value $Value -Encoding UTF8 -ErrorAction Stop
+            return
+        } catch {
+            $exception = $_.Exception
+            while ($null -ne $exception -and $exception -isnot [IO.IOException]) {
+                $exception = $exception.InnerException
+            }
+            # 0x80070020 ERROR_SHARING_VIOLATION, 0x80070021 ERROR_LOCK_VIOLATION
+            $transient = $null -ne $exception -and
+                ($exception.HResult -eq -2147024864 -or $exception.HResult -eq -2147024863)
+            if (-not $transient -or $attempt -ge $MaxAttempts) {
+                throw
+            }
+            Start-Sleep -Milliseconds ([Math]::Min(1000, 50 * $attempt))
+        }
+    }
 }
 
 function Test-GatewayIdentityChanged([object]$Before, [object]$After) {
@@ -3946,10 +4006,13 @@ function New-WizardAgentFixtures([string]$Root) {
         [pscustomobject]@{
             Path = $codexPath
             ClassName = 'CodexVersionFixture'
-            # The wizard contract installs the complete ten-event matrix, whose
-            # first truthful minimum is Codex 0.133.0. Older supported tiers are
-            # covered independently by boundary and real-client compatibility
-            # probes instead of being mislabeled as full-matrix certification.
+            # The wizard contract installs the complete ten-event matrix
+            # (Codex 0.133.0 and later), and setup selects Codex only from
+            # 0.136.0, the first release with app-server --stdio
+            # (CODEX_APP_SERVER_STDIO_MIN_VERSION), so the fixture reports
+            # that floor. Older supported tiers are covered independently by
+            # boundary and real-client compatibility probes instead of being
+            # mislabeled as full-matrix certification.
             Source = @"
 using System;
 public static class CodexVersionFixture {
@@ -3969,7 +4032,7 @@ public static class CodexVersionFixture {
             }
             return 0;
         }
-        Console.WriteLine("codex-cli 0.133.0");
+        Console.WriteLine("codex-cli 0.136.0");
         return 0;
     }
 }
@@ -4081,7 +4144,7 @@ public static class OpenCodeVersionFixture {
             }
         }
         $codexVersion = Invoke-WindowsNativeProcess $codexPath @('--version') -TimeoutSeconds 30
-        if ($codexVersion.StdOut.Trim() -ne 'codex-cli 0.133.0') {
+        if ($codexVersion.StdOut.Trim() -ne 'codex-cli 0.136.0') {
             throw "Codex fixture returned an unexpected version: $($codexVersion.StdOut)"
         }
         $claudeVersion = Invoke-WindowsNativeProcess $claudePath @('--version') -TimeoutSeconds 30
@@ -4686,13 +4749,12 @@ function Assert-NoGatewayAutoStart {
 # started with Process.Start, which keeps the handle CreateProcess returned so
 # a launcher that exits at once still returns its status, and with the call
 # operator piped to Out-Host in Constrained Language mode. It returns the
-# launcher, its arguments and the call-operator invocation, or $null when the
-# script is not exactly that bridge with the same launcher and arguments in
-# both branches.
+# launcher and its arguments, or $null when the script is not exactly that
+# bridge with the same launcher and arguments in both branches.
 function Get-AwaitedHookBridge([string]$Script) {
     $pattern = '^\$ErrorActionPreference=''Stop''; \$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
         'if \(\$ExecutionContext\.SessionState\.LanguageMode -ne ''FullLanguage''\) \{ \$ErrorActionPreference=''Continue''; ' +
-        '(?<invocation>& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+)) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
+        '& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
         '\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\k<file>,''(?<arguments>[^'' ]+(?: [^'' ]+)*)''\); ' +
         '\$hookStart\.UseShellExecute=\$false; \$hookStart\.RedirectStandardError=\$true; ' +
         '\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); ' +
@@ -4708,8 +4770,54 @@ function Get-AwaitedHookBridge([string]$Script) {
     return [pscustomobject]@{
         File = $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace("''", "'")
         Arguments = $arguments
-        Invocation = $match.Groups['invocation'].Value
     }
+}
+
+# Per-user Windows Claude Code Setup registers its launcher through the system
+# cmd.exe so a missing launcher blocks with exit 2 instead of failing open
+# (GAP-1091). Keep this argv identical to
+# internal/gateway/connector/claudecode_launcher_guard.go: an exact generated
+# guard reads as the launcher and hook argv it runs; an edited guard or any
+# other cmd.exe handler is returned unchanged.
+function Get-ClaudeCodeLauncherGuardExecView([object]$Handler) {
+    if ($null -eq $Handler) { return $Handler }
+    $commandProperty = $Handler.PSObject.Properties['command']
+    $argsProperty = $Handler.PSObject.Properties['args']
+    if ($null -eq $commandProperty -or $null -eq $argsProperty -or
+        $commandProperty.Value -isnot [string] -or $argsProperty.Value -isnot [array]) {
+        return $Handler
+    }
+    $guardArgs = @($argsProperty.Value)
+    if ($guardArgs.Count -lt 8 -or @($guardArgs | Where-Object { $_ -isnot [string] }).Count -gt 0) {
+        return $Handler
+    }
+    $systemRoot = [string]$env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($systemRoot) -or -not [IO.Path]::IsPathRooted($systemRoot)) {
+        $systemRoot = 'C:\Windows'
+    }
+    try {
+        $command = [IO.Path]::GetFullPath([string]$commandProperty.Value)
+        $processor = [IO.Path]::GetFullPath([IO.Path]::Combine($systemRoot.Trim(), 'System32', 'cmd.exe'))
+    } catch {
+        return $Handler
+    }
+    if (-not [string]::Equals($command, $processor, [StringComparison]::OrdinalIgnoreCase)) { return $Handler }
+    $end = -1
+    for ($i = 7; $i + 1 -lt $guardArgs.Count; $i++) {
+        if ($guardArgs[$i] -ceq ')' -and $guardArgs[$i + 1] -ceq 'else') { $end = $i; break }
+    }
+    if ($end -lt 0) { return $Handler }
+    $launcher = [string]$guardArgs[4]
+    $hookArgs = @(if ($end -gt 7) { $guardArgs[7..($end - 1)] })
+    $words = @(('DefenseClaw blocked this: its Claude Code hook launcher is missing. ' +
+        'Run the DefenseClaw installer again to repair it.') -split ' ')
+    $expected = @('/d', '/c', 'if', 'exist', $launcher, '(', $launcher) + $hookArgs +
+        @(')', 'else', '(', 'echo') + $words + @('1>&2', '&', 'exit', '/b', '2', ')')
+    if ($expected.Count -ne $guardArgs.Count) { return $Handler }
+    for ($i = 0; $i -lt $expected.Count; $i++) {
+        if ($expected[$i] -cne $guardArgs[$i]) { return $Handler }
+    }
+    return [pscustomobject]@{ command = $launcher; args = $hookArgs }
 }
 
 function Assert-WizardHookRegistration(
@@ -4743,6 +4851,11 @@ function Assert-WizardHookRegistration(
         ))
         $codexEventsByContract = @{
             'codex-hooks-v3' = @(
+                'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest',
+                'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact',
+                'PostCompact', 'Stop'
+            )
+            'codex-hooks-v3-generic' = @(
                 'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest',
                 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact',
                 'PostCompact', 'Stop'
@@ -4857,8 +4970,9 @@ function Assert-WizardHookRegistration(
         foreach ($eventProperty in @($settings.hooks.PSObject.Properties)) {
             foreach ($group in @($eventProperty.Value)) {
                 foreach ($handler in @($group.hooks)) {
-                    $hookArgs = @($handler.args | ForEach-Object { [string]$_ })
-                    if ([IO.Path]::GetFileName([string]$handler.command) -ieq 'defenseclaw-hook.exe' -and
+                    $execView = Get-ClaudeCodeLauncherGuardExecView $handler
+                    $hookArgs = @($execView.args | ForEach-Object { [string]$_ })
+                    if ([IO.Path]::GetFileName([string]$execView.command) -ieq 'defenseclaw-hook.exe' -and
                         ($hookArgs -join "`0") -ceq (@('hook', '--connector', 'claudecode') -join "`0")) {
                         $nativeHookFound = $true
                     }
@@ -5118,8 +5232,11 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
         (@($bridge.Arguments)[0..2] -join ' ') -cne 'hook --connector codex') {
         throw 'cannot stage legacy Codex hook: synchronous launcher expression is missing'
     }
+    # The form 0.8.x released: one non-waiting call of the launcher with no event.
+    # Setup repair must still replace it and Doctor must still refuse it.
+    $legacyFile = "'" + $bridge.File.Replace("'", "''") + "'"
     $legacyScript = "`$ErrorActionPreference='Stop'; `$env:NoDefaultCurrentDirectoryInExePath='1'; " +
-        $bridge.Invocation + '; exit $LASTEXITCODE'
+        "& $legacyFile hook --connector codex; exit `$LASTEXITCODE"
     if ($legacyScript -ceq $script) {
         throw 'cannot stage legacy Codex hook: generated command did not change'
     }
@@ -5607,39 +5724,38 @@ function Invoke-SetupAcceptance {
     $setupOtlpCollector = $null
     $setupHealthSampler = $null
     try {
+        $runPart = { param([string]$Part) $SetupAcceptancePart -in @('all', $Part) }
         if ($disposableGithubRunner) {
-            Invoke-WizardConfigureLaterAcceptance `
-                $setup $root $logs $installRoot $dataRoot $gateway $arpKey `
-                $connectorConfigPaths $userPathBefore
-            Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
-            $env:PATH = "$fixtureSearchPath;$processPathBefore"
+            if (& $runPart 'wizard-1') {
+                Invoke-WizardConfigureLaterAcceptance `
+                    $setup $root $logs $installRoot $dataRoot $gateway $arpKey `
+                    $connectorConfigPaths $userPathBefore
+                Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
+                $env:PATH = "$fixtureSearchPath;$processPathBefore"
+            }
 
-            Invoke-WizardConnectorAcceptance `
-                $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
-                $fixtureSearchPath $userPathBefore 'codex' 'observe'
-            Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
-            $env:PATH = "$fixtureSearchPath;$processPathBefore"
-
-            Invoke-WizardConnectorAcceptance `
-                $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
-                $fixtureSearchPath $userPathBefore 'claudecode' 'action'
-            Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
-            $env:PATH = "$fixtureSearchPath;$processPathBefore"
-
-            Invoke-WizardConnectorAcceptance `
-                $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
-                $fixtureSearchPath $userPathBefore 'amp' 'action'
-            Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
-            $env:PATH = "$fixtureSearchPath;$processPathBefore"
-
-            foreach ($wizardConnector in @('copilot', 'cursor')) {
+            foreach ($wizardCell in @(
+                @{ Part = 'wizard-1'; Connector = 'codex'; Mode = 'observe' },
+                @{ Part = 'wizard-2'; Connector = 'claudecode'; Mode = 'action' },
+                @{ Part = 'wizard-2'; Connector = 'amp'; Mode = 'action' },
+                @{ Part = 'wizard-3'; Connector = 'copilot'; Mode = 'observe' },
+                @{ Part = 'wizard-3'; Connector = 'cursor'; Mode = 'observe' }
+            )) {
+                if (-not (& $runPart $wizardCell.Part)) { continue }
                 Invoke-WizardConnectorAcceptance `
                     $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
-                    $fixtureSearchPath $userPathBefore $wizardConnector 'observe'
+                    $fixtureSearchPath $userPathBefore $wizardCell.Connector $wizardCell.Mode
                 Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
                 $env:PATH = "$fixtureSearchPath;$processPathBefore"
             }
             $env:PATH = $processPathBefore
+        } elseif ($SetupAcceptancePart -notin @('all', 'lifecycle')) {
+            throw "setup acceptance part $SetupAcceptancePart runs only on a disposable GitHub-hosted runner"
+        }
+        if (-not (& $runPart 'lifecycle')) {
+            # A wizard-only part: the finally block below still uninstalls and
+            # proves the profile, registrations and user PATH are clean.
+            return
         }
 
         Invoke-WindowsSetupStandardUserProcess $setup @(
@@ -5780,7 +5896,7 @@ function Invoke-SetupAcceptance {
         }
         $targetVersion = [string]$installedState.version
         $installedState.version = '99.0.0'
-        $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        Set-ContentWithSharingRetry -LiteralPath $statePath -Value ($installedState | ConvertTo-Json -Depth 8)
         Invoke-WindowsSetupStandardUserProcess $setup @('/upgrade', '/quiet', 'INSTALLSCOPE=user') `
             -AllowedExitCodes @(1) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-downgrade-rejected.log') | Out-Null
         # Model the exact native 0.8.0 -> current-candidate observability-v8
@@ -5788,7 +5904,7 @@ function Invoke-SetupAcceptance {
         # preflight this configuration with the staged target runtime before
         # it stops these owned services or publishes either managed tree.
         $installedState.version = '0.8.0'
-        $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        Set-ContentWithSharingRetry -LiteralPath $statePath -Value ($installedState | ConvertTo-Json -Depth 8)
         $configPath = Join-Path $dataRoot 'config.yaml'
         $setupGatewayApiPort = Get-PackagedGatewayApiPort $python $dataRoot
         [IO.Directory]::CreateDirectory((Join-Path $dataRoot 'state')) | Out-Null
@@ -5908,7 +6024,7 @@ with open(os.path.join(sys.argv[1], ".migration_state.json"), "w", encoding="utf
 import sys
 import yaml
 document = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
-assert document.get("config_version") == 8
+assert document.get("config_version") == 9
 observability = document.get("observability") or {}
 assert (observability.get("metric_policy") or {}).get("temporality") == "delta"
 otlp = next(
@@ -5927,8 +6043,8 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
 '@
         Invoke-Installed $python @('-I', '-c', $assertMigratedConfig, $configPath, $setupOtlpPort) -Timeout 120 `
             -Log (Join-Path $logs 'setup-seeded-v8-contract.log') | Out-Null
-        if ((Get-Content -LiteralPath $configPath -Raw -Encoding UTF8) -notmatch '(?m)^config_version:\s*8\s*$') {
-            throw 'seeded setup upgrade did not activate configuration schema v8'
+        if ((Get-Content -LiteralPath $configPath -Raw -Encoding UTF8) -notmatch '(?m)^config_version:\s*9\s*$') {
+            throw 'seeded setup upgrade did not activate configuration schema v9'
         }
         $gatewayAfterSeededUpgrade = Get-GatewayIdentity $dataRoot
         $watchdogAfterSeededUpgrade = Get-WatchdogIdentity $dataRoot

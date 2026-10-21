@@ -37,7 +37,7 @@ def app(tmp_path, monkeypatch):
     cfg.guardrail.mode = "observe"
     cfg.guardrail.port = 4321
     cfg.guardrail.hook_fail_mode = "closed"
-    cfg.guardrail.rule_pack_dir = "/packs/default"
+    cfg.guardrail.rule_pack = "default"
     cfg.save = MagicMock()
     ctx = AppContext()
     ctx.cfg = cfg
@@ -68,6 +68,14 @@ def restarts(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def rerenders(monkeypatch):
+    """Connectors whose hook scripts were re-rendered in place."""
+    calls: list[str] = []
+    monkeypatch.setattr(cmd_guardrail, "reconcile_connector_registration", lambda _cfg, name: calls.append(name))
+    return calls
+
+
 def _run(app, *args):
     result = CliRunner().invoke(cmd_guardrail.guardrail, ["mode", *args], obj=app, catch_exceptions=False)
     return result, (json.loads(result.stdout) if "--json" in args and result.stdout.strip() else None)
@@ -75,7 +83,7 @@ def _run(app, *args):
 
 def _untouched(app) -> None:
     gc = app.cfg.guardrail
-    assert (gc.enabled, gc.port, gc.rule_pack_dir) == (True, 4321, "/packs/default")
+    assert (gc.enabled, gc.port, gc.rule_pack) == (True, 4321, "default")
 
 
 def test_global_switch_sets_only_guardrail_mode(app) -> None:
@@ -100,30 +108,39 @@ def test_global_switch_sets_only_guardrail_mode(app) -> None:
     assert app.logger.log_config_change.call_args.args[0] == "guardrail-mode"  # a config-update mutation
 
 
-def test_global_switch_restarts_a_running_gateway(app, restarts) -> None:
-    # codex inherits hook_fail_mode=closed, which only applies in action mode:
-    # observe -> action flips its hooks from fail-open to fail-closed.
+def test_cursor_mode_switch_restarts_to_rebake_its_fail_mode(app, restarts, rerenders) -> None:
+    # Per-user Cursor follows its guardrail mode (observe open, action
+    # closed), so observe -> action flips its hooks from fail-open to
+    # fail-closed; the gateway restarts and re-bakes its registration. Every
+    # other connector keeps its fail mode across a mode switch
+    # (test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode).
+    app.cfg.claw.mode = "cursor"
+    app.cfg.guardrail.connector = "cursor"
     result, payload = _run(app, "action", "--json")
-    assert payload["gateway"] == "restarted" and restarts == [app.cfg.data_dir]
+    assert payload["gateway"] == "restarted" and restarts == [app.cfg.data_dir] and rerenders == []
     text, _ = _run(app, "observe")
     assert "fail open" in text.output
-    assert len(restarts) == 2
+    assert len(restarts) == 2 and rerenders == []
 
-    # Even without a hook fail-mode flip: hook decisions only see the new
-    # mode after a restart.
-    app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(hook_fail_mode="closed")}
+
+def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restarts, rerenders) -> None:
+    # B-01 (owner rule): outside Secure Client observe and action mode fail
+    # the same way, so a mode switch re-renders no hook and restarts nothing.
     _, payload = _run(app, "action", "--json")
-    assert payload["gateway"] == "restarted" and len(restarts) == 3
+    assert payload["gateway"] == "live" and rerenders == [] and restarts == []
+    _, payload = _run(app, "observe", "--json")
+    assert rerenders == [] and restarts == []
+    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "closed"
 
 
-def test_connector_override_created_on_a_single_install(app, restarts) -> None:
+def test_connector_override_created_on_a_single_install(app, restarts, rerenders) -> None:
     result, payload = _run(app, "action", "--connector", "codex", "--json")
     assert result.exit_code == 0, result.output
     assert (payload["scope"], payload["mode"], payload["mode_source"], payload["gateway"]) == (
         "codex",
         "action",
         "override",
-        "restarted",
+        "live",
     )
     gc = app.cfg.guardrail
     assert gc.mode == "observe" and gc.connectors["codex"].mode == "action"
@@ -133,7 +150,7 @@ def test_connector_override_created_on_a_single_install(app, restarts) -> None:
     _, payload = _run(app, "action", "--connector", "codex", "--no-restart", "--json")
     assert payload["changed"] is False  # already there
     _, payload = _run(app, "--clear", "--connector", "codex", "--no-restart", "--json")
-    assert (payload["mode"], payload["mode_source"], payload["gateway"]) == ("observe", "global", "restart_needed")
+    assert (payload["mode"], payload["mode_source"], payload["gateway"]) == ("observe", "global", "live")
     assert gc.connectors["codex"].mode == ""
 
 
@@ -168,7 +185,9 @@ def test_usage_errors(app, args) -> None:
     app.cfg.save.assert_not_called()
 
 
-def test_action_switch_probes_versions_and_refuses_an_unverified_connector(app, restarts, version_checks) -> None:
+def test_action_switch_probes_versions_and_refuses_an_unverified_connector(
+    app, restarts, version_checks, rerenders
+) -> None:
     # GAP-1340/GAP-1362: after an observe-mode quickstart no agent version is
     # on record, so the action-mode gateway refused to start. The switch now
     # probes first and changes nothing when a connector can't be verified.
@@ -183,8 +202,34 @@ def test_action_switch_probes_versions_and_refuses_an_unverified_connector(app, 
 
     verdicts["codex"] = True
     result, payload = _run(app, "action", "--json")
-    assert result.exit_code == 0 and payload["gateway"] == "restarted"
+    assert result.exit_code == 0 and payload["gateway"] == "live"
     assert calls == ["codex", "codex"]
     # Switching back to observe needs no probe.
     _run(app, "observe", "--json")
     assert calls == ["codex", "codex"]
+
+
+def test_copilot_mode_switch_keeps_its_fail_mode(app) -> None:
+    # A mode switch changes no fail mode outside Cursor (owner rule), so it
+    # names none.
+    app.cfg.claw.mode = "copilot"
+    app.cfg.guardrail.connector = "copilot"
+    result, _ = _run(app, "action", "--connector", "copilot", "--no-restart")
+    assert result.exit_code == 0, result.output
+    assert "Hook failures for" not in result.output
+
+
+def test_action_mode_without_registered_hooks_is_not_reported_as_success(app, restarts, rerenders, tmp_path) -> None:
+    # GAP-1035: after a Codex self-update config.toml had no DefenseClaw hooks,
+    # yet the command said Codex was in action mode and exited 0.
+    config = tmp_path / "codex-config.toml"
+    config.write_text('model = "gpt"\n')
+    data_dir = tmp_path / "dc"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock = {"version": 2, "connectors": {"codex": {"locations": {"hook_config_paths": [str(config)]}}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock))
+
+    result, payload = _run(app, "action", "--connector", "codex", "--json")
+    assert result.exit_code == 1, result.output
+    assert payload["ok"] is False and payload["mode"] == "action"
+    assert "not guarded" in payload["message"] and str(config) in payload["message"]

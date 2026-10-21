@@ -20,11 +20,17 @@ This is the only upgrade code that stays on a machine between releases, so it
 must never need to change. It picks a release, downloads that release's
 installer, checks it against the release's ``checksums.txt``, and runs it.
 Everything else (what to download, how to swap, migrate, and roll back) lives
-in the installer of the release being installed, so a fix to any of it ships
-with the next release.
+in the installer. Windows downgrades first run the saved current installer,
+whose recovery checks must run before an older installer takes over.
 
 Standard library only, and imported before the rest of the CLI, so it keeps
 working when anything else in the installed version is broken.
+
+A downgrade is the one case the older release's installer cannot handle on
+its own: it refuses a config.yaml that sets a key it does not have. So this
+shim sets aside the keys of ``NEWER_CONFIG_KEYS`` the older release lacks
+(``SET_ASIDE_FILE`` in the data folder) before it runs that installer, and
+``defenseclaw migrate`` of a release that has them puts them back.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ import os
 import re
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -43,11 +50,25 @@ import urllib.error
 import urllib.request
 
 DEFAULT_REPO = "cisco-ai-defense/defenseclaw"
+# Deprecated alias of config.yaml update.source: a GitHub owner/name.
 REPO_ENV = "DEFENSECLAW_REPO"
+OFFICIAL_SOURCE = "https://github.com/" + DEFAULT_REPO
+# The release signing identity is compiled in. update.source and
+# DEFENSECLAW_REPO only change where release bytes are fetched from; a
+# mirror serves the same signed checksums.txt and its bundle.
+RELEASE_SIGNER = r"^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$"
+RELEASE_ISSUER = "https://token.actions.githubusercontent.com"
 # Tests only: take the installer and checksums.txt from this directory and
 # pass it to the installer as --local.
 LOCAL_DIR_ENV = "DEFENSECLAW_UPGRADE_LOCAL_DIR"
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+# Configuration keys added after 1.0.2, with the first release that has each.
+# The installer of an older release refuses a config.yaml that sets one
+# ("unknown field", GAP-0137), so a downgrade sets them aside first.
+NEWER_CONFIG_KEYS = (("openshell.trusted_ca_bundle", (1, 0, 3)),)
+# Where a downgrade keeps the keys it set aside, in the data folder:
+# {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
+SET_ASIDE_FILE = "config-set-aside.json"
 _TIMEOUT = 30
 
 RECOVER_CORRUPT_AUDIT_NOTE = (
@@ -97,6 +118,17 @@ def managed_deployment() -> str | None:
     if os.name == "nt":
         return _windows_managed_profile()
     return managed_descriptor()
+
+
+def managed_lifecycle_command() -> str:
+    """The managed package's lifecycle command prefix (``enterprise linux`` or
+    ``enterprise macos``), or "" on Windows, where Setup is the lifecycle."""
+
+    if os.name == "nt":
+        return ""
+    if sys.platform == "darwin":
+        return "/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos"
+    return "/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux"
 
 
 def managed_descriptor() -> str | None:
@@ -152,14 +184,58 @@ def run(argv: list[str]) -> int:
         return 130
 
 
-def _tolerant_output() -> None:
-    """Never fail on a character the console cannot encode (Windows cp1252)."""
+# The glyphs these status lines start with, and what shows instead where a
+# stream cannot show them.
+_ASCII_GLYPHS = str.maketrans({"✓": "OK", "✗": "x", "→": "->", "—": "-", "…": "..."})
 
-    for stream in (sys.stdout, sys.stderr):
+
+class _AsciiGlyphs:
+    """A text stream that writes the status glyphs in ASCII."""
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+
+    def write(self, text):
+        return self._stream.write(text.translate(_ASCII_GLYPHS) if isinstance(text, str) else text)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _shows_glyphs(stream) -> bool:
+    """Whether *stream* can show the status glyphs.
+
+    PowerShell decodes the piped output of a native command with the console
+    code page, and Python writes a redirected stream in the ANSI code page,
+    so on Windows only a console shows them; elsewhere the stream's encoding
+    must have them.
+    """
+
+    try:
+        if os.name == "nt" and not stream.isatty():
+            return False
+        "✓✗→".encode(stream.encoding or "ascii")
+    except (AttributeError, LookupError, UnicodeEncodeError, ValueError, OSError):
+        return False
+    return True
+
+
+def _tolerant_output() -> None:
+    """Never fail on a character the console cannot encode (Windows cp1252).
+
+    Where a stream cannot show the status glyphs they are written in ASCII:
+    replacing them printed a "?" at the start of the upgrade and rollback
+    lines in PowerShell 7 (GAP-0002).
+    """
+
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
         try:
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError, OSError):
             pass
+        if stream is not None and not isinstance(stream, _AsciiGlyphs) and not _shows_glyphs(stream):
+            setattr(sys, name, _AsciiGlyphs(stream))
 
 
 def _parse(command: str, args: list[str]) -> dict[str, object] | None:
@@ -191,10 +267,46 @@ def _parse(command: str, args: list[str]) -> dict[str, object] | None:
     return options
 
 
+def release_source() -> str:
+    """The base URL release bytes come from: config.yaml ``update.source``,
+    else ``DEFENSECLAW_REPO`` (deprecated; a GitHub owner/name), else the
+    official repository."""
+
+    configured = _configured_update_source()
+    if configured:
+        return configured.rstrip("/")
+    repo = os.environ.get(REPO_ENV, "").strip()
+    if repo:
+        return _source_url(repo)
+    return OFFICIAL_SOURCE
+
+
+def _source_url(source: str) -> str:
+    """A base URL; a bare owner/name is a GitHub repository."""
+
+    source = source.strip().rstrip("/")
+    return source if source.startswith("https://") else f"https://github.com/{source}"
+
+
+def _configured_update_source() -> str:
+    try:
+        import yaml
+
+        home = os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw")
+        config = os.environ.get("DEFENSECLAW_CONFIG", "").strip() or os.path.join(home, "config.yaml")
+        with open(os.path.expanduser(config), encoding="utf-8") as stream:
+            raw = yaml.safe_load(stream)
+    except Exception:  # noqa: BLE001 - a missing or unreadable config keeps the official source
+        return ""
+    update = raw.get("update") if isinstance(raw, dict) else None
+    source = str(update.get("source") or "").strip() if isinstance(update, dict) else ""
+    return source if source.startswith("https://") else ""
+
+
 def _upgrade(version: str | None, *, yes: bool) -> int:
     from defenseclaw import __version__ as installed
 
-    repo = os.environ.get(REPO_ENV) or DEFAULT_REPO
+    repo = release_source()
     local_dir = os.environ.get(LOCAL_DIR_ENV)
     explicit = version is not None
     if version is None:
@@ -211,13 +323,141 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
 
     print(f"  → Installing DefenseClaw {version} (installed: {installed})")
     workdir = tempfile.mkdtemp(prefix="defenseclaw-upgrade-")
+    extra = ["--local", local_dir] if local_dir else []
     try:
-        installer = _fetch_installer(repo, version, local_dir, workdir)
+        if os.name == "nt" and _key(version) < _key(installed):
+            # Older installers cannot read current recovery receipts. Let this
+            # install's controller quiesce the gateway and check them before
+            # it delegates to the verified installer of the requested release.
+            saved = os.path.join(_data_home(), "installer", "install.ps1")
+            installer = os.path.join(workdir, "install.ps1")
+            try:
+                _copy_windows_saved_installer(saved, installer)
+                _check_installer_version(installer, installed)
+            except (OSError, ShimError) as exc:
+                raise ShimError(
+                    f"cannot safely use the current saved installer {saved}: {exc}. "
+                    f"Repair DefenseClaw {installed} with its installer before retrying this downgrade"
+                ) from None
+            extra = ["--version", version, *extra]
+        else:
+            installer = _fetch_installer(repo, version, local_dir, workdir)
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
-    extra = ["--local", local_dir] if local_dir else []
+    if _key(version) < _key(installed):
+        try:
+            _set_aside_newer_keys(version)
+        except BaseException:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise
     return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir)
+
+
+def _active_config_path() -> str:
+    override = os.environ.get("DEFENSECLAW_CONFIG", "").strip()
+    return os.path.expanduser(override) if override else os.path.join(_data_home(), "config.yaml")
+
+
+def _set_aside_newer_keys(version: str) -> None:
+    """Take the keys DefenseClaw ``version`` does not have out of config.yaml.
+
+    Its installer would refuse the configuration ("unknown field", GAP-0137).
+    The values go to ``SET_ASIDE_FILE`` first, then one validated write
+    removes the keys; ``defenseclaw migrate`` of a release that has them
+    puts them back. When the keys cannot be set aside, the upgrade stops
+    with the command that removes them, and nothing is changed.
+    """
+
+    target = _key(version)
+    config = _active_config_path()
+    try:
+        import yaml
+
+        with open(config, encoding="utf-8") as stream:
+            raw = yaml.safe_load(stream)
+    except Exception:  # noqa: BLE001 - no config or one that does not parse: the installer's check names it
+        return
+    found: dict[str, object] = {}
+    for dotted, since in NEWER_CONFIG_KEYS:
+        if target >= since:
+            continue
+        node: object = raw
+        for part in dotted.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if node not in (None, ""):
+            found[dotted] = node
+    if not found:
+        return
+    names = ", ".join(found)
+    stop = (
+        f"DefenseClaw {version} does not have {names}, so its installer would refuse config.yaml; "
+        f"remove it with 'defenseclaw config unset {' '.join(found)}' and run the upgrade again"
+    )
+    held = os.path.join(_data_home(), SET_ASIDE_FILE)
+    try:
+        from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply
+    except Exception as exc:  # noqa: BLE001 - a broken install: say what to remove by hand
+        raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
+    previous: bytes | None = None
+    try:
+        with open(held, "rb") as stream:
+            previous = stream.read()
+        kept = json.loads(previous.decode("utf-8")).get("keys")
+    except FileNotFoundError:
+        kept = None
+    except (OSError, ValueError, AttributeError):
+        kept = None
+    keys = dict(kept) if isinstance(kept, dict) else {}
+    keys.update(found)
+    try:
+        _write_private_json(held, {"version": 1, "for": version, "keys": keys})
+    except OSError as exc:
+        raise ShimError(f"{stop} (could not write {held}: {exc})") from None
+    try:
+        apply(
+            [Change(key, unset=True) for key in found],
+            ACTOR_MIGRATION,
+            f"set aside for the downgrade to {version}",
+            path=config,
+        )
+    except Exception as exc:  # noqa: BLE001 - config.yaml is unchanged; so is the record
+        try:
+            if previous is None:
+                os.remove(held)
+            else:
+                _write_private_bytes(held, previous)
+        except OSError:
+            pass
+        raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
+    print(f"  → DefenseClaw {version} does not have {names}: set aside in {held}.")
+    print(
+        "    Installing a release that has it puts it back. If the installer stops, "
+        "or after a rollback, put it back with: defenseclaw migrate"
+    )
+
+
+def _write_private_json(path: str, document: dict[str, object]) -> None:
+    _write_private_bytes(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def _write_private_bytes(path: str, data: bytes) -> None:
+    """Write ``path`` owner-only and atomically."""
+
+    fd, tmp = tempfile.mkstemp(prefix=".config-set-aside.", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _data_home() -> str:
@@ -225,15 +465,94 @@ def _data_home() -> str:
     return os.path.normpath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
 
 
+def _windows_regular_file_info(path: str) -> os.stat_result:
+    """Validate the saved controller's locator without accepting reparse aliases."""
+    path = os.path.abspath(path)
+    ancestors = []
+    parent = os.path.dirname(path)
+    while True:
+        ancestors.append(parent)
+        above = os.path.dirname(parent)
+        if above == parent:
+            break
+        parent = above
+    for entry in [*reversed(ancestors), path]:
+        info = os.lstat(entry)
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise OSError(f"saved installer path contains a reparse point: {entry}")
+        expected_type = stat.S_ISREG if entry == path else stat.S_ISDIR
+        if not expected_type(info.st_mode):
+            raise OSError(f"saved installer path has an unexpected file type: {entry}")
+    return info
+
+
+def _read_windows_regular_file(path: str, limit: int) -> bytes:
+    before = _windows_regular_file_info(path)
+    if before.st_size > limit:
+        raise OSError(f"saved installer metadata exceeds its size limit: {path}")
+    with open(path, "rb") as source:
+        opened = os.fstat(source.fileno())
+        body = source.read(limit + 1)
+        after = os.fstat(source.fileno())
+    named = _windows_regular_file_info(path)
+    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    witness = tuple(getattr(before, field) for field in fields)
+    # On Windows Python can expose creation time through lstat's st_ctime
+    # and change time through fstat's. Compare each source with itself.
+    if (
+        len(body) != before.st_size
+        or before.st_ctime_ns != named.st_ctime_ns
+        or opened.st_ctime_ns != after.st_ctime_ns
+        or any(tuple(getattr(info, field) for field in fields) != witness for info in (opened, after, named))
+    ):
+        raise OSError(f"saved installer changed while being copied: {path}")
+    return body
+
+
+def _copy_windows_saved_installer(source: str, destination: str) -> None:
+    body = _read_windows_regular_file(source, 4 * 1024 * 1024)
+    with open(destination, "xb") as target:
+        target.write(body)
+
+
 def _rollback(*, yes: bool) -> int:
     home = _data_home()
     name = _installer_name()
     installer = os.path.join(home, "installer", name)
-    if not os.path.isfile(installer):
+    if os.name == "nt":
+        from defenseclaw import __version__ as installed
+
+        try:
+            _windows_regular_file_info(installer)
+            use_previous = False
+        except FileNotFoundError:
+            use_previous = True
+        except OSError as exc:
+            raise ShimError(
+                f"cannot safely use the current saved installer {installer}: {exc}. "
+                "Repair the current DefenseClaw install before retrying rollback"
+            ) from None
+    else:
+        use_previous = not os.path.isfile(installer)
+    if use_previous:
         # A source ('make all') install saves no installer. After a rollback to
         # one, the install it replaced (now in previous/) still has its own, and
         # that one rolls forward again (GAP-2459).
         installer = os.path.join(home, "previous", "installer", name)
+        if os.name == "nt":
+            try:
+                back_to = (
+                    _read_windows_regular_file(os.path.join(home, "previous", "VERSION"), 128)
+                    .decode("utf-8-sig")
+                    .strip()
+                )
+            except (OSError, UnicodeError):
+                back_to = ""
+            if not _VERSION.fullmatch(back_to) or _key(back_to) < _key(installed):
+                raise ShimError(
+                    "the current saved Windows installer is missing, and the previous install cannot safely control "
+                    "this rollback. Repair the current DefenseClaw install before retrying rollback"
+                )
     if not os.path.isfile(installer):
         saved = os.path.join(home, "installer")
         raise ShimError(
@@ -249,15 +568,20 @@ def _rollback(*, yes: bool) -> int:
                 back_to = handle.read().strip()
         except OSError:
             back_to = "0.8.x"
-        raise ShimError(legacy_setup_rollback_refusal(back_to, previous, os.environ.get(REPO_ENV) or DEFAULT_REPO))
+        raise ShimError(legacy_setup_rollback_refusal(back_to, previous, release_source()))
     workdir = tempfile.mkdtemp(prefix="defenseclaw-rollback-")
     copy = os.path.join(workdir, name)
     try:
-        shutil.copyfile(installer, copy)
+        if os.name == "nt":
+            _copy_windows_saved_installer(installer, copy)
+            _check_installer_version(copy, back_to if use_previous else installed)
+        else:
+            shutil.copyfile(installer, copy)
     except BaseException as exc:
         shutil.rmtree(workdir, ignore_errors=True)
-        if isinstance(exc, OSError):
-            raise ShimError(f"could not copy the saved installer {installer}: {exc}") from None
+        if isinstance(exc, (OSError, ShimError)):
+            hint = ". Repair the current DefenseClaw install before retrying rollback" if os.name == "nt" else ""
+            raise ShimError(f"could not copy the saved installer {installer}: {exc}{hint}") from None
         raise
     return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir)
 
@@ -267,12 +591,17 @@ def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str
     return (
         f"The previous install is DefenseClaw Setup {back_to}, which cannot be restored automatically. "
         f"To go back to it, run 'defenseclaw uninstall', then download DefenseClawSetup-x64.exe from "
-        f"https://github.com/{repo}/releases/tag/{back_to} and run it in your desktop session. "
+        f"{_source_url(repo)}/releases/tag/{back_to} and run it in your desktop session. "
         f"Its files and your data from before the upgrade are in {previous}"
     )
 
 
 def _run_installer(path: str, args: list[str], workdir: str) -> int:
+    # The installer downloads the release assets: hand it update.source
+    # through its DEFENSECLAW_REPO input (an owner/name or an https base URL).
+    configured = _configured_update_source()
+    if configured:
+        os.environ[REPO_ENV] = configured.rstrip("/")
     if os.name == "nt":
         # The running CLI holds files in .venv open; start the installer in its
         # own console and exit so it can replace them.
@@ -330,7 +659,7 @@ def _windows_terminal_without_desktop() -> bool:
 
 
 def _powershell_flag(arg: str) -> str:
-    return {"--yes": "-Yes", "--rollback": "-Rollback", "--local": "-Local"}.get(arg, arg)
+    return {"--yes": "-Yes", "--rollback": "-Rollback", "--local": "-Local", "--version": "-Version"}.get(arg, arg)
 
 
 def _installer_name() -> str:
@@ -348,7 +677,7 @@ def _fetch_installer(repo: str, version: str, local_dir: str | None, workdir: st
             except OSError as exc:
                 raise ShimError(f"could not read {asset} from {local_dir}: {exc}") from None
     else:
-        base = f"https://github.com/{repo}/releases/download/{version}"
+        base = f"{_source_url(repo)}/releases/download/{version}"
         for asset, destination in ((name, installer), ("checksums.txt", checksums)):
             _download(f"{base}/{asset}", destination)
     _verify_release_signature(repo, version, local_dir, workdir, checksums)
@@ -357,7 +686,32 @@ def _fetch_installer(repo: str, version: str, local_dir: str | None, workdir: st
         actual = hashlib.sha256(stream.read()).hexdigest()
     if actual != expected:
         raise ShimError(f"{name} for {version} does not match checksums.txt")
+    _check_installer_version(installer, version, test_build=bool(local_dir))
     return installer
+
+
+_STAMPED_VERSION = re.compile(r'^(?:(?:readonly )?DC_VERSION=|\$DcVersion = )"([^"]*)"\s*$', re.MULTILINE)
+
+
+def _check_installer_version(installer: str, version: str, *, test_build: bool = False) -> None:
+    """Refuse an installer stamped with another release than *version*.
+
+    Every release is signed by the same identity, so a verified signature
+    alone would let a mirror (update.source) serve an older release under the
+    requested version. A downloaded installer must carry the stamp, as in the
+    bash and PowerShell upgraders; only a local test build (``--local``) may
+    be unstamped.
+    """
+
+    with open(installer, encoding="utf-8", errors="replace") as stream:
+        match = _STAMPED_VERSION.search(stream.read())
+    stamped = match.group(1) if match else ""
+    if test_build and (not stamped or stamped == "__DEFENSECLAW_VERSION__"):
+        return
+    if stamped.lstrip("v") != version.lstrip("v"):
+        raise ShimError(
+            f"the installer served for {version} is release {stamped or 'unknown'}; refusing a mismatched release"
+        )
 
 
 def _cosign() -> str | None:
@@ -386,8 +740,15 @@ def _verify_release_signature(repo: str, version: str, local_dir: str | None, wo
 
     cosign = _cosign()
     if cosign is None:
-        if not local_dir:
-            print("  ! cosign 2.0 or later is not installed; the installer is checked against checksums.txt only")
+        if local_dir:
+            return
+        if _source_url(repo) != OFFICIAL_SOURCE:
+            # checksums.txt from a mirror proves nothing without its signature.
+            raise ShimError(
+                f"releases from {_source_url(repo)} are verified by their signature: install cosign 2.0 or later, "
+                "or clear update.source (and DEFENSECLAW_REPO) to use the official releases"
+            )
+        print("  ! cosign 2.0 or later is not installed; the installer is checked against checksums.txt only")
         return
     bundle = os.path.join(workdir, "checksums.txt.bundle")
     if local_dir:
@@ -396,8 +757,7 @@ def _verify_release_signature(repo: str, version: str, local_dir: str | None, wo
             return
         shutil.copyfile(source, bundle)
     else:
-        _download(f"https://github.com/{repo}/releases/download/{version}/checksums.txt.bundle", bundle)
-    signer = "^https://github\\.com/" + re.escape(repo) + "/\\.github/workflows/release\\.yaml@refs/heads/main$"
+        _download(f"{_source_url(repo)}/releases/download/{version}/checksums.txt.bundle", bundle)
     try:
         result = subprocess.run(  # noqa: S603 - fixed verifier, arguments built from constants and paths
             [
@@ -406,9 +766,9 @@ def _verify_release_signature(repo: str, version: str, local_dir: str | None, wo
                 "--bundle",
                 bundle,
                 "--certificate-identity-regexp",
-                signer,
+                RELEASE_SIGNER,
                 "--certificate-oidc-issuer",
-                "https://token.actions.githubusercontent.com",
+                RELEASE_ISSUER,
                 checksums,
             ],
             capture_output=True,
@@ -473,7 +833,7 @@ def latest_version(repo: str | None = None, *, timeout: float = _TIMEOUT) -> str
     to a GET of the same page and then to the REST API.
     """
 
-    repo = repo or os.environ.get(REPO_ENV) or DEFAULT_REPO
+    repo = repo or release_source()
     for method in ("HEAD", "GET"):
         tag = _latest_from_redirect(repo, method, timeout)
         if tag:
@@ -489,7 +849,7 @@ def _latest_from_redirect(repo: str, method: str, timeout: float) -> str | None:
         _NoRedirect, urllib.request.HTTPSHandler(context=_tls_context())
     )
     request = urllib.request.Request(
-        f"https://github.com/{repo}/releases/latest",
+        f"{_source_url(repo)}/releases/latest",
         method=method,
         headers={"User-Agent": "defenseclaw-upgrade"},
     )
@@ -508,8 +868,11 @@ def _latest_from_redirect(repo: str, method: str, timeout: float) -> str | None:
 
 
 def _latest_from_api(repo: str, timeout: float) -> str | None:
+    source = _source_url(repo)
+    if not source.startswith("https://github.com/"):
+        return None
     request = urllib.request.Request(
-        f"https://api.github.com/repos/{repo}/releases/latest",
+        f"https://api.github.com/repos/{source.removeprefix('https://github.com/')}/releases/latest",
         headers={"User-Agent": "defenseclaw-upgrade", "Accept": "application/vnd.github+json"},
     )
     try:

@@ -23,6 +23,7 @@ import (
 
 const (
 	tcpTableOwnerPIDAll = 5
+	mibTCPStateListen   = 2
 	mibTCPStateEstab    = 5
 	maxTCPTableBytes    = 16 << 20
 )
@@ -32,6 +33,7 @@ var (
 
 	managedEnterpriseQueryServicePID = queryManagedGatewayServicePID
 	managedEnterpriseConnectedPID    = connectedManagedGatewayPID
+	managedEnterpriseListening       = managedGatewayPortListening
 	managedEnterpriseDialContext     = (&net.Dialer{Timeout: 2 * time.Second}).DialContext
 )
 
@@ -86,12 +88,19 @@ func managedEnterpriseHTTPClient(
 
 				servicePID, err := managedEnterpriseQueryServicePID(serviceName)
 				if errors.Is(err, errManagedGatewayNotRunning) {
-					// Still a peer-verification failure (fail closed), but the
-					// hook can say the service is stopped.
-					return nil, fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, err)
+					return nil, stoppedManagedGatewayError(canonicalAddr, err)
 				}
 				if err != nil {
 					return nil, managedGatewayPeerError("query protected gateway service: %v", err)
+				}
+				// A service that has just started (or is about to stop)
+				// can run without a listener on its port. Windows answers a
+				// connect to such a port only after about 2 seconds of SYN
+				// retries, so one try could take most of a restart budget:
+				// read the listen table instead, and try again shortly.
+				if listening, known := managedEnterpriseListening(canonicalAddr); known && !listening {
+					return nil, fmt.Errorf("%w: %w: nothing listens on %s yet",
+						errManagedGatewayPeerUnverified, errManagedGatewayNotRunning, canonicalAddr)
 				}
 				conn, err := managedEnterpriseDialContext(ctx, "tcp4", canonicalAddr)
 				if err != nil {
@@ -108,12 +117,15 @@ func managedEnterpriseHTTPClient(
 				if err != nil {
 					return nil, managedGatewayPeerError("resolve connected listener owner: %v", err)
 				}
-				if connectedPID == 0 || connectedPID != servicePID {
-					return nil, managedGatewayPeerError(
-						"connected listener PID %d does not equal service PID %d",
-						connectedPID,
-						servicePID,
-					)
+				if connectedPID == 0 {
+					return nil, managedGatewayPeerError("connected listener PID 0 does not equal service PID %d", servicePID)
+				}
+				if connectedPID != servicePID {
+					// The service runs, but another process answers on its
+					// port: the hook names the port, not a stopped service
+					// (GAP-1029).
+					return nil, fmt.Errorf("%w: %w: connected listener PID %d does not equal service PID %d",
+						errManagedGatewayPeerUnverified, errManagedGatewayPortHeld, connectedPID, servicePID)
 				}
 				recheckedPID, err := managedEnterpriseQueryServicePID(serviceName)
 				if err != nil {
@@ -135,6 +147,28 @@ func managedEnterpriseHTTPClient(
 			return http.ErrUseLastResponse
 		},
 	}, nil
+}
+
+// stoppedManagedGatewayError is the dial error when the gateway service is
+// not running (serviceErr). That is an outage, which a standalone hook's
+// open fail mode lets through, only when nothing listens on the gateway's
+// port either. Another process on the port while the service is stopped is
+// an integrity failure (errManagedGatewayPortHeld, closed in every fail
+// mode), and so is a listen table the hook cannot read: before, the stopped
+// service was reported before the port was looked at, so fail mode open
+// allowed the call while another program held the port.
+func stoppedManagedGatewayError(canonicalAddr string, serviceErr error) error {
+	listening, known := managedEnterpriseListening(canonicalAddr)
+	switch {
+	case !known:
+		return managedGatewayPeerError("gateway service is not running and the listeners on %s cannot be read: %v", canonicalAddr, serviceErr)
+	case listening:
+		return fmt.Errorf("%w: %w: the gateway service is not running but another process listens on %s",
+			errManagedGatewayPeerUnverified, errManagedGatewayPortHeld, canonicalAddr)
+	}
+	// Still a peer-verification failure, but the hook can say the service
+	// is stopped.
+	return fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, serviceErr)
 }
 
 func managedGatewayPeerError(format string, args ...interface{}) error {
@@ -249,6 +283,42 @@ func connectedManagedGatewayPID(conn net.Conn) (uint32, error) {
 		server.addr,
 		server.port,
 	)
+}
+
+// managedGatewayPortListening reports whether any process listens on the
+// IPv4 address of address (or on every address) and its port; known is
+// false when the table cannot be read, and the hook then dials as before.
+func managedGatewayPortListening(address string) (listening, known bool) {
+	host, rawPort, err := net.SplitHostPort(address)
+	if err != nil {
+		return false, false
+	}
+	port, err := strconv.Atoi(rawPort)
+	if err != nil {
+		return false, false
+	}
+	ip := net.ParseIP(host).To4()
+	if ip == nil {
+		return false, false
+	}
+	rows, err := readTCP4OwnerPIDTable()
+	if err != nil {
+		return false, false
+	}
+	return tcpTableListensOn(rows, [4]byte(ip), uint16(port)), true
+}
+
+// tcpTableListensOn reports a LISTEN row for addr (or 0.0.0.0) and port.
+func tcpTableListensOn(rows []mibTCPRowOwnerPID, addr [4]byte, port uint16) bool {
+	for _, row := range rows {
+		if row.State != mibTCPStateListen || bits.ReverseBytes16(uint16(row.LocalPort)) != port {
+			continue
+		}
+		if local := ipv4FromMIB(row.LocalAddr); local == addr || local == ([4]byte{}) {
+			return true
+		}
+	}
+	return false
 }
 
 func managedIPv4EndpointFromAddr(addr net.Addr) (managedIPv4Endpoint, error) {

@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,6 +37,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -72,6 +74,20 @@ func TestSandboxConfigPersister(t *testing.T) {
 		t.Fatalf("config file = %s, %v", raw, err)
 	}
 
+	// Another writer's entry that the gateway has not reloaded yet survives:
+	// the list comes from the file, not the applied generation.
+	path := configFilePathForSnapshot(live)
+	if _, err := configwrite.Apply(ctx, path, []configwrite.Change{{Path: "openshell.egress.unblocked",
+		Value: []string{"registry.example.org", "docs.example.org", "cli.example.org"}}}, configwrite.Options{Actor: "cli:test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.AllowAlways(ctx, "late.example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if got := api.runtimeConfigSnapshot().OpenShell.Egress.Unblocked; !slices.Contains(got, "cli.example.org") || !slices.Contains(got, "late.example.org") {
+		t.Fatalf("unblocked after a concurrent write = %v", got)
+	}
+
 	// An invalid entry is refused and the file restored.
 	before, _ := os.ReadFile(configFilePathForSnapshot(live))
 	if err := p.AllowAlways(ctx, "bad host name!"); err == nil {
@@ -91,10 +107,19 @@ func TestSandboxConfigPersisterRefusals(t *testing.T) {
 		t.Fatalf("without a config runtime: %v", err)
 	}
 	api.SetConfigRuntime(func(context.Context, string) error { return nil }, func() *config.Config {
-		return &config.Config{DeploymentMode: "managed_enterprise"}
+		return &config.Config{DeploymentMode: "managed_enterprise", DataDir: cfg.DataDir}
 	})
+	path := configFilePathForSnapshot(api.runtimeConfigSnapshot())
+	before := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n")
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := (sandboxConfigPersister{api: api}).AllowAlways(context.Background(), "a.example"); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) {
 		t.Fatalf("managed_enterprise: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("managed config changed: %v", err)
 	}
 }
 

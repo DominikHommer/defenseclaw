@@ -194,3 +194,31 @@ def test_live_mode_fails_when_litellm_used_its_bundled_fallback(monkeypatch, cap
     monkeypatch.setitem(sys.modules, "litellm.litellm_core_utils.get_model_cost_map", cost_map)
     assert mod.main(["--live"]) == 2
     assert "upstream not used: fetch failed" in capsys.readouterr().err
+
+
+def test_live_mode_fails_when_litellm_cannot_report_its_registry_source(monkeypatch, capsys) -> None:
+    """Without source info the radar cannot rule out the bundled snapshot."""
+    import sys
+    import types
+
+    litellm = types.ModuleType("litellm")
+    litellm.model_cost = _FAKE_COST
+    monkeypatch.setitem(sys.modules, "litellm", litellm)
+    monkeypatch.setitem(sys.modules, "litellm.litellm_core_utils", types.ModuleType("litellm.litellm_core_utils"))
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm.litellm_core_utils.get_model_cost_map",
+        types.ModuleType("litellm.litellm_core_utils.get_model_cost_map"),
+    )
+    assert mod.main(["--live"]) == 2
+    assert "cannot confirm litellm used the upstream registry" in capsys.readouterr().err
+
+
+def test_corrupt_bundled_snapshot_reports_the_registry_unavailable(monkeypatch, tmp_path, capsys) -> None:
+    """A truncated snapshot exits 2 with the message, not a traceback."""
+    (tmp_path / mod.BUNDLED_REGISTRY).write_text('{"gpt-4": {', encoding="utf-8")
+    spec = importlib.util.spec_from_loader("litellm", loader=None, is_package=True)
+    spec.submodule_search_locations = [str(tmp_path)]
+    monkeypatch.setattr(mod.importlib.util, "find_spec", lambda name: spec)
+    assert mod.main([]) == 2
+    assert "litellm registry unavailable" in capsys.readouterr().err

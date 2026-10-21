@@ -1,13 +1,15 @@
 # Release-candidate gates compare these reviewed sources byte-for-byte across
 # Linux, macOS, and Windows runners. Keep their checkout representation stable.
 scripts/defenseclaw-upgrade.sh text eol=lf
-scripts/install-openshell-sandbox.sh text eol=lf
 scripts/install.sh text eol=lf
 scripts/install.ps1 text eol=lf
 cli/defenseclaw/install_publish.py text eol=lf
 schemas/config/v8/defenseclaw-config.schema.json text eol=lf
 schemas/config/v8/reference/observability.yaml text eol=lf
 schemas/config/v8/reference/observability.md text eol=lf
+# The signed Windows standalone module pins this exact compiler source by
+# SHA-256; Windows checkout newline conversion must not change its bytes.
+edge-connector/tools/policy_compiler.py text eol=lf
 extensions/defenseclaw/package.json text eol=lf
 extensions/defenseclaw/openclaw.plugin.json text eol=lf
 internal/configs/providers.json text eol=lf
@@ -25,10 +27,26 @@ internal/gateway/connector/testdata/bridge_host/** text eol=lf
 # (STOCK_PROFILE_DIGESTS); keep them LF on Windows checkouts too.
 policies/guardrail/** text eol=lf
 
+# A Fleet-off upgrade retires these optional templates only when their bytes
+# match the reviewed SHA-256 (bundle_refresh._LOCAL_OBSERVABILITY_RETIRED_SHA256); keep
+# them LF on Windows checkouts too.
+bundles/local_observability_stack/docker-compose.fleet.yml text eol=lf
+bundles/local_observability_stack/prometheus/examples/fleet.yml text eol=lf
+bundles/local_observability_stack/grafana/dashboards/defenseclaw-fleet.json text eol=lf
+
 # The MDM kit scripts are uploaded to MDM consoles as committed and the Unix
 # ones run under /bin/sh; keep them LF on Windows checkouts too.
 packaging/mdm/**/*.sh text eol=lf
 packaging/mdm/**/*.ps1 text eol=lf
+# The Tetragon fleet examples are embedded verbatim in the Tetragon guide and
+# cli/tests/test_tetragon_examples.py checks they stay LF.
+packaging/mdm/linux/examples/tetragon/** text eol=lf
+
+# The identity kit (packaging/identity and the Intune tenant helper) is copied
+# to tenant consoles and hosts as committed, and cli/tests/test_identity_kit.py
+# checks it stays LF; keep it LF on Windows checkouts too.
+packaging/identity/** text eol=lf
+packaging/mdm/intune/tenant/** text eol=lf
 
 # These pinned upstream snapshots are authenticated by SHA256 over their exact
 # bytes. Disable checkout-time newline conversion so Windows materializes the
@@ -39,3 +57,48 @@ schemas/telemetry/v8/upstream/** -text
 # SHA-256 over exact bytes. They must survive a Windows checkout without CRLF
 # rewriting before the strict normalization gate reads them.
 benchmarks/fixtures/** -text
+
+# The Secure Client evaluation goldens are compared byte for byte, also on a
+# Windows checkout.
+internal/gateway/testdata/secure_client_evaluation/** text eol=lf
+
+# The kernel controls are embedded and pinned by SHA-256 (policies/kernel
+# TestDigestIsPinned, the CHANGELOG digest line and tetragon verify); a CRLF
+# checkout changed the digest. Keep them LF on Windows checkouts too.
+policies/kernel/** text eol=lf
+
+# The shipped managed config templates are signed into bundles and matched
+# by digest (internal/gateway TestOfflineSignShippedTemplateMatchesDeviceDigest
+# edits them by exact LF text); a CRLF checkout broke that test on Windows.
+testdata/enterprise-configs/*.yaml text eol=lf
+
+# The local observability bundle upgrade removes a retired or Fleet asset only
+# when its SHA-256 matches a shipped digest (bundle_refresh
+# _LOCAL_OBSERVABILITY_RETIRED_SHA256, taken over LF bytes); keep the bundle
+# LF on Windows checkouts too.
+bundles/local_observability_stack/** text eol=lf
+
+# The Windows standalone Setup build scripts run under bash on the release
+# runner, and cmd/defenseclaw-enterprise-setup build_contract_test.go reads
+# their multi-line commands by exact LF text; keep them LF on Windows too.
+packaging/windows/standalone/*.sh text eol=lf
+
+# The sandbox golden texts are compared byte-for-byte; keep them LF on
+# Windows checkouts too.
+internal/config/testdata/*.golden text eol=lf
+internal/openshell/packs/testdata/*.golden text eol=lf
+internal/openshell/sandboxapi/testdata/*.golden text eol=lf
+
+# enterprise bundle CLI goldens are compared byte-for-byte with the command
+# output (LF); keep them LF on Windows checkouts too.
+internal/cli/testdata/enterprise_bundle/*.golden.json text eol=lf
+
+# Go embeds these checkout bytes into hook/adaptor renderers. A Windows CRLF
+# checkout would otherwise change protected adapter hashes across platforms
+# and prevent lifecycle snapshot capture during an upgrade.
+internal/gateway/connector/hooks/** text eol=lf
+internal/gateway/connector/shims/*.sh text eol=lf
+
+# Vendored upstream Eclipse Paho embedded MQTT sources are kept byte-for-byte
+# as published upstream; do not flag their whitespace in git diff --check.
+edge-connector/third_party/** -whitespace

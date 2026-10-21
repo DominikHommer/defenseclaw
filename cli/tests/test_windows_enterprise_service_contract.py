@@ -37,12 +37,47 @@ BOOTSTRAP_ENVIRONMENT_SMOKE = (
     / "enterprise-bootstrap-environment-smoke.ps1"
 )
 UNINSTALL_TRANSACTION_SMOKE = ROOT / "packaging" / "windows" / "tests" / "enterprise-uninstall-transaction-smoke.ps1"
+INSTALL_RECONCILE_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-install-reconcile-smoke.ps1"
+)
+UNINSTALL_ACL_RECOVERY_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-uninstall-acl-recovery-smoke.ps1"
+)
+UNINSTALL_NATIVE_CONTRACT_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-uninstall-native-contract-smoke.ps1"
+)
+UNTRUSTED_METADATA_FALLBACK_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-untrusted-metadata-fallback-smoke.ps1"
+)
 SELF_UNINSTALL_HELPER_CAPTURE_SMOKE = (
     ROOT
     / "packaging"
     / "windows"
     / "tests"
     / "enterprise-detached-helper-smoke.ps1"
+)
+INSTALL_ACL_SELF_HEAL_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-install-acl-self-heal-smoke.ps1"
 )
 DEPLOYMENT_DOC = ROOT / "docs-site" / "content" / "docs" / "enterprise" / "secure-client.mdx"
 CERTIFICATION_DOC = ROOT / "docs" / "WINDOWS-ENTERPRISE-CERTIFICATION.md"
@@ -68,6 +103,31 @@ POWERSHELL = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
 def read(path: Path) -> str:
     assert path.is_file(), f"required Windows enterprise artifact is missing: {path}"
     return path.read_text(encoding="utf-8")
+
+
+def test_bundle_acl_repair_verify_and_uninstall_use_the_same_store_tree() -> None:
+    module = read(MODULE)
+    contract = module[
+        module.index("function Invoke-DefenseClawBundleAclContract"):
+        module.index("function Set-DefenseClawManagedAcls")
+    ]
+    setter = module[
+        module.index("function Set-DefenseClawManagedAcls"):
+        module.index("function Get-DefenseClawLayout")
+    ]
+    verifier = module[
+        module.index("function Assert-DefenseClawEnterpriseDeployment"):
+        module.index("function Get-DefenseClawLifecycleStatus")
+    ]
+    assert "Get-DefenseClawBundlePathKind -RelativePath $relative" in contract
+    assert "Set-DefenseClawPathAcl -Path $item.Path -Kind $item.Kind" in contract
+    assert "Assert-DefenseClawCanonicalPathAcl -Path $item.Path -Expected $expected" in contract
+    assert "Invoke-DefenseClawBundleAclContract -Layout $Layout -GatewayServiceSID $gatewaySID -Repair" in setter
+    assert "Invoke-DefenseClawBundleAclContract -Layout $Layout -GatewayServiceSID $gatewaySID" in verifier
+    # Uninstall and purge remove StateRoot as a tree, so nested receipt-named
+    # directories do not need another fixed-name parser.
+    assert "Remove-DefenseClawManagedTree" in module
+    assert "-Path $Layout.StateRoot" in module
 
 
 def test_windows_shorthand_targets_require_metadata_versions() -> None:
@@ -378,6 +438,129 @@ def test_public_installer_exposes_complete_truthful_lifecycle() -> None:
     assert "errors = @($failureMessage)" in installer
 
 
+def test_enterprise_module_install_is_idempotent_over_active_metadata() -> None:
+    """AVC's Windows installer runs -Action Install unconditionally after its
+    own preinstall has removed machine-wide state. Refusing on a still-present
+    active deployment aborted a legitimate reinstall on hosts where metadata
+    survived (see the AVC 5.1.21.3862 DART for the macOS twin). The psm1 must
+    reconcile in place: emit the reconcile warning and drive the same
+    downstream artifact-hash rewrites Upgrade does, without touching the
+    inactive-metadata tombstone lane (which refuses to adopt active metadata
+    and would abort the run)."""
+    body = read(MODULE)
+
+    # Old refusal must NOT reappear.
+    assert (
+        "'DefenseClaw enterprise mode is already installed; use Upgrade or Repair'"
+        not in body
+    ), "idempotent-Install regression: the pre-reconcile refusal string is back"
+    assert (
+        "throw 'DefenseClaw enterprise mode is already installed" not in body
+    ), "idempotent-Install regression: any throw of the already-installed text"
+
+    # Reconcile branch must be present.
+    assert "reconciling existing installation" in body, (
+        "psm1 must emit the reconcile warning when Install runs over active metadata"
+    )
+    assert "$reconcileInstall = $false" in body, (
+        "reconcile-Install selector must be declared before the Install/Upgrade dispatch"
+    )
+    assert "$reconcileInstall = $true" in body, (
+        "reconcile-Install selector must be flipped when metadata is installed"
+    )
+    assert "-not $reconcileInstall" in body, (
+        "inactive-metadata tombstone adoption must be gated on -not $reconcileInstall so "
+        "it never fires under reconcile-Install"
+    )
+
+    # -DeferredConfig against an active deployment leaves services stopped
+    # and placeholder policy on disk (see reconcile-Install throw in the psm1).
+    # The refusal must live INSIDE the reconcile branch so a fresh install can
+    # still legitimately use -DeferredConfig.
+    assert "refusing -DeferredConfig against an active DefenseClaw" in body, (
+        "reconcile-Install must refuse -DeferredConfig combined with active metadata"
+    )
+
+    # Structural: verify branch ownership directly — the reconcile clause must
+    # hold the $reconcileInstall = $true assignment AND the DeferredConfig
+    # refusal, and its elseif clause must hold the tombstone-teardown call.
+    # Anchor the search inside an `if ($Action -eq 'Install')` block so a
+    # future refactor cannot silently move the reconcile branch under a
+    # different action (Upgrade / Repair / Reconcile) and keep the tests
+    # green while Install regresses to the old throw.
+    # The public lifecycle has multiple `if ($Action -eq 'Install')` sites; the
+    # one that carries the reconcile branch is the one whose body gates on
+    # Test-DefenseClawMetadataInstalled. Walk each candidate with a balanced-
+    # brace scan so nested `{...}` blocks (there are many in the Install body)
+    # don't confuse a naïve regex.
+    install_body = None
+    for m in re.finditer(
+        r"if\s*\(\s*\$Action\s+-eq\s+'Install'\s*\)\s*\{",
+        body,
+    ):
+        start = m.end()
+        depth = 1
+        i = start
+        while i < len(body) and depth > 0:
+            ch = body[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        candidate = body[start:i - 1]
+        if "Test-DefenseClawMetadataInstalled" in candidate:
+            install_body = candidate
+            break
+    assert install_body is not None, (
+        "psm1 must contain an `if ($Action -eq 'Install')` block whose body "
+        "gates on Test-DefenseClawMetadataInstalled — reconcile-Install must "
+        "be bound to the Install dispatch, not siphoned to another action"
+    )
+
+    branch = re.search(
+        r"""if\s*\(
+            \s*\$null\s+-ne\s+\$metadata\s+-and\s+
+            \(\s*Test-DefenseClawMetadataInstalled\s+-Metadata\s+\$metadata\s*\)\s*
+        \)\s*\{
+            (?P<reconcile>(?:[^{}]|\{[^{}]*\})*)
+        \}\s*
+        elseif\s*\(\s*\$null\s+-ne\s+\$metadata\s*\)\s*\{
+            (?P<tombstone>(?:[^{}]|\{[^{}]*\})*)
+        \}""",
+        install_body,
+        re.S | re.X,
+    )
+    assert branch is not None, (
+        "the `if ($Action -eq 'Install')` block must have an if/elseif pair "
+        "rooted at `if ($null -ne $metadata -and "
+        "(Test-DefenseClawMetadataInstalled ...))` followed by "
+        "`elseif ($null -ne $metadata)` — reconcile-Install and "
+        "tombstone-teardown must be sibling clauses of the same construct, "
+        "and that construct must live inside the Install dispatch"
+    )
+    reconcile_clause = branch.group("reconcile")
+    tombstone_clause = branch.group("tombstone")
+    assert "$reconcileInstall = $true" in reconcile_clause, (
+        "reconcile clause must flip $reconcileInstall to $true"
+    )
+    assert (
+        "refusing -DeferredConfig against an active DefenseClaw" in reconcile_clause
+    ), "reconcile clause must contain the -DeferredConfig refusal"
+    assert "reconciling existing installation" in reconcile_clause, (
+        "reconcile clause must emit the reconcile-in-place warning"
+    )
+    assert (
+        "Remove-DefenseClawCommittedManagedHooksTeardownJournal" in tombstone_clause
+    ), (
+        "tombstone-teardown call must live in the elseif ($null -ne $metadata) "
+        "clause (fires only for a tombstone, never for active metadata)"
+    )
+    assert "$reconcileInstall = $true" not in tombstone_clause, (
+        "reconcile-Install selector must never be flipped in the tombstone clause"
+    )
+
+
 def test_public_windows_lifecycle_cli_preserves_every_security_option() -> None:
     source = read(WINDOWS_LIFECYCLE_CLI)
 
@@ -557,8 +740,7 @@ def test_enterprise_process_json_and_machine_root_contracts() -> None:
     assert "$null -eq $argument -or $argument -isnot [string]" in command_line_encoder
     assert "CharSet = CharSet.Unicode" in module_smoke
     assert "ExactSpelling = true" in module_smoke
-    # Spec 005 D1 (docs/specs/005-windows-per-user-hook-lifecycle/):
-    # third `Assert-DefenseClawServiceImagePath` call pins the
+    # The third `Assert-DefenseClawServiceImagePath` call pins the
     # DefenseClawHookEnumerator SCM service's ImagePath alongside
     # the existing gateway + guardian.
     assert module.count("Assert-DefenseClawServiceImagePath `") == 3
@@ -1337,6 +1519,44 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
             ),
         ),
         (
+            INSTALL_RECONCILE_SMOKE,
+            (
+                "reconcileInstall",
+                "Test-DefenseClawMetadataInstalled",
+                "tombstone",
+            ),
+        ),
+        (
+            UNINSTALL_ACL_RECOVERY_SMOKE,
+            (
+                "canonical_noop",
+                "inherited_acl_repaired",
+                "metadata_bytes_preserved",
+                "hashed_attestation_repaired",
+                "changed_attestation_rejected",
+                "trusted_admin_deny_repaired",
+                "purge_skipped_denied_state_child",
+                "non_purge_rejected_denied_state_child",
+                "foreign_writer_rejected",
+                "explorer_full_control_rejected",
+            ),
+        ),
+        (
+            UNINSTALL_NATIVE_CONTRACT_SMOKE,
+            (
+                "seal_and_delete_bound",
+                "internal_helper_rejected",
+                "absent_delete_idempotent",
+            ),
+        ),
+        (
+            UNTRUSTED_METADATA_FALLBACK_SMOKE,
+            (
+                "partial_dispatch",
+                "protected_evidence_blocks_fallback",
+            ),
+        ),
+        (
             SELF_UNINSTALL_HELPER_CAPTURE_SMOKE,
             (
                 "engine",
@@ -1355,6 +1575,10 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
         "bootstrap",
         "bootstrap-environment",
         "uninstall-transaction",
+        "install-reconcile",
+        "uninstall-acl-recovery",
+        "uninstall-native-contract",
+        "untrusted-metadata-fallback",
         "helper-capture",
     ),
 )
@@ -1576,6 +1800,55 @@ def test_windows_packaging_smokes_run_on_every_available_engine(
         assert report["environment_root_retired"] is True
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+@pytest.mark.parametrize(
+    "engine",
+    windows_powershell_engines() or (None,),
+    ids=lambda engine: Path(engine).stem if engine else "missing",
+)
+def test_enterprise_install_acl_self_heal_smoke_runs_on_every_available_engine(
+    engine: str | None,
+) -> None:
+    """Regression gate for the orphan NT SERVICE per-service SID install
+    blocker. The smoke stages the exact SID shape that reproduced the QA
+    failure, drives Set-DefenseClawPathAcl -Kind ManagedIPCDirectory, and
+    asserts (a) the orphan ACE is stripped, (b) SE_DACL_PROTECTED is set.
+
+    Its output is a single PASS line, not JSON, so it is not part of the
+    JSON smoke matrix. It still must run on every Windows PowerShell
+    engine the CI exposes (PowerShell 5.1 and PowerShell 7)."""
+    assert engine, "Windows CI must provide Windows PowerShell 5.1 or PowerShell 7"
+    completed = subprocess.run(
+        [
+            engine,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(INSTALL_ACL_SELF_HEAL_SMOKE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8-sig",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, (
+        f"install ACL self-heal smoke failed (exit {completed.returncode})\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
+    assert "enterprise-install-acl-self-heal-smoke: PASS" in completed.stdout, (
+        "expected PASS line not in stdout\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
+
+
 def test_bootstrap_rejects_raw_per_logon_dos_device_aliases() -> None:
     bootstrap = read(INSTALLER)
     module = read(MODULE)
@@ -1689,6 +1962,17 @@ def test_bootstrap_compiler_environment_is_one_shot_and_protected() -> None:
     assert '"hostile-*-$name"' in smoke
     assert "$pinned" not in bootstrap
     assert "Restore-DefenseClawBootstrapEnvironment -Context $context" in bootstrap
+
+
+def test_guardian_state_identity_uses_runtime_directory() -> None:
+    module = read(MODULE)
+    guardian_identity = module[
+        module.index("function Get-DefenseClawGuardianStateIdentity") : module.index(
+            "function Wait-DefenseClawServiceFailureRestartQuiescence"
+        )
+    ]
+    assert "$Layout.RuntimeDirectory" in guardian_identity
+    assert "$Layout.StateRoot" not in guardian_identity
 
 
 def test_lifecycle_reauthenticates_volumes_and_sources_at_last_use() -> None:
@@ -2115,17 +2399,20 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     assert "TokenIntegrityLevel" in harness
     assert "TokenRestrictedSids" in harness
     assert "IsTokenRestricted" in harness
-    assert "'S-1-16-12288'" in token_probe
-    assert "'S-1-16-16384'" in token_probe
+    # Every service, the gateway included, runs as LocalSystem at System
+    # integrity and must carry its own service SID as a group.
+    assert "$expectedUserSID = 'S-1-5-18'" in token_probe
+    assert "$expectedIntegritySID = 'S-1-16-16384'" in token_probe
+    assert "'S-1-16-12288'" not in token_probe
     assert "$broker = $serviceName -eq $script:BrokerServiceName" in token_probe
     assert "$sensorHelper = $serviceName -eq $script:SensorHelperServiceName" in token_probe
     assert "$expectedPrivileges = if ($gateway -or $broker -or $sensorHelper)" in token_probe
-    assert "$expectedIntegritySID = if ($gateway)" in token_probe
     assert "integrity $($token.IntegritySid), want $expectedIntegrityName" in token_probe
     assert "expected_integrity_sid = $expectedIntegritySID" in token_probe
-    assert "if (-not $gateway -and" in token_probe
     assert "if (-not $gateway -and -not $broker -and -not $sensorHelper)" in token_probe
-    assert "service_sid_group_required = -not $gateway" in token_probe
+    assert "-not [bool]$serviceGroups[0].Enabled -or" in token_probe
+    assert "[bool]$serviceGroups[0].DenyOnly) {" in token_probe
+    assert "service_sid_group_required = $true" in token_probe
     assert "service_sid_group_count = $serviceGroups.Count" in token_probe
     assert "foreach ($requiredSID in @($serviceSID, 'S-1-1-0', 'S-1-5-33'))" in token_probe
     assert "restricted SID list lacks one exact service-logon SID" in token_probe
@@ -2143,7 +2430,7 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     ):
         assert privilege in harness
     assert "live-service-token-least-privilege" in harness
-    assert "High gateway/System service integrity" in harness
+    assert "LocalSystem TokenUser, System integrity for every service" in harness
     assert "service-SID identity/group semantics" in harness
     assert "service_tokens = @($serviceTokenSnapshot)" in harness
 
@@ -2239,13 +2526,25 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
     module = read(MODULE)
 
     assert "@('BrokerBinary', $BrokerBinary)" in module
-    assert "@('ProviderLibrary', $ProviderLibrary)" in module
+    # -ProviderLibrary is deliberately NOT a required source for Install or
+    # Upgrade. A full XDR deployment installs Cloud Management after
+    # DefenseClaw, so cmidapi.dll routinely does not exist at lifecycle time;
+    # the broker discovers it at runtime instead. Requiring it here is what
+    # used to make that install order fail outright, so assert its absence
+    # rather than merely dropping the old assertion.
+    assert "@('ProviderLibrary', $ProviderLibrary)" not in module
+    assert "-ProviderLibrary, -GatewayBinary" not in module
+    # The ACP guard and sensor helper are unrelated to CMID and stay
+    # required sources on main, so the requirements message lists them
+    # alongside the other three. It names exactly what the condition tests.
     assert (
-        "Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, "
-        "-ACPBinary, -HookBinary, and -SensorHelperBinary" in module
+        "Upgrade requires -BrokerBinary, -GatewayBinary, -ACPBinary, "
+        "-HookBinary, and -SensorHelperBinary" in module
     )
     assert "@('sensor_helper', $SensorHelperBinary" in module
     assert "'privs', $sensorHelperServiceName, 'SeChangeNotifyPrivilege'" in module
+    # A path that *is* supplied still has to be described and trusted like
+    # every other artifact; only the requirement relaxed, not the validation.
     assert "@('provider_library', $ProviderLibrary" in module
     assert "$Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path" in (
         module
@@ -3500,7 +3799,12 @@ def test_certification_accepts_only_the_canonical_persistent_lifecycle_lock() ->
 
     smoke = read(MODULE_SMOKE)
     assert smoke.count("Enter-DefenseClawLifecycleLock `") >= 2
-    assert "persistent lifecycle file lock changed across consecutive acquisitions" in smoke
+    assert "legacy residual lifecycle lock did not inherit before reinstall" in smoke
+    assert (
+        "persistent lifecycle file lock was not canonically repaired in place for reinstall"
+        in smoke
+    )
+    assert "writable inherited lifecycle lock was silently adopted" in smoke
     assert "lifecycle_file_lock_reuse_stable = $elevated" in smoke
 
 
@@ -3574,6 +3878,13 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
             "function Write-DefenseClawJsonAtomic"
         )
     ]
+    # The replacement helpers branch on the enterprise profile (Standalone
+    # retires stale replacement backups); run the probe under both profiles.
+    profile_check = module[
+        module.index("function Test-DefenseClawStandaloneProfile") : module.index(
+            "function Get-DefenseClawClaudeMinimumClientVersion"
+        )
+    ]
     probe = tmp_path / f"atomic-file-replacement-{Path(engine).stem}.ps1"
     probe.write_text(
         "Set-StrictMode -Version Latest\n"
@@ -3595,8 +3906,11 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
         "    param([Parameter(Mandatory)][string]$Path)\n"
         "    [void][IO.Directory]::CreateDirectory($Path)\n"
         "}\n"
+        + profile_check
         + atomic_install
         + r'''
+foreach ($profileName in @('SecureClient', 'Standalone')) {
+$script:DefenseClawEnterpriseProfile = $profileName
 $root = [IO.Path]::Combine(
     [IO.Path]::GetTempPath(),
     "DefenseClaw-AtomicFile-$([Guid]::NewGuid().ToString('N'))"
@@ -3641,15 +3955,16 @@ try {
     }
     if (@([IO.Directory]::GetFiles($root, '*.new.*')).Count -ne 0 -or
         @([IO.Directory]::GetFiles($root, '*.backup.*')).Count -ne 0) {
-        throw 'atomic replacement left a staging or backup file behind'
+        throw "$profileName atomic replacement left a staging or backup file behind"
     }
-    'ok'
 }
 finally {
     if ([IO.Directory]::Exists($root)) {
         [IO.Directory]::Delete($root, $true)
     }
 }
+}
+'ok'
 ''',
         encoding="utf-8",
     )
@@ -4037,6 +4352,204 @@ def test_normal_mode_timeout_and_acl_cleanup_are_bounded_and_exact() -> None:
     assert stop_fixture < cleanup.index("Remove-Item `", stop_fixture)
 
 
+def test_recovery_readiness_and_deferred_activation_order_are_fail_closed() -> None:
+    module = read(MODULE).replace("\r\n", "\n")
+
+    transaction_start = module[
+        module.index("function Start-DefenseClawTransactionServices") :
+        module.index("function Restore-DefenseClawTransactionWithManagedHooksRollback")
+    ]
+    enumerator_start = transaction_start.index(
+        "Start-DefenseClawService -Name $enumeratorServiceName"
+    )
+    enumerator_demand = transaction_start.index(
+        "-Name $enumeratorServiceName `\n                -StartMode 3"
+    )
+    readiness = transaction_start.index("Wait-DefenseClawEnterpriseReadiness `")
+    enumerator_final_mode = transaction_start.index(
+        "-StartMode $enumeratorTargetStartMode"
+    )
+    assert enumerator_demand < enumerator_start < readiness < enumerator_final_mode
+    assert "-RequireEnumerator:$enumeratorShouldRun" in transaction_start
+    assert "-Enumerator" in transaction_start[
+        transaction_start.index("-Name $enumeratorServiceName `") :
+        transaction_start.index(
+            "Set-DefenseClawServiceStartMode -Name $name -StartMode 4"
+        )
+    ]
+
+    restore = module[
+        module.index("function Restore-DefenseClawTransaction {") :
+        module.index("function Assert-DefenseClawRestoredTransactionReadyForActivation")
+    ]
+    assert "-Enumerator" in restore[
+        restore.index("-Name $enumeratorServiceName `") :
+        restore.index("Set-DefenseClawServiceStartMode -Name $name -StartMode 4")
+    ]
+
+    quiescing_recovery = module[
+        module.index("function Recover-DefenseClawQuiescingIntent") :
+        module.index("function Recover-DefenseClawPendingTransaction")
+    ]
+    assert "-Enumerator" in quiescing_recovery[
+        quiescing_recovery.index("-Name $enumeratorServiceName `") :
+        quiescing_recovery.index(
+            "foreach ($name in @($GatewayServiceName, $brokerServiceName, $GuardianServiceName, $enumeratorServiceName))"
+        )
+    ]
+
+    readiness_function = module[
+        module.index("function Wait-DefenseClawEnterpriseReadiness") :
+        module.index("function Get-DefenseClawOptionalPropertyValues")
+    ]
+    assert "[bool]$RequireEnumerator = $true" in readiness_function
+    assert "(-not $RequireEnumerator -or $enumeratorReady)" in readiness_function
+
+    reconcile = module[
+        module.index("function Invoke-DefenseClawReconcileLifecycle") :
+        module.index("function Invoke-DefenseClawEnterpriseLifecycle")
+    ]
+    deferred_gate = reconcile.index(
+        "deferred configuration must be completed with Repair before Reconcile"
+    )
+    assert reconcile.index("Assert-DefenseClawMetadataIdentity `") < deferred_gate
+    assert deferred_gate < reconcile.index(
+        "Invoke-DefenseClawCodexRequirementsCommand `"
+    )
+
+    status = module[
+        module.index("function Get-DefenseClawLifecycleStatus") :
+        module.index("function Test-DefenseClawGuardianCoverageReport")
+    ]
+    assert "-not $deferredConfigPending -and" in status
+
+    install_like = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") :
+        module.index("function Invoke-DefenseClawUninstallLifecycle")
+    ]
+    assert "$DeferredConfig -or $priorDeferredConfigPending" in install_like
+    clear_marker = install_like.index(
+        "$newMetadata.deferred_config_pending = $false"
+    )
+    assert install_like.rindex("-RequireReadiness", 0, clear_marker) < clear_marker
+    assert clear_marker < install_like.index(
+        "Complete-DefenseClawTransaction `", clear_marker
+    )
+
+
+def test_legacy_service_recovery_restores_only_authenticated_preimage() -> None:
+    module = read(MODULE).replace("\r\n", "\n")
+
+    states = module[
+        module.index("function Get-DefenseClawTransactionServiceStates") :
+        module.index("function Restore-DefenseClawTransactionServiceStartModes")
+    ]
+    assert states.count("recorded_in_transaction = $false") == 2
+    assert "$states[$enumeratorServiceName]" in states
+    assert "$states[$brokerServiceName]" in states
+
+    configure = module[
+        module.index("function Set-DefenseClawManagedServices") :
+        module.index("function Get-DefenseClawServiceStartMode")
+    ]
+    assert "[switch]$RestoreTransactionWithoutBroker" in configure
+    assert "[switch]$RestoreTransactionWithoutEnumerator" in configure
+    assert "-not $DeferAutomaticStart" in configure
+    assert "$gatewayDependency = if ($RestoreTransactionWithoutBroker)" in configure
+    assert "legacy transaction restore requires the Broker absent" in configure
+    assert "legacy transaction restore requires the Enumerator absent" in configure
+    assert "if (-not $RestoreTransactionWithoutBroker)" in configure
+    assert "if (-not $RestoreTransactionWithoutEnumerator)" in configure
+    assert (
+        "[Parameter(Mandatory)][AllowEmptyString()][string]$ProviderLibraryPath"
+        in configure
+    )
+
+    managed_acls = module[
+        module.index("function Set-DefenseClawManagedAcls") :
+        module.index("function Set-DefenseClawRetainedRuntimeAcls")
+    ]
+    assert "[switch]$AllowTransactionRecordedBrokerAbsence" in managed_acls
+    assert "if (-not $AllowTransactionRecordedBrokerAbsence -or" in managed_acls
+
+    gateway_restore = module[
+        module.index("function Restore-DefenseClawTransactionGatewayWithoutBroker") :
+        module.index("function Set-DefenseClawCMIDBrokerAuthKey")
+    ]
+    ownership = gateway_restore.index("Assert-DefenseClawOwnedServiceOrAbsent `")
+    dependency = gateway_restore.index("'config', $GatewayServiceName, 'depend=', '/'")
+    environment = gateway_restore.index("Set-DefenseClawServiceEnvironment `")
+    assert ownership < dependency < environment
+    assert "exact absent Broker preimage" in gateway_restore
+    assert "-BrokerPipeName" not in gateway_restore
+    assert "-BrokerServiceName" not in gateway_restore
+    assert "-BrokerAuthKeyPath" not in gateway_restore
+
+    restore = module[
+        module.index("function Restore-DefenseClawTransaction {") :
+        module.index("function Assert-DefenseClawRestoredTransactionReadyForActivation")
+    ]
+    legacy_gateway = restore.index(
+        "Restore-DefenseClawTransactionGatewayWithoutBroker `"
+    )
+    broker_recheck = restore.index(
+        "Assert-DefenseClawCMIDBrokerServiceOrAbsent `", legacy_gateway
+    )
+    broker_remove = restore.index(
+        "Remove-DefenseClawService -Name $Layout.BrokerServiceName",
+        broker_recheck,
+    )
+    managed_services = restore.index("Set-DefenseClawManagedServices `", broker_remove)
+    assert legacy_gateway < broker_recheck < broker_remove < managed_services
+    assert "-RestoreTransactionWithoutBroker:(" in restore
+    assert "-RestoreTransactionWithoutEnumerator:(" in restore
+    assert "-AllowTransactionRecordedBrokerAbsence:(" in restore
+
+    activation = module[
+        module.index("function Assert-DefenseClawRestoredTransactionReadyForActivation") :
+        module.index("function Start-DefenseClawTransactionServices")
+    ]
+    assert "-AllowTransactionRecordedBrokerAbsence:$brokerAbsentPreimage" in activation
+    assert "-AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage" in activation
+
+    start = module[
+        module.index("function Start-DefenseClawTransactionServices") :
+        module.index("function Restore-DefenseClawTransactionWithManagedHooksRollback")
+    ]
+    first_mutation = start.index("Set-DefenseClawServiceStartMode -Name $name -StartMode 4")
+    assert start.index("Assert-DefenseClawCMIDBrokerServiceOrAbsent `") < first_mutation
+    assert start.index("Restore-DefenseClawTransactionGatewayWithoutBroker `") < start.index(
+        "Remove-DefenseClawService -Name $brokerServiceName"
+    )
+    assert "if ([bool]$gateway.running)" in start
+    assert "Restore-DefenseClawTransactionServiceStartModes `" in start
+    assert "-RequireBroker:([bool]$broker.existed)" in start
+
+    deployment = module[
+        module.index("function Assert-DefenseClawEnterpriseDeployment") :
+        module.index("function Get-DefenseClawLifecycleStatus")
+    ]
+    assert "[switch]$AllowTransactionRecordedBrokerAbsence" in deployment
+    assert "-not $ServicingTransaction" in deployment
+    assert "authenticated servicing preimage requires Broker to remain absent" in deployment
+    assert "-ExpectedDependencies $gatewayDependencies" in deployment
+
+    smoke = read(
+        ROOT / "packaging/windows/tests/enterprise-uninstall-transaction-smoke.ps1"
+    )
+    managed_acls_mock = smoke[
+        smoke.index("function script:Set-DefenseClawManagedAcls") :
+        smoke.index("function script:Invoke-DefenseClawEnumeratorRefresh")
+    ]
+    assert "[switch]$AllowTransactionRecordedBrokerAbsence" in managed_acls_mock
+    readiness_mock = smoke[
+        smoke.index("function script:Wait-DefenseClawEnterpriseReadiness") :
+        smoke.index("function script:Wait-DefenseClawFreshGuardianReconcile")
+    ]
+    assert "[bool]$RequireBroker = $true" in readiness_mock
+    assert "readiness-require-broker:{0}" in readiness_mock
+
+
 def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatible() -> None:
     module = read(MODULE)
     smoke = read(UNINSTALL_TRANSACTION_SMOKE)
@@ -4045,9 +4558,12 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "rollback_verification_only" in smoke
     assert "disconnected target teardown incomplete" in smoke
 
-    assert "('dcut-' + [Guid]::NewGuid().ToString('N'))" in smoke
+    # UUID is truncated to 8 hex chars so the fixture path stays under
+    # Windows MAX_PATH once the module's staging suffix (.new.<32-hex>) is
+    # appended. See enterprise-uninstall-transaction-smoke.ps1 comment.
+    assert "('dcut-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))" in smoke
     assert "function New-HarnessCaseRoot" in smoke
-    assert "$receiptProbe.Length -ge 240" in smoke
+    assert "$stagedProbe.Length -ge 255" in smoke
     assert "legacy MAX_PATH boundary" in smoke
     assert smoke.count("New-HarnessCaseRoot") == 14
     assert "fresh-install-service-bootstrap-rollback-retry" in smoke
@@ -5254,16 +5770,19 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
     assert "CodexManagedHooksLockPath" in module
     assert "ClaudeManagedHooksLockPath" in module
     assert "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout" in module
-    # A standalone purge then removes the Claude Code folders Setup created
-    # once they are empty (GAP-0100), and stale protected PowerShell temp
+    # A standalone purge then removes the runtime selector state (GAP-0262)
+    # and the Claude Code folders Setup created once they are empty
+    # (GAP-0100), and stale protected PowerShell temp
     # folders (GAP-1734), and reports what it kept (behaviour in
     # enterprise-standalone-machine-leftovers-purge-smoke.ps1).
     assert (
         "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout\n"
         "    $machineStateRemaining = [string[]]@()\n"
         "    if ($Purge -and (Test-DefenseClawStandaloneProfile)) {\n"
-        "        $machineStateRemaining = [string[]]@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders"
+        "        $machineStateRemaining = [string[]]@(\n"
+        "            @(Remove-DefenseClawRuntimeSelectorState -Directories @("
     ) in module
+    assert "@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)" in module
     # GAP-2057: stale installer staging and bootstrap folders go too.
     assert (
         "@(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData "
@@ -5275,6 +5794,9 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
         assert f"'{prefix}'" in sweep
     assert "[string]$PSScriptRoot" in sweep
     assert "-Name machine_state_remaining" in module
+    # GAP-0029: with StateRoot gone, the purge also removes the contract
+    # cleanup receipt a forced uninstall left in the lifecycle folder.
+    assert "@(Remove-DefenseClawStandaloneOrphanedContractCleanupReceipt -Layout $Layout)" in module
 
     # The traverse grant names a virtual account that only exists while the
     # service does, so it is dropped by the caller that deleted the service.
@@ -5340,6 +5862,12 @@ def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
     )
     assert quiesce < validate_only < ipc_revoke < destructive_root_cleanup
     assert destructive_root_cleanup < service_delete
+    # GAP-0250: standalone removes its own IPC directory and OpenCode plugin,
+    # which the native validator does not adopt, once the services are
+    # stopped and before the root is validated.
+    standalone_ipc = fallback.index("Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $Layout")
+    assert quiesce < standalone_ipc < validate_only
+    assert "Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $Layout" in fallback[standalone_ipc:validate_only]
     quiesce_body = fallback[quiesce:ipc_revoke]
     assert "Set-DefenseClawServiceStartMode" in quiesce_body
     assert "Stop-DefenseClawService -Name $name" in quiesce_body
@@ -5362,6 +5890,132 @@ def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
 
     assert "Invoke-DefenseClawNamespaceSweep" not in module
     assert "Remove-DefenseClawSweepPath" not in module
+
+
+def test_delayed_purge_contract_cleanup_is_crash_stable_and_scope_bound() -> None:
+    """Retained connector entries need durable CAS authority across retries."""
+    module = read(MODULE)
+    cleanup = read(ROOT / "internal/cli/windows_managed_hook_contract_cleanup_windows.go")
+    connector_cleanup = read(
+        ROOT / "internal/gateway/connector/managed_hook_contract_purge_windows.go"
+    )
+    connector_state = read(ROOT / "internal/gateway/connector/connector_state.go")
+    cursor_secure = read(
+        ROOT / "internal/enterprisehooks/install_windows_cursor_secure.go"
+    )
+    connector_cleanup_test = read(
+        ROOT / "internal/gateway/connector/managed_hook_contract_purge_windows_test.go"
+    )
+
+    state_purge = module[
+        module.index("function Get-DefenseClawStatePurgeIntent") :
+        module.index("function Invoke-DefenseClawCommittedUninstallCleanup")
+    ]
+    pre_layout = module[
+        module.index("function Invoke-DefenseClawPreLayoutRecovery") :
+        module.index("function Get-DefenseClawTargetRuntimePreparationMode")
+    ]
+    rollback = module[
+        module.index("function Restore-DefenseClawTransactionWithManagedHooksRollback") :
+        module.index("function Assert-DefenseClawInstallRollbackIntentCommitTimestamp")
+    ]
+    purge_writer = module[
+        module.index("function Write-DefenseClawStatePurgeIntentAtomic") :
+        module.index("function Get-DefenseClawSelfUninstallReceipt")
+    ]
+    smoke = read(
+        ROOT / "packaging/windows/tests/enterprise-uninstall-transaction-smoke.ps1"
+    )
+
+    assert 'IdentitySHA256' in cleanup
+    assert 'windowsManagedHookContractCleanupIdentitySHA256' in cleanup
+    cleanup_identity_start = cleanup.index(
+        "type windowsManagedHookContractCleanupIdentity struct"
+    )
+    cleanup_report_start = cleanup.index(
+        "type windowsManagedHookContractCleanupReport struct"
+    )
+    assert cleanup_identity_start < cleanup_report_start, (
+        "cleanup source reordered: identity struct must precede report struct "
+        "for the negative-slice contract below to remain meaningful"
+    )
+    assert 'ApplicationStarted' not in cleanup[
+        cleanup_identity_start : cleanup_report_start
+    ]
+    assert 'writeEnterpriseHookAdminOnlyFile(path, body)' in cleanup
+    assert 'writeWindowsTargetRuntimeProtectedJSON(path, receipt)' not in cleanup
+    assert 'errors.Is(' in cleanup
+    assert 'ErrWindowsManagedHookContractCleanupSuperseded' in cleanup
+    assert 'contract_cleanup_identity_sha256' in state_purge
+    assert 'contract_cleanup_receipt_sha256' not in state_purge
+    assert "'contract_locks_pending'" in state_purge
+    assert "'contract_locks_finalized'" in state_purge
+    assert "'state_root_removed'" in state_purge
+    assert state_purge.count('Write-DefenseClawStatePurgeIntentAtomic `') == 3
+    # File.Replace requires a non-empty backup path on both .NET Framework
+    # and modern .NET; passing $null throws "path is not of a legal form".
+    # The writer now stages a unique same-directory backup and retires it
+    # after the swap completes.
+    assert '[IO.File]::Replace($temporary, $destination, $backup, $true)' in purge_writer
+    assert '[IO.File]::Move($temporary, $destination)' in purge_writer
+    assert 'Microsoft.PowerShell.Management\\Move-Item' not in purge_writer
+    assert purge_writer.index('Set-DefenseClawPathAcl `') < purge_writer.index(
+        '[IO.File]::Replace('
+    )
+    assert 'Write-DefenseClawJsonAtomic `' not in state_purge
+    assert "$phaseValue -ceq 'contract_locks_pending'" in state_purge
+    assert "$phaseValue -ceq 'contract_locks_finalized'" in state_purge
+    assert "$phaseValue -ceq 'state_root_removed'" in state_purge
+    assert "-cin @(" not in state_purge
+    assert '-NativeCleanupSource $nativeCleanupSource' in pre_layout
+    assert "$Sources['gateway']" in pre_layout
+    assert 'retained-state Install requires the authenticated' in pre_layout
+    assert 'exact-scope purge requires the authenticated native cleanup' in module
+    assert 'predates scope-bound connector cleanup ' in module
+    assert 'authority; refusing Purge' in module
+    assert 'legacy state-purge intent cannot authorize user contract cleanup' not in module
+    assert 'Remove-DefenseClawManagedHookContractCleanupReceipt' in rollback
+    assert '-AllowPrepared' in rollback
+    assert 'windowsManagedHookContractEntrySHA256' in connector_cleanup
+    entry_sha_start = connector_cleanup.index(
+        "func windowsManagedHookContractEntrySHA256"
+    )
+    valid_sha_start = connector_cleanup.index(
+        "func validManagedHookContractEntrySHA256"
+    )
+    assert entry_sha_start < valid_sha_start, (
+        "connector cleanup reordered: entry-sha function must precede the "
+        "validator for the negative-slice contract below to remain meaningful"
+    )
+    assert 'lock.UpdatedAt' not in connector_cleanup[
+        entry_sha_start : valid_sha_start
+    ]
+    assert 'ManagedGatewayServiceName string' in connector_state
+    assert 'json:"managed_gateway_service_name,omitempty"' in connector_state
+    assert 'os.Getenv(WindowsGatewayServiceNameEnv)' in connector_state
+    assert 'ValidateWindowsManagedHookContractGatewayServiceBinding' in connector_state
+    assert 'NewHookContractLockEntryForMode(' in cursor_secure
+    assert 'ValidateWindowsManagedHookContractGatewayServiceBinding(lock)' in cursor_secure
+    assert 'identity.GatewayServiceName' in cleanup[
+        cleanup.index("func captureWindowsManagedHookContractCleanupReceipt") :
+        cleanup.index("func readWindowsManagedHookContractCleanupReceipt")
+    ]
+    assert 'Superseded' in connector_cleanup
+    assert 'TestDelayedPurgePreservesSameContractPublishedByNewGatewayScope' in (
+        connector_cleanup_test
+    )
+    assert 'TestCleanupCaptureDoesNotClaimCursorEntryFromNewGatewayScope' in (
+        connector_cleanup_test
+    )
+    assert 'TestCleanupCaptureRemovesLegacyUnboundEntry' in connector_cleanup_test
+    assert 'TestCleanupCaptureRejectsWhitespaceGatewayBinding' in connector_cleanup_test
+    assert 'TestCleanupClaimMissingStateRequiresPersistedMutationBarrier' in (
+        connector_cleanup_test
+    )
+    assert "'pending-native-finalized-crash-retry'" in smoke
+    assert "'contract-cleanup-after-native'" in smoke
+    assert "'legacy-schema1-before-state-delete'" in smoke
+    assert 'HarnessRealManagedContractCleanup' in smoke
 
 
 def test_uninstall_tombstone_names_the_removed_release() -> None:
@@ -5405,3 +6059,326 @@ def test_self_uninstall_finalizer_helper_keeps_its_call_on_one_line() -> None:
     call = next(line for line in helper.splitlines() if "Complete-DefenseClawSelfUninstallRetirement" in line)
     assert "-ReceiptPath `$ProtectedReceiptPath" in call
     assert "-WaitForCallerExit" in call
+
+
+def test_only_the_lifecycle_transaction_records_the_installed_config() -> None:
+    # validate-service-config migrates and records the config only when the
+    # install-like lifecycle asks, after its snapshot; verify is read-only.
+    module = read(MODULE)
+    install_like = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
+            "function Invoke-DefenseClawUninstallLifecycle"
+        )
+    ]
+    start = module.index("function Assert-DefenseClawEnterpriseDeployment {")
+    deployment = module[start : module.index("\nfunction ", start + 1)]
+    after_snapshot = install_like[install_like.index("$snapshot = New-DefenseClawTransaction `") :]
+    assert "-GatewayServiceName $GatewayServiceName `" in after_snapshot
+    # Secure Client keeps its validate-only check (GAP-0136, issue #1092).
+    assert "-RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))" in after_snapshot
+    assert "Assert-DefenseClawInstalledConfig" in deployment and "-RecordLifecycle" not in deployment
+
+
+def _module_function(module: str, name: str) -> str:
+    start = module.index(f"function {name} {{")
+    end = module.find("\nfunction ", start + 1)
+    return module[start : end if end != -1 else len(module)]
+
+
+def test_gateway_service_logs_on_as_local_system() -> None:
+    """The managed Windows gateway runs as LocalSystem, keeping its restricted
+    service SID and single required privilege."""
+    module = read(MODULE)
+    assert "function Get-DefenseClawGatewayServiceAccount {\n    return 'LocalSystem'\n}" in module
+
+    setter = _module_function(module, "Set-DefenseClawManagedServices")
+    assert "Get-DefenseClawGatewayServiceAccount" in setter
+    assert setter.count("'obj=', $gatewayAccount,") == 2  # sc config and sc create
+    assert '$gatewayAccount = "NT SERVICE\\$GatewayServiceName"' not in setter
+    # The writer proves the account it configured.
+    assert "gateway service account is $writtenGatewayAccount after configuration" in setter
+
+    configurations = _module_function(module, "Assert-DefenseClawManagedServiceConfigurations")
+    deployment = _module_function(module, "Assert-DefenseClawEnterpriseDeployment")
+    for body in (configurations, deployment):
+        assert "-ExpectedAccount $ExpectedGatewayAccount" in body
+        assert '-ExpectedAccount "NT SERVICE\\$GatewayServiceName"' not in body
+        # Restricted service SID and least privilege are unchanged.
+        assert "-ExpectedSidType 3" in body
+        assert "-ExpectedPrivileges @('SeChangeNotifyPrivilege')" in body
+
+    metadata_writer = _module_function(module, "New-DefenseClawDeploymentMetadata")
+    assert "gateway_account = (Get-DefenseClawGatewayServiceAccount)" in metadata_writer
+    # The service SID remains the gateway's ACL and trust identity.
+    assert '"DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\\$GatewayServiceName"' in module
+
+
+def test_gateway_needs_no_service_logon_right() -> None:
+    """No code grants or asserts SeServiceLogonRight."""
+    sources = [MODULE, INSTALLER, ROOT / "scripts" / "test-windows-enterprise-hardening.ps1"]
+    sources += sorted((ROOT / "internal").rglob("*.go"))
+    sources += sorted((ROOT / "cmd").rglob("*.go"))
+    for path in sources:
+        text = read(path)
+        for needle in ("SeServiceLogonRight", "LsaAddAccountRights"):
+            assert needle not in text, f"{path.relative_to(ROOT)} references {needle}"
+
+
+def test_existing_virtual_account_gateway_migrates_in_place() -> None:
+    """Installs whose gateway logs on as the virtual account are
+    upgraded, repaired, reinstalled, rolled back and uninstalled in place."""
+    module = read(MODULE)
+
+    accepted = _module_function(module, "Get-DefenseClawAcceptedGatewayServiceAccounts")
+    assert "Get-DefenseClawGatewayServiceAccount" in accepted
+    assert "Get-DefenseClawLegacyGatewayServiceAccount" in accepted
+    legacy = _module_function(module, "Get-DefenseClawLegacyGatewayServiceAccount")
+    assert 'return "NT SERVICE\\$GatewayServiceName"' in legacy
+
+    # Ownership: the old account is this deployment's own gateway, not foreign.
+    owned = _module_function(module, "Assert-DefenseClawOwnedServiceOrAbsent")
+    assert "Test-DefenseClawGatewayServiceAccount -Account $objectName -GatewayServiceName $Name" in owned
+
+    # Verification and teardown accept both accounts unless narrowed.
+    for name in ("Assert-DefenseClawManagedServiceConfigurations", "Assert-DefenseClawEnterpriseDeployment"):
+        body = _module_function(module, name)
+        assert "[string[]]$ExpectedGatewayAccount" in body
+        assert "Get-DefenseClawAcceptedGatewayServiceAccounts" in body
+    configuration = _module_function(module, "Assert-DefenseClawServiceConfiguration")
+    assert "[Parameter(Mandatory)][string[]]$ExpectedAccount" in configuration
+
+    # The transaction preimage records each service account.
+    transaction = _module_function(module, "New-DefenseClawTransaction")
+    assert "account = $account" in transaction
+    assert "-Name ObjectName" in transaction
+
+    # Rollback restores the recorded account and verifies exactly that one.
+    reader = _module_function(module, "Get-DefenseClawTransactionGatewayAccount")
+    assert "PSObject.Properties['account']" in reader
+    assert "Get-DefenseClawLegacyGatewayServiceAccount" in reader  # preimages from earlier releases
+    assert "transaction records an unsupported gateway service account" in reader
+    restore = _module_function(module, "Restore-DefenseClawTransaction")
+    assert "-RestoreGatewayAccount (\n                Get-DefenseClawTransactionGatewayAccount -Snapshot $snapshot\n            )" in restore
+    ready = _module_function(module, "Assert-DefenseClawRestoredTransactionReadyForActivation")
+    assert "-ExpectedGatewayAccount @(\n            Get-DefenseClawTransactionGatewayAccount -Snapshot $Snapshot\n        )" in ready
+
+    setter = _module_function(module, "Set-DefenseClawManagedServices")
+    assert "[string]$RestoreGatewayAccount" in setter
+    assert "a recorded gateway account can be restored only while transaction services remain disabled" in setter
+    assert "refusing to restore unsupported gateway service account" in setter
+
+
+def test_secure_client_purge_removes_only_defenseclaw_user_runtime_entries() -> None:
+    """A Secure Client --purge (nuclear and validated) removes DefenseClaw's
+    own entries from every account's .defenseclaw, never through a link and
+    never a per-user install's folder; what stays is a warning."""
+    module = read(MODULE)
+
+    names = _module_function(module, "Get-DefenseClawManagedUserRuntimeEntryNames")
+    for name in (
+        "'hooks'",
+        "'hook_contract_lock.json'",
+        "'hook_contract_lock.json.lock'",
+        "'inventory.db'",
+        "'inventory.db-journal'",
+        "'inventory.db-shm'",
+        "'inventory.db-wal'",
+    ):
+        assert name in names
+    # Exactly the managed runtime cleanup contract's root leaves: never a
+    # per-user install's data.
+    for name in ("config.yaml", "audit.db", ".venv", "installer", "connector_backups", "acp"):
+        assert f"'{name}'" not in names
+    leftovers = _module_function(module, "Get-DefenseClawPerUserInstallLeftoverNames")
+    assert "return @('config.yaml', 'audit.db', '.venv', 'installer')" in leftovers
+    go_setup = read(ROOT / "internal" / "enterprisehooks" / "target_runtime_setup_windows.go")
+    assert 'var windowsPerUserInstallLeftovers = []string{"config.yaml", "audit.db", ".venv", "installer"}' in go_setup
+    for leaf in ("hook_contract_lock.json", "hook_contract_lock.json.lock", "inventory.db-wal"):
+        assert f'"{leaf}":' in go_setup
+
+    tree = _module_function(module, "Remove-DefenseClawNoFollowTree")
+    assert "[IO.FileAttributes]::ReparsePoint" in tree
+    assert "a link or junction; left as found" in tree
+    assert "$nativeSecurity::OpenDirectoryPinNoFollow($Path)" in tree
+    assert "$nativeSecurity::CloseDirectoryPin($pin)" in tree
+    assert "[IO.Directory]::Delete($Path, $false)" in tree
+    assert "Remove-Item" not in tree and "-Recurse" not in tree
+
+    folder = _module_function(module, "Remove-DefenseClawManagedUserRuntimeFolder")
+    assert "[IO.Path]::Combine($UserHome, '.defenseclaw')" in folder
+    assert "$homePin = $nativeSecurity::OpenDirectoryPinNoFollow($UserHome)" in folder
+    assert "$dataPin = $nativeSecurity::OpenDirectoryPinNoFollow($dataDir)" in folder
+    assert "Get-DefenseClawPerUserInstallLeftoverNames" in folder
+    assert "which a per-user DefenseClaw install leaves" in folder
+    # The per-user install refusal comes before any removal.
+    assert folder.index("Get-DefenseClawPerUserInstallLeftoverNames") < folder.index("Remove-DefenseClawNoFollowTree")
+    # The folder itself goes only when empty, and otherwise names what stays.
+    assert "if ($left.Count -eq 0) {" in folder
+    assert "[IO.Directory]::Delete($dataDir, $false)" in folder
+    assert "kept: it still holds" in folder
+    assert "Remove-Item" not in folder
+
+    native = _module_function(module, "Initialize-DefenseClawNativeSecurity")
+    assert "public static IntPtr OpenDirectoryPinNoFollow(string path)" in native
+    pin = native[native.index("public static IntPtr OpenDirectoryPinNoFollow") :]
+    pin = pin[: pin.index("public static void CloseDirectoryPin")]
+    assert "FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS" in pin
+    # Held without FILE_SHARE_DELETE so the folder cannot be swapped.
+    assert "FILE_SHARE_READ | FILE_SHARE_WRITE," in pin and "FILE_SHARE_DELETE" not in pin
+    assert "FILE_ATTRIBUTE_REPARSE_POINT" in pin
+
+    leftovers_all = _module_function(module, "Remove-DefenseClawManagedUserRuntimeLeftovers")
+    assert "Get-DefenseClawManagedUserRuntimeHomes" in leftovers_all
+    assert "Remove-DefenseClawManagedUserRuntimeFolder -UserHome" in leftovers_all
+    assert "throw" not in leftovers_all
+
+    nuclear = _module_function(module, "Invoke-DefenseClawNuclearUninstall")
+    assert "$userRuntime = Remove-DefenseClawManagedUserRuntimeLeftovers" in nuclear
+    assert '$warnings.Add("nuclear uninstall left per-user DefenseClaw runtime state: $entry")' in nuclear
+    assert "user_runtime_removed                     = [string[]]@($userRuntime.removed)" in nuclear
+    assert "user_runtime_remaining                   = [string[]]@($userRuntime.remaining)" in nuclear
+    # Still reported as a successful purge.
+    assert "ok                                       = $true" in nuclear
+
+    scope = _module_function(module, "Test-DefenseClawManagedUserRuntimeCleanupScope")
+    assert "Test-DefenseClawStandaloneProfile" in scope
+    assert "Get-DefenseClawNuclearSafeRootPattern" in scope
+    uninstall = _module_function(module, "Invoke-DefenseClawUninstallLifecycle")
+    assert (
+        "if ($Purge -and (Test-DefenseClawManagedUserRuntimeCleanupScope -Layout $Layout)) {\n"
+        "        $result = Add-DefenseClawManagedUserRuntimeCleanupResult -Result $result"
+    ) in uninstall
+    added = _module_function(module, "Add-DefenseClawManagedUserRuntimeCleanupResult")
+    assert "-Name user_runtime_remaining" in added and "-Name warnings" in added
+    assert "-Name ok" not in added
+
+
+_USER_RUNTIME_BEHAVIOR_SCRIPT = r"""
+param([string]$Module, [string]$UserHome)
+$ErrorActionPreference = 'Stop'
+$text = [IO.File]::ReadAllText($Module)
+foreach ($name in @(
+    'Get-DefenseClawManagedUserRuntimeEntryNames',
+    'Get-DefenseClawPerUserInstallLeftoverNames',
+    'Test-DefenseClawPathPresentNoFollow',
+    'Remove-DefenseClawNoFollowTree',
+    'Remove-DefenseClawManagedUserRuntimeFolder'
+)) {
+    $start = $text.IndexOf("function $name {")
+    $end = $text.IndexOf("`nfunction ", $start + 1)
+    . ([scriptblock]::Create($text.Substring($start, $end - $start)))
+}
+# The no-follow pin is native Windows code; this stand-in refuses a link or
+# non-folder the same way so the walk can run on any engine.
+Add-Type -TypeDefinition @"
+public static class DefenseClawUserRuntimeTestPin {
+    public static System.IntPtr OpenDirectoryPinNoFollow(string path) {
+        var attributes = System.IO.File.GetAttributes(path);
+        if ((attributes & System.IO.FileAttributes.ReparsePoint) != 0 ||
+            (attributes & System.IO.FileAttributes.Directory) == 0)
+            throw new System.InvalidOperationException("refusing a link, junction or non-folder: " + path);
+        return new System.IntPtr(1);
+    }
+    public static void CloseDirectoryPin(System.IntPtr handle) {}
+}
+"@
+function Initialize-DefenseClawNativeSecurity { return [DefenseClawUserRuntimeTestPin] }
+$outcome = Remove-DefenseClawManagedUserRuntimeFolder -UserHome $UserHome
+if ($null -eq $outcome) { 'null'; return }
+$outcome | ConvertTo-Json -Depth 4 -Compress
+"""
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell 7 is not installed")
+def test_secure_client_user_runtime_cleanup_behavior(tmp_path: Path) -> None:
+    script = tmp_path / "behavior.ps1"
+    script.write_text(_USER_RUNTIME_BEHAVIOR_SCRIPT, encoding="utf-8")
+
+    def run(user_home: Path) -> dict | None:
+        completed = subprocess.run(
+            ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script),
+             "-Module", str(MODULE), "-UserHome", str(user_home)],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        output = completed.stdout.strip().splitlines()[-1]
+        return None if output == "null" else json.loads(output)
+
+    # The field leftover: hooks, the contract lock and its lock file.
+    managed = tmp_path / "managed"
+    data = managed / ".defenseclaw"
+    (data / "hooks" / "generations").mkdir(parents=True)
+    for leaf in ("hook_contract_lock.json", "hook_contract_lock.json.lock"):
+        (data / leaf).write_text("{}", encoding="utf-8")
+    (data / "hooks" / ".hookcfg").write_text("x", encoding="utf-8")
+    (data / "hooks" / "generations" / "bundle").write_text("x", encoding="utf-8")
+    outcome = run(managed)
+    assert outcome is not None and outcome["folder_removed"] is True
+    assert outcome["remaining"] == []
+    assert not data.exists() and managed.exists()
+
+    # No folder: nothing to do.
+    assert run(managed) is None
+
+    # Anything else stays, with a warning naming it.
+    mixed = tmp_path / "mixed"
+    (mixed / ".defenseclaw" / "hooks").mkdir(parents=True)
+    (mixed / ".defenseclaw" / "notes.txt").write_text("mine", encoding="utf-8")
+    outcome = run(mixed)
+    assert outcome is not None and outcome["folder_removed"] is False
+    assert not (mixed / ".defenseclaw" / "hooks").exists()
+    assert (mixed / ".defenseclaw" / "notes.txt").exists()
+    assert any("kept: it still holds notes.txt" in entry for entry in outcome["remaining"])
+
+    # A per-user install's folder is left exactly as found.
+    peruser = tmp_path / "peruser"
+    (peruser / ".defenseclaw" / "hooks").mkdir(parents=True)
+    (peruser / ".defenseclaw" / "config.yaml").write_text("x", encoding="utf-8")
+    outcome = run(peruser)
+    assert outcome is not None and outcome["removed"] == []
+    assert (peruser / ".defenseclaw" / "hooks").is_dir()
+    assert any("per-user DefenseClaw install" in entry for entry in outcome["remaining"])
+
+    # A link below the folder is never followed.
+    linked = tmp_path / "linked"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("x", encoding="utf-8")
+    (linked / ".defenseclaw" / "hooks").mkdir(parents=True)
+    try:
+        (linked / ".defenseclaw" / "hooks" / "link").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("this account cannot create symbolic links")
+    outcome = run(linked)
+    assert outcome is not None and outcome["folder_removed"] is False
+    assert (outside / "keep").exists()
+    assert any("a link or junction; left as found" in entry for entry in outcome["remaining"])
+
+
+def test_production_uninstall_admits_native_cleanup_after_recorded_trust() -> None:
+    """GAP-0023: a production uninstall reads its deployment metadata only
+    under the lifecycle lock, so the unsigned installed CLI it passes as the
+    native cleanup executable is admitted there, after the hash-pinned trust
+    recorded in that metadata is loaded, and not by Authenticode at entry.
+    Standalone only: Secure Client is out of scope and keeps the entry check."""
+    module = read(MODULE)
+    lifecycle = _module_function(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    # Secure Client keeps admitting it at entry (out of scope for GAP-0023).
+    assert (
+        "$entryNativeCleanupBinary = if ($recoverProductionUninstallAcl -and\n"
+        "        (Test-DefenseClawStandaloneProfile)) {"
+    ) in lifecycle
+    entry = lifecycle.index("$sources = Get-DefenseClawLifecycleSources `")
+    entry_call = lifecycle[entry : lifecycle.index("-DeferredConfig:$DeferredConfig", entry)]
+    assert "-NativeCleanupBinary $entryNativeCleanupBinary `" in entry_call
+    assert "-NativeCleanupBinary $NativeCleanupBinary `" not in entry_call
+    repair = lifecycle.index("Repair-DefenseClawUninstallAdminFileAcl `")
+    admit = lifecycle.index("Add-DefenseClawProductionUninstallNativeCleanupSource `")
+    untrusted = lifecycle.index("return Invoke-DefenseClawUntrustedMetadataRecoveryPurge `")
+    forced = lifecycle.index("return Invoke-DefenseClawForcedUninstall `")
+    assert entry < repair < admit < untrusted < forced
+    helper = _module_function(module, "Add-DefenseClawProductionUninstallNativeCleanupSource")
+    assert helper.index("Initialize-DefenseClawRecordedPayloadTrust") < helper.index(
+        "Add-DefenseClawNativeCleanupSource"
+    )
+    assert "$MetadataTrusted" in helper and "Test-DefenseClawStandaloneProfile" in helper

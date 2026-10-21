@@ -14,7 +14,7 @@ Copilot is the most complete connector on this branch. It uses:
 This page lists every file, in the order you would write them for a connector like it. Reproduce the list with:
 
 ```bash
-git grep -l -i -w copilot -- ':!openwiki' ':!docs/research' ':!CHANGELOG.md'
+git grep -l -i -w copilot -- ':!openwiki' ':!CHANGELOG.md'
 ```
 
 ## 0. Vendor research
@@ -81,7 +81,7 @@ Record these, with the source for each, in the contract `Notes` and in the corre
    - `copilot_agent_dirs`;
    - `copilot_mcp_config_files`, `_copilot_mcp_servers`;
    - `copilot_instruction_paths`, `_copilot_workspace_ancestors`;
-   - plus the `KNOWN_CONNECTORS` and `HOOK_ONLY_CONNECTORS` entries.
+   - plus the `KNOWN_CONNECTORS` entry.
 3. **Python inventory and skills.** `cli/defenseclaw/inventory/claw_inventory.py` has the Copilot MCP filter in `_collect_mcp_config_files`. `cli/defenseclaw/skill_discovery.py` handles Copilot commands. `cli/defenseclaw/codeguard_skill.py` handles the CodeGuard install target.
 4. **Plugins.** `cli/defenseclaw/commands/cmd_plugin.py`: `_list_copilot_plugins` runs the trusted Copilot binary (`_trusted_copilot_binary`) instead of reading directories.
 
@@ -166,7 +166,6 @@ Record these, with the source for each, in the contract `Notes` and in the corre
 2. `docs-site/content/docs/connectors/meta.json`, `connectors/index.mdx` and `connectors/compatibility.mdx` rows.
 3. `docs-site/data/capability-matrix.json`, `docs-site/data/connector-icons.ts`, and the committed `docs-site/public/connector-icons/copilot.svg`.
 4. The enterprise pages and the four threat models (enterprise.md §10).
-5. `docs/development/copilot-native-windows-contract.md`: design notes for the Windows adapter.
 
 ## 8. Tests and CI
 

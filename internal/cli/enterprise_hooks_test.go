@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -934,12 +935,12 @@ func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T)
 	); err != nil {
 		t.Fatalf("write initial state: %v", err)
 	}
-	protected, err := previousEnterpriseHookSuccess(dir, "alice", "/home/alice", "", "codex")
+	initial, err := previousEnterpriseHookProtection(dir, "alice", "/home/alice", "", "codex")
 	if err != nil {
-		t.Fatalf("previousEnterpriseHookSuccess: %v", err)
+		t.Fatalf("previousEnterpriseHookProtection: %v", err)
 	}
-	if !protected {
-		t.Fatal("previousEnterpriseHookSuccess = false after successful state")
+	if !initial.PreviouslyProtected {
+		t.Fatal("previousEnterpriseHookProtection = not protected after successful state")
 	}
 	protection, err := previousEnterpriseHookProtection(
 		dir,
@@ -985,16 +986,16 @@ func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T)
 	if len(state.ProtectedTargets) != 1 || state.ProtectedTargets[0].Connector != "codex" {
 		t.Fatalf("ProtectedTargets = %+v, want preserved codex target", state.ProtectedTargets)
 	}
-	protected, err = previousEnterpriseHookSuccess(dir, "alice", "/home/alice", "", "codex")
+	afterFailure, err := previousEnterpriseHookProtection(dir, "alice", "/home/alice", "", "codex")
 	if err != nil {
-		t.Fatalf("previousEnterpriseHookSuccess after failure: %v", err)
+		t.Fatalf("previousEnterpriseHookProtection after failure: %v", err)
 	}
-	if !protected {
-		t.Fatal("previousEnterpriseHookSuccess = false after failed state overwrote results")
+	if !afterFailure.PreviouslyProtected {
+		t.Fatal("previousEnterpriseHookProtection = not protected after failed state overwrote results")
 	}
 }
 
-func TestPreviousEnterpriseHookSuccessIgnoresServiceWritableStatus(t *testing.T) {
+func TestPreviousEnterpriseHookProtectionIgnoresServiceWritableStatus(t *testing.T) {
 	dataDir := t.TempDir()
 	authorizationDir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
@@ -1008,11 +1009,11 @@ func TestPreviousEnterpriseHookSuccessIgnoresServiceWritableStatus(t *testing.T)
 	if err := os.WriteFile(filepath.Join(dataDir, hookGuardianStateFile), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	protected, err := previousEnterpriseHookSuccess(dataDir, "alice", "/home/alice", "", "codex")
+	previous, err := previousEnterpriseHookProtection(dataDir, "alice", "/home/alice", "", "codex")
 	if err != nil {
-		t.Fatalf("previousEnterpriseHookSuccess: %v", err)
+		t.Fatalf("previousEnterpriseHookProtection: %v", err)
 	}
-	if protected {
+	if previous.PreviouslyProtected {
 		t.Fatal("service-writable status file granted privileged repair authorization")
 	}
 }
@@ -1178,11 +1179,11 @@ func TestWriteEnterpriseHookGuardianStateRevokesRemovedManifestTarget(t *testing
 	if len(state.ProtectedTargets) != 0 || state.TargetCount != 0 || state.SuccessCount != 0 || !state.OK {
 		t.Fatalf("authorization after removal = %+v, want empty healthy ledger", state)
 	}
-	protected, err := previousEnterpriseHookSuccess(dataDir, "alice", "/home/alice", "", "codex")
+	previous, err := previousEnterpriseHookProtection(dataDir, "alice", "/home/alice", "", "codex")
 	if err != nil {
-		t.Fatalf("previousEnterpriseHookSuccess: %v", err)
+		t.Fatalf("previousEnterpriseHookProtection: %v", err)
 	}
-	if protected {
+	if previous.PreviouslyProtected {
 		t.Fatal("removed manifest target retained privileged repair authorization")
 	}
 }
@@ -1508,6 +1509,48 @@ func TestEnterpriseHookReconcileLogReportsRepairAsChange(t *testing.T) {
 	}
 }
 
+// A changed reconcile names each failing target and its reason; an unchanged
+// one stays a single summary line.
+func TestEnterpriseHookReconcileLogNamesFailingTargets(t *testing.T) {
+	run := enterpriseHookReconcileRun{
+		Rows: []enterpriseHookReconcileRow{
+			{Connector: "cursor", User: "alice", OK: true},
+			{Connector: "codex", User: "alice", Error: "enterprise hooks: connector codex hook verification failed:\n  owned hook command not present: SessionEnd trust state is not trusted"},
+			{Connector: "claudecode", UserHome: "/Users/bob", Pending: true},
+		},
+		Failures: 1,
+		Pending:  1,
+	}
+	var changed bytes.Buffer
+	writeEnterpriseHookReconcileLog(&changed, "fsnotify", "attention", run, 7, true, "")
+	const want = "[hook-guardian] target codex@alice failed: enterprise hooks: connector codex hook verification failed: owned hook command not present: SessionEnd trust state is not trusted\n"
+	if got := changed.String(); !strings.Contains(got, want) {
+		t.Fatalf("changed log = %q, want %q", got, want)
+	}
+	if got := changed.String(); strings.Contains(got, "target cursor@alice") || strings.Contains(got, "target claudecode@") {
+		t.Fatalf("changed log names a healthy or pending target: %q", got)
+	}
+	var unchanged bytes.Buffer
+	writeEnterpriseHookReconcileLog(&unchanged, "interval", "attention", run, 7, false, "")
+	if got := unchanged.String(); strings.Count(got, "\n") != 1 || strings.Contains(got, "target ") {
+		t.Fatalf("unchanged log = %q, want one summary line", got)
+	}
+	var hostile bytes.Buffer
+	writeEnterpriseHookReconcileLog(&hostile, "fsnotify", "attention", enterpriseHookReconcileRun{
+		Rows:     []enterpriseHookReconcileRow{{Connector: "codex", UserHome: "/Users/a\n[hook-guardian] reconcile status=ok\x1b[2J", Error: "bad\x00\x1b[31mred\rline"}},
+		Failures: 1,
+	}, 7, true, "")
+	if got := hostile.String(); strings.Count(got, "\n") != 2 || strings.ContainsAny(got, "\x00\x1b\r") {
+		t.Fatalf("control characters reached the log: %q", got)
+	}
+	if got := enterpriseHookReconcileRowLabel(enterpriseHookReconcileRow{Connector: "codex", SID: "S-1-5-21-1-2-3-1001"}); got != "codex@S-1-5-21-1-2-3-1001" {
+		t.Fatalf("SID-only row label = %q, want the SID", got)
+	}
+	if got := enterpriseHookReconcileLogDetail(strings.Repeat("x", 3000)); len([]rune(got)) != enterpriseHookReconcileLogMaxDetail+1 {
+		t.Fatalf("detail not bounded: %d runes", len([]rune(got)))
+	}
+}
+
 func TestEnterpriseHookWatchEventInSettleWindow(t *testing.T) {
 	base := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -1780,6 +1823,26 @@ func TestEnterpriseHooksUninstallAcceptsSIDWithoutDeletedProfile(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("RemoveManagedPolicy was not called")
+	}
+}
+
+func TestResolveEnterpriseHookTargetValuesBindsWindowsUserAndHome(t *testing.T) {
+	oldLookup, oldProfile, oldCfg := enterpriseHookLookupUser, enterpriseHookSIDProfilePath, cfg
+	t.Cleanup(func() { enterpriseHookLookupUser, enterpriseHookSIDProfilePath, cfg = oldLookup, oldProfile, oldCfg })
+	cfg = nil
+	enterpriseHookLookupUser = func(name string) (*user.User, error) {
+		if name != "alice" {
+			t.Fatalf("lookup %q", name)
+		}
+		return &user.User{Uid: "S-1-5-21-1-2-3-1001", HomeDir: `C:\Users\alice`}, nil
+	}
+	enterpriseHookSIDProfilePath = func(string) (string, error) { return `C:\Users\alice`, nil }
+	target, err := resolveEnterpriseHookTargetValuesForPlatform("alice", `C:\Users\alice`, -1, -1, "", "", true)
+	if err != nil || target.sid != "S-1-5-21-1-2-3-1001" {
+		t.Fatalf("target=%+v err=%v", target, err)
+	}
+	if _, err := resolveEnterpriseHookTargetValuesForPlatform("alice", `C:\Users\bob`, -1, -1, "", "", true); err == nil {
+		t.Fatal("mismatched user home accepted")
 	}
 }
 

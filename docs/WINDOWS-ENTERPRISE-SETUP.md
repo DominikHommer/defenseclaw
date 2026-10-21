@@ -230,13 +230,106 @@ directory.
 | `build-setup.sh --version <version> --sign-command <cmd>` | Builds the inner files, runs `<cmd> <file>` to sign each one in place, embeds them, and signs the outer Setup with the same command. |
 | `build-setup.sh --version <version> --payload-dir <dir>` | Embeds seven files that were already signed. The directory must hold exactly those seven files. |
 
+Both signed forms also take `--signing-type DEV|PROD` and
+`--expected-signer-sha256 <64-hex>`: the assembler verifies every signed inner
+file against that signer before it appends the payload, with `osslsigncode
+verify` (2.5 or later) on macOS and Linux. `PROD` needs a chain to a root the
+build host trusts; `DEV` also accepts a test or self-signed certificate.
+`authenticode-sign.sh --thumbprint` prints the value of `AUTHENTICODE_PFX`.
+
 With `--payload-dir`, sign the outer Setup afterwards with the same
 certificate, then compute its SHA-256 again: the script hashes the Setup
 before you sign it. `packaging/mdm/signing/authenticode-sign.sh` is a signing
 command for `--sign-command`; the release workflow uses it when a
 code-signing certificate is configured and otherwise ships the hash-pinned
-flavor.
+flavor. Every release dry run proves the signed build with a throwaway
+self-signed certificate (`packaging/windows/standalone/prove-signing-path.sh`).
+
+Every build links the payload binding (the flavor, version and source commit
+of the payload manifest and the SHA-256 of each inner file) into the outer
+Setup, and the Setup stages only that payload under that identity.
 
 There is no AVC handoff kit for the standalone Setup. The AVC flow in
 [Windows AVC packaging handoff](WINDOWS-AVC-PACKAGING-HANDOFF.md) builds only
 `DefenseClawSetup-Enterprise-x64.exe`.
+
+## Cloud Management install order
+
+A full XDR installation installs Cloud Management last, so
+`cmidapi.dll` is usually absent while DefenseClaw installs. That is a
+supported order and needs no sequencing work from the deploying system:
+
+- `/install`, `/upgrade`, and `/repair` complete without the library. The
+  credential broker service is registered without a `--cmid-library` pin.
+- The broker discovers the library at runtime under
+  `%ProgramFiles%\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\`,
+  newest version first, and applies the same path-trust checks an
+  installer-supplied path gets.
+- CMID integration therefore enables itself once Cloud Management lands —
+  no reinstall, repair, or service restart. Adoption is recorded in the
+  broker log as `stage=provider-resolved`.
+- Until then managed inspection stays fail-closed rather than allowing
+  uninspected traffic, and the broker log records
+  `category=cmid_library_pending`.
+
+Because Secure Client nests the library under two version directories
+that move on its own upgrade schedule, runtime discovery also survives a
+Cloud Management upgrade that retires the directory a previous install
+pinned.
+
+## Service accounts
+
+Every DefenseClaw Windows service runs as LocalSystem: the gateway, the
+sensor helper, the hook guardian, the hook enumerator and, with the Secure
+Client profile, the credential broker.
+
+The gateway still runs with its own restricted service SID
+(`NT SERVICE\DefenseClawGateway`) and only `SeChangeNotifyPrivilege`. Its
+token is write-restricted: every write must also pass a check against its
+restricting SIDs (the gateway service SID, Everyone and WRITE_RESTRICTED).
+Among DefenseClaw's managed paths, only the runtime and log ACLs grant one of
+those, so configuration, the target manifest, the authorization ledger,
+binaries, and service definitions stay read-only to it. A host path outside
+DefenseClaw that grants write to Everyone stays writable to the gateway, as
+it was under the virtual account. The gateway makes its service SID the
+owner of the files it creates (its audit database, judge bodies and logs), as
+the virtual account did, so `icacls` shows `NT SERVICE\DefenseClawGateway`
+as their owner.
+
+Because LocalSystem holds the service logon right by design:
+
+- Install needs no "Log on as a service" grant.
+- No Group Policy change is needed. A domain policy that defines "Log on as
+  a service" cannot stop the gateway from starting.
+
+The LocalSystem gateway refuses reads and scans of paths inside user
+profiles, including a project MCP scan inside a profile. The refusal says:
+
+> the managed gateway runs as LocalSystem and does not read inside user profiles; scan the folder as the signed-in user (defenseclaw ... from the user session) or move it outside the profile
+
+Readable paths outside profiles still scan, and the watcher runs for those
+paths. It reports degraded health only when it skips a configured profile
+root. This keeps the former virtual-account boundary around other users'
+profiles. Scanner children inherit the gateway's write-restricted LocalSystem
+token and its single `SeChangeNotifyPrivilege`; the gateway cannot start a
+child as another user because it lacks `SeAssignPrimaryTokenPrivilege` and
+`SeIncreaseQuotaPrivilege`. A caller-supplied path outside a profile that
+only administrators could read can now be read by the gateway as LocalSystem
+(the W-05 early-phase limitation). Issue 1164 tracks a brokered scan as the
+enrolled user for projects inside profiles.
+
+### Upgrading from 1.0.0
+
+DefenseClaw 1.0.0 and earlier releases logged the gateway on as `NT SERVICE\DefenseClawGateway`.
+Those installs move to LocalSystem with no manual step:
+
+- `/ensure`, `/upgrade`, `/repair`, and `/install` over an existing deployment
+  reconfigure the gateway and keep the config, the manifest and the enrolled
+  users.
+- `/uninstall`, with or without purge, works before any upgrade.
+- If an upgrade fails and rolls back, the gateway returns to the account the
+  restored binaries were installed with.
+
+If an administrator added a local "Log on as a service" grant for the old
+gateway account, or for `NT SERVICE\ALL SERVICES`, DefenseClaw leaves it in
+place. It is no longer needed and can be removed.

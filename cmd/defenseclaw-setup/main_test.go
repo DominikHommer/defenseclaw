@@ -1479,7 +1479,11 @@ func TestManagedBytecodeWarmupCompilesCLIImportClosureWithoutRunningCLI(t *testi
 	fixture.writeModule(t, "main.py", fmt.Sprintf(
 		"from defenseclaw import commands\nif __name__ == \"__main__\":\n    open(%q, \"w\").close()\n", marker,
 	))
-	if output, err := fixture.run(managedBytecodeWarmupScript); err != nil {
+	// The Command Line Tools python3 on macOS turns bytecode writes off under
+	// -I (sys.flags.dont_write_bytecode); the packaged interpreter does not,
+	// and the -B check above covers the launcher flags. Turn writes back on
+	// so the import closure is still checked on such a host.
+	if output, err := fixture.run("sys.dont_write_bytecode = False\n" + managedBytecodeWarmupScript); err != nil {
 		t.Fatalf("bytecode warm-up failed: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	for _, module := range []string{"__init__", "main", "commands"} {
@@ -1671,6 +1675,11 @@ func TestValidateMachineVersionRequiresExactIdentityAndVersion(t *testing.T) {
 				t.Fatal("validateMachineVersion accepted invalid report")
 			}
 		})
+	}
+	// The gateway also names the management agent contract it implements.
+	contract := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789abcdef0123456789abcdef01234567","built":"now","management_contract":1}`)
+	if err := validateMachineVersion(contract, "defenseclaw-gateway", "1.2.3-rc.1", commit); err != nil {
+		t.Fatalf("validateMachineVersion with management_contract: %v", err)
 	}
 	cli := []byte(`{"schema_version":1,"name":"defenseclaw-cli","version":"1.2.3-rc.1"}`)
 	if err := validateMachineVersion(cli, "defenseclaw-cli", "1.2.3-rc.1", ""); err != nil {

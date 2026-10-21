@@ -7,6 +7,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -99,7 +100,7 @@ func TestWindowsManagedHooksLifecycleCommandIsHiddenAndBounded(t *testing.T) {
 		actions = append(actions, child.Name())
 	}
 	if !slices.Equal(actions, []string{
-		"capture", "classify-activation", "restore", "retire", "retire-committed",
+		"capture", "classify-activation", "collect", "restore", "retire", "retire-committed",
 	}) {
 		t.Fatalf("actions = %v", actions)
 	}
@@ -326,7 +327,7 @@ func TestFinalizeRetireCommittedWindowsManagedHooksLifecycleCollectsBeforeRename
 		steps = append(steps, "gc")
 		return 0, nil
 	}
-	err := finalizeRetireCommittedWindowsManagedHooksLifecycle(
+	_, err := finalizeRetireCommittedWindowsManagedHooksLifecycle(
 		journal,
 		ctx,
 		true,
@@ -350,7 +351,7 @@ func TestFinalizeRetireCommittedWindowsManagedHooksLifecycleCollectsBeforeRename
 		steps = append(steps, "gc")
 		return 0, gcErr
 	}
-	err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
+	_, err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
 		journal,
 		ctx,
 		true,
@@ -373,7 +374,7 @@ func TestFinalizeRetireCommittedWindowsManagedHooksLifecycleCollectsBeforeRename
 		steps = append(steps, "gc")
 		return 0, nil
 	}
-	err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
+	_, err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
 		journal,
 		ctx,
 		false,
@@ -387,6 +388,133 @@ func TestFinalizeRetireCommittedWindowsManagedHooksLifecycleCollectsBeforeRename
 	}
 	if !slices.Equal(steps, []string{"gc"}) {
 		t.Fatalf("steps = %v, adopted crash prefix must re-run GC without rename", steps)
+	}
+}
+
+// #1105 (GAP-0781): an account whose DefenseClaw folder has permissions
+// DefenseClaw cannot verify or apply is reported and skipped, and every other
+// account is still collected, so a stale or foreign profile no longer fails
+// the retire and rolls back the upgrade. Any other GC failure still fails it,
+// and so does the adoption path's finalize.
+func TestWindowsManagedHooksLifecycleGenerationGCSkipsUntrustedFolders(t *testing.T) {
+	originalGC := windowsManagedHooksLifecycleGenerationGC
+	t.Cleanup(func() { windowsManagedHooksLifecycleGenerationGC = originalGC })
+
+	const stale, healthy = "S-1-5-21-111-222-333-1103", "S-1-5-21-111-222-333-1001"
+	journal := windowsManagedHooksLifecycleJournal{
+		Targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "claudecode", SID: stale, DataDir: `C:\Users\stale\.defenseclaw`},
+			{Connector: "codex", SID: healthy, DataDir: `C:\Users\alice\.defenseclaw`},
+		},
+		HookBinary: `C:\Program Files\DefenseClaw\bin\old-hook.exe`,
+	}
+	untrusted := fmt.Errorf("%w: %s: access denied",
+		enterprisehooks.ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, `C:\Users\stale\.defenseclaw\hooks`)
+	var collected []string
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		collected = append(collected, opts.TargetSID)
+		if opts.TargetSID == stale {
+			return 0, untrusted
+		}
+		return 1, nil
+	}
+	skipped, removed, err := garbageCollectWindowsManagedHooksLifecycleGenerations(journal, windowsManagedHooksLifecycleContext{})
+	if err != nil || removed != 1 {
+		t.Fatalf("an untrusted per-user folder failed the retire: removed=%d err=%v", removed, err)
+	}
+	if len(collected) != 2 {
+		t.Fatalf("collected %v, want both accounts", collected)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "claudecode generations of SID "+stale) ||
+		!strings.Contains(skipped[0], "generation directory is untrusted") ||
+		!strings.Contains(skipped[0], `C:\Users\stale\.defenseclaw\hooks`) {
+		t.Fatalf("skipped = %q, want the stale account, its folder and the reason", skipped)
+	}
+
+	renamed := false
+	skipped, err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
+		journal, windowsManagedHooksLifecycleContext{}, true,
+		func() error { renamed = true; return nil },
+	)
+	if err != nil || !renamed || len(skipped) != 1 {
+		t.Fatalf("adoption finalize: skipped=%q renamed=%v err=%v", skipped, renamed, err)
+	}
+
+	other := errors.New("selector snapshot mismatch")
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		if opts.TargetSID == stale {
+			return 0, other
+		}
+		return 0, nil
+	}
+	if skipped, _, err := garbageCollectWindowsManagedHooksLifecycleGenerations(journal, windowsManagedHooksLifecycleContext{}); !errors.Is(err, other) || skipped != nil {
+		t.Fatalf("another GC failure: skipped=%q err=%v, want the failure", skipped, err)
+	}
+}
+
+// GAP-0211: the collect a compliant ensure runs collects the old generations
+// of every account the manifest names with this deployment's hook binary,
+// reports an account whose folder is still untrusted, and counts what it
+// removed. It refuses, without collecting anything, while a transaction is
+// pending or a committed journal waits for its retire.
+func TestWindowsManagedHooksLifecycleCollectOutsideATransaction(t *testing.T) {
+	originalGC := windowsManagedHooksLifecycleGenerationGC
+	t.Cleanup(func() { windowsManagedHooksLifecycleGenerationGC = originalGC })
+
+	const stale, healthy = "S-1-5-21-111-222-333-1103", "S-1-5-21-111-222-333-1001"
+	ctx := windowsManagedHooksLifecycleContext{
+		journalPath: filepath.Join(t.TempDir(), windowsManagedHooksLifecycleJournalFile),
+		targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "claudecode", SID: stale, DataDir: `C:\Users\stale\.defenseclaw`},
+			{Connector: "claudecode", SID: healthy, DataDir: `C:\Users\alice\.defenseclaw`},
+		},
+	}
+	ctx.opts.HookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	untrusted := fmt.Errorf("%w: managed Windows DACL on %s has 8 ACEs, expected 7",
+		enterprisehooks.ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, `C:\Users\stale\.defenseclaw\hooks`)
+	var calls []enterprisehooks.WindowsManagedRuntimeGenerationGCOptions
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		calls = append(calls, opts)
+		if opts.TargetSID == stale {
+			return 0, untrusted
+		}
+		return 2, nil
+	}
+
+	skipped, collected, err := collectWindowsManagedHooksLifecycleGenerations(ctx, false)
+	if err != nil || collected != 2 {
+		t.Fatalf("collect: collected=%d err=%v, want 2 and no failure", collected, err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("collect ran for %d accounts, want both", len(calls))
+	}
+	for _, call := range calls {
+		if call.HookExecutable != ctx.opts.HookBinary {
+			t.Fatalf("collect used hook binary %q, want this deployment's %q", call.HookExecutable, ctx.opts.HookBinary)
+		}
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "claudecode generations of SID "+stale) ||
+		!strings.Contains(skipped[0], windowsEnterpriseUntrustedUserFolderText) {
+		t.Fatalf("skipped = %q, want the still-untrusted account", skipped)
+	}
+
+	calls = nil
+	if _, _, err := collectWindowsManagedHooksLifecycleGenerations(ctx, true); err == nil ||
+		!strings.Contains(err.Error(), "transaction is pending") || len(calls) != 0 {
+		t.Fatalf("collect during a pending transaction: err=%v calls=%d", err, len(calls))
+	}
+	if err := os.WriteFile(ctx.journalPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collectWindowsManagedHooksLifecycleGenerations(ctx, false); err == nil ||
+		!strings.Contains(err.Error(), "committed lifecycle journal") || len(calls) != 0 {
+		t.Fatalf("collect with a committed journal: err=%v calls=%d", err, len(calls))
 	}
 }
 

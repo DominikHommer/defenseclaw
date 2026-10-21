@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 )
@@ -62,7 +63,9 @@ var ErrCommandNotFound = errors.New("command not found")
 var commandCandidates = map[string][]string{
 	"systemctl":        {"/usr/bin/systemctl", "/bin/systemctl"},
 	"systemd-sysusers": {"/usr/bin/systemd-sysusers", "/bin/systemd-sysusers"},
+	"systemd-run":      {"/usr/bin/systemd-run", "/bin/systemd-run"},
 	"getent":           {"/usr/bin/getent", "/bin/getent"},
+	"journalctl":       {"/usr/bin/journalctl", "/bin/journalctl"},
 	"useradd":          {"/usr/sbin/useradd", "/sbin/useradd"},
 	"groupadd":         {"/usr/sbin/groupadd", "/sbin/groupadd"},
 	"userdel":          {"/usr/sbin/userdel", "/sbin/userdel"},
@@ -70,11 +73,20 @@ var commandCandidates = map[string][]string{
 	"dpkg":             {"/usr/bin/dpkg", "/bin/dpkg"},
 	"rpm":              {"/usr/bin/rpm", "/bin/rpm"},
 	"restorecon":       {"/usr/sbin/restorecon", "/sbin/restorecon"},
+	"semodule":         {"/usr/sbin/semodule", "/sbin/semodule"},
 	"launchctl":        {"/bin/launchctl"},
 	"dscl":             {"/usr/bin/dscl"},
 	"pkgutil":          {"/usr/sbin/pkgutil"},
 	"lsof":             {"/usr/sbin/lsof", "/usr/bin/lsof"},
 	"ps":               {"/bin/ps", "/usr/bin/ps"},
+	"ls":               {"/bin/ls"},
+	"chmod":            {"/bin/chmod"},
+	// The sandbox lifecycle acts as the user (runuser on Linux, sudo on macOS)
+	// and reads the user service manager and group lists.
+	"runuser":  {"/usr/sbin/runuser", "/sbin/runuser", "/usr/bin/runuser"},
+	"sudo":     {"/usr/bin/sudo"},
+	"loginctl": {"/usr/bin/loginctl", "/bin/loginctl"},
+	"id":       {"/usr/bin/id", "/bin/id"},
 }
 
 // ExecRunner is the production Runner.
@@ -160,6 +172,9 @@ const (
 	TrustAdminFile TrustKind = iota
 	// TrustRuntimeDir is a directory the service account may own.
 	TrustRuntimeDir
+	// TrustRulePack is an administrator rule pack: its folders above, and
+	// every folder and file in it (see rulePackTrust).
+	TrustRulePack
 )
 
 // Env binds the lifecycle to one host. Zero values are replaced by
@@ -175,6 +190,13 @@ type Env struct {
 	Services      ServiceManager
 	Accounts      AccountManager
 	MachinePolicy MachinePolicyManager
+	// MacFleetPythonCheck verifies the managed macOS interpreter and PyYAML.
+	// Nil uses Fleet's production trust and isolated import checks; tests may
+	// substitute a probe for an absent macOS framework on non-macOS hosts.
+	MacFleetPythonCheck func() (string, error)
+	// LinuxFleetPythonCheck has the same test seam for the distro Python and
+	// PyYAML prerequisite of a Fleet-enabled managed Linux deployment.
+	LinuxFleetPythonCheck func() (string, error)
 
 	Now     func() time.Time
 	Geteuid func() int
@@ -182,6 +204,9 @@ type Env struct {
 	Lchown func(path string, uid, gid int) error
 	// OwnerOf reports a path's uid and gid without following a symlink.
 	OwnerOf func(path string) (int, int, error)
+	// Fchown changes the owner of an open file: the state folders the service
+	// account can write are re-owned through descriptors (settleStateModes).
+	Fchown func(f *os.File, uid, gid int) error
 	// Trust runs the managed trust checks on a rooted path.
 	Trust func(path string, kind TrustKind) error
 	// HealthGet fetches the gateway /health document over the hook socket
@@ -200,17 +225,48 @@ type Env struct {
 	// connectorName, over the route the standalone plugins use, and returns
 	// the proof (see rotation.go).
 	ListenerProof func(ctx context.Context, connectorName, keyID, nonce string) (string, error)
+	// DiskSpace reports the available bytes, size and device of the
+	// filesystem holding a path (see diskSpace).
+	DiskSpace func(path string) (avail, total, device uint64, err error)
 	// ProcessExecPath returns the executable path the kernel recorded when
 	// process pid started (macOS only; see gatewayProcesses).
 	ProcessExecPath func(pid int) (string, error)
+	// DockerEngine connects to the Docker engine socket at the rooted path
+	// and returns nil when the engine accepts the connection (see
+	// dockerEngineAnswers); status and verify use it for the openshell block
+	// on Linux.
+	DockerEngine func(ctx context.Context, socket string) error
+
+	// UserUnitSource reads the definition of a sandbox user unit by its
+	// embedded file name (default: the embedded unit assets); tests replace it.
+	UserUnitSource func(name string) ([]byte, error)
+	// SandboxUsers is how the lifecycle acts in user accounts for the sandbox
+	// subsystem (default: commands run as the user); tests replace it.
+	SandboxUsers SandboxUserOps
 
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string
+	// BundleDigester computes the effective policy digest of the config of
+	// a signed policy bundle (the gateway ComputeEffectivePolicyFor); nil
+	// refuses every bundle (config_invalid).
+	BundleDigester enterprisebundle.PolicyDigester
+	// RefuseCapabilityLoss makes a bundle apply refuse capability loss
+	// before it changes the installed config.
+	RefuseCapabilityLoss bool
+	// bundleFault is a test seam: it runs at each named phase of a bundle
+	// apply (received, verified, staged, transaction, applied, committed)
+	// and an error fails the apply there; at committed the run stops before
+	// the swap, as a crash after the commit would. Production leaves it nil.
+	bundleFault func(phase string) error
 
 	// SelfUnit names the service unit or launchd job this lifecycle run
 	// executes inside (the config-apply trigger). The lifecycle never stops
 	// or restarts that unit: doing so would kill its own transaction.
 	SelfUnit string
+
+	// Yield lowers the priority of the lifecycle run (yieldToHooks) before
+	// it does any work; tests leave it nil.
+	Yield func()
 
 	LockTimeout  time.Duration
 	ReadyTimeout time.Duration
@@ -219,6 +275,15 @@ type Env struct {
 	// guardian's report on its targets.
 	GuardianReportTimeout time.Duration
 }
+
+// lifecycleNice is the nice value of a lifecycle run. A config or bundle
+// apply builds and verifies a policy generation, in this process and in a
+// gateway CLI it starts, while the gateway keeps answering hook calls; on
+// a small host that work competed with the gateway and with each hook
+// process for the CPU, and hook calls slowed down or timed out for seconds
+// during the apply (#1279). The run yields instead; it does not hold the
+// gateway up.
+const lifecycleNice = 10
 
 // NewEnv returns the production environment for goos.
 func NewEnv(goos, productVersion string) (*Env, error) {
@@ -231,6 +296,7 @@ func NewEnv(goos, productVersion string) (*Env, error) {
 		Layout:         layout,
 		Runner:         ExecRunner{},
 		ProductVersion: productVersion,
+		Yield:          yieldToHooks,
 	}
 	env.fillDefaults()
 	env.SelfUnit = selfUnitFromEnv(env.Services, os.Getenv(LifecycleUnitEnv))
@@ -278,6 +344,9 @@ func (e *Env) fillDefaults() {
 	if e.Lchown == nil {
 		e.Lchown = os.Lchown
 	}
+	if e.Fchown == nil {
+		e.Fchown = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }
+	}
 	if e.OwnerOf == nil {
 		e.OwnerOf = func(path string) (int, int, error) {
 			uid, gid, _, err := statOwnerMode(path)
@@ -307,6 +376,12 @@ func (e *Env) fillDefaults() {
 	}
 	if e.ProcessExecPath == nil {
 		e.ProcessExecPath = processExecPath
+	}
+	if e.DiskSpace == nil {
+		e.DiskSpace = diskSpace
+	}
+	if e.DockerEngine == nil {
+		e.DockerEngine = dialDockerEngine
 	}
 	if e.Services == nil {
 		e.Services = newServiceManager(e)
@@ -357,6 +432,21 @@ func (e *Env) runGatewayCLI(ctx context.Context, args ...string) (CommandResult,
 	return e.Runner.Run(ctx, gateway, args...)
 }
 
+// removeAllTimeout bounds `enterprise hooks remove-all`, which retries a
+// per-user worker that timed out with a longer deadline (GAP-0517); the
+// default two-minute command bound would cut that retry short.
+const removeAllTimeout = 15 * time.Minute
+
+// runGatewayCLILong is runGatewayCLI with a longer bound for the production
+// runner.
+func (e *Env) runGatewayCLILong(ctx context.Context, timeout time.Duration, args ...string) (CommandResult, error) {
+	if runner, ok := e.Runner.(ExecRunner); ok {
+		runner.Timeout = timeout
+		return runner.RunEnv(ctx, e.serviceEnvironment(), filepath.Join(e.P(e.Layout.BinDir), binGateway), args...)
+	}
+	return e.runGatewayCLI(ctx, args...)
+}
+
 // P maps a canonical layout path onto the rooted filesystem.
 func (e *Env) P(path string) string {
 	if e.Root == "" {
@@ -371,6 +461,8 @@ func defaultTrust(path string, kind TrustKind) error {
 		return managed.ValidateTrustedFilePath(path, "managed file")
 	case TrustRuntimeDir:
 		return managed.ValidateTrustedRuntimeDir(path, "managed runtime directory")
+	case TrustRulePack:
+		return rulePackTrust(path)
 	}
 	return fmt.Errorf("unknown trust kind %d", kind)
 }

@@ -30,6 +30,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
@@ -75,15 +77,17 @@ func enterpriseHooksStandaloneUnixActive() bool {
 }
 
 // configureEnterpriseHooksStandaloneUnix switches the enterprisehooks
-// package to the standalone Unix rules once the config is loaded.
-func configureEnterpriseHooksStandaloneUnix(ctx context.Context) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+// package to the standalone Unix rules once the config is loaded. The
+// resolver it installs outlives the command that installs it, so it is bound
+// to context.Background: each lookup gets its own timeout. A resolver bound
+// to the context of the caller failed every directory lookup once that
+// context ended ("getent timed out: context canceled" from policy show and
+// verify --user, GAP-0740).
+func configureEnterpriseHooksStandaloneUnix() {
 	active := enterpriseHooksStandaloneUnixActive()
 	enterprisehooks.SetStandaloneUnix(active)
 	if active {
-		enterprisehooks.SetStandaloneResolver(unixidentity.Default(ctx))
+		enterprisehooks.SetStandaloneResolver(unixidentity.Default(context.Background()))
 	}
 }
 
@@ -323,7 +327,7 @@ func resolveEnterpriseHookStandaloneAccount(
 		home = account.Home
 	}
 	if strings.TrimSpace(account.Home) != "" && filepath.Clean(home) != filepath.Clean(account.Home) {
-		return enterpriseHookWorkerAccount{}, "", fmt.Errorf("enterprise hooks: target %q home %s no longer matches the directory home %s", account.Name, home, account.Home)
+		return enterpriseHookWorkerAccount{}, "", &enterpriseHookTargetHomeChangedError{name: account.Name, home: home, directoryHome: account.Home}
 	}
 	if account.UID <= 0 {
 		return enterpriseHookWorkerAccount{}, "", fmt.Errorf("enterprise hooks: refusing to target uid %d", account.UID)
@@ -338,6 +342,34 @@ var (
 	errEnterpriseHookTargetNotFound   = errors.New("no such account")
 	errEnterpriseHookTargetUIDChanged = errors.New("the account's uid changed")
 )
+
+// enterpriseHookTargetHomeChangedError is a target whose recorded home is
+// not the home the directory now gives its account: a re-homed directory
+// account, or a removed macOS mobile account, whose Active Directory record
+// answers with /var/empty (GAP-0543). home is the recorded one.
+type enterpriseHookTargetHomeChangedError struct {
+	name, home, directoryHome string
+}
+
+// enterpriseHookTargetNoHomeReason is the pending reason of a manifest
+// target whose account the directory now gives no home (a removed macOS
+// mobile account answers with /var/empty): no agent of that account runs
+// on this computer, so it is waiting, not a protection failure. Status and
+// verify stayed failed (guardian_target_failed) until a reinstall
+// (rel-1-0-3 GAP-0177). The row goes when the enumerator drops the account,
+// or is protected again when it gets a home. Any other error is "".
+func enterpriseHookTargetNoHomeReason(err error) string {
+	var changed *enterpriseHookTargetHomeChangedError
+	if !errors.As(err, &changed) || !enterpriseHookDirectoryNoHome(changed.directoryHome) {
+		return ""
+	}
+	return fmt.Sprintf("the directory now gives account %q no home on this computer (%s instead of %s): it looks removed here, so the enrollment waits until the account is dropped from enrollment or gets a home again",
+		changed.name, changed.directoryHome, changed.home)
+}
+
+func (e *enterpriseHookTargetHomeChangedError) Error() string {
+	return fmt.Sprintf("enterprise hooks: target %q home %s no longer matches the directory home %s", e.name, e.home, e.directoryHome)
+}
 
 // enterpriseHookStandaloneIdentityReassigned reports a failed resolution
 // after which the uid the target was last protected under may belong to
@@ -406,12 +438,25 @@ var enterpriseHookCheckHome = func(home string, uid int) enterprisehooks.HomeChe
 // ptrace it. A success must name exactly the requested connector and home
 // and stay small enough for the gateway's bounded ledger read.
 func validateEnterpriseHookWorkerResult(target enterpriseHookWorkerTarget, result enterpriseHookWorkerTargetResult) error {
+	if target.Mode == enterpriseHookWorkerModeRemove {
+		if err := validateEnterpriseHookWorkerRemoveReport(result); err != nil {
+			return err
+		}
+	} else if result.PathsReported || len(result.CleanedPaths) != 0 || result.Remaining != "" || result.Unverified != "" {
+		return errors.New("worker reported removal paths for a non-remove target")
+	}
 	if !result.OK {
 		if result.Result != nil {
 			return errors.New("worker reported a failed target with a result")
 		}
 		if len(result.Error) > enterpriseHookWorkerResultMaxBytes {
 			return errors.New("worker error message is too large")
+		}
+		return nil
+	}
+	if target.Mode == enterpriseHookWorkerModeRemove {
+		if result.Pending || result.Result != nil || strings.TrimSpace(result.Error) != "" {
+			return errors.New("worker reported an inconsistent successful removal")
 		}
 		return nil
 	}
@@ -428,7 +473,59 @@ func validateEnterpriseHookWorkerResult(target enterpriseHookWorkerTarget, resul
 	if err != nil || len(encoded) > enterpriseHookWorkerResultMaxBytes {
 		return errors.New("worker result is too large")
 	}
+	if !connector.ValidAgentConfigStatus(result.AgentConfig) {
+		return errors.New("worker result names an unknown agent config status")
+	}
 	return nil
+}
+
+const (
+	enterpriseHookWorkerRemovePathMax  = 512
+	enterpriseHookWorkerRemovePathsMax = 64
+	enterpriseHookWorkerRemainingMax   = 1024
+)
+
+func validateEnterpriseHookWorkerRemoveReport(result enterpriseHookWorkerTargetResult) error {
+	if !result.PathsReported && (len(result.CleanedPaths) != 0 || result.Remaining != "") {
+		return errors.New("worker removal paths lack a report marker")
+	}
+	if result.PathsReported && result.Unverified != "" {
+		return errors.New("worker reported both removal paths and an unverified reason")
+	}
+	if len(result.Unverified) > enterpriseHookWorkerRemainingMax ||
+		!utf8.ValidString(result.Unverified) || strings.IndexFunc(result.Unverified, unicode.IsControl) >= 0 {
+		return errors.New("worker reported an invalid unverified reason")
+	}
+	if len(result.CleanedPaths) > enterpriseHookWorkerRemovePathsMax {
+		return errors.New("worker reported too many removal paths")
+	}
+	for _, path := range result.CleanedPaths {
+		if len(path) > enterpriseHookWorkerRemovePathMax || !filepath.IsAbs(path) ||
+			filepath.Clean(path) != path || strings.TrimSpace(path) != path ||
+			!utf8.ValidString(path) || strings.IndexFunc(path, unicode.IsControl) >= 0 {
+			display := path
+			if len(display) > 96 && filepath.IsAbs(display) {
+				display = shortEnterpriseHookReportPath(display)
+			} else if len(display) > 96 {
+				display = boundedString(display, 96)
+			}
+			return fmt.Errorf("worker reported an invalid removal path %q", display)
+		}
+	}
+	if len(result.Remaining) > enterpriseHookWorkerRemainingMax ||
+		!utf8.ValidString(result.Remaining) || strings.IndexFunc(result.Remaining, unicode.IsControl) >= 0 {
+		return errors.New("worker reported an invalid remaining-entry reason")
+	}
+	return nil
+}
+
+func enterpriseHookWorkerPathWithin(home, path string) bool {
+	if !filepath.IsAbs(home) || !filepath.IsAbs(path) {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(home), filepath.Clean(path))
+	return err == nil && rel != "." && !filepath.IsAbs(rel) && rel != ".." &&
+		!strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // enterpriseHookStandaloneOutcome is one row's worker disposition.
@@ -438,6 +535,8 @@ type enterpriseHookStandaloneOutcome struct {
 	repaired bool
 	err      string
 	result   *enterprisehooks.InstallResult
+	// agentConfig is the worker's connector.AgentConfigStatus code.
+	agentConfig string
 }
 
 // dispatchEnterpriseHookStandaloneJobs runs the worker pool and maps every
@@ -486,7 +585,7 @@ func dispatchEnterpriseHookStandaloneJobs(
 					outcomes[target.Index] = enterpriseHookStandaloneOutcome{err: firstNonEmpty(result.Error, "worker reported an unspecified failure")}
 					continue
 				}
-				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, result: result.Result}
+				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, result: result.Result, agentConfig: result.AgentConfig}
 			}
 		}
 	}
@@ -554,9 +653,13 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	jobs := map[int]*enterpriseHookWorkerJob{}
 	slots := map[int]enterpriseHookStandaloneSlot{}
+	var machineClaudeRows []int
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
+	// ownedByRow is each dispatched target's exclusive-writer files, which
+	// the pass records the fingerprints of for status (GAP-0044).
+	ownedByRow := map[int][]string{}
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -580,6 +683,10 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			}
 		}
 		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
+		if reason := enterpriseHookTargetNoHomeReason(err); reason != "" {
+			pendingRow(reason)
+			continue
+		}
 		if err != nil {
 			var binding *enterpriseHookUnixBinding
 			if previous, ok := bindings.Bindings[enterpriseHookProtectedTargetKey(row)]; ok {
@@ -647,7 +754,25 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			case !covered:
 				failRow(fmt.Errorf("enterprise hooks: %s machine policy is not in place", row.Connector))
 			default:
-				row.OK = true
+				index := len(rows)
+				if strings.EqualFold(row.Connector, "claudecode") {
+					// An older personal install can leave a second hook in
+					// settings.json. The managed hook is already published;
+					// neutralize that personal script as the target user.
+					job, exists := jobs[account.UID]
+					if !exists {
+						job = &enterpriseHookWorkerJob{Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true}}
+						jobs[account.UID] = job
+					}
+					job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Index: index,
+						Mode: enterpriseHookWorkerModeBlockPersonalClaude,
+						Options: enterpriseHookWorkerOptionsFrom(enterprisehooks.InstallOptions{
+							ConnectorName: "claudecode", UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
+						})})
+					machineClaudeRows = append(machineClaudeRows, index)
+				} else {
+					row.OK = true
+				}
 				rows = append(rows, row)
 				next.Bindings[enterpriseHookProtectedTargetKey(row)] = enterpriseHookUnixBinding{
 					UID: account.UID, Home: account.Home, HomeInode: check.Inode,
@@ -710,13 +835,16 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			ManagedServiceUID:                  serviceUID,
 			HookCredentialIdentity:             identity,
 			ForeignHookGuardBinary:             standaloneForeignHookGuardBinary(target.Connector),
+			ManagedHookBinary:                  standaloneManagedHookBinary(),
 		}
 		if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
 			for _, dir := range dirs {
 				watchDirs[dir] = struct{}{}
 			}
 		}
+		var ownedExclusive []string
 		if own, filesErr := enterprisehooks.WatchOwnedFiles(opts); filesErr == nil {
+			ownedExclusive = own.ExclusiveWriter
 			for _, f := range own.ExclusiveWriter {
 				exclusiveFiles[f] = struct{}{}
 			}
@@ -725,6 +853,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			}
 		}
 		index := len(rows)
+		ownedByRow[index] = ownedExclusive
 		rows = append(rows, row)
 		slot := enterpriseHookStandaloneSlot{
 			key: key, account: account, inode: check.Inode, verifiable: previousProtection.PreviouslyProtected,
@@ -749,8 +878,25 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	}
 
 	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobs)
+	for _, index := range machineClaudeRows {
+		row := rows[index]
+		outcome, ok := outcomes[index]
+		switch {
+		case !ok:
+			row.Error = errEnterpriseHookWorkerNoResult.Error()
+		case outcome.pending:
+			row.Pending = true
+		case outcome.ok:
+			row.OK = true
+		default:
+			row.Error = outcome.err
+		}
+		rows[index] = row
+	}
 	repairs := 0
 	var repaired []enterpriseHookGuardianRepair
+	var auditRepairs []enterpriseHookGuardianAuditReport
+	var notices []enterpriseHookGuardianNotice
 	verified := map[int]bool{}
 	for index, slot := range slots {
 		row := rows[index]
@@ -768,9 +914,13 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			row.Connector = outcome.result.Connector
 			if outcome.repaired {
 				repaired = append(repaired, enterpriseHookGuardianRepair{User: row.User, Connector: row.Connector})
+				auditRepairs = append(auditRepairs, enterpriseHookGuardianAuditReport{User: row.User, UID: slot.account.UID, Connector: row.Connector})
 				repairs++
 			}
 			verified[index] = slot.verifiable && !outcome.repaired
+			if outcome.agentConfig != "" {
+				notices = append(notices, enterpriseHookGuardianNotice{User: row.User, Connector: row.Connector, AgentConfig: outcome.agentConfig})
+			}
 		default:
 			row.Error = outcome.err
 		}
@@ -799,6 +949,8 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 
 	bindingsErr := saveEnterpriseHookUnixBindings(next)
 	writeEnterpriseHookGuardianRepairs(cfg.DataDir, repaired)
+	writeEnterpriseHookGuardianNotices(enterpriseHookWorkerLog, cfg.DataDir, notices)
+	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, auditRepairs)
 	stateErr := writeEnterpriseHookGuardianState(cfg.DataDir, enterpriseHookManifest, manifestSHA256, rows, failures, true)
 	if stateErr == nil && bindingsErr != nil {
 		stateErr = fmt.Errorf("persist protected target identity bindings: %w", bindingsErr)
@@ -806,10 +958,20 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	if stateErr == nil && cleanupErr != nil {
 		stateErr = fmt.Errorf("persist the per-user cleanup ledger: %w", cleanupErr)
 	}
+	uids := make(map[int]int, len(slots))
+	for index, slot := range slots {
+		uids[index] = slot.account.UID
+	}
+	if err := writeEnterpriseHookGuardianOwnedFiles(enterpriseHookWorkerLog, cfg.DataDir, rows, uids, ownedByRow); err != nil && stateErr == nil {
+		// Status would compare the files with an earlier pass: retry with
+		// the repair backoff.
+		stateErr = fmt.Errorf("record the verified hook files: %w", err)
+	}
 	if err := writeEnterpriseHookCredentialAttestation(manifestSHA256, rows, slots, verified, stateErr == nil); err != nil && stateErr == nil {
 		stateErr = fmt.Errorf("publish the guardian credential attestation: %w", err)
 	}
 	run.Rows = rows
+	run.Targets = manifest.Targets
 	run.Failures = failures
 	run.Pending = pending
 	run.Repairs = repairs
@@ -817,7 +979,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
 	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
-	runEnterpriseHookStandaloneForeignCleanup(ctx, os.Stderr, time.Now(), enterpriseHookPerUserEnrolled(manifest, machinePolicy))
+	runEnterpriseHookStandaloneForeignCleanup(ctx, os.Stderr, time.Now(), manifest, enterpriseHookPerUserEnrolled(manifest, machinePolicy), hookSocket)
 	return run, nil
 }
 
@@ -1065,6 +1227,11 @@ func enterpriseHookStandaloneConfigChanged(startup string, w io.Writer) bool {
 	fmt.Fprintf(w, "[hook-guardian] managed config changed; exiting so the service manager restarts the guardian with it\n")
 	return true
 }
+
+// enterpriseHookStandaloneConfigRefresh is the Windows in-place config
+// reload; the Unix guardian exits on a changed config instead
+// (enterpriseHookStandaloneConfigChanged).
+func enterpriseHookStandaloneConfigRefresh(io.Writer) {}
 
 // enterpriseHookStandaloneHookTransport returns the gateway's unix hook socket
 // and service uid from the root-owned runtime descriptor. Per-user hooks and

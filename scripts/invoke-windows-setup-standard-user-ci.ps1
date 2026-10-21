@@ -17,13 +17,17 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('setup-acceptance', 'wizard-smoke', 'contract', 'omnigent-native-degraded')]
+    [ValidateSet('setup-acceptance', 'wizard-smoke', 'contract')]
     [string]$Mode,
     [ValidateSet('codex', 'claudecode', 'amp', 'copilot', 'cursor', 'devin', 'hermes', 'antigravity', 'opencode')][string]$Connector = 'codex',
     [Parameter(Mandatory)][string]$ArtifactRoot,
     [Parameter(Mandatory)][string]$StateRoot,
     [string]$DiagnosticsRoot = '',
     [ValidateRange(60, 7200)][int]$TimeoutSeconds = 4500,
+    # setup-acceptance only: the CI matrix runs the wizard connector cells and
+    # the installed lifecycle as separate parts on separate runners; 'all'
+    # runs every part in one process (release certification and local runs).
+    [ValidateSet('all', 'wizard-1', 'wizard-2', 'wizard-3', 'lifecycle')][string]$SetupAcceptancePart = 'all',
     [switch]$Child,
     [switch]$ExerciseWmiEscape,
     [string]$ExpectedSetupSha256 = '',
@@ -423,62 +427,13 @@ function Invoke-ChildMode {
             & $nativeHarness -Operation setup-acceptance `
                 -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
                 -StateRoot $state -ArtifactRoot $artifacts `
+                -SetupAcceptancePart $SetupAcceptancePart `
                 -AllowCurrentUserSetupAcceptance
         } elseif ($Mode -eq 'contract') {
             & $nativeHarness -Operation contract -Connector $Connector `
                 -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
                 -StateRoot $state -ArtifactRoot $artifacts `
                 -AllowCurrentUserSetupAcceptance
-        } elseif ($Mode -eq 'omnigent-native-degraded') {
-            $uvSource = Join-Path $PSScriptRoot 'uv.exe'
-            # OmniGent validates every uv/token ancestor against the actual
-            # standard-user identity. Transfer this writable state root to
-            # that identity while retaining cleanup only through the trusted
-            # built-in Administrators principal used by the hosted parent.
-            Set-DisposableProtectedDirectoryAcl $state $identity.User `
-                ([Security.AccessControl.FileSystemRights]::FullControl) `
-                -InheritChildRights -UseAdministratorsForCleanup
-            Assert-DisposableChildAcl $state $identity.User `
-                ([Security.AccessControl.FileSystemRights]::FullControl) `
-                -ExpectInheritance -AllowOwnershipBootstrap
-            $localAppData = [Environment]::GetFolderPath(
-                [Environment+SpecialFolder]::LocalApplicationData
-            )
-            if ([string]::IsNullOrWhiteSpace($localAppData)) {
-                throw 'disposable OmniGent user has no LocalApplicationData known folder'
-            }
-            # Keep the authenticated executable beneath the disposable user's
-            # own trusted profile ancestry. The private harness sandbox stays
-            # parent-owned so the child cannot rewrite its immutable inputs.
-            $uvRoot = Join-Path $localAppData 'DefenseClaw-CI\uv-input'
-            [IO.Directory]::CreateDirectory($uvRoot) | Out-Null
-            Set-DisposableProtectedDirectoryAcl $uvRoot $identity.User `
-                ([Security.AccessControl.FileSystemRights]::FullControl) `
-                -InheritChildRights -UseAdministratorsForCleanup
-            Assert-DisposableChildAcl $uvRoot $identity.User `
-                ([Security.AccessControl.FileSystemRights]::FullControl) `
-                -ExpectInheritance -AllowOwnershipBootstrap
-            $uvPath = Join-Path $uvRoot 'uv.exe'
-            [IO.File]::Copy($uvSource, $uvPath, $false)
-            if ((Get-FileHash -LiteralPath $uvPath -Algorithm SHA256).Hash -cne
-                (Get-FileHash -LiteralPath $uvSource -Algorithm SHA256).Hash) {
-                throw 'standard-user OmniGent uv copy does not match its authenticated input'
-            }
-            # OmniGent creates its hook API token below StateRoot. Keep that
-            # mutable product state beneath the same token-bound trusted
-            # profile ancestry as uv; the parent-owned harness sandbox remains
-            # limited to immutable inputs, diagnostics, and result handoff.
-            $omnigentState = Join-Path $localAppData 'DefenseClaw-CI\omnigent-native-degraded'
-            [IO.Directory]::CreateDirectory($omnigentState) | Out-Null
-            Set-DisposableProtectedDirectoryAcl $omnigentState $identity.User `
-                ([Security.AccessControl.FileSystemRights]::FullControl) `
-                -InheritChildRights -UseAdministratorsForCleanup
-            Assert-DisposableChildAcl $omnigentState $identity.User `
-                ([Security.AccessControl.FileSystemRights]::FullControl) `
-                -ExpectInheritance -AllowOwnershipBootstrap
-            & (Join-Path $PSScriptRoot 'test-omnigent-windows-native.ps1') `
-                -StateRoot $omnigentState -ArtifactRoot $artifacts `
-                -UvPath $uvPath
         } else {
             $setup = Join-Path $artifacts 'DefenseClawSetup-x64.exe'
             & (Join-Path $PSScriptRoot 'test-windows-setup-wizard.ps1') `
@@ -1040,7 +995,6 @@ try {
     )
     if ($Mode -eq 'contract') {
         $harnessFiles += @(
-            'assert-gateway-jsonl.py',
             'assert-observability-v8-jsonl.py',
             'prepare-windows-contract-v8.py',
             'live-connector-e2e\run-windows.ps1',
@@ -1067,8 +1021,6 @@ try {
         if (Test-Path -LiteralPath (Join-Path $PSScriptRoot $optionalWindowsBlockGolden) -PathType Leaf) {
             $harnessFiles += $optionalWindowsBlockGolden
         }
-    } elseif ($Mode -eq 'omnigent-native-degraded') {
-        $harnessFiles += 'test-omnigent-windows-native.ps1'
     }
     foreach ($file in $harnessFiles) {
         $source = Join-Path $PSScriptRoot $file
@@ -1079,20 +1031,6 @@ try {
             -AllowedRoot $scripts
         [IO.Directory]::CreateDirectory((Split-Path -Parent $destination)) | Out-Null
         [IO.File]::Copy($source, $destination, $false)
-    }
-    if ($Mode -eq 'omnigent-native-degraded') {
-        $uvSource = (Get-Command uv.exe -CommandType Application -ErrorAction Stop).Source
-        $uvSourceItem = Get-Item -LiteralPath $uvSource -Force -ErrorAction Stop
-        if ($uvSourceItem.PSIsContainer -or
-            ($uvSourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-            $uvSourceItem.Length -gt 268435456) {
-            throw 'pinned OmniGent uv input must be a bounded regular file'
-        }
-        [void][DefenseClaw.DisposableFileGuard]::CopyBoundedRegularFile(
-            $uvSource,
-            (Join-Path $scripts 'uv.exe'),
-            268435456
-        )
     }
     foreach ($resourceInputName in $resourceVerifierInputs) {
         $source = Join-Path $artifactSource $resourceInputName
@@ -1224,6 +1162,9 @@ try {
     }
     if ($Mode -eq 'setup-acceptance') {
         $arguments += '-ExerciseWmiEscape'
+    }
+    if ($Mode -eq 'setup-acceptance' -and $SetupAcceptancePart -ne 'all') {
+        $arguments += @('-SetupAcceptancePart', $SetupAcceptancePart)
     }
     $arguments += @('-ExpectedSetupSha256', $expectedSetupHash)
     # Refresh immediately before the untrusted logon. Only exact PID and

@@ -128,7 +128,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, shuttingDownResponse())
 		return
 	}
-	pr, cred, presented, ok, off := p.authenticate(r)
+	pr, cred, presented, ok, off := p.authenticateCurrent(r)
 	if off != nil {
 		p.refuseForward(w, pr, r.Method, suspendedRefusal(*off, r.URL.Host), start)
 		return
@@ -221,7 +221,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 				// reports this refusal.
 				st.setDialErr(de)
 				if ic != nil {
-					_ = ic.Conn.Close()
+					_ = ic.Close()
 				} else {
 					_ = info.Conn.Close()
 				}
@@ -390,7 +390,7 @@ func asIdleConn(conn net.Conn) *idleConn {
 	return c
 }
 
-func (c *idleConn) touch() { _ = c.Conn.SetDeadline(time.Now().Add(c.idle)) }
+func (c *idleConn) touch() { _ = c.SetDeadline(time.Now().Add(c.idle)) }
 
 func (c *idleConn) moved(n int, err error) {
 	if n > 0 {

@@ -67,6 +67,31 @@ func TestCompatibilityAuditV8OwnsGenericActionCorrelationAndMetric(t *testing.T)
 	}
 }
 
+func TestFleetCredentialPreCommitActionsPersistAsAuthorizationOnly(t *testing.T) {
+	for _, action := range []Action{
+		ActionFleetDeviceCredentialProvisionAuthorized,
+		ActionFleetDeviceDecommissionAuthorized,
+	} {
+		t.Run(string(action), func(t *testing.T) {
+			logger := newTestLogger(t)
+			runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+			logger.SetRuntimeV8Emitter(runtime)
+			if err := logger.LogAction(string(action), "281474976776234", "pre-commit authorization"); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := logger.store.ListEvents(10)
+			if err != nil || len(rows) != 1 || rows[0].Action != string(action) {
+				t.Fatalf("stored events=%+v err=%v", rows, err)
+			}
+			_, records := runtime.snapshot()
+			if len(records) != 1 || records[0].Bucket() != observability.BucketComplianceActivity ||
+				records[0].EventName() != observability.EventName(action) {
+				t.Fatalf("authorization telemetry=%+v", records)
+			}
+		})
+	}
+}
+
 // TestCompatibilityAuditV8CarriesSandboxIdentity pins the sandbox
 // attribution of generic audit rows (codex notify, inspect, ...): the
 // envelope's sandbox id and name reach the event and its v8 record body,
@@ -126,6 +151,34 @@ func TestCompatibilityAuditV8CarriesSandboxIdentity(t *testing.T) {
 	ApplyEnvelope(&pinned, CorrelationEnvelope{SandboxID: "sbx-ctx", SandboxName: "dc-ctx"})
 	if pinned.SandboxID != "sbx-pinned" || pinned.SandboxName != "dc-ctx" {
 		t.Fatalf("ApplyEnvelope = %+v", pinned)
+	}
+}
+
+// TestCompatibilityAuditV8ClassifiesRulePackDirAsPath pins the rule-pack
+// directory of a hook row as a path-class field of the record body, so the
+// sensitive profile hashes it and strict removes it (GAP-0131).
+func TestCompatibilityAuditV8ClassifiesRulePackDirAsPath(t *testing.T) {
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	dir := "/home/alice@corp.example/.defenseclaw/policies/guardrail/default"
+	if err := logger.LogEventCtx(context.Background(), Event{
+		Action: string(ActionConnectorHook), Target: "PreToolUse", Actor: "defenseclaw",
+		Severity: "INFO", Connector: "codex", RulePackDir: dir,
+	}); err != nil {
+		t.Fatalf("LogEventCtx: %v", err)
+	}
+	_, records := runtime.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	body, _ := records[0].Body()
+	object, err := body.Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if object["rule_pack_dir"] != dir || records[0].FieldClasses()["/rule_pack_dir"] != observability.FieldClassPath {
+		t.Fatalf("body = %v classes = %v", object, records[0].FieldClasses())
 	}
 }
 

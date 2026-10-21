@@ -49,7 +49,7 @@ try {
             return $null
         }
         function Assert-DefenseClawCanonicalPathAcl {
-            param($Path, $Expected)
+            param($Path, $Expected, [switch]$AllowSelfHeal)
         }
         $script:TestAclWrites = [Collections.Generic.List[string]]::new()
         function Set-DefenseClawPathAcl {
@@ -140,7 +140,7 @@ try {
                     $utf8
                 )
             }
-            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale, [object[]]$Results = @(), [int64]$RemovedAccountFailures = 0) {
+            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale, [object[]]$Results = @(), [int64]$RemovedAccountFailures = 0, [int64]$AwaitingSignInFailures = 0) {
                 $stamp = '2026-09-27T15:55:44Z'
                 if ([string]::IsNullOrEmpty($StateStamp)) {
                     $StateStamp = $stamp
@@ -178,6 +178,9 @@ try {
                 }
                 if ($RemovedAccountFailures -gt 0) {
                     $report['removed_account_failures'] = $RemovedAccountFailures
+                }
+                if ($AwaitingSignInFailures -gt 0) {
+                    $report['awaiting_sign_in_failures'] = $AwaitingSignInFailures
                 }
                 $script:TestGuardianReport = [pscustomobject]$report
             }
@@ -287,6 +290,95 @@ try {
             if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
                 $failures.Add("a deleted account's failing rows refused the adoption: $($adoption.reason)")
             }
+            # GAP-0644: a target an earlier release protected waits for its
+            # signed-out account's next sign-in; status counts it, and the
+            # adoption accepts it, as verify and status do.
+            Set-TestGuardian $true $republishedSHA256 2 1 -AwaitingSignInFailures 1
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                $failures.Add("a row waiting for its account's next sign-in refused the adoption: $($adoption.reason)")
+            }
+            # #1105, GAP-0211: the 1.0.2 -> 1.0.3 upgrade with a signed-out
+            # account whose hooks folder had one extra permission entry
+            # returned 1603 twice. Only that failure of the account's own
+            # DefenseClaw folder, while it is signed out, waits for its next
+            # sign-in: the adoption goes on and names the folder.
+            $unavailable = 'enterprise hooks: protected target requires repair but its exact active Windows session is unavailable (verification: '
+            $hookCheck = 'enterprise hooks: managed hook directory verification failed: '
+            $folderError = $unavailable + $hookCheck + 'enterprise hooks: managed Windows DACL on C:\Users\r103gb13-u1\.defenseclaw\hooks has 8 ACEs, expected 7)'
+            $healthy = [pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; user_home = 'C:\Users\alice'; connector = 'codex'; ok = $true }
+            $newFolderRow = {
+                param([string]$Message, [string]$UserHome = 'C:\Users\r103gb13-u1')
+                return [pscustomobject]@{
+                    user = 'DCFC\r103gb13-u1'; sid = 'S-1-5-21-1-2-3-1123'; user_home = $UserHome
+                    connector = 'claudecode'; ok = $false; error = $Message
+                }
+            }
+            $folderEntry = 'DCFC\r103gb13-u1 (S-1-5-21-1-2-3-1123): C:\Users\r103gb13-u1\.defenseclaw\hooks'
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($healthy, (& $newFolderRow $folderError))
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2 -or
+                @($adoption.untrusted_folders).Count -ne 1 -or
+                [string]@($adoption.untrusted_folders)[0] -cne $folderEntry) {
+                $failures.Add("a signed-out account's untrusted DefenseClaw folder refused the adoption: $($adoption.reason) [$(@($adoption.untrusted_folders) -join '; ')]")
+            }
+            # It stays excused next to a row waiting for its sign-in.
+            $waitingRow = [pscustomobject]@{
+                sid = 'S-1-5-21-1-2-3-1124'; user_home = 'C:\Users\bob'; connector = 'codex'; ok = $false
+                error = "enterprise hooks: protected target waits for its account's next sign-in: DefenseClaw 1.0.2 protected it, and this release's hooks install only in the account's own Windows session; its exact active Windows session is unavailable, so the guardian repairs it at the account's next sign-in (verification: drift)"
+            }
+            Set-TestGuardian $false $republishedSHA256 3 2 -Results @($healthy, (& $newFolderRow $folderError), $waitingRow)
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 3) {
+                $failures.Add("an untrusted folder next to a waiting row refused the adoption: $($adoption.reason)")
+            }
+            # No other failure is excused: another account's folder, a
+            # junction, a connected account, any other failed row, or a row
+            # only the gateway could excuse.
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($healthy, (& $newFolderRow $folderError 'C:\Users\other'))
+            Assert-TestSyncRefuses 'untrusted folder of another account' 'sign in, or remove it with its profile, then run this command again: DCFC\r103gb13-u1 (S-1-5-21-1-2-3-1123)'
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($healthy, (& $newFolderRow ($unavailable + $hookCheck + 'enterprise hooks: symlinks, junctions, and reparse points are not allowed: C:\Users\r103gb13-u1\.defenseclaw\hooks)')))
+            Assert-TestSyncRefuses 'signed-out junction' 'sign in, or remove it with its profile'
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($healthy, (& $newFolderRow ($hookCheck + 'enterprise hooks: managed Windows DACL on C:\Users\r103gb13-u1\.defenseclaw\hooks has 8 ACEs, expected 7')))
+            Assert-TestSyncRefuses 'connected account with an untrusted folder' 'failure-free reconcile'
+            $otherRow = [pscustomobject]@{
+                sid = 'S-1-5-21-1-2-3-1124'; user_home = 'C:\Users\bob'; connector = 'codex'; ok = $false
+                error = 'enterprise hooks: write managed Claude Code hook runtime: access is denied'
+            }
+            Set-TestGuardian $false $republishedSHA256 3 2 -Results @($healthy, (& $newFolderRow $folderError), $otherRow)
+            Assert-TestSyncRefuses 'untrusted folder next to another failure' 'failure-free reconcile'
+            $removedRow = [pscustomobject]@{
+                sid = 'S-1-5-21-1-2-3-1125'; user_home = 'C:\Users\gone'; connector = 'codex'; ok = $false
+                error = 'enterprise hooks: inspect profile: the system cannot find the path specified'
+            }
+            Set-TestGuardian $false $republishedSHA256 3 2 -Results @($healthy, (& $newFolderRow $folderError), $removedRow) -RemovedAccountFailures 1
+            Assert-TestSyncRefuses 'untrusted folder next to a removed account' 'failure-free reconcile'
+            if ($canRewrite) {
+                # The rebind before a servicing transaction keeps the folder
+                # for the result (signed_out_untrusted_folders).
+                $script:DefenseClawSignedOutUntrustedFolders = @()
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($healthy, (& $newFolderRow $folderError))
+                if (-not (Invoke-TestSync) -or
+                    @($script:DefenseClawSignedOutUntrustedFolders).Count -ne 1 -or
+                    [string]@($script:DefenseClawSignedOutUntrustedFolders)[0] -cne $folderEntry) {
+                    $failures.Add("the rebind did not keep the signed-out untrusted folder: $(@($script:DefenseClawSignedOutUntrustedFolders) -join '; ')")
+                }
+                $script:DefenseClawSignedOutUntrustedFolders = @()
+                Set-TestMetadata $activatedSHA256 'activated' 1
+            }
+
             Set-TestGuardian $true $republishedSHA256 2 0 '2026-09-27T15:50:44Z'
             Assert-TestSyncRefuses 'guardian records from two reconciles' 'state record'
             Set-TestGuardian $true $republishedSHA256 2 -NoAuthorization
@@ -373,6 +465,14 @@ try {
             }
             if (-not $functions['Assert-DefenseClawEnterpriseDeployment'].Contains('Get-DefenseClawStandaloneManifestAdoption')) {
                 $failures.Add('the deployment assertion does not adopt a guardian-activated manifest')
+            }
+            foreach ($name in @('Assert-DefenseClawEnterpriseDeployment', 'Sync-DefenseClawStandaloneManagedHooksActivationBinding')) {
+                if (-not $functions[$name].Contains('Add-DefenseClawSignedOutUntrustedFolders -Adoption $adoption')) {
+                    $failures.Add("$name does not keep the signed-out untrusted folders for the result")
+                }
+            }
+            if (-not $functions['Get-DefenseClawLifecycleStatus'].Contains("`$status['signed_out_untrusted_folders']")) {
+                $failures.Add('the result does not report the signed-out untrusted folders')
             }
             $dispatcher = $functions['Invoke-DefenseClawEnterpriseLifecycle']
             $syncCalls = ([regex]::Matches($dispatcher, 'Sync-DefenseClawStandaloneManagedHooksActivationBinding')).Count

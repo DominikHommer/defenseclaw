@@ -5029,7 +5029,7 @@ function Get-NativeHookArguments([string]$RegisteredEvent) {
         $bridgeArguments = [string[]]@(if ($null -ne $bridge) { $bridge.Arguments })
         $contractIndex = [Array]::IndexOf($bridgeArguments, '--hook-contract')
         if ($contractIndex -lt 0 -or $contractIndex + 1 -ge $bridgeArguments.Count -or
-            $bridgeArguments[$contractIndex + 1] -notmatch '^codex-hooks-v[0-9]+$') {
+            $bridgeArguments[$contractIndex + 1] -notmatch '^codex-hooks-v[0-9]+(-generic)?$') {
             throw 'Codex registration has no finite installer-bound hook contract'
         }
         $arguments += @('--hook-contract', $bridgeArguments[$contractIndex + 1])
@@ -5180,10 +5180,10 @@ function Wait-GatewayHookReady([int]$Timeout = 90) {
                 if ($result.ExitCode -ne 0 -or $null -eq $decision -or
                     $decision.action -cne 'allow' -or $decision.raw_action -cne 'allow' -or
                     $decision.would_block) {
-                    throw 'pre_tool_call readiness did not produce a canonical fail-open allow decision'
+                    throw 'pre_tool_call readiness did not produce a canonical allow decision'
                 }
                 Write-Result 'gateway-hook-readiness' pass `
-                    "stable native pre_tool_call allow after $attempt probe(s); effective-failure=fail-open"
+                    "stable native pre_tool_call allow after $attempt probe(s)"
                 return
             } catch {
                 $lastError = Protect-LogText $_.Exception.Message
@@ -5508,7 +5508,7 @@ function Get-ConnectorHookLabel {
         'copilot' { 'Copilot hooks' }
         'cursor' { 'Cursor hooks' }
         'devin' { 'Devin hooks' }
-        'hermes' { 'Hermes hooks (fail-open)' }
+        'hermes' { 'Hermes hooks' }
         'antigravity' { 'Antigravity hooks' }
         'opencode' { 'OpenCode hooks' }
     }
@@ -5577,13 +5577,12 @@ function Get-CodexWindowsHookCommand([string]$Config) {
 # started with Process.Start, which keeps the handle CreateProcess returned so
 # a launcher that exits at once still returns its status, and with the call
 # operator piped to Out-Host in Constrained Language mode. It returns the
-# launcher, its arguments and the call-operator invocation, or $null when the
-# script is not exactly that bridge with the same launcher and arguments in
-# both branches.
+# launcher and its arguments, or $null when the script is not exactly that
+# bridge with the same launcher and arguments in both branches.
 function Get-AwaitedHookBridge([string]$Script) {
     $pattern = '^\$ErrorActionPreference=''Stop''; \$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
         'if \(\$ExecutionContext\.SessionState\.LanguageMode -ne ''FullLanguage''\) \{ \$ErrorActionPreference=''Continue''; ' +
-        '(?<invocation>& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+)) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
+        '& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
         '\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\k<file>,''(?<arguments>[^'' ]+(?: [^'' ]+)*)''\); ' +
         '\$hookStart\.UseShellExecute=\$false; \$hookStart\.RedirectStandardError=\$true; ' +
         '\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); ' +
@@ -5599,7 +5598,6 @@ function Get-AwaitedHookBridge([string]$Script) {
     return [pscustomobject]@{
         File = $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace("''", "'")
         Arguments = $arguments
-        Invocation = $match.Groups['invocation'].Value
     }
 }
 
@@ -5611,6 +5609,7 @@ function Assert-CodexSynchronousWindowsHookCommand([object]$CodexCommand, [strin
         'codex-hooks-v1' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'Stop')
         'codex-hooks-v2' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'PreCompact', 'PostCompact', 'Stop')
         'codex-hooks-v3' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'Stop')
+        'codex-hooks-v3-generic' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'Stop')
         'codex-hooks-v4' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'Stop', 'SessionEnd')
     }
     $boundEvent = if ($arguments.Count -eq 7) { $arguments[4] } else { '' }
@@ -5991,7 +5990,9 @@ function Assert-DoctorHookRegistration {
         $codexCommand = Get-CodexWindowsHookCommand $registration
         Assert-CodexSynchronousWindowsHookCommand $codexCommand 'setup-created Codex registration'
     } elseif ($Connector -eq 'amp') {
-        $expectedAmpFailMode = if ($script:LastSetupMode -eq 'action') { 'closed' } else { 'open' }
+        # An unset hook fail mode is closed outside Secure Client, in observe
+        # mode too; this Setup sets none.
+        $expectedAmpFailMode = 'closed'
         foreach ($marker in @(
             'DefenseClaw Amp policy bridge',
             '/api/v1/amp/hook',
@@ -6779,14 +6780,36 @@ function Assert-AmpPluginPrivateACL([string]$PluginPath) {
     Write-Result 'amp:private-plugin' pass 'regular protected owner-and-SYSTEM-only plugin plus structured backup authority verified'
 }
 
+function Test-AmpPluginSelfHealReadRetry([Exception]$Exception) {
+    $cause = $Exception.GetBaseException()
+    # ReadAllBytes can race the protected publication handle after the name
+    # becomes visible, or a replacement between Test-Path and the read.
+    # Do not retry permission, malformed-path or unrelated I/O failures.
+    return ($cause -is [IO.IOException] -and
+        ($cause.HResult -band 0xFFFF) -in @(2, 32, 33))
+}
+
 function Assert-AmpPluginSelfHeal([string]$PluginPath, [byte[]]$ExpectedBytes) {
     if ($Connector -ne 'amp') { return }
     Remove-Item -LiteralPath $PluginPath -Force -ErrorAction Stop
     $restored = $false
+    $lastState = 'missing'
     for ($attempt = 0; $attempt -lt 80; $attempt++) {
         Start-Sleep -Milliseconds 250
-        if (-not (Test-Path -LiteralPath $PluginPath -PathType Leaf)) { continue }
-        $actual = [IO.File]::ReadAllBytes($PluginPath)
+        if (-not (Test-Path -LiteralPath $PluginPath -PathType Leaf)) {
+            $lastState = 'missing'
+            continue
+        }
+        try {
+            $actual = [IO.File]::ReadAllBytes($PluginPath)
+        } catch {
+            if (Test-AmpPluginSelfHealReadRetry $_.Exception) {
+                $lastState = 'transient-read-error'
+                continue
+            }
+            throw
+        }
+        $lastState = 'content-mismatch'
         if ([Convert]::ToBase64String($ExpectedBytes) -ceq
             [Convert]::ToBase64String($actual)) {
             $restored = $true
@@ -6794,13 +6817,62 @@ function Assert-AmpPluginSelfHeal([string]$PluginPath, [byte[]]$ExpectedBytes) {
         }
     }
     if (-not $restored) {
-        throw 'Amp policy plugin self-heal did not restore the exact managed artifact within 20 seconds'
+        # Report only the restoration state, never plugin contents or credentials.
+        throw "Amp policy plugin self-heal did not restore the exact managed artifact within 20 seconds (last state: $lastState)"
     }
     Assert-AmpPluginPrivateACL $PluginPath
     Write-Result 'amp:self-heal' pass 'live connector guard restored the deleted plugin byte-for-byte'
 }
 
+# Per-user Windows Claude Code Setup registers its launcher through the system
+# cmd.exe so a missing launcher blocks with exit 2 instead of failing open
+# (GAP-1091). Keep this argv identical to
+# internal/gateway/connector/claudecode_launcher_guard.go: an exact generated
+# guard reads as the launcher and hook argv it runs; an edited guard or any
+# other cmd.exe handler is returned unchanged.
+function Get-ClaudeCodeLauncherGuardExecView([object]$Handler) {
+    if ($null -eq $Handler) { return $Handler }
+    $commandProperty = $Handler.PSObject.Properties['command']
+    $argsProperty = $Handler.PSObject.Properties['args']
+    if ($null -eq $commandProperty -or $null -eq $argsProperty -or
+        $commandProperty.Value -isnot [string] -or $argsProperty.Value -isnot [array]) {
+        return $Handler
+    }
+    $guardArgs = @($argsProperty.Value)
+    if ($guardArgs.Count -lt 8 -or @($guardArgs | Where-Object { $_ -isnot [string] }).Count -gt 0) {
+        return $Handler
+    }
+    $systemRoot = [string]$env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($systemRoot) -or -not [IO.Path]::IsPathRooted($systemRoot)) {
+        $systemRoot = 'C:\Windows'
+    }
+    try {
+        $command = [IO.Path]::GetFullPath([string]$commandProperty.Value)
+        $processor = [IO.Path]::GetFullPath([IO.Path]::Combine($systemRoot.Trim(), 'System32', 'cmd.exe'))
+    } catch {
+        return $Handler
+    }
+    if (-not [string]::Equals($command, $processor, [StringComparison]::OrdinalIgnoreCase)) { return $Handler }
+    $end = -1
+    for ($i = 7; $i + 1 -lt $guardArgs.Count; $i++) {
+        if ($guardArgs[$i] -ceq ')' -and $guardArgs[$i + 1] -ceq 'else') { $end = $i; break }
+    }
+    if ($end -lt 0) { return $Handler }
+    $launcher = [string]$guardArgs[4]
+    $hookArgs = @(if ($end -gt 7) { $guardArgs[7..($end - 1)] })
+    $words = @(('DefenseClaw blocked this: its Claude Code hook launcher is missing. ' +
+        'Run the DefenseClaw installer again to repair it.') -split ' ')
+    $expected = @('/d', '/c', 'if', 'exist', $launcher, '(', $launcher) + $hookArgs +
+        @(')', 'else', '(', 'echo') + $words + @('1>&2', '&', 'exit', '/b', '2', ')')
+    if ($expected.Count -ne $guardArgs.Count) { return $Handler }
+    for ($i = 0; $i -lt $expected.Count; $i++) {
+        if ($expected[$i] -cne $guardArgs[$i]) { return $Handler }
+    }
+    return [pscustomobject]@{ command = $launcher; args = $hookArgs }
+}
+
 function Assert-DoctorWindowsHookRegistration {
+    param([ValidateSet('open', 'closed')][string]$ExpectedFailMode = 'closed')
     if ($Connector -eq 'opencode') {
         Assert-OpenCodePluginContract
         return
@@ -6817,8 +6889,9 @@ function Assert-DoctorWindowsHookRegistration {
         foreach ($eventProperty in @($settings.hooks.PSObject.Properties)) {
             foreach ($group in @($eventProperty.Value)) {
                 foreach ($handler in @($group.hooks)) {
-                    $hookArgs = @($handler.args | ForEach-Object { [string]$_ })
-                    if ([IO.Path]::GetFileName([string]$handler.command) -ieq 'defenseclaw-hook.exe' -and
+                    $execView = Get-ClaudeCodeLauncherGuardExecView $handler
+                    $hookArgs = @($execView.args | ForEach-Object { [string]$_ })
+                    if ([IO.Path]::GetFileName([string]$execView.command) -ieq 'defenseclaw-hook.exe' -and
                         ($hookArgs -join "`0") -ceq (@('hook', '--connector', 'claudecode') -join "`0")) {
                         if ($null -ne $handler.PSObject.Properties['shell']) {
                             throw 'claudecode setup registered a shell field on the Windows native exec-form hook'
@@ -6847,7 +6920,7 @@ function Assert-DoctorWindowsHookRegistration {
         foreach ($marker in @(
             'DefenseClaw Amp policy bridge',
             '/api/v1/amp/hook',
-            'const DC_FAIL_MODE: string = "closed"',
+            ('const DC_FAIL_MODE: string = "' + $ExpectedFailMode + '"'),
             'const DC_TIMEOUT_MS = 10000',
             'new AbortController()',
             'ctx.ui.confirm',
@@ -6908,9 +6981,8 @@ function Assert-DoctorWindowsHookRegistration {
     if ($Connector -eq 'hermes' -and
         ($check.detail -notmatch 'hook_entries=23' -or
          $check.detail -notmatch 'allowlist_entries=23' -or
-         $check.detail -notmatch 'no Hermes host is running' -or
-         $label -notmatch 'fail-open')) {
-        throw "Doctor did not expose Hermes's exact event inventory and forced fail-open posture: $($check.detail)"
+         $check.detail -notmatch 'no Hermes host is running')) {
+        throw "Doctor did not expose Hermes's exact event inventory: $($check.detail)"
     }
     if ($Connector -eq 'devin' -and
         ($check.detail -notmatch 'entries=8' -or
@@ -9405,6 +9477,33 @@ function Invoke-ContractRun {
     Set-IsolatedGatewayPort
     Invoke-Setup observe
     Assert-DoctorHookRegistration
+    if ($Connector -eq 'amp') {
+        # Outside Secure Client an unset or closed delivery policy is closed in
+        # observe mode too (owner rule); only an explicit open opens the
+        # plugin. Round-trip the global policy and restore closed for the
+        # action phase, where the Windows registration assertion below
+        # verifies it takes effect.
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
+        # A failed restore must not mask the open-mode failure that caused
+        # it: keep the primary error, warn about the restore, rethrow primary.
+        $ampFailModeError = $null
+        try {
+            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'open', '--yes', '--no-restart') | Out-Null
+            Invoke-Setup observe
+            Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+        } catch {
+            $ampFailModeError = $_
+        }
+        try {
+            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'closed', '--yes', '--no-restart') | Out-Null
+            Invoke-Setup observe
+        } catch {
+            if ($null -eq $ampFailModeError) { throw }
+            Write-Warning "Amp fail-mode restore to closed failed after the open-mode check failed: $($_.Exception.Message)"
+        }
+        if ($null -ne $ampFailModeError) { throw $ampFailModeError }
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
+    }
     Invoke-DangerousCommandCorpus observe
     $blockEvent = if ($Connector -eq 'amp') { 'tool.call' } else { 'PreTool-block' }
     Invoke-Hook $blockEvent $blockFixture allow $true
@@ -9418,7 +9517,10 @@ function Invoke-ContractRun {
     } finally {
         Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT -ErrorAction SilentlyContinue
     }
-    Assert-DoctorWindowsHookRegistration
+    Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
+    if ($Connector -eq 'amp') {
+        Write-Result 'amp:delivery-mode-contract' pass 'observe follows the global policy (closed, explicit open, restored closed); restored closed policy renders in action mode'
+    }
     $session = Join-Path $golden 'session_start.json'
     $sessionEvent = if ($Connector -eq 'amp') { 'session.start' } else { 'SessionStart' }
     if (Test-Path -LiteralPath $session) { Invoke-Hook $sessionEvent $session allow }

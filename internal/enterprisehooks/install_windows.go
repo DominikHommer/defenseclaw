@@ -70,22 +70,6 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 	return result, true, err
 }
 
-// windowsEnterpriseHookFailMode is the authoritative managed-native hook
-// policy used by rendering, lock publication, and verification. The protected
-// Windows deployment never permits Codex or Claude hooks to inherit a
-// fail-open normal-mode setting.
-func windowsEnterpriseHookFailMode(connectorName, configured string) string {
-	name := strings.ToLower(strings.TrimSpace(connectorName))
-	switch name {
-	case "codex", "claudecode", "cursor":
-		return "closed"
-	}
-	if _, perUser := windowsStandalonePerUserConnector(name); perUser {
-		return "closed"
-	}
-	return strings.TrimSpace(configured)
-}
-
 func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
 	if err := requireWindowsEnterpriseManagedAgentVersion(
 		opts.ConnectorName,
@@ -151,7 +135,18 @@ func requireWindowsStandaloneAgentVersionUnchanged(opts InstallOptions, result I
 	)
 }
 
+// requireWindowsEnterpriseManagedAgentVersion gates install and verify on
+// agent-version evidence: an explicit, well-formed version at or above the
+// Windows enterprise minimum for Codex, Claude Code and Cursor. Under Secure
+// Client (#1163) it does not gate: missing, malformed or unsupported versions
+// select the reviewed best-effort contract in open delivery, while connector
+// certification, enrollment and runtime authentication stay mandatory. The
+// standalone profile's per-target floor is
+// requireWindowsEnterpriseStandaloneAgentFloor.
 func requireWindowsEnterpriseManagedAgentVersion(connectorName, raw string) error {
+	if secureClientHookDelivery() {
+		return nil
+	}
 	if err := requireWindowsEnterpriseAgentVersion(raw); err != nil {
 		return err
 	}
@@ -186,6 +181,18 @@ func requireWindowsEnterpriseManagedAgentVersion(connectorName, raw string) erro
 	return nil
 }
 
+// requireWindowsEnterpriseAgentVersionOutsideSecureClient keeps the explicit
+// agent_version requirement for every profile but Secure Client, which
+// installs without version evidence (#1163).
+func requireWindowsEnterpriseAgentVersionOutsideSecureClient(raw string) error {
+	if secureClientHookDelivery() {
+		return nil
+	}
+	return requireWindowsEnterpriseAgentVersion(raw)
+}
+
+// compareWindowsEnterpriseVersion orders dotted numeric versions; the
+// standalone floors and agent-version discovery use it.
 func compareWindowsEnterpriseVersion(left, right string) int {
 	parse := func(value string) [3]int {
 		var result [3]int
@@ -216,7 +223,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
@@ -265,22 +272,23 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	}
 
 	setupOpts := connector.SetupOpts{
-		DataDir:            dataDir,
-		ProxyAddr:          strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:            strings.TrimSpace(opts.APIAddr),
-		APIToken:           strings.TrimSpace(opts.APIToken),
-		HookAPIToken:       strings.TrimSpace(opts.APIToken),
-		HookAPITokenScoped: true,
-		OTLPPathToken:      strings.TrimSpace(opts.OTLPPathToken),
-		Interactive:        false,
-		ManagedEnterprise:  true,
-		WorkspaceDir:       strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:       windowsEnterpriseHookFailMode(name, opts.HookFailMode),
-		GuardrailMode:      strings.TrimSpace(opts.GuardrailMode),
-		HILTEnabled:        opts.HILTEnabled,
-		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
-		HookContractID:     strings.TrimSpace(opts.HookContractID),
-		HookExecutable:     hookExecutable,
+		DataDir:                  dataDir,
+		ProxyAddr:                strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                  strings.TrimSpace(opts.APIAddr),
+		APIToken:                 strings.TrimSpace(opts.APIToken),
+		HookAPIToken:             strings.TrimSpace(opts.APIToken),
+		HookAPITokenScoped:       true,
+		OTLPPathToken:            strings.TrimSpace(opts.OTLPPathToken),
+		Interactive:              false,
+		ManagedEnterprise:        true,
+		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:             canonicalHookFailMode(opts.HookFailMode),
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		GuardrailMode:            strings.TrimSpace(opts.GuardrailMode),
+		HILTEnabled:              opts.HILTEnabled,
+		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
+		HookContractID:           strings.TrimSpace(opts.HookContractID),
+		HookExecutable:           hookExecutable,
 	}
 	if err := validateWindowsEnterpriseImpersonationSetup(setupOpts); err != nil {
 		return InstallResult{}, err
@@ -291,14 +299,11 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if setupOpts.HookAPIToken == "" {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: connector-scoped hook token is required")
 	}
-	if err := requireWindowsEnterpriseAgentVersion(setupOpts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(setupOpts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
-	if setupOpts.HookContractID == "" {
-		resolution := resolveHookContract(conn.Name(), setupOpts.AgentVersion)
-		setupOpts.HookContractID = resolution.Contract.ContractID
-	}
-	if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
+	setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
+	if err != nil {
 		return InstallResult{}, err
 	}
 
@@ -387,6 +392,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		lock.ContractID,
 		lockUpdatedAt,
 		entryUpdatedAt,
+		setupOpts.HookFailMode,
 	); err != nil {
 		return InstallResult{}, err
 	}
@@ -476,21 +482,22 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 		)
 	}
 	setup := connector.SetupOpts{
-		DataDir:            dataDir,
-		ProxyAddr:          strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:            strings.TrimSpace(opts.APIAddr),
-		APIToken:           strings.TrimSpace(opts.APIToken),
-		HookAPIToken:       strings.TrimSpace(opts.APIToken),
-		HookAPITokenScoped: true,
-		OTLPPathToken:      strings.TrimSpace(opts.OTLPPathToken),
-		Interactive:        false,
-		ManagedEnterprise:  true,
-		WorkspaceDir:       strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:       windowsEnterpriseHookFailMode(name, opts.HookFailMode),
-		HILTEnabled:        opts.HILTEnabled,
-		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
-		HookContractID:     strings.TrimSpace(opts.HookContractID),
-		HookExecutable:     hookExecutable,
+		DataDir:                  dataDir,
+		ProxyAddr:                strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                  strings.TrimSpace(opts.APIAddr),
+		APIToken:                 strings.TrimSpace(opts.APIToken),
+		HookAPIToken:             strings.TrimSpace(opts.APIToken),
+		HookAPITokenScoped:       true,
+		OTLPPathToken:            strings.TrimSpace(opts.OTLPPathToken),
+		Interactive:              false,
+		ManagedEnterprise:        true,
+		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:             canonicalHookFailMode(opts.HookFailMode),
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		HILTEnabled:              opts.HILTEnabled,
+		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
+		HookContractID:           strings.TrimSpace(opts.HookContractID),
+		HookExecutable:           hookExecutable,
 	}
 	// The standalone Amp and OpenCode plugins run the administrator-owned
 	// hook binary for the foreign-hook guard. Install and verify share this
@@ -517,14 +524,11 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	if setup.HookAPIToken == "" {
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector-scoped hook token is required")
 	}
-	if err := requireWindowsEnterpriseAgentVersion(setup.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(setup.AgentVersion); err != nil {
 		return windowsGenericManagedTarget{}, err
 	}
-	if setup.HookContractID == "" {
-		resolution := resolveHookContract(conn.Name(), setup.AgentVersion)
-		setup.HookContractID = resolution.Contract.ContractID
-	}
-	if err := validateHookContract(opts.GuardrailMode, conn, setup); err != nil {
+	setup, err = prepareHookContract(opts.GuardrailMode, conn, setup)
+	if err != nil {
 		return windowsGenericManagedTarget{}, err
 	}
 	if _, perUser := windowsStandalonePerUserConnector(name); perUser && connector.ProtectedSetupSelectionConnector(name) {
@@ -562,8 +566,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 // selected executable, and connectors without protected admission, are
 // left unchanged. Callers hold the target user's impersonation token.
 func recordWindowsManagedSetupSelection(target windowsGenericManagedTarget) error {
-	if target.conn == nil || strings.TrimSpace(target.setup.AgentExecutable) == "" ||
-		!connector.ProtectedSetupSelectionConnector(target.conn.Name()) {
+	if !windowsManagedSetupSelectionRequired(target) {
 		return nil
 	}
 	if err := connector.WriteManagedSetupAgentSelection(
@@ -575,6 +578,41 @@ func recordWindowsManagedSetupSelection(target windowsGenericManagedTarget) erro
 		return fmt.Errorf("enterprise hooks: record managed %s executable selection: %w", target.conn.Name(), err)
 	}
 	return nil
+}
+
+// windowsManagedSetupSelectionRequired reports whether the row records a
+// guardian-selected executable (recordWindowsManagedSetupSelection).
+func windowsManagedSetupSelectionRequired(target windowsGenericManagedTarget) bool {
+	return target.conn != nil && strings.TrimSpace(target.setup.AgentExecutable) != "" &&
+		connector.ProtectedSetupSelectionConnector(target.conn.Name())
+}
+
+// ensureWindowsManagedSetupSelectionDataDir creates %USERPROFILE%\.defenseclaw
+// for an account that never ran DefenseClaw, before the full setup route
+// records the executable selection there. The receipt and its lock file live
+// in that folder and the managed lock opens its parent without creating it, so
+// the first enrollment of a new account failed with "open managed lock parent"
+// and Setup /ensure ended 1603 (GAP-1180). Callers hold the target user's
+// impersonation token: the folder is created as that account, owned by it,
+// with the protected LocalSystem/Administrators/account DACL, relative to
+// no-follow handles from the authenticated profile root, so a junction planted
+// in its place is never followed. An existing folder is left to the footprint
+// checks that already ran. It reports whether it created the folder.
+func ensureWindowsManagedSetupSelectionDataDir(target windowsGenericManagedTarget) (bool, error) {
+	if !windowsManagedSetupSelectionRequired(target) {
+		return false, nil
+	}
+	if _, err := os.Lstat(target.dataDir); !errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	creation, err := ensureWindowsTargetOwnedDirectoryTree(target.home, target.dataDir, target.sid)
+	if err != nil {
+		return creation.createdDataDir, fmt.Errorf(
+			"enterprise hooks: create %s for the managed %s executable selection: %w",
+			target.dataDir, target.conn.Name(), err,
+		)
+	}
+	return creation.createdDataDir, nil
 }
 
 // removeWindowsManagedSetupSelectionReceipt deletes the selection receipt
@@ -594,7 +632,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	target, err := resolveWindowsGenericManagedTarget(opts)
@@ -638,6 +676,20 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			if err := prepareWindowsGenericFootprint(target, configPaths, footprint, allowMissingConfig); err != nil {
 				return err
 			}
+			// Before the relax step, so a first enrollment's data dir takes
+			// the same path through setup as a later reconcile's.
+			createdDataDir, err := ensureWindowsManagedSetupSelectionDataDir(target)
+			if err != nil {
+				return err
+			}
+			if createdDataDir {
+				defer func() {
+					if setupErr != nil {
+						removeWindowsManagedSetupSelectionReceipt(target.dataDir)
+						_ = os.Remove(target.dataDir)
+					}
+				}()
+			}
 			relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
 			// Hardening below only runs when the setup succeeds. A failed setup
 			// must not leave the relaxed directories owner-private.
@@ -672,7 +724,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", target.conn.Name(), err))
 			}
 			if !present {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", target.conn.Name()))
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", target.conn.Name(), ownedHookAbsentDetail(target.conn, target.setup)))
 			}
 			lockEntry, err := connector.NewHookContractLockEntryForMode(
 				target.setup,
@@ -740,7 +792,7 @@ func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions)
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	target, err := resolveWindowsGenericManagedTarget(opts)
@@ -1033,10 +1085,44 @@ func windowsManagedObstructionQuarantinePath(path string) string {
 
 func quarantineWindowsTargetOwnedObstruction(home, path string, target *windows.SID, recreateDirectory bool, label string) error {
 	owner, err := windowsPathOwnerNoFollow(path)
-	if err != nil || owner == nil || !owner.Equals(target) {
+	if err != nil || owner == nil {
 		return fmt.Errorf("enterprise hooks: refusing foreign-owned obstruction in %s path %s", label, path)
 	}
+	if !owner.Equals(target) {
+		// Bulldoze: trusted admin owners (SYSTEM / BUILTIN\Administrators /
+		// TrustedInstaller) from a prior scoped install's elevated token
+		// are quarantinable. A foreign user SID or non-admin group stays
+		// fatal.
+		if !windowsEnterpriseAdminIdentity(owner) {
+			return fmt.Errorf("enterprise hooks: refusing foreign-owned obstruction in %s path %s", label, path)
+		}
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] admin-owned obstruction accepted for quarantine "+
+				"in %s path %s (owner=%s, target=%s)\n",
+			label, path, windowsSIDString(owner), windowsSIDString(target))
+	}
 	quarantine := windowsManagedObstructionQuarantinePath(path)
+	// If a prior repair left an admin-owned slot in the quarantine
+	// location, the target-token purge below will refuse it (its
+	// handle-owner check compares against the exact target SID).
+	// Remove any admin-owned slot via os.RemoveAll under the current
+	// elevated install process's privileges BEFORE the target-token
+	// purge runs, so the subsequent purge has a clean canvas.
+	// Target-owned slots stay on the target-token path.
+	if slotOwner, slotOwnerErr := windowsPathOwnerNoFollow(quarantine); slotOwnerErr == nil &&
+		slotOwner != nil && !slotOwner.Equals(target) &&
+		windowsEnterpriseAdminIdentity(slotOwner) {
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] clearing admin-owned quarantine slot before "+
+				"target-token purge: %s (slot owner=%s, target=%s)\n",
+			quarantine, windowsSIDString(slotOwner), windowsSIDString(target))
+		if removeErr := os.RemoveAll(quarantine); removeErr != nil {
+			return fmt.Errorf(
+				"enterprise hooks: clear admin-owned quarantine slot %s: %w",
+				quarantine, removeErr,
+			)
+		}
+	}
 	if err := removeWindowsTargetOwnedQuarantine(quarantine, target, false); err != nil {
 		return fmt.Errorf(
 			"enterprise hooks: bounded obstruction quarantine for %s is unavailable: %w",
@@ -1170,7 +1256,7 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", target.conn.Name(), err)
 	}
 	if !present {
-		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: canonical hook matrix is absent", target.conn.Name())
+		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: canonical hook matrix is absent: %s", target.conn.Name(), ownedHookAbsentDetail(target.conn, target.setup))
 	}
 	if err := verifyWindowsStandalonePluginRender(target); err != nil {
 		return err
@@ -1208,6 +1294,13 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 	}
 	if lock.Connector != target.conn.Name() {
 		return fmt.Errorf("enterprise hooks: connector %s hook contract lock is missing", target.conn.Name())
+	}
+	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+		return fmt.Errorf(
+			"enterprise hooks: connector %s managed gateway binding: %w",
+			target.conn.Name(),
+			err,
+		)
 	}
 	current, err := connector.NewHookContractLockEntryForMode(
 		target.setup,
@@ -1646,10 +1739,11 @@ func teardownWindowsGenericManagedTarget(
 	if perUser {
 		relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
 		defer func() {
-			if len(relaxed) == 0 {
+			restore := windowsRelaxedPathsToRestoreAfterTeardown(target.dataDir, relaxed, teardownErr == nil)
+			if len(restore) == 0 {
 				return
 			}
-			if restoreErr := restoreWindowsRelaxedPerUserDirectories(target, relaxed); restoreErr != nil {
+			if restoreErr := restoreWindowsRelaxedPerUserDirectories(target, restore); restoreErr != nil {
 				teardownErr = errors.Join(teardownErr, fmt.Errorf("enterprise hooks: restore the directories relaxed for teardown: %w", restoreErr))
 			}
 		}()
@@ -1674,6 +1768,27 @@ func teardownWindowsGenericManagedTarget(
 		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration in %s", name, strings.Join(remaining, ", "))
 	}
 	return nil
+}
+
+// windowsRelaxedPathsToRestoreAfterTeardown returns the paths relaxed for a
+// per-user connector teardown that get the managed DACL back afterwards. A
+// failed teardown leaves the connector managed, so all of them do. After a
+// completed one the guardian no longer manages the agent's own folders, and
+// hardening them again left the read-only OWNER RIGHTS entry behind after an
+// uninstall: a later per-user install could not protect %APPDATA%\devin and
+// its mcp set failed (GAP-1243). Those stay owner-private; only what lies in
+// the DefenseClaw data directory is hardened again.
+func windowsRelaxedPathsToRestoreAfterTeardown(dataDir string, relaxed []string, tornDown bool) []string {
+	if !tornDown {
+		return relaxed
+	}
+	var restore []string
+	for _, path := range relaxed {
+		if sameWindowsEnterprisePath(dataDir, path) || windowsPathWithin(dataDir, path) {
+			restore = append(restore, path)
+		}
+	}
+	return restore
 }
 
 // windowsStandalonePerUserRegistrationLeft reads what of DefenseClaw's
@@ -1860,6 +1975,12 @@ func validateWindowsEnterpriseImpersonationSetup(setup connector.SetupOpts) erro
 	return nil
 }
 
+// requireWindowsEnterpriseAgentVersion requires explicit version evidence.
+// The runtime-only (Copilot and standalone runtime-only) install path always
+// requires it, because its machine policy is rendered per recorded agent
+// version. Codex, Claude Code, Cursor and the generic per-user runtime require
+// it outside Secure Client only; Secure Client installs without version
+// evidence (#1163).
 func requireWindowsEnterpriseAgentVersion(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("enterprise hooks: native Windows managed target requires explicit agent_version")
@@ -1922,6 +2043,13 @@ func validateWindowsEnterpriseHome(raw, rawSID string) (string, *windows.SID, er
 		return "", nil, err
 	}
 	return home, target, nil
+}
+
+// ValidateWindowsEnterpriseHome pins a recorded profile to its owner SID for
+// a LocalSystem cleanup that does not need the user's active logon session.
+func ValidateWindowsEnterpriseHome(home, sid string) (string, error) {
+	verified, _, err := validateWindowsEnterpriseHome(home, sid)
+	return verified, err
 }
 
 // validateWindowsEnterpriseHomeAnchor treats the profile root as an identity
@@ -2122,8 +2250,25 @@ func validateWindowsUserPathElement(path string, target *windows.SID, wantDir, p
 		return err
 	}
 	if requireTargetOwner {
-		if owner == nil || !owner.Equals(target) {
-			return fmt.Errorf("enterprise hooks: owner SID %s does not match target SID %s on %s", windowsSIDString(owner), windowsSIDString(target), path)
+		if owner == nil {
+			return fmt.Errorf("enterprise hooks: null owner on %s", path)
+		}
+		if !owner.Equals(target) {
+			if !windowsEnterpriseAdminIdentity(owner) {
+				return fmt.Errorf("enterprise hooks: owner SID %s does not match target SID %s on %s", windowsSIDString(owner), windowsSIDString(target), path)
+			}
+			// Bulldoze: a prior unsigned certification install done under an
+			// elevated token (LocalSystem or BUILTIN\Administrators) can
+			// leave per-user runtime files owned by that admin principal
+			// instead of the target user SID. Trusted admin owners are
+			// accepted here; the subsequent DACL repair transfers
+			// ownership to the target SID. A foreign user SID (not in the
+			// trusted admin set) stays fatal above.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] admin-owned per-user runtime file "+
+					"accepted during trust check (owner=%s, target=%s on %s): "+
+					"subsequent DACL repair will transfer ownership\n",
+				windowsSIDString(owner), windowsSIDString(target), path)
 		}
 	} else if owner == nil || (!owner.Equals(target) && !windowsEnterpriseAdminIdentity(owner)) {
 		return fmt.Errorf("enterprise hooks: foreign owner SID %s on %s", windowsSIDString(owner), path)
@@ -2271,6 +2416,11 @@ func mapWindowsUserPathGenericMask(mask windows.ACCESS_MASK) windows.ACCESS_MASK
 	return mapped
 }
 
+// validateWindowsUserPathProtectionACL requires the canonical protected DACL
+// of a managed path. A profile's .defenseclaw folder and its hooks child may
+// also carry read-only grants of other products (windowsReadOnlyExtraACE, for
+// example Codex's sandbox group); DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1
+// refuses them too.
 func validateWindowsUserPathProtectionACL(
 	path string,
 	sd *windows.SECURITY_DESCRIPTOR,
@@ -2278,59 +2428,138 @@ func validateWindowsUserPathProtectionACL(
 	target *windows.SID,
 	directory bool,
 ) error {
+	_, err := inspectWindowsUserPathProtectionACL(
+		path, sd, dacl, target, directory,
+		windowsReadOnlyExtraACEsTolerated(path, directory),
+	)
+	return err
+}
+
+// inspectWindowsUserPathProtectionACL is validateWindowsUserPathProtectionACL
+// with an explicit read-only tolerance. It returns the principals of the
+// tolerated read-only extra grants.
+func inspectWindowsUserPathProtectionACL(
+	path string,
+	sd *windows.SECURITY_DESCRIPTOR,
+	dacl *windows.ACL,
+	target *windows.SID,
+	directory bool,
+	tolerateReadOnly bool,
+) ([]*windows.SID, error) {
 	control, _, err := sd.Control()
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: inspect Windows DACL control for %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: inspect Windows DACL control for %s: %w", path, err)
 	}
 	if control&windows.SE_DACL_PROTECTED == 0 {
-		return fmt.Errorf("enterprise hooks: managed Windows DACL is not protected on %s", path)
+		return nil, fmt.Errorf("enterprise hooks: managed Windows DACL is not protected on %s", path)
 	}
-	expected, err := windowsUserPathAppliedCanonicalACEs(target, directory)
+	if dacl == nil || target == nil {
+		return nil, fmt.Errorf("enterprise hooks: null Windows DACL or target on %s", path)
+	}
+	applied, err := windowsUserPathAppliedCanonicalACEs(target, directory)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if int(dacl.AceCount) != len(expected) {
-		return fmt.Errorf(
-			"enterprise hooks: managed Windows DACL on %s has %d ACEs, expected %d",
-			path,
-			dacl.AceCount,
-			len(expected),
-		)
+	required := len(applied)
+	if directory && windowsGatewayReadablePluginRoot(path) {
+		// The Amp and OpenCode plugin folder may also carry the read grant
+		// of the gateway service (GAP-0958): both of its entries or neither.
+		if optional := windowsGatewayPluginRootAppliedACEs(); len(optional) > 0 && int(dacl.AceCount) == required+len(optional) {
+			applied = append(applied, optional...)
+		}
 	}
-	seen := make([]bool, len(expected))
+	expected := make([]windowsDACLExpectedEntry, 0, len(applied))
+	for _, want := range applied {
+		expected = append(expected, windowsDACLExpectedEntry{sid: want.sid.String(), mask: uint32(want.mask), flags: want.flags})
+	}
+	entries := make([]windowsDACLEntry, 0, dacl.AceCount)
+	sids := make([]*windows.SID, 0, dacl.AceCount)
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
-			return fmt.Errorf("enterprise hooks: inspect Windows ACE %d for %s: %w", index, path, err)
+			return nil, fmt.Errorf("enterprise hooks: inspect Windows ACE %d for %s: %w", index, path, err)
 		}
-		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
-			return fmt.Errorf("enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type at index %d", path, index)
+		if ace == nil {
+			return nil, fmt.Errorf("enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type at index %d", path, index)
 		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		match := -1
-		for candidate, want := range expected {
-			if seen[candidate] {
-				continue
-			}
-			if sid.Equals(want.sid) &&
-				ace.Mask == want.mask &&
-				ace.Header.AceFlags == want.flags {
-				match = candidate
-				break
-			}
+		entry := windowsDACLEntry{aceType: ace.Header.AceType, flags: ace.Header.AceFlags, mask: uint32(ace.Mask)}
+		var sid *windows.SID
+		switch ace.Header.AceType {
+		case windows.ACCESS_ALLOWED_ACE_TYPE, windows.ACCESS_DENIED_ACE_TYPE:
+			// Both share the ACE_HEADER, Mask, SidStart layout, so a rejected
+			// deny entry is named like an allow entry. Extended (object,
+			// callback) types keep no SID here.
+			sid = (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+			entry.sid = sid.String()
 		}
-		if match < 0 {
-			return fmt.Errorf(
-				"enterprise hooks: managed Windows DACL on %s contains unexpected or duplicate ACE for principal %s (mask 0x%x, inheritance 0x%x)",
-				path,
-				windowsSIDString(sid),
-				uint32(ace.Mask),
-				uint32(ace.Header.AceFlags),
-			)
-		}
-		seen[match] = true
+		entries = append(entries, entry)
+		sids = append(sids, sid)
 	}
-	return nil
+	result := matchWindowsCanonicalDACL(entries, expected, target.String(), tolerateReadOnly)
+	switch result.failure {
+	case windowsDACLMatched:
+	case windowsDACLCountMismatch:
+		return nil, fmt.Errorf(
+			"enterprise hooks: managed Windows DACL on %s has %d ACEs, expected %d",
+			path,
+			dacl.AceCount,
+			required,
+		)
+	case windowsDACLNonAllowedType:
+		return nil, fmt.Errorf(
+			"enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type %d at index %d (principal %s)",
+			path,
+			entries[result.index].aceType,
+			result.index,
+			windowsSIDString(sids[result.index]),
+		)
+	case windowsDACLUnexpectedEntry:
+		entry := entries[result.index]
+		return nil, fmt.Errorf(
+			"enterprise hooks: managed Windows DACL on %s contains unexpected or duplicate ACE for principal %s (mask 0x%x, inheritance 0x%x)",
+			path,
+			windowsSIDString(sids[result.index]),
+			entry.mask,
+			uint32(entry.flags),
+		)
+	default:
+		return nil, fmt.Errorf(
+			"enterprise hooks: managed Windows DACL on %s has %d ACEs, expected %d (a canonical ACE is missing; %d read-only extra grants)",
+			path,
+			dacl.AceCount,
+			required,
+			len(result.extras),
+		)
+	}
+	extras := make([]*windows.SID, 0, len(result.extras))
+	for _, index := range result.extras {
+		copied, err := sids[index].Copy()
+		if err != nil {
+			return nil, err
+		}
+		extras = append(extras, copied)
+	}
+	return extras, nil
+}
+
+// windowsSIDDisplayNames names each SID as "DOMAIN\name (SID)", or the SID
+// alone when it does not resolve.
+func windowsSIDDisplayNames(sids []*windows.SID) []string {
+	names := make([]string, 0, len(sids))
+	for _, sid := range sids {
+		if sid == nil {
+			continue
+		}
+		label := sid.String()
+		if account, domain, _, err := sid.LookupAccount(""); err == nil && account != "" {
+			if domain != "" {
+				account = domain + `\` + account
+			}
+			label = account + " (" + label + ")"
+		}
+		names = append(names, label)
+	}
+	return names
 }
 
 func rejectWindowsUserRuntimeWriteACEs(path string, dacl *windows.ACL, target *windows.SID, wantDir, protectChildren bool) error {

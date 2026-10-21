@@ -108,6 +108,8 @@ type windowsManagedHooksTeardownReport struct {
 	UserRegistrationsFailed      []string                            `json:"user_registrations_failed,omitempty"`
 	UserStateRemaining           []string                            `json:"user_state_remaining,omitempty"`
 	UserStatePurged              []string                            `json:"user_state_purged,omitempty"`
+	UserSettingsEdited           []string                            `json:"user_settings_edited,omitempty"`
+	UserSettingsHooksLeft        []string                            `json:"user_settings_hooks_left,omitempty"`
 	Results                      []windowsManagedHooksTeardownResult `json:"results"`
 	Error                        string                              `json:"error,omitempty"`
 }
@@ -140,6 +142,8 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	report.UserRegistrationsRemoved = len(cleanup.Removed)
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
+	report.UserSettingsEdited = cleanup.SettingsEdited
+	report.UserSettingsHooksLeft = cleanup.SettingsLeft
 	if revokeErr != nil {
 		report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
 			"gateway/AI discovery read access on users' agent folders: "+boundedEnterpriseHookUserCleanupText(revokeErr.Error()))
@@ -147,6 +151,9 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	purge := os.Getenv(windowsManagedHooksPurgeUserStateEnv) == "1"
 	report.UserStateRemaining, report.UserStatePurged = windowsManagedHooksStandaloneUserState(manifest, purge, windowsManagedHooksAccountsKeepingRegistrations(cleanup))
 	if purge {
+		remaining, purged := windowsManagedHooksStandaloneACPUserState()
+		report.UserStateRemaining = append(report.UserStateRemaining, remaining...)
+		report.UserStatePurged = append(report.UserStatePurged, purged...)
 		if err := windowsManagedHooksStandaloneFloorPurger(); err != nil {
 			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
 				"claudecode/machine policy: the Claude Code version floor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
@@ -159,6 +166,40 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 		}
 	}
 }
+
+// windowsManagedHooksStandaloneACPUserState removes, with purge, the managed
+// ACP folder (token copies and editor contract locks) of every account that
+// still has one: signed out, revoked, ACP-only or kept for its
+// connector_backups (GAP-0773). It returns what stays ("SID: path: reason")
+// and what went ("SID: path").
+func windowsManagedHooksStandaloneACPUserState() ([]string, []string) {
+	if err := enterpriseHookWindowsUserCleanupIdentity(); err != nil {
+		return nil, nil
+	}
+	copies, err := windowsManagedHooksStandaloneACPUserCopies()
+	if err != nil {
+		return []string{"managed ACP user copies: " + boundedEnterpriseHookUserCleanupText(err.Error())}, nil
+	}
+	var remaining, purged []string
+	for _, copy := range copies {
+		label := copy.SID + ": " + filepath.Join(copy.Home, ".defenseclaw", "acp")
+		if err := windowsManagedHooksStandaloneACPUserPurger(copy.Home, copy.SID); err != nil {
+			remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
+			continue
+		}
+		purged = append(purged, label)
+	}
+	sort.Strings(remaining)
+	sort.Strings(purged)
+	return remaining, purged
+}
+
+// windowsManagedHooksStandaloneACPUserCopies and
+// windowsManagedHooksStandaloneACPUserPurger are replaceable in tests.
+var (
+	windowsManagedHooksStandaloneACPUserCopies = enterprisehooks.WindowsManagedACPUserCopies
+	windowsManagedHooksStandaloneACPUserPurger = enterprisehooks.PurgeWindowsACPUserState
+)
 
 // windowsManagedHooksStandaloneCursorTombstonePurger is replaceable in tests.
 var windowsManagedHooksStandaloneCursorTombstonePurger = enterprisehooks.PurgeWindowsCursorManagedTombstone
@@ -292,6 +333,9 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 	for _, action := range []string{"prepare", "verify", "rollback", "finalize"} {
 		action := action
 		var jsonOutput bool
+		var purgeContractLocks bool
+		var contractCleanupReceipt string
+		var contractCleanupScope string
 		child := &cobra.Command{
 			Use:          action,
 			Short:        action + " managed hook machine-wiring teardown",
@@ -299,7 +343,12 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 			Args:         cobra.NoArgs,
 			SilenceUsage: true,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				report, err := runWindowsManagedHooksTeardown(action)
+				report, err := runWindowsManagedHooksTeardown(
+					action,
+					purgeContractLocks,
+					contractCleanupReceipt,
+					contractCleanupScope,
+				)
 				if jsonOutput {
 					if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(report); encodeErr != nil {
 						if err == nil {
@@ -334,6 +383,28 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 			},
 		}
 		child.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+		if action == "prepare" || action == "finalize" {
+			child.Flags().StringVar(
+				&contractCleanupReceipt,
+				"contract-cleanup-receipt",
+				"",
+				"pre-created protected connector-contract cleanup receipt",
+			)
+			child.Flags().StringVar(
+				&contractCleanupScope,
+				"contract-cleanup-scope",
+				"",
+				"exact lifecycle scope SHA-256",
+			)
+		}
+		if action == "finalize" {
+			child.Flags().BoolVar(
+				&purgeContractLocks,
+				"purge-contract-locks",
+				false,
+				"clear manifest-owned per-user hook contract locks",
+			)
+		}
 		command.AddCommand(child)
 	}
 	return command
@@ -341,6 +412,9 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 
 func runWindowsManagedHooksTeardown(
 	action string,
+	purgeContractLocks bool,
+	contractCleanupReceipt string,
+	contractCleanupScope string,
 ) (windowsManagedHooksTeardownReport, error) {
 	report := windowsManagedHooksTeardownReport{
 		SchemaVersion: windowsManagedHooksTeardownSchema,
@@ -488,8 +562,56 @@ func runWindowsManagedHooksTeardown(
 		codexTargets,
 		cursorTargets,
 	)
+	var cleanupReceiptPath string
+	if strings.TrimSpace(contractCleanupReceipt) != "" ||
+		strings.TrimSpace(contractCleanupScope) != "" {
+		cleanupReceiptPath, err = requireWindowsManagedHookContractCleanupReceiptPath(
+			contractCleanupReceipt,
+			"managed hook contract cleanup receipt",
+			action == "prepare",
+		)
+		if err != nil {
+			return fail(err)
+		}
+		if !validWindowsManagedHookContractCleanupScope(contractCleanupScope) {
+			return fail(errors.New("managed hook contract cleanup scope is invalid"))
+		}
+	}
 	switch action {
 	case "prepare":
+		if cleanupReceiptPath != "" {
+			reusePrepared := false
+			if _, statErr := os.Lstat(cleanupReceiptPath); statErr == nil {
+				var existing windowsManagedHookContractCleanupReceipt
+				existing, err = readWindowsManagedHookContractCleanupReceipt(cleanupReceiptPath)
+				if err == nil {
+					reusePrepared, err = windowsManagedHookContractCleanupPrepareReuses(
+						existing,
+						identity,
+						contractCleanupScope,
+						enterprisehooks.WindowsStandaloneProcess(),
+					)
+				}
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				err = statErr
+			}
+			if err == nil && !reusePrepared {
+				var cleanupReceipt windowsManagedHookContractCleanupReceipt
+				cleanupReceipt, err = captureWindowsManagedHookContractCleanupReceipt(
+					identity,
+					contractCleanupScope,
+				)
+				if err == nil {
+					err = writeWindowsManagedHookContractCleanupReceipt(
+						cleanupReceiptPath,
+						cleanupReceipt,
+					)
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
 		report.EnrollmentTargetCount = len(identity.ClaudeTargetSIDs) +
 			len(identity.CodexTargets) + len(identity.CursorTargets)
 		var rollbackCompleted bool
@@ -516,7 +638,8 @@ func runWindowsManagedHooksTeardown(
 		var journal windowsManagedHooksTeardownJournal
 		journal, err = readWindowsManagedHooksTeardownJournal(report.JournalPath)
 		if err == nil {
-			err = validateWindowsManagedHooksTeardownJournal(journal, identity)
+			err = windowsManagedHooksTeardownJournalNamed(
+				validateWindowsManagedHooksTeardownJournal(journal, identity), report.JournalPath)
 		}
 		if err == nil {
 			report.EnrollmentTargetCount =
@@ -543,7 +666,8 @@ func runWindowsManagedHooksTeardown(
 		var journal windowsManagedHooksTeardownJournal
 		journal, err = readWindowsManagedHooksTeardownJournal(report.JournalPath)
 		if err == nil {
-			err = validateWindowsManagedHooksTeardownJournal(journal, identity)
+			err = windowsManagedHooksTeardownJournalNamed(
+				validateWindowsManagedHooksTeardownJournal(journal, identity), report.JournalPath)
 		}
 		if err == nil {
 			report.EnrollmentTargetCount =
@@ -574,13 +698,36 @@ func runWindowsManagedHooksTeardown(
 		var journal windowsManagedHooksTeardownJournal
 		journal, err = readWindowsManagedHooksTeardownJournal(report.JournalPath)
 		if err == nil {
-			err = validateWindowsManagedHooksTeardownJournal(journal, identity)
+			err = windowsManagedHooksTeardownJournalNamed(
+				validateWindowsManagedHooksTeardownJournal(journal, identity), report.JournalPath)
 		}
 		if err == nil && journal.Phase != "prepared" && journal.Phase != "finalized" {
 			err = fmt.Errorf(
 				"managed-hook teardown journal phase %q cannot be finalized",
 				journal.Phase,
 			)
+		}
+		if err == nil && purgeContractLocks && cleanupReceiptPath == "" {
+			err = errors.New("managed hook contract purge requires its protected cleanup receipt")
+		}
+		if err == nil && cleanupReceiptPath != "" {
+			var cleanupReceipt windowsManagedHookContractCleanupReceipt
+			cleanupReceipt, err = readWindowsManagedHookContractCleanupReceipt(
+				cleanupReceiptPath,
+			)
+			if err == nil {
+				err = validateWindowsManagedHookContractCleanupReceiptBinding(
+					cleanupReceipt,
+					journal,
+					contractCleanupScope,
+				)
+			}
+			if err == nil && purgeContractLocks {
+				_, _, _, err = applyWindowsManagedHookContractCleanupReceipt(
+					cleanupReceiptPath,
+					cleanupReceipt,
+				)
+			}
 		}
 		if err == nil {
 			var surviving int
@@ -636,7 +783,8 @@ func prepareWindowsManagedHooksTeardown(
 ) (bool, int, error) {
 	if existing, err := readWindowsManagedHooksTeardownJournal(journalPath); err == nil {
 		if validateErr := validateWindowsManagedHooksTeardownJournal(existing, identity); validateErr != nil {
-			return false, 0, validateErr
+			// Name the file: the refusal named no path (GAP-1041).
+			return false, 0, fmt.Errorf("%w: %s (phase %s)", validateErr, journalPath, existing.Phase)
 		}
 		switch existing.Phase {
 		case "prepared":
@@ -1313,6 +1461,11 @@ func finalizeWindowsManagedHooksTeardownStandaloneMachineState() error {
 	if err := enterprisehooks.RemoveWindowsStandaloneMachinePolicySelectorLocks(); err != nil {
 		return fmt.Errorf("finalize standalone machine-policy selector locks: %w", err)
 	}
+	// Secure Client: DefenseClaw's folder in Copilot's machine folder holds
+	// only lock files by now.
+	if _, err := enterprisehooks.RemoveWindowsSecureClientPerUserRuntimeDirectories(); err != nil {
+		return fmt.Errorf("finalize the GitHub Copilot runtime folder: %w", err)
+	}
 	return nil
 }
 
@@ -1403,7 +1556,7 @@ func verifyWindowsManagedHooksTeardownClean(
 			"Codex machine requirements are not clean after managed-hook teardown",
 		)
 	}
-	if err := verifyWindowsManagedHooksStandalonePerUserClean(targets); err != nil {
+	if err := verifyWindowsManagedHooksStandalonePerUserClean(); err != nil {
 		return 0, err
 	}
 	for _, target := range targets {
@@ -1633,10 +1786,22 @@ func windowsManagedHooksTeardownExpectedEnrollment(
 			[]connector.WindowsCodexManagedRuntimeTarget{},
 			[]enterprisehooks.WindowsCursorManagedRuntimeTarget{}
 	}
-	return append([]string(nil), claudeTargets...),
-		codexPolicyActive,
-		append([]connector.WindowsCodexManagedRuntimeTarget(nil), codexTargets...),
-		append([]enterprisehooks.WindowsCursorManagedRuntimeTarget(nil), cursorTargets...)
+	// append([]T(nil), src...) returns nil when src has length zero, which
+	// then marshals as JSON `null` and used to trip the reader's presence
+	// check on retry. Guarantee an empty-non-nil slice for each connector
+	// target list so the journal always writes `[]` even for connectors
+	// that had no eligible interactive users at install time on a given
+	// box (single-user VMs, deployments with connector-uses-nobody, etc.).
+	claudeCopy := append([]string{}, claudeTargets...)
+	codexCopy := append(
+		[]connector.WindowsCodexManagedRuntimeTarget{},
+		codexTargets...,
+	)
+	cursorCopy := append(
+		[]enterprisehooks.WindowsCursorManagedRuntimeTarget{},
+		cursorTargets...,
+	)
+	return claudeCopy, codexPolicyActive, codexCopy, cursorCopy
 }
 
 func equalWindowsManagedHooksCodexTargets(
@@ -1756,6 +1921,15 @@ func windowsManagedHooksTeardownFingerprint(
 	}
 	digest := sha256.Sum256(body)
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
+}
+
+// windowsManagedHooksTeardownJournalNamed adds the journal path to a
+// validation failure, which named no file (GAP-1041).
+func windowsManagedHooksTeardownJournalNamed(err error, path string) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", err, path)
 }
 
 func validateWindowsManagedHooksTeardownJournal(
@@ -1991,22 +2165,53 @@ func readWindowsManagedHooksTeardownJournal(
 	if err := file.Close(); err != nil {
 		return journal, err
 	}
+	return parseWindowsManagedHooksTeardownJournalBody(body)
+}
+
+// parseWindowsManagedHooksTeardownJournalBody is the ACL-independent
+// JSON layer of readWindowsManagedHooksTeardownJournal. Split out so
+// the schema/tolerance contract can be unit-tested without the
+// trusted-owner ACL walk, which requires SYSTEM/Admins ownership on
+// the input file — impractical inside a Go test running under a CI
+// runner user. readWindowsManagedHooksTeardownJournal is the only
+// production entry point and always enforces the ACL walk first via
+// managed.ValidateTrustedFilePath before calling this helper.
+func parseWindowsManagedHooksTeardownJournalBody(
+	body []byte,
+) (windowsManagedHooksTeardownJournal, error) {
+	var journal windowsManagedHooksTeardownJournal
 	var properties map[string]json.RawMessage
 	if err := json.Unmarshal(body, &properties); err != nil {
 		return journal, err
 	}
+	// Trust-critical identity fields: presence-required and non-null.
+	// These bind the journal to a specific activation record and manifest
+	// bytes; a missing or nulled value would let a foreign journal pass
+	// validation and redirect subsequent teardown/rollback at attacker-
+	// controlled state.
 	for _, name := range []string{
 		"manifest_sha256",
 		"activation_state",
 		"deployment_generation_id",
-		"codex_policy_active",
-		"codex_targets",
 	} {
 		value, ok := properties[name]
 		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return journal, fmt.Errorf("managed-hook teardown journal is missing %s", name)
 		}
 	}
+	// Connector-optional fields (codex_policy_active, codex_targets,
+	// cursor_targets, claude_target_sids) were previously strict-required
+	// too. The current writer emits "[]" for an empty target list
+	// (windowsManagedHooksTeardownExpectedEnrollment), but journals written
+	// by earlier releases used append([]T(nil), src...) and carry "null"
+	// whenever a connector had no eligible interactive users at install
+	// time. Keep reading those legacy journals: downstream code paths use
+	// nil-safe len() semantics, so decoding a null field into a nil slice
+	// is functionally identical to decoding an empty array. Do not require
+	// presence here, and do not drop the writer fix; json.Decoder below still
+	// enforces DisallowUnknownFields, so a foreign extra key still fails
+	// closed, and validateWindowsManagedHooksTeardownJournal still binds
+	// every target list to the recomputed activation identity.
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&journal); err != nil {
@@ -2022,11 +2227,25 @@ func readWindowsManagedHooksTeardownJournal(
 	return journal, nil
 }
 
+// windowsManagedHooksTeardownJournalForWrite writes the empty Codex
+// enrollment of a standalone deployment as [], not null: the reader takes a
+// null codex_targets as missing, so an activated deployment that enrolled no
+// Codex user could not uninstall (GAP-0248). A Secure Client journal is
+// written as before.
+func windowsManagedHooksTeardownJournalForWrite(
+	journal windowsManagedHooksTeardownJournal,
+) windowsManagedHooksTeardownJournal {
+	if journal.CodexTargets == nil && enterprisehooks.WindowsStandaloneProcess() {
+		journal.CodexTargets = []connector.WindowsCodexManagedRuntimeTarget{}
+	}
+	return journal
+}
+
 func writeWindowsManagedHooksTeardownJournal(
 	path string,
 	journal windowsManagedHooksTeardownJournal,
 ) error {
-	body, err := json.MarshalIndent(journal, "", "  ")
+	body, err := json.MarshalIndent(windowsManagedHooksTeardownJournalForWrite(journal), "", "  ")
 	if err != nil {
 		return err
 	}

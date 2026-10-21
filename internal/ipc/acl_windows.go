@@ -26,7 +26,7 @@ import (
 // managed-enterprise gateway service registers under by convention
 // ("NT SERVICE\DefenseClawGateway"). Callers can override this at
 // runtime by setting managed.WindowsServiceAccountEnv, which the
-// installer already pins per spec 002's SCM env plumbing. This
+// installer already pins in the service's SCM environment. This
 // constant is only the fallback when the env is unset — a
 // certification-scoped install with a hashed service name (e.g.
 // DefenseClawCertGateway_<10-hex>) sets the env explicitly and
@@ -39,8 +39,7 @@ const defaultGatewayServiceAccount = `NT SERVICE\DefenseClawGateway`
 // GENERIC_READ|GENERIC_WRITE on a directory includes FILE_ADD_FILE
 // and FILE_ADD_SUBDIRECTORY, which would let Authenticated Users
 // pre-create files inside the IPC directory (including at the socket
-// path while the daemon is stopped). See CR
-// spec-004:PRRT_kwDORuAK-s6ankzk.
+// path while the daemon is stopped).
 type aclObjectClass int
 
 const (
@@ -48,10 +47,10 @@ const (
 	aclObjectSocketFile
 )
 
-// applyBaselineIPCACL applies the spec 004 baseline hygiene DACL to
+// applyBaselineIPCACL applies the baseline hygiene DACL to
 // the file at `path`. The DACL is protected — SE_DACL_PROTECTED
 // severs inheritance so ancestor ACL policy on ProgramData cannot
-// silently over-permit the IPC surface (spec 004 REQ-05).
+// silently over-permit the IPC surface.
 //
 // Four ACEs, no others:
 //
@@ -66,18 +65,19 @@ const (
 //
 // `class` picks a per-object-type mask for Authenticated Users:
 //
-//   - aclObjectDirectory  ⇒ traverse + list ONLY. Authenticated
-//     Users MUST NOT gain FILE_ADD_FILE on the directory or a
-//     malicious local user could pre-create a file at the socket
-//     path while the daemon is stopped.
+//   - aclObjectDirectory  ⇒ traverse + list + metadata/security read.
+//     The metadata rights let AVC validate the recreated IPC endpoint
+//     after a gateway restart. Authenticated Users MUST NOT gain
+//     FILE_ADD_FILE on the directory or a malicious local user could
+//     pre-create a file at the socket path while the daemon is stopped.
 //   - aclObjectSocketFile ⇒ read + write. Enough for UDS connect()
 //   - gRPC handshake; still refuses WRITE_DAC so the auth-user
 //     population cannot rewrite the socket's ACL.
 //
 // Access boundary rationale: the initial-cut deferred-auth posture
-// (spec 004 REQ-06 → REQ-08) does NO accept-time codesign or
+// on Windows does NO accept-time codesign or
 // signer-CN validation. The DACL is the only access control. Full
-// peer-auth lands in a follow-up spec per parity plan §4.4; until
+// peer-auth lands in a follow-up change; until
 // then the GA release-gate at authposture_gagate.go refuses a
 // release-candidate build in which this posture remains reachable.
 func applyBaselineIPCACL(path string, class aclObjectClass) error {
@@ -88,13 +88,20 @@ func applyBaselineIPCACL(path string, class aclObjectClass) error {
 	if err != nil {
 		return err
 	}
+	return applyBaselineIPCACLEntries(path, entries)
+}
+
+// applyBaselineIPCACLEntries is the common restart-time application boundary.
+// Keeping the OS write separate from service-SID lookup lets the Windows test
+// exercise repeated ACL reconciliation with a deterministic service SID.
+func applyBaselineIPCACLEntries(path string, entries []windows.EXPLICIT_ACCESS) error {
 	acl, err := windows.ACLFromEntries(entries, nil)
 	if err != nil {
 		return fmt.Errorf("ipc: build baseline ACL: %w", err)
 	}
 	// DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION:
 	// write the DACL AND set the protected flag so the object does not
-	// inherit any additional ACEs from its parent (spec 004 REQ-05).
+	// inherit any additional ACEs from its parent.
 	// Owner/group left alone — the file's original owner (usually the
 	// process account) retains WRITE_DAC via ownership, which is fine:
 	// only SYSTEM/admins can rewrite the process account's DACL from
@@ -212,24 +219,29 @@ func baselineIPCACEsForGatewaySID(
 	// both object classes. Authenticated Users: per-class mask.
 	//
 	// Directory mask: FILE_TRAVERSE (execute the dir) + FILE_LIST_DIRECTORY
-	// (list child names). Enough for a UDS client to path-resolve
-	// `<parent>\<socket>` and open() it. FILE_ADD_FILE is REFUSED —
+	// (list child names) + FILE_READ_EA, FILE_READ_ATTRIBUTES, READ_CONTROL, and
+	// SYNCHRONIZE. The latter keeps this exact mask aligned with the installer's
+	// canonical FileSystemRights::ReadAndExecute ACE (0x1200a9).
+	// Windows AF_UNIX path resolution needs the extended-attribute read, while
+	// the metadata rights let AVC inspect and validate a newly recreated
+	// endpoint after a gateway restart. FILE_ADD_FILE is REFUSED —
 	// a malicious auth-user must NOT be able to pre-create a decoy
 	// file at the socket path while the daemon is stopped. Windows'
 	// specific rights for a directory object; NOT the generic bits
-	// (which map to FILE_ADD_FILE etc.). See CR
-	// spec-004:PRRT_kwDORuAK-s6ankzk.
+	// (which map to FILE_ADD_FILE etc.).
 	//
 	// Socket-file mask: GENERIC_READ | GENERIC_WRITE. Enough for the
 	// UDS `connect()` + gRPC handshake byte streams. WRITE_DAC is
 	// refused (not present in GENERIC_WRITE for FILE objects).
-	const directoryTraverseList windows.ACCESS_MASK = windows.FILE_TRAVERSE | windows.FILE_LIST_DIRECTORY
+	const directoryTraverseListInspect windows.ACCESS_MASK = windows.FILE_TRAVERSE |
+		windows.FILE_LIST_DIRECTORY | windows.FILE_READ_EA |
+		windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL | windows.SYNCHRONIZE
 	const socketReadWrite windows.ACCESS_MASK = windows.GENERIC_READ | windows.GENERIC_WRITE
 
 	var authUsersMask windows.ACCESS_MASK
 	switch class {
 	case aclObjectDirectory:
-		authUsersMask = directoryTraverseList
+		authUsersMask = directoryTraverseListInspect
 	case aclObjectSocketFile:
 		authUsersMask = socketReadWrite
 	default:
@@ -275,8 +287,7 @@ func explicitAllow(sid *windows.SID, mask windows.ACCESS_MASK) windows.EXPLICIT_
 // is the ONLY access boundary, so an unvalidated principal in the
 // DACL would be the single point of failure. A spoofed
 // WindowsServiceAccountEnv that resolved to e.g. `Everyone` or an
-// unrelated user must NOT slip into the ACE list. See CR
-// spec-004:PRRT_kwDORuAK-s6ankzl.
+// unrelated user must NOT slip into the ACE list.
 //
 // `internal/managed/trust_windows.go` performs a similar check on a
 // different code path (trusted-path binding at daemon startup); this

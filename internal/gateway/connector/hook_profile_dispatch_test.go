@@ -40,8 +40,8 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		{"codex", func() Connector { return NewCodexConnector() }, true, true, true},
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, true, true, true},
 		// Hermes needs no Decode: its nested `extra` content is
-		// recovered by the generic decoder's ContentEnvelopeKey
-		// fallback (declared on the hermes hook contract), and its
+		// read by the generic decoder from the ContentEnvelope its
+		// hook contract declares, and its
 		// wire replies come from the shared hookOnlyProfileRespond
 		// hermes case.
 		{"hermes", func() Connector { return NewHermesConnector() }, false, true, true},
@@ -314,7 +314,7 @@ func TestCodexProfileMapVerdict(t *testing.T) {
 }
 
 // TestClaudeCodeProfileMapVerdict covers Claude Code's "can enforce"
-// gate plus the chat-side-ask demote rule.
+// gate plus advisory alert and non-native confirm projection.
 func TestClaudeCodeProfileMapVerdict(t *testing.T) {
 	caps := HookCapability{
 		CanBlock:     true,
@@ -339,8 +339,9 @@ func TestClaudeCodeProfileMapVerdict(t *testing.T) {
 		{"post_tool_batch_is_advisory", "block", "PostToolBatch", "action", nil, "allow", true},
 		{"policy_config_change_is_advisory", "block", "ConfigChange", "action", map[string]interface{}{"source": "policy_settings"}, "allow", true},
 		{"user_config_change_is_enforceable", "block", "ConfigChange", "action", map[string]interface{}{"source": "user_settings"}, "block", false},
+		{"action_alert_surfaces", "alert", "UserPromptSubmit", "action", nil, "alert", false},
 		{"action_confirm_ask_event", "confirm", "PreToolUse", "action", nil, "confirm", false},
-		{"action_confirm_non_ask_event", "confirm", "PostToolUse", "action", nil, "alert", false},
+		{"action_confirm_non_ask_event_demotes_to_alert", "confirm", "PostToolUse", "action", nil, "alert", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

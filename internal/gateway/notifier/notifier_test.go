@@ -18,6 +18,7 @@ package notifier
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -70,15 +71,33 @@ func (r *recorder) Drain(want int, timeout time.Duration) []notify.Notification 
 	return r.Snapshot()
 }
 
+// defaultNotificationsConfig mirrors the notifications defaults the config
+// loader installs (setDefaults in internal/config/config.go).
+func defaultNotificationsConfig() config.NotificationsConfig {
+	return config.NotificationsConfig{
+		Enabled:         config.DefaultNotificationsEnabledFor(runtime.GOOS),
+		BlockEnforced:   true,
+		BlockWouldBlock: false,
+		HITLApproval:    true,
+		Sources: config.NotificationSourceFilter{
+			Hook:        true,
+			Guardrail:   true,
+			AssetPolicy: true,
+		},
+		DedupWindow:  config.NotificationsDefaultDedupWindow,
+		MaxPerMinute: config.NotificationsDefaultMaxPerMinute,
+	}
+}
+
 func enabledConfig() config.NotificationsConfig {
-	c := config.DefaultNotificationsConfig()
+	c := defaultNotificationsConfig()
 	c.Enabled = true
 	return c
 }
 
 func TestDispatcher_DisabledIsNoOp(t *testing.T) {
 	rec := &recorder{}
-	cfg := config.DefaultNotificationsConfig()
+	cfg := defaultNotificationsConfig()
 	cfg.Enabled = false
 	d := NewWithSender(cfg, rec.Send)
 
@@ -99,7 +118,7 @@ func TestDispatcher_DisabledIsNoOp(t *testing.T) {
 // toast lane.
 func TestDispatcher_ServiceStateReachesObserversWhenDisabled(t *testing.T) {
 	rec := &recorder{}
-	cfg := config.DefaultNotificationsConfig()
+	cfg := defaultNotificationsConfig()
 	cfg.Enabled = false
 	d := NewWithSender(cfg, rec.Send)
 

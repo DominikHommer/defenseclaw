@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // ProfileName is a stable route-selectable projection identity.
@@ -77,6 +78,31 @@ func (profile Profile) DetectorGroups() []DetectorGroup {
 // IsRedacting reports whether this profile is allowed to transform payloads.
 func (profile Profile) IsRedacting() bool { return profile.name != ProfileNone }
 
+// RemovesPersonalIdentifiers reports whether the profile drops the identifiers
+// that name a person, their sign-in or their machine. They are identifier-class
+// like the join keys, but nothing joins on them, so the least-data profile
+// (strict, and any custom profile that extends it) removes them while user.id,
+// the account name and the agent and session ids still correlate records.
+// An engine from Engine.WithPersonalIdentifiersKept (Secure Client) keeps them.
+func (profile Profile) RemovesPersonalIdentifiers() bool { return profile.base == ProfileStrict }
+
+// personalIdentifierKeys are the registry attributes that sensitivity marks as
+// sensitive and that carry a person rather than a join key.
+var personalIdentifierKeys = map[string]struct{}{
+	observability.TelemetryAttributeDefenseClawUserPrincipal:            {},
+	observability.TelemetryAttributeDefenseClawSessionKerberosPrincipal: {},
+	observability.TelemetryAttributeClientAddress:                       {},
+	observability.TelemetryAttributeDefenseClawUserTenantID:             {},
+	observability.TelemetryAttributeDefenseClawUserEmail:                {},
+}
+
+// isPersonalIdentifierPointer matches the attribute by the last token of its
+// JSON pointer, so a log body and a span attribute map are treated alike.
+func isPersonalIdentifierPointer(pointer string) bool {
+	_, ok := personalIdentifierKeys[pointer[strings.LastIndexByte(pointer, '/')+1:]]
+	return ok
+}
+
 // BuiltInProfile resolves one immutable built-in profile.
 func BuiltInProfile(name ProfileName) (Profile, bool) {
 	profile, ok := builtInProfiles()[name]
@@ -91,6 +117,29 @@ func BuiltInProfiles() []Profile {
 		definitions[ProfileSensitive],
 		definitions[ProfileContent],
 		definitions[ProfileStrict],
+	}
+}
+
+// ResolveSinkPolicyProfile applies one already-authorized request-scoped sink
+// policy to an immutable configured profile. Both projection producers and
+// trusted persistence validators must use this resolver so they cannot disagree
+// about the effective profile for an occurrence.
+func ResolveSinkPolicyProfile(
+	configured Profile,
+	policy legacyredaction.SinkPolicy,
+) (Profile, bool) {
+	if !validProfile(configured) {
+		return Profile{}, false
+	}
+	switch policy {
+	case legacyredaction.SinkPolicyDefault:
+		return configured, true
+	case legacyredaction.SinkPolicyRaw:
+		return BuiltInProfile(ProfileNone)
+	case legacyredaction.SinkPolicyRedact:
+		return BuiltInProfile(ProfileSensitive)
+	default:
+		return Profile{}, false
 	}
 }
 

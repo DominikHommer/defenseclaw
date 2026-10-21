@@ -2084,6 +2084,34 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
     assert kwargs["timeout"] == ad.VERSION_TIMEOUT_SECONDS
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is False
+    # GAP-0057, GAP-0065: a probe holding the tty reset init's picker to line
+    # mode, or left raw output, when it or its child exited later.
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["start_new_session"] is True
+
+
+def test_cold_start_probe_timeout_is_retried_once_and_shown_short(monkeypatch, tmp_path):
+    """GAP-0066: on a fresh clone the first --version of four CLIs timed out,
+    and the table split "<path>: version probe timed out" over three rows."""
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(ad.shutil, "which", lambda name: "/opt/bin/codex")
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda path: True)
+    answers = iter([subprocess.TimeoutExpired("codex", 8), "codex 1.2.3\n"])
+
+    def fake_run(args, **kwargs):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=answer, stderr="")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    assert ad._scan_agent("codex").version == "codex 1.2.3"
+
+    slow = ad.AgentSignal(
+        name="codex", installed=True, config_path="", binary_path="/opt/bin/codex",
+        version="", error=f"/opt/bin/codex: {ad.VERSION_PROBE_TIMED_OUT}",
+    )
+    assert ad._display_error(slow) == ad.VERSION_PROBE_TIMED_OUT
 
 
 def test_openhands_version_probe_prefers_cli_line_after_banner(monkeypatch, tmp_path):
@@ -2753,6 +2781,51 @@ def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path
     assert changed.agents["amp"].version == ""
 
 
+def test_a_refresh_that_cannot_find_an_unchanged_binary_keeps_its_version(monkeypatch, tmp_path):
+    """GAP-0231: the upgrade's discovery refresh ran with a PATH that lacked
+    the agents' folder, found no binary and erased the versions the gateway
+    needs, so every action-mode connector was skipped after the upgrade."""
+    binary = tmp_path / "claude"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    old = os.stat(binary).st_mtime - 600
+    os.utime(binary, (old, old))
+
+    def scan(found: bool):
+        def fake(name: str, **_kwargs) -> ad.AgentSignal:
+            if name != "claudecode":
+                return _signal(name)
+            if not found:
+                return ad.AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
+            return ad.AgentSignal(
+                name=name, installed=True, config_path="", binary_path=str(binary),
+                version="2.1.286 (Claude Code)", error="",
+            )
+        return fake
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_scan_agent", scan(True))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    monkeypatch.setattr(ad, "_scan_agent", scan(False))
+    kept = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    signal = kept.agents["claudecode"]
+    assert (signal.version, signal.binary_path, signal.installed) == ("2.1.286 (Claude Code)", str(binary), True)
+    assert ad._read_cache(data_dir=tmp_path).agents["claudecode"].version == "2.1.286 (Claude Code)"
+
+    # Changed since the scan that probed it: its version is not known.
+    os.utime(binary, None)
+    assert ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["claudecode"].version == ""
+
+    # Removed: not installed.
+    os.utime(binary, (old, old))
+    monkeypatch.setattr(ad, "_scan_agent", scan(True))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    binary.unlink()
+    monkeypatch.setattr(ad, "_scan_agent", scan(False))
+    gone = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["claudecode"]
+    assert (gone.version, gone.installed) == ("", False)
+
+
 def test_cached_discovery_rechecks_config_files(monkeypatch, tmp_path):
     """GAP-1627: setup / setup remove change hook files after the cache was written."""
     _pin_home(monkeypatch, tmp_path)
@@ -2774,3 +2847,22 @@ def test_cached_discovery_rechecks_config_files(monkeypatch, tmp_path):
     removed = ad.discover_agents()
     assert removed.agents["copilot"].configured is False
     assert removed.agents["copilot"].config_path == ""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX job control")
+def test_version_probe_never_reads_the_terminal(monkeypatch, tmp_path):
+    # GAP-0376: a vendor CLI that reads stdin was stopped by SIGTTIN when
+    # discovery ran in a background job, and the upgrade hung there.
+    seen: dict = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, b"tool 1.2.3\n", b"")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    binary = tmp_path / "tool"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    ad._version_for_binary(str(binary), ("--version",), require_trusted_binary_paths=False)
+    assert seen.get("stdin") is subprocess.DEVNULL
+    assert seen.get("start_new_session") is True

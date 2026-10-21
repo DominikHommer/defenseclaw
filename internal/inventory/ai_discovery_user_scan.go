@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // Per-user scans (standalone enterprise profile, Linux and macOS).
@@ -49,8 +50,9 @@ const (
 	// UserScanDirName is the spool directory inside the guardian's
 	// authorization directory.
 	UserScanDirName = "ai-discovery"
-	// UserScanRecordVersion is the spool record schema.
-	UserScanRecordVersion = 1
+	// UserScanRecordVersion is the spool record schema. Version 2 added the
+	// report's IDE inventory.
+	UserScanRecordVersion = 2
 	// MaxUserScanSignals bounds one user's report.
 	MaxUserScanSignals = 1024
 
@@ -73,6 +75,12 @@ type UserScanOptions struct {
 	MaxFilesPerScan         int      `json:"max_files_per_scan,omitempty"`
 	MaxFileBytes            int64    `json:"max_file_bytes,omitempty"`
 	StoreRawLocalPaths      bool     `json:"store_raw_local_paths,omitempty"`
+	IDEInventory            string   `json:"ide_inventory,omitempty"`
+	// IncludeUserEmail is ai_discovery.include_user_email: the scan reads
+	// the user's own Claude Code and Codex account address. The gateway's
+	// service account cannot read a home on Linux or macOS, so the per-user
+	// scan is the only reader that can (GAP-0961).
+	IncludeUserEmail bool `json:"include_user_email,omitempty"`
 }
 
 // UserScanOptionsFromConfig keeps the privacy settings of ai_discovery and
@@ -88,6 +96,8 @@ func UserScanOptionsFromConfig(cfg *config.Config) UserScanOptions {
 		MaxFilesPerScan:         ad.MaxFilesPerScan,
 		MaxFileBytes:            int64(ad.MaxFileBytes),
 		StoreRawLocalPaths:      ad.StoreRawLocalPaths,
+		IDEInventory:            ad.EffectiveIDEInventory(),
+		IncludeUserEmail:        ad.IncludeUserEmail,
 	}
 }
 
@@ -198,17 +208,30 @@ func ReadUserScanPass(path string) (UserScanPass, error) {
 }
 
 // ScanUserHome runs one full scan of home, as the account that owns it, with
-// no state store, history or telemetry. It keeps only evidence inside home
-// and the account's own processes; machine-wide surfaces (system binaries,
-// application folders, loopback endpoints, the process environment) are
-// left to the gateway's own scan.
+// no state store, history or telemetry. It keeps evidence inside home, the
+// account's own processes, and macOS CLI binaries in the fixed system install
+// directories. Other machine-wide surfaces are left to the gateway's scan.
 func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserScanOptions, catalog []AISignature) AIDiscoveryReport {
+	var systemBinaryDirs []string
+	if runtime.GOOS == "darwin" {
+		systemBinaryDirs = macOSDiscoverySystemBinaryDirs()
+	}
+	return scanUserHomeWithSystemBinaryDirs(ctx, home, account, uid, opts, catalog, systemBinaryDirs)
+}
+
+// The directory argument lets Linux CI exercise the managed macOS binary
+// path without changing the platform's production search directories.
+func scanUserHomeWithSystemBinaryDirs(ctx context.Context, home, account string, uid int, opts UserScanOptions, catalog []AISignature, systemBinaryDirs []string) AIDiscoveryReport {
 	start := time.Now()
 	home = filepath.Clean(home)
 	// The model file detector reports paths with symlinks resolved.
 	homeRoots := []string{home}
 	if resolved, err := filepath.EvalSymlinks(home); err == nil && filepath.Clean(resolved) != home {
 		homeRoots = append(homeRoots, filepath.Clean(resolved))
+	}
+	var fallbackDirs []string
+	if len(systemBinaryDirs) > 0 {
+		fallbackDirs = discoveryBinaryDirsWithHome(systemBinaryDirs, home)
 	}
 	svc := &ContinuousDiscoveryService{
 		opts: normalizeAIDiscoveryOptions(AIDiscoveryOptions{
@@ -223,12 +246,16 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 			// leave this process only when the administrator keeps them.
 			StoreRawLocalPaths: true,
 			// Never written: this service has no state store.
-			DataDir:  filepath.Join(home, ".defenseclaw"),
-			HomeDir:  home,
-			HomeDirs: []string{home},
+			DataDir:          filepath.Join(home, ".defenseclaw"),
+			HomeDir:          home,
+			HomeDirs:         []string{home},
+			IDEInventory:     opts.IDEInventory,
+			IncludeUserEmail: opts.IncludeUserEmail,
 		}),
-		catalog:       catalog,
-		processOwners: map[string]bool{account: true, strconv.Itoa(uid): true},
+		catalog:            catalog,
+		userHomeScan:       true,
+		processOwners:      map[string]bool{account: true, strconv.Itoa(uid): true},
+		binaryFallbackDirs: fallbackDirs,
 	}
 	scanID := newScanID()
 	signals, stats := svc.scanSignals(ctx, scanID, &aiDiscoveryScanObservation{}, true, nil)
@@ -236,7 +263,10 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 	// No state store stamps these here; an unset time read as 0001-01-01.
 	seen := time.Now().UTC()
 	for _, sig := range signals {
-		if sig.Detector == "application" || !evidenceInsideHome(sig.Evidence, homeRoots) {
+		inHome := evidenceInsideHome(sig.Evidence, homeRoots)
+		inSystemBin := sig.Detector == "binary" && sig.Category == SignalAICLI &&
+			evidenceInSystemBinaryDirs(sig.Evidence, systemBinaryDirs)
+		if sig.Detector == "application" || (!inHome && !inSystemBin) {
 			continue
 		}
 		if !opts.StoreRawLocalPaths {
@@ -266,6 +296,9 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 		stats.Errors++
 		stats.DetectorErrors["user_scan"] = "signal limit reached"
 	}
+	// Associate opt-in connector email from this account's home with its
+	// retained signals, including the fixed system binary signals.
+	svc.stampConnectorEmails(out, func(AISignal) string { return home })
 	if ctx.Err() != nil {
 		stats.Errors++
 		stats.DetectorErrors["user_scan"] = "scan time limit reached"
@@ -284,11 +317,33 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 		Errors:            stats.Errors,
 		DetectorErrors:    stats.DetectorErrors,
 		DetectorDurations: stats.DetectorDurations,
+		DetectorNotes:     svc.emailNotes,
 	}
 	if stats.Errors > 0 {
 		summary.Result = "partial"
 	}
-	return AIDiscoveryReport{Summary: summary, Signals: out}
+	ide := stats.ideInventory
+	if ide != nil {
+		// The gateway names the account from the guardian's record.
+		sanitizeUserScanIDE(ide)
+		boundUserScanIDE(ide)
+	}
+	return AIDiscoveryReport{Summary: summary, Signals: out, IDEInventory: ide}
+}
+
+// userScanNamespace re-derives a worker's digest in the account's
+// namespace with this installation's key.
+func userScanNamespace(uid string) func(string) string {
+	return func(value string) string {
+		if value == "" {
+			return ""
+		}
+		input := "ai-discovery/user-scan/v1\x00" + uid + "\x00" + value
+		if key := currentPathHashKey(); len(key) > 0 {
+			return "hmac-sha256:" + keyedHashHex(key, input)
+		}
+		return "sha256:" + hashHex(input)
+	}
 }
 
 func boundedUserScanList(values []string) []string {
@@ -318,6 +373,19 @@ func evidenceInsideHome(evidence []AIEvidence, homes []string) bool {
 	return true
 }
 
+func evidenceInSystemBinaryDirs(evidence []AIEvidence, dirs []string) bool {
+	if len(evidence) != 1 || evidence[0].Type != "binary" || !filepath.IsAbs(evidence[0].RawPath) {
+		return false
+	}
+	pathDir := filepath.Dir(filepath.Clean(evidence[0].RawPath))
+	for _, dir := range dirs {
+		if pathDir == filepath.Clean(dir) {
+			return true
+		}
+	}
+	return false
+}
+
 func evidenceWithoutRawPaths(evidence []AIEvidence) []AIEvidence {
 	out := make([]AIEvidence, len(evidence))
 	for i, ev := range evidence {
@@ -329,8 +397,9 @@ func evidenceWithoutRawPaths(evidence []AIEvidence) []AIEvidence {
 
 // SanitizeUserScanReport validates a report the scanned user can influence
 // and prepares it for the spool: the account it belongs to is the spool
-// record's, never the report's.
-func SanitizeUserScanReport(report *AIDiscoveryReport, catalog []AISignature, keepRawPaths bool) error {
+// record's, never the report's. keepEmail is ai_discovery.include_user_email:
+// without it no address reaches the spool.
+func SanitizeUserScanReport(report *AIDiscoveryReport, catalog []AISignature, keepRawPaths, keepEmail bool) error {
 	if report == nil {
 		return errors.New("missing report")
 	}
@@ -338,10 +407,15 @@ func SanitizeUserScanReport(report *AIDiscoveryReport, catalog []AISignature, ke
 		return err
 	}
 	report.Summary.Source = AISourceUserScan
+	sanitizeUserScanIDE(report.IDEInventory)
 	for i := range report.Signals {
 		sig := &report.Signals[i]
 		sig.Source = AISourceUserScan
 		sig.UserID, sig.UserName = "", ""
+		sig.SandboxID, sig.SandboxName = "", ""
+		if !keepEmail {
+			sig.UserEmail = ""
+		}
 		if !keepRawPaths {
 			sig.Evidence = evidenceWithoutRawPaths(sig.Evidence)
 		}
@@ -359,6 +433,9 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 	if len(report.Signals) > MaxUserScanSignals {
 		return fmt.Errorf("%d signals exceed the per-user limit of %d", len(report.Signals), MaxUserScanSignals)
 	}
+	if err := validateUserScanIDE(report.IDEInventory); err != nil {
+		return err
+	}
 	if len(report.Summary.DetectorErrors) > maxUserScanField || len(report.Summary.DetectorDurations) > maxUserScanField {
 		return errors.New("too many detector entries")
 	}
@@ -367,16 +444,43 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 			return errors.New("detector errors must be short printable text")
 		}
 	}
+	if len(report.Summary.DetectorNotes) > maxUserScanField {
+		return errors.New("too many detector notes")
+	}
+	for name, detail := range report.Summary.DetectorNotes {
+		if !userScanText(name, maxUserScanField) || !userScanText(detail, 1024) {
+			return errors.New("detector notes must be short printable text")
+		}
+	}
+	// Marketplace AI extensions use generated ide-* signatures. Tie those
+	// signatures to the AI plugin rows in this report when inventory is on.
+	dynamicIDE := make(map[string]bool)
+	if report.IDEInventory != nil {
+		for _, plugin := range report.IDEInventory.Plugins {
+			if plugin.IsAI && plugin.Family == "vscode" &&
+				plugin.AISignatureID == "ide-"+strings.ToLower(plugin.PluginID) {
+				dynamicIDE[plugin.AISignatureID] = true
+			}
+		}
+	}
 	known := make(map[string]bool, len(catalog))
 	for _, sig := range catalog {
 		known[sig.ID] = true
 	}
 	for _, sig := range report.Signals {
-		if !known[sig.SignatureID] && (sig.SignatureID != localModelArtifactSignatureID || sig.Detector != "model_file") {
+		marketplaceIDE := sig.Category == SignalEditorExtension && sig.Detector == "editor_extension" &&
+			strings.HasPrefix(sig.SignatureID, "ide-") &&
+			len(sig.SignatureID) > len("ide-") && len(sig.SignatureID) <= maxUserScanField &&
+			(report.IDEInventory == nil || dynamicIDE[sig.SignatureID])
+		if !known[sig.SignatureID] && !marketplaceIDE &&
+			(sig.SignatureID != localModelArtifactSignatureID || sig.Detector != "model_file") {
 			return errors.New("signal names a signature outside the scan catalog")
 		}
 		if !isSHA256Hash(sig.Fingerprint) {
 			return errors.New("signal fingerprint must be a sha256 digest")
+		}
+		if sig.UserEmail != "" && (!useridentity.ValidEmail(sig.UserEmail) || emailConnector(sig.SupportedConnector) == "") {
+			return errors.New("a signal address must be a valid address of a Claude Code or Codex signal")
 		}
 		fields := []string{sig.Name, sig.Vendor, sig.Product, sig.Detector, sig.Version, sig.SupportedConnector, sig.State, sig.CoverageReason}
 		if sig.Runtime != nil {
@@ -427,13 +531,17 @@ var userScanFileTrustCheck = func(path string) error {
 // (at least 15 minutes), plus the time the guardian's passes take, is
 // skipped, so the signals of a user the guardian no longer scans age out as
 // gone while a slow pass keeps the others current.
-func (s *ContinuousDiscoveryService) detectUserScans(now time.Time) ([]AISignal, int, map[string]string) {
+func (s *ContinuousDiscoveryService) detectUserScans(now time.Time) ([]AISignal, int, *IDEInventory, map[string]string) {
 	entries, err := os.ReadDir(s.opts.UserScanDir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, 0, nil
+		return nil, 0, nil, nil
 	}
 	if err != nil {
-		return nil, 0, map[string]string{"user_scan": err.Error()}
+		return nil, 0, nil, map[string]string{"user_scan": err.Error()}
+	}
+	var ide *IDEInventory
+	if !s.opts.SecureClient && s.ideInventoryScope() != config.IDEInventoryOff {
+		ide = &IDEInventory{Scope: s.ideInventoryScope(), ScannedAt: now}
 	}
 	ttl := 3 * s.opts.ScanInterval
 	if ttl < 15*time.Minute {
@@ -473,11 +581,22 @@ func (s *ContinuousDiscoveryService) detectUserScans(now time.Time) ([]AISignal,
 		if record.Report.Summary.Result != "ok" {
 			errs["user_scan:"+record.User] = "partial scan: " + userScanDetectorNames(record.Report.Summary.DetectorErrors)
 		}
+		// The guardian names the account as NSS does (dcad-alice@dclab.test
+		// on an SSSD host with fully qualified names). Records name it bare,
+		// as the hook, model and tool records of the same uid do; the
+		// qualified form is the principal (GAP-0447).
+		user := useridentity.BareAccountName(record.User)
 		for _, sig := range record.Report.Signals {
-			out = append(out, s.attributeUserScanSignal(sig, uid, record.User))
+			out = append(out, s.attributeUserScanSignal(sig, uid, user))
+		}
+		if ide != nil && record.Report.IDEInventory != nil {
+			userIDE := attributeUserScanIDE(record.Report.IDEInventory, userScanNamespace(uid), uid, user)
+			userIDE.Scope = ide.Scope
+			userIDE.applyScope()
+			ide = mergeIDEInventory(ide, userIDE)
 		}
 	}
-	return out, files, errs
+	return out, files, ide, errs
 }
 
 // ReadUserScanRecord reads one spool record (<uid>.json) with the checks the
@@ -546,16 +665,7 @@ func userScanDetectorNames(detectorErrors map[string]string) string {
 // users' identical files stay distinct and no digest leaves the gateway in
 // the unkeyed form the worker computed.
 func (s *ContinuousDiscoveryService) attributeUserScanSignal(sig AISignal, uid, user string) AISignal {
-	namespace := func(value string) string {
-		if value == "" {
-			return ""
-		}
-		input := "ai-discovery/user-scan/v1\x00" + uid + "\x00" + value
-		if key := currentPathHashKey(); len(key) > 0 {
-			return "hmac-sha256:" + keyedHashHex(key, input)
-		}
-		return "sha256:" + hashHex(input)
-	}
+	namespace := userScanNamespace(uid)
 	evidence := make([]AIEvidence, len(sig.Evidence))
 	for i, ev := range sig.Evidence {
 		ev.PathHash = namespace(ev.PathHash)
@@ -578,6 +688,10 @@ func (s *ContinuousDiscoveryService) attributeUserScanSignal(sig AISignal, uid, 
 	sig.SignalID = stableSignalID(sig.Fingerprint)
 	sig.Source = AISourceUserScan
 	sig.UserID, sig.UserName = uid, user
+	if !s.opts.IncludeUserEmail || s.opts.SecureClient {
+		// A record written before the option was turned off.
+		sig.UserEmail = ""
+	}
 	sig.ModelAPISourceHash = ""
 	if sig.Runtime != nil {
 		runtimeInfo := *sig.Runtime

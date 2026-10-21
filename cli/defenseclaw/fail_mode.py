@@ -51,6 +51,40 @@ _EXPECTED_CONTRACTS = {
     "devin": frozenset({"devin-hooks-v1"}),
 }
 _UPSTREAM_FAIL_OPEN_CONNECTORS = frozenset({"antigravity", "copilot", "hermes"})
+# The hook script each Unix shell registration must name (the connectors in
+# _EXPECTED_CONTRACTS that _unix_registration_freshness checks).
+_UNIX_REGISTRATION_HOOK_SCRIPTS = {
+    "claudecode": "claude-code-hook.sh",
+    "codex": "codex-hook.sh",
+    "devin": "devin-hook.sh",
+}
+
+
+def upstream_fail_open(cfg: Any, connector: str) -> bool:
+    """Whether *connector*'s hooks fail open whatever is configured.
+
+    Copilot CLI, Antigravity and Hermes have no fail-closed hook contract of
+    their own. A managed deployment outside Secure Client blocks their tool
+    calls through the connector's native deny instead, so they follow the
+    administrator's fail mode there (Config.managed_outside_secure_client).
+    The per-user Hermes hook (the Linux
+    and macOS shell hook and the Windows native hook) blocks a call it cannot
+    check through Hermes' block directive when its fail mode is closed, so
+    an unset fail mode resolves closed there as for every other connector
+    (rel-1-0-3 GAP-0150, GAP-0269); only the Secure Client profile keeps
+    Hermes open, as its hook render does (CapableHookFailMode).
+    """
+    name = normalize(connector)
+    if name not in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+        return False
+    standalone = getattr(cfg, "managed_outside_secure_client", None)
+    if callable(standalone) and standalone():
+        return False
+    if name == "hermes":
+        return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    return True
+
+
 _SHARED_RUNTIME_CONNECTORS = frozenset({"claudecode", "codex"})
 _WINDOWS_LAUNCHER_CONNECTORS = frozenset({"claudecode", "codex"})
 _SHARED_HOOK_SCRIPTS = frozenset(
@@ -114,12 +148,32 @@ class ConnectorFailModeState:
             source = candidate
         return source
 
+    @property
+    def note(self) -> str:
+        """Why the effective mode is not the configured guardrail.hook_fail_mode, or "".
+
+        Per-user Cursor follows its guardrail mode (observe open, action
+        closed) whatever the global value says
+        (GuardrailConfig.effective_hook_fail_mode), so ``closed`` in
+        config.yaml next to ``open`` in its observe-mode hooks is intended;
+        reporting says so instead of looking like drift (GAP-0129). Every
+        other connector follows its configured value in observe mode too.
+        """
+
+        if self.configured == self.desired or self.effective != self.desired:
+            return ""
+        return (
+            f"observe mode keeps hooks fail-{self.desired}; "
+            f"guardrail.hook_fail_mode={self.configured} applies in action mode"
+        )
+
     def to_report(self) -> dict[str, Any]:
         """Return the canonical JSON-friendly reporting projection."""
 
         return {
             "effective": self.effective,
             "provenance": self.provenance,
+            "note": self.note,
             "configured": self.configured,
             "desired": self.desired,
             "runtime": self.runtime,
@@ -235,10 +289,11 @@ def connector_fail_mode_report(
     guardrail = cfg.guardrail
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     configured = normalize_fail_mode(resolver(name) if callable(resolver) else getattr(guardrail, "hook_fail_mode", ""))
-    if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+    if upstream_fail_open(cfg, name):
         return {
             "effective": "open",
             "provenance": f"{name}-upstream-fail-open",
+            "note": "",
             "configured": configured,
             "desired": "open",
             "runtime": "open",
@@ -258,6 +313,7 @@ def connector_fail_mode_report(
     return {
         "effective": configured,
         "provenance": "config",
+        "note": "",
         "configured": configured,
         "desired": configured,
         "runtime": None,
@@ -620,15 +676,12 @@ def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
     """Verify the live Unix agent registration points at this data dir's hook."""
 
     paths = connector_config_files(connector, workspace_dir=_connector_workspace(cfg))
-    if not paths:
+    script_name = _UNIX_REGISTRATION_HOOK_SCRIPTS.get(connector)
+    if not paths or script_name is None:
         return "registration-missing"
-    if connector == "claudecode":
-        registration_path = Path(paths[0])
-        script_name = "claude-code-hook.sh"
-    else:
-        registration_path = Path(paths[0])
-        script_name = "codex-hook.sh"
-    registration = _read_small_file(registration_path)
+    # Devin's registration names devin-hook.sh; checking it for codex-hook.sh
+    # reported every current Devin registration as stale (GAP-0027).
+    registration = _read_small_file(Path(paths[0]))
     if registration is None:
         return "registration-missing"
     expected = str((Path(cfg.data_dir) / "hooks" / script_name).resolve())
@@ -738,9 +791,14 @@ def fail_mode_transaction_lock(cfg: Any) -> Iterator[None]:
 
 
 def snapshot_fail_mode_transaction(cfg: Any, connectors: list[str]) -> tuple[FileSnapshot, ...]:
-    paths = {config_module.config_path_for_data_dir(cfg.data_dir)}
+    """Snapshot the registration files a fail-mode change can rewrite.
+
+    config.yaml is not part of it: the caller reverts its modeled change and
+    saves again through the single writer, which keeps concurrent edits and
+    records the rollback as a new generation.
+    """
     hook_dir = Path(cfg.data_dir) / "hooks"
-    paths.update(
+    paths = set(
         {
             hook_dir / ".hookcfg",
             hook_dir / ".hookcfg.legacy",
@@ -832,7 +890,16 @@ def restore_fail_mode_transaction(snapshots: tuple[FileSnapshot, ...]) -> None:
     errors: list[str] = []
     for snapshot in reversed(snapshots):
         try:
+            # A failed save can leave every file untouched. Avoid replacing an
+            # immutable original (and rewriting user edits) in that case.
             if snapshot.existed:
+                try:
+                    current, mode = _snapshot_regular_file(snapshot.path)
+                except FileNotFoundError:
+                    pass
+                else:
+                    if current == snapshot.data and mode == snapshot.mode:
+                        continue
                 snapshot.path.parent.mkdir(parents=True, exist_ok=True)
                 fd, temporary = tempfile.mkstemp(prefix=f".{snapshot.path.name}.", dir=snapshot.path.parent)
                 try:

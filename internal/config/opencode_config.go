@@ -18,6 +18,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -188,6 +189,21 @@ func ReadMCPServersOpenCodeUnderHome(home string) ([]MCPServerEntry, error) {
 	}), nil
 }
 
+// ReadMCPFromOpenCodeConfig reads the servers of one OpenCode config file
+// (its JSONC mcp map, local commands as arrays) for AI discovery (GAP-1062).
+func ReadMCPFromOpenCodeConfig(path string) ([]MCPServerEntry, error) {
+	data, ok := gatewayconnector.ReadStableInventoryFile(path, maxOpenCodeInventoryConfigBytes)
+	if !ok {
+		return nil, fmt.Errorf("config: read OpenCode config %s", path)
+	}
+	doc, err := parseOpenCodeJSONC(data)
+	if err != nil {
+		return nil, err
+	}
+	layer := openCodeConfigLayer{Source: path, Scope: "global", Data: doc}
+	return readMCPServersOpenCodeResolution(openCodeConfigResolution{Layers: []openCodeConfigLayer{layer}}), nil
+}
+
 func readMCPServersOpenCodeResolution(resolution openCodeConfigResolution) []MCPServerEntry {
 	order := []string{}
 	configs := map[string]map[string]any{}
@@ -334,7 +350,7 @@ func stripOpenCodeJSONCComments(data []byte) []byte {
 		}
 		if ch == '/' && i+1 < len(data) && data[i+1] == '*' {
 			i += 2
-			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
+			for i+1 < len(data) && (data[i] != '*' || data[i+1] != '/') {
 				if data[i] == '\n' || data[i] == '\r' {
 					out = append(out, data[i])
 				}

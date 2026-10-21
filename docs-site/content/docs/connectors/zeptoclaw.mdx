@@ -65,7 +65,7 @@ The flags above explicitly set: connector, mode, and (optionally) rule pack. Eve
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
 | Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/observability/redaction#verify-policy). |
-| Verify after setup | on | `--no-verify` |
+| Check the result | `defenseclaw doctor` | none: setup no longer runs its own connectivity check |
 
 See [the full flag reference](/docs/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
 
@@ -137,8 +137,10 @@ defenseclaw setup zeptoclaw \
 ```
 
 Block MEDIUM and above, alert on LOW, and do not offer approval for findings
-that have already crossed the block threshold. Pair it with a reviewed
-first-party allow-list for additional containment.
+that have already crossed the block threshold. The policy also writes the
+matching [admission](/docs/policies/admission) settings, including
+`allow_list_bypass_scan: false`, so first-party skills and plugins are scanned
+too.
 
 </Tab>
 
@@ -186,6 +188,16 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 </Files>
 
 `safety.allow_private_endpoints` is set to `true` so the rewritten api_base (a 127.0.0.1 URL) is accepted.
+
+## Model limits
+
+ZeptoClaw 0.9.2 sends `max_tokens` on its OpenAI-style chat requests. The
+Bedrock `gpt-5.6-luna` model refuses that parameter (HTTP 400,
+`unsupported_parameter`) and accepts `max_completion_tokens`, so a ZeptoClaw
+agent cannot use that model through the Bedrock OpenAI route until ZeptoClaw
+sends the newer parameter. This is the model's and the agent's request shape,
+not a DefenseClaw block: pick a model the agent can call, such as one served
+through the OpenAI-compatible route that accepts `max_tokens`.
 
 ## Hook capabilities
 

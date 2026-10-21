@@ -17,7 +17,6 @@
 package config
 
 import (
-	"runtime"
 	"time"
 )
 
@@ -97,39 +96,15 @@ const NotificationsDefaultDedupWindow = 30 * time.Second
 // summary line at the minute boundary.
 const NotificationsDefaultMaxPerMinute = 12
 
-// DefaultNotificationsEnabled is the platform-conditional master
-// default for the notification dispatcher. macOS and native Windows both
-// provide an attended consumer desktop surface owned by the interactive user,
-// so fresh installs opt in there. Headless Linux and other GOOS values wait for
-// an explicit operator opt-in via `defenseclaw setup notifications on`.
-// Exposed as a package-level var so tests and the Python config helper can pin
-// the matrix without taking a build-tag dependency.
-var DefaultNotificationsEnabled = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
-
-// DefaultNotificationsConfig returns the recommended starting point
-// for fresh installs: master switch defaults to true on macOS and Windows and
-// false elsewhere (see DefaultNotificationsEnabled). Categories
-// favor signal over noise — a fresh install only notifies for
-// things that ACTUALLY happened (enforced block, real native ask).
-// BlockWouldBlock defaults to false; observe-mode "would have
-// blocked" / "would have asked" toasts are off by default and are
-// an explicit opt-in for operators tuning a strict policy. Sources
-// remain on so opting BlockWouldBlock back in still hits every
-// emission site without a second tuning pass.
-func DefaultNotificationsConfig() NotificationsConfig {
-	return NotificationsConfig{
-		Enabled:         DefaultNotificationsEnabled,
-		BlockEnforced:   true,
-		BlockWouldBlock: false,
-		HITLApproval:    true,
-		Sources: NotificationSourceFilter{
-			Hook:        true,
-			Guardrail:   true,
-			AssetPolicy: true,
-		},
-		DedupWindow:  NotificationsDefaultDedupWindow,
-		MaxPerMinute: NotificationsDefaultMaxPerMinute,
-	}
+// DefaultNotificationsEnabledFor is the master default of the notification
+// dispatcher on goos. macOS and native Windows both provide an attended
+// consumer desktop surface owned by the interactive user, so fresh installs
+// opt in there. Headless Linux and other GOOS values wait for an explicit
+// operator opt-in via `defenseclaw setup notifications on`. The loader takes
+// the target platform's value, not the loading host's: an offline bundle
+// signer digests the target's effective policy (GAP-0107).
+func DefaultNotificationsEnabledFor(goos string) bool {
+	return goos == "darwin" || goos == "windows"
 }
 
 // EffectiveDedupWindow returns DedupWindow when set, otherwise the

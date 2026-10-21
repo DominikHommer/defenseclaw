@@ -33,6 +33,7 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
+from defenseclaw.config_writer import ACTOR_PREFIX_CLI, current_actor
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.credentials import (
     CredentialSpec,
@@ -95,6 +96,24 @@ def keys_list(app: AppContext, as_json: bool, show_values: bool, missing_only: b
         _render_unregistered(app, statuses)
 
 
+def _emit_gateway_restart_hint(cfg, env_name: str) -> None:
+    """Say a running gateway needs a restart to see a changed ``.env`` value (GAP-0016).
+
+    The gateway reads ``.env`` once, at start, so a rotated judge, LLM or
+    destination key keeps its old value until the gateway restarts.
+    """
+    import os
+
+    from defenseclaw.process_liveness import pid_file_alive
+
+    if pid_file_alive(os.path.join(cfg.data_dir, "gateway.pid")):
+        ux.subhead(
+            f"The running gateway keeps the {env_name} it loaded at start; "
+            "apply the change with: defenseclaw-gateway restart",
+            indent="    ",
+        )
+
+
 def _gateway_token_names(cfg) -> set[str]:
     """Env names that hold DefenseClaw's own gateway auth token."""
     names = {"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"}
@@ -104,6 +123,20 @@ def _gateway_token_names(cfg) -> set[str]:
     return names
 
 
+def _gateway_token_name(cfg, name: str) -> str | None:
+    """Return the configured spelling of a gateway token environment name."""
+    from defenseclaw import platform_support
+
+    names = _gateway_token_names(cfg)
+    if platform_support.host_os() != "windows":
+        return name if name in names else None
+    configured = str(getattr(getattr(cfg, "gateway", None), "token_env", "") or "").strip()
+    for candidate in (configured, "DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
+        if candidate and candidate.casefold() == name.casefold():
+            return candidate
+    return None
+
+
 def required_removal_warning(cfg, env_name: str) -> str:
     """The line that says removing ``env_name`` breaks a feature in use (GAP-2254).
 
@@ -111,6 +144,26 @@ def required_removal_warning(cfg, env_name: str) -> str:
     marks such a key "● REQUIRED <feature>"; ``keys remove`` and the TUI
     confirm repeat that before the key is deleted.
     """
+    import yaml
+
+    from defenseclaw.config import config_path_for_data_dir
+
+    try:
+        with open(config_path_for_data_dir(cfg.data_dir), encoding="utf-8") as stream:
+            source = yaml.safe_load(stream) or {}
+        destinations = ((source.get("observability") or {}).get("destinations") or [])
+        for destination in destinations:
+            if isinstance(destination, dict) and env_name in (
+                destination.get("token_env"), destination.get("bearer_env")
+            ):
+                name = destination.get("name") or "this destination"
+                return (
+                    f"{env_name} is still used by observability destination {name}; removing it will stop "
+                    f"that destination until the key is restored. Remove the destination first with: "
+                    f"defenseclaw setup observability remove {name} --yes."
+                )
+    except (OSError, ValueError, AttributeError, yaml.YAMLError):
+        pass  # Best effort: removal still warns for credentials the registry marks required.
     try:
         statuses = classify(cfg)
     except Exception:  # noqa: BLE001 - a partial config must not block a remove.
@@ -145,6 +198,19 @@ def _render_unregistered(app: AppContext, statuses: list[CredentialStatus]) -> N
     click.echo(f"  {ux.dim('Remove one with: defenseclaw keys remove <ENV_NAME>')}")
 
 
+def _refuse_managed_secret_write(app: AppContext, action: str) -> None:
+    # A per-user dotenv cannot rotate a managed standalone credential.
+    from defenseclaw.enforce.asset_lists import ManagedDeviceError, is_managed_standalone
+
+    if is_managed_standalone(app.cfg):
+        stdin_option = " --from-stdin" if action == "set" else ""
+        raise ManagedDeviceError(
+            "This device uses the managed enterprise secret store. "
+            f"Ask an administrator to run defenseclaw-gateway enterprise secret {action} "
+            f"--name <configured-credential>{stdin_option}."
+        )
+
+
 @keys_cmd.command("set")
 @click.argument("env_name")
 @click.option("--value", "value", default=None, help="Value to store; prompts if omitted.")
@@ -163,6 +229,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
     """
     import os
 
+    _refuse_managed_secret_write(app, "set")
     if value_stdin and value is not None:
         raise click.UsageError("--value and --value-stdin are mutually exclusive")
     if value_stdin:
@@ -178,8 +245,14 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
     if not env_name:
         raise click.UsageError("env_name must be non-empty")
 
+    gateway_name = _gateway_token_name(app.cfg, env_name)
+    if gateway_name:
+        env_name = gateway_name
+
     spec = lookup(env_name, app.cfg)
-    if spec is None:
+    if gateway_name:
+        click.echo("  DefenseClaw gateway authentication token (managed by DefenseClaw).")
+    elif spec is None:
         ux.warn(f"{env_name} is not in the DefenseClaw registry.")
         ux.subhead(
             "Saving anyway — it will be available via os.environ for custom setups.",
@@ -214,13 +287,20 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
         except OSError:
             had = False
 
+    if gateway_name:
+        from defenseclaw.logger import keep_running_gateway_token
+
+        # The running gateway accepts only the token it loaded until it
+        # restarts; the audit event below sent the new one, got 401 and the
+        # command failed after the key was saved (GAP-0490).
+        keep_running_gateway_token(app.logger, app.cfg.data_dir, app.cfg.gateway.resolved_token(), value)
     _save_secret_to_dotenv(env_name, value, app.cfg.data_dir)
     if app.logger:
         from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
         try:
             app.logger.log_activity(
-                actor="cli:operator",
+                actor=current_actor(ACTOR_PREFIX_CLI),
                 action=ACTION_CONFIG_UPDATE,
                 target_type="config",
                 target_id=f"dotenv:{env_name}",
@@ -243,8 +323,9 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
                 err=True,
             )
     # One path style: keys remove prints os.path.join too (GAP-1297).
-    ux.ok(f"Saved {env_name} = {mask(value)} to {dotenv_path}", indent="  ")
+    ux.ok(f"Saved {env_name} to {dotenv_path} (value hidden)", indent="  ")
     _emit_bound_endpoint_hint(spec, app.cfg, indent="    ")
+    _emit_gateway_restart_hint(app.cfg, env_name)
 
 
 @keys_cmd.command("remove")
@@ -259,15 +340,17 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
     """
     import os
 
+    _refuse_managed_secret_write(app, "remove")
     env_name = env_name.strip()
     if not env_name:
         raise click.UsageError("env_name must be non-empty")
+    env_name = _gateway_token_name(app.cfg, env_name) or env_name
 
     dotenv_path = os.path.join(app.cfg.data_dir, ".env")
     if env_name not in _dotenv_names(dotenv_path):
         ux.warn(f"{env_name} is not stored in {dotenv_path} — nothing removed.")
         return
-    if env_name in _gateway_token_names(app.cfg):
+    if _gateway_token_name(app.cfg, env_name):
         raise click.ClickException(
             f"{env_name} is DefenseClaw's own gateway auth token; removing it would cut the hooks, "
             "the CLI and the TUI off from the gateway. It is not removed. "
@@ -297,7 +380,7 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
 
         try:
             app.logger.log_activity(
-                actor="cli:operator",
+                actor=current_actor(ACTOR_PREFIX_CLI),
                 action=ACTION_CONFIG_UPDATE,
                 target_type="config",
                 target_id=f"dotenv:{env_name}",
@@ -311,6 +394,7 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
                 err=True,
             )
     ux.ok(f"Removed {env_name} from {dotenv_path}", indent="  ")
+    _emit_gateway_restart_hint(app.cfg, env_name)
     if shell_value and not from_dotenv:
         ux.subhead(f"{env_name} is still exported in this shell; unset it there too.", indent="    ")
 
@@ -363,6 +447,7 @@ def keys_fill_missing(app: AppContext, yes: bool) -> None:
     """Interactively prompt for every REQUIRED-but-unset credential."""
     from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
 
+    _refuse_managed_secret_write(app, "set")
     statuses = [s for s in classify(app.cfg) if s.missing]
     if not statuses:
         ux.ok("No missing required credentials — you're all set.")

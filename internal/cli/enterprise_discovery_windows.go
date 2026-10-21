@@ -12,20 +12,69 @@
 
 package cli
 
-import "github.com/spf13/cobra"
+import (
+	"strings"
+
+	"github.com/spf13/cobra"
+	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+)
 
 func init() {
 	enterpriseWindowsCmd.AddCommand(newWindowsDiscoveryCommand())
+	enterpriseWindowsCmd.AddCommand(newEnterpriseIdentityViewCommands("windows")...)
 }
 
 // pinEnterpriseDiscoveryEnv points an elevated administrator's (or
 // LocalSystem's) discovery view at the standalone managed deployment; a
 // standard account cannot read its config or gateway token.
 func pinEnterpriseDiscoveryEnv() error {
+	if runtimeCommand != nil && runtimeCommand.Name() != "discovery" {
+		// An identity view (enterprise_identity_views.go) or a sandbox view
+		// (enterprise_sandbox_views.go).
+		what, view, adminArgs := windowsEnterpriseAdminViewCommand(runtimeCommand)
+		return pinManagedAdministratorEnvironment(view, func() string {
+			return windowsManagedStandardUserViewAnswer(what, adminArgs)
+		})
+	}
 	return pinManagedAdministratorEnvironment("enterprise windows discovery", func() string {
 		return windowsManagedStandardUserViewAnswer("the AI Discovery inventory",
 			"enterprise windows discovery --user "+managedHostCurrentAccountName())
 	})
+}
+
+// windowsEnterpriseAdminViewCommand names an administrator view for a
+// standard account's refusal: what it shows, its command path below the
+// root, and the arguments an administrator runs it with. The path is the
+// command's own: "enterprise windows " + its leaf named `enterprise windows
+// list`, which does not exist, for `enterprise windows sandbox list`
+// (#1201). A --user the caller gave is kept.
+func windowsEnterpriseAdminViewCommand(cmd *cobra.Command) (what, view, adminArgs string) {
+	view = strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()))
+	what = "the identity views"
+	if parent := cmd.Parent(); parent != nil && parent.Name() == "sandbox" {
+		what = "the sandbox registrations"
+	}
+	adminArgs = view
+	if flag := cmd.Flags().Lookup("user"); flag != nil && flag.Changed {
+		if user := strings.TrimSpace(flag.Value.String()); user != "" {
+			adminArgs += " --user " + windowsPowerShellArgument(user)
+		}
+	}
+	return what, view, adminArgs
+}
+
+// windowsPowerShellArgument quotes value for the PowerShell command a hint
+// asks the administrator to paste, when it holds a space or a character
+// PowerShell would read as syntax: the --user value was pasted bare
+// (rel-1-0-2 GAP-0086).
+func windowsPowerShellArgument(value string) string {
+	if !strings.ContainsAny(value, " \t'\"`$;&|(){}@,<>#") {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 // newWindowsDiscoveryCommand is `enterprise windows discovery`, the Windows
@@ -58,7 +107,36 @@ deployment does not run the skill or MCP scanners.`,
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&user, "user", "", "list one account's signals (account name or SID)")
+	addWindowsDiscoveryUserFlag(cmd, &user)
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print every record as JSON")
 	return cmd
+}
+
+// platformDiscoveryAccountIDs resolves a qualified --user (DOMAIN\name,
+// .\name, COMPUTER\name, a UPN) to the SID the LSA names it, as
+// profile-explain and policy show do.
+func platformDiscoveryAccountIDs(user string) []string {
+	user = strings.TrimSpace(user)
+	if !useridentity.QualifiedAccountName(user) {
+		return nil
+	}
+	sid, _, err := gateway.LookupWindowsAccount(user)
+	if err != nil || sid == "" {
+		return nil
+	}
+	return []string{sid}
+}
+
+// platformDiscoveryAccountName is DOMAIN\name of sid as the LSA names it
+// (COMPUTER\name for a local account), or "".
+func platformDiscoveryAccountName(sid string) string {
+	parsed, err := windows.StringToSid(sid)
+	if err != nil {
+		return ""
+	}
+	account, domain, _, err := parsed.LookupAccount("")
+	if err != nil || strings.TrimSpace(account) == "" || strings.TrimSpace(domain) == "" {
+		return ""
+	}
+	return strings.TrimSpace(domain) + `\` + strings.TrimSpace(account)
 }

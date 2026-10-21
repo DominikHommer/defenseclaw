@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -196,6 +197,36 @@ exit $LASTEXITCODE
     assert not (tmp_path / "home").exists()
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    ("argument", "message"),
+    [("-Frobnicate", "Unknown option: -Frobnicate"), ("-Connector=bogus", "Invalid -Connector 'bogus'")],
+)
+def test_an_unknown_argument_stops_with_exit_2(tmp_path: Path, argument: str, message: str) -> None:
+    # GAP-0361: an unknown argument (a typo, or the -Name=value form) was
+    # ignored with a warning and the install went on without it.
+    env = {
+        **os.environ,
+        "USERPROFILE": str(tmp_path),
+        "LOCALAPPDATA": str(tmp_path / "AppData" / "Local"),
+        "APPDATA": str(tmp_path / "AppData" / "Roaming"),
+        "DEFENSECLAW_HOME": str(tmp_path / "home"),
+    }
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_PS1), argument],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        env=env,
+        check=False,
+    )
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    assert message in completed.stdout + completed.stderr
+    assert not (tmp_path / "home").exists()
+
+
 def test_hook_state_matches_what_the_hook_reads() -> None:
     # internal/cli/hook_trusted_state_windows.go accepts a PowerShell install's
     # state only with these values; anything else makes the hook fall back to
@@ -206,7 +237,7 @@ def test_hook_state_matches_what_the_hook_reads() -> None:
         assert field in body.group(1)
     for field in ("install_root = $root", "command_dir = $root", "data_root = "):
         assert field in body.group(1)
-    go = (ROOT / "internal" / "cli" / "hook_trusted_state_windows.go").read_text()
+    go = (ROOT / "internal" / "cli" / "hook_trusted_state_windows.go").read_text(encoding="utf-8")
     assert 'powerShellHookStateName = "defenseclaw-hook-state.json"' in go
     assert re.search(r'\$HookState = "defenseclaw-hook-state.json"', _text())
 
@@ -247,7 +278,12 @@ def test_the_suggested_cleanup_removes_the_read_only_key_copy() -> None:
     # read-only redaction key copy refuses; rd /s /q deletes it through the folder.
     text = _text()
     assert "Remove-Item -Recurse -Force '" not in text
-    assert text.count('cmd /c rd /s /q `"') == 3
+    assert text.count('cmd /c rd /s /q `"') == 2
+    # A failed install can own unresolved external connector transactions;
+    # its troubleshooting copy must not be advertised as safe to delete.
+    failed = _ps1_function("Restore-Snapshot")
+    assert "keep this copy until any connector recovery is complete" in failed
+    assert "cmd /c rd /s /q" not in failed
     # The installer's own cleanup deletes through .NET first, which is also much
     # faster than Remove-Item in Windows PowerShell 5.1 (GAP-1600).
     body = text[text.index("function Remove-Tree") : text.index("function New-InstallDirectory")]
@@ -305,7 +341,9 @@ def test_the_locked_package_install_is_retried_with_backoff() -> None:
 
 def _ps1_function(name: str) -> str:
     text = _text()
-    start = text.index(f"function {name} ")
+    match = re.search(rf"^function {re.escape(name)}[ (]", text, re.M)
+    assert match is not None, name
+    start = match.start()
     return text[start : text.index("\n}\n", start) + 3]
 
 
@@ -533,6 +571,36 @@ Restore-BinDir '{slot}'
         assert list(bin_dir.iterdir()) == []
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_file_robocopy_refuses_is_copied_or_named_with_a_next_step(tmp_path: Path) -> None:
+    # GAP-1048: robocopy exit 8 on the audit.db a failed 0.8.10 Setup left
+    # stopped the upgrade with no cause and no next step.
+    source = tmp_path / "data" / "audit.db"
+    source.parent.mkdir()
+    source.write_text("db", encoding="utf-8")
+    slot = tmp_path / "slot"
+    slot.mkdir()
+    script = f"""
+$ErrorActionPreference = 'Stop'
+function Invoke-Robocopy([string[]]$Arguments) {{
+    [pscustomobject]@{{ Code = 8; Error = 'ERROR 5 (0x00000005) Copying NTFS Security to Destination File Access is denied.' }}
+}}
+{_ps1_function("Copy-Kept")}
+Copy-Kept '{source}' '{slot}'
+try {{ Copy-Kept '{source}' '{tmp_path / "missing"}' }} catch {{ Write-Output $_.Exception.Message }}
+"""
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert (slot / "audit.db").read_text(encoding="utf-8") == "db"
+    assert "ERROR 5" in completed.stdout and "then run the installer again" in completed.stdout, completed.stdout
+
+
 def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:
     # GAP-1839/GAP-1841: the 873 MB .staging left no room for the restore or
     # for the old gateway's restart.
@@ -558,7 +626,7 @@ def test_a_first_install_on_a_full_disk_says_so_and_keeps_no_failed_copy() -> No
     assert "$free -ge 300MB" in full and "then run the installer again" in full
     restore = _ps1_function("Restore-Snapshot")
     first = restore[restore.index("if (-not $PrevVersion) {") :]
-    assert first.index("Remove-Tree $failed") < first.index("return") < first.index("was kept in $failed")
+    assert first.index("Remove-FailedInstall $failed") < first.index("return") < first.index("was kept in $failed")
     assert 'if (-not $PrevVersion) { return "Nothing was left installed." }' in _ps1_function("Get-RestoredNote")
 
 
@@ -577,8 +645,8 @@ def test_a_restored_setup_install_keeps_no_failed_copy_or_uv_cache_in_its_data_d
     # GAP-1839: the failed 1.0 copy and the uv cache stayed in Setup's data
     # dir, and Setup's gateway, which walks it all before it starts, then
     # timed out on every start.
-    clear = _text()[_text().index("function Clear-SetupDataDir(") :][:600]
-    assert "Remove-Tree $Failed" in clear
+    clear = _ps1_function("Clear-SetupDataDir")
+    assert "Remove-FailedInstall $Failed" in clear
     assert 'Remove-Tree (Join-Path $DataDir ".uv")' in clear
     restore = _ps1_function("Restore-Snapshot")
     assert restore.index("Restore-Slot $Snap") < restore.index("Clear-SetupDataDir $failed") < restore.index("Restart-Old")
@@ -599,6 +667,8 @@ def test_the_uv_folder_is_protected_before_uv_runs_and_before_a_rollback_starts_
     uv_env = install.index('$env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\\python"')
     assert uv_env < install.index("Protect-UvDirectory -Create") < install.index("$Uv = Install-Uv")
     rollback = _ps1_function("Invoke-Rollback")
+    # GAP-1284: this install's gateway converts its hook entries before the older one is restored.
+    assert rollback.index("if ($canConvertHooks)") < rollback.index("Convert-HooksForRollback") < rollback.index("Switch-WithPrevious")
     assert (
         rollback.index("Switch-WithPrevious")
         < rollback.index("Protect-UvDirectory")
@@ -638,6 +708,54 @@ def test_a_rollback_to_1_0_0_starts_its_gateway_on_a_large_wal_audit_db(tmp_path
     assert sh_start.index('version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi') < sh_start.index(
         '"${BIN_DIR}/defenseclaw-gateway" start'
     )
+
+
+def test_a_rollback_to_0_x_checks_the_saved_stores_and_undoes_itself_when_0_x_stays_down(tmp_path: Path) -> None:
+    # GAP-1388: a rollback restored a damaged 0.8.10 audit.db, its gateway
+    # could not start, and the agents were left unguarded. Both installers
+    # check the saved stores with the same code, without writing beside them.
+    import sqlite3
+    import sys
+
+    ps1 = re.search(r"^\$RollbackDbCheckPy = @'\n(.*?)'@$", _text(), re.M | re.S)
+    sh_text = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    sh = re.search(r"^ROLLBACK_DB_CHECK_PY='(.*?)'$", sh_text, re.M | re.S)
+    assert ps1 and sh and ps1.group(1) == sh.group(1)
+    good, bad = tmp_path / "good.db", tmp_path / "audit.db"
+    stores = {}
+    for path in (good, bad):
+        stores[path] = sqlite3.connect(path)
+        stores[path].execute("PRAGMA journal_mode=WAL")
+        stores[path].execute("CREATE TABLE audit_events (detail TEXT)")
+        stores[path].executemany("INSERT INTO audit_events VALUES (?)", [("x" * 500,)] * 2000)
+        stores[path].commit()
+    stores[bad].close()
+    with bad.open("r+b") as handle:
+        handle.seek(4096 * 2)
+        handle.write(b"\xff" * 4096 * 3)
+    # good.db is still open, with its -wal: the check reads a copy of it.
+    before = sorted(p.name for p in tmp_path.iterdir())
+    found = subprocess.run(
+        [sys.executable, "-I", "-c", sh.group(1), str(good), str(bad), str(tmp_path / "missing.db")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    after = sorted(p.name for p in tmp_path.iterdir())
+    stores[good].close()
+    assert found.stdout.splitlines() == [str(bad)], found.stdout + found.stderr
+    assert after == before
+    rollback = _ps1_function("Invoke-Rollback")
+    assert (
+        rollback.index("Test-RollbackData $backTo")
+        < rollback.index("Stop-Gateway")
+        < rollback.index("Switch-WithPrevious")
+        < rollback.index("Move-DamagedAuditStore $backTo")
+        < rollback.index("if ($startAfter -and (Start-Gateway)")
+        < rollback.index("if ($toLegacy) { return Undo-Rollback")
+    )
+    undo = _ps1_function("Undo-Rollback")
+    assert undo.index("Switch-WithPrevious $BackTo") < undo.index("Start-Gateway") < undo.rindex("return 1")
 
 
 def test_install_folders_set_only_the_acl_part_that_changed() -> None:
@@ -720,6 +838,331 @@ def test_an_interrupted_first_install_leaves_no_new_files_or_failed_copy() -> No
     assert first < resume.index("$failed = Restore-Slot $slot")
     assert "An earlier first install was interrupted; removing what it had copied" in resume
     assert resume.index("$failed = Restore-Slot $slot") < resume.index(
-        "if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-Tree $failed } }"
+        "if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-FailedInstall $failed } }"
     )
     assert 'Write-Info "Nothing was left installed"' in resume
+
+
+# ── 1.0.2 (FG-01) ───────────────────────────────────────────────────────────
+
+
+def _run_powershell(script: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configured(tmp_path: Path) -> None:
+    # rel-1-0-1:GAP-0009 on Windows: the newer gateway of the two removes the
+    # DefenseClaw hook entries of a connector the live install does not
+    # configure; an older gateway prints its connector help instead.
+    calls = tmp_path / "calls.txt"
+    gateways = []
+    for name, usage in (("older", "defenseclaw-gateway connector [command]"), ("newer", "defenseclaw-gateway connector prune-orphans [flags]")):
+        body = (
+            f"param()\nAdd-Content -LiteralPath '{calls}' -Value ('{name} ' + ($args -join ' '))\n"
+            f"if ($args -contains '--help') {{ Write-Output 'Usage:'; Write-Output '  {usage}' }}\nexit 0\n"
+        )
+        path = tmp_path / f"{name}.ps1"
+        path.write_text(body, encoding="utf-8")
+        gateways.append(path)
+    data_dir = tmp_path / "dc"
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data_dir}'\nfunction Write-Warn([string]$m) {{ 'warn: ' + $m }}\n"
+        f"{_ps1_function('Invoke-Native')}\n{_ps1_function('Get-NativeOutput')}\n{_ps1_function('Invoke-PruneOrphanedHooks')}\n"
+        f"Invoke-PruneOrphanedHooks @('{tmp_path / 'missing.exe'}', '{gateways[0]}', '{gateways[1]}')\n"
+    )
+    completed = _run_powershell(script)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "older connector prune-orphans --help",
+        "newer connector prune-orphans --help",
+        f"newer connector prune-orphans --data-dir {data_dir}",
+    ]
+
+
+def test_windows_rollback_and_upgrade_run_the_hook_entry_prune() -> None:
+    # rel-1-0-1:GAP-0009: after the swap of a 1.x rollback (live gateway, then
+    # the one just left in previous\bin), and in the upgrade after the migration.
+    rollback = _ps1_function("Invoke-Rollback")
+    prune = (
+        'Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"), '
+        '(Join-Path $Previous "bin\\defenseclaw-gateway.exe"))'
+    )
+    assert rollback.index("Switch-WithPrevious $current") < rollback.index(prune)
+    assert "if (-not $toLegacy) {\n        " + prune in rollback
+    install = _ps1_function("Install-New")
+    assert install.index('"migrate"') < install.index('Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"))')
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_an_unreadable_file_is_named_once_without_the_raw_hash_error(tmp_path: Path) -> None:
+    # rel-1-0-1:GAP-0007: a rollback over an unreadable previous gateway printed
+    # PowerShell's ReadError record and "The property 'Hash' cannot be found".
+    missing = tmp_path / "previous" / "bin" / "defenseclaw-gateway.exe"
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"{_ps1_function('Get-Sha256')}\n"
+        f"try {{ Get-Sha256 '{missing}' }} catch {{ 'caught: ' + $_.Exception.Message }}\n"
+    )
+    completed = _run_powershell(script)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    out = completed.stdout + completed.stderr
+    assert f"caught: Could not read {missing}; restore read access to it, then try again" in out
+    assert "Hash" not in out and "CategoryInfo" not in out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("arguments", [["-Local="], ["-Local", ""]])
+def test_an_empty_local_stops_with_exit_2(tmp_path: Path, arguments: list[str]) -> None:
+    # #1096/GAP-1336: an empty -Local was taken as no -Local, so the install
+    # went online instead of using the assets folder that was meant.
+    env = {
+        **os.environ,
+        "USERPROFILE": str(tmp_path),
+        "LOCALAPPDATA": str(tmp_path / "AppData" / "Local"),
+        "APPDATA": str(tmp_path / "AppData" / "Roaming"),
+        "DEFENSECLAW_HOME": str(tmp_path / "home"),
+    }
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_PS1), *arguments],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        env=env,
+        check=False,
+    )
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    assert "-Local needs the folder that holds the release assets" in completed.stdout + completed.stderr
+    assert not (tmp_path / "home").exists()
+
+
+# ── 1.0.2 (DELTA-11): the rollback moves an audit store as one unit ─────────
+
+_POWERSHELLS = sorted({p for p in (shutil.which("powershell.exe"), shutil.which("pwsh.exe") or shutil.which("pwsh")) if p})
+
+
+def _run_audit_store_case(shell: str, tmp_path: Path, call: str, fail: str = "", fail_back: str = "") -> str:
+    # The functions of the shipped installer, with Move-Path made to fail at
+    # one step (the injection of the wave's windows-audit-injection.ps1).
+    move_path = _ps1_function("Move-Path").replace("function Move-Path(", "function Move-PathReal(", 1)
+    script = tmp_path / "case.ps1"
+    script.write_text(
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{tmp_path / 'live'}'\n$Previous = '{tmp_path / 'previous'}'\n$BinDir = '{tmp_path / 'bin'}'\n"
+        "$Run = [pscustomobject]@{ Log = 'install.log' }\n"
+        f"$fail = '{fail}'\n$failBack = '{fail_back}'\n"
+        + move_path
+        + "function Move-Path([string]$From, [string]$To) {\n"
+        "    if ($fail -and $From -eq $fail) { throw 'injected move failure' }\n"
+        "    if ($failBack -and $To -eq $failBack) { throw 'injected move-back failure' }\n"
+        "    Move-PathReal $From $To 0\n}\n"
+        "function Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
+        "function Write-Info([string]$m) { Write-Host \"info: $m\" }\n"
+        "function Write-Ok([string]$m) { Write-Host \"ok: $m\" }\n"
+        "function Write-Err([string]$m) { Write-Host \"err: $m\" }\n"
+        "function Stop-Gateway { return $true }\nfunction Switch-WithPrevious { return 0 }\nfunction Start-Gateway { return 0 }\n"
+        + _ps1_function("Move-AuditStore")
+        + _ps1_function("Move-DamagedAuditStore")
+        + _ps1_function("Undo-Rollback")
+        + f"try {{ $r = {call}; Write-Host \"result: $r\" }} catch {{ Write-Host \"thrown: $($_.Exception.Message)\" }}\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    return completed.stdout
+
+
+def _audit_store(path: Path, label: str) -> dict[str, str]:
+    store = {"": f"{label} db", "-wal": f"{label} wal", "-shm": f"{label} shm"}
+    for suffix, body in store.items():
+        Path(f"{path}{suffix}").write_text(body, encoding="utf-8")
+    return store
+
+
+def _assert_store_at(path: Path, store: dict[str, str]) -> None:
+    for suffix, body in store.items():
+        assert Path(f"{path}{suffix}").read_text(encoding="utf-8") == body, f"{path}{suffix}"
+
+
+@pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
+@pytest.mark.parametrize("shell", _POWERSHELLS)
+@pytest.mark.parametrize("failing", ["", "audit.db", "audit.db-wal", "audit.db-shm"])
+def test_the_damaged_audit_store_moves_aside_as_one_unit(tmp_path: Path, shell: str, failing: str) -> None:
+    # rel-1-0-2:GAP-0491: Move-DamagedAuditStore moved audit.db-wal first, and
+    # a database that then did not move stayed behind without its WAL.
+    live = tmp_path / "live"
+    live.mkdir()
+    store = _audit_store(live / "audit.db", "saved")
+    out = _run_audit_store_case(shell, tmp_path, "Move-DamagedAuditStore '0.8.10'", str(live / failing) if failing else "")
+    aside = sorted(live.glob("audit.db.corrupt-*"))
+    if not failing:
+        assert "result: " + str(live / "audit.db.corrupt-") in out, out
+        assert "warn: The saved 0.8.10 audit store failed SQLite's integrity check" in out
+        _assert_store_at(Path(str(aside[0])), store)
+        assert len(aside) == 3 and not (live / "audit.db").exists()
+        return
+    assert "thrown: injected move failure" in out, out
+    _assert_store_at(live / "audit.db", store)
+    assert aside == []
+
+
+@pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
+@pytest.mark.parametrize("shell", _POWERSHELLS)
+def test_a_store_that_cannot_move_back_is_named(tmp_path: Path, shell: str) -> None:
+    live = tmp_path / "live"
+    live.mkdir()
+    _audit_store(live / "audit.db", "saved")
+    out = _run_audit_store_case(
+        shell, tmp_path, "Move-DamagedAuditStore '0.8.10'", str(live / "audit.db-shm"), str(live / "audit.db")
+    )
+    assert "thrown: injected move failure; " in out and ".corrupt-" in out and f"could not be moved back to {live / 'audit.db'}" in out, out
+    # The WAL went back; only the database that refused is aside, and named.
+    assert (live / "audit.db-wal").read_text(encoding="utf-8") == "saved wal"
+    aside = list(live.glob("audit.db.corrupt-*"))
+    assert len(aside) == 1 and aside[0].read_text(encoding="utf-8") == "saved db", aside
+    assert (live / "audit.db-shm").read_text(encoding="utf-8") == "saved shm"
+
+
+@pytest.mark.skipif(sys.platform != "win32" or not _POWERSHELLS, reason="Windows paths (previous\\data)")
+@pytest.mark.parametrize("shell", _POWERSHELLS)
+@pytest.mark.parametrize(
+    "failing",
+    ["", "audit.db", "audit.db-wal", "audit.db.corrupt-fixture", "audit.db.corrupt-fixture-wal", "audit.db.corrupt-fixture-shm"],
+)
+def test_an_undone_legacy_rollback_puts_the_saved_store_back_over_a_new_one(tmp_path: Path, shell: str, failing: str) -> None:
+    # rel-1-0-2:GAP-0492: the failed start of the 0.x gateway made a new, empty
+    # audit.db, and the undo left it there while the saved store and its WAL
+    # stayed aside, so the next rollback used the empty one without a word.
+    data = tmp_path / "previous" / "data"
+    data.mkdir(parents=True)
+    (tmp_path / "live").mkdir()
+    kept = data / "audit.db.corrupt-fixture"
+    saved = _audit_store(kept, "saved")
+    Path(f"{data / 'audit.db'}").write_text("", encoding="utf-8")
+    Path(f"{data / 'audit.db'}-wal").write_text("new wal", encoding="utf-8")
+    new = {"": "", "-wal": "new wal"}
+    out = _run_audit_store_case(
+        shell,
+        tmp_path,
+        f"Undo-Rollback 'The gateway of DefenseClaw 0.8.10 did not start' '1.0.2' '0.8.10' 'true' '{tmp_path / 'live' / kept.name}'",
+        str(data / failing) if failing else "",
+    )
+    assert "result: 1" in out, out
+    assert "ok: DefenseClaw 1.0.2 is back" in out
+    fresh = sorted(p for p in data.glob("audit.db.failed-start-*") if not p.name.endswith(("-wal", "-shm")))
+    if not failing:
+        _assert_store_at(data / "audit.db", saved)
+        assert len(fresh) == 1
+        _assert_store_at(fresh[0], new)
+        assert not list(data.glob("audit.db.corrupt-*")) and "is still" not in out
+        return
+    # Nothing is mixed: each store is whole at one place, and the warning says
+    # where the saved one is.
+    _assert_store_at(kept, saved)
+    assert f"warn: The saved 0.8.10 audit store is still {kept}" in out, out
+    if failing.startswith("audit.db.corrupt-"):
+        assert not (data / "audit.db").exists() and not Path(f"{data / 'audit.db'}-wal").exists()
+        _assert_store_at(fresh[0], new)
+    else:
+        _assert_store_at(data / "audit.db", new)
+        assert fresh == []
+
+
+# ── 1.0.3 (B-01, GAP-0196): the new hook answers during the install ─────────
+
+
+def test_the_new_hook_goes_in_before_the_data_copy() -> None:
+    # GAP-0196: the 1.0.2 hook answered the whole data copy and environment
+    # build with the operator-stop notice and cold starts. The new hook goes
+    # in once the rollback copy holds the old one, before the slow copies.
+    save = _ps1_function("Save-Snapshot")
+    order = [
+        'Copy-BinDir (Join-Path $Snap "bin")',
+        "Install-HookFirst $Snap",
+        "foreach ($entry in $entries) { Copy-Kept",
+        'Move-Path $Venv (Join-Path $Snap "venv")',
+        'Join-Path $Snap "COMPLETE"',
+    ]
+    positions = [save.index(step) for step in order]
+    assert positions == sorted(positions), save
+    first = _ps1_function("Install-HookFirst")
+    assert first.index('(Join-Path $Slot "HOOK_FIRST")') < first.index("Install-File $staged $live")
+    # An unfinished snapshot puts the old hook back before anything else.
+    undo = _ps1_function("Undo-Snapshot")
+    assert undo.index("Undo-HookFirst $Slot") < undo.index("Move-Path")
+    # A finished one is restored with the rest of the bin folder.
+    assert 'Restore-BinDir (Join-Path $Slot "bin")' in _ps1_function("Restore-Slot")
+
+
+@pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
+@pytest.mark.parametrize("shell", _POWERSHELLS)
+@pytest.mark.parametrize("case", ["upgrade", "first-install", "interrupted-before-marker"])
+def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path, shell: str, case: str) -> None:
+    bin_dir, staging, slot = tmp_path / "bin", tmp_path / "staging", tmp_path / "slot"
+    (staging / "bin").mkdir(parents=True)
+    (staging / "bin" / "defenseclaw-hook.exe").write_text("new", encoding="utf-8")
+    if case != "first-install":
+        bin_dir.mkdir()
+        (bin_dir / "defenseclaw-hook.exe").write_text("old", encoding="utf-8")
+    steps = (
+        "Copy-BinDir (Join-Path $Slot bin); Undo-HookFirst $Slot"
+        if case == "interrupted-before-marker"
+        else "Copy-BinDir (Join-Path $Slot bin); Install-HookFirst $Slot; Write-Host \"after: $(Get-Content -Raw (Join-Path $BinDir 'defenseclaw-hook.exe') -ErrorAction SilentlyContinue)\"; Undo-HookFirst $Slot"
+    )
+    script = tmp_path / "case.ps1"
+    script.write_text(
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$BinDir = '{bin_dir}'\n$Staging = '{staging}'\n$Slot = '{slot}'\n"
+        "$ManagedFiles = @('defenseclaw-hook.exe')\n"
+        "function Install-File([string]$From, [string]$To) { Copy-Item -LiteralPath $From -Destination $To -Force }\n"
+        "function Remove-Aside([string]$Path) { Remove-Item -LiteralPath $Path -Force }\n"
+        + _bin_dir_functions()
+        + _ps1_function("Install-HookFirst")
+        + _ps1_function("Undo-HookFirst")
+        + steps
+        + "\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    live = bin_dir / "defenseclaw-hook.exe"
+    if case == "first-install":
+        # Nothing ran a hook before: nothing to swap, no marker, no hook yet.
+        assert not live.exists() and not (slot / "HOOK_FIRST").exists(), out
+        return
+    if case == "upgrade":
+        assert "after: new" in out, out
+        assert (slot / "HOOK_FIRST").exists()
+        assert (slot / "bin" / "defenseclaw-hook.exe").read_text(encoding="utf-8") == "old"
+    else:
+        assert not (slot / "HOOK_FIRST").exists()
+    # Undo leaves the old hook live.
+    assert live.read_text(encoding="utf-8").strip() == "old", out

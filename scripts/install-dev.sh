@@ -31,6 +31,8 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 readonly MIN_GO_VERSION="1.26.4"
+# Same pin as GOLANGCI_LINT_VERSION in the Makefile (#1228).
+readonly GOLANGCI_LINT_VERSION="v2.14.0"
 readonly MIN_PYTHON_VERSION="3.10"
 readonly MAX_PYTHON_VERSION="3.13"
 readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
@@ -496,12 +498,17 @@ install_go_gateway() {
 install_dev_tools() {
     log_step "Installing Dev Tools"
     
-    # golangci-lint
+    # golangci-lint (`make go-lint` runs the pinned version itself; this copy
+    # is for editors and manual runs)
+    local lint_version=""
     if command_exists golangci-lint; then
-        log_success "golangci-lint already installed"
+        lint_version="$(extract_version "$(golangci-lint --version 2>/dev/null)" || true)"
+    fi
+    if [[ "v${lint_version}" == "${GOLANGCI_LINT_VERSION}" ]]; then
+        log_success "golangci-lint ${GOLANGCI_LINT_VERSION} already installed"
     else
-        log_info "Installing golangci-lint..."
-        go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.0
+        log_info "Installing golangci-lint ${GOLANGCI_LINT_VERSION}..."
+        go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
         if command_exists golangci-lint; then
             log_success "golangci-lint installed"
         else
@@ -643,7 +650,7 @@ main() {
                 echo "  --skip-install          Build only, don't install to ${INSTALL_DIR}"
                 echo "  --check                 Check dependencies only, don't install anything"
                 echo "  --yes, -y               Skip confirmation prompts"
-                echo "  --quickstart            Run 'defenseclaw quickstart --non-interactive' post-install"
+                echo "  --quickstart            Run 'defenseclaw quickstart' post-install"
                 echo "  --quickstart-mode M     Pass --mode M to quickstart (observe|action; implies --quickstart)"
                 echo "  --help, -h              Show this help message"
                 exit 0
@@ -714,7 +721,7 @@ main() {
         local dc_bin="${VENV_DIR}/bin/defenseclaw"
         if [[ ! -x "${dc_bin}" ]]; then
             log_warn "CLI binary not found at ${dc_bin} — skipping quickstart"
-        elif "${dc_bin}" quickstart --non-interactive --yes --mode "${quickstart_mode}"; then
+        elif "${dc_bin}" quickstart --mode "${quickstart_mode}"; then
             log_success "Quickstart completed"
         else
             log_warn "Quickstart reported errors — run 'defenseclaw doctor' to investigate"

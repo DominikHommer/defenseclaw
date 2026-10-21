@@ -20,6 +20,58 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
+func TestIsInteractiveUserSIDSupportsEntraAndRejectsServicePrincipals(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sid  string
+		want bool
+	}{
+		{name: "local or domain user", sid: "S-1-5-21-1000-2000-3000-1001", want: true},
+		{name: "Microsoft Entra ID user", sid: "S-1-12-1-1111111111-2222222222-3333333333-4000000000", want: true},
+		{name: "truncated Microsoft Entra ID user", sid: "S-1-12-1-1111111111-2222222222-3333333333"},
+		{name: "LocalSystem", sid: "S-1-5-18"},
+		{name: "LocalService", sid: "S-1-5-19"},
+		{name: "NetworkService", sid: "S-1-5-20"},
+		{name: "NT SERVICE", sid: "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isInteractiveUserSID(tc.sid); got != tc.want {
+				t.Fatalf("isInteractiveUserSID(%q) = %t, want %t", tc.sid, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWindowsProfileLookupFailureSkipsStandaloneOwner(t *testing.T) {
+	previous := windowsProfileAccountLookup
+	windowsProfileAccountLookup = func(*windows.SID) (string, string, error) {
+		return "", "", errors.New("directory lookup unavailable")
+	}
+	t.Cleanup(func() { windowsProfileAccountLookup = previous })
+
+	sid := "S-1-5-21-1-2-3-1001"
+	home := filepath.Join(t.TempDir(), "alice")
+	owner, ok := windowsDiscoveryProfileOwner(sid, home, true)
+	owners := []discoveryHomeOwner{}
+	if ok {
+		owners = append(owners, owner)
+	}
+	opts := AIDiscoveryOptions{ExcludeUsers: []string{`AD\alice`}}
+	opts.applyPlatformHomeOwners(owners)
+	svc := &ContinuousDiscoveryService{opts: opts}
+	if len(opts.HomeDirs) != 0 {
+		t.Errorf("qualified exclusion missed unresolved profile: %v", opts.HomeDirs)
+	}
+	if owner, ok := svc.homeOwnerForAccount(`OTHER\alice`); ok {
+		t.Errorf("other-domain process acquired unresolved profile: %+v", owner)
+	}
+
+	legacy, ok := windowsDiscoveryProfileOwner(sid, home, false)
+	if !ok || legacy.UserName != "alice" || legacy.Domain != "" {
+		t.Fatalf("Secure Client folder fallback changed: %+v, %t", legacy, ok)
+	}
+}
+
 func TestCollectWindowsApplicationNamesCoversStartMenuAndProgramDirectories(t *testing.T) {
 	tmp := t.TempDir()
 	startMenu := filepath.Join(tmp, "Start Menu", "Programs")

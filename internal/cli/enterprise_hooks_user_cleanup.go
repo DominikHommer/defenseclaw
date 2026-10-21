@@ -41,6 +41,12 @@ const (
 	enterpriseHookUserCleanupRetryInterval = 5 * time.Minute
 )
 
+// Unix installs a formatter for its typed re-home errors. The default keeps
+// Windows and every other cleanup error byte-identical.
+var enterpriseHookUserCleanupFailureText = func(err error) string {
+	return boundedEnterpriseHookUserCleanupText(err.Error())
+}
+
 type enterpriseHookUserCleanup struct {
 	Connector     string `json:"connector"`
 	SID           string `json:"sid"`
@@ -79,6 +85,11 @@ type enterpriseHookUserCleanupResult struct {
 	Removed []string
 	Pending []string
 	Failed  []string
+	// Windows only: each user settings file the cleanup edited, as a change
+	// line (#1290), and each hook command left in a user's Claude Code
+	// settings that still names a DefenseClaw launcher (#1286).
+	SettingsEdited []string
+	SettingsLeft   []string
 }
 
 func enterpriseHookUserCleanupKey(connectorName, sid string) string {
@@ -229,9 +240,10 @@ func runEnterpriseHookUserCleanups(
 		default:
 			message := "cleanup failed"
 			if err != nil {
-				message = err.Error()
+				message = enterpriseHookUserCleanupFailureText(err)
+			} else {
+				message = boundedEnterpriseHookUserCleanupText(message)
 			}
-			message = boundedEnterpriseHookUserCleanupText(message)
 			result.Failed = append(result.Failed, label+": "+message)
 			entry.Attempts++
 			entry.LastAttemptAt = now.UTC().Format(time.RFC3339Nano)

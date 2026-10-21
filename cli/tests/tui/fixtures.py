@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from collections.abc import Callable
 from types import SimpleNamespace
 
 from defenseclaw.config import RegistrySource
@@ -61,7 +62,7 @@ def snapshot_config(tmp_path) -> SimpleNamespace:
             mode="observe",
             connector="openclaw",
             scanner_mode="local",
-            rule_pack_dir="",
+            rule_pack="",
             port=4141,
             model="gpt-5-mini",
             strategy="default",
@@ -72,7 +73,6 @@ def snapshot_config(tmp_path) -> SimpleNamespace:
         llm=SimpleNamespace(provider="openai", model="gpt-5-mini"),
         inspect_llm=SimpleNamespace(provider="", model=""),
         cisco_ai_defense=SimpleNamespace(endpoint=""),
-        privacy=SimpleNamespace(disable_redaction=False),
         active_connector=lambda: "openclaw",
     )
 
@@ -141,6 +141,17 @@ def snapshot_app(tmp_path, *, setup_config: object | None = None) -> DefenseClaw
                 "agents": [{"id": "default", "model": "gpt-5", "source": "openclaw", "is_default": True}],
                 "model_providers": [{"id": "openai", "default_model": "gpt-5", "status": "ready"}],
                 "memory": [{"id": "mem", "backend": "sqlite", "files": 1, "chunks": 3}],
+                "ide_plugins": [
+                    {
+                        "fingerprint": "fp1",
+                        "user": "dev",
+                        "ide_product": "vscode",
+                        "plugin_id": "github.copilot",
+                        "version": "1.250.0",
+                        "enabled": "enabled",
+                        "is_ai": True,
+                    },
+                ],
                 "summary": {"total_items": 6, "skills": {"count": 1}, "plugins": {"count": 1}, "mcp": {"count": 1}},
             }
         )
@@ -236,6 +247,22 @@ async def settle_panel(app: DefenseClawTUI, pilot: Pilot, *, timeout: float = 10
             raise AssertionError(f"{panel}: the deferred panel render did not finish in {timeout}s")
         await pilot.pause(0.01)
     await pilot.pause()
+
+
+async def settle_layout(pilot: Pilot, done: Callable[[], bool], *, timeout: float = 5.0) -> None:
+    """Let the app handle its pending events until ``done()`` holds.
+
+    A resize lands over several refreshes (the screen, then each pane's own
+    Resize, then the re-render it triggers), so a fixed pause could assert
+    between two of them on a slow runner. The timeout only bounds a failure;
+    it stays under the panels' 15 s refresh tick so that cannot mask one.
+    """
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not done():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"the layout did not settle in {timeout}s")
+        await pilot.pause()
 
 
 def screen_text(app: DefenseClawTUI) -> str:

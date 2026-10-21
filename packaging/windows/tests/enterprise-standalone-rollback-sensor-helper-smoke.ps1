@@ -3,17 +3,21 @@
 
 #Requires -Version 5.1
 
-# Function-level regression for the standalone sensor helper around uninstall.
+# Function-level regression for the sensor helper around uninstall, which
+# both profiles register.
 # Uninstall quiesces it for the servicing boundary (it failed every uninstall
 # of a running deployment with "startup mode drift: 2, expected 4"), and the
 # managed-hook rollback restart brings it back.
-# Restore-DefenseClawTransaction quiesces the standalone sensor helper, which
+# Restore-DefenseClawTransaction quiesces the sensor helper, which
 # transaction snapshots do not record. When the managed-hook teardown had to
 # be rolled back, Restore-DefenseClawTransactionWithManagedHooksRollback
 # restarted the restored services without it; the gateway depends on the
 # helper, so SCM refused to start it ("Cannot start service
 # 'DefenseClawGateway'"), every such rollback failed, and the deployment was
-# left down with a pending transaction. The service-control calls are stubbed.
+# left down with a pending transaction. A forced uninstall whose StateRoot move
+# fails (GAP-1438), or whose purge after the move is refused (GAP-1486), gives
+# the services back their startup mode and running state.
+# The service-control calls are stubbed.
 
 [CmdletBinding()]
 param(
@@ -35,7 +39,7 @@ $module = Microsoft.PowerShell.Core\Import-Module `
     -ErrorAction Stop
 
 $failures = & $module {
-    param([string]$ModulePath)
+    param([string]$ModulePath, [string]$ScratchRoot)
 
     $script:TestCalls = [Collections.Generic.List[string]]::new()
     $script:TestServices = @{}
@@ -75,7 +79,7 @@ $failures = & $module {
 
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         $script:TestServices[$helper] = $true
-        $started = Start-DefenseClawRestoredStandaloneSensorHelper -Snapshot $snapshot -Layout $layout
+        $started = Start-DefenseClawRestoredSensorHelper -Snapshot $snapshot -Layout $layout
         Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy -Snapshot $snapshot -Name $started
         $expected = @("owned:$helper", "mode:$helper=3", "start:$helper", "mode:$helper=2")
         if ($started -cne $helper -or (@($script:TestCalls) -join '|') -cne ($expected -join '|')) {
@@ -89,7 +93,7 @@ $failures = & $module {
             guardian_service = 'DefenseClawHookGuardian'
             services = @([pscustomobject]@{ name = 'DefenseClawGateway'; existed = $false; running = $false; start_mode = 0 })
         }
-        $started = Start-DefenseClawRestoredStandaloneSensorHelper -Snapshot $fresh -Layout $layout
+        $started = Start-DefenseClawRestoredSensorHelper -Snapshot $fresh -Layout $layout
         Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy -Snapshot $fresh -Name $started
         if (-not [string]::IsNullOrEmpty($started) -or $script:TestCalls.Count -ne 0) {
             $failures.Add('a fresh-install rollback touched the sensor helper')
@@ -98,21 +102,23 @@ $failures = & $module {
         # No helper service registered: nothing to start.
         $script:TestCalls.Clear()
         $script:TestServices.Clear()
-        $started = Start-DefenseClawRestoredStandaloneSensorHelper -Snapshot $snapshot -Layout $layout
+        $started = Start-DefenseClawRestoredSensorHelper -Snapshot $snapshot -Layout $layout
         if (-not [string]::IsNullOrEmpty($started) -or $script:TestCalls.Count -ne 0) {
             $failures.Add('a missing sensor helper was touched')
         }
 
-        # Secure Client has no standalone sensor helper to restore.
+        # Secure Client registers the helper too; its gateway depends on it
+        # the same way, so the rollback brings it back.
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
         $script:TestServices[$helper] = $true
         $script:TestCalls.Clear()
-        $started = Start-DefenseClawRestoredStandaloneSensorHelper -Snapshot $snapshot -Layout $layout
-        if (-not [string]::IsNullOrEmpty($started) -or $script:TestCalls.Count -ne 0) {
-            $failures.Add('Secure Client rollback touched the standalone sensor helper')
+        $started = Start-DefenseClawRestoredSensorHelper -Snapshot $snapshot -Layout $layout
+        $expected = @("owned:$helper", "mode:$helper=3", "start:$helper")
+        if ($started -cne $helper -or (@($script:TestCalls) -join '|') -cne ($expected -join '|')) {
+            $failures.Add("Secure Client restored gateway: expected $($expected -join ', '), got $(@($script:TestCalls) -join ', ')")
         }
 
-        # Uninstall quiesces the helper for the servicing boundary (standalone only).
+        # Uninstall quiesces the helper for the servicing boundary (both profiles).
         $layout['SensorHelperServiceName'] = $helper
         $script:TestServices[$helper] = $true
         $script:TestCalls.Clear()
@@ -121,14 +127,20 @@ $failures = & $module {
             param([string]$Name)
             $script:TestCalls.Add("stop:$Name")
         }
-        if (-not (Suspend-DefenseClawStandaloneSensorHelperForServicing -Layout $layout) -or
+        if (-not (Suspend-DefenseClawSensorHelperForServicing -Layout $layout) -or
             (@($script:TestCalls) -join '|') -cne ("owned:$helper|mode:$helper=4|stop:$helper")) {
             $failures.Add("uninstall quiesce: got $(@($script:TestCalls) -join ', ')")
         }
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
         $script:TestCalls.Clear()
-        if ((Suspend-DefenseClawStandaloneSensorHelperForServicing -Layout $layout) -or $script:TestCalls.Count -ne 0) {
-            $failures.Add('Secure Client uninstall quiesced the standalone sensor helper')
+        if (-not (Suspend-DefenseClawSensorHelperForServicing -Layout $layout) -or
+            (@($script:TestCalls) -join '|') -cne ("owned:$helper|mode:$helper=4|stop:$helper")) {
+            $failures.Add("Secure Client uninstall quiesce: got $(@($script:TestCalls) -join ', ')")
+        }
+        # A layout without the helper has nothing to quiesce.
+        $script:TestCalls.Clear()
+        if ((Suspend-DefenseClawSensorHelperForServicing -Layout @{}) -or $script:TestCalls.Count -ne 0) {
+            $failures.Add('uninstall quiesced a sensor helper the layout does not name')
         }
         $uninstall = $ast.Find({
             param($node)
@@ -136,27 +148,293 @@ $failures = & $module {
                 $node.Name -ceq 'Invoke-DefenseClawUninstallLifecycle'
         }, $true).Body.Extent.Text
         $open = $uninstall.IndexOf('$snapshot = New-DefenseClawTransaction')
-        $suspend = $uninstall.IndexOf('Suspend-DefenseClawStandaloneSensorHelperForServicing')
+        $suspend = $uninstall.IndexOf('Suspend-DefenseClawSensorHelperForServicing')
         $servicing = $uninstall.IndexOf('-ServicingTransaction')
         if ($open -lt 0 -or $suspend -lt 0 -or $servicing -lt 0 -or
             -not ($open -lt $suspend -and $suspend -lt $servicing)) {
             $failures.Add('uninstall does not quiesce the sensor helper between transaction open and the servicing assertion')
         }
 
-        # A committed standalone uninstall retires bin with the ACP bridge and
-        # the sensor helper still present; Secure Client keeps its allowlist.
+        # A failed Install over a non-purge retained StateRoot rolled back
+        # every service it created except the sensor helper, so the
+        # retained-state ACL restore refused ("while service exists") and
+        # left deployment.json with the installing admin's group.
+        function Remove-DefenseClawService {
+            param([string]$Name)
+            $script:TestCalls.Add("remove:$Name")
+            [void]$script:TestServices.Remove($Name)
+        }
+        function Initialize-DefenseClawNativeSecurity {
+            throw 'reached retained-state ACL restore'
+        }
+        $retained = [pscustomobject][ordered]@{
+            gateway_service = 'DefenseClawGateway'
+            guardian_service = 'DefenseClawHookGuardian'
+            state_root = 'C:\RetainedState\DefenseClaw'
+            state_root_created = $false
+            state_root_identity = '0123abcd:0123456789abcdef'
+            prior_deployment_active = $false
+            services = @([pscustomobject]@{ name = 'DefenseClawGateway'; existed = $false; running = $false; start_mode = 0 })
+        }
+        $retainedLayout = @{ StateRoot = 'C:\RetainedState\DefenseClaw' }
+        foreach ($case in @(
+                @{ name = 'owned'; helper = $true; foreign = $false; calls = "owned:$helper|remove:$helper"; error = 'reached retained-state ACL restore' },
+                @{ name = 'foreign'; helper = $true; foreign = $true; calls = "owned:$helper"; error = "refusing to manage foreign service $helper" },
+                @{ name = 'absent'; helper = $false; foreign = $false; calls = ''; error = 'reached retained-state ACL restore' }
+            )) {
+            foreach ($profileName in 'Standalone', 'SecureClient') {
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile $profileName
+                $script:TestServices.Clear()
+                if ($case.helper) { $script:TestServices[$helper] = $true }
+                $script:TestForeignHelper = $case.foreign
+                function Assert-DefenseClawStandaloneSensorHelperOwned {
+                    param($Name, $Layout)
+                    $script:TestCalls.Add("owned:$Name")
+                    if ($script:TestForeignHelper) { throw "refusing to manage foreign service $Name" }
+                }
+                $script:TestCalls.Clear()
+                $threw = ''
+                try {
+                    Restore-DefenseClawRetainedStateAclsFromTransaction -Snapshot $retained -Layout $retainedLayout
+                }
+                catch {
+                    $threw = $_.Exception.Message
+                }
+                if ($threw -cne $case.error -or (@($script:TestCalls) -join '|') -cne $case.calls) {
+                    $failures.Add("$profileName retained-state rollback with $($case.name) sensor helper: threw '$threw', calls $(@($script:TestCalls) -join ', ')")
+                }
+            }
+        }
+        function Assert-DefenseClawStandaloneSensorHelperOwned {
+            param($Name, $Layout)
+            $script:TestCalls.Add("owned:$Name")
+        }
+        Remove-Item -LiteralPath Function:\Initialize-DefenseClawNativeSecurity
+        Remove-Item -LiteralPath Function:\Remove-DefenseClawService
+        $script:TestServices.Clear()
+
+        # GAP-1438: FORCE=1 stopped and disabled the services, and a StateRoot
+        # move refused by an open file left them so. Put them back as they were.
+        $guardian = 'DefenseClawHookGuardian'
+        $enumerator = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $guardian
+        $script:TestModes = @{ $enumerator = 3; $guardian = 2; 'DefenseClawGateway' = 2; $helper = 2 }
+        $script:TestStoppedService = $enumerator
+        $script:TestServices.Clear()
+        foreach ($name in $script:TestModes.Keys) {
+            $script:TestServices[$name] = $true
+        }
+        function Assert-DefenseClawOwnedServiceOrAbsent {
+            param($Name, $ExpectedGatewayPath, $ExpectedManifestPath, $ExpectedSensorHelperImage,
+                [switch]$Guardian, [switch]$Enumerator, [switch]$SensorHelper)
+        }
+        function Get-DefenseClawSensorHelperImage {
+            param($Layout, $GatewayServiceName)
+            return ''
+        }
+        function Assert-DefenseClawNoReparsePath {
+            param($Path)
+        }
+        function Get-DefenseClawServiceStartMode {
+            param([string]$Name)
+            return $script:TestModes[$Name]
+        }
+        function Get-DefenseClawServiceState {
+            param([string]$Name)
+            if ($Name -ceq $script:TestStoppedService) { return 'stopped' }
+            return 'running'
+        }
+        $root = [IO.Path]::Combine([IO.Path]::GetFullPath($ScratchRoot), 'dc-forced-' + [Guid]::NewGuid().ToString('N'))
+        $stateRoot = [IO.Path]::Combine($root, 'DefenseClaw')
+        [void][IO.Directory]::CreateDirectory($stateRoot)
+        $held = [IO.File]::Open([IO.Path]::Combine($stateRoot, 'audit.db'), 'CreateNew', 'ReadWrite', 'None')
+        $script:TestCalls.Clear()
+        $threw = ''
+        try {
+            [void](Invoke-DefenseClawForcedUninstallPreparation `
+                -Layout @{
+                    StateRoot = $stateRoot
+                    GatewayPath = ''
+                    ManifestPath = ''
+                    SensorHelperPath = ''
+                    SensorHelperServiceName = $helper
+                } `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName $guardian)
+        }
+        catch {
+            $threw = $_.Exception.Message
+        }
+        finally {
+            $held.Dispose()
+        }
+        $stateKept = [IO.Directory]::Exists($stateRoot)
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        $expected = @(
+            "mode:$enumerator=4", "stop:$enumerator", "mode:$guardian=4", "stop:$guardian",
+            'mode:DefenseClawGateway=4', 'stop:DefenseClawGateway', "mode:$helper=4", "stop:$helper",
+            "mode:$helper=2", "start:$helper", 'mode:DefenseClawGateway=2', 'start:DefenseClawGateway',
+            "mode:$guardian=2", "start:$guardian", "mode:$enumerator=3"
+        )
+        if (-not $threw -or -not $stateKept -or (@($script:TestCalls) -join '|') -cne ($expected -join '|')) {
+            $failures.Add("failed forced uninstall ($threw): kept=$stateKept calls $(@($script:TestCalls) -join ', ')")
+        }
+
+        # GAP-1486: the exact-scope purge after the preparation was refused
+        # (an open file under InstallRoot), and StateRoot stayed moved aside
+        # with the services stopped and disabled. Move it back, restore the
+        # services and rethrow the refusal; a completed purge restores nothing.
+        function Invoke-DefenseClawPreLayoutRecovery {
+            param($Action, $Layout, $Sources, $GatewayServiceName, $GuardianServiceName, [switch]$Purge,
+                $RequestedCertificationCodexHome, [switch]$RequestedCoreHardeningCertification, $SelfUninstallCallerPID)
+            $script:TestCalls.Add("purge:$([IO.Directory]::Exists($Layout.StateRoot))")
+            if ($script:TestPurgeRefuses) {
+                throw 'purge refused: marker sharing violation'
+            }
+            return [pscustomobject]@{ handled = $true; result = [pscustomobject]@{ ok = $true } }
+        }
+        $stopped = @(
+            "mode:$enumerator=4", "stop:$enumerator", "mode:$guardian=4", "stop:$guardian",
+            'mode:DefenseClawGateway=4', 'stop:DefenseClawGateway', "mode:$helper=4", "stop:$helper", 'purge:False'
+        )
+        foreach ($refuses in @($true, $false)) {
+            $script:TestPurgeRefuses = $refuses
+            $root = [IO.Path]::Combine([IO.Path]::GetFullPath($ScratchRoot), 'dc-forced-' + [Guid]::NewGuid().ToString('N'))
+            $stateRoot = [IO.Path]::Combine($root, 'DefenseClaw')
+            [void][IO.Directory]::CreateDirectory($stateRoot)
+            [IO.File]::WriteAllText([IO.Path]::Combine($stateRoot, 'audit.db'), 'kept')
+            $script:TestCalls.Clear()
+            $threw = ''
+            $result = $null
+            try {
+                $result = Invoke-DefenseClawForcedUninstall `
+                    -Layout @{
+                        StateRoot = $stateRoot
+                        # Every Get-DefenseClawLayout layout names the receipt; none exists here.
+                        InstallRollbackIntentPath = ''
+                        GatewayPath = ''
+                        ManifestPath = ''
+                        SensorHelperPath = ''
+                        SensorHelperServiceName = $helper
+                    } `
+                    -GatewayServiceName 'DefenseClawGateway' `
+                    -GuardianServiceName $guardian `
+                    -Purge
+            }
+            catch {
+                $threw = $_.Exception.Message
+            }
+            $stateBack = [IO.File]::Exists([IO.Path]::Combine($stateRoot, 'audit.db'))
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            $calls = @($script:TestCalls) -join '|'
+            if ($refuses) {
+                $expected = $stopped + @(
+                    "mode:$helper=2", "start:$helper", 'mode:DefenseClawGateway=2', 'start:DefenseClawGateway',
+                    "mode:$guardian=2", "start:$guardian", "mode:$enumerator=3"
+                )
+                if ($threw -cne 'purge refused: marker sharing violation' -or -not $stateBack -or $calls -cne ($expected -join '|')) {
+                    $failures.Add("refused forced purge ($threw): StateRoot back=$stateBack calls $calls")
+                }
+            }
+            elseif ($threw -or $stateBack -or $null -eq $result -or -not [bool]$result.forced -or $calls -cne ($stopped -join '|')) {
+                $failures.Add("completed forced purge ($threw): StateRoot back=$stateBack calls $calls")
+            }
+        }
+
+        # GAP-1365: a failed initial install's preparation receipt is bound to
+        # the pending transaction in StateRoot, which the preparation moved
+        # aside, so the recovery refused it and every forced retry failed.
+        # The receipt is out of the recovery's way, back in place when the
+        # forced uninstall is refused, and gone when it completes; a receipt
+        # of a committed install stays for the recovery.
+        function Invoke-DefenseClawPreLayoutRecovery {
+            param($Action, $Layout, $Sources, $GatewayServiceName, $GuardianServiceName, [switch]$Purge,
+                $RequestedCertificationCodexHome, [switch]$RequestedCoreHardeningCertification, $SelfUninstallCallerPID)
+            $script:TestCalls.Add("receipt:$([IO.File]::Exists($Layout.InstallRollbackIntentPath))")
+            if ($script:TestPurgeRefuses) {
+                throw 'purge refused: marker sharing violation'
+            }
+            return [pscustomobject]@{ handled = $true; result = [pscustomobject]@{ ok = $true } }
+        }
+        foreach ($case in @(
+                @{ phase = 'preparing_layout'; refuses = $true; seen = 'receipt:False'; kept = $true },
+                @{ phase = 'preparing_layout'; refuses = $false; seen = 'receipt:False'; kept = $false },
+                @{ phase = 'committed'; refuses = $false; seen = 'receipt:True'; kept = $true }
+            )) {
+            $script:TestPurgeRefuses = $case.refuses
+            $root = [IO.Path]::Combine([IO.Path]::GetFullPath($ScratchRoot), 'dc-forced-' + [Guid]::NewGuid().ToString('N'))
+            $stateRoot = [IO.Path]::Combine($root, 'DefenseClaw')
+            $lockDirectory = [IO.Path]::Combine($root, 'lifecycle')
+            [void][IO.Directory]::CreateDirectory($stateRoot)
+            [void][IO.Directory]::CreateDirectory($lockDirectory)
+            $receipt = [IO.Path]::Combine($lockDirectory, 'install-rollback-scope.json')
+            $receiptJson = '{"phase":"' + $case.phase + '","snapshot_path":"C:\\x\\transactions\\t.json"}'
+            [IO.File]::WriteAllText($receipt, $receiptJson)
+            $script:TestCalls.Clear()
+            $threw = ''
+            $result = $null
+            try {
+                $result = Invoke-DefenseClawForcedUninstall `
+                    -Layout @{
+                        StateRoot = $stateRoot
+                        InstallRollbackIntentPath = $receipt
+                        GatewayPath = ''
+                        ManifestPath = ''
+                        SensorHelperPath = ''
+                        SensorHelperServiceName = $helper
+                    } `
+                    -GatewayServiceName 'DefenseClawGateway' `
+                    -GuardianServiceName $guardian `
+                    -Purge
+            }
+            catch {
+                $threw = $_.Exception.Message
+            }
+            $receiptBack = [IO.File]::Exists($receipt) -and ([IO.File]::ReadAllText($receipt) -ceq $receiptJson)
+            $leftovers = @([IO.Directory]::GetFiles($lockDirectory) | Microsoft.PowerShell.Core\Where-Object { $_ -cne $receipt })
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            $seen = @($script:TestCalls) -contains $case.seen
+            if (-not $seen -or $receiptBack -ne $case.kept -or $leftovers.Count -ne 0 -or
+                ($case.refuses -and $threw -cne 'purge refused: marker sharing violation') -or
+                (-not $case.refuses -and ($threw -or $null -eq $result -or -not [bool]$result.forced))) {
+                $failures.Add("forced uninstall with a $($case.phase) receipt (refused=$($case.refuses), $threw): saw=$seen receipt back=$receiptBack leftovers=$($leftovers -join ', ') calls $(@($script:TestCalls) -join ', ')")
+            }
+        }
+
+        # A committed uninstall retires bin with the ACP bridge and the sensor
+        # helper still present, on both profiles; only the standalone policy
+        # compiler is standalone-only.
         $retired = 'C:\\RetiredRoot'
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
-        $standaloneFiles = @((Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired).files)
-        foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe', 'bin\defenseclaw-gateway.exe')) {
+        $standaloneAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired
+        $standaloneFiles = @($standaloneAllowlist.files)
+        $standaloneOnly = @(
+            'lib\defenseclaw\policy_compiler.py'
+        ) | ForEach-Object { [IO.Path]::GetFullPath((Join-Path $retired $_)) }
+        foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe', 'bin\defenseclaw-gateway.exe', 'lib\defenseclaw\policy_compiler.py')) {
             if ([IO.Path]::GetFullPath((Join-Path $retired $leaf)) -notin $standaloneFiles) {
                 $failures.Add("standalone retired-tree allowlist lacks $leaf")
             }
         }
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
-        $secureClientFiles = @((Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired).files)
-        if ($secureClientFiles.Count -ne ($standaloneFiles.Count - 2)) {
+        $secureClientAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired
+        $secureClientFiles = @($secureClientAllowlist.files)
+        $expectedSecureClientFiles = @($standaloneFiles | Where-Object { $_ -notin $standaloneOnly } | Sort-Object)
+        if ($secureClientFiles.Count -ne $expectedSecureClientFiles.Count -or
+            (@($secureClientFiles | Sort-Object) -join '|') -cne ($expectedSecureClientFiles -join '|')) {
             $failures.Add('Secure Client retired-tree allowlist changed')
+        }
+        foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe')) {
+            if ([IO.Path]::GetFullPath((Join-Path $retired $leaf)) -notin $secureClientFiles) {
+                $failures.Add("Secure Client retired-tree allowlist lacks $leaf")
+            }
+        }
+        $standaloneOnlyDirectories = @(
+            [IO.Path]::GetFullPath((Join-Path $retired 'lib')).TrimEnd('\'),
+            [IO.Path]::GetFullPath((Join-Path $retired 'lib\defenseclaw')).TrimEnd('\')
+        )
+        if (@($standaloneOnlyDirectories | Where-Object { $_ -notin $standaloneAllowlist.directories }).Count -gt 0 -or
+            @($standaloneOnlyDirectories | Where-Object { $_ -in $secureClientAllowlist.directories }).Count -gt 0) {
+            $failures.Add('retired compiler directories are not standalone-only')
         }
 
         # Wiring: the deferred managed-hook rollback restart starts the helper
@@ -167,7 +445,7 @@ $failures = & $module {
                 $node.Name -ceq 'Restore-DefenseClawTransactionWithManagedHooksRollback'
         }, $true)
         $body = $definition.Body.Extent.Text
-        $start = $body.IndexOf('Start-DefenseClawRestoredStandaloneSensorHelper')
+        $start = $body.IndexOf('Start-DefenseClawRestoredSensorHelper')
         $services = $body.LastIndexOf('Start-DefenseClawTransactionServices')
         $policy = $body.IndexOf('Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy')
         if ($start -lt 0 -or $services -lt 0 -or $policy -lt 0 -or
@@ -179,7 +457,7 @@ $failures = & $module {
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile $originalProfile
     }
     return , $failures
-} $modulePath
+} $modulePath $ScratchRoot
 
 if ($failures.Count -gt 0) {
     foreach ($failure in $failures) {

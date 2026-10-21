@@ -28,13 +28,13 @@
 // /api/v1/opencode/hook; the response carries hook_output={decision,
 // reason}; decision "deny"/"block" aborts the tool.
 
-import { execFile } from "node:child_process";
+import { execFile{{if not .Sandbox}}, execFileSync{{end}} } from "node:child_process";
 {{if .Sandbox}}import { randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
 {{else}}import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { lstat, open } from "node:fs/promises";
-{{end}}import { userInfo } from "node:os";
-{{if not .Sandbox}}import { dirname } from "node:path";
+import { lstat, mkdir, open } from "node:fs/promises";
+{{end}}import { {{if not .Sandbox}}homedir, {{end}}userInfo } from "node:os";
+{{if not .Sandbox}}import { dirname, join } from "node:path";
 {{end}}
 // DC_-prefixed constants are non-secret values baked in at setup time, not
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
@@ -52,7 +52,7 @@ const DC_HOOK_SOCKET = "";
 const DC_FOREIGN_GUARD = "";
 const DC_INSTALL_MARKER = "";
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}";
-const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
+const DC_FAIL_MODE = "{{if and .Managed (not .SecureClient)}}closed{{else}}{{.FailMode}}{{end}}"; // "open" or "closed"
 // Standalone managed installs talk to the gateway's peer-authorized unix
 // hook socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user
@@ -122,7 +122,63 @@ function defenseclawIdentityHeaders() {
   if (defenseclawSafeIdentityValue(info.username)) {
     headers["X-DefenseClaw-User-Name"] = info.username;
   }
+  const facts = defenseclawSessionFactsHeader();
+  if (facts !== "") {
+    headers["X-DefenseClaw-Session-Facts"] = facts;
+  }
   return headers;
+}
+
+{{if not .Sandbox}}// The Kerberos principal of this login sits in a credential cache the plugin
+// cannot read (a KCM cache is a socket protocol), so a DefenseClaw binary reads
+// it: `hook session-facts` prints the whole X-DefenseClaw-Session-Facts value,
+// the principal included, and keeps its own five-minute cache in
+// ~/.defenseclaw. A managed install runs its administrator-owned hook binary
+// (DC_FOREIGN_GUARD); a per-user install runs the gateway binary the installer
+// puts in ~/.local/bin. No answer is a supported outcome: the SSH and logind
+// variables alone follow.
+const DC_SESSION_FACTS_TTL_MS = 300000;
+const DC_SESSION_FACTS_RETRY_MS = 30000;
+let DC_SESSION_FACTS = { key: "", value: "", until: 0 };
+
+function defenseclawFullSessionFacts() {
+  const env = process.env;
+  const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY].map((v) => String(v || "")).join("|");
+  const now = Date.now();
+  if (DC_SESSION_FACTS.key === key && now < DC_SESSION_FACTS.until) return DC_SESSION_FACTS.value;
+  let value = "";
+  try {
+    const binary = DC_FOREIGN_GUARD ||
+      join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
+    const out = String(execFileSync(binary, ["hook", "session-facts"], {
+      timeout: 3000, maxBuffer: 4096, windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
+    })).trim();
+    if (out.startsWith("v1;") && out.length <= 1024 && /^[A-Za-z0-9._@\/:;=-]+$/.test(out)) value = out;
+  } catch (_) {
+    // No binary or no answer: the caller falls back to the SSH variables.
+  }
+  DC_SESSION_FACTS = { key, value, until: now + (value ? DC_SESSION_FACTS_TTL_MS : DC_SESSION_FACTS_RETRY_MS) };
+  return value;
+}
+
+{{end}}// defenseclawSessionFactsHeader renders the claimed SSH and logind session
+// facts as the X-DefenseClaw-Session-Facts value the hook runner also sends.
+// Each value is dropped unless it matches the header's allowlisted charset.
+function defenseclawSessionFactsHeader() {
+{{if not .Sandbox}}  const full = defenseclawFullSessionFacts();
+  if (full !== "") return full;
+{{end}}  const env = process.env;
+  const address = String(env.SSH_CONNECTION || "").trim().split(/\s+/)[0] || "";
+  const tty = String(env.SSH_TTY || "").replace(/^\/dev\//, "");
+  const session = String(env.XDG_SESSION_ID || "");
+  const kind = address !== "" || tty !== "" ? "ssh" : (session !== "" ? "local" : "");
+  const parts = ["v1"];
+  for (const [key, value] of [["k", kind], ["tty", tty], ["ls", session], ["ca", address]]) {
+    if (value.length > 0 && value.length <= 256 && /^[A-Za-z0-9._@\/:-]+$/.test(value)) {
+      parts.push(key + "=" + value);
+    }
+  }
+  return parts.length > 1 ? parts.join(";") : "";
 }
 
 // defenseclawSafeIdentityValue mirrors the account-name allowlist the POSIX
@@ -305,6 +361,7 @@ async function defenseclawSocketRequest(path, init) {
         resolve({
           ok: res.statusCode >= 200 && res.statusCode < 300,
           status: res.statusCode,
+          headers: { get: (name) => res.headers[String(name).toLowerCase()] ?? null },
           json: async () => JSON.parse(text),
         });
       });
@@ -358,6 +415,27 @@ async function defenseclawFetch(path, init, token) {
   await defenseclawVerifyHookSocket();
   if (globalThis.Bun) return fetch("http://localhost" + path, { ...init, unix: DC_HOOK_SOCKET });
   return defenseclawSocketRequest(path, init);
+}
+
+// defenseclawRetryBusy sends the call again while the gateway answers 429: it
+// is taking all the hook calls it can, or this account is over its budget,
+// and has not evaluated the call. It waits the Retry-After the gateway asks
+// for (1 to 3 s) at most 3 times; the caller's abort signal keeps the whole
+// exchange inside the plugin timeout. The native hook runner does the same
+// (GAP-0205); without it a short burst failed the tool call (GAP-0535).
+async function defenseclawRetryBusy(send, signal) {
+  let res = await send();
+  for (let retry = 0; retry < 3 && res && res.status === 429; retry++) {
+    const asked = Number.parseInt(String((res.headers && res.headers.get("retry-after")) || ""), 10);
+    const delay = Math.min(Math.max(Number.isFinite(asked) ? asked : 1, 1), 3) * 1000;
+    await new Promise((resolve, reject) => {
+      if (signal && signal.aborted) return reject(new Error("DefenseClaw gateway busy"));
+      const timer = setTimeout(resolve, delay);
+      if (signal) signal.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("DefenseClaw gateway busy")); }, { once: true });
+    });
+    res = await send();
+  }
+  return res;
 }
 {{end}}
 // defenseclawForeignHookCheck asks the administrator-owned hook binary for
@@ -473,7 +551,35 @@ function defenseclawShowNotice(client, message, variant) {
   }
 }
 
-async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
+{{if not .Sandbox}}// defenseclawLogFailOpen appends the hook-failures.jsonl line the shell and
+// native hooks write, for a call that went ahead because DefenseClaw could
+// not check it (fail mode open), in this install's data directory (the one
+// that holds the hook credential). The gateway's fail-open report reads it,
+// so such a call is never silent (rel-1-0-2 GAP-0446). Best effort: a log
+// that cannot be written never changes the verdict.
+async function defenseclawLogFailOpen(reason, category) {
+  try {
+    const dir = join(dirname(dirname(DC_TOKEN_FILE)), "logs");
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const file = await open(join(dir, "hook-failures.jsonl"), "a", 0o600);
+    try {
+      await file.appendFile(JSON.stringify({
+        ts: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+        connector: "opencode",
+        hook: "opencode-plugin",
+        reason: String(reason || "unknown"),
+        category,
+        fail_mode: "open",
+      }) + "\n");
+    } finally {
+      await file.close();
+    }
+  } catch (_) {
+    // A notice of a failure never fails the tool call.
+  }
+}
+
+{{end}}async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
   let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
@@ -483,7 +589,8 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     // unless the managed deployment itself was uninstalled.
     if (await defenseclawDeploymentRemoved()) return null;
     if (actionable) return { reason: "DefenseClaw hook credential is unavailable." };
-    return null;
+{{if not .Sandbox}}    await defenseclawLogFailOpen("hook credential unavailable", "transport");
+{{end}}    return null;
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
@@ -510,43 +617,71 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       payload.tool_response = toolResult;
       payload.tool_result = toolResult;
     }
-    const res = await {{if .Sandbox}}defenseclawFetch(headers, JSON.stringify(payload));{{else}}defenseclawFetch("/api/v1/opencode/hook", {
+    const res = await {{if .Sandbox}}defenseclawFetch(headers, JSON.stringify(payload));{{else}}defenseclawRetryBusy(() => defenseclawFetch("/api/v1/opencode/hook", {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
       signal: controller.signal,
-    }, token);{{end}}
+    }, token), controller.signal);{{end}}
     if (!res.ok) {
       // Gateway answered with a bad status (auth/5xx). Honor fail mode.
       if (DC_FAIL_MODE === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
-      return null;
+{{if not .Sandbox}}      await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
+{{end}}      return null;
     }
     const data = await res.json();
 {{if .Sandbox}}    // A reply without a known verdict is as untrustworthy as no reply.
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
-{{end}}    const out = data && data.hook_output;
+{{else}}{{if not .SecureClient}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+{{if not .Managed}}      if (DC_FAIL_MODE === "open") {
+        await defenseclawLogFailOpen("invalid gateway verdict", "response");
+        return null;
+      }
+{{end}}
+      return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
+    }
+{{end}}{{end}}    const out = data && data.hook_output;
     if (out && (out.decision === "deny" || out.decision === "block")) {
       return { reason: out.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
     }
 {{if .Sandbox}}    if (data.action === "block") {
       return { reason: data.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
     }
-{{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
+{{else}}{{if not .SecureClient}}    if (data.action === "block" || data.action === "confirm") {
+      return { reason: data.reason || "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
+    }
+{{end}}{{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
     if (DC_FAIL_MODE === "closed") {
+      if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }
-    return null;
+{{if not .Sandbox}}    await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
+{{end}}    return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+// DC_GATEWAY_STOPPED_TEXT is what a managed install says when its gateway
+// service is stopped, in the words of the native hook (GAP-0578).
+const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
+  "Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
+  "(enterprise_managed_gateway_not_running)";
+
+// defenseclawGatewayStopped reports a transport failure that means the
+// gateway is not running: its hook socket is missing, or nothing accepts
+// the connection.
+function defenseclawGatewayStopped(err) {
+  const codes = [err && err.code, err && err.cause && err.cause.code];
+  return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused");
 }
 
 async function defenseclawPostLoadHeartbeat(cwd) {

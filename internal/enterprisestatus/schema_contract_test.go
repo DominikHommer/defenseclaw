@@ -78,6 +78,10 @@ func sampleResults() map[string]*Result {
 		HigherPrecedence: []string{"mdm_managed_preferences"}, Conflicts: []string{}, LiveVerifiedAt: "2026-09-26T18:00:00Z",
 	}
 	installed.Enrollment = Enrollment{Targets: 3, Pending: 1, Exempt: 1}
+	installed.Destinations = []Destination{
+		{Name: "local-sqlite", Kind: "local_sqlite", Enabled: true, Signals: []string{"logs"}, RedactionProfiles: []string{"none"}},
+		{Name: "galileo", Kind: "otlp", Enabled: true, Preset: "galileo", Signals: []string{"traces"}, RedactionProfiles: []string{"strict"}},
+	}
 	installed.CoverageComplete = true
 	installed.SecurityComplete = true
 	installed.AddWarning("not_started", "installed with --no-start")
@@ -104,8 +108,30 @@ func sampleResults() map[string]*Result {
 	invalid.AddError("invalid_arguments", "--payload and --from-package are exclusive")
 	invalid.Finish("linux", InvalidArgsExitCode("linux"))
 
+	// A bundle device whose newest bundle failed: the last good bundle
+	// keeps enforcing and is named as the current one.
+	bundled := New("status", "standalone", "linux", "1.4.0")
+	bundled.Installed, bundled.InstalledVersion = true, "1.4.0"
+	bundled.Policy = &PolicyState{EffectiveDigest: "sha256:" + strings.Repeat("a", 64), ConfigGeneration: 12, Applied: true,
+		GatewayReportedDigest: "sha256:" + strings.Repeat("a", 64)}
+	bundled.Bundle = &BundleState{BundleID: "b-01JA0000000000000000000002", Version: 8, State: BundleFailed,
+		ErrorCode: "signature_invalid", CurrentBundleID: "b-01JA0000000000000000000001", CurrentVersion: 7}
+	bundled.Finish("linux", 0)
+
+	confirmed := New("ensure", "standalone", "darwin", "1.4.0")
+	confirmed.Installed, confirmed.InstalledVersion = true, "1.4.0"
+	confirmed.Bundle = &BundleState{BundleID: "b-01JA0000000000000000000001", Version: 7, State: BundleConfirmed,
+		EffectivePolicyDigest: "sha256:" + strings.Repeat("b", 64), ConfigGeneration: 12,
+		AppliedAt: "2026-10-12T10:00:00Z", ConfirmedAt: "2026-10-12T10:00:03Z"}
+	confirmed.Finish("darwin", 0)
+
+	notRoot := New("ensure", "standalone", "linux", "1.4.0")
+	notRoot.AddError("not_root", "run this command as root (sudo or the MDM agent)")
+	notRoot.Finish("linux", 0)
+
 	return map[string]*Result{
 		"fresh": fresh, "installed": installed, "noop": noop, "busy": busy, "failed": failed, "invalid": invalid,
+		"not_root": notRoot, "bundle_failed": bundled, "bundle_confirmed": confirmed,
 	}
 }
 
@@ -148,9 +174,19 @@ func TestLifecycleSchemaRejectsContractViolations(t *testing.T) {
 		}
 		return value
 	}
+	bundle := func(fields map[string]any) func(map[string]any) {
+		return func(v map[string]any) { v["bundle"] = fields }
+	}
 	cases := map[string]func(map[string]any){
-		"unknown top-level field": func(v map[string]any) { v["extra"] = true },
-		"failure without errors":  func(v map[string]any) { v["ok"] = false; v["exit_code"] = 1 },
+		"unknown top-level field":         func(v map[string]any) { v["extra"] = true },
+		"bundle failed without a code":    bundle(map[string]any{"bundle_id": "b-01JA0000000000000000000001", "version": 2, "state": "failed"}),
+		"bundle code on a non-failure":    bundle(map[string]any{"bundle_id": "b-01JA0000000000000000000001", "version": 2, "state": "staged", "error_code": "x"}),
+		"bundle unknown state":            bundle(map[string]any{"bundle_id": "b-01JA0000000000000000000001", "version": 2, "state": "done"}),
+		"bundle confirmed without digest": bundle(map[string]any{"bundle_id": "b-01JA0000000000000000000001", "version": 2, "state": "confirmed", "confirmed_at": "2026-10-12T10:00:03Z"}),
+		"bundle unread but not failed":    bundle(map[string]any{"bundle_id": "", "version": 0, "state": "verified"}),
+		"bundle id not a ulid":            bundle(map[string]any{"bundle_id": "b-1", "version": 2, "state": "received"}),
+		"bundle unknown field":            bundle(map[string]any{"bundle_id": "b-01JA0000000000000000000001", "version": 2, "state": "received", "x": 1}),
+		"failure without errors":          func(v map[string]any) { v["ok"] = false; v["exit_code"] = 1 },
 		"windows code on unix": func(v map[string]any) {
 			v["ok"] = false
 			v["exit_code"] = 1603
@@ -173,7 +209,13 @@ func TestLifecycleSchemaRejectsContractViolations(t *testing.T) {
 // TestLifecycleSchemaDescribesEveryField walks the Go types and requires the
 // schema to name exactly their JSON fields, requiring the ones rendered
 // without omitempty.
+func anySlice(value any) []any {
+	items, _ := value.([]any)
+	return items
+}
+
 func TestLifecycleSchemaDescribesEveryField(t *testing.T) {
+
 	data, err := os.ReadFile(filepath.FromSlash(lifecycleSchemaPath))
 	if err != nil {
 		t.Fatal(err)
@@ -193,6 +235,9 @@ func TestLifecycleSchemaDescribesEveryField(t *testing.T) {
 		"machinePolicy": {reflect.TypeOf(MachinePolicyState{}), defs["machinePolicy"].(map[string]any)},
 		"message":       {reflect.TypeOf(Message{}), defs["message"].(map[string]any)},
 		"portHolder":    {reflect.TypeOf(PortHolder{}), defs["portHolder"].(map[string]any)},
+		"policyState":   {reflect.TypeOf(PolicyState{}), defs["policyState"].(map[string]any)},
+		"bundleState":   {reflect.TypeOf(BundleState{}), defs["bundleState"].(map[string]any)},
+		"bundleRefusal": {reflect.TypeOf(BundleRefusal{}), defs["bundleRefusal"].(map[string]any)},
 		"readiness":     {reflect.TypeOf(Readiness{}), properties["readiness"].(map[string]any)},
 		"inspection":    {reflect.TypeOf(Inspection{}), properties["inspection"].(map[string]any)},
 		"enrollment":    {reflect.TypeOf(Enrollment{}), properties["enrollment"].(map[string]any)},
@@ -217,6 +262,17 @@ func TestLifecycleSchemaDescribesEveryField(t *testing.T) {
 		var schemaRequired []string
 		for _, key := range object.schema["required"].([]any) {
 			schemaRequired = append(schemaRequired, key.(string))
+		}
+		if name == "result" {
+			// The deployment state fields are required of every result but
+			// a not_root one, which leaves them out (GAP-0279).
+			for _, clause := range root["allOf"].([]any) {
+				if otherwise, ok := clause.(map[string]any)["else"].(map[string]any); ok {
+					for _, key := range anySlice(otherwise["required"]) {
+						schemaRequired = append(schemaRequired, key.(string))
+					}
+				}
+			}
 		}
 		if object.schema["additionalProperties"] != false {
 			t.Errorf("%s: schema must set additionalProperties: false", name)

@@ -37,6 +37,30 @@ ROOT = Path(__file__).resolve().parents[2]
 _FIND_COSIGN = upgrade_shim._cosign
 
 
+@pytest.fixture(autouse=True)
+def shim_os(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """The shim's own view of ``os``.
+
+    Tests pretend a platform (``os.name``) and stub ``execv``/``chdir`` for
+    the shim only. Patching the real module leaked the pretence into the
+    config writer the shim calls: on a Windows runner a pretend POSIX host
+    fsynced the config folder, which Windows refuses (GAP-0273).
+    """
+    view = types.ModuleType("os")
+    view.__dict__.update(vars(os))
+    monkeypatch.setattr(upgrade_shim, "os", view)
+    return view
+
+
+def test_platform_pretence_stays_in_the_shim(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0273: a pretend platform reaches only the shim, never the config
+    # writer and file helpers it calls; the environment stays shared.
+    real = os.name
+    monkeypatch.setattr(upgrade_shim.os, "name", "posix" if real == "nt" else "nt")
+    assert os.name == real
+    assert upgrade_shim.os.environ is os.environ
+
+
 @pytest.fixture()
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     data = tmp_path / "home" / ".defenseclaw"
@@ -273,6 +297,26 @@ def test_a_failed_fetch_leaves_no_temporary_directory(
     assert list((tmp_path / "tmp").iterdir()) == []
 
 
+def test_an_installer_stamped_with_another_release_is_refused(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A mirror can serve a genuinely signed older release under the requested version.
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.0")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.2.0"]) == 1
+    assert execs == []
+
+
+def test_a_downloaded_installer_without_a_version_stamp_is_refused(tmp_path: Path) -> None:
+    # An older signed installer has no stamp in this format; only a local test build may lack one.
+    unstamped = tmp_path / "install.sh"
+    unstamped.write_text("#!/bin/bash\necho installing\n", encoding="utf-8")
+    with pytest.raises(upgrade_shim.ShimError, match="release unknown"):
+        upgrade_shim._check_installer_version(str(unstamped), "1.2.0")
+    upgrade_shim._check_installer_version(str(unstamped), "1.2.0", test_build=True)
+
+
 def test_explicit_version_may_reinstall_or_go_back(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -320,8 +364,10 @@ def test_windows_rollback_over_ssh_gives_the_command_for_this_terminal(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # GAP-1993: the new window never appears in an SSH session; rc 0 hid the result.
+    from defenseclaw import __version__
+
     (home / "installer").mkdir()
-    (home / "installer" / "install.ps1").write_text("", encoding="utf-8")
+    (home / "installer" / "install.ps1").write_text(f'$DcVersion = "{__version__}"\n', encoding="utf-8")
     monkeypatch.setattr(upgrade_shim.os, "name", "nt")
     monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")
     started: list[object] = []
@@ -441,7 +487,7 @@ def test_notice_never_creates_the_data_directory(tmp_path: Path, monkeypatch: py
 
 def test_notice_reads_update_check_from_defenseclaw_config(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     external = tmp_path / "elsewhere.yaml"
-    external.write_text("config_version: 8\nupdate_check: false\n")
+    external.write_text("config_version: 9\nupdate:\n  check: false\n")
     monkeypatch.setenv("DEFENSECLAW_CONFIG", str(external))
 
     assert update_notice._disabled()
@@ -475,7 +521,7 @@ def test_notice_can_be_disabled(home: Path, monkeypatch: pytest.MonkeyPatch, set
     elif setting == "ci":
         monkeypatch.setenv("CI", "true")
     else:
-        (home / "config.yaml").write_text("config_version: 8\nupdate_check: false\n")
+        (home / "config.yaml").write_text("config_version: 9\nupdate:\n  check: false\n")
 
     assert update_notice.available_message() is None
 
@@ -507,6 +553,7 @@ def test_notice_respects_the_windows_self_update_policy(home: Path, monkeypatch:
     )
     monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
     monkeypatch.setattr(update_notice.os, "name", "nt")
+    monkeypatch.setattr(upgrade_shim.os, "name", "nt")
 
     assert update_notice.available_message() is None
     # The managed-deployment marker is checked first; without it the
@@ -566,14 +613,21 @@ def test_an_installer_that_cannot_start_is_an_error_not_a_traceback(
     assert list((tmp_path / "tmp").iterdir()) == []
 
 
-def test_the_signer_pattern_escapes_the_repository_name(
+def test_a_release_mirror_changes_only_where_bytes_come_from(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """update.source (and DEFENSECLAW_REPO) move the downloads; the release
+    signature is always checked against the compiled official identity, and a
+    mirror is refused without cosign instead of trusting its checksums.txt."""
     monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
     release = _release_dir(tmp_path, "1.0.1")
     (release / "checksums.txt.bundle").write_text("{}")
     monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(release))
     monkeypatch.setenv(upgrade_shim.REPO_ENV, "acme+corp/defense.claw")
+    config = tmp_path / "config.yaml"
+    config.write_text("update:\n  source: https://mirror.example/defenseclaw\n")
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(config))
+    assert upgrade_shim.release_source() == "https://mirror.example/defenseclaw"
     seen: list[list[str]] = []
     monkeypatch.setattr(upgrade_shim, "_cosign", lambda: "/usr/bin/cosign")
 
@@ -585,7 +639,12 @@ def test_the_signer_pattern_escapes_the_repository_name(
 
     assert upgrade_shim.run(["upgrade", "--yes"]) == 0
     pattern = seen[0][seen[0].index("--certificate-identity-regexp") + 1]
-    assert pattern.startswith("^https://github\\.com/acme\\+corp/defense\\.claw/")
+    assert pattern == upgrade_shim.RELEASE_SIGNER
+    assert pattern.startswith("^https://github\\.com/cisco-ai-defense/defenseclaw/")
+
+    monkeypatch.setattr(upgrade_shim, "_cosign", lambda: None)
+    with pytest.raises(upgrade_shim.ShimError, match="install cosign"):
+        upgrade_shim._verify_release_signature(upgrade_shim.release_source(), "1.0.1", None, str(tmp_path), "")
 
 
 def test_the_update_notice_lookup_swallows_network_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -783,3 +842,73 @@ def test_the_rollback_refusal_prints_a_normalized_path(
 
     assert upgrade_shim.run(["rollback", "--yes"]) == 1
     assert f"are in {home / 'previous'}\n" in capsys.readouterr().err
+
+
+# GAP-0137: the installer of a release older than a config key refuses a
+# config.yaml that sets it ("unknown field"), so a downgrade sets the key
+# aside, and a release that has it puts it back (test_migrate).
+_CA_CONFIG = "config_version: 9\nopenshell:\n  trusted_ca_bundle: ~/proxy-root-ca.pem\n"
+
+
+def _set_aside(home: Path) -> Path:
+    return home / upgrade_shim.SET_ASIDE_FILE
+
+
+def test_downgrade_sets_aside_the_keys_the_older_release_lacks(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.3")
+    (home / "config.yaml").write_text(_CA_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.2")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.2", "--yes"]) == 0
+
+    assert len(execs) == 1
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert "trusted_ca_bundle" not in (config.get("openshell") or {})
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record == {"version": 1, "for": "1.0.2", "keys": {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem"}}
+    # The execs fixture sets the shim's os.name to posix; the platform says what the file system is.
+    if sys.platform != "win32":
+        assert _set_aside(home).stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(("installed", "target"), [("1.0.3", "1.0.4"), ("1.0.4", "1.0.3")])
+def test_upgrade_keeps_keys_the_target_release_has(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: str, target: str
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", installed)
+    (home / "config.yaml").write_text(_CA_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, target)))
+
+    assert upgrade_shim.run(["upgrade", "--version", target, "--yes"]) == 0
+
+    assert len(execs) == 1
+    assert (home / "config.yaml").read_text(encoding="utf-8") == _CA_CONFIG
+    assert not _set_aside(home).exists()
+
+
+def test_downgrade_stops_with_the_unset_command_when_the_key_cannot_be_set_aside(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from defenseclaw import config_writer
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.3")
+    (home / "config.yaml").write_text(_CA_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.2")))
+
+    def refuse(*_args, **_kwargs):
+        raise config_writer.ConfigWriteError("config.yaml is locked")
+
+    monkeypatch.setattr(config_writer, "apply", refuse)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.2", "--yes"]) == 1
+
+    assert execs == []
+    assert (home / "config.yaml").read_text(encoding="utf-8") == _CA_CONFIG
+    assert not _set_aside(home).exists()
+    err = capsys.readouterr().err
+    assert "defenseclaw config unset openshell.trusted_ca_bundle" in err
+    assert "Nothing was changed." in err

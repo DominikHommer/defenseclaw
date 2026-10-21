@@ -208,6 +208,14 @@ installs its plugin through OpenCode's managed config (`/etc/opencode`,
 official server/tool sanitizer, maps the effective enabled MCP server names,
 and rejects sanitizer collisions or prefix ambiguity instead of guessing.
 
+Under application control, OpenCode must be allowed to read the managed plugin,
+`<install root>/share/opencode/defenseclaw.js`. OpenCode skips a plugin it
+cannot read and runs the session without DefenseClaw, which `status` and
+`verify` cannot see. On Linux the deb and rpm ship the plugin, so fapolicyd's
+package-database trust covers it; after a payload (tarball) install, add it to
+a trust file. See
+[Application control must allow DefenseClaw files](/docs/enterprise/threat-model#application-control-must-allow-defenseclaw-files).
+
 For local MCP servers, `mcp set` refuses commands outside trusted install
 prefixes unless you explicitly trust the directory or force that one write.
 The managed `defenseclaw.js` registration is connector configuration, not an
@@ -244,6 +252,10 @@ asset declarations.
 
 <HookEventsList connector="opencode" />
 
+OpenCode has no hook that can stop a prompt, so a prompt rule doesn't block
+here: a matching prompt reaches the model. Tool-call rules still block
+([capability matrix](/docs/connectors/capability-matrix)).
+
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run opencode` runs OpenCode in an NVIDIA OpenShell
@@ -255,7 +267,7 @@ covers setup, the session and every flag. The first run builds the OpenCode
 image; `defenseclaw sandbox image build opencode` builds it ahead of time.
 `defenseclaw sandbox setup` builds the images of the harnesses in
 `openshell.harnesses` (Claude Code and Codex by default), and its `--harness`
-replaces that list, so name every harness you want:
+adds to that list:
 `defenseclaw sandbox setup --harness claudecode --harness codex --harness opencode`.
 
 - **User tier.** The hooks are a root-owned bridge plugin registered from
@@ -264,11 +276,12 @@ replaces that list, so name every harness you want:
   other plugin and custom tool into the same process, where one could answer
   for the bridge. So the launcher refuses to start, naming the file, while
   any other plugin or custom tool would load, and refuses `--pure`, which
-  loads none. The refusal also gives the commands that remove the file from
-  your machine (`defenseclaw sandbox start <name> && defenseclaw sandbox exec
-  <name> -- rm <file>`, then `defenseclaw sandbox connect <name>`); the
-  refused start does not appear in `sandbox activity`, as the launcher has no
-  way to report there. DefenseClaw also reports a sandbox whose hooks go
+  loads none. The refusal names the conflicting configuration. Remove an
+  operator-added plugin or custom tool in its owning configuration before
+  starting the sandbox again. The managed config is root-owned, so a user-tier
+  hook-removal silence check is unavailable; that positive check is untested.
+  The refused start does not appear in `sandbox activity`, as the launcher has
+  no way to report there. DefenseClaw also reports a sandbox whose hooks go
   silent while the harness is active.
 - **Blocked tool calls.** OpenCode's TUI shows a refused tool call as its
   command line only, in red, and shows the reason only when you click that

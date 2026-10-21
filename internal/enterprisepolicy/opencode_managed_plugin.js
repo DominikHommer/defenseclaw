@@ -11,7 +11,9 @@
 // (<InstallRoot>/bin/defenseclaw-hook). The hook binary resolves the user's
 // gateway transport from protected machine state (the peer-authorized hook
 // socket on Linux and macOS, the user's protected runtime on Windows),
-// applies the organization's foreign-plugin guard, and fails closed.
+// applies the organization's foreign-plugin guard, and fails closed unless
+// the administrator chose fail mode open; then it answers an explicit allow
+// that carries a notice, never an empty answer.
 //
 // Wire contract: the hook binary receives {hook_event_name, tool_name,
 // tool_input, tool_response, cwd, ...} on stdin, posts it to
@@ -239,6 +241,13 @@ function defenseclawConfirmNotice(data) {
   return lead + ". OpenCode cannot ask you to confirm it here, so it runs; DefenseClaw recorded it.";
 }
 
+// defenseclawFailOpenNotice is the notice of a call the hook binary let
+// through without a check because the fail mode is open (GAP-0351). The
+// hook answers it with an explicit allow; an empty answer stays closed.
+function defenseclawFailOpenNotice(data) {
+  return data && data.fail_open === true && typeof data.notice === "string" ? data.notice.trim() : "";
+}
+
 // defenseclawShowNotice shows a notice in the OpenCode TUI. It is best
 // effort: without a TUI client, or when the notice cannot be shown, nothing
 // else changes.
@@ -270,8 +279,9 @@ async function defenseclawSend(event, payload) {
   }
   const data = defenseclawLastJSON(result.stdout);
   if (data === undefined && result.code === 0) {
-    // The hook is a no-op only after an administrator removed DefenseClaw.
-    return { reason: "", mode: "" };
+    // A cached plugin must fail closed while its deployment artifact exists.
+    if (await defenseclawDeploymentRemoved()) return { reason: "", mode: "" };
+    return { reason: "DefenseClaw hook failed closed (empty response)", mode: "" };
   }
   const out = data && data.hook_output;
   if (out && (out.decision === "deny" || out.decision === "block")) {
@@ -280,7 +290,7 @@ async function defenseclawSend(event, payload) {
   if (!data || result.code !== 0) {
     return { reason: "DefenseClaw hook failed closed (exit " + result.code + ")", mode: "" };
   }
-  return { reason: "", mode: data.mode || "", notice: defenseclawConfirmNotice(data) };
+  return { reason: "", mode: data.mode || "", notice: defenseclawFailOpenNotice(data) || defenseclawConfirmNotice(data) };
 }
 
 function defenseclawToolPayload(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity) {

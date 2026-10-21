@@ -15,6 +15,16 @@ var ErrWindowsManagedRuntimeGenerationConflict = errors.New(
 	"enterprise hooks: Windows managed runtime generation changed concurrently",
 )
 
+// ErrWindowsManagedRuntimeGenerationDirectoryUntrusted marks an account's
+// DefenseClaw data folder, or its hooks child, whose owner or permissions
+// DefenseClaw could not verify or apply. Nothing is read, written or removed
+// in such a folder. Generation garbage collection reports the account and
+// goes on with the others, so one stale or foreign profile no longer rolls
+// back a whole lifecycle (#1105, GAP-0781).
+var ErrWindowsManagedRuntimeGenerationDirectoryUntrusted = errors.New(
+	"enterprise hooks: managed runtime generation directory is untrusted",
+)
+
 // WindowsManagedRuntimeGenerationDesired is the complete authenticated input
 // used to render one immutable per-target hook runtime generation. ScopedToken
 // is deliberately excluded from JSON if this orchestration object is ever
@@ -27,6 +37,7 @@ type WindowsManagedRuntimeGenerationDesired struct {
 	HookExecutable             string `json:"hook_executable"`
 	GatewayAddr                string `json:"gateway_addr"`
 	GatewayServiceName         string `json:"gateway_service_name"`
+	FailMode                   string `json:"fail_mode"`
 	ScopedToken                string `json:"-"`
 	HookContractID             string `json:"hook_contract_id"`
 	HookContractLockUpdatedAt  string `json:"hook_contract_lock_updated_at"`
@@ -240,6 +251,7 @@ type WindowsManagedRuntimeGenerationResolved struct {
 	HookExecutable             string `json:"hook_executable"`
 	GatewayAddr                string `json:"gateway_addr"`
 	GatewayServiceName         string `json:"gateway_service_name"`
+	FailMode                   string `json:"fail_mode"`
 	GenerationID               string `json:"generation_id"`
 	BundleSHA256               string `json:"bundle_sha256"`
 	HookContractID             string `json:"hook_contract_id"`

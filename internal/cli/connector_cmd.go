@@ -29,6 +29,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
@@ -70,6 +71,7 @@ var (
 	connectorFlagDataDir              string
 	connectorFlagConfigHome           string
 	connectorFlagHookExe              string
+	connectorRollbackRestore          bool
 	connectorVerifySetupParent        string
 	connectorVerifySetupStartIdentity string
 	connectorVerifyCleanupRecord      string
@@ -106,6 +108,37 @@ the runtime state before removing files so a still-running hook guard cannot
 immediately reinstall the configuration being deliberately torn down.`,
 	Annotations: map[string]string{auditOptionalAnnotation: "true"},
 	RunE:        runConnectorTeardown,
+}
+
+var connectorPrepareRollbackCmd = &cobra.Command{
+	Use:   "prepare-rollback",
+	Short: "Rewrite hook entries in the form an earlier release removes (run by the installers)",
+	Long: `Rewrite the hook entries this release writes in a shape an earlier release
+does not recognise into the shape it does, so that release's uninstall still
+removes them after a rollback (GAP-1284). The installers run it before
+'defenseclaw rollback' restores the previous install. Without --connector it
+covers every connector that has such entries. Setup writes the current form
+again when you roll forward.`,
+	Hidden:      true,
+	Annotations: map[string]string{auditOptionalAnnotation: "true"},
+	RunE:        runConnectorPrepareRollback,
+}
+
+var connectorPruneOrphansCmd = &cobra.Command{
+	Use:   "prune-orphans",
+	Short: "Remove the DefenseClaw hook entries of connectors that are not configured (run by the installers)",
+	Long: `Tear down every connector that neither config.yaml nor the runtime
+connector state names but whose agent config still holds DefenseClaw hook
+entries for this data directory. A rollback restored a data directory from
+before such a connector was set up, so the agent ran a hook script that no
+longer existed and Claude Code blocked every prompt (GAP-0009). Only the
+DefenseClaw-owned entries go, as with 'connector teardown'. With --connector
+only that connector is checked. The installers run it after a rollback or an
+upgrade, and 'defenseclaw setup remove' runs it for a connector that is not
+configured.`,
+	Hidden:      true,
+	Annotations: map[string]string{auditOptionalAnnotation: "true"},
+	RunE:        runConnectorPruneOrphans,
 }
 
 var connectorVerifyCmd = &cobra.Command{
@@ -181,6 +214,8 @@ Pass --json for a structured payload suitable for piping into 'jq'.`,
 }
 
 func init() {
+	connectorPrepareRollbackCmd.Flags().BoolVar(&connectorRollbackRestore, "restore", false,
+		"Restore authenticated current-release hooks after an aborted rollback")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagName, "connector", "",
 		"Connector name (default: the active connector; 'defenseclaw guardrail status' lists them)")
 	connectorCmd.PersistentFlags().BoolVar(&connectorFlagJSON, "json", false,
@@ -223,6 +258,8 @@ func init() {
 	_ = connectorVerifyCmd.Flags().MarkHidden("internal-deferred-cleanup-transaction")
 
 	connectorCmd.AddCommand(connectorTeardownCmd)
+	connectorCmd.AddCommand(connectorPrepareRollbackCmd)
+	connectorCmd.AddCommand(connectorPruneOrphansCmd)
 	connectorCmd.AddCommand(connectorVerifyCmd)
 	connectorCmd.AddCommand(connectorReconcileCmd)
 	connectorCmd.AddCommand(connectorLaunchCmd)
@@ -444,13 +481,17 @@ func newConnectorRegistryWithPlugins() *connector.Registry {
 // that env files no longer reference the proxy address, so populating
 // them mirrors what the sidecar would pass at boot.
 func resolveConnectorOpts(dataDir string) connector.SetupOpts {
+	return resolveConnectorOptsFor(dataDir, resolveActiveConnectorName(dataDir))
+}
+
+// resolveConnectorOptsFor is resolveConnectorOpts for the named connector.
+func resolveConnectorOptsFor(dataDir, name string) connector.SetupOpts {
 	opts := connector.SetupOpts{
 		DataDir:        dataDir,
 		ConfigHome:     connectorFlagConfigHome,
 		HookExecutable: connectorFlagHookExe,
 		Interactive:    false,
 	}
-	name := resolveActiveConnectorName(dataDir)
 	if name == "amp" {
 		opts.ConfigHome = strings.TrimSpace(connectorFlagConfigHome)
 	}
@@ -511,6 +552,9 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector reconcile: no data directory configured")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	if name == "codex" && connectorFlagConfigHome == "" {
+		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
+	}
 	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
 	if err != nil {
 		return fmt.Errorf("connector reconcile: %w", err)
@@ -535,11 +579,12 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	if cfg != nil {
 		opts.CodexOtelEnvironment = cfg.Environment
 		opts.HookFailMode = cfg.EffectiveHookFailModeForConnector(name)
+		opts.SecureClientHookDelivery = cfg.SecureClientIntegration()
 		opts.GuardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
 		opts.HILTEnabled = cfg.EffectiveHILTForConnector(name).Enabled
 		opts.ManagedEnterprise = managed.IsManagedEnterprise(cfg.DeploymentMode)
 	}
-	if name == "cursor" && !strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "action") {
+	if name == "cursor" && !opts.SecureClientHookDelivery && !strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "action") {
 		// Keep maintenance output and persisted lock evidence truthful: Cursor
 		// observe mode is always fail-open even when a global closed setting is
 		// inherited for connectors that enforce failures independently.
@@ -560,7 +605,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 		strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name)), "action",
 	)
 	if connector.HookContractNeedsActionOverride(resolution) && actionMode &&
-		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return fmt.Errorf(
 			"connector reconcile %s: agent version %q is not verified against a known hook contract: %s",
 			name, opts.AgentVersion, resolution.Reason,
@@ -572,7 +617,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 		// same agent version, or an agent update that still resolves to a
 		// contract, is refreshed by the Setup below, as at gateway boot.
 		if connector.HookContractCompatibilityDrifted(previous, current) && actionMode &&
-			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" &&
+			envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" &&
 			!connector.HookContractChangedByDefenseClawRelease(previous, current) &&
 			!connector.HookContractAgentUpdateAdmitted(previous, current) {
 			return fmt.Errorf("connector reconcile %s: hook contract compatibility drift", name)
@@ -647,7 +692,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 			"fail_mode": opts.HookFailMode,
 		})
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s runtime reconciled\n", Style("✓", "fg=green", "bold"), name)
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s runtime reconciled\n", Style(glyph("✓", "OK"), "fg=green", "bold"), name)
 	return nil
 }
 
@@ -862,6 +907,9 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector teardown: no data directory configured (set --data-dir or run 'defenseclaw init')")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	if name == "codex" && connectorFlagConfigHome == "" {
+		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
+	}
 	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
 	if err != nil {
 		return fmt.Errorf("connector teardown: %w", err)
@@ -890,10 +938,7 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector %s teardown: mark connector inactive: %w", name, err)
 	}
 
-	if err := conn.Teardown(ctx, opts); err != nil {
-		if restoreErr := restoreState(); restoreErr != nil {
-			err = fmt.Errorf("%w; restore active connector state: %v", err, restoreErr)
-		}
+	if err := runMarkedTeardown(ctx, name, conn, opts, restoreState); err != nil {
 		if connectorFlagJSON {
 			payload := map[string]any{
 				"connector": name,
@@ -906,13 +951,6 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		}
 		return fmt.Errorf("connector %s teardown: %w", name, err)
 	}
-	if name == "opencode" {
-		// The empty folders the gateway's install watcher created go too.
-		connector.RemoveOpenCodeWatcherCreatedDirs(opts.DataDir)
-	}
-	// Windows lock files stay after their lock; the idle ones this teardown
-	// used beside the agent configs go now.
-	connector.RemoveIdleFileLockSentinels()
 
 	if connectorFlagJSON {
 		payload := map[string]any{
@@ -922,7 +960,222 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		}
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s teardown complete\n", Style("✓", "fg=green", "bold"), name)
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s teardown complete\n", Style(glyph("✓", "OK"), "fg=green", "bold"), name)
+	return nil
+}
+
+// runMarkedTeardown runs the Teardown of a connector that is already marked
+// inactive, and undoes that mark when the Teardown fails.
+func runMarkedTeardown(ctx context.Context, name string, conn connector.Connector, opts connector.SetupOpts, restoreState func() error) error {
+	if err := conn.Teardown(ctx, opts); err != nil {
+		if restoreErr := restoreState(); restoreErr != nil {
+			err = fmt.Errorf("%w; restore active connector state: %v", err, restoreErr)
+		}
+		return err
+	}
+	if name == "opencode" {
+		// The empty folders the gateway's install watcher created go too.
+		connector.RemoveOpenCodeWatcherCreatedDirs(opts.DataDir)
+	}
+	// Windows lock files stay after their lock; the idle ones this teardown
+	// used beside the agent configs go now.
+	connector.RemoveIdleFileLockSentinels()
+	return nil
+}
+
+func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
+	dataDir := resolveConnectorDataDir()
+	if dataDir == "" {
+		return fmt.Errorf("connector prune-orphans: no data directory configured (set --data-dir)")
+	}
+	// What is configured decides what is an orphan: without config.yaml or
+	// with an unreadable connector state nothing is removed on a guess.
+	if cfg == nil {
+		return fmt.Errorf("connector prune-orphans: config.yaml is not loaded; nothing was removed")
+	}
+	configured := map[string]bool{}
+	for _, name := range cfg.ActiveConnectors() {
+		configured[strings.ToLower(strings.TrimSpace(name))] = true
+	}
+	active, _, err := connector.ReadActiveConnectorState(dataDir)
+	if err != nil {
+		return fmt.Errorf("connector prune-orphans: read the connector state: %w; nothing was removed", err)
+	}
+	for _, name := range active {
+		configured[strings.ToLower(strings.TrimSpace(name))] = true
+	}
+	reg := newConnectorRegistryWithPlugins()
+	names := reg.Names()
+	if want := strings.ToLower(strings.TrimSpace(connectorFlagName)); want != "" {
+		if _, ok := reg.Get(want); !ok {
+			return fmt.Errorf("connector prune-orphans: unknown connector %q (known: %s)",
+				want, strings.Join(names, ", "))
+		}
+		names = []string{want}
+	}
+	removed := map[string][]string{}
+	failed := map[string]string{}
+	for _, name := range names {
+		if configured[name] {
+			continue
+		}
+		conn, _ := reg.Get(name)
+		paths, err := pruneOrphanedConnector(cmd.Context(), dataDir, name, conn)
+		if err != nil {
+			failed[name] = err.Error()
+		} else if len(paths) > 0 {
+			removed[name] = paths
+		}
+	}
+	if connectorFlagJSON {
+		payload := map[string]any{
+			"action":  "prune-orphans",
+			"ok":      len(failed) == 0,
+			"removed": removed,
+			"failed":  failed,
+		}
+		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
+			return err
+		}
+	} else {
+		for _, name := range names {
+			if paths := removed[name]; len(paths) > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s %s is not configured: removed its DefenseClaw hook entries from %s\n",
+					Style(glyph("✓", "OK"), "fg=green", "bold"), name, strings.Join(paths, ", "))
+			}
+			if reason, ok := failed[name]; ok {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  %s: %s\n", name, reason)
+			}
+		}
+	}
+	if len(failed) > 0 {
+		failedNames := make([]string, 0, len(failed))
+		for _, name := range names {
+			if _, ok := failed[name]; ok {
+				failedNames = append(failedNames, name)
+			}
+		}
+		return fmt.Errorf("connector prune-orphans: could not remove the hook entries of %s",
+			strings.Join(failedNames, ", "))
+	}
+	return nil
+}
+
+// pruneOrphanedConnector tears down name, which is not configured, when its
+// agent config still holds DefenseClaw hook entries for dataDir, and returns
+// the config files they were in.
+func pruneOrphanedConnector(ctx context.Context, dataDir, name string, conn connector.Connector) ([]string, error) {
+	if name == "codex" && connectorFlagConfigHome == "" {
+		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
+	}
+	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
+	if err != nil {
+		return nil, err
+	}
+	defer restoreConfigHome()
+	opts := resolveConnectorOptsFor(dataDir, name)
+	paths, err := connector.OrphanedHookConfigPaths(conn, opts)
+	if err != nil || len(paths) == 0 {
+		return nil, err
+	}
+	restoreState, err := connector.MarkConnectorInactive(dataDir, name)
+	if err != nil {
+		return nil, fmt.Errorf("mark connector inactive: %w", err)
+	}
+	if err := runMarkedTeardown(ctx, name, conn, opts, restoreState); err != nil {
+		return nil, err
+	}
+	return paths, nil
+}
+
+func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
+	dataDir := resolveConnectorDataDir()
+	if dataDir == "" {
+		return fmt.Errorf("connector prepare-rollback: no data directory configured (set --data-dir)")
+	}
+	reg := newConnectorRegistryWithPlugins()
+	names := reg.Names()
+	if connectorFlagName != "" {
+		if _, ok := reg.Get(connectorFlagName); !ok {
+			return fmt.Errorf("connector prepare-rollback: unknown connector %q (known: %s)",
+				connectorFlagName, strings.Join(names, ", "))
+		}
+		names = []string{connectorFlagName}
+	}
+	opts := resolveConnectorOpts(dataDir)
+	converted := map[string]int{}
+	failed := map[string]string{}
+	for _, name := range names {
+		conn, _ := reg.Get(name)
+		if connectorRollbackRestore {
+			restorer, ok := conn.(connector.HookRollbackRestorer)
+			if !ok {
+				continue
+			}
+			count, err := restorer.RestoreHooksAfterRollback(opts)
+			if err != nil {
+				failed[name] = err.Error()
+			} else if count > 0 {
+				converted[name] = count
+			}
+			continue
+		}
+		converter, ok := conn.(connector.HookRollbackConverter)
+		if !ok {
+			continue
+		}
+		count, err := converter.ConvertHooksForRollback(opts)
+		if err != nil {
+			failed[name] = err.Error()
+			continue
+		}
+		if count > 0 {
+			converted[name] = count
+		}
+	}
+	if connectorFlagJSON {
+		payload := map[string]any{
+			"action":    "prepare-rollback",
+			"ok":        len(failed) == 0,
+			"converted": converted,
+			"failed":    failed,
+		}
+		if connectorRollbackRestore {
+			payload["restored"] = converted
+			delete(payload, "converted")
+		}
+		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
+			return err
+		}
+	} else {
+		for _, name := range names {
+			if count := converted[name]; count > 0 {
+				if connectorRollbackRestore {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s: restored %d authenticated current-release hook entries\n", name, count)
+					continue
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: rewrote %d hook entries in the form earlier releases remove\n",
+					Style(glyph("✓", "OK"), "fg=green", "bold"), name, count)
+			}
+			if reason, ok := failed[name]; ok {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  %s: %s\n", name, reason)
+			}
+		}
+	}
+	if len(failed) > 0 {
+		failedNames := make([]string, 0, len(failed))
+		for _, name := range names {
+			if _, ok := failed[name]; ok {
+				failedNames = append(failedNames, name)
+			}
+		}
+		if connectorRollbackRestore {
+			return fmt.Errorf("connector prepare-rollback --restore: protection could not be verified or restored for %s; recovery evidence retained",
+				strings.Join(failedNames, ", "))
+		}
+		return fmt.Errorf("connector prepare-rollback: could not rewrite the hook entries of %s",
+			strings.Join(failedNames, ", "))
+	}
 	return nil
 }
 
@@ -932,6 +1185,9 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector verify: no data directory configured (set --data-dir or run 'defenseclaw init')")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	if name == "codex" && connectorFlagConfigHome == "" {
+		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
+	}
 	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
 	if err != nil {
 		return fmt.Errorf("connector verify: %w", err)
@@ -985,11 +1241,11 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 	}
 
 	if verifyErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %v\n", Style("✗", "fg=red", "bold"), name, verifyErr)
+		fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %v\n", Style(glyph("✗", "X"), "fg=red", "bold"), name, verifyErr)
 		connectorExit(1)
 		return nil
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: no residual DefenseClaw state detected\n", Style("✓", "fg=green", "bold"), name)
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: no residual DefenseClaw state detected\n", Style(glyph("✓", "OK"), "fg=green", "bold"), name)
 	return nil
 }
 

@@ -53,9 +53,9 @@ type curlTransferProjection struct {
 
 // StaticCurlStdinUploadTargets returns the exact parser-owned destination that
 // receives stdin from one literal --data-binary @- or --upload-file - operand.
-// The proof is intentionally an exact minimal invocation: another option or
-// target can consume stdin or route bytes independently of an unrelated
-// NetworkUpload fact on the same command.
+// Presentation options, a literal header and an explicit POST method preserve
+// this proof. Other options or targets may consume stdin or route bytes to a
+// different destination.
 func StaticCurlStdinUploadTargets(command CommandFact) []NetworkFact {
 	if command.Dialect != DialectPOSIX || command.Effect != EffectExecute ||
 		!command.ArgvComplete || command.ParentCommandID != 0 ||
@@ -80,16 +80,39 @@ func StaticCurlStdinUploadTargets(command CommandFact) []NetworkFact {
 		return nil
 	}
 
-	if len(parsed.Options) != 1 || len(parsed.Targets) != 1 {
+	if len(parsed.Targets) != 1 {
 		return nil
 	}
-	option := parsed.Options[0]
-	if option.Group != parsed.Targets[0].Group || !option.ValuePresent ||
-		!staticCurlOptionValue(command, option) {
-		return nil
+	stdinBody, stdinUpload := false, false
+	for _, option := range parsed.Options {
+		if option.Group != parsed.Targets[0].Group ||
+			(option.ValuePresent && !staticCurlOptionValue(command, option)) {
+			return nil
+		}
+		switch option.Canonical {
+		case "--data-binary":
+			if stdinBody || stdinUpload || option.Value != "@-" {
+				return nil
+			}
+			stdinBody = true
+		case "--upload-file":
+			if stdinBody || stdinUpload || option.Value != "-" {
+				return nil
+			}
+			stdinUpload = true
+		case "--silent", "--show-error":
+		case "--request":
+			if option.Value != "POST" {
+				return nil
+			}
+		case "--header":
+			if strings.HasPrefix(option.Value, "@") {
+				return nil
+			}
+		default:
+			return nil
+		}
 	}
-	stdinBody := option.Canonical == "--data-binary" && option.Value == "@-"
-	stdinUpload := option.Canonical == "--upload-file" && option.Value == "-"
 	if !stdinBody && !stdinUpload {
 		return nil
 	}
@@ -4185,19 +4208,6 @@ func curlMainProxyOptionUsesHTTP(canonical string, scheme string) bool {
 		(canonical == "--proxy" || canonical == "--proxy1.0")
 }
 
-func curlProxyInertFlag(option curlOptionToken) bool {
-	if !option.Known || option.ValuePresent || option.TakesValue {
-		return false
-	}
-	switch option.Role {
-	case curlOptionNeutral, curlOptionHead, curlOptionNoHead,
-		curlOptionNoRemoteName, curlOptionNoRemoteNameAll:
-		return true
-	default:
-		return false
-	}
-}
-
 func curlProxyHeaderCandidateIsTransmitted(
 	value string,
 	targets []curlTransferTarget,
@@ -4750,35 +4760,6 @@ func curlProxiedOriginRequestMetadata(
 			metadata.HTTPRequestComponents = append(
 				metadata.HTTPRequestComponents,
 				component(query),
-			)
-		}
-	}
-	return metadata
-}
-
-func curlProxiedFTPControlMetadata(
-	command CommandFact,
-	parsed curlArgvParse,
-	values []string,
-	mode curlFTPProxyTunnelMode,
-) CurlTransmittedMetadata {
-	metadata := CurlTransmittedMetadata{}
-	if len(values) == 0 || mode == curlFTPProxyTunnelNone {
-		return metadata
-	}
-	for _, target := range parsed.Targets {
-		network, ok := webTargetFact(command.ID, target.Value, NetworkDownload)
-		if !ok || network.Scheme != "ftp" && network.Scheme != "ftps" ||
-			mode == curlFTPProxyTunnelFTPS && network.Scheme != "ftps" {
-			continue
-		}
-		for _, value := range values {
-			metadata.FTPRequestComponents = append(
-				metadata.FTPRequestComponents,
-				TransmittedRequestComponent{
-					Value: value, Scheme: network.Scheme,
-					Host: network.Host, Port: network.Port,
-				},
 			)
 		}
 	}

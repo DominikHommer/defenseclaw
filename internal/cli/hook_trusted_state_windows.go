@@ -96,6 +96,7 @@ var nativeEnterpriseHookRuntimeSnapshot struct {
 	gatewayServiceName string
 	scopedToken        string
 	generationID       string
+	failMode           string
 	err                error
 }
 
@@ -157,7 +158,7 @@ func NativeHookRuntimeNoop() bool {
 			nativeEnterpriseHookRuntimeSnapshot.Unlock()
 			return false
 		}
-		return enterpriseManagedHookRuntimeNoop(connectorName)
+		return prepareEnterpriseManagedHookRuntime(connectorName)
 	}
 	if !recognized {
 		return false
@@ -258,7 +259,9 @@ func hookConnectorFromArgs(args []string) (string, error) {
 	return connectorName, nil
 }
 
-func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
+// prepareEnterpriseManagedHookRuntime caches the authenticated Windows
+// generation. Its true result is the native launcher tombstone.
+func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	// Cobra passes the raw flag value ("ClaudeCode" for --connector
 	// ClaudeCode), but hookConnectorFromArgs caches the lowercase form
 	// ("claudecode"). Without normalization here the snapshot cache would
@@ -310,6 +313,7 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 	nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = runtime.GatewayServiceName
 	nativeEnterpriseHookRuntimeSnapshot.scopedToken = runtime.ScopedToken
 	nativeEnterpriseHookRuntimeSnapshot.generationID = runtime.GenerationID
+	nativeEnterpriseHookRuntimeSnapshot.failMode = runtime.FailMode
 	nativeEnterpriseHookRuntimeSnapshot.err = err
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	return enterpriseManagedRuntimeAbsenceNoop(
@@ -331,6 +335,21 @@ func validEnterpriseManagedRuntimeGenerationID(generationID string) bool {
 		}
 	}
 	return true
+}
+
+// Only authenticated immutable generation policy may relax managed delivery.
+// An absent or invalid snapshot remains closed, independently of CLI/env flags.
+func enterpriseManagedHookRuntimeFailMode() string {
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		nativeEnterpriseHookRuntimeSnapshot.err == nil &&
+		nativeEnterpriseHookRuntimeSnapshot.registered &&
+		validEnterpriseManagedRuntimeGenerationID(nativeEnterpriseHookRuntimeSnapshot.generationID) &&
+		nativeEnterpriseHookRuntimeSnapshot.failMode == "open" {
+		return "open"
+	}
+	return "closed"
 }
 
 func enterpriseManagedRuntimeAbsenceNoop(
@@ -401,6 +420,7 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
 	prepared := nativeEnterpriseHookRuntimeSnapshot.prepared
 	err := nativeEnterpriseHookRuntimeSnapshot.err
+	home := nativeEnterpriseHookRuntimeSnapshot.home
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	if !prepared || err == nil {
 		return ""
@@ -415,15 +435,26 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 		standaloneEnterpriseHookCheck(nativeHookExecutable()) {
 		return enterprisehooks.WindowsManagedEnrollmentPendingReason
 	}
+	// The account's DefenseClaw folder (renamed, moved or deleted) is gone:
+	// the documented code, not "state invalid" (GAP-0759). The standalone
+	// guardian recreates it in the account's session. Only a folder that is
+	// really absent counts, but whatever step failed on its absence: live, the
+	// failure did not always unwrap to a missing file, and the user read only
+	// "not set up correctly". A folder that is there stays state_invalid.
+	if standaloneEnterpriseHookCheck(nativeHookExecutable()) && windowsManagedRuntimeHomeAbsent(home) {
+		return "enterprise_managed_runtime_home_missing"
+	}
 	return "enterprise_managed_runtime_state_invalid"
 }
 
-func enterpriseManagedHookRuntimeEndpoint(
-	connectorName string,
-) (gatewayAddr, gatewayServiceName string, ok bool) {
-	gatewayAddr, gatewayServiceName, _, ok =
-		enterpriseManagedHookRuntimeConnection(connectorName)
-	return gatewayAddr, gatewayServiceName, ok
+// windowsManagedRuntimeHomeAbsent reports whether the account's DefenseClaw
+// data folder the protected policy names does not exist.
+func windowsManagedRuntimeHomeAbsent(home string) bool {
+	if strings.TrimSpace(home) == "" {
+		return false
+	}
+	_, err := os.Lstat(home)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // enterpriseManagedHookRuntimeConnection returns endpoint identity and the
@@ -433,7 +464,7 @@ func enterpriseManagedHookRuntimeEndpoint(
 func enterpriseManagedHookRuntimeConnection(
 	connectorName string,
 ) (gatewayAddr, gatewayServiceName string, scopedToken *string, ok bool) {
-	// Normalize identically to enterpriseManagedHookRuntimeNoop so the
+	// Normalize identically to prepareEnterpriseManagedHookRuntime so the
 	// snapshot cache lookup matches regardless of the caller's casing.
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	nativeEnterpriseHookRuntimeSnapshot.Lock()

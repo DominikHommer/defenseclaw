@@ -18,6 +18,8 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -310,6 +312,52 @@ func TestKiroWatchDirsDoNotFallBackToOpenClaw(t *testing.T) {
 	}
 }
 
+func TestReadMCPServersKiroKeepsUserAndWorkspaceScopes(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	workspace := filepath.Join(home, "project")
+	userPath := filepath.Join(home, ".kiro", "settings", "mcp.json")
+	projectPath := filepath.Join(workspace, ".kiro", "settings", "mcp.json")
+	for path, body := range map[string]string{
+		userPath:    `{"mcpServers":{"shared":{"command":"user-server"},"global":{"url":"https://example.test/mcp"}}}`,
+		projectPath: `{"mcpServers":{"shared":{"command":"project-server"}}}`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &Config{}
+	cfg.Claw.WorkspaceDir = workspace
+	entries, err := cfg.ReadMCPServersForConnector("kiro")
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("Kiro entries = %+v, err = %v; want both scopes and same-name entries", entries, err)
+	}
+	var project, user, global bool
+	for _, entry := range entries {
+		switch {
+		case entry.Name == "shared" && entry.SourceScope == "project":
+			project = entry.Source == projectPath && entry.Project == workspace && entry.Command == "project-server"
+		case entry.Name == "shared" && entry.SourceScope == "user":
+			user = entry.Source == userPath && entry.Project == "" && entry.Command == "user-server"
+		case entry.Name == "global" && entry.SourceScope == "user":
+			global = entry.URL == "https://example.test/mcp"
+		}
+	}
+	if !project || !user || !global {
+		t.Fatalf("Kiro scope provenance = %+v", entries)
+	}
+	if managed := ReadUserMCPServersForHome("kiro", home); len(managed) != 2 || managed[0].Connector != "kiro" {
+		t.Fatalf("managed Kiro user entries = %+v", managed)
+	}
+	cfg.Claw.WorkspaceDir = home
+	if entries, err := cfg.ReadMCPServersForConnector("kiro"); err != nil || len(entries) != 2 {
+		t.Fatalf("home workspace duplicate = %+v, err = %v", entries, err)
+	}
+}
+
 func TestPluginDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "foo")
 	cfg := &Config{}
@@ -484,6 +532,32 @@ func TestReadMCPServers_UsesPinnedWorkspaceForProjectMCP(t *testing.T) {
 	}
 	if hasMCPEntry(entries, "daemon-cwd") {
 		t.Fatalf("entries = %+v, should not read daemon cwd MCP server", entries)
+	}
+}
+
+func TestClaudeStateMCPServersIncludesProjectsAfterFirst512(t *testing.T) {
+	root := t.TempDir()
+	projects := make(map[string]any)
+	for i := 0; i < 512; i++ {
+		projects[filepath.Join(root, fmt.Sprintf("a%03d", i))] = map[string]any{}
+	}
+	active := filepath.Join(root, "z-active")
+	projects[active] = map[string]any{}
+	data, err := json.Marshal(map[string]any{"projects": projects})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := ClaudeStateMCPServers(data, func(project string) ([]byte, error) {
+		if project == active {
+			return []byte(`{"mcpServers":{"active":{"command":"echo"}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "active" || entries[0].Project != active {
+		t.Fatalf("active project MCP server missing: %+v", entries)
 	}
 }
 
@@ -760,9 +834,7 @@ func TestReadMCPServersOpenCode_V11810PrecedenceJSONCAndDisabled(t *testing.T) {
 			positions[layer.Scope] = index
 		}
 	}
-	if !(positions["project-directory"] < positions["home-directory"] &&
-		positions["home-directory"] < positions["custom-directory"] &&
-		positions["custom-directory"] < positions["inline"]) {
+	if (positions["project-directory"] >= positions["home-directory"] || positions["home-directory"] >= positions["custom-directory"]) || positions["custom-directory"] >= positions["inline"] {
 		t.Fatalf("layer positions = %+v, want project < home < custom < inline", positions)
 	}
 	var remote, managed bool
@@ -1010,6 +1082,9 @@ func TestConnectorHomeDir_OpenCodeAntigravity(t *testing.T) {
 	}
 	if got := cfg.ConnectorHomeDir("opencode"); strings.Contains(got, "openclaw-home") {
 		t.Errorf("ConnectorHomeDir(opencode) leaked OpenClaw home: %q", got)
+	}
+	if got, want := cfg.ConnectorHomeDir("kiro"), filepath.Join(home, ".kiro"); got != want {
+		t.Errorf("ConnectorHomeDir(kiro) = %q, want %q", got, want)
 	}
 }
 
@@ -1363,5 +1438,45 @@ func TestHasConnectorConfigured(t *testing.T) {
 	multi.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {}}
 	if !multi.HasConnectorConfigured() {
 		t.Error("populated guardrail.connectors map must report configured")
+	}
+}
+
+// GAP-0219: the managed enumerator read a project .mcp.json that did not
+// parse, or a server whose fields had the wrong type, as no servers, so its
+// servers silently stayed out of admission. The strict reader fails and
+// names the file; the per-user reader keeps skipping such a file.
+func TestClaudeStateMCPServersRefusesAServerListThatDoesNotParse(t *testing.T) {
+	project := filepath.Join(t.TempDir(), "proj")
+	state := func(local string) []byte {
+		data, err := json.Marshal(map[string]any{"projects": map[string]any{project: json.RawMessage(local)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	for name, file := range map[string]string{
+		"not json":          `{"mcpServers":{"x":`,
+		"args not an array": `{"mcpServers":{"x":{"command":"npx","args":"-y pkg"}}}`,
+	} {
+		_, err := ClaudeStateMCPServers(state(`{}`), func(string) ([]byte, error) { return []byte(file), nil })
+		var fileErr *MCPFileParseError
+		if !errors.As(err, &fileErr) || fileErr.Path != filepath.Join(project, ".mcp.json") {
+			t.Errorf("%s: err %v, want a parse error naming the project .mcp.json", name, err)
+		}
+	}
+	if _, err := ClaudeStateMCPServers(state(`{"mcpServers":{"x":{"command":"npx","env":"A=1"}}}`), nil); err == nil {
+		t.Error("a local-scope server whose env is not a map was read as no servers")
+	}
+	if _, err := ClaudeStateMCPServers([]byte(`{"mcpServers":{"x":{"command":7}}}`), nil); err == nil {
+		t.Error("a user-scope server whose command is a number was read as no servers")
+	}
+	servers, err := ClaudeStateMCPServers(state(`{}`), func(string) ([]byte, error) { return []byte(" \n"), nil })
+	if err != nil || len(servers) != 0 {
+		t.Errorf("an empty .mcp.json: %+v, %v; want no servers", servers, err)
+	}
+	lenient, err := claudeStateProjectServers(map[string]any{"projects": map[string]any{project: map[string]any{}}},
+		func(string) ([]byte, error) { return []byte(`{"mcpServers":{"x":`), nil }, false)
+	if err != nil || len(lenient) != 0 {
+		t.Errorf("per-user reader: %+v, %v; want the file skipped", lenient, err)
 	}
 }

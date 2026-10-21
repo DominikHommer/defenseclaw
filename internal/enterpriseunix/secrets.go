@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -42,16 +43,34 @@ type SecretState struct {
 // listSecrets returns the credential names in the secrets directory and a
 // digest over their names and contents, so ensure notices a rotation.
 func (e *Env) listSecrets() ([]string, string, error) {
-	dir := e.P(e.Layout.SecretsDir)
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, sha256Bytes(nil), nil
-	}
+	names, err := e.secretNames()
 	if err != nil {
 		return nil, "", err
 	}
-	var names []string
 	var digest bytes.Buffer
+	for _, name := range names {
+		sum, err := sha256File(filepath.Join(e.P(e.Layout.SecretsDir), name))
+		if err != nil {
+			return nil, "", err
+		}
+		fmt.Fprintf(&digest, "%s:%s\n", name, sum)
+	}
+	return names, sha256Bytes(digest.Bytes()), nil
+}
+
+// secretNames lists, sorted, the credentials in the secrets directory: the
+// regular files with a credential name. No credential is opened; a missing
+// directory holds none.
+func (e *Env) secretNames() ([]string, error) {
+	dir := e.P(e.Layout.SecretsDir)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
 	for _, entry := range entries {
 		name := entry.Name()
 		if strings.HasPrefix(name, ".") || !config.ValidEnterpriseCredentialName(name) {
@@ -61,24 +80,59 @@ func (e *Env) listSecrets() ([]string, string, error) {
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		sum, err := sha256File(filepath.Join(dir, name))
-		if err != nil {
-			return nil, "", err
-		}
 		names = append(names, name)
-		fmt.Fprintf(&digest, "%s:%s\n", name, sum)
 	}
 	sort.Strings(names)
-	return names, sha256Bytes(digest.Bytes()), nil
+	return names, nil
+}
+
+// SecretPresent reports whether the secrets directory holds the credential
+// name, from the listing `enterprise secret status` reads (bundle verify's
+// presence check); the credential is not opened.
+func (e *Env) SecretPresent(name string) (bool, error) {
+	e.fillDefaults()
+	names, err := e.secretNames()
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(names, name), nil
+}
+
+// TrustedSecretSource refuses a --from-file credential that another account
+// could have changed: a symlink, a file that group or others can write or
+// that another account owns, or one in a folder another account can write.
+// The Windows CLI and the MDM wrapper refuse such a file; the Unix CLI read
+// it (GAP-0334).
+func TrustedSecretSource(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("--from-file %s does not exist", path)
+	}
+	return trustedInputFile(abs, "--from-file")
 }
 
 // ReadSecretValue reads a credential from r, stripping one trailing line
 // ending so `echo key |` works.
 func ReadSecretValue(r io.Reader) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, maxSecretBytes+1))
+	data, err := ReadSecretBytes(r)
 	if err != nil {
 		return nil, err
 	}
+	return ParseSecretValue(data)
+}
+
+// ReadSecretBytes reads what a credential source delivers, at most one byte
+// over the credential limit, without checking it (ParseSecretValue does).
+func ReadSecretBytes(r io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, maxSecretBytes+1))
+}
+
+// ParseSecretValue checks the bytes a credential source delivered and
+// strips one trailing line ending.
+func ParseSecretValue(data []byte) ([]byte, error) {
 	if len(data) > maxSecretBytes {
 		return nil, fmt.Errorf("credential exceeds %d bytes", maxSecretBytes)
 	}
@@ -141,16 +195,17 @@ func (e *Env) WriteSecret(ctx context.Context, name string, value []byte) error 
 	return e.writeFileAtomic(filepath.Join(e.P(e.Layout.SecretsDir), name), value, mode, owner)
 }
 
-// RemoveSecret deletes one protected credential. It refuses one that an
-// enabled observability destination of the installed config references:
-// the gateway could not start on that config without it.
+// RemoveSecret deletes one protected credential. It refuses one the
+// installed config still names: an enabled observability destination (the
+// gateway could not start on that config without it) or the LLM judge and AI
+// Defense keys (the judge would run without its key, GAP-0674).
 func (e *Env) RemoveSecret(name string) error {
 	e.fillDefaults()
 	if !config.ValidEnterpriseCredentialName(name) {
 		return fmt.Errorf("credential name %q is not valid", name)
 	}
 	if raw, err := readBounded(e.P(e.Layout.ConfigPath), maxInputBytes); err == nil {
-		if at := config.ObservabilityV8CredentialReference(e.Layout.ConfigPath, raw, e.Layout.DataDir, name); at != "" {
+		if at := config.InstalledCredentialReference(e.Layout.ConfigPath, raw, e.Layout.DataDir, name); at != "" {
 			return fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", name, at)
 		}
 	}

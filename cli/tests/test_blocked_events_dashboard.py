@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 DASHBOARD = ROOT / "bundles/local_observability_stack/grafana/dashboards/defenseclaw-blocked-events.json"
 PACKAGED = ROOT / "cli/defenseclaw/_data/local_observability_stack/grafana/dashboards/defenseclaw-blocked-events.json"

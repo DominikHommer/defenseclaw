@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -640,6 +641,13 @@ def test_restart_services_roster_line_leaves_out_a_refused_peer(monkeypatch, tmp
     monkeypatch.setattr(cmd_setup, "_hook_runtime_wait_targets", lambda *_args: list(roster))
     monkeypatch.setattr(cmd_setup, "_unverified_setup_peers", frozenset)
     monkeypatch.setattr(cmd_setup, "_wait_for_defense_gateway_api", lambda *_args, **_kwargs: True)
+    # Keep this readiness test independent of the build host's OpenCode home.
+    from defenseclaw import connector_paths
+
+    monkeypatch.setattr(
+        connector_paths, "connector_config_files",
+        lambda _name: [str(tmp_path / "opencode" / "plugins" / "defenseclaw.js")],
+    )
     monkeypatch.setattr(
         cmd_setup,
         "_wait_for_connector_runtime",
@@ -651,6 +659,103 @@ def test_restart_services_roster_line_leaves_out_a_refused_peer(monkeypatch, tmp
 
     assert any(hint.startswith("3 hook connectors (claudecode, codex, opencode):") for hint in hints), hints
     assert not any("hermes" in hint for hint in hints), hints
+
+
+def test_batch_readiness_requires_every_selected_connector(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cmd_setup, "_hook_runtime_wait_targets", lambda *_args: ["codex", "cursor"])
+    monkeypatch.setattr(cmd_setup, "_unverified_setup_peers", frozenset)
+    monkeypatch.setattr(cmd_setup, "_wait_for_defense_gateway_api", lambda *_args, **_kwargs: True)
+
+    def wait(*_args, **kwargs):
+        captured.update(kwargs)
+        return cmd_setup._ConnectorRuntimeReadiness(True)
+
+    monkeypatch.setattr(cmd_setup, "_wait_for_connector_runtime", wait)
+    cmd_setup._restart_services(
+        str(tmp_path), connector="codex", connectors=["codex", "cursor"],
+        wait_for_connector_ready=True, required_connectors=frozenset({"codex", "cursor"}),
+    )
+    assert captured["required"] == {"codex", "cursor"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode check")
+def test_opencode_writable_plugin_folder_is_named_before_restart(monkeypatch, tmp_path: Path) -> None:
+    from defenseclaw import connector_paths
+
+    folder = tmp_path / ".config" / "opencode" / "plugins"
+    folder.mkdir(parents=True)
+    folder.chmod(0o775)
+    plugin = folder / "defenseclaw.js"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(connector_paths, "connector_config_files", lambda _name: [str(plugin)])
+    restarted = []
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *_args, **_kwargs: restarted.append(True))
+    with pytest.raises(click.ClickException) as caught:
+        cmd_setup._restart_services(str(tmp_path), connector="opencode", wait_for_connector_ready=True)
+    assert str(folder) in str(caught.value)
+    assert "chmod go-w" in str(caught.value)
+    assert restarted == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode check")
+@pytest.mark.parametrize("batch", [False, True])
+def test_opencode_preflight_precedes_config_write(monkeypatch, tmp_path: Path, batch: bool) -> None:
+    from defenseclaw import connector_paths
+    from defenseclaw.context import AppContext
+
+    folder = tmp_path / "plugins"
+    folder.mkdir(mode=0o775)
+    folder.chmod(0o775)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        connector_paths, "connector_config_files", lambda _name: [str(folder / "defenseclaw.js")]
+    )
+    cfg = _config(tmp_path)
+    writes = []
+    cfg.save = lambda: writes.append(True)
+    app = AppContext()
+    app.cfg = cfg
+    if batch:
+        ctx = click.Context(cmd_setup.setup, obj=app)
+        with ctx, pytest.raises(click.ClickException, match="group/other writable"):
+            cmd_setup._apply_setup_batch(
+                ctx, app, ["opencode"], mode="action", restart=True,
+                prompt_per_connector=False,
+            )
+    else:
+        with pytest.raises(click.ClickException, match="group/other writable"):
+            cmd_setup._apply_hook_connector_setup(
+                app, connector="opencode", mode="action", restart=True,
+            )
+    assert writes == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode check")
+@pytest.mark.parametrize(
+    "restart_kwargs",
+    [{"teardown": True}, {"title": cmd_setup._ROLLBACK_RESTART_TITLE}],
+)
+def test_opencode_teardown_or_rollback_skips_setup_folder_preflight(
+    monkeypatch, tmp_path: Path, restart_kwargs: dict
+) -> None:
+    from defenseclaw import connector_paths
+
+    folder = tmp_path / ".config" / "opencode" / "plugins"
+    folder.mkdir(parents=True)
+    folder.chmod(0o775)
+    plugin = folder / "defenseclaw.js"
+    monkeypatch.setattr(connector_paths, "connector_config_files", lambda _name: [str(plugin)])
+
+    def reached_restart(*_args, **_kwargs):
+        raise RuntimeError("restart reached")
+
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", reached_restart)
+    with pytest.raises(RuntimeError, match="restart reached"):
+        cmd_setup._restart_services(
+            str(tmp_path), connector="opencode", wait_for_connector_ready=True, **restart_kwargs
+        )
 
 
 def test_restart_services_labels_hermes_pending_reload_without_live_claim(
@@ -691,6 +796,10 @@ def test_restart_services_labels_hermes_pending_reload_without_live_claim(
 def test_upstream_fail_open_remains_distinct_from_configured_mode(monkeypatch, tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     cfg.guardrail = _guardrail(fail_mode="closed")
+    # Under Secure Client the Hermes hook is the upstream fail-open one; per-user
+    # it follows its fail mode on every OS (GAP-0150, GAP-0269).
+    cfg.deployment_mode = "managed_enterprise"
+    monkeypatch.setattr("defenseclaw.fail_mode._is_windows", lambda: True)
     entry = _entry("hermes", tmp_path)
     entry["hook_fail_mode"] = "closed"
     _patch_registration_ready(monkeypatch, entry)
@@ -710,7 +819,7 @@ def test_upstream_fail_open_remains_distinct_from_configured_mode(monkeypatch, t
         "_check_hermes_hooks",
         lambda _cfg, result: cmd_doctor._emit(
             "pass",
-            "Hermes hooks (fail-open)",
+            cmd_doctor._HERMES_HOOKS_LABEL,
             "healthy: registered",
             r=result,
         ),

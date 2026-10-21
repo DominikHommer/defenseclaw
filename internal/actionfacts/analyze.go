@@ -213,16 +213,41 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			*capture = parsed.redirectTargets
 		}
 		if parsed.status == StatusPartial && dialect == DialectPOSIX {
+			// GAP-0651: inert ":" list members are set aside so the
+			// command they accompany is analyzed on its own.
+			if normalized, _, ok := normalizeTrustedHomeInertListSource(command); ok {
+				if simplified := parse(normalized); simplified.status == StatusComplete {
+					parsed = simplified
+				}
+			}
+		}
+		if parsed.status == StatusPartial && dialect == DialectPOSIX {
 			// A trusted ActiveHome makes a lone command's "~/" operands
 			// exact; the rewrite is kept only when nothing else is dynamic.
 			home, _ := normalizeActiveHome(input.ActiveHome)
 			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(command, home); ok {
 				if resolved := parse(rewrite.source); resolved.status == StatusComplete {
 					parsed = resolved
-					homeTildeOperands = rewrite.tildeOperands
+					// A Windows drive home (GAP-0912) keeps its rewritten
+					// spelling: the POSIX parse cannot resolve a drive path,
+					// so its path facts have no Resolved for the respell.
+					if strings.HasPrefix(home, "/") {
+						homeTildeOperands = rewrite.tildeOperands
+					}
 					for _, rewritten := range resolved.commands {
 						homeRewrittenCommands[rewritten.ID] = struct{}{}
 					}
+				}
+			}
+		}
+		if parsed.status == StatusPartial &&
+			(dialect == DialectPowerShell || dialect == DialectCMD) {
+			// The same for $HOME, ~ and %USERPROFILE% under a Windows
+			// ActiveHome (GAP-0912).
+			home, _ := normalizeActiveHome(input.ActiveHome)
+			if rewrite, ok := rewriteTrustedWindowsShellHome(command, home, dialect); ok {
+				if resolved := parse(rewrite); resolved.status == StatusComplete {
+					parsed = resolved
 				}
 			}
 		}
@@ -1455,7 +1480,7 @@ func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 		"writefile", "write_file", "write-file",
 		"fswrite", "fs_write", "fs-write", "fs.write", "fs.write_file",
 		"filewrite", "file_write", "file-write",
-		"createfile", "create_file", "create-file",
+		"create", "createfile", "create_file", "create-file",
 		"editfile", "edit_file", "edit-file":
 		semantics := pathToolSemantics(PathAccessWrite, OperationWrite)
 		semantics.acceptsContent = true

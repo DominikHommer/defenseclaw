@@ -40,6 +40,126 @@ func LocalAccounts(ctx context.Context) (map[string]int, error) {
 	return platformLocalAccounts(ctx)
 }
 
+// LocalGroups returns the groups of the local group database by name (Linux
+// /etc/group, the macOS local directory node). A directory group of the same
+// name is another group: a bare group entry of a guardrail profile matches
+// both, and the profile warnings name the local one (GAP-0356).
+func LocalGroups(ctx context.Context) (map[string]int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformLocalGroups(ctx)
+}
+
+// parseLocalGroups returns name → gid for the entries of a group(5) file.
+// NIS compat markers (+/-) and malformed lines are skipped.
+func parseLocalGroups(content string) map[string]int {
+	out := map[string]int{}
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
+			continue
+		}
+		group, err := ParseGroupLine(line)
+		if err != nil {
+			continue
+		}
+		if _, dup := out[group.Name]; !dup {
+			out[group.Name] = group.GID
+		}
+	}
+	return out
+}
+
+// MobileAccounts returns, by name, the accounts of the macOS local directory
+// node that are mobile copies of a directory account, with the directory node
+// they came from (OriginalNodeName, such as /Active Directory/CORP/corp.example.com).
+// A bound Mac keeps such an account in its local node, so LocalAccounts lists
+// it, but it is the directory's account: its domain groups are listed only
+// while the directory answers (GAP-0496). Linux has none.
+func MobileAccounts(ctx context.Context) (map[string]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformMobileAccounts(ctx)
+}
+
+// parseDSCLOriginalNodes parses `dscl . -list /Users OriginalNodeName` rows
+// ("name   /Active Directory/CORP/corp.example.com"; the node name holds
+// spaces) into name -> node, keeping only nodes of a directory.
+func parseDSCLOriginalNodes(output string) map[string]string {
+	out := map[string]string{}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		cut := strings.IndexAny(line, " \t")
+		if cut <= 0 {
+			continue
+		}
+		name, node := line[:cut], strings.TrimSpace(line[cut:])
+		if validName(name) != nil || !strings.HasPrefix(node, "/") || strings.HasPrefix(node, "/Local/") {
+			continue
+		}
+		out[name] = node
+	}
+	return out
+}
+
+// LocalAccountRecord is an account of the macOS local directory node as any
+// account may list it. RecordID is the record's GeneratedUID, which Open
+// Directory gives every account it creates: an account deleted and created
+// again under the same name and uid has a new one, so it tells the two
+// apart where the name and uid do not (GAP-0669).
+type LocalAccountRecord struct {
+	UID        int
+	RecordID   string
+	Home       string
+	PrimaryGID string
+}
+
+// LocalAccountRecords returns the accounts of the macOS local directory node
+// by name, with their record identifier, home and primary group. Other
+// platforms have none.
+func LocalAccountRecords(ctx context.Context) (map[string]LocalAccountRecord, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformLocalAccountRecords(ctx)
+}
+
+// parseDSCLAttribute parses `dscl . -list /Users <attribute>` rows ("name
+// value"; a home may hold spaces, and a record without the attribute is
+// listed with no value) into name -> value.
+func parseDSCLAttribute(output string) map[string]string {
+	out := map[string]string{}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		name, value := line, ""
+		if cut := strings.IndexAny(line, " \t"); cut > 0 {
+			name, value = line[:cut], strings.TrimSpace(line[cut:])
+		}
+		if validName(name) != nil {
+			continue
+		}
+		out[name] = value
+	}
+	return out
+}
+
+// mergeDSCLAccountRecords joins the UniqueID listing with the GeneratedUID,
+// NFSHomeDirectory and PrimaryGroupID listings. An account is kept when its
+// one uid parses.
+func mergeDSCLAccountRecords(uids, recordIDs, homes, gids map[string]string) map[string]LocalAccountRecord {
+	out := make(map[string]LocalAccountRecord, len(uids))
+	for name, raw := range uids {
+		uid, err := parseSignedDSCLID(raw)
+		if err != nil {
+			continue
+		}
+		out[name] = LocalAccountRecord{UID: uid, RecordID: recordIDs[name], Home: homes[name], PrimaryGID: gids[name]}
+	}
+	return out
+}
+
 // DirectoryConfigured reports whether account lookups on this host may be
 // answered by a remote directory. When it is false every "no such user"
 // answer is definitive. Unknown configurations report true.

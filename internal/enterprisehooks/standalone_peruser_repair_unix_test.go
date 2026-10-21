@@ -163,7 +163,9 @@ func hermesStandaloneOptions(t *testing.T, home string) InstallOptions {
 	}
 	opts := openHandsStandaloneOptions(home, "observe")
 	opts.ConnectorName = "hermes"
-	opts.AgentVersion = "0.9.0"
+	// A version with a hook contract: the guardian installs none for a
+	// version without one, in any mode (GAP-0151).
+	opts.AgentVersion = "0.21.5"
 	return opts
 }
 
@@ -205,6 +207,15 @@ func TestStandaloneVerifyReportsAndRepairsAChangedHookScript(t *testing.T) {
 		}},
 		{"deleted _hardening.sh", filepath.Join(hooks, "_hardening.sh"), "missing", os.Remove},
 		{"deleted inspect-tool.sh", filepath.Join(hooks, "inspect-tool.sh"), "missing", os.Remove},
+		// The runtime records and the scoped token the hook script reads
+		// (GAP-0671, GAP-0424): moved aside, the guardian left them
+		// missing while status and verify stayed green.
+		{"moved .hookcfg.hermes", filepath.Join(hooks, ".hookcfg.hermes"), "missing", os.Remove},
+		{"moved .hookcfg", filepath.Join(hooks, ".hookcfg"), "missing", os.Remove},
+		{"moved .hook-hermes.token", filepath.Join(hooks, ".hook-hermes.token"), "missing", os.Remove},
+		{"edited .hook-hermes.token", filepath.Join(hooks, ".hook-hermes.token"), "does not hold the credential", func(path string) error {
+			return os.WriteFile(path, []byte(strings.Repeat("b", 64)+"\n"), 0o600)
+		}},
 		// After a package upgrade the script still matches the digest
 		// recorded at its last write but carries the previous release's
 		// render, so the digest alone kept verification green.
@@ -483,8 +494,9 @@ func TestStandaloneVerifyFollowsModeSwitchesInOneHome(t *testing.T) {
 		}
 	}
 
-	// An agent on an older hook contract installs in observe mode only, and
-	// verifies right after its install too.
+	// An agent version with no hook contract (below every contract's floor)
+	// gets no hooks in observe mode either: they were rendered without a
+	// contract and status reported the agent as covered (GAP-0151).
 	for _, c := range []struct{ name, version, config string }{
 		{"hermes", "0.9.0", ".hermes/config.yaml"}, {"copilot", "1.0.3", ""},
 		{"devin", "2026.1.2", ".config/devin/config.json"}, {"amp", "0.0.170", ""}, {"opencode", "1.2.0", ""},
@@ -500,11 +512,12 @@ func TestStandaloneVerifyFollowsModeSwitchesInOneHome(t *testing.T) {
 		}
 		opts := openHandsStandaloneOptions(home, "observe")
 		opts.ConnectorName, opts.AgentVersion = c.name, c.version
-		if _, err := Install(context.Background(), opts); err != nil {
-			t.Fatalf("%s %s: install: %v", c.name, c.version, err)
+		if _, err := Install(context.Background(), opts); err == nil ||
+			!strings.Contains(err.Error(), "is not verified against a known hook contract") {
+			t.Fatalf("%s %s: observe install = %v, want the hook_contract_unverified refusal", c.name, c.version, err)
 		}
-		if _, err := Verify(context.Background(), opts); err != nil {
-			t.Fatalf("%s %s: verify right after the install: %v", c.name, c.version, err)
+		if entries, _ := os.ReadDir(filepath.Join(home, ".defenseclaw", "hooks")); len(entries) != 0 {
+			t.Fatalf("%s %s: hook runtime rendered: %v", c.name, c.version, entries)
 		}
 	}
 }

@@ -74,13 +74,17 @@ func StandaloneOptions(layout managed.StandaloneLayout, programFiles, programDat
 	opts.WSL = cfg.Enterprise.MachinePolicy.WindowsWSL
 	opts.CopilotHarnessPreference = cfg.Enterprise.MachinePolicy.CopilotHarnessPreference()
 	opts.CopilotLocalHarness = cfg.Enterprise.MachinePolicy.CopilotLocalHarness()
+	opts.CursorFailOpen = cfg.EffectiveHookFailModeForConnector(cursorConnector) == "open"
 	return opts, opts.Validate()
 }
 
 // StandaloneConnectors is the connector set the standalone lifecycle
 // protects: every active connector plus any connector the administrator
 // configured under enterprise.machine_policy.connectors. A companion's key
-// there (devincascade) configures the companion, not a connector.
+// there (devincascade) configures the companion, not a connector. A
+// connector that guardrail.connectors.<name>.enabled: false turns off is
+// left out, as the enumerator leaves it out, so machine policy, enrollment
+// and the no-connector check agree (GAP-0267).
 func StandaloneConnectors(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
@@ -89,7 +93,32 @@ func StandaloneConnectors(cfg *config.Config) []string {
 	for name := range cfg.Enterprise.MachinePolicy.Connectors {
 		names = append(names, name)
 	}
-	names = withoutCompanions(normalizeConnectors(names))
+	enabled := names[:0]
+	for _, name := range names {
+		if cfg.Guardrail.EffectiveEnabled(name) {
+			enabled = append(enabled, name)
+		}
+	}
+	names = withoutCompanions(normalizeConnectors(enabled))
+
 	sort.Strings(names)
 	return names
+}
+
+// StandaloneConnectorPublished reports whether the standalone lifecycle
+// protects connector name (StandaloneConnectors, with the companions of
+// those connectors): the connectors the administrator's config publishes.
+// A hook installed for any other connector gets no usable answer from the
+// gateway, so every call of that agent is blocked (rel-1-0-3 GAP-0235).
+func StandaloneConnectorPublished(cfg *config.Config, name string) bool {
+	name = config.NormalizeConnectorName(name)
+	if name == "" {
+		return false
+	}
+	for _, published := range withCompanions(StandaloneConnectors(cfg)) {
+		if published == name {
+			return true
+		}
+	}
+	return false
 }

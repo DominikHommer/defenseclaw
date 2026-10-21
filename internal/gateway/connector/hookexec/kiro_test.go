@@ -42,7 +42,7 @@ func TestKiroNativeHookAnswersLikeKiroHookScript(t *testing.T) {
 		{name: "allow", rt: ok(`{"action":"allow"}`), wantCode: 0},
 		{name: "allow with hook_output", rt: ok(`{"action":"allow","hook_output":{"decision":"allow"}}`), wantCode: 0},
 		{name: "block", rt: ok(`{"action":"block","hook_output":{"decision":"block","reason":"marker rule matched"}}`), wantCode: 2, wantStderr: "defenseclaw: marker rule matched"},
-		{name: "deny", rt: ok(`{"hook_output":{"decision":"deny","reason":"marker rule matched"}}`), wantCode: 2, wantStderr: "defenseclaw: marker rule matched"},
+		{name: "deny", rt: ok(`{"action":"block","hook_output":{"decision":"deny","reason":"marker rule matched"}}`), wantCode: 2, wantStderr: "defenseclaw: marker rule matched"},
 		// A reason that names DefenseClaw is not prefixed again (cert kiro:KR-F10).
 		{name: "DefenseClaw's own reason", rt: ok(`{"action":"block","hook_output":{"decision":"block","reason":"Blocked by DefenseClaw rule R1: marker"}}`),
 			wantCode: 2, wantStderr: "Blocked by DefenseClaw rule R1: marker", unprefixed: true},

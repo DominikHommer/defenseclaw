@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,11 +37,21 @@ func TestHookColdStartRefusesAfterStopDuringInstallAndAfterAFailure(t *testing.T
 	if err := hookColdStartRefusal(dataDir, now); err == nil || !strings.Contains(err.Error(), "install") {
 		t.Fatalf("during install = %v, want the install refusal", err)
 	}
+	// GAP-0196: an install stops the gateway with the stop marker; the
+	// refusal names the install, not an operator stop.
+	markGatewayStopped(dataDir)
+	if err := hookColdStartRefusal(dataDir, now); err == nil || !strings.Contains(err.Error(), "install") || strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("during install with the stop marker = %v, want the install refusal", err)
+	}
+	clearGatewayColdStartState(dataDir)
 	if err := os.Remove(lock); err != nil {
 		t.Fatal(err)
 	}
 
-	recordHookColdStartFailure(dataDir)
+	recordHookColdStartFailure(dataDir, startConfigLoadError{err: errors.New("cannot start the gateway: yaml: line 3")})
+	if body, err := os.ReadFile(gatewayColdStartFailedPath(dataDir)); err != nil || !strings.Contains(string(body), "config-invalid") {
+		t.Fatalf("failure marker = %q, %v; want the config-invalid cause the hooks read (GAP-0409)", body, err)
+	}
 	if err := hookColdStartRefusal(dataDir, time.Now()); err == nil || !strings.Contains(err.Error(), "failed") {
 		t.Fatalf("right after a failed start = %v, want the backoff refusal", err)
 	}
@@ -72,22 +83,39 @@ func TestStopRecordsTheStopAndHookStartHonorsIt(t *testing.T) {
 	}
 }
 
-func TestGatewayStartLockSerializesStarts(t *testing.T) {
+// An operator stop must wait for an in-flight watchdog cold start before it
+// checks whether there is a gateway to stop or writes the final stop marker.
+func TestStopWaitsForWatchdogColdStartLock(t *testing.T) {
 	dataDir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dataDir)
 	release, err := acquireGatewayStartLock(dataDir, time.Second)
 	if err != nil {
-		t.Fatalf("first lock: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := acquireGatewayStartLock(dataDir, 200*time.Millisecond); err == nil ||
-		!strings.Contains(err.Error(), "still in progress") {
-		t.Fatalf("second lock while held = %v, want a timeout", err)
+	done := make(chan error, 1)
+	go func() { done <- runStop(stopCmd, nil) }()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("stop returned while a cold start held the start lock: %v", err)
+	case <-time.After(200 * time.Millisecond):
 	}
+
+	// A cold start that passed its initial marker check can clear a marker
+	// written before it finishes. Stop must publish its marker afterward.
+	clearGatewayColdStartState(dataDir)
 	release()
-	again, err := acquireGatewayStartLock(dataDir, time.Second)
-	if err != nil {
-		t.Fatalf("lock after release: %v", err)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("stop after cold start: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("stop did not finish after the cold start released its lock")
 	}
-	again()
+	if _, err := os.Stat(gatewayStoppedMarkerPath(dataDir)); err != nil {
+		t.Fatalf("stop marker after cold start: %v", err)
+	}
 }
 
 func TestStartLockRunsUnlockedWithoutADataDirectory(t *testing.T) {
@@ -121,5 +149,43 @@ func TestHookColdStartRestoresTheRecordedLoginPath(t *testing.T) {
 	restoreGatewayLoginPath(t.TempDir())
 	if got := os.Getenv("PATH"); got != "/usr/bin:/bin" {
 		t.Fatalf("PATH without a record = %q", got)
+	}
+}
+
+// The watchdog checks the external config used by a per-user gateway.
+func TestWatchdogColdStartWithExternalConfig(t *testing.T) {
+	dataDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("DEFENSECLAW_CONFIG", configPath)
+	if got := watchdogGatewayConfigPath(dataDir); got != configPath {
+		t.Fatalf("watchdog config path = %q, want %q", got, configPath)
+	}
+}
+
+// GAP-0143: every hook that meets a restart starts the gateway. Only the
+// first takes the start lock; a start that finds it held (a restart, or
+// another hook's start, is bringing the gateway up) ends at once instead of
+// waiting in line, so a restart does not leave a dozen start processes.
+func TestHookColdStartEndsAtOnceWhileAnotherStartRuns(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dataDir)
+	release, err := acquireGatewayStartLock(dataDir, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := startCmd.Flags().Set(hookColdStartFlag, "true"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = startCmd.Flags().Set(hookColdStartFlag, "false") })
+	started := time.Now()
+	if err := runStart(startCmd, nil); err != nil {
+		t.Fatalf("hook start beside a running start = %v, want it to end quietly", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("hook start waited %s for the start lock, want it to end at once", elapsed)
+	}
+	if _, statErr := os.Stat(gatewayColdStartFailedPath(dataDir)); !os.IsNotExist(statErr) {
+		t.Fatalf("a hook start that ended beside another start recorded a failure: %v", statErr)
 	}
 }

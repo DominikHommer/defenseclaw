@@ -388,6 +388,11 @@ type CorrelationRelationship struct {
 	Status         CorrelationRelationshipStatus `json:"status"`
 	CreatedAt      time.Time                     `json:"created_at"`
 	LastSeenAt     time.Time                     `json:"last_seen_at"`
+	// Unchanged is set by PutRelationship when the relationship already
+	// existed with the same status: the occurrence only added evidence.
+	// Confidence follows from the method, which is part of the ID, so it
+	// cannot change without a new relationship (GAP-0423).
+	Unchanged bool `json:"-"`
 }
 
 type CorrelationRelationshipInput struct {
@@ -1333,19 +1338,25 @@ func (tx *CorrelationTx) PutObservation(ctx context.Context, observation Correla
 	return putCorrelationObservationTx(ctx, tx.tx, tx.repo.store, observation)
 }
 
-// RecordObservation durably commits metadata for an already accepted
-// occurrence. Runtime trace and metric paths call this before handing a signal
-// to a provider/exporter, preserving commit-before-export without storing the
-// trace or metric payload in audit.db.
-func (repo *CorrelationRepository) RecordObservation(
+// RecordObservations durably commits metadata for already accepted
+// occurrences, all in one transaction. Runtime trace and metric paths call
+// this before handing a signal to a provider/exporter, preserving
+// commit-before-export without storing the trace or metric payload in
+// audit.db. A metric batch passes the observations of all its records, so it
+// costs one commit, not one per metric (B-26). Either every observation
+// commits or none does.
+func (repo *CorrelationRepository) RecordObservations(
 	ctx context.Context,
-	observation CorrelationObservation,
+	observations ...CorrelationObservation,
 ) error {
 	if repo == nil || repo.store == nil {
 		return errors.New("audit: correlation repository is not initialized")
 	}
 	if ctx == nil {
 		return errors.New("audit: correlation context is required")
+	}
+	if len(observations) == 0 {
+		return nil
 	}
 	release, err := repo.store.acquireReady()
 	if err != nil {
@@ -1361,8 +1372,10 @@ func (repo *CorrelationRepository) RecordObservation(
 			return fmt.Errorf("audit: begin correlation observation write: %w", beginErr)
 		}
 		defer tx.Rollback() //nolint:errcheck
-		if putErr := putCorrelationObservationTx(ctx, tx, repo.store, observation); putErr != nil {
-			return putErr
+		for _, observation := range observations {
+			if putErr := putCorrelationObservationTx(ctx, tx, repo.store, observation); putErr != nil {
+				return putErr
+			}
 		}
 		if commitErr := tx.Commit(); commitErr != nil {
 			return fmt.Errorf("audit: commit correlation observation: %w", commitErr)
@@ -1470,6 +1483,14 @@ func (tx *CorrelationTx) PutRelationship(
 	id := deterministicCorrelationID("rel_", string(input.FromKind), input.FromID,
 		string(input.ToKind), input.ToID, string(input.Type), string(input.Method), input.RuleID,
 		input.RuleVersion)
+	var previous string
+	switch err := tx.tx.QueryRowContext(ctx, `SELECT status FROM correlation_relationships
+		WHERE relationship_id = ?`, id).Scan(&previous); {
+	case errors.Is(err, sql.ErrNoRows):
+		previous = ""
+	case err != nil:
+		return CorrelationRelationship{}, fmt.Errorf("audit: read correlation relationship: %w", err)
+	}
 	_, err := txExecContextObserved(ctx, tx.tx, "correlation_relationship_upsert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_relationships (
 			relationship_id, from_kind, from_id, to_kind, to_id, relationship_type, method,
@@ -1490,6 +1511,7 @@ func (tx *CorrelationTx) PutRelationship(
 		ToKind: input.ToKind, ToID: input.ToID, Type: input.Type, Method: input.Method,
 		Confidence: confidence, RuleID: input.RuleID, RuleVersion: input.RuleVersion,
 		Status: input.Status, CreatedAt: input.ObservedAt, LastSeenAt: input.ObservedAt,
+		Unchanged: previous == string(input.Status),
 	}, nil
 }
 

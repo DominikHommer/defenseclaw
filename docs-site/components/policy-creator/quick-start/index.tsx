@@ -14,7 +14,7 @@
 
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Policy } from '../types';
 import { emit } from '../lib/emit';
 import { emitInstallScript } from '../lib/emit-script';
@@ -77,18 +77,6 @@ export function QuickStart({
   onAnswersChange,
   onOpenInPlayground,
 }: QuickStartProps) {
-  // Re-derive Policy from Answers whenever they change. We compare via
-  // a ref to avoid an infinite render loop (policy → setPolicy → re-
-  // render → re-derive → setPolicy …).
-  const lastSerialized = useRef('');
-  useEffect(() => {
-    const next = applyAnswers(answers);
-    const ser = JSON.stringify(next);
-    if (ser === lastSerialized.current) return;
-    lastSerialized.current = ser;
-    onPolicyChange(next);
-  }, [answers, onPolicyChange]);
-
   // Step index. Hydrate from localStorage on mount only — SSR returns
   // 0 to keep first paint stable.
   const [stepIdx, setStepIdx] = useState(0);
@@ -121,12 +109,12 @@ export function QuickStart({
       ...answers,
       block: new Set(answers.block),
       allow: new Set(answers.allow),
-      firstPartyExtra: [...answers.firstPartyExtra],
       domainsExtra: [...answers.domainsExtra],
       sinks: { ...answers.sinks },
     };
     mut(draft);
     onAnswersChange(draft);
+    onPolicyChange(applyAnswers(draft));
   }
 
   const current = STEPS[stepIdx];
@@ -346,7 +334,7 @@ function StepBlock({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="What should we block?"
-        subtitle="Pick everything you want flagged. We'll enable the matching rules and add destinations to the firewall."
+        subtitle="Pick rules to include. Firewall destinations are planning notes and are not applied by the install script."
       />
       <div className="space-y-5">
         {BLOCK_CATEGORIES.map((cat) => {
@@ -388,7 +376,7 @@ function StepAllow({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="What should we allow even when flagged?"
-        subtitle="Let your own plugins skip admission scans and your internal domains through the firewall."
+        subtitle="Set first-party admission in Playground → Admission with a name and source path pin. Internal domains are planning notes; the install script does not configure a firewall."
       />
       <div className="grid gap-2 md:grid-cols-2">
         {ALLOW_CARDS.map((card) => (
@@ -405,20 +393,13 @@ function StepAllow({ answers, update }: StepProps) {
           />
         ))}
       </div>
-      <div className="mt-4 grid gap-4 md:grid-cols-2">
-        <FreeFormList
-          label="Additional first-party globs"
-          placeholder="my-org/*"
-          items={answers.firstPartyExtra}
-          onChange={(next) => update((d) => void (d.firstPartyExtra = next))}
-          hint="One per line. Matches a target_name on the first-party allow list."
-        />
+      <div className="mt-4">
         <FreeFormList
           label="Additional internal domains"
           placeholder="*.corp.internal"
           items={answers.domainsExtra}
           onChange={(next) => update((d) => void (d.domainsExtra = next))}
-          hint="One per line. Added to firewall.allowed_domains."
+          hint="One per line. Planning notes only; policy activation does not configure the firewall."
         />
       </div>
     </>
@@ -452,8 +433,12 @@ function StepSinks({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="Where should events go?"
-        subtitle="Wire one or more destinations. Local audit log is on by default — turn it off only if you really mean to."
+        subtitle="Wire webhook destinations. Local audit settings are planning notes; policy activation does not apply them."
       />
+      <p className="mb-3 text-xs text-fd-muted-foreground">
+        Splunk HEC uses a separate observability destination. Configure it with{' '}
+        <a href="/docs/observability/splunk" className="underline">setup splunk</a> after installing this policy.
+      </p>
       <div className="space-y-2">
         {SINK_CARDS.map((card) => (
           <SinkRow
@@ -523,7 +508,7 @@ function StepReview({
           <div className="min-w-[200px] flex-1">
             <div className="text-sm font-semibold text-fd-foreground">Download &amp; run</div>
             <p className="mt-0.5 text-[12px] leading-snug text-fd-muted-foreground">
-              One self-contained bash script. Drops every YAML / <code>data.json</code> / Rego file
+              One self-contained bash script. Drops every YAML and Rego file
               under <code>~/.defenseclaw/policies/</code> via heredocs (no curl, no scp), then
               runs <code>defenseclaw policy activate {policy.name}</code>. Re-runs are idempotent.
             </p>
@@ -674,7 +659,7 @@ function CheckCard({
         )}
         {(card.destinations?.length ?? 0) > 0 && (
           <span className="rounded bg-fd-muted px-1.5 py-0.5 font-mono">
-            {card.destinations!.length} firewall destination
+            {card.destinations!.length} planned firewall destination
             {card.destinations!.length === 1 ? '' : 's'}
           </span>
         )}
@@ -725,21 +710,6 @@ function AllowCheckCard({
           </span>
         </span>
       </label>
-      <div className="flex flex-wrap items-center gap-1.5 pl-6 text-[10px] text-fd-muted-foreground">
-        {card.toolPattern && (
-          <code className="rounded bg-fd-muted px-1.5 py-0.5 font-mono">{card.toolPattern}</code>
-        )}
-        {card.cookbookHref && (
-          <a
-            href={docsHref(card.cookbookHref)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ml-auto text-[10px] text-emerald-700 hover:underline dark:text-emerald-400"
-          >
-            see cookbook →
-          </a>
-        )}
-      </div>
     </div>
   );
 }

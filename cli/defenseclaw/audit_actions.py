@@ -75,6 +75,7 @@ ACTION_TOOL_RESULT: Final[str] = "tool-result"
 
 # Operator mutations (v7 Activity)
 ACTION_CONFIG_UPDATE: Final[str]   = "config-update"
+ACTION_CONFIG_BUNDLE_RECEIPT: Final[str] = "config.bundle.receipt"
 ACTION_POLICY_UPDATE: Final[str]   = "policy-update"
 ACTION_POLICY_RELOAD: Final[str]   = "policy-reload"
 ACTION_ACTION: Final[str]          = "action"
@@ -109,6 +110,10 @@ ACTION_ASSET_POLICY: Final[str]                = "asset-policy"
 ACTION_CONNECTOR_HOOK_TAMPERED: Final[str]     = "connector-hook-tampered"
 ACTION_CONNECTOR_HOOK_REPAIRED: Final[str]     = "connector-hook-repaired"
 
+# A standalone enterprise hook call from an exempt_users account. Mirrors
+# internal/audit/actions.go::ActionEnterpriseExemptUser.
+ACTION_ENTERPRISE_EXEMPT_USER: Final[str]      = "enterprise-exempt-user"
+
 # Codex notify webhook (agent-turn-complete et al.). The notify
 # bridge POSTs codex's JSON arg to /api/v1/codex/notify; the
 # gateway derives the action key from the payload's `type` field.
@@ -127,6 +132,11 @@ ACTION_SANDBOX_APPROVAL: Final[str]  = "sandbox-approval"
 ACTION_SANDBOX_POLICY: Final[str]    = "sandbox-policy"
 ACTION_SANDBOX_HEALTH: Final[str]    = "sandbox-health"
 ACTION_SANDBOX_FINDING: Final[str]   = "sandbox-finding"
+ACTION_SANDBOX_ACTIVITY: Final[str]  = "sandbox-activity"
+ACTION_SANDBOX_PROCESS: Final[str]   = "sandbox-process"
+ACTION_SANDBOX_POLICY_REMATCHED: Final[str]   = "sandbox.policy.rematched"
+ACTION_SANDBOX_POLICY_FOREIGN_RULE: Final[str] = "sandbox.policy.foreign_rule"
+ACTION_SANDBOX_MANAGED: Final[str]   = "sandbox.managed"
 
 # Sidecar lifecycle and bootstrap instrumentation.
 ACTION_SIDECAR_START: Final[str] = "sidecar-start"
@@ -297,6 +307,25 @@ ACTION_TOOL_BLOCK: Final[str] = "tool-block"
 ACTION_TOOL_ALLOW: Final[str] = "tool-allow"
 ACTION_TOOL_UNBLOCK: Final[str] = "tool-unblock"
 
+# Fleet (Edge Connector IoT device management). These actions track
+# device registration, heartbeat processing, verdict decisions,
+# policy pushes, emergency commands, decommissioning, and device
+# alerts detected by the fleet manager's anomaly monitor.
+ACTION_FLEET_DEVICE_REGISTERED: Final[str]   = "fleet.device.registered"
+ACTION_FLEET_DEVICE_HEARTBEAT: Final[str]    = "fleet.device.heartbeat"
+ACTION_FLEET_DEVICE_OFFLINE: Final[str]      = "fleet.device.offline"
+ACTION_FLEET_DEVICE_DECOMMISSION: Final[str] = "fleet.device.decommission"
+ACTION_FLEET_DEVICE_COMMAND: Final[str]      = "fleet.device.command"
+ACTION_FLEET_POLICY_PUSH: Final[str]         = "fleet.policy.push"
+ACTION_FLEET_POLICY_EMERGENCY: Final[str]    = "fleet.policy.emergency"
+ACTION_FLEET_THREAT_INTEL: Final[str]        = "fleet.threat_intel.push"
+ACTION_FLEET_ALERT: Final[str]               = "fleet.alert"
+ACTION_FLEET_DEVICE_REREGISTERED: Final[str] = "fleet.device.reregistered"
+ACTION_FLEET_TOKEN_ROTATED: Final[str]       = "fleet.token.rotated"
+ACTION_FLEET_DEVICE_KEY_ROTATED: Final[str]  = "fleet.device.key_rotated"
+ACTION_FLEET_DEVICE_CREDENTIAL_PROVISION_AUTHORIZED: Final[str] = "fleet.device.credential_provision_authorized"
+ACTION_FLEET_DEVICE_DECOMMISSION_AUTHORIZED: Final[str] = "fleet.device.decommission_authorized"
+
 
 ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_INIT,
@@ -326,6 +355,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_TOOL_CALL,
     ACTION_TOOL_RESULT,
     ACTION_CONFIG_UPDATE,
+    ACTION_CONFIG_BUNDLE_RECEIPT,
     ACTION_POLICY_UPDATE,
     ACTION_POLICY_RELOAD,
     ACTION_ACTION,
@@ -345,6 +375,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_ASSET_POLICY,
     ACTION_CONNECTOR_HOOK_TAMPERED,
     ACTION_CONNECTOR_HOOK_REPAIRED,
+    ACTION_ENTERPRISE_EXEMPT_USER,
     ACTION_CODEX_NOTIFY,
     ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE,
     ACTION_CODEX_NOTIFY_MALFORMED,
@@ -355,6 +386,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_SANDBOX_POLICY,
     ACTION_SANDBOX_HEALTH,
     ACTION_SANDBOX_FINDING,
+    ACTION_SANDBOX_ACTIVITY,
     ACTION_SIDECAR_START,
     ACTION_SIDECAR_STOP,
     ACTION_SIDECAR_CONNECTED,
@@ -512,6 +544,20 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_TOOL_BLOCK,
     ACTION_TOOL_ALLOW,
     ACTION_TOOL_UNBLOCK,
+    ACTION_FLEET_DEVICE_REGISTERED,
+    ACTION_FLEET_DEVICE_HEARTBEAT,
+    ACTION_FLEET_DEVICE_OFFLINE,
+    ACTION_FLEET_DEVICE_DECOMMISSION,
+    ACTION_FLEET_DEVICE_COMMAND,
+    ACTION_FLEET_POLICY_PUSH,
+    ACTION_FLEET_POLICY_EMERGENCY,
+    ACTION_FLEET_THREAT_INTEL,
+    ACTION_FLEET_ALERT,
+    ACTION_FLEET_DEVICE_REREGISTERED,
+    ACTION_FLEET_TOKEN_ROTATED,
+    ACTION_FLEET_DEVICE_KEY_ROTATED,
+    ACTION_FLEET_DEVICE_CREDENTIAL_PROVISION_AUTHORIZED,
+    ACTION_FLEET_DEVICE_DECOMMISSION_AUTHORIZED,
 )
 
 

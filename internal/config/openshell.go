@@ -28,6 +28,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // OpenShell sandbox profiles, from loosest to strictest. They name the
@@ -104,11 +106,6 @@ const (
 	// holds custom sandbox policy packs (<name>/pack.yaml), mirroring the
 	// repository's policies/sandbox layout.
 	DefaultOpenShellPackDirName = "sandbox"
-
-	// DefaultSandboxHome is the legacy openshell-sandbox user's home.
-	//
-	// LEGACY(openshell-0.0.x): delete one release after cleanup.
-	DefaultSandboxHome = "/home/sandbox"
 )
 
 // DefaultOpenShellUndoIgnoredDirs are the directories
@@ -137,10 +134,11 @@ var OpenShellLockableKeys = []string{
 // Admin clamps the result (see internal/openshell/packs). Pack-governed keys
 // therefore stay unset (empty, zero, or nil) unless the operator sets them.
 //
-// The legacy openshell-sandbox (0.0.x) sub-keys policy_dir, version, auto_pair
-// and host_networking are still accepted by the v8 schema and ignored. Mode and
-// SandboxHome are read only by the legacy shim (legacy_openshell.go) until
-// `defenseclaw sandbox legacy-cleanup` resets them. No migration rewrites them.
+// The legacy openshell-sandbox (0.0.x) sub-keys policy_dir, mode, version,
+// sandbox_home, auto_pair and host_networking are still accepted by the v8
+// schema (a 0.8.x config holds them) and ignored. The config_version 9
+// migration drops all six and resets the addresses a standalone install
+// pointed at its sandbox's veth link (migrateRetiredStandaloneSandbox).
 type OpenShellConfig struct {
 	// Enabled turns on the sandbox ingress and egress listeners and the
 	// sandbox API. Off by default.
@@ -190,19 +188,26 @@ type OpenShellConfig struct {
 	UpstreamTelemetry bool                      `mapstructure:"upstream_telemetry" yaml:"upstream_telemetry,omitempty"`
 	TokenDelivery     string                    `mapstructure:"token_delivery"     yaml:"token_delivery,omitempty"`
 	Middleware        OpenShellMiddlewareConfig `mapstructure:"middleware"         yaml:"middleware,omitempty"`
+	// TrustedCABundle names a PEM file of CA certificates sandboxes trust
+	// besides the image's public roots: the root of a TLS-inspecting proxy
+	// that re-signs provider certificates (#1296). Every overlay image
+	// built while it is set carries them in its system store, and the
+	// sandbox shells point every runtime's CA variable (SSL_CERT_FILE,
+	// NODE_EXTRA_CA_CERTS, ...) at OpenShell's bundle plus them. An absolute
+	// path or one starting with "~/"; in managed_enterprise an absolute
+	// path to an administrator-owned file. Nothing is imported from the
+	// host's own store.
+	TrustedCABundle string `mapstructure:"trusted_ca_bundle" yaml:"trusted_ca_bundle,omitempty"`
+	// TrustedCAPEM and TrustedCAError are runtime only: the trusted CAs a
+	// managed computer's sandbox daemon got from the managed gateway (the
+	// administrator's openshell.trusted_ca_bundle, read there), or why the
+	// gateway could not read them. Never read from or written to a file.
+	TrustedCAPEM   string `mapstructure:"-" yaml:"-" json:"-"`
+	TrustedCAError string `mapstructure:"-" yaml:"-" json:"-"`
 	// Admin holds the administrator's constraints. In managed_enterprise the
 	// config file is administrator-owned and Admin is authoritative;
 	// elsewhere it is still enforced, but the user owns the file.
 	Admin OpenShellAdminConfig `mapstructure:"admin" yaml:"admin,omitempty"`
-
-	// Mode is the legacy openshell-sandbox standalone marker.
-	//
-	// LEGACY(openshell-0.0.x): delete one release after cleanup.
-	Mode string `mapstructure:"mode" yaml:"mode,omitempty"`
-	// SandboxHome is the legacy sandbox user's home directory.
-	//
-	// LEGACY(openshell-0.0.x): delete one release after cleanup.
-	SandboxHome string `mapstructure:"sandbox_home" yaml:"sandbox_home,omitempty"`
 }
 
 // OpenShellGatewayConfig selects the local OpenShell gateway registration and
@@ -368,8 +373,9 @@ type OpenShellAdminConfig struct {
 	// required pack must be an administrator-owned file users cannot modify.
 	RequiredPack string `mapstructure:"required_pack" yaml:"required_pack,omitempty"`
 	// RequiredPackDigest pins RequiredPack's content ("sha256:<hex>", the
-	// pack digest `defenseclaw sandbox pack show` reports); a pack with any
-	// other content refuses to run.
+	// pack digest `defenseclaw sandbox pack show` reports, or on a managed
+	// computer `defenseclaw-gateway enterprise <os> sandbox pack-digest`);
+	// a pack with any other content refuses to run.
 	RequiredPackDigest string `mapstructure:"required_pack_digest" yaml:"required_pack_digest,omitempty"`
 	// MinProfile is the loosest profile allowed (strict > balanced > open).
 	MinProfile     string `mapstructure:"min_profile"      yaml:"min_profile,omitempty"`
@@ -404,7 +410,78 @@ type OpenShellAdminConfig struct {
 	// --copy, --no-mcp, a stricter --pack or --profile, a smaller resource
 	// request) still apply.
 	Locked []string `mapstructure:"locked" yaml:"locked,omitempty"`
+
+	// The keys below serve managed identity-based sandboxes. The same type
+	// is openshell.admin (the organization floor: the loosest anyone gets)
+	// and guardrail.profiles.<p>.sandbox (a tighten-only overlay, combined
+	// by TightenOpenShellAdmin). Intersect lists (AllowedHarnesses,
+	// AllowedCredentials, EgressAllowOnly, RequiredFor) are unset = no
+	// constraint; the schema refuses an explicit empty list.
+
+	// Allowed false refuses sandboxes for the subject; nil allows them.
+	Allowed *bool `mapstructure:"allowed" yaml:"allowed,omitempty"`
+	// RequiredFor lists connectors refused on the host: they run only in a
+	// sandbox.
+	RequiredFor []string `mapstructure:"required_for" yaml:"required_for,omitempty"`
+	// WhenUnavailable is what a RequiredFor host run does where sandboxes
+	// can't run: refuse (OpenShellWhenUnavailableRefuse, also "") or alert.
+	WhenUnavailable string `mapstructure:"when_unavailable" yaml:"when_unavailable,omitempty"`
+	// UserApprovals is none or session; "" leaves approvals to
+	// AllowUnblock.
+	UserApprovals string `mapstructure:"user_approvals" yaml:"user_approvals,omitempty"`
+	// AllowedCredentials lists the provider names a sandbox may receive, or
+	// [none] (exclusive) for no credentials.
+	AllowedCredentials []string `mapstructure:"allowed_credentials" yaml:"allowed_credentials,omitempty"`
+	// OnSilence (stop or alert) and MaxSilenceAfter (a Go duration, at
+	// least a minute) bind user-tier harnesses whose hooks fall silent.
+	OnSilence       string `mapstructure:"on_silence"        yaml:"on_silence,omitempty"`
+	MaxSilenceAfter string `mapstructure:"max_silence_after" yaml:"max_silence_after,omitempty"`
+	// ProcessTree true turns the process tree on for every sandbox.
+	ProcessTree *bool `mapstructure:"process_tree" yaml:"process_tree,omitempty"`
+	// ForeignSandboxes is stop or alert for sandboxes on the user's
+	// OpenShell gateway that DefenseClaw did not register ("" = stop when
+	// managed).
+	ForeignSandboxes string `mapstructure:"foreign_sandboxes" yaml:"foreign_sandboxes,omitempty"`
+	// AllowUpstreamTelemetry lets OpenShell's own telemetry on (nil = false
+	// when managed).
+	AllowUpstreamTelemetry *bool `mapstructure:"allow_upstream_telemetry" yaml:"allow_upstream_telemetry,omitempty"`
+	// DeleteStoppedAfter deletes a sandbox stopped this long (a Go
+	// duration or Nd, at least an hour).
+	DeleteStoppedAfter string `mapstructure:"delete_stopped_after" yaml:"delete_stopped_after,omitempty"`
+	// RequestAccess is the contact refusals end with (at most 512
+	// printable bytes). A profile's non-empty value replaces the base's.
+	RequestAccess string `mapstructure:"request_access" yaml:"request_access,omitempty"`
+	// DriverFallback is none or docker ("" = unset): none refuses a Linux
+	// sandbox that wants the MicroVM driver where KVM is not available for
+	// the user, instead of the host's enterprise.openshell.driver_fallback
+	// (docker by default). none wins; docker never loosens a none.
+	DriverFallback string `mapstructure:"driver_fallback" yaml:"driver_fallback,omitempty"`
 }
+
+// Values of the managed sandbox floor keys of OpenShellAdminConfig.
+const (
+	OpenShellWhenUnavailableRefuse = "refuse"
+	OpenShellWhenUnavailableAlert  = "alert"
+
+	OpenShellUserApprovalsNone    = "none"
+	OpenShellUserApprovalsSession = "session"
+
+	OpenShellOnSilenceStop  = "stop"
+	OpenShellOnSilenceAlert = "alert"
+
+	OpenShellForeignSandboxesStop  = "stop"
+	OpenShellForeignSandboxesAlert = "alert"
+
+	// OpenShellCredentialsNone, alone in AllowedCredentials, allows no
+	// credentials.
+	OpenShellCredentialsNone = "none"
+
+	// OpenShellRequestAccessMaxBytes bounds RequestAccess.
+	OpenShellRequestAccessMaxBytes = 512
+	// OpenShellRequestAccessFallback is the contact text when no
+	// RequestAccess is configured.
+	OpenShellRequestAccessFallback = "contact your IT help desk"
+)
 
 // IsZero reports whether no administrator constraint is configured.
 func (a OpenShellAdminConfig) IsZero() bool {
@@ -413,7 +490,11 @@ func (a OpenShellAdminConfig) IsZero() bool {
 		a.AllowLearnMode == nil && len(a.AllowedHarnesses) == 0 &&
 		len(a.EgressBlock) == 0 && len(a.EgressAllowOnly) == 0 && !a.BlockLargeUploads &&
 		len(a.RequireCopyFor) == 0 && a.MaxResources == (OpenShellResourcesConfig{}) &&
-		len(a.Locked) == 0
+		len(a.Locked) == 0 &&
+		a.Allowed == nil && len(a.RequiredFor) == 0 && a.WhenUnavailable == "" && a.UserApprovals == "" &&
+		len(a.AllowedCredentials) == 0 && a.OnSilence == "" && a.MaxSilenceAfter == "" &&
+		a.ProcessTree == nil && a.ForeignSandboxes == "" && a.AllowUpstreamTelemetry == nil &&
+		a.DeleteStoppedAfter == "" && a.RequestAccess == "" && a.DriverFallback == ""
 }
 
 // IsLocked reports whether key is listed in Locked.
@@ -424,20 +505,6 @@ func (a OpenShellAdminConfig) IsLocked(key string) bool {
 		}
 	}
 	return false
-}
-
-// IsStandalone reports whether the config still records the legacy
-// openshell-sandbox standalone mode.
-func (o *OpenShellConfig) IsStandalone() bool {
-	return o.Mode == "standalone"
-}
-
-// EffectiveSandboxHome returns the recorded legacy sandbox home or the default.
-func (o *OpenShellConfig) EffectiveSandboxHome() string {
-	if o.SandboxHome != "" {
-		return o.SandboxHome
-	}
-	return DefaultSandboxHome
 }
 
 // EffectiveBinary returns the openshell CLI to run.
@@ -876,7 +943,7 @@ func ValidateOpenShellCopyPattern(pattern string) error {
 	case strings.ContainsRune(p, 0):
 		return errors.New("pattern contains a NUL byte")
 	case !strings.HasPrefix(p, "/") && p != "~" && !strings.HasPrefix(p, "~/") && p != "**" &&
-		!strings.HasPrefix(p, "**/") && !(hasDriveLetter(p) && len(p) > 2 && (p[2] == '/' || p[2] == '\\')):
+		!strings.HasPrefix(p, "**/") && ((!(hasDriveLetter(p)) || len(p) <= 2) || (p[2] != '/' && p[2] != '\\')):
 		return fmt.Errorf("%q must be an absolute path glob or start with \"~/\"; a relative pattern would never match", pattern)
 	}
 	for _, segment := range strings.Split(p, "/") {
@@ -897,6 +964,15 @@ func (c *Config) ValidateOpenShell() error {
 		return nil
 	}
 	if err := c.OpenShell.Validate(); err != nil {
+		return err
+	}
+	if err := c.validateSecureClientOpenShell(); err != nil {
+		return err
+	}
+	if err := c.validateManagedTrustedCABundle(); err != nil {
+		return err
+	}
+	if err := c.validateManagedSandboxPack("admin", c.OpenShell.Admin.RequiredPack); err != nil {
 		return err
 	}
 	if !c.OpenShell.Enabled {
@@ -934,6 +1010,33 @@ func (c *Config) validateOpenShellListeners() error {
 	return errors.Join(errs...)
 }
 
+// validateOpenShellTrustedCABundle checks the shape of
+// openshell.trusted_ca_bundle; the file itself is read when an image is
+// built and by `sandbox doctor`.
+func validateOpenShellTrustedCABundle(p string) error {
+	switch {
+	case p == "":
+		return nil
+	case len(p) > 4096:
+		return errors.New("trusted_ca_bundle is longer than 4096 bytes")
+	case strings.TrimSpace(p) != p || strings.ContainsAny(p, "\x00\n\r"):
+		return fmt.Errorf("trusted_ca_bundle %q has surrounding spaces or control characters", p)
+	case !strings.HasPrefix(p, "/") && !strings.HasPrefix(p, "~/"):
+		return fmt.Errorf("trusted_ca_bundle %q must be an absolute path or start with ~/", p)
+	}
+	return nil
+}
+
+// validateManagedTrustedCABundle: an administrator's
+// openshell.trusted_ca_bundle names a file by absolute path (the gateway's
+// service account has no home of the user's).
+func (c *Config) validateManagedTrustedCABundle() error {
+	if p := c.OpenShell.TrustedCABundle; p != "" && managed.IsManagedEnterprise(c.DeploymentMode) && !strings.HasPrefix(p, "/") {
+		return fmt.Errorf("trusted_ca_bundle %q: a managed configuration needs an absolute path to an administrator-owned file", p)
+	}
+	return nil
+}
+
 // Validate checks the openshell section's values and relationships. The v8
 // schema owns shape; this also protects programmatic configs and checks what
 // the schema cannot express (quantities, distinct ports, known lockable keys).
@@ -949,6 +1052,7 @@ func (o *OpenShellConfig) Validate() error {
 		}
 	}
 	check(validateOpenShellBinary(o.Binary))
+	check(validateOpenShellTrustedCABundle(o.TrustedCABundle))
 	check(validateOpenShellPort("ingress_port", o.IngressPort, true))
 	check(validateOpenShellPort("egress_port", o.EgressPort, true))
 	if o.IngressPort != 0 && o.IngressPort == o.EgressPort {
@@ -989,11 +1093,13 @@ func (o *OpenShellConfig) Validate() error {
 		}
 	}
 	check(validateOpenShellResources("resources", o.Resources))
-	check(o.Admin.validate())
+	check(o.Admin.validateAs("admin"))
 	return errors.Join(errs...)
 }
 
-func (a *OpenShellAdminConfig) validate() error {
+// validateAs checks one floor section: openshell.admin (prefix "admin") or a
+// profile's sandbox section (prefix "sandbox", the same type).
+func (a *OpenShellAdminConfig) validateAs(prefix string) error {
 	var errs []error
 	check := func(err error) {
 		if err != nil {
@@ -1002,29 +1108,30 @@ func (a *OpenShellAdminConfig) validate() error {
 	}
 	if a.RequiredPackDigest != "" {
 		if !openShellPackDigest.MatchString(a.RequiredPackDigest) {
-			check(fmt.Errorf("admin.required_pack_digest %q must be sha256:<64 lowercase hex digits>", a.RequiredPackDigest))
+			check(fmt.Errorf("%s.required_pack_digest %q must be sha256:<64 lowercase hex digits>", prefix, a.RequiredPackDigest))
 		}
 		if strings.TrimSpace(a.RequiredPack) == "" {
-			check(errors.New("admin.required_pack_digest needs admin.required_pack"))
+			check(fmt.Errorf("%s.required_pack_digest needs %s.required_pack", prefix, prefix))
 		}
 	}
-	check(validateOpenShellEnum("admin.min_profile", a.MinProfile, true,
+	check(validateOpenShellEnum(prefix+".min_profile", a.MinProfile, true,
 		OpenShellProfileOpen, OpenShellProfileBalanced, OpenShellProfileStrict))
-	check(validateOpenShellNames("admin.allowed_harnesses", a.AllowedHarnesses))
-	check(validateOpenShellEgressPatterns("admin.egress_block", a.EgressBlock))
-	check(validateOpenShellEgressPatterns("admin.egress_allow_only", a.EgressAllowOnly))
+	check(validateOpenShellNames(prefix+".allowed_harnesses", a.AllowedHarnesses))
+	check(validateOpenShellEgressPatterns(prefix+".egress_block", a.EgressBlock))
+	check(validateOpenShellEgressPatterns(prefix+".egress_allow_only", a.EgressAllowOnly))
 	for i, pattern := range a.RequireCopyFor {
 		if err := ValidateOpenShellCopyPattern(pattern); err != nil {
-			check(fmt.Errorf("admin.require_copy_for[%d]: %w", i, err))
+			check(fmt.Errorf("%s.require_copy_for[%d]: %w", prefix, i, err))
 		}
 	}
-	check(validateOpenShellResources("admin.max_resources", a.MaxResources))
+	check(validateOpenShellResources(prefix+".max_resources", a.MaxResources))
 	for i, key := range a.Locked {
 		if !isOpenShellLockableKey(strings.TrimSpace(key)) {
-			check(fmt.Errorf("admin.locked[%d]: %q is not a lockable key (want one of %s)",
-				i, key, strings.Join(OpenShellLockableKeys, ", ")))
+			check(fmt.Errorf("%s.locked[%d]: %q is not a lockable key (want one of %s)",
+				prefix, i, key, strings.Join(OpenShellLockableKeys, ", ")))
 		}
 	}
+	check(a.validateManagedFloor(prefix))
 	return errors.Join(errs...)
 }
 

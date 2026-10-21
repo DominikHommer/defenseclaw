@@ -89,7 +89,10 @@ const foreignHookSessionUnavailableReason = "enterprise_foreign_hook_blocked: De
 // still evaluated and recorded, but hookexec answers it with the connector's
 // neutral allow: a block there would keep the agent running, not stop it.
 func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
-	startedAt := time.Now()
+	startedAt := opts.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
 		return
 	}
@@ -139,7 +142,7 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	if event == "" {
 		event = facts.event
 	}
-	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, event, deadline)
+	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, event, startedAt, deadline)
 	if decision.Deny {
 		if name == "devin" {
 			host := opts.AgentHost
@@ -153,7 +156,10 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 		// The block never reaches the gateway, and the managed hook's own
 		// failure log is not user-writable: leave a record in the user's
 		// data directory for the guardian to report (best effort).
-		_ = hookForeignGuardRecord(accountHome, name, event, decision, time.Now())
+		// A stopped gateway is not a foreign-hook block, so it leaves none.
+		if strings.HasPrefix(decision.Reason, hookexec.ForeignHookBlockedReasonPrefix) {
+			_ = hookForeignGuardRecord(accountHome, name, event, decision, time.Now())
+		}
 		return
 	}
 	stderr := opts.Stderr
@@ -193,9 +199,6 @@ func foreignHookGuardedEvent(connectorName, event string) bool {
 // any non-standalone profile, so Secure Client and per-user installs render
 // unchanged.
 func standaloneForeignHookGuardBinary(connectorName string) string {
-	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return ""
-	}
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "amp", enterprisepolicy.ConnectorOpenCode:
 	case "devin", enterprisepolicy.ConnectorHermes:
@@ -203,6 +206,30 @@ func standaloneForeignHookGuardBinary(connectorName string) string {
 			return ""
 		}
 	default:
+		return ""
+	}
+	return standaloneAdminHookBinary()
+}
+
+// standaloneManagedHookBinary is the administrator-owned hook binary a
+// standalone Linux or macOS connector shell hook runs as `hook
+// session-facts` to read the user's Kerberos credential cache, which a
+// shell cannot read and a managed user has no per-user gateway binary to
+// ask (GAP-0194). Every connector gets it, not only the ones that run the
+// foreign-hook guard. Empty on Windows, whose hooks are not shell scripts,
+// and on any non-standalone profile, so Secure Client and per-user installs
+// render unchanged.
+func standaloneManagedHookBinary() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	return standaloneAdminHookBinary()
+}
+
+// standaloneAdminHookBinary is the standalone profile's administrator-owned
+// hook binary, or "" outside that profile.
+func standaloneAdminHookBinary() string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return ""
 	}
 	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
@@ -251,6 +278,10 @@ type hermesForeignHookBlock struct {
 // parentheses, as the other standalone block messages read.
 func hermesForeignHookBlockMessage(reason string) string {
 	reason = strings.TrimSpace(reason)
+	if strings.HasPrefix(reason, "DefenseClaw blocked ") {
+		// Already the sentence (hookexec.ManagedTransportFailureText).
+		return reason
+	}
 	if rest, ok := strings.CutPrefix(reason, hookexec.ForeignHookBlockedReasonPrefix); ok {
 		return "DefenseClaw blocked this tool call: " + strings.TrimSpace(rest) + " (" + strings.TrimSuffix(hookexec.ForeignHookBlockedReasonPrefix, ":") + ")"
 	}
@@ -296,10 +327,15 @@ func runForeignHookCheck(connectorName string, stdin io.Reader, stdout io.Writer
 	}
 	opts := hookexec.Options{Connector: name, Stdin: stdin}
 	facts := captureHookPayloadFacts(&opts)
-	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, facts.event, startedAt.Add(hookForeignGuardMaxScan))
+	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, facts.event, startedAt, startedAt.Add(hookForeignGuardMaxScan))
 	if decision.Deny {
 		_ = hookForeignGuardRecord(accountHome, name, facts.event, decision, time.Now())
 		result = foreignHookCheckResult{Deny: true, Reason: decision.Reason}
+		// The plugin shows the reason as is: a stopped gateway or a held
+		// port gets the sentence the native hooks print, not its code.
+		if text, ok := hookexec.ManagedTransportFailureText(facts.event, decision.Reason); ok {
+			result.Reason = text
+		}
 		return 0
 	}
 	for _, finding := range decision.Findings {
@@ -335,7 +371,7 @@ func hookForeignGuardScanBudget(connector, event string) time.Duration {
 // with the session's state in the gateway (a session that started with an
 // unapproved hook stays denied until the agent restarts), and the agent's config-location environment is
 // recorded for the guardian's cleanup.
-func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.PublicConnectorPolicy, facts hookPayloadFacts, event string, deadline time.Time) (enterprisepolicy.GuardDecision, string) {
+func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.PublicConnectorPolicy, facts hookPayloadFacts, event string, startedAt, deadline time.Time) (enterprisepolicy.GuardDecision, string) {
 	accountHome := hookForeignGuardAccountHome()
 	owned := []string{}
 	if accountHome != "" {
@@ -396,15 +432,45 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		})
 		return decision, accountHome
 	}
-	decision, err := hookForeignGuardExchange(name, event, deadline, update)
+	decision, err := hookForeignGuardExchange(name, event, startedAt, deadline, update)
+	// Bounded review P1: the gateway holds the session record, in its
+	// protected data directory. No copy the hook can read is one the user
+	// cannot write (the account-home mirror of 6c2aea5449 could be deleted or
+	// edited), so a guarded connector's call is blocked whenever the gateway
+	// cannot answer for its session, in every fail mode, a gateway outage
+	// under fail mode open included: a session the gateway blocked earlier
+	// may still run the hook it loaded, even after its file was deleted.
 	if err != nil {
 		// The gateway holds the session record. Without its answer the call
 		// is blocked in every fail mode, and the reason must not suggest an
 		// unapproved hook that may not exist (the usual cause is a gateway
 		// that is stopped or restarting).
+		reason := foreignHookSessionUnavailableReason
+		if update.Decision.Deny {
+			// This scan found the unapproved hook itself: name it.
+			reason = update.Decision.Reason
+		} else if hookexec.ManagedGatewayNotRunning(err) {
+			// A stopped gateway is not a foreign-hook finding: the hook
+			// says so in the words, and with the reason code, every other
+			// managed hook uses (GAP-0578, GAP-0639).
+			reason = hookexec.ManagedGatewayNotRunningReason
+		} else if hookexec.ManagedGatewayRestarting(err) {
+			// The gateway was still restarting at the end of the restart
+			// budget, counted from the invocation (#1278).
+			reason = hookexec.ManagedGatewayRestartingReason
+		} else if hookexec.ManagedGatewayNoAnswer(err) {
+			// The gateway took the exchange of a tool call but gave no
+			// answer within the hook's answer budget.
+			reason = hookexec.ManagedGatewayNoAnswerReason
+		} else if hookexec.ManagedGatewayPortHeld(err) {
+			// The gateway service runs but another process answers on its
+			// port: say so, not that the session record is unavailable
+			// (GAP-1029).
+			reason = hookexec.ManagedGatewayPortHeldReason
+		}
 		decision = enterprisepolicy.GuardDecision{
 			Deny:     true,
-			Reason:   foreignHookSessionUnavailableReason,
+			Reason:   reason,
 			Findings: update.Decision.Findings,
 		}
 	}
@@ -425,11 +491,16 @@ func foreignHookSessionLocal(name string) bool {
 	return hookForeignGuardGOOS == "windows" && strings.EqualFold(strings.TrimSpace(name), "amp")
 }
 
-func exchangeForeignHookSession(name, event string, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
-	if enterpriseManagedHookRuntimeNoop(name) {
-		return enterprisepolicy.GuardDecision{}, fmt.Errorf("standalone hook runtime unavailable")
+func exchangeForeignHookSession(name, event string, startedAt, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	// --foreign-hook-check exits before the ordinary hook preflight. Prepare
+	// its managed runtime here so this exchange uses the verified transport.
+	if prepareEnterpriseManagedHookRuntime(name) {
+		return enterprisepolicy.GuardDecision{}, fmt.Errorf("managed hook runtime has been retired")
 	}
 	opts := buildHookOptionsForRuntime(name, event, "", "closed", true)
+	// A restarting gateway is waited for within the restart budget of the
+	// invocation, not of the exchange: the scan before it counts.
+	opts.StartedAt = startedAt
 	deadline := scanDeadline.Add(hookForeignGuardScanBudget(name, event))
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()

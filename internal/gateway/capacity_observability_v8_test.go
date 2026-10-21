@@ -5,7 +5,6 @@ package gateway
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -30,18 +29,9 @@ func (runtime *capacityHealthRuntime) DestinationHealthSnapshot(
 }
 
 func TestCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) {
-	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		lastErr = runCapacityMetricsUseCompleteGeneratedV8Families(t)
-		if lastErr == nil {
-			return
-		}
-		var metricErr *observabilityruntime.GeneratedMetricError
-		if !errors.As(lastErr, &metricErr) || metricErr.Code() != observabilityruntime.GeneratedMetricRecordFailed {
-			t.Fatal(lastErr)
-		}
+	if err := runCapacityMetricsUseCompleteGeneratedV8Families(t); err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal(lastErr)
 }
 
 func runCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) error {
@@ -149,7 +139,7 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 			Sources: []delivery.HealthSnapshot{{
 				Destination: "capture", Generation: graph.Generation(), Signal: string(observability.SignalMetrics),
 				State: delivery.HealthDegraded, Reason: string(delivery.HealthReasonRetryable),
-				Counters: delivery.Counters{Failed: 2}, LastSuccess: lastSuccess,
+				Counters: delivery.Counters{Failed: 2, Dropped: 4, Rejected: 1}, LastSuccess: lastSuccess,
 			}},
 		}},
 	}
@@ -169,6 +159,8 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 	}
 	sidecar.recordExporterHealthMetricsV8(t.Context(), observedAt.Add(time.Second), wrapper, health2)
 	wrapper.snapshot.Destinations[0].Sources[0].Counters.Failed = 5
+	wrapper.snapshot.Destinations[0].Sources[0].Counters.Dropped = 7
+	wrapper.snapshot.Destinations[0].Sources[0].Counters.Rejected = 3
 	health3, err := wrapper.DestinationHealthSnapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +186,24 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 			t.Fatalf("exporter error[%d] attributes=%v", index, attributes)
 		}
 	}
+	drops := generatedMetricByName(metrics, observability.TelemetryInstrumentDefenseClawQueueDrops)
+	if len(drops) != 4 {
+		t.Fatalf("destination loss observations=%d want=4", len(drops))
+	}
+	wantLoss := map[string][]int64{"dropped": {4, 3}, "rejected": {1, 2}}
+	for _, drop := range drops {
+		attrs := drop.Attributes()
+		if attrs["defenseclaw.metric.queue"] != "destination.capture.metrics" {
+			t.Fatalf("drop queue attributes=%v", attrs)
+		}
+		reason, _ := attrs["defenseclaw.metric.reason"].(string)
+		values := wantLoss[reason]
+		value, ok := drop.Value().Int64()
+		if !ok || len(values) == 0 || value != values[0] {
+			t.Fatalf("drop reason=%s value=%d expected=%v", reason, value, values)
+		}
+		wantLoss[reason] = values[1:]
+	}
 	successes := generatedMetricByName(
 		metrics, observability.TelemetryInstrumentDefenseClawTelemetryExporterLastExportTs,
 	)
@@ -209,6 +219,29 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 	}
 	if wrapper.snapshotCalls != 3 {
 		t.Fatalf("destination snapshots=%d want=3", wrapper.snapshotCalls)
+	}
+}
+
+func TestSecureClientOmitsDestinationLossMetrics(t *testing.T) {
+	old := ManagedEnterpriseActive()
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(old) })
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	graph := runtime.Active()
+	wrapper := &capacityHealthRuntime{Runtime: runtime}
+	wrapper.snapshot = observabilityruntime.DestinationHealthSnapshot{
+		Generation: graph.Generation(), PlanDigest: graph.Digest(),
+		Destinations: []observabilityruntime.DestinationHealth{{
+			Name: "capture", Enabled: true, Signals: []observability.Signal{observability.SignalMetrics},
+			Sources: []delivery.HealthSnapshot{{
+				Destination: "capture", Generation: graph.Generation(), Signal: string(observability.SignalMetrics),
+				Counters: delivery.Counters{Dropped: 2, Rejected: 1},
+			}},
+		}},
+	}
+	(&Sidecar{}).recordExporterHealthMetricsV8(t.Context(), time.Now().UTC(), wrapper, wrapper.snapshot)
+	if drops := generatedMetricByName(capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawQueueDrops); len(drops) != 0 {
+		t.Fatalf("Secure Client exported %d destination loss metrics", len(drops))
 	}
 }
 

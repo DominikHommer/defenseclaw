@@ -27,6 +27,7 @@
 package harness
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"path"
@@ -67,6 +68,85 @@ const (
 // adds.
 const LauncherSystemPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+// The workload's Python (WorkloadPythonShimStep). The base image's pip and
+// uv install into WorkloadVenv, but LauncherSystemPATH puts /usr/local/bin,
+// where the base image's python3 is, ahead of the venv's bin, so `pip
+// install x` and then `python3 -c 'import x'` used two environments
+// (#1238). Root-owned python3 and python shims in WorkloadPythonShimDir,
+// first on LauncherSystemPATH, run the venv's interpreter instead, and pip
+// and pip3 shims there run its pip: the venv's bin is not on the harness's
+// PATH, so a bare pip was not found in the agent's tool shell. The
+// hooks' PATH (connector.SandboxHookPATH) leaves that directory out, so a
+// hook never runs the workload-writable venv.
+const (
+	WorkloadPythonShimDir = "/usr/local/sbin"
+	WorkloadVenv          = connector.SandboxHomeDir + "/.venv"
+)
+
+// pythonShimScript is each shim: @PY@ is the venv's versioned interpreter
+// (python3.X), run by its absolute path so the shim never finds itself on
+// PATH, and @BASE@ the base image's python3, which a venv the agent removed
+// leaves (empty: none).
+const pythonShimScript = `#!/bin/sh
+# DefenseClaw: python3 is the sandbox's workload environment (@VENV@), where
+# pip and uv install, as in a shell that activated it.
+if [ -x @PY@ ]; then exec @PY@ "$@"; fi
+if [ -n "@BASE@" ]; then exec @BASE@ "$@"; fi
+echo "python3: @PY@ is gone" >&2
+exit 127
+`
+
+// pipShimScript is each pip shim: the pip of the interpreter the python3
+// shim runs (pythonShimScript, the same @PY@ and @BASE@), so `pip install x`
+// installs where `python3 -c 'import x'` looks.
+const pipShimScript = `#!/bin/sh
+# DefenseClaw: pip installs into the sandbox's workload environment (@VENV@),
+# the one python3 runs, as in a shell that activated it.
+if [ -x @PY@ ]; then exec @PY@ -m pip "$@"; fi
+if [ -n "@BASE@" ]; then exec @BASE@ -m pip "$@"; fi
+echo "pip: @PY@ is gone" >&2
+exit 127
+`
+
+// WorkloadPythonShimStep is the image step that installs the python3 and
+// python shims (pythonShimScript) when the base image has the workload venv,
+// and the pip and pip3 shims (pipShimScript) when that venv has pip.
+// Like WorkloadPythonStep it is a compatibility fix, not a control: the
+// venv is the workload's, as pip already was. A base image without the
+// venv, or with a program of its own at a shim's path, builds on without
+// it. It runs after the harness install steps, which keep the base image's
+// python3.
+func WorkloadPythonShimStep() InstallStep {
+	return InstallStep{
+		Comment: "python3, pip and pip3 use one environment, the workload venv " + WorkloadVenv + " (the hooks keep the system python3)",
+		Run:     workloadPythonShimRun(WorkloadVenv, WorkloadPythonShimDir, "/usr/local/bin/python3 /usr/bin/python3"),
+	}
+}
+
+// workloadPythonShimRun is WorkloadPythonShimStep's command for the venv,
+// the shim directory and the base interpreters to fall back to (shell
+// words).
+func workloadPythonShimRun(venv, dir, bases string) string {
+	encode := func(script string) string {
+		return base64.StdEncoding.EncodeToString([]byte(strings.ReplaceAll(script, "@VENV@", venv)))
+	}
+	// install writes the shim b64 for each name in names, keeping a
+	// program the base image has at a shim's path.
+	install := func(names, b64 string) string {
+		return `for name in ` + names + `; do ` +
+			`if [ -e "$dir/$name" ]; then echo "DefenseClaw: the base image has its own $dir/$name" >&2; continue; fi; ` +
+			`printf '%s' ` + b64 + ` | base64 -d | sed -e "s#@PY@#$py#g" -e "s#@BASE@#$base#g" >"$dir/$name"; chmod 0755 "$dir/$name"; done; `
+	}
+	return `set -eu; venv=` + shellQuote(venv) + `; dir=` + shellQuote(dir) + `; ` +
+		`if [ -x "$venv/bin/python3" ]; then ` +
+		`v="$("$venv/bin/python3" -I -S -c 'import sys; print("%d.%d" % sys.version_info[:2])')"; py="$venv/bin/python$v"; ` +
+		`base=""; for b in ` + bases + `; do if [ -x "$b" ]; then base="$b"; break; fi; done; ` +
+		`if [ ! -x "$py" ]; then echo "DefenseClaw: $venv has no python$v, so python3 and pip may use different environments" >&2; ` +
+		`else install -d -m 0755 "$dir"; ` + install("python3 python", encode(pythonShimScript)) +
+		`if "$py" -I -c 'import pip' >/dev/null 2>&1; then ` + install("pip pip3", encode(pipShimScript)) +
+		`else echo "DefenseClaw: $venv has no pip, so pip stays off the agent's PATH" >&2; fi; fi; fi`
+}
+
 // launcherScrubbedEnv are variables no launcher passes to its harness. The
 // harnesses run hooks and tool commands through bash, which reads the file
 // BASH_ENV names before a -c command and applies SHELLOPTS and BASHOPTS
@@ -98,9 +178,10 @@ unset dc_var
 
 // launcherPreamble is the environment set-up every launcher runs first: the
 // loader variables are dropped (launcherLoaderScrub), system directories
-// lead PATH, Node's compile cache is off, and the egress proxy is exported
-// (egressEnvScript, which the sandbox's login shells and `sandbox exec`
-// commands run too; see shellenv.go). It also defines dc_launch, which
+// lead PATH, Node's compile cache is off, and the egress proxy and the
+// trusted CA bundle are exported (egressEnvScript and trustedCAScript, which
+// the sandbox's login shells and `sandbox exec` commands run too; see
+// shellenv.go). It also defines dc_launch, which
 // launcherExec starts the harness with (launcherJobControl).
 //
 // Node keeps its compile cache wherever NODE_COMPILE_CACHE (or a harness's
@@ -115,7 +196,7 @@ export PATH
 # root-owned harness sources.
 NODE_DISABLE_COMPILE_CACHE=1
 export NODE_DISABLE_COMPILE_CACHE
-` + egressEnvScript + timeZoneScript + launcherJobControl
+` + egressEnvScript + trustedCAScript + timeZoneScript + launcherJobControl
 
 // launcherJobControl defines dc_launch COMMAND..., which every launcher
 // ends with: it execs COMMAND, except in a terminal session, where nothing
@@ -289,7 +370,8 @@ type CredentialProfile struct {
 	// DefaultModel is the model a sandbox with this profile runs because
 	// the provider does not serve the harness's own default. It travels
 	// with ModelProvider (Codex) or as ANTHROPIC_MODEL in Env (Claude Code)
-	// into the run's managed configuration, above user config and
+	// into the run's managed configuration, or as a model flag in
+	// LaunchArgs (Hermes) ahead of the caller's arguments, above user config and
 	// configuration overrides; only the harness's model flag picks another
 	// (Spec.Model).
 	DefaultModel string
@@ -402,15 +484,41 @@ type Spec struct {
 	// directFetches are requests the pinned harness makes around the
 	// egress proxy that it does without (DirectFetch).
 	directFetches []DirectFetch
+	// toolHosts are hosts a tool of the harness calls on every use
+	// (ToolHost).
+	toolHosts []ToolHost
 }
 
-// DirectFetch is a request the pinned harness binary makes on its own
-// around the egress proxy (its HTTP client ignores the proxy variables)
-// with no setting that turns it off, and that the harness does without
-// when it fails. OpenShell refuses it and drafts a proposal to open the
+// ToolHost is a host one of the harness's own tools calls on every use,
+// whatever the tool's target: Claude Code's WebFetch asks its vendor's API
+// whether each URL is safe to fetch. An allowlist profile that refuses the
+// host breaks the tool for every site, which read as the site's refusal
+// (GAP-0234, GAP-0263).
+type ToolHost struct {
+	Host string
+	// What says what refusing it breaks, for the feed and the agent.
+	What string
+}
+
+// ToolHostOf says what refusing host breaks, when it is one of the
+// harness's tool hosts.
+func (s *Spec) ToolHostOf(host string) (string, bool) {
+	for _, t := range s.toolHosts {
+		if strings.EqualFold(t.Host, host) {
+			return t.What, true
+		}
+	}
+	return "", false
+}
+
+// DirectFetch is a request the pinned harness binary makes on its own with
+// no setting that turns it off, and that the harness does without when it
+// fails. Around the egress proxy (its HTTP client ignores the proxy
+// variables) OpenShell refuses it and drafts a proposal to open the
 // destination; triage rejects that proposal instead of adding a direct rule
 // (and the policy reload that closes the sandbox's open connections) the
-// harness does not need.
+// harness does not need. Through the proxy, an allowlist pack refuses it.
+// Either refusal is audited but not shown or counted as the agent's.
 type DirectFetch struct {
 	Host string
 	Port int

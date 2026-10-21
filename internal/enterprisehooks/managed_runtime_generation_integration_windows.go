@@ -33,6 +33,7 @@ func prepareWindowsManagedRuntimeGenerationForInstall(
 	hookContractID,
 	hookContractLockUpdatedAt,
 	hookContractEntryUpdatedAt string,
+	failMode ...string,
 ) (WindowsManagedRuntimeGenerationPublication, error) {
 	if targetSID == nil {
 		return WindowsManagedRuntimeGenerationPublication{}, errors.New(
@@ -54,6 +55,7 @@ func prepareWindowsManagedRuntimeGenerationForInstall(
 			HookExecutable:             hookExecutable,
 			GatewayAddr:                gatewayAddr,
 			GatewayServiceName:         serviceName,
+			FailMode:                   windowsManagedGenerationFailMode(failMode),
 			ScopedToken:                scopedToken,
 			HookContractID:             hookContractID,
 			HookContractLockUpdatedAt:  hookContractLockUpdatedAt,
@@ -91,6 +93,7 @@ func verifyWindowsManagedRuntimeGenerationForInstall(
 	hookContractID,
 	hookContractLockUpdatedAt,
 	hookContractEntryUpdatedAt string,
+	failMode ...string,
 ) error {
 	if targetSID == nil {
 		return errors.New("enterprise hooks: managed runtime generation target SID is unavailable")
@@ -107,10 +110,26 @@ func verifyWindowsManagedRuntimeGenerationForInstall(
 			HookExecutable:             hookExecutable,
 			GatewayAddr:                gatewayAddr,
 			GatewayServiceName:         serviceName,
+			FailMode:                   windowsManagedGenerationFailMode(failMode),
 			ScopedToken:                scopedToken,
 			HookContractID:             hookContractID,
 			HookContractLockUpdatedAt:  hookContractLockUpdatedAt,
 			HookContractEntryUpdatedAt: hookContractEntryUpdatedAt,
 		},
 	)
+}
+
+// windowsManagedGenerationFailMode is the delivery mode an authenticated
+// runtime generation records: the mode the administrator's config resolved
+// (owner decision 2026-10-20: an explicit open or closed wins on every
+// profile). Without one it is open under Secure Client (#1163) and closed on
+// every other profile.
+func windowsManagedGenerationFailMode(modes []string) string {
+	if len(modes) == 0 {
+		if secureClientHookDelivery() {
+			return "open"
+		}
+		return "closed"
+	}
+	return canonicalHookFailMode(modes[0])
 }

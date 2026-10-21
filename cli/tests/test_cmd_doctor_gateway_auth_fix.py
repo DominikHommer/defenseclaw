@@ -178,27 +178,24 @@ def test_gateway_subsystem_expectation_is_off_when_discovery_found_no_openclaw(t
 
 
 @pytest.mark.parametrize(
-    ("enabled", "standalone", "platform", "deployment_mode", "expected"),
+    ("enabled", "platform", "deployment_mode", "expected"),
     [
-        (True, False, "linux", "", True),
-        (True, False, "darwin", "", True),
-        (False, False, "linux", "", False),
-        (False, True, "linux", "", True),
-        (True, False, "win32", "", None),
-        (True, False, "linux", "managed_enterprise", None),
+        (True, "linux", "", True),
+        (True, "darwin", "", True),
+        (False, "linux", "", False),
+        (True, "win32", "", None),
+        (True, "linux", "managed_enterprise", None),
     ],
 )
 def test_sandbox_subsystem_expectation_follows_openshell_enabled(
     enabled,
-    standalone,
     platform,
     deployment_mode,
     expected,
 ):
-    # The gateway runs the sandbox subsystem when openshell.enabled is set,
-    # not only for the legacy standalone install.
+    # The gateway runs the sandbox subsystem when openshell.enabled is set.
     cfg = SimpleNamespace(
-        openshell=SimpleNamespace(enabled=enabled, is_standalone=lambda: standalone),
+        openshell=SimpleNamespace(enabled=enabled),
         deployment_mode=deployment_mode,
     )
     with patch("defenseclaw.commands.cmd_doctor.sys.platform", platform):
@@ -598,6 +595,25 @@ def test_fix_gateway_token_generates_canonical_token_when_openclaw_has_none(tmp_
     assert tag == "pass"
     assert "DEFENSECLAW_GATEWAY_TOKEN" in detail
     assert "OPENCLAW_GATEWAY_TOKEN" not in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_fix_gateway_token_preserves_running_token_before_openclaw_resync(tmp_path):
+    from defenseclaw.logger import _running_gateway_token
+
+    cfg = _cfg(str(tmp_path), token="running-token")
+    cfg.active_connector = lambda: "openclaw"
+    cfg.claw = SimpleNamespace(config_file=str(tmp_path / "openclaw.json"))
+    (tmp_path / "gateway.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    with patch(
+        "defenseclaw.commands.cmd_setup._detect_openclaw_gateway_token",
+        return_value="new-token",
+    ):
+        tag, _ = _fix_gateway_token(cfg, assume_yes=True)
+
+    assert tag == "pass"
+    assert _running_gateway_token(str(tmp_path)) == "running-token"
+    assert "OPENCLAW_GATEWAY_TOKEN=new-token" in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
 def test_fix_stale_pid_removes_malformed_file(tmp_path):
@@ -1282,7 +1298,7 @@ def test_fix_gateway_service_restarts_deterministic_config_runtime_drift(
     if drift == "watcher":
         cfg.gateway.watcher = SimpleNamespace(enabled=False)
     if drift == "sandbox":
-        cfg.openshell = SimpleNamespace(is_standalone=lambda: False)
+        cfg.openshell = SimpleNamespace(enabled=False)
     (tmp_path / "gateway.pid").write_text("4242", encoding="utf-8")
     before_trust = _strong_gateway_trust(str(tmp_path), pid=4242)
     after_trust = _strong_gateway_trust(
@@ -1467,7 +1483,7 @@ def test_fix_gateway_service_does_not_restart_operational_subsystem_errors(
     elif subsystem == "telemetry":
         cfg._source_config_version = 8
     else:
-        cfg.openshell = SimpleNamespace(is_standalone=lambda: True)
+        cfg.openshell = SimpleNamespace(enabled=True)
 
     with (
         patch(
@@ -1696,7 +1712,7 @@ def test_fix_gateway_service_reports_started_with_operational_upstream_state(
 def test_fix_gateway_service_restarts_stale_enabled_subsystem(tmp_path):
     cfg = _cfg(str(tmp_path), token="configured")
     cfg.guardrail = SimpleNamespace(enabled=True)
-    cfg.openshell = SimpleNamespace(is_standalone=lambda: False)
+    cfg.openshell = SimpleNamespace(enabled=False)
     (tmp_path / "gateway.pid").write_text("4242", encoding="utf-8")
     before_trust = _strong_gateway_trust(str(tmp_path), pid=4242)
     after_trust = _strong_gateway_trust(
@@ -1763,6 +1779,8 @@ def test_fix_gateway_service_surfaces_only_safe_lifecycle_reason(tmp_path):
         return False
 
     with (
+        # A gateway installed on this host's PATH would be named instead.
+        patch.dict(os.environ, {"PATH": str(tmp_path)}),
         patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(0, "")),
         patch(
             "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",

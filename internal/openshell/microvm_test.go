@@ -90,6 +90,31 @@ func (f *doctorFixture) onMicroVMs() {
 // macTempDir is a Mac user's $TMPDIR.
 const macTempDir = "/var/folders/1r/kq1tw76n1rv8s9wxygbgtglm0000gn/T/"
 
+// GAP-0252: a prepared disk's final size understates the host space its
+// first start uses. Doctor and the start preflight share this floor.
+func TestMicroVMFirstStartDiskFloor(t *testing.T) {
+	for _, tc := range []struct {
+		imageBytes       uint64
+		need, fail, warn uint64
+	}{
+		{0, 11 << 30, 12 << 30, 22 << 30},
+		{5 << 30, 11 << 30, 12 << 30, 22 << 30},
+		{12 << 30, 13 << 30, 14 << 30, 26 << 30},
+	} {
+		need, fail, warn := openshell.VMDiskRoom(tc.imageBytes)
+		if need != tc.need || fail != tc.fail || warn != tc.warn {
+			t.Errorf("image %d: got %d/%d/%d, want %d/%d/%d", tc.imageBytes, need, fail, warn, tc.need, tc.fail, tc.warn)
+		}
+	}
+	if openshell.VMDiskFailBytes != 12<<30 {
+		t.Fatal("doctor and preflight floors differ")
+	}
+	warning, err := openshell.VMDiskShortage("/vm/images", 10<<30, 5<<30, "this sandbox's first start")
+	if err == nil || warning != "" || !strings.Contains(err.Error(), "uses about 11.0 GiB") || !strings.Contains(err.Error(), "at least 12.0 GiB") {
+		t.Fatalf("10 GiB first start: warning %q, error %v", warning, err)
+	}
+}
+
 // TestDoctorOnAMacRunningMicroVMs: on a Mac whose gateway runs the
 // MicroVM driver, Landlock is the MicroVM kernel's (no Docker VM probe),
 // Docker Desktop's network does not matter and its file sharing only for
@@ -132,6 +157,17 @@ func TestDoctorOnAMacRunningMicroVMs(t *testing.T) {
 	if f.diskProbed != f.home || r.Driver != openshell.DriverVM || r.ConfiguredDriver != openshell.DriverVM || r.MicroVM == nil ||
 		r.MicroVM.Identity != (openshell.VMIdentity{UID: 501, GID: 20}) || !r.MicroVM.HypervisorSigned {
 		t.Fatalf("facts = %+v, microvm %+v (disk probed at %q)", r, r.MicroVM, f.diskProbed)
+	}
+}
+
+// TestDoctorNamesTheMacLoginSession (GAP-0193): on a Mac the row Linux
+// calls systemd linger is named for what keeps the gateway running there.
+func TestDoctorNamesTheMacLoginSession(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.onMicroVMs()
+	c := expectCheck(t, f.run(), openshell.CheckIDLinger, openshell.StatusSkip, "Homebrew services, the OpenShell gateway among them, run while you are logged in")
+	if c.Title != "Login session" {
+		t.Fatalf("title = %q, want Login session", c.Title)
 	}
 }
 
@@ -181,6 +217,44 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 			_ = os.Remove(filepath.Join(f.e2fsprogs, "mke2fs"))
 			touchExecutable(f.t, filepath.Join(f.e2fsprogs, "mkfs.ext4"))
 		}, want: checkWant{"vm-driver", pass, "e2fsprogs in "}},
+		// GAP-0112: the driver searches only the kegs under /opt/homebrew
+		// and /usr/local, so an e2fsprogs installed by a Homebrew of your
+		// own is never found: the doctor says so instead of offering a
+		// build that cannot help.
+		{name: "e2fsprogs missing under a Homebrew of your own", setup: func(f *doctorFixture) {
+			f.doctor.E2fsprogsDirs = []string{filepath.Join(f.home, "kegs", "e2fsprogs", "sbin")}
+		}, want: checkWant{"vm-driver", fail, "; it does not look in your Homebrew at "},
+			fix: &fixWant{text: "have an administrator install it with a Homebrew there (brew install e2fsprogs)", manual: true}},
+		// A managed computer has no Homebrew for its users (spec D4, D5): the
+		// fix names the administrator and no brew command, and offers none to
+		// apply.
+		{name: "managed host: e2fsprogs missing", setup: func(f *doctorFixture) {
+			f.doctor.Gateway.Managed = true
+			_ = os.RemoveAll(f.e2fsprogs)
+		}, want: checkWant{"vm-driver", fail, "e2fsprogs is not installed where the MicroVM driver looks for it"},
+			fix: &fixWant{text: "ask your administrator to repair the managed package's e2fsprogs or set enterprise.openshell.e2fsprogs_dir", manual: true}},
+		// Managed accounts do not use a Homebrew keg, even when its files and
+		// directory chain look trusted by the old owner check.
+		{name: "managed host: a Homebrew keg is not used", setup: func(f *doctorFixture) {
+			f.doctor.Gateway.Managed = true
+			f.doctor.E2fsprogsDirs = []string{f.e2fsprogs}
+		}, want: checkWant{"vm-driver", fail, "enterprise.openshell.e2fsprogs_dir"},
+			fix: &fixWant{text: "ask your administrator to repair the managed package's e2fsprogs", manual: true}},
+		{name: "managed host: the user's own e2fsprogs build", setup: func(f *doctorFixture) {
+			f.doctor.Gateway.Managed = true
+			_ = os.RemoveAll(f.e2fsprogs)
+			for _, tool := range []string{"mke2fs", "debugfs"} {
+				touchExecutable(f.t, filepath.Join(f.home, ".local", "opt", "e2fsprogs", "sbin", tool))
+			}
+		}, want: checkWant{"vm-driver", pass, filepath.Join(".local", "opt", "e2fsprogs", "sbin") + "; "}},
+		{name: "managed host: driver not signed", setup: func(f *doctorFixture) {
+			f.doctor.Gateway.Managed = true
+			for _, tool := range []string{"mke2fs", "debugfs"} {
+				touchExecutable(f.t, filepath.Join(f.home, ".local", "opt", "e2fsprogs", "sbin", tool))
+			}
+			f.runner.On(codesign, f.vmDriverPath()+": code object is not signed at all", errors.New("exit status 1"))
+		}, want: checkWant{"vm-driver", fail, "openshell-driver-vm is not signed for Apple's Hypervisor"},
+			fix: &fixWant{text: "ask your administrator for an OpenShell whose MicroVM driver is signed", manual: true}},
 		// The driver runs under launchd, whose PATH is not the shell's.
 		{name: "e2fsprogs only on PATH", setup: func(f *doctorFixture) {
 			_ = os.RemoveAll(f.e2fsprogs)
@@ -299,10 +373,10 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 		{name: "admin maximum below one MicroVM", setup: func(f *doctorFixture) { f.doctor.MaxCPUMillis = 500 },
 			want: checkWant{"vm-resources", fail, "below what any MicroVM gets"}, fix: &fixWant{text: "ask your administrator", manual: true}},
 
-		{name: "disk low", setup: func(f *doctorFixture) { f.diskFree = 8 << 30 },
-			want: checkWant{"disk", warn, "8.0 GiB free under"}, fix: &fixWant{text: "about 5 GB", manual: true}},
-		{name: "disk too full", setup: func(f *doctorFixture) { f.diskFree = 4 << 30 },
-			want: checkWant{"disk", fail, "MicroVM sandboxes need at least 6.0 GiB"}},
+		{name: "measured first start below floor", setup: func(f *doctorFixture) { f.diskFree = 10 << 30 },
+			want: checkWant{"disk", fail, "MicroVM sandboxes need at least 12.0 GiB"}, fix: &fixWant{text: "uses about 11 GiB", manual: true}},
+		{name: "disk low", setup: func(f *doctorFixture) { f.diskFree = 15 << 30 },
+			want: checkWant{"disk", warn, "15.0 GiB free under"}, fix: &fixWant{text: "uses about 11 GiB", manual: true}},
 		// Only the disks prepared from images count: the driver's overlay
 		// templates, the bootstrap rootfs every MicroVM boots with and a
 		// preparation under way are its own state.
@@ -393,7 +467,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 			" (process 7976) was started by hand, not Homebrew's nvidia/openshell/openshell service: it does not start again at login, and DefenseClaw cannot restart it")
 		wantUnmanagedFix(t, c, restartYourself)
 		expectCheck(t, r, openshell.CheckIDTelemetry, openshell.StatusSkip,
-			"DefenseClaw changes it on Linux only; the gateway reads OPENSHELL_TELEMETRY_ENABLED from the environment it was started with")
+			"the gateway reads OPENSHELL_TELEMETRY_ENABLED from the environment it was started with, which DefenseClaw does not change")
 		if !r.OK() || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
 			t.Fatalf("report:\n%s\nmicrovm %+v", r, r.MicroVM)
 		}
@@ -575,7 +649,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		// The user starts it: setup stops here, where it would have to.
 		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, fail, "nvidia/openshell/openshell is not installed"), startYourself)
 		// Not `brew services start` of the formula that is not installed.
-		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, fail, "the gateway is not answering"), startYourself)
+		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, fail, "the gateway is not running"), startYourself)
 		if r.OK() {
 			t.Fatalf("a Mac whose gateway does not answer is ready:\n%s", r)
 		}
@@ -858,21 +932,6 @@ func TestDoctorOnADockerMac(t *testing.T) {
 		f.doctor.GOARCH = "amd64"
 		expectCheck(t, f.run(), openshell.CheckIDPlatform, openshell.StatusFail, "darwin/amd64: the OpenShell MicroVM driver runs on Apple silicon only")
 	})
-}
-
-// TestDoctorOnLinuxWithTheVMDriver: DefenseClaw certifies the MicroVM
-// driver on macOS only; on Linux doctor says so, and offers no bind mounts
-// on it.
-func TestDoctorOnLinuxWithTheVMDriver(t *testing.T) {
-	f := newDoctorFixture(t)
-	f.fake = openshelltest.New(openshelltest.WithDriver(openshell.DriverVM))
-	r := f.run()
-	expectCheck(t, r, openshell.CheckIDGatewayDriver, openshell.StatusWarn, "not certified by DefenseClaw off macOS")
-	expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusSkip, "mounts no host folders")
-	expectCheck(t, r, openshell.CheckIDLandlock, openshell.StatusPass, "ABI 6")
-	if r.Get(openshell.CheckIDVMDriver) != nil || r.MicroVM != nil {
-		t.Fatalf("Linux got the macOS MicroVM checks:\n%s", r)
-	}
 }
 
 // On the MicroVM driver the file sharing check is of the temp directory

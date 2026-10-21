@@ -24,6 +24,7 @@ param(
     [string]$ACPBinary,
     [string]$HookBinary,
     [string]$SensorHelperBinary,
+    [string]$PolicyCompiler,
     [string]$CLIBinary,
     [string]$NativeCleanupBinary,
     [string]$Config,
@@ -73,11 +74,22 @@ param(
     [switch]$AllowUnsigned,
     [switch]$AttestAgentApplicationControl,
     [switch]$AttestClaudeEffectivePolicy,
-    # Retained for command-line compatibility, but rejected before bootstrap
-    # creation until late config publication can authenticate and prepare all
-    # enrolled user runtimes before any service activation.
+    # Stages an installed but disabled deployment with protected placeholder
+    # policy. Activation is allowed only through a later Repair that supplies
+    # BOTH authenticated Config and Manifest inputs; direct file-drop/start is
+    # deliberately not an activation contract.
     [switch]$DeferredConfig,
     [int]$SelfUninstallCallerPID,
+    # Protected parent directory for the installer's one-shot bootstrap
+    # environment. When set (the outer signed DefenseClawSetup EXE passes
+    # its own protected %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch
+    # path here), the bootstrap directory is created inside it INSTEAD of
+    # C:\Windows\Temp — which on Azure-AD-joined hosts carries an Allow ACE
+    # for the interactive AAD principal with Delete/DeleteSubdirectoriesAndFiles
+    # rights, failing the module's later trusted-ancestor walk on rendered
+    # config/targets YAML. Empty falls back to C:\Windows\Temp for
+    # direct-caller compatibility on stock Windows.
+    [string]$BootstrapParent = '',
     [switch]$Json,
 
     # Enterprise profile. SecureClient (default) is the Cisco Secure Client
@@ -460,6 +472,22 @@ namespace $nativeNamespace
             }
         }
 
+        public static bool IsInteractiveUserSID(SecurityIdentifier sid)
+        {
+            if (sid == null)
+                return false;
+            string value = sid.Value;
+            int componentCount = value.Split('-').Length;
+            return (value.StartsWith(
+                        "S-1-5-21-",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    componentCount >= 8) ||
+                (value.StartsWith(
+                        "S-1-12-1-",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    componentCount == 8);
+        }
+
         public static string[] GetActiveSessionSIDs()
         {
             return GetActiveSessionSIDs(false);
@@ -517,12 +545,7 @@ namespace $nativeNamespace
                         : new NTAccount(domain, user);
                     SecurityIdentifier sid = (SecurityIdentifier)account.Translate(
                         typeof(SecurityIdentifier));
-                    if (sid.Value.StartsWith(
-                            "S-1-5-21-",
-                            StringComparison.OrdinalIgnoreCase) ||
-                        (includeEntra && sid.Value.StartsWith(
-                            "S-1-12-1-",
-                            StringComparison.OrdinalIgnoreCase)))
+                    if (IsInteractiveUserSID(sid))
                         active.Add(sid.Value);
                 }
                 List<string> ordered = new List<string>(active);
@@ -1032,25 +1055,149 @@ function Get-DefenseClawBootstrapSecuritySDDL {
     return $Security.GetSecurityDescriptorSddlForm($sections)
 }
 
+function Assert-DefenseClawBootstrapExternalParentTrust {
+    # Called only when the caller passed a non-empty -BootstrapParent. The
+    # outer signed DefenseClawSetup EXE hands its own protected
+    # %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch path here
+    # (SDDL O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)); this validator
+    # rejects anything whose ancestor chain grants an untrusted principal
+    # replacement rights, so an attacker cannot redirect the bootstrap into
+    # a directory they can retake. Mirrors the ancestor-walk rule the
+    # module's Assert-DefenseClawTrustedAncestor applies to managed content
+    # later, so if this passes, the later content-trust check also passes.
+    param([Parameter(Mandatory)][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or
+        $Path.Contains('"') -or
+        $Path -match '[\x00-\x1f]') {
+        throw '-BootstrapParent is empty or contains an invalid character'
+    }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if (-not [IO.Path]::IsPathRooted($full) -or
+        $full.StartsWith('\\') -or
+        $full.StartsWith('//') -or
+        $full.StartsWith('\\?\') -or
+        $full.StartsWith('\\.\') -or
+        ($full.Length -gt 2 -and $full.Substring(2).Contains(':'))) {
+        throw "-BootstrapParent must be an absolute local Win32 drive path: $full"
+    }
+    if (-not [IO.Directory]::Exists($full)) {
+        throw "-BootstrapParent directory does not exist: $full"
+    }
+    $attributes = [IO.File]::GetAttributes($full)
+    if (($attributes -band [IO.FileAttributes]::Directory) -eq 0 -or
+        ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "-BootstrapParent must be a real non-reparse directory: $full"
+    }
+
+    $nativePathType = Initialize-DefenseClawBootstrapNativePath
+    $driveRoot = [IO.Path]::GetPathRoot($full)
+    $driveID = $driveRoot.TrimEnd('\')
+    $driveType = $nativePathType::GetDriveType($driveRoot)
+    $fileSystem = $nativePathType::GetFileSystem($driveRoot)
+    $nativePathType::AssertCanonicalDriveRoot($driveRoot, $driveID)
+    if ([int]$driveType -ne 3 -or
+        -not [string]::Equals(
+            $fileSystem,
+            'NTFS',
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "-BootstrapParent must be on a local fixed NTFS volume: $full"
+    }
+
+    $trustedSIDs = @(
+        'S-1-5-18',
+        'S-1-5-32-544',
+        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    )
+    $chain = [Collections.Generic.List[string]]::new()
+    $current = $full
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        $chain.Add($current)
+        $parent = [IO.Path]::GetDirectoryName($current)
+        if ([string]::IsNullOrWhiteSpace($parent) -or
+            [string]::Equals(
+                $parent,
+                $current,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            break
+        }
+        $current = $parent
+    }
+    for ($index = $chain.Count - 1; $index -ge 0; $index--) {
+        $candidate = $chain[$index]
+        $item = Microsoft.PowerShell.Management\Get-Item `
+            -LiteralPath $candidate `
+            -Force `
+            -ErrorAction Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "-BootstrapParent path contains a reparse point: $candidate"
+        }
+        if (-not $item.PSIsContainer) {
+            throw "-BootstrapParent path ancestor is not a directory: $candidate"
+        }
+        $acl = Microsoft.PowerShell.Security\Get-Acl `
+            -LiteralPath $candidate `
+            -ErrorAction Stop
+        $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
+            [Security.AccessControl.AccessControlSections]::Access
+        )
+        if ([string]::IsNullOrWhiteSpace($accessSDDL) -or
+            -not $accessSDDL.StartsWith(
+                'D:',
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "-BootstrapParent path has an absent or null DACL: $candidate"
+        }
+        $ownerSID = ConvertTo-DefenseClawBootstrapSID -Identity $acl.Owner
+        if ($ownerSID -notin $trustedSIDs) {
+            throw "-BootstrapParent path has untrusted owner $ownerSID`: $candidate"
+        }
+        foreach ($rule in $acl.Access) {
+            if ($rule.AccessControlType -ne
+                [Security.AccessControl.AccessControlType]::Allow -or
+                (($rule.PropagationFlags -band
+                    [Security.AccessControl.PropagationFlags]::InheritOnly) -ne
+                    0)) {
+                continue
+            }
+            $sid = ConvertTo-DefenseClawBootstrapSID `
+                -Identity $rule.IdentityReference
+            if ($sid -in $trustedSIDs) {
+                continue
+            }
+            if (Test-DefenseClawBootstrapReplacementRights `
+                    -Rights $rule.FileSystemRights) {
+                throw (
+                    "-BootstrapParent path has untrusted principal $sid " +
+                    "with replacement rights: $candidate"
+                )
+            }
+        }
+    }
+    $nativePathType::AssertCanonicalDriveRoot($driveRoot, $driveID)
+    return $full
+}
+
 function Assert-DefenseClawBootstrapOneShotRoot {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]
         [Security.AccessControl.DirectorySecurity]$ExpectedSecurity,
+        [Parameter(Mandatory)][string]$ExpectedParent,
         [switch]$RequireEmpty
     )
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $windowsTemp = [IO.Path]::GetFullPath(
-        [IO.Path]::Combine($trustedWindows, 'Temp')
-    ).TrimEnd('\')
+    $expectedParentFull =
+        [IO.Path]::GetFullPath($ExpectedParent).TrimEnd('\')
     if (-not [string]::Equals(
             [IO.Path]::GetDirectoryName($full),
-            $windowsTemp,
+            $expectedParentFull,
             [StringComparison]::OrdinalIgnoreCase
         ) -or
         [IO.Path]::GetFileName($full) -cnotmatch
             '^DefenseClaw-Bootstrap-[a-f0-9]{32}$') {
-        throw "bootstrap environment is outside its exact Windows Temp capability scope: $full"
+        throw "bootstrap environment is outside its exact protected parent scope ($expectedParentFull): $full"
     }
     if (-not [IO.Directory]::Exists($full)) {
         throw "bootstrap environment directory is missing: $full"
@@ -1232,7 +1379,8 @@ function Remove-DefenseClawBootstrapEnvironment {
     param([Parameter(Mandatory)]$Context)
     $root = Assert-DefenseClawBootstrapOneShotRoot `
         -Path ([string]$Context.Path) `
-        -ExpectedSecurity $Context.Security
+        -ExpectedSecurity $Context.Security `
+        -ExpectedParent ([string]$Context.BootstrapParent)
     $directories = [Collections.Generic.List[string]]::new()
     $files = [Collections.Generic.List[string]]::new()
     $pending = [Collections.Generic.Stack[string]]::new()
@@ -1351,10 +1499,26 @@ function New-DefenseClawBootstrapEnvironment {
     $allowedOwnerSIDs.Add('S-1-5-32-544')
     $allowedOwnerSIDs.Add($identity.User.Value)
 
-    $windowsTemp = [IO.Path]::GetFullPath(
-        [IO.Path]::Combine($trustedWindows, 'Temp')
-    ).TrimEnd('\')
-    foreach ($trustedDirectory in @($trustedWindows, $windowsTemp)) {
+    # Resolve the protected bootstrap parent. When the outer signed
+    # DefenseClawSetup EXE passes -BootstrapParent (a protected
+    # %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch directory it
+    # created and locked down to SYSTEM+Administrators only), route the
+    # bootstrap into it. Falling back to C:\Windows\Temp is retained for
+    # direct-caller compatibility on stock Windows, but on Azure-AD-joined
+    # hosts C:\Windows\Temp carries an Allow ACE for the interactive AAD
+    # principal with replacement rights, so the trusted-ancestor walk on
+    # the rendered YAML content fails later; direct callers on those hosts
+    # MUST pass -BootstrapParent.
+    if (-not [string]::IsNullOrWhiteSpace($BootstrapParent)) {
+        $resolvedBootstrapParent = Assert-DefenseClawBootstrapExternalParentTrust `
+            -Path $BootstrapParent
+    }
+    else {
+        $resolvedBootstrapParent = [IO.Path]::GetFullPath(
+            [IO.Path]::Combine($trustedWindows, 'Temp')
+        ).TrimEnd('\')
+    }
+    foreach ($trustedDirectory in @($trustedWindows, $resolvedBootstrapParent)) {
         if (-not [IO.Directory]::Exists($trustedDirectory)) {
             throw "trusted bootstrap parent directory is missing: $trustedDirectory"
         }
@@ -1376,7 +1540,7 @@ function New-DefenseClawBootstrapEnvironment {
                 ''
             ).ToLowerInvariant()
             $candidate = [IO.Path]::Combine(
-                $windowsTemp,
+                $resolvedBootstrapParent,
                 "DefenseClaw-Bootstrap-$capability"
             )
             if (Test-DefenseClawBootstrapPathExists -Path $candidate) {
@@ -1400,6 +1564,7 @@ function New-DefenseClawBootstrapEnvironment {
             $path = Assert-DefenseClawBootstrapOneShotRoot `
                 -Path $candidate `
                 -ExpectedSecurity $security `
+                -ExpectedParent $resolvedBootstrapParent `
                 -RequireEmpty
             break
         }
@@ -1426,6 +1591,7 @@ function New-DefenseClawBootstrapEnvironment {
         AllowedAccessSIDs = $allowedAccessSIDs.ToArray()
         AllowedOwnerSIDs = $allowedOwnerSIDs.ToArray()
         OriginalEnvironment = $originalEnvironment
+        BootstrapParent = $resolvedBootstrapParent
     }
     try {
         foreach ($name in @(
@@ -1462,6 +1628,7 @@ function New-DefenseClawBootstrapEnvironment {
         [void](Assert-DefenseClawBootstrapOneShotRoot `
             -Path $path `
             -ExpectedSecurity $security `
+            -ExpectedParent $resolvedBootstrapParent `
             -RequireEmpty)
         return $context
     }
@@ -1720,9 +1887,14 @@ function Get-DefenseClawBootstrapRecordedModulePin {
 # Windows managed_enterprise supports only connectors with a complete native
 # reconcile, trusted-runtime, rollback, and teardown lifecycle. Cursor uses its
 # documented machine enterprise hook source while retaining per-user scoped
-# DefenseClaw runtime and credentials.
-$script:DefenseClawSupportedConnectors = @('codex', 'cursor', 'claudecode', 'amp')
+# DefenseClaw runtime and credentials. The Secure Client profile also manages
+# GitHub Copilot (the Copilot CLI and the GitHub Copilot app, which runs the
+# same CLI) through Copilot's policy.d machine policy.
+$script:DefenseClawSupportedConnectors = @('codex', 'cursor', 'claudecode', 'amp', 'copilot')
 $script:DefenseClawWindowsManagedEnterpriseSupportedConnectors = @('codex', 'claudecode', 'cursor')
+if ($EnterpriseProfile -cne 'Standalone') {
+    $script:DefenseClawWindowsManagedEnterpriseSupportedConnectors += 'copilot'
+}
 
 function ConvertTo-DefenseClawConnectorList {
     param([Parameter(Mandatory)][string]$Connector)
@@ -1824,19 +1996,23 @@ function Get-DefenseClawRenderedEnterpriseConfig {
     return $sb.ToString()
 }
 
-function Test-DefenseClawBootstrapInteractiveUserSID {
-    <#
-        Secure Client admits only on-premises/local account SIDs
-        (S-1-5-21-...), exactly as before. The standalone profile also admits
-        Microsoft Entra ID user SIDs (S-1-12-1-a-b-c-d), which Intune-joined
-        devices use for every cloud user.
-    #>
-    param([Parameter(Mandatory)][string]$SID)
-    if ($SID.StartsWith('S-1-5-21-', [StringComparison]::OrdinalIgnoreCase)) {
-        return $true
-    }
-    return $EnterpriseProfile -ceq 'Standalone' -and
-        $SID -cmatch '^S-1-12-1-[0-9]+-[0-9]+-[0-9]+-[0-9]+$'
+function Test-DefenseClawInteractiveUserSID {
+    param(
+        [AllowNull()]
+        [Security.Principal.SecurityIdentifier]$SID
+    )
+
+    if ($null -eq $SID) { return $false }
+    $value = $SID.Value
+    $componentCount = $value.Split('-').Length
+    return ($value.StartsWith(
+            'S-1-5-21-',
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and $componentCount -ge 8) -or
+        ($value.StartsWith(
+            'S-1-12-1-',
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and $componentCount -eq 8)
 }
 
 function Select-DefenseClawActiveInteractiveUserProfiles {
@@ -1856,7 +2032,7 @@ function Select-DefenseClawActiveInteractiveUserProfiles {
             )
         }
         catch { continue }
-        if (Test-DefenseClawBootstrapInteractiveUserSID -SID $candidate.Value) {
+        if (Test-DefenseClawInteractiveUserSID -SID $candidate) {
             [void]$active.Add($candidate.Value)
         }
     }
@@ -1873,7 +2049,7 @@ function Select-DefenseClawActiveInteractiveUserProfiles {
             )
         }
         catch { continue }
-        if ((Test-DefenseClawBootstrapInteractiveUserSID -SID $profileSID.Value) -and
+        if ((Test-DefenseClawInteractiveUserSID -SID $profileSID) -and
             $active.Contains($profileSID.Value)) {
             $selected.Add($profile)
         }
@@ -1900,9 +2076,9 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
     }
 
     # Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList
-    # and return one PSCustomObject per eligible interactive user (SID starts
-    # with S-1-5-21-, has a resolvable ProfileImagePath that exists on disk, and
-    # the SID translates to a live NTAccount).
+    # and return one PSCustomObject per eligible local/domain or Microsoft Entra
+    # ID interactive user with a resolvable on-disk ProfileImagePath whose SID
+    # translates to a live NTAccount.
     $rootKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
     $out = [Collections.Generic.List[psobject]]::new()
     if (-not (Test-Path -LiteralPath $rootKey)) {
@@ -1910,7 +2086,11 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
     }
     foreach ($sub in Get-ChildItem -LiteralPath $rootKey -ErrorAction SilentlyContinue) {
         $sid = $sub.PSChildName
-        if (-not (Test-DefenseClawBootstrapInteractiveUserSID -SID $sid)) { continue }
+        try {
+            $profileSID = [Security.Principal.SecurityIdentifier]::new($sid)
+        }
+        catch { continue }
+        if (-not (Test-DefenseClawInteractiveUserSID -SID $profileSID)) { continue }
         $image = $null
         try {
             $image = (Get-ItemProperty -LiteralPath $sub.PSPath `
@@ -1922,7 +2102,7 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
         if (-not [IO.Directory]::Exists($image)) { continue }
         $account = $null
         try {
-            $account = ([Security.Principal.SecurityIdentifier]::new($sid)).Translate(
+            $account = $profileSID.Translate(
                 [Security.Principal.NTAccount]
             ).Value
         }
@@ -2899,6 +3079,7 @@ function Get-DefenseClawConnectorMetadataVersion {
         'codex' { '@openai\codex'; break }
         'claudecode' { '@anthropic-ai\claude-code'; break }
         'amp' { '@ampcode\cli'; break }
+        'copilot' { '@github\copilot'; break }
         default { return '' }
     }
     $expectedName = $package -replace '\\', '/'
@@ -2934,6 +3115,11 @@ function Get-DefenseClawConnectorMetadataVersion {
         -Path $machinePackage `
         -ExpectedNames @($expectedName)
     if (-not [string]::IsNullOrWhiteSpace($version)) { return $version }
+
+    if ($Connector -eq 'copilot') {
+        return Get-DefenseClawCopilotAppCLIMetadataVersion `
+            -UserHome $userHomeFull
+    }
 
     if ($Connector -eq 'codex') {
         $codexCandidateObserved = $false
@@ -2992,6 +3178,44 @@ function Get-DefenseClawConnectorMetadataVersion {
         }
     }
     return ''
+}
+
+function Get-DefenseClawCopilotAppCLIMetadataVersion {
+    <#
+        The GitHub Copilot app (not Microsoft Copilot) runs the Copilot CLI it
+        keeps under %LOCALAPPDATA%\github-copilot-sdk\cli\<version>\copilot.exe.
+        Return the newest such release whose copilot.exe exists, read from
+        its folder name; nothing in the profile is executed.
+    #>
+    param([Parameter(Mandatory)][string]$UserHome)
+
+    $root = [IO.Path]::Combine($UserHome, 'AppData\Local\github-copilot-sdk\cli')
+    if (-not (Test-DefenseClawConnectorMetadataPath `
+            -Root $UserHome -Path $root -Directory)) {
+        return ''
+    }
+    $best = ''
+    $bestVersion = $null
+    $entries = @(
+        [IO.Directory]::EnumerateDirectories($root) |
+            Microsoft.PowerShell.Utility\Select-Object -First 64
+    )
+    foreach ($entry in $entries) {
+        $name = [IO.Path]::GetFileName($entry)
+        if ($name -cnotmatch '^([0-9]+\.[0-9]+\.[0-9]+)(?:-[0-9]+)?$') { continue }
+        $release = $Matches[1]
+        if (-not (Test-DefenseClawConnectorMetadataPath `
+                -Root $UserHome `
+                -Path ([IO.Path]::Combine($entry, 'copilot.exe')))) {
+            continue
+        }
+        $parsed = [version]$release
+        if ($null -eq $bestVersion -or $parsed -gt $bestVersion) {
+            $best = $release
+            $bestVersion = $parsed
+        }
+    }
+    return $best
 }
 
 function Resolve-DefenseClawConnectorMetadataVersion {
@@ -3071,6 +3295,7 @@ function Get-DefenseClawRenderedEnterpriseTargets {
         'codex'      = '0.131.0'
         'claudecode' = '2.1.152'
         'cursor'     = '1.7.0'
+        'copilot'    = '1.0.18'
     }
     foreach ($u in $users) {
         $deferTarget = (
@@ -3166,15 +3391,13 @@ $failureMessage = $null
 $failureEvidence = $null
 $exitCode = 0
 try {
-    # Deferred installation cannot authenticate or precreate per-user target
-    # runtimes because targets.yaml does not exist yet. Fail before the
-    # bootstrap environment creates its first protected staging directory;
-    # the module repeats this check as defense in depth for direct callers.
-    if ($DeferredConfig) {
-        throw (
-            '-DeferredConfig is temporarily unavailable: secure target ' +
-            'runtime preparation requires authenticated targets.yaml during Install'
-        )
+    if ($DeferredConfig -and $Action -ne 'Install') {
+        throw '-DeferredConfig is valid only with Install'
+    }
+    if ($DeferredConfig -and
+        (-not [string]::IsNullOrWhiteSpace($Config) -or
+            -not [string]::IsNullOrWhiteSpace($Manifest))) {
+        throw '-DeferredConfig cannot be combined with -Config or -Manifest'
     }
     $bootstrapEnvironment = New-DefenseClawBootstrapEnvironment
     $modulePath = [IO.Path]::GetFullPath(
@@ -3241,6 +3464,35 @@ try {
     }
     if ($modeSupplied -and $Action -ne 'Install' -and $Action -ne 'Upgrade' -and $Action -ne 'Repair') {
         throw '-Mode / -Connector are valid only with Install, Upgrade, or Repair'
+    }
+    if ($DeferredConfig) {
+        # Use a real, valid managed-enterprise policy and an empty target set so
+        # the ordinary authenticated install transaction can establish every
+        # machine artifact and ACL. All services remain disabled. A later
+        # Repair with both real inputs performs target preparation and the
+        # guardian-first service activation transaction.
+        $renderRoot = $bootstrapEnvironment.Path
+        $deferredConnectors = @('codex')
+        $deferredConfigPath = [IO.Path]::Combine(
+            $renderRoot, 'deferred-config-placeholder.yaml'
+        )
+        $deferredManifestPath = [IO.Path]::Combine(
+            $renderRoot, 'deferred-targets-placeholder.yaml'
+        )
+        [IO.File]::WriteAllText(
+            $deferredConfigPath,
+            (Get-DefenseClawRenderedEnterpriseConfig `
+                -Mode observe -Connectors $deferredConnectors),
+            [Text.UTF8Encoding]::new($false)
+        )
+        [IO.File]::WriteAllText(
+            $deferredManifestPath,
+            (Get-DefenseClawRenderedEnterpriseTargets `
+                -Connectors $deferredConnectors -Profiles @()),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $Config = $deferredConfigPath
+        $Manifest = $deferredManifestPath
     }
     if ($modeSupplied) {
         $renderedConnectors = ConvertTo-DefenseClawConnectorList -Connector $Connector
@@ -3344,6 +3596,7 @@ try {
         ACPBinary = $ACPBinary
         HookBinary = $HookBinary
         SensorHelperBinary = $SensorHelperBinary
+        PolicyCompiler = $PolicyCompiler
         CLIBinary = $CLIBinary
         NativeCleanupBinary = $NativeCleanupBinary
         Config = $Config
@@ -3362,9 +3615,8 @@ try {
         # The exact service/root/CODEX_HOME grammar scopes this relaxation for
         # every certification lifecycle action, including pre-install Status.
         AllowUnsigned = [bool]$AllowUnsigned
-        # Retained in the module invocation shape for CLI compatibility. The
-        # entry gate above rejects it before bootstrap creation, and the module
-        # repeats that rejection for direct callers.
+        # Marks the protected installed metadata as awaiting a complete Repair;
+        # the module keeps every managed service disabled until then.
         DeferredConfig = [bool]$DeferredConfig
         InstallerSource = $PSCommandPath
         ModuleSource = $modulePath
@@ -3378,6 +3630,25 @@ try {
         # The launching CLI's protected temp folder, which the purge's stale
         # temp sweep must keep (GAP-1853); TEMP now points at the bootstrap.
         $arguments['LauncherTemp'] = [string]$bootstrapEnvironment.OriginalEnvironment['TEMP']
+        # Setup /uninstall FORCE=1 (enterprise windows uninstall --force), the
+        # last resort that removes the deployment without reading its pending
+        # transaction (Invoke-DefenseClawForcedUninstallPreparation). The CLI
+        # asks for it in the strict environment it builds for the standalone
+        # engine, not with a parameter: the parameter set above is the command
+        # line of the Secure Client installer and stays unchanged. Cleared here
+        # so no child process inherits it.
+        $forcedUninstallRequest = [Environment]::GetEnvironmentVariable('DEFENSECLAW_STANDALONE_FORCED_UNINSTALL', 'Process')
+        [Environment]::SetEnvironmentVariable('DEFENSECLAW_STANDALONE_FORCED_UNINSTALL', $null, 'Process')
+        if ($Action -eq 'Uninstall' -and $forcedUninstallRequest -ceq '1') {
+            $arguments['Force'] = $true
+        }
+        # An ensure that found the deployment compliant asks its Verify, the
+        # same way, to collect old managed runtime generations (GAP-0211).
+        $collectRequest = [Environment]::GetEnvironmentVariable('DEFENSECLAW_STANDALONE_COLLECT_RUNTIME_GENERATIONS', 'Process')
+        [Environment]::SetEnvironmentVariable('DEFENSECLAW_STANDALONE_COLLECT_RUNTIME_GENERATIONS', $null, 'Process')
+        if ($Action -eq 'Verify' -and $collectRequest -ceq '1') {
+            $arguments['CollectRuntimeGenerations'] = $true
+        }
     }
     $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle @arguments
     if ($null -ne $result.PSObject.Properties['ok'] -and -not [bool]$result.ok) {
@@ -3459,10 +3730,27 @@ elseif ($Json) {
     $result | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 12 -Compress
 }
 else {
+    $resultState = if ($null -ne $result.PSObject.Properties['ok'] -and
+        -not [bool]$result.ok) {
+        'INCOMPLETE'
+    }
+    else {
+        'OK'
+    }
     Microsoft.PowerShell.Utility\Write-Host (
-        "DefenseClaw Windows enterprise {0}: OK" -f
-        $Action.ToLowerInvariant()
+        "DefenseClaw Windows enterprise {0}: {1}" -f
+        $Action.ToLowerInvariant(), $resultState
     )
+    # StrictMode Latest throws on a missing property, so read errors the same
+    # guarded way as ok.
+    $errorsProperty = $result.PSObject.Properties['errors']
+    if ($resultState -eq 'INCOMPLETE' -and $null -ne $errorsProperty) {
+        foreach ($message in @($errorsProperty.Value)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$message)) {
+                Microsoft.PowerShell.Utility\Write-Warning -Message ([string]$message)
+            }
+        }
+    }
     if ($null -ne $result.gateway_service_state) {
         Microsoft.PowerShell.Utility\Write-Host (
             "  Gateway service: {0}" -f $result.gateway_service_state

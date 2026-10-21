@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -33,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -43,10 +45,11 @@ import (
 // it delivered, root-owned and out of the workload's reach. On the MicroVM
 // driver none of that is the container runtime's doing: the identity is the
 // gateway's configuration ([openshell.drivers.vm] sandbox_uid and
-// sandbox_gid) and the image is unpacked into a disk of the driver's own.
-// So one exec checks it after every create and start (on every driver that
-// does not skip it, openshell.Driver.SkipWorkloadCheck), and a sandbox that
-// is not as prepared is deleted (create) or stopped (start). The check
+// sandbox_gid) and the image is unpacked into a disk of the driver's own;
+// on docker it is the container runtime's and the policy's
+// process.run_as_user. So one exec checks it after every create and start,
+// on every driver, and a sandbox that is not as prepared is deleted
+// (create) or stopped (start). The check
 // reads CapEff in its own exec: that holds for the harness too while the
 // harness also starts through the supervisor's exec path.
 //
@@ -309,7 +312,8 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 		return out
 	}
 	if got.UID != want.UID || got.GID != want.GID {
-		msg := fmt.Sprintf("the workload runs as uid %d:%d, not %d:%d, the identity its image was built for", got.UID, got.GID, want.UID, want.GID)
+		msg := fmt.Sprintf("the workload runs as uid %d:%d, not %d:%d, the identity its image was built for and its policy's process.run_as_user names",
+			got.UID, got.GID, want.UID, want.GID)
 		if d.GatewayIdentity {
 			msg = fmt.Sprintf("the OpenShell %[1]s driver runs sandboxes as uid %[2]d:%[3]d, but DefenseClaw's images are built for %[4]d:%[5]d; "+
 				"set sandbox_uid = %[4]d and sandbox_gid = %[5]d under [openshell.drivers.%[1]s] in the gateway's gateway.toml "+
@@ -357,9 +361,10 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 // verifyWorkload runs the workload check in sandbox name and returns what
 // it found. A sandbox that does not run as want expects, or that cannot be
 // checked, is refused with CodePolicyRejected: the caller deletes or stops
-// it, so one not as prepared never keeps running.
-func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord) (workloadFacts, error) {
-	res, err := gw.Client.Exec(ctx, name, verifyArgv(want), openshell.ExecOptions{
+// it, so one not as prepared never keeps running, and outcome (what the
+// caller does with it, "it was deleted") ends the refusal's message.
+func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord, eff *packs.Effective, outcome string) (workloadFacts, error) {
+	res, err := m.ownExec(ctx, gw, name, verifyArgv(want), openshell.ExecOptions{
 		Timeout: verifyTimeout, Idempotent: true, MaxOutputBytes: verifyMaxOutput,
 	})
 	if err != nil {
@@ -376,7 +381,7 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 	case res.ExitCode != 0:
 		problems = []string{fmt.Sprintf("the check exited with status %d", res.ExitCode)}
 	default:
-		problems = workloadProblems(want, facts, gw.Driver, adminLimits(m.config().OpenShell.Admin.MaxResources))
+		problems = workloadProblems(want, facts, gw.Driver, adminLimits(eff.MaxResources()))
 	}
 	if len(problems) == 0 {
 		return facts, nil
@@ -384,25 +389,35 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 	detail := strings.Join(problems, "; ")
 	m.logf("%s: sandbox %s does not run as DefenseClaw prepared it: %s", gatewaylog.ErrCodeOpenShellPolicyRejected, name, detail)
 	return facts, &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected,
-		Message: "sandbox " + name + " does not run as DefenseClaw prepared it", Detail: truncate(detail, 2048)}
+		Message: "sandbox " + name + " does not run as DefenseClaw prepared it; " + outcome, Detail: truncate(detail, 2048)}
 }
 
 // verifyStarted runs the workload check of a sandbox a start just made
 // ready, against what its create recorded, and keeps the hostname it
 // found. A sandbox that fails it is stopped again before the error
-// returns, so one not as prepared never keeps running. Of a record from
-// before the check only the identity is checked: what its create delivered
-// is not known.
+// returns, so one not as prepared never keeps running. Every create records
+// what the check expects (create.go); a record without it cannot be
+// checked, and is refused the same way.
 func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec record) error {
-	var want verifyRecord
-	if rec.Verify != nil {
-		want = *rec.Verify
-	} else {
-		want.UID, want.GID = m.runAs()
+	const outcome = "DefenseClaw stopped it again (its work is kept)"
+	if rec.Verify == nil {
+		m.logf("%s: sandbox %s has no workload check in its record; stopping it again", gatewaylog.ErrCodeOpenShellPolicyRejected, rec.Name)
+		refusal := &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected,
+			Message: "sandbox " + rec.Name + " does not run as DefenseClaw prepared it; " + outcome,
+			Detail:  "its record does not say what its create delivered, so it cannot be checked: pull its work, delete it and run it again"}
+		if m.stopUnverified(ctx, gw, b) != nil {
+			return stillRunning(rec.Name, refusal, outcome)
+		}
+		return refusal
 	}
-	facts, err := m.verifyWorkload(ctx, gw, rec.Name, want)
+	m.mu.Lock()
+	eff := b.eff
+	m.mu.Unlock()
+	facts, err := m.verifyWorkload(ctx, gw, rec.Name, *rec.Verify, eff, outcome)
 	if err != nil {
-		m.stopUnverified(ctx, gw, b)
+		if m.stopUnverified(ctx, gw, b) != nil {
+			return stillRunning(rec.Name, err, outcome)
+		}
 		return err
 	}
 	m.mu.Lock()
@@ -419,11 +434,14 @@ func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec re
 	return nil
 }
 
-// stopUnverified stops a sandbox that failed the workload check after a
-// start, flushing its disk first where the driver's stop does not (the
-// last session's work stays for pull), and records the phase OpenShell
-// reports then.
-func (m *Manager) stopUnverified(ctx context.Context, gw *Gateway, b *box) {
+// stopUnverified stops again a sandbox a start must not leave running (it
+// failed the workload check, or still has a rule of its last session),
+// flushing its disk first where the driver's stop does not (the last
+// session's work stays for pull), and records the phase OpenShell reports
+// then. It returns why the stop failed: the sandbox then still runs, and
+// the start's refusal must say so rather than that it was stopped
+// (GAP-0014).
+func (m *Manager) stopUnverified(ctx context.Context, gw *Gateway, b *box) error {
 	ctx, cancel := detached(ctx, rollbackTimeout)
 	defer cancel()
 	m.mu.Lock()
@@ -437,8 +455,24 @@ func (m *Manager) stopUnverified(ctx context.Context, gw *Gateway, b *box) {
 		_, err = gw.Client.WaitStopped(ctx, name)
 	}
 	if err != nil {
-		m.logf("%s: sandbox %s failed its check after the start, and stopping it failed too: %v",
+		m.logf("%s: sandbox %s must not keep running after its start, and stopping it again failed: %v",
 			gatewaylog.ErrCodeOpenShellSandboxFailed, name, err)
 	}
 	m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
+	return err
+}
+
+// stillRunning is the refusal err of a start whose sandbox DefenseClaw
+// could not stop again (stopUnverified failed): the sandbox still runs, so
+// the refusal drops stopped, the outcome it ends with when the stop works,
+// and says how to stop it. The stop's own error is in the log.
+func stillRunning(name string, err error, stopped string) error {
+	out := sandboxapi.Error{Code: sandboxapi.CodeInternal, Message: err.Error()}
+	var apiErr *sandboxapi.Error
+	if errors.As(err, &apiErr) {
+		out = *apiErr
+	}
+	out.Message = strings.TrimSuffix(strings.TrimSuffix(out.Message, stopped), "; ") +
+		"; DefenseClaw could not stop the sandbox again, so it is still running: stop it with `defenseclaw sandbox stop " + name + "`"
+	return &out
 }

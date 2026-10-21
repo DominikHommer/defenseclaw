@@ -28,6 +28,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -112,6 +113,15 @@ func withFileLock(path string, fn func() error) error {
 // a per-user .lock indefinitely; managed reconciliation must report that row
 // and continue to later targets/ticks instead of blocking the service thread.
 func withFileLockMode(path string, managedEnterprise bool, fn func() error) error {
+	return withFileLockModeForTarget(path, managedEnterprise, nil, fn)
+}
+
+func withFileLockModeForTarget(
+	path string,
+	managedEnterprise bool,
+	managedTarget *windows.SID,
+	fn func() error,
+) error {
 	lockPath := path + ".lock"
 
 	// O_RDWR (not O_EXCL): every caller opens the shared lock file; mutual
@@ -124,7 +134,10 @@ func withFileLockMode(path string, managedEnterprise bool, fn func() error) erro
 	var lockParent *os.File
 	var err error
 	if managedEnterprise {
-		lockFile, lockParent, err = openWindowsManagedFileLock(lockPath)
+		lockFile, lockParent, err = openWindowsManagedFileLockForTarget(
+			lockPath,
+			managedTarget,
+		)
 	} else {
 		lockFile, err = os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	}
@@ -183,10 +196,11 @@ func withFileLockMode(path string, managedEnterprise bool, fn func() error) erro
 		_ = windows.UnlockFileEx(handle, 0, 1, 0, overlapped)
 	}()
 	if managedEnterprise {
-		if err := validateWindowsManagedFileLockName(
+		if err := validateWindowsManagedFileLockNameForTarget(
 			lockParent,
 			filepath.Base(lockPath),
 			lockFile,
+			managedTarget,
 		); err != nil {
 			return fmt.Errorf("validate held managed lock %s: %w", lockPath, err)
 		}
@@ -225,6 +239,33 @@ func lockWindowsFileExclusive(handle windows.Handle, overlapped *windows.Overlap
 // ordinary Windows os.OpenFile sharing and deliberately excludes delete/rename
 // sharing for the lifetime of the mutex handle.
 func openWindowsManagedFileLock(path string) (*os.File, *os.File, error) {
+	return openWindowsManagedFileLockForTarget(path, nil)
+}
+
+func openWindowsManagedFileLockForTarget(
+	path string,
+	target *windows.SID,
+) (*os.File, *os.File, error) {
+	var err error
+	if target == nil {
+		target, err = windowsEffectiveUserSID()
+		if err != nil || target == nil {
+			return nil, nil, fmt.Errorf(
+				"resolve effective Windows user for managed lock: %w",
+				err,
+			)
+		}
+	}
+	// Reject caller-supplied broad group and virtual-account SIDs so the
+	// protected lock DACL owner slot always resolves to a specific
+	// interactive user. A group SID here would let any authenticated user
+	// race the managed target-runtime write path.
+	if !windowsManagedHookContractInteractiveUserSID(target) {
+		return nil, nil, fmt.Errorf(
+			"managed lock target %s is not an interactive user",
+			target.String(),
+		)
+	}
 	parent, err := openAtomicTransformBoundDirectoryPlatform(filepath.Dir(path))
 	if err != nil {
 		return nil, nil, fmt.Errorf("open managed lock parent: %w", err)
@@ -234,7 +275,7 @@ func openWindowsManagedFileLock(path string) (*os.File, *os.File, error) {
 		return nil, nil, fmt.Errorf("validate managed lock parent: %w", err)
 	}
 
-	descriptor, err := windowsManagedFileLockSecurityDescriptor()
+	descriptor, err := windowsManagedFileLockSecurityDescriptorForTarget(target)
 	if err != nil {
 		_ = parent.Close()
 		return nil, nil, err
@@ -268,7 +309,7 @@ func openWindowsManagedFileLock(path string) (*os.File, *os.File, error) {
 		_ = parent.Close()
 		return nil, nil, err
 	}
-	if err := validateWindowsManagedFileLockHandle(handle); err != nil {
+	if err := validateWindowsManagedFileLockHandleForTarget(handle, target); err != nil {
 		_ = windows.CloseHandle(handle)
 		_ = parent.Close()
 		return nil, nil, err
@@ -282,10 +323,11 @@ func openWindowsManagedFileLock(path string) (*os.File, *os.File, error) {
 	return file, parent, nil
 }
 
-func validateWindowsManagedFileLockName(
+func validateWindowsManagedFileLockNameForTarget(
 	parent *os.File,
 	name string,
 	held *os.File,
+	target *windows.SID,
 ) error {
 	if parent == nil || held == nil {
 		return fmt.Errorf("managed lock has no bound parent or held file")
@@ -295,7 +337,10 @@ func validateWindowsManagedFileLockName(
 		return fmt.Errorf("open managed lock name relative to held parent: %w", err)
 	}
 	defer named.Close()
-	if err := validateWindowsManagedFileLockHandle(windows.Handle(named.Fd())); err != nil {
+	if err := validateWindowsManagedFileLockHandleForTarget(
+		windows.Handle(named.Fd()),
+		target,
+	); err != nil {
 		return err
 	}
 	heldIdentity, err := atomicTransformOpenFileIdentity(held)
@@ -321,6 +366,15 @@ func windowsManagedFileLockSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, e
 	target, err := windowsEffectiveUserSID()
 	if err != nil || target == nil {
 		return nil, fmt.Errorf("resolve effective Windows user for managed lock: %w", err)
+	}
+	return windowsManagedFileLockSecurityDescriptorForTarget(target)
+}
+
+func windowsManagedFileLockSecurityDescriptorForTarget(
+	target *windows.SID,
+) (*windows.SECURITY_DESCRIPTOR, error) {
+	if target == nil {
+		return nil, fmt.Errorf("managed lock target SID is required")
 	}
 	ownerRights, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerRightsSid)
 	if err != nil {
@@ -381,6 +435,13 @@ func windowsManagedFileLockSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, e
 }
 
 func validateWindowsManagedFileLockHandle(handle windows.Handle) error {
+	return validateWindowsManagedFileLockHandleForTarget(handle, nil)
+}
+
+func validateWindowsManagedFileLockHandleForTarget(
+	handle windows.Handle,
+	target *windows.SID,
+) error {
 	if err := validateAtomicTransformWindowsHandleType(handle, false); err != nil {
 		return fmt.Errorf("managed lock type: %w", err)
 	}
@@ -402,16 +463,40 @@ func validateWindowsManagedFileLockHandle(handle windows.Handle) error {
 	if err != nil {
 		return fmt.Errorf("inspect managed lock protection: %w", err)
 	}
-	target, err := windowsEffectiveUserSID()
-	if err != nil || target == nil {
-		return fmt.Errorf("resolve effective Windows user for managed lock validation: %w", err)
+	if target == nil {
+		target, err = windowsEffectiveUserSID()
+		if err != nil || target == nil {
+			return fmt.Errorf("resolve effective Windows user for managed lock validation: %w", err)
+		}
 	}
 	owner, _, err := descriptor.Owner()
 	if err != nil {
 		return err
 	}
-	if owner == nil || !owner.Equals(target) {
-		return fmt.Errorf("managed lock owner does not match effective target user")
+	if owner == nil {
+		return fmt.Errorf("managed lock has null owner")
+	}
+	if !owner.Equals(target) {
+		// Bulldoze: a prior unsigned certification install done under an
+		// elevated token can leave the lock file owned by SYSTEM /
+		// BUILTIN\Administrators / TrustedInstaller instead of the target
+		// user. The DACL check below still enforces SE_DACL_PROTECTED and
+		// the exact 4-ACE canonical layout, so a trusted admin owner on
+		// an otherwise canonical lock is safe to adopt in non-strict
+		// mode. A foreign user SID or non-admin group stays fatal.
+		//
+		// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+		// refuses even trusted-admin ownership: a hardened deployment
+		// must observe the exact target-user owner on the lock, and
+		// silently adopting an admin-owned lock masks the exact tamper
+		// signal the strict-mode operator opts in to catch.
+		if managed.TrustStrictAncestors() ||
+			!managed.IsWindowsTrustedAdminOwner(owner) {
+			return fmt.Errorf("managed lock owner does not match effective target user")
+		}
+		fmt.Fprintf(os.Stderr,
+			"[connector] managed lock owner is trusted admin %s (target %s); adopting\n",
+			owner.String(), target.String())
 	}
 	control, _, err := descriptor.Control()
 	if err != nil {

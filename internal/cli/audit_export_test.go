@@ -59,6 +59,38 @@ func TestExportAuditEventsFallbackHonorsLimit(t *testing.T) {
 	}
 }
 
+func TestExportAuditEventsFallbackOrdersExactTime(t *testing.T) {
+	db, err := sql.Open("sqlite", t.TempDir()+"/audit.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE audit_events (
+		id TEXT, timestamp TEXT, retention_timestamp_unix_nano INTEGER,
+		action TEXT, target TEXT, actor TEXT, details TEXT, severity TEXT, run_id TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		id, timestamp string
+		instant       int64
+	}{
+		{"earlier", "2026-10-13T12:00:00.12345Z", 123450},
+		{"later", "2026-10-13T12:00:00.123451Z", 123451},
+	} {
+		if _, err := db.Exec(`INSERT INTO audit_events VALUES (?, ?, ?, 'scan-finding', '', 'test', '', 'HIGH', '')`, row.id, row.timestamp, row.instant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if err := exportAuditEventsFallback(db, &out, version.Provenance{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Index(out.String(), `"id":"earlier"`) > strings.Index(out.String(), `"id":"later"`) ||
+		!strings.Contains(out.String(), `"id":"earlier"`) || !strings.Contains(out.String(), `"id":"later"`) {
+		t.Fatalf("audit export order = %s", out.String())
+	}
+}
+
 // TestNormalizeAuditAction_PassesThroughKnownActions guards the F3 fix:
 // `defenseclaw audit export` previously kept a hand-maintained copy of the
 // audit action enum that silently fell behind whenever internal/audit added
@@ -266,6 +298,25 @@ func TestRunAuditExport_ConnectorFilter(t *testing.T) {
 	if raw2, _ := os.ReadFile(outPath); string(raw2) != string(raw) {
 		t.Fatalf("--force output differs:\n%s\nvs\n%s", raw2, raw)
 	}
+
+	// GAP-0126: --db reads a database by path with no configuration, the
+	// way the other install's audit log is read after a rollback.
+	prevDB := auditExportDB
+	t.Cleanup(func() { auditExportDB = prevDB })
+	cfg = nil
+	auditExportDB = dbPath
+	auditExportConnector = ""
+	auditExportOut = dir + "/other-window.jsonl"
+	if err := runAuditExport(nil, nil); err != nil {
+		t.Fatalf("runAuditExport --db: %v", err)
+	}
+	if other, _ := os.ReadFile(auditExportOut); len(strings.Split(strings.TrimSpace(string(other)), "\n")) != 3 {
+		t.Fatalf("--db export rows:\n%s", other)
+	}
+	auditExportDB = dir + "/missing.db"
+	if err := runAuditExport(nil, nil); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("--db with a missing file error = %v", err)
+	}
 }
 
 func TestLineCountWriterCountsLines(t *testing.T) {
@@ -456,6 +507,9 @@ func TestBuildAuditEventLineKeepsV8RecordAction(t *testing.T) {
 		if ev["action"] != action || ev["details"] != "destination=otlp" {
 			t.Errorf("v8 record %q exported action=%v details=%v, want the action kept", action, ev["action"], ev["details"])
 		}
+	}
+	if ev := build("config-update", "config.change.applied"); ev["action"] != "config.change.applied" {
+		t.Errorf("canonical config change exported action=%v", ev["action"])
 	}
 	for _, eventName := range []string{"", "legacy.audit.action"} {
 		ev := build("circuit_breaker_open", eventName)
