@@ -17,6 +17,7 @@
 package sensor
 
 import (
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -580,7 +581,7 @@ func (r *ownerResolver) resolve(processes []procRef, configPaths []string) owner
 	if found, ok := r.profileOwner(configPaths); ok {
 		return found
 	}
-	reason := "the process owner could not be read (process token, Win32_Process owner and session user) " +
+	reason := "the process owner could not be read (" + ownerSourcesFor(ownerGOOS) + ") " +
 		"and no enrolled profile holds the agent's configuration"
 	switch {
 	case len(matched) == 0 && reused:
@@ -591,6 +592,19 @@ func (r *ownerResolver) resolve(processes []procRef, configPaths []string) owner
 			"and no enrolled profile holds the agent's configuration"
 	}
 	return owner{Attribution: AttributionUnattributed, Reason: reason}
+}
+
+// ownerGOOS is the system the owner sources are named for; tests replace it.
+var ownerGOOS = runtime.GOOS
+
+// ownerSourcesFor names the sources an unattributed finding's owner was
+// looked up in on goos, so a Linux or macOS diagnostic does not name Windows
+// mechanisms (GAP-0092).
+func ownerSourcesFor(goos string) string {
+	if goos == "windows" {
+		return "process token, Win32_Process owner and session user"
+	}
+	return "the process's owning uid in the process table"
 }
 
 // eventOwner is the one account the events of processes named, and mixed

@@ -20,6 +20,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -338,13 +339,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		// exclude_users, or no enrolled agent is left) loses the gateway's
 		// read access now, so its inventory rows go at the next scan
 		// (GAP-0717).
-		if dropped := enterprisehooks.ManifestHomesDropped(previous, manifest); len(dropped.Targets) > 0 {
-			if revokeErr := enterpriseWindowsInventoryReadRevoker(dropped); revokeErr != nil {
-				fmt.Fprintf(stderr, "[hook-enumerator] WARN the gateway keeps read access on %d profile(s) no longer enrolled; the revoke failed\n", countDistinctSIDs(dropped.Targets))
-			} else {
-				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d profile(s) no longer enrolled\n", countDistinctSIDs(dropped.Targets))
-			}
-		}
+		revokeEnterpriseWindowsDroppedInventoryRead(stderr, enterprisehooks.ManifestHomesDropped(previous, manifest), manifest)
 	}
 	if standalone {
 		revokeEnterpriseWindowsExcludedInventoryRead(stderr, excluded)
@@ -360,6 +355,56 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN cycle exceeded 10 s target: %s\n", elapsed)
 	}
 	return nil
+}
+
+// enterpriseWindowsDroppedRevokes holds the profiles a cycle stopped
+// enrolling whose inventory read access a revoke could not take away yet.
+// The next manifest no longer lists them, so without this a transient
+// failure left the gateway's access in place for good (GAP-1269).
+var enterpriseWindowsDroppedRevokes = struct {
+	sync.Mutex
+	targets map[string]enterprisehooks.ManifestTarget
+}{targets: map[string]enterprisehooks.ManifestTarget{}}
+
+// revokeEnterpriseWindowsDroppedInventoryRead revokes the gateway's
+// inventory read access on the profiles this cycle dropped and on those an
+// earlier cycle failed to revoke, except a profile current enrolls again. A
+// failed revoke is retried at the next cycle.
+func revokeEnterpriseWindowsDroppedInventoryRead(stderr io.Writer, dropped, current enterprisehooks.Manifest) {
+	key := func(home string) string { return strings.ToLower(filepath.Clean(strings.TrimSpace(home))) }
+	enrolled := map[string]bool{}
+	for _, target := range current.Targets {
+		enrolled[key(target.UserHome)] = true
+	}
+	state := &enterpriseWindowsDroppedRevokes
+	state.Lock()
+	defer state.Unlock()
+	for home := range state.targets {
+		if enrolled[home] {
+			delete(state.targets, home)
+		}
+	}
+	for _, target := range dropped.Targets {
+		state.targets[key(target.UserHome)] = target
+	}
+	if len(state.targets) == 0 {
+		return
+	}
+	homes := make([]string, 0, len(state.targets))
+	for home := range state.targets {
+		homes = append(homes, home)
+	}
+	sort.Strings(homes)
+	var pending enterprisehooks.Manifest
+	for _, home := range homes {
+		pending.Targets = append(pending.Targets, state.targets[home])
+	}
+	if revokeErr := enterpriseWindowsInventoryReadRevoker(pending); revokeErr != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN the gateway keeps read access on %d profile(s) no longer enrolled; the revoke failed and is retried at the next cycle\n", countDistinctSIDs(pending.Targets))
+		return
+	}
+	fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d profile(s) no longer enrolled\n", countDistinctSIDs(pending.Targets))
+	clear(state.targets)
 }
 
 // enterpriseWindowsExcludedRevoked holds the excluded profiles whose

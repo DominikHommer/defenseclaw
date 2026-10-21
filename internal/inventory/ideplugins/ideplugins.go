@@ -210,6 +210,10 @@ type scanner struct {
 	bytes  int64
 	full   bool
 	out    []Install
+	// realHome is the home's path as the system names an opened handle of
+	// it, read once (resolvedHome).
+	realHome     string
+	realHomeRead bool
 }
 
 func newScanner(goos string, limits Limits) *scanner {
@@ -328,12 +332,18 @@ func (s *scanner) listDir(dir string, limit int) []os.DirEntry {
 	if !s.isDir(dir) || !s.charge(0) {
 		return nil
 	}
+	if beforeOpen != nil {
+		beforeOpen(dir)
+	}
 	f, err := os.Open(dir)
 	if err != nil {
 		s.full = true
 		return nil
 	}
 	defer f.Close()
+	if !s.openedInPlace(f, dir) {
+		return nil
+	}
 	// Read one extra entry so hitting the cap cannot look like a full listing.
 	entries, err := f.ReadDir(limit + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -374,16 +384,13 @@ func (s *scanner) readFile(path string) ([]byte, bool) {
 }
 
 func (s *scanner) readFileLimit(path string, limit int64) ([]byte, bool) {
-	if !s.isFile(path) {
-		return nil, false
-	}
-	f, err := openNonblocking(path, s.limits.FollowSymlinks)
-	if err != nil {
+	f, ok := s.openFile(path)
+	if !ok {
 		return nil, false
 	}
 	defer f.Close()
 	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > limit {
+	if err != nil || !info.Mode().IsRegular() || info.Size() > limit || !s.openedInPlace(f, path) {
 		return nil, false
 	}
 	if !s.charge(info.Size()) {
@@ -394,6 +401,82 @@ func (s *scanner) readFileLimit(path string, limit int64) ([]byte, bool) {
 		return nil, false
 	}
 	return data, true
+}
+
+// beforeOpen, when set, runs between the checks on a path and its open;
+// tests use it to change a folder above the path in that window.
+var beforeOpen func(path string)
+
+// openFile opens a regular file the link rule admits (isFile).
+func (s *scanner) openFile(path string) (*os.File, bool) {
+	if !s.isFile(path) {
+		return nil, false
+	}
+	if beforeOpen != nil {
+		beforeOpen(path)
+	}
+	f, err := openNonblocking(path, s.limits.FollowSymlinks)
+	if err != nil {
+		return nil, false
+	}
+	return f, true
+}
+
+// openedInPlace reports whether f, opened for path, is the object path
+// names below the home: the checks of the folders above path ran before the
+// open, so a folder swapped for a link to another profile in between would
+// otherwise put that profile's plugins in this home's inventory (GAP-1138).
+// It compares the path the system gives the opened handle with the home's.
+// Where the system cannot name an opened file (macOS), the folders above
+// path are checked again after the open and the opened object must be the
+// one path names now. A scan that follows links and the machine-wide scan
+// keep the checks made before the open.
+func (s *scanner) openedInPlace(f *os.File, path string) bool {
+	if s.limits.FollowSymlinks || s.layout.home == "" {
+		return true
+	}
+	got, ok := openedPath(f)
+	home := s.resolvedHome()
+	if !ok || home == "" {
+		return s.openedObjectIsPath(f, path)
+	}
+	rel, err := filepath.Rel(s.layout.home, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	want := filepath.Join(home, rel)
+	if s.goos == "linux" {
+		return filepath.Clean(got) == want
+	}
+	return strings.EqualFold(filepath.Clean(got), want)
+}
+
+// openedObjectIsPath reports whether f is the object path names now, through
+// plain folders only.
+func (s *scanner) openedObjectIsPath(f *os.File, path string) bool {
+	opened, err := f.Stat()
+	if err != nil || !s.plainDirsAbove(path) {
+		return false
+	}
+	current, err := os.Lstat(path)
+	return err == nil && os.SameFile(opened, current)
+}
+
+// resolvedHome is the home's opened path, or "" when it cannot be named.
+func (s *scanner) resolvedHome() string {
+	if s.realHomeRead {
+		return s.realHome
+	}
+	s.realHomeRead = true
+	f, err := os.Open(s.layout.home)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if home, ok := openedPath(f); ok {
+		s.realHome = filepath.Clean(home)
+	}
+	return s.realHome
 }
 
 // clean bounds a metadata value: printable, single line, at most
