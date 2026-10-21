@@ -170,10 +170,13 @@ type identityObservedMark struct {
 }
 
 // identityObservedMaxUsers bounds the users remembered. At the bound, the
-// marks older than the cache lifetime are dropped; while every mark is
-// younger, a user not yet remembered waits for one to age out instead of
-// emptying the whole table, which let every recent user's record out again
-// at once (GAP-1130).
+// marks older than the cache lifetime are dropped, and while every mark is
+// younger the oldest one is: a user seen for the first time always gets its
+// record. Emptying the whole table let every recent user's record out again
+// at once (GAP-1130), and making a new user wait for a mark to age out lost
+// its first record, the one compliance needs. One new user lets one
+// remembered user's record out again, so the records stay at most one per
+// request of a user past the bound.
 const identityObservedMaxUsers = 4096
 
 func identityObservedBegin(userID string, facts useridentity.DirectoryFacts, now time.Time) (func(bool), bool) {
@@ -193,9 +196,6 @@ func identityObservedBegin(userID string, facts useridentity.DirectoryFacts, now
 	if known && last.fingerprint == fingerprint && now.Sub(last.at) < identityDirectoryTTL {
 		return nil, false
 	}
-	if !known && !identityObservedRoomLocked(now) {
-		return nil, false
-	}
 	identityObservedState.pending[userID] = true
 	return func(success bool) {
 		identityObservedState.Lock()
@@ -204,25 +204,33 @@ func identityObservedBegin(userID string, facts useridentity.DirectoryFacts, now
 		if !success {
 			return
 		}
-		if _, known := identityObservedState.last[userID]; !known && !identityObservedRoomLocked(now) {
-			return
+		if _, known := identityObservedState.last[userID]; !known {
+			identityObservedMakeRoomLocked(now)
 		}
 		identityObservedState.last[userID] = identityObservedMark{at: now, fingerprint: fingerprint}
 	}, true
 }
 
-// identityObservedRoomLocked reports whether one more user fits, dropping
-// the marks that are past the cache lifetime first.
-func identityObservedRoomLocked(now time.Time) bool {
-	if len(identityObservedState.last)+len(identityObservedState.pending) < identityObservedMaxUsers {
-		return true
+// identityObservedMakeRoomLocked makes room for one more remembered user at
+// the bound: it drops the marks past the cache lifetime, or, when every mark
+// is younger, the oldest one.
+func identityObservedMakeRoomLocked(now time.Time) {
+	if len(identityObservedState.last) < identityObservedMaxUsers {
+		return
 	}
+	oldestID, oldest := "", time.Time{}
 	for id, mark := range identityObservedState.last {
 		if now.Sub(mark.at) >= identityDirectoryTTL {
 			delete(identityObservedState.last, id)
+			continue
+		}
+		if oldestID == "" || mark.at.Before(oldest) {
+			oldestID, oldest = id, mark.at
 		}
 	}
-	return len(identityObservedState.last)+len(identityObservedState.pending) < identityObservedMaxUsers
+	if len(identityObservedState.last) >= identityObservedMaxUsers {
+		delete(identityObservedState.last, oldestID)
+	}
 }
 
 // identityFactsFingerprint digests the directory facts an identity.observed
