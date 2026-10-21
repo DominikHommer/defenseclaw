@@ -2386,6 +2386,51 @@ func providerRegistrySnapshot() (*configs.ProvidersConfig, []providerDomainEntry
 	return providerRegistry, providerDomains, ollamaPorts
 }
 
+// requestProviderRegistry is the provider registry of the generation a proxy
+// request pinned, so its upstream routing and its policy stamp come from one
+// generation (GAP-1294); nil outside a gateway.
+func requestProviderRegistry(ctx context.Context) *configs.ProvidersConfig {
+	g := pinnedGeneration(ctx)
+	if !g.published() || g.Providers == nil {
+		return nil
+	}
+	return &configs.ProvidersConfig{Providers: g.Providers.Providers, OllamaPorts: g.Providers.OllamaPorts}
+}
+
+// providerRegistry is the registry req routes with: its generation's, else
+// the process-wide one.
+func (req *ChatRequest) providerRegistry() *configs.ProvidersConfig {
+	if req != nil && req.providers != nil {
+		return req.providers
+	}
+	registry, _, _ := providerRegistrySnapshot()
+	return registry
+}
+
+// inferProviderFromRegistry is inferProviderFromURL with registry's domains
+// (nil: the process-wide ones).
+func inferProviderFromRegistry(targetURL string, registry *configs.ProvidersConfig) string {
+	if registry == nil {
+		return inferProviderFromURL(targetURL)
+	}
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, provider := range registry.Providers {
+		for _, domain := range provider.Domains {
+			if matchProviderDomain(host, u.Path, domain) {
+				return provider.Name
+			}
+		}
+	}
+	if isOllamaLoopback(targetURL, 0) {
+		return "ollama"
+	}
+	return ""
+}
+
 // inferProviderFromURL maps a target URL (from the X-DC-Target-URL header
 // set by the plugin's fetch interceptor) to a provider name. The domain list
 // is loaded from internal/configs/providers.json — the single source of truth
@@ -2443,7 +2488,7 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: using configured model %q provider=%q\n", cfgModel, p.cfg.LLM.Provider)
 	}
 
-	registry, _, _ := providerRegistrySnapshot()
+	registry := req.providerRegistry()
 	// Build an effective LLMConfig from the proxy config, with the
 	// already-resolved API key pinned inline so the dispatcher does
 	// not re-resolve (which would lose the connector token resolver
@@ -2539,7 +2584,7 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 		return p.resolveConfiguredProvider(req)
 	}
 
-	prefix := inferProviderFromURL(req.TargetURL + req.TargetPath)
+	prefix := inferProviderFromRegistry(req.TargetURL+req.TargetPath, req.providers)
 	if prefix == "" {
 		return nil
 	}
@@ -2590,7 +2635,7 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 	//      the inferred prefix is the overlay name, not "bedrock".
 	instanceName := strings.TrimSpace(p.cfg.LLM.InstanceName)
 	if instanceName != "" {
-		registry, _, _ := providerRegistrySnapshot()
+		registry := req.providerRegistry()
 		if registry != nil {
 			for _, prov := range registry.Providers {
 				if !strings.EqualFold(prov.Name, instanceName) {
@@ -3204,6 +3249,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			fmt.Fprintf(os.Stderr, "[routing] routed provider error: %v\n", err)
 		}
 	} else {
+		req.providers = requestProviderRegistry(r.Context())
 		upstream = p.resolveProviderFn(&req)
 	}
 	if upstream == nil {
