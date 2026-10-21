@@ -118,7 +118,6 @@ def test_status_names_a_gateway_that_answers_health_but_not_this_account(tmp_pat
     # GAP-0150: a gateway that answers /health is not hung because this
     # account cannot read its .env.
     import requests
-
     from defenseclaw.commands import cmd_doctor
 
     client = MagicMock()
