@@ -218,12 +218,17 @@ func newHookSessionFactsCmd() *cobra.Command {
 func armHookAnswerWatchdog(connectorName, event, failMode, surface string, managed bool, startedAt time.Time, exit func(int)) (io.Reader, *hookexec.AnswerWatchdog) {
 	payload, _ := io.ReadAll(io.LimitReader(os.Stdin, hookexec.DefaultMaxBody+1))
 	stdin := io.MultiReader(bytes.NewReader(payload), os.Stdin)
+	failureLogHome := ""
+	if managed {
+		failureLogHome = managedHookFailureLogHome()
+	}
 	return stdin, hookexec.ArmAnswerWatchdog(hookexec.Options{
 		Connector:         connectorName,
 		Event:             event,
 		FailMode:          failMode,
 		HookSurface:       strings.TrimSpace(surface),
 		ManagedEnterprise: managed,
+		FailureLogHome:    failureLogHome,
 		SecureClient:      managed && secureClientHost(),
 		StartedAt:         startedAt,
 		Exit:              exit,
@@ -449,6 +454,14 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 	return buildHookOptionsForRuntime(connector, event, apiAddr, failMode, false)
 }
 
+func managedHookFailureLogHome() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, config.DefaultDataDirName)
+}
+
 func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, enterpriseManaged bool) hookexec.Options {
 	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
 		// The administrator-owned runtime failed trust validation. Do not read its
@@ -463,6 +476,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			SecureClient:          secureClientHost(),
 			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
+		opts.FailureLogHome = managedHookFailureLogHome()
 		// Marks a failed Unix standalone runtime as the standalone profile's
 		// (no transport is selected); a no-op elsewhere.
 		applyStandaloneManagedHookTransport(&opts, connector)
@@ -580,6 +594,9 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			os.Getenv("TRACESTATE"),
 			os.Getenv("OTEL_TRACESTATE"),
 		),
+	}
+	if enterpriseManaged {
+		opts.FailureLogHome = managedHookFailureLogHome()
 	}
 	if trustedNativeState {
 		opts.GatewayRecovery = trustedNativeGatewayRecovery()

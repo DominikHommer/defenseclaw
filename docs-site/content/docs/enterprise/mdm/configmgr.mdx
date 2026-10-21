@@ -209,7 +209,8 @@ Get-Content -Raw C:\secure\ai-defense-key.txt | & 'C:\Program Files\Cisco\Defens
 ```
 
 `enterprise secret set` runs only elevated and only when a standalone
-deployment is installed. It stores the key and restarts the gateway, and exits
+deployment is installed. It stores the key and restarts the gateway when the
+value changes; repeating the same value leaves both untouched. It exits
 `1639` for invalid input or `1603` on failure. Then set
 `enterprise.inspection.ai_defense.enabled: true` and
 `credential: ai-defense-api-key` in `config.yaml`. See

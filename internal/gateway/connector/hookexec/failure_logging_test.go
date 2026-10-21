@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,5 +121,69 @@ func TestFailOpenDiagnosticEscapesReason(t *testing.T) {
 	var record map[string]string
 	if err := json.Unmarshal(failure, &record); err != nil || record["reason"] != "offline\nforged" || record["outcome"] != "fail_open" {
 		t.Fatalf("invalid escaped record: %v: %s", err, failure)
+	}
+}
+
+func TestManagedNativeOutageLogsInCallingUsersHome(t *testing.T) {
+	for _, mode := range []string{"open", "closed"} {
+		t.Run(mode, func(t *testing.T) {
+			userHome := filepath.Join(t.TempDir(), ".defenseclaw")
+			var runtimeHome string
+			r := run(t, "codex", &stubRT{err: fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)}, func(opts *Options) {
+				runtimeHome = opts.Home
+				opts.ManagedEnterprise = true
+				opts.ManagedStandalone = true
+				opts.ManagedUnixSocket = "/not-used-by-stub/hook.sock"
+				opts.ExplainUnenrolledAccount = true
+				opts.FailMode = mode
+				opts.FailureLogHome = userHome
+			})
+			data, err := os.ReadFile(filepath.Join(userHome, "logs", "hook-failures.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Count(data, []byte{'\n'}) != 1 {
+				t.Fatalf("want one outage row, got %q", data)
+			}
+			var row map[string]string
+			if err := json.Unmarshal(bytes.TrimSpace(data), &row); err != nil {
+				t.Fatal(err)
+			}
+			wantOutcome := "fail_closed"
+			if mode == "open" {
+				wantOutcome = "fail_open"
+			}
+			if row["fail_mode"] != mode || row["outcome"] != wantOutcome || row["category"] != "transport" {
+				t.Fatalf("unexpected outage row: %v", row)
+			}
+			if _, err := os.Stat(filepath.Join(runtimeHome, "logs", "hook-failures.jsonl")); !os.IsNotExist(err) {
+				t.Fatalf("runtime home received user log: %v", err)
+			}
+			if blocked(r) != (mode == "closed") {
+				t.Fatalf("outage decision in mode %s: %+v", mode, r)
+			}
+		})
+	}
+}
+
+func TestManagedCodexBindingErrorUsesShellWording(t *testing.T) {
+	var logHome string
+	r := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+		logHome = filepath.Join(t.TempDir(), ".defenseclaw")
+		opts.FailureLogHome = logHome
+		opts.ManagedEnterprise = true
+		opts.ManagedStandalone = true
+		opts.ExplainUnenrolledAccount = true
+		opts.FailMode = "open"
+		opts.Stdin = strings.NewReader(`{"hook_event_name":"PostToolUse"}`)
+	})
+	if !blocked(r) || r.rt.requests != 0 || !strings.Contains(r.stdout, "codex hook binding error") ||
+		!strings.Contains(r.stderr, "defenseclaw: codex hook binding error:") ||
+		strings.Contains(r.stdout, "gateway returned an answer") {
+		t.Fatalf("binding denial: %+v", r)
+	}
+	data, err := os.ReadFile(filepath.Join(logHome, "logs", "hook-failures.jsonl"))
+	if err != nil || bytes.Count(data, []byte{'\n'}) != 1 {
+		t.Fatalf("binding log %q: %v", data, err)
 	}
 }

@@ -110,6 +110,23 @@ func isTracestateChar(c byte) bool {
 // without a fail-closed contract records what the call got instead
 // (loggedFailMode), so the fail-open report finds the calls that ran.
 func logHookFailure(opts Options, sp spec, reason, category, failMode string, blocked bool) {
+	if w := opts.answerWatch; w != nil {
+		w.mu.Lock()
+		answeredByWatchdog := w.fired
+		if !answeredByWatchdog {
+			if w.failureLogged {
+				w.mu.Unlock()
+				return
+			}
+			w.failureLogged = true
+			w.failureLogDone = make(chan struct{})
+		}
+		w.mu.Unlock()
+		if answeredByWatchdog {
+			return
+		}
+		defer close(w.failureLogDone)
+	}
 	if sp.failOpenOnly {
 		blocked = loggedFailMode(opts, sp, failMode) == "closed"
 	}
@@ -120,17 +137,26 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		// Never include request/response bodies or authentication credentials.
 		fmt.Fprintf(opts.Stderr, "defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %q\n", sp.connector, sp.hookName, category, reason)
 	}
-	if opts.Home == "" {
+	home := opts.Home
+	if opts.FailureLogHome != "" {
+		home = opts.FailureLogHome
+		// Managed hooks can run for accounts with no prior per-user install.
+		// Their diagnostic directory is independent of the protected runtime.
+		if err := os.MkdirAll(home, 0o700); err != nil {
+			return
+		}
+	}
+	if home == "" {
 		return
 	}
-	// Never create the DefenseClaw folder itself for a log line: a managed
-	// hook whose folder was missing recreated it here, and the next event's
+	// Never create the enforcement home for a log line: a managed hook whose
+	// protected folder was missing recreated it here, and the next event's
 	// hook found a folder and no longer said it was missing (GAP-0154).
-	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
+	if info, err := os.Stat(home); err != nil || !info.IsDir() {
 		return
 	}
 	failMode = loggedFailMode(opts, sp, failMode)
-	logDir := filepath.Join(opts.Home, "logs")
+	logDir := filepath.Join(home, "logs")
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		return
 	}

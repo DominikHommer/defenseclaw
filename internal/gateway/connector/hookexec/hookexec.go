@@ -284,6 +284,9 @@ type Options struct {
 	// Home is DEFENSECLAW_HOME (default ~/.defenseclaw). If it does not exist
 	// or contains a .disabled file the hook is a no-op (exit 0).
 	Home string
+	// FailureLogHome is the invoking user's diagnostic directory on managed
+	// hooks. Enforcement still uses the administrator-owned Home.
+	FailureLogHome string
 	// HookDir holds connector-scoped and legacy token sidecars (default Home/hooks).
 	HookDir string
 	// Token, when set, is the resolved gateway token (e.g. from the
@@ -497,6 +500,9 @@ func runHook(ctx context.Context, opts Options) int {
 		)
 		opts.Event = strings.TrimSpace(opts.Event)
 		if bindingErr != nil {
+			if managedNativeDecision(opts) {
+				return failManagedCodexBinding(opts, sp, bindingErr.Error())
+			}
 			return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), bindingErr.Error())
 		}
 		opts.Event = event
@@ -2208,6 +2214,16 @@ func responseFailureReason(reason string) string {
 		return reason + " (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)"
 	}
 	return reason
+}
+
+// failManagedCodexBinding keeps the shell hook's binding-error wording in
+// Codex's native denial body. A mismatched registered event is an integrity
+// refusal, including when the administrator allows outages to fail open.
+func failManagedCodexBinding(opts Options, sp spec, reason string) int {
+	logHookFailure(opts, sp, reason, "response", "closed", true)
+	text := "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": codex hook binding error: " + reason
+	fmt.Fprintln(opts.Stderr, "defenseclaw: codex hook binding error: "+reason)
+	return emitCodexBlock(opts, text)
 }
 
 // invalidManagedCopilotBindingReason is the hook-failure reason of a managed

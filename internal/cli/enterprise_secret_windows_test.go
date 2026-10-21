@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -71,10 +72,12 @@ type windowsSecretLockEvents struct {
 func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windowsSecretLockEvents {
 	t.Helper()
 	previousLayout, previousInstalled, previousElevated, previousRestart := windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway
+	previousLoaded := windowsSecretGatewayLoadedValue
 	previousBundle, previousPath, previousLifecycle, previousWait, previousArgs := windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs
 	previousManaged := managedHostWindowsStandalone
 	t.Cleanup(func() {
 		windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway = previousLayout, previousInstalled, previousElevated, previousRestart
+		windowsSecretGatewayLoadedValue = previousLoaded
 		windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs = previousBundle, previousPath, previousLifecycle, previousWait, previousArgs
 		managedHostWindowsStandalone = previousManaged
 	})
@@ -83,6 +86,7 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 	windowsSecretDeploymentInstalled = func() (bool, error) { return true, nil }
 	windowsSecretIsElevated = func() bool { return true }
 	windowsSecretRestartGateway = func() (bool, error) { host.events = append(host.events, "restart"); return true, nil }
+	windowsSecretGatewayLoadedValue = func(string) bool { return true }
 	windowsSecretLockBundleStore = func(_ context.Context, dir string, wait time.Duration) (func(), error) {
 		if dir != layout.LifecycleDir {
 			t.Errorf("bundle.lock taken in %q, want %q", dir, layout.LifecycleDir)
@@ -436,7 +440,7 @@ func TestWindowsSecretFlagErrorsPrintTheFailureDocument(t *testing.T) {
 
 // A5: set and remove take bundle.lock (with --lock-wait), then
 // lifecycle.lock, and change the credential and restart the gateway under
-// both; an identical value is written and restarted again.
+// both; a byte-identical value is a no-op while the gateway has loaded it.
 func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
 	dir := windowsSecretTestHarness(t)
 	host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
@@ -454,12 +458,38 @@ func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("set %d: %v", i, err)
 		}
-		if out != `{"action":"set","gateway_restarted":true,"name":"ai-defense-api-key","ok":true,"schema_version":1}`+"\n" {
+		expectRestart := i == 0
+		if out != fmt.Sprintf("{\"action\":\"set\",\"gateway_restarted\":%t,\"name\":\"ai-defense-api-key\",\"noop\":%t,\"ok\":true,\"schema_version\":1}\n", expectRestart, !expectRestart) {
 			t.Fatalf("success document changed: %q", out)
 		}
-		if strings.Join(host.events, ",") != strings.Join(want, ",") || host.bundle != 10*time.Minute || !written {
+		expectedEvents := want
+		if i == 1 {
+			expectedEvents = []string{"lock bundle", "lock lifecycle", "unlock lifecycle", "unlock bundle"}
+		}
+		if strings.Join(host.events, ",") != strings.Join(expectedEvents, ",") || host.bundle != 10*time.Minute || !written {
 			t.Fatalf("set %d: events %v, bundle wait %s, written before restart %v", i, host.events, host.bundle, written)
 		}
+	}
+	// The gateway reader trims whitespace, but an on-disk byte difference
+	// still rewrites the credential and restarts the service.
+	storedPath := filepath.Join(dir, "ai-defense-api-key")
+	if err := os.WriteFile(storedPath, []byte("same-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	host.events = nil
+	if out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "same-value\n"); err != nil || !strings.Contains(out, `"noop":false`) {
+		t.Fatalf("byte-different set: %q, %v", out, err)
+	}
+	if data, err := os.ReadFile(storedPath); err != nil || string(data) != "same-value" || strings.Join(host.events, ",") != strings.Join(want, ",") {
+		t.Fatalf("byte-different value was not rewritten and restarted: %v, %v", err, host.events)
+	}
+	host.events = nil
+	windowsSecretGatewayLoadedValue = func(string) bool { return false }
+	if out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "same-value\n"); err != nil || !strings.Contains(out, `"gateway_restarted":true`) || !strings.Contains(out, `"noop":false`) {
+		t.Fatalf("stale gateway set: %q, %v", out, err)
+	}
+	if strings.Join(host.events, ",") != strings.Join(want, ",") {
+		t.Fatalf("stale gateway was not restarted under both locks: %v", host.events)
 	}
 	host.events = nil
 	if _, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "ai-defense-api-key", json: true}, ""); err != nil {

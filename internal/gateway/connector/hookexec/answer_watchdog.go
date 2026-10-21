@@ -36,9 +36,11 @@ var answerWatchdogLogWait = 100 * time.Millisecond
 // allows a call: its answer is the one the call gives when its gateway does
 // not answer in time.
 type answerWatchdog struct {
-	mu       sync.Mutex
-	finished bool
-	fired    bool
+	mu             sync.Mutex
+	finished       bool
+	fired          bool
+	failureLogged  bool
+	failureLogDone chan struct{}
 
 	stdout, stderr io.Writer
 	out, err       bytes.Buffer
@@ -88,7 +90,8 @@ func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {
 	failMode := "closed"
 	if opts.ManagedEnterprise {
 		opts.FailMode = "closed"
-		// A managed hook writes no failure log into the account's home.
+		// This is not an enforcement home. The watchdog's separate
+		// FailureLogHome carries diagnostics if it answers first.
 		opts.Home = ""
 	} else if strings.EqualFold(strings.TrimSpace(opts.FailMode), "open") {
 		failMode = "open"
@@ -120,8 +123,11 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 	rendered.Stdout, rendered.Stderr = &out, &errb
 	// Rendering only: the failure is logged when the watchdog answers.
 	rendered.Home = ""
+	rendered.FailureLogHome = ""
+	rendered.answerWatch = nil
 	code = failNoAnswer(rendered, sp, failMode)
 	logged := opts
+	logged.answerWatch = nil
 	// The rendered answer already carries any fail-open warning.
 	logged.Stderr = io.Discard
 	logFailure = func() {
@@ -167,7 +173,21 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	_, _ = w.stderr.Write(w.fallbackErr)
 	_, _ = w.stdout.Write(w.fallbackOut)
 	if w.exit == nil {
-		w.logFailure()
+		if !w.failureLogged {
+			w.logFailure()
+		}
+		return
+	}
+	if w.failureLogged {
+		if w.failureLogDone != nil {
+			timer := time.NewTimer(answerWatchdogLogWait)
+			select {
+			case <-w.failureLogDone:
+			case <-timer.C:
+			}
+			timer.Stop()
+		}
+		w.exit(w.fallbackCode)
 		return
 	}
 	logged := make(chan struct{})

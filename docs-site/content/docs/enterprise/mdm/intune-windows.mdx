@@ -483,7 +483,8 @@ Then delete the file. The command:
   is not valid (exit `1639`);
 - writes `C:\ProgramData\Cisco\DefenseClaw\secrets\ai-defense-api-key`, which
   SYSTEM and Administrators control and only the gateway service can also
-  read, then restarts the gateway service.
+  read, then restarts the gateway service when the value changes. Repeating
+  the same value leaves the file and running gateway untouched.
 
 `enterprise secret status` shows whether the key is present, when it changed,
 and a digest prefix, never the value. The same wrapper options,

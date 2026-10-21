@@ -72,8 +72,9 @@ var (
 		}
 		return deployment.State == winpath.EnterpriseDeploymentInstalled, nil
 	}
-	windowsSecretIsElevated     = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
-	windowsSecretRestartGateway = restartWindowsStandaloneGateway
+	windowsSecretIsElevated         = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
+	windowsSecretRestartGateway     = restartWindowsStandaloneGateway
+	windowsSecretGatewayLoadedValue = windowsGatewayLoadedSecretValue
 	// windowsSecretLockBundleStore, windowsSecretLifecycleLockPath and
 	// windowsSecretLifecycleLock are the two locks set and remove take.
 	windowsSecretLockBundleStore   = lockWindowsBundleStoreWithin
@@ -140,16 +141,20 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 		return nil
 	}
-	restarted, err := changeWindowsSecret(cmd, action, opts)
+	change, err := changeWindowsSecret(cmd, action, opts)
 	if err != nil {
 		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json)
 	}
 	if opts.json {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
-			"schema_version": 1, "ok": true, "action": action, "name": opts.name, "gateway_restarted": restarted,
+			"schema_version": 1, "ok": true, "action": action, "name": opts.name, "gateway_restarted": change.restarted, "noop": change.noop,
 		})
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "credential %s %s; gateway restarted: %v\n", opts.name, windowsSecretChanged(action), restarted)
+	if change.noop {
+		fmt.Fprintf(cmd.OutOrStdout(), "credential %s already holds this value; gateway restart not needed\n", opts.name)
+		return nil
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "credential %s %s; gateway restarted: %v\n", opts.name, windowsSecretChanged(action), change.restarted)
 	return nil
 }
 
@@ -201,57 +206,62 @@ func runWindowsSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) e
 // before any lock is taken; the change and the restart run under both
 // locks (lockWindowsSecretChange). It reports whether the gateway was
 // restarted.
-func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions) (bool, error) {
+type windowsSecretChange struct {
+	restarted bool
+	noop      bool
+}
+
+func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions) (windowsSecretChange, error) {
 	if err := windowsSecretElevation(action, opts); err != nil {
-		return false, err
+		return windowsSecretChange{}, err
 	}
 	if err := checkWindowsLockWait(cmd, opts.lockWait); err != nil {
-		return false, err
+		return windowsSecretChange{}, err
 	}
 	layout, err := windowsSecretLayout()
 	if err != nil {
-		return false, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	if !managed.ValidCredentialName(opts.name) {
-		return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("--name %q must be lowercase letters, digits and dashes", opts.name))
+		return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("--name %q must be lowercase letters, digits and dashes", opts.name))
 	}
 	if err := requireWindowsSecretDeployment(); err != nil {
-		return false, err
+		return windowsSecretChange{}, err
 	}
 	var value []byte
 	switch action {
 	case "set":
 		if opts.fromStdin == (opts.fromFile != "") {
-			return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, errors.New("pass exactly one of --from-stdin or --from-file"))
+			return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, errors.New("pass exactly one of --from-stdin or --from-file"))
 		}
 		var source io.Reader = cmd.InOrStdin()
 		if opts.fromFile != "" {
 			if err := managed.ValidateTrustedFilePath(opts.fromFile, "credential source"); err != nil {
-				return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
+				return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
 			}
 			file, err := os.Open(opts.fromFile)
 			if err != nil {
-				return false, secretFailed("change_failed", windowsSecretExitFailure, err)
+				return windowsSecretChange{}, secretFailed("change_failed", windowsSecretExitFailure, err)
 			}
 			defer file.Close()
 			source = file
 		}
 		if value, err = readWindowsSecretValue(source); err != nil {
-			return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
+			return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
 		}
 	case "remove":
 	default:
-		return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("unknown action %q", action))
+		return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("unknown action %q", action))
 	}
 	release, err := lockWindowsSecretChange(cmd.Context(), layout, opts.lockWait)
 	if err != nil {
-		return false, err
+		return windowsSecretChange{}, err
 	}
 	defer release()
 	// An uninstall holds lifecycle.lock, so one can finish while this run
 	// waits for it; check again under both locks before anything is written.
 	if err := requireWindowsSecretDeployment(); err != nil {
-		return false, err
+		return windowsSecretChange{}, err
 	}
 	// Pin the store before anything in it is read, written or deleted: a
 	// junction, mount point, symlink or file where the folder belongs is
@@ -259,24 +269,45 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	// and reported success (GAP-1315); set reported change_failed (GAP-1314).
 	store, err := openWindowsSecretStore(layout.SecretsDir, action == "set")
 	if err != nil {
-		return false, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	defer store.close()
 	if action == "set" {
+		stored, _, readErr := managed.ResolveServiceCredentialAs(opts.name, store.dir, windowsSecretGatewayAccount)
+		storedPath := filepath.Join(store.dir, opts.name)
+		switch {
+		case readErr == nil && bytes.Equal(stored, value):
+			// The gateway reader normalizes whitespace. A no-op needs exact
+			// stored bytes, not merely the same value after normalization.
+			raw, err := os.ReadFile(storedPath)
+			if err == nil && bytes.Equal(raw, value) {
+				if windowsSecretGatewayLoadedValue(storedPath) {
+					return windowsSecretChange{noop: true}, nil
+				}
+				// A running gateway that predates the credential still needs a
+				// restart after an earlier restart failed. Keep the file intact.
+				store.close()
+				restarted, err := windowsSecretRestartGateway()
+				if err != nil {
+					return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure, fmt.Errorf("credential %s was already stored, but restarting the gateway failed: %w", opts.name, err))
+				}
+				return windowsSecretChange{restarted: restarted}, nil
+			}
+		}
 		if err := writeWindowsSecret(store, opts.name, value); err != nil {
-			return false, secretFailed("change_failed", windowsSecretExitFailure, err)
+			return windowsSecretChange{}, secretFailed("change_failed", windowsSecretExitFailure, err)
 		}
 	} else if err := removeWindowsSecret(layout, store, opts.name); err != nil {
-		return false, err
+		return windowsSecretChange{}, err
 	}
 	store.close()
 	// The gateway reads credentials when it starts; apply the change now.
 	restarted, err := windowsSecretRestartGateway()
 	if err != nil {
-		return false, secretFailed("restart_failed", windowsSecretExitFailure,
+		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
 			fmt.Errorf("credential %s %s, but restarting the gateway failed: %w", opts.name, windowsSecretChanged(action), err))
 	}
-	return restarted, nil
+	return windowsSecretChange{restarted: restarted}, nil
 }
 
 // requireWindowsSecretDeployment refuses not_installed (1603) unless a
@@ -692,6 +723,46 @@ func windowsSecretStatus(dir string) ([]windowsSecretState, error) {
 	}
 	sort.Slice(states, func(i, j int) bool { return states[i].Name < states[j].Name })
 	return states, nil
+}
+
+// windowsGatewayLoadedSecretValue only permits the no-op when the gateway is
+// stopped (its next start reads the file), or its current process started
+// after the stored credential was written. Any uncertainty retries restart.
+func windowsGatewayLoadedSecretValue(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	manager, err := mgr.Connect()
+	if err != nil {
+		return false
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		return false
+	}
+	defer service.Close()
+	status, err := service.Query()
+	if err != nil {
+		return false
+	}
+	if status.State == svc.Stopped {
+		return true
+	}
+	if status.State != svc.Running || status.ProcessId == 0 {
+		return false
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, status.ProcessId)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(process)
+	var creation, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(process, &creation, &exited, &kernel, &user); err != nil {
+		return false
+	}
+	return creation.Nanoseconds() > info.ModTime().UnixNano()
 }
 
 // restartWindowsStandaloneGateway restarts the gateway service when it is
