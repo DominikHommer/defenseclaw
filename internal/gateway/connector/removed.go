@@ -44,6 +44,9 @@ package connector
 import (
 	"bytes"
 	"context"
+	"debug/elf"
+	"debug/macho"
+	"debug/pe"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -53,6 +56,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -653,8 +657,12 @@ func (c removedOpenHandsConnector) hooksThatMayRunScript(p *removedCleanupPlan, 
 // script when it names
 // DefenseClaw or the script, is the script (through links or as a hard link),
 // is a directory that holds the script or names DefenseClaw, or is a file
-// whose bytes name either. A text file (a wrapper) may also run it through
-// the paths it names, checked the same way a few levels deep (a quoted path
+// whose bytes name either. Only a program (machine code this system's loader
+// runs) is ruled out by the names in its bytes alone. Any other file with a
+// NUL byte may run the script: a shell reads a script that holds one, and
+// runs as a script a file the loader cannot run. A text file (a wrapper) may
+// also run it through the paths it names, checked the same way a few levels
+// deep (a quoted path
 // with a blank whole, a list of paths part by part), and through what the
 // check cannot follow: a relative path or cd, a variable or a command
 // substitution in a path, a path that goes on past the plain characters the
@@ -962,13 +970,13 @@ func (c *removedScriptCheck) fileMayRun(path string, info os.FileInfo, depth int
 		}
 	}
 	var text, window []byte
-	binary := false
+	nul := false
 	chunk := make([]byte, 64<<10)
 	for {
 		n, err := file.Read(chunk)
 		if n > 0 {
-			binary = binary || bytes.IndexByte(chunk[:n], 0) >= 0
-			if !binary && len(text) <= removedScriptCheckTextLimit {
+			nul = nul || bytes.IndexByte(chunk[:n], 0) >= 0
+			if !nul && len(text) <= removedScriptCheckTextLimit {
 				text = append(text, chunk[:n]...)
 			}
 			window = append(window, chunk[:n]...)
@@ -986,8 +994,12 @@ func (c *removedScriptCheck) fileMayRun(path string, info os.FileInfo, depth int
 			return true
 		}
 	}
-	if binary {
-		return false
+	if nul {
+		// A NUL byte does not make a file a program: dash drops NUL bytes,
+		// bash refuses one only on the first line, and a file the loader
+		// cannot run (a script with no #! line, an image for another
+		// system) is run by the shell as a script (the ENOEXEC fallback).
+		return !removedLoadableImage(file, runtime.GOOS)
 	}
 	if !removedShellText(path, text) {
 		return true
@@ -1017,6 +1029,39 @@ func (c *removedScriptCheck) fileMayRun(path string, info os.FileInfo, depth int
 		covered = through
 	}
 	return false
+}
+
+// removedLoadableImage reports whether file is machine code that the loader
+// of goos runs itself: an ELF executable or shared object (Linux and the
+// other Unix systems), a Mach-O executable, library or bundle, thin or
+// universal (macOS), or a PE image (Windows). A program may run any path it
+// holds; the check rules one out by the names in its bytes alone.
+func removedLoadableImage(file io.ReaderAt, goos string) bool {
+	switch goos {
+	case "windows":
+		_, err := pe.NewFile(file)
+		return err == nil
+	case "darwin", "ios":
+		if thin, err := macho.NewFile(file); err == nil {
+			return removedMachOLoadable(thin.Type)
+		}
+		fat, err := macho.NewFatFile(file)
+		if err != nil || len(fat.Arches) == 0 {
+			return false
+		}
+		for _, arch := range fat.Arches {
+			if !removedMachOLoadable(arch.Type) {
+				return false
+			}
+		}
+		return true
+	}
+	image, err := elf.NewFile(file)
+	return err == nil && (image.Type == elf.ET_EXEC || image.Type == elf.ET_DYN)
+}
+
+func removedMachOLoadable(t macho.Type) bool {
+	return t == macho.TypeExec || t == macho.TypeDylib || t == macho.TypeBundle
 }
 
 // removedShells are the interpreters whose scripts the check reads.

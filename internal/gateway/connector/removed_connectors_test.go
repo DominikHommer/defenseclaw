@@ -10,6 +10,9 @@ package connector
 import (
 	"bytes"
 	"context"
+	"debug/elf"
+	"debug/macho"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"os"
@@ -1798,6 +1801,47 @@ func TestRemovedOpenHandsTeardownChecksTheHooksItPutsBack(t *testing.T) {
 			path := wrapper(t, h, "exit 0\n")
 			return "/usr/bin/env -i /bin/sh --login " + path, []string{link, profile, path}
 		}},
+		// Review fixes (G-deadcode loop round 3): a file with a NUL byte
+		// was taken for a program and ruled out by the names in its bytes.
+		// But a shell reads a script that holds one, and runs as a script
+		// a file the system cannot load; only machine code the loader runs
+		// is a program now.
+		{"a shell script with a NUL byte that runs a symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
+			path := filepath.Join(h.home, "audit")
+			writeRemovedFixture(t, path, "#!/bin/sh\n: \x00\nexec "+link+" \"$@\"\n", 0o700)
+			return "/bin/sh " + path, []string{path, link}
+		}},
+		{"a script with a NUL byte and no #! line", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
+			path := filepath.Join(h.home, "audit")
+			writeRemovedFixture(t, path, "\x00\nexec "+link+"\n", 0o700)
+			return path, []string{path, link}
+		}},
+		{"a script with a NUL byte after the command", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
+			path := wrapper(t, h, link+"\n# \x00\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a script with a NUL byte", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
+			inner := filepath.Join(h.home, "lib", "inner")
+			writeRemovedFixture(t, inner, "#!/bin/sh\n: \x00\nexec "+link+"\n", 0o700)
+			path := wrapper(t, h, "exec "+inner+" \"$@\"\n")
+			return path, []string{path, inner, link}
+		}},
+		{"a script behind an ELF magic number", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
+			path := filepath.Join(h.home, "audit")
+			writeRemovedFixture(t, path, "\x7fELF\x02\x01\x01\x00\x00\nexec "+link+"\n", 0o700)
+			return "/bin/sh " + path, []string{path, link}
+		}},
+		{"a script behind an image this system does not load", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
+			path := filepath.Join(h.home, "audit")
+			writeRemovedFixture(t, path, string(removedTestImage(t, "windows"))+"\nexec "+link+"\n", 0o700)
+			return path, []string{path, link}
+		}},
 	} {
 		for _, back := range []bool{false, true} {
 			mode := "put back by the cleanup"
@@ -1869,7 +1913,7 @@ func TestRemovedOpenHandsTeardownTombstonesWhenEverySavedHookIsRuledOut(t *testi
 			spaced := filepath.Join(h.home, "my hooks", "audit.sh")
 			writeRemovedFixture(t, spaced, "#!/usr/bin/env sh\nexit 0\n", 0o700)
 			compiled := filepath.Join(h.home, "tools", "audit-bin")
-			writeRemovedFixture(t, compiled, "\x7fELF\x02\x01\x01\x00\x00/usr/lib/x\x00", 0o700)
+			writeRemovedFixture(t, compiled, string(removedTestImage(t, runtime.GOOS))+"/usr/lib/x\x00", 0o700)
 			// A wrapper that runs a quoted path with a blank (checked whole,
 			// and the rest of the string is part of it), a URL and /dev/null.
 			quoted := filepath.Join(h.home, "tools", "run-quoted.sh")
@@ -1893,6 +1937,79 @@ func TestRemovedOpenHandsTeardownTombstonesWhenEverySavedHookIsRuledOut(t *testi
 			h.requireDone(t)
 			requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: saved})
 		})
+	}
+}
+
+// removedTestImage is the smallest program the loader of goos takes: an ELF
+// executable header (Linux and the other Unix systems), a universal Mach-O
+// executable (macOS) or a PE header (Windows).
+func removedTestImage(t *testing.T, goos string) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	write := func(order binary.ByteOrder, v interface{}) {
+		if err := binary.Write(&b, order, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	switch goos {
+	case "windows":
+		dos := make([]byte, 64)
+		copy(dos, "MZ")
+		binary.LittleEndian.PutUint32(dos[0x3c:], 64)
+		b.Write(dos)
+		b.WriteString("PE\x00\x00")
+		write(binary.LittleEndian, struct {
+			Machine, Sections          uint16
+			Time, Symbols, SymbolCount uint32
+			OptionalHeaderSize, Flags  uint16
+		}{Machine: 0x8664, Flags: 0x0002})
+		b.Write(make([]byte, 64))
+	case "darwin":
+		var thin bytes.Buffer
+		if err := binary.Write(&thin, binary.LittleEndian, macho.FileHeader{Magic: macho.Magic64, Cpu: macho.CpuArm64, Type: macho.TypeExec}); err != nil {
+			t.Fatal(err)
+		}
+		thin.Write(make([]byte, 4))
+		write(binary.BigEndian, []uint32{macho.MagicFat, 1, uint32(macho.CpuArm64), 0, 64, uint32(thin.Len()), 0})
+		b.Write(make([]byte, 64-b.Len()))
+		b.Write(thin.Bytes())
+	default:
+		header := elf.Header64{Type: uint16(elf.ET_EXEC), Machine: uint16(elf.EM_X86_64), Version: uint32(elf.EV_CURRENT), Ehsize: 64}
+		copy(header.Ident[:], elf.ELFMAG)
+		header.Ident[elf.EI_CLASS] = byte(elf.ELFCLASS64)
+		header.Ident[elf.EI_DATA] = byte(elf.ELFDATA2LSB)
+		header.Ident[elf.EI_VERSION] = byte(elf.EV_CURRENT)
+		write(binary.LittleEndian, header)
+	}
+	return b.Bytes()
+}
+
+// Only machine code that this system's loader runs is a program the check
+// rules out by its bytes: an image for another system, a header that does
+// not parse and an ELF object file are run, if at all, as shell scripts.
+func TestRemovedLoadableImageIsMachineCodeThisSystemRuns(t *testing.T) {
+	elfObject := removedTestImage(t, "linux")
+	binary.LittleEndian.PutUint16(elfObject[16:], uint16(elf.ET_REL))
+	machoObject := removedTestImage(t, "darwin")
+	binary.LittleEndian.PutUint32(machoObject[64+12:], uint32(macho.TypeObj))
+	images := map[string][]byte{
+		"ELF":                   removedTestImage(t, "linux"),
+		"Mach-O":                removedTestImage(t, "darwin"),
+		"PE":                    removedTestImage(t, "windows"),
+		"ELF object":            elfObject,
+		"Mach-O object":         machoObject,
+		"ELF magic number only": []byte("\x7fELF\x02\x01\x01\x00\x00\nexec /tmp/relay\n"),
+		"MZ only":               []byte("MZ\x00\nexec /tmp/relay\n"),
+		"shell script":          []byte("#!/bin/sh\n: \x00\nexec /tmp/relay\n"),
+	}
+	for _, tc := range []struct {
+		goos, loads string
+	}{{"linux", "ELF"}, {"freebsd", "ELF"}, {"darwin", "Mach-O"}, {"windows", "PE"}} {
+		for name, image := range images {
+			if got, want := removedLoadableImage(bytes.NewReader(image), tc.goos), name == tc.loads; got != want {
+				t.Errorf("removedLoadableImage(%s) on %s = %v, want %v", name, tc.goos, got, want)
+			}
+		}
 	}
 }
 
