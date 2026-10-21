@@ -72,6 +72,13 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 				words[i], static = boundValue, true
 			}
 			if !static {
+				// Interpreter arguments after fixed code do not change that
+				// code. Keep its write operands even though argv is dynamic.
+				if i > 0 && fixedInterpreterCodePrefix(words[:i]) {
+					for _, name := range literalProgramOperands(words[:i], stmt, cwd, home, depth, len(file.Stmts) == 1) {
+						add(name)
+					}
+				}
 				return true
 			}
 		}
