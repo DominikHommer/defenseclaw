@@ -8449,8 +8449,11 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if !strings.Contains(headers, "x-defenseclaw-source=claudecode") {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing source attribution; got %q", headers)
 	}
-	if !slices.Contains(splitOTelHeader(headers), "authorization=Bearer "+scoped) {
-		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing connector-scoped Authorization; got %q", headers)
+	// Windows writes the bearer as a literal header; a per-user Linux or
+	// macOS install gets it from the otelHeadersHelper (GAP-1421).
+	staticBearer := runtime.GOOS == "windows"
+	if slices.Contains(splitOTelHeader(headers), "authorization=Bearer "+scoped) != staticBearer {
+		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS Authorization (static %v) got %q", staticBearer, headers)
 	}
 	for _, key := range []string{
 		"OTEL_EXPORTER_OTLP_HEADERS",
@@ -8459,9 +8462,12 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
 	} {
 		value, _ := env[key].(string)
-		if !strings.Contains(value, "authorization=Bearer "+scoped) || strings.Contains(value, "Bearer%20") {
-			t.Errorf("%s does not use Claude's literal managed Authorization contract", key)
+		if strings.Contains(value, "authorization=Bearer "+scoped) != staticBearer || strings.Contains(value, "Bearer%20") {
+			t.Errorf("%s does not use Claude's managed Authorization contract", key)
 		}
+	}
+	if _, helper := settings[claudeCodeOTLPHeadersHelperKey]; helper == staticBearer {
+		t.Errorf("otelHeadersHelper present = %v, want %v", helper, !staticBearer)
 	}
 	probes, err := LoadClaudeCodeNativeOTLPProbes()
 	if err != nil {
@@ -8520,6 +8526,8 @@ func TestApplyClaudeCodeManagedOtelEnvMigratesPercentEncodedNativeOTLPBearer(t *
 		DataDir:       dir,
 		APIAddr:       "127.0.0.1:18970",
 		OTLPPathToken: scopedToken,
+		// The static bearer contract (Windows and managed installs).
+		GOOS: "windows",
 	}
 	applyClaudeCodeManagedOtelEnv(legacyEnv, buildClaudeCodeOtelEnv(opts))
 	settings := map[string]interface{}{"env": legacyEnv}
@@ -11322,6 +11330,10 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		cursorScripts = append(cursorScripts, "cursor-hook.ps1")
 	}
+	claudeScripts := withVendor("claude-code-hook.sh")
+	if runtime.GOOS != "windows" {
+		claudeScripts = append(claudeScripts, claudeCodeOTLPHeadersHelperScript)
+	}
 	copilotScripts := withVendor("copilot-hook.sh")
 	if runtime.GOOS == "windows" {
 		copilotScripts = append(copilotScripts, "copilot-hook.ps1")
@@ -11335,7 +11347,7 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		{func() Connector { return NewZeptoClawConnector() }, "zeptoclaw", generic},
 		{func() Connector { return NewOpenClawConnector() }, "openclaw", generic},
 		{func() Connector { return NewCodexConnector() }, "codex", withVendor("codex-hook.sh")},
-		{func() Connector { return NewClaudeCodeConnector() }, "claudecode", withVendor("claude-code-hook.sh")},
+		{func() Connector { return NewClaudeCodeConnector() }, "claudecode", claudeScripts},
 		{func() Connector { return NewHermesConnector() }, "hermes", withVendor("hermes-hook.sh")},
 		{func() Connector { return NewCursorConnector() }, "cursor", cursorScripts},
 		{func() Connector { return NewDevinConnector() }, "devin", withVendor("devin-hook.sh")},
@@ -11667,6 +11679,10 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 //   - openclaw   owns no vendor template (fetch-interceptor plugin)
 //   - zeptoclaw  owns no vendor template (config-only)
 func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
+	claudeHooks := []string{"claude-code-hook.sh"}
+	if runtime.GOOS != "windows" {
+		claudeHooks = append(claudeHooks, claudeCodeOTLPHeadersHelperScript)
+	}
 	cursorHooks := []string{"cursor-hook.sh"}
 	copilotHooks := []string{"copilot-hook.sh"}
 	if runtime.GOOS == "windows" {
@@ -11678,7 +11694,7 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 		ctor func() Connector
 		want []string
 	}{
-		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []string{"claude-code-hook.sh"}},
+		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, claudeHooks},
 		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
 		{"hermes", func() Connector { return NewHermesConnector() }, []string{"hermes-hook.sh"}},
 		{"cursor", func() Connector { return NewCursorConnector() }, cursorHooks},

@@ -1366,7 +1366,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		stopRefusals()
 		select {
 		case <-refusalsDone:
-		case <-time.After(unenrolledRefusalDrainTimeout):
+		case <-time.After(unenrolledRefusalStopTimeout):
 		}
 	}()
 	go func() {

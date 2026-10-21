@@ -187,9 +187,11 @@ func TestValidateServiceCanWriteFileRequiresRotationPermission(t *testing.T) {
 	}
 }
 
-// GAP-1432: compression reads each rotated file back. A folder and file that
-// let the service create, append to, rotate and prune the file but not read
-// it pass the write check and fail the read-back check; Modify passes both.
+// GAP-1432: compression reads each rotated file back. An existing file that
+// lets the service append to, rotate and prune it but not read it passes the
+// write check and fails the read-back check; Modify on it passes both. A
+// missing file passes even in a folder that passes no read to its files: the
+// gateway creates it with a protected DACL that gives the service full access.
 func TestValidateServiceCanReadRotatedFileRequiresReadData(t *testing.T) {
 	folder := t.TempDir()
 	path := filepath.Join(folder, "audit.jsonl")
@@ -218,16 +220,22 @@ func TestValidateServiceCanReadRotatedFileRequiresReadData(t *testing.T) {
 	if err := ValidateServiceCanWriteFile(path, account); err != nil {
 		t.Fatalf("write check: %v", err)
 	}
-	if err := ValidateServiceCanReadRotatedFile(path, account); err == nil || !strings.Contains(err.Error(), "cannot read back") {
-		t.Fatalf("accepted rotated files the service cannot read back: %v", err)
-	}
-	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICI;0x1301bf;;;BU)")
 	if err := ValidateServiceCanReadRotatedFile(path, account); err == nil || !strings.Contains(err.Error(), "cannot read back "+path) {
-		t.Fatalf("existing file without read data in a Modify folder: %v", err)
+		t.Fatalf("accepted an existing file the service cannot read back: %v", err)
 	}
 	setDACL(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)")
 	if err := ValidateServiceCanReadRotatedFile(path, account); err != nil {
-		t.Fatalf("Modify folder and file: %v", err)
+		t.Fatalf("Modify on the file: %v", err)
+	}
+	// The gateway creates a missing file itself, readable by the service.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateServiceCanWriteFile(path, account); err != nil {
+		t.Fatalf("write check, missing file: %v", err)
+	}
+	if err := ValidateServiceCanReadRotatedFile(path, account); err != nil {
+		t.Fatalf("refused a missing file the gateway would create readable: %v", err)
 	}
 }
 

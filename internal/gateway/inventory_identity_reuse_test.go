@@ -46,7 +46,21 @@ func TestInventoryRecordOfAReusedUIDDoesNotTakeTheNewHoldersFacts(t *testing.T) 
 	if identity := inventoryIdentityFor("1001", "bob"); identity == nil || identity.Directory.Principal != "bob@dclab.test" {
 		t.Fatalf("bob's record lost his own facts: %+v", identity)
 	}
-	if identity := inventoryIdentityFor("1001", ""); identity == nil {
-		t.Fatal("a record that names no account lost the uid's facts")
+	// A record that names no account cannot show it is the uid's account now.
+	if identity := inventoryIdentityFor("1001", ""); identity != nil {
+		t.Fatalf("a record that names no account took the uid's facts: %+v", identity.Directory)
+	}
+	// The same bare name in another domain is another principal.
+	userScopedIdentityName = func(id string) string {
+		if id == "1001" {
+			return "alice@new.example"
+		}
+		return ""
+	}
+	if identity := inventoryIdentityFor("1001", "alice@old.example"); identity != nil {
+		t.Fatalf("alice@old.example's record took alice@new.example's facts: %+v", identity.Directory)
+	}
+	if identity := inventoryIdentityFor("1001", "ALICE@new.example"); identity == nil {
+		t.Fatal("the uid's own qualified account, spelled in another case, lost its facts")
 	}
 }

@@ -249,6 +249,10 @@ func TestCodexHookProfile_IsPureAndLeavesScopedTokenUnresolved(t *testing.T) {
 func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 	t.Parallel()
 	opts := fixedSetupOpts(t)
+	// The static bearer contract of Windows and managed installs; a
+	// per-user Linux or macOS install gets its bearer from the
+	// otelHeadersHelper (claudecode_otel_headers_helper_test.go).
+	opts.GOOS = "windows"
 
 	env := buildClaudeCodeOtelEnv(opts)
 	if len(env) == 0 {
@@ -361,6 +365,8 @@ func TestClaudeCodeManagedSettingsProjectionIsStableAcrossGatewayMasterRotation(
 			HookAPIToken:       scopedHookToken,
 			HookAPITokenScoped: true,
 			OTLPPathToken:      scopedOTLPToken,
+			// The static bearer contract (Windows and managed installs).
+			GOOS: "windows",
 		}
 		hookCommand, hookArgs := claudeCodeHookInvocation(
 			opts,

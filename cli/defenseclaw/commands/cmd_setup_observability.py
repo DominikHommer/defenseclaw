@@ -551,122 +551,88 @@ def _add_v8_destination(
             )
     elif plaintext:
         raise ValueError("--plaintext applies to OTLP destinations only")
-    authored, expected_sha256 = _v8_authored_destination_snapshot(data_dir)
-    matches = [
-        (index, existing)
-        for index, existing in enumerate(authored)
-        if existing.get("name") == destination_name
-    ]
-    if matches:
-        index, existing = matches[0]
-        if existing.get("kind") != destination["kind"]:
-            raise ValueError(
-                f"destination {destination_name!r} already has kind {existing.get('kind')!r}; "
-                "remove it before changing adapter kind"
-            )
-        mutations = _v8_destination_update_mutations(index, existing, destination)
-    else:
-        mutations = [
-            V8YAMLMutation.set(
-                ("observability", "destinations", len(authored)),
-                destination,
-            )
+    # GAP-1320: one setup at a time stages the secret, commits config.yaml and
+    # takes the secret back out on a failure. A second setup that committed
+    # in between could rely on the staged value, and the rollback would then
+    # break its destination. The config writer's lock serializes the whole
+    # transaction across both files; mutate_v8_config joins it.
+    from defenseclaw import config_writer
+
+    with config_writer.hold_lock(config_path_for_data_dir(data_dir), timeout_s=None):
+        authored, expected_sha256 = _v8_authored_destination_snapshot(data_dir)
+        matches = [
+            (index, existing)
+            for index, existing in enumerate(authored)
+            if existing.get("name") == destination_name
         ]
-    mutations.extend(extra_mutations)
-
-    stored_secret = token_value
-    if preset.id == "grafana-cloud":
-        if stored_secret and not stored_secret.startswith("Basic "):
-            stored_secret = "Basic " + stored_secret
-        elif not stored_secret:
-            warnings.append(
-                "GRAFANA_OTLP_TOKEN must contain the complete Authorization value, including the Basic prefix"
-            )
-    secret_before = _stored_secret(data_dir, preset.token_env)
-    environ_before = os.environ.get(preset.token_env) if preset.token_env else None
-    warnings.extend(_apply_secret(data_dir, preset, stored_secret, dry_run=dry_run))
-    secret_changed = not dry_run and _stored_secret(data_dir, preset.token_env) != secret_before
-    validator = None
-    if dry_run and stored_secret and preset.token_env:
-        validator = _staged_secret_validator({preset.token_env: stored_secret})
-    try:
-        result = mutate_v8_config(
-            config_path_for_data_dir(data_dir),
-            mutations,
-            data_dir=data_dir,
-            validator=validator,
-            dry_run=dry_run,
-            expected_before_sha256=expected_sha256,
-        )
-    except BaseException:
-        keep_for = (
-            _destinations_now_using_secret(data_dir, preset.token_env, authored) if secret_changed else []
-        )
-        if keep_for:
-            # GAP-1320: another setup committed a destination that uses the
-            # staged value while this one failed; taking it out of .env would
-            # break that destination.
-            click.echo(
-                f"  Note: {preset.token_env} stays in .env: destination "
-                f"{', '.join(repr(name) for name in keep_for)} that another setup saved uses it.",
-                err=True,
-            )
-        elif secret_changed:
-            # GAP-0210: a failed add leaves no key behind in .env.
-            try:
-                restore_secret(data_dir, preset.token_env, secret_before, environ_before, stored_secret)
-            except Exception as restore_error:  # noqa: BLE001 - the add error is the one to report.
-                # GAP-0374: a hand-made .env whose permissions DefenseClaw did
-                # not write can refuse the restore. Keep the original error,
-                # take the key out of this process, and say what is left.
-                if os.environ.get(preset.token_env) == stored_secret:
-                    if environ_before is None:
-                        os.environ.pop(preset.token_env, None)
-                    else:
-                        os.environ[preset.token_env] = environ_before
-                dotenv_path = os.path.join(data_dir, ".env")
-                click.echo(
-                    f"  Note: {preset.token_env} is still in {dotenv_path}: it could not be "
-                    f"taken out again ({type(restore_error).__name__}), because the permissions of that file are "
-                    "not the private ones DefenseClaw writes. Delete that line, then run: defenseclaw doctor --fix",
-                    err=True,
+        if matches:
+            index, existing = matches[0]
+            if existing.get("kind") != destination["kind"]:
+                raise ValueError(
+                    f"destination {destination_name!r} already has kind {existing.get('kind')!r}; "
+                    "remove it before changing adapter kind"
                 )
-        raise
-    if secret_changed:
-        # GAP-2356: the running gateway still holds the old key, and
-        # config.yaml may be unchanged, so the restart has to be asked for.
-        mark_setup_secret_changed()
-    return result, warnings
+            mutations = _v8_destination_update_mutations(index, existing, destination)
+        else:
+            mutations = [
+                V8YAMLMutation.set(
+                    ("observability", "destinations", len(authored)),
+                    destination,
+                )
+            ]
+        mutations.extend(extra_mutations)
 
-
-def _destinations_now_using_secret(
-    data_dir: str, key: str | None, before: list[dict[str, Any]]
-) -> list[str]:
-    """Destinations config.yaml now has that use the secret key and did not before.
-
-    A destination uses it through a ``*_env`` field naming key or a
-    ``${key}`` reference in a value.
-    """
-
-    if not key:
-        return []
-    try:
-        now = _v8_authored_destinations(data_dir)
-    except Exception:  # noqa: BLE001 - an unreadable config commits nothing.
-        return []
-    needle = "${" + key + "}"
-
-    def refers(value: Any) -> bool:
-        if isinstance(value, dict):
-            return any(refers(item) for item in value.values())
-        if isinstance(value, list):
-            return any(refers(item) for item in value)
-        return isinstance(value, str) and (value == key or needle in value)
-
-    def using(destinations: list[dict[str, Any]]) -> set[str]:
-        return {str(destination.get("name")) for destination in destinations if refers(destination)}
-
-    return sorted(using(now) - using(before))
+        stored_secret = token_value
+        if preset.id == "grafana-cloud":
+            if stored_secret and not stored_secret.startswith("Basic "):
+                stored_secret = "Basic " + stored_secret
+            elif not stored_secret:
+                warnings.append(
+                    "GRAFANA_OTLP_TOKEN must contain the complete Authorization value, including the Basic prefix"
+                )
+        secret_before = _stored_secret(data_dir, preset.token_env)
+        environ_before = os.environ.get(preset.token_env) if preset.token_env else None
+        warnings.extend(_apply_secret(data_dir, preset, stored_secret, dry_run=dry_run))
+        secret_changed = not dry_run and _stored_secret(data_dir, preset.token_env) != secret_before
+        validator = None
+        if dry_run and stored_secret and preset.token_env:
+            validator = _staged_secret_validator({preset.token_env: stored_secret})
+        try:
+            result = mutate_v8_config(
+                config_path_for_data_dir(data_dir),
+                mutations,
+                data_dir=data_dir,
+                validator=validator,
+                dry_run=dry_run,
+                expected_before_sha256=expected_sha256,
+            )
+        except BaseException:
+            if secret_changed:
+                # GAP-0210: a failed add leaves no key behind in .env.
+                try:
+                    restore_secret(data_dir, preset.token_env, secret_before, environ_before, stored_secret)
+                except Exception as restore_error:  # noqa: BLE001 - the add error is the one to report.
+                    # GAP-0374: a hand-made .env whose permissions DefenseClaw did
+                    # not write can refuse the restore. Keep the original error,
+                    # take the key out of this process, and say what is left.
+                    if os.environ.get(preset.token_env) == stored_secret:
+                        if environ_before is None:
+                            os.environ.pop(preset.token_env, None)
+                        else:
+                            os.environ[preset.token_env] = environ_before
+                    dotenv_path = os.path.join(data_dir, ".env")
+                    click.echo(
+                        f"  Note: {preset.token_env} is still in {dotenv_path}: it could not be "
+                        f"taken out again ({type(restore_error).__name__}), because the permissions of that file are "
+                        "not the private ones DefenseClaw writes. Delete that line, then run: defenseclaw doctor --fix",
+                        err=True,
+                    )
+            raise
+        if secret_changed:
+            # GAP-2356: the running gateway still holds the old key, and
+            # config.yaml may be unchanged, so the restart has to be asked for.
+            mark_setup_secret_changed()
+        return result, warnings
 
 
 def _stored_secret(data_dir: str, key: str) -> str | None:

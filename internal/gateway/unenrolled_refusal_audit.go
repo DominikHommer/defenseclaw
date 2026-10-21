@@ -5,8 +5,11 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
@@ -34,6 +37,9 @@ const (
 	// waits for the last refusal rows: naming a domain account can wait on a
 	// domain controller.
 	unenrolledRefusalDrainTimeout = 5 * time.Second
+	// unenrolledRefusalStopTimeout bounds the whole stop: the pipe clients
+	// still being read (a second each), then the drain.
+	unenrolledRefusalStopTimeout = unenrolledRefusalDrainTimeout + 2*time.Second
 )
 
 type unenrolledRefusalKey struct {
@@ -153,36 +159,42 @@ func (u *unenrolledRefusalAuditor) run(ctx context.Context) {
 // runUnenrolledRefusalAudit serves refusal reports until ctx ends and then,
 // before it returns, writes what a stop would otherwise lose: the rows still
 // queued and the counts of the windows still open (GAP-1253). serve returns
-// once ctx ends. Rows are written off the serving goroutines, since naming a
-// domain account can wait on a domain controller, and with a context that a
-// stop does not cancel, so the last rows still reach the audit log.
+// once ctx ends and the pipe handlers it started have returned. Rows are
+// written off the serving goroutines, since naming a domain account can wait
+// on a domain controller, and with a context that a stop does not cancel, so
+// the last rows still reach the audit log.
 func runUnenrolledRefusalAudit(
 	ctx context.Context,
 	serve func(context.Context, *unenrolledRefusalAuditor),
 	write func(context.Context, unenrolledRefusalRow),
 ) {
-	rows := make(chan unenrolledRefusalRow, unenrolledRefusalMaxEntries)
-	var queueMu sync.Mutex
-	closed := false
+	runUnenrolledRefusalAuditQueue(ctx, newUnenrolledRefusalQueue(unenrolledRefusalMaxEntries), serve, write)
+}
+
+func runUnenrolledRefusalAuditQueue(
+	ctx context.Context,
+	queue *unenrolledRefusalQueue,
+	serve func(context.Context, *unenrolledRefusalAuditor),
+	write func(context.Context, unenrolledRefusalRow),
+) {
 	writeCtx := context.WithoutCancel(ctx)
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
-		for row := range rows {
-			write(writeCtx, row)
+		for {
+			rows, more := queue.take()
+			for _, row := range rows {
+				write(writeCtx, row)
+			}
+			if !more {
+				return
+			}
 		}
 	}()
-	auditor := newUnenrolledRefusalAuditor(func(row unenrolledRefusalRow) {
-		queueMu.Lock()
-		defer queueMu.Unlock()
-		if closed {
-			return // a report that arrived after the stop was drained
-		}
-		select {
-		case rows <- row:
-		default:
-		}
-	})
+	// The open windows' counts the stop drains go to the queue even when a
+	// stalled writer has filled it: the auditor's table bounds them.
+	var stopping atomic.Bool
+	auditor := newUnenrolledRefusalAuditor(func(row unenrolledRefusalRow) { queue.push(row, stopping.Load()) })
 	runDone := make(chan struct{})
 	go func() {
 		defer close(runDone)
@@ -190,12 +202,106 @@ func runUnenrolledRefusalAudit(
 	}()
 	serve(ctx, auditor)
 	<-runDone
+	stopping.Store(true)
 	auditor.drain()
-	queueMu.Lock()
-	closed = true
-	close(rows)
-	queueMu.Unlock()
-	<-writerDone
+	queue.close()
+	select {
+	case <-writerDone:
+	case <-time.After(unenrolledRefusalDrainTimeout):
+		rows, attempts := queue.pending()
+		fmt.Fprintf(os.Stderr, "[sidecar-api] unenrolled-account refusal audit: %d rows (%d refusals) still queued: "+
+			"the audit writer did not finish within %s of the stop\n", rows, attempts, unenrolledRefusalDrainTimeout)
+	}
+	if rows, attempts := queue.lost(); rows > 0 {
+		fmt.Fprintf(os.Stderr, "[sidecar-api] unenrolled-account refusal audit: %d rows (%d refusals) dropped "+
+			"while the audit writer was behind\n", rows, attempts)
+	}
+}
+
+// unenrolledRefusalQueue holds the refusal rows waiting for the writer. A
+// row for a key that already has one waiting is merged into it, so a stalled
+// writer costs rows but not counts. Past its bound a new key's row is
+// dropped and counted; the stop's drain is never dropped.
+type unenrolledRefusalQueue struct {
+	mu           sync.Mutex
+	limit        int
+	rows         []unenrolledRefusalRow
+	index        map[unenrolledRefusalKey]int
+	ready        chan struct{}
+	closed       bool
+	lostRows     int
+	lostAttempts int
+}
+
+func newUnenrolledRefusalQueue(limit int) *unenrolledRefusalQueue {
+	return &unenrolledRefusalQueue{
+		limit: limit,
+		index: make(map[unenrolledRefusalKey]int),
+		ready: make(chan struct{}, 1),
+	}
+}
+
+func (q *unenrolledRefusalQueue) push(row unenrolledRefusalRow, drain bool) {
+	key := unenrolledRefusalKey{sid: row.SID, connector: row.Report.Connector, reason: row.Report.Reason}
+	q.mu.Lock()
+	switch at, waiting := q.index[key]; {
+	case q.closed:
+		q.lostRows, q.lostAttempts = q.lostRows+1, q.lostAttempts+row.Attempts
+	case waiting:
+		q.rows[at].Attempts += row.Attempts
+		q.rows[at].Report = row.Report
+	case !drain && len(q.rows) >= q.limit:
+		q.lostRows, q.lostAttempts = q.lostRows+1, q.lostAttempts+row.Attempts
+	default:
+		q.index[key] = len(q.rows)
+		q.rows = append(q.rows, row)
+	}
+	q.mu.Unlock()
+	select {
+	case q.ready <- struct{}{}:
+	default:
+	}
+}
+
+// take waits for rows and returns them all; more is false once the queue
+// is closed and empty.
+func (q *unenrolledRefusalQueue) take() (rows []unenrolledRefusalRow, more bool) {
+	for {
+		q.mu.Lock()
+		if len(q.rows) > 0 || q.closed {
+			rows, more = q.rows, len(q.rows) > 0 || !q.closed
+			q.rows, q.index = nil, make(map[unenrolledRefusalKey]int)
+			q.mu.Unlock()
+			return rows, more
+		}
+		q.mu.Unlock()
+		<-q.ready
+	}
+}
+
+func (q *unenrolledRefusalQueue) close() {
+	q.mu.Lock()
+	q.closed = true
+	q.mu.Unlock()
+	select {
+	case q.ready <- struct{}{}:
+	default:
+	}
+}
+
+func (q *unenrolledRefusalQueue) pending() (rows, attempts int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, row := range q.rows {
+		attempts += row.Attempts
+	}
+	return len(q.rows), attempts
+}
+
+func (q *unenrolledRefusalQueue) lost() (rows, attempts int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.lostRows, q.lostAttempts
 }
 
 // auditUnenrolledRefusal writes one refusal row for an account the pipe
