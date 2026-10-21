@@ -5,6 +5,7 @@
     "sources",
     "ad-linux",
     "okta",
-    "entra-id"
+    "entra-id",
+    "reference"
   ]
 }
