@@ -23,6 +23,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
 
@@ -108,12 +109,25 @@ func TestOldGatewayTimeoutWayOnStartsWithoutAStop(t *testing.T) {
 		errorPhaseReason(&audit.SandboxCondition{Type: "Ready", Status: "False", Reason: "ProvisioningTimedOut", Message: "Provisioning repair window expired after 300 seconds"}),
 		errorPhaseReason(&audit.SandboxCondition{Type: "Ready", Status: "False", Reason: "ImagePreparationTimedOut", Message: "exceeded its absolute deadline"}),
 	} {
-		if got := errorPhaseWayOn("box", reason, upgrade); !timedOut(got) {
-			t.Errorf("%q on an old gateway: %q", reason, got)
+		for _, microVM := range []bool{false, true} {
+			if got := errorPhaseWayOn("box", reason, upgrade, microVM); !timedOut(got) {
+				t.Errorf("%q on an old gateway (MicroVM %v): %q", reason, microVM, got)
+			}
 		}
 	}
-	if got := errorPhaseWayOn("box", "Unavailable: the container stopped", upgrade); !strings.Contains(got, upgrade+", then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`") {
+	if got := errorPhaseWayOn("box", "Unavailable: the container stopped", upgrade, false); !strings.Contains(got, upgrade+", then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`") ||
+		strings.Contains(got, "first `defenseclaw sandbox stop box`") {
 		t.Errorf("another error state on an old gateway: %q", got)
+	}
+	// On a MicroVM nothing flushes it (OpenShell runs no command in it):
+	// the upgrade waits for its guest to write its disk back, which keeps
+	// its work, and the way on does not count on a stop to flush it.
+	if got := errorPhaseWayOn("box", "ProcessExited: main process exited with status 1", upgrade, true); !strings.HasPrefix(got,
+		"this OpenShell can neither stop nor start a sandbox in its error state, and nothing flushes its MicroVM, whose guest writes its disk back on its own within "+
+			openshell.EndedSettleWords()) ||
+		!strings.Contains(got, "the upgrade waits for that, and so keeps its work. "+upgrade+", then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`") ||
+		strings.Contains(got, "first `defenseclaw sandbox stop box`") {
+		t.Errorf("a MicroVM in the error state on an old gateway: %q", got)
 	}
 
 	e := newEnv(t, nil)
@@ -137,7 +151,7 @@ func TestOldGatewayTimeoutWayOnStartsWithoutAStop(t *testing.T) {
 	if !timedOut(line) {
 		t.Fatalf("the feed's line on 0.1.3: %q", line)
 	}
-	refusal := e.m.errorPhaseRefusal("box", e.boxOf("box").rec.PhaseReason,
+	refusal := e.m.errorPhaseRefusal("box", e.boxOf("box").rec.PhaseReason, "",
 		&types.StatusError{Code: types.ErrorConflict, Message: "sandbox must be Stopped, Completed, or a failed main-process Error to start (current phase: Error)"})
 	var apiErr *sandboxapi.Error
 	if !errors.As(refusal, &apiErr) || !timedOut(apiErr.Detail) {
@@ -147,10 +161,14 @@ func TestOldGatewayTimeoutWayOnStartsWithoutAStop(t *testing.T) {
 
 // TestMayHoldCompute: what stops the gateway on its own waits for every
 // sandbox that may still hold compute, not only the running ones: one
-// starting or stopping, in an unknown phase, or a MicroVM in OpenShell's
-// error state, which DefenseClaw cannot flush before the stop. A docker
-// sandbox in that state is a stopped container, whose writes the stop of
-// docker kept.
+// starting or stopping, in an unknown phase, or a MicroVM whose workload
+// ended (completed, or in OpenShell's error state), whose VM still runs
+// (GAP-0012) and which nothing in OpenShell flushes. A docker sandbox in
+// those phases is an exited container, whose writes the stop of docker
+// kept, and a missing one is gone. A MicroVM whose guest has had
+// openshell.EndedSettle since its workload ended (EndedAt) to write its
+// disk back, or whose provisioning timed out (nothing ran in it), holds
+// nothing to lose; one whose VM OpenShell could not poll may still run.
 func TestMayHoldCompute(t *testing.T) {
 	vm, docker := string(openshell.DriverVM), string(openshell.DriverDocker)
 	for _, tc := range []struct {
@@ -171,9 +189,13 @@ func TestMayHoldCompute(t *testing.T) {
 		{audit.SandboxPhaseError, docker, false},
 		{audit.SandboxPhaseError, "", false},
 		{audit.SandboxPhaseStopped, vm, false},
-		{audit.SandboxPhaseCompleted, vm, false},
+		{audit.SandboxPhaseCompleted, vm, true},
+		{audit.SandboxPhaseCompleted, "podman", true},
+		{audit.SandboxPhaseCompleted, docker, false},
+		{audit.SandboxPhaseCompleted, "", false},
 		{audit.SandboxPhaseDeleting, vm, false},
 		{audit.SandboxPhaseDeleted, vm, false},
+		{phaseMissing, vm, false},
 	} {
 		if got := MayHoldCompute(string(tc.phase), tc.driver); got != tc.holding {
 			t.Errorf("MayHoldCompute(%q, %q) = %v", tc.phase, tc.driver, got)
@@ -195,26 +217,63 @@ func TestMayHoldCompute(t *testing.T) {
 		t.Fatalf("a running sandbox: running %d, live %d", st.Running, *st.Live)
 	}
 	b := e.boxOf("box")
+	now, _ := e.fakeClock(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
+	timedOut := "ProvisioningTimedOut: Provisioning repair window expired after 300 seconds"
+	unpolled := "ProcessPollFailed: Bad file descriptor"
+	justNow, settled := now(), now().Add(-openshell.EndedSettle)
 	for _, tc := range []struct {
-		phase  audit.SandboxPhase
-		driver string
-		live   int
+		phase          audit.SandboxPhase
+		driver, reason string
+		endedAt        time.Time
+		live           int
 	}{
-		{audit.SandboxPhaseError, vm, 1},
-		{audit.SandboxPhaseError, docker, 0},
-		{audit.SandboxPhaseStarting, docker, 1},
-		{audit.SandboxPhaseStopped, vm, 0},
+		{audit.SandboxPhaseError, vm, "", justNow, 1},
+		{audit.SandboxPhaseError, docker, "", justNow, 0},
+		{audit.SandboxPhaseStarting, docker, "", time.Time{}, 1},
+		{audit.SandboxPhaseStopped, vm, "", time.Time{}, 0},
+		{audit.SandboxPhaseCompleted, vm, "", justNow, 1},
+		{audit.SandboxPhaseCompleted, vm, "", time.Time{}, 1},
+		{audit.SandboxPhaseCompleted, docker, "", justNow, 0},
+		{audit.SandboxPhaseCompleted, vm, "", settled, 0},
+		{audit.SandboxPhaseError, vm, "", settled, 0},
+		{audit.SandboxPhaseError, vm, unpolled, settled, 1},
+		{audit.SandboxPhaseError, vm, timedOut, justNow, 0},
+		{audit.SandboxPhaseCompleted, vm, timedOut, justNow, 1},
+		{audit.SandboxPhaseUnknown, vm, "", settled, 1},
+		{audit.SandboxPhaseReady, vm, "", settled, 1},
 	} {
 		e.m.mu.Lock()
-		b.phase, b.rec.Driver = tc.phase, tc.driver
+		b.phase, b.rec.Driver, b.rec.PhaseReason, b.rec.EndedAt = tc.phase, tc.driver, tc.reason, tc.endedAt
 		e.m.mu.Unlock()
-		if st := status(); st.Running != 0 || *st.Live != tc.live || st.Busy() != tc.live {
-			t.Errorf("%s on %s: running %d, live %d, busy %d", tc.phase, tc.driver, st.Running, *st.Live, st.Busy())
+		if st := status(); st.Running != boolInt(tc.phase == audit.SandboxPhaseReady) || *st.Live != tc.live || st.Busy() != tc.live {
+			t.Errorf("%s on %s (reason %q, ended at %v): running %d, live %d, busy %d", tc.phase, tc.driver, tc.reason, tc.endedAt, st.Running, *st.Live, st.Busy())
+		}
+		v := sandboxapi.Sandbox{Phase: string(tc.phase), Driver: tc.driver, PhaseReason: tc.reason, EndedAt: tc.endedAt}
+		if got := HoldsCompute(v, now()); got != (tc.live == 1) {
+			t.Errorf("HoldsCompute(%+v) = %v", v, got)
 		}
 	}
+	// A box OpenShell no longer has holds nothing.
+	e.m.mu.Lock()
+	b.phase, b.rec.Driver, b.rec.PhaseReason, b.rec.EndedAt, b.missing = audit.SandboxPhaseError, vm, "", time.Time{}, true
+	e.m.mu.Unlock()
+	if st := status(); *st.Live != 0 {
+		t.Errorf("a missing MicroVM: live %d", *st.Live)
+	}
+	e.m.mu.Lock()
+	b.missing = false
+	e.m.mu.Unlock()
 	// A daemon before Live does not say which phases its sandboxes are in:
 	// every one counts.
 	if got := (&sandboxapi.Status{Sandboxes: 2, Running: 0}).Busy(); got != 2 {
 		t.Errorf("busy without live = %d", got)
 	}
+}
+
+// boolInt is 1 for true, 0 for false.
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

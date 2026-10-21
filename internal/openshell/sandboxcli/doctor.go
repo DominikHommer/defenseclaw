@@ -297,11 +297,15 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 	// OpenShell's error state because the gateway cannot run it, not because a
 	// container stopped or Docker restarted (GAP-0455). A gateway older than
 	// openshell.SandboxMin can neither stop nor start a sandbox in that state.
-	liveDriver, oldGateway := "", false
+	liveDriver, oldGateway, managed := "", false, false
 	if st, serr := api.Status(ctx); serr == nil && st.Gateway != nil {
 		liveDriver = st.Gateway.Driver
 		oldGateway = !openshell.RunsSandboxes(st.Gateway.Version)
+		managed = st.Managed != nil
 	}
+	// The MicroVMs in the error state, which nothing flushes: ended, whose
+	// workload ended, and unpolled, whose VM OpenShell could not poll.
+	var endedVMs, unpolledVMs []string
 	otherDriver := otherDriverSandboxes(list, liveDriver)
 	otherDriverNames := map[string]bool{}
 	for _, sb := range otherDriver {
@@ -317,6 +321,13 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 			timedOut = append(timedOut, sb.Name)
 		default:
 			errored = append(errored, sb.Name)
+			if d, ok := openshell.LookupDriver(sb.Driver); !ok || !d.StopFlushes {
+				if openshell.WorkloadEnded(openshell.PhaseError, sb.PhaseReason) {
+					endedVMs = append(endedVMs, sb.Name)
+				} else {
+					unpolledVMs = append(unpolledVMs, sb.Name)
+				}
+			}
 		}
 		if sb.Phase != "ready" && sb.Phase != "error" && sb.Hooks.Silent && sb.Hooks.OnSilence == "stop" {
 			stoppedSilent = append(stoppedSilent, sb.Name)
@@ -360,8 +371,33 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		if oldGateway {
 			// The upgrade first; after it, the way on of the upgraded
 			// gateway, which still refuses to stop a sandbox whose
-			// provisioning timed out.
+			// provisioning timed out. The upgrade (per user, or the
+			// administrator's pin move on a managed computer) waits for a
+			// MicroVM in the error state, which nothing flushes: until its
+			// guest has written its disk back, or, while OpenShell cannot
+			// tell whether it still runs, until it is deleted.
 			c.Detail += ", where this OpenShell can neither stop nor start " + itThem(append(slices.Clone(errored), timedOut...))
+			upgrade, move, waits := "upgrade OpenShell to "+openshell.InstallerVersion, "the upgrade", []string{"see Gateway"}
+			if managed {
+				upgrade, move, waits = "your organization's OpenShell setting moves this account to "+openshell.InstallerVersion+
+					" on its own where DefenseClaw installs OpenShell (ask IT otherwise)", "the move", nil
+			}
+			if len(endedVMs) > 0 {
+				been := " has been"
+				if len(endedVMs) > 1 {
+					been = " have been"
+				}
+				waits = append(waits, move+" waits until "+strings.Join(endedVMs, ", ")+been+" in the error state for "+
+					openshell.EndedSettleWords()+": nothing flushes "+itsTheir(endedVMs)+" MicroVM, whose guest writes its disk back by then, which keeps "+
+					itsTheir(endedVMs)+" work")
+			}
+			if len(unpolledVMs) > 0 {
+				waits = append(waits, move+" waits for "+strings.Join(unpolledVMs, ", ")+" for as long as OpenShell cannot tell whether "+
+					itsTheir(unpolledVMs)+" MicroVM still runs: `"+CommandName+" delete NAME` ends that wait if "+itsTheir(unpolledVMs)+" work is not needed")
+			}
+			if len(waits) > 0 {
+				upgrade += " (" + strings.Join(waits, "; ") + ")"
+			}
 			var after []string
 			if len(errored) > 0 {
 				after = append(after, "`"+CommandName+" stop NAME` and `"+CommandName+" start NAME` for "+strings.Join(errored, ", ")+
@@ -371,7 +407,7 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 				after = append(after, "for "+strings.Join(timedOut, ", ")+" wait a minute for OpenShell's cleanup, then `"+CommandName+
 					" start NAME` with no stop: OpenShell "+openshell.SandboxMin+" refuses to stop a sandbox whose provisioning timed out")
 			}
-			c.Fix = &openshell.Fix{Summary: "upgrade OpenShell to " + openshell.InstallerVersion + " (see Gateway), then " + strings.Join(after, "; ")}
+			c.Fix = &openshell.Fix{Summary: upgrade + ", then " + strings.Join(after, "; ")}
 		}
 	case len(stoppedSilent) > 0:
 		c.Status = openshell.StatusWarn
@@ -878,7 +914,11 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			// known) it is a no by default, and --yes takes that default.
 			def := true
 			if d, _ := openshell.LookupDriver(string(rep.Driver)); c.Fix.RestartsGateway && !d.StopFlushes {
-				if why := a.restartStops(ctx); why != "" {
+				why, wait := a.restartStops(ctx)
+				if wait != "" && o.Output != OutputJSON {
+					a.note(c.Title + ": " + wait)
+				}
+				if why != "" {
 					def = false
 					if o.Output != OutputJSON {
 						a.warn(c.Title + ": " + why)

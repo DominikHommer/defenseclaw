@@ -220,12 +220,12 @@ func versionNote(version string) string {
 
 // describePending reports a change that waits for an account's sandboxes.
 func (l *lifecycle) describePending(entry pending) {
-	waiting := fmt.Sprintf("%d sandboxes run (or are starting, stopping, or a MicroVM in OpenShell's error state)", entry.Sandboxes)
+	waiting := fmt.Sprintf("%d sandboxes run (or are starting, stopping, or a MicroVM whose workload ended, its disk not written back yet)", entry.Sandboxes)
 	switch {
 	case entry.Sandboxes < 0:
 		waiting = "the lifecycle could not tell whether sandboxes run"
 	case entry.Sandboxes == 1:
-		waiting = "1 sandbox runs (or is starting, stopping, or a MicroVM in OpenShell's error state)"
+		waiting = "1 sandbox runs (or is starting, stopping, or a MicroVM whose workload ended, its disk not written back yet)"
 	case entry.Sandboxes == 0:
 		waiting = "waiting to be tried again"
 	}
@@ -252,7 +252,9 @@ func (l *lifecycle) describePending(entry pending) {
 			entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionRepair)))
 		return
 	}
-	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running",
+	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running. "+
+		"The user's `defenseclaw sandbox stop NAME` flushes and stops a running one. Nothing in OpenShell flushes a MicroVM whose workload ended: it stops counting once its guest has had "+
+		openshell.EndedSettleWords()+" to write its disk back, which keeps its work",
 		entry.Kind, entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionEnsure)))
 }
 
