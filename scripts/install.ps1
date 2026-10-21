@@ -1246,6 +1246,19 @@ function Invoke-FileCopy([string]$From, [string]$To) {
     [IO.File]::Copy($From, $To, $false)
 }
 
+function New-VerifiedCopy([string]$From, [string]$To) {
+    # Copy $From to $To, a path no hook names, and keep it only when it is a
+    # whole copy. A copy that fails or stops partway is removed and $false
+    # returned, so a partial file is never published or counted as a copy of
+    # the old launcher.
+    try {
+        Invoke-FileCopy $From $To
+        if ((Get-Sha256 $From) -eq (Get-Sha256 $To)) { return $true }
+    } catch { }
+    Remove-Item -LiteralPath $To -Force -ErrorAction SilentlyContinue
+    return $false
+}
+
 function Close-SwapGap([string]$New, [string]$Backup, [string]$Restore, [string]$Destination) {
     # ReplaceFile stopped after it renamed the installed file to the backup
     # (ERROR_UNABLE_TO_MOVE_REPLACEMENT_2), so nothing is at $Destination.
@@ -1253,18 +1266,33 @@ function Close-SwapGap([string]$New, [string]$Backup, [string]$Restore, [string]
     # from the backup, else the restore copy Switch-InPlace made before the
     # swap (a scanner can hold both the new file and the backup against a
     # rename), else a copy of the old file (a hold against a rename still lets
-    # it be read). No step waits with the path missing. Returns $true when the
-    # new file is in place, $false when the old one is back.
-    for ($tries = 0; ; $tries++) {
-        if (Test-Path -LiteralPath $New) { try { Invoke-FileMove $New $Destination; return $true } catch { } }
-        foreach ($old in @($Backup, $Restore)) {
-            if ($old -and (Test-Path -LiteralPath $old)) { try { Invoke-FileMove $old $Destination; return $false } catch { } }
+    # it be read). Only renames reach $Destination: a copy is made to a ready
+    # file beside it, checked, and renamed in, so a hook never runs a partial
+    # launcher and a failed copy never passes for the old one. No step waits
+    # with the path missing. Returns $true when the new file is in place,
+    # $false when the old one is back.
+    $ready = ""
+    $copies = 0
+    try {
+        for ($tries = 0; ; $tries++) {
+            if (Test-Path -LiteralPath $New) { try { Invoke-FileMove $New $Destination; return $true } catch { } }
+            foreach ($old in @($Backup, $Restore)) {
+                if ($old -and (Test-Path -LiteralPath $old)) { try { Invoke-FileMove $old $Destination; return $false } catch { } }
+            }
+            if (-not $ready) {
+                foreach ($old in @($Restore, $Backup)) {
+                    if (-not $old -or -not (Test-Path -LiteralPath $old)) { continue }
+                    $copies++
+                    $candidate = "$Backup.ready$copies"
+                    if (New-VerifiedCopy $old $candidate) { $ready = $candidate; break }
+                }
+            }
+            if ($ready) { try { Invoke-FileMove $ready $Destination; $ready = ""; return $false } catch { } }
+            if ($tries -ge 200) { throw "Could not put $Destination back after a partial replace; the installed file is $Backup" }
+            Start-Sleep -Milliseconds 50
         }
-        foreach ($old in @($Restore, $Backup)) {
-            if ($old -and (Test-Path -LiteralPath $old)) { try { Invoke-FileCopy $old $Destination; return $false } catch { } }
-        }
-        if ($tries -ge 200) { throw "Could not put $Destination back after a partial replace; the installed file is $Backup" }
-        Start-Sleep -Milliseconds 50
+    } finally {
+        if ($ready) { Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -1283,22 +1311,24 @@ function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) 
     # the retries then run with the installed file back in place. The restore
     # copy, an independent copy of the installed file made before each
     # attempt, is what Close-SwapGap publishes when a scanner holds both the
-    # new file and the backup. Its name starts like the backup's, so the next
-    # install removes one this run could not.
+    # new file and the backup; only a verified whole copy is used. Its name
+    # starts like the backup's, so the next install removes one this run
+    # could not.
     $aside = "$Destination.old-" + (Get-Date -Format "yyyyMMddTHHmmssfff")
     $restore = "$aside.restore"
+    $restoreReady = $false
     try {
         for ($waited = 0; ; $waited++) {
-            if (-not (Test-Path -LiteralPath $restore)) {
-                try { Invoke-FileCopy $Destination $restore } catch { Remove-Item -LiteralPath $restore -Force -ErrorAction SilentlyContinue }
-            }
+            # A recovery may have moved the last restore copy in: make another.
+            if (-not $restoreReady -or -not (Test-Path -LiteralPath $restore)) { $restoreReady = New-VerifiedCopy $Destination $restore }
             try {
                 Invoke-FileReplace $New $Destination $aside
                 return
             } catch {
                 $reason = $_.Exception.Message
             }
-            if (-not (Test-Path -LiteralPath $Destination) -and (Close-SwapGap $New $aside $restore $Destination)) {
+            $restoreCopy = if ($restoreReady) { $restore } else { "" }
+            if (-not (Test-Path -LiteralPath $Destination) -and (Close-SwapGap $New $aside $restoreCopy $Destination)) {
                 return
             }
             if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
@@ -1309,6 +1339,8 @@ function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) 
         }
     } finally {
         # Keep them when nothing is at $Destination: they are the old file.
+        # Only whole files are ever renamed to $Destination, so one there is a
+        # launcher.
         if (Test-Path -LiteralPath $Destination -PathType Leaf) {
             foreach ($leftover in @($aside, $restore)) { Remove-Item -LiteralPath $leftover -Force -ErrorAction SilentlyContinue }
         }

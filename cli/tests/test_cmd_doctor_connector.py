@@ -444,7 +444,7 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         "defenseclaw.fail_mode.connector_fail_mode_report",
         return_value={
             "effective": "open",
-            "provenance": "process-env",
+            "provenance": "hook-script",
             "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
         },
     )
@@ -460,7 +460,7 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         self.assertEqual(
             mode_rows[0]["detail"],
             "action; fail-mode=open (observe mode keeps hooks fail-open; "
-            "guardrail.hook_fail_mode=closed applies in action mode); provenance=process-env",
+            "guardrail.hook_fail_mode=closed applies in action mode); provenance=hook-script",
         )
         self.assertFalse(any(c["label"] == "Fail mode" for c in r.checks))
 

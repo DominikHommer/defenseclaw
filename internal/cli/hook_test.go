@@ -269,6 +269,41 @@ func TestReadHookSidecarParsing(t *testing.T) {
 	}
 }
 
+// 1.0.4 review (loop round 3): a v2 sidecar whose connector map is present
+// but not an object of strings, or holds a blank entry, never falls back to
+// the legacy open mode. A missing map (what every release writes before the
+// first connector entry) still keeps the legacy mode of an unrefreshed
+// install.
+func TestReadHookSidecarMalformedConnectorMapResolvesClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"null-map", `{"version":2,"fail_modes":null,"legacy_fail_mode":"open"}`, "closed"},
+		{"list-map", `{"version":2,"fail_modes":["open"],"legacy_fail_mode":"open"}`, "closed"},
+		{"false-map", `{"version":2,"fail_modes":false,"legacy_fail_mode":"open"}`, "closed"},
+		{"string-map", `{"version":2,"fail_modes":"open","legacy_fail_mode":"open"}`, "closed"},
+		{"non-string-entry", `{"version":2,"fail_modes":{"codex":true},"legacy_fail_mode":"open"}`, "closed"},
+		{"blank-entry", `{"version":2,"fail_modes":{"codex":""},"legacy_fail_mode":"open"}`, "closed"},
+		{"space-entry", `{"version":2,"fail_modes":{"codex":" "},"legacy_fail_mode":"open"}`, "closed"},
+		// Controls.
+		{"missing-map-legacy-open", `{"version":2,"legacy_fail_mode":"open"}`, "open"},
+		{"empty-map-legacy-open", `{"version":2,"fail_modes":{},"legacy_fail_mode":"open"}`, "open"},
+		{"peer-entry-legacy-open", `{"version":2,"fail_modes":{"claudecode":"closed"},"legacy_fail_mode":"open"}`, "open"},
+		{"own-entry-open", `{"version":2,"fail_modes":{"codex":"open"},"legacy_fail_mode":"closed"}`, "open"},
+		{"own-entry-closed", `{"version":2,"fail_modes":{"codex":"closed"},"legacy_fail_mode":"open"}`, "closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".hookcfg")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := nativeHookFailMode(hookSidecarFailMode(readHookSidecar(path), "codex")); got != tc.want {
+				t.Fatalf("fail mode %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildHookOptionsRejectsNonLoopbackAddr(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", home)

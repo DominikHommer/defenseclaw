@@ -338,11 +338,16 @@ defenseclaw_shared_hook_token_file() {
 # connector is selected: a selector can only tighten. With every record open,
 # a selected connector (the single record, or the environment's choice) needs
 # an open record of its own; with none selected (several records, or none),
-# only the unscoped legacy mode (.hookcfg.legacy, legacy_fail_mode) can open
-# the call. After an upgrade, a kept legacy open therefore never reopens a
-# connector recorded closed. An inherited DEFENSECLAW_FAIL_MODE can only
-# tighten (GAP-0315); guardian-managed hooks trust only installer-owned
-# state. Malformed, ambiguous or missing state fails closed.
+# only the unscoped legacy mode can open the call, and only when its flat
+# record (.hookcfg.legacy, which names no connector) and the JSON
+# legacy_fail_mode both say open: every writer since 0.8.10 writes the two
+# together. After an upgrade, a kept legacy open therefore never reopens a
+# connector recorded closed. A v2 JSON whose fail_modes is present but not an
+# object (null included) is malformed; a missing fail_modes is the shape every
+# release writes for an install with no connector entry yet. An inherited
+# DEFENSECLAW_FAIL_MODE can only tighten (GAP-0315); guardian-managed hooks
+# trust only installer-owned state. Malformed, ambiguous or missing state
+# fails closed.
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
@@ -381,15 +386,15 @@ defenseclaw_shared_runtime_fail_mode() {
       summary="$(jq -r --arg connector "$connector" '
         def word: if . == null or . == "" then "none" elif . == "open" then "open" else "closed" end;
         if type == "object" and (.version | type) == "number" and .version >= 2
-          and ((.fail_modes // {}) | type) == "object" then
-          (.fail_modes // {}) as $modes
+          and ((has("fail_modes") | not) or (.fail_modes | type) == "object") then
+          (if has("fail_modes") then .fail_modes else {} end) as $modes
           | "\($modes | length) \(if [$modes[]] | all(. == "open") then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word) end) \(.legacy_fail_mode | word)"
         else "invalid" end' "$config" 2>/dev/null)" || summary="invalid"
     elif _dc_python3_usable; then
       summary="$(python3 -c 'import json,sys
 d=json.load(open(sys.argv[1],encoding="utf-8"))
 assert isinstance(d,dict) and type(d.get("version")) is int and d["version"]>=2
-m=d.get("fail_modes") or {}
+m=d.get("fail_modes",{})
 assert isinstance(m,dict)
 w=lambda v:"none" if v in (None,"") else ("open" if v=="open" else "closed")
 c=sys.argv[2]
@@ -424,16 +429,21 @@ print(len(m),"open" if all(v=="open" for v in m.values()) else "closed",w(m.get(
   fi
   # No selected connector: several records (an ambiguous identity) or none.
   # Only the unscoped legacy mode can open such a call, as before connector
-  # records existed; a closed record already closed it above.
-  local legacy_flat=none
-  if [ -f "${hook_dir}/.hookcfg.legacy" ]; then
-    legacy_flat="$(defenseclaw_flat_hookcfg_value "${hook_dir}/.hookcfg.legacy" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
-    [ "$legacy_flat" = "open" ] || legacy_flat=closed
+  # records existed; a closed record already closed it above. Its flat record
+  # must name no connector and say open, and JSON a parser read must agree.
+  # Without a parser the flat record decides, as for connector records.
+  local legacy="${hook_dir}/.hookcfg.legacy" legacy_connector
+  if ! legacy_connector="$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_CONNECTOR 2>/dev/null)" \
+    || [ -n "$legacy_connector" ] \
+    || [ "$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)" != "open" ]; then
+    printf closed
+    return 0
   fi
-  case "$legacy_flat/$json_legacy" in
-    open/open|open/none|none/open) printf open ;;
-    *) printf closed ;;
-  esac
+  if [ -n "$summary" ] && [ "$json_legacy" != "open" ]; then
+    printf closed
+    return 0
+  fi
+  printf open
 }
 
 # _defenseclaw_sweep_stale_hook_dirs removes orphaned hook-tmp.*

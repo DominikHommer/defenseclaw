@@ -132,14 +132,14 @@ class TestPrintAgentsRoster(unittest.TestCase):
     def test_roster_reports_effective_fail_mode_and_provenance(self):
         report = {
             "effective": "open",
-            "provenance": "process-env",
+            "provenance": "hook-script",
             "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
         }
         with patch.object(cmd_status, "_effective_status_fail_mode", return_value=report):
             out = _render(_cfg(["codex"], modes={"codex": "action"}))
 
         self.assertIn("fail-mode=open (observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed", out)
-        self.assertIn("provenance=process-env", out)
+        self.assertIn("provenance=hook-script", out)
 
     def test_zero_connectors_shows_no_active(self):
         out = _render(_cfg([]))
