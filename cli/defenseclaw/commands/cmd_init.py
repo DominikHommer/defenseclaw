@@ -276,7 +276,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     # GAP-2593: the LLM key's env var name too.
     llm_api_key_env = _validated_api_key_env_name(llm_api_key_env, "'--llm-api-key-env'", "DEFENSECLAW_LLM_KEY")
     connector = _single_connector_option(connector)
-    _refuse_unknown_action_connectors(action_connectors)
+    _refuse_unknown_action_connectors(action_connectors, supplied=_option_supplied("action_connectors"))
     requested_connectors = []
     if connector:
         requested_connectors.append(_normalize_connector_arg(connector))
@@ -976,16 +976,32 @@ def _parse_connector_list(raw: str | None) -> list[str]:
     return out
 
 
-def _refuse_unknown_action_connectors(raw: str | None) -> None:
-    """Stop on an --action-connectors entry that is not a hook connector.
+def _option_supplied(name: str) -> bool:
+    """Whether the operator passed option *name* (command line or env)."""
+    ctx = click.get_current_context(silent=True)
+    source = ctx.get_parameter_source(name) if ctx is not None else None
+    return source in (click.core.ParameterSource.COMMANDLINE, click.core.ParameterSource.ENVIRONMENT)
+
+
+def _refuse_unknown_action_connectors(raw: str | None, *, supplied: bool) -> None:
+    """Stop on an --action-connectors entry that is not a hook connector, or
+    on a supplied value that names none (``--action-connectors ,``).
 
     The entry used to be skipped with a warning after the run had already
     replaced the guarded roster, so a typo turned an enforcing install into
-    an observe-only one for another connector (GAP-0044).
+    an observe-only one for another connector (GAP-0044). A value with no
+    names read as the option left out, so first run fell back to one
+    connector in observe.
     """
     from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
 
-    unknown = [name for name in _parse_connector_list(raw) if name not in _HOOK_ENFORCED_CONNECTORS]
+    names = _parse_connector_list(raw)
+    if (supplied or (raw or "").strip()) and not names:
+        raise click.UsageError(
+            "--action-connectors names no connector; nothing was changed. "
+            f"Name one or more of: {', '.join(sorted(_HOOK_ENFORCED_CONNECTORS))}, or leave the option out."
+        )
+    unknown = [name for name in names if name not in _HOOK_ENFORCED_CONNECTORS]
     if unknown:
         raise click.UsageError(
             f"--action-connectors: {', '.join(unknown)} is not a hook connector; nothing was changed. "
