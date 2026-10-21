@@ -7,33 +7,30 @@ keywords:
   - Codex notify bridge
 ---
 
-Reference for the [Codex connector](/docs/connectors/codex). Codex talks to `api.openai.com` or the ChatGPT backend directly. DefenseClaw observes through Codex's hooks, its [native OpenTelemetry exporter](https://learn.chatgpt.com/docs/config-file/config-advanced#observability-and-telemetry) and the notify bridge. No proxy is involved.
+Reference for the [Codex connector](/docs/connectors/codex). Codex talks to `api.openai.com` or the ChatGPT backend directly. DefenseClaw observes through Codex's hooks, its [native OpenTelemetry exporter](https://learn.chatgpt.com/docs/config-file/config-advanced#observability-and-telemetry) and, under Secure Client only, the notify bridge. Per-user and standalone enterprise installs do not register the bridge. No proxy is involved.
 
 ## Install surface
 
 <Flow
   direction="TB"
-  caption="Codex reaches the gateway's API port three separate ways. Only the hooks can block. They run on up to eleven events, depending on the Codex version, and nine of them can block. Codex's OpenTelemetry exporter and the notify bridge, which reports agent-turn-complete to /api/v1/codex/notify, only record."
+  caption="Codex reaches the gateway through hooks and OpenTelemetry. Only the hooks can block. They run on up to eleven events, depending on the Codex version, and nine of them can block. The OpenTelemetry exporter only records."
 >
   <Node id="codex" kind="agent">Codex</Node>
   <Node id="hooks" kind="connector">{`DefenseClaw hooks\nup to eleven events`}</Node>
   <Node id="otel" kind="connector">{`Built-in telemetry\nOpenTelemetry exporter`}</Node>
-  <Node id="notify" kind="connector">{`Notify bridge\nafter each turn`}</Node>
   <Node id="gateway" kind="gateway">{`DefenseClaw gateway\nAPI port, 18970 by default`}</Node>
   <Edge from="codex" to="hooks" label="runs" />
   <Edge from="hooks" to="gateway" label="asks for a verdict" />
   <Edge from="codex" to="otel" label="exports" />
   <Edge from="otel" to="gateway" label="logs, traces, metrics" />
-  <Edge from="codex" to="notify" label="runs" />
-  <Edge from="notify" to="gateway" label="reports turn end" />
 </Flow>
 
 ### Platform status
 
 | Platform | Status | Connector path |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | Portable command hooks, native OTel and the notify bridge. |
-| Native Windows x64 | **Supported** | A system PowerShell bridge starts the protected `defenseclaw-hook.exe` for each registered event, plus native OTel and the notify bridge. |
+| macOS and Linux | **Supported** | Portable command hooks and native OTel. |
+| Native Windows x64 | **Supported** | A system PowerShell bridge starts the protected `defenseclaw-hook.exe` for each registered event, plus native OTel. |
 
 ### Setup details
 
@@ -47,7 +44,7 @@ On native Windows, DefenseClaw writes each event and contract into `%CODEX_HOME%
 
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
-| Hooks, OTel, notify | `~/.codex/config.toml` | `%CODEX_HOME%\config.toml` |
+| Hooks and OTel | `~/.codex/config.toml` | `%CODEX_HOME%\config.toml` |
 | Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Credential sidecars | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
 
@@ -149,7 +146,7 @@ When a hook fails closed because DefenseClaw cannot decide, `Stop`, `SubagentSto
 | --- | --- |
 | Hooks do nothing | `codex features disable hooks` (or `[features] hooks = false`). Run `codex features enable hooks`. |
 | Codex refuses to load `config.toml` ("missing field command") | DefenseClaw `command` lines were deleted by hand, leaving `[[hooks.*]]` entries. The self-heal, `defenseclaw setup codex --yes` and `defenseclaw doctor --fix` restore them. To stop guarding Codex, run `defenseclaw guardrail disable --connector codex`. |
-| Notify entry changed or deleted | The top-level `notify` entry is DefenseClaw's turn-complete bridge. The self-heal writes it back about a second later (500 ms debounce) or at the next 30-second check. A notifier you set yourself is kept and still run by the bridge. `defenseclaw doctor` warns on the **Codex notify** row when the gateway is stopped. |
+| Notify entry changed or deleted (Secure Client only) | Under Secure Client, the top-level `notify` entry is DefenseClaw's turn-complete bridge. The self-heal writes it back about a second later (500 ms debounce) or at the next 30-second check. A notifier you set yourself is kept and still run by the bridge. `defenseclaw doctor` warns on the **Codex notify** row when the gateway is stopped. |
 | 401 right after rotating a model key | Codex's shared app-server daemon keeps the environment it started with. Run `codex app-server daemon restart` from a shell with the new key. DefenseClaw's hooks are not involved. |
 | `doctor` warns about rejected OTLP attempts after an upgrade | The daemon keeps the old telemetry credential. Run `codex app-server daemon restart`. The **Native OTLP credentials** row clears 24 hours after the last refused attempt. |
 | First prompt of a new session recorded twice | Codex 0.156 starts a second internal session during the first turn, with its own session id. It fires `SessionStart`, `UserPromptSubmit` and `Stop` for the same prompt. Two rows differ in `defenseclaw.session.root.id`. Count prompts by session and turn id. |

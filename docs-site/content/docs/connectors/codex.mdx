@@ -1,6 +1,6 @@
 ---
 title: Codex
-description: Guard Codex with DefenseClaw hooks that can block before a tool runs, plus Codex's native OpenTelemetry and notify bridge.
+description: Guard Codex with DefenseClaw hooks that can block before a tool runs, plus Codex's native OpenTelemetry.
 keywords:
   - Codex connector
   - Codex hooks
@@ -9,7 +9,7 @@ keywords:
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-DefenseClaw writes hooks, an OpenTelemetry exporter and a notify bridge into Codex's `config.toml`. This is a hook connector: Codex talks to OpenAI directly and no proxy is involved.
+DefenseClaw writes hooks and an OpenTelemetry exporter into Codex's `config.toml`. Per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. This is a hook connector: Codex talks to OpenAI directly and no proxy is involved.
 
 ## Platform support
 
@@ -46,7 +46,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
-| Hooks, OpenTelemetry, notify | `$CODEX_HOME/config.toml` (default `~/.codex`) | `%CODEX_HOME%\config.toml` |
+| Hooks and OpenTelemetry | `$CODEX_HOME/config.toml` (default `~/.codex`) | `%CODEX_HOME%\config.toml` |
 | Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
 | Proxy bypass for telemetry | `$CODEX_HOME/.env` (marked block, only when a proxy is set) | not written |
