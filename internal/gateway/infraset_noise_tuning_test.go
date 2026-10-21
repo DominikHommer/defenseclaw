@@ -307,6 +307,10 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		// exec of such a string still writes.
 		{"python docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", false},
 		{"python exec docstring write", `python3 -c 'from pathlib import Path; exec("""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""")'`, "", "", true},
+		// An f-string runs its fields: the write in one is not a docstring.
+		{"python f-string write", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("dccert-block-marker")}"""'`, "", "", true},
+		{"python f-string same quotes write", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{"""a""" + str(p.write_text("dccert-block-marker"))}"""'`, "", "", true},
+		{"python docstring write beside an f-string", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print(f"{1}")'`, "", "", false},
 		// A path bound again before the write is not the keys file (GAP-1299).
 		{"python reassigned path", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p = Path("notes.txt"); p.write_text("example")'`, "", "", false},
 		{"python append absolute", `python3 -c 'open("/home/alice/.ssh/authorized_keys", "a").write("dccert-block-marker")'`, "", "", true},

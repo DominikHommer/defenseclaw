@@ -2125,6 +2125,10 @@ func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload 
 		toolArgs := profile.DecodeToolArgs(rawPayload)
 		req.ToolArgsProjectionUncertain = len(toolArgs) == 0
 		if len(toolArgs) == 0 {
+			// A body the raw decoder rejects (a duplicate key, an alias
+			// collision) is an unread tool call even when the map decode
+			// found one: refuse it, never judge it as an empty call.
+			req.ToolCallUnparsed = true
 			toolArgs = json.RawMessage(`{}`)
 		}
 		req.ToolArgs = append(json.RawMessage(nil), toolArgs...)

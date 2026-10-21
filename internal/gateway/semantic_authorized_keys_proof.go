@@ -191,10 +191,11 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	}
 }
 
-// trustedPythonExecutedText is Python -c code with its comments and
+// trustedPythonExecutedText is Python -c code with its comments and inert
 // triple-quoted strings blanked: a docstring that spells a write executes
-// nothing (GAP-1199). Code that may run a string (exec, eval, compile) is
-// kept whole, so such a string still proves its write.
+// nothing (GAP-1199); an f-string field runs and is kept. Code that may run
+// a string (exec, eval, compile) is kept whole, so such a string still proves
+// its write.
 func trustedPythonExecutedText(code string) string {
 	if trustedPythonDynamicCode.MatchString(code) {
 		return code

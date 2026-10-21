@@ -153,11 +153,19 @@ func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
 	}
 	t.Cleanup(func() { RemoveConnectorRulePackOverrides(connectorName) })
 	dir := t.TempDir()
-	for body, want := range map[string]bool{
-		"#!/bin/sh\n# see acme.own-7f3c in the runbook\nprintf '%s\\n' done\n": false,
-		"#!/bin/sh\necho acme.own-7f3c > /tmp/acme-marker.txt\n":               true,
+	for i, tc := range []struct {
+		body string
+		want bool
+	}{
+		{"#!/bin/sh\n# see acme.own-7f3c in the runbook\nprintf '%s\\n' done\n", false},
+		{"#!/bin/sh\necho acme.own-7f3c > /tmp/acme-marker.txt\n", true},
+		// A quoted heredoc is data the command that reads it acts on.
+		{"#!/bin/sh\ncat > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		// A ':' heredoc comment block leaves the parse partial: never enforced.
+		{"#!/bin/sh\n: <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\nprintf '%s\\n' done\n", false},
 	} {
-		path := filepath.Join(dir, fmt.Sprintf("script-%t.sh", want))
+		body, want := tc.body, tc.want
+		path := filepath.Join(dir, fmt.Sprintf("script-%d.sh", i))
 		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
 			t.Fatal(err)
 		}

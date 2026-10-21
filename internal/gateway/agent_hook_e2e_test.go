@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -543,6 +544,10 @@ func TestHandleAgentHook_AntigravityRefusesAnUnreadableToolCall(t *testing.T) {
 		{"tool call without args", "PreToolUse", `{"conversationId":"c1","toolCall":{"name":"run_command"}}`, "block"},
 		{"payload claims another event", "PreToolUse", `{"conversationId":"c1","hookEventName":"Stop","terminationReason":"done"}`, "block"},
 		{"nested benign", "PreToolUse", `{"conversationId":"c1","workspacePaths":["/tmp"],"toolCall":{"name":"run_command","args":{"CommandLine":"echo ok","Cwd":"/tmp"}}}`, "allow"},
+		// The raw decoder owns the arguments: a body it rejects is refused
+		// even when the map decode reads a tool call from it.
+		{"duplicate metadata key", "PreToolUse", `{"conversationId":"c1","conversationId":"c2","toolCall":{"name":"run_command","args":{"CommandLine":"echo ok","Cwd":"/tmp"}}}`, "block"},
+		{"duplicate metadata key file read", "PreToolUse", `{"stepIdx":1,"stepIdx":2,"toolCall":{"name":"view_file","args":{"AbsolutePath":"/home/alice/.ssh/id_rsa"}}}`, "block"},
 		{"post tool use", "PostToolUse", `{"conversationId":"c1","stepIdx":1}`, "allow"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -560,6 +565,9 @@ func TestHandleAgentHook_AntigravityRefusesAnUnreadableToolCall(t *testing.T) {
 			}
 			if parsed.Action != tc.want {
 				t.Fatalf("action=%q, want %q: %s", parsed.Action, tc.want, recorder.Body.String())
+			}
+			if strings.HasPrefix(tc.name, "duplicate") && !slices.Contains(parsed.Findings, "HOOK-TOOL-CALL-UNPARSED") {
+				t.Fatalf("findings=%v, want HOOK-TOOL-CALL-UNPARSED: %s", parsed.Findings, recorder.Body.String())
 			}
 		})
 	}

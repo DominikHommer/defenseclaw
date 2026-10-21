@@ -588,6 +588,12 @@ func trustedActionTexts(request trustedActionRequest, facts actionfacts.Facts) [
 	}
 	for _, command := range facts.Commands {
 		texts = append(texts, command.Argv...)
+		// The quoted heredoc a command reads (cat > file <<'EOF') is data
+		// the command acts on, so a migrated literal in it counts in a
+		// script body too.
+		if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous {
+			texts = append(texts, command.LiteralStdin)
+		}
 		for _, argument := range command.Arguments {
 			texts = append(texts, argument.Value)
 		}
