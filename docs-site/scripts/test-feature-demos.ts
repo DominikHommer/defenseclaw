@@ -18,7 +18,7 @@ import {
 
 const connectorIds = new Set(matrix.connectors.map((connector) => connector.id));
 const cursorStory = readFileSync(
-  new URL('../content/docs/stories/cursor-secret-exfil.mdx', import.meta.url),
+  new URL('../content/docs/how-to/guardrail/stop-a-secret-upload.mdx', import.meta.url),
   'utf8',
 );
 const approvedFixtureHosts = new Set([

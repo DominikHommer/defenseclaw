@@ -1,126 +1,17 @@
 ---
-title: Unified LLM key
-description: Wire up DEFENSECLAW_LLM_KEY — the single environment variable that powers the LLM judge, the MCP / skill / plugin scanners, and any custom LLM call DefenseClaw makes through Bifrost.
+title: LLM providers
+description: How DefenseClaw resolves the LLM key and provider for the judge and scanners, the provider catalog, custom providers and regional providers.
 keywords:
   - DEFENSECLAW_LLM_KEY
-  - defenseclaw keys
-  - defenseclaw keys set
-  - defenseclaw keys list
-  - defenseclaw keys check
-  - DefenseClaw unified key
   - Bifrost provider routing
   - LiteLLM provider routing
-  - per-component LLM key override
+  - custom LLM provider
+  - Bedrock Vertex Azure judge
 ---
 
-DefenseClaw routes every LLM call through one of two layers: the in-process **Bifrost** SDK (used by the gateway and judge) or **LiteLLM** (used by the scanner SDKs). Both layers derive the provider-specific key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.) from a single canonical knob — `DEFENSECLAW_LLM_KEY` — plus the model prefix you pass on the model field.
+DefenseClaw sends every LLM call through one of two layers: the in-process **Bifrost** SDK (the gateway and the judge) or **LiteLLM** (the scanner SDKs). Both derive the provider key from `DEFENSECLAW_LLM_KEY` and the model prefix. For the short path, see [Set up an LLM key](/docs/how-to/guardrail/set-up-an-llm-key).
 
-Set it once. Verify it with `defenseclaw keys check`. Override per-component only when you need a separate billing or rate-limit posture for the judge or a specific scanner.
-
-<Callout title="Why one key">
-Operators were drowning in N=4 keys for an install (judge, skill scanner, MCP scanner, gateway upstream) — usually all pointing at the same OpenAI / Anthropic / Bedrock account. The unified key collapses that to one env var, with optional per-component overrides for the rare case where they diverge.
-</Callout>
-
-## The happy path
-
-<Steps>
-
-<Step>
-
-### Pick the provider and model
-
-```bash
-defenseclaw setup llm
-```
-
-The wizard writes the unified top-level `llm:` block (provider, model and the
-env var that holds the key). The judge and the scanners inherit it unless you
-override them. In scripts, pass the values as flags:
-
-```bash
-defenseclaw setup llm --non-interactive \
-  --provider anthropic \
-  --model claude-sonnet-4-5 \
-  --api-key-env DEFENSECLAW_LLM_KEY
-```
-
-</Step>
-
-<Step>
-
-### Set the key (interactive, hidden prompt)
-
-```bash
-defenseclaw keys set DEFENSECLAW_LLM_KEY
-```
-
-The CLI prompts for the value without echoing it, then writes it to the
-current user's DefenseClaw dotenv file: `~/.defenseclaw/.env` on macOS/Linux
-or `%USERPROFILE%\.defenseclaw\.env` on Windows. POSIX installs enforce mode
-`0o600`; native Windows installs replace inherited access with an owner-private
-DACL. The confirmation shows only the last four characters (`…9f3a`), and the
-audit log never records the value.
-
-</Step>
-
-<Step>
-
-### Verify it landed
-
-```bash
-defenseclaw keys check
-```
-
-Exits `0` when every required key for the current config is set, non-zero otherwise, and prints a one-line summary. Use it as a CI or preflight gate.
-
-</Step>
-
-<Step>
-
-### Run guardrail
-
-```bash
-defenseclaw setup guardrail
-```
-
-When you turn the judge on, the wizard offers the LLM you configured (**Use this LLM for the judge?**) instead of asking for a provider, model and key again.
-
-</Step>
-
-</Steps>
-
-## Watch the flow
-
-<TerminalAnimation
-  cwd="~/project"
-  height={460}
-  ariaLabel="Animated terminal replay of defenseclaw keys list, keys set and keys check: the judge key is missing, is saved with a hidden prompt, and the check passes."
-  caption="Recorded on a host with the judge turned on for Claude Code. keys list shows what the current config needs, keys set writes to ~/.defenseclaw/.env, and keys check is the CI gate."
-  frames={[
-    { type: 'cmd', text: 'defenseclaw keys list', pauseMs: 700 },
-    { type: 'dim', text: '     ENV NAME                  FEATURE                   REQUIREMENT  SOURCE  STATUS' },
-    { type: 'dim', text: '  ─  ────────────────────────  ────────────────────────  ───────────  ──────  ───────' },
-    { type: 'out', text: '  ●  DEFENSECLAW_LLM_KEY       llm.default               REQUIRED     unset   MISSING' },
-    { type: 'out', text: '  ·  OPENCLAW_GATEWAY_TOKEN    gateway                   NOT_USED     unset   n/a' },
-    { type: 'out', text: '  ·  CISCO_AI_DEFENSE_API_KEY  guardrail.remote          NOT_USED     unset   n/a' },
-    { type: 'out', text: '  ·  VIRUSTOTAL_API_KEY        skill-scanner.virustotal  NOT_USED     unset   n/a' },
-    { type: 'out', text: '  ·  SPLUNK_ACCESS_TOKEN       observability.splunk      NOT_USED     unset   n/a' },
-    { type: 'out', text: '  ·  GALILEO_API_KEY           observability.galileo     NOT_USED     unset   n/a' },
-    { type: 'dim', text: '  Legend:  ● required   ○ optional   · not used by current config' },
-    { type: 'dim', text: "           Source: 'env' = process environment, 'dotenv' = ~/.defenseclaw/.env, 'unset' = missing" },
-    { type: 'spacer', pauseMs: 600 },
-    { type: 'cmd', text: 'defenseclaw keys set DEFENSECLAW_LLM_KEY', pauseMs: 600 },
-    { type: 'dim', text: '  llm.default: Canonical LLM API key used by the guardrail upstream, LLM judge, MCP/skill/plugin scanners. Override per-component with a component-specific llm.api_key_env.' },
-    { type: 'prompt', text: '  DEFENSECLAW_LLM_KEY: ', reply: '', pauseMs: 900 },
-    { type: 'ok', text: '  ✓ Saved DEFENSECLAW_LLM_KEY = …9f3a to ~/.defenseclaw/.env' },
-    { type: 'spacer', pauseMs: 500 },
-    { type: 'cmd', text: 'defenseclaw keys check', pauseMs: 600 },
-    { type: 'out', text: '  1/1 required credentials set.' },
-    { type: 'ok', text: '  ✓ all required credentials present' },
-  ]}
-/>
-
-## All four `keys` subcommands
+## `keys` subcommands
 
 <TypeTable
   type={{
@@ -165,7 +56,7 @@ macOS/Linux or `$env:NAME = ...` in PowerShell.
 
 ## Per-component overrides
 
-For most installs, `DEFENSECLAW_LLM_KEY` is the only knob you ever set. When you want a different key for a specific feature — say, a higher rate-limit account for the judge, or a separate billing line for the skill-scanner LLM second opinion — you point that one component at its own env var:
+A component can use its own env var. Everything else falls through to `DEFENSECLAW_LLM_KEY`.
 
 ```yaml title="~/.defenseclaw/config.yaml"
 guardrail:
@@ -193,7 +84,7 @@ defenseclaw keys check    # both REQUIRED entries should now be ✓ set
 
 `keys list` automatically resolves the env name from `cfg.resolve_llm()`, so the table you see is always the env vars **you actually configured** — not the canonical defaults.
 
-## Non-interactive (CI and scripts)
+## Non-interactive
 
 <Tabs items={['macOS / Linux', 'Windows PowerShell']}>
 
@@ -252,7 +143,7 @@ defenseclaw keys check
 
 </Tabs>
 
-## Provider routing: Bifrost vs LiteLLM
+## Bifrost vs LiteLLM
 
 Both routing layers consume `DEFENSECLAW_LLM_KEY` plus the model prefix on the configured model name. You **do not** need to set provider-specific env vars. Every component starts from the unified top-level `llm:` block that `defenseclaw setup llm` writes; a component-level block overrides only the fields it sets:
 
@@ -266,11 +157,9 @@ Both routing layers consume `DEFENSECLAW_LLM_KEY` plus the model prefix on the c
 
 Local providers (`ollama/`, `vllm/`, `lm_studio/`) need no key — `keys list` correctly classifies them as `NOT_USED` even when the feature is on.
 
-## Bifrost provider catalog
+## Provider catalog
 
-Inside the Go gateway, every provider call goes through the embedded **Bifrost SDK** — DefenseClaw never speaks directly to a provider. Bifrost handles auth, retries, streaming, and routing, and gives DefenseClaw one consistent shape for tool calls, completions, and embeddings.
-
-[`mapProviderKey`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/provider_bifrost.go) is the source of truth for what's wired today:
+The Go gateway reaches every provider through Bifrost. The names below are the supported `provider` values (the source of truth is `mapProviderKey` in `internal/gateway/provider_bifrost.go`).
 
 | Provider | Provider name | Notes |
 | --- | --- | --- |
@@ -294,14 +183,14 @@ Inside the Go gateway, every provider call goes through the embedded **Bifrost S
 | vLLM | `vllm` | Self-hosted vLLM (no key needed) |
 | DeepSeek, Together AI, LM Studio | `deepseek`, `together_ai` (also `togetherai`, `together`), `lm_studio` (also `lmstudio`) | Reached through their own `base_url` with Bifrost's OpenAI-compatible adapter |
 
-You don't pick the Bifrost key directly. You pick a model — the gateway maps `gpt-4o-mini` → `openai`, `claude-3-5-sonnet-20241022` → `anthropic`, and so on. The unified key is then handed to whichever provider the model resolves to.
+You pick a model, not a Bifrost key: `gpt-4o-mini` resolves to `openai`, a `claude-*` model to `anthropic`, and the unified key goes to whichever provider the model resolves to.
 
 ## What consumes the key
 
 <Cards>
   <Card
     title="LLM judge"
-    href="/docs/policies"
+    href="/docs/how-to/policies/tune-the-llm-judge"
     description="The gateway's optional second-opinion model. Reads guardrail.judge.llm and falls back to DEFENSECLAW_LLM_KEY."
   />
   <Card
@@ -316,7 +205,7 @@ You don't pick the Bifrost key directly. You pick a model — the gateway maps `
   />
   <Card
     title="Set up the guardrail (judge)"
-    href="/docs/guardrail"
+    href="/docs/reference/guardrail-setup"
     description="defenseclaw setup guardrail --judge-model writes the judge config that consumes the key when enabled."
   />
 </Cards>
@@ -337,7 +226,7 @@ unified key actually pays for:
 
 | Connector class | Examples | What the LLM does |
 | --- | --- | --- |
-| Hook-based | Codex, Claude Code, Hermes, Cursor, Devin, Copilot CLI, OpenHands, Antigravity, OpenCode, Amp, OmniGent, Kiro | The agent talks to its own LLM directly. DefenseClaw runs as a *judge only*: it inspects prompts/responses and emits verdicts. The unified key is only needed when `guardrail.judge.enabled: true`. |
+| Hook-based | Codex, Claude Code, Hermes, Cursor, Devin, Copilot CLI, Antigravity, OpenCode, Amp, Kiro | The agent talks to its own LLM directly. DefenseClaw runs as a *judge only*: it inspects prompts/responses and emits verdicts. The unified key is only needed when `guardrail.judge.enabled: true`. |
 | Proxy-based | OpenClaw, ZeptoClaw | Outbound LLM traffic is routed through the gateway proxy. The gateway uses the unified key for *both* the upstream LLM (the agent's model) and the optional judge. |
 
 The wizard records the intent on `guardrail.llm_role`:
@@ -361,6 +250,7 @@ defenseclaw setup guardrail \
   --judge-model anthropic/claude-sonnet-4-5 \
   --non-interactive
 ```
+
 
 ## Custom providers for internal or self-hosted endpoints
 
@@ -389,7 +279,7 @@ cannot represent, migration reports it and leaves the legacy file as a
 `remove` copy its providers into `llm_providers` (without the overrides) and
 leave the file in place. Preserve and review the file until those request
 overrides are no longer needed; changing `llm_providers` alone does not remove
-them. See [v9 migration](/docs/reference/migrate-v9#custom-providers).
+them. See [v9 migration](/docs/appendix/upgrade-from-0-8).
 
 ```bash
 defenseclaw setup provider add \
@@ -413,7 +303,7 @@ agent** versus **judge/aux only** depends entirely on the connector class:
 | Connector class | A bound custom provider… |
 | --- | --- |
 | Proxy (OpenClaw, ZeptoClaw) | **Is enforced.** The agent's model traffic routes through DefenseClaw, so the custom provider can serve the agent's upstream model, the judge, or both. |
-| Hook (Hermes, Cursor, Codex, OpenCode, Amp, OmniGent, Claude Code, Devin, Copilot, OpenHands, Antigravity, Kiro) | **Configures DefenseClaw's judge/aux model only.** The agent talks to its own model directly — those calls are never routed through or inspected by DefenseClaw, so a custom provider cannot change the agent's model. |
+| Hook (Hermes, Cursor, Codex, OpenCode, Amp, Claude Code, Devin, Copilot, Antigravity, Kiro) | **Configures DefenseClaw's judge/aux model only.** The agent talks to its own model directly — those calls are never routed through or inspected by DefenseClaw, so a custom provider cannot change the agent's model. |
 
 <Callout type="warn" title="Hook connectors: a custom provider is judge-only">
 This is the easiest thing to get wrong: attaching a custom provider while
@@ -623,11 +513,9 @@ defenseclaw setup llm \
   ✓ llm ping: ok (anthropic/claude-sonnet-4-5)
 ```
 
-## Reference
+## Source files
 
-- [`cli/defenseclaw/commands/cmd_keys.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_keys.py) — the four subcommands.
-- [`cli/defenseclaw/credentials.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/credentials.py) — the `CREDENTIALS` registry and the resolve / classify functions.
-- [`cli/defenseclaw/commands/_llm_picker.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/_llm_picker.py) — shared interactive pickers and the inherit preflight.
-- [`internal/configs/embed.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/configs/embed.go) — the Go-side `Provider` schema that `llm_providers.custom` entries map to.
-- [Reference → Keys](/docs/reference/keys) — the full credential table with feature gating and override paths.
-- [Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner) — the two scanners whose LLM judge inherits the unified `llm:` block.
+- `cli/defenseclaw/commands/cmd_keys.py`: the `keys` subcommands.
+- `cli/defenseclaw/credentials.py`: the credential registry and resolve and classify functions.
+- `internal/configs/embed.go`: the `Provider` schema behind `llm_providers.custom`.
+- [Keys and credentials](/docs/reference/keys): the full credential table.
