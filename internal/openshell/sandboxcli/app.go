@@ -564,6 +564,27 @@ type DisabledError struct {
 
 func (e *DisabledError) Error() string { return e.Message }
 
+// hostHasSandboxRuntime reports whether this computer has Docker or KVM, one
+// of which every sandbox driver needs. A variable for tests.
+var hostHasSandboxRuntime = func() bool {
+	if _, err := exec.LookPath("docker"); err == nil {
+		return true
+	}
+	_, err := os.Stat("/dev/kvm")
+	return err == nil
+}
+
+// sandboxRuntimeMissing is what the sandboxes-off refusal adds on a Linux
+// computer with neither Docker nor KVM: `sandbox setup` alone cannot turn
+// sandboxes on there, and only the doctor named it (r103 GAP-0332).
+func sandboxRuntimeMissing() string {
+	if runtime.GOOS != "linux" || onManagedHost() || hostHasSandboxRuntime() {
+		return ""
+	}
+	return "; this computer also lacks Docker, which sandboxes need: install Docker Engine 28 or newer " +
+		"(https://docs.docker.com/engine/install/) first, and see `defenseclaw sandbox doctor` for every prerequisite"
+}
+
 // apiError explains a daemon error for people. Admin refusals start with
 // "blocked by your organization's DefenseClaw policy".
 func apiError(err error) error {
@@ -588,7 +609,7 @@ func apiError(err error) error {
 			return errors.New("the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)")
 		}
 	case sandboxapi.CodeDisabled:
-		return &DisabledError{Message: e.Message}
+		return &DisabledError{Message: e.Message + sandboxRuntimeMissing()}
 	case sandboxapi.CodeAdminViolation:
 		if sandboxapi.IsPolicyRefusal(e.Message) {
 			// A managed refusal is complete (sandboxapi.AccessRefusedWhy):
