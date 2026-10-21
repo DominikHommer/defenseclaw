@@ -29,35 +29,4 @@ jobs:
         env:
           GFLOOD_SYNC: "1"
         run: |
-          go test -count=1 -run '^TestGFloodSyncCost$' -v ./internal/audit/ 2>&1 | grep -E "sync|ok|FAIL|PASS"
-          GFLOOD_DIR="$RUNNER_TEMP" go test -count=1 -run '^TestGFloodSyncCost$' -v ./internal/audit/ 2>&1 | grep -E "sync|ok|FAIL|PASS"
-  probe:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: windows-latest, v: v0, cap: "", settle: "" }
-          - { os: windows-latest, v: v1, cap: "1500", settle: "" }
-          - { os: windows-latest, v: v2, cap: "1500", settle: "0" }
-          - { os: ubuntu-latest, v: v0, cap: "", settle: "" }
-    name: probe ${{ matrix.os }} ${{ matrix.v }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 50
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: probe
-        shell: bash
-        env:
-          DEFENSECLAW_HOOK_FLOOD_PROBE: "1"
-          DEFENSECLAW_HOOK_FLOOD_CALLS: "6000"
-          GFLOOD_CAP_MS: ${{ matrix.cap }}
-          GFLOOD_SETTLE: ${{ matrix.settle }}
-        run: |
-          nproc 2>/dev/null || echo "$NUMBER_OF_PROCESSORS"
-          go test -count=1 -timeout 45m -run '^TestHookFloodProbe$' -v ./internal/gateway/ 2>&1 | grep -E "minute|WAL|PASS|FAIL|sent|drained|flat|ok " || true
+          go test -count=1 -run '^TestGFlood(SyncCost|FlushViewCost)$' -v ./internal/audit/ 2>&1 | grep -E "sync|flush|Flush|ok|FAIL|PASS|panic|Error"
