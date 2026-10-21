@@ -234,6 +234,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
 			}
 			_ = publishEnterpriseWindowsMCPServers(cfg, authored, stderr) // logged; the next cycle publishes again
+			publishEnterpriseWindowsIDEAppData(cfg, authored, stderr)
 		} else if cfg.StandaloneEnterprise() {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not load administrator targets for identity facts: %v\n", loadErr)
 		}
@@ -297,6 +298,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", spoolErr)
 		}
 		_ = publishEnterpriseWindowsMCPServers(cfg, manifest, stderr) // logged; the next cycle publishes again
+		publishEnterpriseWindowsIDEAppData(cfg, manifest, stderr)
 		unprotected = append(unprotected, ownerUnknown...)
 		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
@@ -669,6 +671,22 @@ func publishEnterpriseWindowsMCPServers(cfg *config.Config, manifest enterpriseh
 	return errors.Join(errs...)
 }
 
+// publishEnterpriseWindowsIDEAppData publishes the IDE inventory of each
+// enrolled profile whose AppData folder redirection moved, which the gateway
+// service cannot read (enterprisehooks.WriteWindowsIDEAppDataSpool,
+// GAP-1249). Standalone with AI discovery on only: the Secure Client profile
+// gateway has no IDE inventory.
+func publishEnterpriseWindowsIDEAppData(cfg *config.Config, manifest enterprisehooks.Manifest, stderr io.Writer) {
+	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() || !cfg.AIDiscovery.Enabled {
+		return
+	}
+	logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
+	dir := enterprisehooks.IDEAppDataSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
+	if err := enterpriseWindowsIDEAppDataSpoolWriter(dir, manifest, enterpriseHookAuthorizationOwnershipSetter, logf); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the IDE inventory of redirected AppData: %v\n", err)
+	}
+}
+
 // refreshEnterpriseWindowsMCPServers republishes them from the last
 // published manifest. The error says why nothing was published; a
 // deployment that publishes no MCP servers has nothing to refresh.
@@ -727,6 +745,7 @@ var (
 	enterpriseWindowsIdentitySpoolWriter         = enterprisehooks.WriteWindowsIdentitySpool
 	enterpriseWindowsClaudeMCPSpoolWriter        = enterprisehooks.WriteWindowsClaudeMCPSpool
 	enterpriseWindowsKiroMCPSpoolWriter          = enterprisehooks.WriteWindowsKiroMCPSpool
+	enterpriseWindowsIDEAppDataSpoolWriter       = enterprisehooks.WriteWindowsIDEAppDataSpool
 	enterpriseWindowsManifestGroupCacheRefresher = enterprisehooks.RefreshWindowsManifestIdentityGroups
 	enterpriseWindowsEnumerateUnprotectedWriter  = enterprisehooks.WriteWindowsUnprotectedAgents
 	// enterpriseWindowsInventoryReadRevoker takes the gateway's inventory

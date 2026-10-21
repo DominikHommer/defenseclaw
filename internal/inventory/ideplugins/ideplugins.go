@@ -115,7 +115,9 @@ type Limits struct {
 	FollowSymlinks bool
 	// RoamingAppData and LocalAppData override %APPDATA% and
 	// %LOCALAPPDATA% for a Windows home (default: <home>\AppData\Roaming
-	// and <home>\AppData\Local).
+	// and <home>\AppData\Local). A scan that does not follow links stays in
+	// the home and in these folders when folder redirection moved them out
+	// of it.
 	RoamingAppData string
 	LocalAppData   string
 	// ProgramFiles lists the Program Files roots ScanMachine reads.
@@ -181,6 +183,14 @@ func Scan(home, goos string, limits Limits) []Install {
 	}
 	s := newScanner(goos, limits)
 	s.layout = newLayout(home, goos, s.limits)
+	s.roots = []scanRoot{{path: home}}
+	if goos == "windows" {
+		for _, dir := range []string{s.layout.appSupport, s.layout.localData} {
+			if dir = filepath.Clean(dir); filepath.IsAbs(dir) && s.rootOf(dir) == nil {
+				s.roots = append(s.roots, scanRoot{path: dir})
+			}
+		}
+	}
 	s.scanVSCode()
 	s.scanJetBrains()
 	s.scanVisualStudio()
@@ -210,10 +220,32 @@ type scanner struct {
 	bytes  int64
 	full   bool
 	out    []Install
-	// realHome is the home's path as the system names an opened handle of
-	// it, read once (resolvedHome).
-	realHome     string
-	realHomeRead bool
+	// roots are the folders a scan that does not follow links stays in: the
+	// home, then a Windows %APPDATA% or %LOCALAPPDATA% outside it.
+	roots []scanRoot
+}
+
+// scanRoot is one folder a scan stays in.
+type scanRoot struct {
+	path string
+	// real is the path as the system names an opened handle of it, read
+	// once (resolvedRoot).
+	real     string
+	realRead bool
+}
+
+// rootOf returns the root that holds path, the deepest one, or nil.
+func (s *scanner) rootOf(path string) *scanRoot {
+	var best *scanRoot
+	for i := range s.roots {
+		root := &s.roots[i]
+		inside := path == root.path ||
+			strings.HasPrefix(path, strings.TrimSuffix(root.path, string(filepath.Separator))+string(filepath.Separator))
+		if inside && (best == nil || len(root.path) > len(best.path)) {
+			best = root
+		}
+	}
+	return best
 }
 
 func newScanner(goos string, limits Limits) *scanner {
@@ -295,19 +327,23 @@ func (s *scanner) stat(path string) (os.FileInfo, error) {
 	return os.Lstat(path)
 }
 
-// plainDirsAbove reports whether every directory between the home and path
-// is a plain directory; Lstat reports a link, and a Windows junction, as
-// no directory. The machine-wide scan has no home: Program Files is the
-// administrator's.
+// plainDirsAbove reports whether every directory between the root that
+// holds path (the home, or a redirected AppData folder) and path is a plain
+// directory; Lstat reports a link, and a Windows junction, as no directory.
+// A path in no root is not plain. The machine-wide scan has no home:
+// Program Files is the administrator's.
 func (s *scanner) plainDirsAbove(path string) bool {
-	home := s.layout.home
-	if home == "" || path == home {
+	if s.layout.home == "" {
 		return true
 	}
+	root := s.rootOf(path)
+	if root == nil {
+		return false
+	}
 	var dirs []string
-	for dir := filepath.Dir(path); dir != home; dir = filepath.Dir(dir) {
+	for dir := filepath.Dir(path); path != root.path && dir != root.path; dir = filepath.Dir(dir) {
 		if filepath.Dir(dir) == dir {
-			return false // not inside the home
+			return false
 		}
 		dirs = append(dirs, dir)
 	}
@@ -423,28 +459,35 @@ func (s *scanner) openFile(path string) (*os.File, bool) {
 }
 
 // openedInPlace reports whether f, opened for path, is the object path
-// names below the home: the checks of the folders above path ran before the
-// open, so a folder swapped for a link to another profile in between would
-// otherwise put that profile's plugins in this home's inventory (GAP-1138).
-// It compares the path the system gives the opened handle with the home's.
-// Where the system cannot name an opened file (macOS), the folders above
-// path are checked again after the open and the opened object must be the
-// one path names now. A scan that follows links and the machine-wide scan
-// keep the checks made before the open.
+// names below its root (the home, or a redirected AppData folder): the
+// checks of the folders above path ran before the open, so a folder swapped
+// for a link to another profile in between would otherwise put that
+// profile's plugins in this home's inventory (GAP-1138). It compares the
+// path the system gives the opened handle with the root's. Where the system
+// cannot name an opened file (macOS), the folders above path are checked
+// again after the open and the opened object must be the one path names
+// now. A Windows file with more than one name is refused: through a hard
+// link another profile's file would be read as this one's. A scan that
+// follows links and the machine-wide scan keep the checks made before the
+// open.
 func (s *scanner) openedInPlace(f *os.File, path string) bool {
 	if s.limits.FollowSymlinks || s.layout.home == "" {
 		return true
 	}
+	root := s.rootOf(path)
+	if root == nil || !openedOneName(f) {
+		return false
+	}
 	got, ok := openedPath(f)
-	home := s.resolvedHome()
-	if !ok || home == "" {
+	real := s.resolvedRoot(root)
+	if !ok || real == "" {
 		return s.openedObjectIsPath(f, path)
 	}
-	rel, err := filepath.Rel(s.layout.home, path)
+	rel, err := filepath.Rel(root.path, path)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return false
 	}
-	want := filepath.Join(home, rel)
+	want := filepath.Join(real, rel)
 	if s.goos == "linux" {
 		return filepath.Clean(got) == want
 	}
@@ -462,21 +505,21 @@ func (s *scanner) openedObjectIsPath(f *os.File, path string) bool {
 	return err == nil && os.SameFile(opened, current)
 }
 
-// resolvedHome is the home's opened path, or "" when it cannot be named.
-func (s *scanner) resolvedHome() string {
-	if s.realHomeRead {
-		return s.realHome
+// resolvedRoot is root's opened path, or "" when it cannot be named.
+func (s *scanner) resolvedRoot(root *scanRoot) string {
+	if root.realRead {
+		return root.real
 	}
-	s.realHomeRead = true
-	f, err := os.Open(s.layout.home)
+	root.realRead = true
+	f, err := os.Open(root.path)
 	if err != nil {
 		return ""
 	}
 	defer f.Close()
-	if home, ok := openedPath(f); ok {
-		s.realHome = filepath.Clean(home)
+	if real, ok := openedPath(f); ok {
+		root.real = filepath.Clean(real)
 	}
-	return s.realHome
+	return root.real
 }
 
 // clean bounds a metadata value: printable, single line, at most
