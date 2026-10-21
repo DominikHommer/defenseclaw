@@ -782,7 +782,15 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 							t.Errorf("%s: action=%q mode=%q would_block=%v, want %s/%s", name, resp.Action, resp.Mode, resp.WouldBlock, wantAction, wantMode)
 						}
 						// Amp and Omnigent plugins read the action field itself.
-						if wantAction == "block" && len(resp.HookOutput) == 0 && connectorName != "amp" && connectorName != "omnigent" {
+						// A Claude Code event whose native denial is exit 2 with
+						// the reason on stderr (TaskCreated, TaskCompleted,
+						// TeammateIdle) has no output to render.
+						exitTwoDenial := connectorName == "claudecode" &&
+							claudeCodeOutput(claudeCodeHookRequest{HookEventName: event}, "block", "block", "", "") == nil
+						if wantAction == "block" && exitTwoDenial && len(resp.HookOutput) != 0 {
+							t.Errorf("%s: an exit-2 denial rendered output %v", name, resp.HookOutput)
+						}
+						if wantAction == "block" && len(resp.HookOutput) == 0 && !exitTwoDenial && connectorName != "amp" && connectorName != "omnigent" {
 							t.Errorf("%s: block without the connector's native output: %+v", name, resp)
 						}
 					}

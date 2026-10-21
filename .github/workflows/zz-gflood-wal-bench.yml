@@ -15,11 +15,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest, v: r2-rate10a, ref: "", rate: "10", calls: "6000", trace: "1", bf: "1" }
-          - { os: windows-latest, v: r2-rate10b, ref: "", rate: "10", calls: "6000", trace: "1", bf: "1" }
-          - { os: windows-latest, v: r2-rate5, ref: "", rate: "5", calls: "3000", trace: "1", bf: "1" }
-          - { os: windows-latest, v: r2-rate3, ref: "", rate: "3", calls: "1800", trace: "1", bf: "1" }
-          - { os: ubuntu-latest, v: r2-rate10, ref: "", rate: "10", calls: "6000", trace: "1", bf: "1" }
+          - { os: windows-latest, v: r3-rate10a, ref: "", rate: "10", calls: "6000", trace: "1", bf: "1" }
+          - { os: windows-latest, v: r3-rate10b, ref: "", rate: "10", calls: "6000", trace: "1", bf: "1" }
+          - { os: windows-latest, v: r3-rate5, ref: "", rate: "5", calls: "3000", trace: "1", bf: "1" }
+          - { os: windows-latest, v: r3-rate3, ref: "", rate: "3", calls: "1800", trace: "1", bf: "1" }
+          - { os: ubuntu-latest, v: r3-rate10, ref: "", rate: "10", calls: "6000", trace: "1", bf: "1" }
     name: probe ${{ matrix.os }} ${{ matrix.v }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
@@ -51,3 +51,5 @@ jobs:
           grep -E "writer phase bounded=true" probe.log | head -60 || true
           grep -E "presync" probe.log | awk '{print $NF}' | sort | tail -5 || true
           grep -E "audit persistence failed" probe.log | head -10 || true
+          echo "pass outcomes:"; grep -oE "gfw [0-9:.]+ pass over=true misses=[0-9]+" probe.log | awk '{print $4}' | sort | uniq -c || true
+          grep -E "gfw [0-9:.]+ pass .*err=[^<]" probe.log | grep -v "err=<nil>" | head -10 || true

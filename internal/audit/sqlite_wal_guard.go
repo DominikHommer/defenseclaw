@@ -109,8 +109,9 @@ const walBoundedMissesMax = 16
 // Test seams: walCopyPhaseHook runs inside each copy pass on the dedicated
 // connection, after the pass read the commit counter, walSyncPhaseHook before
 // each sync of the database file off the writer, and walWriterPhaseHook while
-// the writer connection is held, so tests can write during a copy, slow a
-// sync or hold the writer phase open.
+// the writer connection is held (in a catch-up, inside its copy after it read
+// the commit counter), so tests can write during a copy, slow a sync or hold
+// the writer phase open.
 var (
 	walCopyPhaseHook   func(context.Context)
 	walSyncPhaseHook   func(context.Context)
@@ -176,24 +177,28 @@ type WALCheckpoint struct {
 // interrupt it, and the WAL passed its bound because the restart then failed
 // (rel-1-0-3 GAP-0186, GAP-0247, GAP-0136). Now:
 //
-//   - Once the log passes limit/walCatchUpFraction and the copy cannot reach
-//     its end, the pass syncs the database file from its own pinned handle,
-//     off the writer. While that sync takes longer than walSettledSync it
-//     copies what the hooks wrote meanwhile and syncs again (at most
-//     walSettleRounds more times), so the copy under the writer has only the
-//     pages of the last round to write and sync. Then it waits for an idle
+//   - Once the log passes limit/walCatchUpFraction (and is still under the
+//     limit) and the copy cannot reach its end, the pass syncs the database
+//     file from its own pinned handle, off the writer. While that sync takes
+//     longer than walSettledSync it copies what the hooks wrote meanwhile and
+//     syncs again (at most walSettleRounds more times), so the copy under the
+//     writer has only the pages of the last round to write and sync. Then it
+//     waits for an idle
 //     gap (no commit for walIdleWindow and the writer free) and holds the
 //     writer only while one more PASSIVE copy on the checkpoint connection
 //     reaches the end. It gives the writer back at walCatchUpCap whether or
 //     not that copy finished; an unfinished copy goes on without the writer
 //     and the next pass tries again.
-//   - A log over the limit is bounded: the catch-up takes the writer whatever
-//     the hooks do and holds it until the copy reaches the end, at most
-//     walBoundedCatchUpCap, so a flood on a slow disk delays hooks by up to
-//     that long now and then instead of growing the WAL until the disk is
-//     full (rel-1-0-3 GAP-0320, GAP-0136). Each bounded catch-up that still
-//     gives the writer back first doubles the next one's wait and cap, up to
-//     walBoundedAcquireMax and walBoundedCatchUpMax.
+//   - A log over the limit is bounded: right after the copy that finds it
+//     over, with no settle syncs, the catch-up takes the writer whatever the
+//     hooks do, and SQLite's write lock so that no other store or process
+//     commits either (lockWALWriter), and holds them until the copy reaches
+//     the end, at most walBoundedCatchUpCap, so a flood on a slow disk delays
+//     hooks by up to that long now and then instead of growing the WAL until
+//     the disk is full (rel-1-0-3 GAP-0320, GAP-0136). Each bounded catch-up
+//     that still gives the writer back first, and each pass that fails or
+//     runs out of time while the log is over, doubles the next one's wait and
+//     cap, up to walBoundedAcquireMax and walBoundedCatchUpMax.
 //   - A fully copied log whose file is larger than walIdleTrimBytes (or whose
 //     log is over the limit) is cut to zero bytes with a TRUNCATE checkpoint
 //     on the writer when the hooks are not flooding the store: nothing was
@@ -203,9 +208,9 @@ type WALCheckpoint struct {
 //     since the copy, so it copies and syncs nothing and only resets the log;
 //     writerBudget bounds it.
 //
-// After each pass the store records whether the log is over the limit; while
-// it is, background writers (retention, planner statistics) wait for it
-// (awaitWALHeadroom). Hook writes are never held back by this.
+// After each pass, however it ended, the store records whether the log is over
+// the limit; while it is, background writers (retention, planner statistics)
+// wait for it (awaitWALHeadroom). Hook writes are never held back by this.
 func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writerBudget time.Duration) (result WALCheckpoint, err error) {
 	if ctx == nil {
 		return result, fmt.Errorf("audit: WAL checkpoint context is required")
@@ -224,6 +229,11 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 		return result, fmt.Errorf("audit: open SQLite checkpoint connection: %w", err)
 	}
 	quiet := s.walGuardQuiet(ctx, db)
+	// logBytes is the log in use as of the latest copy, -1 until a copy
+	// measured it. The pass's outcome is recorded however the pass ends, at
+	// its deadline too (noteWALGuardPass).
+	logBytes := int64(-1)
+	defer func() { s.noteWALGuardPass(result, err, logBytes, limitBytes) }()
 	var ckpt walCopy
 	for pass := 0; pass < walCopyPasses; pass++ {
 		ckpt, err = s.copyWAL(ctx, db, walCopyPhaseHook)
@@ -234,20 +244,17 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 			// Another checkpoint holds the log; the next pass tries again.
 			return result, nil
 		}
+		logBytes = int64(ckpt.frames) * walFrameBytes
 		if pass == 0 {
-			result.LogBytes = int64(ckpt.frames) * walFrameBytes
+			result.LogBytes = logBytes
 		}
-		if ckpt.complete || ckpt.frames-ckpt.copied <= walCopyTargetFrames {
+		// A log over the limit goes to the bounded catch-up after this copy:
+		// on a slow disk more copies, and the syncs below, could use up the
+		// pass before it held the writer.
+		if ckpt.complete || ckpt.frames-ckpt.copied <= walCopyTargetFrames || logBytes > limitBytes {
 			break
 		}
 	}
-	logBytes := int64(ckpt.frames) * walFrameBytes
-	defer func() {
-		s.walPressure.Store(err == nil && !result.Restarted && logBytes > limitBytes)
-		if err == nil {
-			s.noteBoundedCatchUp(result.Restarted || logBytes <= limitBytes, result.Bounded && result.WriterDeferred)
-		}
-	}()
 	if ckpt.complete {
 		result.Restarted = ckpt.frames > 0
 		oversized := s.walFileBytes() > walIdleTrimBytes || logBytes > limitBytes
@@ -262,10 +269,16 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	if logBytes <= limitBytes/walCatchUpFraction {
 		return result, nil
 	}
-	// Sync the pages the copies left, off the writer, and copy and sync again
-	// while the hooks write more during a sync than the copy under the writer
-	// can write and sync within walCatchUpCap (rel-1-0-3 GAP-0247, GAP-0136).
-	for round := 0; ; round++ {
+	// Under the limit, sync the pages the copies left, off the writer, and
+	// copy and sync again while the hooks write more during a sync than the
+	// copy under the writer can write and sync within walCatchUpCap (rel-1-0-3
+	// GAP-0247, GAP-0136). A log over the limit, from the start or after a
+	// copy here, goes to the bounded catch-up instead: on a slow disk these
+	// syncs took 8-26 s each, so the pass could run out of time before it
+	// held the writer while the hooks kept writing (G-flood-wal round 3). Its
+	// copy syncs under the writer, and a copy that outruns the hold goes on
+	// and syncs without it.
+	for round := 0; logBytes <= limitBytes; round++ {
 		began := time.Now()
 		if walSyncPhaseHook != nil {
 			walSyncPhaseHook(ctx)
@@ -327,18 +340,31 @@ func (s *Store) boundedCatchUpPolicy() walCatchUpPolicy {
 	}
 }
 
-// noteBoundedCatchUp records a pass's outcome for boundedCatchUpPolicy:
-// settled (the log restarted, or it is under the limit) resets the misses, and
-// missed (a bounded catch-up gave the writer back first) adds one.
-func (s *Store) noteBoundedCatchUp(settled, missed bool) {
+// noteWALGuardPass records how a pass left the log, however it ended. The log
+// is over when the pass did not restart it and its last copy found it over
+// limitBytes; a pass that never measured it (logBytes < 0) keeps the last
+// pass's record. Over marks the store for background writers
+// (awaitWALHeadroom). For boundedCatchUpPolicy a log that is not over resets
+// the misses, and over adds one after a bounded catch-up that gave the writer
+// back first or a pass that failed or ran out of time. Such a pass used to
+// clear the mark and leave the misses as they were, so background writers
+// went on and the next bounded catch-up waited and held no longer
+// (G-flood-wal round 3).
+func (s *Store) noteWALGuardPass(result WALCheckpoint, err error, logBytes, limitBytes int64) {
+	over := !result.Restarted && logBytes > limitBytes
+	if logBytes < 0 {
+		over = s.walPressure.Load()
+	}
+	s.walPressure.Store(over)
 	s.walGuardMu.Lock()
 	defer s.walGuardMu.Unlock()
 	switch {
-	case settled:
+	case !over:
 		s.walBoundedMisses = 0
-	case missed:
+	case err != nil || (result.Bounded && result.WriterDeferred):
 		s.walBoundedMisses = min(s.walBoundedMisses+1, walBoundedMissesMax)
 	}
+	gfwTrace("pass over=%v misses=%d log=%d bounded=%v restarted=%v deferred=%v syncs=%d err=%v", over, s.walBoundedMisses, logBytes, result.Bounded, result.Restarted, result.WriterDeferred, result.Syncs, err)
 }
 
 // walEscalated is base doubled misses times, at most ceiling.
@@ -450,12 +476,13 @@ func (s *Store) takeIdleWriter(ctx context.Context, db *sql.DB, since int64, win
 	}
 }
 
-// catchUpWAL takes the writer connection as policy says and holds it while
-// one PASSIVE copy on the checkpoint connection reaches the end of the log,
-// and gives it back when the copy finishes or at policy.hold, whichever comes
-// first. It reports whether the copy left the whole log copied and synced,
-// how long it held the writer, and whether it deferred (no gap or no free
-// connection, or the cap).
+// catchUpWAL takes the writer connection as policy says, and SQLite's write
+// lock on it (lockWALWriter), and holds them while one PASSIVE copy on the
+// checkpoint connection reaches the end of the log, and gives them back when
+// the copy finishes or at policy.hold, whichever comes first. It reports
+// whether the copy left the whole log copied and synced, how long it held the
+// writer, and whether it deferred (no gap, no free connection or lock, or the
+// cap).
 func (s *Store) catchUpWAL(ctx context.Context, db *sql.DB, policy walCatchUpPolicy) (complete bool, held time.Duration, deferred bool, err error) {
 	conn, err := s.takeCatchUpWriter(ctx, db, policy)
 	if err != nil || conn == nil {
@@ -463,15 +490,26 @@ func (s *Store) catchUpWAL(ctx context.Context, db *sql.DB, policy walCatchUpPol
 	}
 	acquired := time.Now()
 	gfwTrace("writer taken bounded=%v window=%v", policy.bounded, policy.window)
-	defer func() { gfwTrace("writer phase bounded=%v cap=%v acquire=%v complete=%v held=%v deferred=%v", policy.bounded, policy.hold, policy.acquire, complete, held, deferred) }()
+	defer func() {
+		gfwTrace("writer phase bounded=%v cap=%v acquire=%v complete=%v held=%v deferred=%v", policy.bounded, policy.hold, policy.acquire, complete, held, deferred)
+	}()
+	locked, err := lockWALWriter(ctx, conn, policy.acquire)
+	if err != nil || !locked {
+		if err != nil {
+			dropWriterConn(conn)
+		}
+		_ = conn.Close()
+		return false, heldSince(acquired), err == nil, err
+	}
 	holdCtx, cancelHold := context.WithTimeout(ctx, policy.hold)
 	defer cancelHold()
 	done := make(chan walCopyResult, 1)
 	go func() {
-		if walWriterPhaseHook != nil {
-			walWriterPhaseHook(holdCtx)
-		}
-		ckpt, err := s.copyWAL(ctx, db, nil)
+		ckpt, err := s.copyWAL(ctx, db, func(context.Context) {
+			if walWriterPhaseHook != nil {
+				walWriterPhaseHook(holdCtx)
+			}
+		})
 		done <- walCopyResult{ckpt: ckpt, err: err}
 	}()
 	timer := time.NewTimer(policy.hold)
@@ -484,6 +522,7 @@ func (s *Store) catchUpWAL(ctx context.Context, db *sql.DB, policy walCatchUpPol
 		capped = true
 	}
 	// The writer goes back before the pass waits for an unfinished copy.
+	unlockWALWriter(ctx, conn)
 	_ = conn.Close()
 	held = heldSince(acquired)
 	if capped {
@@ -517,6 +556,54 @@ func (s *Store) takeCatchUpWriter(ctx context.Context, db *sql.DB, policy walCat
 		return nil, nil
 	}
 	return conn, nil
+}
+
+// lockWALWriter takes SQLite's write lock on the held writer connection (BEGIN
+// IMMEDIATE), waiting at most wait for it, so that no connection commits
+// while the copy under the writer runs. Holding the store's writer connection
+// holds off this store's hooks only: another store or process with audit.db
+// open (a CLI command, a scan) could commit during every copy, which then
+// never reached the end of the log, so the log need not restart and could
+// grow without bound (G-flood-wal round 3). Their writes wait in SQLite's
+// busy handler meanwhile, up to their busy timeout (auditBusyTimeoutMillis for
+// every audit connection). It reports false and no error when another
+// connection held the lock throughout; on an error the caller drops the
+// connection, whose close rolls back the transaction.
+func lockWALWriter(ctx context.Context, conn *sql.Conn, wait time.Duration) (bool, error) {
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", max(wait.Milliseconds(), 1))); err != nil {
+		return false, fmt.Errorf("audit: set the WAL catch-up lock wait: %w", err)
+	}
+	_, beginErr := conn.ExecContext(ctx, "BEGIN IMMEDIATE")
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancel()
+	if _, err := conn.ExecContext(restoreCtx, fmt.Sprintf("PRAGMA busy_timeout = %d", auditBusyTimeoutMillis)); err != nil {
+		return false, fmt.Errorf("audit: restore the writer busy timeout: %w", err)
+	}
+	switch {
+	case beginErr == nil:
+		return true, nil
+	case isSQLiteBusy(beginErr):
+		return false, nil
+	default:
+		return false, fmt.Errorf("audit: take the SQLite write lock for the WAL catch-up: %w", beginErr)
+	}
+}
+
+// unlockWALWriter ends lockWALWriter's transaction, which wrote nothing, before
+// the writer connection goes back to the hooks. A connection it cannot roll
+// back is dropped from the pool, whose close rolls it back.
+func unlockWALWriter(ctx context.Context, conn *sql.Conn) {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancel()
+	if _, err := conn.ExecContext(rollbackCtx, "ROLLBACK"); err != nil {
+		dropWriterConn(conn)
+	}
+}
+
+// dropWriterConn makes the pool discard conn when it is closed, instead of
+// handing it to a hook in an unknown state.
+func dropWriterConn(conn *sql.Conn) {
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 }
 
 // heldSince is how long the pass has held the writer connection since it got
@@ -573,7 +660,7 @@ func (s *Store) checkpointWALOnWriter(ctx context.Context, conn *sql.Conn, budge
 		return fmt.Errorf("audit: checkpoint SQLite WAL on the writer: %w", err)
 	}
 	if _, err := conn.ExecContext(writerCtx, "PRAGMA busy_timeout = 0"); err != nil {
-		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		dropWriterConn(conn)
 		return 0, 0, yielded(err)
 	}
 	defer func() {
@@ -582,7 +669,7 @@ func (s *Store) checkpointWALOnWriter(ctx context.Context, conn *sql.Conn, budge
 		if _, err := conn.ExecContext(restoreCtx, fmt.Sprintf("PRAGMA busy_timeout = %d", auditBusyTimeoutMillis)); err != nil {
 			// Hook writes on a connection without its busy timeout would fail
 			// under contention. The pool opens a new one with the DSN pragmas.
-			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			dropWriterConn(conn)
 		}
 	}()
 	if walWriterPhaseHook != nil {

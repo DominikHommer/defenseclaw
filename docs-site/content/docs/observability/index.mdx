@@ -430,8 +430,12 @@ The local history's write-ahead log (`audit.db-wal`) stays bounded under
 sustained hook traffic. Every two seconds the gateway copies the log into
 `audit.db` without holding up hook writes. Once the log holds more than
 256 MiB, or it is fully copied and its file is larger than 64 MiB, the gateway
-truncates the file. Under load the file peaks at 256 MiB plus about two
-seconds of writes. If it grows past 1 GiB, checkpoints are not keeping up,
+truncates the file. Past 256 MiB the gateway holds hook writes for up to two
+seconds while it copies the log back, and longer (up to 30 seconds) when a
+hold could not finish. On Linux and macOS the file stays near 256 MiB under
+load. On a slow Windows disk it can peak at about 1 GB during a flood of
+10 hook calls a second. Under Secure Client the gateway does not run this
+check. If it grows past 1 GiB, checkpoints are not keeping up,
 and the gateway log says `the audit WAL file is N MiB, over its 1024 MiB
 bound` every ten minutes until it is back under. A process that keeps
 `audit.db` open for reading can cause this. The
