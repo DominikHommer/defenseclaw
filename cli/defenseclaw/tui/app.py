@@ -196,7 +196,7 @@ from defenseclaw.tui.widgets.panel_split import (
     split_layout,
     step_nav,
 )
-from defenseclaw.tui.widgets.status_strip import render_status_strip
+from defenseclaw.tui.widgets.status_strip import render_status_strip, render_status_with_hint
 from defenseclaw.tui.widgets.tab_fit import (
     BADGE_RESERVE,
     fit_tab_labels,
@@ -10712,14 +10712,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         width = int(getattr(self.size, "width", 0) or 0)
         # The strip gets the cells the line has left after the text, the
         # padding (2) and the separator (5), so it ends on a whole segment.
+        status_model = self._hint_status_model()
         strip = render_status_strip(
-            self._hint_status_model(),
+            status_model,
             width=width - 2 - _status_text_cells(text) - 5 if width > 0 else None,
         )
         rendered = f"{text}  [#444444]│[/]  {strip}" if strip else text
+        if not _is_command_result(text) and any(
+            service.label not in strip
+            for service in (status_model.gateway, status_model.watchdog, status_model.guardrail)
+        ):
+            rendered = render_status_with_hint(status_model, text, max(0, width - 2))
         if self._config_error:
             rendered = f"[bold {TOKENS.accent_red}]{rich_escape(self._config_error)}[/]"
-        elif _status_text_fills_line(text, self.size.width):
+        elif _is_command_result(text) and _status_text_fills_line(text, self.size.width):
             # A "Done: ..." fitted to the line lost its last cell to the "…"
             # of the cut-off health strip ("press i for readines…", GAP-2133).
             rendered = text

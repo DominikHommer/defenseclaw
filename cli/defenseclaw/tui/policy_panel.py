@@ -1014,21 +1014,24 @@ def hilt_change_modal(
 ) -> ConsequenceModalModel:
     """Human approval for one scope; red when it asks for fewer severities."""
     old = str(getattr(row, "hilt", "") or "off")
-    weaker = hilt_weakens(old, level)
     scope = str(getattr(row, "scope", "") or "global")
     mode = str(getattr(row, "mode", "") or "observe")
     block, alert = model.scope_levels(row)
     connector = model.connector_of(row)
     intent = hilt_intent(level, model.command_connector(row))
-    details = [posture_summary(scope, "action", block, alert, level)]
-    if mode != "action":
+    all_connectors = not connector and model.multi_connector
+    affected = [r for r in model.postures if model.connector_of(r)] if all_connectors else [row]
+    weaker = any(hilt_weakens(str(getattr(r, "hilt", "") or "off"), level) for r in affected)
+    details = [] if all_connectors else [posture_summary(scope, "action", block, alert, level)]
+    if mode != "action" and not all_connectors:
         details.append(f"{scope} is in observe mode, so nothing waits for approval until it runs in action mode.")
     if connector and not model.multi_connector:
         details.append("This install has one connector, so this sets approval for every connector.")
-    elif not connector and model.multi_connector:
+    elif all_connectors:
         others = [str(getattr(r, "scope", "")) for r in model.postures if model.connector_of(r)]
         if others:
             details.append("Sets approval on every active connector: " + ", ".join(others) + ".")
+        details.append(f"The global default stays {old}; this command sets connector overrides.")
     # What `guardrail hilt` does: a Secure Client gateway reads approval at
     # start, so the command restarts it; elsewhere the running gateway
     # applies the new config generation with no restart.
@@ -1037,7 +1040,11 @@ def hilt_change_modal(
     else:
         details.append(_run_line(intent, "; a running gateway applies it now."))
     consequence = ""
-    if weaker:
+    if weaker and all_connectors:
+        names = [str(getattr(r, "scope", "")) for r in affected
+                 if hilt_weakens(str(getattr(r, "hilt", "") or "off"), level)]
+        consequence = f"This weakens protection: {', '.join(names)} ask a person for fewer findings."
+    elif weaker:
         lost = actions_weaken(severity_actions(block, alert, old), severity_actions(block, alert, level))
         if lost:
             consequence = (
@@ -1047,8 +1054,8 @@ def hilt_change_modal(
             consequence = f"This weakens protection: {scope} asks a person for fewer findings."
     title = "Turn off human approval" if level == "off" else f"Ask a human for {level}"
     return _modal(
-        f"{title} on {_scope_words(model, row)}?",
-        f"{old} → {level}",
+        f"{title} on {'every active connector' if all_connectors else _scope_words(model, row)}?",
+        f"{'Connector overrides' if all_connectors else old} → {level}",
         details,
         consequence,
         _confirm("hilt", "s", "Turn approval off" if level == "off" else f"Ask for {level}", weaker),

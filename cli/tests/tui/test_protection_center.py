@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import string
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -313,7 +314,14 @@ def test_global_changes_name_the_connectors_that_keep_their_own_setting() -> Non
     model = protection_model()
     global_row = model.scope_row("")
     assert any("codex" in line for line in mode_change_modal(model, global_row, "action").details)
-    assert any("claudecode" in line for line in hilt_change_modal(model, global_row, "HIGH+").details)
+    modal = hilt_change_modal(model, global_row, "HIGH+")
+    assert any("claudecode" in line for line in modal.details)
+    assert "global default" not in modal.title
+    assert all(not line.startswith("The global default asks") for line in modal.details)
+    assert any("global default stays" in line.lower() for line in modal.details)
+    model.postures = tuple(replace(row, hilt="MEDIUM+") if model.connector_of(row) else row
+                           for row in model.postures)
+    assert hilt_change_modal(model, model.scope_row(""), "HIGH+").actions[0].danger is True
 
 
 # ---- opt-in packs -------------------------------------------------------------
