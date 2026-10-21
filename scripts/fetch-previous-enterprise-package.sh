@@ -16,7 +16,9 @@
 #   --dir DIR       where to download it
 #   --version V     the release to fetch (default: the latest release)
 #   --require       fail when there is no such release or package; without it
-#                   a missing one is a notice and an empty version output
+#                   a missing one is a notice and an empty version output.
+#                   A package the release lists but that does not download
+#                   fails either way, so a broken download is never a skip.
 #   --github-output FILE
 #                   append version=<V> and package=<path> (both empty when
 #                   skipped) to this file
@@ -37,7 +39,7 @@ while [ "$#" -gt 0 ]; do
         --version) version=$2; shift 2 ;;
         --require) require=true; shift ;;
         --github-output) github_output=${2:?--github-output needs a value}; shift 2 ;;
-        -h | --help) sed -n '4,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '4,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -73,12 +75,24 @@ case "$asset" in
     *) echo "unknown --asset $asset" >&2; exit 2 ;;
 esac
 
+# Only a release that does not publish the package may be skipped; one that
+# lists it must download it, or the lane fails instead of passing unrun.
+if ! assets=$(gh release view "$version" --repo "$repository" --json assets --jq '.assets[].name'); then
+    echo "::error::could not look up the assets of release $version" >&2
+    exit 1
+fi
+for wanted in "$name" checksums.txt checksums.txt.bundle; do
+    grep -Fxq -- "$wanted" <<<"$assets" || skip "release $version has no $wanted"
+done
 mkdir -p "$dir"
 if ! gh release download "$version" --repo "$repository" --dir "$dir" --clobber \
     --pattern "$name" --pattern checksums.txt --pattern checksums.txt.bundle; then
-    skip "release $version has no $name, checksums.txt or checksums.txt.bundle"
+    echo "::error::could not download $name of release $version" >&2
+    exit 1
 fi
-[ -f "$dir/$name" ] || skip "release $version has no $name"
+for wanted in "$name" checksums.txt checksums.txt.bundle; do
+    [ -f "$dir/$wanted" ] || { echo "::error::the download of release $version has no $wanted" >&2; exit 1; }
+done
 
 cosign verify-blob --bundle "$dir/checksums.txt.bundle" \
     --certificate-identity "$identity" \
