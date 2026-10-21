@@ -163,7 +163,7 @@ Only `preToolUse` supports native ask. In action mode a confirm verdict that is 
 
 ## Fail mode
 
-Copilot exposes no fail-closed hook transport. `--fail-mode closed`, inherited strict availability, missing auth, timeouts and malformed responses cannot make an unavailable hook block the agent. Such a call is recorded in `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports a `guardrail-degraded` alert when it starts again. On a managed standalone host the administrator-owned hook denies `preToolUse` and `permissionRequest` while the gateway service is not running. The gateway requires the exact trusted event-specific registration header and never infers the event from stdin fields.
+Copilot runs a call when its hook times out or cannot start. Every other failure DefenseClaw sees (gateway down, unusable answer, missing token, oversized input) is denied with Copilot's own `deny` in fail mode `closed`, the default, and the reason names the next step. With `--fail-mode open` such a call runs, is recorded in `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports a `guardrail-degraded` alert when it starts again. On a managed standalone host the administrator-owned hook denies `preToolUse` and `permissionRequest` while the gateway service is not running. Under Secure Client the hook stays open. The gateway requires the exact trusted event-specific registration header and never infers the event from stdin fields.
 
 ## Limits
 

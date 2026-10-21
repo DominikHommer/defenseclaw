@@ -73,6 +73,8 @@ rollback, the version floor, the last enforcing receipt, the last refusal
 and whether the running gateway enforces the current bundle digest.
 On Windows, status confirms an applied receipt left by an interrupted run
 only after the installed config and running gateway pass the confirm gate.
+Status warns gateway_unchecked when the running gateway cannot be asked. The
+receipt history keeps the last 20 receipts.
 Run it as root or an administrator.`,
 		Args:         bundleNoArgs,
 		SilenceUsage: true,

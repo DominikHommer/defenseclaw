@@ -20,6 +20,7 @@
     "test:feature-demos": "tsx --test ./scripts/test-feature-demos.ts",
     "test:diagram-zones": "tsx --test ./scripts/test-diagram-zones.tsx",
     "test:support-matrix": "tsx --test ./scripts/test-support-matrix.ts",
+    "test:docs-claims": "tsx --test ./scripts/test-docs-claims.ts",
     "postinstall": "fumadocs-mdx && tsx ./scripts/build-policy-assets.ts && tsx ./scripts/sync-connector-icons.ts"
   },
   "dependencies": {

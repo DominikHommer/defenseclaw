@@ -187,7 +187,17 @@ func newEnterpriseBundleVerifyCommand() *cobra.Command {
 signature, manifest, tenant, device group and platform, version floor,
 minimum product version, files[] hashes, inline secrets, secret references,
 the config validator and the effective policy digest. On a standalone managed
-device it also checks that every required credential is present.`,
+device it also checks that every required credential is present.
+
+A bundle must have a version above both floors: the min_version of the trust
+anchors and the last confirmed bundle version; the confirmed bundle itself
+passes as already_applied. On Linux and macOS a standard account cannot read
+the confirmed state, so verify warns floor_unchecked and checks only the
+anchor floor; apply checks again as root. On Windows the installed anchors
+are readable only by administrators and SYSTEM, so run verify elevated; a
+standard account gets not_admin. A bundle signed by a revoked key is refused
+(key_revoked). A retired key verifies only the confirmed bundle, which needs
+the confirmed state; any other bundle it signed is refused (key_expired).`,
 		Args:         bundleNoArgs,
 		SilenceUsage: true,
 		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},

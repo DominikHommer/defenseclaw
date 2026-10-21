@@ -24,6 +24,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -322,6 +323,26 @@ func TestWindowsBundleVerifyFailsWhileTheGatewayEnforcesAnEdit(t *testing.T) {
 func TestWindowsBundleEnsureFailsClosedWhenTheBundleStoreCannotRestore(t *testing.T) {
 	host := newWindowsBundleRestoreHost(t)
 	edited := host.tamper(t, false)
+	host.damageCurrentVersion(t)
+	stub := host.installer(t) // any installer run fails the test
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, windowsBundleRestoreOptions(), `C:\stage\install-enterprise.ps1`)
+	result := windowsBundleLifecycleResult(t, &stdout)
+	if commandExitCode(err) != enterprisestatus.WindowsExitFailure || !windowsBundleHasCode(result.Errors, "bundle_restore_failed") || len(stub.calls) != 0 {
+		t.Fatalf("ensure over a damaged bundle store: exit %d, errors %+v, installer runs %q", commandExitCode(err), result.Errors, stub.calls)
+	}
+	if installed, err := os.ReadFile(host.layout.ConfigPath); err != nil || !bytes.Equal(installed, edited) {
+		t.Fatalf("the failed restore changed config.yaml (read %v)", err)
+	}
+}
+
+// damageCurrentVersion changes one file of the confirmed version directory
+// so it no longer matches its manifest.
+func (host *windowsBundleRestoreHost) damageCurrentVersion(t *testing.T) {
+	t.Helper()
 	driver := newWindowsBundleDriver(host.layout)
 	st, err := driver.Store.LoadState()
 	if err != nil || st.Current == nil {
@@ -342,18 +363,51 @@ func TestWindowsBundleEnsureFailsClosedWhenTheBundleStoreCannotRestore(t *testin
 	if !damaged {
 		t.Fatalf("no bundle file to damage under %s", versionDir)
 	}
+}
+
+// Repair over a damaged bundle store changes nothing, also when the hook
+// runtime folder's permissions drifted: bundle_restore_failed comes before
+// the permission repair and the installer, as bundle apply --help says.
+func TestWindowsBundleRepairChangesNothingWhenTheBundleStoreCannotRestore(t *testing.T) {
+	host := newWindowsBundleRestoreHost(t)
+	edited := host.tamper(t, false)
+	host.damageCurrentVersion(t)
+	// The installer stub clears the hook runtime seam, so the drift is set
+	// up after it.
 	stub := host.installer(t) // any installer run fails the test
+	runtimeDir := t.TempDir()
+	dir, inspect, repair := windowsEnterpriseHookRuntimeDir, windowsEnterpriseInspectPublicDir, windowsEnterpriseRepairPublicDir
+	t.Cleanup(func() {
+		windowsEnterpriseHookRuntimeDir, windowsEnterpriseInspectPublicDir, windowsEnterpriseRepairPublicDir = dir, inspect, repair
+	})
+	windowsEnterpriseHookRuntimeDir = func() (string, error) { return runtimeDir, nil }
+	windowsEnterpriseInspectPublicDir = func(string) (enterprisepolicy.WindowsPublicDirDrift, error) {
+		return enterprisepolicy.WindowsPublicDirDrift{UsersReadMissing: true}, nil
+	}
+	var repaired []string
+	windowsEnterpriseRepairPublicDir = func(path string) error {
+		repaired = append(repaired, path)
+		return nil
+	}
 	command := &cobra.Command{}
 	var stdout bytes.Buffer
 	command.SetOut(&stdout)
 	command.SetErr(&bytes.Buffer{})
-	err = runWindowsEnterpriseStandaloneEnsure(context.Background(), command, windowsBundleRestoreOptions(), `C:\stage\install-enterprise.ps1`)
+	opts := windowsBundleRestoreOptions()
+	err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "repair", opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs("repair", opts))
 	result := windowsBundleLifecycleResult(t, &stdout)
 	if commandExitCode(err) != enterprisestatus.WindowsExitFailure || !windowsBundleHasCode(result.Errors, "bundle_restore_failed") || len(stub.calls) != 0 {
-		t.Fatalf("ensure over a damaged bundle store: exit %d, errors %+v, installer runs %q", commandExitCode(err), result.Errors, stub.calls)
+		t.Fatalf("repair over a damaged bundle store: exit %d, errors %+v, installer runs %q", commandExitCode(err), result.Errors, stub.calls)
+	}
+	if len(repaired) != 0 || len(result.Changes) != 0 {
+		t.Fatalf("repair changed the host before it stopped: permission repairs %q, changes %q", repaired, result.Changes)
 	}
 	if installed, err := os.ReadFile(host.layout.ConfigPath); err != nil || !bytes.Equal(installed, edited) {
 		t.Fatalf("the failed restore changed config.yaml (read %v)", err)
+	}
+	// The drift is real: the permission repair on its own fixes it.
+	if repairWindowsEnterpriseHookRuntimeAccess() == "" || len(repaired) != 1 || repaired[0] != runtimeDir {
+		t.Fatalf("the drifted hook runtime folder was not repairable: %q", repaired)
 	}
 }
 

@@ -22,6 +22,8 @@ The command downloads the latest release's installer (`install.sh` on macOS and 
 3. Stops the gateway, keeps the current install in `~/.defenseclaw/previous`, swaps in the new version and runs `defenseclaw migrate`.
 4. Starts the gateway and waits for it to report healthy.
 
+An upgrade sets each hook's fail mode from your config before the new hook runs. A fail mode you set to open stays open; outside Secure Client one you never set is closed.
+
 If a step fails, the installer puts the previous version back, restarts it and keeps the failed attempt in `~/.defenseclaw/.failed-<time>`. Every run writes a log to `~/.defenseclaw/logs/`. On Windows the installer continues in a new PowerShell window so the running command can release its files.
 
 | Command | What it does |

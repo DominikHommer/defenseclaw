@@ -57,7 +57,7 @@ Setup backs up `hooks.json` and keeps unrelated hooks. It writes only the global
 
 ## Limits
 
-- Only the synchronous `PreToolUse` decision is a hard block. Antigravity does not document a non-zero hook exit as enforcement, so there is no connector-wide fail-closed. A gateway failure lets the call run.
+- Only the synchronous `PreToolUse` decision is a hard block. Antigravity does not document a non-zero hook exit as enforcement, so there is no connector-wide fail-closed. In fail mode `closed`, the default, a gateway failure denies `PreToolUse`; Antigravity itself still runs a call when the hook times out or cannot start.
 - DefenseClaw cannot override Antigravity's own permission bypass.
 - Windows ARM64 is not supported.
 - Enterprise, Team and organization policy surfaces are outside this connector.
