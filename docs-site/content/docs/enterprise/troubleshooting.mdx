@@ -27,11 +27,12 @@ the `message` next to it has the details. To produce a fresh document, run `veri
 | Reserved: success, reboot required | — | `3010` | Not used |
 
 The Secure Client profile on Windows returns only `0` and `1603`. The standalone Setup can
-also refuse before the lifecycle starts: a malformed command line exits `1639` (a relative or
-environment-expanded `CONFIG=` or `MANIFEST=` path, an unknown property, `/install` without
-`CONFIG=` and `MANIFEST=`, or `TIMEOUTSECONDS` out of range), and other refusals, such as a
-token that is not elevated, exit `1603`. With `JSON=1` Setup then prints a short document with
-an `error` string and no `errors[].code`.
+also refuse before the lifecycle starts. It exits `1639` for a malformed command line (a
+relative or environment-expanded `CONFIG=` or `MANIFEST=` path, an unknown property,
+`/install` without `CONFIG=` and `MANIFEST=`, or `TIMEOUTSECONDS` out of range) and for a
+config or manifest file that a non-administrator can change. A token that is not elevated
+exits `1603`. With `JSON=1` the standalone Setup prints the same schema-version-2 document
+as the lifecycle, with `invalid_arguments` in `errors[].code`.
 
 ## Lifecycle error codes
 
@@ -133,7 +134,7 @@ Warnings do not fail an action. They appear in `warnings[]`.
 | `enrollment_pending_account_folder` | Windows | An account created its own `%USERPROFILE%\.defenseclaw`, for example when an agent it ran before enrollment was refused, or after it moved DefenseClaw's folder away. DefenseClaw takes over the folder when the account next signs in, and a fresh Setup install takes it over at once; `repair` leaves it alone until then |
 | `hook_contract_unverified` | all | A user runs an agent version that has no verified DefenseClaw hook contract, so that agent runs without DefenseClaw hooks. `coverage_complete` and `security_complete` are `false`; `verify` warns for that account and does not fail |
 | `agent_unprotected` | all | The enumerator found an agent installed for a user but could not enroll it, or could not finish the Windows per-user WinGet package listing; the message gives the reason. `security_complete` is `false`; `verify` warns for that account and does not fail. On Windows this also covers a running enabled agent whose account SID cannot be resolved, and an account whose WinGet listing reaches the entry limit or deadline ("not fully scanned"). See [Enrollment](/docs/enterprise/enrollment#agents-that-cannot-be-enrolled) |
-| `agent_settings_not_restored` | Linux, macOS, Windows | The hook guardian put back a missing Hermes `config.yaml` or Devin `config.json` from the last known good copy or the pristine backup, or recreated it with DefenseClaw's hooks only when no copy was available. Review the account's settings: changes after the copy may be missing. This warning alone does not fail `verify`, set `security_complete` to `false` or fail MDM detection |
+| `agent_settings_not_restored` | Linux, macOS, Windows | The hook guardian put back a missing Hermes `config.yaml` or Devin `config.json` from the last known good copy or the pristine backup, or recreated it with DefenseClaw's hooks only when no copy was available. Review the account's settings: changes after the copy may be missing. The warning clears at the next successful guardian refresh. A restore that could not bring the settings back stays reported (`settings_lost`) until they return. This warning alone does not fail `verify`, set `security_complete` to `false` or fail MDM detection |
 | `guardian_target_failed` | Linux, macOS | The guardian could not install or repair hooks for one user and connector; the message gives the reason. Every other user stays protected. If the message says the guardian state does not say why, the guardian's root-only attestation reports the failure but the state file in the data directory does not; read the guardian log |
 | `guardian_target_user_path` | Linux, macOS | The guardian could not protect one user and connector because of a path in that user's own home: a link, a file where a folder belongs (or the reverse), or a folder the user made unreadable. The message names the path. Only that user is affected, and the guardian protects the account again at its next reconcile after the path is fixed. A warning only: `reconcile`, `verify`, `detect.sh --require-healthy` and `security_complete` do not fail on it. See [When a user breaks their own setup](/docs/enterprise/operations#when-a-user-breaks-their-own-setup-linux-and-macos) |
 | `guardian_target_account_removed` | Linux, macOS | A target's account no longer exists (the directory answers "no such account"), usually because it was deleted. The enumerator removes the target after three consecutive definitive misses, one per cycle, and `enterprise linux repair` or `enterprise macos repair` removes it at once. A warning only: `verify`, `reconcile`, `detect.sh --require-healthy` and `security_complete` do not fail on it. A directory outage that hides an account does not produce it: `directory_lookups_failing` reports the outage, and the target stays |
@@ -243,7 +244,7 @@ and the full meaning are in [Exit codes](/docs/enterprise/mdm#exit-codes).
 | `mdm_untrusted_input` | A config, credential or keyring file can be changed by a non-administrator, or (`uninstall.sh`) the installed gateway is not root-owned |
 | `mdm_untrusted_install` | Windows, `uninstall.ps1`: the installed CLI or its folders are not administrator-only |
 | `mdm_input_too_large` | The config is over 1 MiB or the credential is over 16 KiB |
-| `mdm_payload_invalid`, `mdm_package_invalid`, `mdm_wrong_package`, `mdm_wrong_architecture` | Linux and macOS: the archive or package is not a DefenseClaw enterprise artifact for this host. The Linux wrapper checks `.deb` architecture before installation; an RPM for another CPU architecture reaches `rpm -U` and reports `mdm_package_install_failed` |
+| `mdm_payload_invalid`, `mdm_package_invalid`, `mdm_wrong_package`, `mdm_wrong_architecture` | Linux and macOS: the archive or package is not a DefenseClaw enterprise artifact for this host. The Linux wrapper reads the package architecture, for a `.deb` and for an RPM, before installation; a package for another CPU architecture reports `mdm_wrong_architecture` and nothing is installed |
 | `mdm_package_manager_busy` | Linux and macOS: dpkg, rpm or the installer held its lock. Exit `75`; retry |
 | `mdm_package_install_failed`, `mdm_package_remove_failed`, `mdm_package_manager_missing` | Linux and macOS: the package manager failed or is missing. On macOS, when the package's own preinstall or postinstall refused (a downgrade, a rejected config), the wrapper prints that result instead, with its own code such as `downgrade_refused` or `config_invalid` |
 | `mdm_package_result_empty` | macOS: the Installer failed and the postinstall left an empty `last-package-result.json`, and no lifecycle run holds the lock. Read `last-package-result.log` next to it. When a run holds the lock, the wrapper reports `lifecycle_busy` and exits `75` instead |

@@ -581,6 +581,11 @@ warning. Watcher rows for roots outside profiles carry no per-user attribution.
   the user's own token and publishes their servers to the gateway every 30
   seconds. If it cannot read or parse the file, the user's MCP tool calls are
   refused and `status` warns `claude_state_unreadable` or `kiro_mcp_unreadable`.
+  A project's `.mcp.json` is opened with the enrolled user's token, from the signed-in
+  session, which can be a disconnected one. A project that user cannot open (access
+  denied) is skipped and its servers are not published; the other projects are
+  unaffected. If the enumerator cannot obtain the token, it reports the state as
+  unreadable and publishes no inventory for that user.
 - **Plugins in profiles.** A Claude Code plugin from a local marketplace runs from
   its folder and is not watched. A matching `asset_policy.plugin.denied` rule
   still makes the hook refuse it with `ASSET-POLICY reason_code=admin-deny

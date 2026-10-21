@@ -242,7 +242,8 @@ First remove the devices from the install script's assignment. Then assign a roo
 platform script with `packaging/mdm/linux/uninstall.sh`; set `DC_PURGE=1` in its
 settings block for a purge. What it removes is in
 [Uninstall](/docs/enterprise/mdm#uninstall). On a host with nothing installed it
-exits `0`, so repeated runs are harmless. To keep the machine state for a
+exits `0`, so repeated runs are harmless. A plain removal keeps your policies in
+`/etc/defenseclaw/policies`; `DC_PURGE=1` removes them. To keep the machine state for a
 reinstall, see [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
 ## Notes

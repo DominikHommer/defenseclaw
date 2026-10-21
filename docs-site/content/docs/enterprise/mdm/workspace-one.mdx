@@ -87,7 +87,7 @@ re-checks the SHA-256 pins on the device, then starts
 Windows PowerShell 5.1. The packager requires a supplied `config_version: 9` config
 and refuses an inline `api_key`. Setup refuses a config file that a
 non-administrator can change, or that sits in a folder a non-administrator can
-replace; if the device's app cache does not meet that, Setup stops with exit `1603`
+replace; if the device's app cache does not meet that, Setup stops with exit `1639`
 and names the file.
 
 ### Add PowerShell 7 as a dependency
@@ -201,9 +201,9 @@ removes is in [Uninstall](/docs/enterprise/mdm#uninstall).
 | Code | Meaning | In Workspace ONE |
 | --- | --- | --- |
 | `0` | Success, or nothing to do | Success (**Installer Success Exit Code**) |
-| `1603` | The action failed and rolled back, the config does not validate, Setup is not elevated, or a non-administrator can change the config file | Failure; retried up to **Retry Count**. Read `errors[].code` in the lifecycle log. |
+| `1603` | The action failed and rolled back, or Setup is not elevated | Failure; retried up to **Retry Count**. Read `errors[].code` in the lifecycle log. |
 | `1618` | Another lifecycle run holds the lock | Failure for this attempt; the retry usually succeeds |
-| `1639` | Invalid arguments, such as a first install without a config, an unknown Setup property, or a relative or environment-expanded `CONFIG=` path | Failure; fix the content, because a retry gives the same result |
+| `1639` | Invalid arguments, such as a first install without a config, an unknown Setup property, a relative or environment-expanded `CONFIG=` path, a config that does not validate, or a config file a non-administrator can change | Failure; fix the content, because a retry gives the same result |
 | `3010` | Reserved; Setup does not return it | Reboot (**Installer Reboot Exit Code**) |
 
 See [Exit codes](/docs/enterprise/mdm#exit-codes) and
@@ -341,7 +341,7 @@ DC_FORMAT="value"
 ```
 
 The sensor always exits `0` and reports the installed version, `not-installed`,
-`outdated` or `unhealthy`.
+`outdated`, `unhealthy`, or `busy` while a lifecycle run holds its lock (a transient value).
 
 ### Deliver the AI Defense key on macOS
 

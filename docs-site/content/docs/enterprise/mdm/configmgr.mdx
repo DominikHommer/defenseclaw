@@ -75,7 +75,7 @@ launcher solves both: it re-checks the pins, then starts
 `CONFIG=` path to the config in its own folder. It runs in 32- or 64-bit Windows
 PowerShell 5.1. Setup also refuses a config file that a non-administrator can
 change, or that sits in a folder a non-administrator can replace; if the client
-cache does not meet that, Setup stops with exit `1603` and names the file.
+cache does not meet that, Setup stops with exit `1639` and names the file.
 
 ## Create the application
 
@@ -204,7 +204,39 @@ and `credential: ai-defense-api-key` in `config.yaml`. See
 | --- | --- |
 | Upgrade | Build content for the new release and create a new application. On its **Supersedence** tab, add the old application and leave **Uninstall** cleared, so the new deployment type upgrades in place ([Revise and supersede applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/revise-and-supersede-applications)). Raise the detection rule to the new version. `/ensure` upgrades in place, keeps the state, and applies the config in the new content. |
 | Roll back | `ensure` refuses to downgrade on Windows. Follow [Roll back](/docs/enterprise/lifecycle#roll-back). |
-| Change the config | Build new content with the new `config.yaml` and deploy it the same way. `/ensure` validates the config, applies it, and rolls back if applying fails. |
+| Change the config | See [Change the config](#change-the-config) below. The registry rule above checks the version only, so it does not run the application again for a config-only change. |
+
+### Change the config
+
+Build new content with the new `config_version: 9` `config.yaml`, and create it as a new
+application with the same Setup. Replace the registry rule with a **Script** detection
+method that also checks the installed config. Take the minimum version and the
+`config_sha256` value from the new content's `intune-package.json`. In Configuration Manager
+a script that exits `0` with output means **Installed**; no output means **Not installed**,
+so the devices with the old config run the new application, and `/ensure` validates the
+config, applies it and rolls back if applying fails.
+
+```powershell
+$minimum = [version]'X.Y.Z'
+$configSha256 = 'replace-with-config_sha256-from-intune-package.json'
+$base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+$key = $base.OpenSubKey('SOFTWARE\Cisco\DefenseClaw\Enterprise')
+if ($null -eq $key) { exit 0 }
+$version = [string]$key.GetValue('ProductVersion')
+$stateRoot = [string]$key.GetValue('StateRoot')
+$key.Dispose()
+$base.Dispose()
+$core = ($version -split '[-+]')[0]
+if (-not $core -or [version]$core -lt $minimum) { exit 0 }
+$config = Join-Path $stateRoot 'etc\config.yaml'
+if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { exit 0 }
+$actual = (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $configSha256.ToLowerInvariant()) { exit 0 }
+Write-Output "DefenseClaw Enterprise $version"
+exit 0
+```
+
+Do not edit the installed file by hand: changes made outside Setup are not validated.
 
 ## Uninstall
 
@@ -233,9 +265,9 @@ See [Logs](/docs/enterprise/mdm#logs).
 | Code | Meaning | Configuration Manager |
 | --- | --- | --- |
 | `0` | Success, or nothing to do | Success (no reboot) |
-| `1603` | The action failed and rolled back, the config does not validate, Setup is not elevated, or a non-administrator can change the config file | Failure; read `errors[].code` in `enterprise-lifecycle.log` and see [Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes) |
+| `1603` | The action failed and rolled back, or Setup is not elevated | Failure; read `errors[].code` in `enterprise-lifecycle.log` and see [Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes) |
 | `1618` | Another lifecycle run holds the lock | Fast Retry |
-| `1639` | Invalid arguments, such as a first install without a config, an unknown Setup property, or a relative or environment-expanded `CONFIG=` path | Failure; fix the content |
+| `1639` | Invalid arguments, such as a first install without a config, an unknown Setup property, a relative or environment-expanded `CONFIG=` path, a config that does not validate, or a config file a non-administrator can change | Failure; fix the content |
 | `3010` | Reserved; Setup does not return it | Soft Reboot |
 
 See [Exit codes](/docs/enterprise/mdm#exit-codes).
