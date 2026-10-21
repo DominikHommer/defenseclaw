@@ -1,0 +1,251 @@
+---
+title: Troubleshooting
+description: Common DefenseClaw problems with the symptom, the cause, the fix command and how to confirm it worked.
+keywords:
+  - DefenseClaw troubleshooting
+  - defenseclaw doctor
+  - DefenseClaw gateway not running
+  - DefenseClaw hooks not working
+---
+
+Start with `defenseclaw doctor`; each failing row names a next step ([Read doctor](/docs/troubleshooting/doctor)). Then find your symptom below. Each entry gives the symptom, the cause, the fix and how to confirm.
+
+More: [Windows](/docs/troubleshooting/windows), [Sandboxes](/docs/troubleshooting/sandboxes), [Enterprise](/docs/enterprise/troubleshooting). An AI agent can run these checks for you: [Troubleshoot DefenseClaw](/docs/for-agents/troubleshoot).
+
+## Install
+
+### `defenseclaw: command not found`
+
+**Cause.** `~/.local/bin` is not on your `PATH` (macOS and Linux), or the terminal predates the install (Windows).
+
+**Fix.** Run the line the installer printed, add it to your shell profile and open a new shell. On Windows open a new terminal. If the launcher is missing, run the install command again.
+
+**Confirm.** `defenseclaw --version` prints a version.
+
+### The installer stops before changing anything
+
+**Cause.** The platform is unsupported: an Intel Mac, Windows on ARM64 or x86. Rosetta and x64 emulation do not change that.
+
+**Fix.** Use a supported computer ([Install](/docs/get-started/install)).
+
+**Confirm.** The installer's message names the unsupported architecture.
+
+### Installer exit code 3
+
+**Cause.** DefenseClaw is installed, but a connector refused to start, usually because the agent updated.
+
+**Fix.** `defenseclaw doctor`, then the next step on the failing row.
+
+**Confirm.** `defenseclaw doctor` shows the connector row as `[PASS]`.
+
+### Installer exit code 4
+
+**Cause.** DefenseClaw is installed, but the first-run quickstart failed.
+
+**Fix.** Run the `defenseclaw quickstart ...` command the installer printed once the cause it named is fixed.
+
+**Confirm.** The report says `status=ready`.
+
+### `Another DefenseClaw install is running`
+
+**Cause.** An install or upgrade holds the lock. A stale lock from a crashed run is cleared automatically.
+
+**Fix.** Wait for it to finish, then run the command again.
+
+**Confirm.** The command proceeds.
+
+### `defenseclaw upgrade` changes nothing over SSH (Windows)
+
+**Cause.** The installer continues in a new window, and an SSH session has no desktop.
+
+**Fix.** Run the `powershell -File ... install.ps1` command the message prints, in the same terminal.
+
+**Confirm.** The installer shows its result and sets the exit code.
+
+## Agents and hooks
+
+### The agent is not guarded: no events, no blocks
+
+**Cause.** The agent was open when you ran `init`, so it never loaded the hooks. Or setup did not run for it.
+
+**Fix.** Quit and reopen the agent. Then `defenseclaw status` and `defenseclaw doctor`. Run `defenseclaw setup <connector>` if the agent is not listed.
+
+**Confirm.** Ask the agent to use a tool; a new event shows in `defenseclaw tui` within a second or two.
+
+### Doctor: `Claude Code hooks - ... settings.json not found`
+
+**Cause.** The hooks were never written, or the settings file moved.
+
+**Fix.** `defenseclaw setup claude-code --yes`, then restart Claude Code.
+
+**Confirm.** `defenseclaw doctor` shows the hooks row as `[PASS]`.
+
+### Doctor: stale generated script
+
+**Cause.** A hook script was rendered by an older build, or bakes a different fail mode than `config.yaml`.
+
+**Fix.** Run the command the row names, for example `defenseclaw setup codex --yes --restart` or `defenseclaw-gateway restart`.
+
+**Confirm.** The freshness row clears.
+
+### The gateway refuses to start: `<connector>'s agent changed`
+
+**Cause.** The agent's version changed after DefenseClaw recorded its hook contract.
+
+**Fix.** `defenseclaw setup <connector>`, then `defenseclaw-gateway restart`.
+
+**Confirm.** `defenseclaw-gateway status` shows running.
+
+### A connector was switched to observe with a warning
+
+**Cause.** Its installed version has no hook contract (below the tested floor or known broken). Action mode needs one.
+
+**Fix.** Update the agent to a supported version ([Hook contracts](/docs/reference/hook-contracts)). `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` overrides the check for exploratory testing only.
+
+**Confirm.** `defenseclaw doctor` shows `Connector compatibility` as `[PASS]`.
+
+### `Hook failed: hook exited with code 1` after uninstall
+
+**Cause.** An agent session stayed open while DefenseClaw was removed.
+
+**Fix.** Restart the session.
+
+**Confirm.** The message no longer appears.
+
+## Gateway
+
+### Tool calls blocked with `gateway restarting or not running`
+
+**Cause.** The gateway is stopped, and the hook is fail-closed. This holds in observe mode too.
+
+**Fix.** `defenseclaw-gateway status`, then `defenseclaw-gateway start`. A hook does not start a stopped gateway after `defenseclaw-gateway stop`, during an upgrade, for 60 seconds after a failed start, or with `DEFENSECLAW_GATEWAY_AUTOSTART=0`. Read `~/.defenseclaw/gateway.log` for the start error.
+
+**Confirm.** `defenseclaw-gateway status` shows running.
+
+### `gateway did not answer`
+
+**Cause.** The gateway runs but is frozen. Neither a hook nor the watchdog restarts it.
+
+**Fix.** `defenseclaw-gateway restart`.
+
+**Confirm.** `defenseclaw doctor` shows the sidecar row as `[PASS]`.
+
+### The API port is held by another account
+
+**Cause.** On a shared host, another account's gateway uses the default port. The installer stops before changing anything.
+
+**Fix.** Run the `defenseclaw setup gateway --api-port <free port>` command it prints, then upgrade again.
+
+**Confirm.** `defenseclaw status` shows your gateway's API port.
+
+### `refusing to run ... gateway executable ... can be changed by another account`
+
+**Cause.** The gateway file or a directory above it is writable by others.
+
+**Fix.** The message names the command, for example `chmod go-w <file>`. Run it as the file's owner.
+
+**Confirm.** `defenseclaw doctor` shows `Config validation` as `[PASS]`.
+
+### `Config validation` fails after an edit
+
+**Cause.** `config.yaml` is invalid. A running gateway keeps the config it started with.
+
+**Fix.** `defenseclaw config validate`, fix the field it names, save.
+
+**Confirm.** `defenseclaw doctor` shows `Policy` as `[PASS]` with the new digest.
+
+## Blocking and approvals
+
+### Nothing is blocked
+
+**Cause.** The agent is in observe mode, or the finding is below the block level. The default blocks CRITICAL and only alerts on HIGH and MEDIUM.
+
+**Fix.** `defenseclaw guardrail status`. To enforce: `defenseclaw guardrail mode action --connector <agent>`. To change the level: `defenseclaw guardrail block-at HIGH`.
+
+**Confirm.** `defenseclaw alerts --limit 5` shows `decision=blocked`.
+
+### Every tool call is blocked while the gateway is down
+
+**Cause.** The hook fail mode is `closed`, the default for a new install.
+
+**Fix.** Start the gateway. If you want calls to run unchecked during an outage, `defenseclaw guardrail fail-mode open` (your decision; the audit log still records the gap).
+
+**Confirm.** `defenseclaw guardrail status` shows the fail mode.
+
+### A custom rule pack is rejected: `digest ... does not match`
+
+**Cause.** The pack's files changed after you pinned its digest.
+
+**Fix.** `defenseclaw guardrail validate-pack <dir>`; if the change was intended, pin the digest it prints: `defenseclaw config set guardrail.custom_packs.<name>.digest sha256:<digest>`.
+
+**Confirm.** `defenseclaw doctor` shows `Policy` as `[PASS]`.
+
+### Human approval never asks
+
+**Cause.** The agent has no native approval prompt. The call takes the connector's fallback right away, and the audit log records that approval was asked for.
+
+**Fix.** None needed. See which agents can ask on the [capability matrix](/docs/reference/capability-matrix).
+
+**Confirm.** The matrix lists the agent's ask support.
+
+## Keys and judge
+
+### `no gateway token is configured`
+
+**Cause.** The gateway has never started on this account, or its token was removed.
+
+**Fix.** `defenseclaw doctor --fix` (previews with `--dry-run`). It never prints the token.
+
+**Confirm.** `Gateway authentication` is `[PASS]`.
+
+### `the LLM judge is off`
+
+**Cause.** No LLM key is configured. The local rules work without one.
+
+**Fix.** To add the judge: `defenseclaw setup llm`, or follow [Set up an LLM key](/docs/how-to/guardrail/set-up-an-llm-key). Check what is set with `defenseclaw keys list`.
+
+**Confirm.** `defenseclaw doctor` shows `LLM API key` and `LLM reachable` as `[PASS]`.
+
+## Upgrade
+
+### `Your configuration is from a newer DefenseClaw than X`
+
+**Cause.** You installed an older release over data from a newer one.
+
+**Fix.** `defenseclaw rollback`, or install the newer release again.
+
+**Confirm.** `defenseclaw migrate --check` exits 0.
+
+### `The running gateway did not stop`
+
+**Cause.** The old gateway ignored the stop. Nothing was changed.
+
+**Fix.** `defenseclaw-gateway stop`, then run the upgrade again.
+
+**Confirm.** The upgrade completes.
+
+### `missing release-provenance.json; refusing before services are stopped`
+
+**Cause.** `defenseclaw upgrade` cannot upgrade 0.8.7 or older, or any 0.x on Windows.
+
+**Fix.** Run the install command from [Install](/docs/get-started/install). See [Upgrade from 0.8.x](/docs/appendix/upgrade-from-0-8).
+
+**Confirm.** `defenseclaw --version` shows the new version.
+
+### An upgrade failed
+
+**Cause.** A step failed. The installer put the previous version back and kept the attempt in `~/.defenseclaw/.failed-<time>`.
+
+**Fix.** Read the newest log in `~/.defenseclaw/logs/`, fix what it names, run `defenseclaw upgrade` again. A cut-off run restores the install it was replacing first.
+
+**Confirm.** `defenseclaw version` shows `OK All components in sync.`
+
+## Observability
+
+### A destination fails or shows degraded
+
+**Cause.** The endpoint, key or route is wrong. Repeated failures pause that destination.
+
+**Fix.** `defenseclaw observability plan`, then `defenseclaw doctor` (Observability rows). Fix and reload the destination, or `defenseclaw setup observability disable NAME`.
+
+**Confirm.** The doctor row is `[PASS]`. Local audit history kept working throughout.

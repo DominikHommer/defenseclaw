@@ -56,11 +56,11 @@ operator workflows:
 | First run | [Quickstart](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/quickstart/) |
 | Upgrade | [Upgrade](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/) |
 | Windows | [Native Windows](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/) |
-| Connectors | [Connector compatibility](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/) |
-| Guardrails | [Guardrail setup](https://cisco-ai-defense.github.io/defenseclaw/docs/guardrail/) |
+| Connectors | [Connector compatibility](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/hook-contracts/) |
+| Guardrails | [Guardrail setup](https://cisco-ai-defense.github.io/defenseclaw/docs/features/guardrail/) |
 | Configuration | [Configuration reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/) |
 | CLI | [CLI reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/) |
-| Observability | [Observability](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/) |
+| Observability | [Observability](https://cisco-ai-defense.github.io/defenseclaw/docs/features/observability/) |
 
 Repository Markdown is limited to contributor guidance, implementation
 contracts, package-local notes, generated schema references, test fixtures, and

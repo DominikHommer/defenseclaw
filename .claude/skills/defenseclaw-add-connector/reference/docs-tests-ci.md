@@ -61,7 +61,7 @@ Python: cli/defenseclaw/connector_paths.py KNOWN_CONNECTORS
 | `docs-site/components/connector-brand.tsx` `FALLBACKS` | initials and color when there is no LobeHub icon (zeptoclaw, omnigent) | nothing |
 | `docs-site/lib/hero-connectors.ts` `TERMINAL_CONNECTORS` | id, label, setup command, modeId | nothing |
 | `docs-site/content/docs/connectors/index.mdx` | frontmatter count and keywords, the Integration families card, a Platform support row (`\| [Label](/docs/connectors/<id>) \| **Supported** \| **<win>** \| ... \|`), a Capability summary row | the platform row is regex-pinned; the rest isn't |
-| `docs-site/content/docs/connectors/compatibility.mdx` | a row per contract band: `\| <ConnectorLabel id="<id>" /> \| gate \| range \| contract / script gen \| AID surfaces \|` | only the codex and claude rows are pinned; add a pin |
+| `docs-site/content/docs/reference/hook-contracts.mdx` | a row per contract band: `\| <ConnectorLabel id="<id>" /> \| gate \| range \| contract / script gen \| AID surfaces \|` | only the codex and claude rows are pinned; add a pin |
 | `docs/CONNECTOR-MATRIX.md` | **nothing.** It only points to the website (`test_connector_matrix_delegates_current_support_to_the_website`) | |
 
 ## 3. Pages that list every connector

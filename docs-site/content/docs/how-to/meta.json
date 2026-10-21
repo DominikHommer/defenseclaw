@@ -1,0 +1,18 @@
+{
+  "title": "How-to",
+  "pages": [
+    "---Guardrail---",
+    "...guardrail",
+    "---Rules and policy---",
+    "...policies",
+    "---Skills, MCP and discovery---",
+    "...scanning",
+    "---Sandboxes---",
+    "...sandboxes",
+    "---Observability---",
+    "...observability",
+    "---More---",
+    "guard-an-acp-editor",
+    "install-the-edge-connector"
+  ]
+}

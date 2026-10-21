@@ -1,25 +1,20 @@
 ---
 title: Deploy to a fleet
-description: The six steps to deploy DefenseClaw enterprise to managed Windows, Linux and macOS endpoints, from choosing a profile and agents to your MDM recipe, config, ensure and a ringed rollout.
+description: Deploy DefenseClaw enterprise to managed Windows, Linux and macOS endpoints in six steps, from choosing a profile to a ringed rollout.
 keywords:
   - deploy DefenseClaw enterprise
-  - DefenseClaw fleet deployment
+  - fleet deployment
   - standalone profile
   - MDM recipe
   - ensure
-  - observe mode pilot
 ---
 
-This page is the short path through an enterprise deployment. Each step makes
-one decision and links to the page with the details. You need an MDM,
-configuration-management tool or administrator shell that runs commands as
-SYSTEM on Windows and as root on Linux and macOS. Terms such as *profile*,
-*lifecycle* and *ensure* are defined in [Concepts](/docs/enterprise/concepts).
-
-Not sure enterprise deployment is what you need? Read
-[Is this for you?](/docs/enterprise#is-this-for-you) first. To compare the
-open-source and enterprise editions feature by feature, see the
-[support matrix](/docs/support-matrix#features).
+Deploy the standalone profile in six steps. Each step makes one decision and
+links to the page with the details. You need an MDM, configuration-management
+tool or administrator shell that runs commands as SYSTEM on Windows and as root
+on Linux and macOS. [Concepts](/docs/enterprise/concepts) defines *profile*,
+*lifecycle* and *ensure*. Not sure you need enterprise deployment? Read
+[Is this for you?](/docs/enterprise#is-this-for-you).
 
 ## 1. Pick the profile
 
@@ -34,8 +29,8 @@ one of them.
 | Next | Continue with step 2 on this page | [Secure Client managed deployment](/docs/enterprise/secure-client) |
 
 The rest of this page covers the standalone profile. On Windows and macOS the
-profile defaults to Secure Client, so set `enterprise.profile: standalone` in
-the config ([Two profiles](/docs/enterprise#two-profiles)).
+profile defaults to Secure Client, so set `enterprise.profile: standalone`
+([Two profiles](/docs/enterprise#two-profiles)).
 
 ## 2. Pick the agents
 
@@ -46,12 +41,10 @@ one of two ways:
 | Route | Agents | What DefenseClaw writes |
 | --- | --- | --- |
 | [Machine policy](/docs/enterprise/concepts#machine-policy-connector) | Claude Code, Codex, Cursor, GitHub Copilot, and OpenCode with DefenseClaw's managed OpenCode plugin | Its hooks in the vendor's administrator-owned policy files, which apply to every user of the computer |
-| [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp and Kiro, and OpenCode while the managed plugin is not in force. On Linux and macOS also OpenHands and OmniGent | The guardian writes the hook, or plugin, into each enrolled user's own agent config and repairs it |
+| [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp and Kiro, and OpenCode while the managed plugin is not in force | The guardian writes the hook, or plugin, into each enrolled user's own agent config and repairs it |
 
-ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.
-
-OpenHands and OmniGent are refused on Windows. Which agent and OS combinations
-were verified in this release is in the
+OpenClaw, ZeptoClaw and ACP (Agent Client Protocol) editors are not supported
+in enterprise managed mode. The verified agent and OS combinations are in the
 [enterprise route table](/docs/support-matrix#enterprise). How to list agents,
 users and per-agent modes is in
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
@@ -76,9 +69,7 @@ Each card names what you push.
   <Card title="Any other tool" href="/docs/enterprise/mdm#what-you-deliver" description="Any tool that runs a command as SYSTEM or root can call the kit wrapper directly." />
 </Cards>
 
-The MDM recipes are templates, checked by simulating each MDM's execution
-context; they have not been run in a live tenant. The release files they
-deliver:
+The release files the recipes deliver:
 
 | OS | Release file |
 | --- | --- |
@@ -93,10 +84,10 @@ deliver:
 
 ## 4. Deliver the config and the AI Defense key
 
-The config is one YAML file that only administrators can change, and it is the
-only policy the host enforces: thresholds, block and allow lists, rule packs and
-the agents to protect all live in it. Local tools cannot change it on a managed
-host ([Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host)).
+The config is one YAML file that only administrators can change. It is the only
+policy the host enforces: thresholds, block and allow lists, rule packs and the
+agents to protect all live in it, and local tools cannot change it
+([Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host)).
 The lifecycle installs it at a fixed path:
 
 | OS | Installed config |
@@ -178,15 +169,11 @@ Every exit code is listed in [Exit codes](/docs/enterprise/mdm#exit-codes).
 
 Deploy a pilot ring with `guardrail.mode: observe`. Observe mode records every
 decision, including what DefenseClaw would have blocked, without blocking on
-policy verdicts. When the pilot is healthy and the decisions are reviewed, set
-`guardrail.mode: action` and deliver the config again. Then grow the
-deployment in rings (pilot, early, broad, everyone), moving on only when a
-ring is healthy.
-
-[Plan a rollout](/docs/enterprise/rollout) has a ring plan with sizes and exit
-criteria ([Step 5](/docs/enterprise/rollout#step-5-expand-in-rings)), and
-covers choosing users, handling existing per-user installs and planning
-upgrades and rollback.
+policy verdicts. When the pilot is healthy and you have reviewed the decisions,
+set `guardrail.mode: action` and deliver the config again. Then grow in rings
+(pilot, early, broad, everyone), moving on only when a ring is healthy.
+[Plan a rollout](/docs/enterprise/rollout#step-5-expand-in-rings) has ring
+sizes and exit criteria.
 
 ## Next steps
 

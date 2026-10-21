@@ -133,7 +133,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 - [ ] **M-REQ-4** Add a detection check with a stable ID that ends in pass, warn, fail or skip with a copy-paste fix (sudo marked), never a traceback. Surface it in `defenseclaw doctor` (and `status` when operators act on it). Why: operators learn what is missing before it fails.
   Check: `defenseclaw doctor --json` on a host without the requirement. Evidence: `internal/openshell/doctor.go`, `cli/defenseclaw/commands/cmd_doctor.py`.
 - [ ] **M-REQ-5** Document the requirement in `docs-site` in a "You need" table (versions, disk, rights, first-start caveats) and in the install prerequisites. Why: it is the operator's only pre-flight list.
-  Check: `grep -rn '<name>' docs-site/content/docs`. Evidence: `docs-site/content/docs/get-started/install.mdx`, `docs-site/content/docs/sandboxes/linux.mdx`.
+  Check: `grep -rn '<name>' docs-site/content/docs`. Evidence: `docs-site/content/docs/get-started/install.mdx`, `docs-site/content/docs/how-to/sandboxes/set-up-on-linux.mdx`.
 - [ ] **M-REQ-6** Test the missing case: binary, daemon, KVM, key or platform absent, asserting severity, reason code and fix text. Why: only the happy path gets tested otherwise.
   Check: `pytest cli/tests/test_cmd_doctor_sandbox.py` and `go test ./internal/openshell/...`. Evidence: `internal/openshell/doctor_test.go`.
 - [ ] **M-REQ-7** Refuse unsupported platforms by name in code even when config says enabled; never silently downgrade a required backend. Why: a config copied from another OS must not read as active.
@@ -158,9 +158,9 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 - [ ] **M-SBX-3** Keep the Python `sandbox` commands in lockstep with the Go command tree and its golden file. Why: the two CLIs drift.
   Check: `go test ./internal/cli ./internal/openshell/sandboxcli`. Evidence: `internal/cli/testdata/sandbox_commands.json`, `docs-site/content/docs/reference/sandbox-cli.mdx`.
 - [ ] **M-SBX-4** Built-in and custom sandbox packs load through the strict pack loader; keep `@sym:BuiltinPackNames` ordered loosest to strictest; a change to a built-in pack or egress feed updates the embedded copy and its test. Why: a leniently loaded pack or a stale feed changes sandbox posture silently.
-  Check: `go test ./policies/sandbox/... ./internal/openshell/packs/...`. Evidence: `policies/sandbox/packs.go`, `policies/sandbox/egress/embed_test.go`, `docs-site/content/docs/sandboxes/policy-packs.mdx`.
+  Check: `go test ./policies/sandbox/... ./internal/openshell/packs/...`. Evidence: `policies/sandbox/packs.go`, `policies/sandbox/egress/embed_test.go`, `docs-site/content/docs/reference/sandbox-policy.mdx`.
 - [ ] **M-SBX-5** Sandbox traffic leaves only through the DefenseClaw egress proxy and the rendered OpenShell policy; credentialed endpoints (hook ingress, LLM) are reachable only through their scoped rules. Why: a direct route bypasses egress policy and telemetry.
-  Check: `go test ./internal/openshell/egress/... ./internal/openshell/policy/...`. Evidence: `internal/openshell/egress`, `internal/openshell/policy`, `docs-site/content/docs/sandboxes/network.mdx`.
+  Check: `go test ./internal/openshell/egress/... ./internal/openshell/policy/...`. Evidence: `internal/openshell/egress`, `internal/openshell/policy`, `docs-site/content/docs/reference/sandbox-network.mdx`.
 - [ ] **M-SBX-6** Each sandbox authenticates with its own binding (random bearer stored only as a hash, scoped to one connector's hook routes); managed registrations and saved decisions stay scoped to the caller's uid; relayed calls use the sandboxrelay contract. Why: a shared or unscoped credential lets one sandbox or user act as another.
   Check: `go test ./internal/sandboxauth/... ./internal/sandboxreg/... ./internal/sandboxrelay/...`. Evidence: `internal/sandboxauth`, `internal/sandboxreg`, `internal/sandboxrelay`.
 - [ ] **M-SBX-7** Any feature that lets sandboxed code write into the mounted project keeps the nested-repository guard. Why: a planted `.git` config runs code on the host.
@@ -246,7 +246,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 - [ ] **M-OBS-5** Do not reintroduce the retired v7 runtime outside the upgrade and recovery boundaries. Why: the hard-cut gate fails.
   Check: `make check-observability-v8-hard-cut`. Evidence: `scripts/check_observability_v8_hard_cut.py`.
 - [ ] **M-OBS-6** Redact once at the projection boundary through redaction profiles; state the privacy class and effective profile of any new field or destination. Why: dashboards are not a redaction boundary.
-  Check: `go test ./internal/redaction ./internal/observability`. Evidence: `docs-site/content/docs/observability/redaction.mdx`.
+  Check: `go test ./internal/redaction ./internal/observability`. Evidence: `docs-site/content/docs/reference/redaction.mdx`.
 - [ ] **M-OBS-7** Dashboard and provider-shape changes keep source and packaged copies in sync. Why: queries on missing metrics render plausible zeros.
   Check: `make check-grafana-dashboards check-provider-coverage`. Evidence: `scripts/check_grafana_dashboards.py`, `test/testdata/llm-endpoints.json`.
 

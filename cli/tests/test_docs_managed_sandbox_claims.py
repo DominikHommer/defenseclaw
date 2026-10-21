@@ -33,7 +33,7 @@ def test_docs_never_prescribe_sandbox_run_mount_or_yolo_flags() -> None:
 
 
 def test_no_sandbox_variable_is_not_an_unconditional_bypass() -> None:
-    guide = " ".join(_read("sandboxes/guide.mdx").split())
+    guide = " ".join(_read("how-to/sandboxes/more-ways-to-run.mdx").split())
     bullet = guide.split("DEFENSECLAW_NO_SANDBOX=1 claude` runs the harness", 1)[1][:400]
     assert "where your organization allows it" in bullet  # GAP-0047
     assert "required_for" in bullet

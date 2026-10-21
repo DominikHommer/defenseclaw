@@ -63,7 +63,7 @@ Each principle maps to requirement IDs in `reference/checklist.md`.
 | A config key, schema, default, migration | CFG, DOC, PKG | `docs/CONFIG_FILES.md`, `schemas/README.md` |
 | A `DEFENSECLAW_*` environment variable | CFG, DEP, DOC | `internal/envvars/registry.json` |
 | Rego, admission, rule packs, detections | POL, TST, PERF | `docs/GUARDRAIL_RULE_PACKS.md` |
-| Profiles, assignments, directory facts, agent identity | ID, POL, SEC | `docs-site/content/docs/guardrail/user-and-group-policies.mdx` |
+| Profiles, assignments, directory facts, agent identity | ID, POL, SEC | `docs-site/content/docs/reference/guardrail-profiles.mdx` |
 | Enterprise, MDM, guardian, lifecycle, machine policy | DEP, PKG, SEC, TST | `docs-site/content/docs/enterprise/machine-policy.mdx`, `.github/managed-paths.txt` |
 | Sandboxes, OpenShell, drivers | SBX, REQ, DEP | `docs/SANDBOX.md` (contributor notes) |
 | Scanners, judges, local models | SCN, REQ | `reference/requirements-and-sandboxes.md` |

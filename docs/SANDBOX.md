@@ -8,8 +8,8 @@ behaviours the code is built around. The code is the authority; each section
 names the package to read.
 
 The operator guide for the sandbox commands is the
-[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
-(`docs-site/content/docs/sandboxes/guide.mdx`): setup, running a harness, the
+[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/sandboxes/run-an-agent/)
+(`docs-site/content/docs/how-to/sandboxes/run-an-agent.mdx`): setup, running a harness, the
 session, the end-of-session review and undo, the run variations, MCP
 servers, the shell wrapper, troubleshooting, and removing what a retired 0.0.x standalone install left.
 Telemetry details are in
@@ -3389,5 +3389,5 @@ watchdog, status, the Python CLI's `api_bind_host`) dials it there; the
 migration record lists the removed keys. Running it again changes nothing.
 The root systemd units, launchers, network namespace, NAT rules and `sandbox`
 user are removed by hand, as the
-[published sandbox guide](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/#remove-a-retired-standalone-sandbox)
+[published sandbox guide](https://cisco-ai-defense.github.io/defenseclaw/docs/troubleshooting/sandboxes/#remove-a-retired-standalone-sandbox)
 lists.

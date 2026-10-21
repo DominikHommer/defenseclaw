@@ -2247,7 +2247,7 @@ class JudgeConfig:
 class WebhookConfig:
     # Mirrors ``internal/config.WebhookConfig`` (notifier webhook, not an
     # audit sink). See the published webhook guide:
-    # https://cisco-ai-defense.github.io/defenseclaw/docs/setup/webhooks/
+    # https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/set-up-webhook-alerts/
     #
     # ``name`` is the CLI-visible identifier used by
     # ``defenseclaw setup webhook {enable,disable,remove,show,test}``.

@@ -1,0 +1,11 @@
+{
+  "title": "Rules and policy",
+  "pages": [
+    "change-block-and-alert-levels",
+    "use-a-different-rule-pack",
+    "write-a-custom-rule",
+    "validate-a-rule-pack",
+    "tune-the-llm-judge",
+    "build-a-policy-in-the-browser"
+  ]
+}
