@@ -6,6 +6,7 @@
     "enrollment",
     "machine-policy",
     "foreign-hook-guard",
-    "ai-defense-key"
+    "ai-defense-key",
+    "reference"
   ]
 }

@@ -39,24 +39,7 @@ The MDM wrappers follow the same order for you; see
 
 ## Where the key is stored
 
-| OS | File | Owner and mode | How the gateway reads it |
-| --- | --- | --- | --- |
-| Linux, systemd 247 or later | `/etc/defenseclaw/secrets/<name>` | root, `0600`; directory root, `0700` | systemd passes it with `LoadCredential=`. The gateway cannot read the secrets directory itself. |
-| Linux, older systemd | `/etc/defenseclaw/secrets/<name>` | root, group `defenseclaw`, `0640`; directory `0750` | Reads the file through its group |
-| macOS | `/opt/cisco/defenseclaw/etc/secrets/<name>` | root, group `_defenseclaw`, `0640`; directory `0750` | Reads the file through its group |
-| Windows | `C:\ProgramData\Cisco\DefenseClaw\secrets\<name>` | Owner Administrators. Protected DACL: full control for SYSTEM and Administrators; read for `NT SERVICE\DefenseClawGateway` only. On the `secrets` folder the gateway gets only the rights to traverse it and read its attributes and security descriptor, so it can check the file's parents. | Reads the file as its service identity |
-
-Before the gateway uses a stored key, it checks the file:
-
-- **Linux and macOS.** A root-owned regular file with one link, that other
-  users cannot read, in directories only administrators can write.
-- **Windows.** Only SYSTEM, Administrators and the gateway service may read
-  it. `enterprise secret set` runs this check right after writing and
-  deletes the file if it fails.
-
-The value must be a single line of at most 16 KiB, without NUL bytes. Linux
-and macOS remove one trailing line ending; Windows removes all leading and
-trailing whitespace.
+The key is a file in an administrator-only directory (`/etc/defenseclaw/secrets/<name>` on Linux, `/opt/cisco/defenseclaw/etc/secrets/<name>` on macOS, `C:\ProgramData\Cisco\DefenseClaw\secrets\<name>` on Windows). The gateway checks the file's owner and mode before it uses it. Modes and checks per OS: [AI Defense key detail](/docs/enterprise/configure/reference#where-the-key-is-stored).
 
 ## Store the key
 
@@ -170,11 +153,6 @@ On macOS use `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise sec
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret status --json
 ```
 
-To confirm a key matches the one you hold, compare the digest prefix with
-the first 12 characters of the key's SHA-256, for example from
-`printf '%s' "$AID_KEY" | sha256sum` on Linux or
-`printf '%s' "$AID_KEY" | shasum -a 256` on macOS.
-
 The lifecycle status (`enterprise linux status`, `enterprise macos status`
 or `enterprise windows status`, with `--json`) has an
 `inspection.ai_defense` field:
@@ -199,37 +177,6 @@ Run `enterprise secret set` again with the same name and the new value.
 The file is replaced atomically and the gateway restarts, as above. Revoke
 the old key in AI Defense after `secret status` shows the new digest.
 
-## Remove the key
-
-Remove the reference first. The removal refuses a credential the installed config
-still names (`enterprise.inspection.ai_defense.credential`), so the key stays
-stored until you do this:
-
-1. In the config you deploy, set `enabled: false` under
-   `enterprise.inspection.ai_defense` and delete its `credential` line. Otherwise
-   the gateway keeps logging that the credential is missing, while the local
-   engine decides alone.
-2. Apply the config with `ensure`.
-3. Remove the key:
-
-```bash
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret remove --name ai-defense-api-key
-```
-On macOS use `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret remove --name ai-defense-api-key`.
-
-```powershell
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret remove --name ai-defense-api-key
-```
-
-If the config still names the key, the command exits `1` (`1603` on Windows)
-with `the installed config still references credential ai-defense-api-key`, and
-nothing is removed. On Linux and macOS a successful removal prints
-`- removed credential ai-defense-api-key`, or
-`- credential ai-defense-api-key was not stored; nothing to remove`.
-On Windows, removal reads the installed config to check for references.
-If it cannot read that config, it refuses and leaves the credential in place;
-restore config access, then run the command again.
-
 ## Deliver the key with an MDM
 
 Never put the key in an MDM script body or on a command line: neither is
@@ -248,19 +195,10 @@ key fails after the deployment applied. See
 [Deliver the AI Defense key](/docs/enterprise/mdm#deliver-the-ai-defense-key)
 for recipes.
 
+## Remove the key
+
+Remove the reference first (set `enabled: false` and delete `credential` under `enterprise.inspection.ai_defense`), apply the config with `ensure`, then run `enterprise secret remove --name ai-defense-api-key`. Removal refuses a credential the installed config still names. See [AI Defense key detail](/docs/enterprise/configure/reference#remove-the-key).
+
 ## Exit codes
 
-| Result | Linux and macOS | Windows |
-| --- | --- | --- |
-| Stored, listed or removed | `0` | `0` |
-| Invalid input: an invalid credential name, both or neither of `--from-stdin` and `--from-file`, or an empty, multi-line or oversized value | `2` | `1639` |
-| Not elevated or not root, not installed (Windows only), the config still references the credential on removal, or the write failed | `1` | `1603` |
-| The follow-up `ensure` failed and rolled back | `1` | Not applicable |
-| Another lifecycle run holds the lock | `75` | Not applicable |
-| The gateway restart failed after the key was stored | Not applicable | `1603` |
-
-A `--from-file` path that another account could change is also refused
-before anything is stored: on Linux and macOS a symlink, a file that group or
-others can write or that another account owns, or a file in a folder another
-account can write (exit `2`); on Windows a path that non-administrators can
-write (exit `1639`).
+`0` on success, `2` (Linux and macOS) or `1639` (Windows) for invalid input, `1` or `1603` for not elevated, not installed, still referenced or a failed write. Full table: [AI Defense key detail](/docs/enterprise/configure/reference#exit-codes).
