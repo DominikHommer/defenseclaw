@@ -74,10 +74,24 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	stateDir := foreignHookSessionStateDir(dataDir, identity)
-	removals, removalsErr := a.foreignHookRemovals.forIdentity(managed.HookGuardianAuthorizationDir(dataDir), identity)
+	guardianDir := managed.HookGuardianAuthorizationDir(dataDir)
+	admission, active := enterprisepolicy.ForeignHookFencePaths(guardianDir, identity)
+	for _, path := range []string{admission, active} {
+		if err := validateManagedGuardianAuthorization(path, "foreign-hook removal fence"); err != nil {
+			writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_removal_fence_unavailable")
+			return
+		}
+	}
+	fenceUnlock, err := enterprisepolicy.LockForeignHookFence(r.Context(), guardianDir, identity, false)
+	if err != nil {
+		writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_removal_fence_unavailable")
+		return
+	}
+	defer fenceUnlock()
 	// Each identity has its own store, so only that identity's exchanges
 	// are serialized; another account's exchange never waits on this one.
 	unlock := a.foreignHookSessionLocks.lock(stateDir)
+	removals, removalsErr := a.foreignHookRemovals.forIdentity(guardianDir, identity)
 	decision := enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
 		StateDir:     stateDir,
 		Key:          exchange.Key,

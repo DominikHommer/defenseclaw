@@ -182,6 +182,32 @@ func foreignTxPendingConnectors(dataDir string) string {
 	return strings.Join(connectors, ",")
 }
 
+func TestForeignHookCleanupAdmitsRemovalBeforeWorkerEdits(t *testing.T) {
+	var dataDir string
+	dataDir = useForeignTxPass(t, func(request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		if foreignTxPlanning(request) {
+			return foreignTxPlan(map[string][]string{"cursor": {"/home/alice/.cursor/hooks.json"}}), nil
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+		dir := managed.HookGuardianAuthorizationDir(dataDir)
+		if unlock, err := enterprisepolicy.LockForeignHookFence(ctx, dir, "4242", false); !errors.Is(err, context.DeadlineExceeded) {
+			if unlock != nil {
+				unlock()
+			}
+			t.Errorf("exchange entered while cleanup worker could edit files: %v", err)
+		}
+		return enterpriseHookWorkerResponse{Cleanup: map[string]enterpriseHookWorkerCleanupReport{"cursor": {}}}, nil
+	})
+	runForeignTxPass(t)
+	dir := managed.HookGuardianAuthorizationDir(dataDir)
+	unlock, err := enterprisepolicy.LockForeignHookFence(t.Context(), dir, "4242", false)
+	if err != nil {
+		t.Fatalf("exchange did not resume after cleanup commit: %v", err)
+	}
+	unlock()
+}
+
 // Every cleanup transaction of a pass ends: a pending denial never outlives
 // its worker, whatever the worker did. A cleanup that cannot tell what it
 // changed leaves removals at its end, which deny the account's agents of

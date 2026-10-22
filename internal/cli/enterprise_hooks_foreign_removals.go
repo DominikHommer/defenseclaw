@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -36,6 +37,57 @@ type enterpriseForeignHookCleanupTx struct {
 	entries   []enterprisepolicy.ForeignHookRemoval
 	running   bool
 	uncertain bool
+	unlock    func()
+}
+
+func prepareEnterpriseForeignHookFence(dataDir, identity string) (string, error) {
+	canonical, ok := connector.CanonicalUserScopedIdentity(identity)
+	if !ok {
+		return "", errors.New("cannot bind the foreign-hook fence to an account")
+	}
+	identity = canonical
+	dir, err := prepareEnterpriseHookAuthorizationDir(dataDir)
+	if err != nil {
+		return "", err
+	}
+	admission, active := enterprisepolicy.ForeignHookFencePaths(dir, identity)
+	for _, path := range []string{admission, active} {
+		// O_EXCL keeps the inode stable when two guardian processes first
+		// meet this account. Replacing a lock file would split the fence.
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
+		if err == nil {
+			if err := file.Close(); err != nil {
+				return "", err
+			}
+			if err := os.Chmod(path, 0o640); err != nil {
+				return "", err
+			}
+			if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
+				return "", err
+			}
+		} else if !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
+			// A guardian killed between O_EXCL and the ownership stamp
+			// leaves its own empty file behind. Re-harden that regular
+			// inode in place; never replace a lock another process may hold.
+			info, statErr := os.Lstat(path)
+			if statErr != nil || !info.Mode().IsRegular() {
+				return "", err
+			}
+			if repairErr := os.Chmod(path, 0o640); repairErr != nil {
+				return "", errors.Join(err, repairErr)
+			}
+			if repairErr := enterpriseHookAuthorizationOwnershipSetter(path); repairErr != nil {
+				return "", errors.Join(err, repairErr)
+			}
+			if repairErr := enterpriseHookAuthorizationFileTrustCheck(path); repairErr != nil {
+				return "", errors.Join(err, repairErr)
+			}
+		}
+	}
+	return dir, nil
 }
 
 // enterpriseForeignHookCleanupTxs are this process's cleanup transactions
@@ -138,7 +190,7 @@ func enterpriseForeignHookDenialConnectors(home string, planned map[string][]str
 // edited. finishEnterpriseForeignHookCleanup ends the transaction.
 func beginEnterpriseForeignHookCleanup(stderr io.Writer, account string, connectors []string) (string, error) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return "", nil
+		return "", errors.New("the standalone cleanup ledger is unavailable; hook removal is refused")
 	}
 	identity, ok := connector.CanonicalUserScopedIdentity(account)
 	if !ok {
@@ -153,16 +205,25 @@ func beginEnterpriseForeignHookCleanup(stderr io.Writer, account string, connect
 	if len(names) == 0 {
 		return "", errors.New("the cleanup denial names no connector")
 	}
+	dir, err := prepareEnterpriseForeignHookFence(cfg.DataDir, identity)
+	if err != nil {
+		return "", fmt.Errorf("prepare the foreign-hook removal fence: %w", err)
+	}
+	fenceUnlock, err := enterprisepolicy.LockForeignHookFence(context.Background(), dir, identity, true)
+	if err != nil {
+		return "", fmt.Errorf("admit the foreign-hook removal before cleanup: %w", err)
+	}
 	var id [8]byte
 	if _, err := rand.Read(id[:]); err != nil {
+		fenceUnlock()
 		return "", err
 	}
 	token := enterprisepolicy.ForeignHookCleanupPendingPath(hex.EncodeToString(id[:]), enterpriseForeignHookCleanupOwner())
 	enterpriseForeignHookRemovalsMu.Lock()
 	defer enterpriseForeignHookRemovalsMu.Unlock()
-	tx := &enterpriseForeignHookCleanupTx{running: true}
+	tx := &enterpriseForeignHookCleanupTx{running: true, unlock: fenceUnlock}
 	enterpriseForeignHookCleanupTxs[token] = tx
-	err := updateEnterpriseForeignHookLedger(stderr, func(now time.Time, mark string) []enterprisepolicy.ForeignHookRemoval {
+	err = updateEnterpriseForeignHookLedger(stderr, func(now time.Time, mark string) []enterprisepolicy.ForeignHookRemoval {
 		tx.entries = tx.entries[:0]
 		for _, name := range names {
 			tx.entries = append(tx.entries, enterprisepolicy.ForeignHookRemoval{
@@ -181,6 +242,7 @@ func beginEnterpriseForeignHookCleanup(stderr io.Writer, account string, connect
 		} else {
 			_ = updateEnterpriseForeignHookLedger(stderr, nil)
 		}
+		fenceUnlock()
 		return "", err
 	}
 	return token, nil
@@ -197,7 +259,7 @@ func beginEnterpriseForeignHookCleanup(stderr io.Writer, account string, connect
 // cannot be written the pending denial stays, and the next ledger update
 // settles it.
 func finishEnterpriseForeignHookCleanup(stderr io.Writer, token string, uncertain bool) error {
-	if token == "" || cfg == nil || !cfg.StandaloneEnterprise() {
+	if token == "" {
 		return nil
 	}
 	enterpriseForeignHookRemovalsMu.Lock()
@@ -205,6 +267,11 @@ func finishEnterpriseForeignHookCleanup(stderr io.Writer, token string, uncertai
 	tx := enterpriseForeignHookCleanupTxs[token]
 	if tx == nil {
 		return nil
+	}
+	defer tx.unlock()
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		tx.running, tx.uncertain = false, true
+		return errors.New("the standalone cleanup ledger is unavailable; its pending denial is kept")
 	}
 	tx.running, tx.uncertain = false, uncertain
 	return updateEnterpriseForeignHookLedger(stderr, nil)

@@ -346,6 +346,14 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	createdDirs := map[int][]string{}
 	var auditRepairs []enterpriseHookGuardianAuditReport
 	reportedUIDs := map[int]bool{}
+	// An upgraded gateway denies exchanges until each account has its
+	// protected fence, including accounts with nothing to clean this pass.
+	for _, job := range jobs {
+		if _, err := prepareEnterpriseForeignHookFence(cfg.DataDir, strconv.Itoa(job.Account.UID)); err != nil {
+			clean = false
+			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: prepare the exchange fence for %s: %v\n", job.Account.User, err)
+		}
+	}
 	// The first worker of each account does its other work and only plans
 	// its foreign-hook cleanup, editing nothing. An account with files to
 	// clean gets a second worker, which cleans only the planned files (an

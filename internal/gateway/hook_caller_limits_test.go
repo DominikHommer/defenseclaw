@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestHookCallerLimiterBoundsEachCallerSeparately(t *testing.T) {
@@ -314,6 +315,10 @@ func TestForeignHookSessionExchangesDoNotWaitOnOtherIdentities(t *testing.T) {
 	if !filepath.IsAbs(dataDir) {
 		t.Fatalf("test data dir %q is not absolute", dataDir)
 	}
+	writeTestForeignHookFence(t, managed.HookGuardianAuthorizationDir(dataDir), alice, bob)
+	previousTrust := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = previousTrust })
 	exchange := func(identity string) <-chan int {
 		done := make(chan int, 1)
 		go func() {

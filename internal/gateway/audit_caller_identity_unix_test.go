@@ -22,6 +22,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 )
 
@@ -62,7 +63,8 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 		return peercred.Credentials{UID: 7101, GID: 7101, PID: 301}, nil
 	}
 	t.Cleanup(func() { hookSocketPeerCredentials = restoreCredentials })
-	socket, _, store := startTestHookSocketServer(t, hookSocketTestServer{ledger: `{"version":1,"ok":true,"protected_targets":[{"user":"user7101","uid":7101,"connector":"claudecode","ok":true}]}`})
+	socket, api, store := startTestHookSocketServer(t, hookSocketTestServer{ledger: `{"version":1,"ok":true,"protected_targets":[{"user":"user7101","uid":7101,"connector":"claudecode","ok":true}]}`})
+	writeTestForeignHookFence(t, managed.HookGuardianAuthorizationDir(api.configDataDir()), "7101")
 	client := hookSocketClient(socket, 10*time.Second)
 	post := func(path, connectorName string, body any) int {
 		t.Helper()

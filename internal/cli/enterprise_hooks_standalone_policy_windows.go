@@ -458,6 +458,9 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 	// cleanup interval.
 	for _, key := range order {
 		enterpriseHookWSLEditorPass(stderr, users[key].creds, now, due)
+		if _, err := prepareEnterpriseForeignHookFence(cfg.DataDir, key); err != nil {
+			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: prepare the exchange fence for %s: %v\n", users[key].creds.UserHome, err)
+		}
 	}
 	if !due {
 		return

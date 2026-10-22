@@ -27,6 +27,94 @@ type foreignSessionResult struct {
 	Reason string `json:"reason"`
 }
 
+func writeTestForeignHookFence(t *testing.T, dir string, identities ...string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, identity := range identities {
+		admission, active := enterprisepolicy.ForeignHookFencePaths(dir, identity)
+		for _, path := range []string{admission, active} {
+			if err := os.WriteFile(path, nil, 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// GAP-0457: an exchange queued behind an admitted removal must read the
+// committed ledger. Reading first would let the old process keep an allow
+// verdict while the guardian removes the hook it loaded.
+func TestForeignHookExchangeReadsLedgerAfterRemovalAdmission(t *testing.T) {
+	const identity = "1001"
+	dir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, dir)
+	writeTestForeignHookFence(t, dir, identity)
+	previousTrust := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = previousTrust })
+	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
+	writerUnlock, err := enterprisepolicy.LockForeignHookFence(t.Context(), dir, identity, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"key":           map[string]any{"connector": "claudecode", "session": "race", "process": "process"},
+		"session_start": true, "decision": map[string]any{"deny": false},
+	})
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(body))
+		ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")
+		ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
+		response := httptest.NewRecorder()
+		api.handleForeignHookSession(response, req.WithContext(ctx))
+		result <- response
+	}()
+	select {
+	case got := <-result:
+		writerUnlock()
+		t.Fatalf("exchange crossed the removal admission: %d %s", got.Code, got.Body.String())
+	case <-time.After(100 * time.Millisecond):
+	}
+	pending := enterprisepolicy.ForeignHookRemoval{Identity: identity, Connector: "claudecode",
+		Path: enterprisepolicy.ForeignHookCleanupPendingPath("test", "guardian"), At: time.Now().UTC().Format(time.RFC3339Nano), Mark: "unprovable"}
+	ledger, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{pending}, time.Now())
+	if err != nil {
+		writerUnlock()
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile), ledger, 0o640); err != nil {
+		writerUnlock()
+		t.Fatal(err)
+	}
+	writerUnlock()
+	select {
+	case got := <-result:
+		var decision foreignSessionResult
+		_ = json.Unmarshal(got.Body.Bytes(), &decision)
+		if got.Code != http.StatusOK || !decision.Deny || !strings.Contains(decision.Reason, "cleanup and its denial record are not complete") {
+			t.Fatalf("exchange missed admitted removal: %d %+v", got.Code, decision)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("exchange did not resume after removal commit")
+	}
+}
+
+func TestForeignHookExchangeWithoutRemovalFenceFailsClosed(t *testing.T) {
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, t.TempDir())
+	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
+	body := []byte(`{"key":{"connector":"claudecode","session":"s"},"session_start":true,"decision":{"deny":false}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(body))
+	ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")
+	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, "1001")
+	response := httptest.NewRecorder()
+	api.handleForeignHookSession(response, req.WithContext(ctx))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("exchange without an admitted removal fence = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestForeignHookRemovalSourceSeesPendingLedgerWithUnchangedMetadata(t *testing.T) {
 	dir := t.TempDir()
 	previous := validateManagedGuardianAuthorization
@@ -94,6 +182,7 @@ func TestForeignHookSessionGatewayPersistsAndBindsTheCaller(t *testing.T) {
 	}
 	guardianDir := t.TempDir()
 	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
+	writeTestForeignHookFence(t, guardianDir, alice, bob)
 	restoreValidate := validateManagedGuardianAuthorization
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	t.Cleanup(func() { validateManagedGuardianAuthorization = restoreValidate })
