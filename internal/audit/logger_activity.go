@@ -54,8 +54,9 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	if in.OccurrenceID != "" {
 		// The producer keeps this occurrence queued under its stable id and
 		// offers it until it is stored durably and every remote destination
-		// has it. The first offer stores it and exports it only after the
-		// local write (a failed write exports nothing). A later offer finds
+		// has it. The first offer stores it and exports it only once its row
+		// survives a power loss (a failed write or flush exports nothing):
+		// the runtime runs makeDurable between the two. A later offer finds
 		// it stored and sends the stored record, with its stable ids, time
 		// and the run, sidecar, binary and config of the process that stored
 		// it, to the destinations that do not have it yet.
@@ -64,6 +65,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		if delivery == nil {
 			delivery = observability.NewRemoteDelivery()
 		}
+		makeDurable := func(ctx context.Context) error { return l.syncOccurrence(ctx, delivery) }
 		found := false
 		var err error
 		row, found, err = l.store.storedOccurrence(ctx, auditID)
@@ -76,9 +78,9 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 			if err := l.syncOccurrence(ctx, delivery); err != nil {
 				return err
 			}
-			ctx = withStoredOccurrence(observability.WithStoredReplay(ctx, row.record), row)
+			ctx = withStoredOccurrence(observability.WithStoredReplay(ctx, row.record, makeDurable), row)
 		} else {
-			ctx = observability.WithExportAfterLocalWrite(ctx)
+			ctx = observability.WithExportAfterLocalWrite(ctx, makeDurable)
 		}
 		ctx = observability.WithRemoteDelivery(ctx, delivery)
 		delivery.BeginAttempt()
@@ -181,7 +183,8 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 }
 
 // occurrenceStored makes a newly stored occurrence power-loss durable
-// before its producer may mark it reported.
+// before its producer may mark it reported. When a remote destination takes
+// it, the runtime already did (makeDurable), and this is a no-op.
 func (l *Logger) occurrenceStored(ctx context.Context, newlyStored bool, delivery *observability.RemoteDelivery) error {
 	if !newlyStored {
 		return nil

@@ -42,6 +42,10 @@ const (
 	ErrorStorePathMismatch    ErrorCode = "store_path_mismatch"
 	ErrorComponentUnavailable ErrorCode = "component_unavailable"
 	ErrorShutdown             ErrorCode = "shutdown_degraded"
+	// ErrorLocalNotDurable: an occurrence marked
+	// observability.WithExportAfterLocalWrite has no local row that
+	// survives a power loss, so no destination got it.
+	ErrorLocalNotDurable ErrorCode = "local_not_durable"
 )
 
 // Error never retains a configured path, endpoint, record, projection, or
@@ -451,6 +455,9 @@ func (runtime *Runtime) emitWithLeaseControls(
 		(suppressAll && originDestination != "") || (localOnly && originDestination != "") {
 		return pipeline.LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
 	}
+	if !exportAfterLocalWriteComplete(ctx) {
+		return pipeline.LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
+	}
 	graph := lease.Graph()
 	component, ok := lease.Component(LocalLogComponentName)
 	if graph == nil || !ok {
@@ -510,8 +517,54 @@ func (runtime *Runtime) emitWithLeaseControls(
 	if localOnly || suppressAll {
 		return outcome, nil
 	}
+	if err := makeExportDurable(ctx, outcome); err != nil {
+		failOptional(ctx, outcome)
+		return outcome, err
+	}
 	runtime.dispatchOptional(ctx, lease, graph, outcome)
 	return outcome, nil
+}
+
+// exportAfterLocalWriteComplete refuses, before anything is written, an
+// occurrence marked observability.WithExportAfterLocalWrite with no step
+// that makes its local row durable.
+func exportAfterLocalWriteComplete(ctx context.Context) bool {
+	return !observability.ExportAfterLocalWrite(ctx) || observability.LocalDurabilityStep(ctx) != nil
+}
+
+// makeExportDurable makes the local row of an occurrence marked
+// observability.WithExportAfterLocalWrite survive a power loss before any
+// optional destination gets it, so a destination never acknowledges a
+// record a power loss can take back. A marked occurrence with no stored row
+// (the managed fallback of an occurrence collection dropped) is not sent:
+// its producer offers it again until it is stored.
+func makeExportDurable(ctx context.Context, outcome pipeline.LocalLogOutcome) error {
+	if !observability.ExportAfterLocalWrite(ctx) || len(outcome.OptionalWork()) == 0 {
+		return nil
+	}
+	if !outcome.LocalPersisted() && !observability.StoredReplay(ctx) {
+		return &Error{code: ErrorLocalNotDurable}
+	}
+	makeDurable := observability.LocalDurabilityStep(ctx)
+	if makeDurable == nil {
+		return &Error{code: ErrorInvalidDependency}
+	}
+	if err := makeDurable(ctx); err != nil {
+		return &Error{code: ErrorLocalNotDurable}
+	}
+	return nil
+}
+
+// failOptional tells the observability.RemoteDelivery of ctx that no
+// destination of outcome got the occurrence in this attempt.
+func failOptional(ctx context.Context, outcome pipeline.LocalLogOutcome) {
+	tracker := observability.RemoteDeliveryFrom(ctx)
+	for _, work := range outcome.OptionalWork() {
+		tracker.Fail(work.Delivery().DestinationName)
+	}
+	for _, failure := range outcome.OptionalFailures() {
+		tracker.Fail(failure.DestinationName())
+	}
 }
 
 // leaseRecordBuilder builds one occurrence's record on the pinned generation:
@@ -579,7 +632,9 @@ func leaseRecordBuilder(
 // dispatchers, as Emit does for one. A dropped item takes Emit's
 // managed-destination fallback. When the commit fails nothing is persisted and
 // the remote projections are dispatched, as Emit does on a failed write,
-// except those of an item marked observability.WithExportAfterLocalWrite.
+// except those of an item marked observability.WithExportAfterLocalWrite,
+// whose stored row, as in Emit, is made durable before any destination
+// gets it.
 func (runtime *Runtime) EmitAtomicBatch(
 	ctx context.Context,
 	items []LogBatchItem,
@@ -592,7 +647,8 @@ func (runtime *Runtime) EmitAtomicBatch(
 		// A stored-record replay goes through Emit, which skips its local
 		// write; a batch always writes every item.
 		if items[index].Context == nil || items[index].Builder == nil ||
-			observability.StoredReplay(items[index].Context) {
+			observability.StoredReplay(items[index].Context) ||
+			!exportAfterLocalWriteComplete(items[index].Context) {
 			return nil, &Error{code: ErrorInvalidDependency}
 		}
 	}
@@ -634,6 +690,13 @@ func (runtime *Runtime) EmitAtomicBatch(
 		if outcome.LocalPersisted() || outcome.ManagedOnly() ||
 			(processErr != nil && len(outcome.OptionalWork()) > 0 &&
 				!observability.ExportAfterLocalWrite(items[index].Context)) {
+			if err := makeExportDurable(items[index].Context, outcome); err != nil {
+				failOptional(items[index].Context, outcome)
+				if processErr == nil {
+					processErr = err
+				}
+				continue
+			}
 			runtime.dispatchOptional(items[index].Context, lease, graph, outcome)
 		}
 	}

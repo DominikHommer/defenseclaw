@@ -43,6 +43,9 @@ type testRuntimeV8Emitter struct {
 	exportAfterWrite []bool
 	// replays is observability.StoredReplay of each emitted record.
 	replays []bool
+	// durableAtExport is, for each change, whether its row was power-loss
+	// durable when a destination could get it.
+	durableAtExport []bool
 	// build is the config of this process (nil: generation 23).
 	build *RuntimeV8BuildContext
 }
@@ -144,6 +147,20 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 	emitter.records = append(emitter.records, record.Clone())
 	emitter.replays = append(emitter.replays, observability.StoredReplay(ctx))
 	emitter.mu.Unlock()
+	// Like the runtime, make a change's row durable before a destination
+	// could get it.
+	if observability.ExportAfterLocalWrite(ctx) {
+		makeDurable := observability.LocalDurabilityStep(ctx)
+		if makeDurable == nil {
+			return RuntimeV8EmitOutcome{}, fmt.Errorf("test runtime emitter: a change has no durability step")
+		}
+		if err := makeDurable(ctx); err != nil {
+			return RuntimeV8EmitOutcome{}, err
+		}
+		emitter.mu.Lock()
+		emitter.durableAtExport = append(emitter.durableAtExport, observability.RemoteDeliveryFrom(ctx).LocalDurable())
+		emitter.mu.Unlock()
+	}
 	return RuntimeV8EmitOutcome{Admission: emitter.admission, LocalPersisted: true}, nil
 }
 

@@ -374,7 +374,7 @@ func TestLocalLogPipelineLocalFailureContracts(t *testing.T) {
 	// is stored: its failed write hands back no remote work, alone or in an
 	// atomic batch, so no offer is exported twice; its stored write does.
 	t.Run("write of a record exported after its local write", func(t *testing.T) {
-		marked := observability.WithExportAfterLocalWrite(t.Context())
+		marked := observability.WithExportAfterLocalWrite(t.Context(), func(context.Context) error { return nil })
 		build := func(admission router.Admission) (observability.Record, error) {
 			return buildClassifiedLog(test, admission, "marked-write")
 		}

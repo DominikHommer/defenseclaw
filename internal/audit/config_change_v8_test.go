@@ -382,3 +382,46 @@ func TestAuditDurableConnectionFlushesEveryCommit(t *testing.T) {
 		t.Fatal("Close kept the durable connection")
 	}
 }
+
+// A change's row survives a power loss before any remote destination can
+// get it, for every kind and outcome: the runtime runs the change's
+// durability step after the local write and before it hands the record to
+// a destination, and the step flushes the store once. Before, the first
+// offer flushed the row only after the emit returned, so a sink could
+// acknowledge a record a power loss then took back, and the next offer
+// sent another record (another time, run and sidecar) under the same id.
+func TestLogConfigChangeRowIsDurableBeforeAnyDestinationGetsIt(t *testing.T) {
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	generation := func() int64 {
+		t.Helper()
+		var value int64
+		if err := logger.store.db.QueryRow(`SELECT verification_generation
+			FROM observability_store_readiness WHERE id = 1`).Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	ids := []string{testConfigChangeID, "c-01JB8Z4X6T2Q9V3M5N7P1R0S4X", "c-01JB8Z4X6T2Q9V3M5N7P1R0S4Y"}
+	for index, change := range []ConfigChange{
+		{Kind: ConfigChangeTrustAnchors, Action: "install", Outcome: ConfigChangeApplied, SHA256: strings.Repeat("a", 64)},
+		{Kind: ConfigChangeSecret, Action: "set", Outcome: ConfigChangeApplied, SecretName: "splunk-hec-token"},
+		{Kind: ConfigChangeSecret, Action: "remove", Outcome: ConfigChangeFailed, ReasonCode: "interrupted", SecretName: "otlp-token"},
+	} {
+		change.EventID, change.Actor = ids[index], "os:uid:0:root"
+		before := generation()
+		if err := logger.LogConfigChange(change, observability.NewRemoteDelivery()); err != nil {
+			t.Fatalf("LogConfigChange %d: %v", index, err)
+		}
+		if got := generation(); got != before+1 {
+			t.Fatalf("change %d made %d durable commits, want 1", index, got-before)
+		}
+	}
+	runtime.mu.Lock()
+	durable := append([]bool(nil), runtime.durableAtExport...)
+	runtime.mu.Unlock()
+	if want := []bool{true, true, true}; fmt.Sprint(durable) != fmt.Sprint(want) {
+		t.Fatalf("durable when a destination could get it = %v, want %v", durable, want)
+	}
+}

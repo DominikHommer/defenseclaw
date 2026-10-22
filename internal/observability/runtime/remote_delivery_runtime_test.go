@@ -48,9 +48,9 @@ func TestRuntimeReplaysAStoredChangeOnlyToDestinationsThatLackIt(t *testing.T) {
 	const recordID = "runtime-change-replay"
 	offer := func(tracker *observability.RemoteDelivery, replay bool) {
 		t.Helper()
-		ctx := observability.WithExportAfterLocalWrite(t.Context())
+		ctx := observability.WithExportAfterLocalWrite(t.Context(), runtimeRowDurable)
 		if replay {
-			ctx = observability.WithStoredReplay(t.Context(), storedRuntimeRecord(t, dependencies, recordID))
+			ctx = observability.WithStoredReplay(t.Context(), storedRuntimeRecord(t, dependencies, recordID), runtimeRowDurable)
 		}
 		tracker.BeginAttempt()
 		_, err := runtime.Emit(observability.WithRemoteDelivery(ctx, tracker), diagnosticMetadata(t),
@@ -112,7 +112,7 @@ func TestRuntimeReplaysAStoredChangeOnlyToDestinationsThatLackIt(t *testing.T) {
 	// A replay writes nothing, so it cannot be one item of an atomic batch,
 	// which writes every item.
 	if _, err := runtime.EmitAtomicBatch(t.Context(), []LogBatchItem{{
-		Context: observability.WithStoredReplay(t.Context(), storedRuntimeRecord(t, dependencies, recordID)), Metadata: diagnosticMetadata(t),
+		Context: observability.WithStoredReplay(t.Context(), storedRuntimeRecord(t, dependencies, recordID), runtimeRowDurable), Metadata: diagnosticMetadata(t),
 		Builder: runtimeContentRecordBuilder("runtime-change-batch-replay", "change"),
 	}}); err == nil {
 		t.Fatal("an atomic batch took a stored replay")
@@ -170,7 +170,7 @@ func TestRuntimeReplaysAStoredChangeAfterAReload(t *testing.T) {
 		first = snapshot
 		return runtimeContentRecordBuilder(recordID, "change")(snapshot, admission)
 	}
-	if _, err := runtime.Emit(observability.WithExportAfterLocalWrite(t.Context()), diagnosticMetadata(t), storing); err != nil {
+	if _, err := runtime.Emit(observability.WithExportAfterLocalWrite(t.Context(), runtimeRowDurable), diagnosticMetadata(t), storing); err != nil {
 		t.Fatal(err)
 	}
 	_ = receiveRuntimeDelivery(t, adapter)
@@ -187,7 +187,7 @@ func TestRuntimeReplaysAStoredChangeAfterAReload(t *testing.T) {
 	stored := storedRuntimeRecord(t, dependencies, recordID)
 	replay := func(builder EmitBuilder) error {
 		t.Helper()
-		_, err := runtime.Emit(observability.WithStoredReplay(t.Context(), stored), diagnosticMetadata(t), builder)
+		_, err := runtime.Emit(observability.WithStoredReplay(t.Context(), stored, runtimeRowDurable), diagnosticMetadata(t), builder)
 		return err
 	}
 	asStored := func(content string) EmitBuilder {
