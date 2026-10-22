@@ -8292,11 +8292,38 @@ def _setup_applied_runtime_difference(
 
 
 def _capture_setup_agent_discovery_file(data_dir) -> tuple[bool, bytes, tuple[int, int, int, int] | None]:
+    # The cache is rewritten private by every discovery run; a copy left
+    # group/other-readable by an older release's umask is tightened in place.
     return _capture_protected_setup_file(
         os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_DISCOVERY_FILENAME),
         _AGENT_DISCOVERY_MAX_BYTES,
         "agent_discovery.json",
+        repair_owned_read_bits=True,
     )
+
+
+def _capture_setup_prior_agent_discovery(data_dir) -> tuple[bool, bytes, tuple[int, int, int, int] | None] | None:
+    """Return the discovery cache from before the version check, or None.
+
+    The version check republishes the cache as a private user-owned file, so
+    a copy this user cannot take (root-owned, foreign-owned, or writable by
+    others) does not refuse setup: the rollback point taken after the check
+    holds the cache instead (GAP-0547).
+    """
+    path = os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_DISCOVERY_FILENAME)
+    try:
+        return _capture_setup_agent_discovery_file(data_dir)
+    except OSError as exc:
+        try:
+            root_owned = hasattr(os, "geteuid") and os.geteuid() != 0 and os.lstat(path).st_uid == 0
+        except OSError:
+            root_owned = False
+        if root_owned:
+            next_step = f'To keep it on a failed setup, run: sudo chown "$(id -un)" {shlex.quote(path)}'
+        else:
+            next_step = "It is replaced by the version check; a failed setup restores that copy."
+        ux.warn(f"agent_discovery.json from before setup cannot be kept: {exc}. {next_step}")
+        return None
 
 
 def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
@@ -9971,15 +9998,7 @@ def _apply_hook_connector_setup(
         # this check wrote (GAP-0547), so it is captured first.
         data_dir = getattr(app.cfg, "data_dir", None)
         if data_dir:
-            try:
-                prior_discovery = _capture_setup_agent_discovery_file(data_dir)
-            except OSError as exc:
-                ux.echo(
-                    f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
-                    f"    {_SETUP_ROLLBACK_POINT_NEXT_STEP}",
-                    err=True,
-                )
-                return False
+            prior_discovery = _capture_setup_prior_agent_discovery(data_dir)
         version_check_kwargs = {
             "mode": desired_mode,
             "data_dir": getattr(app.cfg, "data_dir", None),
