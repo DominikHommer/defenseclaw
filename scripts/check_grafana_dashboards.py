@@ -101,11 +101,13 @@ PROMETHEUS_METRIC_LABELS = {
         "guardrail_scanner",
     },
     "defenseclaw_schema_violations_total": {"code", "event_type"},
-    "defenseclaw_sandbox_managed_refusals_total": {"reason", "profile", "driver", "connector"},
-    "defenseclaw_sandbox_managed_asks_total": {"result", "reason", "profile", "driver", "connector"},
-    "defenseclaw_sandbox_managed_foreign_items_total": {"kind", "action", "profile", "driver", "connector"},
-    "defenseclaw_sandbox_managed_provisional_total": {"result", "profile", "driver", "connector"},
-    "defenseclaw_sandbox_managed_drift_total": {"field", "profile", "driver", "connector"},
+    # No profile label: an operator may name a guardrail profile after one
+    # person, so the profile view stays in the access-controlled logs.
+    "defenseclaw_sandbox_managed_refusals_total": {"reason", "driver", "connector"},
+    "defenseclaw_sandbox_managed_asks_total": {"result", "reason", "driver", "connector"},
+    "defenseclaw_sandbox_managed_foreign_items_total": {"kind", "action", "driver", "connector"},
+    "defenseclaw_sandbox_managed_provisional_total": {"result", "driver", "connector"},
+    "defenseclaw_sandbox_managed_drift_total": {"field", "driver", "connector"},
     "defenseclaw_stream_bytes_sent_bucket": {"le", "outcome"},
     "defenseclaw_stream_duration_ms_milliseconds_bucket": {"le", "outcome"},
     "defenseclaw_stream_lifecycle_total": {"outcome", "transition"},

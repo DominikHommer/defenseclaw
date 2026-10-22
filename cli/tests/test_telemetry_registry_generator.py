@@ -2212,6 +2212,10 @@ def test_upstream_attribute_extension_is_required_exactly_once(tmp_path: Path) -
         ("metadata", "high", "high-cardinality label attribute defenseclaw.test.name is forbidden"),
         ("content", "bounded", "unsafe label attribute defenseclaw.test.name"),
         ("credential", "low", "unsafe label attribute defenseclaw.test.name"),
+        # An identifier off the allow-list (a guardrail profile or directory
+        # group an operator may name after one person, a user, a sandbox).
+        ("identifier", "bounded", "identifier label attribute defenseclaw.test.name is not on the metric label allow-list"),
+        ("identifier", "low", "identifier label attribute defenseclaw.test.name is not on the metric label allow-list"),
     ],
 )
 def test_metric_labels_reject_high_cardinality_or_sensitive_classes(

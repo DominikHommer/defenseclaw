@@ -3385,6 +3385,65 @@ def test_managed_sandbox_counters_are_never_filtered_by_host(
     )
 
 
+
+def test_managed_sandbox_counters_carry_no_profile_label(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An operator may name a guardrail profile after one person, so the
+    managed sandbox counters carry no profile label: the shipped Sandboxes
+    dashboard filters none of them by profile, and the audit refuses a
+    dashboard that does."""
+    shipped = json.dumps(_dashboard("defenseclaw-sandboxes.json"))
+    for name in ("refusals", "asks", "foreign_items", "provisional", "drift"):
+        metric = f"defenseclaw_sandbox_managed_{name}_total"
+        selectors = re.findall(rf"{metric}\{{([^}}]*)\}}", shipped)
+        assert selectors, metric
+        for selector in selectors:
+            assert "profile" not in selector
+            assert "group" not in selector
+
+    audit = _load_audit_module()
+    for name in ("refusals", "asks", "foreign_items", "provisional", "drift"):
+        assert "profile" not in audit.PROMETHEUS_METRIC_LABELS[f"defenseclaw_sandbox_managed_{name}_total"]
+    dashboard_dir = tmp_path / "dashboards"
+    dashboard_dir.mkdir()
+    dashboard = {
+        "uid": "managed-sandbox-profile-fixture",
+        "title": "Managed sandbox profile fixture",
+        "description": "A managed counter filtered by guardrail profile.",
+        "panels": [
+            {
+                "type": "timeseries",
+                "title": "Refusals for alice",
+                "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+                "targets": [
+                    {
+                        "expr": (
+                            'sum by (profile) (increase(defenseclaw_sandbox_managed_asks_total{profile="alice", '
+                            'os_type=~"$os"}[$__rate_interval]))'
+                        ),
+                        "refId": "A",
+                    },
+                ],
+            },
+        ],
+    }
+    (dashboard_dir / "fixture.json").write_text(json.dumps(dashboard), encoding="utf-8")
+    datasource = tmp_path / "datasources.yml"
+    datasource.write_text("jsonData:\n  timeInterval: 15s\n", encoding="utf-8")
+    monkeypatch.setattr(audit, "SOURCE_DIR", dashboard_dir)
+    monkeypatch.setattr(audit, "PACKAGED_DIR", tmp_path / "missing-dashboards")
+    monkeypatch.setattr(audit, "SOURCE_DATASOURCES", datasource)
+    monkeypatch.setattr(audit, "PACKAGED_DATASOURCES", tmp_path / "missing-datasources.yml")
+
+    _dashboards, errors = audit.static_audit()
+
+    assert any(
+        "defenseclaw_sandbox_managed_asks_total filters on unknown labels: profile" in error for error in errors
+    ), errors
+
+
 def test_connector_dashboard_queries_the_metric_named_by_each_panel() -> None:
     dashboard = _dashboard("defenseclaw-connectors.json")
     expected_fragments = {

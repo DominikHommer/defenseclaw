@@ -23,11 +23,12 @@ import (
 // The managed sandbox counters are the fleet view of the managed sandbox
 // records: defenseclaw.sandbox.managed.refusals, .asks, .foreign_items,
 // .provisional and .drift. Each is a companion of its record and
-// moves only when the record is admitted. Their labels are the guardrail
-// profile name, the sandbox driver, the harness connector and one closed
-// code; the host OS is the os.type resource attribute every record carries.
-// No user, account, subject key, sandbox, registration, host or path is
-// ever a label.
+// moves only when the record is admitted. Their labels are the sandbox
+// driver, the harness connector and one closed code; the host OS is the
+// os.type resource attribute every record carries. No guardrail profile,
+// directory group, user, account, subject key, sandbox, registration, host
+// or path is ever a label: an operator may name a profile or a group after
+// one person, so the profile view stays in the managed sandbox records.
 
 // Values of defenseclaw.metric.kind on defenseclaw.sandbox.managed.foreign_items.
 const (
@@ -49,14 +50,13 @@ const (
 
 // sandboxManagedLabels are the labels every managed sandbox counter shares.
 type sandboxManagedLabels struct {
-	connector             string
-	profile, driver, conn observability.Optional[string]
+	connector    string
+	driver, conn observability.Optional[string]
 }
 
 func sandboxManagedLabelsFor(identity SandboxIdentity, fields sandboxV8Fields) sandboxManagedLabels {
 	return sandboxManagedLabels{
 		connector: identity.Connector,
-		profile:   fields.guardrailProfile,
 		driver:    fields.driver,
 		conn:      optionalSandboxEnum(identity.Connector),
 	}
@@ -90,7 +90,7 @@ func newSandboxManagedRefusalMetric(event Event, labels sandboxManagedLabels, re
 		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 			return builder.BuildMetricDefenseClawSandboxManagedRefusals(observability.MetricDefenseClawSandboxManagedRefusalsInput{
 				Envelope: envelope, Value: 1, DefenseClawSandboxManagedReason: reason,
-				DefenseClawGuardrailProfileName: labels.profile, DefenseClawSandboxDriver: labels.driver,
+				DefenseClawSandboxDriver:   labels.driver,
 				DefenseClawConnectorSource: labels.conn,
 			})
 		})}
@@ -102,8 +102,8 @@ func newSandboxManagedAskMetric(event Event, labels sandboxManagedLabels, result
 			return builder.BuildMetricDefenseClawSandboxManagedAsks(observability.MetricDefenseClawSandboxManagedAsksInput{
 				Envelope: envelope, Value: 1, DefenseClawApprovalResult: observability.Present(result),
 				DefenseClawSandboxManagedReason: reason,
-				DefenseClawGuardrailProfileName: labels.profile, DefenseClawSandboxDriver: labels.driver,
-				DefenseClawConnectorSource: labels.conn,
+				DefenseClawSandboxDriver:        labels.driver,
+				DefenseClawConnectorSource:      labels.conn,
 			})
 		})}
 }
@@ -114,8 +114,8 @@ func newSandboxManagedForeignMetric(event Event, labels sandboxManagedLabels, ki
 			return builder.BuildMetricDefenseClawSandboxManagedForeignItems(observability.MetricDefenseClawSandboxManagedForeignItemsInput{
 				Envelope: envelope, Value: 1, DefenseClawMetricKind: observability.Present(kind),
 				DefenseClawSandboxManagedAction: observability.Present(action),
-				DefenseClawGuardrailProfileName: labels.profile, DefenseClawSandboxDriver: labels.driver,
-				DefenseClawConnectorSource: labels.conn,
+				DefenseClawSandboxDriver:        labels.driver,
+				DefenseClawConnectorSource:      labels.conn,
 			})
 		})}
 }
@@ -125,7 +125,7 @@ func newSandboxManagedProvisionalMetric(event Event, labels sandboxManagedLabels
 		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 			return builder.BuildMetricDefenseClawSandboxManagedProvisional(observability.MetricDefenseClawSandboxManagedProvisionalInput{
 				Envelope: envelope, Value: 1, DefenseClawMetricResult: observability.Present(result),
-				DefenseClawGuardrailProfileName: labels.profile, DefenseClawSandboxDriver: labels.driver,
+				DefenseClawSandboxDriver:   labels.driver,
 				DefenseClawConnectorSource: labels.conn,
 			})
 		})}
@@ -136,7 +136,7 @@ func newSandboxManagedDriftMetric(event Event, labels sandboxManagedLabels, fiel
 		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 			return builder.BuildMetricDefenseClawSandboxManagedDrift(observability.MetricDefenseClawSandboxManagedDriftInput{
 				Envelope: envelope, Value: 1, DefenseClawOpenshellSettingsField: observability.Present(field),
-				DefenseClawGuardrailProfileName: labels.profile, DefenseClawSandboxDriver: labels.driver,
+				DefenseClawSandboxDriver:   labels.driver,
 				DefenseClawConnectorSource: labels.conn,
 			})
 		})}

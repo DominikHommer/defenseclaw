@@ -11042,6 +11042,28 @@ def _validate_attribute_use_constraints(
                 raise RegistryError(f"group {group.id}: enum constraint weakens normalization for {use.ref}")
 
 
+# The identifier-class attributes a metric family may project as a label: a
+# connector, scanner or destination kind, a registered rule or policy id, an
+# opaque hash, a model or a tool. Every other identifier stays in the
+# access-controlled records and is never a metric series: an operator names a
+# guardrail profile or a directory group after a person as easily as after a
+# team, and a user, account, subject, sandbox or registration names one
+# directly. Add an attribute here only when no value of it can name a person.
+_METRIC_IDENTIFIER_LABELS: Final[frozenset[str]] = frozenset(
+    {
+        "defenseclaw.connector.source",
+        "defenseclaw.destination.app",
+        "defenseclaw.destination.id",
+        "defenseclaw.finding.rule_id",
+        "defenseclaw.metric.webhook.target_hash",
+        "defenseclaw.policy.id",
+        "defenseclaw.scan.scanner",
+        "gen_ai.request.model",
+        "gen_ai.tool.name",
+    }
+)
+
+
 def _validate_metric_attribute_safety(
     groups: dict[str, GroupIR],
     local_attributes: dict[str, AttributeIR],
@@ -11118,6 +11140,10 @@ def _validate_metric_attribute_safety(
                 )
             if cardinality == "high":
                 raise RegistryError(f"metric {group.id}: high-cardinality label attribute {reference} is forbidden")
+            if field_class == "identifier" and reference not in _METRIC_IDENTIFIER_LABELS:
+                raise RegistryError(
+                    f"metric {group.id}: identifier label attribute {reference} is not on the metric label allow-list"
+                )
             if set(field_types) & {"string", "string[]"}:
                 if normalization.id not in {"enum-v1", "bounded-v1", "identifier-v1"}:
                     raise RegistryError(

@@ -12886,14 +12886,12 @@ groups:
     - local-observability-v1
 - id: metric.defenseclaw.sandbox.managed.refusals
   type: metric
-  brief: Managed sandbox refusals (host run refused, sandbox unavailable, access refused) by reason, guardrail profile, driver and harness connector; no user or sandbox label.
+  brief: Managed sandbox refusals (host run refused, sandbox unavailable, access refused) by reason, driver and harness connector; no user, profile, group or sandbox label.
   stability: stable
   introduced_in: telemetry-registry-v2
   extends: []
   attributes:
   - ref: defenseclaw.sandbox.managed.reason
-    requirement_level: recommended
-  - ref: defenseclaw.guardrail.profile.name
     requirement_level: recommended
   - ref: defenseclaw.sandbox.driver
     requirement_level: recommended
@@ -12905,15 +12903,13 @@ groups:
     instrument_type: counter
     value_type: int64
     unit: '{refusal}'
-    description: Managed sandbox refusals (host run refused, sandbox unavailable, access refused) by reason, guardrail profile, driver and harness connector; no user or sandbox label.
+    description: Managed sandbox refusals (host run refused, sandbox unavailable, access refused) by reason, driver and harness connector; no user, profile, group or sandbox label.
     temporality: delta
     label_projections:
     - profile: local-observability-v1
       mappings:
       - ref: defenseclaw.sandbox.managed.reason
         label: reason
-      - ref: defenseclaw.guardrail.profile.name
-        label: profile
       - ref: defenseclaw.sandbox.driver
         label: driver
       - ref: defenseclaw.connector.source
@@ -12926,7 +12922,7 @@ groups:
     - local-observability-v1
 - id: metric.defenseclaw.sandbox.managed.asks
   type: metric
-  brief: Managed sandbox asks decided by the gateway, by result, reason, guardrail profile, driver and harness connector; no user or sandbox label.
+  brief: Managed sandbox asks decided by the gateway, by result, reason, driver and harness connector; no user, profile, group or sandbox label.
   stability: stable
   introduced_in: telemetry-registry-v2
   extends: []
@@ -12934,8 +12930,6 @@ groups:
   - ref: defenseclaw.approval.result
     requirement_level: recommended
   - ref: defenseclaw.sandbox.managed.reason
-    requirement_level: recommended
-  - ref: defenseclaw.guardrail.profile.name
     requirement_level: recommended
   - ref: defenseclaw.sandbox.driver
     requirement_level: recommended
@@ -12947,7 +12941,7 @@ groups:
     instrument_type: counter
     value_type: int64
     unit: '{ask}'
-    description: Managed sandbox asks decided by the gateway, by result, reason, guardrail profile, driver and harness connector; no user or sandbox label.
+    description: Managed sandbox asks decided by the gateway, by result, reason, driver and harness connector; no user, profile, group or sandbox label.
     temporality: delta
     label_projections:
     - profile: local-observability-v1
@@ -12956,8 +12950,6 @@ groups:
         label: result
       - ref: defenseclaw.sandbox.managed.reason
         label: reason
-      - ref: defenseclaw.guardrail.profile.name
-        label: profile
       - ref: defenseclaw.sandbox.driver
         label: driver
       - ref: defenseclaw.connector.source
@@ -12970,7 +12962,7 @@ groups:
     - local-observability-v1
 - id: metric.defenseclaw.sandbox.managed.foreign_items
   type: metric
-  brief: Foreign sandboxes, containers and network rules found on a managed host, by kind, action, guardrail profile, driver and harness connector; no user or sandbox label.
+  brief: Foreign sandboxes, containers and network rules found on a managed host, by kind, action, driver and harness connector; no user, profile, group or sandbox label.
   stability: stable
   introduced_in: telemetry-registry-v2
   extends: []
@@ -12978,8 +12970,6 @@ groups:
   - ref: defenseclaw.metric.kind
     requirement_level: recommended
   - ref: defenseclaw.sandbox.managed.action
-    requirement_level: recommended
-  - ref: defenseclaw.guardrail.profile.name
     requirement_level: recommended
   - ref: defenseclaw.sandbox.driver
     requirement_level: recommended
@@ -12991,7 +12981,7 @@ groups:
     instrument_type: counter
     value_type: int64
     unit: '{item}'
-    description: Foreign sandboxes, containers and network rules found on a managed host, by kind, action, guardrail profile, driver and harness connector; no user or sandbox label.
+    description: Foreign sandboxes, containers and network rules found on a managed host, by kind, action, driver and harness connector; no user, profile, group or sandbox label.
     temporality: delta
     label_projections:
     - profile: local-observability-v1
@@ -13000,8 +12990,6 @@ groups:
         label: kind
       - ref: defenseclaw.sandbox.managed.action
         label: action
-      - ref: defenseclaw.guardrail.profile.name
-        label: profile
       - ref: defenseclaw.sandbox.driver
         label: driver
       - ref: defenseclaw.connector.source
@@ -13014,14 +13002,12 @@ groups:
     - local-observability-v1
 - id: metric.defenseclaw.sandbox.managed.provisional
   type: metric
-  brief: Provisional managed sandbox resolutions (registered on the offline floor, or resolved once the directory lookup answered), by result, guardrail profile, driver and harness connector; no user or sandbox label.
+  brief: Provisional managed sandbox resolutions (registered on the offline floor, or resolved once the directory lookup answered), by result, driver and harness connector; no user, profile, group or sandbox label.
   stability: stable
   introduced_in: telemetry-registry-v2
   extends: []
   attributes:
   - ref: defenseclaw.metric.result
-    requirement_level: recommended
-  - ref: defenseclaw.guardrail.profile.name
     requirement_level: recommended
   - ref: defenseclaw.sandbox.driver
     requirement_level: recommended
@@ -13033,15 +13019,13 @@ groups:
     instrument_type: counter
     value_type: int64
     unit: '{resolution}'
-    description: Provisional managed sandbox resolutions (registered on the offline floor, or resolved once the directory lookup answered), by result, guardrail profile, driver and harness connector; no user or sandbox label.
+    description: Provisional managed sandbox resolutions (registered on the offline floor, or resolved once the directory lookup answered), by result, driver and harness connector; no user, profile, group or sandbox label.
     temporality: delta
     label_projections:
     - profile: local-observability-v1
       mappings:
       - ref: defenseclaw.metric.result
         label: result
-      - ref: defenseclaw.guardrail.profile.name
-        label: profile
       - ref: defenseclaw.sandbox.driver
         label: driver
       - ref: defenseclaw.connector.source
@@ -13054,14 +13038,12 @@ groups:
     - local-observability-v1
 - id: metric.defenseclaw.sandbox.managed.drift
   type: metric
-  brief: OpenShell settings drift found on a managed sandbox, by setting, guardrail profile, driver and harness connector; no user or sandbox label.
+  brief: OpenShell settings drift found on a managed sandbox, by setting, driver and harness connector; no user, profile, group or sandbox label.
   stability: stable
   introduced_in: telemetry-registry-v2
   extends: []
   attributes:
   - ref: defenseclaw.openshell.settings.field
-    requirement_level: recommended
-  - ref: defenseclaw.guardrail.profile.name
     requirement_level: recommended
   - ref: defenseclaw.sandbox.driver
     requirement_level: recommended
@@ -13073,15 +13055,13 @@ groups:
     instrument_type: counter
     value_type: int64
     unit: '{drift}'
-    description: OpenShell settings drift found on a managed sandbox, by setting, guardrail profile, driver and harness connector; no user or sandbox label.
+    description: OpenShell settings drift found on a managed sandbox, by setting, driver and harness connector; no user, profile, group or sandbox label.
     temporality: delta
     label_projections:
     - profile: local-observability-v1
       mappings:
       - ref: defenseclaw.openshell.settings.field
         label: field
-      - ref: defenseclaw.guardrail.profile.name
-        label: profile
       - ref: defenseclaw.sandbox.driver
         label: driver
       - ref: defenseclaw.connector.source

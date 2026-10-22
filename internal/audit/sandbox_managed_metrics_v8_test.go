@@ -35,18 +35,21 @@ var sandboxManagedInstruments = []string{
 }
 
 // Each managed sandbox record moves its fleet counter once, with the
-// profile, driver and connector and one closed code as the only labels:
-// never the person, the sandbox, the registration or the destination.
+// driver and connector and one closed code as the only labels: never the
+// guardrail profile or directory group (an operator may name either after
+// one person), the person, the sandbox, the registration or the destination.
 func TestSandboxManagedRecordsMoveTheirFleetCounter(t *testing.T) {
 	harness := newSandboxHarness(t)
 	identity, subject := testManagedIdentity(), testManagedSubject()
+	// A profile assigned to one user only, and named after them.
+	identity.Managed.GuardrailProfile, identity.Managed.ProfileMatch = "alice", SandboxProfileMatchUser
+	identity.Managed.MatchedGroup = ""
 	provisional := true
 	floor := identity
 	floor.Managed.Provisional = &provisional
 	base := map[string]any{
-		"defenseclaw.guardrail.profile.name": "contractors",
-		"defenseclaw.sandbox.driver":         "docker",
-		"defenseclaw.connector.source":       "claudecode",
+		"defenseclaw.sandbox.driver":   "docker",
+		"defenseclaw.connector.source": "claudecode",
 	}
 	with := func(extra map[string]any, drop ...string) map[string]any {
 		out := map[string]any{}
@@ -131,8 +134,11 @@ func TestSandboxManagedRecordsMoveTheirFleetCounter(t *testing.T) {
 				if !reflect.DeepEqual(attributes, tc.want) {
 					t.Fatalf("%s attributes=%#v want %#v", instrument, attributes, tc.want)
 				}
-				for key := range attributes {
-					for _, private := range []string{"user", "subject", "principal", "registration", "sandbox.name", "sandbox.id", "server.", "host."} {
+				for key, value := range attributes {
+					if value == "alice" {
+						t.Fatalf("%s label %q carries the user-named profile or the user", instrument, key)
+					}
+					for _, private := range []string{"guardrail.profile", "group", "user", "subject", "principal", "registration", "sandbox.name", "sandbox.id", "server.", "host."} {
 						if strings.Contains(key, private) {
 							t.Fatalf("%s carries the per-person or per-sandbox label %q", instrument, key)
 						}
