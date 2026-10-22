@@ -1026,10 +1026,12 @@ elevated PowerShell.
 The Windows package's `init` and `quickstart` are not shipped: they return an
 unknown-command error and exit `2`. Its `doctor` prints administrator guidance and exits `1`,
 including with `--passive` or `--json`; it does not run the Python doctor's checks.
-Native `config get`, `config show` and `config validate` can read the managed config
-from an elevated prompt. For an account's policy, use
-`enterprise policy show --user NAME` as an administrator. These package commands
-do not share the Python CLI's no-config exit `3` contract.
+Its `config` group has only `validate` and `migrate`: there is no `config get` or
+`config show`. From an elevated prompt, an administrator checks the managed config with
+`config validate 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'`, reads the
+compiled admission policy with `policy show`, and checks an account's agents with
+`enterprise policy show --user NAME`. These package commands do not share the
+Python CLI's no-config exit `3` contract.
 
 ## Registries
 
@@ -1267,7 +1269,7 @@ Setup. See [Install with an MDM](/docs/enterprise/mdm).
 
 Property names are case-insensitive, and dashes in them are ignored. Paths
 must be absolute: Setup refuses relative paths and paths that contain `%`.
-The unsigned (hash-pinned) Setup writes its payload trust file itself from its embedded manifest; a signed Setup uses Authenticode trust, optionally pinned with `ALLOWEDSIGNERS=`. Setup's own argument errors, such as an unknown property, a missing, relative or environment-expanded `CONFIG=` or `MANIFEST=` path, `/install` without `CONFIG=` and `MANIFEST=`, or a `TIMEOUTSECONDS` out of range, exit `1639`. A token that is not elevated, or a `CONFIG=` or `MANIFEST=` file a non-administrator can change, exits `1603`. The Secure Client Setup returns only `0` and `1603`.
+The unsigned (hash-pinned) Setup writes its payload trust file itself from its embedded manifest; a signed Setup uses Authenticode trust, optionally pinned with `ALLOWEDSIGNERS=`. Setup's own argument errors, such as an unknown property, a missing, relative or environment-expanded `CONFIG=` or `MANIFEST=` path, `/install` without `CONFIG=` and `MANIFEST=`, or a `TIMEOUTSECONDS` out of range, exit `1639`. Setup also exits `1639` for a `CONFIG=` or `MANIFEST=` file that a non-administrator owns or can change, and names the account and the `icacls` fix. A token that is not elevated exits `1603`. The Secure Client Setup returns only `0` and `1603`.
 
 On managed Linux and macOS, an administrator's in-process `scan code --json`
 redacts its local output with a process-local key and leaves the gateway's audit

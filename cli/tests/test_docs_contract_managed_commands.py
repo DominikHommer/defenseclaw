@@ -3,11 +3,13 @@
 
 """Managed package commands must not inherit the per-user CLI's promises."""
 
+import re
 from pathlib import Path
 
 import pytest
 
-DOCS = Path(__file__).resolve().parents[2] / "docs-site/content/docs"
+REPO = Path(__file__).resolve().parents[2]
+DOCS = REPO / "docs-site/content/docs"
 
 
 @pytest.mark.parametrize(
@@ -81,3 +83,86 @@ def test_mdm_invalid_candidate_code_is_consistent():
             text = text.split("## macOS", 1)[0]
         assert "invalid_arguments" in text, page
         assert "1639" in text, page
+
+
+def _windows_config_verbs() -> set[str]:
+    """The `config` subcommands the Windows package's Go binary registers."""
+    cli = REPO / "internal/cli"
+    sources = {
+        f: f.read_text(encoding="utf-8")
+        for f in cli.glob("*.go")
+        if not f.name.endswith("_test.go")
+    }
+    everything = "\n".join(sources.values())
+    verbs = set()
+    for ident in re.findall(r"configCmd\.AddCommand\(([^)]*)\)", everything):
+        for name in (part.strip() for part in ident.split(",")):
+            use = re.search(r"var " + re.escape(name) + r" = &cobra\.Command\{\s*Use:\s*\"(\w+)", everything)
+            assert use, name
+            verbs.add(use.group(1))
+    # The managed Windows refusals of `config set` / `config unset`.
+    guard = sources[cli / "managed_host_guard.go"]
+    loop = re.search(r"for _, verb := range \[\]string\{([^}]*)\}\s*\{[^}]*?addManagedWindowsAnswer\(configCmd", guard)
+    assert loop
+    verbs.update(re.findall(r"\"(\w+)\"", loop.group(1)))
+    return verbs
+
+
+def _windows_package_section() -> str:
+    text = (DOCS / "reference/commands/cli.mdx").read_text(encoding="utf-8")
+    start = text.index("Windows has no sandbox-only command.")
+    return text[start:text.index("\n## ", start)]
+
+
+def test_windows_package_config_commands_are_the_shipped_ones():
+    verbs = _windows_config_verbs()
+    assert {"migrate", "validate", "set", "unset"} <= verbs
+    assert not verbs & {"get", "show"}
+    section = _windows_package_section()
+    # Every config command the section offers, leaving out the sentences
+    # that say which ones the package lacks.
+    offered = " ".join(s for s in _sentences(section) if not re.search(r"\bno `config ", s))
+    named = set(re.findall(r"`config (\w+)", offered))
+    assert named, section
+    assert named <= verbs, named - verbs
+    flat = " ".join(section.split())
+    assert "there is no `config get` or `config show`" in flat
+    assert "config validate 'C:\\ProgramData\\Cisco\\DefenseClaw\\etc\\config.yaml'" in flat
+
+
+def test_no_page_runs_config_get_or_show_with_the_windows_package_cli():
+    pattern = re.compile(r"defenseclaw\.exe['\"]?\s+config\s+(get|show)\b")
+    for page in DOCS.rglob("*.mdx"):
+        assert not pattern.search(page.read_text(encoding="utf-8")), page
+
+
+_UNTRUSTED_SETUP_INPUT = re.compile(
+    r"non-administrator (?:owns or )?can (?:change|write)|non-administrator owns", re.I
+)
+_SETUP_INPUT_FILE = re.compile(r"`CONFIG=`|`MANIFEST=`|config (?:or manifest )?file|manifest file", re.I)
+
+
+def _sentences(text: str):
+    for paragraph in re.split(r"\n\s*\n", text):
+        flat = " ".join(paragraph.split())
+        yield from re.split(r"(?<=[.!?])\s+(?=[A-Z`])", flat)
+
+
+def test_untrusted_setup_input_is_documented_as_1639_everywhere():
+    """Standalone Setup reports an untrusted CONFIG=/MANIFEST= file as
+    invalid_arguments, exit 1639 (standaloneEnterpriseSetupInputError);
+    only a token that is not elevated is 1603. The MDM wrappers' own
+    mdm_untrusted_input stays 1603 and is not this refusal."""
+    checked = 0
+    for page in DOCS.rglob("*.mdx"):
+        for sentence in _sentences(page.read_text(encoding="utf-8")):
+            if not (_UNTRUSTED_SETUP_INPUT.search(sentence) and _SETUP_INPUT_FILE.search(sentence)):
+                continue
+            if re.search(r"wrapper|mdm_untrusted_input", sentence, re.I):
+                continue
+            if not re.search(r"`\d{4}`", sentence):
+                continue
+            checked += 1
+            assert "`1639`" in sentence, (page, sentence)
+            assert "`1603`" not in sentence, (page, sentence)
+    assert checked >= 4
