@@ -1543,25 +1543,35 @@ class TestRemoveConnector(unittest.TestCase):
                 self.assertEqual(self._effective_policy(survivor), expected_policy)
 
     # D3=A: --restart bounces the gateway so boot-time set-diff teardown runs.
-    def test_remove_modified_opencode_refuses_before_config_save(self):
-        self._seed_map("codex", "opencode")
-        plugin = os.path.join(self.tmp_dir, "defenseclaw.js")
-        original = b"// defenseclaw-managed-plugin v1\n// operator edit\n"
-        with open(plugin, "wb") as stream:
-            stream.write(original)
-        with (
-            patch("defenseclaw.connector_paths.connector_config_files", return_value=[plugin]),
-            self._no_restart_bounce() as bounce,
-            patch.object(self.app.cfg, "save") as save,
-        ):
-            result = _invoke(["remove", "opencode", "--yes"], self.app)
-        self.assertNotEqual(result.exit_code, 0, result.output)
-        self.assertIn("defenseclaw setup opencode --yes --restart", result.output)
-        save.assert_not_called()
-        bounce.assert_not_called()
-        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "opencode"})
-        with open(plugin, "rb") as stream:
-            self.assertEqual(stream.read(), original)
+    def test_remove_modified_plugin_refuses_before_config_save(self):
+        for connector in ("opencode", "amp"):
+            with self.subTest(connector=connector):
+                self._seed_map("codex", connector)
+                plugin = os.path.join(self.tmp_dir, f"{connector}.js")
+                pristine = b"// defenseclaw-managed-plugin v1\n"
+                original = pristine + b"// operator edit\n"
+                with open(plugin, "wb") as stream:
+                    stream.write(original)
+                record = {
+                    "version": 1, "connector": connector, "logical_name": "config",
+                    "path": plugin, "existed": False, "pristine_sha256": "missing",
+                    "post_sha256": hashlib.sha256(pristine).hexdigest(),
+                }
+                receipt = os.path.join(self.app.cfg.data_dir, "connector_backups", connector, "config.json")
+                atomic_write_private_bytes(receipt, json.dumps(record).encode())
+                with (
+                    patch("defenseclaw.connector_paths.connector_config_files", return_value=[plugin]),
+                    self._no_restart_bounce() as bounce,
+                    patch.object(self.app.cfg, "save") as save,
+                ):
+                    result = _invoke(["remove", connector, "--yes"], self.app)
+                self.assertNotEqual(result.exit_code, 0, result.output)
+                self.assertIn(f"defenseclaw setup {connector} --yes --restart", result.output)
+                save.assert_not_called()
+                bounce.assert_not_called()
+                self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", connector})
+                with open(plugin, "rb") as stream:
+                    self.assertEqual(stream.read(), original)
 
     def test_remove_restart_bounces_gateway(self):
         self._seed_map("codex", "cursor")
