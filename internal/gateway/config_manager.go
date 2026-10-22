@@ -339,6 +339,11 @@ func (m *ConfigManager) recordLoadError(ctx context.Context, errorType string) {
 		return
 	}
 	recordConfigLoadErrorV8(ctx, m.observabilityV8, errorType)
+	if emitter, ok := m.observabilityV8.(sidecarRuntimeEmitter); ok {
+		if err := emitConfigReloadRejectionV8(ctx, emitter, errorType); err != nil {
+			fmt.Fprintf(os.Stderr, "[config] could not persist config.reload.rejected: %v\n", err)
+		}
+	}
 }
 
 // getEnvConfigPath returns the current env_config.json overlay path, or
