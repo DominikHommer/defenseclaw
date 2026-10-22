@@ -336,7 +336,7 @@ func TestForeignHookSessionExchangesDoNotWaitOnOtherIdentities(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(body))
 			ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")
 			ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
-			response := httptest.NewRecorder()
+			response := newDeadlineRecorder()
 			api.handleForeignHookSession(response, req.WithContext(ctx))
 			done <- response.Code
 		}()

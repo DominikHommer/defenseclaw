@@ -89,6 +89,9 @@ type APIServer struct {
 	// caller identity: each identity has its own session store, so callers
 	// never wait on each other's exchanges.
 	foreignHookSessionLocks keyedMutex
+	// foreignHookFence queues the exchanges for the guardian's foreign-hook
+	// removal fence (handleForeignHookSession).
+	foreignHookFence foreignHookFenceQueue
 	// foreignHookRemovals caches the hook guardian foreign-hook removal
 	// ledger the session exchanges check.
 	foreignHookRemovals foreignHookRemovalCache
@@ -3828,6 +3831,10 @@ func (sw *statusWriter) Flush() {
 		f.Flush()
 	}
 }
+
+// Unwrap lets http.ResponseController reach the connection, so a handler
+// behind the metrics middleware can bound its write (handleForeignHookSession).
+func (sw *statusWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
 
 type authenticatedInspectConnectorKey struct{}
 
