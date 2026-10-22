@@ -13,7 +13,13 @@ import pytest
 from click.testing import CliRunner
 from defenseclaw.main import cli
 
-PAGE = Path(__file__).resolve().parents[2] / "docs-site/content/docs/get-started/install.mdx"
+REPO = Path(__file__).resolve().parents[2]
+PAGE = REPO / "docs-site" / "content" / "docs" / "get-started" / "install.mdx"
+
+
+def _read_page(path: Path) -> str:
+    """Read the page the same way on every OS: UTF-8, whatever the locale, and LF line ends."""
+    return path.read_bytes().decode("utf-8").replace("\r\n", "\n")
 
 
 @pytest.mark.parametrize("flavor", ["native", "windows"])
@@ -44,7 +50,7 @@ def test_install_page_shows_doctor_before_init(tmp_path, monkeypatch: pytest.Mon
     ]
     assert len(rows) == 1 and "[FAIL] Config file" in rows[0], result.output
 
-    text = PAGE.read_text(encoding="utf-8")
+    text = _read_page(PAGE)
     section = text.split("## Check it worked", 1)[1].split("\n## ", 1)[0]
     assert "After init" in section, "the page must say what doctor shows before and after init"
     before, after = section.split("After init", 1)
@@ -55,10 +61,21 @@ def test_install_page_shows_doctor_before_init(tmp_path, monkeypatch: pytest.Mon
     assert "`defenseclaw doctor`" in after
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="forces a non-UTF-8 POSIX locale")
+def test_read_page_ignores_crlf_checkout(tmp_path) -> None:
+    """A Windows checkout with core.autocrlf has CRLF line ends; the section split must still work."""
+    crlf = tmp_path / "install.mdx"
+    crlf.write_bytes(_read_page(PAGE).replace("\n", "\r\n").encode("utf-8"))
+    assert _read_page(crlf) == _read_page(PAGE)
+    assert "\n## Check it worked" in _read_page(crlf)
+
+
 def test_install_page_check_passes_without_utf8_locale() -> None:
-    """Windows CI runs without PYTHONUTF8, so the page must not be read with the locale codec."""
+    """Windows CI runs without PYTHONUTF8, so the page must not be read with the locale codec.
+
+    Runs on every OS: on Windows UTF-8 mode off means cp1252, elsewhere the C locale means ASCII.
+    """
     env = {**os.environ, "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0", "LC_ALL": "C", "LANG": "C"}
+    node = Path(__file__).resolve().relative_to(REPO).as_posix()
     proc = subprocess.run(
         [
             sys.executable,
@@ -67,9 +84,9 @@ def test_install_page_check_passes_without_utf8_locale() -> None:
             "-q",
             "-p",
             "no:cacheprovider",
-            f"{__file__}::test_install_page_shows_doctor_before_init",
+            f"{node}::test_install_page_shows_doctor_before_init",
         ],
-        cwd=Path(__file__).resolve().parents[1],
+        cwd=REPO,
         env=env,
         capture_output=True,
         text=True,
@@ -78,3 +95,4 @@ def test_install_page_check_passes_without_utf8_locale() -> None:
         timeout=300,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "2 passed" in proc.stdout, proc.stdout
