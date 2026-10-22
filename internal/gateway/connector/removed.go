@@ -320,7 +320,10 @@ func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error 
 // A file with more than one name (a hard link elsewhere) is written in
 // place instead: a rename gives only this name the stub, and the old hook
 // under its other name would go on running with its tokens revoked, which
-// in fail mode open lets every call run.
+// in fail mode open lets every call run. That is done only for a file owned
+// by the owner of its hooks folder (removedMayWriteInPlace): a link to
+// someone else's file, made to have a privileged teardown write it, gets the
+// rename.
 func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	path := c.scriptPath(dataDir)
 	state, links, err := c.scriptStateAndLinks(path)
@@ -360,6 +363,14 @@ func (c removedOnlyConnector) writeStubIntoFile(path string) error {
 	}
 	if !info.Mode().IsRegular() || info.Size() > removedScriptReadLimit {
 		return nil
+	}
+	folder, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	if !removedMayWriteInPlace(info, folder) {
+		_ = file.Close()
+		return atomicWriteFileNoFollow(path, []byte(c.tombstone), c.mode)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, removedScriptReadLimit+1))
 	if err != nil {

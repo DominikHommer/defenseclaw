@@ -22,6 +22,9 @@ import (
 // the old hook with its token revoked, and the old OpenHands hook lets every
 // call run when its token is missing in fail mode open.
 func TestRemovedTeardownWritesTheStubIntoEveryHardLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps the rename (removedMayWriteInPlace): no OpenHands script there, and the retired route blocks an OmniGent module")
+	}
 	for _, c := range removedConnectorsUnderTest() {
 		for _, old := range []struct{ name, body string }{
 			{"the 1.0.3 script", map[string]string{removedOpenHandsID: removedOpenHands103Script, removedOmnigentID: removedOmnigent103Module}[c.name]},
