@@ -3397,6 +3397,18 @@ func parseLegacyClaudeCodeNativeHookCommand(command string) (string, bool) {
 	return executable, true
 }
 
+// IsLegacyClaudeCodeUserHookCommand identifies a released Windows user
+// registration for retirement only. This does not prove that the executable
+// is trusted, and must never be used to allow a hook past an enterprise guard.
+func IsLegacyClaudeCodeUserHookCommand(command, home string) bool {
+	executable, ok := parseLegacyClaudeCodeNativeHookCommand(command)
+	if !ok || !filepath.IsAbs(home) {
+		return false
+	}
+	want := filepath.Join(home, ".local", "bin", "defenseclaw-hook.exe")
+	return strings.EqualFold(normalizeWindowsHookExecutable(executable), normalizeWindowsHookExecutable(want))
+}
+
 func hookUsesTrackedClaudeCodeCommand(rawHook interface{}, commands []string) bool {
 	hook, ok := rawHook.(map[string]interface{})
 	if !ok || len(commands) == 0 {
