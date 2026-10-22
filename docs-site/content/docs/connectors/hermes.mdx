@@ -32,8 +32,15 @@ Then reload or restart every Hermes host. Hermes registers hooks in each running
 defenseclaw status
 ```
 
-The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
+The agent appears under **Agents** with its mode.
 
+`defenseclaw doctor` cannot see which hooks a running Hermes loaded. While any Hermes host runs, the **Hermes hooks** row fails, also after a restart:
+
+```text
+[FAIL] Hermes hooks [hermes]  —  on-disk registration is present at ~/.hermes/config.yaml, but running Hermes hosts are unverified: doctor cannot verify which hooks an already running host loaded, even after a restart or successful hook traffic; live=false
+```
+
+Close every Hermes host and run `defenseclaw doctor` again. With no Hermes running the row passes: `registered at ~/.hermes/config.yaml; no Hermes host is running, so the next one starts with the DefenseClaw hooks`. Then start Hermes.
 
 ## What it can block or ask
 

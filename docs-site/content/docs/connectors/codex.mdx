@@ -64,6 +64,16 @@ Teardown restores the backup, or removes only DefenseClaw's entries.
 
 The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup codex` and `setup remove`, and has no `guardrail` group. Protected requirements pin `[features] hooks = true`, so `codex features disable hooks` writes the user's config but hooks stay on.
 
+The per-user files in [Files it changes](#files-it-changes) are not used there. The hooks are in Codex's machine requirements file and run the administrator's hook program:
+
+| | Hooks | Hook program |
+| --- | --- | --- |
+| Linux | `/etc/codex/requirements.toml` | `/opt/defenseclaw/bin/defenseclaw-hook` |
+| macOS | `/etc/codex/requirements.toml` | `/opt/cisco/defenseclaw/bin/defenseclaw-hook` |
+| Windows | `C:\ProgramData\OpenAI\Codex\requirements.toml` | `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe` |
+
+`enterprise policy verify` prints both, for example on Windows `Standalone machine agent policy (hook binary C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe)` and, under `codex`, `file: C:\ProgramData\OpenAI\Codex\requirements.toml`.
+
 The administrator manages Codex in the managed `config.yaml` under `guardrail.connectors.codex` (`{}` adds it, `enabled: false` removes it). Apply the change as in [Change the config](/docs/enterprise/operate/lifecycle#change-the-config), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/configure/machine-policy#inspect-export-and-verify)).
 
 ## Turn it off
