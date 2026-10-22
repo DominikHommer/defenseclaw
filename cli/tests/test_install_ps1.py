@@ -1234,6 +1234,7 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         f"$BinDir = '{bin_dir}'\n$Staging = '{staging}'\n$Slot = '{slot}'\n"
         "$ManagedFiles = @('defenseclaw-hook.exe')\n"
         "function Install-File([string]$From, [string]$To) { Copy-Item -LiteralPath $From -Destination $To -Force }\n"
+        "function Wait-PreviousHookExit([DateTime]$PublishedAt) {}\n"
         "function Remove-Aside([string]$Path) { Remove-Item -LiteralPath $Path -Force }\n"
         + _bin_dir_functions()
         + _ps1_function("Install-HookFirst")
@@ -1625,3 +1626,25 @@ Write-Output "WAITS=$script:waits MISSING_AT_WAIT=$script:missingAtWait"
         kept = [tmp_path / name for name in leftovers if name.startswith("defenseclaw-hook.exe.old-")]
         assert len(kept) == 2 and any(path.name.endswith(".restore") for path in kept), leftovers
         assert all(path.read_text(encoding="ascii") == old_body for path in kept)
+
+
+def test_previous_hook_calls_drain_while_new_hook_traffic_continues() -> None:
+    script = _ps1_function("Wait-PreviousHookExit") + r"""
+$ErrorActionPreference = 'Stop'
+$BinDir = '.'
+$script:passes = 0
+$published = [DateTime]::UtcNow
+function Get-ProcessesUnder {
+    $script:passes++
+    if ($script:passes -le 2) { [pscustomobject]@{ ProcessId = 10 } }
+    [pscustomobject]@{ ProcessId = 20 }
+}
+function Get-Process {
+    param($Id, $ErrorAction)
+    return [pscustomobject]@{ StartTime = $(if ($Id -eq 10) { $published.AddSeconds(-1) } else { $published.AddSeconds(1) }) }
+}
+Wait-PreviousHookExit $published
+if ($script:passes -ne 3) { throw 'did not drain only the old calls' }
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr

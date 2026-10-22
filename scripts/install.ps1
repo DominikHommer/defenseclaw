@@ -1487,6 +1487,7 @@ function Save-BinarySnapshot {
     New-InstallDirectory $Snap
     Copy-BinDir (Join-Path $Snap "bin")
     Install-HookFirst $Snap
+    Set-Content -LiteralPath (Join-Path $Snap "GATEWAY_WAS_RUNNING") -Value ([string]$WasRunning).ToLowerInvariant() -Encoding Ascii
     Set-Content -LiteralPath (Join-Path $Snap "BIN_SAVED") -Value "" -Encoding Ascii
 }
 
@@ -1556,6 +1557,31 @@ function Install-HookFirst([string]$Slot) {
     }
     Set-Content -LiteralPath (Join-Path $Slot "HOOK_FIRST") -Value "" -Encoding Ascii
     Install-File $staged $live
+    Wait-PreviousHookExit ([DateTime]::UtcNow)
+}
+
+function Wait-PreviousHookExit([DateTime]$PublishedAt) {
+    # A hook already running the previous image can still cold-start its
+    # gateway after the swap. Drain only calls born before publication while
+    # the old gateway remains available; new hook traffic keeps running.
+    $image = Join-Path $BinDir 'defenseclaw-hook.exe'
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $pending = $false
+        foreach ($row in @(Get-ProcessesUnder @($image))) {
+            $process = Get-Process -Id $row.ProcessId -ErrorAction SilentlyContinue
+            if (-not $process) { $pending = $true; continue }
+            try { $started = $process.StartTime.ToUniversalTime() } catch {
+                throw 'Cannot prove that previous hook calls finished; close the agents and run the installer again before stopping the gateway'
+            }
+            if ($started -le $PublishedAt) { $pending = $true }
+        }
+        if (-not $pending) { return }
+        if ($clock.Elapsed.TotalSeconds -ge 30) {
+            throw 'Previous hook calls did not finish within 30 seconds; close the agents and run the installer again before stopping the gateway'
+        }
+        Start-Sleep -Milliseconds 25
+    }
 }
 
 function Undo-HookFirst([string]$Slot) {
@@ -1983,7 +2009,11 @@ function Resume-InterruptedRun {
             }
         } else {
             # The snapshot never finished, so live data was only copied, not changed.
+            $restart = (Read-Text (Join-Path $slot "GATEWAY_WAS_RUNNING")) -eq "true"
             Undo-Snapshot $slot
+            if ($restart -and -not (Get-GatewayProcess) -and (Test-Path -LiteralPath (Join-Path $BinDir 'defenseclaw-gateway.exe') -PathType Leaf)) {
+                [void](Start-Gateway)
+            }
         }
     }
     $hold = Join-Path $DataDir ".rollback-hold"
