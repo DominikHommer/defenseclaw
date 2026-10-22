@@ -283,7 +283,9 @@ func (acknowledgedCaptureSink) ConfirmPolicyBundleReceipt(context.Context, strin
 	return nil
 }
 
-func (acknowledgedCaptureSink) ConfirmConfigChange(context.Context, audit.ConfigChange) error { return nil }
+func (acknowledgedCaptureSink) ConfirmConfigChange(context.Context, audit.ConfigChange) error {
+	return nil
+}
 
 func TestBundleReceiptReporterOnlyOnStandaloneEnterprise(t *testing.T) {
 	if r := newBundleReceiptReporter(&config.Config{DataDir: t.TempDir()}, filepath.Join(t.TempDir(), "config.yaml"), &audit.Logger{}); r != nil {
