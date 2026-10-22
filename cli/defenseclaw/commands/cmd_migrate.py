@@ -138,6 +138,23 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
     if not check and not as_json and _upgraded_from_0x(result):
         _report_hook_fail_mode_changes(data_dir or _default_data_dir())
         _report_ignored_dotenv_keys(data_dir or _default_data_dir())
+    if not check and not as_json:
+        _report_ignored_process_fail_mode(data_dir or _default_data_dir())
+
+
+def _report_ignored_process_fail_mode(data_dir: str) -> None:
+    """Name a DEFENSECLAW_FAIL_MODE the upgrading shell exports: 1.0.4 hooks do not read it (GAP-0361)."""
+    if not any(key.upper() == "DEFENSECLAW_FAIL_MODE" for key in os.environ):
+        return
+    try:
+        from defenseclaw.config import load
+        from defenseclaw.fail_mode import ignored_process_fail_mode
+
+        detail = ignored_process_fail_mode(load(data_dir=data_dir))
+    except Exception:  # noqa: BLE001 - a notice must never fail the migration
+        return
+    if detail:
+        ux.warn(detail)
 
 
 def _report_ignored_dotenv_keys(data_dir: str) -> None:

@@ -30,6 +30,36 @@ from defenseclaw.connector_paths import (
 from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
 
 _VALID_MODES = frozenset({"open", "closed"})
+
+
+def ignored_process_fail_mode(cfg: Any, environ: Any = None) -> str | None:
+    """How to persist a DEFENSECLAW_FAIL_MODE this process environment sets, which no hook reads.
+
+    Hooks rendered by 1.0.3 and earlier read the variable as a per-process
+    replacement of the installed mode. A 1.0.4 hook outside Secure Client
+    reads only the mode installed with it (GAP-0315, GAP-0361), so after an
+    upgrade a shell that still exports DEFENSECLAW_FAIL_MODE=closed runs the
+    installed open hooks open. Returns the line that names the variable and
+    the command that persists it, or None when it is unset or on Secure
+    Client, whose shell hooks still read it.
+    """
+    env = os.environ if environ is None else environ
+    raw = next((str(value) for key, value in env.items() if str(key).upper() == "DEFENSECLAW_FAIL_MODE"), None)
+    if raw is None or not raw.strip():
+        return None
+    guardrail = getattr(cfg, "guardrail", None)
+    secure_client = getattr(guardrail, "secure_client_hook_fail_modes", None)
+    if callable(secure_client) and secure_client():
+        return None
+    value = raw.strip().lower()
+    command = f"defenseclaw guardrail fail-mode {value}" if value in _VALID_MODES else "defenseclaw guardrail fail-mode open|closed"
+    detail = (
+        f"DEFENSECLAW_FAIL_MODE is set in this environment; hooks do not read it and run the fail mode "
+        f"installed with them. To keep that posture, save it: {command} (then remove the variable)"
+    )
+    if value == "closed":
+        detail += "; for one agent process, DEFENSECLAW_STRICT_AVAILABILITY=1 blocks while the gateway is down"
+    return detail
 _MAX_RUNTIME_FILE = 2 * 1024 * 1024
 # The gateway records the digest of the whole hook launcher with no size cap.
 # An unstripped Windows source build (make all) of defenseclaw-hook.exe is
@@ -455,9 +485,7 @@ def report_renders_fail_mode(report: dict[str, Any]) -> bool:
 def rendered_fail_mode(report: dict[str, Any]) -> str | None:
     """The fail mode the installed hook of a connector_fail_mode_report was rendered with, or None.
 
-    ``effective`` also counts an inherited DEFENSECLAW_FAIL_MODE=closed, which
-    only the process reading the report has: the agent that runs the hook may
-    not. A hook rendered open is open for every agent without it.
+    A hook rendered open is open for every agent: no environment closes it.
     """
 
     for source in report.get("sources") or ():
