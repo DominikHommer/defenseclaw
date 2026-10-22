@@ -57,7 +57,7 @@ func classifyFindOutputOperands(out *parseOutput, command *CommandFact) {
 func classifyAwkOutputOperands(out *parseOutput, command *CommandFact, program string) {
 	// AWK source is a separate language. Its expression grammar can write
 	// files or run commands; option and operand parsing cannot certify it.
-	out.markPartial(IssueOpaqueArtifact)
+	out.markPartial(IssueUnknownOperandGrammar)
 	argv := command.Argv
 	inplace := false
 	programSupplied := false
