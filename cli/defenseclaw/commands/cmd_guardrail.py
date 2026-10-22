@@ -1816,9 +1816,11 @@ def fail_mode_cmd(
         return
 
     gc = app.cfg.guardrail
-    current = (gc.hook_fail_mode or "open").lower()
-    if current not in ("open", "closed"):
-        current = "open"
+    # A bare write sets the global value every unlisted connector inherits
+    # (an OpenShell policy connector, a connector set up later), so a no-op
+    # needs the saved global value to be exactly the requested one.
+    saved_global = str(gc.hook_fail_mode or "").strip().lower()
+    current = saved_global if saved_global in ("open", "closed") else "open"
 
     if mode is None:
         click.echo()
@@ -1913,6 +1915,7 @@ def fail_mode_cmd(
 
     if (
         fail_mode_targets
+        and saved_global == mode
         and all(target_modes[name] == desired_modes[name] for name in fail_mode_targets)
         and all(
             (runtime_states[name].desired == desired_modes[name] and runtime_states[name].current)
@@ -1936,7 +1939,7 @@ def fail_mode_cmd(
     )
     if (
         not fail_mode_targets
-        and mode == current
+        and saved_global == mode
         and (single_state is None or (single_state.desired == mode and single_state.current))
     ):
         if upstream_fail_open(app.cfg, single_connector):

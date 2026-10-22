@@ -119,3 +119,39 @@ def test_bare_policy_writes_resolve_the_same_alias_keys(app, field, value, comma
     app.cfg.save.assert_called_once()
     assert set(gc.connectors) == {"claude-code", "codex"}
     assert all(getattr(entry, field) == value for entry in gc.connectors.values())
+
+
+@pytest.mark.parametrize("key", ["claude-code", "claude_code", "claudecode"])
+@pytest.mark.parametrize("mode,prior", [("closed", "open"), ("open", "closed")])
+def test_bare_fail_mode_saves_the_global_value_when_every_override_already_matches(app, key, mode, prior) -> None:
+    """A connector that inherits the global value (Codex under OpenShell) gets the requested mode."""
+    gc = app.cfg.guardrail
+    gc.hook_fail_mode = prior
+    gc.connectors = {key: PerConnectorGuardrailConfig(hook_fail_mode=mode)}
+    runner = CliRunner()
+    result = runner.invoke(cmd_guardrail.fail_mode_cmd, [mode, "--no-restart", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" not in result.output
+    app.cfg.save.assert_called_once()
+    assert gc.hook_fail_mode == mode
+    assert gc.effective_hook_fail_mode("codex") == gc.effective_hook_fail_mode(key) == mode
+    shown = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+    assert f"guardrail.hook_fail_mode: {mode}" in shown.output, shown.output
+    again = runner.invoke(cmd_guardrail.fail_mode_cmd, [mode, "--no-restart", "--yes"], obj=app)
+    assert "nothing to do" in again.output, again.output
+    app.cfg.save.assert_called_once()
+
+
+@pytest.mark.parametrize("connectors", [{}, {"claude-code": "closed"}])
+@pytest.mark.parametrize("saved", ["", "typo"])
+def test_bare_fail_mode_writes_an_unset_or_invalid_global_value(app, connectors, saved) -> None:
+    gc = app.cfg.guardrail
+    gc.hook_fail_mode = saved
+    gc.connectors = {key: PerConnectorGuardrailConfig(hook_fail_mode=value) for key, value in connectors.items()}
+    for mode in ("closed", "open"):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [mode, "--no-restart", "--yes"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert "nothing to do" not in result.output
+        assert gc.hook_fail_mode == mode
+        gc.hook_fail_mode = saved
+    assert app.cfg.save.call_count == 2
