@@ -444,7 +444,7 @@ func writeHookHelpersForMode(hookDir string, managedEnterprise bool) error {
 		}
 		helperPath := filepath.Join(hookDir, name)
 		if !managedEnterprise {
-			existing, err := os.ReadFile(helperPath)
+			existing, err := readConnectorStateFile(helperPath)
 			if err == nil {
 				diskV := parseHookSchemaVersion(existing)
 				embedV := parseHookSchemaVersion(content)
@@ -986,7 +986,7 @@ type hookRuntimeFileSnapshot struct {
 
 func snapshotHookRuntimeFile(path string) (hookRuntimeFileSnapshot, error) {
 	snapshot := hookRuntimeFileSnapshot{path: path}
-	data, err := os.ReadFile(path)
+	data, err := readConnectorStateFile(path)
 	if os.IsNotExist(err) {
 		return snapshot, nil
 	}
@@ -1229,7 +1229,7 @@ func refreshHookFailModesLocked(hookDir string, mode func(connector string) stri
 	var out HookFailModeRefresh
 	path := filepath.Join(hookDir, hookConfigSidecarName)
 	var state hookConfigSidecar
-	data, err := os.ReadFile(path)
+	data, err := readConnectorStateFile(path)
 	switch {
 	case err == nil:
 		prior, err := carryableHookConfigSidecar(data)
@@ -1342,7 +1342,7 @@ func flatHookRuntimeRecordNames(hookDir string) []string {
 		if !hookRuntimeRecordFile(path) {
 			continue
 		}
-		if body, err := os.ReadFile(path); err == nil && legacyHookConfigValue(body, "DEFENSECLAW_CONNECTOR") == name {
+		if body, err := readConnectorStateFile(path); err == nil && legacyHookConfigValue(body, "DEFENSECLAW_CONNECTOR") == name {
 			names = append(names, name)
 		}
 	}
@@ -1452,7 +1452,7 @@ func closeBakedHookFailMode(path string, opens *strings.Replacer) (bool, error) 
 	if !info.Mode().IsRegular() || info.Size() > hookScriptMaxBytes {
 		return false, nil
 	}
-	body, err := os.ReadFile(path)
+	body, err := readConnectorStateFile(path)
 	if err != nil {
 		return false, fmt.Errorf("read hook %s: %w", filepath.Base(path), err)
 	}
@@ -1605,7 +1605,7 @@ func validateHookRuntimeStateForContract(
 	} else {
 		// Preserve the pre-enterprise unmanaged contract exactly: follow the
 		// operator's path and let json.Unmarshal handle the complete file.
-		body, err = os.ReadFile(path)
+		body, err = readConnectorStateFile(path)
 		if os.IsNotExist(err) {
 			return nil
 		}
@@ -1651,7 +1651,7 @@ func validateHookRuntimeStateForContract(
 			false,
 		)
 	} else {
-		flat, err = os.ReadFile(flatPath)
+		flat, err = readConnectorStateFile(flatPath)
 	}
 	if err != nil {
 		return fmt.Errorf("read connector shell runtime sidecar: %w", err)
@@ -1749,7 +1749,7 @@ func readStableManagedRuntimeFileForOwner(
 			maxBytes,
 		)
 	}
-	file, err := os.Open(path)
+	file, err := openConnectorStateFileWithRetry(path)
 	if err != nil {
 		return nil, false, err
 	}
