@@ -199,6 +199,12 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 			t.Errorf("worker spawned for %+v", account)
 		}
 		requests = append(requests, request)
+		if !request.ForeignCleanup[0].Plan {
+			// The second worker cleans the file the first one planned.
+			return enterpriseHookWorkerResponse{Cleanup: map[string]enterpriseHookWorkerCleanupReport{
+				"cursor": {Removed: request.ForeignCleanup[0].Files, BackupDir: "/home/alice/.defenseclaw/foreign-hooks-backup/cursor/x"},
+			}}, nil
+		}
 		var targets []enterpriseHookWorkerTargetResult
 		for _, target := range request.Targets {
 			targets = append(targets, enterpriseHookWorkerTargetResult{Index: target.Index, OK: true, Removed: target.Options.ConnectorName == "claudecode"})
@@ -206,7 +212,7 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 		return enterpriseHookWorkerResponse{
 			Targets: targets,
 			Cleanup: map[string]enterpriseHookWorkerCleanupReport{
-				"cursor": {Removed: []string{"/home/alice/.cursor/hooks.json"}, BackupDir: "/home/alice/.defenseclaw/foreign-hooks-backup/cursor/x"},
+				"cursor": {Planned: []string{"/home/alice/.cursor/hooks.json"}},
 			},
 			Blocks: []enterprisepolicy.BlockSummary{{
 				BlockRecord: enterprisepolicy.BlockRecord{Time: "2026-09-26T11:59:00Z", Connector: "cursor", Event: "preToolUse", Scope: "project", Path: "/home/alice/repo/.cursor/hooks.json\nforged line", Digest: "ab"},
@@ -225,8 +231,14 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	if loadedFrom != "/etc/defenseclaw/hook-guardian/"+enterprisehooks.UnixEligibleAccountsFileName {
 		t.Fatalf("eligible accounts loaded from %s", loadedFrom)
 	}
-	if len(requests) != 1 || requests[0].Operation != enterpriseHookWorkerOpForeignCleanup {
+	if len(requests) != 2 || requests[0].Operation != enterpriseHookWorkerOpForeignCleanup || requests[1].Operation != enterpriseHookWorkerOpForeignCleanup ||
+		len(requests[1].Targets) != 0 || len(requests[1].ForeignCleanup) != 1 ||
+		!slices.Equal(requests[1].ForeignCleanup[0].Files, []string{"/home/alice/.cursor/hooks.json"}) {
 		t.Fatalf("worker requests %+v", requests)
+	}
+	ledger, err := loadEnterpriseForeignHookRemovals(filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile))
+	if err != nil || len(ledger) != 1 || ledger[0].Path != "/home/alice/.cursor/hooks.json" || ledger[0].Connector != "cursor" || ledger[0].Identity != "4242" {
+		t.Fatalf("the removal must be recorded for the gateway: %+v %v", ledger, err)
 	}
 	names := []string{}
 	for _, cleanup := range requests[0].ForeignCleanup {
@@ -264,12 +276,12 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 
 	// Within the interval nothing runs again; a new account does.
 	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(time.Minute), enterprisehooks.Manifest{}, perUser, "")
-	if len(requests) != 1 {
+	if len(requests) != 2 {
 		t.Fatal("cleanup must be throttled")
 	}
 	accounts = append(accounts, enterprisehooks.UnixEligibleAccount{User: "bob", UID: 4242, GID: 4242, Home: "/home/alice", HomeInode: 7})
 	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(2*time.Minute), enterprisehooks.Manifest{}, perUser, "")
-	if len(requests) != 3 {
+	if len(requests) != 6 {
 		t.Fatalf("a changed account list must run at once, got %d requests", len(requests))
 	}
 }

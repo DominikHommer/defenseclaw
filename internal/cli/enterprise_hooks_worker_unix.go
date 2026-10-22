@@ -208,6 +208,12 @@ type enterpriseHookWorkerForeignCleanup struct {
 	HookBinary    string                                 `json:"hook_binary"`
 	Policy        enterprisepolicy.PublicConnectorPolicy `json:"policy"`
 	OwnedCommands []string                               `json:"owned_commands,omitempty"`
+	// Plan asks only for the files the cleanup would edit
+	// (enterpriseHookWorkerCleanupReport.Planned); nothing is edited.
+	Plan bool `json:"plan,omitempty"`
+	// Files, unless null, are the only files the cleanup may edit: those
+	// the plan listed, which the guardian's pending denial covers.
+	Files []string `json:"files"`
 }
 
 // enterpriseHookWorkerCleanupReport summarizes one connector's cleanup.
@@ -220,6 +226,8 @@ type enterpriseHookWorkerCleanupReport struct {
 	// Uncertain says the cleanup may have changed files Removed does not
 	// list: an edit failed.
 	Uncertain bool `json:"uncertain,omitempty"`
+	// Planned are the files a planning cleanup would edit.
+	Planned []string `json:"planned,omitempty"`
 }
 
 type enterpriseHookWorkerTargetResult struct {
@@ -1153,22 +1161,26 @@ func runEnterpriseHookWorker(
 	account enterpriseHookWorkerAccount,
 	request enterpriseHookWorkerRequest,
 ) (enterpriseHookWorkerResponse, error) {
+	// Every failure before the process starts is errEnterpriseHookWorkerNotStarted.
+	notStarted := func(err error) (enterpriseHookWorkerResponse, error) {
+		return enterpriseHookWorkerResponse{}, fmt.Errorf("%w: %w", errEnterpriseHookWorkerNotStarted, err)
+	}
 	if account.UID <= 0 {
-		return enterpriseHookWorkerResponse{}, fmt.Errorf("refusing a worker for uid %d", account.UID)
+		return notStarted(fmt.Errorf("refusing a worker for uid %d", account.UID))
 	}
 	if os.Geteuid() != 0 && (os.Geteuid() != account.UID || os.Getegid() != account.GID) {
-		return enterpriseHookWorkerResponse{}, fmt.Errorf("a non-root guardian can only run a worker for itself (uid %d)", os.Geteuid())
+		return notStarted(fmt.Errorf("a non-root guardian can only run a worker for itself (uid %d)", os.Geteuid()))
 	}
 	request.Version = enterpriseHookWorkerProtocolVersion
 	request.UID, request.GID = account.UID, account.GID
 	request.User, request.Home = account.User, account.Home
 	payload, err := json.Marshal(request)
 	if err != nil {
-		return enterpriseHookWorkerResponse{}, err
+		return notStarted(err)
 	}
 	exe, err := enterpriseHookWorkerExecutable()
 	if err != nil {
-		return enterpriseHookWorkerResponse{}, err
+		return notStarted(err)
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -1197,7 +1209,10 @@ func runEnterpriseHookWorker(
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 2 * time.Second
-	runErr := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return notStarted(fmt.Errorf("start the worker for uid %d: %w", account.UID, err))
+	}
+	runErr := cmd.Wait()
 	forwardEnterpriseHookWorkerStderr(account, stderr)
 	if ctx.Err() != nil {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w", account.UID, ctx.Err())
@@ -1337,6 +1352,11 @@ type enterpriseHookWorkerOutcome struct {
 // enterpriseHookWorkerRunner is replaceable in tests.
 var enterpriseHookWorkerRunner = runEnterpriseHookWorker
 
+// errEnterpriseHookWorkerNotStarted marks a worker failure from before its
+// process started (runEnterpriseHookWorker): no code ran as the user, so
+// the worker changed no file.
+var errEnterpriseHookWorkerNotStarted = errors.New("the worker did not start")
+
 // runEnterpriseHookWorkerPool runs one worker per job with bounded
 // parallelism and returns outcomes in job order.
 func runEnterpriseHookWorkerPool(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int) []enterpriseHookWorkerOutcome {
@@ -1344,10 +1364,11 @@ func runEnterpriseHookWorkerPool(ctx context.Context, jobs []enterpriseHookWorke
 }
 
 // runEnterpriseHookWorkerPoolReporting is runEnterpriseHookWorkerPool that
-// also hands each job to start, when set, just before its worker starts,
-// and each outcome to done, when set, as soon as its worker ends
-// (concurrently with the other workers).
-func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int, start func(*enterpriseHookWorkerJob), done func(enterpriseHookWorkerOutcome)) []enterpriseHookWorkerOutcome {
+// also hands each job to start, when set, just before its worker starts
+// (a job start refuses ends with start's error and runs no worker), and
+// each outcome to done, when set, as soon as its worker ends (concurrently
+// with the other workers).
+func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int, start func(*enterpriseHookWorkerJob) error, done func(enterpriseHookWorkerOutcome)) []enterpriseHookWorkerOutcome {
 	if parallelism <= 0 {
 		parallelism = enterpriseHookWorkerParallelism
 	}
@@ -1360,10 +1381,14 @@ func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterprise
 			defer wg.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
+			var response enterpriseHookWorkerResponse
+			var err error
 			if start != nil {
-				start(&jobs[i])
+				err = start(&jobs[i])
 			}
-			response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
+			if err == nil {
+				response, err = enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
+			}
 			outcomes[i] = enterpriseHookWorkerOutcome{Job: jobs[i], Response: response, Err: err}
 			if done != nil {
 				done(outcomes[i])

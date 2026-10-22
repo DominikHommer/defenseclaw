@@ -152,12 +152,42 @@ func runForeignTxPass(t *testing.T) string {
 	return log.String()
 }
 
+// foreignTxPlanning reports whether request is a pass's first worker,
+// which only plans its foreign-hook cleanup.
+func foreignTxPlanning(request enterpriseHookWorkerRequest) bool {
+	return len(request.ForeignCleanup) > 0 && request.ForeignCleanup[0].Plan
+}
+
+// foreignTxPlan is a planning worker's answer: the files each connector's
+// cleanup would edit.
+func foreignTxPlan(files map[string][]string) enterpriseHookWorkerResponse {
+	reports := map[string]enterpriseHookWorkerCleanupReport{}
+	for name, paths := range files {
+		reports[name] = enterpriseHookWorkerCleanupReport{Planned: paths}
+	}
+	return enterpriseHookWorkerResponse{Cleanup: reports}
+}
+
+// foreignTxPendingConnectors names the connectors of uid 4242's pending
+// denials in the ledger.
+func foreignTxPendingConnectors(dataDir string) string {
+	entries, _ := loadEnterpriseForeignHookRemovals(foreignTxLedger(dataDir))
+	connectors := []string{}
+	for _, entry := range foreignTxPending(entries) {
+		if entry.Identity == "4242" {
+			connectors = append(connectors, entry.Connector)
+		}
+	}
+	slices.Sort(connectors)
+	return strings.Join(connectors, ",")
+}
+
 // Every cleanup transaction of a pass ends: a pending denial never outlives
 // its worker, whatever the worker did. A cleanup that cannot tell what it
-// changed leaves removals at its end, which deny the account's agents that
-// started earlier and let later ones (also a new account that reuses the
-// uid) run; a cleanup that removed nothing leaves the ledger as it was, also
-// when it is full.
+// changed leaves removals at its end, which deny the account's agents of
+// the connectors that may load a planned file that started earlier, and
+// let later ones (also a new account that reuses the uid) run; a cleanup
+// that removed nothing leaves the ledger as it was, also when it is full.
 func TestForeignHookCleanupTransactionEndsWithItsWorker(t *testing.T) {
 	const hook = "/home/alice/.cursor/hooks.json"
 	for _, tc := range []struct {
@@ -168,7 +198,7 @@ func TestForeignHookCleanupTransactionEndsWithItsWorker(t *testing.T) {
 		incomplete bool
 		removed    bool
 	}{
-		{name: "no-op cleanup on a full ledger", full: true, response: enterpriseHookWorkerResponse{Cleanup: map[string]enterpriseHookWorkerCleanupReport{"cursor": {}}}},
+		{name: "nothing removed on a full ledger", full: true, response: enterpriseHookWorkerResponse{Cleanup: map[string]enterpriseHookWorkerCleanupReport{"cursor": {}}}},
 		{name: "clean removal", response: enterpriseHookWorkerResponse{Cleanup: map[string]enterpriseHookWorkerCleanupReport{"cursor": {Removed: []string{hook}}}}, removed: true},
 		{name: "worker failed", err: errors.New("worker killed"), incomplete: true},
 		{name: "worker did not answer for the connector", response: enterpriseHookWorkerResponse{Cleanup: map[string]enterpriseHookWorkerCleanupReport{}}, incomplete: true},
@@ -181,19 +211,20 @@ func TestForeignHookCleanupTransactionEndsWithItsWorker(t *testing.T) {
 			oldAgent := fmt.Sprintf("%s:%s:4343:%d", goos, boot, start)
 			var dataDir string
 			sawPending := false
+			var cleaned [][]string
 			dataDir = useForeignTxPass(t, func(request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
-				// The denial is published before the worker can edit, for
-				// every governed connector.
-				entries, _ := loadEnterpriseForeignHookRemovals(foreignTxLedger(dataDir))
-				pending := foreignTxPending(entries)
-				connectors := []string{}
-				for _, entry := range pending {
-					if entry.Identity == "4242" {
-						connectors = append(connectors, entry.Connector)
+				if foreignTxPlanning(request) {
+					if got := foreignTxPendingConnectors(dataDir); got != "" {
+						t.Errorf("the planning worker ran with pending denials for %s", got)
 					}
+					return foreignTxPlan(map[string][]string{"cursor": {hook}}), nil
 				}
-				slices.Sort(connectors)
-				sawPending = len(request.ForeignCleanup) == 1 && strings.Join(connectors, ",") == "codex,cursor"
+				// The cleaning worker cleans only the planned file, after
+				// the denial for the connectors that load it is published.
+				for _, cleanup := range request.ForeignCleanup {
+					cleaned = append(cleaned, append([]string{cleanup.Connector}, cleanup.Files...))
+				}
+				sawPending = foreignTxPendingConnectors(dataDir) == "cursor"
 				return tc.response, tc.err
 			})
 			var fixture []enterprisepolicy.ForeignHookRemoval
@@ -212,8 +243,8 @@ func TestForeignHookCleanupTransactionEndsWithItsWorker(t *testing.T) {
 				writeForeignTxLedger(t, dataDir, fixture)
 			}
 			log := runForeignTxPass(t)
-			if !sawPending {
-				t.Fatalf("the worker ran without the account's pending denial; log:\n%s", log)
+			if !sawPending || len(cleaned) != 1 || !slices.Equal(cleaned[0], []string{"cursor", hook}) {
+				t.Fatalf("the cleaning worker ran with cleanups %v and the pending denial %t; log:\n%s", cleaned, sawPending, log)
 			}
 			ledger := readForeignTxLedger(t, dataDir)
 			if pending := foreignTxPending(ledger); len(pending) != 0 {
@@ -241,30 +272,293 @@ func TestForeignHookCleanupTransactionEndsWithItsWorker(t *testing.T) {
 					t.Fatalf("a cleanup that knows what it changed left incomplete-cleanup removals %+v", incomplete)
 				}
 			} else {
-				connectors := []string{}
-				for _, entry := range incomplete {
-					connectors = append(connectors, entry.Connector)
-				}
-				slices.Sort(connectors)
-				if strings.Join(connectors, ",") != "codex,cursor" {
+				if len(incomplete) != 1 || incomplete[0].Connector != "cursor" {
 					t.Fatalf("incomplete cleanup removals %+v", incomplete)
 				}
 				parts := strings.Split(incomplete[0].Mark, ":")
 				end, _ := strconv.ParseInt(parts[len(parts)-1], 10, 64)
 				newAgent := fmt.Sprintf("%s:%s:4444:%d", goos, boot, end+1)
-				for _, name := range []string{"cursor", "codex"} {
-					if got := foreignTxCall(t, ledger, "4242", name, oldAgent); !got.Deny {
-						t.Fatalf("a %s agent that started before an uncertain cleanup was allowed: %+v", name, got)
+				if got := foreignTxCall(t, ledger, "4242", "cursor", oldAgent); !got.Deny {
+					t.Fatalf("a cursor agent that started before an uncertain cleanup was allowed: %+v", got)
+				}
+				for _, agent := range []string{oldAgent, newAgent} {
+					if got := foreignTxCall(t, ledger, "4242", "codex", agent); got.Deny {
+						t.Fatalf("a codex agent, which loads no file the cleanup planned, is denied: %+v", got)
 					}
-					if got := foreignTxCall(t, ledger, "4242", name, newAgent); got.Deny {
-						t.Fatalf("a %s agent started after the cleanup ended (or a new account reusing the uid) is denied: %+v", name, got)
-					}
+				}
+				if got := foreignTxCall(t, ledger, "4242", "cursor", newAgent); got.Deny {
+					t.Fatalf("a cursor agent started after the cleanup ended (or a new account reusing the uid) is denied: %+v", got)
 				}
 			}
 			if tc.full {
 				if got := foreignTxCall(t, ledger, "4242", "cursor", oldAgent); !got.Deny || !strings.Contains(got.Reason, "hooks-0.json") {
 					t.Fatalf("the old agent's first call after the pass: %+v", got)
 				}
+			}
+		})
+	}
+}
+
+// A routine pass that finds nothing to remove publishes no denial: while
+// its worker runs, and after it, the account's running agents keep
+// working, and no second worker runs. The in-process cleanup (Windows, and
+// Unix per-user rows) follows the same rule.
+func TestForeignHookNoOpCleanupDeniesNoAgent(t *testing.T) {
+	goos, boot, start := foreignTxClock(t)
+	agent := fmt.Sprintf("%s:%s:4343:%d", goos, boot, start)
+	t.Run("worker pass", func(t *testing.T) {
+		var dataDir string
+		workers := 0
+		dataDir = useForeignTxPass(t, func(request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+			workers++
+			if !foreignTxPlanning(request) {
+				t.Errorf("a pass with nothing to remove ran a cleaning worker: %+v", request.ForeignCleanup)
+			}
+			entries, err := loadEnterpriseForeignHookRemovals(foreignTxLedger(dataDir))
+			if err != nil {
+				t.Errorf("ledger: %v", err)
+			}
+			for _, name := range []string{"cursor", "codex"} {
+				if got := foreignTxCall(t, entries, "4242", name, agent); got.Deny {
+					t.Errorf("a %s call during a pass that removes nothing was denied: %+v", name, got)
+				}
+			}
+			return foreignTxPlan(map[string][]string{"cursor": nil}), nil
+		})
+		log := runForeignTxPass(t)
+		if workers != 1 {
+			t.Fatalf("%d workers ran for a pass with nothing to remove; log:\n%s", workers, log)
+		}
+		if _, err := os.Lstat(foreignTxLedger(dataDir)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("a pass that removes nothing wrote the removal ledger (%v); log:\n%s", err, log)
+		}
+	})
+	t.Run("a pass denies only the connectors that load a planned file", func(t *testing.T) {
+		var dataDir string
+		dataDir = useForeignTxPass(t, func(request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+			if foreignTxPlanning(request) {
+				return foreignTxPlan(map[string][]string{"cursor": {"/home/alice/.cursor/hooks.json"}}), nil
+			}
+			entries, _ := loadEnterpriseForeignHookRemovals(foreignTxLedger(dataDir))
+			if got := foreignTxCall(t, entries, "4242", "cursor", agent); !got.Deny {
+				t.Errorf("a cursor call during the removal of a cursor hook was allowed: %+v", got)
+			}
+			if got := foreignTxCall(t, entries, "4242", "codex", agent); got.Deny {
+				t.Errorf("a codex call during the removal of a cursor-only hook was denied: %+v", got)
+			}
+			return enterpriseHookWorkerResponse{Cleanup: map[string]enterpriseHookWorkerCleanupReport{"cursor": {}}}, nil
+		})
+		runForeignTxPass(t)
+	})
+	t.Run("in-process cleanup", func(t *testing.T) {
+		resetForeignTxs(t)
+		dataDir := useUserCleanupStateDir(t)
+		previous, previousRunAs := cfg, enterpriseForeignHookRunAsTarget
+		t.Cleanup(func() { cfg, enterpriseForeignHookRunAsTarget = previous, previousRunAs })
+		cfg = standaloneTestConfig(dataDir)
+		cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"cursor": {}, "codex": {}}
+		home := t.TempDir()
+		var during []string
+		enterpriseForeignHookRunAsTarget = func(_ enterprisehooks.TargetCredentials, fn func() error) error {
+			entries, _ := loadEnterpriseForeignHookRemovals(foreignTxLedger(dataDir))
+			connectors := []string{}
+			for _, entry := range foreignTxPending(entries) {
+				connectors = append(connectors, entry.Connector)
+			}
+			during = append(during, strings.Join(connectors, ","))
+			return fn()
+		}
+		target := enterprisehooks.TargetCredentials{UserHome: home, UID: 4242, GID: 4242}
+		if _, err := enterpriseForeignHookCleanup(target, "cursor", ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(foreignTxLedger(dataDir)); !errors.Is(err, os.ErrNotExist) || !slices.Equal(during, []string{""}) {
+			t.Fatalf("an in-process cleanup with nothing to remove published a denial: runs %q, ledger %v", during, err)
+		}
+		hooks := filepath.Join(home, ".cursor", "hooks.json")
+		if err := os.MkdirAll(filepath.Dir(hooks), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(hooks, []byte(`{"version": 1, "hooks": {"preToolUse": [{"command": "./rewrite.sh"}]}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		during = nil
+		result, err := enterpriseForeignHookCleanup(target, "cursor", "")
+		if err != nil || len(result.Removed) != 1 {
+			t.Fatalf("cleanup: %+v %v", result, err)
+		}
+		ledger := readForeignTxLedger(t, dataDir)
+		if !slices.Equal(during, []string{"", "cursor"}) || len(foreignTxPending(ledger)) != 0 ||
+			!slices.ContainsFunc(ledger, func(r enterprisepolicy.ForeignHookRemoval) bool { return r.Path == hooks && r.Connector == "cursor" }) {
+			t.Fatalf("the cleanup must plan without a denial, then clean under a cursor denial and record the removal: runs %q, ledger %+v", during, ledger)
+		}
+	})
+}
+
+// The denial names every connector whose agent may load a planned file:
+// Cursor also loads Claude Code's user settings.
+func TestForeignHookDenialCoversEveryConnectorThatLoadsAPlannedFile(t *testing.T) {
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+	cfg = standaloneTestConfig(t.TempDir())
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"claudecode": {}, "cursor": {}, "codex": {}}
+	got := enterpriseForeignHookDenialConnectors("/home/alice", map[string][]string{"claudecode": {"/home/alice/.claude/settings.json"}})
+	if !slices.Equal(got, []string{"claudecode", "cursor"}) {
+		t.Fatalf("denial connectors %v", got)
+	}
+	if got := enterpriseForeignHookDenialConnectors("/home/alice", map[string][]string{"cursor": nil}); len(got) != 0 {
+		t.Fatalf("a cleanup with no planned file denies %v", got)
+	}
+	if _, err := beginEnterpriseForeignHookCleanup(io.Discard, "1000", nil); err == nil {
+		t.Fatal("a cleanup opened a transaction without a connector to deny")
+	}
+}
+
+// A cleaning worker that never started (its executable could not be found
+// or started, or the guardian refused it) edited nothing: its transaction
+// clears its pending denial and leaves no incomplete-cleanup removal, so
+// running agents are not denied for the removal TTL. A worker that started
+// and then failed stays uncertain.
+func TestForeignHookWorkerThatNeverStartedLeavesNoDenial(t *testing.T) {
+	notExecutable := filepath.Join(t.TempDir(), "defenseclaw")
+	if err := os.WriteFile(notExecutable, []byte("not a program"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name       string
+		executable func() (string, error)
+		incomplete bool
+	}{
+		{name: "executable lookup failed", executable: func() (string, error) { return "", errors.New("readlink /proc/self/exe: no such file") }},
+		{name: "executable missing", executable: func() (string, error) { return filepath.Join(t.TempDir(), "gone"), nil }},
+		{name: "executable cannot run", executable: func() (string, error) { return notExecutable, nil }},
+		{name: "worker started and failed", executable: func() (string, error) { return "/bin/false", nil }, incomplete: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip("runs the worker as the test's own non-root account")
+			}
+			goos, boot, start := foreignTxClock(t)
+			oldAgent := fmt.Sprintf("%s:%s:4343:%d", goos, boot, start)
+			previousExe := enterpriseHookWorkerExecutable
+			t.Cleanup(func() { enterpriseHookWorkerExecutable = previousExe })
+			var workerErr error
+			dataDir := useForeignTxPass(t, func(request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+				if foreignTxPlanning(request) {
+					return foreignTxPlan(map[string][]string{"cursor": {"/home/alice/.cursor/hooks.json"}}), nil
+				}
+				// The real worker launch, as the test's own account.
+				enterpriseHookWorkerExecutable = tc.executable
+				response, err := runEnterpriseHookWorker(context.Background(), enterpriseHookWorkerAccount{
+					UID: os.Getuid(), GID: os.Getgid(), User: "self", Home: t.TempDir()}, request)
+				workerErr = err
+				return response, err
+			})
+			log := runForeignTxPass(t)
+			if workerErr == nil || errors.Is(workerErr, errEnterpriseHookWorkerNotStarted) == tc.incomplete {
+				t.Fatalf("worker error %v; not-started %t, want %t", workerErr, errors.Is(workerErr, errEnterpriseHookWorkerNotStarted), !tc.incomplete)
+			}
+			ledger := readForeignTxLedger(t, dataDir)
+			if pending := foreignTxPending(ledger); len(pending) != 0 || len(enterpriseForeignHookCleanupTxs) != 0 {
+				t.Fatalf("the pass left pending denials %+v; log:\n%s", pending, log)
+			}
+			incomplete := slices.ContainsFunc(ledger, func(r enterprisepolicy.ForeignHookRemoval) bool {
+				return r.Path == enterprisepolicy.ForeignHookCleanupIncompletePath
+			})
+			if incomplete != tc.incomplete {
+				t.Fatalf("incomplete-cleanup removal %t, want %t: %+v", incomplete, tc.incomplete, ledger)
+			}
+			if got := foreignTxCall(t, ledger, "4242", "cursor", oldAgent); got.Deny != tc.incomplete {
+				t.Fatalf("a running cursor agent after the pass: deny %t, want %t: %+v", got.Deny, tc.incomplete, got)
+			}
+		})
+	}
+	t.Run("refused before the worker", func(t *testing.T) {
+		workers := 0
+		dataDir := useForeignTxPass(t, func(request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+			workers++
+			if foreignTxPlanning(request) {
+				return foreignTxPlan(map[string][]string{"cursor": {"/home/alice/.cursor/hooks.json"}}), nil
+			}
+			return enterpriseHookWorkerResponse{}, nil
+		})
+		// The ledger cannot be read, so the denial cannot be published.
+		writeForeignTxLedger(t, dataDir, nil)
+		if err := os.WriteFile(foreignTxLedger(dataDir), []byte("{"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		log := runForeignTxPass(t)
+		if workers != 1 || !strings.Contains(log, "refused before file removal") {
+			t.Fatalf("a cleanup whose denial could not be published ran %d workers; log:\n%s", workers, log)
+		}
+	})
+}
+
+// A ledger that cannot be read (it does not parse, or fails its trust
+// check) is never replaced: the gateway keeps denying every call until it
+// can be read again or an administrator removes it, and once it can be read
+// its removals still deny the agents that started before them. No ledger
+// update replaces it: a pass's reconcile, a pass that removes nothing, a
+// cleanup's start or the recording of a removal.
+func TestForeignHookUnreadableLedgerIsKept(t *testing.T) {
+	for _, damage := range []string{"does not parse", "fails its trust check"} {
+		t.Run(damage, func(t *testing.T) {
+			goos, boot, start := foreignTxClock(t)
+			oldAgent := fmt.Sprintf("%s:%s:4343:%d", goos, boot, start)
+			var dataDir string
+			dataDir = useForeignTxPass(t, func(request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+				return foreignTxPlan(nil), nil
+			})
+			ledger := foreignTxLedger(dataDir)
+			removal := enterprisepolicy.ForeignHookRemoval{Identity: "4242", Connector: "cursor", Path: "/home/alice/.cursor/hooks.json",
+				At: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), Mark: fmt.Sprintf("%s:%s:%d", goos, boot, start+1)}
+			writeForeignTxLedger(t, dataDir, []enterprisepolicy.ForeignHookRemoval{removal})
+			good, err := os.ReadFile(ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restore := func() {}
+			if damage == "does not parse" {
+				if err := os.WriteFile(ledger, []byte(`{"version": 1, "removals": [`), 0o640); err != nil {
+					t.Fatal(err)
+				}
+				restore = func() {
+					if err := os.WriteFile(ledger, good, 0o640); err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else {
+				trust := enterpriseHookAuthorizationFileTrustCheck
+				enterpriseHookAuthorizationFileTrustCheck = func(path string) error {
+					if filepath.Base(path) == enterprisepolicy.ForeignHookRemovalsFile {
+						return errors.New("group-writable")
+					}
+					return trust(path)
+				}
+				restore = func() { enterpriseHookAuthorizationFileTrustCheck = trust }
+				t.Cleanup(restore)
+			}
+			damaged, err := os.ReadFile(ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconcileEnterpriseForeignHookCleanups(io.Discard)
+			log := runForeignTxPass(t)
+			if _, err := beginEnterpriseForeignHookCleanup(io.Discard, "4242", []string{"cursor"}); err == nil || len(enterpriseForeignHookCleanupTxs) != 0 {
+				t.Errorf("a cleanup started on an unreadable ledger (%v) or left transactions %v", err, enterpriseForeignHookCleanupTxs)
+			}
+			if err := recordEnterpriseForeignHookRemovals(io.Discard, "4242", "/home/alice", "cursor", []string{"/home/alice/.cursor/other.json"}); err == nil {
+				t.Error("a removal was recorded into a replaced ledger")
+			}
+			if data, err := os.ReadFile(ledger); err != nil || string(data) != string(damaged) {
+				t.Fatalf("the unreadable ledger was replaced (%v):\n%s\nlog:\n%s", err, data, log)
+			}
+			if _, err := loadEnterpriseForeignHookRemovals(ledger); err == nil {
+				t.Fatal("the damaged ledger reads; the gateway would not deny")
+			}
+			restore()
+			if got := foreignTxCall(t, readForeignTxLedger(t, dataDir), "4242", "cursor", oldAgent); !got.Deny {
+				t.Fatalf("once the ledger can be read again, the agent that started before its removal is allowed: %+v", got)
 			}
 		})
 	}
@@ -288,7 +582,7 @@ func TestForeignHookCleanupDenialIsPublishedWhole(t *testing.T) {
 			Path: enterprisepolicy.ForeignHookCleanupPendingPath(strconv.Itoa(i), ""), At: now, Mark: "m"})
 	}
 	writeForeignTxLedger(t, dataDir, fixture)
-	if _, err := beginEnterpriseForeignHookCleanup(io.Discard, "1000", []string{"cursor"}); err == nil {
+	if _, err := beginEnterpriseForeignHookCleanup(io.Discard, "1000", []string{"cursor", "codex"}); err == nil {
 		t.Fatal("a cleanup started without its whole denial")
 	}
 	if got := readForeignTxLedger(t, dataDir); len(got) != len(fixture) {
@@ -390,5 +684,58 @@ func TestForeignHookAbandonedCleanupDenialIsSettled(t *testing.T) {
 				t.Fatalf("a new agent of the account (or of an account reusing the uid) is denied: %+v", got)
 			}
 		})
+	}
+}
+
+// The two-worker pass with real worker processes: a clean home runs one
+// worker and writes no ledger; a home with a foreign Cursor hook gets a
+// planning worker and a cleaning worker, and the removal is recorded with
+// no pending denial left.
+func TestForeignHookCleanupPassWithRealWorkers(t *testing.T) {
+	useEnterpriseHookWorkerHelper(t, "real")
+	home := t.TempDir()
+	var dataDir string
+	workers := 0
+	dataDir = useForeignTxPass(t, nil)
+	self := enterprisehooks.UnixEligibleAccount{User: "self", UID: os.Getuid(), GID: os.Getgid(), Home: home}
+	enterpriseHookLoadEligibleAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		return []enterprisehooks.UnixEligibleAccount{self}, nil
+	}
+	enterpriseHookCheckHome = func(string, int) enterprisehooks.HomeCheck {
+		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
+	}
+	enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		workers++
+		return runEnterpriseHookWorker(ctx, account, request)
+	}
+	pass := func() string {
+		enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+		var log bytes.Buffer
+		runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Now(), enterprisehooks.Manifest{}, nil, "")
+		return log.String()
+	}
+	if log := pass(); workers != 1 {
+		t.Fatalf("a clean home ran %d workers; log:\n%s", workers, log)
+	}
+	if _, err := os.Lstat(foreignTxLedger(dataDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a pass over a clean home wrote the removal ledger: %v", err)
+	}
+	hooks := filepath.Join(home, ".cursor", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooks), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooks, []byte(`{"version": 1, "hooks": {"preToolUse": [{"command": "./rewrite.sh"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workers = 0
+	log := pass()
+	if data, _ := os.ReadFile(hooks); workers != 2 || strings.Contains(string(data), "rewrite.sh") {
+		t.Fatalf("%d workers; the foreign hook must be removed: %s\nlog:\n%s", workers, data, log)
+	}
+	ledger := readForeignTxLedger(t, dataDir)
+	if len(foreignTxPending(ledger)) != 0 || !slices.ContainsFunc(ledger, func(r enterprisepolicy.ForeignHookRemoval) bool {
+		return r.Path == hooks && r.Connector == "cursor" && r.Identity == strconv.Itoa(os.Getuid())
+	}) {
+		t.Fatalf("the removal must be recorded and no pending denial left: %+v\nlog:\n%s", ledger, log)
 	}
 }

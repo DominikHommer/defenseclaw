@@ -109,11 +109,33 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 	return err
 }
 
+// enterpriseForeignHookDenialConnectors names the connectors whose agents
+// may load a file a cleanup will edit, given the files each connector's
+// cleanup planned: the connectors its pending denial covers, the ones
+// recordEnterpriseForeignHookRemovals records its removals for.
+func enterpriseForeignHookDenialConnectors(home string, planned map[string][]string) []string {
+	candidates := enterprisepolicy.StandaloneConnectors(cfg)
+	names := []string{}
+	for connectorName, paths := range planned {
+		connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+		for _, path := range paths {
+			for _, name := range enterprisepolicy.ForeignHookRemovalConnectors(home, path, connectorName, candidates) {
+				if !slices.Contains(names, name) {
+					names = append(names, name)
+				}
+			}
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
 // beginEnterpriseForeignHookCleanup opens a cleanup transaction for account
 // before any of its user hook files can be removed: one ledger write
-// publishes a pending denial for every governed connector and for
-// connectors, because several can load the same file. On an error nothing
-// may be edited. finishEnterpriseForeignHookCleanup ends the transaction.
+// publishes a pending denial for each of connectors, those whose agents may
+// load a file the cleanup will edit (enterpriseForeignHookDenialConnectors).
+// A cleanup with nothing to edit opens none. On an error nothing may be
+// edited. finishEnterpriseForeignHookCleanup ends the transaction.
 func beginEnterpriseForeignHookCleanup(stderr io.Writer, account string, connectors []string) (string, error) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return "", nil
@@ -122,17 +144,20 @@ func beginEnterpriseForeignHookCleanup(stderr io.Writer, account string, connect
 	if !ok {
 		return "", errors.New("cannot bind the cleanup denial to an account")
 	}
+	names := []string{}
+	for _, name := range connectors {
+		if name = strings.ToLower(strings.TrimSpace(name)); name != "" && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return "", errors.New("the cleanup denial names no connector")
+	}
 	var id [8]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return "", err
 	}
 	token := enterprisepolicy.ForeignHookCleanupPendingPath(hex.EncodeToString(id[:]), enterpriseForeignHookCleanupOwner())
-	names := []string{}
-	for _, name := range append(enterprisepolicy.StandaloneConnectors(cfg), connectors...) {
-		if name = strings.ToLower(strings.TrimSpace(name)); name != "" && !slices.Contains(names, name) {
-			names = append(names, name)
-		}
-	}
 	enterpriseForeignHookRemovalsMu.Lock()
 	defer enterpriseForeignHookRemovalsMu.Unlock()
 	tx := &enterpriseForeignHookCleanupTx{running: true}
@@ -148,9 +173,14 @@ func beginEnterpriseForeignHookCleanup(stderr io.Writer, account string, connect
 	})
 	if err != nil {
 		// Nothing was edited: take back whatever was published, now or
-		// on a later update.
+		// on a later update. A denial the update never built (the ledger
+		// could not be read) was never published.
 		tx.running = false
-		_ = updateEnterpriseForeignHookLedger(stderr, nil)
+		if tx.entries == nil {
+			delete(enterpriseForeignHookCleanupTxs, token)
+		} else {
+			_ = updateEnterpriseForeignHookLedger(stderr, nil)
+		}
 		return "", err
 	}
 	return token, nil
@@ -202,9 +232,8 @@ func reconcileEnterpriseForeignHookCleanups(stderr io.Writer) {
 // entries add returns (nil adds none), each of which must survive
 // encoding, and settles the pending denials of ended cleanups
 // (settleEnterpriseForeignHookPending). It writes only when something
-// changed. A ledger that cannot be read is replaced, keeping this process's
-// pending denials: the gateway denies every call while it is unreadable.
-// The caller holds enterpriseForeignHookRemovalsMu.
+// changed. A ledger that cannot be read is never replaced: the update
+// fails. The caller holds enterpriseForeignHookRemovalsMu.
 func updateEnterpriseForeignHookLedger(stderr io.Writer, add func(now time.Time, mark string) []enterprisepolicy.ForeignHookRemoval) error {
 	dataDir := cfg.DataDir
 	dir := managed.HookGuardianAuthorizationDir(dataDir)
@@ -217,19 +246,20 @@ func updateEnterpriseForeignHookLedger(stderr io.Writer, add func(now time.Time,
 	}
 	now := time.Now().UTC()
 	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
-	existing, loadErr := loadEnterpriseForeignHookRemovals(path)
-	if loadErr != nil {
-		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: replacing the removal ledger: %v\n", loadErr)
-		existing = nil
-		for _, tx := range enterpriseForeignHookCleanupTxs {
-			existing = append(existing, tx.entries...)
-		}
+	existing, err := loadEnterpriseForeignHookRemovals(path)
+	if err != nil {
+		// The gateway denies every call while the ledger cannot be read. A
+		// new ledger would drop the removals it holds and allow the agents
+		// they deny once it is read again, so it stays as it is until it can
+		// be read again or an administrator removes it. Until then no
+		// cleanup starts and ended cleanups keep their pending denials.
+		return fmt.Errorf("the removal ledger cannot be read and is kept until it can be read again or an administrator removes %s: %w", path, err)
 	}
 	kept, added, settled := settleEnterpriseForeignHookPending(existing, now, mark)
 	if add != nil {
 		added = append(added, add(now, mark)...)
 	}
-	if loadErr == nil && len(added) == 0 && len(kept) == len(existing) {
+	if len(added) == 0 && len(kept) == len(existing) {
 		// Nothing changes; settled transactions have no denial left.
 		for _, token := range settled {
 			delete(enterpriseForeignHookCleanupTxs, token)
