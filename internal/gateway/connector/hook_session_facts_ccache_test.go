@@ -44,7 +44,7 @@ func TestShellHookSessionFactsFollowANewKinitIntoTheSameCache(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(cache), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	record, err := json.Marshal(map[string]string{"key": "k", "env_key": envKey, "header": "v1;k=ssh;ca=192.0.2.10;krb=alice@EXAMPLE.TEST"})
+	record, err := json.Marshal(map[string]any{"expires_at": time.Now().Add(4 * time.Minute).Unix(), "key": "k", "env_key": envKey, "header": "v1;k=ssh;ca=192.0.2.10;krb=alice@EXAMPLE.TEST"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,5 +127,55 @@ func TestOpenCodePluginSessionFactsFollowANewKinitIntoTheSameCache(t *testing.T)
 	if len(facts) != 2 || !strings.HasSuffix(facts[1], "krb=bob@EXAMPLE.TEST") || strings.Count(string(ran), "x") != 2 {
 		t.Fatalf("session facts sent by the plugin = %q after %d binary runs, want bob last and 2 runs (one per cache state)",
 			facts, strings.Count(string(ran), "x"))
+	}
+}
+
+// The warm KCM cache path uses shell builtins for expiry, with no find or
+// native helper. Expired records still refresh identity rather than reusing it.
+func TestShellHookSessionFactsWarmCacheUsesNoPrograms(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the Linux hook uses the Bash epoch clock")
+	}
+	shell := systemBashForTest(t)
+	helper := materializeHookAssetForTest(t, "hooks/_hardening.sh")
+	home := t.TempDir()
+	cache := filepath.Join(home, ".defenseclaw", "session-facts.json")
+	if err := os.MkdirAll(filepath.Dir(cache), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	ran := filepath.Join(bin, "program-ran")
+	program := "#!/bin/sh\nprintf ran >> '" + ran + "'\nprintf 'v1;k=console;krb=bob@EXAMPLE.TEST'\n"
+	for _, name := range []string{"find", "helper"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(program), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(expires int64) string {
+		record, err := json.Marshal(map[string]any{"env_key": "KCM:|||", "header": "v1;k=console;krb=alice@EXAMPLE.TEST", "expires_at": expires})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cache, record, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(shell, "-c", `source "$0"; defenseclaw_session_facts_full`, helper)
+		cmd.Env = append(withoutSessionFactsEnv(os.Environ()), "PATH="+bin,
+			"HOME="+home, "KRB5CCNAME=KCM:", "DEFENSECLAW_MANAGED_HOOK=1",
+			"DEFENSECLAW_SESSION_FACTS_BIN="+filepath.Join(bin, "helper"))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		return string(out)
+	}
+	if got := run(time.Now().Add(4 * time.Minute).Unix()); got != "v1;k=console;krb=alice@EXAMPLE.TEST" {
+		t.Fatalf("fresh cache = %q", got)
+	}
+	if _, err := os.Stat(ran); !os.IsNotExist(err) {
+		t.Fatalf("warm cache executed a program: %v", err)
+	}
+	if got := run(time.Now().Add(-time.Second).Unix()); got != "v1;k=console;krb=bob@EXAMPLE.TEST" {
+		t.Fatalf("expired cache = %q", got)
 	}
 }
