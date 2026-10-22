@@ -21,6 +21,16 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = REPO_ROOT / "bundles" / "local_observability_stack"
+
+
+def test_grafana_provisions_the_documented_defenseclaw_folder() -> None:
+    provider = (BUNDLE / "grafana/provisioning/dashboards/dashboards.yml").read_text(encoding="utf-8")
+    # Grafana requires foldersFromFilesStructure to be unset when a provider
+    # names a folder. The dashboard JSON files live at the path root.
+    assert "folder: DefenseClaw" in provider
+    assert "foldersFromFilesStructure:" not in provider
+
+
 FLEET_TEMPLATES = {
     "docker-compose.fleet.yml",
     "prometheus/examples/fleet.yml",
