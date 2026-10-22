@@ -230,6 +230,13 @@ func (f AccountFilter) Matches(id, name string) bool {
 // loop 3). Its recorded name does not select a row recorded for another
 // account than the one the filter resolves to (recordedForAnother).
 func (f AccountFilter) MatchesIn(id, name, domains, incarnation string) bool {
+	if f.domain != "" && f.incarnation == "" && f.holderChanged && slices.ContainsFunc(f.ids, func(resolved string) bool {
+		return KindForID(resolved) == KindPOSIXUID
+	}) {
+		// The resolved uid's current holder is unproven. Even a row with
+		// another uid and the same qualified name has no ownership proof.
+		return false
+	}
 	return f.matches(id, name, domains, func() bool { return f.ownRow(id, domains, incarnation) },
 		func() bool { return f.recordedForAnother(id, incarnation) })
 }
