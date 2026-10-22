@@ -20,7 +20,16 @@ Reference for the [Amp connector](/docs/connectors/amp). DefenseClaw installs a 
 
 ### Setup details
 
-`--workspace` also inventories that repository's `.amp/settings.json` or `.jsonc`, `.amp/plugins`, skills, checks, guidance, MCP servers and custom agents. Without it, global setup still governs tool calls but limits discovery to user and managed surfaces. The plugin is owner-only (private permissions, or the Windows user-only ACL) and holds a connector-scoped token. Setup preserves an existing file, teardown restores it, and a user-modified managed file is never silently removed.
+`--workspace` sets the workspace for the whole DefenseClaw install. It inventories
+that repository's `.amp/settings.json` or `.jsonc`, `.amp/plugins`, skills, checks,
+guidance, MCP servers and custom agents. If that change would move configured peer connectors
+to a different scope, setup refuses and changes nothing. Use it on a single-Amp
+install, or keep global protection with `defenseclaw setup amp` without `--workspace`.
+Global setup governs tool calls and inventories user and managed surfaces.
+
+The plugin is owner-only (private permissions, or the Windows user-only ACL) and
+holds a connector-scoped token. Setup preserves an existing file, teardown restores
+it, and a user-modified managed file is never silently removed.
 
 Plugin lists, scans and the AIBOM treat the file as connector configuration. `defenseclaw plugin remove`, `disable`, `block` and `quarantine` refuse `defenseclaw --connector amp`, because Amp runs unguarded without it. The built-in `admission.plugin.first_party_allow_list` entry for `defenseclaw` matches the Amp bridge only at `.config/amp/plugins/defenseclaw.ts` ([first-party assets](/docs/reference/scanning/admission/#first-party-assets)).
 

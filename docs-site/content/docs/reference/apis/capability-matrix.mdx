@@ -21,7 +21,7 @@ This page answers "can this connector do X?" for every connector. The table is c
 | Subprocess policy | `shims`: setup installs PATH shims for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` that ask the gateway before running the real binary. They do not isolate the process. `none`: the agent runs commands itself. |
 | Block | Whether the connector's hooks can return a block decision at all. |
 | Native ask | Whether the hooks can prompt you inside the agent. Without it, a confirm verdict becomes an alert, allow or context message that the TUI can show but cannot resume. |
-| Fail-closed | Whether the hook surface can block when it cannot reach the gateway. It does not cover a hook process you kill or stop. |
+| Fail-closed | Whether DefenseClaw can deny a delivery failure in mode `closed`. A note marks agents that can still allow a call if the hook cannot start or times out. |
 | OpenShell sandbox | Tamper tier and verification of the harness image. See below. |
 | HITL | How human approvals reach you on that connector. |
 
@@ -60,10 +60,16 @@ Claude Code (`PreToolUse`), Copilot CLI (`preToolUse`), Antigravity (`PreToolUse
 
 ### Which connectors fail closed?
 
-OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, OpenCode, Amp and Kiro. Copilot CLI, Hermes and Antigravity expose no generic fail-closed transport response. Their DefenseClaw hooks still deny a call DefenseClaw cannot check in fail mode `closed`, the default; the agent runs the call only when the hook times out or cannot start.
+Every listed connector can block a gateway outage. Copilot CLI, Antigravity and
+Hermes hooks block delivery failures when the effective mode is `closed`, the default.
+Those agents can still allow a call when the hook times out or cannot start; the
+table marks that limit separately from the hook's deny response.
 
 - Fail-closed means the hook blocks when it cannot reach the gateway. A hook process that dies or times out is non-blocking in Claude Code, Codex and Devin (see the [enterprise threat model](/docs/enterprise/plan/threat-model#residual-risks)).
-- On a managed standalone host, every connector's hook fails closed, also in observe mode, and the administrator-owned Copilot CLI and Hermes hooks block a tool call DefenseClaw cannot check.
+- On a managed standalone host, hooks use the administrator's resolved fail mode,
+  also in observe mode. The default is `closed`. If the administrator explicitly selects `open`,
+  a gateway outage can allow the call. Oversized input, a gateway 5xx, an unusable
+  answer and other transport errors still block. See [Fail modes](/docs/reference/configuration/fail-modes).
 - On a per-user install a fail-open call is recorded as a `guardrail-degraded` alert when the gateway starts again ([Fail modes](/docs/reference/configuration/fail-modes#reporting-and-diagnosis)).
 - Cursor is mode-matched: action writes `failClosed: true` and observe writes `failClosed: false`.
 
