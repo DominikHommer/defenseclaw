@@ -62,7 +62,7 @@ The local stack gives you 19 DefenseClaw dashboards on `localhost:3000` in one c
    OTLP HTTP:  127.0.0.1:4318
    ```
 
-3. Open Grafana and sign in as `admin`. The generated password is in `~/.defenseclaw/observability-stack/.grafana-admin-password`. A stack that was already running with anonymous access keeps it; the setup summary says which mode applies.
+3. Open Grafana and sign in as `admin`. The generated password is in `~/.defenseclaw/observability-stack/.grafana-admin-password`. A stack that was already running with anonymous access keeps it, read-only (Viewer): to edit dashboards, rerun setup with `--password`. The setup summary says which mode applies.
 
 4. Run one agent turn, for example ask Claude Code or Codex to list the files in a folder. Dashboards fill only from real traffic; a destination test adds nothing.
 
