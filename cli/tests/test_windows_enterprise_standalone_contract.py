@@ -808,3 +808,37 @@ if ([IO.File]::ReadAllText($destination) -cne 'new verified executable') { throw
 if (@(Get-ChildItem $root -Filter 'hook.exe.backup.*').Count) { throw 'replacement left a backup' }
 """, replacements=[("[IO.File]::Replace($temporary, $Destination, $backup, $true)", "Invoke-TestMappedImageReplace")])
 
+
+
+def test_service_start_mode_refusal_names_the_modes(tmp_path) -> None:
+    import shutil
+
+    shell = shutil.which("pwsh") or shutil.which("pwsh.exe")
+    if not shell:
+        pytest.skip("PowerShell is unavailable")
+    module = _text(MODULE)
+    body = _function_body(module, "Assert-DefenseClawServiceConfiguration")
+    # Stub registry reads only; run the real configuration checker.
+    body = body.replace("Microsoft.PowerShell.Management\\Get-ItemProperty", "Get-TestServiceProperties")
+    helpers = _function_body(module, "ConvertTo-DefenseClawServiceStartModeName")
+    script = tmp_path / "service-modes.ps1"
+    script.write_text(helpers + "\n" + body + r"""
+$ErrorActionPreference = 'Stop'
+$script:ServiceDescription = 'test service'
+function Test-DefenseClawServiceExists { return $true }
+function Test-DefenseClawStandaloneProfile { return $true }
+function Get-TestServiceProperties {
+    return [pscustomobject]@{ ImagePath='image'; ObjectName='account'; DisplayName='test';
+        Description='test service'; Type=16; Start=4 }
+}
+try {
+    Assert-DefenseClawServiceConfiguration -Name test -ExpectedImage image -ExpectedAccount account `
+        -ExpectedDisplayName test -ExpectedSidType 1 -ExpectedPrivileges @('priv') -ExpectedEnvironment @()
+    throw 'disabled service passed verification'
+} catch {
+    if ($_.Exception.Message -notmatch 'startup mode drift: disabled, expected auto') { throw }
+}
+""", encoding="utf-8")
+    result = subprocess.run([shell, "-NoProfile", "-File", str(script)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+

@@ -21967,6 +21967,14 @@ function Assert-DefenseClawServiceConfiguration {
         throw "service $Name is not a Win32 own-process service: Type=$($properties.Type)"
     }
     if ([int]$properties.Start -notin $ExpectedStartMode) {
+        if (Test-DefenseClawStandaloneProfile) {
+            $actualMode = ConvertTo-DefenseClawServiceStartModeName -StartMode ([int]$properties.Start)
+            if ([string]::IsNullOrEmpty($actualMode)) { $actualMode = 'unknown' }
+            $expectedModes = @($ExpectedStartMode | Microsoft.PowerShell.Core\ForEach-Object {
+                ConvertTo-DefenseClawServiceStartModeName -StartMode $_
+            })
+            throw "service $Name startup mode drift: $actualMode, expected $($expectedModes -join ' or ')"
+        }
         throw "service $Name startup mode drift: $($properties.Start), expected $($ExpectedStartMode -join ' or ')"
     }
     if ([int]$properties.ErrorControl -ne 1) {
@@ -23897,25 +23905,24 @@ function Get-DefenseClawServiceState {
     return $service.Status.ToString().ToLowerInvariant()
 }
 
-function Get-DefenseClawServiceStartModeName {
-    <#
-        The startup type of a service as status reports it (auto, manual or
-        disabled), or '' when the service is absent or its mode cannot be
-        read. Verify said only "startup mode drift: 4, expected 2", so the
-        Intune Detect line could not say that a stopped guardian was also
-        disabled (GAP-0864).
-    #>
-    param([Parameter(Mandatory)][string]$Name)
-    try {
-        switch (Get-DefenseClawServiceStartMode -Name $Name) {
-            2 { return 'auto' }
-            3 { return 'manual' }
-            4 { return 'disabled' }
-        }
-    }
-    catch {
+function ConvertTo-DefenseClawServiceStartModeName {
+    param([Parameter(Mandatory)][int]$StartMode)
+    switch ($StartMode) {
+        2 { return 'auto' }
+        3 { return 'manual' }
+        4 { return 'disabled' }
     }
     return ''
+}
+
+function Get-DefenseClawServiceStartModeName {
+    param([Parameter(Mandatory)][string]$Name)
+    try {
+        return ConvertTo-DefenseClawServiceStartModeName -StartMode (Get-DefenseClawServiceStartMode -Name $Name)
+    }
+    catch {
+        return ''
+    }
 }
 
 function ConvertTo-DefenseClawBoundedDiagnostic {
