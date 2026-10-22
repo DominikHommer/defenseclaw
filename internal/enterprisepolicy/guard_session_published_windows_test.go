@@ -57,7 +57,7 @@ func TestPublishedSessionKeyFileGivesOnlyTheGatewayItsRemoval(t *testing.T) {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path, err := createPublishedSessionKey(root, publishedSessionTestTrust)
+	path, err := createAccountTestKey(root, publishedSessionTestIdentity(t), publishedSessionTestTrust)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,10 +74,10 @@ func TestPublishedSessionKeyFileGivesOnlyTheGatewayItsRemoval(t *testing.T) {
 		!strings.Contains(sddl, "(A;;0x130080;;;"+gateway.String()+")") {
 		t.Fatalf("the key file's DACL must give standard users no access a sharing mode applies to: %s", sddl)
 	}
-	if _, err := createPublishedSessionKey(filepath.Join(t.TempDir(), "x"), PublishedSessionTrust{}); err == nil {
+	if _, err := createAccountTestKey(filepath.Join(t.TempDir(), "x"), publishedSessionTestIdentity(t), PublishedSessionTrust{}); err == nil {
 		t.Fatal("a key file without the gateway service account must not be made")
 	}
-	if err := KillPublishedSessionKey(root); err != nil {
+	if err := KillPublishedSessionKey(root, publishedSessionTestIdentity(t)); err != nil {
 		t.Fatal(err)
 	}
 }

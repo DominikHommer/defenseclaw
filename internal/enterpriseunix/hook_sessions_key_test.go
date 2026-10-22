@@ -33,9 +33,12 @@ func withHookSessionTestKeys(t *testing.T) {
 	t.Cleanup(restore)
 }
 
-// hookSessionTestKeyID names the record folder's one key, or "".
+// hookSessionTestAccount is the account whose key the tests follow.
+const hookSessionTestAccount = "1001"
+
+// hookSessionTestKeyID names the test account's one key, or "".
 func hookSessionTestKeyID(root string) string {
-	key, err := enterprisepolicy.ReadPublishedSessionKey(root)
+	key, err := enterprisepolicy.ReadPublishedSessionKey(root, hookSessionTestAccount)
 	if err != nil {
 		return ""
 	}
@@ -57,8 +60,15 @@ func TestTheLifecycleKillsTheHookSessionKeyFirstAndMakesANewOneLast(t *testing.T
 			h := newTestHost(t, goos)
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 			root := h.env.P(h.env.Layout.HookSessionDir)
+			// The gateway makes an account's folder when it first answers
+			// for it; the lifecycle makes a key for every account folder.
+			account, _ := enterprisepolicy.PublishedSessionIdentityDir(root, hookSessionTestAccount)
+			if err := os.Mkdir(account, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			requireOK(t, h.run(Options{Action: ActionEnsure}))
 			if hookSessionTestKeyID(root) == "" {
-				t.Fatal("an install must make a key")
+				t.Fatal("a run must make a key for every account folder")
 			}
 			if dir, _ := enterprisepolicy.PublishedSessionKeyDir(root); dir != h.env.P(h.env.Layout.HookSocketDir) {
 				t.Fatalf("the key must be in the hook socket folder, which only root and the gateway can change: %s", dir)
@@ -73,18 +83,18 @@ func TestTheLifecycleKillsTheHookSessionKeyFirstAndMakesANewOneLast(t *testing.T
 				lock.release()
 				return false
 			}
-			previousRetire, previousCreate, previousLchown := hookSessionRetireKey, hookSessionCreateKey, h.env.Lchown
+			previousRetire, previousCreate, previousLchown := hookSessionKillKeys, hookSessionEnsureKeys, h.env.Lchown
 			t.Cleanup(func() {
-				hookSessionRetireKey, hookSessionCreateKey, h.env.Lchown = previousRetire, previousCreate, previousLchown
+				hookSessionKillKeys, hookSessionEnsureKeys, h.env.Lchown = previousRetire, previousCreate, previousLchown
 			})
-			hookSessionRetireKey = func(path string, trust enterprisepolicy.PublishedSessionTrust) error {
+			hookSessionKillKeys = func(path string) error {
 				if locked() {
 					t.Error("the key must go before the run takes its lock")
 				}
 				events = append(events, "kill")
-				return previousRetire(path, trust)
+				return previousRetire(path)
 			}
-			hookSessionCreateKey = func(path string, trust enterprisepolicy.PublishedSessionTrust) error {
+			hookSessionEnsureKeys = func(path string, trust enterprisepolicy.PublishedSessionTrust) error {
 				if !locked() {
 					t.Error("the new key must be made while the run still holds the lock")
 				}
@@ -137,7 +147,7 @@ func TestTheLifecycleKillsTheHookSessionKeyFirstAndMakesANewOneLast(t *testing.T
 				t.Fatal("the next repair must make a key")
 			}
 			// A key that cannot be removed is reported, and the run goes on.
-			hookSessionRetireKey = func(string, enterprisepolicy.PublishedSessionTrust) error {
+			hookSessionKillKeys = func(string) error {
 				return errors.New("read-only file system")
 			}
 			result := h.run(Options{Action: ActionRepair})
@@ -148,7 +158,7 @@ func TestTheLifecycleKillsTheHookSessionKeyFirstAndMakesANewOneLast(t *testing.T
 			if len(result.Errors) != 0 || !found {
 				t.Fatalf("a key that cannot be removed must be a warning: %+v", result)
 			}
-			hookSessionRetireKey = previousRetire
+			hookSessionKillKeys = previousRetire
 			// Uninstall removes the key and makes none.
 			events = nil
 			requireOK(t, h.run(Options{Action: ActionUninstall}))
@@ -157,7 +167,7 @@ func TestTheLifecycleKillsTheHookSessionKeyFirstAndMakesANewOneLast(t *testing.T
 					t.Fatalf("an uninstall must make no key: %v", events)
 				}
 			}
-			if keys, _ := filepath.Glob(filepath.Join(h.env.P(h.env.Layout.HookSocketDir), filepath.Base(root)+enterprisepolicy.PublishedSessionKeyInfix+"*")); len(keys) != 0 {
+			if keys, _ := filepath.Glob(filepath.Join(h.env.P(h.env.Layout.HookSocketDir), filepath.Base(root)+".*"+enterprisepolicy.PublishedSessionKeyInfix+"*")); len(keys) != 0 {
 				t.Fatalf("an uninstall must leave no key: %v", keys)
 			}
 		})

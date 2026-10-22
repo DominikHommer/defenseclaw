@@ -68,7 +68,7 @@ func TestApplyForeignHookSessionKillsTheKeyBeforeItRecordsABlock(t *testing.T) {
 				if blockedInStore(key) != before {
 					t.Error("the block must not be in the store before the key is removed")
 				}
-				if err := KillPublishedSessionKey(root); err != nil {
+				if err := KillPublishedSessionKey(root, identity); err != nil {
 					t.Errorf("kill: %v", err)
 				}
 			},
@@ -82,7 +82,7 @@ func TestApplyForeignHookSessionKillsTheKeyBeforeItRecordsABlock(t *testing.T) {
 	}
 	newKey := func() {
 		t.Helper()
-		if err := EnsurePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+		if err := EnsurePublishedSessionKey(root, identity, publishedSessionTestTrust); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -138,7 +138,7 @@ func TestApplyForeignHookSessionKillsTheKeyBeforeItRecordsABlock(t *testing.T) {
 // other key, while a call the removals alone deny writes nothing.
 func TestApplyForeignHookSessionRecordsABlockWhileTheRemovalsCannotBeRead(t *testing.T) {
 	for name, removalsErr := range map[string]error{
-		"pending mark":            ErrForeignHookRemovalPending,
+		"a removal in progress":   ErrForeignHookRemovalPending,
 		"untrusted ledger":        errors.New("the removal ledger fails its trust check"),
 		"record folder not found": errors.New("the protected foreign-hook session record folder cannot be located"),
 	} {

@@ -4,6 +4,7 @@
 package enterprisepolicy
 
 import (
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -30,9 +31,9 @@ func TestForeignHookRemovalLedgerKeepsEveryAccountsDenialWhenFull(t *testing.T) 
 	// An earlier wall-clock time with a later mark (the clock was set
 	// back): the horizon keeps the latest mark and the newest time.
 	flood = append(flood, ForeignHookRemoval{Identity: "1001", Connector: "copilot", Path: "/home/a/late", At: at(5 * time.Hour), Mark: "linux:b:999"})
-	data, evicted, err := EncodeForeignHookRemovals(victim, flood, now)
-	if err != nil || len(evicted) != 0 {
-		t.Fatalf("%v %v", evicted, err)
+	data, err := EncodeForeignHookRemovals(victim, flood, now)
+	if err != nil {
+		t.Fatal(err)
 	}
 	removals, err := ParseForeignHookRemovals(data)
 	if err != nil {
@@ -69,26 +70,18 @@ func TestForeignHookRemovalLedgerKeepsEveryAccountsDenialWhenFull(t *testing.T) 
 		t.Fatal("the horizon lives as long as the pair's newest entry")
 	}
 
-	// More pairs than the ledger holds: the oldest accounts are dropped
-	// and named, never silently.
+	// More pairs than the ledger holds: the encoding fails, so the guardian
+	// removes nothing (the hook stays and the scan keeps blocking) rather
+	// than drop an account's denial.
 	var many []ForeignHookRemoval
 	for i := 0; i < foreignHookRemovalsLimit+10; i++ {
 		many = append(many, ForeignHookRemoval{Identity: strconv.Itoa(5000 + i), Connector: "copilot", Path: "/x",
 			At: now.Add(-time.Duration(i) * time.Minute).UTC().Format(time.RFC3339), Mark: "linux:b:900"})
 	}
-	data, evicted, err = EncodeForeignHookRemovals(nil, many, now)
-	if err != nil {
-		t.Fatal(err)
+	if _, err = EncodeForeignHookRemovals(nil, many, now); !errors.Is(err, ErrForeignHookRemovalLedgerFull) {
+		t.Fatalf("a ledger that cannot keep every account's denial must not be written: %v", err)
 	}
-	if removals, err = ParseForeignHookRemovals(data); err != nil || len(removals) != foreignHookRemovalsLimit {
-		t.Fatalf("%d %v", len(removals), err)
-	}
-	if len(evicted) != 10 || evicted[0] != strconv.Itoa(5000+foreignHookRemovalsLimit) {
-		t.Fatalf("the dropped accounts must be named: %v", evicted)
-	}
-	for _, identity := range evicted {
-		if len(of(identity)) != 0 {
-			t.Fatalf("%s is both kept and dropped", identity)
-		}
+	if _, err = EncodeForeignHookRemovals(nil, many[:foreignHookRemovalsLimit], now); err != nil {
+		t.Fatalf("a ledger that holds every pair is written: %v", err)
 	}
 }
