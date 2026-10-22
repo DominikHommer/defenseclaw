@@ -3496,9 +3496,15 @@ function Invoke-Install {
         Die "Could not record the current install before changing it ($($_.Exception.Message)); nothing was changed"
     }
     try { Save-BinarySnapshot } catch {
+        $failure = $_
         Stop-HookFailModeHold
         Undo-EarlySnapshot $Snap
-        throw
+        # Nothing else changed yet: prove the install is the recorded one,
+        # which drops the record. An unfinished undo keeps it and the lock.
+        if (-not (Test-RecoveryPending)) {
+            try { Assert-LifecycleRestored $Manifest } catch { Write-Err $_.Exception.Message }
+        }
+        throw $failure
     }
     # From here to the rollback copy the new hook is live while the old
     # gateway stops. Any failure, a refusal or a thrown error (a gateway.pid
