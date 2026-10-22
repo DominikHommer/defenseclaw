@@ -128,7 +128,7 @@ func TestFailOpenDiagnosticEscapesReason(t *testing.T) {
 func TestManagedNativeOutageLogsInCallingUsersHome(t *testing.T) {
 	for _, mode := range []string{"open", "closed"} {
 		t.Run(mode, func(t *testing.T) {
-			userHome := filepath.Join(t.TempDir(), ".defenseclaw")
+			userHome := t.TempDir()
 			var runtimeHome string
 			r := run(t, "codex", &stubRT{err: fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)}, func(opts *Options) {
 				runtimeHome = opts.Home
@@ -195,10 +195,37 @@ func TestManagedFailureLogNeverFallsBackToTheEnforcementHome(t *testing.T) {
 	}
 }
 
+// A managed hook never creates the invoking user's DefenseClaw folder to log
+// a failure: the folder it would make is user-owned with the profile's
+// inherited access control, and on Windows it is the protected folder whose
+// absence the next call must still report (rel-1-0-4 GAP-0593, GAP-0561).
+// The decision is unchanged and no row is written.
+func TestManagedFailureLogNeverCreatesTheDiagnosticDirectory(t *testing.T) {
+	for _, mode := range []string{"open", "closed"} {
+		t.Run(mode, func(t *testing.T) {
+			userHome := filepath.Join(t.TempDir(), ".defenseclaw")
+			r := run(t, "codex", &stubRT{err: fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)}, func(opts *Options) {
+				opts.ManagedEnterprise = true
+				opts.ManagedStandalone = true
+				opts.ManagedUnixSocket = "/not-used-by-stub/hook.sock"
+				opts.ExplainUnenrolledAccount = true
+				opts.FailMode = mode
+				opts.FailureLogHome = func() string { return userHome }
+			})
+			if blocked(r) != (mode == "closed") {
+				t.Fatalf("outage decision in mode %s changed: %+v", mode, r)
+			}
+			if _, err := os.Lstat(userHome); !os.IsNotExist(err) {
+				t.Fatalf("the managed hook created the diagnostic directory: %v", err)
+			}
+		})
+	}
+}
+
 func TestManagedCodexBindingErrorUsesShellWording(t *testing.T) {
 	var logHome string
 	r := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
-		logHome = filepath.Join(t.TempDir(), ".defenseclaw")
+		logHome = t.TempDir()
 		opts.FailureLogHome = func() string { return logHome }
 		opts.ManagedEnterprise = true
 		opts.ManagedStandalone = true
@@ -227,7 +254,7 @@ func TestManagedCodexStopBindingErrorKeepsTheNeutralStopRule(t *testing.T) {
 		"mismatched": `{"hook_event_name":"PreToolUse"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			logHome := filepath.Join(t.TempDir(), ".defenseclaw")
+			logHome := t.TempDir()
 			r := run(t, "codex", ok(`{"action":"block"}`), func(opts *Options) {
 				opts.FailureLogHome = func() string { return logHome }
 				opts.ManagedEnterprise = true
