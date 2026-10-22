@@ -161,7 +161,11 @@ func trustedGitBashAuthorizedKeysWrite(input actionfacts.Input) bool {
 	return parsed.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(parsed)
 }
 
-func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
+// trustedInlineAuthorizedKeysWrite proves the write of one inline
+// interpreter program (python -c, perl/ruby/node -e). pythonDir is the
+// directory python -c imports from first when the gateway can look at it
+// (trustedPythonImportDir), or "".
+func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts, pythonDir string) bool {
 	if len(facts.Commands) != 1 {
 		return false
 	}
@@ -178,7 +182,7 @@ func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts
 			(!command.ArgvComplete && !shellArgvProven) {
 			return false
 		}
-		text, calls := trustedPythonExecutedViews(command.Argv[2], facts.CWD, importPathOverride)
+		text, calls := trustedPythonExecutedViews(command.Argv[2], pythonDir, importPathOverride)
 		return trustedPathlibAuthorizedKeysWrite(text, calls, facts.ActiveHome, facts.CWD) ||
 			trustedPythonPathExpandWrite(text, calls) ||
 			trustedInterpreterAuthorizedKeysWrite(text, facts.ActiveHome, "python")
@@ -204,14 +208,26 @@ func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts
 // read one (guardrail.PythonStringsMayRun: exec, a child process, a file it
 // writes, its docstrings, an import of a module that may be a file of the
 // working directory, ...), both views are the code whole, so such a string
-// still proves its write. An unused import of a preloaded module (os, sys)
-// runs nothing.
-func trustedPythonExecutedViews(code, cwd string, importPathOverride bool) (text, calls string) {
+// still proves its write. So does every program when its working directory
+// is not known or may hold a module: the interpreter imports on its own.
+func trustedPythonExecutedViews(code, dir string, importPathOverride bool) (text, calls string) {
 	calls = guardrail.MaskPythonStrings(code)
-	if importPathOverride || guardrail.PythonStringsMayRun(calls, cwd) {
+	if importPathOverride || guardrail.PythonStringsMayRun(calls, dir) {
 		return code, code
 	}
 	return guardrail.MaskPythonCommentsAndDocstrings(code), calls
+}
+
+// trustedPythonImportDir is the directory python -c imports from first, the
+// command's working directory, when the gateway sees the filesystem the
+// command runs in (as literalStdinFilesOf requires): not a sandbox, and an
+// absolute directory. Otherwise it is "" and every import that may load a
+// module from it keeps the program's strings.
+func trustedPythonImportDir(request trustedActionRequest, facts actionfacts.Facts) string {
+	if request.SkipLocalFilesystemResolution || request.SandboxGuestCWD != "" || !filepath.IsAbs(facts.CWD) {
+		return ""
+	}
+	return facts.CWD
 }
 
 // trustedPythonImportPathOverride checks the shell assignment syntax of the
@@ -1298,42 +1314,58 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 		}
 	}
-	for _, candidate := range facts.Paths {
-		if candidate.Access != actionfacts.PathAccessWrite &&
-			candidate.Access != actionfacts.PathAccessAppend {
-			continue
-		}
-		command, ok := integrityCommandByID(facts, candidate.CommandID)
-		if !ok || !integrityCommandMutatesPath(command, candidate) ||
-			((!(integrityExplicitCommandMutator(command, candidate)) && (command.Program != "dd" || !(command.ArgvComplete))) && !(integrityStructuredFileMutator(facts, command))) {
-			continue
-		}
-		target := candidate.Resolved
-		// A POSIX shell running on Windows can leave a relative path
-		// unresolved because ActionFacts does not reinterpret the Windows CWD
-		// as a POSIX root. The owned, literal redirect still names a local
-		// file relative to that CWD.
-		if target == "" && command.Dialect == actionfacts.DialectPOSIX &&
-			candidate.Flavor == actionfacts.PathFlavorPOSIX &&
-			candidate.Normalized != "" && !isAbsoluteSemanticPath(candidate.Normalized) &&
-			!strings.ContainsAny(candidate.Value, "*?[]$`\\") &&
-			!strings.HasPrefix(candidate.Value, "~") &&
-			integrityCommandOwnsStaticRedirect(command, candidate) {
-			target = filepath.Join(facts.CWD, filepath.FromSlash(candidate.Normalized))
-		}
-		if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
-			target = raw
-		}
-		ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
-			target == hookpaths.CopyDestination(command.Argv, clientCWD)
-		if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
-			continue
-		}
-		if replacedBySed[target] && !isProtected(target) {
-			continue
-		}
-		if writeTarget(target, false, ownCopy) {
-			return true
+	// A native write call with a key outside its reviewed schema stays
+	// partial and names no path; the harness still writes the file its
+	// target key names (actionfacts.UnknownKeyWriteTargetViews), which the
+	// hook's write evidence lists, so each such target is judged as well.
+	views := append([]actionfacts.Facts{facts}, actionfacts.UnknownKeyWriteTargetViews(request.Input, facts)...)
+	for _, view := range views {
+		for _, candidate := range view.Paths {
+			if candidate.Access != actionfacts.PathAccessWrite &&
+				candidate.Access != actionfacts.PathAccessAppend {
+				continue
+			}
+			command, ok := integrityCommandByID(view, candidate.CommandID)
+			if !ok || !integrityCommandMutatesPath(command, candidate) ||
+				((!(integrityExplicitCommandMutator(command, candidate)) && (command.Program != "dd" || !(command.ArgvComplete))) && !(integrityStructuredFileMutator(view, command))) {
+				continue
+			}
+			target := candidate.Resolved
+			// A POSIX shell running on Windows can leave a relative path
+			// unresolved because ActionFacts does not reinterpret the Windows CWD
+			// as a POSIX root. The owned, literal redirect still names a local
+			// file relative to that CWD.
+			if target == "" && command.Dialect == actionfacts.DialectPOSIX &&
+				candidate.Flavor == actionfacts.PathFlavorPOSIX &&
+				candidate.Normalized != "" && !isAbsoluteSemanticPath(candidate.Normalized) &&
+				!strings.ContainsAny(candidate.Value, "*?[]$`\\") &&
+				!strings.HasPrefix(candidate.Value, "~") &&
+				integrityCommandOwnsStaticRedirect(command, candidate) {
+				target = filepath.Join(view.CWD, filepath.FromSlash(candidate.Normalized))
+			}
+			// A structured write names its target from the event cwd. A
+			// gateway that could not validate that cwd (ProtectHome) has no
+			// resolved path for a relative target: place it in the client's
+			// cwd, as the hook keyed it (hookpaths.ResolveConnector), or the
+			// write through a link there was never judged.
+			if target == "" && candidate.Normalized != "" && integrityStructuredFileMutator(view, command) &&
+				!strings.ContainsAny(candidate.Normalized, "*?[]$`") && !strings.HasPrefix(candidate.Normalized, "~") {
+				target = candidate.Normalized
+			}
+			if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
+				target = raw
+			}
+			ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
+				target == hookpaths.CopyDestination(command.Argv, clientCWD)
+			if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
+				continue
+			}
+			if replacedBySed[target] && !isProtected(target) {
+				continue
+			}
+			if writeTarget(target, false, ownCopy) {
+				return true
+			}
 		}
 	}
 	// An apply_patch edit (its own tool or a shell wrapper) names its files

@@ -181,7 +181,7 @@ func TestR104InterpreterTextNeedsAnExecutableWrite(t *testing.T) {
 			// it counts (T5 integration with g-hooks-wp's argv-only rows).
 			input := actionfacts.Input{Tool: "Bash", Command: "python3 -c '" + strings.ReplaceAll(tc.code, "'", `'\''`) + "'", CWD: home,
 				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
-			if got := trustedInlineAuthorizedKeysWrite(input, actionfacts.Analyze(input)); got != tc.want {
+			if got := trustedInlineAuthorizedKeysWrite(input, actionfacts.Analyze(input), home); got != tc.want {
 				t.Fatalf("inline write proof = %v, want %v", got, tc.want)
 			}
 		})
@@ -190,7 +190,7 @@ func TestR104InterpreterTextNeedsAnExecutableWrite(t *testing.T) {
 	// proven, so docstring text keeps its write (fails closed).
 	argvOnly := actionfacts.Input{Tool: "Bash", CWD: home, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX,
 		Argv: []string{"python3", "-c", `"""Path('~/.ssh/authorized_keys').expanduser().write_text('example')"""; print('ok')`}}
-	if !trustedInlineAuthorizedKeysWrite(argvOnly, actionfacts.Analyze(argvOnly)) {
+	if !trustedInlineAuthorizedKeysWrite(argvOnly, actionfacts.Analyze(argvOnly), home) {
 		t.Fatal("argv-only docstring write: proof false, want true (import path unproven)")
 	}
 }
