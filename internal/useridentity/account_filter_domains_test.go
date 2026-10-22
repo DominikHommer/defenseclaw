@@ -45,11 +45,11 @@ func TestAccountFilterKeepsAPriorHoldersRowsOut(t *testing.T) {
 // identical. A name-only lookup remains useful after account deletion.
 func TestQualifiedAccountFilterRejectsPriorUIDWithTheSameRecordedName(t *testing.T) {
 	resolved := NewAccountFilter(`CORP\alice`, "2002")
-	if resolved.MatchesIn("1001", `CORP\alice`, "corp") || !resolved.MatchesIn("2002", "alice", "corp") {
+	if resolved.MatchesIn("1001", `CORP\alice`, "corp", "") || !resolved.MatchesIn("2002", "alice", "corp", "") {
 		t.Fatal("resolved account filter selected the old UID or missed the live UID")
 	}
 	unresolved := NewAccountFilter(`CORP\alice`)
-	if !unresolved.MatchesIn("1001", `CORP\alice`, "corp") {
+	if !unresolved.MatchesIn("1001", `CORP\alice`, "corp", "") {
 		t.Fatal("unresolved qualified name lost its recorded-name fallback")
 	}
 }

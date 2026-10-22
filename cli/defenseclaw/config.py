@@ -2428,7 +2428,7 @@ class GuardrailProfileMatch:
 
 @dataclass
 class GuardrailProfileAssignment:
-    """One ordered ``guardrail.profile_assignments`` entry (first match wins).
+    """One ``guardrail.profile_assignments`` entry (the strictest match wins).
 
     Mirrors ``config.ProfileAssignment``.
     """

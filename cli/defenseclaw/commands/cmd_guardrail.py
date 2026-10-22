@@ -5256,7 +5256,7 @@ def profile_group() -> None:
       explain  which profile a user, connector or agent resolves to
 
     Profiles live under ``guardrail.profiles`` in config.yaml; assignments
-    are tried in order and the first match wins. Only verified identities
+    are all tried and the strictest matching profile wins. Only verified identities
     select a profile, so ``explain`` asks the running gateway.
     """
 
@@ -5360,7 +5360,7 @@ def profile_list_cmd(app: AppContext, json_out: bool) -> None:
         detail = ux.dim("(" + (summary or "inherits everything") + ")")
         ux.echo(f"  • {ux.accent(name)}  {profile.description or ''} {detail}")
     click.echo()
-    ux.echo(f"  • {ux._style('assignments (first match wins):', fg='bright_black', bold=True)}")
+    ux.echo(f"  • {ux._style('assignments (strictest match wins):', fg='bright_black', bold=True)}")
     if not gc.profile_assignments:
         click.echo(f"      {ux.dim('none')}")
     for index, assignment in enumerate(gc.profile_assignments, start=1):

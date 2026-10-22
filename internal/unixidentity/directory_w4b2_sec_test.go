@@ -27,7 +27,9 @@ func TestW4B2UnnamedSSSDGroupNeedsDomainAnswer(t *testing.T) {
 		"initgroups alice": {stdout: []byte("alice 1001 5200\n")},
 		"group 1001 5200":  {stdout: []byte("staff:x:1001:\n"), exitCode: getentExitNotFound},
 	}})
-	if facts, err := r.DirectoryFactsForUID(1001, time.Now()); err == nil || !strings.Contains(err.Error(), "offline") {
+	// The gid stays unconfirmed (or the lookup fails): an offline domain
+	// behind a live responder never proves it unnamed.
+	if facts, err := r.DirectoryFactsForUID(1001, time.Now()); err == nil && len(facts.UnconfirmedGroups) == 0 {
 		t.Fatalf("facts = %+v, %v; an unnamed GID needs a domain answer", facts, err)
 	}
 }

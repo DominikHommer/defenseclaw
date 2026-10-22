@@ -556,7 +556,7 @@ func TestIdentityRecordStaysForEveryCallerTheGatewayStillAccepts(t *testing.T) {
 			manifestMode: true, eligible: staleBob, kept: true, listed: true},
 		{name: "exempt and excluded, out of the manifest", exclude: []string{"bob"}, exempt: []string{"bob"},
 			manifestMode: true, eligible: staleBob, kept: true, listed: true},
-		{name: "exempt and excluded, an unlisted record", exclude: []string{"bob"}, exempt: []string{"bob"}, kept: true},
+		{name: "exempt and excluded, an unlisted record", exclude: []string{"bob"}, exempt: []string{"bob"}, kept: true, listed: true},
 		{name: "a machine-policy connector, out of the manifest", machine: claude,
 			manifestMode: true, eligible: staleBob, kept: true, listed: true},
 		{name: "a machine-policy connector, excluded, an old row", exclude: []string{"bob"}, machine: claude,

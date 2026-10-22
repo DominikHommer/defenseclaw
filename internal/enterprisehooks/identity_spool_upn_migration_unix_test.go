@@ -27,9 +27,10 @@ import (
 // and a users entry written as that UPN fell to the default profile. The
 // guardian now asks the directory who holds the UPN: it stays when the
 // directory gives it to the account (and the record gets the SID, so later
-// passes need no lookup), and while the directory does not answer (without
-// a SID, so the next pass asks again); it goes when the directory gives it
-// to another account.
+// passes need no lookup); it goes when the directory gives it to another
+// account. r104 identity: a directory that does not answer proves nothing,
+// so the UPN goes too (GAP-0384) and the gateway takes the unproven-UPN
+// path, which selects the strictest profile that may apply.
 func TestIdentitySpoolKeepsAnUpgradedRecordsUPNWhileTheDirectoryBindsIt(t *testing.T) {
 	const uid = 94401601
 	const upn = "alice.alt@alt.dclab.test"
@@ -37,6 +38,7 @@ func TestIdentitySpoolKeepsAnUpgradedRecordsUPNWhileTheDirectoryBindsIt(t *testi
 	legacy.Facts.UPN, legacy.Facts.Principal, legacy.Facts.Source = upn, upn, useridentity.SourceSSSDInfoPipe
 	answer := testDirectoryRecord(uid, "dcad-alice", "dclab.test")
 	answer.AccountSID, answer.UPNSource, answer.Facts.UPN, answer.Facts.Principal = testAccountSID, UPNSourceDerived, "", "dcad-alice@DCLAB.TEST"
+	answer.AccountIncarnation = testSameIncarnation
 	previousCollect, previousBind := identitySpoolCollect, identitySpoolBindUPN
 	t.Cleanup(func() { identitySpoolCollect, identitySpoolBindUPN = previousCollect, previousBind })
 	identitySpoolCollect = func(context.Context, IdentitySpoolAccount, time.Time) (IdentitySpoolRecord, error) {
@@ -55,10 +57,8 @@ func TestIdentitySpoolKeepsAnUpgradedRecordsUPNWhileTheDirectoryBindsIt(t *testi
 		asked int
 	}{
 		{"the directory binds the UPN", []UPNBinding{UPNBindingBound, UPNBindingOther}, []bool{true, true}, []string{testAccountSID, testAccountSID}, 1},
-		{"the directory does not answer, then binds it", []UPNBinding{UPNBindingUnknown, UPNBindingUnknown, UPNBindingBound},
-			[]bool{true, true, true}, []string{"", "", testAccountSID}, 3},
-		{"the directory does not answer, then names another account", []UPNBinding{UPNBindingUnknown, UPNBindingOther},
-			[]bool{true, false}, []string{"", testAccountSID}, 2},
+		{"the directory does not answer", []UPNBinding{UPNBindingUnknown, UPNBindingBound},
+			[]bool{false, false}, []string{testAccountSID, testAccountSID}, 1},
 		{"another account holds the UPN", []UPNBinding{UPNBindingOther}, []bool{false}, []string{testAccountSID}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

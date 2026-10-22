@@ -23,7 +23,7 @@ import (
 //	guardrail:
 //	  profiles:
 //	    contractors: {mode: action, block_at: medium, connectors: {codex: {mode: observe}}}
-//	  profile_assignments:          # ordered, first match wins; keys AND, values OR
+//	  profile_assignments:          # the strictest match wins; keys AND, values OR
 //	    - {profile: contractors, match: {groups: ["CORP\\Contractors"]}}
 //	  default_profile: ""           # "" keeps today's guardrail.* behaviour
 //

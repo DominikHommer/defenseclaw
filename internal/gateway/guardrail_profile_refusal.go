@@ -14,30 +14,14 @@ import (
 
 // A Refused profile decision (profileDecision.Refused).
 //
-// An agents entry that may be a request agent's 1.0.3 identity, which the
-// agent ledger does not prove (matchAgent), or a group assignment that may
-// name a group whose name no NSS provider confirms
-// (matchWithUnconfirmedGroups), leaves more than one profile that may
-// apply. When none of them enforces at least what each of the
-// others does (profileCovers), no single profile is safe to apply: the
-// request is refused wherever its surface can block it, on the connector
-// hook, the inspect endpoints, ACP and the guardrail proxy. What a surface
-// cannot block (an event the agent does not let a hook stop) is decided by
-// the strictest of them by hook mode and block_at. The refusal holds until
-// the ledger proves whose entry it is or the entry names the agent's
-// current identity. Remove with agentidentity.LegacyAgentID.
-
-// profileRefusedReason is what a refused request tells the agent and its
-// user.
-const profileRefusedReason = "DefenseClaw refused this request: a guardrail profile assignment names an agent identity from before the upgrade " +
-	"that cannot be matched to this account, and the profiles that may apply enforce different rules. " +
-	"Ask your administrator to replace the entry with the agent identity `defenseclaw agent identities` shows now."
-
-// profileRefusedGroupsReason is what a request refused for an unconfirmed
-// group name (matchWithUnconfirmedGroups) tells the agent and its user.
-const profileRefusedGroupsReason = "DefenseClaw refused this request: the names of some of your groups cannot be confirmed now " +
-	"(a directory group provider did not answer), a guardrail profile assignment may name one of them, and the profiles that may apply " +
-	"enforce different rules. Try again shortly; if it persists, ask your administrator to check the host's directory group provider."
+// A fact that decides the request's guardrail profile is not proven (the
+// account, its groups, or an agents entry from before 1.0.4), and none of
+// the profiles that may apply enforces at least what each of the others
+// does (selectProfile). No single profile is safe to apply: the request is
+// refused wherever its surface can block it, on the connector hook, the
+// inspect endpoints, ACP, the sandbox relay and the guardrail proxy. What a
+// surface cannot block (an event the agent does not let a hook stop) is
+// decided by the strictest of them by hook mode and block_at.
 
 // profileRefused is why ctx's profile decision is Refused, or "".
 func (a *APIServer) profileRefused(ctx context.Context) string {

@@ -122,127 +122,13 @@ func (r *NSSResolver) DirectoryFactsWithoutGroupsForUID(uid int, now time.Time) 
 	return r.directoryFactsForUID(uid, now, false)
 }
 
-// directoryFactsForUID is provenFactsForUID. When it fails only because a
+// directoryFactsForUID is provenFactsForUID. A lookup that fails because a
 // directory could not show that it holds nothing more of the account
-// (errDirectoryUnconfirmed: SSSD stopped on a "passwd: files sss" host, an
-// nslcd that cannot reach LDAP, NIS, whose miss getent cannot show), the
-// error is an UnprovenFactsError with the facts the account has if every
-// such directory holds nothing more. Before those proofs a local account
-// was served those facts; after them it got none, and a failed lookup
-// selects default_profile, which can be weaker than the profile of the
-// account's local groups (review of r104 W2B, loop 5). The guardian's
-// spool (no groups) needs no candidate. When the facts cannot be resolved
-// even then (another failure in the candidate pass), the UnprovenFactsError
-// has no candidate (HasCandidate): which account the uid is, or its groups,
-// stay unknown, and the gateway refuses every request an assignment could
-// give another profile (review of r104 W2B, loop round 3).
+// (errDirectoryUnconfirmed) fails as a whole: the gateway then treats the
+// account and its groups as unproven and selects the strictest profile that
+// could apply (resolveIdentity).
 func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups bool) (useridentity.DirectoryFacts, error) {
-	facts, err := r.provenFactsForUID(uid, now, includeGroups)
-	if err == nil || !includeGroups || r.provisional() || !errors.Is(err, errDirectoryUnconfirmed) {
-		return facts, err
-	}
-	provisional := *r
-	provisional.ctx = context.WithValue(r.context(), provisionalProofsKey{}, true)
-	candidate, candidateErr := provisional.provenFactsForUID(uid, now, includeGroups)
-	if shared := (*SharedUIDError)(nil); errors.As(candidateErr, &shared) {
-		// The uid is shared whatever the directory that did not answer
-		// holds (two /etc/passwd entries while SSSD is stopped): that is
-		// proved, and the gateway refuses the requests a shared uid decides
-		// (review of r104 W2B, loop round 2).
-		return useridentity.DirectoryFacts{}, candidateErr
-	}
-	if candidateErr != nil {
-		return useridentity.DirectoryFacts{}, &UnprovenFactsError{Err: err}
-	}
-	return useridentity.DirectoryFacts{}, &UnprovenFactsError{Candidate: candidate, Err: err}
-}
-
-// LocalCandidateForUID is what uid's facts are if no directory holds the uid
-// or more groups of its account: its /etc/passwd entry with its /etc/group
-// memberships, as DefenseClaw took a local account before the directory
-// proofs. It reads the local files only, so the gateway has it before a
-// slow directory answers: a request that stopped waiting for the lookup
-// selected default_profile, weaker than the profile of the account's local
-// groups (review of r104 W2B, loop round 2). Like the Candidate of an
-// UnprovenFactsError it is a hypothesis: nothing may cache, record or apply
-// it. ok is false when the passwd line names no local source or
-// /etc/passwd holds no entry of uid. Entries of two names give a
-// SharedUIDError.
-func LocalCandidateForUID(uid int, now time.Time) (name string, facts useridentity.DirectoryFacts, ok bool, err error) {
-	data, err := readSmallFile(nsswitchPath, 1<<20)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", useridentity.DirectoryFacts{}, false, fmt.Errorf("unixidentity: read NSS configuration: %w", err)
-	}
-	// glibc reads the local files without the file or its passwd line.
-	if line := nssSwitchLine(string(data), "passwd"); len(line) > 0 && !slices.Contains(line, "files") && !slices.Contains(line, "compat") {
-		return "", useridentity.DirectoryFacts{}, false, nil
-	}
-	entries, err := localPasswdEntriesForUID(uid)
-	if err != nil || len(entries) == 0 {
-		return "", useridentity.DirectoryFacts{}, false, err
-	}
-	holders := []string{entries[0].Name + " (files)"}
-	for _, entry := range entries[1:] {
-		if holder := entry.Name + " (files)"; !slices.Contains(holders, holder) {
-			holders = append(holders, holder)
-		}
-	}
-	if len(holders) > 1 {
-		return "", useridentity.DirectoryFacts{}, false, &SharedUIDError{UID: uid, Accounts: holders}
-	}
-	_, groups, err := localAccountGroups(entries[0])
-	if err != nil {
-		return "", useridentity.DirectoryFacts{}, false, fmt.Errorf("unixidentity: groups of %s: %w", entries[0].Name, err)
-	}
-	return entries[0].Name, useridentity.DirectoryFacts{
-		Directory:  useridentity.DirectoryLocal,
-		Source:     useridentity.SourceNSSFiles,
-		Assurance:  useridentity.AssuranceVerified,
-		ResolvedAt: now,
-		Groups:     groups,
-	}, true, nil
-}
-
-// UnprovenFactsError is a lookup of an account's facts that failed for
-// want of a proof only: a directory service could not show that it holds no
-// other account of the uid, or no more groups of the account. Candidate is
-// what the facts are if every such service holds nothing more (the
-// /etc/passwd account with its local groups, as DefenseClaw took it before
-// the proofs). It is a hypothesis, not facts: nothing may cache, record or
-// apply it. The gateway only compares the profile it selects with the one a
-// failed lookup selects, and refuses the request when they differ. Without
-// a candidate (HasCandidate) the facts are unknown even if those services
-// hold nothing more, and the gateway refuses every request an assignment
-// could give another profile than the failed lookup's.
-type UnprovenFactsError struct {
-	Candidate useridentity.DirectoryFacts
-	Err       error
-}
-
-func (e *UnprovenFactsError) Error() string { return e.Err.Error() }
-func (e *UnprovenFactsError) Unwrap() error { return e.Err }
-
-// HasCandidate reports whether the lookup names the facts the account has
-// if every service that did not show it holds nothing more holds nothing.
-func (e *UnprovenFactsError) HasCandidate() bool { return !e.Candidate.ResolvedAt.IsZero() }
-
-// provisionalProofsKey marks the context of a resolver that computes the
-// candidate of an UnprovenFactsError (directoryFactsForUID).
-type provisionalProofsKey struct{}
-
-// provisional reports whether r computes candidate facts.
-func (r *NSSResolver) provisional() bool {
-	return r.ctx != nil && r.ctx.Value(provisionalProofsKey{}) != nil
-}
-
-// unproven is err, or nil when r computes candidate facts and err only says
-// that a directory could not show that it holds nothing more of the account
-// (errDirectoryUnconfirmed).
-func (r *NSSResolver) unproven(err error) error {
-	if err != nil && r.provisional() && errors.Is(err, errDirectoryUnconfirmed) {
-		return nil
-	}
-	return err
+	return r.provenFactsForUID(uid, now, includeGroups)
 }
 
 // provenFactsForUID resolves uid's facts with every proof that no directory
@@ -999,7 +885,7 @@ func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) (ids []in
 			continue
 		}
 		listed, skip, listErr := r.memberListGroupsOf(service, account)
-		if listErr = r.unproven(listErr); listErr != nil {
+		if listErr != nil {
 			return nil, nil, nil, listErr
 		}
 		if skip {
@@ -1115,7 +1001,7 @@ func (r *NSSResolver) confirmMemberListGroups(account Account, services []string
 			continue
 		}
 		asked[service] = true
-		if _, _, err := r.memberListGroupsOf(service, account); r.unproven(err) != nil {
+		if _, _, err := r.memberListGroupsOf(service, account); err != nil {
 			return nil, err
 		}
 	}
@@ -2235,12 +2121,12 @@ func (r *NSSResolver) passwdOwner(uid int) (string, Account, error) {
 			// rel/1.0.4 asked only the directory services and took the
 			// later account's facts (review of r104 W2B, loop round 3).
 			err = fmt.Errorf("unixidentity: NSS service %s did not answer whether it holds uid %d: %w: %w", service, uid, err, errDirectoryUnconfirmed)
-			if err = r.unproven(err); err != nil {
+			if err != nil {
 				return "", Account{}, err
 			}
 			continue
 		}
-		if err := r.unproven(r.passwdAbsent(service, strconv.Itoa(uid), true)); err != nil && !errors.Is(err, errServiceUncheckable) {
+		if err := r.passwdAbsent(service, strconv.Itoa(uid), true); err != nil && !errors.Is(err, errServiceUncheckable) {
 			return "", Account{}, fmt.Errorf("unixidentity: NSS service %s holds no uid %d but cannot show that it answers: %w", service, uid, err)
 		}
 	}
@@ -2370,7 +2256,7 @@ func (r *NSSResolver) checkUIDNotShared(uid int, owner string, account Account) 
 	}
 	holders := []string{account.Name + " (" + owner + ")"}
 	more, err := r.otherHoldersInService(owner, uid, account)
-	if err = r.unproven(err); err != nil {
+	if err != nil {
 		return err
 	}
 	holders = append(holders, more...)
@@ -2390,13 +2276,13 @@ func (r *NSSResolver) checkUIDNotShared(uid int, owner string, account Account) 
 		switch {
 		case err == nil:
 		case IsNotFound(err):
-			if absentErr := r.unproven(r.passwdAbsent(service, strconv.Itoa(uid), true)); absentErr != nil && !errors.Is(absentErr, errServiceUncheckable) {
+			if absentErr := r.passwdAbsent(service, strconv.Itoa(uid), true); absentErr != nil && !errors.Is(absentErr, errServiceUncheckable) {
 				return fmt.Errorf("unixidentity: uid %d: NSS service %s cannot show that it holds no other account of the uid: %w", uid, service, absentErr)
 			}
 			continue
 		default:
 			err = fmt.Errorf("unixidentity: uid %d: NSS service %s did not answer whether it holds another account of the uid: %w: %w", uid, service, err, errDirectoryUnconfirmed)
-			if err = r.unproven(err); err != nil {
+			if err != nil {
 				return err
 			}
 			continue

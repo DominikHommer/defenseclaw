@@ -49,8 +49,10 @@ func listedUIDs(accounts []enterprisehooks.IdentitySpoolAccount) (listed, left [
 
 // GAP-0399: an exempt account calls the managed hook socket although the
 // enumerator gives it no row or eligible-account entry. Its record keeps
-// being refreshed, so its UPN profile survives the hourly expiry; an
-// exclusion of the same account still wins.
+// being refreshed, so its UPN profile survives the hourly expiry. An
+// exclude_users entry for the same account does not end the gateway's
+// acceptance of an exempt caller, so the record stays; without the
+// exemption the excluded account's record is withdrawn.
 func TestExemptUnlistedCallerKeepsAFreshIdentityRecord(t *testing.T) {
 	identityCallerTestConfig(t)
 	const uid = 94401104
@@ -67,8 +69,13 @@ func TestExemptUnlistedCallerKeepsAFreshIdentityRecord(t *testing.T) {
 	}
 	cfg.Enterprise.Enrollment.ExcludeUsers = []string{"bob@corp.example"}
 	accounts, _, _ = enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{})
-	if listed, left := listedUIDs(accounts); len(listed) != 0 || !slices.Equal(left, []int{uid}) {
-		t.Fatalf("excluded and exempt caller: accounts %+v; exclusion must win", accounts)
+	if listed, _ := listedUIDs(accounts); !slices.Equal(listed, []int{uid}) {
+		t.Fatalf("excluded and exempt caller: accounts %+v; the gateway still accepts it, so its record stays", accounts)
+	}
+	cfg.Enterprise.Enrollment.ExemptUsers = nil
+	accounts, _, _ = enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{})
+	if listed, _ := listedUIDs(accounts); slices.Contains(listed, uid) {
+		t.Fatalf("excluded caller without the exemption: accounts %+v; want no refreshed record", accounts)
 	}
 }
 
@@ -111,10 +118,10 @@ func TestNameOnlyAcceptedCallerKeepsAFreshIdentityRecord(t *testing.T) {
 	if listed, _ := listedUIDs(accounts); !slices.Equal(listed, []int{uid}) {
 		t.Fatalf("name-only accepted caller whose lookup does not answer: accounts %+v; want the record's uid listed", accounts)
 	}
-	// An excluded name-only caller is not kept.
-	cfg.Enterprise.Enrollment.ExcludeUsers = []string{"94401105"}
+	// Once the authorization no longer accepts the target, it is not kept.
+	enterpriseHookLoadAcceptedTargets = func() ([]enterpriseHookReconcileRow, error) { return nil, nil }
 	accounts, _, _ = enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{})
 	if listed, _ := listedUIDs(accounts); slices.Contains(listed, uid) {
-		t.Fatalf("excluded name-only caller: accounts %+v; exclusion must win", accounts)
+		t.Fatalf("no longer accepted caller: accounts %+v; want no refreshed record", accounts)
 	}
 }

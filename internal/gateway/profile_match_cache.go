@@ -82,25 +82,9 @@ func profileMatchKey(subject *profileSubject, source, connectorName, agent strin
 		for _, g := range subject.Groups {
 			put(g)
 		}
-		// The candidate facts of a failed lookup can refuse the request
-		// (withUnprovenCandidate).
-		if subject.unproven != nil {
-			put("unproven")
-			put(subject.unprovenReason)
-			putSubject(subject.unproven)
-		}
-		if subject.ownershipAmbiguous {
-			put("ownership-ambiguous")
-			if subject.ownershipUnknown {
-				put("ownership-unknown")
-			}
-			put(subject.unprovenReason)
-		}
-		// A gid whose name is unconfirmed selects apart from one proved to
-		// have none.
-		for _, g := range subject.unconfirmedGroups {
-			put("unconfirmed:" + g)
-		}
+		// The incarnation names the account the last proven profile is kept
+		// for (provenProfileStore).
+		put(subject.accountToken)
 	}
 	if subject == nil {
 		put("\x00nil")

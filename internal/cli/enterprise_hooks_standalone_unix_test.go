@@ -1710,8 +1710,8 @@ func TestRemoveAllReportKeepsTheWorkerErrorCause(t *testing.T) {
 // 15-minute refresh. A left account now has a key of its own, and the
 // exclude_users entries are keys too, since the pass checks every record it
 // does not list against them (review loop 6). exempt_users withdraw
-// nothing, so they change no key: the gateway still accepts and inspects an
-// exempt account's hook calls under its own profile.
+// nothing, but an exempt account the listing omitted is listed again, so
+// its record keeps being refreshed (GAP-0399): that changes the keys too.
 func TestIdentitySpoolKeysChangeWhenAnOmittedAccountLeaves(t *testing.T) {
 	previousCfg := cfg
 	t.Cleanup(func() {
@@ -1746,7 +1746,7 @@ func TestIdentitySpoolKeysChangeWhenAnOmittedAccountLeaves(t *testing.T) {
 	}{
 		{name: "excluded by name", exclude: []string{"bob"}},
 		{name: "excluded by uid", exclude: []string{"4243"}},
-		{name: "exempt", exempt: []string{"bob"}, same: true},
+		{name: "exempt", exempt: []string{"bob"}},
 	} {
 		cfg = &config.Config{}
 		cfg.Enterprise.Enrollment.ExcludeUsers, cfg.Enterprise.Enrollment.ExemptUsers = tc.exclude, tc.exempt

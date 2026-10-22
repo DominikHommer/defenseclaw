@@ -73,27 +73,24 @@ type profileSubject struct {
 	// no NSS group service could give or prove absent
 	// (useridentity.DirectoryFacts.UnconfirmedGroups): the account is in
 	// them, but a group assignment that names a group may or may not apply
-	// (matchWithUnconfirmedGroups).
+	// (identityResolution).
 	unconfirmedGroups []string
+	// accountToken names the account incarnation that holds UserID (the
+	// SSSD or AD account SID); "" when the facts give none
+	// (identityIncarnation).
+	accountToken string
+	// upnUnproven marks guardian-backed facts whose UPN the guardian has
+	// not given yet (awaitingSpoolUPN): a users entry written as a UPN or
+	// DOMAIN\name may name the account.
+	upnUnproven bool
 	// LookupFailed is set when the directory lookup for this subject failed
-	// and no cached facts within their TTL exist. Directory-dependent
-	// assignments then select default_lookup_failed; a verified ID can match.
+	// and no cached facts within their TTL exist: the account and its groups
+	// are unproven (resolveIdentity), and only a uid or SID entry, an agent
+	// and a connector match for sure.
 	LookupFailed bool
 	// LookupError is why the lookup failed, when `explain` knows (the live
 	// path only records default_lookup_failed).
 	LookupError string
-	// unproven is the subject as the candidate facts of its failed lookup
-	// give it, and unprovenReason why that lookup failed (unprovenFactsFor);
-	// set by withUnprovenCandidate, for match only.
-	unproven       *profileSubject
-	unprovenReason string
-	// ownershipAmbiguous marks a subject whose uid more than one account
-	// holds (unixidentity.SharedUIDError): no candidate tells which one it
-	// is. Set by withUnprovenCandidate, for match only. ownershipUnknown
-	// marks, with it, a lookup that failed for want of a proof and named no
-	// candidate (unprovenFactsEntry.unknown).
-	ownershipAmbiguous bool
-	ownershipUnknown   bool
 	// viaProcessOwner marks a subject verified as the per-user gateway's own
 	// account, so explain and telemetry report it as process_owner.
 	viaProcessOwner bool
@@ -190,6 +187,11 @@ type profileDecision struct {
 	// can block it (guardrail_profile_refusal.go); Name is the strictest of
 	// those profiles by hook mode and block_at, for the rest.
 	Refused string
+	// Unproven names the identity facts this pass did not prove, and
+	// Candidates the profiles the decision chose among (selectProfile);
+	// both empty for a fully proven decision.
+	Unproven   []string
+	Candidates []string
 }
 
 // profileRefusal is why the request on ctx is refused (profileDecision.Refused),
@@ -228,6 +230,9 @@ type guardrailProfileSet struct {
 	// agentBridge links agents entries written for 1.0.3 identities to the
 	// identities their accounts have now (profileAgent).
 	agentBridge profileAgentBridge
+	// provenProfiles holds the last fully proven profile of each account
+	// incarnation (selectProfile).
+	provenProfiles *provenProfileStore
 }
 
 // newGuardrailProfileSet derives every profile of cfg and preloads their rule
@@ -252,6 +257,7 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 		rules:          make(map[string]*compiledRulePackCategories),
 		packs:          make(map[string]*guardrail.RulePack),
 		matches:        newProfileMatchCache(),
+		provenProfiles: &provenProfileStore{},
 	}
 	if runtime.GOOS == "windows" && cfg.StandaloneEnterprise() && profileGroupSIDLookup != nil {
 		set.groupSIDs = buildProfileGroupSIDs(set.assignments, profileGroupSIDLookup, profileGroupLocalSIDLookup, profileGroupSIDWait)
@@ -777,6 +783,8 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 		Groups:        s.Directory.Groups,
 		// The names of these gids are unknown, not absent.
 		unconfirmedGroups: s.Directory.UnconfirmedGroups,
+		accountToken:      s.Directory.AccountSID,
+		upnUnproven:       lookupAttempted && !s.Directory.ResolvedAt.IsZero() && awaitingSpoolUPN(s.Directory),
 		GroupsUnknown:     lookupAttempted && s.Directory.GroupsPartial,
 		LookupFailed: lookupAttempted && (s.Directory.ResolvedAt.IsZero() ||
 			(s.Directory.Source == useridentity.SourceWindowsLSA ||
@@ -938,18 +946,18 @@ func accountGroups(account *osuser.User) ([]string, error) {
 	return groups, nil
 }
 
-// match runs the ordered assignments: the first match wins; within one
-// assignment the set keys AND together and the values of a key OR together.
-// Identity keys (users, groups, agents) match only a verified subject; a
-// connector-only assignment matches any other request authenticated for that
-// connector. A failed directory lookup leaves groups and names unknown, so
-// their assignments select default_lookup_failed (GAP-0312). An assignment
-// naming the kernel-verified UID or SID, or a verified agent, can still
-// select its profile.
+// match is selectProfile for a request without an unresolved agents entry
+// (matchAgent has the bridge's answer).
 func (set *guardrailProfileSet) match(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	subject = withUnprovenCandidate(subject)
-	if set.matches == nil {
-		return set.matchUncached(subject, source, connectorName, agent)
+	return set.matchResolved(subject, resolveIdentity(subject, nil), source, connectorName, agent)
+}
+
+// matchResolved is selectProfile, memoised for repeated subjects whose
+// facts are all proven. A decision taken on unproven facts is never cached:
+// it reads the last proven profile of the incarnation, which changes.
+func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res identityResolution, source, connectorName, agent string) profileDecision {
+	if set.matches == nil || !res.proven() {
+		return set.selectProfile(subject, res, source, connectorName, agent)
 	}
 	key := profileMatchKey(subject, source, connectorName, agent)
 	if set.groupSIDs != nil {
@@ -960,339 +968,15 @@ func (set *guardrailProfileSet) match(subject *profileSubject, source, connector
 	if decision, ok := set.matches.get(key); ok {
 		return decision
 	}
-	decision := set.matchUncached(subject, source, connectorName, agent)
+	decision := set.selectProfile(subject, res, source, connectorName, agent)
 	set.matches.put(key, decision)
 	return decision
 }
 
+// matchUncached is selectProfile without the memo, for a request without an
+// unresolved agents entry.
 func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	if subject != nil && subject.LookupFailed {
-		decision := set.matchWithFailedLookup(subject, source, connectorName, agent)
-		if subject.unproven != nil && source != "" &&
-			set.matchUncached(subject.unproven, source, connectorName, agent).Name != decision.Name {
-			decision.Refused = unprovenRefusal(subject)
-		}
-		if subject.ownershipAmbiguous && source != "" && decision.Match == profileMatchDefaultLookupFailed &&
-			set.anotherProfileCouldApply(subject, decision.Name, connectorName, agent) {
-			decision.Refused = ambiguousRefusal(subject)
-		}
-		return decision
-	}
-	if subject != nil && subject.GroupsUnknown {
-		return set.matchWithUnknownGroups(subject, source, connectorName, agent)
-	}
-	verified := subject != nil && source != ""
-	if verified && len(subject.unconfirmedGroups) > 0 {
-		return set.matchWithUnconfirmedGroups(subject, source, connectorName, agent)
-	}
-	groups := &subjectGroups{sids: set.groupSIDs}
-	if verified {
-		groups.list = subject.Groups
-	}
-	for i, assignment := range set.assignments {
-		reason, group, ok := assignmentMatches(assignment.Match, subject, groups, verified, connectorName, agent)
-		if !ok {
-			continue
-		}
-		decision := set.decision(assignment.Profile, reason, group, source)
-		decision.Assignment = i + 1
-		return decision
-	}
-	reason := profileMatchDefault
-	if !verified {
-		reason = profileMatchDefaultUnverified
-	}
-	return set.decision(set.defaultProfile, reason, "", source)
-}
-
-// withUnprovenCandidate returns subject with the candidate facts of its
-// failed lookup attached (unprovenFacts), when its lookup failed for want of
-// a proof only: the subject as those facts give it is one possibility, and
-// any account or group the directory could not rule out is the other, which
-// the failed lookup stands for (matchUncached).
-func withUnprovenCandidate(subject *profileSubject) *profileSubject {
-	if subject == nil || !subject.LookupFailed || subject.unproven != nil || subject.ownershipAmbiguous || subject.UserID == "" ||
-		subject.IDKind != useridentity.KindPOSIXUID {
-		return subject
-	}
-	entry, ok := unprovenFactsFor(subject.UserID, time.Now())
-	if !ok {
-		return subject
-	}
-	if entry.ambiguous || entry.unknown {
-		with := *subject
-		with.ownershipAmbiguous, with.ownershipUnknown, with.unprovenReason = true, entry.unknown, entry.reason
-		return &with
-	}
-	candidate := profileSubjectFromVerified(VerifiedSubject{
-		UserID: subject.UserID, IDKind: subject.IDKind,
-		UserName: firstNonEmpty(subject.accountName, subject.UserName, entry.name), Directory: entry.facts,
-	}, true)
-	if candidate.LookupFailed {
-		return subject
-	}
-	candidate.viaProcessOwner = subject.viaProcessOwner
-	with := *subject
-	with.unproven, with.unprovenReason = &candidate, entry.reason
-	return &with
-}
-
-// unprovenRefusal is the refusal of a request whose account's lookup failed
-// for want of a proof, or has not finished (profileDecision.Refused).
-func unprovenRefusal(subject *profileSubject) string {
-	return fmt.Sprintf("DefenseClaw cannot confirm which account uid %s is or which groups it is in, because a directory service "+
-		"on this computer did not answer or has not answered yet, and that decides its guardrail profile: the request is refused "+
-		"until the directory answers", subject.UserID)
-}
-
-// ambiguousRefusal is the refusal of a request whose uid more than one
-// account holds, or whose account a failed lookup could not name
-// (profileDecision.Refused).
-func ambiguousRefusal(subject *profileSubject) string {
-	if subject.ownershipUnknown {
-		return fmt.Sprintf("DefenseClaw cannot confirm which account uid %s is or which groups it is in, because a directory service "+
-			"on this computer did not answer, and an assignment could give it another guardrail profile than a failed lookup: "+
-			"the request is refused until the directory answers", subject.UserID)
-	}
-	return fmt.Sprintf("DefenseClaw cannot confirm which account uid %s is, because more than one account holds the uid, "+
-		"and that decides its guardrail profile: the request is refused until each account has its own uid", subject.UserID)
-}
-
-// anotherProfileCouldApply reports whether an assignment the request could
-// match selects another profile than name, when the subject's account and
-// groups are unknown: every assignment its connector, agent and uid do not
-// rule out counts, since the facts that decide it are missing.
-func (set *guardrailProfileSet) anotherProfileCouldApply(subject *profileSubject, name, connectorName, agent string) bool {
-	for _, assignment := range set.assignments {
-		m := assignment.Match
-		if m.Empty() || assignment.Profile == name {
-			continue
-		}
-		if len(m.Connectors) > 0 && !anyMatches(m.Connectors, func(v string) bool {
-			return config.NormalizeConnectorName(v) == connectorName && connectorName != ""
-		}) {
-			continue
-		}
-		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool {
-			return strings.EqualFold(strings.TrimSpace(v), agent) && agent != ""
-		}) {
-			continue
-		}
-		if len(m.Users) > 0 && !anyMatches(m.Users, func(v string) bool {
-			return useridentity.KindForID(v) == "" || useridentity.EqualFold(strings.TrimSpace(v), subject.UserID)
-		}) {
-			continue // only other accounts' IDs
-		}
-		return true
-	}
-	return false
-}
-
-// unprovenRefusalNote is explain's account of a refusal: the profile the
-// candidate facts select, the one the failed lookup selects, and why.
-func unprovenRefusalNote(set *guardrailProfileSet, subject *profileSubject, decision profileDecision, connectorName, agent string) string {
-	subject = withUnprovenCandidate(subject)
-	if subject != nil && subject.ownershipUnknown {
-		return fmt.Sprintf("requests from this account are refused (hooks fail closed): its directory lookup could not tell which account "+
-			"the uid is or which groups it is in (%s), and an assignment could select another profile than the failed lookup's. "+
-			"No profile applies until the directory answers; an assignment by uid selects a profile without the proof", subject.unprovenReason)
-	}
-	if subject != nil && subject.ownershipAmbiguous {
-		return fmt.Sprintf("requests from this account are refused (hooks fail closed): more than one account holds its uid (%s), "+
-			"so which account it is and which groups it is in cannot be proven, and an assignment could select another profile than "+
-			"the failed lookup's. Give each account its own uid", subject.unprovenReason)
-	}
-	if subject == nil || subject.unproven == nil {
-		return decision.Refused
-	}
-	candidate := set.matchUncached(subject.unproven, decision.SubjectSource, connectorName, agent)
-	name := func(profile string) string {
-		if profile == "" {
-			return "the base configuration"
-		}
-		return fmt.Sprintf("profile %q", profile)
-	}
-	return fmt.Sprintf("requests from this account are refused (hooks fail closed): its directory lookup has not proved the account (%s). "+
-		"If the directory holds nothing more of it, the account selects %s; a failed lookup selects %s. Neither applies until the directory answers; "+
-		"an assignment by uid selects a profile without the proof", subject.unprovenReason, name(candidate.Name), name(decision.Name))
-}
-
-// matchWithUnconfirmedGroups is match for a verified subject some of whose
-// gids no NSS group service could name or prove unnamed (a Himmelblau or
-// aad module DefenseClaw cannot check, a provider that failed or answered
-// what the system's lookup did not take). The account is in those groups,
-// initgroups proved it, but their names are unknown. An assignment the
-// proven groups satisfy applies, in order. One whose groups entry may name
-// an unconfirmed gid, by a name the gid may have or by its number (which
-// matches only a gid without a name), may or may not apply: the request
-// then gets a profile that enforces at least what each such assignment and
-// the decision after them enforce, or is refused (coverUnproven), never a
-// weaker profile. Failing the whole lookup instead sent the account to
-// default_lookup_failed and a possibly weaker default, even where its
-// proven gid selected a strict profile.
-func (set *guardrailProfileSet) matchWithUnconfirmedGroups(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	proven := &subjectGroups{list: provenGroups(subject), sids: set.groupSIDs}
-	decision := set.decision(set.defaultProfile, profileMatchDefault, "", source)
-	var mayApply []string
-	for i, assignment := range set.assignments {
-		if reason, group, ok := assignmentMatches(assignment.Match, subject, proven, true, connectorName, agent); ok {
-			decision = set.decision(assignment.Profile, reason, group, source)
-			decision.Assignment = i + 1
-			break
-		}
-		if set.unconfirmedGroupMayMatch(assignment.Match, subject, connectorName, agent) {
-			mayApply = append(mayApply, strings.TrimSpace(assignment.Profile))
-		}
-	}
-	if len(mayApply) == 0 {
-		return decision
-	}
-	return set.coverUnproven(append(mayApply, decision.Name), connectorName, source, profileRefusedGroupsReason)
-}
-
-// provenGroups is subject's groups without the gids whose names are
-// unconfirmed.
-func provenGroups(subject *profileSubject) []string {
-	if len(subject.unconfirmedGroups) == 0 {
-		return subject.Groups
-	}
-	return slices.DeleteFunc(slices.Clone(subject.Groups), func(group string) bool {
-		return slices.Contains(subject.unconfirmedGroups, strings.TrimSpace(group))
-	})
-}
-
-// unconfirmedGroupMayMatch reports whether m's groups entry may name one of
-// subject's unconfirmed gids while its other keys hold: any group name may
-// be such a gid's, and a number names the gid only when it has no name.
-func (set *guardrailProfileSet) unconfirmedGroupMayMatch(m config.ProfileMatch, subject *profileSubject, connectorName, agent string) bool {
-	if len(m.Groups) == 0 || len(subject.unconfirmedGroups) == 0 {
-		return false
-	}
-	others := m
-	others.Groups = nil
-	if !others.Empty() {
-		if _, _, ok := assignmentMatches(others, subject, &subjectGroups{}, true, connectorName, agent); !ok {
-			return false
-		}
-	}
-	return slices.ContainsFunc(m.Groups, func(want string) bool {
-		want = strings.TrimSpace(want)
-		if want != "" && strings.Trim(want, "0123456789") == "" {
-			return slices.Contains(subject.unconfirmedGroups, want)
-		}
-		return want != ""
-	})
-}
-
-// coverUnproven is the decision for a request that may get any of the
-// profiles candidates (an unproven fact decides between them), reported as
-// default_lookup_failed: a profile that enforces at least what each of
-// them enforces (profileCovers), the default when it does, else the first
-// of them that does. When none does, the decision is Refused, and its Name
-// is the strictest of them by hook mode and block_at (profileStricter), for
-// what the request's surface cannot refuse. Unproven facts never resolve
-// to a weaker profile, whatever default_profile says.
-func (set *guardrailProfileSet) coverUnproven(candidates []string, connectorName, source, refusal string) profileDecision {
-	connectors := profileCoverConnectors(connectorName)
-	for _, name := range append([]string{set.defaultProfile}, candidates...) {
-		if !slices.ContainsFunc(candidates, func(other string) bool { return !set.profileCovers(name, other, connectors) }) {
-			return set.decision(name, profileMatchDefaultLookupFailed, "", source)
-		}
-	}
-	strictest := set.defaultProfile
-	for _, name := range candidates {
-		if set.profileStricter(name, strictest, connectorName) {
-			strictest = name
-		}
-	}
-	refused := set.decision(strictest, profileMatchDefaultLookupFailed, "", source)
-	refused.Refused = refusal
-	return refused
-}
-
-// matchWithUnknownGroups preserves verified user and agent assignments in
-// order. An earlier group assignment whose other conditions match could
-// preempt them, so use the default until a current desktop token supplies
-// its membership.
-func (set *guardrailProfileSet) matchWithUnknownGroups(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	fallback := func() profileDecision {
-		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
-	}
-	if source == "" || subject.UserID == "" {
-		return fallback()
-	}
-	for i, assignment := range set.assignments {
-		m := assignment.Match
-		if m.Empty() {
-			continue
-		}
-		known := m
-		known.Groups = nil
-		if known.Empty() {
-			return fallback()
-		}
-		reason, group, ok := assignmentMatches(known, subject, &subjectGroups{}, true, connectorName, agent)
-		if !ok {
-			continue
-		}
-		if len(m.Groups) > 0 {
-			return fallback()
-		}
-		decision := set.decision(assignment.Profile, reason, group, source)
-		decision.Assignment = i + 1
-		return decision
-	}
-	return fallback()
-}
-
-// matchWithFailedLookup can use a kernel-verified UID or SID or a
-// verified agent even when directory names and groups are unknown. Preserve
-// assignment order: an earlier assignment that could depend on missing facts
-// still selects the
-// outage default rather than letting a later assignment shadow it.
-func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	fallback := func() profileDecision {
-		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
-	}
-	if source == "" || subject.UserID == "" {
-		return fallback()
-	}
-	idOnly := &profileSubject{UserID: subject.UserID, IDKind: subject.IDKind}
-	for i, assignment := range set.assignments {
-		m := assignment.Match
-		if len(m.Connectors) > 0 && !anyMatches(m.Connectors, func(v string) bool {
-			return config.NormalizeConnectorName(v) == connectorName && connectorName != ""
-		}) {
-			continue
-		}
-		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool { return agentEntryMatches(v, agent) }) {
-			continue
-		}
-		uidMatches := anyMatches(m.Users, func(v string) bool {
-			return useridentity.EqualFold(strings.TrimSpace(v), subject.UserID)
-		})
-		if len(m.Users) > 0 && !uidMatches {
-			// A list of other IDs is known not to match, regardless of
-			// its group condition. A name or principal could still
-			// name this account, so fail closed.
-			for _, entry := range m.Users {
-				if useridentity.KindForID(entry) == "" {
-					return fallback()
-				}
-			}
-			continue
-		}
-		if len(m.Groups) > 0 || (len(m.Users) == 0 && len(m.Agents) == 0) {
-			return fallback()
-		}
-		reason, group, ok := assignmentMatches(m, idOnly, &subjectGroups{}, true, connectorName, agent)
-		if ok {
-			decision := set.decision(assignment.Profile, reason, group, source)
-			decision.Assignment = i + 1
-			return decision
-		}
-	}
-	return fallback()
+	return set.selectProfile(subject, resolveIdentity(subject, nil), source, connectorName, agent)
 }
 
 func (set *guardrailProfileSet) decision(name, reason, group, source string) profileDecision {
@@ -2023,10 +1707,14 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["subject_source"] = decision.SubjectSource
 	out["assignment"] = decision.Assignment
 	warnings := profileExplainWarnings(set, decision, subject)
+	if len(decision.Unproven) > 0 {
+		out["unproven_facts"] = decision.Unproven
+		out["candidate_profiles"] = decision.Candidates
+	}
 	if decision.Refused != "" {
 		out["refused"] = true
 		out["refused_reason"] = decision.Refused
-		warnings = append(warnings, unprovenRefusalNote(set, subject, decision, connectorName, agent))
+		warnings = append(warnings, unprovenRefusalNote(decision))
 	}
 	if agent != "" {
 		warnings = append(warnings, fmt.Sprintf("agent %q is not verified against a host identity record by profile-explain; confirm it with agent identities before relying on this answer", agent))

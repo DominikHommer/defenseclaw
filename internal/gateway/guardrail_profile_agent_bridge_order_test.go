@@ -43,7 +43,7 @@ func TestLegacyAgentAssignmentKeepsItsPlaceBeforeACurrentIdentityAssignment(t *t
 	}
 	expect := func(t *testing.T, got profileDecision, mode, name, match, wantMode string, refused bool) {
 		t.Helper()
-		if got.Name != name || got.Match != match || mode != wantMode || got.Refused != refused {
+		if got.Name != name || got.Match != match || mode != wantMode || (got.Refused != "") != refused {
 			t.Errorf("profile %+v, mode %q; want %s (%s) as %s, refused %v", got, mode, name, wantMode, match, refused)
 		}
 	}
@@ -79,7 +79,9 @@ func TestLegacyAgentAssignmentKeepsItsPlaceBeforeACurrentIdentityAssignment(t *t
 		b, legacy, corp := setup(t)
 		recorded(b, legacy, corp)
 		got, mode := b.hook(orderBridgeConfig(strictBridgeModes, legacy, "strict", corp, "watch", false, "watch"), 70001, alice)
-		expect(t, got, mode, "watch", profileMatchAgent, "observe", false)
+		// r104 identity: the strictest of the legacy and the current
+		// assignment wins whatever their order.
+		expect(t, got, mode, "strict", profileMatchDefaultLookupFailed, "action", false)
 	})
 	t.Run("ledger cannot be read", func(t *testing.T) {
 		b, legacy, corp := setup(t)
@@ -123,7 +125,7 @@ func TestLegacyAgentAssignmentKeepsItsPlaceBeforeACurrentIdentityAssignment(t *t
 		b, legacy, corp := setup(t)
 		b.ledger(nil)
 		got, mode := b.hook(orderBridgeConfig(strictBridgeModes, legacy, "strict", corp, "watch", false, "strict"), 70001, alice)
-		expect(t, got, mode, "watch", profileMatchAgent, "observe", false)
+		expect(t, got, mode, "strict", profileMatchDefaultLookupFailed, "action", false)
 	})
 	t.Run("another account's current identity", func(t *testing.T) {
 		// Its own 1.0.3 identity is derived with its request and no entry

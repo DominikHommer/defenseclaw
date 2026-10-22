@@ -328,7 +328,7 @@ func (a *APIServer) sandboxRelayServe(routes map[string]sandboxRelayRoute) http.
 			ctx = contextWithSandboxUser(ctx, binding)
 			ctx = a.withGuardrailProfileDecision(ctx, binding.Connector)
 			if reason := profileRefusal(ctx); reason != "" {
-				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": reason})
+				a.writeJSON(w, http.StatusForbidden, map[string]string{"error": reason})
 				return
 			}
 			r = r.WithContext(ctx)

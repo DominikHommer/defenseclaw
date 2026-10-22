@@ -8,7 +8,7 @@ keywords:
   - identity-based policy
 ---
 
-A guardrail profile is a named set of guardrail overrides. Assignments are an ordered list; the first one that matches wins; a default profile catches everyone else. For the task, see [Give a group its own policy](/docs/how-to/policies/give-a-group-its-own-policy).
+A guardrail profile is a named set of guardrail overrides. When more than one assignment matches, the strictest of their profiles applies, whatever their order; a default profile catches everyone else. For the task, see [Give a group its own policy](/docs/how-to/policies/give-a-group-its-own-policy).
 
 <Callout type="info" title="Where the identity comes from">
 DefenseClaw reads who a user is from the operating system and never calls
@@ -50,7 +50,7 @@ guardrail:
       connectors:
         codex: {mode: action, block_at: MEDIUM}
 
-  profile_assignments:           # ordered: the first match wins, so list the narrowest first
+  profile_assignments:           # when several match, the strictest profile applies
     - profile: ml-team           # by one agent install
       match: {agents: ["agt-3f9c0a1b2c3d4e5f"]}
     - profile: alice-codex       # by user and connector together
@@ -135,15 +135,27 @@ How the keys combine:
 - **Keys AND, values OR.** Inside one `match`, every key you list must match.
   For one key, any one value is enough. `{groups: [a, b], connectors: [codex]}`
   means "in group a or b, **and** using Codex".
-- **First match wins.** Put the narrowest assignment first (an agent or a user
-  and connector), the broad group assignments after it.
-- **Unproven legacy agent ownership blocks tool calls.** After an upgrade from
-  1.0.0–1.0.3, a bare account gets a distinct agent ID. If an older `agents`
-  entry could belong to that account or to a previous holder of its uid, the
-  gateway refuses blockable tool calls regardless of assignment order or the
-  default profile. Read the current ID with `defenseclaw agent identities`,
-  replace the old `agents` entry in `config.yaml`, and run
-  `defenseclaw-gateway restart`.
+- **The strictest wins.** When several assignments match (a user and a
+  group, a legacy and a current agent ID), the strictest of their profiles
+  applies, whatever their order: the one that enforces at least what each of
+  the others does, or else the one that blocks (`action`) from the lowest
+  `block_at`. Order still sets which assignment `explain` reports when two
+  give the same profile.
+- **Unproven facts never select a weaker profile.** When a fact an
+  assignment needs is not proven in this pass (the directory lookup failed or
+  timed out, a group name no provider confirms, a UPN the guardian has not
+  given yet, an uid more than one account holds, an `agents` entry from before
+  1.0.4 that may be this account's), the request gets the strictest of every
+  profile that could apply, the default profile and the last profile proven
+  for this account incarnation (`default_lookup_failed`). When none of them
+  enforces what each of the others does, the request is refused on every
+  surface that can block (hook, inspect, ACP, sandbox relay, LLM proxy), and
+  the refusal names the `profile explain` command for this host.
+- **Rebind 1.0.3 agent IDs.** After an upgrade from 1.0.0–1.0.3, a bare
+  account gets a distinct agent ID. An older `agents` entry that could belong
+  to that account or to a previous holder of its uid stays unproven. Read the
+  current ID with `defenseclaw agent identities`, replace the old `agents`
+  entry in `config.yaml`, and run `defenseclaw-gateway restart`.
 - **Case and accents' encoding do not matter.** Groups, account names,
   principals and UPNs compare without regard to case, so
   `alice@CORP.EXAMPLE.COM` and `alice@corp.example.com` are the same user. They
@@ -178,8 +190,9 @@ How the keys combine:
   account never gets the AD principal, whatever its name. While SSSD does not
   answer (stopped,
   restarting, or no answer within 2 seconds) the lookup fails and the account
-  keeps its last facts for up to an hour; with none, it gets the default
-  profile with `default_lookup_failed`. Add the uid to the assignment when the
+  keeps its last facts for up to an hour; with none, it gets the strictest
+  profile that could apply (`default_lookup_failed`), or its requests are
+  refused. Add the uid to the assignment when the
   account must match regardless. Groups follow the same rule: an account keeps
   only the groups inside the domain of its SID (an LDAP `carol` next to an AD
   `carol` does not get the AD `carol`'s groups), and an account whose
@@ -249,7 +262,7 @@ than one key, the reason names the most specific key, in the order
 | `connector` | Only a `connectors` entry matched. |
 | `default` | The user is verified, but no assignment matched, so `default_profile` applied. |
 | `default_unverified` | No verified user reached the gateway, so only assignments that match on `connectors` alone could apply. |
-| `default_lookup_failed` | The directory lookup for a verified user failed or was too slow, so the default profile applied. Or a fact the match needs is unproven (a 1.0.3 `agents` entry, a group name no provider confirms), so the strictest profile that may apply applied, or the request was refused. |
+| `default_lookup_failed` | A fact an assignment needs was not proven in this pass (a failed or slow directory lookup, a group name no provider confirms, a UPN the guardian has not given yet, a uid more than one account holds, a 1.0.3 `agents` entry). The strictest of every profile that could apply, the default profile and the last profile proven for this account incarnation applied, or the request was refused because none of them enforces what each of the others does. `explain` lists the facts as `unproven_facts` and the profiles as `candidate_profiles`. |
 
 ## Only verified facts select a profile
 
@@ -277,13 +290,13 @@ What follows when the identity is missing:
   (`default_unverified`).
 - **Directory lookup fails or is slow.** A first request for a user the
   gateway has not seen yet waits up to two seconds for a cold SSSD or Active
-  Directory answer. Then the assignments are read in order without names or
-  groups. One that matches on the verified uid, SID or agent alone applies.
-  One that names groups, lists users by name but not this uid or SID, or
-  matches on `connectors` alone could depend on the missing facts, so the
-  default profile applies (`default_lookup_failed`) and later assignments are
-  not read. One that lists only other uids or SIDs, or another agent or
-  connector, is skipped. The lookup is retried 15 seconds later. Later
+  Directory answer. Then every assignment is read without names or groups.
+  One that matches on the verified uid, SID, agent or connector alone
+  matches. One that names groups, or lists users by name but not this uid or
+  SID, may match. One that lists only other uids or SIDs, or another agent or
+  connector, does not. The request gets the strictest of the profiles that
+  match or may match and the default profile (`default_lookup_failed`); when
+  none of them enforces what each of the others does, it is refused. The lookup is retried 15 seconds later. Later
   requests use the cached answer. A lookup counts as failed unless every part
   of it finished: an account whose group list timed out, or that is in more
   than 2,048 groups, has no facts rather than part of its membership. On
@@ -322,24 +335,24 @@ What follows when the identity is missing:
   (a removed member stayed in the group for more than ten minutes): flush it
   with `dscacheutil -flushcache` and `dsmemberutil flushcache`, then explain
   the account, restart the gateway, or wait for its 15-minute refresh. On Windows, group profiles use a current desktop sign-in token. After sign-out,
-  group membership is unknown: an SSH or scheduled-task agent uses the default
-  profile for group-dependent assignments until the user signs in at the desktop
-  again. Set a strict default profile. A membership change also needs a new
+  group membership is unknown: an SSH or scheduled-task agent gets the
+  strictest profile a group-dependent assignment could give it, or is refused,
+  until the user signs in at the desktop again. Set a strict default profile. A membership change also needs a new
   desktop sign-in. While the directory does not answer, the gateway keeps using a
   user's last facts, for at most an hour (four times the cache lifetime). After
   that group-dependent assignments cannot match. A verified UID, SID or agent
-  assignment can still select a profile; otherwise the default profile applies
-  (`default_lookup_failed`) until a lookup succeeds, so a user removed from a
+  assignment still matches, and the strictest profile that could apply is
+  selected (`default_lookup_failed`) until a lookup succeeds, so a user removed from a
   group does not keep its group profile for the whole outage. `defenseclaw doctor`,
   `guardrail status` and `guardrail profile explain` warn while lookups are
   failing, with the number of accounts, the first failure and the reason; the
   gateway log has one line when an account's lookups start to fail and one when
   they work again.
 
-Because a failed lookup may fall through to the default profile, and so does
-an unverified request that no `connectors`-only assignment selects, **set a
-strict `default_profile`**. A lenient default can treat an unresolved user
-more leniently than a known user.
+An unverified request that no `connectors`-only assignment selects gets the
+default profile, and the default is one of the profiles an unproven request
+chooses among, so **set a strict `default_profile`**: it is the fallback an
+outage cannot go below.
 
 <Callout type="warn" title="Per-user installs on Windows have no groups">
 On a per-user Windows install the gateway cannot read the sign-in token's

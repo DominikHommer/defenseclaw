@@ -581,7 +581,6 @@ func (c *managedHookPeerHomeCache) noteHolder(uid int, key string) {
 	c.mu.Unlock()
 	if changed {
 		c.directoryCache().forget(key)
-		forgetUnprovenFacts(key)
 	}
 }
 
@@ -804,7 +803,6 @@ func (c *managedHookPeerHomeCache) dropHolder(uid int, holder managedHookPeerHol
 	}
 	c.mu.Unlock()
 	c.directoryCache().forget(key)
-	forgetUnprovenFacts(key)
 }
 
 // confirmCachedSpelling reports, with nil, that the account that holds uid

@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,8 +56,10 @@ func TestUnconfirmedGroupNamesNeverResolveToAWeakerProfile(t *testing.T) {
 			profile: "strict", match: profileMatchDefaultLookupFailed, mode: "action"},
 		{name: "the numeric gid names a weak row before a strict group the gid may be", cfg: r2BridgeConfig(group("watch", "7000"), group("strict", "himmel-strict")),
 			profile: "strict", match: profileMatchDefaultLookupFailed, mode: "action"},
+		// r104 identity: a proven weaker group does not hide a strict
+		// group the gid may be; the strictest wins whatever the order.
 		{name: "a proven group first", cfg: r2BridgeConfig(group("watch", "staff"), group("strict", "himmel-strict")),
-			profile: "watch", match: profileMatchGroup, mode: "observe"},
+			profile: "strict", match: profileMatchDefaultLookupFailed, mode: "action"},
 		{name: "another gid by number", cfg: r2BridgeConfig(group("strict", "7002")),
 			profile: "watch", match: profileMatchDefault, mode: "observe"},
 		{name: "another user's group row", cfg: r2BridgeConfig(config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{"bob"}, Groups: []string{"himmel-strict"}}}),
@@ -74,11 +77,11 @@ func TestUnconfirmedGroupNamesNeverResolveToAWeakerProfile(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			api, ctx := resolve(t, tc.cfg, alice)
 			got, mode := api.resolveProfile(ctx), api.agentHookMode(ctx, "codex")
-			if got.Name != tc.profile || got.Match != tc.match || mode != tc.mode || got.Refused != tc.refused {
+			if got.Name != tc.profile || got.Match != tc.match || mode != tc.mode || (got.Refused != "") != tc.refused {
 				t.Errorf("profile %+v, mode %q; want %s (%s) as %s, refused %v", got, mode, tc.profile, tc.mode, tc.match, tc.refused)
 			}
-			if tc.refused && api.profileRefusalReason(ctx) != profileRefusedGroupsReason {
-				t.Errorf("refusal reason %q, want the group reason", api.profileRefusalReason(ctx))
+			if tc.refused && !strings.Contains(got.Refused, "directory group membership is unconfirmed") {
+				t.Errorf("refusal reason %q, want the group reason", got.Refused)
 			}
 			// Once the gid is proved unnamed, the numeric row is exact again.
 			proven := alice
@@ -104,7 +107,7 @@ func TestUnconfirmedGroupNamesNeverResolveToAWeakerProfile(t *testing.T) {
 		cfg.Guardrail.DefaultProfile = "current"
 		set := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg).guardrailProfileSet()
 		got := set.matchAgent(&alice, profileSubjectVerified, "codex", "agt-alice", nil)
-		if !got.Refused || got.Match != profileMatchDefaultLookupFailed {
+		if got.Refused == "" || got.Match != profileMatchDefaultLookupFailed {
 			t.Errorf("decision %+v; want refused as default_lookup_failed", got)
 		}
 	})

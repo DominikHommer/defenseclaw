@@ -206,12 +206,14 @@ func TestUnresolvedLegacyAgentAssignmentSelectsTheOutageDefault(t *testing.T) {
 	if got, mode := hook(corp); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
 		t.Errorf("later current identity bypassed the unresolved legacy entry: %+v, mode %q", got, mode)
 	}
-	// An assignment naming the agent's current identity needs no ledger.
+	// An assignment naming the agent's current identity, listed first, does
+	// not skip the unresolved legacy entry either: the strictest of them
+	// wins whatever their order. Rebinding removes the legacy entry.
 	cfg.Guardrail.ProfileAssignments = append([]config.ProfileAssignment{
 		{Profile: "watch", Match: config.ProfileMatch{Agents: []string{corp}}},
 	}, cfg.Guardrail.ProfileAssignments...)
-	if got, _ := hook(corp); got.Name != "watch" || got.Match != profileMatchAgent {
-		t.Errorf("named identity: profile %+v, want its agent assignment", got)
+	if got, _ := hook(corp); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed {
+		t.Errorf("named identity before a legacy entry: profile %+v, want strict", got)
 	}
 }
 

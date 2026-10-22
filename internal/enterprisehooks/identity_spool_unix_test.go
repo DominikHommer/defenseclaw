@@ -639,7 +639,7 @@ func TestIdentitySpoolFailedLookupDropsSIDLessRecordWhenFreshSIDIsKnown(t *testi
 		fresh.UPNSource, fresh.Facts.UPN, fresh.Facts.Principal = "", "", ""
 		return fresh, errors.New("SSSD InfoPipe UPN lookup: timed out")
 	}
-	if err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: uid, User: old.User}}, nil, nil); err == nil {
+	if err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: uid, User: old.User}}, nil, nil, nil); err == nil {
 		t.Fatal("the failed lookup was not reported")
 	}
 	got, err := ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), nil)

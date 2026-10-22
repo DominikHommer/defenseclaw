@@ -166,7 +166,11 @@ func TestUnresolvedLegacyAgentAssignmentIsNeverWeakerThanItsProfile(t *testing.T
 		b, legacy, _ := setup(t)
 		b.ledger(nil)
 		got, mode := b.hook(strictBridgeConfig(strictBridgeModes, legacy, "watch", "strict", "watch"), 70001, alice)
-		want(t, "later assignment", got, mode, "strict", "action")
+		// The later connector assignment is the strictest and keeps its
+		// own reason (r104 identity).
+		if got.Name != "strict" || mode != "action" || got.Match != profileMatchConnector {
+			t.Errorf("later assignment: profile %+v, mode %q; want strict (action) as connector", got, mode)
+		}
 	})
 	t.Run("the default enforces more", func(t *testing.T) {
 		b, legacy, _ := setup(t)
@@ -200,7 +204,7 @@ func TestLegacyAgentAssignmentAcrossAnAccountSpellingIsNeverWeaker(t *testing.T)
 			now := b.inputs(70001, "alice@corp.example")
 			legacy, corp := agentidentity.LegacyAgentID(now), agentidentity.AgentID(now)
 			// 1.0.3 gave every spelling the legacy identity.
-			if old := agentidentity.AgentID(b.inputs(70001, "alice")); old != legacy {
+			if old := agentidentity.LegacyAgentID(b.inputs(70001, "alice")); old != legacy {
 				t.Fatalf("1.0.3 identity %q, want the legacy identity %q", old, legacy)
 			}
 			for _, records := range [][]inventory.AgentIdentityRecord{
@@ -218,14 +222,15 @@ func TestLegacyAgentAssignmentAcrossAnAccountSpellingIsNeverWeaker(t *testing.T)
 		})
 	}
 	// The other way round, the host names the account without its domain
-	// now: its identity is the 1.0.3 one and the entry names it.
+	// now: a bare account has its own namespace since 1.0.4 (GAP-0424), so
+	// the 1.0.3 entry is not proven to be its own either.
 	t.Run("qualified before, bare now", func(t *testing.T) {
 		b := newStrictBridge(t, "alice")
 		legacy := agentidentity.LegacyAgentID(b.inputs(70001, "alice@corp.example"))
 		b.ledger([]inventory.AgentIdentityRecord{b.record(70001, legacy, "alice@corp.example")})
 		got, mode := b.hook(strictBridgeConfig(strictBridgeModes, legacy, "strict", "watch", "watch"), 70001, alice)
-		if got.Name != "strict" || got.Match != profileMatchAgent || mode != "action" {
-			t.Errorf("profile %+v, mode %q; want the 1.0.3 assignment strict", got, mode)
+		if got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
+			t.Errorf("profile %+v, mode %q; want strict as default_lookup_failed", got, mode)
 		}
 	})
 }

@@ -99,7 +99,7 @@ func TestUnresolvedLegacyAgentProfilesThatDoNotCoverEachOtherAreRefused(t *testi
 			def: config.GuardrailProfile{Mode: "action", BlockAt: "high"}, wantName: "default", wantRefused: true},
 		{name: "a later assignment's rule pack differs", entry: config.GuardrailProfile{Mode: "action", BlockAt: "high", RulePackDir: strictDir},
 			later: config.GuardrailProfile{Mode: "action", BlockAt: "high", RulePackDir: permissiveDir}, withLater: true,
-			def: config.GuardrailProfile{Mode: "observe"}, wantName: "entry", wantRefused: true},
+			def: config.GuardrailProfile{Mode: "observe"}, wantName: "later", wantRefused: true},
 
 		// Ordered: one profile covers every other.
 		{name: "a lower block level with the same pack", entry: config.GuardrailProfile{Mode: "action", BlockAt: "low"},
@@ -117,9 +117,12 @@ func TestUnresolvedLegacyAgentProfilesThatDoNotCoverEachOtherAreRefused(t *testi
 			def: config.GuardrailProfile{Mode: "action", BlockAt: "high"}, wantName: "entry"},
 		{name: "the same sandbox section", entry: config.GuardrailProfile{Mode: "action", BlockAt: "low", Sandbox: sandbox},
 			def: config.GuardrailProfile{Mode: "action", BlockAt: "high", Sandbox: &config.OpenShellAdminConfig{EgressBlock: []string{"example.com"}}}, wantName: "entry"},
-		{name: "the default cannot apply", entry: config.GuardrailProfile{Mode: "action", BlockAt: "high", RulePackDir: strictDir},
+		// r104 identity: default_profile is the configured fallback an
+		// unproven fact always weighs, so a default no other profile covers
+		// refuses even when a later assignment matches for sure.
+		{name: "the default is the configured fallback", entry: config.GuardrailProfile{Mode: "action", BlockAt: "high", RulePackDir: strictDir},
 			later: config.GuardrailProfile{Mode: "action", BlockAt: "high", RulePackDir: strictDir}, withLater: true,
-			def: config.GuardrailProfile{Mode: "action", BlockAt: "high", RulePackDir: permissiveDir}, wantName: "entry"},
+			def: config.GuardrailProfile{Mode: "action", BlockAt: "high", RulePackDir: permissiveDir}, wantName: "default", wantRefused: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, legacy := refusalAgent(t)
@@ -131,7 +134,7 @@ func TestUnresolvedLegacyAgentProfilesThatDoNotCoverEachOtherAreRefused(t *testi
 			api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, refusalConfig(profiles, legacy, "entry", later, "default"))
 			ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, refusalAlice)
 			got := api.resolveProfile(api.withGuardrailProfileDecision(ctx, "codex"))
-			if got.Name != tc.wantName || got.Refused != tc.wantRefused || got.Match != profileMatchDefaultLookupFailed {
+			if got.Name != tc.wantName || (got.Refused != "") != tc.wantRefused || got.Match != profileMatchDefaultLookupFailed {
 				t.Errorf("decision %+v; want %s, refused %v, as default_lookup_failed", got, tc.wantName, tc.wantRefused)
 			}
 		})

@@ -269,13 +269,15 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 	// uid of the record that names it: a record a pass does not list ages
 	// out after an hour, and the gateway then lost the profile its UPN
 	// selects while it still accepted the caller (GAP-0399, GAP-0442). An
-	// exclusion still wins.
+	// exclude_users entry leaves out the account's enrollment, not the
+	// gateway's acceptance of its hooks: an accepted caller keeps its
+	// record, as every other accepted caller does.
 	for _, uid := range enterpriseHookNameCallerUIDs(ctx, dir, leftOut, accepted) {
 		if seen[uid] || left[uid] {
 			continue
 		}
 		user := canonicalUser(uid)
-		if leftOut.withdraws(uid, user) {
+		if !caller(uid, user) && leftOut.withdraws(uid, user) {
 			leave(uid)
 			continue
 		}
