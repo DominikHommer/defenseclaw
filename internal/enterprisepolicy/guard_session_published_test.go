@@ -65,16 +65,33 @@ func publishedSessionTestRoot(t *testing.T) string {
 	if err := os.Mkdir(root, 0o711); err != nil {
 		t.Fatal(err)
 	}
-	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
-		t.Fatal(err)
+	identity := publishedSessionTestIdentity(t)
+	for _, account := range []string{identity, publishedSessionOtherIdentity(identity)} {
+		if err := RotatePublishedSessionKey(root, account, publishedSessionTestTrust); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return root
+}
+
+// createAccountTestKey creates one more key file for identity's account
+// under root (a second key when it has one).
+func createAccountTestKey(root, identity string, trust PublishedSessionTrust) (string, error) {
+	digest, ok := publishedSessionIdentityDigest(identity)
+	if !ok {
+		return "", errors.New("invalid identity")
+	}
+	dir, prefix, ok := publishedSessionKeyPlace(root, digest)
+	if !ok {
+		return "", errors.New("no key place")
+	}
+	return createPublishedSessionKey(dir, prefix, trust)
 }
 
 // publishCurrent publishes an answer the way the gateway does: with the key
 // it reads first (none when it cannot read one).
 func publishCurrent(root, identity string, key SessionKey, decision GuardDecision, now time.Time) error {
-	recordKey, _ := ReadPublishedSessionKey(root)
+	recordKey, _ := ReadPublishedSessionKey(root, identity)
 	return PublishForeignHookSessionDecision(root, identity, key, decision, recordKey, now)
 }
 
@@ -84,9 +101,9 @@ func publishedSessionTestAllows(root, identity string, key SessionKey) bool {
 	return err == nil && !got.Deny
 }
 
-func publishedSessionTestKey(t *testing.T, root string) SessionRecordKey {
+func publishedSessionTestKey(t *testing.T, root, identity string) SessionRecordKey {
 	t.Helper()
-	key, err := ReadPublishedSessionKey(root)
+	key, err := ReadPublishedSessionKey(root, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +167,7 @@ func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 		t.Fatalf("another account's record must not prove this one: %v", err)
 	}
 	// A record or key file that fails the trust check blocks.
-	recordKey := publishedSessionTestKey(t, root)
+	recordKey := publishedSessionTestKey(t, root, identity)
 	for _, refused := range []string{"", recordKey.ID()} {
 		trust := func(path string) error {
 			if refused == "" || path == refused {
@@ -248,7 +265,7 @@ func TestPublishedForeignHookSessionNeedsTheRecordOfTheSessionToo(t *testing.T) 
 	if err := publishCurrent(root, identity, SessionKey{Connector: "copilot", Session: resumed.Session}, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+	if err := RotatePublishedSessionKey(root, identity, publishedSessionTestTrust); err != nil {
 		t.Fatal(err)
 	}
 	if err := publishCurrent(root, identity, SessionKey{Connector: "copilot", Process: own.Process}, GuardDecision{}, time.Now()); err != nil {
@@ -266,20 +283,22 @@ func TestPublishedForeignHookSessionNeedsTheRecordOfTheSessionToo(t *testing.T) 
 	}
 }
 
-// Kill switch: removing the key ends every allow, of every connector and
-// account, with no record found or deleted. An allow published while there
-// is no key proves nothing, and neither does any record after a new key:
-// only the next exchange under it proves the process again. Killing what is
-// gone is no error.
-func TestKillPublishedSessionKeyEndsEveryEarlierAllow(t *testing.T) {
+// Kill switch per account: removing an account's key ends every allow of
+// that account, of every connector, with no record found or deleted, and
+// leaves every other account's allows alone. An allow published while the
+// account has no key proves nothing, and neither does any record after a
+// new key: only the next exchange under it proves the process again.
+// Killing what is gone is no error. A rotation is one rename: the account
+// has its new key at once, and the old allows are dead.
+func TestKillPublishedSessionKeyEndsEveryEarlierAllowOfTheAccount(t *testing.T) {
 	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
 	other := publishedSessionOtherIdentity(identity)
 	copilot := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
 	opencode := SessionKey{Connector: "opencode", Session: "o-1", Process: "p-1"}
-	publish := func() {
+	publish := func(accounts ...string) {
 		t.Helper()
-		for _, account := range []string{identity, other} {
+		for _, account := range accounts {
 			for _, key := range []SessionKey{copilot, opencode} {
 				if err := publishCurrent(root, account, key, GuardDecision{}, time.Now()); err != nil {
 					t.Fatal(err)
@@ -287,66 +306,80 @@ func TestKillPublishedSessionKeyEndsEveryEarlierAllow(t *testing.T) {
 			}
 		}
 	}
-	allowed := func() int {
+	allowed := func(account string) int {
 		count := 0
-		for _, account := range []string{identity, other} {
-			for _, key := range []SessionKey{copilot, opencode} {
-				if publishedSessionTestAllows(root, account, key) {
-					count++
-				}
+		for _, key := range []SessionKey{copilot, opencode} {
+			if publishedSessionTestAllows(root, account, key) {
+				count++
 			}
 		}
 		return count
 	}
-	publish()
-	if got := allowed(); got != 4 {
-		t.Fatalf("every published allow must prove its process: %d", got)
+	publish(identity, other)
+	if allowed(identity) != 2 || allowed(other) != 2 {
+		t.Fatalf("every published allow must prove its process: %d %d", allowed(identity), allowed(other))
 	}
-	if err := KillPublishedSessionKey(root); err != nil {
+	if err := KillPublishedSessionKey(root, identity); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadPublishedSessionKey(root); err == nil {
-		t.Fatal("no key may be left")
+	if _, err := ReadPublishedSessionKey(root, identity); err == nil {
+		t.Fatal("no key may be left for the account")
 	}
-	if got := allowed(); got != 0 {
-		t.Fatalf("the kill must end every earlier allow: %d", got)
+	if allowed(identity) != 0 {
+		t.Fatalf("the kill must end every earlier allow of the account: %d", allowed(identity))
 	}
-	publish()
-	if got := allowed(); got != 0 {
-		t.Fatalf("an allow published without a key must prove nothing: %d", got)
+	if allowed(other) != 2 {
+		t.Fatalf("the kill must not end another account's allows: %d", allowed(other))
 	}
-	if err := KillPublishedSessionKey(root); err != nil {
+	publish(identity)
+	if allowed(identity) != 0 {
+		t.Fatalf("an allow published without a key must prove nothing: %d", allowed(identity))
+	}
+	if err := KillPublishedSessionKey(root, identity); err != nil {
 		t.Fatalf("killing what is gone is no error: %v", err)
 	}
-	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+	if err := EnsurePublishedSessionKey(root, identity, publishedSessionTestTrust); err != nil {
 		t.Fatal(err)
 	}
-	if got := allowed(); got != 0 {
-		t.Fatalf("a new key must not bring an earlier allow back: %d", got)
+	if allowed(identity) != 0 {
+		t.Fatalf("a new key must not bring an earlier allow back: %d", allowed(identity))
 	}
-	publish()
-	if got := allowed(); got != 4 {
-		t.Fatalf("the allows of the new key must prove their processes: %d", got)
+	publish(identity)
+	if allowed(identity) != 2 {
+		t.Fatalf("the allows of the new key must prove their processes: %d", allowed(identity))
 	}
-	// A new key while one exists replaces it: one key, and the allows of
-	// the old one are dead.
-	before := publishedSessionTestKey(t, root)
-	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+	// The rotation renames the one key: still one key, a new name, and the
+	// allows of the old one are dead at once.
+	before := publishedSessionTestKey(t, root, identity)
+	renames := 0
+	previousRename := publishedSessionRenameKey
+	publishedSessionRenameKey = func(from, to string) error { renames++; return previousRename(from, to) }
+	t.Cleanup(func() { publishedSessionRenameKey = previousRename })
+	if err := RotatePublishedSessionKey(root, identity, publishedSessionTestTrust); err != nil {
 		t.Fatal(err)
 	}
-	if after := publishedSessionTestKey(t, root); after.ID() == before.ID() {
-		t.Fatal("a new key must have a new name")
+	if after := publishedSessionTestKey(t, root, identity); after.ID() == before.ID() || renames != 1 {
+		t.Fatalf("a rotation must rename the key once: %s -> %s (%d renames)", before.ID(), after.ID(), renames)
 	}
-	if got := allowed(); got != 0 {
-		t.Fatalf("a new key must end the allows of the one it replaced: %d", got)
+	if allowed(identity) != 0 || allowed(other) != 2 {
+		t.Fatalf("a rotation must end the account's allows only: %d %d", allowed(identity), allowed(other))
+	}
+	// The lifecycle removes every account's key.
+	if err := KillAllPublishedSessionKeys(root); err != nil {
+		t.Fatal(err)
+	}
+	if allowed(other) != 0 {
+		t.Fatal("removing every key must end every account's allows")
 	}
 }
 
-// Kill switch: any failure to rotate the key blocks. A key file that cannot
-// be removed fails the kill; root or SYSTEM then adds a second key, and the
-// hook trusts no folder with more than one. A key that cannot be created
-// leaves none. A key folder that cannot be listed, a key owner that cannot
-// be read, more than one key, or one whose name is not a key's all block.
+// Kill switch: any failure to rotate the key blocks. The rotation falls back
+// from the rename to removing the key and making a new one, then to adding
+// a second key (the hook trusts no account with two); only when all of
+// that fails is the key alive (ErrPublishedSessionKeyAlive), and then the
+// caller must not go on. A key folder that cannot be listed, a key owner
+// that cannot be read, more than one key, or a name that is not a key's
+// all block.
 func TestPublishedSessionKeyRotationFailureBlocks(t *testing.T) {
 	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
@@ -361,71 +394,81 @@ func TestPublishedSessionKeyRotationFailureBlocks(t *testing.T) {
 	if !publishedSessionTestAllows(root, identity, key) {
 		t.Fatal("the allow must prove the process")
 	}
+	previousRename, previousRemove, previousCreate := publishedSessionRenameKey, publishedSessionRemoveKey, publishedSessionCreateKeyFile
+	t.Cleanup(func() {
+		publishedSessionRenameKey, publishedSessionRemoveKey, publishedSessionCreateKeyFile = previousRename, previousRemove, previousCreate
+	})
+	inUse := func(op string) error {
+		return &os.PathError{Op: op, Path: "key", Err: errors.New("the file is in use")}
+	}
+	type fault struct{ rename, remove, create bool }
+	for _, tc := range []struct {
+		name  string
+		fault fault
+		alive bool
+	}{
+		{"rename fails, the key is removed and a new one made", fault{rename: true}, false},
+		{"rename and remove fail, a second key is added", fault{rename: true, remove: true}, false},
+		{"rename fails and no new key can be made", fault{rename: true, create: true}, false},
+		{"rename, remove and create all fail", fault{rename: true, remove: true, create: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			publishedSessionRenameKey, publishedSessionRemoveKey, publishedSessionCreateKeyFile = previousRename, previousRemove, previousCreate
+			if err := EnsurePublishedSessionKey(root, identity, publishedSessionTestTrust); err != nil {
+				t.Fatal(err)
+			}
+			allow()
+			if !publishedSessionTestAllows(root, identity, key) {
+				t.Fatal("the allow must prove the process before the rotation")
+			}
+			if tc.fault.rename {
+				publishedSessionRenameKey = func(string, string) error { return inUse("rename") }
+			}
+			if tc.fault.remove {
+				publishedSessionRemoveKey = func(string) error { return inUse("remove") }
+			}
+			if tc.fault.create {
+				publishedSessionCreateKeyFile = func(string, PublishedSessionTrust) error { return errors.New("no space left on device") }
+			}
+			err := RotatePublishedSessionKey(root, identity, publishedSessionTestTrust)
+			if got := errors.Is(err, ErrPublishedSessionKeyAlive); got != tc.alive {
+				t.Fatalf("alive = %v, want %v: %v", got, tc.alive, err)
+			}
+			if !tc.alive && publishedSessionTestAllows(root, identity, key) {
+				t.Fatal("an allow from before a rotation that ended the key must prove nothing")
+			}
+			if tc.fault != (fault{rename: true}) && err == nil {
+				t.Fatal("a rotation that could not do it the plain way must report it")
+			}
+			// Allows published now prove nothing until one key is back.
+			publishedSessionRenameKey, publishedSessionRemoveKey, publishedSessionCreateKeyFile = previousRename, previousRemove, previousCreate
+			if !tc.alive && tc.fault != (fault{rename: true}) {
+				allow()
+				if publishedSessionTestAllows(root, identity, key) {
+					t.Fatal("an allow published while the account has no single key must prove nothing")
+				}
+			}
+			if err := EnsurePublishedSessionKey(root, identity, publishedSessionTestTrust); err != nil {
+				t.Fatal(err)
+			}
+			allow()
+			if !publishedSessionTestAllows(root, identity, key) {
+				t.Fatal("one key again must prove the next allow")
+			}
+		})
+	}
 
-	// The key file cannot be removed.
-	stuck := publishedSessionTestKey(t, root).ID()
-	previousRemove := publishedSessionRemoveKey
-	publishedSessionRemoveKey = func(name string) error {
-		if name == stuck {
-			return &os.PathError{Op: "remove", Path: name, Err: errors.New("the file is in use")}
-		}
-		return previousRemove(name)
-	}
-	t.Cleanup(func() { publishedSessionRemoveKey = previousRemove })
-	if err := KillPublishedSessionKey(root); err == nil {
-		t.Fatal("a kill that leaves the key must fail")
-	}
-	if err := RetirePublishedSessionKey(root, publishedSessionTestTrust); err == nil || !strings.Contains(err.Error(), "a second key was added") {
-		t.Fatalf("root must add a second key when it cannot remove the first: %v", err)
-	}
-	if publishedSessionTestAllows(root, identity, key) {
-		t.Fatal("a folder with two keys must prove nothing")
-	}
-	allow()
-	if publishedSessionTestAllows(root, identity, key) {
-		t.Fatal("an allow published while the folder has two keys must prove nothing")
-	}
-	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err == nil {
-		t.Fatal("a new key that cannot replace the stuck one must report it")
-	}
-	allow()
-	if publishedSessionTestAllows(root, identity, key) {
-		t.Fatal("the stuck key must keep the folder ambiguous")
-	}
-	publishedSessionRemoveKey = previousRemove
-	if err := EnsurePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Lstat(stuck); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("the next run must remove the stuck key: %v", err)
-	}
-	allow()
-	if !publishedSessionTestAllows(root, identity, key) {
-		t.Fatal("one key again must prove the next allow")
-	}
-
-	// The new key cannot be created: the kill took, so nothing proves.
-	previousCreate := publishedSessionCreateKeyFile
-	publishedSessionCreateKeyFile = func(string, PublishedSessionTrust) error { return errors.New("no space left on device") }
-	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err == nil {
-		t.Fatal("a key that cannot be created must be reported")
-	}
-	publishedSessionCreateKeyFile = previousCreate
-	if publishedSessionTestAllows(root, identity, key) {
-		t.Fatal("no key must prove nothing")
-	}
-	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
-		t.Fatal(err)
-	}
-	allow()
-
-	// The key folder cannot be listed, or a key owner cannot be read.
+	// The key folder cannot be listed, or a key owner cannot be read: the
+	// check blocks and the rotation reports the key alive.
 	previousList := publishedSessionList
 	publishedSessionList = func(string) ([]string, error) { return nil, errors.New("input/output error") }
 	if publishedSessionTestAllows(root, identity, key) {
 		t.Fatal("a key folder that cannot be listed must prove nothing")
 	}
-	if err := KillPublishedSessionKey(root); err == nil {
+	if err := RotatePublishedSessionKey(root, identity, publishedSessionTestTrust); !errors.Is(err, ErrPublishedSessionKeyAlive) {
+		t.Fatalf("a rotation that cannot list the key folder must report the key alive: %v", err)
+	}
+	if err := KillPublishedSessionKey(root, identity); err == nil {
 		t.Fatal("a kill that cannot list the key folder must fail")
 	}
 	publishedSessionList = previousList
@@ -439,29 +482,28 @@ func TestPublishedSessionKeyRotationFailureBlocks(t *testing.T) {
 	}
 
 	// A name with the key prefix that is not a key's is no key at all.
-	dir, _ := PublishedSessionKeyDir(root)
-	current := publishedSessionTestKey(t, root).ID()
-	upper := filepath.Join(dir, filepath.Base(root)+PublishedSessionKeyInfix+strings.ToUpper(strings.TrimPrefix(filepath.Base(current), filepath.Base(root)+PublishedSessionKeyInfix)))
-	names := []string{filepath.Join(dir, filepath.Base(root)+PublishedSessionKeyInfix+"abc")}
+	current := publishedSessionTestKey(t, root, identity).ID()
+	dir := filepath.Dir(current)
+	prefix := strings.TrimSuffix(filepath.Base(current), current[strings.LastIndex(current, PublishedSessionKeyInfix)+len(PublishedSessionKeyInfix):])
+	names := []string{filepath.Join(dir, prefix+"abc")}
 	if runtime.GOOS != "windows" {
 		// Windows file names ignore case: there it is the key itself.
-		names = append(names, upper)
+		names = append(names, filepath.Join(dir, prefix+strings.ToUpper(strings.TrimPrefix(filepath.Base(current), prefix))))
 	}
 	for _, name := range names {
 		if err := os.WriteFile(name, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got := publishedSessionTestKey(t, root); got.ID() != current {
+	if got := publishedSessionTestKey(t, root, identity); got.ID() != current {
 		t.Fatalf("a name that is not a key's must be skipped: %s", got.ID())
 	}
 }
 
 // Kill switch: a file with a key's name that root, SYSTEM or
 // Administrators did not make is not a key. On Windows a standard user may
-// create one in %ProgramData%\Cisco: it neither counts as a second key (one
-// account must not block every other account's outage allows) nor proves
-// anything on its own.
+// create one in %ProgramData%\Cisco: it neither counts as a second key nor
+// proves anything on its own.
 func TestPublishedSessionKeyOfAnotherAccountIsNoKey(t *testing.T) {
 	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
@@ -469,7 +511,8 @@ func TestPublishedSessionKeyOfAnotherAccountIsNoKey(t *testing.T) {
 	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	dir, prefix, _ := publishedSessionKeyPlace(root)
+	digest, _ := publishedSessionIdentityDigest(identity)
+	dir, prefix, _ := publishedSessionKeyPlace(root, digest)
 	planted := filepath.Join(dir, prefix+strings.Repeat("ab", publishedSessionKeyBytes))
 	if err := os.WriteFile(planted, nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -478,14 +521,12 @@ func TestPublishedSessionKeyOfAnotherAccountIsNoKey(t *testing.T) {
 	if !publishedSessionTestAllows(root, identity, key) {
 		t.Fatal("a planted key file must not block the real key")
 	}
-	if err := KillPublishedSessionKey(root); err != nil {
+	if err := KillPublishedSessionKey(root, identity); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(planted); err != nil {
 		t.Fatalf("the kill only removes keys: %v", err)
 	}
-	// The planted name alone, even with a record MACed under it, proves
-	// nothing: the hook finds no key.
 	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, SessionRecordKey{path: planted, secret: []byte(strings.Repeat("\xab", publishedSessionKeyBytes))}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -494,13 +535,12 @@ func TestPublishedSessionKeyOfAnotherAccountIsNoKey(t *testing.T) {
 	}
 }
 
-// Review fixes (round 3 scenario 4, kill switch): a repair cannot rely on
-// replacing the record folder. An account that kept a way to change it (a
-// retained Windows handle with WRITE_DAC, a macOS access-list entry) may put
-// the earlier records back, folder and all, after the repair, and even a
-// file with the earlier key's name. None of it counts: the repair retired
-// the key first, and only root or SYSTEM can give a file a key's name that
-// the hook accepts.
+// A repair cannot rely on replacing the record folder. An account that kept
+// a way to change it (a retained Windows handle with WRITE_DAC, a macOS
+// access-list entry) may put the earlier records back, folder and all,
+// after the repair, and even a file with the earlier key's name. None of it
+// counts: the lifecycle removed every key first, and only root or SYSTEM
+// can give a file a key's name that the hook accepts.
 func TestPublishedSessionRecordsPutBackAfterARepairProveNothing(t *testing.T) {
 	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
@@ -508,22 +548,21 @@ func TestPublishedSessionRecordsPutBackAfterARepairProveNothing(t *testing.T) {
 	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	old := publishedSessionTestKey(t, root).ID()
+	old := publishedSessionTestKey(t, root, identity).ID()
 	dir, _ := PublishedSessionIdentityDir(root, identity)
 	saved := filepath.Join(t.TempDir(), "saved")
 	if err := os.CopyFS(saved, os.DirFS(dir)); err != nil {
 		t.Fatal(err)
 	}
-	// The repair: the key is retired before anything else, and a new one
-	// made once the run succeeded.
-	if err := RetirePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+	if err := KillAllPublishedSessionKeys(root); err != nil {
 		t.Fatal(err)
 	}
-	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+	if err := EnsurePublishedSessionKeys(root, publishedSessionTestTrust); err != nil {
 		t.Fatal(err)
 	}
-	// The account puts its old folder back, and a file with the old key's
-	// name that it made itself.
+	if _, err := ReadPublishedSessionKey(root, identity); err != nil {
+		t.Fatalf("the repair makes the account a new key: %v", err)
+	}
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -545,47 +584,55 @@ func TestPublishedSessionRecordsPutBackAfterARepairProveNothing(t *testing.T) {
 	}
 }
 
-// The guardian makes sure there is a key at every pass: none or more than
-// one gets one new key, one is kept, and a missing record folder gets none.
-func TestEnsurePublishedSessionKey(t *testing.T) {
+// The guardian makes sure every account folder has a key at every pass:
+// none or more than one gets one new key, one is kept, and a missing record
+// folder gets none.
+func TestEnsurePublishedSessionKeys(t *testing.T) {
 	root := publishedSessionTestRoot(t)
-	first := publishedSessionTestKey(t, root).ID()
-	if err := EnsurePublishedSessionKey(root, publishedSessionTestTrust); err != nil || publishedSessionTestKey(t, root).ID() != first {
+	identity := publishedSessionTestIdentity(t)
+	if err := publishCurrent(root, identity, SessionKey{Connector: "copilot", Session: "s", Process: "p"}, GuardDecision{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	first := publishedSessionTestKey(t, root, identity).ID()
+	if err := EnsurePublishedSessionKeys(root, publishedSessionTestTrust); err != nil || publishedSessionTestKey(t, root, identity).ID() != first {
 		t.Fatalf("one key must be kept: %v", err)
 	}
-	if err := KillPublishedSessionKey(root); err != nil {
+	if err := KillPublishedSessionKey(root, identity); err != nil {
 		t.Fatal(err)
 	}
-	if err := EnsurePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+	if err := EnsurePublishedSessionKeys(root, publishedSessionTestTrust); err != nil {
 		t.Fatal(err)
 	}
-	second := publishedSessionTestKey(t, root).ID()
+	second := publishedSessionTestKey(t, root, identity).ID()
 	if second == first {
 		t.Fatal("a missing key must be replaced by a new one")
 	}
-	if _, err := createPublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+	if _, err := createAccountTestKey(root, identity, publishedSessionTestTrust); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadPublishedSessionKey(root); err == nil {
+	if _, err := ReadPublishedSessionKey(root, identity); err == nil {
 		t.Fatal("two keys must be no key")
 	}
-	if err := EnsurePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+	if err := EnsurePublishedSessionKeys(root, publishedSessionTestTrust); err != nil {
 		t.Fatal(err)
 	}
-	if third := publishedSessionTestKey(t, root).ID(); third == second {
+	if third := publishedSessionTestKey(t, root, identity).ID(); third == second {
 		t.Fatal("two keys must be replaced by one new one")
 	}
 	missing := filepath.Join(t.TempDir(), "sessions")
-	if err := EnsurePublishedSessionKey(missing, publishedSessionTestTrust); err != nil {
+	if err := EnsurePublishedSessionKeys(missing, publishedSessionTestTrust); err != nil {
 		t.Fatal(err)
 	}
-	if keys, err := publishedSessionKeys(missing); err != nil || len(keys) != 0 {
+	if err := EnsurePublishedSessionKey(missing, identity, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, keys, err := accountKeys(missing, identity); err != nil || len(keys) != 0 {
 		t.Fatalf("a missing record folder gets no key: %v %v", keys, err)
 	}
 	if err := RemovePublishedSessionKeys(root); err != nil {
 		t.Fatal(err)
 	}
-	if keys, err := publishedSessionKeys(root); err != nil || len(keys) != 0 {
+	if _, _, keys, err := accountKeys(root, identity); err != nil || len(keys) != 0 {
 		t.Fatalf("uninstall must remove every key: %v %v", keys, err)
 	}
 }
@@ -622,22 +669,19 @@ func TestPublishedForeignHookSessionOnAReadOnlyVolumeProvesNothing(t *testing.T)
 	}
 }
 
-// The key is read again at the end of the check: a kill while the check
-// runs ends the allow it was reading.
+// The key is read again at the end of the check: a kill or a rotation
+// while the check runs ends the allow it was reading.
 func TestPublishedForeignHookSessionKeyKilledDuringTheCheck(t *testing.T) {
 	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
-	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
 	previous := publishedSessionVolumeReadOnly
 	t.Cleanup(func() { publishedSessionVolumeReadOnly = previous })
 	for name, during := range map[string]func(){
-		"killed":   func() { _ = KillPublishedSessionKey(root) },
-		"replaced": func() { _ = CreatePublishedSessionKey(root, publishedSessionTestTrust) },
+		"killed":  func() { _ = KillPublishedSessionKey(root, identity) },
+		"rotated": func() { _ = RotatePublishedSessionKey(root, identity, publishedSessionTestTrust) },
 	} {
-		if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+		if err := EnsurePublishedSessionKey(root, identity, publishedSessionTestTrust); err != nil {
 			t.Fatal(err)
 		}
 		if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {

@@ -113,7 +113,7 @@ func TestThePublishedSessionKeyMustBeRoots(t *testing.T) {
 	if err := os.Mkdir(root, 0o711); err != nil {
 		t.Fatal(err)
 	}
-	path, err := createPublishedSessionKey(root, PublishedSessionTrust{})
+	path, err := createAccountTestKey(root, publishedSessionTestIdentity(t), PublishedSessionTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,10 +128,10 @@ func TestThePublishedSessionKeyMustBeRoots(t *testing.T) {
 	if err := ValidatePublishedSessionPath(record, service); err != nil && strings.HasSuffix(err.Error(), ", not root") {
 		t.Fatalf("a record of the gateway service uid is not refused for its owner: %v", err)
 	}
-	if _, err := ReadPublishedSessionKey(root); err == nil {
+	if _, err := ReadPublishedSessionKey(root, publishedSessionTestIdentity(t)); err == nil {
 		t.Fatal("a key file root does not own must be no key")
 	}
-	if err := KillPublishedSessionKey(root); err != nil {
+	if err := KillPublishedSessionKey(root, publishedSessionTestIdentity(t)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(path); err != nil {

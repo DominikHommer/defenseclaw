@@ -74,7 +74,7 @@ func TestPackageTmpfilesCreateTheHookFoldersAndNoKey(t *testing.T) {
 			t.Fatalf("tmpfiles must not make a key: %q", line)
 		}
 	}
-	if err := enterprisepolicy.EnsurePublishedSessionKey(root, enterprisepolicy.PublishedSessionTrust{}); err != nil {
+	if err := enterprisepolicy.EnsurePublishedSessionKey(root, hookSessionTestAccount, enterprisepolicy.PublishedSessionTrust{}); err != nil {
 		t.Fatal(err)
 	}
 	key := hookSessionTestKeyID(root)
