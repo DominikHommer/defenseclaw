@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -50,6 +51,8 @@ func TestR104Refix3WriteEvidence(t *testing.T) {
 		{"xargs replacement form", `printf alias | xargs --replace=DEST python3 -c 'open("DEST","a").write("marker")'`, ""},
 		{"copyfile keyword literal expression", `python3 -c 'import shutil; shutil.copyfile(src="payload",dst="ali" "as")'`, "interpreter-path"},
 		{"copyfile optional literal expression", `python3 -c 'import shutil; shutil.copyfile("payload","ali" "as",follow_symlinks=True)'`, "interpreter-path"},
+		{"GAP-0475 f-string with inert argv", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("marker")}"""' .`, "interpreter-path"},
+		{"GAP-0475 inert triple string", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """{p.write_text("marker")}"""'`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := UnprovenProtectedWrite(tc.command, cwd, home); got != tc.reason {
@@ -65,6 +68,24 @@ func TestR104Refix3WriteEvidence(t *testing.T) {
 	} {
 		if got := LiteralWriteOperands(command, cwd, home); !slices.Contains(got, filepath.Join(cwd, "alias")) {
 			t.Errorf("%q operands=%q, want alias", command, got)
+		}
+	}
+}
+
+func TestR104PythonStringEffectPosition(t *testing.T) {
+	for _, tc := range []struct {
+		code string
+		want bool
+	}{
+		{`f"""{p.write_text("marker")}"""`, true},
+		{`fr"""{p.write_text("marker")}"""`, true},
+		{`"""{p.write_text("marker")}"""`, false},
+		{`f"""{{p.write_text("marker")}}"""`, false},
+		{`"value"; p.write_text("marker")`, true},
+	} {
+		position := strings.Index(tc.code, "write_text")
+		if got := pythonExecutableCodePosition(tc.code, position); got != tc.want {
+			t.Errorf("code %q: executable=%v, want %v", tc.code, got, tc.want)
 		}
 	}
 }

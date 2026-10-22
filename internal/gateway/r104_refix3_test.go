@@ -31,6 +31,9 @@ func TestR104CodexNativeExecWorkdirRefix3(t *testing.T) {
 		{"native exec_command indirect writer", "make writekeys", project, true},
 		{"native exec_command relative workdir", "make writekeys", filepath.Base(project), true},
 		{"native exec_command ordinary writer", "make safe", project, false},
+		{"GAP-0475 native f-string trailing argument", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("marker")}"""' .`, project, true},
+		{"GAP-0475 native f-string exact", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("marker")}"""'`, project, true},
+		{"GAP-0475 inert plain string", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """{p.write_text("marker")}"""'`, project, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := mustJSON(t, map[string]any{
@@ -96,6 +99,9 @@ func TestR104ProtectedWriteRefix3(t *testing.T) {
 		{"copyfile keyword literal expression", `python3 -c 'import shutil; shutil.copyfile(src="payload",dst="ali" "as")'`, true},
 		{"copyfile optional literal expression", `python3 -c 'import shutil; shutil.copyfile("payload","ali" "as",follow_symlinks=True)'`, true},
 		{"copyfile ordinary destination", `python3 -c 'import shutil; shutil.copyfile("payload","out.txt")'`, false},
+		{"GAP-0475 trailing Python argument", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("marker")}"""' .`, true},
+		{"GAP-0475 exact Python argument", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("marker")}"""'`, true},
+		{"GAP-0475 inert triple string", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """{p.write_text("marker")}"""'`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for i, got := range r104ReviewProtectedWrite(t, tc.command, cwd, home) {

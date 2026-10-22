@@ -581,6 +581,9 @@ func interpreterProtectedUseSafe(code, language, cwd, home string) bool {
 		return true
 	}
 	if language == "python" || strings.HasPrefix(language, "python3") {
+		if pythonInertTripleStringProgram(code) {
+			return true
+		}
 		if safePythonRead.MatchString(code) || safePythonPrint.MatchString(code) {
 			return true
 		}
@@ -835,6 +838,9 @@ func unprovenInterpreterCode(code, language, cwd, home string) (string, bool) {
 	}
 	if language == "python" || strings.HasPrefix(language, "python3") {
 		for _, location := range literalCopyCall.FindAllStringIndex(code, -1) {
+			if !pythonExecutableCodePosition(code, location[0]) {
+				continue
+			}
 			api := strings.TrimSuffix(code[location[0]:location[1]], "(")
 			if api != "shutil.copy" && api != "shutil.copy2" {
 				continue
@@ -884,6 +890,10 @@ func unprovenInterpreterCode(code, language, cwd, home string) (string, bool) {
 		}
 	}
 	for _, location := range unprovenWriter.FindAllStringIndex(code, -1) {
+		if (language == "python" || strings.HasPrefix(language, "python3")) &&
+			!pythonExecutableCodePosition(code, location[0]) {
+			continue
+		}
 		call, ok := literalBoundedCall(code, location[1]-1)
 		if !ok {
 			return "interpreter-path", true
