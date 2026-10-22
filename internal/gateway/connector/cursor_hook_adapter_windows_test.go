@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -41,6 +42,7 @@ const cursorAdapterPIDFileEnv = "TEST_CURSOR_ADAPTER_PID_FILE"
 const copilotAdapterHelperMode = "TEST_COPILOT_ADAPTER_MODE"
 const copilotAdapterPIDFileEnv = "TEST_COPILOT_ADAPTER_PID_FILE"
 const copilotAdapterChildStdoutEnv = "TEST_COPILOT_ADAPTER_CHILD_STDOUT"
+const copilotAdapterChildStdoutFileEnv = "TEST_COPILOT_ADAPTER_CHILD_STDOUT_FILE"
 
 func TestMain(m *testing.M) {
 	switch os.Getenv(copilotAdapterHelperMode) {
@@ -65,7 +67,16 @@ func TestMain(m *testing.M) {
 	case "crash":
 		os.Exit(7)
 	case "crash-with-output":
-		fmt.Print(os.Getenv(copilotAdapterChildStdoutEnv))
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		if path := os.Getenv(copilotAdapterChildStdoutFileEnv); path != "" {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				os.Exit(6)
+			}
+			_, _ = os.Stdout.Write(body)
+		} else {
+			fmt.Print(os.Getenv(copilotAdapterChildStdoutEnv))
+		}
 		os.Exit(7)
 	}
 	switch os.Getenv(cursorAdapterHelperMode) {
@@ -179,11 +190,27 @@ func runCopilotAdapterEventTest(
 	event string,
 ) (stdout, stderr string, exitCode int) {
 	t.Helper()
+	return runCopilotAdapterEventEnvTest(t, adapterPath, payload, event, nil)
+}
+
+// runCopilotAdapterEventEnvTest adds env to the adapter's environment, so
+// parallel subtests can give their own launcher helper settings.
+func runCopilotAdapterEventEnvTest(
+	t *testing.T,
+	adapterPath string,
+	payload string,
+	event string,
+	env []string,
+) (stdout, stderr string, exitCode int) {
+	t.Helper()
 	quoted := strings.ReplaceAll(adapterPath, "'", "''")
 	cmd := exec.Command(
 		"powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
 		"& '"+quoted+"' -Event '"+event+"'",
 	)
+	if env != nil {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	cmd.Stdin = strings.NewReader(payload)
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
@@ -289,72 +316,175 @@ func TestCopilotAdapterExplicitOpenKeepsOpenAnswer(t *testing.T) {
 // TestCopilotAdapterKeepsChildDenialWhenChildExitsNonzero: a launcher that
 // printed one complete denial for its event and then exited nonzero has
 // decided, in either fail mode; anything else with a nonzero status is a
-// failure the fail mode answers.
+// failure the fail mode answers. "Denial" means what Copilot's JSON.parse
+// reads: the exact top-level key (keys that differ only by case are other
+// keys), the last duplicate wins, the value is the string "deny", any
+// nesting depth. The adapter answers with its own denial, so the expected
+// output is decoded and compared key by key.
 func TestCopilotAdapterKeepsChildDenialWhenChildExitsNonzero(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(copilotAdapterHelperMode, "crash-with-output")
-	ownDenial := map[string]string{
-		"preToolUse":        `{"permissionDecision":"deny","permissionDecisionReason":"matched: test"}`,
-		"permissionRequest": `{"behavior":"deny","message":"matched: test"}`,
-	}
-	failClosed := map[string]string{
-		"preToolUse":        `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}`,
-		"permissionRequest": `{"behavior":"deny","message":"DefenseClaw hook failed closed"}`,
-	}
-	other := map[string]string{"preToolUse": "permissionRequest", "permissionRequest": "preToolUse"}
 	released, err := os.ReadFile(filepath.Join("testdata", "released-hooks", "1.0.3", "copilot-hook.ps1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	refreshed := filepath.Join(t.TempDir(), "copilot-hook.ps1")
 	text := strings.ReplaceAll(string(released), "{{.HookBinaryPS}}", strings.ReplaceAll(executable, "'", "''"))
-	if err := os.WriteFile(refreshed, []byte(strings.ReplaceAll(text, "{{.CopilotHookTimeoutMS}}", "10000")), 0o600); err != nil {
+	if err := os.WriteFile(refreshed, []byte(strings.ReplaceAll(text, "{{.CopilotHookTimeoutMS}}", "20000")), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if changed, err := closeReleasedCopilotAdapter(refreshed); err != nil || !changed {
 		t.Fatalf("refresh released Copilot adapter: changed=%v error=%v", changed, err)
 	}
 	adapters := map[string]string{
-		"closed":            renderCopilotAdapterForTest(t, executable, 10_000, "closed"),
-		"open":              renderCopilotAdapterForTest(t, executable, 10_000, "open"),
+		"closed":            renderCopilotAdapterForTest(t, executable, 20_000, "closed"),
+		"open":              renderCopilotAdapterForTest(t, executable, 20_000, "open"),
 		"refreshed release": refreshed,
+		// The budget cases need the check to outlast the hook budget.
+		"closed budget": renderCopilotAdapterForTest(t, executable, 8_000, "closed"),
+		"open budget":   renderCopilotAdapterForTest(t, executable, 8_000, "open"),
 	}
-	for _, mode := range []string{"closed", "open", "refreshed release"} {
-		for _, event := range []string{"preToolUse", "permissionRequest"} {
-			cases := []struct{ name, child string }{
-				{"own denial", ownDenial[event]},
-				{"other event's denial", ownDenial[other[event]]},
-				{"two denials", ownDenial[event] + "\n" + ownDenial[event]},
-				{"allow", `{"permissionDecision":"allow","behavior":"allow"}`},
-				{"truncated denial", strings.TrimSuffix(ownDenial[event], "}")},
-			}
-			if mode == "refreshed release" {
-				cases = cases[:1]
-			}
-			for _, tc := range cases {
-				t.Run(mode+"/"+event+"/"+tc.name, func(t *testing.T) {
-					t.Setenv(copilotAdapterChildStdoutEnv, tc.child)
-					stdout, stderr, code := runCopilotAdapterEventTest(t, adapters[mode], `{"source":"copilot-adapter-probe"}`, event)
-					want := ""
-					switch {
-					case tc.name == "own denial":
-						want = tc.child
-					case mode != "open":
-						want = failClosed[event]
-					}
-					if code != 0 || strings.TrimSpace(stdout) != want {
-						t.Fatalf("exit %d stdout=%q want %q stderr=%q", code, stdout, want, stderr)
-					}
-					if tc.name != "own denial" && !strings.Contains(stderr, "exited with status 7") {
-						t.Fatalf("stderr = %q, want the launcher status", stderr)
-					}
-				})
-			}
+	// Millions of tokens: PowerShell cannot check this inside the budget.
+	huge := filepath.Join(t.TempDir(), "huge-answer.json")
+	if err := os.WriteFile(huge, []byte(`{"pad":[`+strings.Repeat("0,", 3_000_000)+`0]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string][2]string{
+		"preToolUse":        {"permissionDecision", "permissionDecisionReason"},
+		"permissionRequest": {"behavior", "message"},
+	}
+	failClosed := func(event string) map[string]any {
+		k := keys[event]
+		return map[string]any{k[0]: "deny", k[1]: "DefenseClaw hook failed closed"}
+	}
+	const failure = "failure"
+	type adapterCase struct {
+		name  string
+		child string
+		want  any // a decoded denial, or failure
+	}
+	casesFor := func(event string) []adapterCase {
+		k, r := keys[event][0], keys[event][1]
+		upper := strings.ToUpper(k[:1]) + k[1:]
+		otherEvent := map[string]string{"preToolUse": "permissionRequest", "permissionRequest": "preToolUse"}[event]
+		otherKey, otherReason := keys[otherEvent][0], keys[otherEvent][1]
+		own := `{"` + k + `":"deny","` + r + `":"matched: test"}`
+		return []adapterCase{
+			{"own denial", own, map[string]any{k: "deny", r: "matched: test"}},
+			{"own denial with CRLF and spaces", " \r\n" + own + "\r\n\t", map[string]any{k: "deny", r: "matched: test"}},
+			{"case-colliding allow after the denial", `{"` + k + `":"deny","` + r + `":"policy","` + upper + `":"allow"}`, map[string]any{k: "deny", r: "policy"}},
+			{"case-colliding allow before the denial", `{"` + upper + `":"allow","` + k + `":"deny","` + r + `":"policy"}`, map[string]any{k: "deny", r: "policy"}},
+			{"case-colliding denial with the exact key allowing", `{"` + upper + `":"deny","` + k + `":"allow"}`, failure},
+			{"denial under another case only", `{"` + upper + `":"deny"}`, failure},
+			{"last duplicate denies", `{"` + k + `":"allow","` + k + `":"deny"}`, map[string]any{k: "deny"}},
+			{"last duplicate allows", `{"` + k + `":"deny","` + k + `":"allow"}`, failure},
+			{"escaped key and value", `{"` + k[:2] + `\u00` + strconv.FormatInt(int64(k[2]), 16) + k[3:] + `":"deny","` + r + `":"a \"q\" \\ \/ \n \u2028\u2029 café \ud83d\ude00 😀"}`, map[string]any{k: "deny", r: "a \"q\" \\ / \n \u2028\u2029 café \U0001F600 \U0001F600"}},
+			{"non-string reason", `{"` + k + `":"deny","` + r + `":7}`, map[string]any{k: "deny"}},
+			{"denial deeper than ConvertFrom-Json reads", `{"` + k + `":"deny","pad":` + strings.Repeat("[", 2000) + strings.Repeat("]", 2000) + `}`, map[string]any{k: "deny"}},
+			{"array value", `{"` + k + `":["deny"]}`, failure},
+			{"object value", `{"` + k + `":{"deny":"deny"}}`, failure},
+			{"other case of the value", `{"` + k + `":"Deny"}`, failure},
+			{"nested denial only", `{"hookSpecificOutput":{"` + k + `":"deny"}}`, failure},
+			{"other event's denial", `{"` + otherKey + `":"deny","` + otherReason + `":"matched: test"}`, failure},
+			{"two denials", own + "\n" + own, failure},
+			{"allow", `{"permissionDecision":"allow","behavior":"allow"}`, failure},
+			{"truncated denial", strings.TrimSuffix(own, "}"), failure},
+			{"trailing text", own + "x", failure},
+			{"trailing comma", `{"` + k + `":"deny",}`, failure},
+			{"invalid number", `{"` + k + `":"deny","pad":01}`, failure},
+			{"array of denials", "[" + own + "]", failure},
 		}
 	}
+	type run struct {
+		name, adapter, event, child, childFile string
+		want                                   any
+	}
+	var runs []run
+	for _, event := range []string{"preToolUse", "permissionRequest"} {
+		cases := casesFor(event)
+		for _, mode := range []string{"closed", "open", "refreshed release"} {
+			for i, tc := range cases {
+				if mode == "refreshed release" && i > 2 {
+					break
+				}
+				want := tc.want
+				if want == failure {
+					want = nil
+					if mode != "open" {
+						want = failClosed(event)
+					}
+				}
+				runs = append(runs, run{mode + "/" + event + "/" + tc.name, adapters[mode], event, tc.child, "", want})
+			}
+		}
+		// A check that cannot finish inside the budget is doubt: it denies in
+		// either fail mode.
+		for _, mode := range []string{"closed", "open"} {
+			runs = append(runs, run{mode + "/" + event + "/answer too large to check", adapters[mode+" budget"], event, "", huge, failClosed(event)})
+		}
+	}
+	for _, r := range runs {
+		t.Run(r.name, func(t *testing.T) {
+			t.Parallel()
+			env := []string{
+				copilotAdapterHelperMode + "=crash-with-output",
+				copilotAdapterChildStdoutEnv + "=" + r.child,
+				copilotAdapterChildStdoutFileEnv + "=" + r.childFile,
+			}
+			stdout, stderr, code := runCopilotAdapterEventEnvTest(t, r.adapter, `{"source":"copilot-adapter-probe"}`, r.event, env)
+			if code != 0 {
+				t.Fatalf("exit %d stdout=%q stderr=%q", code, stdout, stderr)
+			}
+			got := decodeOneCopilotAnswer(t, stdout)
+			if !reflect.DeepEqual(got, r.want) {
+				t.Fatalf("answer = %#v, want %#v; stdout=%q stderr=%q", got, r.want, stdout, stderr)
+			}
+			if wantMap, _ := r.want.(map[string]any); wantMap == nil || wantMap[keys[r.event][1]] == "DefenseClaw hook failed closed" {
+				if !strings.Contains(stderr, "exited with status 7") {
+					t.Fatalf("stderr = %q, want the launcher status", stderr)
+				}
+			}
+		})
+	}
+}
+
+// decodeOneCopilotAnswer returns the one JSON object stdout holds, or nil
+// for empty stdout. It fails on a duplicate key, a second document or
+// trailing text, since Copilot would read those differently.
+func decodeOneCopilotAnswer(t *testing.T, stdout string) any {
+	t.Helper()
+	if strings.TrimSpace(stdout) == "" {
+		return nil
+	}
+	dec := json.NewDecoder(strings.NewReader(stdout))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		t.Fatalf("answer %q is not one JSON object: %v %v", stdout, tok, err)
+	}
+	answer := map[string]any{}
+	for dec.More() {
+		tok, err := dec.Token()
+		key, isKey := tok.(string)
+		if err != nil || !isKey {
+			t.Fatalf("answer %q: bad key %v %v", stdout, tok, err)
+		}
+		if _, dup := answer[key]; dup {
+			t.Fatalf("answer %q repeats key %q", stdout, key)
+		}
+		var value any
+		if err := dec.Decode(&value); err != nil {
+			t.Fatalf("answer %q: %v", stdout, err)
+		}
+		answer[key] = value
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		t.Fatalf("answer %q is not one JSON object: %v %v", stdout, tok, err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		t.Fatalf("answer %q has text after the object: %v", stdout, err)
+	}
+	return answer
 }
 
 func TestCopilotAdapterProductionDeadlineKillsChildAndFailsClosed(t *testing.T) {
