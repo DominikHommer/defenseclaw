@@ -167,7 +167,7 @@ func TestDirectStopAndDeleteExcludeNewSessionUntilAPICallCompletes(t *testing.T)
 		sb.Phase = "ready"
 		ta.daemon.add(sb)
 		api := &stalledFinishAPI{API: ta.daemon.client(), started: make(chan struct{}), proceed: make(chan struct{})}
-		ta.App.API = api
+		ta.API = api
 		finished := make(chan error, 1)
 		go func() {
 			if remove {
