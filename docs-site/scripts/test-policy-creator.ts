@@ -321,9 +321,10 @@ test('deterministic docs: profile totals and chain posture match canonical sourc
   assert.ok(index.includes(
     `The balanced/default enabled catalog currently contains ${balanced.enabled} local rules`,
   ));
-  assert.ok(creator.includes(
-    `Balanced/default exposes ${balanced.declared} declared rules (${balanced.enabled} enabled)`,
-  ));
+  // Counts live in the reference and policy overview. The creator guide
+  // defines the boundary of its browser replay, not a second rule catalog.
+  assert.ok(creator.includes('Live Test evaluates only the admission and guardrail Rego.'));
+  assert.ok(creator.includes('does not run ActionFacts parsing, CEL, regex, YARA or bounded chains.'));
 
   const enforcementCapable = BOUNDED_CHAINS.filter(
     (chain) => chain.mode === 'enforcement-capable',
