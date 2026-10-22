@@ -31,13 +31,11 @@ import (
 // refuses to install below the floor, and it follows an agent upgrade at or
 // above it (a not-gated connector has no known contract to follow).
 //
-// Kiro: kiro-cli 2.24.1 is the lowest build verified on Windows, Linux and
-// macOS. Its `kiro-cli chat --help` lists
-// --v3 and --agent-engine v1|v2|v3, the engine that reads the user's global
-// ~/.kiro/hooks file and vetoes UserPromptSubmit. kiro.dev documents --v3
-// from 2.21.4; builds between 2.21.4 and 2.24.1 are not certified here.
+// Kiro: connector.KiroCLIHookFloor (2.27.1). Before it a non-interactive
+// `kiro-cli chat --v3` run loads no hooks, so that kiro-cli has a surface
+// whose tool calls never reach DefenseClaw (rel-1-0-4 GAP-0227).
 var standaloneNotGatedAgentFloors = map[string]string{
-	"kiro": "2.24.1",
+	"kiro": connector.KiroCLIHookFloor,
 }
 
 // Kiro IDE rows. The Kiro IDE reads the global ~/.kiro/hooks file from
@@ -77,6 +75,9 @@ func standaloneNotGatedVersionAdmitted(resolution connector.HookContractResoluti
 		return false, fmt.Sprintf("its version could not be read; the standalone profile certifies %s %s and later", product, floor)
 	}
 	if compareStandaloneFloorVersion(normalized, floor) < 0 {
+		if product == "kiro" {
+			return false, connector.KiroCLIBelowHookFloorReason(normalized)
+		}
 		return false, fmt.Sprintf("%s %s is below the certified minimum %s", subject, normalized, floor)
 	}
 	return true, ""

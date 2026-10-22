@@ -554,11 +554,11 @@ Only Kiro IDE 1.0.182 and later and `kiro-cli --v3` read the global `~/.kiro/hoo
 
 **Where:** Kiro, Linux, macOS and Windows.
 
-**What reduces it:** Keep kiro-cli at 2.24.1 or later. Treat a kiro-cli prompt block as a record, not a veto. Turn off configuration sync in the Kiro console.
+**What reduces it:** Keep kiro-cli at 2.27.1 or later (DefenseClaw refuses an older one: its non-interactive `--v3` runs load no hooks). Treat a kiro-cli prompt block as a record, not a veto. Turn off configuration sync in the Kiro console.
 
 #### Kiro on Windows before its first run
 
-Kiro on Windows is enrolled per user, and a kiro-cli that has never run has no version the guardian can read, so it is enrolled at 2.24.1 (the lowest reviewed contract) until its first run names the version. The Kiro hook returns a block as exit 2 whether Kiro starts it through `pwsh -Command`, `powershell -Command`, `cmd.exe` or directly.
+Kiro on Windows is enrolled per user, and a kiro-cli that has never run has no version the guardian can read, so it is enrolled at 2.27.1 (the lowest reviewed contract) until its first run names the version. The Kiro hook returns a block as exit 2 whether Kiro starts it through `pwsh -Command`, `powershell -Command`, `cmd.exe` or directly.
 
 **Where:** Kiro, Windows.
 

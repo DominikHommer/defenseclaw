@@ -227,7 +227,7 @@ def test_discovery_absence_is_unavailable_and_unregistered_names_are_bounded() -
 def test_connector_rows_name_the_connector_and_accept_untested_newer_versions() -> None:
     discovery = SimpleNamespace(
         agents={
-            "kiro": _signal(installed=True, version="kiro-cli 2.22.0"),
+            "kiro": _signal(installed=True, version="kiro-cli 2.27.1"),
             "omnigent": _signal(installed=True, version="omnigent 0.15.0"),
         }
     )

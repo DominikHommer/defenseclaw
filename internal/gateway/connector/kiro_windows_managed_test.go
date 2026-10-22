@@ -20,8 +20,9 @@ import "testing"
 
 func TestKiroWindowsManagedHookContract(t *testing.T) {
 	for raw, want := range map[string]string{
-		"2.24.1":                         KiroWindowsManagedCLIContractID,
+		"2.27.1":                         KiroWindowsManagedCLIContractID,
 		"2.30.0":                         KiroWindowsManagedCLIContractID,
+		"2.26.1":                         "", // its non-interactive --v3 runs load no hooks (GAP-0227)
 		"2.20.0":                         "",
 		"1.0.190" + KiroIDEVersionSuffix: KiroWindowsManagedIDEContractID,
 		"1.0.170" + KiroIDEVersionSuffix: "",
@@ -36,15 +37,15 @@ func TestKiroWindowsManagedHookContract(t *testing.T) {
 	// The managed footprint pins the contract; the gateway serving it
 	// resolves the pin without the managed flag. Per-user Kiro stays
 	// not gated, and Windows managed IDs are not registered elsewhere.
-	managed := resolveHookContractForOptions("kiro", SetupOpts{GOOS: "windows", ManagedEnterprise: true, AgentVersion: "2.24.1"})
+	managed := resolveHookContractForOptions("kiro", SetupOpts{GOOS: "windows", ManagedEnterprise: true, AgentVersion: "2.27.1"})
 	if managed.Contract.ContractID != KiroWindowsManagedCLIContractID {
 		t.Fatalf("managed Windows Kiro = %q (%s)", managed.Contract.ContractID, managed.Reason)
 	}
-	gateway := resolveHookContractForOptions("kiro", SetupOpts{GOOS: "windows", AgentVersion: "2.24.1", HookContractID: KiroWindowsManagedCLIContractID})
+	gateway := resolveHookContractForOptions("kiro", SetupOpts{GOOS: "windows", AgentVersion: "2.27.1", HookContractID: KiroWindowsManagedCLIContractID})
 	if gateway.Status != HookCompatibilityKnown || gateway.Contract.ContractID != KiroWindowsManagedCLIContractID {
 		t.Fatalf("pinned Windows Kiro = %q (%s, %s)", gateway.Contract.ContractID, gateway.Status, gateway.Reason)
 	}
-	if perUser := resolveHookContractForOptions("kiro", SetupOpts{GOOS: "windows", AgentVersion: "2.24.1"}); perUser.Status != HookCompatibilityNotGated {
+	if perUser := resolveHookContractForOptions("kiro", SetupOpts{GOOS: "windows", AgentVersion: "2.27.1"}); perUser.Status != HookCompatibilityNotGated {
 		t.Fatalf("per-user Windows Kiro = %s", perUser.Status)
 	}
 	if _, ok := hookContractByIDForOS("kiro", KiroWindowsManagedCLIContractID, "linux"); ok {
@@ -52,7 +53,7 @@ func TestKiroWindowsManagedHookContract(t *testing.T) {
 	}
 
 	// The profile keeps the paths, scope and correlation it had unpinned.
-	opts := SetupOpts{GOOS: "windows", ManagedEnterprise: true, AgentVersion: "2.24.1"}
+	opts := SetupOpts{GOOS: "windows", ManagedEnterprise: true, AgentVersion: "2.27.1"}
 	plain := HookProfile{Name: "kiro", Capabilities: HookCapability{Scope: "user", ConfigPath: "hooks.json"}}
 	profile := ApplyHookContract(plain, opts)
 	if profile.ContractID != KiroWindowsManagedCLIContractID || profile.Capabilities.Scope != "user" ||

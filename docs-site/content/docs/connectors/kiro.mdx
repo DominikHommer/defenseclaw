@@ -22,6 +22,24 @@ an optional, independent [ACP path](#acp-guard) runs `kiro-cli acp` behind
 | Native Windows x64 | **Supported** | The same native hooks, run by DefenseClaw's native hook binary ([Native Windows](#native-windows)), plus the optional `defenseclaw-acp.exe` ACP guard. |
 | Windows ARM64 | **Not certified** | The guard cross-compiles, but the native Windows release is certified on x64 only. |
 
+## Supported versions
+
+Kiro CLI must be **2.27.1 or later**. Before 2.27.1, a non-interactive
+`kiro-cli chat --v3` run (`--no-interactive`) loads no hooks at all, from the
+agent or the workspace ([Kiro headless mode](https://kiro.dev/docs/cli/headless/)),
+so its tool calls never reach DefenseClaw: on kiro-cli 2.26.1 such a run
+completed a tool call that sent DefenseClaw nothing. DefenseClaw therefore
+treats an older kiro-cli as unsupported:
+
+- `defenseclaw setup kiro` refuses it in observe and action mode, before it
+  changes any Kiro file, and says to update Kiro CLI.
+- `defenseclaw doctor` reports the active Kiro connector as unsupported.
+- The enterprise guardian does not enroll it (see
+  [Enterprise](#enterprise-standalone-profile)).
+
+Kiro IDE is not gated by this floor; its own floor for the global hook file
+is below.
+
 ## Setup
 
 ```bash
@@ -220,14 +238,16 @@ directory is machine-wide, so every enrolled user would share the copy, and
 the global file already covers it. Teardown still removes a workspace copy
 that an earlier release wrote.
 
-The standalone profile certifies kiro-cli 2.24.1 and later. That is the first
-build checked with `--v3` and `--agent-engine v3`. In action mode the guardian
+The standalone profile certifies kiro-cli 2.27.1 and later (see
+[Supported versions](#supported-versions)). In action mode the guardian
 refuses to enroll a new user whose kiro-cli is older and reports the reason. A
-user an earlier release already enrolled below 2.24.1 keeps being repaired at
-that version; a kiro-cli change to another version below 2.24.1 is refused as
-hook contract drift until kiro-cli reaches 2.24.1. The guardian follows a
-kiro-cli self-update at or above 2.24.1 and re-renders the user's hooks. It
-does not follow a downgrade below that version.
+user an earlier release already enrolled below 2.27.1 keeps being repaired at
+that version, so the interactive sessions stay enforced, but that kiro-cli's
+non-interactive `--v3` runs send no hooks until it is updated. A kiro-cli
+change to another version below 2.27.1 is refused as hook contract drift until
+kiro-cli reaches 2.27.1. The guardian follows a kiro-cli self-update at or
+above 2.27.1 and re-renders the user's hooks. It does not follow a downgrade
+below that version.
 
 On Windows the guardian writes the same files under `%USERPROFILE%\.kiro`,
 with the hook command described in [Native Windows](#native-windows).
@@ -235,13 +255,13 @@ Windows discovery runs nothing. `kiro-cli.exe` records no version beside
 itself, but each run copies the build to
 `%LOCALAPPDATA%\Kiro-Cli\run\chat-cli-<version>.exe`; the guardian takes
 the copy whose size matches `kiro-cli.exe`. A kiro-cli that has never run has
-no copy; unless the Kiro IDE enrolls the user, it is enrolled at 2.24.1, the
+no copy; unless the Kiro IDE enrolls the user, it is enrolled at 2.27.1, the
 lowest reviewed contract, so its first chat already runs with the
 DefenseClaw agent, and the next pass after that run reads its real version. The IDE's version
 comes from the `product.json` folders in the hook scope callout above.
 
 Managed Windows pins each enrolled user to one of two reviewed hook
-contracts: `kiro-cli-windows-managed-hooks-v1` for kiro-cli 2.24.1 and later,
+contracts: `kiro-cli-windows-managed-hooks-v1` for kiro-cli 2.27.1 and later,
 and `kiro-ide-windows-managed-hooks-v1` for Kiro IDE 1.0.182 and later (a
 `+kiro-ide` version). Both cover the global hook file, where
 DefenseClaw blocks on `UserPromptSubmit` and `PreToolUse` (kiro-cli `--v3`

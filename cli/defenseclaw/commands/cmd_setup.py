@@ -87,6 +87,7 @@ from defenseclaw.config import (
 )
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACTS,
+    KIRO_CLI_HOOK_FLOOR,
     PROXY_CONNECTORS,
     STATUS_KNOWN,
     STATUS_NOT_GATED,
@@ -5504,6 +5505,8 @@ def _connector_contract_upgrade_guidance(
     """Give range-aware remediation without calling every mismatch an upgrade."""
 
     contracts = HOOK_CONTRACTS.get(normalize_connector(connector), ())
+    if normalize_connector(connector) == "kiro":
+        return f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then rerun setup."
     if not contracts:
         return f"Use a {label} version covered by a DefenseClaw hook contract, then rerun setup."
 
@@ -5836,16 +5839,21 @@ def _check_connector_version_supported_for_setup(
         label,
         compatibility.normalized_version,
     )
-    strict_unknown = connector == "opencode"
+    # OpenCode needs a validated plugin contract, and a kiro-cli below the
+    # floor has a surface that sends no hooks (GAP-0227): both refuse in
+    # observe mode too.
+    strict_unknown = connector in {"opencode", "kiro"}
     if compatibility.status == STATUS_UNKNOWN and not allow_drift and (action_mode or strict_unknown):
         if emit:
             ux.err(detail)
             ux.subhead(upgrade_guidance)
-            if strict_unknown:
+            if connector == "opencode":
                 ux.subhead(
                     "OpenCode requires a bounded validated plugin contract in both observe and action mode; "
                     "refusing setup before activation."
                 )
+            elif strict_unknown:
+                ux.subhead("Refusing Kiro setup in observe and action mode before activation.")
             else:
                 ux.subhead("Refusing action-mode connector setup before activation.")
             ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")

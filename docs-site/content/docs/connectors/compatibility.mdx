@@ -51,12 +51,15 @@ rollout holds. Existing policy defaults are unchanged.
 | <ConnectorLabel id="opencode" /> | `>=1.18.10, <1.19.0` | `opencode-hooks-v1` / `v7` | tool_call, tool_result |
 | <ConnectorLabel id="amp" /> | `>=0.0.1785334225` | `amp-plugin-v1` / `v2` (plugin contract) | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="omnigent" /> | `>=0.7.0, <0.14.0` | `omnigent-custom-policy-v1` / `v1` | prompt, tool_call, tool_result, event_content |
-| <ConnectorLabel id="kiro" /> | not gated per user (see below) | native hooks on both Kiro hook surfaces, plus the optional ACP contract | prompt, tool_call, tool_result; ACP adds permission, filesystem, terminal |
+| <ConnectorLabel id="kiro" /> | kiro-cli `>=2.27.1`; Kiro IDE not gated per user (see below) | native hooks on both Kiro hook surfaces, plus the optional ACP contract | prompt, tool_call, tool_result; ACP adds permission, filesystem, terminal |
 
-**Kiro.** Per-user installs are not version-gated. Kiro IDE and
+**Kiro.** Kiro IDE and
 `kiro-cli --v3` read `.kiro/hooks/*.json`; bare `kiro-cli` (2.x) reads its
-agent config. Managed Windows pins `kiro-cli-windows-managed-hooks-v1`
-(kiro-cli `>=2.24.1`) or `kiro-ide-windows-managed-hooks-v1` (Kiro IDE
+agent config. Per-user installs have no hook contract, but kiro-cli must be
+2.27.1 or later: before it, a non-interactive `kiro-cli chat --v3` run loads
+no hooks, so setup refuses an older kiro-cli in both modes and doctor reports
+it as unsupported. Managed Windows pins `kiro-cli-windows-managed-hooks-v1`
+(kiro-cli `>=2.27.1`) or `kiro-ide-windows-managed-hooks-v1` (Kiro IDE
 `>=1.0.182`).
 
 **Cursor.** DefenseClaw reads the version from `agent --version`. A

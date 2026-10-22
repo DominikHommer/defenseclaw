@@ -435,7 +435,7 @@ func TestDiscoverWindowsStandalonePerUserAgentVersions(t *testing.T) {
 	if got := discover("kiro"); got != "2.24.1" {
 		t.Fatalf("kiro-cli version = %q, want the run copy matching kiro-cli.exe", got)
 	}
-	for version, admitted := range map[string]bool{"2.24.1": true, "2.20.0": false, "1.0.190" + KiroIDEVersionSuffix: true, "1.0.170" + KiroIDEVersionSuffix: false} {
+	for version, admitted := range map[string]bool{"2.27.1": true, "2.26.1": false, "2.20.0": false, "1.0.190" + KiroIDEVersionSuffix: true, "1.0.170" + KiroIDEVersionSuffix: false} {
 		if ok, reason := windowsStandaloneHookContractAdmitted("kiro", version); ok != admitted {
 			t.Fatalf("kiro %s admitted = %v (%s), want %v", version, ok, reason, admitted)
 		}
