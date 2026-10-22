@@ -165,6 +165,12 @@ type profileDecision struct {
 	// Assignment is the 1-based index of the assignment that matched, 0 for
 	// the default.
 	Assignment int
+	// Refused marks a decision no profile is safe for: an unproven 1.0.3
+	// agents entry leaves profiles that may apply, none of which enforces
+	// what each of the others does (matchAgent). The request is refused
+	// where it can be blocked (guardrail_profile_refusal.go); Name is the
+	// strictest of them by hook mode and block_at, for the rest.
+	Refused bool
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
@@ -1763,6 +1769,12 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["subject_source"] = decision.SubjectSource
 	out["assignment"] = decision.Assignment
 	warnings := profileExplainWarnings(set, decision, subject)
+	if decision.Refused {
+		out["refused"] = true
+		warnings = append(warnings, "a profile assignment's agents entry may be this agent's 1.0.3 identity and no profile of those that may apply "+
+			"enforces what each of the others does: requests of this agent are refused where they can be blocked; replace the entry with "+
+			"the agent identity `defenseclaw agent identities` shows now")
+	}
 	if agent != "" {
 		warnings = append(warnings, fmt.Sprintf("agent %q is not verified against a host identity record by profile-explain; confirm it with agent identities before relying on this answer", agent))
 	}

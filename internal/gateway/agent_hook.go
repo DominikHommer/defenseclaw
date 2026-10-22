@@ -625,6 +625,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// before anything is evaluated; finalizeAgentHook records its
 		// outcome on the audit row.
 		sandboxGate, resp, gated := a.requireSandboxHostRun(ctx, profile, connectorName, req, b, payload, requireSandboxSurface(ctx, r.Header))
+		if !gated {
+			// A request no guardrail profile is safe for is refused where it
+			// can be blocked (guardrail_profile_refusal.go).
+			resp, gated = a.refuseProfileHook(ctx, profile, connectorName, req, b, payload)
+		}
 		panicked := false
 		if !gated {
 			resp, panicked = a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)

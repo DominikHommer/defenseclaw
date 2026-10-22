@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -93,11 +95,18 @@ type profileAgentLegacy func() (legacy string, known bool)
 // legacy, when not nil, derives agent's legacy identity. When an agents
 // entry may be the legacy identity of agent's account but the agent ledger
 // does not prove it, an assignment with that entry whose other conditions
-// hold may or may not apply. The request then gets the strictest of the
-// default profile, the profile of each such assignment and the profile it
-// matches otherwise (profileStricter), reported as default_lookup_failed:
-// unproven ownership never resolves to a weaker profile, whatever
-// default_profile says, and a later assignment never applies in its place.
+// hold may or may not apply. The request then gets, reported as
+// default_lookup_failed, a profile that enforces at least what every
+// profile that may apply enforces (profileCovers): each such assignment's
+// and the one the request matches otherwise. That is the default profile
+// when it does, else the first of those that does. Unproven ownership never
+// resolves to a weaker profile, whatever default_profile says, and a later
+// assignment never applies in its place. When none of them enforces what
+// each of the others does (another rule pack, other rules, a HILT that asks
+// less or another sandbox section where one of them blocks), no profile is
+// safe and the decision is Refused (guardrail_profile_refusal.go); its Name
+// is then the strictest of them by hook mode and block_at
+// (profileStricter), for what the request's surface cannot refuse.
 func (set *guardrailProfileSet) matchAgent(subject *profileSubject, source, connectorName, agent string, legacy profileAgentLegacy) profileDecision {
 	matched, unresolved := set.profileAgent(agent, legacy)
 	decision := set.match(subject, source, connectorName, matched)
@@ -108,31 +117,108 @@ func (set *guardrailProfileSet) matchAgent(subject *profileSubject, source, conn
 	if decision.Assignment > 0 && decision.Assignment <= len(earlier) {
 		earlier = earlier[:decision.Assignment-1]
 	}
-	var candidates []string
+	var mayApply []string
 	for _, assignment := range earlier {
 		if set.unresolvedAgentMatch(assignment.Match, subject, connectorName, unresolved) {
-			candidates = append(candidates, strings.TrimSpace(assignment.Profile))
+			mayApply = append(mayApply, strings.TrimSpace(assignment.Profile))
 		}
 	}
-	if len(candidates) == 0 {
+	if len(mayApply) == 0 {
 		return decision
 	}
-	// The outage default, unless a profile that may apply enforces more.
+	mayApply = append(mayApply, decision.Name)
+	connectors := profileCoverConnectors(connectorName)
+	for _, name := range append([]string{set.defaultProfile}, mayApply...) {
+		if !slices.ContainsFunc(mayApply, func(other string) bool { return !set.profileCovers(name, other, connectors) }) {
+			return set.decision(name, profileMatchDefaultLookupFailed, "", source)
+		}
+	}
 	strictest := set.defaultProfile
-	for _, name := range append(candidates, decision.Name) {
+	for _, name := range mayApply {
 		if set.profileStricter(name, strictest, connectorName) {
 			strictest = name
 		}
 	}
-	return set.decision(strictest, profileMatchDefaultLookupFailed, "", source)
+	refused := set.decision(strictest, profileMatchDefaultLookupFailed, "", source)
+	refused.Refused = true
+	set.agentBridge.noteRefused(agent, mayApply)
+	return refused
 }
 
-// profileStricter reports whether profile a enforces more than profile b
-// for a request of connectorName: a blocks (action) where b only observes,
-// or both block and a blocks from a lower severity (block_at). A name that
-// is not a profile is the base configuration. Rule packs and their rules
-// are not compared: of two profiles that block alike, the one already
-// chosen stays.
+// profileCoverConnectors are the connectors the decisions of a request of
+// connectorName read: its own, and the global settings for a decision
+// taken without one.
+func profileCoverConnectors(connectorName string) []string {
+	if connectorName == "" {
+		return []string{""}
+	}
+	return []string{connectorName, ""}
+}
+
+// profileCovers reports whether profile a enforces at least what profile b
+// enforces for a request decided for connectors: the same sandbox section,
+// and wherever b blocks (action, by the hook mode or by the inspect and
+// proxy mode) a blocks too, with b's rule pack and rules, from a block
+// level at or below b's, and with a HILT that asks wherever b's asks. Where
+// b only observes it blocks nothing, so a's guardrail settings there do not
+// matter. A name that is not a profile is the base configuration. alert_at
+// and block_message enforce nothing and are not compared.
+func (set *guardrailProfileSet) profileCovers(a, b string, connectors []string) bool {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	if a == b {
+		return true
+	}
+	ca, cb := set.profileConfig(a), set.profileConfig(b)
+	if ca == nil || cb == nil || !reflect.DeepEqual(set.profileSandbox(a), set.profileSandbox(b)) {
+		return false
+	}
+	for _, name := range connectors {
+		hookB, inspectB := hookModeForConfig(cb, name) == "action", inspectMode(cb, name) == "action"
+		if !hookB && !inspectB {
+			continue
+		}
+		if (hookB && hookModeForConfig(ca, name) != "action") || (inspectB && inspectMode(ca, name) != "action") {
+			return false
+		}
+		if effectiveRulePackKey(ca, name) != effectiveRulePackKey(cb, name) ||
+			!reflect.DeepEqual(ca.Guardrail.EffectiveRulePackRef(name), cb.Guardrail.EffectiveRulePackRef(name)) {
+			return false
+		}
+		blockA, _ := guardrailThresholdRanks(resolveThresholds(ca, name))
+		blockB, _ := guardrailThresholdRanks(resolveThresholds(cb, name))
+		proxyA, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&ca.Guardrail, name))
+		proxyB, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&cb.Guardrail, name))
+		if blockA > blockB || proxyA > proxyB {
+			return false
+		}
+		if !hiltCovers(hiltEnabledForConfig(ca, name), hiltMinRankForConfig(ca, name), hiltEnabledForConfig(cb, name), hiltMinRankForConfig(cb, name)) ||
+			!hiltCovers(hiltEnabled(&ca.Guardrail, name), hiltMinRank(&ca.Guardrail, name), hiltEnabled(&cb.Guardrail, name), hiltMinRank(&cb.Guardrail, name)) {
+			return false
+		}
+	}
+	return true
+}
+
+// hiltCovers reports whether a HILT (enabledA, from severity rank minA)
+// asks wherever another one asks. A confirm stands only below the block
+// level, so asking more never allows more.
+func hiltCovers(enabledA bool, minA int, enabledB bool, minB int) bool {
+	return !enabledB || (enabledA && minA <= minB)
+}
+
+// profileSandbox is the sandbox section of profile name; nil for the base
+// configuration.
+func (set *guardrailProfileSet) profileSandbox(name string) *config.OpenShellAdminConfig {
+	if set.base == nil {
+		return nil
+	}
+	return set.base.Guardrail.Profiles[name].Sandbox
+}
+
+// profileStricter orders the profiles of a Refused decision (matchAgent),
+// for what the request's surface cannot refuse: a blocks (action) where b
+// only observes, or both block and a blocks from a lower severity
+// (block_at). A name that is not a profile is the base configuration.
 func (set *guardrailProfileSet) profileStricter(a, b, connectorName string) bool {
 	ca, cb := set.profileConfig(a), set.profileConfig(b)
 	modeA, modeB := hookModeForConfig(ca, connectorName), hookModeForConfig(cb, connectorName)
@@ -288,6 +374,29 @@ func (b *profileAgentBridge) note(key string) {
 		b.noted = map[string]bool{}
 	}
 	b.noted[key] = true
+}
+
+// noteRefused logs, once per agent, that no profile of those that may apply
+// to it is safe (matchAgent).
+func (b *profileAgentBridge) noteRefused(agent string, profiles []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	key := "!" + strings.ToLower(agent)
+	if b.noted[key] {
+		return
+	}
+	b.note(key)
+	names := make([]string, 0, len(profiles))
+	for _, name := range profiles {
+		if name == "" {
+			name = "(base configuration)"
+		}
+		names = append(names, name)
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] agent %s: a profile assignment's agents entry may be its 1.0.3 identity, and none of the profiles that may apply (%s) "+
+		"enforces what each of the others does (rule pack, rules, HILT or sandbox section): its requests are refused where they can be blocked "+
+		"(default_lookup_failed) until the agent ledger proves whose entry it is or the entry names the agent's current identity\n",
+		agent, strings.Join(names, ", "))
 }
 
 // profileAgentLinks is what the agent ledger says about the assignments'
