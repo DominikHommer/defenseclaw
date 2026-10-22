@@ -20,9 +20,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
-	"time"
-
-	"golang.org/x/sys/unix"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -32,89 +29,45 @@ import (
 // account) is what keeps other accounts out.
 func publishedSessionFileMode(file *os.File) error { return file.Chmod(0o644) }
 
-// expirePublishedSessionRecord sets the modification time of the record at
-// path to publishedSessionRevokedTime (revokePublishedSessionRecord). Only a
-// regular file is changed: the record folder is the gateway's own.
-func expirePublishedSessionRecord(path string) error {
-	info, err := os.Lstat(path)
+// createPublishedSessionKeyFile creates the key file at path, which must
+// not exist: 0644, owned by this process (root, the only account whose key
+// the gateway and the hook accept). Its name is the key; it has no content.
+func createPublishedSessionKeyFile(path string, _ PublishedSessionTrust) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
+	}
+	return errors.Join(file.Chmod(0o644), file.Sync(), file.Close())
+}
+
+// publishedSessionKeyOwnerCheck reports a key file root owns: a regular
+// file, not a symbolic link. A file that is gone is not a key.
+func publishedSessionKeyOwnerCheck(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", path)
+		return false, nil
 	}
-	return publishedSessionSetTime(path, publishedSessionRevokedTime)
-}
-
-// setPublishedSessionTime sets the access and modification time of the
-// file at path, never through a symbolic link.
-func setPublishedSessionTime(path string, at time.Time) error {
-	stamp := unix.NsecToTimespec(at.UnixNano())
-	return unix.UtimesNanoAt(unix.AT_FDCWD, path, []unix.Timespec{stamp, stamp}, unix.AT_SYMLINK_NOFOLLOW)
-}
-
-// createPublishedSessionGeneration creates the generation file at path:
-// 0644, owned by this process (root, the only one that bumps it).
-func createPublishedSessionGeneration(path string) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return err
-	}
-	return errors.Join(file.Chmod(0o644), file.Close())
-}
-
-// publishedSessionHoldDir is the hold folder of the record folder root
-// (PublishedSessionHoldDir): the folder above it, which only root and the
-// gateway service can change.
-func publishedSessionHoldDir(root string) string { return filepath.Dir(root) }
-
-// publishedSessionRootRefusals and releasePublishedSessionRootRefusals have
-// nothing to do on Linux and macOS: root can always give a record folder it
-// cannot replace an owner the hook refuses, so no refusal is ever made.
-func publishedSessionRootRefusals(string) ([]string, error) { return nil, nil }
-
-func releasePublishedSessionRootRefusals(string) error { return nil }
-
-// createPublishedSessionHold creates the hold file at path with text: 0644,
-// owned by this process (root). The hook only checks that something is
-// there.
-func createPublishedSessionHold(path, text string) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return err
-	}
-	_, _ = file.WriteString(text)
-	return errors.Join(file.Chmod(0o644), file.Close())
-}
-
-// publishedSessionHoldTrusted reports a hold this process's account made: a
-// regular file with one link, owned by that account (root in production),
-// that no other account can write.
-func publishedSessionHoldTrusted(path string) bool {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
-		return false
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	return ok && st.Uid == uint32(os.Geteuid()) && st.Nlink == 1
-}
-
-// checkPublishedSessionGenerationOwner checks the owner of the generation file:
-// root for the gateway and the hook, and this process (root in production)
-// for the bump.
-func checkPublishedSessionGenerationOwner(path string, info os.FileInfo, self bool) error {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return fmt.Errorf("%s: cannot read its owner", path)
+		return false, fmt.Errorf("%s: cannot read its owner", path)
 	}
-	want := uint32(0)
-	if self {
-		want = uint32(os.Geteuid())
+	return st.Uid == 0, nil
+}
+
+// publishedSessionSyncDir flushes the folder dir, so that a key file it
+// removed or created stays so after a crash.
+func publishedSessionSyncDir(dir string) error {
+	folder, err := os.Open(dir)
+	if err != nil {
+		return err
 	}
-	if st.Uid != want {
-		return fmt.Errorf("%s is owned by uid %d, not uid %d", path, st.Uid, want)
-	}
-	return nil
+	return errors.Join(folder.Sync(), folder.Close())
 }
 
 // publishedSessionGrantReader gives uid read and search on the per-user
@@ -194,17 +147,17 @@ func publishedSessionOwnDir(path string, self uint32, rootOwnerOK bool) error {
 }
 
 // ValidatePublishedSessionPath checks a protected session record, or the
-// record folder's generation file, before the hook reads it: the file and
-// every folder above it are real files and folders owned by root or the
-// gateway service uid (from the root-owned runtime descriptor, never from
-// the environment), writable by no group or other, with no access-list entry
-// that grants write. The generation file must be root's: only root bumps it.
+// record folder's key file, before the hook reads it: the file and every
+// folder above it are real files and folders owned by root or the gateway
+// service uid (from the root-owned runtime descriptor, never from the
+// environment), writable by no group or other, with no access-list entry
+// that grants write. The key file must be root's: only root creates one.
 func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) error {
 	clean, err := filepath.Abs(path)
 	if err != nil {
 		return err
 	}
-	generation := filepath.Base(clean) == PublishedSessionGenerationFile
+	key := IsPublishedSessionKeyName(filepath.Base(clean))
 	for cur, leaf := clean, true; ; cur, leaf = filepath.Dir(cur), false {
 		info, err := os.Lstat(cur)
 		if err != nil {
@@ -223,7 +176,7 @@ func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) erro
 		if !ok {
 			return fmt.Errorf("%s: cannot read its owner", cur)
 		}
-		if leaf && generation && st.Uid != 0 {
+		if leaf && key && st.Uid != 0 {
 			return fmt.Errorf("%s is owned by uid %d, not root", cur, st.Uid)
 		}
 		if st.Uid != 0 && (trust.ServiceUID <= 0 || st.Uid != uint32(trust.ServiceUID)) {

@@ -29,10 +29,12 @@ func publishedSessionTestExists(path string) bool {
 
 // Review P2 (GAP-0352, loop round 2): an answer dated after now proves
 // nothing. The clock was ahead when the gateway wrote the allow and was set
-// back since: without the bound both ages are negative, and the allow would
-// outlive the age limit by as long as the clock was ahead. A small
-// step back of the clock (publishedSessionClockSkew) still passes, and the
-// prune drops a future-dated record like an expired one.
+// back since: without the bound its age is negative, and the allow would
+// outlive the age limit by as long as the clock was ahead. A small step
+// back of the clock (publishedSessionClockSkew) still passes, an answer
+// older than the limit proves nothing, and the prune drops a future-dated
+// record like an expired one. The time is under the MAC, so it cannot be
+// changed.
 func TestPublishedForeignHookSessionRefusesAFutureDatedAnswer(t *testing.T) {
 	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
@@ -41,12 +43,9 @@ func TestPublishedForeignHookSessionRefusesAFutureDatedAnswer(t *testing.T) {
 	if !ok {
 		t.Fatal("no record path")
 	}
-	publish := func(at, modified time.Time) {
+	publish := func(at time.Time) {
 		t.Helper()
 		if err := publishCurrent(root, identity, key, GuardDecision{}, at); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(path, modified, modified); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -58,22 +57,22 @@ func TestPublishedForeignHookSessionRefusesAFutureDatedAnswer(t *testing.T) {
 	now := time.Now()
 	// The record exists first: a publication that creates one prunes the
 	// folder by the publication's time.
-	publish(now, now)
+	publish(now)
 	for _, tc := range []struct {
-		name         string
-		at, modified time.Time
+		name string
+		at   time.Time
 	}{
-		{"both a month ahead", now.Add(30 * 24 * time.Hour), now.Add(30 * 24 * time.Hour)},
-		{"the record's time ahead", now.Add(time.Hour), now},
-		{"the modification time ahead", now, now.Add(time.Hour)},
-		{"just past the skew", now.Add(publishedSessionClockSkew + 10*time.Second), now},
+		{"a month ahead", now.Add(30 * 24 * time.Hour)},
+		{"an hour ahead", now.Add(time.Hour)},
+		{"just past the skew", now.Add(publishedSessionClockSkew + 10*time.Second)},
+		{"older than the limit", now.Add(-publishedSessionMaxAge - time.Minute)},
 	} {
-		publish(tc.at, tc.modified)
+		publish(tc.at)
 		if err := check(); !errors.Is(err, ErrPublishedSessionUnavailable) {
-			t.Fatalf("%s: a future-dated answer must prove nothing: %v", tc.name, err)
+			t.Fatalf("%s: the answer must prove nothing: %v", tc.name, err)
 		}
 	}
-	publish(now.Add(publishedSessionClockSkew/2), now.Add(publishedSessionClockSkew/2))
+	publish(now.Add(publishedSessionClockSkew / 2))
 	if err := check(); err != nil {
 		t.Fatalf("an answer within the clock skew must prove the process: %v", err)
 	}

@@ -219,28 +219,13 @@ const (
 	StandaloneWindowsHookSessionDirName = "DefenseClaw-HookSessions"
 )
 
-// HookSessionHoldSuffix follows the name of the protected session record
-// folder (HookSessionDir) in the name of each of its holds: a file a
-// lifecycle run or hook guardian pass that is invalidating the records, or
-// could not finish, keeps in the hold folder (beside the record folder on
-// Linux and macOS, in HookRuntimeDir on Windows). While one is there the
-// hook allows nothing during a gateway outage (GAP-0352).
-const HookSessionHoldSuffix = ".hold"
-
-// HookSessionHoldPrefix starts the name of every hold of the record folder
-// root, a Windows or a slash path.
-func HookSessionHoldPrefix(root string) string {
-	root = strings.TrimRight(strings.TrimSpace(root), `\/`)
-	return root[strings.LastIndexAny(root, `\/`)+1:] + HookSessionHoldSuffix
-}
-
 // StandaloneHookSessionDirForDataDir is the protected session record folder
 // (HookSessionDir) of the standalone layout for goos whose DataDir is
 // dataDir. The hook guardian falls back to it when it cannot resolve the
 // layout itself (on Windows, a failed lookup of the protected ProgramData
 // registration): the data directory it already runs with names the same
-// folder, so it can still hold and invalidate the records (GAP-0352, 1.0.4
-// guard loop round 1). False when dataDir is not that layout's.
+// folder, so it can still remove the records' key (GAP-0352, 1.0.4 guard
+// loop round 1). False when dataDir is not that layout's.
 func StandaloneHookSessionDirForDataDir(goos, dataDir string) (string, bool) {
 	dataDir = strings.TrimSpace(dataDir)
 	if dataDir == "" {

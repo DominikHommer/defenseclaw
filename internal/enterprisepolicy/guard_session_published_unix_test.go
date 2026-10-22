@@ -101,22 +101,25 @@ func TestPublishedSessionPrepareReplacesAFolderThatIsNotTheGateways(t *testing.T
 	}
 }
 
-// Lead directive (GAP-0352 review loop round 1): the generation file is
-// root's alone. The hook's trust check refuses one the gateway service uid
-// owns (it accepts that uid for a record), and so does the gateway's read;
-// only the bump, which runs as root, takes a file of its own account.
-func TestThePublishedSessionGenerationMustBeRoots(t *testing.T) {
+// Kill switch: the key file is root's alone. The gateway may remove it (it
+// owns the folder the key is in) but never make one: the hook's trust check
+// refuses a key the gateway service uid owns (it accepts that uid for a
+// record), and the key read skips it.
+func TestThePublishedSessionKeyMustBeRoots(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root owns every test file")
 	}
-	root := t.TempDir()
-	if err := BumpPublishedSessionGeneration(root); err != nil {
-		t.Fatalf("the bump takes a generation file of its own account: %v", err)
+	root := filepath.Join(t.TempDir(), "sessions")
+	if err := os.Mkdir(root, 0o711); err != nil {
+		t.Fatal(err)
 	}
-	path, _ := PublishedSessionGenerationPath(root)
+	path, err := createPublishedSessionKey(root, PublishedSessionTrust{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	service := PublishedSessionTrust{ServiceUID: os.Geteuid()}
 	if err := ValidatePublishedSessionPath(path, service); err == nil || !strings.HasSuffix(err.Error(), ", not root") {
-		t.Fatalf("a generation file of the gateway service uid must be refused: %v", err)
+		t.Fatalf("a key file of the gateway service uid must be refused: %v", err)
 	}
 	record := filepath.Join(root, "copilot-p-x.json")
 	if err := os.WriteFile(record, []byte("{}"), 0o644); err != nil {
@@ -125,7 +128,13 @@ func TestThePublishedSessionGenerationMustBeRoots(t *testing.T) {
 	if err := ValidatePublishedSessionPath(record, service); err != nil && strings.HasSuffix(err.Error(), ", not root") {
 		t.Fatalf("a record of the gateway service uid is not refused for its owner: %v", err)
 	}
-	if _, err := PublishedSessionGeneration(root); err == nil {
-		t.Fatal("the gateway must refuse a generation file root does not own")
+	if _, err := ReadPublishedSessionKey(root); err == nil {
+		t.Fatal("a key file root does not own must be no key")
+	}
+	if err := KillPublishedSessionKey(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("the kill only removes root's keys: %v", err)
 	}
 }

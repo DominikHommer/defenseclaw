@@ -50,29 +50,3 @@ func TestStandaloneHookSessionDirForDataDir(t *testing.T) {
 		}
 	}
 }
-
-// The holds of the record folder are named after it, and on Windows they
-// are in the hook runtime folder next to it (enterprisepolicy
-// PublishedSessionHoldDir), which the layout names with the same constant.
-func TestHookSessionHoldNames(t *testing.T) {
-	layout, err := StandaloneWindowsLayoutForRoots(`C:\Program Files`, `C:\ProgramData`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := HookSessionHoldPrefix(layout.HookSessionDir); got != StandaloneWindowsHookSessionDirName+".hold" {
-		t.Fatalf("Windows hold prefix %q", got)
-	}
-	if !strings.EqualFold(layout.HookRuntimeDir, windowsParent(layout.HookSessionDir)+`\`+StandaloneWindowsHookRuntimeDirName) {
-		t.Fatalf("the hook runtime folder %q must be next to the record folder %q", layout.HookRuntimeDir, layout.HookSessionDir)
-	}
-	unix, err := StandaloneLayoutFor("linux")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := HookSessionHoldPrefix(unix.HookSessionDir); got != "sessions.hold" {
-		t.Fatalf("Linux hold prefix %q", got)
-	}
-	if got := HookSessionHoldPrefix(unix.HookSessionDir + "/"); got != "sessions.hold" {
-		t.Fatalf("a trailing slash changes nothing: %q", got)
-	}
-}

@@ -32,9 +32,9 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectProc=invisible
 ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
-# /run/defenseclaw-hook: the guardian bumps the generation of the protected
-# session records in sessions/, and holds them with a file next to that
-# folder from before it writes a removal until the bump (GAP-0352).
+# /run/defenseclaw-hook: the guardian removes the key of the protected
+# session records in sessions/ before it records a removal, and makes a new
+# one after it and at every pass when there is none (GAP-0352).
 ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian -/run/defenseclaw-hook
 # CAP_SETUID and CAP_SETGID are also ambient: systemd 255 (Ubuntu 24.04)
 # drops CAP_SETUID from a User= service that filters system calls unless it

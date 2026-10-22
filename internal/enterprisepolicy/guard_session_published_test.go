@@ -11,20 +11,91 @@
 package enterprisepolicy
 
 import (
+	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func trustAll(string) error { return nil }
 
+// publishedSessionTestTrust names the gateway service the way a lifecycle
+// does: a Windows key file lets it remove the key.
+var publishedSessionTestTrust = PublishedSessionTrust{ServiceAccount: `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc}
+
+// withPublishedSessionKeysOfTheTestAccount accepts a key file the test
+// account made, where production accepts only root's, SYSTEM's or
+// Administrators'. A path in refused is not a key: it stands in for a file
+// another account made with a key's name.
+func withPublishedSessionKeysOfTheTestAccount(t *testing.T, refused ...string) {
+	t.Helper()
+	restore := OverridePublishedSessionKeyOwnerForTest(func(path string) (bool, error) {
+		for _, name := range refused {
+			if path == name {
+				return false, nil
+			}
+		}
+		info, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return info.Mode().IsRegular(), nil
+	})
+	t.Cleanup(restore)
+}
+
+// publishedSessionTestRoot is a record folder with its key, as the
+// lifecycle makes it.
+func publishedSessionTestRoot(t *testing.T) string {
+	t.Helper()
+	withoutPublishedSessionACL(t)
+	withPublishedSessionKeysOfTheTestAccount(t)
+	root := filepath.Join(t.TempDir(), "sessions")
+	if err := os.Mkdir(root, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// publishCurrent publishes an answer the way the gateway does: with the key
+// it reads first (none when it cannot read one).
+func publishCurrent(root, identity string, key SessionKey, decision GuardDecision, now time.Time) error {
+	recordKey, _ := ReadPublishedSessionKey(root)
+	return PublishForeignHookSessionDecision(root, identity, key, decision, recordKey, now)
+}
+
+// publishedSessionTestAllows reports an outage allow for key.
+func publishedSessionTestAllows(root, identity string, key SessionKey) bool {
+	got, err := CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll)
+	return err == nil && !got.Deny
+}
+
+func publishedSessionTestKey(t *testing.T, root string) SessionRecordKey {
+	t.Helper()
+	key, err := ReadPublishedSessionKey(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
 // GAP-0352: the gateway's answer for every session exchange is written to
-// the protected record, and during an outage only a record that proves the
-// agent process not blocked lets a call go on.
+// the protected records, and during an outage only the records of the
+// agent process and the session, under the current key, let a call go on.
 func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
@@ -42,7 +113,7 @@ func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got, err := check(key, trustAll); err != nil || got.Deny {
-		t.Fatalf("an allowed process must be proven unblocked: %+v %v", got, err)
+		t.Fatalf("an allowed process and session must be proven unblocked: %+v %v", got, err)
 	}
 	reason := foreignHookBlockedPrefix + " When this agent session started, the project hook file /repo/.github/hooks/x.json defined a hook."
 	if err := publishCurrent(root, identity, key, GuardDecision{Deny: true, Reason: reason}, time.Now()); err != nil {
@@ -78,59 +149,64 @@ func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 	if _, err := CheckPublishedForeignHookSession(root, publishedSessionOtherIdentity(identity), key, clean, trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
 		t.Fatalf("another account's record must not prove this one: %v", err)
 	}
-	// A record that fails the trust check, is corrupt, has unknown fields or
-	// names another key blocks.
-	if _, err := check(key, func(string) error { return errors.New("writable by the user") }); !errors.Is(err, ErrPublishedSessionUnavailable) {
-		t.Fatalf("an untrusted record must prove nothing: %v", err)
+	// A record or key file that fails the trust check blocks.
+	recordKey := publishedSessionTestKey(t, root)
+	for _, refused := range []string{"", recordKey.ID()} {
+		trust := func(path string) error {
+			if refused == "" || path == refused {
+				return errors.New("writable by the user")
+			}
+			return nil
+		}
+		if _, err := check(key, trust); !errors.Is(err, ErrPublishedSessionUnavailable) {
+			t.Fatalf("an untrusted record or key (%q) must prove nothing: %v", refused, err)
+		}
 	}
 	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
 	if !ok {
 		t.Fatal("no record path")
 	}
-	generation, err := PublishedSessionGeneration(root)
-	if err != nil {
-		t.Fatal(err)
-	}
+	canonical, _ := connector.CanonicalUserScopedIdentity(identity)
 	at := time.Now().UTC().Format(time.RFC3339)
+	encode := func(record PublishedSessionRecord, macIdentity string) string {
+		t.Helper()
+		record.MAC = publishedSessionMAC(recordKey.secret, macIdentity, record)
+		data, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	good := PublishedSessionRecord{Version: publishedSessionVersion, Connector: "copilot", Kind: sessionKindProcess, ID: key.Process, At: at}
 	// The writer's own encoding of the same record proves the process: the
 	// cases below differ from it in one point each.
-	if err := os.WriteFile(path, []byte(`{"v":2,"connector":"copilot","kind":"p","id":"`+key.Process+`","blocked":false,"at":"`+at+`","gen":"`+generation+`"}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(encode(good, canonical)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := check(key, trustAll); err != nil || got.Deny {
 		t.Fatalf("a well-formed record must prove the process: %+v %v", got, err)
 	}
+	withID, withVersion, withAt := good, good, good
+	withID.ID, withVersion.Version, withAt.At = "linux:b:9:9", 2, ""
+	tampered := encode(good, canonical)
+	tampered = strings.Replace(tampered, `"at":"`+at+`"`, `"at":"`+time.Now().Add(time.Second).UTC().Format(time.RFC3339)+`"`, 1)
 	for name, content := range map[string]string{
-		"corrupt":        `{"v":2,"connector":"copilot"`,
-		"unknown field":  `{"v":2,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"` + at + `","gen":"` + generation + `","x":1}`,
-		"other key":      `{"v":2,"connector":"copilot","kind":"p","id":"linux:b:9:9","blocked":false,"at":"` + at + `","gen":"` + generation + `"}`,
-		"other version":  `{"v":1,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"` + at + `","gen":"` + generation + `"}`,
-		"no time":        `{"v":2,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"","gen":"` + generation + `"}`,
-		"no generation":  `{"v":2,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"` + at + `"}`,
-		"trailing value": `{"v":2,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"` + at + `","gen":"` + generation + `"} {}`,
+		"corrupt":           `{"v":3,"connector":"copilot"`,
+		"unknown field":     strings.TrimSuffix(encode(good, canonical), "}") + `,"x":1}`,
+		"other key":         encode(withID, canonical),
+		"other version":     encode(withVersion, canonical),
+		"no time":           encode(withAt, canonical),
+		"no MAC":            strings.Replace(encode(good, canonical), `,"mac":"`, `,"x":"`, 1),
+		"another account":   encode(good, publishedSessionOtherIdentity(canonical)),
+		"a changed field":   tampered,
+		"trailing value":    encode(good, canonical) + ` {}`,
+		"an earlier schema": `{"v":2,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"` + at + `","gen":"1"}`,
 	} {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := check(key, trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
 			t.Fatalf("%s: the record must prove nothing: %v", name, err)
-		}
-	}
-	// The guardian removed a hook of this account and bumped the
-	// generation: every earlier allow goes, of every connector.
-	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	opencode := SessionKey{Connector: "opencode", Session: "o-1", Process: key.Process}
-	if err := publishCurrent(root, identity, opencode, GuardDecision{}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if err := BumpPublishedSessionGeneration(root); err != nil {
-		t.Fatal(err)
-	}
-	for _, k := range []SessionKey{key, opencode} {
-		if _, err := check(k, trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
-			t.Fatalf("%s: a bump must end the earlier allow: %v", k.Connector, err)
 		}
 	}
 	// Review P2: a session record alone proves nothing. An agent process the
@@ -148,190 +224,449 @@ func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 	}
 }
 
-// Review P2 (GAP-0352): an answer older than publishedSessionMaxAge, by the
-// record's time or its modification time, proves nothing, and neither does
-// a record that was deleted, replaced or expired after the hook read it.
-func TestPublishedForeignHookSessionRefusesAStaleOrChangedAnswer(t *testing.T) {
+// Kill switch (1.0.4 guard loop round 1): an outage allow needs the record
+// of every key part the call names. A process allowed in one session is
+// not allowed in a session the gateway never answered for under the
+// current key (a new one, or one whose record a block left or a removal
+// ended), so a block whose publication failed for the session cannot leave
+// another process's allow usable in it.
+func TestPublishedForeignHookSessionNeedsTheRecordOfTheSessionToo(t *testing.T) {
 	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
-	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
-	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
-	if !ok {
-		t.Fatal("no record path")
-	}
-	sessionPath, _ := PublishedSessionRecordPath(root, identity, "copilot", sessionKindSession, key.Session)
-	check := func(trust func(string) error) (GuardDecision, error) {
-		t.Helper()
-		return CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trust)
-	}
-	allow := func(at time.Time) {
-		t.Helper()
-		if err := publishCurrent(root, identity, key, GuardDecision{}, at); err != nil {
-			t.Fatal(err)
-		}
-	}
-	allow(time.Now())
-	if got, err := check(trustAll); err != nil || got.Deny {
-		t.Fatalf("a fresh allow must prove the process unblocked: %+v %v", got, err)
-	}
-	old := time.Now().Add(-publishedSessionMaxAge - time.Hour)
-	if err := os.Chtimes(path, old, old); err != nil {
+	own := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-2"}
+	if err := publishCurrent(root, identity, own, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := check(trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
-		t.Fatalf("a record older than the limit must prove nothing: %v", err)
+	if !publishedSessionTestAllows(root, identity, own) {
+		t.Fatal("the process in its own session must be allowed")
 	}
-	allow(old)
-	if _, err := check(trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
-		t.Fatalf("an answer older than the limit must prove nothing: %v", err)
+	resumed := SessionKey{Connector: "copilot", Session: "s-9", Process: own.Process}
+	if publishedSessionTestAllows(root, identity, resumed) {
+		t.Fatal("a session with no record must not be allowed on the process record alone")
 	}
-	// Between the read of the process record and the end of the check (the
-	// session record's trust check runs in between).
-	for name, change := range map[string]func(){
-		"deleted": func() { _ = os.Remove(path) },
-		"expired": func() { _ = publishedSessionExpire(path) },
-		"replaced": func() {
-			data, _ := os.ReadFile(path)
-			_ = os.WriteFile(path+".new", data, 0o644)
-			_ = os.Rename(path+".new", path)
-		},
-	} {
-		allow(time.Now())
-		changed := false
-		_, err := check(func(p string) error {
-			if p == sessionPath && !changed {
-				changed = true
-				change()
-			}
-			return nil
-		})
-		if !changed || !errors.Is(err, ErrPublishedSessionUnavailable) {
-			t.Fatalf("%s after the read: the record must prove nothing (changed=%v): %v", name, changed, err)
-		}
+	// The session record of an earlier key is dead too.
+	if err := publishCurrent(root, identity, SessionKey{Connector: "copilot", Session: resumed.Session}, GuardDecision{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishCurrent(root, identity, SessionKey{Connector: "copilot", Process: own.Process}, GuardDecision{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if publishedSessionTestAllows(root, identity, resumed) {
+		t.Fatal("a session record of an earlier key must not prove the session")
+	}
+	// A blocking session record denies a process that is allowed elsewhere.
+	if err := publishCurrent(root, identity, SessionKey{Connector: "copilot", Session: resumed.Session}, GuardDecision{Deny: true}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := CheckPublishedForeignHookSession(root, identity, resumed, GuardDecision{}, trustAll); err != nil || !got.Deny {
+		t.Fatalf("a blocked session must deny: %+v %v", got, err)
 	}
 }
 
-// Review P1 (GAP-0352): a revocation of a record that can be neither
-// deleted nor replaced (a Windows reader holds it open) must not depend on
-// creating the deny marker: on a full volume that fails too. The record is
-// expired in place, which needs no space, and the hook refuses it. Only when
-// every override fails is the revocation an error.
-func TestPublishedForeignHookSessionRevocationSurvivesAMarkerThatCannotBeCreated(t *testing.T) {
+// Kill switch: removing the key ends every allow, of every connector and
+// account, with no record found or deleted. An allow published while there
+// is no key proves nothing, and neither does any record after a new key:
+// only the next exchange under it proves the process again. Killing what is
+// gone is no error.
+func TestKillPublishedSessionKeyEndsEveryEarlierAllow(t *testing.T) {
+	root := publishedSessionTestRoot(t)
+	identity := publishedSessionTestIdentity(t)
+	other := publishedSessionOtherIdentity(identity)
+	copilot := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
+	opencode := SessionKey{Connector: "opencode", Session: "o-1", Process: "p-1"}
+	publish := func() {
+		t.Helper()
+		for _, account := range []string{identity, other} {
+			for _, key := range []SessionKey{copilot, opencode} {
+				if err := publishCurrent(root, account, key, GuardDecision{}, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	allowed := func() int {
+		count := 0
+		for _, account := range []string{identity, other} {
+			for _, key := range []SessionKey{copilot, opencode} {
+				if publishedSessionTestAllows(root, account, key) {
+					count++
+				}
+			}
+		}
+		return count
+	}
+	publish()
+	if got := allowed(); got != 4 {
+		t.Fatalf("every published allow must prove its process: %d", got)
+	}
+	if err := KillPublishedSessionKey(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadPublishedSessionKey(root); err == nil {
+		t.Fatal("no key may be left")
+	}
+	if got := allowed(); got != 0 {
+		t.Fatalf("the kill must end every earlier allow: %d", got)
+	}
+	publish()
+	if got := allowed(); got != 0 {
+		t.Fatalf("an allow published without a key must prove nothing: %d", got)
+	}
+	if err := KillPublishedSessionKey(root); err != nil {
+		t.Fatalf("killing what is gone is no error: %v", err)
+	}
+	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	if got := allowed(); got != 0 {
+		t.Fatalf("a new key must not bring an earlier allow back: %d", got)
+	}
+	publish()
+	if got := allowed(); got != 4 {
+		t.Fatalf("the allows of the new key must prove their processes: %d", got)
+	}
+	// A new key while one exists replaces it: one key, and the allows of
+	// the old one are dead.
+	before := publishedSessionTestKey(t, root)
+	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	if after := publishedSessionTestKey(t, root); after.ID() == before.ID() {
+		t.Fatal("a new key must have a new name")
+	}
+	if got := allowed(); got != 0 {
+		t.Fatalf("a new key must end the allows of the one it replaced: %d", got)
+	}
+}
+
+// Kill switch: any failure to rotate the key blocks. A key file that cannot
+// be removed fails the kill; root or SYSTEM then adds a second key, and the
+// hook trusts no folder with more than one. A key that cannot be created
+// leaves none. A key folder that cannot be listed, a key owner that cannot
+// be read, more than one key, or one whose name is not a key's all block.
+func TestPublishedSessionKeyRotationFailureBlocks(t *testing.T) {
 	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
-	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
-	if !ok {
-		t.Fatal("no record path")
-	}
-	check := func() (GuardDecision, error) {
-		t.Helper()
-		return CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll)
-	}
 	allow := func() {
 		t.Helper()
 		if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 			t.Fatal(err)
 		}
-		if got, err := check(); err != nil || got.Deny {
-			t.Fatalf("the allow must prove the process unblocked: %+v %v", got, err)
-		}
 	}
-	full := errors.New("there is not enough space on the disk")
-	previousCreate := publishedSessionCreate
-	publishedSessionCreate = func(name string) (*os.File, error) { return nil, &os.PathError{Op: "open", Path: name, Err: full} }
-	t.Cleanup(func() { publishedSessionCreate = previousCreate })
-	revocations := map[string]func() error{
-		"block": func() error {
-			_ = publishCurrent(root, identity, key, GuardDecision{Deny: true, Reason: foreignHookBlockedPrefix + " x"}, time.Now())
-			return nil
-		},
-		"block of the process alone": func() error {
-			_ = publishCurrent(root, identity, SessionKey{Connector: key.Connector, Process: key.Process}, GuardDecision{Deny: true}, time.Now())
-			return nil
-		},
-	}
-	for name, revoke := range revocations {
-		allow()
-		release := heldOpenPublishedSessionRecord(t, path)
-		if err := revoke(); err != nil {
-			t.Fatalf("%s: an expired record is a revocation, not an error: %v", name, err)
-		}
-		if _, err := os.Lstat(publishedSessionDenyPath(path)); !os.IsNotExist(err) {
-			t.Fatalf("%s: no marker can exist on a full volume: %v", name, err)
-		}
-		// The block also wrote the session record (not held), which denies;
-		// the others leave the expired process record, which proves nothing.
-		if got, err := check(); err == nil && !got.Deny {
-			t.Fatalf("%s: the held record must stop proving the allow: %+v", name, got)
-		}
-		// The prune keeps a held, expired record (it cannot delete it) and it
-		// keeps refusing it.
-		prunePublishedSessionRecords(filepath.Dir(path), time.Now())
-		if got, err := check(); err == nil && !got.Deny {
-			t.Fatalf("%s: the pruned held record must still prove nothing: %+v", name, got)
-		}
-		if _, err := os.Lstat(path); err != nil {
-			t.Fatalf("%s: the prune cannot delete the held record: %v", name, err)
-		}
-		release()
-	}
-	// An allow that replaces the record proves the process again.
 	allow()
+	if !publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("the allow must prove the process")
+	}
 
-	// Every override fails: the revocation reports it.
-	release := heldOpenPublishedSessionRecord(t, path)
-	defer release()
-	previousExpire := publishedSessionExpire
-	publishedSessionExpire = func(string) error { return errors.New("the volume is read-only") }
-	t.Cleanup(func() { publishedSessionExpire = previousExpire })
-	if err := revokePublishedSessionRecord(path, PublishedSessionRecord{Version: publishedSessionVersion, Connector: "copilot", Kind: sessionKindProcess, ID: key.Process, Blocked: true}); err == nil {
-		t.Fatal("a revocation that changed nothing must report it")
+	// The key file cannot be removed.
+	stuck := publishedSessionTestKey(t, root).ID()
+	previousRemove := publishedSessionRemoveKey
+	publishedSessionRemoveKey = func(name string) error {
+		if name == stuck {
+			return &os.PathError{Op: "remove", Path: name, Err: errors.New("the file is in use")}
+		}
+		return previousRemove(name)
 	}
-}
-
-// A missing record root (no lifecycle folder, Secure Client, per-user)
-// writes nothing and is not an error; the hook then blocks.
-func TestPublishedForeignHookSessionWithoutARootWritesNothing(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "missing")
-	identity := publishedSessionTestIdentity(t)
-	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
-	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
-		t.Fatalf("a missing root is not an error: %v", err)
+	t.Cleanup(func() { publishedSessionRemoveKey = previousRemove })
+	if err := KillPublishedSessionKey(root); err == nil {
+		t.Fatal("a kill that leaves the key must fail")
 	}
-	if _, err := os.Lstat(root); !os.IsNotExist(err) {
-		t.Fatalf("the gateway must not create the lifecycle's root: %v", err)
+	if err := RetirePublishedSessionKey(root, publishedSessionTestTrust); err == nil || !strings.Contains(err.Error(), "a second key was added") {
+		t.Fatalf("root must add a second key when it cannot remove the first: %v", err)
 	}
-	if err := publishCurrent("", identity, key, GuardDecision{}, time.Now()); err != nil {
+	if publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("a folder with two keys must prove nothing")
+	}
+	allow()
+	if publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("an allow published while the folder has two keys must prove nothing")
+	}
+	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err == nil {
+		t.Fatal("a new key that cannot replace the stuck one must report it")
+	}
+	allow()
+	if publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("the stuck key must keep the folder ambiguous")
+	}
+	publishedSessionRemoveKey = previousRemove
+	if err := EnsurePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
 		t.Fatal(err)
 	}
-	if err := publishCurrent(t.TempDir(), identity, SessionKey{Connector: "../x", Session: "s"}, GuardDecision{}, time.Now()); err == nil {
-		t.Fatal("a connector name that is not a plain name must be refused")
+	if _, err := os.Lstat(stuck); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the next run must remove the stuck key: %v", err)
+	}
+	allow()
+	if !publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("one key again must prove the next allow")
+	}
+
+	// The new key cannot be created: the kill took, so nothing proves.
+	previousCreate := publishedSessionCreateKeyFile
+	publishedSessionCreateKeyFile = func(string, PublishedSessionTrust) error { return errors.New("no space left on device") }
+	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err == nil {
+		t.Fatal("a key that cannot be created must be reported")
+	}
+	publishedSessionCreateKeyFile = previousCreate
+	if publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("no key must prove nothing")
+	}
+	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	allow()
+
+	// The key folder cannot be listed, or a key owner cannot be read.
+	previousList := publishedSessionList
+	publishedSessionList = func(string) ([]string, error) { return nil, errors.New("input/output error") }
+	if publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("a key folder that cannot be listed must prove nothing")
+	}
+	if err := KillPublishedSessionKey(root); err == nil {
+		t.Fatal("a kill that cannot list the key folder must fail")
+	}
+	publishedSessionList = previousList
+	restore := OverridePublishedSessionKeyOwnerForTest(func(string) (bool, error) { return false, errors.New("access denied") })
+	if publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("a key owner that cannot be read must prove nothing")
+	}
+	restore()
+	if !publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("the allow must prove the process again")
+	}
+
+	// A name with the key prefix that is not a key's is no key at all.
+	dir, _ := PublishedSessionKeyDir(root)
+	current := publishedSessionTestKey(t, root).ID()
+	upper := filepath.Join(dir, filepath.Base(root)+PublishedSessionKeyInfix+strings.ToUpper(strings.TrimPrefix(filepath.Base(current), filepath.Base(root)+PublishedSessionKeyInfix)))
+	names := []string{filepath.Join(dir, filepath.Base(root)+PublishedSessionKeyInfix+"abc")}
+	if runtime.GOOS != "windows" {
+		// Windows file names ignore case: there it is the key itself.
+		names = append(names, upper)
+	}
+	for _, name := range names {
+		if err := os.WriteFile(name, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := publishedSessionTestKey(t, root); got.ID() != current {
+		t.Fatalf("a name that is not a key's must be skipped: %s", got.ID())
 	}
 }
 
-// A blocked answer that cannot be written must not leave the earlier allow
-// behind (Linux and macOS: a root another account can write is refused).
-func TestPublishedForeignHookSessionBlockThatCannotBeWrittenRemovesTheAllow(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("mode bits do not make a Windows folder writable by others")
-	}
+// Kill switch: a file with a key's name that root, SYSTEM or
+// Administrators did not make is not a key. On Windows a standard user may
+// create one in %ProgramData%\Cisco: it neither counts as a second key (one
+// account must not block every other account's outage allows) nor proves
+// anything on its own.
+func TestPublishedSessionKeyOfAnotherAccountIsNoKey(t *testing.T) {
 	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
 	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(root, 0o777); err != nil {
+	dir, prefix, _ := publishedSessionKeyPlace(root)
+	planted := filepath.Join(dir, prefix+strings.Repeat("ab", publishedSessionKeyBytes))
+	if err := os.WriteFile(planted, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
-	err := publishCurrent(root, identity, key, GuardDecision{Deny: true, Reason: foreignHookBlockedPrefix + " x"}, time.Now())
-	if err == nil || !strings.Contains(err.Error(), "writable by group or other") {
-		t.Fatalf("an untrusted root must be refused: %v", err)
+	withPublishedSessionKeysOfTheTestAccount(t, planted)
+	if !publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("a planted key file must not block the real key")
 	}
-	if _, err := CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
-		t.Fatalf("the earlier allow must be gone: %v", err)
+	if err := KillPublishedSessionKey(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(planted); err != nil {
+		t.Fatalf("the kill only removes keys: %v", err)
+	}
+	// The planted name alone, even with a record MACed under it, proves
+	// nothing: the hook finds no key.
+	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, SessionRecordKey{path: planted, secret: []byte(strings.Repeat("\xab", publishedSessionKeyBytes))}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("a key another account made must prove nothing")
+	}
+}
+
+// Review fixes (round 3 scenario 4, kill switch): a repair cannot rely on
+// replacing the record folder. An account that kept a way to change it (a
+// retained Windows handle with WRITE_DAC, a macOS access-list entry) may put
+// the earlier records back, folder and all, after the repair, and even a
+// file with the earlier key's name. None of it counts: the repair retired
+// the key first, and only root or SYSTEM can give a file a key's name that
+// the hook accepts.
+func TestPublishedSessionRecordsPutBackAfterARepairProveNothing(t *testing.T) {
+	root := publishedSessionTestRoot(t)
+	identity := publishedSessionTestIdentity(t)
+	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	old := publishedSessionTestKey(t, root).ID()
+	dir, _ := PublishedSessionIdentityDir(root, identity)
+	saved := filepath.Join(t.TempDir(), "saved")
+	if err := os.CopyFS(saved, os.DirFS(dir)); err != nil {
+		t.Fatal(err)
+	}
+	// The repair: the key is retired before anything else, and a new one
+	// made once the run succeeded.
+	if err := RetirePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	// The account puts its old folder back, and a file with the old key's
+	// name that it made itself.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.CopyFS(dir, os.DirFS(saved)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(old, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withPublishedSessionKeysOfTheTestAccount(t, old)
+	if publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("records put back after a repair must prove nothing")
+	}
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("the next exchange under the new key must prove the process")
+	}
+}
+
+// The guardian makes sure there is a key at every pass: none or more than
+// one gets one new key, one is kept, and a missing record folder gets none.
+func TestEnsurePublishedSessionKey(t *testing.T) {
+	root := publishedSessionTestRoot(t)
+	first := publishedSessionTestKey(t, root).ID()
+	if err := EnsurePublishedSessionKey(root, publishedSessionTestTrust); err != nil || publishedSessionTestKey(t, root).ID() != first {
+		t.Fatalf("one key must be kept: %v", err)
+	}
+	if err := KillPublishedSessionKey(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsurePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	second := publishedSessionTestKey(t, root).ID()
+	if second == first {
+		t.Fatal("a missing key must be replaced by a new one")
+	}
+	if _, err := createPublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadPublishedSessionKey(root); err == nil {
+		t.Fatal("two keys must be no key")
+	}
+	if err := EnsurePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	if third := publishedSessionTestKey(t, root).ID(); third == second {
+		t.Fatal("two keys must be replaced by one new one")
+	}
+	missing := filepath.Join(t.TempDir(), "sessions")
+	if err := EnsurePublishedSessionKey(missing, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	if keys, err := publishedSessionKeys(missing); err != nil || len(keys) != 0 {
+		t.Fatalf("a missing record folder gets no key: %v %v", keys, err)
+	}
+	if err := RemovePublishedSessionKeys(root); err != nil {
+		t.Fatal(err)
+	}
+	if keys, err := publishedSessionKeys(root); err != nil || len(keys) != 0 {
+		t.Fatalf("uninstall must remove every key: %v %v", keys, err)
+	}
+}
+
+// Review P1 (round 3, kept): a record folder on a volume that is read-only
+// proves nothing, since no key could be removed there; one whose state
+// cannot be read neither. A block still denies.
+func TestPublishedForeignHookSessionOnAReadOnlyVolumeProvesNothing(t *testing.T) {
+	root := publishedSessionTestRoot(t)
+	identity := publishedSessionTestIdentity(t)
+	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if readOnly, err := publishedSessionVolumeIsReadOnly(root); err != nil || readOnly {
+		t.Fatalf("a temporary folder is on a writable volume: %v %v", readOnly, err)
+	}
+	previous := publishedSessionVolumeReadOnly
+	t.Cleanup(func() { publishedSessionVolumeReadOnly = previous })
+	for name, state := range map[string]func(string) (bool, error){
+		"read-only":  func(string) (bool, error) { return true, nil },
+		"unreadable": func(string) (bool, error) { return false, errors.New("statfs failed") },
+	} {
+		publishedSessionVolumeReadOnly = state
+		if publishedSessionTestAllows(root, identity, key) {
+			t.Fatalf("%s: the allow must prove nothing", name)
+		}
+	}
+	if err := publishCurrent(root, identity, key, GuardDecision{Deny: true}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll); err != nil || !got.Deny {
+		t.Fatalf("a block must still deny: %+v %v", got, err)
+	}
+}
+
+// The key is read again at the end of the check: a kill while the check
+// runs ends the allow it was reading.
+func TestPublishedForeignHookSessionKeyKilledDuringTheCheck(t *testing.T) {
+	root := publishedSessionTestRoot(t)
+	identity := publishedSessionTestIdentity(t)
+	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	previous := publishedSessionVolumeReadOnly
+	t.Cleanup(func() { publishedSessionVolumeReadOnly = previous })
+	for name, during := range map[string]func(){
+		"killed":   func() { _ = KillPublishedSessionKey(root) },
+		"replaced": func() { _ = CreatePublishedSessionKey(root, publishedSessionTestTrust) },
+	} {
+		if err := CreatePublishedSessionKey(root, publishedSessionTestTrust); err != nil {
+			t.Fatal(err)
+		}
+		if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		publishedSessionVolumeReadOnly = func(path string) (bool, error) {
+			during()
+			return false, nil
+		}
+		if publishedSessionTestAllows(root, identity, key) {
+			t.Fatalf("%s during the check: the allow must prove nothing", name)
+		}
+		publishedSessionVolumeReadOnly = previous
+	}
+}
+
+// Without a root nothing is written.
+func TestPublishedForeignHookSessionWithoutARootWritesNothing(t *testing.T) {
+	identity := publishedSessionTestIdentity(t)
+	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
+	if err := PublishForeignHookSessionDecision("", identity, key, GuardDecision{}, SessionRecordKey{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	if err := PublishForeignHookSessionDecision(missing, identity, key, GuardDecision{}, SessionRecordKey{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(missing); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("a missing root must not be created")
 	}
 }
 
@@ -367,116 +702,5 @@ func TestPublishedForeignHookSessionPruneKeepsTheNewest(t *testing.T) {
 	}
 	if _, err := os.Lstat(old); !os.IsNotExist(err) {
 		t.Fatal("a record past its age must be pruned")
-	}
-}
-
-// heldOpenPublishedSessionRecord makes the replacement and the deletion of
-// the record at path fail the way Windows refuses them while the account
-// holds the record open without delete sharing.
-func heldOpenPublishedSessionRecord(t *testing.T, path string) (release func()) {
-	t.Helper()
-	held := true
-	previousRename, previousRemove := publishedSessionRename, publishedSessionRemove
-	sharing := errors.New("the process cannot access the file because it is being used by another process")
-	publishedSessionRename = func(from, to string) error {
-		if held && to == path {
-			return &os.LinkError{Op: "rename", Old: from, New: to, Err: sharing}
-		}
-		return previousRename(from, to)
-	}
-	publishedSessionRemove = func(name string) error {
-		if held && name == path {
-			return &os.PathError{Op: "remove", Path: name, Err: sharing}
-		}
-		return previousRemove(name)
-	}
-	t.Cleanup(func() { publishedSessionRename, publishedSessionRemove = previousRename, previousRemove })
-	return func() { held = false }
-}
-
-// Review P1 (GAP-0352): a record the account holds open so that it can be
-// neither replaced nor deleted must still stop proving an allow after a
-// block, a guardian removal or a withdrawn answer: each writes the
-// record's deny marker, which the hook honours whatever the record says.
-// Only a later allow that replaced the record clears the marker.
-func TestPublishedForeignHookSessionRevocationSurvivesARecordThatCannotBeReplaced(t *testing.T) {
-	root := publishedSessionTestRoot(t)
-	identity := publishedSessionTestIdentity(t)
-	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
-	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
-	if !ok {
-		t.Fatal("no record path")
-	}
-	check := func() (GuardDecision, error) {
-		t.Helper()
-		return CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll)
-	}
-	allow := func() {
-		t.Helper()
-		if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-		if got, err := check(); err != nil || got.Deny {
-			t.Fatalf("the allow must prove the process unblocked: %+v %v", got, err)
-		}
-	}
-	allow()
-
-	// The gateway's block cannot replace or delete the held record.
-	release := heldOpenPublishedSessionRecord(t, path)
-	reason := foreignHookBlockedPrefix + " the project hook /repo/.github/hooks/x.json"
-	if err := publishCurrent(root, identity, key, GuardDecision{Deny: true, Reason: reason}, time.Now()); err == nil {
-		t.Fatal("a block that cannot replace the record must report it")
-	}
-	if data, err := os.ReadFile(path); err != nil || !strings.Contains(string(data), `"blocked":false`) {
-		t.Fatalf("the held record must still hold the old allow: %q %v", data, err)
-	}
-	if got, err := check(); err != nil || !got.Deny || got.Reason != reason {
-		t.Fatalf("the deny marker must deny with the gateway's reason: %+v %v", got, err)
-	}
-	// An allow that cannot replace the held record leaves the marker.
-	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err == nil {
-		t.Fatal("an allow that cannot replace the record must report it")
-	}
-	if got, err := check(); err != nil || !got.Deny {
-		t.Fatalf("an allow that did not replace the record must not clear the marker: %+v %v", got, err)
-	}
-	// The allow that replaced the record clears it.
-	release()
-	allow()
-	if _, err := os.Lstat(publishedSessionDenyPath(path)); !os.IsNotExist(err) {
-		t.Fatalf("the replacing allow must remove the marker: %v", err)
-	}
-
-	// A block of the process alone cannot delete the held record either.
-	release = heldOpenPublishedSessionRecord(t, path)
-	if err := publishCurrent(root, identity, SessionKey{Connector: key.Connector, Process: key.Process}, GuardDecision{Deny: true}, time.Now()); err == nil {
-		t.Fatal("a block that cannot replace the record must report it")
-	}
-	if got, err := check(); err != nil || !got.Deny || !strings.HasPrefix(got.Reason, foreignHookBlockedPrefix) {
-		t.Fatalf("the marker must deny: %+v %v", got, err)
-	}
-	// A marker whose record still exists survives the prune; once the record
-	// is gone, the marker goes with the next prune.
-	prunePublishedSessionRecords(filepath.Dir(path), time.Now())
-	if _, err := os.Lstat(publishedSessionDenyPath(path)); err != nil {
-		t.Fatalf("the prune must keep the marker of a record that stays: %v", err)
-	}
-	release()
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	prunePublishedSessionRecords(filepath.Dir(path), time.Now())
-	if _, err := os.Lstat(publishedSessionDenyPath(path)); !os.IsNotExist(err) {
-		t.Fatalf("the prune must remove the marker of a record that is gone: %v", err)
-	}
-
-	// Anything at a marker path denies, even what does not decode.
-	allow()
-	if err := os.WriteFile(publishedSessionDenyPath(path), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := check(); err != nil || !got.Deny {
-		t.Fatalf("a marker that does not decode must still deny: %+v %v", got, err)
 	}
 }

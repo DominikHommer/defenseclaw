@@ -19,21 +19,20 @@ import (
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
 )
 
-// Review P1/P2 (GAP-0352, 1.0.4 guard loop round 1): the guardian units run
-// under ProtectSystem=strict, so the hold folder of the record folder (the
-// folder above it) must be writable to them, or every hold the guardian
-// puts in place before a removal fails, and a pass that cannot bump leaves
-// nothing the hook sees.
-func TestTheGuardianUnitsCanHoldTheSessionRecords(t *testing.T) {
+// Kill switch: the gateway and guardian units run under
+// ProtectSystem=strict, so the folder of the record key (the folder above
+// the record folder) must be writable to them, or the gateway could not
+// remove the key before a block, nor the guardian before a removal.
+func TestTheUnitsCanChangeTheSessionRecordKey(t *testing.T) {
 	layout, err := managed.StandaloneLayoutFor("linux")
 	if err != nil {
 		t.Fatal(err)
 	}
-	holds, ok := PublishedSessionHoldDir(layout.HookSessionDir)
+	holds, ok := PublishedSessionKeyDir(layout.HookSessionDir)
 	if !ok {
-		t.Fatal("no hold folder")
+		t.Fatal("no key folder")
 	}
-	for _, unit := range []string{"defenseclaw-hook-guardian.service", "defenseclaw-hook-guardian-reconcile.service"} {
+	for _, unit := range []string{"defenseclaw-gateway.service", "defenseclaw-hook-guardian.service", "defenseclaw-hook-guardian-reconcile.service"} {
 		data, err := systemdunits.ReadFile(unit)
 		if err != nil {
 			t.Fatal(err)
@@ -50,7 +49,7 @@ func TestTheGuardianUnitsCanHoldTheSessionRecords(t *testing.T) {
 			}
 		}
 		if !writable {
-			t.Errorf("%s cannot write the hold folder %s", unit, holds)
+			t.Errorf("%s cannot write the key folder %s", unit, holds)
 		}
 	}
 }

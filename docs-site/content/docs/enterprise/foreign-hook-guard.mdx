@@ -247,112 +247,68 @@ change:
 gateway creates each account's folder with one access entry for that account
 (a POSIX ACL entry on Linux, a macOS ACL entry, a protected DACL on Windows).
 
-Every answer carries the record folder's generation: the modification time
-of a `generation` file in the folder, which only root or SYSTEM can change.
-`ensure`, `repair`, an upgrade and Setup start a new generation before they
-change anything, and again after they put the folder's permissions back
-(the folder is closed to users in between). The guardian starts one after
-every hook removal it records. During an outage the hook honors an allow
-only when its record is of the current generation, so a new generation ends
-every earlier answer at once. Nothing has to find or delete old records: a
-user who moved a record folder aside and brought it back while an
-administrator left the folder writable only brings back answers that no
-longer count. On Linux the package's tmpfiles.d entries create the folder
-and a new generation file at boot, and only at boot.
+Every allow record carries a MAC made with the record folder's key. The key
+is the name of one file next to the record folder,
+`<folder>.key-<64 hex characters>`, which only root or SYSTEM can create:
 
-While a run works on the record folder, it holds the records: it puts a
-hold file in the hold folder and deletes it only after the folder is closed
-or replaced and has a new generation. On Linux and macOS the hold folder is
-the folder above the record folder (`sessions.hold`). On Windows it is
-`%ProgramData%\Cisco\DefenseClaw-HookRuntime`
-(`DefenseClaw-HookSessions.hold`), because standard users can create files
-in `C:\ProgramData\Cisco`. A file at the hold path that DefenseClaw did not
-make is replaced first. While a hold exists, guarded calls block during an
-outage. A run that fails before then leaves the file, so guarded calls keep
-blocking during an outage until a later `repair` succeeds. On Windows the
-hold starts when the action starts, and so does an owner the hook refuses
-for `DefenseClaw-HookSessions` (see below).
+| OS | Key file |
+| --- | --- |
+| Linux | `/run/defenseclaw-hook/sessions.key-…` |
+| macOS | `/opt/cisco/defenseclaw/run/sessions.key-…` |
+| Windows | `%ProgramData%\Cisco\DefenseClaw-HookSessions.key-…` |
 
-The guardian holds the records the same way for each hook removal. Before
-it writes the removal to its ledger, it puts a hold for the account in the
-hold folder (`<folder>.hold-removal-<account digest>`) and deletes the
-`generation` file. While that file is missing, no record counts. After the
-ledger write it starts the new generation, which creates the file again,
-and only then deletes the hold. A guardian that stops, or cannot start the
-generation, in between leaves the hold or the missing file, so guarded
-calls block during an outage until a later pass starts it. If the guardian
-can neither make the hold nor delete the file, it blocks the account in the
-gateway, then deletes the account's own records (or sets them to 1970 and
-adds a `.deny` file), and only then writes the ledger. Only when that fails
-too does it publish the removal with nothing the hook sees, and it logs
-that. The next pass finishes the work: for
-that account it records the removal for every connector, and for another
-account it first blocks that account in the gateway. When the guardian
-cannot resolve the standalone layout (on Windows, the protected ProgramData
-registration), it uses the record folder it found last, or else finds the
-folder from its own data directory.
+During an outage the hook honors an allow only when its MAC verifies with
+the current key. So one step ends every earlier answer at once: the key is
+removed. Nothing has to find or delete old records, and a record put back
+later (for example by a user who kept access to the folder) does not count,
+because a new key has a new random name and no user can make a key file the
+hook accepts.
 
-On macOS, a macOS ACL entry grants access that the folder's mode does not.
-When such an entry lets another account change the record folder, or
-anything in it, `ensure` and `repair` replace the folder with a new, empty
-one before they start the new generation.
+Every revocation removes the key first and only then does anything else:
 
-Before the gateway records a block in its own session store (a session
-start that found an unapproved hook, or a block carried to another agent
-process or session), it takes the session's records out of use, and it
-writes the block to them after. A gateway that stops in between leaves no
-allow, so guarded calls block during the outage, as the gateway would. If
-it cannot take the records out of use (for example, the volume is
-read-only), it deletes the `generation` file instead, so no allow of any
-account counts until the next `repair` or guardian removal starts a new
-generation. The hook also refuses every record on a read-only volume. The
-gateway records the block even while it cannot read the guardian's
-removals. When it cannot resolve the standalone layout, it uses the record
-folder it found last, or the one its data directory names.
+- the gateway, before it records a block and before it sends any denial;
+- the hook guardian, before it records a hook removal; it makes a new key
+  only after the ledger write;
+- `ensure`, `repair`, an upgrade, Setup and uninstall, before they change
+  anything; they make a new key only when they finish without an error.
 
-A block that cannot replace or delete a record (on Windows the account can
-hold its record open) sets the record's modification time to 1970, which the
-hook reads as expired, and writes a `.deny` file next to it. Either one
-blocks, so a full disk that refuses the `.deny` file does not keep the old
-answer. The next allow that replaces the record clears both.
+The hook guardian also makes a key at every pass (once a minute) when there
+is none, for example after a gateway block or a run that failed. Until
+then, guarded calls block during an outage. On Linux there is no key after a
+boot until the guardian's first pass. If a key file cannot be removed (on
+Windows, a program can hold it open for a moment), root or SYSTEM adds a
+second one next to it, and the hook trusts no folder with more than one
+key. The hook also refuses every record on a read-only volume, where no key
+can be removed. If the gateway cannot remove the key, it still records and
+publishes the block, which denies during an outage.
 
 The record folder holds no removal state. When the guardian cannot write its
-removal ledger (for example, the disk is full), or cannot start a new
-generation after a removal (for example, it cannot find the record folder),
-it marks the account in the gateway's own session store, in the gateway's
-data directory, which no user can reach. The mark changes only a folder's
-metadata, so it needs no free space. While the mark is set, the gateway
-blocks every guarded call of that account. The next guardian pass for the
-account that can write the ledger and start a new generation records the
+removal ledger (for example, the disk is full), or cannot remove the key
+first, it marks the account in the gateway's own session store, in the
+gateway's data directory, which no user can reach. The mark changes only a
+folder's metadata, so it needs no free space. While the mark is set, the
+gateway blocks every guarded call of that account. The next guardian pass
+for the account that can remove the key and write the ledger records the
 removal for every connector and then clears the mark. Agents that were
-running then stay blocked until they restart. A Windows gateway that cannot
-find the record folder at all (not from the protected registration, not
-earlier, and not from its data directory) blocks every guarded call.
-A check that was running when the guardian recorded a removal reads the
-removals again before it answers, so that call is blocked too.
+running then stay blocked until they restart. When the gateway or the
+guardian cannot resolve the standalone layout (on Windows, the protected
+ProgramData registration), it uses the record folder it found last, or the
+one its data directory names. A Windows gateway that cannot find the record
+folder at all blocks every guarded call. A check that was running when the
+guardian recorded a removal reads the removals again before it answers, so
+that call is blocked too.
 
 On Windows, the hook refuses a record when anyone but SYSTEM,
 Administrators or the gateway service can change the record, its folder,
-`DefenseClaw-HookSessions` or `C:\ProgramData\Cisco`, and a generation file
-that SYSTEM or Administrators do not own. If other software loosens the
-permissions on `C:\ProgramData\Cisco`, guarded calls block during an outage.
-`ensure`, `repair`, an upgrade and Setup replace `DefenseClaw-HookSessions`
-with a new, empty folder every time: a user who opened the folder while it
-allowed changing its permissions keeps that access through the open handle.
-If the folder cannot be moved aside (a program holds it open), the step
-fails. The folder then keeps an owner the hook refuses and that no open
-handle can change: LOCAL SERVICE, or the administrator account that ran the
-step when that account lacks the "Restore files and directories" right.
-SYSTEM without that right can name no such owner, so the step puts a
-`DefenseClaw-HookSessions.refused-<random>` file in `C:\ProgramData\Cisco`
-instead. No handle on the record folder or the hook runtime folder reaches
-it, and the hook refuses the folder while it is there. The
-records also stay held, so guarded calls block during an outage until a
-later `repair` replaces the folder and deletes the file. Windows `status` and `verify` warn
-`hook_session_records_untrusted` while the records are held, and when the
-hook would refuse the folder, a folder above it, or its generation file. If
-you fix the folder's permissions by hand, run `repair` afterwards, which
-starts a new generation.
+`DefenseClaw-HookSessions` or `C:\ProgramData\Cisco`, and a key file that
+SYSTEM or Administrators do not own or that a standard user can rename or
+delete. If other software loosens the permissions on `C:\ProgramData\Cisco`,
+guarded calls block during an outage. `ensure`, `repair`, an upgrade and
+Setup put the folder's owner and permissions back. Windows `status` and
+`verify` warn `hook_session_records_untrusted` when the hook would refuse
+the folder or a folder above it, or when there is not exactly one key it
+trusts. If you fix the folder's permissions by hand, run `repair`
+afterwards.
 
 While the gateway cannot answer (it is stopped or restarting, or it ended
 without removing its hook socket), a guarded tool call runs only when the
@@ -361,8 +317,8 @@ process. Otherwise the call is blocked. That covers `closed` and an unset
 fail mode, a session the gateway blocked, an agent that started while the
 gateway was down, an agent process DefenseClaw cannot name, and a record
 that is missing, older than 15 minutes (the gateway writes it again at every
-check, so a longer outage blocks), of an earlier generation, dated more than a
-minute in the future (the clock was ahead when it was written), or that the
+check, so a longer outage blocks), not written under the current key, dated
+more than a minute in the future (the clock was ahead when it was written), or that the
 account could change. A blocked session gets the gateway's own block message. Other calls
 get the outage message, for example:
 

@@ -508,7 +508,7 @@ func runWindowsEnterpriseStandaloneAction(
 	args []string,
 ) error {
 	// Before the action changes anything (GAP-0352).
-	bumpWindowsHookSessionGeneration(action)
+	killWindowsHookSessionKey(action)
 	var unsettledBundles []*enterprisebundle.Receipt
 	if action == "status" && windowsEnterpriseIsElevated() && windowsEnterpriseStandaloneInstalled() {
 		var err error

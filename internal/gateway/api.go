@@ -95,6 +95,9 @@ type APIServer struct {
 	// foreignHookSessionRoot is the protected session record folder this
 	// gateway located last (foreignHookSessionRecordRoot).
 	foreignHookSessionRoot atomic.Pointer[string]
+	// foreignHookSessionKilled names the denials this gateway removed the
+	// record key for (killForeignHookSessionKey).
+	foreignHookSessionKilled foreignHookSessionKillCache
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
