@@ -4,7 +4,6 @@
 package gateway
 
 import (
-	"fmt"
 	"reflect"
 	"runtime"
 	"slices"
@@ -21,28 +20,29 @@ import (
 // from and how each fact that can decide its guardrail profile is known:
 // the account (which account holds the verified uid or SID, its name,
 // domain and UPN), its groups, and the request agent's ownership of a
-// pre-1.0.4 agents entry. Each fact is proven, stale, unknown or failed
-// (proofStatus). selectProfile then applies one rule, with no exception:
+// pre-1.0.4 agents entry. Each fact is proven, unknown or failed
+// (proofStatus). selectProfile then applies one rule (record, never infer):
 //
 //   - Every assignment is evaluated against the facts as yes, no or maybe:
-//     maybe when a fact it needs is not proven in this pass.
-//   - When every fact is proven, the profiles of the assignments that match
-//     are the candidates, or default_profile when none does, and the
-//     strictest of them applies, whatever their order.
-//   - When any fact is not proven (absent, incomplete, timed out, a provider
-//     error anywhere in the NSS, SSSD, LDAP, winbind or Windows token chain,
-//     an ambiguous name or uid, an unproven 1.0.3 agents entry), the
-//     candidates are every profile that could match the account (yes and
-//     maybe, or default_profile when nothing matches for sure) and the last
-//     profile proven for this exact incarnation. A profile that enforces at
-//     least what each of them enforces applies (profileCovers); when none
-//     does, the request is refused wherever its surface can block it, and
-//     Name is the strictest of them by hook mode and block_at for the rest.
-//     It never resolves to a weaker default.
+//     maybe when a fact it needs is not proven in this pass (absent,
+//     incomplete, timed out, a provider error anywhere in the NSS, SSSD,
+//     LDAP, winbind or Windows token chain, an ambiguous name or uid, a
+//     pre-1.0.4 agents entry the upgrade did not bind, a group fact newer
+//     than the last macOS account listing).
+//   - A maybe whose profile the proven facts already give (a yes
+//     assignment's, or with no yes the default) changes nothing. Otherwise
+//     the request is refused, naming the facts those maybes need
+//     (profileDecision.Refused); Name is then the strictest combination of
+//     default_profile and every profile that matches or could match, for
+//     the administrator's explain, and authorizes nothing.
+//   - Else the profiles of the yes assignments apply, or default_profile
+//     when none matches: the one that enforces at least what each of the
+//     others does (profileCovers), otherwise their meet, the strictest
+//     combination field by field (guardrail_profile_meet_gw.go).
 //
 // This replaces the earlier special cases (matchWithFailedLookup,
-// matchWithUnknownGroups, matchWithUnconfirmedGroups, the unproven-candidate
-// and shared-uid refusals, and the legacy agent layering of matchAgent).
+// matchWithUnknownGroups, matchWithUnconfirmedGroups, and the legacy agent
+// layering of matchAgent).
 
 // proofStatus is how one identity fact is known in this pass.
 type proofStatus string
@@ -52,11 +52,6 @@ const (
 	// identity cache holds within their TTL (hooks and explain apply the
 	// same cached facts during an outage).
 	proofProven proofStatus = "proven"
-	// proofStale: the fact is a proof of an earlier pass that this pass
-	// could not repeat, past the TTL the cache trusts it for. The cache
-	// drops such facts, so a request sees them as unknown; explain and the
-	// refusal text name the state.
-	proofStale proofStatus = "stale"
 	// proofUnknown: the fact is not known (a lookup that has not answered,
 	// timed out, or left the fact out).
 	proofUnknown proofStatus = "unknown"
@@ -68,10 +63,14 @@ const (
 
 // identityIncarnation names one account incarnation: the verified uid or
 // SID, the account that holds it, and a token that changes when the account
-// is recreated under the same uid and name (the SSSD or AD account SID; a
-// Windows SID is its own token). Caches of proven decisions are keyed by
-// the whole incarnation (key), never by a bare uid or a spelling. The UPN
-// is a fact of the incarnation, not part of its key.
+// is recreated under the same uid and name (the SSSD or AD account SID, a
+// macOS account's local node record; a Windows SID is its own token).
+// Caches of proven decisions are keyed by the whole incarnation (key),
+// never by a bare uid or a spelling. An account no such token names (a
+// local Linux account, an LDAP or winbind account, a macOS directory
+// account with no local record) has no key: its uid, name and domain are
+// the same for an account deleted and created again, so nothing proven is
+// kept for it. The UPN is a fact of the incarnation, not part of its key.
 type identityIncarnation struct {
 	Kind, ID          string
 	Name, Domain, UPN string
@@ -104,25 +103,15 @@ type identityResolution struct {
 	// agentUnresolved reports the agents entries (lower case) that may be
 	// the request agent's 1.0.3 identity; nil when none may.
 	agentUnresolved func(entry string) bool
+	// agentOwned reports the agents entries (lower case) the 1.0.3 bridge
+	// proves are the request agent's own 1.0.3 identity
+	// (profileAgentBridge): they match as the agent's identity does.
+	agentOwned func(entry string) bool
 }
 
 // proven reports whether every fact is proven.
 func (r identityResolution) proven() bool {
 	return r.Account == proofProven && r.UPN == proofProven && r.Groups == proofProven && r.Agent == proofProven
-}
-
-// unprovenFacts names the facts that are not proven, for explain.
-func (r identityResolution) unprovenFacts() []string {
-	var out []string
-	for _, fact := range []struct {
-		name   string
-		status proofStatus
-	}{{"account", r.Account}, {"upn", r.UPN}, {"groups", r.Groups}, {"agent", r.Agent}} {
-		if fact.status != proofProven {
-			out = append(out, fact.name+":"+string(fact.status))
-		}
-	}
-	return out
 }
 
 // resolveIdentity computes the identity facts of a verified subject and
@@ -162,12 +151,8 @@ func resolveIdentity(subject *profileSubject, agentUnresolved func(string) bool)
 	if res.Account == proofProven {
 		res.Incarnation.Name, res.Incarnation.Domain, res.Incarnation.UPN = subject.UserName, subject.Domain, subject.UPN
 		res.Incarnation.Token = subject.accountToken
-		if res.Incarnation.Token == "" {
-			if subject.IDKind == useridentity.KindWindowsSID {
-				res.Incarnation.Token = subject.UserID
-			} else if subject.UserName != "" {
-				res.Incarnation.Token = "name:" + string(subject.Directory) + ":" + subject.AccountDomain
-			}
+		if res.Incarnation.Token == "" && subject.IDKind == useridentity.KindWindowsSID {
+			res.Incarnation.Token = subject.UserID
 		}
 	}
 	return res
@@ -185,17 +170,18 @@ const (
 // assignmentState evaluates m for the request: yes when the proven facts
 // satisfy every key, no when a proven fact rules a key out, and maybe when
 // a key depends on a fact that is not proven. reason and group are the
-// match reason of a yes, as assignmentMatches gives them.
+// match reason of a yes, as assignmentMatches gives them; needs names the
+// unproven facts a maybe depends on, as <fact>:<proofStatus> (upn:unknown).
 func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *profileSubject, res identityResolution,
-	verified bool, connectorName, agent string) (state matchState, reason, group string) {
+	verified bool, connectorName, agent string) (state matchState, reason, group string, needs []string) {
 	if !verified || subject == nil {
 		if reason, group, ok := assignmentMatches(m, subject, &subjectGroups{}, false, connectorName, agent); ok {
-			return matchYes, reason, group
+			return matchYes, reason, group, nil
 		}
-		return matchNo, "", ""
+		return matchNo, "", "", nil
 	}
 	if m.Empty() {
-		return matchNo, "", ""
+		return matchNo, "", "", nil
 	}
 	state = matchYes
 	lower := func(next matchState) {
@@ -203,24 +189,36 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 			state = next
 		}
 	}
+	need := func(fact string) {
+		if !slices.Contains(needs, fact) {
+			needs = append(needs, fact)
+		}
+	}
 	if len(m.Connectors) > 0 {
 		if connectorName == "" || !anyMatches(m.Connectors, func(v string) bool { return config.NormalizeConnectorName(v) == connectorName }) {
-			return matchNo, "", ""
+			return matchNo, "", "", nil
 		}
 		reason = profileMatchConnector
 	}
 	if len(m.Groups) > 0 {
 		groupState, matched := set.groupsState(m.Groups, subject, res)
 		if groupState == matchNo {
-			return matchNo, "", ""
+			return matchNo, "", "", nil
 		}
 		lower(groupState)
-		if groupState == matchYes {
+		switch {
+		case groupState == matchYes:
 			reason, group = profileMatchGroup, matched
+		case res.Groups == proofProven:
+			// The account's groups are proven; an assignment group name's
+			// SID is not (groupsState, GAP-0487).
+			need(factAssignmentGroupSID)
+		default:
+			need("groups:" + string(res.Groups))
 		}
 	}
 	if len(m.Users) > 0 {
-		userState := matchNo
+		userState, userNeed := matchNo, ""
 		for _, entry := range m.Users {
 			entry = strings.TrimSpace(entry)
 			switch {
@@ -233,48 +231,59 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 			case res.Account == proofProven:
 				if userEntryMatches(subject, entry) {
 					userState = matchYes
-				} else if res.UPN != proofProven && strings.ContainsAny(entry, `@\`) {
+				} else if res.UPN != proofProven && strings.ContainsAny(entry, `@\`) && !strings.HasPrefix(entry, `.\`) {
 					// A UPN or DOMAIN\name entry may name the account
-					// through the UPN the guardian has not given yet.
-					userState = max(userState, matchMaybe)
+					// through the UPN the guardian has not given yet. A
+					// .\name entry names a local account, never a UPN.
+					userState, userNeed = max(userState, matchMaybe), "upn:"+string(res.UPN)
 				}
 			default:
 				// Any name, UPN or principal may be the unproven account's.
-				userState = max(userState, matchMaybe)
+				userState, userNeed = max(userState, matchMaybe), "account:"+string(res.Account)
 			}
 			if userState == matchYes {
 				break
 			}
 		}
 		if userState == matchNo {
-			return matchNo, "", ""
+			return matchNo, "", "", nil
 		}
 		lower(userState)
 		if userState == matchYes {
 			reason, group = profileMatchUser, ""
+		} else {
+			need(userNeed)
 		}
 	}
 	if len(m.Agents) > 0 {
 		agentState := matchNo
-		if anyMatches(m.Agents, func(v string) bool { return agentEntryMatches(v, agent) }) {
+		if anyMatches(m.Agents, func(v string) bool {
+			return agentEntryMatches(v, agent) || (res.agentOwned != nil && res.agentOwned(strings.ToLower(strings.TrimSpace(v))))
+		}) {
 			agentState = matchYes
 		} else if res.agentUnresolved != nil &&
 			anyMatches(m.Agents, func(v string) bool { return res.agentUnresolved(strings.ToLower(strings.TrimSpace(v))) }) {
 			agentState = matchMaybe
 		}
 		if agentState == matchNo {
-			return matchNo, "", ""
+			return matchNo, "", "", nil
 		}
 		lower(agentState)
 		if agentState == matchYes {
 			reason, group = profileMatchAgent, ""
+		} else {
+			need("agent:" + string(res.Agent))
 		}
 	}
 	if state != matchYes {
-		return state, "", ""
+		return state, "", "", needs
 	}
-	return matchYes, reason, group
+	return matchYes, reason, group, nil
 }
+
+// factAssignmentGroupSID is the unproven fact of an assignment group name
+// whose Windows SID lookup has not answered.
+const factAssignmentGroupSID = "assignment_group_sid:unknown"
 
 // groupsState evaluates a groups key. Proven groups decide it. Unknown
 // groups make every entry a maybe. With some gids unconfirmed, a proven
@@ -295,6 +304,12 @@ func (set *guardrailProfileSet) groupsState(entries []string, subject *profileSu
 			}
 		}
 		if res.Groups == proofProven {
+			// A group name whose SID a Windows lookup has not given yet (in
+			// flight, or failed for a reason other than "no such group")
+			// may be one of the token's groups (GAP-0487).
+			if set.groupSIDs.unresolvedAny(entries) {
+				return matchMaybe, ""
+			}
 			return matchNo, ""
 		}
 	}
@@ -331,13 +346,15 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	}
 	var yes []hit
 	var maybe []string
+	var maybeNeeds [][]string
 	for i, assignment := range set.assignments {
-		state, reason, group := set.assignmentState(assignment.Match, subject, res, verified, connectorName, agent)
+		state, reason, group, needs := set.assignmentState(assignment.Match, subject, res, verified, connectorName, agent)
 		switch state {
 		case matchYes:
 			yes = append(yes, hit{index: i + 1, profile: strings.TrimSpace(assignment.Profile), reason: reason, group: group})
 		case matchMaybe:
 			maybe = append(maybe, strings.TrimSpace(assignment.Profile))
+			maybeNeeds = append(maybeNeeds, needs)
 		}
 	}
 	definite := func(name string) (profileDecision, bool) {
@@ -350,20 +367,26 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		}
 		return profileDecision{}, false
 	}
-	var candidates []string
-	for _, h := range yes {
-		candidates = append(candidates, h.profile)
+	// An assignment that may apply changes nothing when its profile is one
+	// the proven facts already give: a matching assignment's, or with none
+	// matching, the default. The decision needs the unproven facts of the
+	// others only.
+	var needed []string
+	for i, name := range maybe {
+		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && slices.ContainsFunc(yes, func(h hit) bool { return h.profile == name }) {
+			continue
+		}
+		for _, fact := range maybeNeeds[i] {
+			if !slices.Contains(needed, fact) {
+				needed = append(needed, fact)
+			}
+		}
 	}
-	if len(yes) == 0 {
-		candidates = append(candidates, set.defaultProfile)
-	}
-	if !verified || len(maybe) == 0 {
-		// No assignment depends on a fact that is not proven: the facts
-		// decide, and the strictest profile of the assignments that match
-		// applies, whatever their order.
-		name, _ := set.strictestOf(candidates, connectorName)
-		decision, ok := definite(name)
-		if !ok {
+	if !verified || len(needed) == 0 {
+		// No assignment depends on a fact that is not proven: the profiles
+		// of the matching assignments, or the default.
+		var decision profileDecision
+		if len(yes) == 0 {
 			reason := profileMatchDefault
 			switch {
 			case !verified:
@@ -374,99 +397,102 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 				reason = profileMatchDefaultLookupFailed
 			}
 			decision = set.decision(set.defaultProfile, reason, "", source)
+		} else {
+			var matched []string
+			for _, h := range yes {
+				matched = append(matched, h.profile)
+			}
+			matched = compactProfiles(matched)
+			name, single := set.meetOf(matched, connectorName)
+			var ok bool
+			if decision, ok = definite(name); !ok || !single {
+				// Overlapping assignments whose profiles enforce different
+				// rules: their meet, reported as the first one matched.
+				decision = set.decision(name, yes[0].reason, yes[0].group, source)
+				decision.Assignment = yes[0].index
+				decision.Candidates = matched
+			}
 		}
 		if verified && res.proven() {
-			set.provenProfiles.note(res.Incarnation.key(), decision.Name)
+			set.provenProfiles.note(res.Incarnation, decision.Name)
 		}
 		return decision
 	}
-	// An assignment may or may not apply: the strictest of every profile
-	// that could match, default_profile (the configured fallback) and the
-	// last profile proven for this incarnation.
-	// default_profile is tried first, so an outage reports the configured
-	// fallback when it is as strict as any other.
-	candidates = append(append([]string{set.defaultProfile}, candidates...), maybe...)
-	if last, ok := set.provenProfiles.get(res.Incarnation.key()); ok {
+	// An assignment may or may not apply: default_profile (the configured
+	// fallback, tried first, so an outage reports it when it is as strict as
+	// any other), every profile that matches or could match, and the last
+	// profile proven for this incarnation; the one that covers the others,
+	// else their meet.
+	candidates := []string{set.defaultProfile}
+	for _, h := range yes {
+		candidates = append(candidates, h.profile)
+	}
+	candidates = append(candidates, maybe...)
+	if last, ok := set.provenProfiles.get(res.Incarnation, res.Account == proofProven); ok {
 		candidates = append(candidates, last)
 	}
-	candidates = compactProfiles(candidates)
-	name, covers := set.strictestOf(candidates, connectorName)
+	candidates = meetMembers(candidates)
+	name, single := set.meetOf(candidates, connectorName)
 	decision, ok := definite(name)
-	if !ok || !covers {
-		// A profile the proven facts select keeps its reason when it is
-		// the strictest; any other is the unproven fallback.
+	if !ok || !single {
+		// A profile the proven facts select keeps its reason when it covers
+		// the others; any other is the unproven fallback.
 		decision = set.decision(name, profileMatchDefaultLookupFailed, "", source)
 	}
-	decision.Unproven = res.unprovenFacts()
+	decision.Unproven = orderedFacts(needed)
 	decision.Candidates = candidates
-	if !covers {
-		decision.Refused = set.unprovenRefusalReason(subject, res, connectorName)
-	}
+	decision.Refused = set.identityUncertaintyReason(subject, decision.Unproven, connectorName)
 	return decision
 }
 
-// compactProfiles drops repeated names, keeping the first.
-func compactProfiles(names []string) []string {
-	out := make([]string, 0, len(names))
-	for _, name := range names {
-		if !slices.Contains(out, name) {
-			out = append(out, name)
+// orderedFacts is facts in a fixed order: account, upn, groups, the
+// assignment group SID, agent.
+func orderedFacts(facts []string) []string {
+	rank := func(fact string) int {
+		for i, prefix := range []string{"account:", "upn:", "groups:", factAssignmentGroupSID, "agent:"} {
+			if strings.HasPrefix(fact, prefix) {
+				return i
+			}
 		}
+		return 5
 	}
+	out := slices.Clone(facts)
+	slices.SortStableFunc(out, func(a, b string) int { return rank(a) - rank(b) })
 	return out
 }
 
-// strictestOf picks the strictest of candidates for connectorName: the
-// first that enforces at least what each of the others does
-// (profileCovers), with covers true; when none does, the strictest by hook
-// mode and block_at (profileStricter, the first of equals), with covers
-// false.
-func (set *guardrailProfileSet) strictestOf(candidates []string, connectorName string) (name string, covers bool) {
-	if len(candidates) == 0 {
-		return set.defaultProfile, true
-	}
-	connectors := profileCoverConnectors(connectorName)
-	for _, candidate := range candidates {
-		if !slices.ContainsFunc(candidates, func(other string) bool { return !set.profileCovers(candidate, other, connectors) }) {
-			return candidate, true
+// identityUncertaintyReason names each missing fact without naming a group,
+// another account or a candidate profile. The same text is used by hooks,
+// inspect, ACP, proxy, sandbox and the administrator's explain response.
+func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubject, facts []string, connectorName string) string {
+	why := make([]string, 0, len(facts))
+	for _, fact := range facts {
+		switch fact {
+		case "account:failed":
+			why = append(why, "the account holder is ambiguous")
+		case "account:unknown":
+			why = append(why, "the account holder is unconfirmed")
+		case "upn:unknown":
+			why = append(why, "this account's UPN is unconfirmed")
+		case "groups:unknown":
+			why = append(why, "group membership is unconfirmed")
+		case "agent:unknown":
+			why = append(why, "ownership of a pre-upgrade agent identity is unconfirmed")
+		case factAssignmentGroupSID:
+			why = append(why, "an assignment group SID is unconfirmed")
+		default:
+			why = append(why, "identity fact "+fact+" is unconfirmed")
 		}
 	}
-	strictest := candidates[0]
-	for _, candidate := range candidates[1:] {
-		if set.profileStricter(candidate, strictest, connectorName) {
-			strictest = candidate
-		}
-	}
-	return strictest, false
-}
-
-// unprovenRefusalReason is what a refused request tells the agent and its
-// user: which fact is not proven, and the command that explains the
-// decision on this host.
-func (set *guardrailProfileSet) unprovenRefusalReason(subject *profileSubject, res identityResolution, connectorName string) string {
-	var why []string
-	switch res.Account {
-	case proofFailed:
-		why = append(why, "more than one account holds this account's uid")
-	case proofUnknown:
-		why = append(why, "the directory has not confirmed which account this is")
-	case proofStale:
-		why = append(why, "the directory cannot confirm this account now")
-	}
-	if res.Groups != proofProven && res.Account == proofProven {
-		why = append(why, "directory group membership is unconfirmed")
-	}
-	if res.Agent != proofProven {
-		why = append(why, "a guardrail profile assignment names an agent identity from before the upgrade that cannot be matched to this account "+
-			"(ask your administrator to replace the entry with the agent identity `defenseclaw agent identities` shows now)")
+	if subject != nil && subject.tokenGroupsCause != "" {
+		why = append(why, subject.tokenGroupsCause)
 	}
 	return "DefenseClaw refused this request: " + strings.Join(why, "; ") +
-		", and the guardrail profiles that may apply enforce different rules; run `" + set.profileExplainCommand(subject, connectorName) +
-		"` after the directory recovers"
+		"; run `" + set.profileExplainCommand(subject, connectorName) + "` to inspect the identity decision"
 }
 
-// profileExplainCommand is the installed command that explains the profile
-// of subject on this host.
+// profileExplainCommand names the installed administrator command for the
+// verified ID. Only a numeric uid or SID and a safe connector are included.
 func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName string) string {
 	if subject == nil || subject.UserID != strings.TrimSpace(subject.UserID) || useridentity.KindForID(subject.UserID) == "" {
 		return "defenseclaw guardrail profile list"
@@ -488,8 +514,6 @@ func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, c
 	return command
 }
 
-// profileCommandToken is a shell-safe connector argument in a diagnostic
-// command. The subject ID is validated as a numeric uid or a SID.
 func profileCommandToken(value string) bool {
 	if value == "" || len(value) > 64 {
 		return false
@@ -503,47 +527,136 @@ func profileCommandToken(value string) bool {
 	return true
 }
 
+// compactProfiles drops repeated names, keeping the first.
+func compactProfiles(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// strictestOf picks the strictest of candidates for connectorName: the
+// first that enforces at least what each of the others does
+// (profileCovers), with covers true; when none does, the strictest by hook
+// mode and block_at (profileStricter, the first of equals), with covers
+// false, which meetOf replaces with the candidates' meet.
+func (set *guardrailProfileSet) strictestOf(candidates []string, connectorName string) (name string, covers bool) {
+	if len(candidates) == 0 {
+		return set.defaultProfile, true
+	}
+	connectors := profileCoverConnectors(connectorName)
+	for _, candidate := range candidates {
+		if !slices.ContainsFunc(candidates, func(other string) bool { return !set.profileCovers(candidate, other, connectors) }) {
+			return candidate, true
+		}
+	}
+	strictest := candidates[0]
+	for _, candidate := range candidates[1:] {
+		if set.profileStricter(candidate, strictest, connectorName) {
+			strictest = candidate
+		}
+	}
+	return strictest, false
+}
+
 // provenProfileStore holds the last profile a fully proven decision gave
 // each account incarnation (identityIncarnation.key), for the unproven
 // rule: an outage never selects a weaker profile than the one the same
-// account was last proven to have. It is per profile set, so a
-// configuration change starts it empty, and bounded.
+// account was last proven to have. It keeps one incarnation per uid or SID:
+// once another account is proven to hold it (another token, or one with no
+// token), the former one's profile is forgotten, so it never reaches the
+// new account, nor the former one's block message. It is per profile set,
+// so a configuration change starts it empty, and bounded.
 type provenProfileStore struct {
 	mu    sync.Mutex
-	byKey map[string]string
-	order []string
+	byKey map[string]provenProfile
+	// holders maps a uid or SID (provenProfileHolder) to the key of the
+	// incarnation whose profile is kept for it.
+	holders map[string]string
+	order   []string
+}
+
+type provenProfile struct {
+	profile, holder string
 }
 
 // provenProfileStoreMax bounds a provenProfileStore.
 const provenProfileStoreMax = 4096
 
-func (s *provenProfileStore) note(key, profile string) {
-	if s == nil || key == "" {
+func provenProfileHolder(inc identityIncarnation) string {
+	return inc.Kind + "\x00" + strings.ToLower(inc.ID)
+}
+
+// note keeps profile for inc, an incarnation a fully proven decision
+// resolved.
+func (s *provenProfileStore) note(inc identityIncarnation, profile string) {
+	if s == nil || inc.ID == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	key := inc.key()
+	s.forgetOtherHolderLocked(inc, key)
+	if key == "" {
+		return
+	}
 	if s.byKey == nil {
-		s.byKey = map[string]string{}
+		s.byKey, s.holders = map[string]provenProfile{}, map[string]string{}
 	}
 	if _, ok := s.byKey[key]; !ok {
 		if len(s.order) >= provenProfileStoreMax {
-			delete(s.byKey, s.order[0])
-			s.order = s.order[1:]
+			s.forgetLocked(s.order[0])
 		}
 		s.order = append(s.order, key)
 	}
-	s.byKey[key] = profile
+	holder := provenProfileHolder(inc)
+	s.byKey[key] = provenProfile{profile: profile, holder: holder}
+	s.holders[holder] = key
 }
 
-func (s *provenProfileStore) get(key string) (string, bool) {
-	if s == nil || key == "" {
+// get returns the profile kept for inc. accountProven reports that this
+// pass proved which account holds inc's ID: when that is another
+// incarnation than the one kept, the kept one is forgotten.
+func (s *provenProfileStore) get(inc identityIncarnation, accountProven bool) (string, bool) {
+	if s == nil || inc.ID == "" {
 		return "", false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	profile, ok := s.byKey[key]
-	return profile, ok
+	key := inc.key()
+	if accountProven {
+		s.forgetOtherHolderLocked(inc, key)
+	}
+	if key == "" {
+		return "", false
+	}
+	kept, ok := s.byKey[key]
+	return kept.profile, ok
+}
+
+// forgetOtherHolderLocked forgets the profile kept for inc's ID when it was
+// kept for another incarnation than key (a recreated account, or one that
+// no token names). s.mu is held.
+func (s *provenProfileStore) forgetOtherHolderLocked(inc identityIncarnation, key string) {
+	if previous, ok := s.holders[provenProfileHolder(inc)]; ok && previous != key {
+		s.forgetLocked(previous)
+	}
+}
+
+// forgetLocked drops the profile kept under key. s.mu is held.
+func (s *provenProfileStore) forgetLocked(key string) {
+	kept, ok := s.byKey[key]
+	if !ok {
+		return
+	}
+	delete(s.byKey, key)
+	if s.holders[kept.holder] == key {
+		delete(s.holders, kept.holder)
+	}
+	s.order = slices.DeleteFunc(s.order, func(k string) bool { return k == key })
 }
 
 // profileCoverConnectors are the connectors the decisions of a request of
@@ -632,7 +745,7 @@ func (set *guardrailProfileSet) profileStricter(a, b, connectorName string) bool
 
 // profileConfig is the configuration a decision for profile name applies.
 func (set *guardrailProfileSet) profileConfig(name string) *config.Config {
-	if derived, ok := set.profiles[strings.TrimSpace(name)]; ok && derived.Config != nil {
+	if derived, ok := set.derivedProfile(name); ok && derived.Config != nil {
 		return derived.Config
 	}
 	return set.base
@@ -655,10 +768,4 @@ func blockAtRank(cfg *config.Config, connectorName string) int {
 		return 1
 	}
 	return 0
-}
-
-// unprovenRefusalNote is explain's account of a refused decision.
-func unprovenRefusalNote(decision profileDecision) string {
-	return fmt.Sprintf("requests from this account are refused where they can be blocked: %s are not proven, and none of the profiles "+
-		"that may apply (%s) enforces what each of the others does", strings.Join(decision.Unproven, ", "), strings.Join(decision.Candidates, ", "))
 }

@@ -631,15 +631,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// audit envelope without a second pass here.
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
-		// The require-sandbox gate (require_sandbox.go) answers a host run
-		// of a connector the caller's sandbox floor requires in a sandbox
-		// before anything is evaluated; finalizeAgentHook records its
-		// outcome on the audit row.
-		sandboxGate, resp, gated := a.requireSandboxHostRun(ctx, profile, connectorName, req, b, payload, requireSandboxSurface(ctx, r.Header))
+		// An uncertain identity refuses before any profile-specific gate can
+		// replace its missing-fact explanation.
+		resp, gated := a.refuseProfileHook(ctx, profile, connectorName, req, b, payload)
+		sandboxGate := requireSandboxOutcome{}
 		if !gated {
-			// A request no guardrail profile is safe for is refused where it
-			// can be blocked (guardrail_profile_refusal.go).
-			resp, gated = a.refuseProfileHook(ctx, profile, connectorName, req, b, payload)
+			// The require-sandbox gate answers a host run of a connector
+			// the caller's proven floor requires in a sandbox.
+			sandboxGate, resp, gated = a.requireSandboxHostRun(ctx, profile, connectorName, req, b, payload, requireSandboxSurface(ctx, r.Header))
 		}
 		panicked := false
 		if !gated {

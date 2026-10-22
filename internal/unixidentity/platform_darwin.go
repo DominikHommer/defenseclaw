@@ -125,6 +125,54 @@ func platformLocalAccountRecords(ctx context.Context) (map[string]LocalAccountRe
 	return mergeDSCLAccountRecords(listed[0], listed[1], listed[2], listed[3]), nil
 }
 
+// parseDSCLRead parses `dscl . -read /Users/<name> <attributes>` output
+// ("Attribute: value", or "Attribute:" with the value on the next,
+// indented line) into attribute -> value.
+func parseDSCLRead(output string) map[string]string {
+	out := map[string]string{}
+	pending := ""
+	for _, line := range strings.Split(output, "\n") {
+		if pending != "" && strings.HasPrefix(line, " ") {
+			out[pending] = strings.TrimSpace(line)
+			pending = ""
+			continue
+		}
+		pending = ""
+		key, value, ok := strings.Cut(line, ":")
+		if !ok || key == "" || strings.ContainsAny(key, " \t") {
+			continue
+		}
+		if value = strings.TrimSpace(value); value == "" {
+			pending = key
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+// platformLocalAccountRecord reads one local account's record.
+func platformLocalAccountRecord(ctx context.Context, name string) (LocalAccountRecord, bool, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return LocalAccountRecord{}, false, err
+	}
+	result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-read", "/Users/" + name,
+		"UniqueID", "GeneratedUID", "NFSHomeDirectory", "PrimaryGroupID"})
+	if err != nil {
+		return LocalAccountRecord{}, false, err
+	}
+	if result.exitCode != 0 {
+		// Also a record the node does not hold: the uid lookup tells that.
+		return LocalAccountRecord{}, false, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+	}
+	read := parseDSCLRead(string(result.stdout))
+	uid, err := parseSignedDSCLID(read["UniqueID"])
+	if err != nil {
+		return LocalAccountRecord{}, false, err
+	}
+	return LocalAccountRecord{UID: uid, RecordID: read["GeneratedUID"], Home: read["NFSHomeDirectory"], PrimaryGID: read["PrimaryGroupID"]}, true, nil
+}
+
 // platformMobileAccounts lists the local node's mobile accounts with the
 // directory node each came from.
 func platformMobileAccounts(ctx context.Context) (map[string]string, error) {

@@ -58,9 +58,11 @@ func awaitingSpool(facts useridentity.DirectoryFacts) bool {
 // short incomplete lifetime so a restored guardian record does not leave a
 // users-by-UPN assignment on the default profile for the full directory TTL.
 // An account the guardian never names keeps refreshing at that pace, which
-// costs a directory cache read.
+// costs a directory cache read. Facts its current record was merged into
+// await nothing: a local Mac account, or an SSSD account whose directory
+// gives no UPN, has none (GAP-0522).
 func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
-	if currentIdentitySpoolDir() == "" {
+	if currentIdentitySpoolDir() == "" || facts.GuardianRecord {
 		return false
 	}
 	switch facts.Source {
@@ -229,9 +231,10 @@ func identitySpoolAccountName(sid string) string {
 // a record that names another SID is an account recreated under the same
 // uid and name, whose UPN is not this one's. The account's own UPN is then
 // unknown until the guardian writes its record, so the error makes the
-// lookup a failed one (identityFactsUnconfirmedError): a users entry written
-// as a UPN selects default_lookup_failed, which is retried every
-// identityDirectoryRetry, instead of the plain default as a verified answer.
+// lookup a failed one (identityFactsUnconfirmedError): a request that a users
+// entry written as a UPN could match is refused, naming the upn, and the
+// lookup is retried every identityDirectoryRetry, instead of the plain
+// default as a verified answer.
 func readIdentitySpoolFactsForAccount(key, accountName, accountSID string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool, error) {
 	record, ok := readIdentitySpoolFacts(key, now)
 	if !ok || record.User == "" || accountName == "" || !strings.EqualFold(record.User, accountName) {
@@ -298,6 +301,7 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 		merged.ResolvedAt = spool.ResolvedAt
 	}
 	merged.Assurance = useridentity.AssuranceVerified
+	merged.GuardianRecord = true
 	return merged
 }
 
@@ -325,15 +329,16 @@ func forgetOnSpoolGroupChange(cache *identityDirectoryCache, key string, now tim
 // token groups, so a record that is gone ends the cached groups: the
 // enumerator removes it when the account left its group cache or the
 // enrollment, or when it could not publish groups that changed (GAP-0329).
-// The next lookup has no groups and takes the outage path
-// (default_lookup_failed).
+// The next lookup has no groups and takes the outage path: a request whose
+// assignments need the groups is refused, naming them; others get the
+// proven or default profile (default_lookup_failed).
 //
 // On Linux and macOS the gateway resolves the account's groups and SID
 // through NSS itself and takes only the UPN and its realm from the record.
 // A missing record is no withdrawal there: before the guardian's first
 // record, an NSS-verified account's facts were dropped at every request,
-// and a slow directory then sent it to a possibly weaker
-// default_lookup_failed profile; a record without a SID dropped them at
+// and a slow directory then refused its requests or sent it to a possibly
+// weaker default_lookup_failed profile; a record without a SID dropped them at
 // every request too (loop round 3). The guardian withdraws an identity
 // explicitly instead (identitySpoolWithdrawnAt), and a withdrawal written
 // after the facts were resolved drops them. A current record drops them
@@ -547,7 +552,9 @@ func spoolUPNAssignmentWarnings(assignments []config.ProfileAssignment, now time
 // (GAP-0496, GAP-0517). Open Directory itself lists the domain's node Offline
 // then (odutil show nodenames), so an Active Directory account's lookup also
 // fails while it does: requests keep the facts cached before the outage (for
-// up to an hour, then default_lookup_failed, provisional for sandboxes), and
+// up to an hour; then a request whose assignments need the directory facts
+// is refused, naming the missing fact, and others get default_lookup_failed,
+// provisional for sandboxes), and
 // a lookup is retried every 15 s. Right after the outage Open Directory may
 // still list the account without its groups for a minute or two, so facts
 // resolved within openDirectorySettleWindow of the node last seen offline are
@@ -645,8 +652,10 @@ func openDirectoryGroupsUnavailable(record *enterprisehooks.IdentitySpoolRecord,
 		// than a few minutes, and keeping them for another hour left the
 		// account on its group profile almost two hours into an outage, or
 		// (with explain refreshing them) on plain "default". They go now:
-		// directory-dependent assignments use default_lookup_failed and
-		// sandboxes start provisional (GAP-0496, GAP-0517).
+		// requests whose assignments need the directory facts are refused,
+		// naming the missing fact; others get the proven or default profile
+		// (default_lookup_failed, provisional for sandboxes) (GAP-0496,
+		// GAP-0517).
 		return &identityFactsUnconfirmedError{err: fmt.Errorf("the facts cached before are no longer used: the hook guardian has not "+
 			"confirmed this account for %s, and %w", identitySpoolMaxAge, err)}
 	}
@@ -667,7 +676,8 @@ func openDirectoryGroupsUnavailable(record *enterprisehooks.IdentitySpoolRecord,
 // spool (enterprisehooks.DirectoryUnreachableFile). An SSSD account of such
 // a domain that SSSD lists with its primary group only
 // (useridentity.DirectoryFacts.OnlyPrimaryGroup) is a failed lookup: requests
-// get default_lookup_failed (provisional sandboxes), status and verify warn
+// whose assignments need its groups are refused, naming them, and others get
+// default_lookup_failed (provisional sandboxes); status and verify warn
 // directory_lookups_failing, and the lookup is retried every 15 seconds.
 // When SSSD is online again the guardian flushes SSSD's caches and removes
 // the domain from the list, so the next lookup gets the account's groups.

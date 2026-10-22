@@ -63,7 +63,7 @@ This applies to per-user installs and the standalone enterprise profile on Linux
        --config /root/defenseclaw-config.yaml --json
    ```
 
-   For a per-user install, merge the `guardrail` keys of `user-config.example.yaml` into `~/.defenseclaw/config.yaml` and run `defenseclaw config validate`. Set a strict `default_profile`: a request whose user cannot be looked up gets it with the reason `default_lookup_failed`. Profile keys and precedence are in [User- and group-based policies](/docs/reference/policy/guardrail-profiles).
+   For a per-user install, merge the `guardrail` keys of `user-config.example.yaml` into `~/.defenseclaw/config.yaml` and run `defenseclaw config validate`. Set a strict `default_profile` for accounts no assignment selects. An assignment that needs an unanswered identity fact refuses the request with `default_lookup_failed` and names that fact. Profile keys and precedence are in [User- and group-based policies](/docs/reference/policy/guardrail-profiles).
 
 The sign-on policy from `signon-policy` lets the bind user and one group sign in with a password alone. Restrict who can reach SSH as you would for any password login.
 

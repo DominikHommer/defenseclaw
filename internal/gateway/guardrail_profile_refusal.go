@@ -12,16 +12,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// A Refused profile decision (profileDecision.Refused).
-//
-// A fact that decides the request's guardrail profile is not proven (the
-// account, its groups, or an agents entry from before 1.0.4), and none of
-// the profiles that may apply enforces at least what each of the others
-// does (selectProfile). No single profile is safe to apply: the request is
-// refused wherever its surface can block it, on the connector hook, the
-// inspect endpoints, ACP, the sandbox relay and the guardrail proxy. What a
-// surface cannot block (an event the agent does not let a hook stop) is
-// decided by the strictest of them by hook mode and block_at.
+// A profile decision that depends on an unproven identity fact is refused
+// on every blocking surface. Name remains the meet of possible profiles for
+// diagnostics and for surfaces whose events cannot be blocked.
+
+func profileRefusal(ctx context.Context) string {
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil {
+		return resolved.decision.Refused
+	}
+	return ""
+}
 
 // profileRefused is why ctx's profile decision is Refused, or "".
 func (a *APIServer) profileRefused(ctx context.Context) string {
@@ -32,8 +32,8 @@ func (a *APIServer) profileRefused(ctx context.Context) string {
 }
 
 // refuseProfileHook answers a hook whose profile decision is Refused with a
-// block, rendered for the agent, where the connector honours one on the
-// event. Any other hook is evaluated as usual.
+// block, rendered for the agent. Whether a connector honours a block for
+// that event is reported separately as WouldBlock.
 func (a *APIServer) refuseProfileHook(
 	ctx context.Context,
 	profile connector.HookProfile,
@@ -46,10 +46,7 @@ func (a *APIServer) refuseProfileHook(
 	if reason == "" {
 		return agentHookResponse{}, false
 	}
-	action, wouldBlock := mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, payload)
-	if action != "block" {
-		return agentHookResponse{}, false
-	}
+	_, wouldBlock := mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, payload)
 	resp = agentHookResponse{
 		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
 		WouldBlock: wouldBlock, Reason: reason,
@@ -74,7 +71,7 @@ func (a *APIServer) refuseProfileInspect(w http.ResponseWriter, r *http.Request,
 	if reason == "" {
 		return false
 	}
-	fmt.Fprintf(os.Stderr, "[inspect] REFUSED %s: no guardrail profile is safe for the request (unproven identity)\n", route)
+	fmt.Fprintf(os.Stderr, "[inspect] REFUSED %s: identity fact unproven\n", route)
 	if a.logger != nil {
 		_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, route, action, target,
 			"severity=HIGH mode=action reason=guardrail_profile_refused"))
@@ -93,7 +90,7 @@ func refuseProfileProxy(w http.ResponseWriter, r *http.Request) bool {
 	if reason == "" {
 		return false
 	}
-	fmt.Fprintf(os.Stderr, "[guardrail] REFUSED %s: no guardrail profile is safe for the request (unproven identity)\n", r.URL.Path)
+	fmt.Fprintf(os.Stderr, "[guardrail] REFUSED %s: identity fact unproven\n", r.URL.Path)
 	writeOpenAIError(w, http.StatusForbidden, reason)
 	return true
 }

@@ -32,7 +32,7 @@ func orderBridgeConfig(profiles map[string]config.GuardrailProfile, legacy, lega
 // assignments before it that name the agent's 1.0.3 identity. No ledger
 // record proves whose that entry is, a sole one of the agent's own account
 // included (GAP-0337): an entry that comes first gets the strictest profile
-// that may apply, or a refusal, never the later row's weaker profile or a
+// that may apply, or their strictest combination, never the later row's weaker profile or a
 // weaker default.
 func TestLegacyAgentAssignmentKeepsItsPlaceBeforeACurrentIdentityAssignment(t *testing.T) {
 	alice := profileSubject{UserID: "70001", UserName: "alice"}
@@ -43,7 +43,7 @@ func TestLegacyAgentAssignmentKeepsItsPlaceBeforeACurrentIdentityAssignment(t *t
 	}
 	expect := func(t *testing.T, got profileDecision, mode, name, match, wantMode string, refused bool) {
 		t.Helper()
-		if got.Name != name || got.Match != match || mode != wantMode || (got.Refused != "") != refused {
+		if got.Name != name || got.Match != match || mode != wantMode || config.IsProfileMeet(got.Name) != refused {
 			t.Errorf("profile %+v, mode %q; want %s (%s) as %s, refused %v", got, mode, name, wantMode, match, refused)
 		}
 	}
@@ -111,7 +111,7 @@ func TestLegacyAgentAssignmentKeepsItsPlaceBeforeACurrentIdentityAssignment(t *t
 		got, mode := b.hook(orderBridgeConfig(strictBridgeModes, legacy, "strict", corp, "watch", true, "watch"), 70001, alice)
 		expect(t, got, mode, "strict", profileMatchDefaultLookupFailed, "action", false)
 	})
-	t.Run("an unproven entry first that the later row does not cover is refused", func(t *testing.T) {
+	t.Run("an unproven entry first that the later row does not cover takes their meet", func(t *testing.T) {
 		b, legacy, corp := setup(t)
 		b.ledger(nil)
 		profiles := map[string]config.GuardrailProfile{
@@ -119,7 +119,7 @@ func TestLegacyAgentAssignmentKeepsItsPlaceBeforeACurrentIdentityAssignment(t *t
 			"current": {Mode: "action", BlockAt: "high", RulePack: "permissive"},
 		}
 		got, mode := b.hook(orderBridgeConfig(profiles, legacy, "entry", corp, "current", true, "entry"), 70001, alice)
-		expect(t, got, mode, "entry", profileMatchDefaultLookupFailed, "action", true)
+		expect(t, got, mode, config.ProfileMeetName([]string{"current", "entry"}), profileMatchDefaultLookupFailed, "action", true)
 	})
 	t.Run("an unproven entry second", func(t *testing.T) {
 		b, legacy, corp := setup(t)

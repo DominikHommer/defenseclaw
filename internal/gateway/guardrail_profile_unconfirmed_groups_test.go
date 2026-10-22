@@ -6,7 +6,6 @@ package gateway
 import (
 	"context"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -72,16 +71,13 @@ func TestUnconfirmedGroupNamesNeverResolveToAWeakerProfile(t *testing.T) {
 			}
 			cfg.Guardrail.DefaultProfile = "current"
 			return cfg
-		}(), profile: "current", match: profileMatchDefaultLookupFailed, mode: "action", refused: true},
+		}(), profile: config.ProfileMeetName([]string{"current", "entry"}), match: profileMatchDefaultLookupFailed, mode: "action", refused: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api, ctx := resolve(t, tc.cfg, alice)
 			got, mode := api.resolveProfile(ctx), api.agentHookMode(ctx, "codex")
-			if got.Name != tc.profile || got.Match != tc.match || mode != tc.mode || (got.Refused != "") != tc.refused {
-				t.Errorf("profile %+v, mode %q; want %s (%s) as %s, refused %v", got, mode, tc.profile, tc.mode, tc.match, tc.refused)
-			}
-			if tc.refused && !strings.Contains(got.Refused, "directory group membership is unconfirmed") {
-				t.Errorf("refusal reason %q, want the group reason", got.Refused)
+			if got.Name != tc.profile || got.Match != tc.match || mode != tc.mode || config.IsProfileMeet(got.Name) != tc.refused {
+				t.Errorf("profile %+v, mode %q; want %s (%s) as %s, meet %v", got, mode, tc.profile, tc.mode, tc.match, tc.refused)
 			}
 			// Once the gid is proved unnamed, the numeric row is exact again.
 			proven := alice
@@ -94,7 +90,7 @@ func TestUnconfirmedGroupNamesNeverResolveToAWeakerProfile(t *testing.T) {
 			}
 		})
 	}
-	t.Run("a refused group decision stays refused with an unresolved agents entry", func(t *testing.T) {
+	t.Run("a combined group decision stays combined with an unresolved agents entry", func(t *testing.T) {
 		previous := profileAgentLedger
 		t.Cleanup(func() { profileAgentLedger = previous })
 		profileAgentLedger = func(inventory.AgentIdentityFilter) ([]inventory.AgentIdentityRecord, bool) { return nil, false }
@@ -107,8 +103,8 @@ func TestUnconfirmedGroupNamesNeverResolveToAWeakerProfile(t *testing.T) {
 		cfg.Guardrail.DefaultProfile = "current"
 		set := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg).guardrailProfileSet()
 		got := set.matchAgent(&alice, profileSubjectVerified, "codex", "agt-alice", nil)
-		if got.Refused == "" || got.Match != profileMatchDefaultLookupFailed {
-			t.Errorf("decision %+v; want refused as default_lookup_failed", got)
+		if !config.IsProfileMeet(got.Name) || got.Match != profileMatchDefaultLookupFailed {
+			t.Errorf("decision %+v; want the strictest combination as default_lookup_failed", got)
 		}
 	})
 }

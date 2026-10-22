@@ -55,6 +55,11 @@ var agentIdentityVerifiedAccountToken = func(string) string { return "" }
 
 var agentIdentityHolderHistory = func(string) (string, bool) { return "", false }
 
+// legacyAgentOwnerBound binds no 1.0.3 agent identity here: Windows keyed
+// them on the SID, which did not change, so its agents entries match as
+// they did.
+var legacyAgentOwnerBound = func(string, string) bool { return false }
+
 // managedHookPeerLastName keeps no last name off Linux and macOS, where no
 // sandbox runs.
 var managedHookPeerLastName = func(int) string { return "" }

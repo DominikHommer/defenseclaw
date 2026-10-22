@@ -68,7 +68,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 
 - [ ] **M-ID-1** Only verified identity selects a profile (kernel or credential verified uid or SID plus OS directory facts). Never headers, payloads, env or claimed session facts. Why: a client-supplied identity would pick a looser profile.
   Check: `go test ./internal/gateway -run GuardrailProfile`. Evidence: `internal/gateway/guardrail_profile.go`, `internal/useridentity/directory.go`.
-- [ ] **M-ID-2** No lenient fallback in matching: a failed directory lookup selects the lookup-failed or default profile, a stale name matches nobody, names compare through the shared normalizers. Why: a failed lookup that lands in a looser profile is a bypass.
+- [ ] **M-ID-2** No lenient fallback in matching: refuse when an assignment needs an identity fact the OS has not confirmed, naming that fact; otherwise use only proven matches or the default. A stale name matches nobody, and names compare through the shared normalizers. Why: a failed lookup that lands in a looser profile is a bypass.
   Check: `go test ./internal/gateway ./internal/useridentity`. Evidence: `internal/useridentity/principal.go`.
 - [ ] **M-ID-3** Policy visibility is own-only for users and admin-only otherwise, enforced server side (loopback plus token, or privileged peer). Any new endpoint, status field or telemetry attribute naming a policy, profile, digest, group or account is gated and tested per caller class. Why: a field that names another account's policy, group or digest discloses it to every local user.
   Check: `go test ./internal/gateway -run 'PolicyBlockOnlyToAnAdministrator|PolicyPrivacy|ProfileExplain'`. Evidence: `internal/gateway/health_policy_privacy_test.go`.

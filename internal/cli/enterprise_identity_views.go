@@ -205,6 +205,13 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 			if view.use == "profile-explain" && query.Get("user") == "" {
 				return invalidLifecycleArguments(fmt.Errorf("--user is required to explain a guardrail profile"))
 			}
+			if view.use == "profile-explain" {
+				// The account as root resolves it, so explain needs no root-only
+				// lookup in the gateway service (GAP-0500).
+				if facts := enterpriseExplainCallerFacts(query.Get("user")); facts != "" {
+					query.Set("caller_facts", facts)
+				}
+			}
 			if aiOnly {
 				query.Set("ai_only", "true")
 			}

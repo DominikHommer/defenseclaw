@@ -1885,11 +1885,11 @@ func TestProfileWindowsPartialGroupsUseLookupFailed(t *testing.T) {
 	}
 	set.assignments = append([]config.ProfileAssignment{{Profile: "user", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}}}, set.assignments...)
 	// r104 identity: the UPN assignment matches, the unknown groups may
-	// match lenient, and strict is the default; these profiles (no settings
-	// to compare) do not cover each other, so the request is refused, and
-	// never decided by the last session's lenient group.
-	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Refused == "" || got.Name == "lenient" {
-		t.Fatalf("verified UPN with unknown groups selected %+v, want a refusal", got)
+	// match lenient, and strict is the default; these profiles do not cover
+	// each other, so their strictest combination applies, never the last
+	// session's lenient group alone.
+	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Name == "lenient" {
+		t.Fatalf("verified UPN with unknown groups selected %+v, want their strictest combination", got)
 	}
 	set.assignments = set.assignments[1:]
 	facts.GroupsPartial = false
@@ -2139,7 +2139,9 @@ func TestWindowsGroupAssignmentsMatchOnResolvedSIDs(t *testing.T) {
 		t.Fatalf("warnings do not name the unresolved groups:\n%s", warnings)
 	}
 	// The retry is due: the next request starts it, a later one matches on the
-	// SID, never on a name, and the memoised default does not shadow it.
+	// SID, never on a name, and the memoised default does not shadow it. The
+	// strict assignment's names still stall: they may name one of the
+	// caller's groups, so strict stays a candidate beside tooling (GAP-0487).
 	for _, entry := range set.groupSIDs.entries {
 		entry.nextTry = time.Time{}
 	}
@@ -2147,7 +2149,7 @@ func TestWindowsGroupAssignmentsMatchOnResolvedSIDs(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		got := set.match(subject, profileSubjectVerified, "codex", "")
-		if got.Name == "tooling" && got.Match == profileMatchGroup && got.MatchedGroup == `CORP\gap0860-devs` {
+		if slices.Contains(got.Candidates, "tooling") && slices.Contains(got.Candidates, "strict") {
 			break
 		}
 		if time.Now().After(deadline) {

@@ -139,6 +139,17 @@ type DirectoryFacts struct {
 	// binds a guardian record to the directory object it was resolved for,
 	// which the uid and name alone do not. Never emitted or stored.
 	AccountSID string `json:"-"`
+	// AccountRecord names the macOS local node record of the account (a
+	// digest of its listed record: uid, GeneratedUID, home and primary
+	// group), "" for none. An account deleted and created again under the
+	// same name and uid has another one, so the gateway keeps nothing proven
+	// for one account under the other's key. Never emitted or stored.
+	AccountRecord string `json:"-"`
+	// GuardianRecord says the hook guardian's current identity record of
+	// the account was merged into these facts (Linux and macOS): its UPN,
+	// or the absence of one, is what the guardian reported, not a fact still
+	// to come. Never emitted or stored.
+	GuardianRecord bool `json:"-"`
 	// SpoolSeenAt is when the guardian wrote the newest identity record or
 	// withdrawal of the account that the lookup of these facts read (Linux
 	// and macOS), zero for none. The gateway acts once on a record or a

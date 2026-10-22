@@ -173,10 +173,15 @@ func TestUnresolvedLegacyAgentAssignmentIsNeverWeakerThanItsProfile(t *testing.T
 		}
 	})
 	t.Run("the default enforces more", func(t *testing.T) {
+		// The proven connector assignment gives watch whether or not the
+		// entry is the agent's, so the default never applies and nothing
+		// is refused: the decision needs no unproven fact.
 		b, legacy, _ := setup(t)
 		b.ledger(nil)
 		got, mode := b.hook(strictBridgeConfig(strictBridgeModes, legacy, "watch", "watch", "strict"), 70001, alice)
-		want(t, "strict default", got, mode, "strict", "action")
+		if got.Name != "watch" || mode != "observe" || got.Match != profileMatchConnector || got.Refused != "" {
+			t.Errorf("strict default: profile %+v, mode %q; want watch (observe) as connector, not refused", got, mode)
+		}
 	})
 	t.Run("another account's agent", func(t *testing.T) {
 		// Its own 1.0.3 identity is derived with its request: the entry
@@ -213,8 +218,9 @@ func TestLegacyAgentAssignmentAcrossAnAccountSpellingIsNeverWeaker(t *testing.T)
 			} {
 				b.ledger(records)
 				got, mode := b.hook(strictBridgeConfig(strictBridgeModes, legacy, "strict", "watch", "watch"), 70001, alice)
-				// Not even the same domain's record proves the account
-				// (GAP-0337).
+				// Nothing proves the account incarnation here (no token
+				// was ever known), so not even the same domain's record
+				// proves the account (GAP-0337).
 				if got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
 					t.Errorf("%d records: profile %+v, mode %q; want strict (action) as default_lookup_failed", len(records), got, mode)
 				}

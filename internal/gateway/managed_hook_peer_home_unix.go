@@ -371,6 +371,11 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	}
 	stamp := managedHookPeerStamp()
 	c.mu.Lock()
+	if stamp == "" && !managedHookPeerAccountsConfirmed() {
+		// A listing that has not confirmed the accounts yet changes nothing
+		// here; directory serves no facts until it does.
+		stamp = c.stamp
+	}
 	now := c.now()
 	if c.resolver == nil || now.Sub(c.resolvedAt) > managedHookPeerHomeTTL || stamp != c.stamp {
 		c.resolver = c.newResolver()
@@ -474,6 +479,12 @@ func (c *managedHookPeerHomeCache) recheckAccount(uid int, entry *managedHookPee
 	incarnation, incarnationKnown := "", false
 	if ok {
 		incarnation, incarnationKnown = managedHookPeerAccountIncarnation(account)
+		if managedHookPeerRecordChanged(account) {
+			// The account's own record is newer than the listing (deleted
+			// and created again, or another primary group): the listing
+			// confirms nothing until the next one (GAP-0494, GAP-0392).
+			managedHookPeerAccountsInvalidate()
+		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -525,6 +536,14 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	}
 	key := strconv.Itoa(uid)
 	c.noteHolder(uid, key)
+	if !managedHookPeerAccountsConfirmed() {
+		// A group fact newer than the last macOS account listing is not
+		// proven: the listing that would tie the cached facts to the
+		// account holding the uid now has not ended (GAP-0392, GAP-0494).
+		// An assignment that needs the unproven account or group fact
+		// refuses the request with that fact named.
+		return useridentity.DirectoryFacts{}, false
+	}
 	cache := c.directoryCache()
 	forgetOnSpoolAccountChange(cache, key, time.Now())
 	return cache.get(key, block)
@@ -1011,7 +1030,8 @@ func (c *managedHookPeerHomeCache) accountToken(uid int) (string, bool) {
 // (review of GAP-0947, loop 3). It keeps the IDs of before only when its
 // token shows continuity (legacyContinuity); otherwise the base is
 // agentIncarnationUnproven, every account derives its own IDs, and the rows
-// of before are retired.
+// of before are retired. A uid's 1.0.3 agents entries are bound by the
+// upgrade's migration map instead (legacyAgentOwnerBound).
 func (c *managedHookPeerHomeCache) agentIncarnation(uid int) string {
 	token, known := c.accountToken(uid)
 	c.mu.Lock()

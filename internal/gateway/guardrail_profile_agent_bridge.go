@@ -15,42 +15,38 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
-// profileAgentBridge treats the agents entries an assignment wrote for a
-// legacy identity (1.0.0 to 1.0.3, keyed without the account's domain) as
-// unresolved for every current agent that may have held it. Such an ID
-// omits the account's domain, and 1.0.3 kept one record for every domain's
-// namesake of a uid and wrote the last one's name over the earlier one's,
-// so not even a sole surviving record proves whose agent the assignment was
-// written for (GAP-0337). The entry stays unresolved for the account its
-// record names and for every namesake of another domain the ledger holds
-// under the uid. So does an entry that is the agent's own legacy identity
-// (the hook path derives it with the request's identity) while no record
-// names it: the ledger cannot be read, 1.0.3 pruned the record of an agent
-// idle for the retention window (a prune now keeps the records the bridge
-// reads, inventory.retireLegacyAgentIdentities), or 1.0.3 recorded the
-// account under another spelling (alice or CORP\alice, now
-// alice@corp.example). An assignment with an unresolved entry never
-// resolves to a weaker profile than one that may apply, whatever
-// default_profile says (matchAgent); only an assignment naming the agent's
-// current identity proves it. Remove with agentidentity.LegacyAgentID.
+// profileAgentBridge decides, for the agents entries an assignment wrote for
+// a legacy identity (1.0.0 to 1.0.3: keyed without the account's domain and
+// without an account incarnation, agentidentity.LegacyAgentID), whether an
+// entry is the request agent's own. 1.0.3 gave one legacy identity to every
+// domain's namesake of a uid and to every account that took the uid over,
+// so the derivation alone proves nothing. The upgrade's migration map does:
+// the root guardian records, once, at its first pass after the upgrade,
+// which account incarnation held each enrolled uid (its name, and its SID or
+// the identity of its home directory; enterprisehooks.LegacyAgentOwnersFile).
+// An entry the request derives as its 1.0.3 identity is the agent's own when
+// the account that holds the uid now is that incarnation under that name
+// (legacyAgentOwnerBound), or is a per-user gateway's own account; it then
+// matches as the agent's current identity does, with no rebind.
+//
+// Any other entry the request derives (no map entry, another holder,
+// another domain's namesake) is a candidate, not a match: the request is
+// refused until the entry's owner is proven (selectProfile). Windows
+// identities are SIDs, which 1.0.3 keyed the same way, so
+// their entries match as they did. Remove with agentidentity.LegacyAgentID.
 type profileAgentBridge struct {
 	once sync.Once
 	// entries are the assignments' agents entries, lower-cased.
 	entries map[string]bool
 	mu      sync.Mutex
-	// ambiguous maps an identity to the legacy entries it may hold but
-	// the ledger does not prove; nil until the ledger answered.
-	ambiguous map[string]map[string]bool
-	// derived maps every identity the ledger records to its legacy
-	// identity ("" for an account without a domain): explain names an agent
-	// by its identity only, so the hook path's derivation is not at hand
-	// there.
-	derived map[string]string
-	// readAt is when the ledger is read again: a namesake recorded later
-	// takes a link back.
+	// derived maps every identity the agent ledger's records derive to its
+	// 1.0.3 claim, at the ledger's last read: explain names an agent by its
+	// identity only. read is false until the ledger answered once.
+	derived map[string]profileAgentClaim
+	read    bool
+	// readAt is when the ledger is read again.
 	readAt time.Time
-	// noted holds the ambiguous entries already logged; "" the unreadable
-	// ledger.
+	// noted holds the entries already logged; "" the unreadable ledger.
 	noted map[string]bool
 }
 
@@ -74,36 +70,79 @@ var profileAgentLedger = func(filter inventory.AgentIdentityFilter) ([]inventory
 	return records, err == nil
 }
 
-// profileAgentLegacy returns the legacy identity of a request's agent
-// (agentidentity.LegacyAgentID, "" for an account without a domain) and
-// true, or false when it is not known.
-type profileAgentLegacy func() (legacy string, known bool)
+// profileAgentClaim is the 1.0.3 identity of an agent and whether the
+// upgrade binds it to the account that holds the uid now.
+type profileAgentClaim struct {
+	// ID is the 1.0.3 identity (agentidentity.LegacyAgentID), lower-cased;
+	// "" when the agent's identity did not change (a SID).
+	ID string
+	// UserID, MachineHash and Account are the facts ID was derived from:
+	// Account is the account as the host names it now.
+	UserID, MachineHash, Account string
+	// Bound reports that ID is the agent's own: the migration map records
+	// the account that holds UserID now as the one that held it at the
+	// upgrade, or UserID is a per-user gateway's own account.
+	Bound bool
+}
+
+// legacyAgentClaim is the claim of the 1.0.3 identity legacy derived for the
+// account account that holds userID on machine. self marks a per-user
+// gateway's own account.
+func legacyAgentClaim(legacy, userID, machine, account string, self bool) profileAgentClaim {
+	claim := profileAgentClaim{
+		ID:     strings.ToLower(strings.TrimSpace(legacy)),
+		UserID: agentidentity.NormalizeUserID(userID), MachineHash: machine, Account: account,
+	}
+	if claim.ID == "" {
+		return claim
+	}
+	claim.Bound = self || legacyAgentOwnerBound(claim.UserID, account)
+	return claim
+}
+
+// profileAgentSelf reports whether userID is a per-user gateway's own
+// account, which only it can be the verified user of.
+func profileAgentSelf(userID string) bool {
+	if gatewayRunsAsServiceAccount() {
+		return false
+	}
+	self := agentidentity.NormalizeUserID(gatewaySelfUser().ID)
+	return self != "" && self == agentidentity.NormalizeUserID(userID)
+}
+
+// profileAgentLegacy returns the 1.0.3 identity of a request's agent with
+// its binding (profileAgentClaim) and true, or false when it is not known.
+type profileAgentLegacy func() (claim profileAgentClaim, known bool)
 
 // matchAgent is set.match for a request of the agent identity agent;
-// legacy, when not nil, derives agent's legacy identity. An agents entry
-// that may be the legacy identity of agent's account, which the agent
-// ledger does not prove, leaves the agent fact unproven (resolveIdentity):
-// an assignment with that entry whose other conditions hold may apply, and
-// the one selection rule gives the request the strictest profile of those
-// that may apply, or refuses it (selectProfile).
+// legacy, when not nil, derives agent's 1.0.3 identity. An agents entry that
+// may be that identity, which the upgrade did not bind, leaves the agent
+// fact unproven (resolveIdentity): its assignment is a candidate and the
+// request is refused. An entry the upgrade bound
+// matches as agent does.
 func (set *guardrailProfileSet) matchAgent(subject *profileSubject, source, connectorName, agent string, legacy profileAgentLegacy) profileDecision {
-	matched, unresolved := set.profileAgent(agent, legacy)
+	matched, unresolved, owned := set.profileAgent(agent, legacy)
 	if subject == nil || source == "" {
-		unresolved = nil
+		unresolved, owned = nil, nil
 	}
-	return set.matchResolved(subject, resolveIdentity(subject, unresolved), source, connectorName, matched)
+	res := resolveIdentity(subject, unresolved)
+	if owned != nil {
+		// The binding depends on the account holding the uid now, which
+		// the memo key does not carry: not memoised.
+		res.agentOwned = owned
+		return set.selectProfile(subject, res, source, connectorName, matched)
+	}
+	return set.matchResolved(subject, res, source, connectorName, matched)
 }
 
 // profileAgent is what the request's agent identity agent is matched as
-// (match's agent argument): agent itself, as no legacy entry is proved to
-// be its account's. unresolved, when not nil, reports the entries that may
-// be agent's legacy identity; matchAgent then lets no later assignment, one
-// naming agent included, apply in place of an earlier one with such an
-// entry.
-func (set *guardrailProfileSet) profileAgent(agent string, legacy profileAgentLegacy) (matched string, unresolved func(entry string) bool) {
+// (match's agent argument): agent itself. unresolved, when not nil, reports
+// the entries that may be agent's 1.0.3 identity, which the upgrade did not
+// bind; owned, when not nil, the entry it bound: it matches as agent does.
+func (set *guardrailProfileSet) profileAgent(agent string, legacy profileAgentLegacy) (matched string, unresolved, owned func(entry string) bool) {
 	agent = strings.TrimSpace(agent)
 	if set == nil || agent == "" {
-		return agent, nil
+		return agent, nil, nil
 	}
 	bridge := &set.agentBridge
 	bridge.once.Do(func() {
@@ -117,67 +156,75 @@ func (set *guardrailProfileSet) profileAgent(agent string, legacy profileAgentLe
 		}
 	})
 	if len(bridge.entries) == 0 {
-		return agent, nil
+		return agent, nil, nil
 	}
-	own, known := "", false
+	var claim profileAgentClaim
+	known := false
 	if legacy != nil {
-		own, known = legacy()
-		own = strings.ToLower(strings.TrimSpace(own))
+		claim, known = legacy()
+		claim.ID = strings.ToLower(strings.TrimSpace(claim.ID))
 	}
-	if known && (own == "" || !bridge.entries[own]) {
-		// No entry is agent's legacy identity.
-		return agent, nil
+	if known && (claim.ID == "" || !bridge.entries[claim.ID]) {
+		// No entry is agent's 1.0.3 identity.
+		return agent, nil, nil
 	}
-	return agent, bridge.unresolvedLegacy(strings.ToLower(agent), own, known)
+	unresolved, owned = bridge.resolve(strings.ToLower(agent), claim, known)
+	return agent, unresolved, owned
 }
 
-// unresolvedLegacy is profileAgent's ledger side; own is agent's legacy
-// identity when known.
-func (b *profileAgentBridge) unresolvedLegacy(agent, own string, known bool) func(string) bool {
+// resolve is profileAgent's binding side. claim is agent's when known; else
+// (explain names an agent by its identity only) the ledger's records of
+// agent say what its 1.0.3 identity is.
+func (b *profileAgentBridge) resolve(agent string, claim profileAgentClaim, known bool) (unresolved, owned func(string) bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if now := time.Now(); !now.Before(b.readAt) {
-		if ledger, ok := b.readLedger(); ok {
-			b.ambiguous, b.derived, b.readAt = ledger.ambiguous, ledger.derived, now.Add(profileAgentBridgeRefresh)
-		} else {
-			b.readAt = now.Add(profileAgentBridgeRetry)
-			if b.ambiguous == nil && !b.noted[""] {
-				b.note("")
-				fmt.Fprintf(os.Stderr, "[guardrail] the agent ledger cannot be read: an agent that a profile assignment's agents entries may name "+
-					"gets the strictest profile that may apply (default_lookup_failed) where such an assignment comes first, until the ledger answers\n")
-			}
-		}
-	}
-	if b.ambiguous == nil {
-		if known {
-			return func(entry string) bool { return entry == own }
-		}
-		// Any entry may be agent's legacy identity.
-		return func(entry string) bool { return entry != agent }
-	}
-	if entries := b.ambiguous[agent]; len(entries) > 0 {
-		return func(entry string) bool { return entries[entry] }
-	}
 	if !known {
+		b.refreshLocked()
 		recorded, ok := b.derived[agent]
-		if !ok {
-			// Neither the request nor the ledger says what agent's legacy
+		if !b.read || !ok {
+			// Neither the request nor the ledger says what agent's 1.0.3
 			// identity is: any entry may be it.
-			return func(entry string) bool { return entry != agent }
+			return func(entry string) bool { return entry != agent }, nil
 		}
-		own = recorded
+		if recorded.ID == "" || !b.entries[recorded.ID] {
+			return nil, nil
+		}
+		claim = legacyAgentClaim(recorded.ID, recorded.UserID, recorded.MachineHash, recorded.Account, profileAgentSelf(recorded.UserID))
 	}
-	// agent's own legacy identity, which no record links to it.
-	if own == "" || !b.entries[own] {
-		return nil
+	legacy := claim.ID
+	if claim.Bound {
+		if !b.noted["="+legacy] {
+			b.note("=" + legacy)
+			fmt.Fprintf(os.Stderr, "[guardrail] profile assignment agent %s: the 1.0.3 identity of %s's agent %s, which the upgrade "+
+				"bound to this account; it keeps applying\n", legacy, claim.Account, agent)
+		}
+		return nil, func(entry string) bool { return entry == legacy }
 	}
-	if !b.noted["?"+own] {
-		b.note("?" + own)
-		fmt.Fprintf(os.Stderr, "[guardrail] profile assignment agent %s: no record shows which account 1.0.3 recorded it for; "+
-			"agent %s gets the strictest profile that may apply (default_lookup_failed) where it applies until it names the account's current agent identity\n",
-			own, agent)
+	if !b.noted["?"+legacy] {
+		b.note("?" + legacy)
+		fmt.Fprintf(os.Stderr, "[guardrail] profile assignment agent %s: the upgrade did not record the account holding uid %s now as the "+
+			"one 1.0.3 derived it for; agent %s is refused until ownership is proven (default_lookup_failed)\n",
+			legacy, claim.UserID, agent)
 	}
-	return func(entry string) bool { return entry == own }
+	return func(entry string) bool { return entry == legacy }, nil
+}
+
+// refreshLocked reads the ledger again once its answer is due. b.mu is held.
+func (b *profileAgentBridge) refreshLocked() {
+	now := time.Now()
+	if now.Before(b.readAt) {
+		return
+	}
+	if derived, ok := readProfileAgentLedger(); ok {
+		b.derived, b.read, b.readAt = derived, true, now.Add(profileAgentBridgeRefresh)
+		return
+	}
+	b.readAt = now.Add(profileAgentBridgeRetry)
+	if !b.read && !b.noted[""] {
+		b.note("")
+		fmt.Fprintf(os.Stderr, "[guardrail] the agent ledger cannot be read: explain cannot tell which 1.0.3 agents entry an agent "+
+			"identity derives until it answers\n")
+	}
 }
 
 func (b *profileAgentBridge) note(key string) {
@@ -187,80 +234,44 @@ func (b *profileAgentBridge) note(key string) {
 	b.noted[key] = true
 }
 
-// profileAgentLinks is what the agent ledger says about the assignments'
-// legacy entries.
-type profileAgentLinks struct {
-	// ambiguous maps an identity to the legacy entries it may hold but the
-	// ledger does not prove.
-	ambiguous map[string]map[string]bool
-	// derived maps every recorded identity to its legacy identity.
-	derived map[string]string
-}
-
-// readLedger lists the identities that may hold a legacy entry; false when
-// the ledger cannot be read. No record proves an entry's original account,
-// a sole surviving one included (GAP-0337). It reads every record, the ones
-// a prune kept aside included.
-func (b *profileAgentBridge) readLedger() (profileAgentLinks, bool) {
+// readProfileAgentLedger maps every identity the ledger's records derive to
+// its 1.0.3 claim, unbound (legacyAgentClaim binds it), reading the records
+// a prune kept aside too (inventory.retireLegacyAgentIdentities); false
+// when the ledger cannot be read.
+func readProfileAgentLedger() (map[string]profileAgentClaim, bool) {
 	records, ok := profileAgentLedger(inventory.AgentIdentityFilter{Retired: true})
 	if !ok {
-		return profileAgentLinks{}, false
+		return nil, false
 	}
-	links := profileAgentLinks{ambiguous: map[string]map[string]bool{}, derived: map[string]string{}}
-	uidRecords := map[string][]inventory.AgentIdentityRecord{}
+	derived := map[string]profileAgentClaim{}
 	for _, rec := range records {
-		uid := agentidentity.NormalizeUserID(rec.UserID)
-		uidRecords[uid] = append(uidRecords[uid], rec)
-	}
-	for _, rec := range records {
+		if agentidentity.IsSID(agentidentity.NormalizeUserID(rec.UserID)) || agentidentity.AccountKey(rec.UserName) == "" {
+			continue
+		}
 		in := agentidentity.Inputs{
 			MachineHash: rec.MachineHash, UserID: rec.UserID, Account: rec.UserName,
 			Connector: rec.Connector, InstallFP: rec.InstallFP,
 		}
-		id, legacyID := strings.ToLower(rec.AgentID), strings.ToLower(agentidentity.LegacyAgentID(in))
-		if id != legacyID && id == strings.ToLower(agentidentity.AgentID(in)) {
-			links.derived[id] = legacyID
-		}
-		if legacyID == "" || id != legacyID || !b.entries[legacyID] {
+		legacy := strings.ToLower(agentidentity.LegacyAgentID(in))
+		if legacy == "" {
 			continue
 		}
-		if !b.noted[id] {
-			b.note(id)
-			fmt.Fprintf(os.Stderr, "[guardrail] profile assignment agent %s: a pre-1.0.4 ledger row cannot prove its account; "+
-				"affected agents get the strictest profile that may apply (default_lookup_failed) until the assignment names the current agent identity\n", rec.AgentID)
-		}
-		for _, account := range append(profileAgentNamesakes(rec, uidRecords[agentidentity.NormalizeUserID(rec.UserID)]), rec.UserName) {
-			holder := in
-			holder.Account = account
-			if current := strings.ToLower(agentidentity.AgentID(holder)); current != "" {
-				if links.ambiguous[current] == nil {
-					links.ambiguous[current] = map[string]bool{}
-				}
-				links.ambiguous[current][id] = true
+		id, current := strings.ToLower(rec.AgentID), strings.ToLower(agentidentity.AgentID(in))
+		claim := profileAgentClaim{ID: legacy, UserID: agentidentity.NormalizeUserID(rec.UserID), MachineHash: rec.MachineHash, Account: rec.UserName}
+		switch {
+		case id == legacy:
+			// A 1.0.3 record derives its account's current identity.
+			if _, seen := derived[current]; !seen {
+				derived[current] = claim
+			}
+		case id == current:
+			derived[id] = claim
+		case strings.TrimSpace(rec.UserIncarnation) != "":
+			in.Incarnation = rec.UserIncarnation
+			if id == strings.ToLower(agentidentity.AgentID(in)) {
+				derived[id] = claim
 			}
 		}
 	}
-	return links, true
-}
-
-// profileAgentNamesakes returns the names of the accounts of another domain
-// with rec's name that held, the ledger's records of rec's uid, records on
-// rec's machine: 1.0.3 recorded each of them as rec, under the last one's
-// name.
-func profileAgentNamesakes(rec inventory.AgentIdentityRecord, held []inventory.AgentIdentityRecord) []string {
-	key, domain := agentidentity.AccountKey(rec.UserName), agentidentity.AccountDomain(rec.UserName)
-	var out []string
-	seen := map[string]bool{}
-	for _, other := range held {
-		if other.MachineHash != rec.MachineHash ||
-			agentidentity.NormalizeUserID(other.UserID) != agentidentity.NormalizeUserID(rec.UserID) ||
-			agentidentity.AccountKey(other.UserName) != key {
-			continue
-		}
-		if otherDomain := agentidentity.AccountDomain(other.UserName); otherDomain != "" && otherDomain != domain && !seen[otherDomain] {
-			seen[otherDomain] = true
-			out = append(out, other.UserName)
-		}
-	}
-	return out
+	return derived, true
 }

@@ -61,8 +61,10 @@ type agentIdentityFacts struct {
 	InstallHint string
 	// LegacyID is the identity 1.0.0 to 1.0.3 gave this agent
 	// (agentidentity.LegacyAgentID), "" when it is ID. A guardrail profile
-	// assignment may still name it (profileAgentBridge).
-	LegacyID string
+	// assignment may still name it (profileAgentBridge); LegacyClaim says
+	// whether the upgrade bound it to this agent's account.
+	LegacyID    string
+	LegacyClaim profileAgentClaim
 }
 
 // agentIdentityConfig is the config the gateway resolves connector config
@@ -125,6 +127,9 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		return agentIdentityFacts{}
 	}
 	facts.LegacyID = agentidentity.LegacyAgentID(inputs)
+	if facts.LegacyID != "" {
+		facts.LegacyClaim = legacyAgentClaim(facts.LegacyID, facts.UserID, facts.MachineHash, account, user.Self)
+	}
 	facts.Verified = machineVerified && user.Verified
 	if hint := claimedInstallHint(req.Payload); hint != "" &&
 		agentidentity.NormalizeInstallFP(hint) != agentidentity.NormalizeInstallFP(facts.InstallFP) {

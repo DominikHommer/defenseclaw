@@ -136,7 +136,6 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	if a.refuseProfileInspect(w, r, "/api/v1/inspect/request", "inspect-request-block", "pre-request") {
 		return
 	}
@@ -224,7 +223,6 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	if a.refuseProfileInspect(w, r, "/api/v1/inspect/response", "inspect-response-block", "post-response") {
 		return
 	}
@@ -309,7 +307,6 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	if a.refuseProfileInspect(w, r, "/api/v1/inspect/tool-response", "inspect-tool-response-block", "tool") {
 		return
 	}
@@ -513,7 +510,15 @@ func (a *APIServer) sensitiveToolResultAlert(ctx context.Context, connectorName,
 		if resolved == nil || resolved.set != g.Profiles {
 			resolved = resolveGuardrailProfileFor(ctx, g.Profiles)
 		}
-		if resolved != nil && resolved.derived != nil {
+		var meet *profileMeet
+		if resolved != nil {
+			meet = g.Profiles.meet(resolved.decision.Name)
+		}
+		if meet != nil {
+			if selected := meet.rulePack(ctx, a, g.Profiles, connectorName); selected != nil {
+				pack = selected
+			}
+		} else if resolved != nil && resolved.derived != nil {
 			key := effectiveRulePackKey(resolved.derived, connectorName)
 			if key != effectiveRulePackKey(g.Profiles.base, connectorName) {
 				if selected := g.Profiles.packs[key]; selected != nil {

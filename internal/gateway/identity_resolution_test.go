@@ -4,12 +4,16 @@
 package gateway
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -30,6 +34,16 @@ type identityTestProvider struct {
 	directory useridentity.Directory
 	domain    string
 	sid       string
+	// record is a macOS account's local node record
+	// (DirectoryFacts.AccountRecord).
+	record string
+}
+
+// keyed reports whether a proven account of the provider names its
+// incarnation: by a SID, a macOS local node record, or its Windows SID. An
+// account no token names keeps nothing proven (review loop 3).
+func (provider identityTestProvider) keyed(p identityTestPlatform) bool {
+	return provider.sid != "" || provider.record != "" || p.kind == useridentity.KindWindowsSID
 }
 
 var identityTestPlatforms = []identityTestPlatform{
@@ -40,8 +54,11 @@ var identityTestPlatforms = []identityTestPlatform{
 		{source: useridentity.SourceWinbind, directory: useridentity.DirectoryActiveDirectory, domain: "corp.example", sid: "S-1-5-21-1-2-3-1602"},
 	}},
 	{os: "darwin", id: "501", kind: useridentity.KindPOSIXUID, name: "alice", group: "eng-strict", providers: []identityTestProvider{
+		// A mobile account (a local node record), a local account, and a
+		// network account with no local record.
+		{source: useridentity.SourceMacOSOpenDirectory, directory: useridentity.DirectoryActiveDirectory, domain: "corp.example", record: "record:0a1b2c"},
+		{source: useridentity.SourceMacOSOpenDirectory, directory: useridentity.DirectoryLocal, record: "record:3d4e5f"},
 		{source: useridentity.SourceMacOSOpenDirectory, directory: useridentity.DirectoryActiveDirectory, domain: "corp.example"},
-		{source: useridentity.SourceMacOSOpenDirectory, directory: useridentity.DirectoryLocal},
 	}},
 	{os: "windows", id: "S-1-5-21-9-9-9-1105", kind: useridentity.KindWindowsSID, name: `CORP\alice`, group: "S-1-5-21-9-9-9-2201",
 		providers: []identityTestProvider{
@@ -64,6 +81,7 @@ func identityTestSubject(p identityTestPlatform, provider identityTestProvider, 
 	facts := useridentity.DirectoryFacts{
 		Directory: provider.directory, Source: provider.source, Domain: provider.domain,
 		Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now(), AccountSID: provider.sid,
+		AccountRecord: provider.record,
 	}
 	if inGroup {
 		facts.Groups = []string{p.group, "everyone"}
@@ -108,6 +126,115 @@ func identityTestSet(t *testing.T, p identityTestPlatform, defaultProfile string
 	return set
 }
 
+// GAP-0522: a decision that depends on a missing OS identity fact must
+// refuse with that fact named, including a guardian UPN on macOS. A missing
+// fact unrelated to any assignment does not make the decision uncertain.
+func TestGAP0522UncertainIdentityNamesTheMissingFact(t *testing.T) {
+	p := identityTestPlatforms[1]
+	base := identityTestSubject(p, p.providers[1], stateProven, false)
+	const legacy = "agt-00000000000000aa"
+	for _, tc := range []struct {
+		name       string
+		subject    profileSubject
+		assignment config.ProfileMatch
+		unresolved func(string) bool
+		fact       string
+	}{
+		{name: "macOS UPN", subject: func() profileSubject {
+			s := base
+			s.upnUnproven = true
+			return s
+		}(), assignment: config.ProfileMatch{Users: []string{"dcm-std1@example.test"}}, fact: "UPN"},
+		{name: "account", subject: profileSubject{UserID: p.id, IDKind: p.kind, LookupFailed: true},
+			assignment: config.ProfileMatch{Users: []string{"dcm-std1"}}, fact: "account"},
+		{name: "groups", subject: func() profileSubject {
+			s := base
+			s.GroupsUnknown = true
+			return s
+		}(), assignment: config.ProfileMatch{Groups: []string{"engineering"}}, fact: "group"},
+		{name: "agent", subject: base, assignment: config.ProfileMatch{Agents: []string{legacy}},
+			unresolved: func(entry string) bool { return entry == legacy }, fact: "agent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set := identityTestSet(t, p, "watch", config.ProfileAssignment{Profile: "strict", Match: tc.assignment})
+			got := set.selectProfile(&tc.subject, resolveIdentity(&tc.subject, tc.unresolved), profileSubjectVerified, "hermes", "agt-00000000000000bb")
+			if got.Refused == "" || !strings.Contains(got.Refused, tc.fact) ||
+				strings.Contains(got.Refused, ": ,") || !strings.Contains(got.Refused, "explain --user 501 --connector hermes") {
+				t.Fatalf("uncertain %s decision: %+v", tc.name, got)
+			}
+			if name, present := guardrailProfileTelemetryFromDecision(got).Name.Get(); present {
+				t.Fatalf("uncertain %s decision recorded inferred profile %q", tc.name, name)
+			}
+			if tc.name == "macOS UPN" {
+				api := &APIServer{}
+				api.guardrailProfiles.set.Store(set)
+				ctx := context.WithValue(t.Context(), resolvedGuardrailProfileKey{}, &resolvedGuardrailProfile{decision: got, set: set})
+				w := httptest.NewRecorder()
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", nil).WithContext(ctx)
+				if !api.refuseProfileInspect(w, r, "/api/v1/inspect/tool", "inspect-tool-block", "tool") ||
+					w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"action":"block"`) ||
+					!strings.Contains(w.Body.String(), "UPN is unconfirmed") {
+					t.Fatalf("inspect refusal = %d %s", w.Code, w.Body.String())
+				}
+				if response, refused := api.refuseProfileHook(ctx, connector.HookProfile{}, "hermes",
+					agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_use"}, nil, nil); !refused ||
+					response.Action != "block" || response.Reason != got.Refused {
+					t.Fatalf("hook refusal = %+v, %v", response, refused)
+				}
+				w = httptest.NewRecorder()
+				if !refuseProfileProxy(w, r) || w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "UPN is unconfirmed") {
+					t.Fatalf("proxy refusal = %d %s", w.Code, w.Body.String())
+				}
+				w = httptest.NewRecorder()
+				sandboxRefuseView(w, got)
+				if w.Code < http.StatusBadRequest || !strings.Contains(w.Body.String(), "UPN is unconfirmed") ||
+					strings.Contains(w.Body.String(), "strict") || strings.Contains(w.Body.String(), "watch") {
+					t.Fatalf("sandbox refusal = %d %s", w.Code, w.Body.String())
+				}
+			}
+		})
+	}
+	base.upnUnproven = true
+	set := identityTestSet(t, p, "watch", config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"engineering"}}})
+	if got := set.match(&base, profileSubjectVerified, "hermes", ""); got.Refused != "" {
+		t.Fatalf("unrelated UPN uncertainty refused a proven group decision: %+v", got)
+	}
+
+	// An unproven fact refuses only when it could change the profile: an
+	// assignment that may apply but gives the profile the proven facts
+	// already select decides the request.
+	unknownGroups := identityTestSubject(p, p.providers[1], stateGroupsUnknown, false)
+	byGroup := config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{p.group}}}
+	byUID := config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{p.id}}}
+	for _, tc := range []struct {
+		name        string
+		def         string
+		assignments []config.ProfileAssignment
+		want        string
+		refused     bool
+	}{
+		{name: "the default gives the same profile", def: "strict", assignments: []config.ProfileAssignment{byGroup}, want: "strict"},
+		{name: "a proven match gives the same profile", def: "watch", assignments: []config.ProfileAssignment{byUID, byGroup}, want: "strict"},
+		{name: "the default differs", def: "watch", assignments: []config.ProfileAssignment{byGroup}, refused: true},
+		{name: "a proven match differs", def: "strict", assignments: []config.ProfileAssignment{
+			{Profile: "tooling", Match: config.ProfileMatch{Users: []string{p.id}}}, byGroup}, refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set := identityTestSet(t, p, tc.def, tc.assignments...)
+			got := set.selectProfile(&unknownGroups, resolveIdentity(&unknownGroups, nil), profileSubjectVerified, "hermes", "")
+			if tc.refused {
+				if got.Refused == "" || !strings.Contains(got.Refused, "group membership is unconfirmed") {
+					t.Fatalf("%+v; want a refusal naming the group fact", got)
+				}
+				return
+			}
+			if got.Refused != "" || got.Name != tc.want {
+				t.Fatalf("%+v; want %s, not refused", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestResolveIdentityProofStatesAcrossProvidersAndPlatforms is the table
 // of resolveIdentity: every proof state of a pass, for every directory
 // provider, on Linux, macOS and Windows, and the profile the one selection
@@ -147,6 +274,9 @@ func TestResolveIdentityProofStatesAcrossProvidersAndPlatforms(t *testing.T) {
 					if res.Account != tc.want.account || res.Groups != tc.want.groups || res.Agent != proofProven {
 						t.Fatalf("resolution %+v; want account %s, groups %s", res, tc.want.account, tc.want.groups)
 					}
+					if tc.want.keyed && !provider.keyed(p) {
+						tc.want.keyed = false
+					}
 					if (res.Incarnation.key() != "") != tc.want.keyed {
 						t.Fatalf("incarnation %+v keyed %v; want keyed %v", res.Incarnation, res.Incarnation.key() != "", tc.want.keyed)
 					}
@@ -156,7 +286,7 @@ func TestResolveIdentityProofStatesAcrossProvidersAndPlatforms(t *testing.T) {
 					set := identityTestSet(t, p, "watch",
 						config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{p.group}}})
 					got := set.selectProfile(&subject, res, profileSubjectVerified, "codex", "")
-					if got.Name != tc.want.profile || got.Match != tc.want.match || got.Refused != "" {
+					if got.Name != tc.want.profile || got.Match != tc.want.match {
 						t.Fatalf("decision %+v; want %s (%s)", got, tc.want.profile, tc.want.match)
 					}
 					if tc.want.account != proofProven || tc.want.groups != proofProven {
@@ -170,9 +300,9 @@ func TestResolveIdentityProofStatesAcrossProvidersAndPlatforms(t *testing.T) {
 	}
 }
 
-// When the profiles that may apply do not cover each other, the request is
-// refused, with the strictest of them by mode and block_at as its Name.
-func TestUnprovenFactsWithIncomparableProfilesRefuse(t *testing.T) {
+// When the profiles that may apply do not cover each other, their meet
+// applies: never a refusal, and never the weaker of them.
+func TestUnprovenFactsWithIncomparableProfilesApplyTheirMeet(t *testing.T) {
 	p := identityTestPlatforms[0]
 	cfg := &config.Config{}
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
@@ -187,11 +317,13 @@ func TestUnprovenFactsWithIncomparableProfilesRefuse(t *testing.T) {
 	}
 	subject := identityTestSubject(p, p.providers[1], stateUnknown, true)
 	got := set.match(&subject, profileSubjectVerified, "codex", "")
-	if got.Refused == "" || got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed {
-		t.Fatalf("decision %+v; want a refusal named strict", got)
+	if got.Name != config.ProfileMeetName([]string{"default", "strict"}) || got.Match != profileMatchDefaultLookupFailed {
+		t.Fatalf("decision %+v; want the meet of default and strict", got)
 	}
-	if !strings.Contains(got.Refused, "profile-explain --user 70001") && !strings.Contains(got.Refused, "explain --user 70001") {
-		t.Fatalf("refusal %q names no explain command", got.Refused)
+	derived, ok := set.derivedProfile(got.Name)
+	if !ok || hookModeForConfig(derived.Config, "codex") != "action" || resolveThresholds(derived.Config, "codex").Block != "LOW" ||
+		!slices.Contains(derived.Sandbox.RequiredFor, "codex") {
+		t.Fatalf("meet %+v; want action, block_at LOW and codex required in a sandbox", derived)
 	}
 }
 
@@ -235,7 +367,7 @@ func TestGAP0402UnknownMembershipIsNotHiddenByEarlierAssignments(t *testing.T) {
 	}
 	set := identityTestSet(t, p, "watch",
 		config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"ldap-privileged"}, Connectors: []string{"cursor"}}})
-	if got := set.match(&unknownGroups, profileSubjectVerified, "codex", ""); got.Name != "watch" || got.Refused != "" {
+	if got := set.match(&unknownGroups, profileSubjectVerified, "codex", ""); got.Name != "watch" {
 		t.Fatalf("a group assignment of another connector made %+v; want the default", got)
 	}
 	set = identityTestSet(t, p, "watch",
@@ -257,7 +389,7 @@ func TestSeveralMatchingAssignmentsTheStrictestWins(t *testing.T) {
 	} {
 		set := identityTestSet(t, p, "watch", order...)
 		got := set.match(&subject, profileSubjectVerified, "codex", "")
-		if got.Name != "strict" || got.Match != profileMatchGroup || got.Refused != "" {
+		if got.Name != "strict" || got.Match != profileMatchGroup {
 			t.Fatalf("assignments %+v: %+v; want strict as group", order, got)
 		}
 	}
@@ -284,41 +416,51 @@ func TestLastProvenProfileIsKeyedByTheWholeIncarnation(t *testing.T) {
 		t.Fatalf("unproven UPN and groups: %+v; want strict", got)
 	}
 	res := resolveIdentity(&later, nil)
-	if last, ok := set.provenProfiles.get(res.Incarnation.key()); !ok || last != "strict" {
+	if last, ok := set.provenProfiles.get(res.Incarnation, true); !ok || last != "strict" {
 		t.Fatalf("last proven profile %q %v; want strict", last, ok)
 	}
 	recreated := later
 	recreated.accountToken = "S-1-5-21-1-2-3-1777"
-	if _, ok := set.provenProfiles.get(resolveIdentity(&recreated, nil).Incarnation.key()); ok {
+	if _, ok := set.provenProfiles.get(resolveIdentity(&recreated, nil).Incarnation, true); ok {
 		t.Fatal("a recreated account under the same uid and name inherited the last proven profile")
 	}
 }
 
 // An unresolved 1.0.3 agents entry anywhere in the list makes the agent
-// fact unproven: the strictest profile of those that may apply, the
-// default among them, applies in either order (GAP-0337, GAP-0424).
+// fact unproven, in either order (GAP-0337, GAP-0424). When the entry gives
+// the profile a proven assignment already gives, the decision needs no
+// unproven fact; when it gives another one, the request is refused naming
+// the agent fact.
 func TestUnresolvedLegacyAgentEntryIsStrictestInEitherOrder(t *testing.T) {
 	p := identityTestPlatforms[0]
 	const legacy = "agt-00000000000000aa"
 	subject := identityTestSubject(p, p.providers[0], stateProven, false)
 	unresolved := func(entry string) bool { return entry == legacy }
 	for _, legacyFirst := range []bool{true, false} {
-		legacyAssignment := config.ProfileAssignment{Profile: "watch", Match: config.ProfileMatch{Agents: []string{legacy}}}
-		general := config.ProfileAssignment{Profile: "watch", Match: config.ProfileMatch{Connectors: []string{"codex"}}}
-		assignments := []config.ProfileAssignment{general, legacyAssignment}
-		if legacyFirst {
-			assignments = []config.ProfileAssignment{legacyAssignment, general}
-		}
-		set := identityTestSet(t, p, "strict", assignments...)
-		got := set.selectProfile(&subject, resolveIdentity(&subject, unresolved), profileSubjectVerified, "codex", "agt-00000000000000bb")
-		if got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed {
-			t.Fatalf("legacyFirst=%v: %+v; want the strict default", legacyFirst, got)
+		for _, entryProfile := range []string{"watch", "strict"} {
+			legacyAssignment := config.ProfileAssignment{Profile: entryProfile, Match: config.ProfileMatch{Agents: []string{legacy}}}
+			general := config.ProfileAssignment{Profile: "watch", Match: config.ProfileMatch{Connectors: []string{"codex"}}}
+			assignments := []config.ProfileAssignment{general, legacyAssignment}
+			if legacyFirst {
+				assignments = []config.ProfileAssignment{legacyAssignment, general}
+			}
+			set := identityTestSet(t, p, "strict", assignments...)
+			got := set.selectProfile(&subject, resolveIdentity(&subject, unresolved), profileSubjectVerified, "codex", "agt-00000000000000bb")
+			if entryProfile == "watch" && (got.Name != "watch" || got.Match != profileMatchConnector || got.Refused != "") {
+				t.Fatalf("legacyFirst=%v, entry watch: %+v; want watch by connector, not refused", legacyFirst, got)
+			}
+			if entryProfile == "strict" && (!strings.Contains(got.Refused, "pre-upgrade agent identity") ||
+				!slices.Equal(got.Unproven, []string{"agent:unknown"})) {
+				t.Fatalf("legacyFirst=%v, entry strict: %+v; want a refusal naming the agent fact", legacyFirst, got)
+			}
 		}
 	}
 }
 
-// Privacy: the refusal names only the requesting account's own uid.
-func TestUnprovenRefusalNamesOnlyTheRequestingAccount(t *testing.T) {
+// Privacy: the account a meet applies to sees it as the strictest
+// combination, never the names of its members (one may be the profile of a
+// group it is not proven to be in, or another account's).
+func TestMeetNamesNoMemberToTheAccount(t *testing.T) {
 	p := identityTestPlatforms[0]
 	cfg := &config.Config{}
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
@@ -335,7 +477,65 @@ func TestUnprovenRefusalNamesOnlyTheRequestingAccount(t *testing.T) {
 	}
 	subject := identityTestSubject(p, p.providers[1], stateUnknown, true)
 	got := set.match(&subject, profileSubjectVerified, "codex", "")
-	if got.Refused == "" || strings.Contains(got.Refused, "bob") || strings.Contains(got.Refused, p.group) {
-		t.Fatalf("refusal %q leaks another account or a group name", got.Refused)
+	label := profileUserLabel(got.Name)
+	if !config.IsProfileMeet(got.Name) || label != profileMeetLabel || strings.Contains(label, "default") || strings.Contains(label, "bob") ||
+		strings.Contains(label, p.group) || strings.Contains(label, got.Name) {
+		t.Fatalf("decision %+v shown as %q; want the strictest combination, naming no member", got, label)
+	}
+	if profileUserLabel("strict") != "strict" {
+		t.Fatal("a single profile keeps its own name")
+	}
+}
+
+// GAP-0522, the rest of the class. A refusal names the facts the decision
+// needs and no other. The guardian's current record answers for the UPN, so
+// a managed Mac's local account, which has none, is not refused for a UPN
+// entry; a .\name entry never waits for a UPN. A Windows account without
+// current token groups is told why.
+func TestUncertainIdentityRefusalNamesOnlyWhatTheDecisionNeeds(t *testing.T) {
+	previous := currentIdentitySpoolDir()
+	setIdentitySpoolDir(t.TempDir())
+	t.Cleanup(func() { setIdentitySpoolDir(previous) })
+	mac := identityTestPlatforms[1]
+	local := func(record bool) profileSubject {
+		return profileSubjectFromVerified(VerifiedSubject{UserID: "502", IDKind: useridentity.KindPOSIXUID, UserName: "bob",
+			Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, Source: useridentity.SourceMacOSOpenDirectory,
+				Groups: []string{"staff"}, ResolvedAt: time.Now(), Assurance: useridentity.AssuranceVerified, GuardianRecord: record},
+			Source: subjectSourcePeerCredentials}, true)
+	}
+	byUPN := config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}}
+	set := identityTestSet(t, mac, "watch", byUPN)
+	awaiting := local(false)
+	if got := set.match(&awaiting, profileSubjectVerified, "codex", ""); !strings.Contains(got.Refused, "UPN is unconfirmed") {
+		t.Fatalf("before the guardian's record: %+v; want a refusal naming the UPN", got)
+	}
+	recorded := local(true)
+	if got := set.match(&recorded, profileSubjectVerified, "codex", ""); got.Refused != "" || got.Name != "watch" {
+		t.Fatalf("with the guardian's record: %+v; want watch, not refused", got)
+	}
+	dotted := identityTestSet(t, mac, "watch", config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{`.\kiosk`}}})
+	if got := dotted.match(&awaiting, profileSubjectVerified, "codex", ""); got.Refused != "" || got.Name != "watch" {
+		t.Fatalf(".\\name entry: %+v; want watch, not refused", got)
+	}
+
+	// Groups and the UPN are both unproven; only a group assignment exists.
+	both := identityTestSubject(mac, mac.providers[0], stateGroupsUnknown, false)
+	both.upnUnproven = true
+	groups := identityTestSet(t, mac, "watch", config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{mac.group}}})
+	got := groups.match(&both, profileSubjectVerified, "codex", "")
+	if !strings.Contains(got.Refused, "group membership is unconfirmed") || strings.Contains(got.Refused, "UPN") ||
+		!slices.Equal(got.Unproven, []string{"groups:unknown"}) {
+		t.Fatalf("%+v; want a refusal naming the groups only", got)
+	}
+
+	win := identityTestPlatforms[2]
+	signedOut := profileSubjectFromVerified(VerifiedSubject{UserID: win.id, IDKind: win.kind, UserName: win.name,
+		Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Source: useridentity.SourceWindowsLSA,
+			Domain: "corp.example", GroupsPartial: true, ResolvedAt: time.Now(), Assurance: useridentity.AssuranceVerified},
+		Source: subjectSourcePeerCredentials}, true)
+	winSet := identityTestSet(t, win, "watch", config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{win.group}}})
+	if got := winSet.match(&signedOut, profileSubjectVerified, "codex", ""); !strings.Contains(got.Refused, "group membership is unconfirmed") ||
+		!strings.Contains(got.Refused, "no desktop session") {
+		t.Fatalf("Windows without a desktop session: %+v; want the groups and the reason named", got)
 	}
 }
