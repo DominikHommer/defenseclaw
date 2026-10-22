@@ -703,7 +703,8 @@ func newOpenHandsHarness(t *testing.T, configHome bool) *openHandsHarness {
 	h.script = filepath.Join(h.dataDir, "hooks", removedOpenHandsHookScript)
 	writeRemovedFixture(t, h.script, "#!/bin/sh\n# defenseclaw-managed-hook v1\n", 0o700)
 	h.recordScript(t)
-	writeRemovedFixture(t, filepath.Join(h.dataDir, "hooks", ".hookcfg.openhands"), "DEFENSECLAW_CONNECTOR=openhands\n", 0o600)
+	// What the hook writer of 0.8.10 through 1.0.3 wrote.
+	writeRemovedFixture(t, filepath.Join(h.dataDir, "hooks", ".hookcfg.openhands"), removedOpenHandsRuntimeRecord("closed"), 0o600)
 	writeRemovedFixture(t, filepath.Join(h.dataDir, "hooks", ".otlp-openhands.token"), strings.Repeat("a", 64)+"\n", 0o600)
 	if _, err := EnsureHookAPIToken(h.dataDir, removedOpenHandsID); err != nil {
 		t.Fatal(err)
@@ -2310,4 +2311,322 @@ func TestRemovedManualCleanupRecordReplacesAndRemovesItsOwn(t *testing.T) {
 		t.Fatalf("Teardown after the manual step: %v", err)
 	}
 	h.requireDone(t)
+}
+
+// --- Review fixes (G-deadcode loop round 3) ---
+
+// removedOpenHandsRuntimeRecord is the runtime record an older release's hook
+// writer kept for OpenHands (0.8.10 through 1.0.3).
+func removedOpenHandsRuntimeRecord(mode string) string {
+	return "DEFENSECLAW_CONNECTOR=openhands\nDEFENSECLAW_FAIL_MODE=" + mode + "\n"
+}
+
+// The OpenHands runtime record (.hookcfg.openhands) is removed only while it
+// holds exactly what an older release wrote. Any other file there is left
+// byte for byte, with everything else, for the user.
+func TestRemovedOpenHandsTeardownNeverRemovesAForeignRuntimeRecord(t *testing.T) {
+	for _, mode := range []string{"closed", "open"} {
+		t.Run("its own, fail mode "+mode, func(t *testing.T) {
+			h := newOpenHandsHarness(t, false)
+			h.setUp(t, true)
+			writeRemovedFixture(t, filepath.Join(h.dataDir, "hooks", ".hookcfg.openhands"), removedOpenHandsRuntimeRecord(mode), 0o600)
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			h.requireDone(t)
+		})
+	}
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, h *openHandsHarness, path string) // replaces the record
+		links bool
+	}{
+		{name: "a user file", plant: func(t *testing.T, _ *openHandsHarness, path string) {
+			writeRemovedFixture(t, path, "theirs\n", 0o600)
+		}},
+		{name: "the Codex record", plant: func(t *testing.T, _ *openHandsHarness, path string) {
+			writeRemovedFixture(t, path, "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=closed\n", 0o600)
+		}},
+		{name: "its own record with one byte more", plant: func(t *testing.T, _ *openHandsHarness, path string) {
+			writeRemovedFixture(t, path, removedOpenHandsRuntimeRecord("closed")+"\n", 0o600)
+		}},
+		{name: "its own record with CRLF", plant: func(t *testing.T, _ *openHandsHarness, path string) {
+			writeRemovedFixture(t, path, "DEFENSECLAW_CONNECTOR=openhands\r\nDEFENSECLAW_FAIL_MODE=closed\r\n", 0o600)
+		}},
+		{name: "an unknown fail mode", plant: func(t *testing.T, _ *openHandsHarness, path string) {
+			writeRemovedFixture(t, path, removedOpenHandsRuntimeRecord("audit"), 0o600)
+		}},
+		{name: "a link to a user file", links: true, plant: func(t *testing.T, h *openHandsHarness, path string) {
+			target := filepath.Join(h.home, "notes.txt")
+			writeRemovedFixture(t, target, removedOpenHandsRuntimeRecord("closed"), 0o600)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a directory", plant: func(t *testing.T, _ *openHandsHarness, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeRemovedFixture(t, filepath.Join(path, "keep"), "theirs\n", 0o600)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.links && runtime.GOOS == "windows" {
+				t.Skip("symlinks need privileges on Windows")
+			}
+			h := newOpenHandsHarness(t, false)
+			h.setUp(t, true)
+			path := filepath.Join(h.dataDir, "hooks", ".hookcfg.openhands")
+			tc.plant(t, h, path)
+			paths := []string{h.hooksPath, h.script, filepath.Join(h.home, "notes.txt"),
+				filepath.Join(h.dataDir, "hooks", ".otlp-openhands.token"),
+				removedTokenFile(t, h.dataDir, removedOpenHandsID),
+				managedFileBackupPath(h.dataDir, removedOpenHandsID, "config")}
+			if info, err := os.Lstat(path); err == nil && info.IsDir() {
+				paths = append(paths, filepath.Join(path, "keep"))
+			} else {
+				paths = append(paths, path)
+			}
+			before := removedSnapshot(t, paths...)
+			for run := 1; run <= 2; run++ {
+				h.notices.Reset()
+				if err := h.teardown(); err != nil {
+					t.Fatalf("Teardown run %d = %v, want the state left for manual cleanup", run, err)
+				}
+				requireRemovedSnapshot(t, "a teardown with a runtime record DefenseClaw did not write", before)
+				h.requirePeerUnchanged(t)
+				if !strings.Contains(h.notices.String(), path) {
+					t.Fatalf("run %d did not name %s:\n%s", run, path, h.notices)
+				}
+				if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(path) {
+					t.Fatalf("manual cleanup record = %+v, %v; want %s", record, ok, path)
+				}
+			}
+			if err := h.verify(); err != nil {
+				t.Fatalf("VerifyClean with the manual step recorded: %v", err)
+			}
+			// The user moves the file away; the next teardown finishes.
+			if err := os.RemoveAll(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown after the manual step: %v", err)
+			}
+			h.requireDone(t)
+		})
+	}
+}
+
+// removedFinishCase makes one step after the file changes impossible, and
+// undoes that.
+type removedFinishCase struct {
+	name string
+	// block breaks the step; it returns what the error must name and the
+	// paths it planted, with their contents.
+	block func(t *testing.T, dataDir, connectorName, home string) (string, map[string]string)
+	// unblock lets the step through again.
+	unblock func(t *testing.T, dataDir, connectorName string)
+	// afterChanges: the step fails only after the changes (so they are
+	// rolled back); otherwise it is checked before any change.
+	afterChanges bool
+}
+
+func removedFinishCases() []removedFinishCase {
+	folder := func(dataDir string) string { return filepath.Join(dataDir, removedCleanupDir) }
+	unlinkFolder := func(t *testing.T, dataDir, _ string) {
+		t.Helper()
+		if err := os.RemoveAll(folder(dataDir)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	otlp := func(dataDir, connectorName string) string {
+		return filepath.Join(dataDir, "hooks", otlpPathTokenFileName(OTLPPathTokenScope(connectorName)))
+	}
+	return []removedFinishCase{
+		{name: "the record folder is a link", block: func(t *testing.T, dataDir, _ string, home string) (string, map[string]string) {
+			elsewhere := filepath.Join(home, "elsewhere")
+			writeRemovedFixture(t, filepath.Join(elsewhere, "keep"), "theirs\n", 0o600)
+			if err := os.Symlink(elsewhere, folder(dataDir)); err != nil {
+				t.Fatal(err)
+			}
+			return "not a plain directory", map[string]string{
+				folder(dataDir): "symlink:" + elsewhere, filepath.Join(elsewhere, "keep"): "theirs\n"}
+		}, unblock: unlinkFolder},
+		{name: "the record folder is a file", block: func(t *testing.T, dataDir, _ string, _ string) (string, map[string]string) {
+			writeRemovedFixture(t, folder(dataDir), "theirs\n", 0o600)
+			return "not a plain directory", map[string]string{folder(dataDir): "theirs\n"}
+		}, unblock: unlinkFolder},
+		{name: "a user file at the record path", block: func(t *testing.T, dataDir, connectorName string, _ string) (string, map[string]string) {
+			path := removedCleanupRecordPath(dataDir, connectorName)
+			writeRemovedFixture(t, path, "theirs\n", 0o600)
+			return path, map[string]string{path: "theirs\n"}
+		}, unblock: unlinkFolder},
+		{name: "a token is a link", afterChanges: true, block: func(t *testing.T, dataDir, connectorName string, home string) (string, map[string]string) {
+			target := filepath.Join(home, "token-target")
+			writeRemovedFixture(t, target, "theirs\n", 0o600)
+			path := otlp(dataDir, connectorName)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+			return path, map[string]string{path: "symlink:" + target, target: "theirs\n"}
+		}, unblock: func(t *testing.T, dataDir, connectorName string) {
+			t.Helper()
+			if err := os.Remove(otlp(dataDir, connectorName)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+}
+
+// A cleanup that cannot finish changes nothing: a step after the file
+// changes (clearing the manual-cleanup record, revoking a token) is checked
+// before them, or, when it still fails, rolls them back and keeps the backup
+// records, so the next start retries from the same state.
+func TestRemovedTeardownThatCannotFinishChangesNothing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	for _, tc := range removedFinishCases() {
+		t.Run("OmniGent, "+tc.name, func(t *testing.T) {
+			h := newOmnigentHarness(t, false)
+			h.setUp(t, omnigentSetup{config: omnigentOperatorConfig})
+			names, planted := tc.block(t, h.dataDir, removedOmnigentID, h.home)
+			before := h.state(t)
+			if tc.afterChanges {
+				// The hook token goes before the failing step: nothing
+				// accepts it any more, so it is not put back.
+				delete(before, removedTokenFile(t, h.dataDir, removedOmnigentID))
+			}
+			for path, body := range planted {
+				before[path] = body
+			}
+			err := h.teardown(t)
+			if err == nil || !strings.Contains(err.Error(), names) {
+				t.Fatalf("Teardown = %v, want an error naming %s", err, names)
+			}
+			requireRemovedSnapshot(t, "a teardown that cannot finish", before)
+			h.requirePeerUnchanged(t)
+			if err := h.verify(); err == nil {
+				t.Fatal("VerifyClean passed while every file is still as DefenseClaw wrote it")
+			}
+			tc.unblock(t, h.dataDir, removedOmnigentID)
+			if err := h.teardown(t); err != nil {
+				t.Fatalf("Teardown once the step can finish: %v", err)
+			}
+			h.requireDone(t)
+		})
+		t.Run("OpenHands, "+tc.name, func(t *testing.T) {
+			h := newOpenHandsHarness(t, false)
+			h.setUp(t, true)
+			names, planted := tc.block(t, h.dataDir, removedOpenHandsID, h.home)
+			before := h.state(t)
+			if tc.afterChanges {
+				delete(before, removedTokenFile(t, h.dataDir, removedOpenHandsID))
+			}
+			for path, body := range planted {
+				before[path] = body
+			}
+			err := h.teardown()
+			if err == nil || !strings.Contains(err.Error(), names) {
+				t.Fatalf("Teardown = %v, want an error naming %s", err, names)
+			}
+			requireRemovedSnapshot(t, "a teardown that cannot finish", before)
+			h.requirePeerUnchanged(t)
+			if err := h.verify(); err == nil {
+				t.Fatal("VerifyClean passed while every file is still as DefenseClaw wrote it")
+			}
+			tc.unblock(t, h.dataDir, removedOpenHandsID)
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown once the step can finish: %v", err)
+			}
+			h.requireDone(t)
+		})
+	}
+}
+
+// A removed connector's teardown never writes the hook contract lock or the
+// shared .hookcfg, which hold the surviving connectors' entries: on a managed
+// host only the managed writer may write them. Each caller that drops the
+// connector clears its entry afterwards in its own mode, and the surviving
+// entries stay as they were.
+func TestRemovedTeardownLeavesTheHookContractLockToItsCaller(t *testing.T) {
+	sharedRuntime := func(t *testing.T, dataDir, connectorName string) string {
+		t.Helper()
+		body, err := json.MarshalIndent(hookConfigSidecar{
+			Version: 2, GatewayAddr: "127.0.0.1:18970",
+			FailModes: map[string]string{"codex": "closed", connectorName: "closed"},
+		}, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dataDir, "hooks", hookConfigSidecarName)
+		writeRemovedFixture(t, path, string(body)+"\n", 0o600)
+		return path
+	}
+	codexEntry := HookContractLockEntry{Connector: "codex", HookScriptDigests: map[string]string{"codex-hook.sh": "sha256:" + strings.Repeat("c", 64)}}
+	check := func(t *testing.T, dataDir, connectorName string, teardown func() error, done func(*testing.T)) {
+		t.Helper()
+		if err := SaveHookContractLockEntry(dataDir, codexEntry); err != nil {
+			t.Fatal(err)
+		}
+		if LoadHookContractLockEntry(dataDir, connectorName).Connector == "" {
+			if err := SaveHookContractLockEntry(dataDir, HookContractLockEntry{Connector: connectorName}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		lock := filepath.Join(dataDir, hookContractLockFile)
+		shared := sharedRuntime(t, dataDir, connectorName)
+		before := removedSnapshot(t, lock, shared)
+		for run := 1; run <= 2; run++ {
+			if err := teardown(); err != nil {
+				t.Fatalf("Teardown run %d: %v", run, err)
+			}
+			requireRemovedSnapshot(t, "a removed connector's teardown", before)
+		}
+		done(t)
+		// The caller's clear, in its mode, drops only this entry.
+		if err := ClearHookContractLockEntry(dataDir, connectorName); err != nil {
+			t.Fatalf("the caller's lock clear: %v", err)
+		}
+		if got := LoadHookContractLockEntry(dataDir, connectorName); got.Connector != "" {
+			t.Fatalf("%s lock entry survived the caller's clear: %+v", connectorName, got)
+		}
+		if got := LoadHookContractLockEntry(dataDir, "codex"); got.Connector != "codex" ||
+			got.HookScriptDigests["codex-hook.sh"] != codexEntry.HookScriptDigests["codex-hook.sh"] {
+			t.Fatalf("surviving Codex lock entry = %+v", got)
+		}
+		data, err := os.ReadFile(shared)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var state hookConfigSidecar
+		if err := json.Unmarshal(data, &state); err != nil || state.FailModes["codex"] != "closed" || state.FailModes[connectorName] != "" {
+			t.Fatalf("shared runtime state after the caller's clear = %+v, %v", state, err)
+		}
+	}
+	for _, managedMode := range []bool{false, true} {
+		t.Run(map[bool]string{false: "OmniGent, per-user", true: "OmniGent, managed"}[managedMode], func(t *testing.T) {
+			h := newOmnigentHarness(t, false)
+			h.opts.ManagedEnterprise = managedMode
+			h.setUp(t, omnigentSetup{config: omnigentOperatorConfig})
+			check(t, h.dataDir, removedOmnigentID, func() error { return h.teardown(t) }, h.requireDone)
+		})
+	}
+	t.Run("OpenHands", func(t *testing.T) {
+		h := newOpenHandsHarness(t, false)
+		h.setUp(t, true)
+		check(t, h.dataDir, removedOpenHandsID, h.teardown, h.requireDone)
+	})
 }

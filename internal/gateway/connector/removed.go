@@ -38,9 +38,14 @@ package connector
 // how to remove the hook, so a hook that still runs it, by any path, link,
 // wrapper or shell, never allows a call. Writes replace the
 // file itself, never a link's target, and a change that fails, even after its
-// new bytes are in place, is rolled back with the changes before it. Rollback
-// writes a file back only while it still holds what teardown wrote: a file
-// someone changed since is kept as it is, with the backup records.
+// new bytes are in place, is rolled back with the changes before it. So is
+// every change when a step after them fails (removing the manual-cleanup
+// record, revoking the tokens), and the backup records go only once every
+// step is done. Rollback writes a file back only while it still holds what
+// teardown wrote: a file someone changed since is kept as it is, with the
+// backup records. Teardown never writes the hook contract lock or the shared
+// .hookcfg: each caller that drops the connector clears its entry after
+// VerifyClean with the writer of its own (managed or per-user) mode.
 
 import (
 	"bytes"
@@ -110,8 +115,13 @@ func (c removedConnectorBase) Route(*http.Request, []byte) (*ConnectorSignals, e
 func (c removedConnectorBase) SetCredentials(string, string) {}
 
 // removeCredentials revokes the connector-scoped hook and OTLP tokens an
-// older release minted, and its hook contract lock entry. Callers run it
-// only after the agent's config no longer references DefenseClaw.
+// older release minted. Nothing in 1.0.4 accepts them any more. The hook
+// contract lock entry is not touched here: the lock and the shared .hookcfg
+// hold the surviving connectors' entries too, and on a managed host only the
+// managed writer may write them, so each caller that drops the connector
+// (gateway boot, native Windows Setup, enterprise removal) clears the entry
+// itself after VerifyClean, in its own mode. A direct `connector teardown`
+// leaves the entry, as it did before 1.0.4.
 func (c removedConnectorBase) removeCredentials(dataDir string) error {
 	var errs []error
 	if err := RemoveHookAPIToken(dataDir, c.name); err != nil {
@@ -125,21 +135,20 @@ func (c removedConnectorBase) removeCredentials(dataDir string) error {
 			errs = append(errs, fmt.Errorf("remove %s: %w", path, err))
 		}
 	}
-	if err := ClearHookContractLockEntry(dataDir, c.name); err != nil {
-		errs = append(errs, err)
-	}
 	return errors.Join(errs...)
 }
 
 // removedPlanner lists what a removed connector's teardown would change.
 type removedPlanner func(SetupOpts) (*removedCleanupPlan, error)
 
-// teardown runs plan. With every file provably DefenseClaw's it makes all the
-// changes or none (a failure rolls back and is returned, so the next start
-// retries), drops the backup records named by logicals, runs finish, revokes
-// the credentials and clears an earlier manual-cleanup record. Otherwise it
-// changes nothing, records the manual steps and prints them once.
-func (c removedConnectorBase) teardown(opts SetupOpts, plan removedPlanner, logicals []string, finish func() error) error {
+// teardown runs plan. With every file provably DefenseClaw's it does all of
+// the cleanup or none of it: the changes, then clearing an earlier
+// manual-cleanup record and revoking the credentials, and only then dropping
+// the backup records named by logicals. The record is checked before any
+// change; a step that still fails rolls the changes back and keeps the backup
+// records, and the error is returned, so the next start retries. Otherwise
+// it changes nothing, records the manual steps and prints them once.
+func (c removedConnectorBase) teardown(opts SetupOpts, plan removedPlanner, logicals []string) error {
 	if strings.TrimSpace(opts.DataDir) == "" {
 		return fmt.Errorf("%s cleanup: empty data directory", c.name)
 	}
@@ -150,24 +159,33 @@ func (c removedConnectorBase) teardown(opts SetupOpts, plan removedPlanner, logi
 	if len(p.manual) > 0 {
 		return c.leaveForManualCleanup(opts.DataDir, p.manual)
 	}
+	if err := c.checkRecord(opts.DataDir); err != nil {
+		return fmt.Errorf("%s cleanup: %w; nothing was changed", c.name, err)
+	}
 	if err := p.apply(); err != nil {
 		return fmt.Errorf("%s cleanup: %w; the next start tries again", c.name, err)
 	}
+	if err := c.finish(opts.DataDir); err != nil {
+		if rollbackErr := p.rollback(len(p.files)); rollbackErr != nil {
+			return fmt.Errorf("%s cleanup: %w", c.name, errors.Join(err, rollbackErr))
+		}
+		return fmt.Errorf("%s cleanup: %w; its files were put back, and the next start tries again", c.name, err)
+	}
+	// Last: until every step is done, the backup records are what a retry
+	// plans from.
 	for _, logical := range logicals {
 		discardManagedFileBackup(opts.DataDir, c.name, logical)
 	}
-	if finish != nil {
-		if err := finish(); err != nil {
-			return fmt.Errorf("%s cleanup: %w", c.name, err)
-		}
-	}
-	if err := c.removeCredentials(opts.DataDir); err != nil {
+	return nil
+}
+
+// finish runs the steps after the file changes: it clears c's earlier
+// manual-cleanup record and revokes the credentials.
+func (c removedConnectorBase) finish(dataDir string) error {
+	if err := c.removeRecord(dataDir); err != nil {
 		return err
 	}
-	if err := c.removeRecord(opts.DataDir); err != nil {
-		return fmt.Errorf("%s cleanup: %w", c.name, err)
-	}
-	return nil
+	return c.removeCredentials(dataDir)
 }
 
 // verifyClean fails while plan would still change a file, or while a file
@@ -364,24 +382,50 @@ func (c removedConnectorBase) loadRecord(dataDir string) removedCleanupRecord {
 	return owned.record
 }
 
-// removeRecord removes c's record after a finished cleanup. A file at the
-// record path that DefenseClaw cannot prove it wrote is left as it is.
-func (c removedConnectorBase) removeRecord(dataDir string) error {
+// openOwnedRecord opens the record folder and reads c's record there: a nil
+// folder when there is none, a nil record when it holds none. A folder that
+// is a link, or a file at the record path that DefenseClaw cannot prove it
+// wrote, is an error naming the path.
+func (c removedConnectorBase) openOwnedRecord(dataDir string) (*os.Root, *ownedRecord, error) {
 	path := removedCleanupRecordPath(dataDir, c.name)
 	dir, err := openRemovedCleanupDir(dataDir, false)
 	if err != nil {
-		return fmt.Errorf("left %s: %w", path, err)
+		return nil, nil, fmt.Errorf("left %s: %w", path, err)
 	}
 	if dir == nil {
-		return nil
+		return nil, nil, nil
+	}
+	owned, err := c.readOwnedRecord(dir)
+	if err != nil {
+		_ = dir.Close()
+		return nil, nil, fmt.Errorf("left %s: %w; remove it by hand", path, err)
+	}
+	return dir, owned, nil
+}
+
+// checkRecord fails while removeRecord would, so a cleanup that could not
+// finish fails before it changes anything.
+func (c removedConnectorBase) checkRecord(dataDir string) error {
+	dir, _, err := c.openOwnedRecord(dataDir)
+	if dir != nil {
+		_ = dir.Close()
+	}
+	return err
+}
+
+// removeRecord removes c's record after a finished cleanup. A file at the
+// record path that DefenseClaw cannot prove it wrote is left as it is.
+func (c removedConnectorBase) removeRecord(dataDir string) error {
+	dir, owned, err := c.openOwnedRecord(dataDir)
+	if err != nil || dir == nil {
+		return err
 	}
 	defer dir.Close()
-	owned, err := c.readOwnedRecord(dir)
-	if err == nil && owned != nil {
-		err = c.dropOwnedRecord(dir, owned)
+	if owned == nil {
+		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("left %s: %w; remove it by hand", path, err)
+	if err := c.dropOwnedRecord(dir, owned); err != nil {
+		return fmt.Errorf("left %s: %w; remove it by hand", removedCleanupRecordPath(dataDir, c.name), err)
 	}
 	return nil
 }
@@ -753,11 +797,56 @@ func (c removedOpenHandsConnector) plan(opts SetupOpts) (*removedCleanupPlan, er
 			return nil, err
 		}
 	}
+	if err := c.addRuntimeRecord(p, opts); err != nil {
+		return nil, err
+	}
 	// Last: the script becomes the tombstone once the hooks files are back.
 	if err := c.addHookScript(p, opts); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+// runtimeRecord is the shell runtime record (.hookcfg.openhands) an older
+// release's hook writer kept beside the hook script.
+func (c removedOpenHandsConnector) runtimeRecord(opts SetupOpts) string {
+	return filepath.Join(opts.DataDir, "hooks", hookConfigSidecarName+"."+c.name)
+}
+
+// addRuntimeRecord plans the runtime record. It is removed only while it
+// holds exactly what that hook writer wrote (0.8.10 through 1.0.3: the
+// connector line and a fail mode). Any other file there (other bytes, a
+// link, another kind of file) may be anyone's: it is left for the user, and
+// so is everything else.
+func (c removedOpenHandsConnector) addRuntimeRecord(p *removedCleanupPlan, opts SetupOpts) error {
+	path := c.runtimeRecord(opts)
+	const step = "move it away or delete it: DefenseClaw no longer reads it"
+	data, info, err := readRemovedFile(path)
+	switch {
+	case errors.Is(err, errRemovedNotRegular):
+		p.leave(path, "it is not a regular file", step)
+		return nil
+	case err != nil:
+		return err
+	case info == nil:
+		return nil
+	case !removedOpenHandsRuntimeRecordBytes(data):
+		p.leave(path, "it is not the runtime record DefenseClaw wrote", step)
+		return nil
+	}
+	p.files = append(p.files, removedFile{path: path, data: data, mode: info.Mode().Perm()})
+	return nil
+}
+
+// removedOpenHandsRuntimeRecordBytes reports whether data is exactly a runtime
+// record an older release wrote for OpenHands.
+func removedOpenHandsRuntimeRecordBytes(data []byte) bool {
+	for _, mode := range []string{"closed", "open"} {
+		if string(data) == "DEFENSECLAW_CONNECTOR="+removedOpenHandsID+"\nDEFENSECLAW_FAIL_MODE="+mode+"\n" {
+			return true
+		}
+	}
+	return false
 }
 
 // addHookScript plans DefenseClaw's hook script. A script exactly as setup
@@ -862,17 +951,12 @@ func removedOpenHandsAllowTombstone(data []byte) bool {
 	return string(data) == disabledHookTombstone(removedOpenHandsID) || string(data) == disabledHookTombstone("OpenHands")
 }
 
-// Teardown puts back the hooks.json an older release's setup found and turns
-// DefenseClaw's hook script into the tombstone that blocks every call, when
-// each is exactly as setup left it (see the file comment).
+// Teardown puts back the hooks.json an older release's setup found, removes
+// its runtime record and turns DefenseClaw's hook script into the tombstone
+// that blocks every call, when each is exactly as setup left it (see the file
+// comment).
 func (c removedOpenHandsConnector) Teardown(_ context.Context, opts SetupOpts) error {
-	return c.teardown(opts, c.plan, []string{"config"}, func() error {
-		record := filepath.Join(opts.DataDir, "hooks", hookConfigSidecarName+"."+c.name)
-		if err := os.Remove(record); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove %s: %w", record, err)
-		}
-		return nil
-	})
+	return c.teardown(opts, c.plan, []string{"config"})
 }
 
 // VerifyClean fails while a hooks file or the hook script is still as
@@ -1098,7 +1182,7 @@ func (c removedOmnigentConnector) plan(opts SetupOpts) (*removedCleanupPlan, err
 // way an older release's setup found them (removing what it created), when
 // each is exactly as setup left it (see the file comment).
 func (c removedOmnigentConnector) Teardown(_ context.Context, opts SetupOpts) error {
-	return c.teardown(opts, c.plan, []string{"config", "pth", "module"}, nil)
+	return c.teardown(opts, c.plan, []string{"config", "pth", "module"})
 }
 
 // VerifyClean fails while a file is still as DefenseClaw wrote it, or still
