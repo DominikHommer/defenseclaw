@@ -2281,12 +2281,9 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 			if err := json.Unmarshal(data, &settings); err != nil {
 				return atomicTransformResult{}, fmt.Errorf("parse claude settings for restore: %w", err)
 			}
-			var exactCanonical []byte
-			if exactData != nil {
-				exactCanonical, err = json.Marshal(settings)
-				if err != nil {
-					return atomicTransformResult{}, fmt.Errorf("canonicalize exact Claude settings snapshot: %w", err)
-				}
+			inputCanonical, err := json.Marshal(settings)
+			if err != nil {
+				return atomicTransformResult{}, fmt.Errorf("canonicalize Claude settings for restore: %w", err)
 			}
 
 			if rawHooks, present := settings["hooks"]; present {
@@ -2440,8 +2437,13 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 			if err != nil {
 				return atomicTransformResult{}, fmt.Errorf("canonicalize restored settings: %w", err)
 			}
-			if exactData != nil && bytes.Equal(canonical, exactCanonical) {
-				return atomicTransformResult{Data: exactData, Perm: restorePerm}, nil
+			if bytes.Equal(canonical, inputCanonical) {
+				if exactData != nil {
+					return atomicTransformResult{Data: exactData, Perm: restorePerm}, nil
+				}
+				// Nothing of DefenseClaw's was in the file: leave its bytes
+				// and mode as the user has them (GAP-0650).
+				return atomicTransformResult{Data: data, Keep: true}, nil
 			}
 			out, err := json.MarshalIndent(settings, "", "  ")
 			if err != nil {

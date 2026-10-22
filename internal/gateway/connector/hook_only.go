@@ -5417,7 +5417,8 @@ func removeJSONHookReferencesWithMatchers(path string, secureClient, openHands b
 		if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
 			before, _ := cfg["hooks"].(map[string]interface{})
 			pruneNewlyEmptyHookEntries(before, hooks)
-			if len(hooks) == 0 {
+			// An empty hooks object the user already had is theirs (GAP-0650).
+			if len(hooks) == 0 && len(before) > 0 {
 				delete(pruned, "hooks")
 			}
 		}

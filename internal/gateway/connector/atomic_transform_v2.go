@@ -222,7 +222,7 @@ func atomicTransformFileV2Locked(
 		if !result.Remove && len(result.Data) > atomicTransformMaxConfigBytes {
 			return fmt.Errorf("transformed config exceeds %d-byte compare-and-swap limit", atomicTransformMaxConfigBytes)
 		}
-		semanticNoop := (!snapshot.exists && result.Remove) ||
+		semanticNoop := result.Keep || (!snapshot.exists && result.Remove) ||
 			(snapshot.exists && !result.Remove && bytes.Equal(snapshot.data, result.Data) &&
 				(options.preserveExistingProtection || atomicTransformSnapshotSatisfiesPermissions(snapshot, writePerm)))
 		runAtomicTransformBeforeCompareHook(path, attempt)
