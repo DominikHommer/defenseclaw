@@ -81,6 +81,33 @@ func TestManagedRootCodeScanKeepsServiceOwnedRedactionKey(t *testing.T) {
 	if owner := info.Sys().(*syscall.Stat_t); owner.Uid != 65534 || owner.Gid != 65534 {
 		t.Fatal("scan changed the service's key owner")
 	}
+	canonical, err := loadCodeScanRedactor(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFingerprint, err := canonical.FingerprintRuntimeV8FindingContent("managed-directory-proof")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(dir, "foreign")
+	if err := os.MkdirAll(filepath.Join(foreign, "child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreign, "redaction-correlation.key"), bytes.Repeat([]byte{0x6c}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(foreign, "child"), filepath.Join(dataDir, "redirect")); err != nil {
+		t.Fatal(err)
+	}
+	// Clean matches the deployment, while a raw open follows redirect first.
+	aliased, err := loadCodeScanRedactor(dataDir + "/redirect/..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotFingerprint, err := aliased.FingerprintRuntimeV8FindingContent("managed-directory-proof")
+	if err != nil || gotFingerprint != wantFingerprint {
+		t.Fatal("managed scan selected a key outside its verified runtime directory")
+	}
 	managedStandaloneAdminDeployment = func() (managed.StandaloneLayout, *managed.RuntimeDescriptor, error) {
 		return managed.StandaloneLayout{DataDir: dataDir}, &managed.RuntimeDescriptor{ServiceUID: 65533}, nil
 	}

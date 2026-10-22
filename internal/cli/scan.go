@@ -170,7 +170,9 @@ func loadCodeScanRedactor(dataDir string) (*scanoutput.Redactor, error) {
 			if err != nil || descriptor == nil || descriptor.ServiceUID < 0 || uint64(descriptor.ServiceUID) > math.MaxUint32 {
 				return nil, fmt.Errorf("managed redaction key owner is unproven; run sudo %s enterprise %s repair", managedHostGatewayCommand(), managedHostPlatform())
 			}
-			key, err := observabilityredaction.LoadExistingCorrelationKeyForOwner(dataDir, uint32(descriptor.ServiceUID))
+			// The raw spelling can traverse a symlink before a trailing "..".
+			// Open the verified layout path used by the identity comparison.
+			key, err := observabilityredaction.LoadExistingCorrelationKeyForOwner(layout.DataDir, uint32(descriptor.ServiceUID))
 			if err != nil {
 				return nil, fmt.Errorf("%w; run sudo %s enterprise %s repair", err, managedHostGatewayCommand(), managedHostPlatform())
 			}
