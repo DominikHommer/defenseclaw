@@ -1648,3 +1648,25 @@ if ($script:passes -ne 3) { throw 'did not drain only the old calls' }
 """
     result = _run_powershell(script)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_unproven_previous_hook_refuses_with_the_checked_local_retry() -> None:
+    script = _ps1_function("Wait-PreviousHookExit") + r"""
+$ErrorActionPreference = 'Stop'
+$BinDir = '.'
+$blocked = [pscustomobject]@{}
+$blocked | Add-Member -MemberType ScriptProperty -Name StartTime -Value { throw 'Access is denied' }
+function Get-ProcessesUnder { [pscustomobject]@{ ProcessId = 10 } }
+function Get-Process { return $blocked }
+$refused = $false
+try { Wait-PreviousHookExit ([DateTime]::UtcNow) } catch {
+    if (-not $_.Exception.Message.Contains('Cannot prove that previous hook calls finished')) { throw }
+    if (-not $_.Exception.Message.Contains("& '<checked install.ps1>' -Local '<checked release assets directory>' -Yes")) {
+        throw 'refusal omitted the checked local retry command'
+    }
+    $refused = $true
+}
+if (-not $refused) { throw 'an unproven previous hook was accepted' }
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -1572,13 +1572,13 @@ function Wait-PreviousHookExit([DateTime]$PublishedAt) {
             $process = Get-Process -Id $row.ProcessId -ErrorAction SilentlyContinue
             if (-not $process) { $pending = $true; continue }
             try { $started = $process.StartTime.ToUniversalTime() } catch {
-                throw 'Cannot prove that previous hook calls finished; close the agents and run the installer again before stopping the gateway'
+                throw "Cannot prove that previous hook calls finished before stopping the gateway. Close the agents, then run: & '<checked install.ps1>' -Local '<checked release assets directory>' -Yes"
             }
             if ($started -le $PublishedAt) { $pending = $true }
         }
         if (-not $pending) { return }
         if ($clock.Elapsed.TotalSeconds -ge 30) {
-            throw 'Previous hook calls did not finish within 30 seconds; close the agents and run the installer again before stopping the gateway'
+            throw "Previous hook calls did not finish within 30 seconds before stopping the gateway. Close the agents, then run: & '<checked install.ps1>' -Local '<checked release assets directory>' -Yes"
         }
         Start-Sleep -Milliseconds 25
     }
