@@ -30,11 +30,20 @@ import (
 )
 
 // managedHookPeerListedStampInterval bounds the age of a listed account
-// database stamp that a hook request reads: a request never waits for the
-// listing, which runs in the background at most once per interval while
-// requests come in. An expired listing is unconfirmed until that refresh
-// finishes. Explain lists at once (managedHookPeerAccountsRefresh).
+// database stamp that a hook request reads. The listing runs in the
+// background at most once per interval while requests come in. Explain
+// lists at once (managedHookPeerAccountsRefresh).
 const managedHookPeerListedStampInterval = 2 * time.Second
+
+// managedHookPeerListedStampWait bounds how long the requests that find the
+// listing expired wait for the refresh it starts. One that ends in time
+// decides them, so an account changed since the last listing never gets
+// the facts of the account before it (GAP-0392). Past the wait they read the
+// last listing until the refresh ends, and a listing that failed keeps the
+// cached facts for their lifetime: a slow or failed listing never moves a
+// request to the failed-lookup default, which can have fewer guards than the
+// profile the confirmed account's groups select.
+const managedHookPeerListedStampWait = time.Second
 
 // managedHookPeerListTimeout bounds one listing of the local accounts.
 const managedHookPeerListTimeout = 5 * time.Second
@@ -60,6 +69,10 @@ type managedHookPeerAccountsSource struct {
 	listedSeq  uint64 // the listing that set listed
 	nextSeq    uint64
 	refreshing bool
+	// refreshed is closed when the background refresh in flight ends, and
+	// refreshBy is when requests stop waiting for it (real time).
+	refreshed chan struct{}
+	refreshBy time.Time
 }
 
 // managedHookPeerListing is one listing of the local accounts: its stamp
@@ -88,9 +101,11 @@ func (s *managedHookPeerAccountsSource) fileStamped() (string, bool) {
 	return stamp, stamp != ""
 }
 
-// get returns the file stamp or a fresh listed stamp. An expired listing
-// starts one background refresh and returns no stamp, so its old account
-// record cannot select a profile for the request that started the refresh.
+// get returns the file stamp, else the listed one. An expired listing
+// starts one background refresh, which the request waits for up to
+// managedHookPeerListedStampWait after it started; past that it gets the
+// last listing. "" until a listing succeeds, after a failed one, or when
+// neither source works.
 func (s *managedHookPeerAccountsSource) get() string {
 	if stamp, ok := s.fileStamped(); ok {
 		return stamp
@@ -99,15 +114,22 @@ func (s *managedHookPeerAccountsSource) get() string {
 		return ""
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.freshLocked() {
-		if !s.refreshing {
-			s.refreshing = true
-			seq := s.startLocked()
-			go s.listInto(seq, true)
-		}
-		return ""
+	if s.freshLocked() {
+		defer s.mu.Unlock()
+		return s.listed.stamp
 	}
+	if !s.refreshing {
+		s.refreshing = true
+		s.refreshed = make(chan struct{})
+		s.refreshBy = time.Now().Add(managedHookPeerListedStampWait)
+		seq := s.startLocked()
+		go s.listInto(seq, true)
+	}
+	refreshed, by := s.refreshed, s.refreshBy
+	s.mu.Unlock()
+	waitManagedHookPeerUntil(refreshed, by)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.listed.stamp
 }
 
@@ -115,9 +137,10 @@ func (s *managedHookPeerAccountsSource) freshLocked() bool {
 	return !s.listedAt.IsZero() && s.now().Sub(s.listedAt) < managedHookPeerListedStampInterval
 }
 
-// record returns the listed record of the local account name: "" where the
-// stamp comes from the file, before the first listing ends, after a failed
-// one, and for an account the local node does not hold.
+// record returns the listed record of the local account name, from the
+// listing get returned: "" where the stamp comes from the file, before the
+// first listing ends, after a failed one, and for an account the local node
+// does not hold.
 func (s *managedHookPeerAccountsSource) record(name string) string {
 	if s.list == nil {
 		return ""
@@ -127,9 +150,6 @@ func (s *managedHookPeerAccountsSource) record(name string) string {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.freshLocked() {
-		return ""
-	}
 	return s.listed.records[name]
 }
 
@@ -163,11 +183,13 @@ func (s *managedHookPeerAccountsSource) listInto(seq uint64, background bool) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if background {
-		s.refreshing = false
-	}
 	if seq > s.listedSeq {
 		s.listed, s.listedAt, s.listedSeq = listing, s.now(), seq
+	}
+	if background {
+		s.refreshing = false
+		close(s.refreshed)
+		s.refreshed = nil
 	}
 }
 

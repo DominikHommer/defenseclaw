@@ -36,17 +36,37 @@ type provenanceGateway struct {
 	SocketManagerPID int
 }
 
-// Use the service manager for a standalone deployment, and the existing
-// process-identity record for a per-user gateway. Never trust a loopback
+// Use the service manager for a standalone deployment, and the per-user
+// gateway's process-identity record otherwise. Never trust a loopback
 // listener merely because it answers on the configured port.
 var provenanceGatewayIdentity = func(ctx context.Context) (provenanceGateway, error) {
 	if cfg.StandaloneEnterprise() {
 		return provenanceManagedGateway(ctx)
 	}
-	if running, pid := gatewayManagedState(); running && pid > 0 {
-		return provenanceGateway{PID: pid}, nil
+	running, pid := gatewayManagedState()
+	if !running || pid <= 0 {
+		return provenanceGateway{}, errors.New("gateway process identity is unavailable")
 	}
-	return provenanceGateway{}, fmt.Errorf("gateway process identity is unavailable")
+	if !provenanceGatewayProven(pid) {
+		return provenanceGateway{}, fmt.Errorf("the gateway PID record names PID %d without proving its process identity; "+
+			"restart the gateway with `defenseclaw-gateway restart`", pid)
+	}
+	return provenanceGateway{PID: pid}, nil
+}
+
+// provenanceGatewayProven reports whether this home's PID record proves pid
+// is the gateway it started: a current record (executable, kernel start
+// identity, data directory), the strong record of the release before it
+// (executable and start identity), or a current record of a gateway whose
+// file was replaced while it ran. The read then sends the credential only
+// to a listener that process holds, and accepts only an answer that names
+// it. A bare PID or an older record without both identities names only a
+// PID, which the OS may since have given to another account's process
+// (start and status still use it to detect a running gateway). A seam for
+// tests.
+var provenanceGatewayProven = func(pid int) bool {
+	d := daemon.New(config.DefaultDataPath())
+	return d.HasManagedProcessIdentity(pid) || d.HasAuthenticatedMigrationProcessIdentity(pid)
 }
 
 // provenanceLookupIP resolves a configured API host name. A seam for tests.
@@ -203,7 +223,10 @@ func provenanceAppliedConfig(ctx context.Context, loadErr error) (*config.Config
 // as the API. No credential is sent while it looks.
 func provenancePerUserEndpoint(ctx context.Context, c *config.Config) error {
 	gateway, err := provenanceGatewayIdentity(ctx)
-	if err != nil || gateway.PID <= 0 {
+	if err != nil {
+		return err
+	}
+	if gateway.PID <= 0 {
 		return errors.New("gateway process identity is unavailable")
 	}
 	listeners, err := provenanceGatewayListeners(gateway.PID)
@@ -405,8 +428,11 @@ func runningGatewayProvenance(cmd *cobra.Command) (version.Provenance, error) {
 		return version.Provenance{}, err
 	}
 	gateway, err := provenanceGatewayIdentity(ctx)
-	if err != nil || gateway.PID <= 0 {
-		return version.Provenance{}, fmt.Errorf("gateway process identity is unavailable")
+	if err != nil {
+		return version.Provenance{}, err
+	}
+	if gateway.PID <= 0 {
+		return version.Provenance{}, errors.New("gateway process identity is unavailable")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sidecarStatusURL(cfg), nil)
 	if err != nil {

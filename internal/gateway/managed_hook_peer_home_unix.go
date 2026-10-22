@@ -44,8 +44,14 @@ const managedHookPeerLookupRetry = 15 * time.Second
 
 // managedHookPeerAccountBudget leaves room for the directory-facts budget
 // and the verdict inside the managed hook's answer watchdog. Account and
-// incarnation lookups continue once per uid in the background; subsequent
-// requests never queue behind an unresolved lookup.
+// incarnation lookups continue once per uid in the background; the requests
+// of the uid wait for that one lookup until this long after it started, and
+// none queues behind it. A lookup past it that would confirm an account
+// already confirmed (a recheck, or a lookup after the resolver's lifetime
+// with no account database change) keeps that account until it answers, as
+// one the directory cannot answer does: a slow directory never moves a
+// request to the failed-lookup default, which can have fewer guards than the
+// confirmed account's profile.
 const managedHookPeerAccountBudget = 250 * time.Millisecond
 
 // managedHookPeerAccountRecheck is how long a uid's account (name, home and
@@ -122,10 +128,14 @@ var managedHookPeerHomes = &managedHookPeerHomeCache{
 }
 
 type managedHookPeerHomeCache struct {
-	mu          sync.Mutex
-	resolver    unixidentity.Resolver
-	resolvedAt  time.Time
-	stamp       string // managedHookPeerStamp when resolver was made
+	mu         sync.Mutex
+	resolver   unixidentity.Resolver
+	resolvedAt time.Time
+	stamp      string // managedHookPeerStamp when resolver was made
+	// knownStamp is the last stamp that named the account database: a
+	// resolver made under it or under none ("": unreadable, or a listing
+	// failed) saw no account change.
+	knownStamp  string
 	newResolver func() unixidentity.Resolver
 	now         func() time.Time
 	// accounts holds one answer per uid. A lookup in flight is shared by
@@ -341,10 +351,15 @@ const managedHookPeerHomesMax = 16384
 
 type managedHookPeerAccount struct {
 	ready    chan struct{} // closed once account, ok and expires are set
+	readyBy  time.Time     // when requests stop waiting for ready (real time)
 	account  unixidentity.Account
 	ok       bool
 	notFound bool
 	expires  time.Time
+	// confirmed is the account the previous answer for the uid confirmed,
+	// when no account database change came since. It is served while this
+	// lookup has not answered by readyBy. Set at creation only.
+	confirmed *unixidentity.Account
 	// incarnation names which directory account holds the uid
 	// (managedHookPeerAccountIncarnation); incarnationKnown is false when
 	// that could not be told.
@@ -353,10 +368,27 @@ type managedHookPeerAccount struct {
 	// checked is when account and incarnation were last confirmed (or,
 	// after a recheck the directory could not answer, when the next one is
 	// due less managedHookPeerAccountRecheck); recheck is closed when the
-	// recheck in flight ends (recheckAccount). Both are guarded by c.mu,
-	// and so are account and the incarnation once a recheck may run.
-	checked time.Time
-	recheck chan struct{}
+	// recheck in flight ends (recheckAccount), and recheckBy is when
+	// requests stop waiting for it. All are guarded by c.mu, and so are
+	// account and the incarnation once a recheck may run.
+	checked   time.Time
+	recheck   chan struct{}
+	recheckBy time.Time
+}
+
+// confirmedAccount is the account entry answered with, or nil while it has
+// not answered or answered no account. c.mu is held.
+func (e *managedHookPeerAccount) confirmedAccount() *unixidentity.Account {
+	select {
+	case <-e.ready:
+		if e.ok {
+			account := e.account
+			return &account
+		}
+		return nil
+	default:
+		return e.confirmed
+	}
 }
 
 // rechecksAccounts reports whether account answers are rechecked every
@@ -375,54 +407,62 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 		return unixidentity.Account{}, false
 	}
 	stamp := managedHookPeerStamp()
-	if !ManagedEnterpriseActive() && managedHookPeerAccounts.list != nil && stamp == "" {
-		return unixidentity.Account{}, false
-	}
 	c.mu.Lock()
 	now := c.now()
+	var confirmed *unixidentity.Account
 	if c.resolver == nil || now.Sub(c.resolvedAt) > managedHookPeerHomeTTL || stamp != c.stamp {
+		// The resolver's lifetime ran out, or a listing failed: the account
+		// confirmed before stays the uid's answer while its next lookup is
+		// slow. An account database change confirms nothing: the uid may
+		// hold another account now (GAP-0947).
+		if entry := c.accounts[uid]; entry != nil && (stamp == "" || stamp == c.knownStamp) {
+			confirmed = entry.confirmedAccount()
+		}
 		c.resolver = c.newResolver()
 		c.resolvedAt = now
 		c.accounts = nil
 		c.stamp = stamp
+		if stamp != "" {
+			c.knownStamp = stamp
+		}
 	}
 	if entry := c.accounts[uid]; entry != nil {
 		select {
 		case <-entry.ready:
 			if now.Before(entry.expires) {
 				if entry.ok && rechecksAccounts() && !now.Before(entry.checked.Add(managedHookPeerAccountRecheck)) {
-					if entry.recheck != nil {
-						c.mu.Unlock()
-						return unixidentity.Account{}, false
+					if entry.recheck == nil {
+						entry.recheck = make(chan struct{})
+						entry.recheckBy = time.Now().Add(managedHookPeerAccountBudget)
+						go c.recheckAccount(uid, entry, c.resolver, entry.recheck)
 					}
-					resolver := c.resolver
-					done := make(chan struct{})
-					entry.recheck = done
+					// Until the recheck answers, the account stays the one
+					// it confirmed last (recheckAccount).
+					recheck, by := entry.recheck, entry.recheckBy
 					c.mu.Unlock()
-					go c.recheckAccount(uid, entry, resolver, done)
-					if !waitManagedHookAccount(done) {
-						return unixidentity.Account{}, false
-					}
+					waitManagedHookPeerUntil(recheck, by)
 					c.mu.Lock()
 				}
 				account, ok := entry.account, entry.ok
 				c.mu.Unlock()
 				return account, ok
 			}
+			// Its lifetime ran out with no account database change.
+			confirmed = entry.confirmedAccount()
 		default:
-			if !ManagedEnterpriseActive() {
+			if ManagedEnterpriseActive() {
 				c.mu.Unlock()
-				return unixidentity.Account{}, false
+				<-entry.ready
+				c.mu.Lock()
+				account, ok := entry.account, entry.ok
+				c.mu.Unlock()
+				return account, ok
 			}
 			c.mu.Unlock()
-			<-entry.ready
-			c.mu.Lock()
-			account, ok := entry.account, entry.ok
-			c.mu.Unlock()
-			return account, ok
+			return c.awaitAccount(entry)
 		}
 	}
-	entry := &managedHookPeerAccount{ready: make(chan struct{})}
+	entry := &managedHookPeerAccount{ready: make(chan struct{}), readyBy: time.Now().Add(managedHookPeerAccountBudget), confirmed: confirmed}
 	if c.accounts == nil {
 		c.accounts = make(map[int]*managedHookPeerAccount)
 	}
@@ -432,25 +472,37 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 
 	if ManagedEnterpriseActive() {
 		c.resolveAccount(uid, entry, resolver)
-	} else {
-		go c.resolveAccount(uid, entry, resolver)
-		if !waitManagedHookAccount(entry.ready) {
-			return unixidentity.Account{}, false
-		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return entry.account, entry.ok
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return entry.account, entry.ok
+	go c.resolveAccount(uid, entry, resolver)
+	return c.awaitAccount(entry)
 }
 
-func waitManagedHookAccount(done <-chan struct{}) bool {
-	timer := time.NewTimer(managedHookPeerAccountBudget)
+// awaitAccount waits for entry's lookup until its readyBy. A lookup that has
+// not answered by then gives the account confirmed before it, or none.
+func (c *managedHookPeerHomeCache) awaitAccount(entry *managedHookPeerAccount) (unixidentity.Account, bool) {
+	waitManagedHookPeerUntil(entry.ready, entry.readyBy)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if account := entry.confirmedAccount(); account != nil {
+		return *account, true
+	}
+	return unixidentity.Account{}, false
+}
+
+// waitManagedHookPeerUntil waits for done until deadline (real time).
+func waitManagedHookPeerUntil(done <-chan struct{}, deadline time.Time) {
+	wait := time.Until(deadline)
+	if done == nil || wait <= 0 {
+		return
+	}
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case <-done:
-		return true
 	case <-timer.C:
-		return false
 	}
 }
 
@@ -489,10 +541,10 @@ func (c *managedHookPeerHomeCache) resolveAccount(uid int, entry *managedHookPee
 // that entry holds (managedHookPeerAccountRecheck), and records its answer:
 // another name, home or incarnation then makes noteHolder drop the facts
 // cached for the former account before they are served. Concurrent
-// requests of the uid share the recheck and return no account while it is
-// unresolved. An answer the directory
-// cannot give (a failed lookup, an incarnation it cannot name) keeps the
-// last one and is asked again after managedHookPeerLookupRetry.
+// requests of the uid share the recheck, and get the account it confirmed
+// last while it has not answered. An answer the directory cannot give (a
+// failed lookup, an incarnation it cannot name) keeps the last one and is
+// asked again after managedHookPeerLookupRetry.
 func (c *managedHookPeerHomeCache) recheckAccount(uid int, entry *managedHookPeerAccount, resolver unixidentity.Resolver, done chan struct{}) {
 	defer close(done)
 
@@ -549,21 +601,12 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	if uid < 0 {
 		return useridentity.DirectoryFacts{}, false
 	}
-	if !ManagedEnterpriseActive() && managedHookPeerAccounts.list != nil && managedHookPeerStamp() == "" {
-		// A stale or failed macOS account listing proves no membership.
-		// Keep the hook bounded and use the failed-lookup policy until the
-		// background listing confirms which account owns these facts.
-		return useridentity.DirectoryFacts{}, false
-	}
 	key := strconv.Itoa(uid)
 	confirmed := c.noteHolder(uid, key)
 	if !ManagedEnterpriseActive() && !confirmed {
 		// An unresolved account may have changed holders. Do not let a
 		// lookup completing between this check and the cache read revive
 		// the former holder's facts for this request.
-		return useridentity.DirectoryFacts{}, false
-	}
-	if !ManagedEnterpriseActive() && managedHookPeerAccounts.list != nil && managedHookPeerStamp() == "" {
 		return useridentity.DirectoryFacts{}, false
 	}
 	return c.directoryCache().get(key, block)

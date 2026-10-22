@@ -398,3 +398,72 @@ func TestProvenanceAppliedConfigOfAStandaloneDeploymentIgnoresTheRejectedFile(t 
 		}
 	}
 }
+
+// A PID record that names only a PID proves nothing about the process the
+// OS gave that PID to since: on Windows another account's process called
+// defenseclaw-gateway, which listens on the gateway port. Start and status
+// still take the record as a running gateway. Provenance sends that
+// process no request with the gateway credential: the bare PID of a release
+// before 1.0, an older JSON record without the executable, and one without
+// the kernel start identity. A record that proves the process is read.
+func TestProvenanceShowSendsNoCredentialOnALegacyPIDRecord(t *testing.T) {
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	gateway := newProvenanceTestGateway()
+	server := httptest.NewServer(gateway)
+	defer server.Close()
+	previous, previousVersion := cfg, appVersion
+	oldHolders, oldProven := gatewayPortHolders, provenanceGatewayProven
+	t.Cleanup(func() {
+		cfg, appVersion = previous, previousVersion
+		gatewayPortHolders, provenanceGatewayProven = oldHolders, oldProven
+	})
+	appVersion = "cli-test"
+	// The process the record names holds the listener: only the record
+	// tells it from the gateway.
+	gatewayPortHolders = ownProcessHolds
+	cfg = provenanceTestConfig(t, server)
+	pid := os.Getpid()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonRecord := func(fields map[string]any) string {
+		data, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	for _, tc := range []struct{ name, record string }{
+		{"bare PID", strconv.Itoa(pid)},
+		{"JSON without the executable", jsonRecord(map[string]any{"pid": pid})},
+		{"JSON without the start identity", jsonRecord(map[string]any{"pid": pid, "executable": executable, "data_dir": home})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(home, daemon.PIDFileName), []byte(tc.record), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if running, got := daemon.New(home).IsRunning(); !running || got != pid {
+				t.Fatalf("precondition: the record must name a running gateway, IsRunning = %v, %d", running, got)
+			}
+			before := gateway.requests.Load()
+			cmd, buf, _ := provenanceTestCommand()
+			err := runProvenanceShow(cmd, nil)
+			if err == nil || !strings.Contains(err.Error(), "without proving its process identity") || buf.Len() != 0 {
+				t.Fatalf("legacy PID record: output=%q error=%v", buf, err)
+			}
+			if gateway.requests.Load() != before || gateway.credentialed.Load() != 0 {
+				t.Fatalf("sent %d requests, %d with the gateway credential, to the process a legacy record names",
+					gateway.requests.Load()-before, gateway.credentialed.Load())
+			}
+		})
+	}
+	provenanceGatewayProven = func(got int) bool { return got == pid }
+	cmd, buf, _ := provenanceTestCommand()
+	if err := runProvenanceShow(cmd, nil); err != nil || !strings.Contains(buf.String(), "generation: 7\n") {
+		t.Fatalf("a proven gateway: output=%q error=%v", buf, err)
+	}
+}

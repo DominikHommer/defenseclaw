@@ -145,7 +145,7 @@ func TestAccountsSourceListsWhenTheFileIsUnreadable(t *testing.T) {
 	var clock atomic.Int64
 	clock.Store(time.Now().UnixNano())
 	s := &managedHookPeerAccountsSource{stat: unreadableStat, list: listing.list, now: func() time.Time { return time.Unix(0, clock.Load()) }}
-	s.get() // a request never waits for the first listing
+	s.get() // the first request waits for the first listing
 	waitListed(t, s)
 	before := s.get()
 	if before == "" || s.record("alice") == "" {
@@ -180,7 +180,7 @@ func TestAccountsSourceKeepsTheLaterListing(t *testing.T) {
 	gate := make(chan struct{})
 	listing := &listedAccounts{accounts: byUID(map[string]int{"alice": 501}), gate: gate}
 	s := &managedHookPeerAccountsSource{stat: unreadableStat, list: listing.list, now: time.Now}
-	s.get() // starts a listing that waits on the gate
+	s.get() // starts a listing that waits on the gate; the request stops waiting for it
 	for {
 		listing.mu.Lock()
 		started := listing.calls == 1
@@ -333,8 +333,9 @@ func TestL1SameNameAndUIDReplacementRevalidatesCachedFacts(t *testing.T) {
 				facts.set("staff")
 				listing.set(map[string]unixidentity.LocalAccountRecord{"alice": tc.after})
 				if path == "hook" {
-					// The first call after an idle interval starts a slow listing.
-					// Its old dc-admins membership must not decide this call.
+					// The first call after an idle interval starts a slow listing
+					// and waits for it (GAP-0392): the old dc-admins membership
+					// must not decide this call.
 					var clock atomic.Int64
 					clock.Store(time.Now().Add(managedHookPeerListedStampInterval).UnixNano())
 					managedHookPeerAccounts.now = func() time.Time { return time.Unix(0, clock.Load()) }
@@ -342,8 +343,11 @@ func TestL1SameNameAndUIDReplacementRevalidatesCachedFacts(t *testing.T) {
 					listing.mu.Lock()
 					listing.gate = gate
 					listing.mu.Unlock()
+					go func() {
+						time.Sleep(100 * time.Millisecond)
+						close(gate)
+					}()
 					got, ok := managedHookPeerDirectory(uid, true)
-					close(gate)
 					waitListed(t, managedHookPeerAccounts)
 					cfg := config.DefaultConfig()
 					cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
@@ -366,8 +370,9 @@ func TestL1SameNameAndUIDReplacementRevalidatesCachedFacts(t *testing.T) {
 					set := &guardrailProfileSet{base: cfg, profiles: profiles,
 						assignments: cfg.Guardrail.ProfileAssignments, defaultProfile: "strict"}
 					decision := set.match(&subject, profileSubjectVerified, "claudecode", "")
-					if ok || decision.Name != "strict" || profiles[decision.Name].Config.Guardrail.Mode != "action" {
-						t.Fatalf("first stale hook facts=%+v ok=%v decision=%+v: must use strict action policy", got, ok, decision)
+					if !ok || slices.Contains(got.Groups, "dc-admins") || decision.Name != "strict" ||
+						profiles[decision.Name].Config.Guardrail.Mode != "action" {
+						t.Fatalf("first hook after the change facts=%+v ok=%v decision=%+v: must use the live account's strict action policy", got, ok, decision)
 					}
 				} else {
 					managedHookPeerAccountsRefresh()
@@ -395,8 +400,11 @@ func TestL1SameNameAndUIDReplacementRevalidatesCachedFacts(t *testing.T) {
 	}
 }
 
-// A failed listing cannot serve the stored facts. The same record
-// confirmed again may reuse them within their existing TTL.
+// A failed listing is a failed step: it keeps the confirmed account's
+// cached facts for their lifetime, as 1.0.3 did, and never moves the hook to
+// the failed-lookup default, which can have fewer guards than the profile
+// those facts select (review of loop round 3). The same record listed again
+// reuses them.
 func TestL1FailedListingKeepsCachedFacts(t *testing.T) {
 	const uid = 94301
 	record := unixidentity.LocalAccountRecord{UID: uid, RecordID: "0C3D", Home: "/Users/Shared/bob", PrimaryGID: "20"}
@@ -408,8 +416,8 @@ func TestL1FailedListingKeepsCachedFacts(t *testing.T) {
 	managedHookPeerDirectory(uid, true)
 	listing.setFail(true)
 	managedHookPeerAccountsRefresh()
-	if facts, ok := managedHookPeerDirectory(uid, true); ok {
-		t.Fatalf("failed account listing served unconfirmed groups: %+v", facts)
+	if got, ok := managedHookPeerDirectory(uid, true); !ok || !slices.Contains(got.Groups, "dc-admins") {
+		t.Fatalf("a failed account listing dropped the confirmed groups: %+v, %v", got, ok)
 	}
 	listing.setFail(false)
 	managedHookPeerAccountsRefresh()
