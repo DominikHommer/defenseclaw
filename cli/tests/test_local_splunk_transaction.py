@@ -460,7 +460,6 @@ def test_local_and_remote_splunk_tokens_remain_independent(tmp_path: Path, monke
         # An older Unix local setup saved its generated token under the remote
         # name, with no isolated local reference yet. Only the private bridge
         # contract can establish its local origin after upgrade.
-        local_dotenv = (tmp_path / ".env").read_bytes()
         monkeypatch.delenv(LOCAL_TOKEN_ENV, raising=False)
         atomic_write_private_bytes(
             tmp_path / ".env", f"DEFENSECLAW_SPLUNK_HEC_TOKEN='{local_token}'\n".encode(),
@@ -479,7 +478,26 @@ def test_local_and_remote_splunk_tokens_remain_independent(tmp_path: Path, monke
                 {"endpoint": "https://splunk.example.test:8088/services/collector/event"},
             )
         assert (tmp_path / "config.yaml").read_bytes() == saved
-        atomic_write_private_bytes(tmp_path / ".env", local_dotenv)
+        # A remote-first upgrade must not overwrite the credential still used
+        # by an older local destination, even with a genuine new remote token.
+        legacy = yaml.safe_load(saved)
+        legacy["observability"]["destinations"][0]["token_env"] = "DEFENSECLAW_SPLUNK_HEC_TOKEN"
+        atomic_write_private_bytes(tmp_path / "config.yaml", yaml.safe_dump(legacy).encode())
+        legacy_config = (tmp_path / "config.yaml").read_bytes()
+        legacy_dotenv = (tmp_path / ".env").read_bytes()
+        with pytest.raises(ValueError, match="defenseclaw setup splunk --logs"):
+            cmd_setup._apply_v8_observability_preset(
+                app, "splunk-enterprise",
+                {"endpoint": "https://splunk.example.test:8088/services/collector/event"},
+                secret_value="independent remote fixture credential",
+            )
+        assert (tmp_path / "config.yaml").read_bytes() == legacy_config
+        assert (tmp_path / ".env").read_bytes() == legacy_dotenv
+        cmd_setup._apply_logs_config(
+            app,
+            index="defenseclaw_local", source="defenseclaw", sourcetype="defenseclaw:json",
+            bootstrap_bridge=True,
+        )
         cmd_setup._apply_v8_observability_preset(
             app,
             "splunk-enterprise",

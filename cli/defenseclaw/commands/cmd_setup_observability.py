@@ -41,6 +41,7 @@ import json as _json
 import os
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 import click
 
@@ -560,6 +561,21 @@ def _add_v8_destination(
 
     with config_writer.hold_lock(config_path_for_data_dir(data_dir), timeout_s=None):
         authored, expected_sha256 = _v8_authored_destination_snapshot(data_dir)
+        if preset.adapter_kind == "splunk_hec":
+            from defenseclaw.observability.local_splunk import LOCAL_TOKEN_ENV
+
+            if preset.token_env != LOCAL_TOKEN_ENV and any(
+                existing.get("name") != destination_name
+                and existing.get("kind") == "splunk_hec"
+                and existing.get("token_env") == preset.token_env
+                and urlsplit(str(existing.get("endpoint", ""))).hostname in {"127.0.0.1", "localhost", "::1"}
+                for existing in authored
+            ):
+                raise ValueError(
+                    "A local Splunk destination still shares the remote credential reference. "
+                    "Run defenseclaw setup splunk --logs --accept-splunk-license to isolate it, "
+                    "then repeat remote setup with the remote collector's token. Nothing was changed."
+                )
         matches = [
             (index, existing)
             for index, existing in enumerate(authored)
