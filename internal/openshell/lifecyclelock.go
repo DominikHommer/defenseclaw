@@ -26,26 +26,21 @@ import (
 )
 
 // lifecycleLockFile, in the account's OpenShell configuration directory,
-// keeps DefenseClaw from creating or starting a sandbox on the account's
-// gateway while DefenseClaw restarts or upgrades that gateway: the
-// restart's or the upgrade's check of the sandboxes holds only until one
-// starts, and an upgrade's restart comes minutes after it. A restart or an
-// upgrade holds it exclusively from its check to the healthy gateway after
-// it (LockGatewayLifecycle); a create or a start holds it shared over
-// OpenShell's call (LockSandboxStart), so a sandbox started before the
-// check is in the list the check reads, and one started after waits. It
-// is advisory, between DefenseClaw processes of the account (the CLI and
-// its sandbox daemon): another OpenShell client is not held back.
+// keeps DefenseClaw sandbox commands and sessions from crossing a gateway
+// restart or upgrade. A restart or upgrade holds it exclusively from its
+// check to the healthy gateway after it (LockGatewayLifecycle); sandbox
+// commands and session attachment hold it shared until their work ends.
+// It is advisory between DefenseClaw processes of the account (the CLI
+// and its sandbox daemon): another OpenShell client is not held back.
 const lifecycleLockFile = ".defenseclaw-lifecycle.lock"
 
-// ErrGatewayBusy refuses a create or a start while DefenseClaw restarts or
-// upgrades the OpenShell gateway, and a restart or an upgrade while
-// another is under way or a create or a start does not end in time.
+// ErrGatewayBusy refuses a sandbox operation while DefenseClaw restarts or
+// upgrades the OpenShell gateway, and a restart or upgrade while another
+// lifecycle holder does not end in time.
 var ErrGatewayBusy = errors.New("openshell: DefenseClaw is restarting or upgrading the OpenShell gateway")
 
-// lifecycleLockWait bounds how long a restart or an upgrade waits for the
-// creates and starts in flight, each of which holds the lock only for
-// OpenShell's call.
+// lifecycleLockWait bounds how long a restart, upgrade, or sandbox command
+// waits for an incompatible lifecycle holder.
 var lifecycleLockWait = 2 * time.Minute
 
 // lifecycleLockPoll is how often that wait tries the lock again.
@@ -74,7 +69,7 @@ func lifecycleLockPath(dir string) (string, error) {
 
 // LockGatewayLifecycle takes the lifecycle lock of the OpenShell
 // configuration directory dir ("" is UserConfigDir) for a restart or an
-// upgrade of its gateway, waiting for the creates and starts in flight,
+// upgrade of its gateway, waiting for sandbox operations in flight,
 // up to lifecycleLockWait (ErrGatewayBusy after it) or the end of ctx.
 // unlock releases it.
 func LockGatewayLifecycle(ctx context.Context, dir string) (unlock func(), err error) {
@@ -89,7 +84,7 @@ func LockGatewayLifecycle(ctx context.Context, dir string) (unlock func(), err e
 			return u, lerr
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("%w: another restart or upgrade, or a sandbox create or start, held it for %s; try again once it is done", ErrGatewayBusy, lifecycleLockWait)
+			return nil, fmt.Errorf("%w: another restart, upgrade, or sandbox operation held it for %s; try again once it is done", ErrGatewayBusy, lifecycleLockWait)
 		}
 		t := time.NewTimer(lifecycleLockPoll)
 		select {
@@ -102,9 +97,9 @@ func LockGatewayLifecycle(ctx context.Context, dir string) (unlock func(), err e
 }
 
 // LockSandboxStart takes the lifecycle lock of the OpenShell configuration
-// directory dir ("" is UserConfigDir) for a create or a start of a sandbox,
-// shared with the others, and refuses with ErrGatewayBusy at once while a
-// restart or an upgrade holds it. unlock releases it.
+// directory dir ("" is UserConfigDir) for a sandbox operation, shared with
+// other operations. It refuses with ErrGatewayBusy at once while a restart
+// or upgrade holds the lock. unlock releases it.
 func LockSandboxStart(dir string) (unlock func(), err error) {
 	path, err := lifecycleLockPath(dir)
 	if err != nil {
