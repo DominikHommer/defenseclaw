@@ -1173,6 +1173,9 @@ func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label st
 // is present in the installed regular file.
 func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	if !c.pluginArtifact {
+		if c.name == "hermes" && len(HookConfigPathsForConnector(c, opts)) != 1 {
+			return false, nil
+		}
 		present, err := ownedHooksPresentInConfig(c, opts)
 		if err != nil || !present || c.name != "hermes" {
 			return present, err
