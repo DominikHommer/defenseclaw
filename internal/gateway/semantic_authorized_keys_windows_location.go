@@ -329,7 +329,9 @@ func windowsLocationSegments(command string) ([][]windowsLocationToken, bool) {
 			} else {
 				tokens = append(tokens, windowsLocationToken{text: ">"})
 			}
-		case '<', '\r', '\n', '`':
+		case '\r', '\n':
+			finish()
+		case '<', '`':
 			return nil, false
 		default:
 			word.WriteByte(c)

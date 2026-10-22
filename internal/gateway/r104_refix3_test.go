@@ -118,6 +118,9 @@ func TestR104MaterializedLinkWriteRefix3(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(cwd, "other-repo"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Join(cwd, "other-repo", ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name, command string
 		block         bool
@@ -160,12 +163,17 @@ func TestR104WindowsRegisteredHookWriteRefix3(t *testing.T) {
 		{"GAP-0421 Codex Join-Path variable", "codex", "exec_command", `$sshDirectory = Join-Path $HOME '.ssh'; $authorizedKeys = Join-Path $sshDirectory 'authorized_keys'; New-Item -ItemType Directory -Path $sshDirectory -Force | Out-Null; Add-Content -LiteralPath $authorizedKeys -Value 'dummy-key'; Write-Output "Appended literal string to $authorizedKeys"`, true},
 		{"Codex Join-Path ordinary variable", "codex", "exec_command", `$output = Join-Path $HOME 'report.txt'; Add-Content -LiteralPath $output -Value 'dummy-key'`, false},
 		{"Codex unknown write variable", "codex", "exec_command", `Add-Content -LiteralPath $destination -Value 'dummy-key'`, true},
+		{"GAP-0510 Codex newline", "codex", "exec_command", "Write-Output 'ok'\nAdd-Content -Path '~/.ssh/authorized_keys' -Value 'marker'", true},
+		{"GAP-0510 CMD prefix then newline", "codex", "exec_command", "cmd.exe /c \"echo ok\"\nAdd-Content -Path '~/.ssh/authorized_keys' -Value 'marker'", true},
+		{"GAP-0510 Copilot CRLF", "copilot", "powershell", "Write-Output 'ok'\r\nSet-Content -Path '~/.ssh/authorized_keys' -Value 'marker'", true},
+		{"GAP-0510 Hermes ordinary newline", "hermes", "shell", "Write-Output 'ok'\nAdd-Content -Path 'notes.txt' -Value 'marker'", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: agentHookTrustedActionTool(tc.connector, tc.tool, "windows"),
 				Command: tc.command, CWD: `C:\Users\alice\project`, ActiveHome: `C:\Users\alice`}
 			input.DialectHint = selectWindowsShellDialect(input.Tool, input.Command, input)
-			if tc.connector == "copilot" && tc.block && input.DialectHint != actionfacts.DialectCMD {
+			if tc.connector == "copilot" && tc.block && soleCMDInvocation(tc.command) &&
+				input.DialectHint != actionfacts.DialectCMD {
 				t.Fatalf("CMD wrapper dialect=%q, want CMD", input.DialectHint)
 			}
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
@@ -189,6 +197,7 @@ func TestR104WindowsRegisteredHookNativeRefix3(t *testing.T) {
 		{"copilot", "preToolUse", "powershell", `cmd.exe /c "echo dummy-key>>%USERPROFILE%\.ssh\authorized_keys"`, "command"},
 		{"hermes", "pre_tool_call", "terminal", `Add-Content -Path '~/.ssh/authorized_keys' -Value 'dummy-key'`, "command"},
 		{"codex", "PreToolUse", "exec_command", `$sshDirectory = Join-Path $HOME '.ssh'; $authorizedKeys = Join-Path $sshDirectory 'authorized_keys'; New-Item -ItemType Directory -Path $sshDirectory -Force | Out-Null; Add-Content -LiteralPath $authorizedKeys -Value 'dummy-key'; Write-Output "Appended literal string to $authorizedKeys"`, "cmd"},
+		{"codex", "PreToolUse", "exec_command", "Write-Output 'ok'\nAdd-Content -Path '~/.ssh/authorized_keys' -Value 'marker'", "cmd"},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
 			cfg := &config.Config{}

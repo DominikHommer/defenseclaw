@@ -18,7 +18,6 @@ var (
 	literalPathWrite        = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
 	literalPathOpen         = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
 	literalPerlOpen         = regexp.MustCompile(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
-	literalAwkRedirect      = regexp.MustCompile(`(?:>>|>)\s*['"]([^'"]+)['"]`)
 	literalCopyCall         = regexp.MustCompile(`\b(?:shutil\.(?:copyfile|copy|copy2)|copyFileSync|copyFile|copyfile|copy2|(?:File::Copy::)?copy)\s*\(`)
 	literalPythonCopyImport = regexp.MustCompile(`\bfrom\s+shutil\s+import\s+copyfile\b`)
 	literalPerlCopy         = regexp.MustCompile(`\b(?:File::Copy::)?copy\s+['"][^'"]+['"]\s*,\s*(['"][^'"]+['"])`)

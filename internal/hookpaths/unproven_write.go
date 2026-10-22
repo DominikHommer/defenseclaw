@@ -429,8 +429,8 @@ func unprovenShellParseWrite(command, cwd, home string) bool {
 // awk code. A -v or -F value, an operand and a var=value assignment are data,
 // however much they look like code. After an option this proof does not know,
 // any later word can be the program, so each one is checked as a program. A
-// dynamic program keeps the bounded program check below; a dynamic program
-// file, or any dynamic word after an unknown option, is unproved. A dynamic
+// dynamic program with a visible file output, a dynamic program file, or any
+// dynamic word after an unknown option is unproved. A dynamic
 // operand or -v value is an input file or a var=value assignment, so it
 // matters only when the program has an unproved output or command effect (or
 // the program text is unknown).
@@ -492,14 +492,12 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 			continue
 		}
 		valueFixed := true
-		var valueWord *syntax.Word
 		if !attached {
 			if i+1 >= len(args) {
 				return true
 			}
 			i++
-			valueWord = args[i]
-			value, valueFixed = StaticWord(valueWord, home)
+			value, valueFixed = StaticWord(args[i], home)
 			if unknownOption && valueFixed && awkUnprovenOutput(value, cwd, home) {
 				return true
 			}
@@ -518,7 +516,7 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 		case "e":
 			programSupplied = true
 			if !valueFixed {
-				rendered, ok := awkDynamicProgram(valueWord, cwd, home)
+				rendered, ok := awkDynamicProgram(args[i], cwd, home)
 				if !ok {
 					return true
 				}
@@ -581,22 +579,46 @@ func awkDynamicOptionName(word *syntax.Word) string {
 	return name
 }
 
-// awkDynamicProgram keeps the bounded check for program text with a shell
-// expansion: a braced program with no unproved output and no literal output
-// to a protected file is judged by its rendered text.
+// awkDynamicProgram checks visible file effects in an inline program with a
+// shell expansion. A shell word's outer quotes are syntax, not AWK source.
+// Exposed file output is unproved because the expansion can change its target.
 func awkDynamicProgram(word *syntax.Word, cwd, home string) (string, bool) {
+	if word == nil || len(word.Parts) != 1 {
+		return "", false
+	}
+	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
+	if !ok {
+		return "", false
+	}
 	var rendered strings.Builder
-	if word == nil || syntax.NewPrinter().Print(&rendered, word) != nil {
-		return "", false
-	}
-	text := rendered.String()
-	if !strings.Contains(text, "{") || !strings.Contains(text, "}") || awkUnprovenOutput(text, cwd, home) {
-		return "", false
-	}
-	for _, target := range literalAwkRedirect.FindAllStringSubmatch(text, -1) {
-		if protectedReachPath(OperandPath(target[1], cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
+	for _, part := range quoted.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			value := part.Value
+			for i := 0; i < len(value); i++ {
+				if value[i] == '\\' && i+1 < len(value) {
+					switch value[i+1] {
+					case '"', '\\', '$':
+						i++
+						rendered.WriteByte(value[i])
+						continue
+					}
+				}
+				rendered.WriteByte(value[i])
+			}
+		case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ArithmExp:
+			rendered.WriteByte('X')
+		default:
 			return "", false
 		}
+	}
+	text := rendered.String()
+	if !strings.Contains(text, "{") || !strings.Contains(text, "}") {
+		return "", false
+	}
+	output, unsafe, _ := awkOutputProof(text, cwd, home)
+	if output || unsafe || awkCommandEffect(text) {
+		return "", false
 	}
 	return text, true
 }
@@ -755,6 +777,14 @@ func provedOrdinaryInterpreterPrefix(words []string, cwd, home string) bool {
 // one is not a redirect. A print statement continues past a newline after a
 // comma, && or ||, and past a backslash-newline.
 func awkUnprovenOutput(code, cwd, home string) bool {
+	_, unsafe, _ := awkOutputProof(code, cwd, home)
+	return unsafe
+}
+
+// awkOutputProof records file output as well as unproved destinations. A
+// literal target is checked against protected links even when a later AWK
+// input operand is dynamic and the literal operand extractor cannot run.
+func awkOutputProof(code, cwd, home string) (output, unsafe bool, literals []string) {
 	printing := false
 	previous := byte('{')
 	for i := 0; i < len(code); i++ {
@@ -764,7 +794,7 @@ func awkUnprovenOutput(code, cwd, home string) bool {
 		}
 		if end, found, ok := awkDataEnd(code, i, previous); found {
 			if !ok {
-				return true
+				return output, true, literals
 			}
 			if c != '#' {
 				previous = code[end]
@@ -797,6 +827,7 @@ func awkUnprovenOutput(code, cwd, home string) bool {
 		if c != '>' || !printing {
 			continue
 		}
+		output = true
 		if i+1 < len(code) && code[i+1] == '>' {
 			i++
 		}
@@ -804,26 +835,33 @@ func awkUnprovenOutput(code, cwd, home string) bool {
 			i++
 		}
 		if i+1 >= len(code) {
-			return true
+			return output, true, literals
 		}
 		if code[i+1] == '"' || code[i+1] == '\'' {
 			quote := code[i+1]
 			end := i + 2
 			for end < len(code) && code[end] != quote {
 				if code[end] == '\\' {
-					return true // Escape semantics need an interpreter proof.
+					return output, true, literals // Escape semantics need an interpreter proof.
 				}
 				end++
 			}
 			if end >= len(code) {
-				return true
+				return output, true, literals
+			}
+			if quote == '"' {
+				literals = append(literals, code[i+2:end])
+			}
+			if quote == '"' && protectedReachPath(OperandPath(code[i+2:end], cwd),
+				newProtectedFiles(home), filepath.Join(home, ".ssh")) {
+				return output, true, literals
 			}
 			for end+1 < len(code) && (code[end+1] == ' ' || code[end+1] == '\t') {
 				end++
 			}
 			if end+1 < len(code) && code[end+1] != ';' && code[end+1] != '}' &&
 				code[end+1] != '\n' && code[end+1] != '#' {
-				return true // A later expression changes the opened target.
+				return output, true, literals // A later expression changes the opened target.
 			}
 		} else {
 			start := i + 1
@@ -833,15 +871,15 @@ func awkUnprovenOutput(code, cwd, home string) bool {
 				end++
 			}
 			if end == start || end < len(code) && code[end] != ' ' && code[end] != '\t' && code[end] != ';' && code[end] != '}' {
-				return true
+				return output, true, literals
 			}
 			value, fixed := awkFixedAssignment(code[:start], code[start:end])
 			if !fixed || protectedReachPath(OperandPath(value, cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
-				return true
+				return output, true, literals
 			}
 		}
 	}
-	return false
+	return output, false, literals
 }
 
 func awkFixedAssignment(prefix, name string) (string, bool) {

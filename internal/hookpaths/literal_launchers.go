@@ -262,12 +262,9 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		}
 	case program == "awk" || program == "gawk" || program == "mawk" || program == "nawk":
 		var names []string
-		for _, arg := range words[1:] {
-			if strings.Contains(arg, "{") {
-				for _, match := range literalAwkRedirect.FindAllStringSubmatch(arg, -1) {
-					names = append(names, match[1])
-				}
-			}
+		for _, code := range awkInlineProgramText(words) {
+			_, _, targets := awkOutputProof(code, cwd, home)
+			names = append(names, targets...)
 		}
 		return add(names)
 	case program == "sed" || program == "gsed":
@@ -284,6 +281,50 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		}
 	}
 	return nil
+}
+
+// awkInlineProgramText keeps option data and input operands out of the source
+// scanner. A -f file is separate code; the literal extractor examines only
+// program text present in the tool call.
+func awkInlineProgramText(words []string) []string {
+	options, supplied := true, false
+	var programs []string
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		if options && word == "--" {
+			options = false
+			continue
+		}
+		if options && word != "-" && strings.HasPrefix(word, "-") {
+			name, value, attached := awkOptionValue(word)
+			if name == "" {
+				if slicesContainsString(awkHarmlessFlags, word) {
+					continue
+				}
+				return nil
+			}
+			if !attached {
+				i++
+				if i >= len(words) {
+					return nil
+				}
+				value = words[i]
+			}
+			if name == "f" || name == "e" {
+				supplied = true
+				if name == "e" {
+					programs = append(programs, value)
+				}
+			}
+			continue
+		}
+		if !supplied {
+			programs = append(programs, word)
+			supplied = true
+		}
+		options = false
+	}
+	return programs
 }
 
 // pythonLiteralCode accepts only fixed no-argument switches before -c.

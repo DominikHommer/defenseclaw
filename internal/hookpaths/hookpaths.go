@@ -1125,6 +1125,15 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			}
 		case program == "git":
 			if destination, materializes := gitMaterializationScope(words[1:], static[1:], cwd); materializes {
+				for _, assignment := range call.Assigns {
+					if assignment.Name == nil {
+						continue
+					}
+					switch assignment.Name.Value {
+					case "GIT_WORK_TREE", "GIT_DIR", "GIT_COMMON_DIR":
+						destination = ""
+					}
+				}
 				links.unknownIn(destination)
 			}
 		case slices.Contains(renamePrograms, program):
@@ -1674,7 +1683,8 @@ func archiveCopyDestination(args []string, static []bool, cwd string) string {
 
 // gitMaterializationScope identifies worktree operations that can install a
 // link whose name is not available from the shell command. A fixed clone
-// destination narrows the uncertainty; worktree updates stay in that tree.
+// destination narrows the uncertainty; worktree updates can change any name
+// in the repository, even when -C starts Git in a subdirectory.
 func gitMaterializationScope(args []string, static []bool, cwd string) (string, bool) {
 	working := cwd
 	for i := 0; i < len(args); i++ {
@@ -1692,6 +1702,11 @@ func gitMaterializationScope(args []string, static []bool, cwd string) (string, 
 		case "-c", "--config-env":
 			i++
 			if i >= len(args) || !static[i] {
+				return "", true
+			}
+			option := strings.ToLower(args[i])
+			if strings.HasPrefix(option, "core.worktree=") ||
+				strings.HasPrefix(option, "core.bare=") {
 				return "", true
 			}
 			continue
@@ -1713,12 +1728,37 @@ func gitMaterializationScope(args []string, static []bool, cwd string) (string, 
 			}
 			return working, true
 		case "checkout", "switch", "pull", "apply", "restore", "reset", "merge", "rebase", "cherry-pick", "am":
-			return working, true
+			return gitWorktreeRoot(working), true
 		default:
 			return "", false
 		}
 	}
 	return "", false
+}
+
+// gitWorktreeRoot uses the nearest .git marker, as Git does for a worktree
+// update from a subdirectory. Resolve directory aliases to the physical tree
+// used by the write-path proof; if no worktree is found, the scope is global.
+func gitWorktreeRoot(working string) string {
+	working = filepath.Clean(working)
+	resolved, err := filepath.EvalSymlinks(working)
+	if err != nil {
+		return ""
+	}
+	working = resolved
+	for dir, depth := working, 0; depth < 64; dir, depth = filepath.Dir(dir), depth+1 {
+		marker, err := os.Lstat(filepath.Join(dir, ".git"))
+		if err == nil {
+			if marker.IsDir() || marker.Mode().IsRegular() {
+				return dir
+			}
+			return ""
+		}
+		if !os.IsNotExist(err) || filepath.Dir(dir) == dir {
+			return ""
+		}
+	}
+	return ""
 }
 
 // cpOperands reads the options that can change source and destination
