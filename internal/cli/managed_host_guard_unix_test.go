@@ -57,19 +57,20 @@ func TestManagedConfigPermissionErrorNamesAdministrator(t *testing.T) {
 func TestManagedRootProvenanceShowDoesNotLoadPerUserConfig(t *testing.T) {
 	withUnixManagedHostDescriptor(t)
 	withManagedHostCallerUID(t, 0)
+	previous := cfg
+	cfg = nil
+	t.Cleanup(func() { cfg = previous })
 	if provenanceShowCmd.Annotations["defenseclaw.skip-daemon-bootstrap"] != "true" {
 		t.Fatal("provenance show must skip the per-user gateway bootstrap on a managed host")
 	}
 	var out strings.Builder
 	provenanceShowCmd.SetOut(&out)
 	t.Cleanup(func() { provenanceShowCmd.SetOut(nil) })
-	if err := runProvenanceShow(provenanceShowCmd, nil); err != nil {
-		t.Fatal(err)
+	if err := runProvenanceShow(provenanceShowCmd, nil); err == nil || !strings.Contains(err.Error(), "defenseclaw-gateway status") {
+		t.Fatalf("unloaded gateway state must be refused with its next command: %v", err)
 	}
-	for _, field := range []string{"schema_version:", "content_hash:", "generation:", "binary_version:"} {
-		if !strings.Contains(out.String(), field) {
-			t.Fatalf("provenance missing %s", field)
-		}
+	if out.Len() != 0 {
+		t.Fatalf("unloaded gateway state invented a provenance snapshot: %s", &out)
 	}
 }
 
@@ -79,7 +80,7 @@ func TestManagedStandardUserPolicyAndStatusRefuseBeforeUserConfig(t *testing.T) 
 	restore := managedHostServiceUID
 	t.Cleanup(func() { managedHostServiceUID = restore })
 	managedHostServiceUID = func(string) (int, bool) { return 991, true }
-	for _, command := range []*cobra.Command{statusCmd, policyShowCmd, policyReloadCmd} {
+	for _, command := range []*cobra.Command{statusCmd, policyShowCmd, policyReloadCmd, provenanceShowCmd} {
 		err := command.PersistentPreRunE(command, nil)
 		if err == nil || !strings.Contains(err.Error(), "managed by your organization") ||
 			strings.Contains(err.Error(), "move this account's gateway") {

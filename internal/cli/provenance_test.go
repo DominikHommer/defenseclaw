@@ -23,6 +23,8 @@ import (
 // A separate provenance command reports the running gateway's quartet,
 // never the new CLI process's zero generation. Unproven state is an error.
 func TestProvenanceShowOutput(t *testing.T) {
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 	previous, previousVersion := cfg, appVersion
 	t.Cleanup(func() { cfg, appVersion = previous, previousVersion })
 	live := version.Provenance{SchemaVersion: version.SchemaVersion, ContentHash: strings.Repeat("a", 64), Generation: 7, BinaryVersion: "1.0.4"}
@@ -45,6 +47,7 @@ func TestProvenanceShowOutput(t *testing.T) {
 	cfg.Gateway.APIBind = host
 	cfg.Gateway.APIPort, _ = strconv.Atoi(port)
 	cfg.Gateway.Token = "provided by secret store"
+	cfg.Gateway.TokenEnv = ""
 	appVersion = "cli-test"
 	buf := new(bytes.Buffer)
 	cmd := &cobra.Command{}

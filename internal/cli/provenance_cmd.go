@@ -28,6 +28,9 @@ var provenanceShowCmd = &cobra.Command{
 	Short:       "Show the running gateway schema, content hash, generation, and binary version",
 	Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		if err := managedStandardUserGatewayRefusal(); err != nil {
+			return err
+		}
 		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 		if err := loadGatewayCommandConfigFor(cmd); err != nil {
 			return fmt.Errorf("cannot locate the running gateway: %w; run `defenseclaw-gateway status`", err)
