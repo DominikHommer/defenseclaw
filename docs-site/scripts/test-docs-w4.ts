@@ -47,14 +47,21 @@ test('guardrail scenarios keep their authored action-mode expectations', async (
   }
 });
 
-test('Quick Start observe mode reports the documented guardrail alerts', async () => {
+test('Quick Start observe mode alerts at HIGH+ and allows MEDIUM', async () => {
   const data = projectPolicyToData(applyAnswers(defaultAnswers()));
   assert.equal(data.guardrail.mode, 'observe');
+  assert.equal(data.guardrail.alert_threshold, 3);
+  const expected = new Map([
+    ['guardrail-critical-prompt', 'alert'],
+    ['guardrail-medium-completion', 'allow'],
+    ['correlator-lethal-trifecta', 'alert'],
+  ]);
   for (const scenario of scenarios.scenarios.filter((s) => s.domain === 'guardrail')) {
     const engine = await loadPolicy(readFileSync(new URL('../public/opa/guardrail.wasm', import.meta.url)));
     engine.setData(data);
     const result = engine.evaluate(withPolicyInput('guardrail', scenario.input, data), pickVerdictEntrypoint('guardrail'));
-    assert.equal(result[0]?.result, 'alert', scenario.id);
+    assert.ok(expected.has(scenario.id), `add an explicit observe expectation for ${scenario.id}`);
+    assert.equal(result[0]?.result, expected.get(scenario.id), scenario.id);
   }
 });
 
