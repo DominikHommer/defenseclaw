@@ -322,7 +322,7 @@ func TestFailModeEnvDocsNameTheSecureClientException(t *testing.T) {
 		}
 	}
 	claim := regexp.MustCompile("(?i)\\bno (?:[a-z]+ ){0,3}hooks? reads?\\b|\\bnot read by [^|]{0,40}?hooks\\b|`DEFENSECLAW_FAIL_MODE` is not read")
-	unqualified := regexp.MustCompile("(?i)\\bno hooks? reads?\\b")
+	unqualified := regexp.MustCompile(`(?i)\bno hooks? reads?\b`)
 	units := func(text string) []string {
 		var out []string
 		var paragraph []string
