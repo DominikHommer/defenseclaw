@@ -232,6 +232,41 @@ def test_doctor_fails_an_unguarded_hook_edit(tmp_path, monkeypatch, case, event,
     assert f"{hook_integrity.setup_command(connector)} --yes" in str(failed[0].get("remediation"))
 
 
+# A managed install keeps the field checks: Antigravity, Devin, Hermes and
+# Kiro keep user-writable per-user files there, and the enterprise policy
+# guard checks no enabled flag or matcher. Only a machine-policy connector's
+# timeout is the enterprise policy's to check.
+_MANAGED_EDIT_CASES = [
+    p
+    for p in _EDIT_CASES
+    if p.values[0]["os"] == "posix"
+    and p.values[2] != "event-removed"
+    and not (p.values[2] == "timeout-short" and TOOL_GUARD_HOOKS[p.values[0]["connector"]].machine_policy)
+]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook layouts")
+@pytest.mark.parametrize("case, event, edit", _MANAGED_EDIT_CASES)
+def test_a_managed_install_fails_an_unguarded_hook_edit(tmp_path, monkeypatch, case, event, edit):
+    connector = case["connector"]
+    label = cmd_doctor._SETUP_READINESS_PRIMARY_LABELS[connector]
+    cfg, _paths = _install(tmp_path, monkeypatch, _edited_case(case, event, edit))
+    cfg.deployment_mode = "managed_enterprise"
+    rows = [row for row in _doctor_rows(cfg, connector, monkeypatch) if row["label"] == label]
+    assert any(row["status"] == "fail" and event in str(row.get("detail")) for row in rows), rows
+    assert not any(row["status"] == "pass" for row in rows), rows
+    assert fail_mode.REGISTRATION_UNGUARDED in _fail_mode_drift(cfg, connector)
+
+
+@pytest.mark.parametrize("connector", sorted(c for c, spec in TOOL_GUARD_HOOKS.items() if spec.machine_policy))
+def test_a_managed_install_leaves_the_machine_policy_timeout_to_the_enterprise_policy(tmp_path, monkeypatch, connector):
+    case = next(c for c in _GUARDED if c["connector"] == connector and c["os"] == "posix")
+    event = TOOL_GUARD_HOOKS[connector].events[0]
+    cfg, _paths = _install(tmp_path, monkeypatch, _edited_case(case, event, "timeout-short"))
+    cfg.deployment_mode = "managed_enterprise"
+    assert hook_integrity.unguarded_tool_call_hooks(cfg, connector) == []
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook layouts")
 def test_doctor_fix_restarts_the_gateway_for_an_unguarded_hook_edit(tmp_path, monkeypatch):
     case = next(c for c in _GUARDED if c["connector"] == "antigravity" and c["os"] == "posix")

@@ -58,14 +58,24 @@ class ToolGuardHook:
     matchers: tuple[str | None, ...] = ()
     # Whether the handler carries ``type`` (Hermes entries have none).
     typed: bool = True
+    # Whether a managed install publishes the hooks through a machine policy
+    # layer, whose own timeout the enterprise policy reconcile checks
+    # (internal/enterprisepolicy claude.go, codex.go, copilot.go, cursor.go).
+    # Per-user-route connectors keep user-writable files on managed hosts too.
+    machine_policy: bool = False
 
 
 TOOL_GUARD_HOOKS: dict[str, ToolGuardHook] = {
     "antigravity": ToolGuardHook(ANTIGRAVITY, ("PreToolUse",), 30, matchers=("*",)),
-    "claudecode": ToolGuardHook(GROUPED, ("PreToolUse",), 30, matchers=(None, "", "*")),
-    "codex": ToolGuardHook(GROUPED, ("PreToolUse",), 30, matchers=("*",)),
-    "copilot": ToolGuardHook(FLAT, ("preToolUse",), 30, timeout_key="timeoutSec"),
-    "cursor": ToolGuardHook(FLAT, ("preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"), 30),
+    "claudecode": ToolGuardHook(GROUPED, ("PreToolUse",), 30, matchers=(None, "", "*"), machine_policy=True),
+    "codex": ToolGuardHook(GROUPED, ("PreToolUse",), 30, matchers=("*",), machine_policy=True),
+    "copilot": ToolGuardHook(FLAT, ("preToolUse",), 30, timeout_key="timeoutSec", machine_policy=True),
+    "cursor": ToolGuardHook(
+        FLAT,
+        ("preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"),
+        30,
+        machine_policy=True,
+    ),
     "devin": ToolGuardHook(GROUPED, ("PreToolUse",), 10, matchers=(None, "")),
     "hermes": ToolGuardHook(FLAT, ("pre_tool_call",), 30, matchers=(".*",), typed=False),
     "kiro": ToolGuardHook(KIRO, ("PreToolUse",), 30, matchers=(".*",)),
@@ -149,8 +159,13 @@ def _entries(spec: ToolGuardHook, document: dict[str, Any], event: str) -> Itera
                 )
 
 
-def _entry_problem(spec: ToolGuardHook, entry: _Entry) -> str:
-    """Why *entry* does not run before every tool call, or ""."""
+def _entry_problem(spec: ToolGuardHook, entry: _Entry, *, managed: bool) -> str:
+    """Why *entry* does not run before every tool call, or "".
+
+    On a *managed* install the timeout of a machine-policy connector is the
+    one the enterprise policy publishes and checks, so it is not compared
+    here; every other field is.
+    """
 
     if type(entry.enabled) is not bool or not entry.enabled:
         return f"is disabled (enabled: {entry.enabled!r})"
@@ -160,7 +175,7 @@ def _entry_problem(spec: ToolGuardHook, entry: _Entry) -> str:
         present, matcher = entry.matcher
         if (matcher if present else None) not in spec.matchers:
             return f"matcher {matcher!r} does not select every tool (setup registers {spec.matchers[-1]!r})"
-    if type(entry.timeout) is not int or entry.timeout != spec.timeout:
+    if not (managed and spec.machine_policy) and (type(entry.timeout) is not int or entry.timeout != spec.timeout):
         return (
             f"{spec.timeout_key} is {entry.timeout!r}, not the {spec.timeout} seconds setup registers, "
             "and the agent runs the call when the hook does not answer in time"
@@ -180,15 +195,15 @@ def unguarded_tool_events(
     document: Any,
     owns: Callable[[dict[str, Any]], bool],
     *,
-    fields: bool = True,
+    managed: bool = False,
 ) -> list[tuple[str, str]]:
     """The tool-guard events of *connector* that *document* leaves unguarded.
 
     Each item is ``(event, why)``; ``why`` is "" when the document has no
     DefenseClaw handler for the event at all. *owns* tells whether a decoded
     handler runs DefenseClaw. Callers pass only documents that register
-    DefenseClaw hooks; the unregistered-file check reports the others. With
-    ``fields=False`` only missing events are reported.
+    DefenseClaw hooks; the unregistered-file check reports the others.
+    *managed* is a managed_enterprise install (see _entry_problem).
     """
 
     spec = TOOL_GUARD_HOOKS.get(connector)
@@ -200,9 +215,7 @@ def unguarded_tool_events(
         if not owned:
             found.append((event, ""))
             continue
-        if not fields:
-            continue
-        problems = [_entry_problem(spec, entry) for entry in owned]
+        problems = [_entry_problem(spec, entry, managed=managed) for entry in owned]
         if all(problems):
             found.append((event, problems[0]))
     return found

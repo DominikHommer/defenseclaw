@@ -596,8 +596,10 @@ def _unguarded_tool_events(cfg: Any, connector: str, document: Any, path: Path) 
     while no tool call reached DefenseClaw (GAP-0645); an Antigravity or
     Copilot entry with ``enabled: false``, a narrowed matcher, another type
     or a short timeout did the same on Linux and macOS (rel-1-0-4 GAP-0538).
-    Managed installs publish their own entry fields (the enterprise policy
-    guard checks them), so there only a missing event is reported.
+    Managed installs get the same checks: Antigravity, Devin, Hermes and
+    Kiro keep user-writable per-user files there, and the enterprise policy
+    guard checks no enabled flag or matcher. Only the timeout of a
+    machine-policy connector is left to the enterprise policy reconcile.
     """
 
     if connector not in TOOL_GUARD_HOOKS:
@@ -619,7 +621,7 @@ def _unguarded_tool_events(cfg: Any, connector: str, document: Any, path: Path) 
     ):
         return False, []
     managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
-    return True, unguarded_tool_events(connector, document, owns, fields=not managed)
+    return True, unguarded_tool_events(connector, document, owns, managed=managed)
 
 
 def _unguarded_problem(connector: str, event: str, why: str, where: str) -> HookProblem:
