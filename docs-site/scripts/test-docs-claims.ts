@@ -69,3 +69,24 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('Hooks follow an open fail mode only when your config sets it'));
   });
 });
+
+describe('Claude Code setup and teardown', () => {
+  it('says disabling removes DefenseClaw entries but preserves other settings', () => {
+    const turnOff = page('connectors/claudecode.mdx').split('## Turn it off')[1]?.split('## Details')[0];
+    assert.ok(turnOff, 'Claude Code turn-off section is missing');
+    assert.match(turnOff, /removes? DefenseClaw(?:'s)? hooks and OpenTelemetry settings/i);
+    assert.match(turnOff, /preserves? (?:your|the) other Claude Code settings/i);
+    assert.match(turnOff, /guardrail enable.*(?:restores?|reinstalls?) DefenseClaw(?:'s)? (?:entries|hooks)/i);
+  });
+
+  it('limits the observe default to first setup and explains reruns', () => {
+    const setup = readFileSync(join(site, 'content/docs/connectors/claudecode.mdx'), 'utf8')
+      .split('## Set up')[1]?.split('## Check it')[0];
+    assert.ok(setup, 'Claude Code setup section is missing');
+    const bareCommand = setup.split('\n').find((line) => /^defenseclaw setup claude-code\s+#/.test(line));
+    assert.ok(bareCommand, 'bare Claude Code setup command is missing');
+    assert.match(bareCommand, /first setup.*observe|observe.*first setup/i);
+    assert.match(setup, /re-?runs?[^\n]*keeps? (?:the )?current mode/i);
+    assert.match(setup, /defenseclaw setup claude-code --mode action/);
+  });
+});
