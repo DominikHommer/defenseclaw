@@ -414,6 +414,19 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
                 "copy back what you need, then delete this folder",
             )
         )
+    if c.name == "omnigent" and os.path.isdir(backups):
+        # The teardown saves an edited policy module there before it writes
+        # the stub (removed.go keepEdited).
+        for entry in sorted(os.listdir(backups)):
+            if entry.startswith(c.script + ".edited-"):
+                items.append(
+                    Leftover(
+                        os.path.join(backups, entry),
+                        f"your edited {c.script}, as it was when the teardown replaced it with the stub that blocks "
+                        "every call",
+                        "copy back what you need (not into DefenseClaw's hooks folder), then delete it",
+                    )
+                )
     hook_token = os.path.join(hooks, f".hook-{c.name}.token")
     if c.name == "openhands" and os.path.lexists(hook_token):
         items.append(_kept_token(c, hook_token))

@@ -105,6 +105,7 @@ func TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript(t *testing.T) {
 				h := newRemovedHost(t)
 				h.stage(t, c)
 				writeRemovedFile(t, h.script(c), old.body, c.mode)
+				h.recordWritten(t, c)
 				links := h.removedHardLinks(t, c)
 				first, err := os.Stat(h.script(c))
 				if err != nil {
@@ -269,6 +270,7 @@ func TestRemovedInPlaceWriteThatFailsLeavesNoPartScript(t *testing.T) {
 					old = removedLongOld(c)
 				}
 				writeRemovedFile(t, h.script(c), old, c.mode)
+				h.recordWritten(t, c)
 				links := h.removedHardLinks(t, c)
 				first, err := os.Stat(h.script(c))
 				if err != nil {

@@ -111,6 +111,26 @@ class LeftoversTests(_Host):
         self.assertEqual(items[script].what, "the stub that blocks every OpenHands call")
         self.assertEqual(items[os.path.join(self.hooks, ".hookcfg.openhands")].step, "delete it")
 
+    # Review fix (G-deadcode loop round 3): the teardown saves an edited
+    # OmniGent policy module under connector_backups/omnigent before it writes
+    # the stub (removed.go keepEdited); the leftovers list each saved copy.
+    def test_a_saved_edited_omnigent_module_is_listed(self):
+        backups = os.path.join(self.data, "connector_backups", "omnigent")
+        saved = _write(os.path.join(backups, "defenseclaw_omnigent_policy.py.edited-0123456789abcdef"), "# mine\n")
+        _write(os.path.join(backups, "module.json"), "{}")
+        _write(os.path.join(self.hooks, "defenseclaw_omnigent_policy.py"), _OMNIGENT_STUB)
+        items = self.items("omnigent")
+        self.assertIn(backups, items)
+        self.assertNotIn(os.path.join(backups, "module.json"), items)
+        self.assertEqual(
+            items[saved].what,
+            "your edited defenseclaw_omnigent_policy.py, as it was when the teardown replaced it with the stub "
+            "that blocks every call",
+        )
+        self.assertEqual(
+            items[saved].step, "copy back what you need (not into DefenseClaw's hooks folder), then delete it"
+        )
+
     def test_a_script_the_teardown_has_not_replaced_says_to_run_it(self):
         self.openhands(_OPENHANDS_103)
         _write(os.path.join(self.hooks, ".otlp-openhands.token"), "t")
@@ -354,6 +374,9 @@ class GoParityTests(unittest.TestCase):
             "the stub that blocks every ",
             "delete it once nothing above runs it",
             "copy back what you need, then delete this folder",
+            'removedEditedInfix = ".edited-"',
+            ", as it was when the teardown replaced it with the stub that blocks every call",
+            "copy back what you need (not into DefenseClaw's hooks folder), then delete it",
             " (DefenseClaw's hook folder) from this file, and keep every other line, once no OmniGent config.yaml names ",
             "; it holds other import paths too",
             "; it holds nothing else",

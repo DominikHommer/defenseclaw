@@ -506,9 +506,29 @@ func TestRemovedTeardownReplacesOnlyScriptsDefenseClawWrote(t *testing.T) {
 		name    string
 		plant   func(t *testing.T, path string)
 		replace bool
+		// saved is the edit the teardown saves before it replaces it
+		// (keepEdited, G-deadcode loop round 3).
+		saved string
 	}
 	write := func(body string) func(*testing.T, string) {
 		return func(t *testing.T, path string) { writeRemovedFile(t, path, body, 0o700) }
+	}
+	// setup writes the module as the 1.0.3 setup did, with its backup
+	// record, then body over it ("" for none).
+	setup := func(body string) func(*testing.T, string) {
+		return func(t *testing.T, path string) {
+			dataDir := filepath.Dir(filepath.Dir(path))
+			if err := captureManagedFileBackup(dataDir, removedOmnigentID, "module", path); err != nil {
+				t.Fatal(err)
+			}
+			writeRemovedFile(t, path, removedOmnigent103Module, 0o600)
+			if err := updateManagedFileBackupPostHash(dataDir, removedOmnigentID, "module", path); err != nil {
+				t.Fatal(err)
+			}
+			if body != "" {
+				writeRemovedFile(t, path, body, 0o600)
+			}
+		}
 	}
 	common := func(marker string) []variant {
 		return []variant{
@@ -535,8 +555,9 @@ func TestRemovedTeardownReplacesOnlyScriptsDefenseClawWrote(t *testing.T) {
 			{name: "an earlier 1.0.4 stub without -p", plant: write(strings.Replace(removedOpenHandsTombstone, "#!/bin/sh -p\n", "#!/bin/sh\n", 1)), replace: true},
 		}, common("# defenseclaw-managed-hook v")...),
 		removedOmnigentID: append([]variant{
-			{name: "the 1.0.3 module", plant: write(removedOmnigent103Module), replace: true},
-			{name: "the module edited, marker kept", plant: write(removedOmnigent103Module + "# edited\n"), replace: true},
+			{name: "the 1.0.3 module", plant: setup(""), replace: true},
+			{name: "the module edited, marker kept", plant: setup(removedOmnigent103Module + "# edited\n"), replace: true, saved: removedOmnigent103Module + "# edited\n"},
+			{name: "the module without its record", plant: write(removedOmnigent103Module), replace: true, saved: removedOmnigent103Module},
 			{name: "a user's own policy module", plant: write("def defenseclaw_policy(event):\n    return {\"result\": \"ALLOW\"}\n")},
 		}, common("# defenseclaw-managed-policy v")...),
 	}
@@ -571,7 +592,18 @@ func TestRemovedTeardownReplacesOnlyScriptsDefenseClawWrote(t *testing.T) {
 				if err := conn.Teardown(context.Background(), h.opts); err != nil {
 					t.Fatalf("Teardown: %v", err)
 				}
-				requireRemovedSame(t, "teardown", h.snapshot(t, h.script(c)), before)
+				skip := []string{h.script(c)}
+				if v.saved != "" {
+					h.requireEditedSaved(t, c, v.saved)
+					saved := c.editedCopyPath(h.dataDir, []byte(v.saved))
+					skip = append(skip, saved)
+					for dir := filepath.Dir(saved); len(dir) > len(h.dataDir); dir = filepath.Dir(dir) {
+						if _, ok := before[dir]; !ok {
+							skip = append(skip, dir)
+						}
+					}
+				}
+				requireRemovedSame(t, "teardown", h.snapshot(t, skip...), before)
 				h.requireStub(t, c)
 				if err := conn.VerifyClean(h.opts); err != nil {
 					t.Fatalf("VerifyClean: %v", err)

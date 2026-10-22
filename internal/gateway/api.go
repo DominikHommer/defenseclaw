@@ -630,7 +630,10 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	presented = strings.TrimSpace(presented)
-	if name == "" || presented == "" {
+	// until 1.1: the hook token an upgraded host keeps for a connector 1.0.4
+	// removed (OpenHands) authenticates nothing; old hooks reach the route
+	// that blocks them whatever the token.
+	if name == "" || presented == "" || connector.IsRemovedConnector(name) {
 		return false
 	}
 
@@ -4021,7 +4024,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
 			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
 			registered := false
-			if a.connectorRegistry != nil {
+			if a.connectorRegistry != nil && !connector.IsRemovedConnector(hookScope) {
 				_, registered = a.connectorRegistry.Get(hookScope)
 			}
 			if registered {
