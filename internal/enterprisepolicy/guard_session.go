@@ -161,7 +161,7 @@ type SessionUpdate struct {
 	Now         time.Time
 	// BeforeBlock (gateway only) runs once, right before the first write
 	// that records a block in StateDir: the gateway removes the account's key
-	// of the protected session records (KillPublishedSessionKey), so that a gateway
+	// of the protected session records (RevokePublishedSessionKey), so that a gateway
 	// that stops between that write and the publication of the block, or
 	// whose publication fails, leaves no allow behind that the hook would
 	// honor during the outage (GAP-0352, 1.0.4 guard loop).

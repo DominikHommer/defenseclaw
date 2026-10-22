@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -420,14 +421,14 @@ func TestForeignHookAccountRemovalNeverDelaysAnotherAccount(t *testing.T) {
 	}
 }
 
-// Round-3 P1 #1: a standalone gateway that cannot locate its protected
-// record folder at all (the lookup fails and nothing to fall back on) at a
-// session start that found an unapproved hook still records the block in its
-// private store and denies the call; it publishes nothing and can remove no
-// key. Once the folder is found again, every call of the blocked process is
-// still denied (the block is sticky), the account's key is removed (only
-// that account's) before the denial is published.
-func TestForeignHookSessionRecordRootLookupFailureStillRecordsTheBlock(t *testing.T) {
+// Round-3 P1 #1, 1.0.4 guard loop round 1: a standalone gateway whose data
+// directory names no record folder still records a session start's block
+// in its private store and denies the call; it publishes nothing and
+// removes no key (it never published an allow either). Where the folder is
+// named, every call of the blocked process is still denied (the block is
+// sticky), and the account's key, only that account's, is removed before
+// the denial is published.
+func TestForeignHookSessionWithoutARecordFolderStillRecordsTheBlock(t *testing.T) {
 	var writes []foreignHookPublished
 	server := newForeignHookPublishTestServer(t, foreignHookRecorder(&writes, nil))
 	var kills []string
@@ -437,9 +438,6 @@ func TestForeignHookSessionRecordRootLookupFailureStillRecordsTheBlock(t *testin
 		return previousKill(r, identity)
 	}
 	foreignHookSessionRootForDataDir = func(string) (string, bool) { return "", false }
-	foreignHookSessionPublishRoot = func() (string, error) {
-		return "", errors.New("the protected ProgramData registration cannot be read")
-	}
 	process := runtime.GOOS + ":b:1:500"
 	if got := server.call(server.aliceToken, foreignHookPublishTestBlock("s-1", process)); !got.Deny || !strings.Contains(got.Reason, "project hook") {
 		t.Fatalf("the session start that found the hook: %+v", got)
@@ -456,12 +454,12 @@ func TestForeignHookSessionRecordRootLookupFailureStillRecordsTheBlock(t *testin
 		t.Fatalf("without a record folder nothing is published or removed: %+v %v", writes, kills)
 	}
 
-	foreignHookSessionPublishRoot = func() (string, error) { return server.root, nil }
+	foreignHookSessionRootForDataDir = func(string) (string, bool) { return server.root, true }
 	bobKey := server.keyID(server.bob)
 	for _, session := range []string{"s-1", "s-2"} {
 		kills = nil
 		if got := server.call(server.aliceToken, foreignHookTestCall(session, process, false)); !got.Deny || !strings.Contains(got.Reason, "restart the agent") {
-			t.Fatalf("a call of the blocked process (%s) once the folder is back: %+v", session, got)
+			t.Fatalf("a call of the blocked process (%s) where the folder is named: %+v", session, got)
 		}
 		if len(kills) != 1 || kills[0] != server.root+"|"+server.alice || server.keyID(server.alice) != "" || server.keyID(server.bob) != bobKey {
 			t.Fatalf("the blocked account's key, and only its key, is removed: %v", kills)
@@ -490,7 +488,7 @@ func TestForeignHookSessionBlockKillsTheAccountKeyBeforeTheStoreWrite(t *testing
 		{"the kill works", nil,
 			[]string{"kill (store empty)", "publish deny"},
 			[]string{"kill (store has the block)", "publish deny"}, true},
-		{"the kill fails", errors.New("read-only file system"),
+		{"the kill and its revocation mark fail", fmt.Errorf("%w: read-only file system", enterprisepolicy.ErrPublishedSessionKeyAlive),
 			[]string{"kill failed (store empty)", "kill failed (store has the block)", "publish deny"},
 			[]string{"kill failed (store has the block)", "publish deny"}, false},
 	} {

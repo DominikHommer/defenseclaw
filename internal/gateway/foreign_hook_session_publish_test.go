@@ -255,13 +255,14 @@ func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, 
 		}
 		return info.Mode().IsRegular(), nil
 	})
-	previousRoot, previousPublish, previousKey, previousKill := foreignHookSessionPublishRoot, foreignHookSessionPublish, foreignHookSessionKey, foreignHookSessionKill
+	previousPublish, previousKey, previousKill := foreignHookSessionPublish, foreignHookSessionKey, foreignHookSessionKill
 	previousDataDirRoot := foreignHookSessionRootForDataDir
-	foreignHookSessionPublishRoot = func() (string, error) { return root, nil }
+	// The test's data directory names the test's record folder.
+	foreignHookSessionRootForDataDir = func(string) (string, bool) { return root, true }
 	foreignHookSessionPublish = publish
 	t.Cleanup(func() {
 		restoreOwner()
-		foreignHookSessionPublishRoot, foreignHookSessionPublish, foreignHookSessionKey, foreignHookSessionKill = previousRoot, previousPublish, previousKey, previousKill
+		foreignHookSessionPublish, foreignHookSessionKey, foreignHookSessionKill = previousPublish, previousKey, previousKill
 		foreignHookSessionRootForDataDir = previousDataDirRoot
 	})
 	server.newKey(alice)
@@ -305,49 +306,52 @@ func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, 
 	return server
 }
 
-// Review P2 (GAP-0352, loop round 3): a standalone gateway that cannot
-// locate its protected session record folder at all denies the exchange:
-// it can neither remove the key nor publish its answer. Nothing is
-// published, a removal of the account in progress keeps its own reason, and
-// the exchange is allowed again once the folder is found. A record folder
-// whose key cannot be read is published to without a key, so the allow
-// proves nothing during an outage.
-func TestForeignHookSessionGatewayDeniesWhenTheRecordFolderCannotBeLocated(t *testing.T) {
+// Review P1 (1.0.4 guard loop round 1, finding 1): the record folder is the
+// one the gateway's data directory names, a function of its configuration
+// alone, so the gateway always finds again a folder it published an allow
+// to. A gateway whose data directory names none publishes nothing at all,
+// allow or block, and removes no key: no allow of it exists that it could
+// later fail to find and revoke, and the hook finds no record and blocks
+// during an outage. Its online answers are its own. A record folder whose
+// key cannot be read is published to without a key, so that allow proves
+// nothing during an outage.
+func TestForeignHookSessionGatewayPublishesOnlyWhereItsDataDirectoryNamesTheFolder(t *testing.T) {
 	var writes []foreignHookPublished
 	server := newForeignHookPublishTestServer(t, foreignHookRecorder(&writes, nil))
-	setForeignHookExchangeWaitForTest(t, 50*time.Millisecond)
-	foreignHookSessionRootForDataDir = func(string) (string, bool) { return "", false }
-	lookupErr := errors.New("the protected ProgramData registration cannot be read")
-	foreignHookSessionPublishRoot = func() (string, error) {
-		if lookupErr != nil {
-			return "", lookupErr
-		}
-		return server.root, nil
+	var kills []string
+	previousKill := foreignHookSessionKill
+	foreignHookSessionKill = func(r, identity string) error {
+		kills = append(kills, r+"|"+identity)
+		return previousKill(r, identity)
 	}
-	allow := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": runtime.GOOS + ":b:1:500"}, "decision": map[string]any{"deny": false}}
-	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "cannot verify") {
-		t.Fatalf("an exchange without its record folder must be denied: %+v", got)
+	named := false
+	foreignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
+		return server.root, named && dataDir == server.dataDir
 	}
-	release, drained, err := lockForeignHookAccountRemovalForTest(t, server.dataDir, server.alice, time.Second)
-	if err != nil || !drained {
-		t.Fatalf("take the removal lock: drained %v, %v", drained, err)
+	process := runtime.GOOS + ":b:1:500"
+	if got := server.call(server.aliceToken, foreignHookTestCall("s-1", process, false)); got.Deny {
+		t.Fatalf("the online answer is the gateway's own: %+v", got)
 	}
-	got := server.call(server.aliceToken, allow)
-	release()
-	if !got.Deny || !strings.Contains(got.Reason, "is removing an unapproved hook") {
-		t.Fatalf("a removal in progress must deny with its own reason: %+v", got)
+	if got := server.call(server.aliceToken, foreignHookPublishTestBlock("s-2", process)); !got.Deny {
+		t.Fatalf("the session start that found the hook is blocked: %+v", got)
 	}
-	if len(writes) != 0 {
-		t.Fatalf("nothing can be published without the folder: %+v", writes)
+	if len(writes) != 0 || len(kills) != 0 {
+		t.Fatalf("a gateway whose data directory names no record folder publishes and removes nothing: %+v %v", writes, kills)
 	}
-	lookupErr = nil
-	if got := server.call(server.aliceToken, allow); got.Deny || len(writes) != 1 || writes[0].keyID != server.keyID(server.alice) || writes[0].keyID == "" {
-		t.Fatalf("once the folder is found the exchange is allowed and published with the key: %+v %+v", got, writes)
+	key := enterprisepolicy.SessionKey{Connector: "claudecode", Session: "s-1", Process: process}
+	if _, err := enterprisepolicy.CheckPublishedForeignHookSession(server.root, server.alice, key, enterprisepolicy.GuardDecision{}, func(string) error { return nil }); err == nil {
+		t.Fatal("no record of this gateway may prove a process during an outage")
+	}
+	named = true
+	other := runtime.GOOS + ":b:2:500"
+	if got := server.call(server.aliceToken, foreignHookTestCall("s-3", other, false)); got.Deny || len(writes) != 1 || writes[0].root != server.root ||
+		writes[0].keyID == "" || writes[0].keyID != server.keyID(server.alice) {
+		t.Fatalf("where its data directory names the folder, the allow is published there with the key: %+v %+v", got, writes)
 	}
 	foreignHookSessionKey = func(string, string) (enterprisepolicy.SessionRecordKey, error) {
 		return enterprisepolicy.SessionRecordKey{}, errors.New("the key file is not root's")
 	}
-	if got := server.call(server.aliceToken, allow); got.Deny || len(writes) != 2 || writes[1].keyID != "" {
+	if got := server.call(server.aliceToken, foreignHookTestCall("s-3", other, false)); got.Deny || len(writes) != 2 || writes[1].keyID != "" {
 		t.Fatalf("without a key the allow is published without one: %+v %+v", got, writes)
 	}
 }
@@ -423,56 +427,5 @@ func TestForeignHookSessionGatewayKillsTheKeyBeforeItRecordsABlock(t *testing.T)
 	}
 	if last := writes[len(writes)-1]; !last.deny || last.keyID != "" || server.keyID(server.alice) != "" {
 		t.Fatalf("the block is published after a kill: %+v (key %q)", last, server.keyID(server.alice))
-	}
-}
-
-// Review P1 (round 3 scenario 1, kill switch): a gateway whose lookup of
-// the record folder failed (on Windows, the protected ProgramData
-// registration) falls back to the folder it located last, or else to the
-// one its data directory names, removes the account's key there before it
-// records the block, and publishes the block there; the process stays
-// blocked once the lookup recovers. (Without any fallback, see
-// TestForeignHookSessionRecordRootLookupFailureStillRecordsTheBlock.)
-func TestForeignHookSessionGatewayRecordsABlockWhileItsLayoutLookupFails(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		located bool
-	}{{"the folder it located last", true}, {"the folder its data directory names", false}} {
-		t.Run(tc.name, func(t *testing.T) {
-			var writes []foreignHookPublished
-			server := newForeignHookPublishTestServer(t, foreignHookRecorder(&writes, nil))
-			var killed []string
-			previousKill := foreignHookSessionKill
-			foreignHookSessionKill = func(r, identity string) error {
-				killed = append(killed, r+"|"+identity)
-				return previousKill(r, identity)
-			}
-			foreignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
-				return server.root, !tc.located && dataDir == server.dataDir
-			}
-			process := runtime.GOOS + ":b:1:500"
-			clean := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": process}, "decision": map[string]any{"deny": false}}
-			if tc.located {
-				if got := server.call(server.aliceToken, clean); got.Deny {
-					t.Fatalf("a clean exchange is allowed: %+v", got)
-				}
-			}
-			foreignHookSessionPublishRoot = func() (string, error) {
-				return "", errors.New("the protected ProgramData registration cannot be read")
-			}
-			if got := server.call(server.aliceToken, foreignHookPublishTestBlock("s-2", process)); !got.Deny {
-				t.Fatalf("the session start that found the hook is blocked: %+v", got)
-			}
-			if len(killed) != 1 || killed[0] != server.root+"|"+server.alice || server.keyID(server.alice) != "" || server.keyID(server.bob) == "" {
-				t.Fatalf("the account's key must be removed where the hook reads it, and only its key: %v", killed)
-			}
-			if len(writes) == 0 || writes[len(writes)-1].root != server.root || !writes[len(writes)-1].deny {
-				t.Fatalf("the block is published where the hook reads it: %+v", writes)
-			}
-			foreignHookSessionPublishRoot = func() (string, error) { return server.root, nil }
-			if got := server.call(server.aliceToken, clean); !got.Deny {
-				t.Fatalf("the agent process the block recorded stays blocked once the lookup recovers: %+v", got)
-			}
-		})
 	}
 }

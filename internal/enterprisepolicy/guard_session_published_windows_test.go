@@ -77,7 +77,7 @@ func TestPublishedSessionKeyFileGivesOnlyTheGatewayItsRemoval(t *testing.T) {
 	if _, err := createAccountTestKey(filepath.Join(t.TempDir(), "x"), publishedSessionTestIdentity(t), PublishedSessionTrust{}); err == nil {
 		t.Fatal("a key file in a folder that does not exist must not be made")
 	}
-	if err := KillPublishedSessionKey(root, publishedSessionTestIdentity(t)); err != nil {
+	if err := RevokePublishedSessionKey(root, publishedSessionTestIdentity(t)); err != nil {
 		t.Fatal(err)
 	}
 }

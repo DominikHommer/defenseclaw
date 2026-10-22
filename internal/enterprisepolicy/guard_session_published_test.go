@@ -319,7 +319,7 @@ func TestKillPublishedSessionKeyEndsEveryEarlierAllowOfTheAccount(t *testing.T) 
 	if allowed(identity) != 2 || allowed(other) != 2 {
 		t.Fatalf("every published allow must prove its process: %d %d", allowed(identity), allowed(other))
 	}
-	if err := KillPublishedSessionKey(root, identity); err != nil {
+	if err := RevokePublishedSessionKey(root, identity); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadPublishedSessionKey(root, identity); err == nil {
@@ -335,7 +335,7 @@ func TestKillPublishedSessionKeyEndsEveryEarlierAllowOfTheAccount(t *testing.T) 
 	if allowed(identity) != 0 {
 		t.Fatalf("an allow published without a key must prove nothing: %d", allowed(identity))
 	}
-	if err := KillPublishedSessionKey(root, identity); err != nil {
+	if err := RevokePublishedSessionKey(root, identity); err != nil {
 		t.Fatalf("killing what is gone is no error: %v", err)
 	}
 	if err := EnsurePublishedSessionKey(root, identity, publishedSessionTestTrust); err != nil {
@@ -394,14 +394,15 @@ func TestPublishedSessionKeyRotationFailureBlocks(t *testing.T) {
 	if !publishedSessionTestAllows(root, identity, key) {
 		t.Fatal("the allow must prove the process")
 	}
-	previousRename, previousRemove, previousCreate := publishedSessionRenameKey, publishedSessionRemoveKey, publishedSessionCreateKeyFile
-	t.Cleanup(func() {
-		publishedSessionRenameKey, publishedSessionRemoveKey, publishedSessionCreateKeyFile = previousRename, previousRemove, previousCreate
-	})
+	previousRename, previousRemove, previousCreate, previousMark := publishedSessionRenameKey, publishedSessionRemoveKey, publishedSessionCreateKeyFile, publishedSessionCreateMarkFile
+	restoreAll := func() {
+		publishedSessionRenameKey, publishedSessionRemoveKey, publishedSessionCreateKeyFile, publishedSessionCreateMarkFile = previousRename, previousRemove, previousCreate, previousMark
+	}
+	t.Cleanup(restoreAll)
 	inUse := func(op string) error {
 		return &os.PathError{Op: op, Path: "key", Err: errors.New("the file is in use")}
 	}
-	type fault struct{ rename, remove, create bool }
+	type fault struct{ rename, remove, create, mark bool }
 	for _, tc := range []struct {
 		name  string
 		fault fault
@@ -410,10 +411,11 @@ func TestPublishedSessionKeyRotationFailureBlocks(t *testing.T) {
 		{"rename fails, the key is removed and a new one made", fault{rename: true}, false},
 		{"rename and remove fail, a second key is added", fault{rename: true, remove: true}, false},
 		{"rename fails and no new key can be made", fault{rename: true, create: true}, false},
-		{"rename, remove and create all fail", fault{rename: true, remove: true, create: true}, true},
+		{"rename, remove and create fail, the key is marked revoked", fault{rename: true, remove: true, create: true}, false},
+		{"rename, remove, create and the mark all fail", fault{rename: true, remove: true, create: true, mark: true}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			publishedSessionRenameKey, publishedSessionRemoveKey, publishedSessionCreateKeyFile = previousRename, previousRemove, previousCreate
+			restoreAll()
 			if err := EnsurePublishedSessionKey(root, identity, publishedSessionTestTrust); err != nil {
 				t.Fatal(err)
 			}
@@ -430,6 +432,9 @@ func TestPublishedSessionKeyRotationFailureBlocks(t *testing.T) {
 			if tc.fault.create {
 				publishedSessionCreateKeyFile = func(string, PublishedSessionTrust) error { return errors.New("no space left on device") }
 			}
+			if tc.fault.mark {
+				publishedSessionCreateMarkFile = func(string) error { return errors.New("no space left on device") }
+			}
 			err := RotatePublishedSessionKey(root, identity, publishedSessionTestTrust)
 			if got := errors.Is(err, ErrPublishedSessionKeyAlive); got != tc.alive {
 				t.Fatalf("alive = %v, want %v: %v", got, tc.alive, err)
@@ -441,7 +446,7 @@ func TestPublishedSessionKeyRotationFailureBlocks(t *testing.T) {
 				t.Fatal("a rotation that could not do it the plain way must report it")
 			}
 			// Allows published now prove nothing until one key is back.
-			publishedSessionRenameKey, publishedSessionRemoveKey, publishedSessionCreateKeyFile = previousRename, previousRemove, previousCreate
+			restoreAll()
 			if !tc.alive && tc.fault != (fault{rename: true}) {
 				allow()
 				if publishedSessionTestAllows(root, identity, key) {
@@ -458,27 +463,43 @@ func TestPublishedSessionKeyRotationFailureBlocks(t *testing.T) {
 		})
 	}
 
-	// The key folder cannot be listed, or a key owner cannot be read: the
-	// check blocks and the rotation reports the key alive.
+	// The key folder cannot be listed: the check blocks; the rotation and
+	// the revocation, which can neither rename nor remove a key they cannot
+	// see, mark whatever key the account has revoked, and report the key
+	// alive only when no mark can be added either. A key owner that cannot
+	// be read blocks too.
 	previousList := publishedSessionList
+	t.Cleanup(func() { publishedSessionList = previousList })
 	publishedSessionList = func(string) ([]string, error) { return nil, errors.New("input/output error") }
 	if publishedSessionTestAllows(root, identity, key) {
 		t.Fatal("a key folder that cannot be listed must prove nothing")
 	}
+	publishedSessionCreateMarkFile = func(string) error { return errors.New("input/output error") }
 	if err := RotatePublishedSessionKey(root, identity, publishedSessionTestTrust); !errors.Is(err, ErrPublishedSessionKeyAlive) {
-		t.Fatalf("a rotation that cannot list the key folder must report the key alive: %v", err)
+		t.Fatalf("a rotation that can neither list the key folder nor add a mark must report the key alive: %v", err)
 	}
-	if err := KillPublishedSessionKey(root, identity); err == nil {
-		t.Fatal("a kill that cannot list the key folder must fail")
+	if err := RevokePublishedSessionKey(root, identity); !errors.Is(err, ErrPublishedSessionKeyAlive) {
+		t.Fatalf("a revocation that can neither list the key folder nor add a mark must report the key alive: %v", err)
+	}
+	publishedSessionCreateMarkFile = previousMark
+	if err := RevokePublishedSessionKey(root, identity); err == nil || errors.Is(err, ErrPublishedSessionKeyAlive) {
+		t.Fatalf("a revocation that cannot list the key folder must mark the account revoked: %v", err)
 	}
 	publishedSessionList = previousList
+	if publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("an account marked revoked must prove nothing")
+	}
+	if err := EnsurePublishedSessionKey(root, identity, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	allow()
 	restore := OverridePublishedSessionKeyOwnerForTest(func(string) (bool, error) { return false, errors.New("access denied") })
 	if publishedSessionTestAllows(root, identity, key) {
 		t.Fatal("a key owner that cannot be read must prove nothing")
 	}
 	restore()
 	if !publishedSessionTestAllows(root, identity, key) {
-		t.Fatal("the allow must prove the process again")
+		t.Fatal("the allow under the new key must prove the process again")
 	}
 
 	// A name with the key prefix that is not a key's is no key at all.
@@ -521,7 +542,7 @@ func TestPublishedSessionKeyOfAnotherAccountIsNoKey(t *testing.T) {
 	if !publishedSessionTestAllows(root, identity, key) {
 		t.Fatal("a planted key file must not block the real key")
 	}
-	if err := KillPublishedSessionKey(root, identity); err != nil {
+	if err := RevokePublishedSessionKey(root, identity); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(planted); err != nil {
@@ -597,7 +618,7 @@ func TestEnsurePublishedSessionKeys(t *testing.T) {
 	if err := EnsurePublishedSessionKeys(root, publishedSessionTestTrust); err != nil || publishedSessionTestKey(t, root, identity).ID() != first {
 		t.Fatalf("one key must be kept: %v", err)
 	}
-	if err := KillPublishedSessionKey(root, identity); err != nil {
+	if err := RevokePublishedSessionKey(root, identity); err != nil {
 		t.Fatal(err)
 	}
 	if err := EnsurePublishedSessionKeys(root, publishedSessionTestTrust); err != nil {
@@ -678,7 +699,7 @@ func TestPublishedForeignHookSessionKeyKilledDuringTheCheck(t *testing.T) {
 	previous := publishedSessionVolumeReadOnly
 	t.Cleanup(func() { publishedSessionVolumeReadOnly = previous })
 	for name, during := range map[string]func(){
-		"killed":  func() { _ = KillPublishedSessionKey(root, identity) },
+		"killed":  func() { _ = RevokePublishedSessionKey(root, identity) },
 		"rotated": func() { _ = RotatePublishedSessionKey(root, identity, publishedSessionTestTrust) },
 	} {
 		if err := EnsurePublishedSessionKey(root, identity, publishedSessionTestTrust); err != nil {

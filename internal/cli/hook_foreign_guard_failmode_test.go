@@ -314,7 +314,7 @@ func TestForeignHookGuardOpenOutageFollowsTheProtectedSessionRecord(t *testing.T
 		records.untrusted[key] = true
 		blocked("a key file the user can change")
 		delete(records.untrusted, key)
-		if err := enterprisepolicy.KillPublishedSessionKey(records.root, protectedRecordIdentity); err != nil {
+		if err := enterprisepolicy.RevokePublishedSessionKey(records.root, protectedRecordIdentity); err != nil {
 			t.Fatal(err)
 		}
 		blocked("no key")

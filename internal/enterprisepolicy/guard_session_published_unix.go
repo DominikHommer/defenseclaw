@@ -190,3 +190,9 @@ func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) erro
 		}
 	}
 }
+
+// publishedSessionMarkDir is the folder of the revocation marks of the
+// record folder root: its key folder (the hook socket folder, which every
+// account can list and only root and the gateway service can add a file
+// to). The record folder itself is not listable (0711).
+func publishedSessionMarkDir(_, keyDir string) string { return keyDir }

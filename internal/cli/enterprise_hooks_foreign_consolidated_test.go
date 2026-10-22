@@ -37,8 +37,9 @@ import (
 // folder and protected session record folder are temporary folders it
 // trusts. Key files the test account makes count as root's.
 type foreignHookGuardian struct {
-	ledger string // the removal ledger
-	root   string // the protected session record folder
+	ledger  string // the removal ledger
+	root    string // the protected session record folder
+	keyLock string // the key lock of the lifecycle folder
 }
 
 // useForeignHookRemovalRecords gives the standalone cfg the caller set a
@@ -53,12 +54,14 @@ func useForeignHookRemovalRecords(t *testing.T) *foreignHookGuardian {
 	previousOwner, previousDirTrust, previousFileTrust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck
 	previousRoot, previousLayout, previousForDataDir := enterpriseForeignHookSessionRoot, enterpriseForeignHookSessionLayoutRoot, enterpriseForeignHookSessionRootForDataDir
 	previousLock, previousRotate, previousEnsure, previousCan := enterpriseForeignHookLockAccount, enterpriseForeignHookRotateSessionKey, enterpriseForeignHookEnsureSessionKeys, enterpriseForeignHookCanCreateSessionKey
+	previousRevoke, previousKeyCreation := enterpriseForeignHookRevokeSessionKey, enterpriseForeignHookWithKeyCreation
 	restoreOwner := enterprisepolicy.OverridePublishedSessionKeyOwnerForTest(func(string) (bool, error) { return true, nil })
 	forgetForeignHookSessionRoot()
 	t.Cleanup(func() {
 		enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck = previousOwner, previousDirTrust, previousFileTrust
 		enterpriseForeignHookSessionRoot, enterpriseForeignHookSessionLayoutRoot, enterpriseForeignHookSessionRootForDataDir = previousRoot, previousLayout, previousForDataDir
 		enterpriseForeignHookLockAccount, enterpriseForeignHookRotateSessionKey, enterpriseForeignHookEnsureSessionKeys, enterpriseForeignHookCanCreateSessionKey = previousLock, previousRotate, previousEnsure, previousCan
+		enterpriseForeignHookRevokeSessionKey, enterpriseForeignHookWithKeyCreation = previousRevoke, previousKeyCreation
 		restoreOwner()
 		forgetForeignHookSessionRoot()
 	})
@@ -76,7 +79,15 @@ func useForeignHookRemovalRecords(t *testing.T) *foreignHookGuardian {
 		t.Fatal(err)
 	}
 	enterpriseForeignHookSessionRoot = func() (string, error) { return root, nil }
-	return &foreignHookGuardian{ledger: filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile), root: root}
+	// A lifecycle folder whose key lock a lifecycle run made and let go.
+	keyLock := enterprisepolicy.PublishedSessionKeysLockPath(t.TempDir())
+	if err := os.WriteFile(keyLock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enterpriseForeignHookWithKeyCreation = func(create func() error) (bool, error) {
+		return enterprisepolicy.WithPublishedSessionKeyCreation(keyLock, create)
+	}
+	return &foreignHookGuardian{ledger: filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile), root: root, keyLock: keyLock}
 }
 
 // useForeignHookGuardian makes cfg a standalone enterprise config with the
@@ -724,7 +735,7 @@ func TestForeignHookRemovalWithoutANewKeyStillRemoves(t *testing.T) {
 	g.allow(t, "1001", process)
 	// The rotation ended the key but could not make a new one.
 	enterpriseForeignHookRotateSessionKey = func(root, identity string, _ enterprisepolicy.PublishedSessionTrust) error {
-		if err := enterprisepolicy.KillPublishedSessionKey(root, identity); err != nil {
+		if err := enterprisepolicy.RevokePublishedSessionKey(root, identity); err != nil {
 			return fmt.Errorf("%w: %v", enterprisepolicy.ErrPublishedSessionKeyAlive, err)
 		}
 		return errors.New("create the protected session record key: no space left on device")
@@ -1195,7 +1206,7 @@ func TestEnsureEnterpriseForeignHookSessionKeyAtEveryPass(t *testing.T) {
 	if g.key("1001") != first || g.key("1002") != other || stderr.Len() != 0 {
 		t.Fatalf("keys that are there must be kept: %q", stderr.String())
 	}
-	if err := enterprisepolicy.KillPublishedSessionKey(g.root, "1001"); err != nil {
+	if err := enterprisepolicy.RevokePublishedSessionKey(g.root, "1001"); err != nil {
 		t.Fatal(err)
 	}
 	ensureEnterpriseForeignHookSessionKey(&stderr)
@@ -1207,5 +1218,68 @@ func TestEnsureEnterpriseForeignHookSessionKeyAtEveryPass(t *testing.T) {
 	ensureEnterpriseForeignHookSessionKey(&stderr)
 	if !strings.Contains(stderr.String(), "the RPC server is unavailable") {
 		t.Fatalf("stderr %q", stderr.String())
+	}
+}
+
+// Review P1 (1.0.4 guard loop round 1, finding 6): while a lifecycle run
+// holds the key lock, the guardian makes no key: its pass makes none for an
+// account without one, and a removal only revokes the account's key, with
+// no new one, and goes on (the run makes new keys at its end). Once the run
+// let the lock go, the next pass makes the keys.
+func TestForeignHookGuardianMakesNoKeyWhileALifecycleRunHoldsTheKeyLock(t *testing.T) {
+	skipForeignHookLedgerOnWindows(t)
+	g := useForeignHookGuardian(t, nil)
+	enterpriseForeignHookCanCreateSessionKey = func() bool { return true }
+	process := runtime.GOOS + ":b:1:100"
+	g.allow(t, "1001", process)
+	if err := enterprisepolicy.WritePublishedSessionRecordsForTest(g.root, "1002", foreignHookTestSessionKey(process), enterprisepolicy.GuardDecision{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	release, err := enterprisepolicy.LockPublishedSessionKeysForLifecycle(context.Background(), g.keyLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	var stderr bytes.Buffer
+	ensureEnterpriseForeignHookSessionKey(&stderr)
+	if g.key("1002") != "" {
+		t.Fatal("the guardian must make no key while a lifecycle run holds the key lock")
+	}
+	if !strings.Contains(stderr.String(), "a lifecycle run holds the protected session record key lock") {
+		t.Fatalf("the pass must say why it made no key: %q", stderr.String())
+	}
+	rotations := 0
+	previousRotate := enterpriseForeignHookRotateSessionKey
+	enterpriseForeignHookRotateSessionKey = func(root, identity string, trust enterprisepolicy.PublishedSessionTrust) error {
+		rotations++
+		return previousRotate(root, identity, trust)
+	}
+	home := t.TempDir()
+	path := foreignHookTestCursorHook(t, home)
+	stderr.Reset()
+	tx, err := beginEnterpriseForeignHookRemoval(context.Background(), &stderr, "1001", home, "cursor", []string{path})
+	if err != nil {
+		t.Fatalf("a removal during a lifecycle run must go on with the key revoked: %v", err)
+	}
+	if rotations != 0 || g.key("1001") != "" || g.proves("1001", process) {
+		t.Fatalf("the removal must only revoke the key, with no new one (rotations %d, key %q)", rotations, g.key("1001"))
+	}
+	if err := foreignHookTestRemoveHook(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.commit([]string{path}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := g.entry(t, "1001", "cursor", path); !ok {
+		t.Fatal("the removal must be recorded")
+	}
+	release()
+	stderr.Reset()
+	ensureEnterpriseForeignHookSessionKey(&stderr)
+	if g.key("1001") == "" || g.key("1002") == "" || stderr.Len() != 0 {
+		t.Fatalf("once the run let the lock go the pass makes the keys: %q", stderr.String())
+	}
+	if g.proves("1001", process) {
+		t.Fatal("the new key must not bring the earlier allow back")
 	}
 }

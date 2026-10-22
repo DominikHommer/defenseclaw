@@ -7,7 +7,9 @@
 package cli
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,21 +87,21 @@ func windowsHookSessionTestProves(root, identity string, key enterprisepolicy.Se
 // before they change anything (KillAllPublishedSessionKeys), and status and
 // verify do not; a lifecycle that is not elevated touches nothing. Only an
 // install, upgrade, repair or ensure that finished without an error makes
-// keys again (EnsurePublishedSessionKeys), after it put the folder's owner
+// keys again (RotateAllPublishedSessionKeys), after it put the folder's owner
 // and DACL back; one with an error, uninstall, status and verify make none.
 func TestWindowsLifecycleKillsTheKeysFirstAndMakesThemLast(t *testing.T) {
 	root, identity := windowsHookSessionTestHost(t)
 	var kills, ensures []string
-	previousKill, previousEnsure := windowsHookSessionKillKeys, windowsHookSessionEnsureKeys
+	previousKill, previousEnsure := windowsHookSessionKillKeys, windowsHookSessionRotateKeys
 	windowsHookSessionKillKeys = func(path string) error {
 		kills = append(kills, path)
 		return previousKill(path)
 	}
-	windowsHookSessionEnsureKeys = func(path string, trust enterprisepolicy.PublishedSessionTrust) error {
+	windowsHookSessionRotateKeys = func(path string, trust enterprisepolicy.PublishedSessionTrust) error {
 		ensures = append(ensures, path)
 		return previousEnsure(path, trust)
 	}
-	t.Cleanup(func() { windowsHookSessionKillKeys, windowsHookSessionEnsureKeys = previousKill, previousEnsure })
+	t.Cleanup(func() { windowsHookSessionKillKeys, windowsHookSessionRotateKeys = previousKill, previousEnsure })
 	for _, action := range []string{"install", "upgrade", "repair", "ensure", "uninstall", "status", "verify"} {
 		kills = nil
 		killWindowsHookSessionKey(action)
@@ -235,5 +237,47 @@ func TestWindowsHookSessionRepairWithARetainedHandleKeepsNoOldAllow(t *testing.T
 	}
 	if !windowsHookSessionTestProves(root, identity, key) {
 		t.Fatal("the next allow after the repair proves the process")
+	}
+}
+
+// Review P1 (1.0.4 guard loop round 1, findings 4 and 6): an elevated
+// install, upgrade, repair or ensure takes the key lock before it removes
+// the keys and holds it to its end, so the hook guardian makes no key
+// meanwhile, and a key that cannot be shown dead stops it before it changes
+// anything (the error the command reports). A key that is shadowed or
+// marked revoked is enough. An uninstall takes no lock and goes on.
+func TestWindowsLifecycleStopsWhenAKeyCannotBeShownDead(t *testing.T) {
+	windowsHookSessionTestHost(t)
+	previousKill, previousLock := windowsHookSessionKillKeys, windowsHookSessionKeyLock
+	t.Cleanup(func() { windowsHookSessionKillKeys, windowsHookSessionKeyLock = previousKill, previousLock })
+	lockPath := enterprisepolicy.PublishedSessionKeysLockPath(t.TempDir())
+	windowsHookSessionKeyLock = func() (string, error) { return lockPath, nil }
+	windowsHookSessionKillKeys = func(string) error {
+		return fmt.Errorf("%w: the file is in use", enterprisepolicy.ErrPublishedSessionKeyAlive)
+	}
+	opts := &windowsEnterpriseLifecycleOptions{}
+	for _, action := range []string{"install", "upgrade", "repair", "ensure"} {
+		release, err := beginWindowsHookSessionKeyChange(context.Background(), action, opts)
+		release()
+		if !errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive) || windowsEnterpriseMessageCode(err.Error(), "") != "hook_session_records_unavailable" {
+			t.Fatalf("%s must stop when a key cannot be shown dead: %v", action, err)
+		}
+	}
+	release, err := beginWindowsHookSessionKeyChange(context.Background(), "uninstall", opts)
+	if err != nil {
+		t.Fatalf("an uninstall goes on: %v", err)
+	}
+	release()
+	windowsHookSessionKillKeys = func(string) error { return errors.New("the file is in use; a second key stays next to it") }
+	release, err = beginWindowsHookSessionKeyChange(context.Background(), "repair", opts)
+	if err != nil {
+		t.Fatalf("a key that is shadowed is enough: %v", err)
+	}
+	if ran, err := enterprisepolicy.WithPublishedSessionKeyCreation(lockPath, func() error { return nil }); ran || err != nil {
+		t.Fatalf("the guardian must make no key while the action holds the key lock: %v %v", ran, err)
+	}
+	release()
+	if ran, err := enterprisepolicy.WithPublishedSessionKeyCreation(lockPath, func() error { return nil }); !ran || err != nil {
+		t.Fatalf("the guardian makes keys once the action ended: %v %v", ran, err)
 	}
 }

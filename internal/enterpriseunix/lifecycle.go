@@ -437,10 +437,6 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	if readOnly {
 		return l.readOnly(ctx)
 	}
-	// Before anything changes (the kill switch, GAP-0352): no protected
-	// foreign-hook session record written before this run proves anything
-	// once it started.
-	l.killHookSessionKey()
 	// Before the lock, which another run can hold for the readiness timeout.
 	env.closePrivateDirs(ctx)
 
@@ -496,8 +492,15 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) before it started; nothing was changed")
 		return 0
 	}
+	// Once this run holds the lock, before anything changes (the kill
+	// switch, GAP-0352): no protected foreign-hook session record written
+	// before it proves anything once it started, not even one written under
+	// a key a run this one waited for made at its end.
+	if !l.killHookSessionKeys() {
+		return 0
+	}
 	// Registered after the lock, so it runs before the lock goes: only a run
-	// that finished without an error makes a new key (GAP-0352).
+	// that finished without an error makes new keys (GAP-0352).
 	if l.opts.Action != ActionUninstall {
 		defer l.createHookSessionKey()
 	}
@@ -2516,39 +2519,57 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 	return changed, nil
 }
 
-// hookSessionKillKeys and hookSessionEnsureKeys remove every account's key
-// of the protected foreign-hook session records and make one for each
-// account that has none (enterprisepolicy.KillAllPublishedSessionKeys,
-// EnsurePublishedSessionKeys; replaceable in tests).
+// hookSessionKillKeys removes every account's key of the protected
+// foreign-hook session records (enterprisepolicy.KillAllPublishedSessionKeys)
+// and hookSessionRotateKeys gives every account a new one
+// (RotateAllPublishedSessionKeys); replaceable in tests.
 var (
 	hookSessionKillKeys   = enterprisepolicy.KillAllPublishedSessionKeys
-	hookSessionEnsureKeys = enterprisepolicy.EnsurePublishedSessionKeys
+	hookSessionRotateKeys = enterprisepolicy.RotateAllPublishedSessionKeys
 )
 
-// killHookSessionKey removes every account's key of the protected
-// foreign-hook session records (Layout.HookSessionDir) before a lifecycle
-// run changes anything: from then on no record written before proves
-// anything during an outage (the kill switch, GAP-0352). No record has to
-// be found, so whatever another account could do to the record folder or
-// the folders above it while they were loosened brings no allow back: only
-// root can make a key the hook accepts. Safe while another run holds the
-// lock. A failure is a warning.
-func (l *lifecycle) killHookSessionKey() {
+// killHookSessionKeys removes every account's key of the protected
+// foreign-hook session records (Layout.HookSessionDir) once the run holds
+// the lifecycle lock and before it changes anything: from then on no record
+// written before proves anything during an outage (the kill switch,
+// GAP-0352). The lifecycle lock is also the key lock
+// (enterprisepolicy.PublishedSessionKeysLockPath): no hook guardian makes a
+// key until the run made new ones and let the lock go. No record has to be
+// found, so whatever another account could do to the record folder or the
+// folders above it while they were loosened brings no allow back: only
+// root can make a key the hook accepts. A key that could not be removed but
+// is shadowed or marked revoked is a warning. A key that cannot be shown
+// dead stops every action but uninstall before it changes anything: an
+// install, upgrade, repair or ensure would put the record folders' trust
+// back while an earlier allow could still prove itself. An uninstall goes
+// on with a warning; it removes the record folder. It reports whether the
+// run may go on.
+func (l *lifecycle) killHookSessionKeys() bool {
 	e := l.env
 	if e.Layout.HookSessionDir == "" {
-		return
+		return true
 	}
-	if err := hookSessionKillKeys(e.P(e.Layout.HookSessionDir)); err != nil {
-		l.result.AddWarning(codeHookSessionKey, "the protected foreign-hook session record keys could not be removed before the run: "+err.Error())
+	err := hookSessionKillKeys(e.P(e.Layout.HookSessionDir))
+	switch {
+	case err == nil:
+	case !errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive):
+		l.result.AddWarning(codeHookSessionKey, "a protected foreign-hook session record key could not be removed before the run; the hook refuses it (a second key or a revocation mark): "+err.Error())
+	case l.opts.Action == ActionUninstall:
+		l.result.AddWarning(codeHookSessionKey, "the protected foreign-hook session record keys could not be shown dead before the uninstall: "+err.Error())
+	default:
+		l.result.AddError(codeHookSessionKey, "the protected foreign-hook session record keys could not be shown dead, so nothing was changed (a record written before this run could still allow a guarded call during a gateway outage): "+err.Error())
+		return false
 	}
+	return true
 }
 
-// createHookSessionKey makes a new key for every account of the protected
-// foreign-hook session records once a run finished without an error, while
-// it still holds the lock. A run that failed makes none: guarded connectors
-// then block during a gateway outage until a later run, or the hook
-// guardian's next pass, makes them. A record folder that does not exist
-// gets none.
+// createHookSessionKey gives every account of the protected foreign-hook
+// session records a new key once a run finished without an error, while it
+// still holds the lifecycle lock, whatever key an account has: no allow
+// published while the run changed the deployment outlives it. A run that
+// failed makes none: guarded connectors then block during a gateway outage
+// until a later run, or the hook guardian's next pass, makes them. A record
+// folder that does not exist gets none.
 func (l *lifecycle) createHookSessionKey() {
 	e := l.env
 	if e.Layout.HookSessionDir == "" || len(l.result.Errors) != 0 {
@@ -2558,7 +2579,7 @@ func (l *lifecycle) createHookSessionKey() {
 	if info, err := os.Lstat(path); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return
 	}
-	if err := hookSessionEnsureKeys(path, enterprisepolicy.PublishedSessionTrust{}); err != nil {
+	if err := hookSessionRotateKeys(path, enterprisepolicy.PublishedSessionTrust{}); err != nil {
 		l.result.AddWarning(codeHookSessionKey, "the protected foreign-hook session record keys could not be made, so guarded connectors block during a gateway outage until the next run or hook guardian pass: "+err.Error())
 	}
 }

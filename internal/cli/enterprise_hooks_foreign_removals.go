@@ -145,13 +145,25 @@ func limitEnterpriseForeignHookPaths(paths []string) []string {
 // folder that cannot be located, or a key that could not be ended, refuses
 // the removal; a rotation that ended the key but could not make a new one
 // only warns (the account's guarded calls block during an outage until a
-// later pass makes one).
+// later pass makes one). While a lifecycle run holds the key lock, or when
+// it cannot be taken, the key is only revoked: no key the guardian makes
+// while a run changes the deployment outlives the run (the run makes new
+// ones at its end).
 func (tx *enterpriseForeignHookRemovalTx) rotate() error {
 	root, err := enterpriseForeignHookSessionRoot()
 	if err != nil {
 		return fmt.Errorf("rotate the protected session record key before the removal: %w", err)
 	}
-	err = enterpriseForeignHookRotateSessionKey(root, tx.identity, enterpriseForeignHookSessionKeyTrust())
+	ran, err := enterpriseForeignHookWithKeyCreation(func() error {
+		return enterpriseForeignHookRotateSessionKey(root, tx.identity, enterpriseForeignHookSessionKeyTrust())
+	})
+	if !ran {
+		if err != nil {
+			fmt.Fprintf(tx.stderr, "defenseclaw: enterprise foreign-hook guard: the protected session record key lock (%v); the key of %s is revoked without a new one\n",
+				err, foreignGuardLogField(tx.identity, 256))
+		}
+		err = enterpriseForeignHookRevokeSessionKey(root, tx.identity)
+	}
 	if errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive) {
 		return fmt.Errorf("rotate the protected session record key before the removal: %w", err)
 	}
@@ -245,22 +257,30 @@ func recordEnterpriseForeignHookRemovalsAt(stderr io.Writer, mark, account, home
 	}
 }
 
-// ensureEnterpriseForeignHookSessionKeys gives every account under the
+// ensureEnterpriseForeignHookSessionKey gives every account under the
 // protected session records exactly one key at every guardian pass
-// (enterprisepolicy.EnsurePublishedSessionKeys): the gateway removes an
-// account's key before every block, and a lifecycle run removes all of
-// them. A new key never makes an earlier record count. Only root or SYSTEM
-// can make a key the hook accepts, so any other account does nothing.
+// (enterprisepolicy.EnsurePublishedSessionKeys), unless a lifecycle run
+// holds the key lock: the gateway removes an account's key before every
+// block, and a lifecycle run removes all of them. A new key never makes an
+// earlier record count. Only root or SYSTEM can make a key the hook
+// accepts, so any other account does nothing.
 func ensureEnterpriseForeignHookSessionKey(stderr io.Writer) {
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() || !enterpriseForeignHookCanCreateSessionKey() {
 		return
 	}
 	root, err := enterpriseForeignHookSessionRoot()
+	ran := false
 	if err == nil {
-		err = enterpriseForeignHookEnsureSessionKeys(root, enterpriseForeignHookSessionKeyTrust())
+		// Never while a lifecycle run holds the key lock: the run removed
+		// every key and makes new ones at its end.
+		ran, err = enterpriseForeignHookWithKeyCreation(func() error {
+			return enterpriseForeignHookEnsureSessionKeys(root, enterpriseForeignHookSessionKeyTrust())
+		})
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: make the protected session record keys (guarded calls of an account without one block during a gateway outage): %v\n", err)
+	} else if !ran {
+		fmt.Fprintln(stderr, "defenseclaw: enterprise foreign-hook guard: a lifecycle run holds the protected session record key lock; its end makes the keys")
 	}
 }
 
@@ -355,6 +375,22 @@ var enterpriseForeignHookSessionLayoutRoot = func() (string, error) {
 	return layout.HookSessionDir, nil
 }
 
+// enterpriseForeignHookWithKeyCreation runs create, which makes or rotates
+// keys, holding the key lock of the standalone lifecycle folder shared,
+// only when no lifecycle run holds it
+// (enterprisepolicy.WithPublishedSessionKeyCreation). A layout that cannot
+// be resolved is an error, and create does not run (replaceable in tests).
+var enterpriseForeignHookWithKeyCreation = func(create func() error) (bool, error) {
+	layout, _, _, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return false, fmt.Errorf("locate the lifecycle folder: %w", err)
+	}
+	if !filepath.IsAbs(layout.LifecycleDir) {
+		return false, fmt.Errorf("the lifecycle folder %q is not an absolute path", layout.LifecycleDir)
+	}
+	return enterprisepolicy.WithPublishedSessionKeyCreation(enterprisepolicy.PublishedSessionKeysLockPath(layout.LifecycleDir), create)
+}
+
 // enterpriseForeignHookSessionRootForDataDir is the record folder of the
 // standalone layout whose data directory is dataDir (replaceable in tests).
 var enterpriseForeignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
@@ -363,7 +399,9 @@ var enterpriseForeignHookSessionRootForDataDir = func(dataDir string) (string, b
 
 // enterpriseForeignHookLockAccount takes an account's removal lock,
 // enterpriseForeignHookRotateSessionKey rotates its record key before a
-// removal, enterpriseForeignHookEnsureSessionKeys makes the keys of the
+// removal (enterpriseForeignHookRevokeSessionKey only revokes it while a
+// lifecycle run holds the key lock, enterpriseForeignHookWithKeyCreation),
+// enterpriseForeignHookEnsureSessionKeys makes the keys of the
 // accounts that have none at every pass,
 // enterpriseForeignHookSessionKeyTrust names the gateway service a Windows
 // key file lets remove it, and enterpriseForeignHookCanCreateSessionKey
@@ -372,6 +410,7 @@ var (
 	enterpriseForeignHookLockAccount       = enterprisepolicy.LockForeignHookAccountRemoval
 	enterpriseForeignHookLockLedger        = enterprisepolicy.LockForeignHookRemovalLedger
 	enterpriseForeignHookRotateSessionKey  = enterprisepolicy.RotatePublishedSessionKey
+	enterpriseForeignHookRevokeSessionKey  = enterprisepolicy.RevokePublishedSessionKey
 	enterpriseForeignHookEnsureSessionKeys = enterprisepolicy.EnsurePublishedSessionKeys
 	enterpriseForeignHookSessionKeyTrust   = func() enterprisepolicy.PublishedSessionTrust {
 		return enterprisepolicy.PublishedSessionTrust{ServiceAccount: `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc}

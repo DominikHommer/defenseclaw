@@ -131,7 +131,7 @@ func TestThePublishedSessionKeyMustBeRoots(t *testing.T) {
 	if _, err := ReadPublishedSessionKey(root, publishedSessionTestIdentity(t)); err == nil {
 		t.Fatal("a key file root does not own must be no key")
 	}
-	if err := KillPublishedSessionKey(root, publishedSessionTestIdentity(t)); err != nil {
+	if err := RevokePublishedSessionKey(root, publishedSessionTestIdentity(t)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(path); err != nil {

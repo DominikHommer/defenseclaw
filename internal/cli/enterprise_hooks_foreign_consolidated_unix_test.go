@@ -182,7 +182,7 @@ func TestForeignHookWorkerRemovalAndTheKeyRotation(t *testing.T) {
 			return fmt.Errorf("%w: the key file is in use", enterprisepolicy.ErrPublishedSessionKeyAlive)
 		}},
 		{name: "the key ended, no new one", rotate: func(root, identity string) error {
-			if err := enterprisepolicy.KillPublishedSessionKey(root, identity); err != nil {
+			if err := enterprisepolicy.RevokePublishedSessionKey(root, identity); err != nil {
 				return fmt.Errorf("%w: %v", enterprisepolicy.ErrPublishedSessionKeyAlive, err)
 			}
 			return errors.New("create the protected session record key: no space left on device")

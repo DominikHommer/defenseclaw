@@ -89,6 +89,15 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	unlock := sync.OnceFunc(a.foreignHookSessionLocks.lock(stateDir))
 	defer unlock()
 	places := a.foreignHookSessionPlaces(dataDir)
+	// The deadline of an allow is set before the account's lock is asked
+	// for, not once it is held. This exchange takes the gate before any
+	// removal of the account that it holds the lock against, and a removal
+	// gives up waiting for it only ForeignHookRemovalDrainWait (longer than
+	// the hold) after it took the gate: so a removal goes on past this
+	// exchange only once answerBy passed, and a key this exchange reads after
+	// a removal rotated it (a pause between taking the lock and reading the
+	// key) can never carry an allow (GAP-0414).
+	answerBy := time.Now().Add(foreignHookExchangeHold)
 	// Only a standalone gateway gets here (userScopedCredentialsRequired),
 	// so every exchange takes its account's removal lock.
 	var lockErr error
@@ -101,7 +110,6 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	}
 	cancel()
 	defer release()
-	answerBy := time.Now().Add(foreignHookExchangeHold)
 	// The record key first, then the guardian's removals, both under the
 	// account's lock: a removal rotates the key and records itself while it
 	// holds the lock exclusively, so an allow made with the key read here was
@@ -111,7 +119,7 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	removals, ledgerErr := a.foreignHookRemovals.forIdentity(places.removalsDir, identity)
 	// A removal in progress keeps its own reason through the join
 	// (ApplyForeignHookRemovals checks it first).
-	removalsErr := errors.Join(lockErr, ledgerErr, places.rootErr)
+	removalsErr := errors.Join(lockErr, ledgerErr)
 	killed := false
 	decision := enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
 		StateDir:     stateDir,
@@ -218,47 +226,37 @@ func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolic
 	return ""
 }
 
-// foreignHookSessionPublishRoot is the folder of the protected session
-// records on a standalone host (managed.StandaloneLayout.HookSessionDir),
-// foreignHookSessionRootForDataDir the same folder named by the gateway's
-// data directory (managed.StandaloneHookSessionDirForDataDir),
-// foreignHookSessionKey reads an account's key
-// (enterprisepolicy.ReadPublishedSessionKey), foreignHookSessionPublish
-// writes the protected record and foreignHookSessionKill removes an
-// account's key (replaceable in tests).
+// foreignHookSessionRootForDataDir is the folder of the protected session
+// records that the gateway's data directory names on a standalone host
+// (managed.StandaloneHookSessionDirForDataDir), foreignHookSessionKey
+// reads an account's key (enterprisepolicy.ReadPublishedSessionKey),
+// foreignHookSessionPublish writes the protected record and
+// foreignHookSessionKill revokes an account's key
+// (enterprisepolicy.RevokePublishedSessionKey; replaceable in tests).
 var (
-	foreignHookSessionPublishRoot    = standaloneHookSessionDir
 	foreignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
 		return managed.StandaloneHookSessionDirForDataDir(runtime.GOOS, dataDir)
 	}
 	foreignHookSessionKey     = enterprisepolicy.ReadPublishedSessionKey
 	foreignHookSessionPublish = enterprisepolicy.PublishForeignHookSessionDecision
-	foreignHookSessionKill    = enterprisepolicy.KillPublishedSessionKey
+	foreignHookSessionKill    = enterprisepolicy.RevokePublishedSessionKey
 )
 
 // foreignHookSessionPlaces are where one exchange reads the guardian's
 // removals and writes its protected session record: the guardian's ledger
 // folder (managed.HookGuardianAuthorizationDir) and the protected session
-// record root ("" where this gateway publishes none). rootErr is a record
-// root a standalone gateway
-// could not locate at all (foreignHookSessionRecordRoot): the exchange is
-// denied, because the gateway can then neither remove the key nor publish
-// its answer.
+// record root ("" where this gateway publishes none,
+// foreignHookSessionRecordRoot).
 type foreignHookSessionPlaces struct {
 	removalsDir string
 	recordRoot  string
-	rootErr     error
 }
 
 func (a *APIServer) foreignHookSessionPlaces(dataDir string) foreignHookSessionPlaces {
-	places := foreignHookSessionPlaces{removalsDir: managed.HookGuardianAuthorizationDir(dataDir)}
-	root, err := a.foreignHookSessionRecordRoot(dataDir)
-	if err != nil {
-		places.rootErr = fmt.Errorf("the protected foreign-hook session record folder cannot be located: %w", err)
-	} else {
-		places.recordRoot = strings.TrimSpace(root)
+	return foreignHookSessionPlaces{
+		removalsDir: managed.HookGuardianAuthorizationDir(dataDir),
+		recordRoot:  a.foreignHookSessionRecordRoot(dataDir),
 	}
-	return places
 }
 
 // key is the account's current record key, or none where there is no record
@@ -277,31 +275,25 @@ func (p foreignHookSessionPlaces) key(identity string) enterprisepolicy.SessionR
 
 // foreignHookSessionRecordRoot is the protected session record folder of a
 // standalone gateway, or "" for Secure Client and per-user gateways, which
-// have none. On Linux and macOS the layout is fixed. A lookup of the
-// Windows layout that fails (the protected ProgramData registration cannot
-// be read for a moment) falls back to the folder this gateway located last,
-// and else to the one its data directory names (dataDir), so that an
-// exchange still removes the key where the hook reads it. Only when none
-// names a folder is it an error.
-func (a *APIServer) foreignHookSessionRecordRoot(dataDir string) (string, error) {
+// have none. It is the folder the gateway's data directory names
+// (foreignHookSessionRootForDataDir), a function of its configuration
+// alone: the gateway finds every folder it ever published an allow to
+// again, with no lookup that can fail when it must revoke one (on Windows
+// the protected ProgramData registration, which the hook reads, may not be
+// readable for a moment). A data directory that names none (not the
+// standard one) has no folder: such a gateway publishes nothing, so no
+// allow of it can pass an outage, and the hook blocks there. Its data
+// directory changes only with its managed configuration, which a lifecycle
+// run applies after it removed every key.
+func (a *APIServer) foreignHookSessionRecordRoot(dataDir string) string {
 	cfg := a.scannerCfg
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
-		return "", nil
+		return ""
 	}
-	root, err := foreignHookSessionPublishRoot()
-	if err == nil {
-		if root = strings.TrimSpace(root); root != "" {
-			a.foreignHookSessionRoot.Store(&root)
-		}
-		return root, nil
+	if root, ok := foreignHookSessionRootForDataDir(dataDir); ok {
+		return strings.TrimSpace(root)
 	}
-	if last := a.foreignHookSessionRoot.Load(); last != nil {
-		return *last, nil
-	}
-	if fallback, ok := foreignHookSessionRootForDataDir(dataDir); ok {
-		return fallback, nil
-	}
-	return "", err
+	return ""
 }
 
 // publishForeignHookSessionDecision writes the answer of one session
@@ -324,28 +316,32 @@ func (a *APIServer) publishForeignHookSessionDecision(root, identity string, key
 	}
 }
 
-// killForeignHookSessionKey removes the account's record key before the
+// killForeignHookSessionKey revokes the account's record key before the
 // exchange records a block, and before it publishes any denial (the kill
-// switch, GAP-0352): every allow of the account written before proves
-// nothing during an outage from then on, until the hook guardian makes a
-// new key (it does at every pass). Other accounts keep theirs. A removal
-// that fails is logged; the block is still recorded and published, and the
-// published block denies during an outage. It reports whether the key is
-// gone.
+// switch, GAP-0352): it removes the key, or marks it revoked when the
+// operating system refuses the removal
+// (enterprisepolicy.RevokePublishedSessionKey). Every allow of the account
+// written before proves nothing during an outage from then on, until the
+// hook guardian makes a new key (it does at every pass). Other accounts
+// keep theirs. A revocation that took neither way is logged; the block is
+// still recorded and published, and the published block denies during an
+// outage. It reports whether the key is gone or marked revoked.
 func (a *APIServer) killForeignHookSessionKey(places foreignHookSessionPlaces, identity string, key enterprisepolicy.SessionKey) bool {
-	connectorName := clipForeignHookAuditField(key.Connector, 64)
 	if places.recordRoot == "" {
-		if places.rootErr != nil {
-			fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record key for %s could not be removed before a block: %v\n", connectorName, places.rootErr)
-		}
 		return false
 	}
-	if err := foreignHookSessionKill(places.recordRoot, identity); err != nil {
-		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record key for %s could not be removed before a block, so only the published block denies during a gateway outage: %v\n",
-			connectorName, err)
-		return false
+	err := foreignHookSessionKill(places.recordRoot, identity)
+	if err == nil {
+		return true
 	}
-	return true
+	connectorName := clipForeignHookAuditField(key.Connector, 64)
+	if !errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive) {
+		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record key for %s could not be removed before a block, so it was marked revoked: %v\n", connectorName, err)
+		return true
+	}
+	fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record key for %s could be neither removed nor marked revoked before a block, so only the published block denies during a gateway outage: %v\n",
+		connectorName, err)
+	return false
 }
 
 // foreignHookAuditReasonLimit bounds the reason an audit row repeats, and

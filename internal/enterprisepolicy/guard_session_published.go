@@ -62,17 +62,35 @@ import (
 // with the account's current key proves nothing. Every revocation ends the
 // key first and only then does anything else:
 //
-//   - the gateway removes the account's key (KillPublishedSessionKey: one
+//   - the gateway removes the account's key (RevokePublishedSessionKey: one
 //     unlink, then the folder is flushed) before it records a block and
 //     before it publishes any denial;
 //   - the hook guardian rotates it (RotatePublishedSessionKey: one atomic
 //     rename to a new random name, then the folder is flushed) under the
 //     account's removal lock before it records a removal, and removes the
 //     hook file only after that (ForeignHookAccountLockPaths);
-//   - the lifecycle (install, upgrade, repair, ensure, uninstall) removes
-//     every account's key before it changes anything
-//     (KillAllPublishedSessionKeys); the guardian and a lifecycle run that
-//     succeeded make keys again (EnsurePublishedSessionKeys).
+//   - the lifecycle (install, upgrade, repair, ensure, uninstall), once it
+//     holds the key lock (PublishedSessionKeysLockPath: its own lock on
+//     Linux and macOS, LockPublishedSessionKeysForLifecycle on Windows),
+//     removes every account's key before it changes anything
+//     (KillAllPublishedSessionKeys); it stops
+//     when it cannot show every key dead, and a run that succeeded gives
+//     every account a new key as its last step
+//     (RotateAllPublishedSessionKeys). The guardian makes keys at every pass
+//     (EnsurePublishedSessionKeys), but only while no lifecycle run holds
+//     the key lock (WithPublishedSessionKeyCreation), so no key made during
+//     a run outlives it.
+//
+// A key that cannot be removed or renamed is revoked by a mark instead: an
+// empty file <folder name>.<account digest>.revoked-<the key's 64 hex>, or
+// .revoked-any-<random> when the account's keys cannot even be listed, in a
+// folder every account can list and only root, SYSTEM, Administrators and
+// the gateway service can add a file to (publishedSessionMarkDir). A key a
+// mark names is no key, and an account with a revoked-any mark has none.
+// So an earlier allow outlives a revocation only when that folder takes
+// neither an unlink nor a new file (and the gateway's block, published in
+// another folder, fails too). A rotation that made a new key removes the
+// marks it listed before it changed anything.
 //
 // A new key never brings an earlier record back: its name is random, and
 // no account but root or SYSTEM can give a file that name. So no revocation
@@ -86,8 +104,8 @@ import (
 // and blocks otherwise:
 //
 //   - the account has exactly one key file that root, SYSTEM or
-//     Administrators own, and the hook's trust check accepts it and every
-//     folder above it;
+//     Administrators own and no revocation mark ends, and the hook's trust
+//     check accepts it and every folder above it;
 //   - the records of the agent process and of the session (every key part
 //     the call names) say not blocked, carry a MAC that verifies with that
 //     key, and are at most publishedSessionMaxAge old. A record the call
@@ -127,17 +145,24 @@ const (
 	// publishedSessionKeyRemoveAttempts bounds how often a key file a
 	// reader holds for a moment is removed again.
 	publishedSessionKeyRemoveAttempts = 3
+	// publishedSessionMarkInfix follows the account digest in the name of a
+	// revocation mark; publishedSessionMarkAny starts the rest of the name of
+	// a mark that ends whatever key the account has.
+	publishedSessionMarkInfix = ".revoked-"
+	publishedSessionMarkAny   = "any-"
 )
 
 // publishedSessionRemoveKey removes a key file, publishedSessionCreateKeyFile
-// creates one and publishedSessionList lists a folder (replaceable in
-// tests, which stand in for a key file that cannot be removed or created
-// and a folder that cannot be listed).
+// creates one, publishedSessionCreateMarkFile creates a revocation mark and
+// publishedSessionList lists a folder (replaceable in tests, which stand in
+// for a key file that cannot be removed or created, a mark that cannot be
+// added and a folder that cannot be listed).
 var (
-	publishedSessionRemoveKey     = os.Remove
-	publishedSessionRenameKey     = os.Rename
-	publishedSessionCreateKeyFile = createPublishedSessionKeyFile
-	publishedSessionList          = func(dir string) ([]string, error) {
+	publishedSessionRemoveKey      = os.Remove
+	publishedSessionRenameKey      = os.Rename
+	publishedSessionCreateKeyFile  = createPublishedSessionKeyFile
+	publishedSessionCreateMarkFile = createPublishedSessionMarkFile
+	publishedSessionList           = func(dir string) ([]string, error) {
 		folder, err := os.Open(dir)
 		if err != nil {
 			return nil, err
@@ -168,6 +193,15 @@ func OverridePublishedSessionKeyOwnerForTest(check func(path string) (bool, erro
 		publishedSessionKeyOwner = previous
 		publishedSessionKeyOwnerMu.Unlock()
 	}
+}
+
+// OverridePublishedSessionKeyRemoveForTest replaces the removal of key
+// files, for tests in other packages that stand in for a key file the
+// operating system refuses to remove.
+func OverridePublishedSessionKeyRemoveForTest(remove func(path string) error) (restore func()) {
+	previous := publishedSessionRemoveKey
+	publishedSessionRemoveKey = remove
+	return func() { publishedSessionRemoveKey = previous }
 }
 
 func publishedSessionKeyOwned(path string) (bool, error) {
@@ -392,9 +426,9 @@ func accountKeys(root, identity string) (dir, prefix string, keys []SessionRecor
 }
 
 // ReadPublishedSessionKey is the current key of identity's account in the
-// record folder root: its one key file. None, more than one, or a key
-// folder that cannot be read is an error; an allow published without a key
-// proves nothing.
+// record folder root: its one key file. None, more than one, one a
+// revocation mark ends, or a key or mark folder that cannot be read is an
+// error; an allow published without a key proves nothing.
 func ReadPublishedSessionKey(root, identity string) (SessionRecordKey, error) {
 	_, _, keys, err := accountKeys(root, identity)
 	if err != nil {
@@ -402,11 +436,20 @@ func ReadPublishedSessionKey(root, identity string) (SessionRecordKey, error) {
 	}
 	switch len(keys) {
 	case 1:
-		return keys[0], nil
 	case 0:
 		return SessionRecordKey{}, fmt.Errorf("the account has no protected session record key under %s", root)
+	default:
+		return SessionRecordKey{}, fmt.Errorf("the account has %d protected session record keys under %s", len(keys), root)
 	}
-	return SessionRecordKey{}, fmt.Errorf("the account has %d protected session record keys under %s", len(keys), root)
+	digest, _ := publishedSessionIdentityDigest(identity)
+	marks, err := publishedSessionMarksOf(root, digest)
+	if err != nil {
+		return SessionRecordKey{}, fmt.Errorf("the revocation marks of the account under %s cannot be read: %w", root, err)
+	}
+	if marks.ends(keys[0]) {
+		return SessionRecordKey{}, fmt.Errorf("the account's protected session record key under %s was revoked", root)
+	}
+	return keys[0], nil
 }
 
 // readPublishedSessionKeyForHook is ReadPublishedSessionKey after trust
@@ -424,21 +467,168 @@ func readPublishedSessionKeyForHook(root, identity string, trust func(string) er
 	return key, nil
 }
 
-// KillPublishedSessionKey removes every key file of identity's account in
-// the record folder root, so that no record of the account written before
-// proves anything during an outage, and flushes the key folder. Each
-// removal is one unlink. The gateway calls it before it records a block and
+// RevokePublishedSessionKey ends every record of identity's account in the
+// record folder root, so that none written before proves anything during
+// an outage. It removes the account's key files and flushes the key folder
+// (each removal is one unlink), and adds a revocation mark for the keys it
+// could not remove, or one that ends whatever key the account has when its
+// keys cannot be listed. The gateway calls it before it records a block and
 // before it publishes a denial. A key folder that does not exist has no
-// key. A key file that is still there is an error.
-func KillPublishedSessionKey(root, identity string) error {
-	dir, _, keys, err := accountKeys(root, identity)
+// key. It returns nil when every key is gone, an error when a mark ends what
+// is left (the hook refuses a marked key), and an error wrapping
+// ErrPublishedSessionKeyAlive when neither took.
+func RevokePublishedSessionKey(root, identity string) error {
+	digest, ok := publishedSessionIdentityDigest(identity)
+	if !ok {
+		return fmt.Errorf("%w: invalid caller identity", ErrPublishedSessionKeyAlive)
+	}
+	dir, prefix, ok := publishedSessionKeyPlace(root, digest)
+	if !ok {
+		return fmt.Errorf("%w: no protected session record folder %q", ErrPublishedSessionKeyAlive, root)
+	}
+	keys, err := publishedSessionKeys(dir, prefix)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
+		return revokePublishedSessionKeyByMark(root, digest, nil, err)
+	}
+	if err := removePublishedSessionKeyFiles(dir, keys); err != nil {
+		return revokePublishedSessionKeyByMark(root, digest, keys, err)
+	}
+	return nil
+}
+
+// revokePublishedSessionKeyByMark marks keys of the account digest under
+// root revoked (whatever key it has when keys is empty) after cause kept
+// them from being removed or rotated.
+func revokePublishedSessionKeyByMark(root, digest string, keys []SessionRecordKey, cause error) error {
+	if err := markPublishedSessionKeysRevoked(root, digest, keys); err != nil {
+		return fmt.Errorf("%w: %v; no revocation mark could be added either: %v", ErrPublishedSessionKeyAlive, cause, err)
+	}
+	return fmt.Errorf("%v; a revocation mark ends the key, so the hook refuses it", cause)
+}
+
+// publishedSessionMarkPlace is the folder the revocation marks of the
+// account digest under root are in (publishedSessionMarkDir) and the
+// prefix of their names: <root name>.<digest>.revoked-.
+func publishedSessionMarkPlace(root, digest string) (dir, prefix string, ok bool) {
+	keyDir, rootPrefix, ok := publishedSessionKeyRoot(root)
+	if !ok || !publishedSessionDigest(digest) {
+		return "", "", false
+	}
+	return publishedSessionMarkDir(filepath.Clean(strings.TrimSpace(root)), keyDir), rootPrefix + digest + publishedSessionMarkInfix, true
+}
+
+// markPublishedSessionKeysRevoked adds a revocation mark for each of keys
+// of the account digest under root, or one that ends whatever key the
+// account has when keys is empty, and flushes the mark folder. A mark that
+// is there already is kept: one key's mark has one name.
+func markPublishedSessionKeysRevoked(root, digest string, keys []SessionRecordKey) error {
+	dir, prefix, ok := publishedSessionMarkPlace(root, digest)
+	if !ok {
+		return fmt.Errorf("no protected session record folder %q", root)
+	}
+	var names []string
+	for _, key := range keys {
+		names = append(names, prefix+hex.EncodeToString(key.secret))
+	}
+	if len(names) == 0 {
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return err
+		}
+		names = append(names, prefix+publishedSessionMarkAny+hex.EncodeToString(nonce[:]))
+	}
+	var errs []error
+	for _, name := range names {
+		if err := publishedSessionCreateMarkFile(filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrExist) {
+			errs = append(errs, fmt.Errorf("add the revocation mark %s: %w", filepath.Join(dir, name), err))
+		}
+	}
+	if len(errs) == 0 {
+		if err := publishedSessionSyncDir(dir); err != nil {
+			errs = append(errs, fmt.Errorf("flush %s: %w", dir, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// createPublishedSessionMarkFile creates an empty revocation mark at path,
+// which must not exist (fs.ErrExist when it does), and flushes it. It gets
+// the mark folder's access: only accounts that may add a file there can
+// remove it.
+func createPublishedSessionMarkFile(path string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
 		return err
 	}
-	return removePublishedSessionKeyFiles(dir, keys)
+	return errors.Join(file.Sync(), file.Close())
+}
+
+// publishedSessionMarkSet is the revocation marks of one account: the
+// folder and names of their files, the keys they end (each key's 64 hex),
+// and whether one ends whatever key the account has.
+type publishedSessionMarkSet struct {
+	dir   string
+	names []string
+	keys  map[string]bool
+	any   bool
+}
+
+// ends reports a key a mark revokes.
+func (m publishedSessionMarkSet) ends(key SessionRecordKey) bool {
+	return m.any || m.keys[hex.EncodeToString(key.secret)]
+}
+
+// clear removes the marks listed: the caller ended every key they can name
+// since. A mark added after the listing stays. One that cannot be removed
+// keeps the account's outage allows blocked until a later pass.
+func (m publishedSessionMarkSet) clear() {
+	for _, name := range m.names {
+		_ = os.Remove(filepath.Join(m.dir, name))
+	}
+}
+
+// publishedSessionMarksOf lists the revocation marks of the account digest
+// under root. A mark folder that does not exist holds none; one that cannot
+// be listed is an error. A file with the marks' prefix whose rest names no
+// key ends every key.
+func publishedSessionMarksOf(root, digest string) (publishedSessionMarkSet, error) {
+	dir, prefix, ok := publishedSessionMarkPlace(root, digest)
+	if !ok {
+		return publishedSessionMarkSet{}, fmt.Errorf("no protected session record folder %q", root)
+	}
+	marks := publishedSessionMarkSet{dir: dir}
+	names, err := publishedSessionList(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return marks, nil
+	}
+	if err != nil {
+		return marks, err
+	}
+	for _, name := range names {
+		if !hasPrefixFold(name, prefix) {
+			continue
+		}
+		marks.names = append(marks.names, name)
+		rest := strings.ToLower(name[len(prefix):])
+		if _, ok := publishedSessionKeySecret(rest); ok {
+			if marks.keys == nil {
+				marks.keys = map[string]bool{}
+			}
+			marks.keys[rest] = true
+			continue
+		}
+		marks.any = true
+	}
+	return marks, nil
+}
+
+// isPublishedSessionMarkName reports a revocation mark of the record folder
+// whose key prefix is rootPrefix.
+func isPublishedSessionMarkName(name, rootPrefix string) bool {
+	return hasPrefixFold(name, rootPrefix) && strings.Contains(strings.ToLower(name[len(rootPrefix):]), publishedSessionMarkInfix)
 }
 
 // removePublishedSessionKeyFiles unlinks keys, each a few times when a
@@ -466,11 +656,12 @@ func removePublishedSessionKeyFiles(dir string, keys []SessionRecordKey) error {
 	return errors.Join(errs...)
 }
 
-// ErrPublishedSessionKeyAlive is a rotation that could neither rename, nor
-// remove, nor shadow the account's key: a record written under it may still
-// prove an allow during an outage. The caller must not go on with what the
-// rotation was for.
-var ErrPublishedSessionKeyAlive = errors.New("the protected session record key could not be rotated or removed")
+// ErrPublishedSessionKeyAlive is a revocation or rotation that could
+// neither rename, nor remove, nor shadow, nor mark revoked the account's
+// key, or could not list it: a record written under it may still prove an
+// allow during an outage. The caller must not go on with what the
+// revocation was for.
+var ErrPublishedSessionKeyAlive = errors.New("the protected session record key could not be rotated, removed or marked revoked")
 
 // RotatePublishedSessionKey ends every record of identity's account under
 // root (root or SYSTEM only) and leaves the account one new key, in this
@@ -480,48 +671,81 @@ var ErrPublishedSessionKeyAlive = errors.New("the protected session record key c
 //     name in one atomic rename, and the key folder is flushed: from that
 //     moment no earlier record proves anything, and the account already has
 //     its new key.
-//  2. Otherwise, or when the rename fails, every key file of the account is
-//     removed, the folder flushed, and a new key file created.
-//  3. When a key file could not be removed either, a second key is added
-//     next to it: the hook trusts no account with two keys.
+//  2. Otherwise, or when the rename fails, a new key file is created first,
+//     then every old key file of the account is removed and the folder
+//     flushed. Until the old ones are gone the account has two or more
+//     keys, which the hook refuses, so a removal that fails never leaves an
+//     old key alone; without a new key, an account that has two or more
+//     keys keeps them.
+//  3. When one old key could be neither renamed nor removed and no new key
+//     made, it is marked revoked.
 //
-// When none of that took, the error wraps ErrPublishedSessionKeyAlive. A
-// rotation that ended the old key but could not create a new one returns an
-// error without it: guarded calls of the account then block during an
-// outage until a later pass makes a key.
+// The revocation marks it listed before it changed anything are removed
+// once every key they can name is gone. When none of that took, the error
+// wraps ErrPublishedSessionKeyAlive. A rotation that ended the old key but
+// could not make a new one returns an error without it: guarded calls of
+// the account then block during an outage until a later pass makes a key.
 func RotatePublishedSessionKey(root, identity string, trust PublishedSessionTrust) error {
-	dir, prefix, keys, err := accountKeys(root, identity)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("%w: %v", ErrPublishedSessionKeyAlive, err)
+	digest, ok := publishedSessionIdentityDigest(identity)
+	if !ok {
+		return fmt.Errorf("%w: invalid caller identity", ErrPublishedSessionKeyAlive)
 	}
-	if err == nil && len(keys) == 1 {
+	return rotatePublishedSessionAccountKey(root, digest, trust)
+}
+
+func rotatePublishedSessionAccountKey(root, digest string, trust PublishedSessionTrust) error {
+	dir, prefix, ok := publishedSessionKeyPlace(root, digest)
+	if !ok {
+		return fmt.Errorf("%w: no protected session record folder %q", ErrPublishedSessionKeyAlive, root)
+	}
+	// The marks before any key changes: only these are removed once the
+	// keys they name are gone; one a revocation adds meanwhile stays.
+	marks, marksErr := publishedSessionMarksOf(root, digest)
+	clearMarks := func() {
+		if marksErr == nil {
+			marks.clear()
+		}
+	}
+	keys, err := publishedSessionKeys(dir, prefix)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return revokePublishedSessionKeyByMark(root, digest, nil, err)
+	}
+	if len(keys) == 1 {
 		next, nameErr := newPublishedSessionKeyName(dir, prefix)
 		if nameErr == nil {
 			if renameErr := publishedSessionRenameKey(keys[0].path, next); renameErr == nil {
 				if syncErr := publishedSessionSyncDir(dir); syncErr != nil {
 					return fmt.Errorf("flush %s after the key rotation: %w", dir, syncErr)
 				}
+				clearMarks()
 				return nil
 			}
 		}
 	}
 	if err := publishedSessionRecordRootExists(root); err != nil {
 		// Without a record folder there is no record to end and no key to
-		// make; a key file left over is removed.
+		// make; a key file left over is removed, or else marked revoked.
 		if killErr := removePublishedSessionKeyFiles(dir, keys); killErr != nil {
-			return fmt.Errorf("%w: %v", ErrPublishedSessionKeyAlive, killErr)
+			return revokePublishedSessionKeyByMark(root, digest, keys, killErr)
 		}
 		return nil
 	}
-	killErr := removePublishedSessionKeyFiles(dir, keys)
 	_, createErr := createPublishedSessionKey(dir, prefix, trust)
-	switch {
-	case killErr == nil:
-		return createErr
-	case createErr == nil:
-		return fmt.Errorf("%v; a second key was added, so the hook trusts neither until a later pass removes both", killErr)
+	if createErr != nil && len(keys) >= 2 {
+		return fmt.Errorf("no new key could be made (%v); the account keeps its %d keys, which the hook refuses", createErr, len(keys))
 	}
-	return fmt.Errorf("%w: %v; no second key could be added either: %v", ErrPublishedSessionKeyAlive, killErr, createErr)
+	killErr := removePublishedSessionKeyFiles(dir, keys)
+	switch {
+	case killErr == nil && createErr == nil:
+		clearMarks()
+		return nil
+	case killErr == nil:
+		clearMarks()
+		return fmt.Errorf("the old key is gone, but no new one could be made, so the account's guarded calls block during a gateway outage until a later pass makes one: %w", createErr)
+	case createErr == nil:
+		return fmt.Errorf("%v; the new key stays next to it, so the hook trusts neither until a later pass removes the old one", killErr)
+	}
+	return revokePublishedSessionKeyByMark(root, digest, keys, fmt.Errorf("%v; no new key could be made either: %v", killErr, createErr))
 }
 
 // publishedSessionRecordRootExists reports a record folder root that is a
@@ -537,27 +761,67 @@ func publishedSessionRecordRootExists(root string) error {
 	return nil
 }
 
-// EnsurePublishedSessionKey gives identity's account a key when it has none,
-// or more than one (RotatePublishedSessionKey). A new key never makes an
-// earlier record count, so this is safe at any time.
+// EnsurePublishedSessionKey gives identity's account one key no revocation
+// mark ends when it has none, more than one, or a revoked one
+// (RotatePublishedSessionKey). A new key never makes an earlier record
+// count, so this is safe at any time.
 func EnsurePublishedSessionKey(root, identity string, trust PublishedSessionTrust) error {
 	if err := publishedSessionRecordRootExists(root); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	if _, _, keys, err := accountKeys(root, identity); err == nil && len(keys) == 1 {
-		return nil
+	digest, ok := publishedSessionIdentityDigest(identity)
+	if !ok {
+		return fmt.Errorf("invalid caller identity")
 	}
-	return RotatePublishedSessionKey(root, identity, trust)
+	return ensurePublishedSessionAccountKey(root, digest, trust)
+}
+
+// ensurePublishedSessionAccountKey keeps the one key of the account digest
+// that no mark ends, and removes the marks of keys it no longer has;
+// otherwise it rotates the account's key.
+func ensurePublishedSessionAccountKey(root, digest string, trust PublishedSessionTrust) error {
+	dir, prefix, ok := publishedSessionKeyPlace(root, digest)
+	if !ok {
+		return fmt.Errorf("no protected session record folder %q", root)
+	}
+	if keys, err := publishedSessionKeys(dir, prefix); err == nil && len(keys) == 1 {
+		if marks, err := publishedSessionMarksOf(root, digest); err == nil && !marks.ends(keys[0]) {
+			// Every mark listed names a key that is gone, and no account
+			// but root or SYSTEM makes a key with that name again.
+			marks.clear()
+			return nil
+		}
+	}
+	return rotatePublishedSessionAccountKey(root, digest, trust)
 }
 
 // EnsurePublishedSessionKeys gives every account that has a folder under
-// root exactly one key (root or SYSTEM only): the gateway removes an
-// account's key before every block, and a lifecycle run removes all of
-// them. The hook guardian runs it at every pass and the lifecycle after a
-// run that succeeded.
+// root exactly one key no revocation mark ends (root or SYSTEM only): the
+// gateway removes an account's key before every block, and a lifecycle run
+// removes all of them. The hook guardian runs it at every pass, while no
+// lifecycle run holds the key lock (WithPublishedSessionKeyCreation).
 func EnsurePublishedSessionKeys(root string, trust PublishedSessionTrust) error {
+	return forEachPublishedSessionAccount(root, func(digest string) error {
+		return ensurePublishedSessionAccountKey(root, digest, trust)
+	})
+}
+
+// RotateAllPublishedSessionKeys gives every account that has a folder under
+// root one new key, whatever key it had (root or SYSTEM only): the last
+// step of a lifecycle run that succeeded, so that no allow published while
+// the run changed the deployment, under a key another process made
+// meanwhile, proves anything after the run.
+func RotateAllPublishedSessionKeys(root string, trust PublishedSessionTrust) error {
+	return forEachPublishedSessionAccount(root, func(digest string) error {
+		return rotatePublishedSessionAccountKey(root, digest, trust)
+	})
+}
+
+// forEachPublishedSessionAccount runs do for every account folder under
+// root. A record folder that does not exist has none.
+func forEachPublishedSessionAccount(root string, do func(digest string) error) error {
 	names, err := publishedSessionList(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -565,8 +829,7 @@ func EnsurePublishedSessionKeys(root string, trust PublishedSessionTrust) error 
 	if err != nil {
 		return err
 	}
-	dir, _, ok := publishedSessionKeyRoot(root)
-	if !ok {
+	if _, _, ok := publishedSessionKeyRoot(root); !ok {
 		return fmt.Errorf("no protected session record folder %q", root)
 	}
 	var errs []error
@@ -574,18 +837,7 @@ func EnsurePublishedSessionKeys(root string, trust PublishedSessionTrust) error 
 		if !publishedSessionDigest(name) {
 			continue
 		}
-		_, prefix, _ := publishedSessionKeyPlace(root, name)
-		keys, err := publishedSessionKeys(dir, prefix)
-		if err == nil && len(keys) == 1 {
-			continue
-		}
-		if err == nil {
-			err = removePublishedSessionKeyFiles(dir, keys)
-		}
-		if err == nil {
-			_, err = createPublishedSessionKey(dir, prefix, trust)
-		}
-		if err != nil {
+		if err := do(name); err != nil {
 			errs = append(errs, fmt.Errorf("account folder %s: %w", name, err))
 		}
 	}
@@ -593,26 +845,32 @@ func EnsurePublishedSessionKeys(root string, trust PublishedSessionTrust) error 
 }
 
 // KillAllPublishedSessionKeys removes the key of every account under the
-// record folder root (root or SYSTEM): the lifecycle runs it before install,
-// upgrade, repair, ensure and uninstall change anything, so nothing another
-// account did to the record folders while they were loosened brings an
-// allow back. Keys come back per account (EnsurePublishedSessionKeys). A
-// key file whose owner cannot be read is removed too. An account whose key
-// cannot be removed gets a second key next to it, which the hook refuses,
-// and the error names it.
+// record folder root (root or SYSTEM): the lifecycle runs it, holding its
+// lock and the key lock, before install, upgrade, repair, ensure and
+// uninstall change anything, so nothing another account did to the record
+// folders while they were loosened brings an allow back. Keys come back per
+// account at the end of a run that succeeded
+// (RotateAllPublishedSessionKeys). A key file whose owner cannot be read is
+// removed too. Each account gets a second key before its keys are removed
+// (removed again after them), so a key that cannot be removed is never left
+// alone: it stays next to the second key, which the hook refuses, or, when
+// no second key could be made, it is marked revoked; the error names it. The error wraps ErrPublishedSessionKeyAlive when a
+// key could not be shown dead: the key folder cannot be listed, or a key
+// could be neither removed, nor shadowed, nor marked revoked.
 func KillAllPublishedSessionKeys(root string) error {
 	dir, rootPrefix, ok := publishedSessionKeyRoot(root)
 	if !ok {
-		return fmt.Errorf("no protected session record folder %q", root)
+		return fmt.Errorf("%w: no protected session record folder %q", ErrPublishedSessionKeyAlive, root)
 	}
 	names, err := publishedSessionList(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: list %s: %v", ErrPublishedSessionKeyAlive, dir, err)
 	}
-	var errs []error
+	var prefixes []string
+	accounts := map[string][]SessionRecordKey{}
 	for _, name := range names {
 		if !hasPrefixFold(name, rootPrefix) || !IsPublishedSessionKeyName(name) {
 			continue
@@ -621,35 +879,87 @@ func KillAllPublishedSessionKeys(root string) error {
 		if owned, err := publishedSessionKeyOwned(path); err == nil && !owned {
 			continue
 		}
-		if err := removePublishedSessionKeyFiles(dir, []SessionRecordKey{{path: path}}); err != nil {
-			prefix := name[:strings.LastIndex(name, PublishedSessionKeyInfix)+len(PublishedSessionKeyInfix)]
-			if _, decoyErr := createPublishedSessionKey(dir, prefix, PublishedSessionTrust{}); decoyErr != nil {
-				err = fmt.Errorf("%w: %v; no second key could be added either: %v", ErrPublishedSessionKeyAlive, err, decoyErr)
-			}
-			errs = append(errs, err)
+		cut := strings.LastIndex(name, PublishedSessionKeyInfix) + len(PublishedSessionKeyInfix)
+		secret, _ := publishedSessionKeySecret(name[cut:])
+		prefix := name[:cut]
+		if _, seen := accounts[prefix]; !seen {
+			prefixes = append(prefixes, prefix)
 		}
+		accounts[prefix] = append(accounts[prefix], SessionRecordKey{path: path, secret: secret})
+	}
+	var errs []error
+	for _, prefix := range prefixes {
+		keys := accounts[prefix]
+		// A second key first: until every old key is gone the account has
+		// two or more, which the hook refuses, so a removal that fails never
+		// leaves an old key alone. It goes again once they are gone.
+		decoy, decoyErr := createPublishedSessionKey(dir, prefix, PublishedSessionTrust{})
+		if decoy == "" && len(keys) >= 2 {
+			// Already refused for its keys; removing some could leave one
+			// of them alone.
+			errs = append(errs, fmt.Errorf("no second key could be made (%v); the account keeps its %d keys, which the hook refuses", decoyErr, len(keys)))
+			continue
+		}
+		killErr := removePublishedSessionKeyFiles(dir, keys)
+		if killErr == nil {
+			if decoy != "" {
+				if err := removePublishedSessionKeyFiles(dir, []SessionRecordKey{{path: decoy}}); err != nil {
+					errs = append(errs, fmt.Errorf("the old keys are gone, but the second key made before their removal stays: %v", err))
+				}
+			}
+			continue
+		}
+		left := publishedSessionKeysLeft(keys)
+		if decoy != "" && len(left) >= 1 {
+			errs = append(errs, fmt.Errorf("%v; a second key stays next to it, so the hook trusts neither", killErr))
+			continue
+		}
+		if len(left) >= 2 {
+			errs = append(errs, fmt.Errorf("%v; the account keeps %d keys, which the hook refuses", killErr, len(left)))
+			continue
+		}
+		digest := strings.TrimSuffix(strings.ToLower(prefix[len(rootPrefix):]), PublishedSessionKeyInfix)
+		if !publishedSessionDigest(digest) {
+			errs = append(errs, fmt.Errorf("%w: %v", ErrPublishedSessionKeyAlive, killErr))
+			continue
+		}
+		errs = append(errs, revokePublishedSessionKeyByMark(root, digest, keys, killErr))
 	}
 	return errors.Join(errs...)
 }
 
+// publishedSessionKeysLeft are the keys whose file is still there, or
+// cannot be checked.
+func publishedSessionKeysLeft(keys []SessionRecordKey) []SessionRecordKey {
+	var left []SessionRecordKey
+	for _, key := range keys {
+		if _, err := os.Lstat(key.path); !errors.Is(err, fs.ErrNotExist) {
+			left = append(left, key)
+		}
+	}
+	return left
+}
+
 // RemovePublishedSessionKeys removes every key file of the record folder
-// root and every file with its key prefix this account may remove: for
-// uninstall, which removes the folder.
+// root, every file with its key prefix this account may remove, and its
+// revocation marks: for uninstall, which removes the folder.
 func RemovePublishedSessionKeys(root string) error {
 	if err := KillAllPublishedSessionKeys(root); err != nil {
 		return err
 	}
 	dir, rootPrefix, _ := publishedSessionKeyRoot(root)
-	names, err := publishedSessionList(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	for _, name := range names {
-		if hasPrefixFold(name, rootPrefix) && IsPublishedSessionKeyName(name) {
-			_ = os.Remove(filepath.Join(dir, name))
+	for _, folder := range []string{dir, publishedSessionMarkDir(filepath.Clean(strings.TrimSpace(root)), dir)} {
+		names, err := publishedSessionList(folder)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			if hasPrefixFold(name, rootPrefix) && (IsPublishedSessionKeyName(name) || isPublishedSessionMarkName(name, rootPrefix)) {
+				_ = os.Remove(filepath.Join(folder, name))
+			}
 		}
 	}
 	return nil

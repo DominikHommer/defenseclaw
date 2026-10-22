@@ -13,11 +13,13 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -40,10 +42,13 @@ import (
 // current key.
 //
 // The kill switch (1.0.4 guard loop): install, upgrade, repair, ensure and
-// uninstall remove the key before they change anything
-// (killWindowsHookSessionKey). Install, upgrade, repair and ensure that
-// finish without an error put the folder's owner and DACL back and only
-// then make a new key; uninstall removes the folder and the key. No record
+// uninstall take the key lock and remove every key before they change
+// anything (beginWindowsHookSessionKeyChange), and hold the lock to their
+// end, so the hook guardian makes no key meanwhile. An install, upgrade,
+// repair or ensure stops when the lock cannot be taken or a key cannot be
+// shown dead. Those that finish without an error put the folder's owner and
+// DACL back and only then give every account a new key; uninstall removes
+// the folder and the key. No record
 // written before the run proves anything after it, whatever an account
 // that kept a handle on the folder (with WRITE_DAC, from a time it owned
 // the folder) puts back in it: no handle on the folder reaches the key, and
@@ -54,6 +59,12 @@ var (
 	windowsHookSessionDir = func() (string, error) {
 		layout, err := managed.StandaloneWindowsLayout()
 		return layout.HookSessionDir, err
+	}
+	// windowsHookSessionKeyLock is the key lock in the lifecycle folder
+	// (enterprisepolicy.PublishedSessionKeysLockPath).
+	windowsHookSessionKeyLock = func() (string, error) {
+		layout, err := managed.StandaloneWindowsLayout()
+		return enterprisepolicy.PublishedSessionKeysLockPath(layout.LifecycleDir), err
 	}
 	windowsHookSessionGatewayAccount = `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc
 )
@@ -81,12 +92,18 @@ func windowsHookSessionTrust() enterprisepolicy.PublishedSessionTrust {
 	return enterprisepolicy.PublishedSessionTrust{ServiceAccount: windowsHookSessionGatewayAccount}
 }
 
+// windowsHookSessionLockKeys takes the key lock for an action,
 // windowsHookSessionKillKeys removes every account's key of the records
-// before an action changes anything, and windowsHookSessionEnsureKeys makes
-// one for each account that has none after it (replaceable in tests).
+// before the action changes anything, and windowsHookSessionRotateKeys
+// gives every account a new one after it (replaceable in tests).
+// windowsHookSessionKeyLockWait is the least an action waits for the key
+// lock, which another action holds for its whole run (its --lock-wait, when
+// longer, applies).
 var (
-	windowsHookSessionKillKeys   = enterprisepolicy.KillAllPublishedSessionKeys
-	windowsHookSessionEnsureKeys = enterprisepolicy.EnsurePublishedSessionKeys
+	windowsHookSessionLockKeys    = enterprisepolicy.LockPublishedSessionKeysForLifecycle
+	windowsHookSessionKillKeys    = enterprisepolicy.KillAllPublishedSessionKeys
+	windowsHookSessionRotateKeys  = enterprisepolicy.RotateAllPublishedSessionKeys
+	windowsHookSessionKeyLockWait = 30 * time.Second
 )
 
 // windowsHookSessionRootTrustProblem reports a record folder, or a folder
@@ -96,25 +113,89 @@ var windowsHookSessionRootTrustProblem = func(root string) error {
 	return enterprisepolicy.ValidatePublishedSessionRoot(root, windowsHookSessionTrust())
 }
 
-// killWindowsHookSessionKey removes the key of the protected session
-// records, of every account, before an install, upgrade, repair, ensure or
-// uninstall changes anything (GAP-0352): no record written before the
-// action proves anything once it started. Best effort: the end of the
-// action, and the hook guardian, make new keys.
-func killWindowsHookSessionKey(action string) {
+// windowsHookSessionKeyChange reports an action that changes the
+// deployment, and so the trust of the record folders.
+func windowsHookSessionKeyChange(action string) bool {
 	switch action {
 	case "install", "upgrade", "repair", "ensure", "uninstall":
-	default:
-		return
+		return true
 	}
-	if !windowsEnterpriseIsElevated() {
-		return
+	return false
+}
+
+// beginWindowsHookSessionKeyChange takes the key lock of the protected
+// session records for an elevated action that changes the deployment and
+// removes every account's key (killWindowsHookSessionKey), before the
+// action changes anything (GAP-0352): no hook guardian makes a key until
+// the action released the lock at its end, after it made new ones, and no
+// record written before the action proves anything once it started, not
+// even one written under a key an action it waited for made at its end. An
+// install, upgrade, repair or ensure stops with an error when the lock
+// cannot be taken or a key cannot be shown dead: it would put the record
+// folder's trust back while an earlier allow could still prove itself. An
+// uninstall only removes the keys and goes on; it removes the folder and
+// the keys at its end. The caller releases the lock once the action
+// finished.
+func beginWindowsHookSessionKeyChange(ctx context.Context, action string, opts *windowsEnterpriseLifecycleOptions) (release func(), err error) {
+	release = func() {}
+	if !windowsHookSessionKeyChange(action) || !windowsEnterpriseIsElevated() {
+		return release, nil
+	}
+	if action == "uninstall" {
+		// It removes the record folder and the keys at its end; a lock held
+		// across it would only keep the installer from removing its state.
+		_ = killWindowsHookSessionKey(action)
+		return release, nil
+	}
+	lockPath, err := windowsHookSessionKeyLock()
+	if err == nil {
+		wait := windowsHookSessionKeyLockWait
+		if opts != nil && opts.bundleLockWait > wait {
+			wait = opts.bundleLockWait
+		}
+		lockCtx, cancel := context.WithTimeout(ctx, wait)
+		var held func()
+		held, err = windowsHookSessionLockKeys(lockCtx, lockPath)
+		cancel()
+		if err == nil {
+			release = held
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			err = fmt.Errorf("another DefenseClaw lifecycle action %s of the protected session record keys (waited %s): %w", windowsEnterpriseLifecycleBusyMarker, wait, err)
+		}
+	}
+	if err != nil {
+		return func() {}, fmt.Errorf("hook_session_records_unavailable: the protected foreign-hook session record key lock could not be taken, so nothing was changed: %w", err)
+	}
+	if err := killWindowsHookSessionKey(action); err != nil {
+		release()
+		return func() {}, err
+	}
+	return release, nil
+}
+
+// killWindowsHookSessionKey removes the key of the protected session
+// records, of every account, before an elevated install, upgrade, repair,
+// ensure or uninstall changes anything (GAP-0352): no record written before
+// the action proves anything once it started. A key that could not be
+// removed but is shadowed or marked revoked is enough. It returns an error
+// when the record folder cannot be located or a key cannot be shown dead
+// (enterprisepolicy.ErrPublishedSessionKeyAlive). The end of the action,
+// and the hook guardian, make new keys.
+func killWindowsHookSessionKey(action string) error {
+	if !windowsHookSessionKeyChange(action) || !windowsEnterpriseIsElevated() {
+		return nil
 	}
 	root, err := windowsHookSessionDir()
-	if err != nil || strings.TrimSpace(root) == "" {
-		return
+	if err == nil && strings.TrimSpace(root) == "" {
+		err = errors.New("the standalone layout names no record folder")
 	}
-	_ = windowsHookSessionKillKeys(root)
+	if err != nil {
+		return fmt.Errorf("hook_session_records_unavailable: the protected foreign-hook session record folder cannot be located, so its keys cannot be removed and nothing was changed: %w", err)
+	}
+	if err := windowsHookSessionKillKeys(root); errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive) {
+		return fmt.Errorf("hook_session_records_unavailable: the protected foreign-hook session record keys could not be shown dead, so nothing was changed (a record written before this action could still allow a guarded call during a gateway outage): %w", err)
+	}
+	return nil
 }
 
 // ensureWindowsHookSessionRoot makes root a folder Administrators own with
@@ -239,7 +320,7 @@ func applyWindowsStandaloneHookSessionRecords(result *enterprisestatus.Result, o
 			}
 		}
 		if err == nil {
-			err = windowsHookSessionEnsureKeys(root, windowsHookSessionTrust())
+			err = windowsHookSessionRotateKeys(root, windowsHookSessionTrust())
 		}
 		if err != nil {
 			result.AddWarning("hook_session_records_unavailable", "the protected foreign-hook session record folder could not be prepared ("+

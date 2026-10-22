@@ -260,3 +260,10 @@ func publishedSessionKeyOwnerCheck(path string) (bool, error) {
 // file's creation and deletion in its journal, and the key file itself is
 // flushed when it is created.
 func publishedSessionSyncDir(string) error { return nil }
+
+// publishedSessionMarkDir is the folder of the revocation marks of the
+// record folder root: the record folder itself, which every account can
+// list and only SYSTEM, Administrators and the gateway service can add a
+// file to (its protected DACL). A standard user may add a file to the key
+// folder, %ProgramData%\Cisco.
+func publishedSessionMarkDir(root, _ string) string { return root }

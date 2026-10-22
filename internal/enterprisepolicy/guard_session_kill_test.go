@@ -33,7 +33,7 @@ func publishedSessionKillTestBlock() GuardDecision {
 // file removed, the outage scan was clean and the hook honored it, while
 // the gateway, once back, denies from its store. The gateway now removes
 // the record key right before the first write of a block
-// (SessionUpdate.BeforeBlock, KillPublishedSessionKey), for each way a
+// (SessionUpdate.BeforeBlock, RevokePublishedSessionKey), for each way a
 // block is recorded:
 //   - a session start that finds an unapproved hook;
 //   - a block carried from a blocked session to the agent process that
@@ -68,7 +68,7 @@ func TestApplyForeignHookSessionKillsTheKeyBeforeItRecordsABlock(t *testing.T) {
 				if blockedInStore(key) != before {
 					t.Error("the block must not be in the store before the key is removed")
 				}
-				if err := KillPublishedSessionKey(root, identity); err != nil {
+				if err := RevokePublishedSessionKey(root, identity); err != nil {
 					t.Errorf("kill: %v", err)
 				}
 			},
