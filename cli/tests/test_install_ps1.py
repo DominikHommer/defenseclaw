@@ -514,7 +514,7 @@ def test_a_room_refusal_runs_before_the_uv_folder_or_uv_is_created() -> None:
 def _bin_dir_functions() -> str:
     text = _text()
     out = []
-    for name in ("Copy-BinDir", "Restore-BinDir"):
+    for name in ("Copy-BinDir", "Restore-BinDir", "Assert-BinDirRestored", "Get-Sha256"):
         start = text.index(f"function {name}(")
         out.append(text[start : text.index("\n}\n", start) + 3])
     return "\n".join(out)
@@ -1397,3 +1397,178 @@ Write-Output "REPLACES=$script:replaces CHECKS=$script:checks"
     assert ("REFUSED:" if held else "INSTALLED") in out, out
     assert dest.read_text(encoding="ascii") == ("old" if held else "new")
     assert not list(tmp_path.glob("*.new"))
+
+
+# ── 1.0.4 (W4b loop round 1) ────────────────────────────────────────────────
+
+
+def _restore_case_functions() -> str:
+    names = (
+        "Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace", "Copy-BinDir", "Restore-BinDir",
+        "Assert-BinDirRestored", "Move-Path", "Get-DataEntries", "Test-ConnectorRecoveryArtifactName",
+        "Move-RestoreConnectorRecovery", "Undo-RestoreConnectorRecovery", "Restore-Slot", "Invoke-Quietly",
+        "Read-Text", "Restore-ExternalConfig", "Undo-HookFirst", "Undo-Snapshot",
+    )
+    return "\n".join(_ps1_function(name) for name in names)
+
+
+def _restore_case(tmp_path: Path, body: str) -> str:
+    # The shipped functions against disposable paths. A running hook refuses
+    # the in-place switch of its file, as Windows refuses MoveFileEx over a
+    # running program; Start-Sleep returns at once.
+    data, bin_dir = tmp_path / "data", tmp_path / "bin"
+    script = tmp_path / "case.ps1"
+    script.write_text(
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data}'\n$BinDir = '{bin_dir}'\n"
+        f"$Venv = '{data / '.venv'}'\n$InstallerDir = '{data / 'installer'}'\n"
+        "$NotData = @('.venv', 'installer', 'previous.new', '.failed-*')\n"
+        "$ManagedFiles = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')\n"
+        "$script:busy = $true\n"
+        "function Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
+        "function Start-Sleep { }\n"
+        "function Remove-Tree([string]$Path) { if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force } }\n"
+        "function Remove-Aside([string]$Path) { Remove-Item -LiteralPath $Path -Force }\n"
+        "function Remove-FailedInstall([string]$Failed) { Remove-Tree $Failed }\n"
+        "function New-FailedInstallDirectory {\n"
+        "    $failed = Join-Path $DataDir ('.failed-' + [Guid]::NewGuid().ToString('N'))\n"
+        "    New-Item -ItemType Directory -Path $failed | Out-Null\n    return $failed\n}\n"
+        "function Invoke-AtomicReplace([string]$New, [string]$Destination) {\n"
+        "    if ($script:busy -and $Destination -like '*defenseclaw-hook.exe') { throw 'Access is denied.' }\n"
+        "    [IO.File]::Copy($New, $Destination, $true); Remove-Item -LiteralPath $New -Force\n}\n"
+        + _restore_case_functions()
+        + "\n"
+        + body
+        + "\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    return out
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="ascii")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_restore_a_running_hook_refuses_keeps_the_snapshot_and_never_claims_recovery(tmp_path: Path) -> None:
+    # W4b loop round 1: after Install-HookFirst published the new hook, a
+    # later failure restores the snapshot while that hook runs. Its in-place
+    # switch is refused; the restore used to warn, delete the snapshot and
+    # report the previous install back over the new programs.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        _write(bin_dir / name, "new " + name)
+        _write(slot / "bin" / name, "old " + name)
+    _write(slot / "COMPLETE", "")
+    _write(data / "config.yaml", "new data")
+    _write(slot / "data" / "config.yaml", "old data")
+    receipt = ".defenseclaw-cas-v2-" + "a" * 24 + ".intent"
+    _write(data / receipt, "new receipt")
+    _write(slot / "data" / receipt, "old receipt")
+    _write(data / ".venv" / "runtime.txt", "new runtime")
+    _write(slot / "venv" / "runtime.txt", "old runtime")
+    out = _restore_case(
+        tmp_path,
+        f"try {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}",
+    )
+    assert "RESTORED" not in out and "REFUSED:" in out, out
+    assert "defenseclaw-hook.exe" in out and f"kept in {slot}" in out and "Run the installer again" in out, out
+    # Nothing but the idle programs moved: the snapshot, its marker, the data,
+    # the environment and both receipts are where they were.
+    assert (slot / "COMPLETE").exists()
+    assert (bin_dir / "defenseclaw-hook.exe").read_text(encoding="ascii") == "new defenseclaw-hook.exe"
+    assert (slot / "bin" / "defenseclaw-hook.exe").read_text(encoding="ascii") == "old defenseclaw-hook.exe"
+    assert (data / "config.yaml").read_text(encoding="ascii") == "new data"
+    assert (slot / "data" / "config.yaml").read_text(encoding="ascii") == "old data"
+    assert (data / ".venv" / "runtime.txt").read_text(encoding="ascii") == "new runtime"
+    assert (slot / "venv" / "runtime.txt").read_text(encoding="ascii") == "old runtime"
+    assert (data / receipt).read_text(encoding="ascii") == "new receipt"
+    assert (slot / "data" / receipt).read_text(encoding="ascii") == "old receipt"
+    assert not list(data.glob(".failed-*"))
+    # Once the hook has finished, running the restore again finishes it.
+    out = _restore_case(tmp_path, f"$script:busy = $false\nRestore-Slot '{slot}' | Out-Null\nWrite-Output 'RESTORED'")
+    assert "RESTORED" in out, out
+    assert not slot.exists()
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        assert (bin_dir / name).read_text(encoding="ascii") == "old " + name
+    assert (data / "config.yaml").read_text(encoding="ascii") == "old data"
+    assert (data / ".venv" / "runtime.txt").read_text(encoding="ascii") == "old runtime"
+    assert (data / receipt).read_text(encoding="ascii") == "old receipt"
+    failed = list(data.glob(".failed-*"))
+    assert len(failed) == 1
+    assert (failed[0] / "data" / "config.yaml").read_text(encoding="ascii") == "new data"
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("case", ["switch-left-new-bytes", "extra-file-stays"])
+def test_restore_bin_dir_proves_the_saved_bytes_before_it_returns(tmp_path: Path, case: str) -> None:
+    # A switch that reports success but leaves other bytes, or a file the
+    # snapshot did not hold that is still there, is not a restored install.
+    bin_dir, saved = tmp_path / "bin", tmp_path / "data" / "previous.new" / "bin"
+    _write(bin_dir / "defenseclaw-hook.exe", "new hook")
+    _write(saved / "defenseclaw-hook.exe", "old hook")
+    _write(bin_dir / "defenseclaw-gateway.exe", "new gateway")
+    if case == "switch-left-new-bytes":
+        _write(saved / "defenseclaw-gateway.exe", "old gateway")
+        override = "function Invoke-AtomicReplace([string]$New, [string]$Destination) { Remove-Item -LiteralPath $New -Force }"
+    else:
+        override = "function Remove-Aside([string]$Path) { }"
+    out = _restore_case(
+        tmp_path,
+        f"$script:busy = $false\n{override}\n"
+        f"try {{ Restore-BinDir '{saved}'; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}",
+    )
+    assert "RESTORED" not in out and "does not hold the saved copy of" in out, out
+    assert "defenseclaw-gateway.exe" in out, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_an_unfinished_snapshot_keeps_the_old_hook_copy_when_the_new_hook_is_running(tmp_path: Path) -> None:
+    # Save-Snapshot failed after Install-HookFirst: the slot holds the only
+    # copy of the previous hook. A refused switch keeps the slot (no COMPLETE
+    # marker, so the next run undoes it again) and says so; the environment
+    # it moved goes back either way.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    _write(bin_dir / "defenseclaw-hook.exe", "new hook")
+    _write(slot / "bin" / "defenseclaw-hook.exe", "old hook")
+    _write(slot / "HOOK_FIRST", "")
+    _write(slot / "venv" / "runtime.txt", "old runtime")
+    out = _restore_case(
+        tmp_path,
+        f"try {{ Undo-Snapshot '{slot}'; Write-Output 'UNDONE' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}",
+    )
+    assert "UNDONE" not in out and "Could not put the previous hook back" in out and f"kept in {slot}" in out, out
+    assert (slot / "bin" / "defenseclaw-hook.exe").read_text(encoding="ascii") == "old hook"
+    assert (bin_dir / "defenseclaw-hook.exe").read_text(encoding="ascii") == "new hook"
+    assert (data / ".venv" / "runtime.txt").read_text(encoding="ascii") == "old runtime"
+    out = _restore_case(tmp_path, f"$script:busy = $false\nUndo-Snapshot '{slot}'\nWrite-Output 'UNDONE'")
+    assert "UNDONE" in out, out
+    assert not slot.exists()
+    assert (bin_dir / "defenseclaw-hook.exe").read_text(encoding="ascii") == "old hook"
+
+
+def test_no_restore_or_undo_hides_a_refused_program_switch() -> None:
+    # Every path that puts programs back propagates the refusal: none runs
+    # under Invoke-Quietly, and a failed Save-Snapshot whose undo is
+    # unfinished never says that nothing was changed.
+    text = _text()
+    assert not re.search(r"Invoke-Quietly \{[^}]*(Restore-BinDir|Undo-Snapshot|Undo-HookFirst|Restore-Live)", text)
+    install = _ps1_function("Invoke-Install")
+    failed_save = install[install.index("if (-not $saved) {") :]
+    failed_save = failed_save[: failed_save.index("Die \"Could not save the current install; nothing was changed\"")]
+    assert "try { Undo-Snapshot $Snap }" in failed_save
+    assert failed_save.index("if (-not $undone) { Die") < failed_save.index("it was not changed, but")
+    restore = _ps1_function("Restore-BinDir")
+    assert restore.count("Assert-BinDirRestored $From") == 2

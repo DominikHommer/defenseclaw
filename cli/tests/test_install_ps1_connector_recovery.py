@@ -53,6 +53,7 @@ def _helpers() -> str:
         "New-FailedInstallDirectory",
         "Get-DataEntries",
         "Move-RestoreConnectorRecovery",
+        "Undo-RestoreConnectorRecovery",
         "Restore-Slot",
         "Clear-SetupDataDir",
         "Invoke-Quietly",
@@ -1464,7 +1465,11 @@ def test_every_automatic_failed_tree_removal_preserves_receipts_first() -> None:
     assert slot.count("-not (Test-ConnectorRecoveryArtifactName $_.Name)") == 2
     receipts = _function("Move-RestoreConnectorRecovery")
     assert "Remove-Tree" not in receipts
-    assert "Move-Path $entry.To $entry.From" in receipts
+    assert "Undo-RestoreConnectorRecovery $moved $Slot $Failed" in receipts
+    assert "Move-Path $entry.To $entry.From" in _function("Undo-RestoreConnectorRecovery")
+    # A refused program restore puts the receipts back too (W4b loop round 1).
+    refused = slot[slot.index('try { Restore-BinDir (Join-Path $Slot "bin") } catch {') :]
+    assert refused.index("Undo-RestoreConnectorRecovery $receipts $Slot $failed") < refused.index("throw $refused")
 
 
 def _restore_stubs(data: Path, slot: Path) -> str:

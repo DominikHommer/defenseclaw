@@ -1361,15 +1361,42 @@ function Restore-BinDir([string]$From) {
                 Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
             }
         }
+        Assert-BinDirRestored $From
         return
     }
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+    # A hook still running refuses its in-place switch (Switch-InPlace): put
+    # back every file that can be, then stop on the rest, so the caller keeps
+    # the copy in $From and the run can be repeated.
+    $refused = @()
     foreach ($name in $ManagedFiles) {
         $saved = Join-Path $From $name
         $live = Join-Path $BinDir $name
-        if (Test-Path -LiteralPath $saved -PathType Leaf) { Install-File $saved $live }
-        elseif (Test-Path -LiteralPath $live) { Remove-Aside $live }
+        try {
+            if (Test-Path -LiteralPath $saved -PathType Leaf) { Install-File $saved $live }
+            elseif (Test-Path -LiteralPath $live) { Remove-Aside $live }
+        } catch { $refused += $_.Exception.Message }
     }
+    if ($refused.Count) { throw "Could not put back every program in ${BinDir}: $($refused -join '; ')" }
+    Assert-BinDirRestored $From
+}
+
+function Assert-BinDirRestored([string]$From) {
+    # A restore is claimed only when $BinDir holds exactly the files saved in
+    # $From, byte for byte: a hook or gateway of the failed install left
+    # beside the previous data is not the previous install.
+    $wrong = @()
+    $noBinDir = Test-Path -LiteralPath (Join-Path $From "NO_BINDIR")
+    foreach ($name in $ManagedFiles) {
+        $saved = Join-Path $From $name
+        $live = Join-Path $BinDir $name
+        if (-not $noBinDir -and (Test-Path -LiteralPath $saved -PathType Leaf)) {
+            if (-not (Test-Path -LiteralPath $live -PathType Leaf) -or (Get-Sha256 $live) -ne (Get-Sha256 $saved)) { $wrong += $name }
+        } elseif (Test-Path -LiteralPath $live) {
+            $wrong += $name
+        }
+    }
+    if ($wrong.Count) { throw "$BinDir does not hold the saved copy of $($wrong -join ', ')" }
 }
 
 # $Where names the environment in the progress lines: the installer builds
@@ -1570,12 +1597,17 @@ function Undo-HookFirst([string]$Slot) {
 }
 
 function Undo-Snapshot([string]$Slot) {
-    # Put back what an unfinished Save-Snapshot moved.
-    Undo-HookFirst $Slot
+    # Put back what an unfinished Save-Snapshot moved. The slot holds the
+    # only copy of the previous hook until it is back in place: when a
+    # running hook refuses that switch, the slot stays and the error says so,
+    # and the next run finishes the undo (Resume-InterruptedRun).
+    $hookRefused = ""
+    try { Undo-HookFirst $Slot } catch { $hookRefused = $_.Exception.Message }
     if ((Test-Path -LiteralPath (Join-Path $Slot "venv")) -and -not (Test-Path -LiteralPath $Venv)) { Move-Path (Join-Path $Slot "venv") $Venv 60 }
     if ((Test-Path -LiteralPath (Join-Path $Slot "installer")) -and -not (Test-Path -LiteralPath $InstallerDir)) {
         Move-Path (Join-Path $Slot "installer") $InstallerDir
     }
+    if ($hookRefused) { throw "Could not put the previous hook back in $BinDir ($hookRefused); its copy was kept in $Slot. Run the installer again to finish putting it back" }
     Remove-Tree $Slot
 }
 
@@ -1811,17 +1843,25 @@ function Move-RestoreConnectorRecovery([string]$Slot, [string]$Failed) {
             $moved.Add(@{ From = $entry.FullName; To = $to })
         }
     } catch {
-        $failure = $_.Exception.Message
-        $retained = @()
-        for ($index = $moved.Count - 1; $index -ge 0; $index--) {
-            $entry = $moved[$index]
-            try { Move-Path $entry.To $entry.From } catch { $retained += $entry.To }
-        }
-        if ($retained.Count) {
-            throw "$failure; connector receipt moves could not all be undone; keep $Slot and $Failed (retained: $($retained -join ', '))"
-        }
-        throw $failure
+        Undo-RestoreConnectorRecovery $moved $Slot $Failed $_.Exception.Message
     }
+    # The caller undoes these renames when a later step of its restore refuses.
+    return ,$moved
+}
+
+function Undo-RestoreConnectorRecovery($Moved, [string]$Slot, [string]$Failed, [string]$Failure) {
+    # Put the receipt renames of Move-RestoreConnectorRecovery back, latest
+    # first, and throw $Failure: with every one back, retrying the marked
+    # snapshot moves each receipt once.
+    $retained = @()
+    for ($index = $Moved.Count - 1; $index -ge 0; $index--) {
+        $entry = $Moved[$index]
+        try { Move-Path $entry.To $entry.From } catch { $retained += $entry.To }
+    }
+    if ($retained.Count) {
+        throw "$Failure; connector receipt moves could not all be undone; keep $Slot and $Failed (retained: $($retained -join ', '))"
+    }
+    throw $Failure
 }
 
 function Restore-Slot([string]$Slot) {
@@ -1829,11 +1869,24 @@ function Restore-Slot([string]$Slot) {
     $olderFailed = @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".failed-*" -ErrorAction SilentlyContinue)
     $failed = New-FailedInstallDirectory
     New-Item -ItemType Directory -Path (Join-Path $failed "data") | Out-Null
-    Move-RestoreConnectorRecovery $Slot $failed
+    $receipts = Move-RestoreConnectorRecovery $Slot $failed
+    # A program that cannot go back (a hook of the failed install still
+    # running refuses its in-place switch) stops the restore before any data
+    # or environment moves. $Slot keeps its COMPLETE marker and the only copy
+    # of the previous programs, and the receipts go back, so running the
+    # installer again finishes the restore; what is already back is skipped.
+    try { Restore-BinDir (Join-Path $Slot "bin") } catch {
+        $refused = "$($_.Exception.Message). The previous install was not restored; its copy was kept in $Slot. Run the installer again to finish restoring it"
+        try { Undo-RestoreConnectorRecovery $receipts $Slot $failed $refused } catch {
+            $refused = $_.Exception.Message
+        }
+        # Only this restore's empty .failed folder goes; a non-empty one stays.
+        try { [IO.Directory]::Delete((Join-Path $failed "data"), $false); [IO.Directory]::Delete($failed, $false) } catch { }
+        throw $refused
+    }
     # Only the latest failed install is kept. Do not prune an earlier copy
     # until the strict receipt phase succeeds; archive its evidence first.
     foreach ($old in $olderFailed) { Invoke-Quietly { Remove-FailedInstall $old.FullName } }
-    Invoke-Quietly { Restore-BinDir (Join-Path $Slot "bin") }
     foreach ($part in @(@($Venv, "venv"), @($InstallerDir, "installer"))) {
         Invoke-Quietly { if (Test-Path -LiteralPath $part[0]) { Move-Path $part[0] (Join-Path $failed $part[1]) 60 } }
         Invoke-Quietly { if (Test-Path -LiteralPath (Join-Path $Slot $part[1])) { Move-Path (Join-Path $Slot $part[1]) $part[0] 60 } }
@@ -2784,9 +2837,11 @@ function Invoke-Install {
     try { [Console]::TreatControlCAsInput = $true } catch { }
     try { $saved = Save-Snapshot } catch { Write-Err $_.Exception.Message; [void](Test-DiskFull); $saved = $false }
     if (-not $saved) {
-        Invoke-Quietly { Undo-Snapshot $Snap }
+        $undone = $true
+        try { Undo-Snapshot $Snap } catch { Write-Err $_.Exception.Message; $undone = $false }
         Clear-StagedRelease
         Restart-Old
+        if (-not $undone) { Die "Could not save the current install, and what it had changed is not all back yet (see above); run the installer again to finish. Log: $($Run.Log)" }
         if ($Run.OldGatewayDown) { Die "Could not save the current install; it was not changed, but its gateway is not running (see above)" }
         Die "Could not save the current install; nothing was changed"
     }
