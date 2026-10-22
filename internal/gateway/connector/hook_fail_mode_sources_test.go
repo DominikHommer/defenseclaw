@@ -422,3 +422,160 @@ func TestSharedShellReaderFollowsOnlyAnOpenTheConfigChose(t *testing.T) {
 		})
 	}
 }
+
+// A managed hook's guardian-written runtime records carry no config source
+// (the managed readers decode them canonically), and their open is the
+// administrator's explicit choice: the shared inspect scripts follow it while
+// the gateway is down, with or without jq and python3. The managed exception
+// needs both the managed hook and a sidecar the managed writer wrote: a
+// per-user hook that inherits DEFENSECLAW_MANAGED_HOOK=1 still closes an
+// unsourced open, and a managed hook does not follow a per-user record.
+func TestSharedShellReaderFollowsAManagedSidecarsOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hooks are not used on Windows")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is not installed")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const addr = "127.0.0.1:18970"
+	writeManaged := func(t *testing.T, hookDir string, modes ...string) {
+		t.Helper()
+		for i := 0; i+1 < len(modes); i += 2 {
+			if err := writeHookConfigSidecar(hookDir, addr, modes[i], modes[i+1], true); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	writePerUser := func(t *testing.T, hookDir, connector, mode, source string) {
+		t.Helper()
+		if err := writeHookConfigSidecarUsing(hookDir, addr, connector, mode, source, false, atomicWriteFile); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRaw := func(name, body string) func(*testing.T, string) {
+		return func(t *testing.T, hookDir string) {
+			t.Helper()
+			if err := os.WriteFile(filepath.Join(hookDir, name), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	flatOpen := writeRaw(hookConfigSidecarName+".codex", "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n")
+	for _, test := range []struct {
+		name      string
+		managed   bool
+		connector string
+		setup     func(*testing.T, string)
+		want      string
+		// jsonOnly: only hooks/.hookcfg holds the entry, which the reader
+		// parses with jq or python3; without both it fails closed.
+		jsonOnly bool
+	}{
+		{name: "managed open", managed: true, connector: "codex", setup: func(t *testing.T, d string) { writeManaged(t, d, "codex", "open") }, want: "open"},
+		// One shared script serves every connector and nothing authenticates
+		// the selected one, so a closed peer record closes it (train rule:
+		// a selector can only tighten), managed or not.
+		{name: "managed open beside a closed peer", managed: true, connector: "codex", setup: func(t *testing.T, d string) {
+			writeManaged(t, d, "codex", "open", "claudecode", "closed")
+		}, want: "closed"},
+		{name: "managed open beside a managed open peer", managed: true, connector: "codex", setup: func(t *testing.T, d string) {
+			writeManaged(t, d, "codex", "open", "claudecode", "open")
+		}, want: "open"},
+		{name: "managed closed peer of an open", managed: true, connector: "claudecode", setup: func(t *testing.T, d string) {
+			writeManaged(t, d, "codex", "open", "claudecode", "closed")
+		}, want: "closed"},
+		{name: "managed closed", managed: true, connector: "codex", setup: func(t *testing.T, d string) { writeManaged(t, d, "codex", "closed") }, want: "closed"},
+		{name: "managed unscoped open", managed: true, connector: "", setup: func(t *testing.T, d string) { writeManaged(t, d, "", "open") }, want: "open"},
+		{name: "managed open in the JSON sidecar only", managed: true, connector: "codex", setup: func(t *testing.T, d string) {
+			writeManaged(t, d, "codex", "open")
+			if err := os.Remove(filepath.Join(d, hookConfigSidecarName+".codex")); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "open", jsonOnly: true},
+		{name: "per-user unsourced open in the JSON sidecar only", managed: false, connector: "codex", setup: func(t *testing.T, d string) {
+			writePerUser(t, d, "codex", "open", "")
+			if err := os.Remove(filepath.Join(d, hookConfigSidecarName+".codex")); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "closed", jsonOnly: true},
+		{name: "managed hook, flat open without the managed sidecar", managed: true, connector: "codex", setup: flatOpen, want: "closed"},
+		{name: "managed hook, per-user unsourced open", managed: true, connector: "codex", setup: func(t *testing.T, d string) { writePerUser(t, d, "codex", "open", "") }, want: "closed"},
+		{name: "managed hook, earlier release's per-user sidecar", managed: true, connector: "codex", setup: func(t *testing.T, d string) {
+			flatOpen(t, d)
+			writeRaw(hookConfigSidecarName, "{\"version\":2,\"gateway_addr\":\""+addr+"\",\"fail_modes\":{\"codex\":\"open\"}}\n")(t, d)
+		}, want: "closed"},
+		{name: "managed hook, managed_enterprise false", managed: true, connector: "codex", setup: func(t *testing.T, d string) {
+			flatOpen(t, d)
+			writeRaw(hookConfigSidecarName, "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"managed_enterprise\":false}\n")(t, d)
+		}, want: "closed"},
+		{name: "managed hook, managed_enterprise only inside a string", managed: true, connector: "codex", setup: func(t *testing.T, d string) {
+			flatOpen(t, d)
+			writeRaw(hookConfigSidecarName, "{\"version\":2,\"gateway_addr\":\"x\\\"managed_enterprise\\\": true\",\"fail_modes\":{\"codex\":\"open\"}}\n")(t, d)
+		}, want: "closed"},
+		{name: "per-user hook reads a managed sidecar", managed: false, connector: "codex", setup: func(t *testing.T, d string) { writeManaged(t, d, "codex", "open") }, want: "closed"},
+		{name: "per-user sourced open", managed: false, connector: "codex", setup: func(t *testing.T, d string) {
+			writePerUser(t, d, "codex", "open", HookFailModeSourceConfig)
+		}, want: "open"},
+	} {
+		for _, tools := range readerToolSets(t) {
+			t.Run(test.name+"/"+tools.name, func(t *testing.T) {
+				want := test.want
+				if test.jsonOnly && !tools.json {
+					want = "closed"
+				}
+				hookDir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), helper, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				test.setup(t, hookDir)
+				cmd := exec.Command(bash, "-c", `. "$1/_hardening.sh"; defenseclaw_shared_runtime_fail_mode "$1" "$2"`, "test", hookDir, test.connector)
+				cmd.Env = []string{"PATH=" + tools.path, "HOME=" + t.TempDir()}
+				if test.managed {
+					cmd.Env = append(cmd.Env, "DEFENSECLAW_MANAGED_HOOK=1")
+				}
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("reader: %v", err)
+				}
+				if got := string(out); got != want {
+					t.Fatalf("fail mode %q, want %q", got, want)
+				}
+			})
+		}
+	}
+}
+
+// readerToolSets are the PATHs the shared shell reader runs under: the host
+// PATH, one with only python3 (no jq), when the host has python3, and one
+// with neither. json says whether the reader can parse hooks/.hookcfg.
+func readerToolSets(t *testing.T) []struct {
+	name, path string
+	json       bool
+} {
+	t.Helper()
+	_, jq := exec.LookPath("jq")
+	python, pythonErr := exec.LookPath("python3")
+	sets := []struct {
+		name, path string
+		json       bool
+	}{
+		{name: "host PATH", path: os.Getenv("PATH"), json: jq == nil || pythonErr == nil},
+		{name: "no jq or python3", path: filepath.Join(t.TempDir(), "empty-bin")},
+	}
+	if pythonErr == nil {
+		bin := t.TempDir()
+		if err := os.Symlink(python, filepath.Join(bin, "python3")); err != nil {
+			t.Fatal(err)
+		}
+		sets = append(sets, struct {
+			name, path string
+			json       bool
+		}{name: "python3 only", path: bin, json: true})
+	}
+	return sets
+}
