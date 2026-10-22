@@ -3623,6 +3623,12 @@ def _unused_pin_changes(cfg, after: dict[str, str]) -> tuple[list, list[str]]:
         selected[_scope_key(None, profile)] = getattr(block, "rule_pack", "")
         for connector, sub in (getattr(block, "connectors", None) or {}).items():
             selected[_scope_key(connector, profile)] = getattr(sub, "rule_pack", "")
+    application = getattr(cfg, "application_protection", None)
+    selected["application_protection.guardrail"] = getattr(getattr(application, "guardrail", None), "rule_pack", "")
+    for connector, block in (getattr(application, "connectors", None) or {}).items():
+        selected[f"application_protection.connectors.{connector}.guardrail"] = getattr(
+            getattr(block, "guardrail", None), "rule_pack", ""
+        )
     selected.update(after)
     used = {str(name or "").strip() for name in selected.values()}
     dropped = sorted(name for name in (getattr(gc, "custom_packs", None) or {}) if name not in used)
@@ -3975,6 +3981,22 @@ def use_pack_cmd(
         path = candidate
         pack_name, kind = policy_catalog.pack_name_for_path(app.cfg, path)
 
+    # A directory spelling is the same pinned pack even when its key differs
+    # from the basename (or it is reached through a symlink). Check every pin
+    # for that directory so conflicting aliases cannot silently re-pin it.
+    path_pins = []
+    if kind != "preset":
+        canonical = os.path.normcase(os.path.realpath(path))
+        path_pins = [
+            (name, pin)
+            for name, pin in sorted((getattr(gc, "custom_packs", None) or {}).items())
+            if getattr(pin, "path", "")
+            and os.path.normcase(os.path.realpath(policy_catalog.normalize_pack_path(pin.path))) == canonical
+        ]
+        if path_pins and kind != "registered":
+            pack_name = path_pins[0][0]
+            kind = "registered"
+
     if kind == "preset" and not os.path.isdir(path):
         _finish(
             ok=False,
@@ -4017,8 +4039,10 @@ def use_pack_cmd(
                 )
             # The pin covers the pack's own files, not the embedded defaults.
             digest = str((result.summary or {}).get("files_digest", "") or "")
-            pinned = str(getattr(registered, "digest", "") or "").strip().lower().removeprefix("sha256:")
-            if kind == "registered" and digest.lower() != pinned:
+            for pin_name, pin in path_pins:
+                pinned = str(getattr(pin, "digest", "") or "").strip().lower().removeprefix("sha256:")
+                if digest and digest.lower() == pinned:
+                    continue
                 _finish(
                     ok=False,
                     exit_code=1,
@@ -4026,8 +4050,8 @@ def use_pack_cmd(
                     path=path,
                     validation=validation,
                     message=(
-                        f"Rule pack {pack_name!r} no longer matches the digest registered for it. Review the pack, "
-                        f"then pin it: defenseclaw config set guardrail.custom_packs.{pack_name}.digest "
+                        f"Rule pack {pin_name!r} no longer matches the digest registered for it. Review the pack, "
+                        f"then pin it: defenseclaw config set guardrail.custom_packs.{pin_name}.digest "
                         f"sha256:{digest}. Nothing was changed."
                     ),
                 )
