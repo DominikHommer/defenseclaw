@@ -792,8 +792,9 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
     (GAP-1094). Codex also refuses to start when hook entries have lost their
     command, for example after hook lines were deleted by hand (GAP-1102).
     Copilot reads ``disableAllHooks`` from its user and repository settings
-    (rel-1-0-4 GAP-0580); settings that cannot be read fail too, since what
-    Copilot does with them is unknown. Managed installs keep the hooks in machine policy that these settings
+    (rel-1-0-4 GAP-0580) and from the hook registration files themselves;
+    settings that cannot be read fail too, since what Copilot does with them
+    is unknown. Managed installs keep the hooks in machine policy that these settings
     cannot turn off, so they are not checked here.
     """
 
@@ -839,7 +840,7 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
                     )
                 )
     elif connector == "copilot":
-        from defenseclaw.connector_paths import copilot_settings_resolution
+        from defenseclaw.connector_paths import connector_hook_config_paths, copilot_settings_resolution
 
         if workspace_dir is None:
             resolver = getattr(cfg, "connector_workspace_dir", None)
@@ -861,7 +862,47 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
                     f"remove disableAllHooks from {settings.source} (or set it to false), then restart Copilot",
                 )
             )
+        # A lock written before the hook files were recorded (an upgrade)
+        # still has the registration at the path setup writes.
+        try:
+            canonical = [Path(item) for item in connector_hook_config_paths(connector, workspace_dir)]
+        except ValueError:
+            canonical = []
+        for path in dict.fromkeys([*_hook_config_paths(cfg, connector), *canonical]):
+            problem = copilot_registration_switch_problem(path)
+            if problem:
+                problems.append(problem)
+                break
     return problems
+
+
+def copilot_registration_switch_problem(path: Path | str) -> str:
+    """Why the Copilot hook registration file at *path* turns its own hooks off, or "".
+
+    Copilot also reads ``disableAllHooks`` from the hook file itself; setup
+    refuses such a file (hook_only.go) and so does the Windows doctor, while
+    POSIX doctor and status showed the hooks guarded. A value that is not a
+    boolean fails too, since what Copilot does with it is unknown.
+    """
+
+    path = Path(path)
+    document = _read_agent_config(path)
+    if not isinstance(document, dict) or "disableAllHooks" not in document:
+        return ""
+    value = document["disableAllHooks"]
+    if type(value) is not bool:
+        return HookProblem(
+            f"Copilot disableAllHooks in {path} is not a boolean, so DefenseClaw cannot tell whether Copilot "
+            "runs its hooks",
+            f"remove disableAllHooks from {path}, then restart Copilot",
+        )
+    if not value:
+        return ""
+    return HookProblem(
+        f"Copilot disableAllHooks is true in {path}, so Copilot runs none of its hooks "
+        "and DefenseClaw is not guarding its tool calls",
+        f"remove disableAllHooks from {path} (or set it to false), then restart Copilot",
+    )
 
 
 def _registered_commands(value: Any) -> list[str]:

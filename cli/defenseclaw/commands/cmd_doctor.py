@@ -9280,6 +9280,8 @@ def _check_copilot_hooks(
     search_path: str | None = None,
     pathext: str | None = None,
 ) -> None:
+    from defenseclaw.hook_integrity import copilot_registration_switch_problem
+
     workspace = _workspace_dir(cfg)
     data_dir = getattr(cfg, "data_dir", "") or ""
     if workspace and _path_is_inside(workspace, data_dir):
@@ -9331,6 +9333,8 @@ def _check_copilot_hooks(
         _emit("fail", "Copilot hooks", f"{path} not found", r=r)
     elif not _hook_json_references(path, "copilot-hook.sh"):
         _emit("fail", "Copilot hooks", f"{path} does not reference DefenseClaw hook script", r=r)
+    elif switched_off := copilot_registration_switch_problem(path):
+        _emit("fail", "Copilot hooks", switched_off, r=r, remediation=switched_off.repair)
     elif unguarded := _unguarded_tool_call_problem(cfg, "copilot", path):
         _emit("fail", "Copilot hooks", unguarded, r=r, remediation=unguarded.repair)
     else:
