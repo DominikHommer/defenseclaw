@@ -3639,10 +3639,33 @@ def _scope_pack_selections(cfg) -> dict[str, tuple[str | None, str | None, str]]
     return selected
 
 
+def _app_protection_pack_selections(cfg) -> dict[str, tuple[str | None, str, bool]]:
+    """Every automatic-protection guardrail block: config path -> (connector,
+    its ``rule_pack``, whether it is on). The gateway loads these packs for
+    the connectors it protects automatically (appProtectionGuardrailOverride
+    in internal/config/application_protection.go); use-pack never writes them."""
+    ap = getattr(cfg, "application_protection", None)
+    if ap is None:
+        return {}
+    on = bool(getattr(ap, "enabled", False))
+
+    def _pack(block) -> str:
+        return str(getattr(getattr(block, "guardrail", None), "rule_pack", "") or "").strip()
+
+    selected = {"application_protection.guardrail": (None, _pack(ap), on)}
+    for connector, entry in sorted((getattr(ap, "connectors", None) or {}).items()):
+        selected[f"application_protection.connectors.{connector}.guardrail"] = (
+            connector,
+            _pack(entry),
+            on and getattr(entry, "enabled", None) is not False,
+        )
+    return selected
+
+
 def _repin_shared_scopes(cfg, name: str, written: set[str]) -> list[str]:
     """The scopes outside *written* (config paths) that select custom pack
     *name*: re-pinning its digest changes their policy too, so the prompt
-    and the result name them."""
+    and the result name them, automatic-protection scopes included."""
     shared = []
     for path, (connector, profile, selected) in _scope_pack_selections(cfg).items():
         if path in written or selected != name:
@@ -3651,6 +3674,15 @@ def _repin_shared_scopes(cfg, name: str, written: set[str]) -> list[str]:
             shared.append("the global pack (every connector without its own pack)")
         else:
             shared.append(_scope_words(connector, profile))
+    for path, (connector, selected, on) in _app_protection_pack_selections(cfg).items():
+        if selected != name:
+            continue
+        words = (
+            f"automatic protection for {_connector_label(connector)}"
+            if connector
+            else "automatic protection (connectors it protects that are not set up manually)"
+        )
+        shared.append(f"{words} ({path}{'' if on else ', when turned on'})")
     return shared
 
 
@@ -3664,6 +3696,9 @@ def _unused_pin_changes(cfg, after: dict[str, str]) -> tuple[list, list[str]]:
     gc = cfg.guardrail
     selected = {path: pack for path, (_c, _p, pack) in _scope_pack_selections(cfg).items()}
     selected.update(after)
+    # An automatic-protection pack keeps its pin; the gateway refuses a pack
+    # name that is neither built in nor a custom_packs key.
+    selected.update({path: pack for path, (_c, pack, _on) in _app_protection_pack_selections(cfg).items()})
     used = {str(name or "").strip() for name in selected.values()}
     dropped = sorted(name for name in (getattr(gc, "custom_packs", None) or {}) if name not in used)
     return [config_writer.Change(f"guardrail.custom_packs.{name}", unset=True) for name in dropped], dropped

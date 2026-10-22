@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
+from defenseclaw import config as config_mod
 from defenseclaw import config_writer, policy_catalog, rulepack_validation
 from defenseclaw.commands import cmd_guardrail
 from defenseclaw.config import (
@@ -268,6 +269,124 @@ def test_repin_of_a_pin_no_other_scope_uses_names_no_one_else(env):
         result = _run(app, ["use-pack", "team", *args, "--repin", "--yes", "--json"])
         assert result.exit_code == 0, result.output
         assert "shared" not in json.loads(result.output)["message"]
+
+
+def _app_protection(app, raw: dict) -> None:
+    """Load an application_protection block the way the config loader does."""
+    app.cfg.application_protection = config_mod._merge_application_protection(raw)
+
+
+@pytest.mark.parametrize(
+    ("args", "raw", "named"),
+    [
+        (
+            ["--connector", "codex"],
+            {"enabled": True, "guardrail": {"rule_pack": "team"}},
+            "automatic protection (connectors it protects that are not set up manually) "
+            "(application_protection.guardrail)",
+        ),
+        (
+            ["--connector", "codex"],
+            {"enabled": True, "connectors": {"claudecode": {"guardrail": {"rule_pack": "team"}}}},
+            "automatic protection for Claude Code (application_protection.connectors.claudecode.guardrail)",
+        ),
+        (
+            [],
+            {"enabled": True, "connectors": {"claudecode": {"guardrail": {"rule_pack": "team"}}}},
+            "automatic protection for Claude Code (application_protection.connectors.claudecode.guardrail)",
+        ),
+        (
+            ["--connector", "codex"],
+            {"enabled": False, "guardrail": {"rule_pack": "team"}},
+            "(application_protection.guardrail, when turned on)",
+        ),
+        (
+            ["--connector", "codex"],
+            {"enabled": True, "connectors": {"claudecode": {"enabled": False, "guardrail": {"rule_pack": "team"}}}},
+            "(application_protection.connectors.claudecode.guardrail, when turned on)",
+        ),
+    ],
+    ids=["global", "connector", "global-repin", "off", "connector-off"],
+)
+def test_repin_names_automatic_protection_scopes_that_share_the_pin(env, args, raw, named):
+    """W4 review loop 1: an application_protection pack that selects the same
+    custom_packs key enforces the edited pack too, so the --repin prompt, the
+    --json refusal, the result and the audit line name it."""
+    app, _root, custom, writes = env
+    gc = app.cfg.guardrail
+    gc.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)}
+    gc.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="team")}
+    _app_protection(app, raw)
+    note = "The pin is shared, so the edited pack also applies to "
+
+    unattended = _run(app, ["use-pack", "team", *args, "--repin", "--json"])
+    assert unattended.exit_code == 2 and writes == [], unattended.output
+    message = json.loads(unattended.output)["message"]
+    assert note in message and named in message
+
+    declined = CliRunner().invoke(cmd_guardrail.guardrail, ["use-pack", "team", *args, "--repin"], obj=app, input="n\n")
+    assert declined.exit_code == 1 and writes == [], declined.output
+    assert named in " ".join(declined.output.split())
+
+    scripted = _run(app, ["use-pack", "team", *args, "--repin", "--yes", "--json"])
+    assert scripted.exit_code == 0, scripted.output
+    assert named in json.loads(scripted.output)["message"]
+    audit = app.logger.log_config_change.call_args.args[-1]
+    assert "repin_shared=" in audit and "application_protection." in audit
+    # use-pack never writes the automatic-protection block.
+    assert not any(c.path.startswith("application_protection") for c in writes[-1])
+
+
+def test_automatic_protection_pack_on_another_pin_is_not_named(env):
+    app, _root, custom, _writes = env
+    gc = app.cfg.guardrail
+    gc.custom_packs = {
+        "team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64),
+        "other": CustomRulePack(path=str(custom.parent / "other"), digest="sha256:" + "d" * 64),
+    }
+    gc.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="team")}
+    _app_protection(app, {"enabled": True, "guardrail": {"rule_pack": "other"}})
+    result = _run(app, ["use-pack", "team", "--connector", "codex", "--repin", "--yes", "--json"])
+    assert result.exit_code == 0, result.output
+    assert "shared" not in json.loads(result.output)["message"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"enabled": True, "guardrail": {"rule_pack": "team"}},
+        {"enabled": False, "connectors": {"claudecode": {"guardrail": {"rule_pack": "team"}}}},
+    ],
+    ids=["global", "connector"],
+)
+def test_switching_away_keeps_a_pin_automatic_protection_still_selects(env, raw):
+    """W4 review loop 1: the unused-pin cleanup counts automatic-protection
+    packs, so moving the last guardrail scope off a pack never unpins a pack
+    application_protection still loads."""
+    app, _root, custom, writes = env
+    gc = app.cfg.guardrail
+    gc.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64)}
+    gc.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="team")}
+    _app_protection(app, raw)
+    for args in (["strict", "--connector", "codex"], ["strict"]):
+        result = _run(app, ["use-pack", *args, "--json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output).get("dropped_pins", []) == []
+        assert not any(c.path == "guardrail.custom_packs.team" for c in writes[-1])
+
+
+def test_config_loader_keeps_the_automatic_protection_pack():
+    """The CLI reads (and saves) application_protection rule_pack, as the gateway does."""
+    ap = config_mod._merge_application_protection(
+        {"guardrail": {"rule_pack": "team"}, "connectors": {"codex": {"guardrail": {"rule_pack": "strict"}}}}
+    )
+    assert ap.guardrail.rule_pack == "team"
+    assert ap.connectors["codex"].guardrail.rule_pack == "strict"
+    cfg = default_config()
+    cfg.application_protection = ap
+    saved = config_mod._config_to_dict(cfg)["application_protection"]
+    assert saved["guardrail"]["rule_pack"] == "team"
+    assert saved["connectors"]["codex"]["guardrail"]["rule_pack"] == "strict"
 
 
 def test_repin_of_an_unchanged_or_new_pack_needs_no_confirmation(env):

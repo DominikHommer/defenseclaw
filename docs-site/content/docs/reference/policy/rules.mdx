@@ -83,7 +83,7 @@ defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/acme-rules
 defenseclaw guardrail use-pack acme-rules-2
 ```
 
-The second re-pins the edited directory in place. A plain `use-pack` refuses a pack whose digest no longer matches its pin; `--repin` validates the directory, shows the pinned and the new digest, names every other connector, profile or the global pack that selects the same pin (they enforce the edited pack too), asks, then writes the new digest to `guardrail.custom_packs`. It runs even while the old digest makes `config.yaml` fail validation. Scripts pass `--yes`; `--json` without `--yes` refuses:
+The second re-pins the edited directory in place. A plain `use-pack` refuses a pack whose digest no longer matches its pin; `--repin` validates the directory, shows the pinned and the new digest, names every other connector, profile, the global pack or automatic-protection (`application_protection`) pack that selects the same pin (they enforce the edited pack too), asks, then writes the new digest to `guardrail.custom_packs`. It runs even while the old digest makes `config.yaml` fail validation. Scripts pass `--yes`; `--json` without `--yes` refuses:
 
 ```bash
 defenseclaw guardrail use-pack acme-rules --repin

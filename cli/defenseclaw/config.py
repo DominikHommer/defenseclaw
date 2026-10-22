@@ -7722,6 +7722,10 @@ def _merge_application_protection_guardrail(raw: Any) -> PerConnectorGuardrailCo
         hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
         hook_fail_mode=str(raw.get("hook_fail_mode", "") or ""),
         block_message=str(raw.get("block_message", "") or ""),
+        # The pack the gateway loads for connectors it protects automatically
+        # (EffectiveRulePackRefForConnector); the CLI needs it to know which
+        # scopes select a custom_packs pin.
+        rule_pack=str(raw.get("rule_pack", "") or ""),
         enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
