@@ -81,6 +81,8 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 		previous, next   string
 		bundle           bool
 		validationFails  bool
+		writeFails       bool
+		writerRestored   bool
 		generationLags   bool
 		otherBundle      bool
 		restartFails     bool
@@ -91,6 +93,12 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 		onlyWhenFollowed bool
 	}
 	failures := []failure{
+		{name: "initial write failed after publishing the candidate",
+			previous: policyPrevious, next: policyNext, writeFails: true},
+		{name: "initial bundle write failed after publishing the candidate",
+			previous: policyPrevious, next: policyNext, bundle: true, writeFails: true, code: "bundle_config_write_failed"},
+		{name: "initial writer restored bytes after the watcher loaded the candidate",
+			previous: policyPrevious, next: policyNext, writeFails: true, writerRestored: true},
 		{name: "post-write validation failed after the watcher loaded the candidate",
 			previous: policyPrevious, next: policyNext, validationFails: true},
 		{name: "adoption failed on the generation with the candidate digest live",
@@ -131,6 +139,14 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 					if string(raw) == tc.next && !tc.restartFails {
 						// The watcher loads the candidate at once.
 						gw.loaded = append([]byte(nil), raw...)
+					}
+					if tc.writeFails && string(raw) == tc.next {
+						if tc.writerRestored {
+							if err := os.WriteFile(path, []byte(tc.previous), 0o600); err != nil {
+								return err
+							}
+						}
+						return errors.New("generation write and writer restore failed after config publication")
 					}
 					return nil
 				}

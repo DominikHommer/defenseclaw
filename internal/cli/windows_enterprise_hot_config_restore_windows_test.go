@@ -30,39 +30,49 @@ import (
 // upgrade transaction ran with the config the attempt left behind as its
 // preimage.
 func TestWindowsEnterpriseHotConfigFailedRestoreStopsTheEnsure(t *testing.T) {
-	const previous = "config_version: 9\nguardrail:\n  block_at: HIGH\n"
-	const next = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
-	host, opts := newHotConfigHost(t, previous, next)
-	recorded := `{"generation":3,"config_sha256":"` + configwrite.SHA256Hex([]byte(previous)) + `"}`
-	if err := os.WriteFile(configwrite.GenerationPath(host.configPath), []byte(recorded), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	apply := windowsEnterpriseHotConfigWrite
-	windowsEnterpriseHotConfigWrite = func(ctx context.Context, path string, raw []byte, opt configwrite.Options) error {
-		if strings.Contains(opt.Reason, "not applied") {
-			return errors.New("config writer busy")
-		}
-		return apply(ctx, path, raw, opt)
-	}
-	// The gateway never adopts the change, so the attempt is undone.
-	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status")}}
-	stub.install(t)
-	windowsEnterprisePolicyDigest = host.digest
-	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "config", nil }
-	command := &cobra.Command{}
-	var stdout bytes.Buffer
-	command.SetOut(&stdout)
-	command.SetErr(&bytes.Buffer{})
-	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
-	var result enterprisestatus.Result
-	if jsonErr := json.Unmarshal(stdout.Bytes(), &result); jsonErr != nil {
-		t.Fatalf("decode result: %v: %s", jsonErr, stdout.String())
-	}
-	if len(stub.calls) != 1 {
-		t.Fatalf("installer runs %q: want status only, no upgrade transaction after a failed restore", stub.calls)
-	}
-	if err == nil || result.OK || !windowsBundleHasCode(result.Errors, "config_restore_failed") {
-		t.Fatalf("err=%v ok=%t errors=%+v, want config_restore_failed", err, result.OK, result.Errors)
+	for _, writeFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("initial write fails=%t", writeFails), func(t *testing.T) {
+			const previous = "config_version: 9\nguardrail:\n  block_at: HIGH\n"
+			const next = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
+			host, opts := newHotConfigHost(t, previous, next)
+			recorded := `{"generation":3,"config_sha256":"` + configwrite.SHA256Hex([]byte(previous)) + `"}`
+			if err := os.WriteFile(configwrite.GenerationPath(host.configPath), []byte(recorded), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			apply := windowsEnterpriseHotConfigWrite
+			windowsEnterpriseHotConfigWrite = func(ctx context.Context, path string, raw []byte, opt configwrite.Options) error {
+				if strings.Contains(opt.Reason, "not applied") {
+					return errors.New("config writer busy")
+				}
+				if err := apply(ctx, path, raw, opt); err != nil {
+					return err
+				}
+				if writeFails {
+					return errors.New("initial write failed after config publication")
+				}
+				return nil
+			}
+			// The gateway never adopts the change, so the attempt is undone.
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status")}}
+			stub.install(t)
+			windowsEnterprisePolicyDigest = host.digest
+			windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "config", nil }
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+			var result enterprisestatus.Result
+			if jsonErr := json.Unmarshal(stdout.Bytes(), &result); jsonErr != nil {
+				t.Fatalf("decode result: %v: %s", jsonErr, stdout.String())
+			}
+			if len(stub.calls) != 1 {
+				t.Fatalf("installer runs %q: want status only, no upgrade transaction after a failed restore", stub.calls)
+			}
+			if err == nil || result.OK || !windowsBundleHasCode(result.Errors, "config_restore_failed") {
+				t.Fatalf("err=%v ok=%t errors=%+v, want config_restore_failed", err, result.OK, result.Errors)
+			}
+		})
 	}
 }
 

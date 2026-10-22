@@ -347,6 +347,100 @@ def _ps1_function(name: str) -> str:
     return text[start : text.index("\n}\n", start) + 3]
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_failed_readiness_preserves_hooks_without_restarting_the_old_setup(tmp_path: Path) -> None:
+    install = _ps1_function("Invoke-Install")
+    startup = install[install.index("    $startRc = 0") : install.index("    Complete-Swap")]
+    functions = "\n".join(_ps1_function(name) for name in (
+        "Restore-Snapshot", "Restart-Old", "Restore-SetupInstall", "Get-RestoredNote",
+        "Resume-InterruptedRun", "Read-Text",
+    ))
+    script = tmp_path / "failed-start.ps1"
+    script.write_text(
+        r"""param([string]$Root)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+function Clear-StagedRelease {}
+function Restore-Slot { param($Slot) $script:restores++; return (Join-Path $Root 'failed') }
+function Clear-SetupDataDir { param($Failed) }
+function Remove-Tree { param($Path) }
+function Find-SetupInstall { return $Setup }
+function Get-TreeSize { param($Path) return 0 }
+function Write-Warn { param($Message) $script:messages.Add($Message) }
+function Write-Info { param($Message) $script:messages.Add($Message) }
+function Write-Err { param($Message) $script:messages.Add($Message) }
+function Die { param($Message) throw $Message }
+function Get-GatewayProcess { return $null }
+function Get-UtcClock { return '00:00:00Z' }
+function Stop-Gateway { return $true }
+function Start-Gateway {
+    $script:starts++
+    if ($script:starts -eq 1) { return 1 }
+    # Earlier releases can remove hooks after meeting the same sharing error.
+    [IO.File]::WriteAllText($script:settings, 'hookless predecessor')
+    return 0
+}
+function Start-SetupGateway { param($Path) [void](Start-Gateway) }
+"""
+        + functions
+        + r"""
+foreach ($legacySetup in @($false, $true)) {
+    $DataDir = Join-Path $Root ([string]$legacySetup)
+    $Snap = Join-Path $DataDir 'snapshot'
+    $Staging = Join-Path $DataDir 'staging'
+    $BinDir = Join-Path $DataDir 'bin'
+    [void][IO.Directory]::CreateDirectory($Snap)
+    [IO.File]::WriteAllText((Join-Path $DataDir 'config.yaml'), 'config_version: 9')
+    $script:settings = Join-Path $DataDir 'settings.json'
+    [IO.File]::WriteAllText($script:settings, 'working native hooks')
+    $Setup = if ($legacySetup) { @{ Root = (Join-Path $DataDir 'legacy') } } else { $null }
+    $SetupHookState = Join-Path $DataDir 'hook-runtime-state.json'
+    $Run = @{ OldGatewayDown = $false; Log = 'install.log' }
+    $WasRunning = $true
+    $PrevVersion = '1.0.2'
+    $Ver = '1.0.4'
+    $previousLabel = 'the previous state'
+    $script:starts = 0
+    $script:restores = 0
+    $script:messages = [Collections.Generic.List[string]]::new()
+    $failed = $false
+    try {
+"""
+        + startup
+        + r"""
+    } catch { $failed = $true }
+    if (-not $failed -or $script:starts -ne 1 -or $script:restores -ne 1) {
+        throw "failed readiness: failed=$failed starts=$script:starts restores=$script:restores"
+    }
+    if ([IO.File]::ReadAllText($script:settings) -cne 'working native hooks') { throw 'rollback removed the previous hooks' }
+    if (-not $Run.OldGatewayDown -or ($script:messages -join ' ') -notlike '*then run:*defenseclaw-gateway.exe*start*') {
+        throw 'the stopped gateway has no exact recovery command'
+    }
+    # The same refusal survives interruption before snapshot restoration.
+    $resume = Join-Path $DataDir 'previous.new'
+    $Previous = Join-Path $DataDir 'previous'
+    [void][IO.Directory]::CreateDirectory($resume)
+    foreach ($entry in @(@('COMPLETE', ''), @('VERSION', '1.0.2'), @('GATEWAY_WAS_RUNNING', 'true'), @('GATEWAY_RESTART_UNPROVEN', ''))) {
+        [IO.File]::WriteAllText((Join-Path $resume $entry[0]), $entry[1])
+    }
+    $script:starts = 0
+    $script:restores = 0
+    Resume-InterruptedRun
+    if ($script:starts -ne 0 -or $script:restores -ne 1 -or [IO.File]::ReadAllText($script:settings) -cne 'working native hooks') {
+        throw 'interrupted recovery started an older setup after an unproven start'
+    }
+}
+""",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [str(POWERSHELL), "-NoProfile", "-NonInteractive", "-File", str(script), "-Root", str(tmp_path)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 _GUARDRAIL_CONFIGS = {
     # What 'uninstall --binaries' and 'setup guardrail --disable' save.
     "off": ("guardrail:\n  enabled: false\n  mode: action\n  judge:\n    enabled: true\ngateway:\n  port: 18970\n", True),

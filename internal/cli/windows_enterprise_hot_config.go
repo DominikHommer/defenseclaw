@@ -330,10 +330,6 @@ func windowsEnterpriseHotConfigApply(
 		failBundle("bundle_state_invalid", "cannot prove the signed config principal: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 		return false, nil
 	}
-	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, writeOptions); err != nil {
-		failBundle("bundle_config_write_failed", "the bundle config could not be installed: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
-		return false, nil
-	}
 	// Undoing puts the config back. A config the record named is recorded
 	// again as a new generation: the counter never goes back, because the
 	// gateway may already have reported the number the attempt took. A hand
@@ -362,14 +358,20 @@ func windowsEnterpriseHotConfigApply(
 	undo := func() {
 		restoreCtx := context.WithoutCancel(ctx)
 		var restoreErr error
-		if recordedBefore {
+		observed, readErr := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+		switch {
+		case readErr != nil:
+			restoreErr = readErr
+		case !bytes.Equal(observed, previous) && !bytes.Equal(observed, next):
+			restoreErr = errors.New("the installed config no longer matches this attempt's previous or candidate bytes")
+		case recordedBefore:
 			// The record named previous: a bundle config goes back as that
 			// bundle, so /health names the bundle that enforces again.
 			restoreErr = windowsEnterpriseHotConfigWrite(restoreCtx, layout.ConfigPath, previous, configwrite.RestoreOptions(state, configwrite.SHA256Hex(previous), configwrite.Options{
 				Actor: configwrite.ActorLifecycle, LocalActor: configwrite.CurrentOSActor(),
-				Reason: "enterprise windows ensure (config change not applied)", ExpectSHA256: configwrite.SHA256Hex(next),
+				Reason: "enterprise windows ensure (config change not applied)", ExpectSHA256: configwrite.SHA256Hex(observed),
 			}))
-		} else {
+		default:
 			restoreErr = writeFileKeepingDACL(layout.ConfigPath, previous, layout.ConfigPath)
 		}
 		if restoreErr == nil {
@@ -429,14 +431,23 @@ func windowsEnterpriseHotConfigApply(
 		case restoreErr != nil:
 			result.AddError("config_restore_failed", "the config change was not applied and the previous config could not be put back at "+
 				layout.ConfigPath+": "+windowsEnterpriseBoundedDiagnostic(restoreErr.Error())+"; "+installed+"; "+gateway+
-				". Run the same ensure again, or repair with the last good config")
+				". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+"; repair with the last good config before starting the gateway again")
 		case targetsErr != nil:
 			result.AddError("targets_restore_failed", "the previous config is back, but the enrolled targets could not be published for it again: "+
-				windowsEnterpriseBoundedDiagnostic(targetsErr.Error())+"; "+installed+"; "+gateway+". Run the same ensure again, or repair")
+				windowsEnterpriseBoundedDiagnostic(targetsErr.Error())+"; "+installed+"; "+gateway+". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+"; repair before starting the gateway again")
 		default:
 			result.AddError("config_restore_failed", "the previous config is back at "+layout.ConfigPath+", but "+gatewayErr.Error()+
-				"; "+installed+"; "+gateway+". Run the same ensure again, or repair")
+				"; "+installed+"; "+gateway+". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+"; repair before starting the gateway again")
 		}
+	}
+	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, writeOptions); err != nil {
+		// Publication can precede a failed generation write and failed writer
+		// restore. Even unchanged bytes may have been restored after the gateway
+		// loaded the candidate. Inspect, undo, and prove the running policy on
+		// every write error before a transaction can use these bytes as preimage.
+		undo()
+		failBundle("bundle_config_write_failed", "the bundle config could not be installed: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
+		return false, nil
 	}
 	if _, err := windowsEnterpriseHotConfigValidate(layout.ConfigPath, layout.DataDir, layout.ServiceUser, false); err != nil {
 		undo()

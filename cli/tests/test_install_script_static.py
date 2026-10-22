@@ -1603,6 +1603,40 @@ def test_a_restore_that_leaves_the_old_gateway_down_says_so(tmp_path: Path) -> N
     assert "note: Your previous install is back, but its gateway is not running (see above)." in out
 
 
+@pytest.mark.allow_subprocess
+def test_failed_readiness_preserves_hooks_without_restarting_the_old_setup(tmp_path: Path) -> None:
+    home, bin_dir = tmp_path / "dc", tmp_path / "bin"
+    snap = home / "previous.new"
+    for path in (snap / "bin", snap / "venv" / "bin", snap / "data", home / ".venv" / "bin", bin_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    (snap / "data" / "config.yaml").write_text("previous config\n", encoding="utf-8")
+    (home / "config.yaml").write_text("candidate config\n", encoding="utf-8")
+    (snap / "bin" / "defenseclaw-gateway").write_text("previous gateway", encoding="utf-8")
+    settings = tmp_path / "settings.json"
+    settings.write_text("working native hooks", encoding="utf-8")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    startup = text[text.index("\nSTART_RC=0\n") + 1 : text.index("\nfinish_swap\n")]
+    script = tmp_path / "failed-start.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_", "readonly NOT_DATA")))
+        + 'info() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\nerr() { echo "err: $*"; }\n'
+        + 'stop_gateway() { :; }\ndrop_staging() { :; }\ndie() { echo "$*"; exit 1; }\n'
+        + 'starts=0\nstart_gateway() { starts=$((starts+1)); [ "$starts" -ne 1 ] || return 1; '
+        + 'printf "hookless predecessor" > "$settings"; }\n'
+        + _install_sh_functions("is_machinery", "data_entries", "restore_external_config", "restore_snapshot", "restart_old")
+        + 'DEFENSECLAW_HOME="$1" BIN_DIR="$2" SNAP="$1/previous.new" VENV="$1/.venv" INSTALLER_DIR="$1/installer"\n'
+        + 'settings="$3" APP_PATH="" VERSION=1.0.4 PREV_VERSION=1.0.2 WAS_RUNNING=true RESTORED_NOTE="previous install" LOG="install.log"\n'
+        + startup,
+        encoding="utf-8",
+    )
+    result = _run([str(script), str(home), str(bin_dir), str(settings)], tmp_path)
+    assert result.returncode == 1, result
+    assert settings.read_text(encoding="utf-8") == "working native hooks", result.stdout + result.stderr
+    assert (home / "config.yaml").read_text(encoding="utf-8") == "previous config\n"
+    assert f"{bin_dir}/defenseclaw-gateway start" in result.stdout
+
+
 def test_python_environment_step_says_it_can_take_minutes() -> None:
     # GAP-1665: a first Windows install sat on this line for about 7 minutes.
     hint = "Building the Python environment (a first install can take several minutes)"

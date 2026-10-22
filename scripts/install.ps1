@@ -1048,10 +1048,10 @@ function Disable-SetupHooks {
     if (Test-Path -LiteralPath $SetupHookState) { Move-Path $SetupHookState (Join-Path $Staging "hook-runtime-state.json") }
 }
 
-function Restore-SetupInstall {
+function Restore-SetupInstall([switch]$KeepStopped) {
     $state = Join-Path $Staging "hook-runtime-state.json"
     if (Test-Path -LiteralPath $state) { Move-Path $state $SetupHookState }
-    if ($WasRunning) { Start-SetupGateway $Setup.Root }
+    if ($WasRunning -and -not $KeepStopped) { Start-SetupGateway $Setup.Root }
 }
 
 function Start-SetupGateway([string]$Root) {
@@ -1790,10 +1790,11 @@ function Install-New {
     return $true
 }
 
-function Restart-Old {
+function Restart-Old([switch]$KeepStopped) {
     # An unfinished snapshot left by a failed undo is undone once more. The
-    # old gateway starts either way: with the new hook still live (the pair an
-    # upgrade runs until it stops the gateway) the agents stay guarded.
+    # old gateway starts either way, unless -KeepStopped: with the new hook
+    # still live (the pair an upgrade runs until it stops the gateway) the
+    # agents stay guarded.
     $earlySlot = Get-Variable -Name Snap -ValueOnly -ErrorAction SilentlyContinue
     if ($earlySlot -and (Test-Path -LiteralPath $earlySlot) -and -not (Test-Path -LiteralPath (Join-Path $earlySlot "COMPLETE"))) {
         Undo-EarlySnapshot $earlySlot
@@ -1807,13 +1808,23 @@ function Restart-Old {
     # hook state that cannot be moved back) must not end the restore it is
     # part of: it is reported like a gateway that did not start.
     try {
-        if ($Setup) { Restore-SetupInstall } elseif ($WasRunning) { [void](Start-Gateway) }
+        if ($Setup) { Restore-SetupInstall -KeepStopped:$KeepStopped } elseif ($WasRunning -and -not $KeepStopped) { [void](Start-Gateway) }
         # Say plainly when the gateway that ran before is down now (GAP-1349).
         $Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)
     } catch {
         Write-Err "Could not start the previous gateway again: $($_.Exception.Message)"
         $Run.OldGatewayDown = [bool]$WasRunning
         if ($Setup) { $Run.RestorePending = $true }
+    }
+    if ($KeepStopped) {
+        # An old release may tear down the still-working hooks when its own
+        # setup meets the same sharing error (GAP-0407). Keep the restored
+        # registration callable in fail-closed mode until the cause is fixed.
+        $gateway = if ($Setup) { Join-Path $Setup.Root "bin\defenseclaw-gateway.exe" } else { Join-Path $BinDir "defenseclaw-gateway.exe" }
+        $gatewayCommand = "& '" + $gateway.Replace("'", "''") + "' start"
+        Write-Warn "The previous install is restored with its gateway kept stopped to preserve its hook registration"
+        Write-Info "Fix the startup error above (close the agent if its settings are in use), then run: $gatewayCommand"
+        return
     }
     if ($Run.OldGatewayDown) {
         Write-Warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
@@ -2068,6 +2079,7 @@ function Clear-SetupDataDir([string]$Failed) {
 
 function Restore-Snapshot {
     Clear-StagedRelease
+    $keepStopped = Test-Path -LiteralPath (Join-Path $Snap "GATEWAY_RESTART_UNPROVEN")
     try { $failed = Restore-Slot $Snap } catch {
         # The snapshot stays marked complete, so the next run restores it.
         $Run.RestorePending = $true
@@ -2081,7 +2093,7 @@ function Restore-Snapshot {
         # (about 2 GB) held a full disk full for every account (GAP-1883).
         Invoke-Quietly { Remove-FailedInstall $failed }
     }
-    Restart-Old
+    Restart-Old -KeepStopped:$keepStopped
     if (-not $PrevVersion) { Write-KeptUvCache; return }
     if ($Setup) {
         if (Test-Path -LiteralPath $failed) {
@@ -2173,6 +2185,7 @@ function Resume-InterruptedRun {
             }
             [void](Stop-Gateway)
             $wasRunning = (Read-Text (Join-Path $slot "GATEWAY_WAS_RUNNING")) -eq "true"
+            $keepStopped = Test-Path -LiteralPath (Join-Path $slot "GATEWAY_RESTART_UNPROVEN")
             $state = Join-Path $Staging "hook-runtime-state.json"
             if ((Test-Path -LiteralPath $state) -and -not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
             $failed = Restore-Slot $slot
@@ -2182,7 +2195,13 @@ function Resume-InterruptedRun {
             if ($setupBack) { Clear-SetupDataDir $failed }
             # Nothing was installed before, so the copy holds nothing to go back to.
             if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-FailedInstall $failed } }
-            if ($wasRunning -and $setupBack) {
+            if ($keepStopped) {
+                $gateway = if ($setupBack) { Join-Path $setupInstall.Root "bin\defenseclaw-gateway.exe" } else { Join-Path $BinDir "defenseclaw-gateway.exe" }
+                $gatewayCommand = "& '" + $gateway.Replace("'", "''") + "' start"
+                $Run.OldGatewayDown = $wasRunning
+                Write-Warn "The previous install is restored with its gateway kept stopped to preserve its hook registration"
+                Write-Info "Resolve the earlier startup error (close the agent if its settings are in use), then run: $gatewayCommand"
+            } elseif ($wasRunning -and $setupBack) {
                 Start-SetupGateway $setupInstall.Root
             } elseif ($wasRunning) {
                 [void](Start-Gateway)
@@ -3054,21 +3073,23 @@ function Invoke-Install {
         Write-Warn "The gateway was running without a configuration; run 'defenseclaw init' to set it up"
     }
     if ($startNew) {
+        # A failed or interrupted start must not run an older setup against
+        # the same busy agent settings during automatic rollback. Record the
+        # refusal before starting so interrupted recovery keeps it too.
+        Set-Content -LiteralPath (Join-Path $Snap "GATEWAY_RESTART_UNPROVEN") -Value "" -Encoding Ascii
         $startedAt = Get-Date
         # A start that throws is a start that failed: the install is restored.
         try { $startRc = Start-Gateway } catch { Write-Err $_.Exception.Message; $startRc = 1 }
         if ($sealOnly) {
             try { [void](Stop-Gateway) } catch { Write-Warn "Could not stop the $Ver gateway after its first start: $($_.Exception.Message)" }
-            if ($startRc -ne 0 -and $startRc -ne 3) {
-                Write-Warn "The $Ver gateway did not start (see above); fix what it reports, then run 'defenseclaw-gateway start'"
-                $startRc = 0
-            }
-        } elseif ($startRc -ne 0 -and $startRc -ne 3) {
+        }
+        if ($startRc -ne 0 -and $startRc -ne 3) {
             Write-Err ("The $Ver gateway did not become healthy within {0:N0} s [{1}]; restoring $previousLabel" -f ((Get-Date) - $startedAt).TotalSeconds, (Get-UtcClock))
             try { [void](Stop-Gateway) } catch { Write-Err "Could not stop the $Ver gateway: $($_.Exception.Message)" }
             Restore-Snapshot
             Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"
         }
+        Remove-Item -LiteralPath (Join-Path $Snap "GATEWAY_RESTART_UNPROVEN") -Force -ErrorAction Stop
     }
     Complete-Swap
     Remove-DeveloperFiles
