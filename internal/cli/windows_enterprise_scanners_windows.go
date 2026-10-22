@@ -386,8 +386,8 @@ var windowsScannerRuntimeProductionSigners = func() ([]string, error) {
 // a valid Authenticode signature from a signer the production config pins.
 // A config that pins no signer proves no signed executable: a production
 // run's --allowed-signer pins are recorded nowhere, so a scanner from a
-// signer they leave out would be kept (W2B-G-win third review loop, round 1). An unsigned
-// executable is never proven here: an
+// signer they leave out would be kept (W2B-G-win third review loop, round
+// 1). An unsigned executable is never proven here: an
 // Authenticode-only deployment refuses it, and a hash-pinned one pins it only
 // in its Setup's payload manifest, which only a production run has. Anything
 // that cannot be read proves nothing.

@@ -158,13 +158,15 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 	}{
 		{name: "signed by the signer production pins", setup: func() { signed, signers, deployment = true, []string{pin}, installed("authenticode") }, want: kept},
 		{name: "signed by a pinned signer, hash-pinned production", want: kept,
-			setup: func() { signed, signers, deployment = true, []string{pin, strings.Repeat("0", 64)}, installed("hash_pinned") }},
+			setup: func() {
+				signed, signers, deployment = true, []string{pin, strings.Repeat("0", 64)}, installed("hash_pinned")
+			}},
 		{name: "signed by a pinned signer, production trust not recorded", want: kept,
 			setup: func() { signed, signers, deployment = true, []string{pin}, installed("") }},
-		// Third review loop, round 1: production pinned its signer with --allowed-signer
-		// alone, which nothing records, so a config that pins none (or no
-		// config) proves no signed scanner: it may be a certification
-		// install's, from a signer production does not pin.
+		// Third review loop, round 1: production pinned its signer with
+		// --allowed-signer alone, which nothing records, so a config that
+		// pins none (or no config) proves no signed scanner: it may be a
+		// certification install's, from a signer production does not pin.
 		{name: "signed, production config pins no signer", want: quarantined, reason: "cannot prove the signer",
 			setup: func() { signed, signers, deployment = true, []string{}, installed("authenticode") }},
 		{name: "signed, no production config", want: quarantined, reason: "cannot prove the signer",
