@@ -146,7 +146,9 @@ type foreignHookPublishTestServer struct {
 	root                 string
 	api                  *APIServer
 	call                 func(token string, update map[string]any) enterprisepolicy.GuardDecision
-	t                    *testing.T
+	// exchange is call without failing the test, for another goroutine.
+	exchange func(token string, update map[string]any) (int, []byte)
+	t        *testing.T
 }
 
 // keyID names identity's current record key ("" for none).
@@ -278,11 +280,15 @@ func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, 
 	bobToken := userScopedTestToken(t, connector.UserScopedHookCredential, "claudecode", bob)
 	server.aliceToken, server.bobToken = aliceToken, bobToken
 	peerUIDs := map[string]int{aliceToken: 1001, bobToken: 1002}
-	server.call = func(token string, update map[string]any) enterprisepolicy.GuardDecision {
-		t.Helper()
+	// The listener the hooks call: the gateway renews the outage proofs only
+	// while it answers.
+	listener := httptest.NewServer(handler)
+	t.Cleanup(listener.Close)
+	api.serveForeignHooks(listener.Listener)
+	server.exchange = func(token string, update map[string]any) (int, []byte) {
 		data, err := json.Marshal(update)
 		if err != nil {
-			t.Fatal(err)
+			return 0, []byte(err.Error())
 		}
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(data))
 		req.RemoteAddr = "127.0.0.1:12345"
@@ -294,12 +300,17 @@ func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, 
 		// is refused on one that cannot.
 		response := newDeadlineRecorder()
 		handler.ServeHTTP(response, req)
-		if response.Code != http.StatusOK {
-			t.Fatalf("exchange: %d %s", response.Code, response.Body.String())
+		return response.Code, response.Body.Bytes()
+	}
+	server.call = func(token string, update map[string]any) enterprisepolicy.GuardDecision {
+		t.Helper()
+		code, body := server.exchange(token, update)
+		if code != http.StatusOK {
+			t.Fatalf("exchange: %d %s", code, body)
 		}
 		var decision enterprisepolicy.GuardDecision
-		if err := json.Unmarshal(response.Body.Bytes(), &decision); err != nil {
-			t.Fatalf("exchange answer %q: %v", response.Body.String(), err)
+		if err := json.Unmarshal(body, &decision); err != nil {
+			t.Fatalf("exchange answer %q: %v", body, err)
 		}
 		return decision
 	}

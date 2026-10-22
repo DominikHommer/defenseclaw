@@ -98,6 +98,9 @@ type APIServer struct {
 	// foreignHookProofs are the sessions whose outage proof this gateway
 	// renews (foreign_hook_session_proof.go).
 	foreignHookProofs foreignHookSessionProofs
+	// foreignHookServing tells whether this gateway answers the hooks; the
+	// proofs are renewed only while it does.
+	foreignHookServing foreignHookServing
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
@@ -1383,9 +1386,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// operating system refused is tried again until it takes, and once more
 	// as this run stops (foreign_hook_revocation_owed.go), and the outage
 	// proof of every session this gateway still allows is renewed while it
-	// runs (foreign_hook_session_proof.go); both are no-ops where the
-	// gateway publishes no records. Once this run stops nothing renews a
-	// proof, so every allow ends by itself within its lifetime.
+	// answers the hooks (foreign_hook_session_proof.go); both are no-ops
+	// where the gateway publishes no records. Once this run stops or no
+	// longer answers, nothing renews a proof, so every allow ends by itself
+	// within its lifetime.
 	revocationsCtx, stopRevocations := context.WithCancel(ctx)
 	revocationsDone := make(chan struct{})
 	defer func() {
@@ -1410,6 +1414,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	errCh := make(chan error, 2)
 	if hookSrv != nil {
 		apiDetails["hook_socket"] = hookLn.Addr().String()
+		a.serveForeignHooks(hookLn)
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] standalone hook socket listening on %s\n", hookLn.Addr())
 			if err := hookSrv.Serve(hookLn); err != nil && err != http.ErrServerClosed {
@@ -1419,6 +1424,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	}
 
 	serveTCP := func(ln net.Listener) {
+		a.serveForeignHooks(ln)
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
