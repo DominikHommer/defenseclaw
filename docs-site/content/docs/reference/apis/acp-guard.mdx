@@ -112,6 +112,12 @@ environment or another launch field requires setup again. Setting up a
 different binding in the same editor keeps existing entry pins; it cannot
 approve changes to another binding's launch fields.
 
+`defenseclaw acp verify` and `defenseclaw acp status` also fail while any
+other entry in the editor file can start the agent without the guard: its
+command, a wrapper or script that names it, a link or copy of the pinned
+binary, or a registry or built-in entry for it. Delete that entry, or route it
+through the guard with `defenseclaw acp adopt`.
+
 A lock written by an older release pins the whole settings file, so after an
 upgrade any edit to that file, a theme change included, still fails
 `defenseclaw acp verify` and the guard refuses the binding. The installer and

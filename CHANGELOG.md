@@ -11,7 +11,7 @@ for current behavior.
 ## [Unreleased] — 1.0.4
 
 - **Local observability rejects invalid signals before changing a running stack.** Inspect metrics use fixed tool labels, so caller-chosen tool names do not become metric series.
-- **Standalone ACP setup pins guarded entries rather than unrelated editor settings.** Adopted and numbered entries retain launch-field verification; Zed preferences remain editable. A lock from an older release keeps pinning the whole settings file until you run `defenseclaw acp setup` again for that binding; the installer and `acp refresh` re-pin only the guard.
+- **Standalone ACP setup pins guarded entries rather than unrelated editor settings.** Adopted and numbered entries retain launch-field verification; Zed preferences remain editable. A lock from an older release keeps pinning the whole settings file until you run `defenseclaw acp setup` again for that binding; the installer and `acp refresh` re-pin only the guard. Verify and status fail while another editor entry can start the guarded agent directly.
 - **Hermes sandbox images include the native Anthropic provider's pinned SDK.** Provider initialization no longer requires installing a package inside the sandbox.
 - **Rule-pack directory aliases cannot bypass stale pins.** Selection checks every pin for the directory's filesystem identity before saving, including case-only spellings on macOS.
 - **Per-user provenance survives rejected custom-token configuration edits.** It reads the running gateway only after proving its local listener identity. Migration previews omit unchanged version ranges, and the initial TUI audit-loading notice fits at 80 columns.

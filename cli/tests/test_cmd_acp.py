@@ -1859,3 +1859,161 @@ def test_docs_name_setup_not_refresh_for_legacy_whole_file_pins():
                         relative, sentence,
                     )
         assert not re.search(r"until (you run `defenseclaw acp refresh`|refreshed)", text), relative
+
+
+def _direct_alias_variants(tmp_path: Path, agent: str) -> dict:
+    """Second editor entries that start Kiro without the guard (W7 loop 2)."""
+    tools = tmp_path / "tools"
+    tools.mkdir(exist_ok=True)
+
+    def copy() -> dict:
+        target = tools / "assistant-copy"
+        target.write_bytes(Path(agent).read_bytes())
+        target.chmod(0o700)
+        return {"command": str(target), "args": ["acp"]}
+
+    def script() -> dict:
+        target = tools / "wrapper.sh"
+        target.write_text('#!/bin/sh\nexec kiro-cli acp "$@"\n')
+        target.chmod(0o700)
+        return {"command": str(target)}
+
+    def renamed_on_path() -> dict:
+        target = tools / "k2"
+        target.write_bytes(Path(agent).read_bytes())
+        target.chmod(0o700)
+        return {"command": "env", "args": ["k2", "acp"]}
+
+    def guard_lookalike() -> dict:
+        wrapper = tools / "other" / "defenseclaw-acp"
+        wrapper.parent.mkdir(exist_ok=True)
+        wrapper.write_bytes(b"not the pinned guard")
+        wrapper.chmod(0o700)
+        return {"command": str(wrapper), "args": ["--agent", "kiro", "--client", "zed", "--", agent, "acp"]}
+
+    variants = {
+        "catalog command": lambda: {"command": "kiro-cli", "args": ["acp"]},
+        "pinned path, other args": lambda: {"command": agent, "args": ["acp", "--trust-all-tools"]},
+        "case and suffix": lambda: {"command": "KIRO-CLI.EXE", "args": ["ACP"]},
+        "windows path": lambda: {"command": "C:\\Tools\\Kiro\\Kiro-Cli.cmd", "args": ["acp"]},
+        "copy of the pinned binary": copy,
+        "env wrapper": lambda: {"command": "env", "args": ["KIRO_LOG=1", "kiro-cli", "acp"]},
+        "inline shell": lambda: {"command": "sh", "args": ["-c", "exec kiro-cli acp"]},
+        "path in env": lambda: {"command": "sh", "args": ["-c", 'exec "$K" acp'], "env": {"K": agent}},
+        "renamed binary on PATH": renamed_on_path,
+        "wrapper script": script,
+        "guard look-alike": guard_lookalike,
+        "registry entry": lambda: {"type": "registry"},
+        "preferences only": lambda: {"default_mode": "write"},
+    }
+    if os.name != "nt":
+        def link() -> dict:
+            target = tools / "assistant-link"
+            target.unlink(missing_ok=True)
+            target.symlink_to(agent)
+            return {"command": str(target), "args": ["acp"]}
+
+        variants["link under another name"] = link
+    return variants
+
+
+@pytest.mark.parametrize("entry_names", [[], ["My Kiro"]], ids=["reserved", "adopted"])
+def test_verify_rejects_a_direct_agent_alias_beside_the_guarded_entry(tmp_path, monkeypatch, entry_names):
+    # W7 loop 2: entry pins cover only the guarded entries, so a second
+    # entry that starts Kiro directly left verify green while Zed could
+    # launch Kiro unmediated. The whole-file pin in 1.0.3 caught it.
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    opencode = tmp_path / "other-agent"
+    opencode.write_bytes(b"another agent")
+    opencode.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path / "tools") + os.pathsep + os.environ.get("PATH", ""))
+    controls = {
+        "Foreign": {"command": "other"},
+        "Other Agent": {"command": str(opencode), "args": ["acp", "--mode", "agent"]},
+    }
+    try:
+        initial = {"agent_servers": dict(controls)}
+        for name in entry_names:
+            initial["agent_servers"][name] = {"command": agent, "args": ["acp"]}
+        settings.write_text(json.dumps(initial))
+        args = ["setup", "--client", "zed", "--agent", "kiro", "--activate", "--guard-binary", guard,
+                "--agent-binary", agent]
+        if entry_names:
+            args = ["adopt", "--client", "zed", "--guard-binary", guard, "--activate", "--yes", "--json-output"]
+        configured = CliRunner().invoke(acp_cmd, args, obj=app)
+        assert configured.exit_code == 0, configured.output
+        guarded = json.loads(settings.read_text())
+        assert set(guarded["agent_servers"]) - set(controls) == set(entry_names or ["DefenseClaw · Kiro"])
+        # Controls: unrelated entries and Zed's own preferences keep it verified.
+        for name in entry_names or ["DefenseClaw · Kiro"]:
+            guarded["agent_servers"][name]["default_mode"] = "write"
+        settings.write_text(json.dumps(guarded))
+        verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert verified.exit_code == 0, verified.output
+
+        for label, make in _direct_alias_variants(tmp_path, agent).items():
+            name = "Kiro" if label in {"registry entry", "preferences only"} else "Fast Assistant"
+            document = json.loads(json.dumps(guarded))
+            document["agent_servers"][name] = make()
+            settings.write_text(json.dumps(document))
+            verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert verified.exit_code != 0, (label, verified.output)
+            assert f"editor entry {name!r} can start kiro without the DefenseClaw guard" in verified.output, label
+            status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)
+            assert status["bindings"]["zed/kiro"]["healthy"] is False, label
+
+        # The remedy verify names: adopt routes the direct entry through the guard.
+        document = json.loads(json.dumps(guarded))
+        document["agent_servers"]["Fast Assistant"] = {"command": agent, "args": ["acp"]}
+        settings.write_text(json.dumps(document))
+        adopted = CliRunner().invoke(
+            acp_cmd, ["adopt", "--client", "zed", "--guard-binary", guard, "--activate", "--yes", "--json-output"],
+            obj=app,
+        )
+        assert adopted.exit_code == 0, adopted.output
+        assert json.loads(settings.read_text())["agent_servers"]["Fast Assistant"]["command"] == guard
+        verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert verified.exit_code == 0, verified.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_verify_reads_a_generic_agent_command_only_as_a_launch(tmp_path, monkeypatch):
+    # Cursor's ACP command is the bare word "agent": an entry that starts it
+    # is a bypass, but the word as another agent's option value is not.
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    cursor = _binary(tmp_path / "agent")
+    opencode = tmp_path / "opencode"
+    opencode.write_bytes(b"another agent")
+    opencode.chmod(0o700)
+    try:
+        settings.write_text(json.dumps({"agent_servers": {
+            "OpenCode": {"command": str(opencode), "args": ["acp", "--mode", "agent"], "env": {"ROLE": "agent"}},
+        }}))
+        configured = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "cursor", "--guard-binary", guard, "--agent-binary", cursor],
+            obj=app,
+        )
+        assert configured.exit_code == 0, configured.output
+        verify = ["verify", "--client", "zed", "--agent", "cursor"]
+        assert CliRunner().invoke(acp_cmd, verify, obj=app).exit_code == 0
+        guarded = json.loads(settings.read_text())
+        for entry in ({"command": "agent", "args": ["acp"]}, {"command": "env", "args": ["agent", "acp"]},
+                      {"command": "Agent.exe"}):
+            document = json.loads(json.dumps(guarded))
+            document["agent_servers"]["Assistant"] = entry
+            settings.write_text(json.dumps(document))
+            verified = CliRunner().invoke(acp_cmd, verify, obj=app)
+            assert verified.exit_code != 0 and "'Assistant' can start cursor" in verified.output, entry
+    finally:
+        cleanup_app(app, db_path, data_dir)

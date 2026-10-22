@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -764,6 +765,213 @@ def _managed_guard_custody_is_trusted(path_value: str) -> bool:
         return False
 
 
+# Program suffixes Windows runs a bare command name with (PATHEXT). A direct
+# entry may name the agent with any of them, in any case.
+_LAUNCH_SUFFIXES = (".exe", ".cmd", ".bat", ".com", ".ps1")
+# What ends a word in an argument, an environment value or a script, so a
+# wrapper (env, sh -c, cmd /c, npx, a script file) that names the agent is
+# read word by word.
+_LAUNCH_WORD_SPLIT = re.compile(r"[\s\"'`;|&()<>=,]+")
+_LAUNCH_SCRIPT_BYTES = 1 << 20
+
+
+def _launch_stem(word: str) -> str:
+    """The case-folded program name a launch word runs, split on either OS's separators."""
+    name = re.split(r"[\\/]", word.strip())[-1].casefold()
+    for suffix in _LAUNCH_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def _path_key(path: Path) -> str:
+    """A canonical real path, case-folded on a case-insensitive volume."""
+    text = str(path)
+    if os.name == "nt":
+        return text.casefold()
+    swapped = path.with_name(path.name.swapcase())
+    try:
+        insensitive = swapped.name != path.name and os.path.samefile(path, swapped)
+    except OSError:
+        insensitive = False
+    return text.casefold() if insensitive else text
+
+
+def _launch_file(word: str, *, search_path: bool) -> Path | None:
+    """The regular file a launch word runs: a path, or a bare name on PATH."""
+    value = word.strip()
+    if not value or "\0" in value:
+        return None
+    try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            if not search_path:
+                return None
+            found = shutil.which(value)
+            if not found:
+                return None
+            candidate = Path(found)
+        return candidate.resolve() if candidate.is_file() else None
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _is_pinned_file(path: Path | None, pinned: dict[str, Any], *, by_digest: bool) -> bool:
+    """Whether a file is the pinned executable: the same file by any path,
+    link or letter case, or (by_digest) a copy with the pinned digest."""
+    pinned_path, pinned_sha = pinned.get("path"), pinned.get("sha256")
+    if path is None or not isinstance(pinned_path, str) or not pinned_path:
+        return False
+    try:
+        expected = Path(pinned_path).resolve()
+        if _path_key(path) == _path_key(expected):
+            return True
+        if expected.is_file() and os.path.samefile(path, expected):
+            return True
+        return (
+            by_digest
+            and isinstance(pinned_sha, str)
+            and expected.is_file()
+            and path.stat().st_size == expected.stat().st_size
+            and _sha256_file(str(path)).casefold() == pinned_sha.casefold()
+        )
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _launch_words(text: str) -> list[str]:
+    return [word for word in _LAUNCH_WORD_SPLIT.split(text) if word]
+
+
+def _is_path_word(word: str) -> bool:
+    return "/" in word or "\\" in word or word.startswith("~")
+
+
+def _words_launch_agent(
+    words: list[str], whole: list[str], agent: str, lock_agent: dict[str, Any], *, scripts: bool
+) -> bool:
+    """Whether these words can start the agent.
+
+    A word names the agent (its id, or a program name containing it, in any
+    letter case and with any Windows suffix), is followed by the agent's ACP
+    arguments, or is a path to the pinned agent or a copy of it. With
+    scripts, a path to a small text script is read for the same words (one
+    level). whole holds the unsplit strings, so a path with spaces is checked.
+    """
+    catalog_command, catalog_args = _AGENTS[agent]
+    pinned_path = lock_agent.get("path") if isinstance(lock_agent.get("path"), str) else ""
+    distinct = {agent.casefold()} | {
+        stem for stem in (_launch_stem(catalog_command), _launch_stem(pinned_path)) if agent.casefold() in stem
+    }
+    launch_stems = {_launch_stem(catalog_command), _launch_stem(pinned_path)} - {""}
+    acp_args = [value.casefold() for value in catalog_args]
+    folded = [word.casefold() for word in words]
+    for index, word in enumerate(words):
+        stem = _launch_stem(word)
+        if stem in distinct:
+            return True
+        if acp_args and folded[index + 1:index + 1 + len(acp_args)] == acp_args and (
+            stem in launch_stems
+            or _is_pinned_file(_launch_file(word, search_path=True), lock_agent, by_digest=True)
+        ):
+            return True
+    for word in [*whole, *words]:
+        if not _is_path_word(word) and not Path(word.strip() or ".").is_absolute():
+            continue
+        target = _launch_file(word, search_path=False)
+        if _is_pinned_file(target, lock_agent, by_digest=True):
+            return True
+        if scripts and _script_launches_agent(target, agent, lock_agent):
+            return True
+    return False
+
+
+def _script_launches_agent(target: Path | None, agent: str, lock_agent: dict[str, Any]) -> bool:
+    """Whether a small text script (a wrapper the entry runs) names the agent."""
+    try:
+        if target is None or target.stat().st_size > _LAUNCH_SCRIPT_BYTES:
+            return False
+        body = target.read_bytes()
+    except OSError:
+        return False
+    if b"\0" in body[:8192]:
+        return False
+    text = body.decode("utf-8", "replace")
+    return _words_launch_agent(_launch_words(text), text.splitlines(), agent, lock_agent, scripts=False)
+
+
+def _entry_strings(value: Any, skip: frozenset[str] | set[str]) -> list[str]:
+    """Every string value in an entry, leaving out the editor's own preference keys."""
+    found: list[str] = []
+
+    def walk(item: Any, top: bool) -> None:
+        if isinstance(item, str):
+            found.append(item)
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                if not (top and key in skip):
+                    walk(child, False)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child, False)
+
+    walk(value, True)
+    return found
+
+
+def _unguarded_agent_entries(
+    servers: dict[str, Any],
+    guarded: list[str],
+    client: str,
+    agent: str,
+    lock_agent: dict[str, Any],
+    lock_guard: Any,
+) -> list[str]:
+    """Other editor entries that can start the agent without the guard.
+
+    Entry pins cover only the guarded entries, so a direct alias added
+    beside them (the agent's command, a wrapper or script that names it, a
+    link or copy of the pinned binary, or a registry or built-in entry for
+    it) left the binding verified while the editor could start the agent
+    unmediated. Any doubt counts as a bypass. An entry that starts the
+    pinned guard itself is mediated by that guard's own lock and is left out.
+    """
+    catalog_command, _catalog_args = _AGENTS[agent]
+    skip = _EDITOR_OWNED_ENTRY_KEYS.get(client, set())
+    pinned_guard = lock_guard if isinstance(lock_guard, dict) else {}
+    found: list[str] = []
+    for name, entry in servers.items():
+        if name in guarded:
+            continue
+        command = entry.get("command") if isinstance(entry, dict) else None
+        command = command if isinstance(command, str) and command.strip() else ""
+        strings = _entry_strings(entry, skip)
+        if command:
+            target = _launch_file(command, search_path=True)
+            if _is_pinned_file(target, pinned_guard, by_digest=False):
+                continue
+            if _is_pinned_file(target, lock_agent, by_digest=True) or _launch_stem(command) in {
+                agent.casefold(), _launch_stem(catalog_command), _launch_stem(str(lock_agent.get("path") or ""))
+            } - {""}:
+                found.append(name)
+                continue
+            if _script_launches_agent(target, agent, lock_agent):
+                found.append(name)
+                continue
+        else:
+            # No argv: the editor starts it itself, from its registry, an
+            # extension or a built-in, by the entry's name.
+            label = str(name).casefold()
+            name_words = {label, label.removesuffix("-acp"), *re.split(r"[\W_]+", label)}
+            if name_words & {agent.casefold(), _launch_stem(catalog_command)}:
+                found.append(name)
+                continue
+        words = [word for text in strings for word in _launch_words(text)]
+        if _words_launch_agent(words, strings, agent, lock_agent, scripts=True):
+            found.append(name)
+    return sorted(found)
+
+
 def _verify_binding(
     data_dir: str,
     client: str,
@@ -897,6 +1105,12 @@ def _verify_binding(
             }.items())
         ):
             problems.append(f"editor launch command does not match the lock: {name}")
+    if isinstance(servers, dict) and isinstance(lock_agent, dict):
+        problems.extend(
+            f"editor entry {name!r} can start {agent} without the DefenseClaw guard; delete it from "
+            f"{client_path}, or route it through the guard with: defenseclaw acp adopt --client {client}"
+            for name in _unguarded_agent_entries(servers, names, client, agent, lock_agent, lock_guard)
+        )
     return problems
 
 
