@@ -218,6 +218,10 @@ func Locked(ctx context.Context, path string, opt Options, install func() (bool,
 		return Result{}, err
 	}
 	defer txn.Close()
+	before, _, beforeExists, err := txn.Read()
+	if err != nil {
+		return Result{}, err
+	}
 	changed, err := install()
 	if err != nil {
 		return Result{}, err
@@ -233,6 +237,13 @@ func Locked(ctx context.Context, path string, opt Options, install func() (bool,
 	if !changed {
 		state, _ := cfgtxn.ReadGenerationState(txn.Path())
 		return Result{Generation: state.Generation, SHA256: sum}, nil
+	}
+	// Recording bytes that were already in place binds them to the bundle
+	// through the record alone, as an equal-byte ReplaceDocument does.
+	if beforeExists && bytes.Equal(before, raw) {
+		if err := refuseUnprovenBundleBinding(txn.Path(), opt); err != nil {
+			return Result{}, err
+		}
 	}
 	state, err := txn.RecordGeneration(sum, opt.writer())
 	if err != nil {
@@ -449,6 +460,49 @@ func managedRefuses(current []byte, opt Options) bool {
 	return config.StandaloneManagedSource(current)
 }
 
+// ErrUnprovenBundleBinding is returned when a bundle would be bound to
+// config bytes already in place while config.generation.json is there but
+// cannot be read: the record is the only proof of what installed those
+// bytes, and recording the bundle would replace it.
+var ErrUnprovenBundleBinding = errors.New("configwrite: cannot bind a bundle to an unreadable generation record")
+
+// RefuseUnprovenBundleBinding returns ErrUnprovenBundleBinding (wrapped,
+// with the next step) when opt binds a bundle and something is at the
+// generation record's path next to configPath that is not a readable regular
+// record: a corrupt or unreadable file, a directory, or a link or other
+// reparse point, dangling or not. Only a path that is not there at all is no
+// evidence to lose; the path is inspected without following links, since a
+// read through a dangling link reports it missing and recording the bundle
+// would then replace the link. Callers that bind installed bytes outside
+// this package (the Windows lifecycle's config step) check it before they
+// change anything.
+func RefuseUnprovenBundleBinding(configPath string, opt Options) error {
+	return refuseUnprovenBundleBinding(configPath, opt)
+}
+
+func refuseUnprovenBundleBinding(configPath string, opt Options) error {
+	if opt.Bundle.ID == "" {
+		return nil
+	}
+	path := cfgtxn.GenerationPath(configPath)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err == nil && !info.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a regular file (%s)", path, info.Mode().Type())
+	}
+	if err == nil {
+		// Read after the check: a record that vanishes in between is not
+		// proven absent either.
+		_, err = cfgtxn.ReadGenerationState(configPath)
+	}
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w; it was left as it was. Run `enterprise bundle status --json` and restore the protected generation record before retrying", ErrUnprovenBundleBinding, err)
+}
+
 type mutateFunc func(current []byte) (candidate []byte, changed []string, err error)
 
 func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) (Result, error) {
@@ -489,8 +543,21 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 		return Result{}, err
 	}
 	if exists && bytes.Equal(candidate, current) {
-		state, _ := cfgtxn.ReadGenerationState(txn.Path())
-		return Result{Generation: state.Generation, SHA256: sum}, nil
+		if err := refuseUnprovenBundleBinding(txn.Path(), opt); err != nil {
+			return Result{}, err
+		}
+		state, stateErr := cfgtxn.ReadGenerationState(txn.Path())
+		// A first bundle (or another bundle with equal config bytes) still
+		// changes the policy's provenance and digest scope. The lifecycle
+		// must also clear that identity when undoing to the equal-byte base.
+		// Other writers retain the ordinary unchanged-document behavior.
+		bundleTransition := (opt.Lifecycle || opt.Actor == ActorLifecycle) &&
+			(opt.Bundle.ID != "" || state.BundleID != "") &&
+			(stateErr != nil || state.ConfigSHA256 != sum || state.BundleID != opt.Bundle.ID ||
+				state.BundleVersion != opt.Bundle.Version || state.SignerKeyID != opt.Bundle.SignerKeyID)
+		if !bundleTransition {
+			return Result{Generation: state.Generation, SHA256: sum}, nil
+		}
 	}
 	if err := config.ValidateCandidate(txn.Path(), candidate); err != nil {
 		return Result{}, fmt.Errorf("configwrite: the change does not validate: %w", err)

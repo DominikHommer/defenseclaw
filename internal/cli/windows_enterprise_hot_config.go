@@ -285,7 +285,7 @@ func windowsEnterpriseHotConfigApply(
 	if err != nil {
 		return unavailable("cannot compare the staged and installed configs: " + err.Error())
 	}
-	if bytes.Equal(previous, next) {
+	if bytes.Equal(previous, next) && !bundleChange {
 		return unavailable("the staged config is byte-identical to the installed config")
 	}
 	// Turning Codex protection on or off is the lifecycle transaction's:

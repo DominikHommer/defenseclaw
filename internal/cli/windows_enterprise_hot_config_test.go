@@ -713,8 +713,19 @@ func TestWindowsHotConfigDoesNotApplyFleetEnablementWithoutCompilerLifecycle(t *
 }
 
 func TestWindowsHotBundleReloadsWhenWatcherMissesConfigWrite(t *testing.T) {
+	for _, identical := range []bool{false, true} {
+		t.Run(fmt.Sprintf("identical-base=%t", identical), func(t *testing.T) {
+			testWindowsHotBundleReload(t, identical)
+		})
+	}
+}
+
+func testWindowsHotBundleReload(t *testing.T, identical bool) {
 	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
-	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
+	next := "config_version: 9\nguardrail:\n  block_at: LOW\n"
+	if identical {
+		next = previous
+	}
 	host, opts := newHotConfigHost(t, previous, next)
 	host.bundleID, host.bundleVersion = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", 2
 	opts.bundle = host.bundleRun()
@@ -1140,5 +1151,55 @@ func TestWindowsEnterpriseCodexTargetAction(t *testing.T) {
 	installedCLI.gatewayBinary, installedCLI.acpBinary, installedCLI.hookBinary, installedCLI.sensorHelperBinary = "", "", "", ""
 	if got := windowsEnterpriseCodexTargetAction(installedCLI); got != "repair" {
 		t.Fatalf("installed CLI: action %q, want repair", got)
+	}
+}
+
+// GAP-0360: deployment metadata can lag the configured target when a vendor
+// client was discovered after installation. A payload-less first bundle
+// repairs through the lifecycle instead of asking the guardian to own it.
+func TestWindowsEnsureReconcilesRecordedCodexTarget(t *testing.T) {
+	for _, payload := range []bool{false, true} {
+		t.Run(fmt.Sprintf("payload=%t", payload), func(t *testing.T) {
+			_, opts := newHotConfigHost(t, "config_version: 9\nguardrail:\n  connectors:\n    codex: {}\n", "config_version: 9\nguardrail:\n  connectors:\n    codex: {}\n")
+			if !payload {
+				configPath := opts.configPath
+				clearWindowsEnterpriseSources(opts)
+				opts.configPath = configPath
+			}
+			saved := windowsEnterpriseEnsureDriftDetector
+			t.Cleanup(func() { windowsEnterpriseEnsureDriftDetector = saved })
+			windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "codex_target", nil }
+			status := &windowsEnterpriseInstallerReport{OK: true, Installed: true, InstalledVersion: opts.productVersion}
+			plan, err := planWindowsEnterpriseEnsure(status, opts, "installer.ps1")
+			want := "repair"
+			if payload {
+				want = "upgrade"
+			}
+			if err != nil || plan.Action != want || !opts.codexTargetTransaction {
+				t.Fatalf("plan=%+v transaction=%t error=%v", plan, opts.codexTargetTransaction, err)
+			}
+		})
+	}
+}
+
+func TestWindowsEqualBaseFirstBundleStillPlansApply(t *testing.T) {
+	const raw = "config_version: 9\nguardrail:\n  connectors:\n    claudecode: {}\n"
+	_, opts := newHotConfigHost(t, raw, raw)
+	configPath := opts.configPath
+	clearWindowsEnterpriseSources(opts)
+	opts.configPath = configPath
+	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+	saved := windowsEnterpriseEnsureDriftDetector
+	t.Cleanup(func() { windowsEnterpriseEnsureDriftDetector = saved })
+	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "", nil }
+	status := &windowsEnterpriseInstallerReport{OK: true, Installed: true, InstalledVersion: opts.productVersion}
+	plan, err := planWindowsEnterpriseEnsure(status, opts, "installer.ps1")
+	if err != nil || plan.Action != "upgrade" || plan.Reason != "drift:bundle" {
+		t.Fatalf("first bundle plan=%+v, %v", plan, err)
+	}
+	opts.bundle.prepared.AlreadyApplied = true
+	plan, err = planWindowsEnterpriseEnsure(status, opts, "installer.ps1")
+	if err != nil || plan.Action != "" || plan.Reason != "compliant" {
+		t.Fatalf("confirmed repeat plan=%+v, %v", plan, err)
 	}
 }

@@ -514,7 +514,7 @@ def test_a_room_refusal_runs_before_the_uv_folder_or_uv_is_created() -> None:
 def _bin_dir_functions() -> str:
     text = _text()
     out = []
-    for name in ("Copy-BinDir", "Restore-BinDir"):
+    for name in ("Copy-BinDir", "Restore-BinDir", "Assert-BinDirRestored", "Get-Sha256"):
         start = text.index(f"function {name}(")
         out.append(text[start : text.index("\n}\n", start) + 3])
     return "\n".join(out)
@@ -1142,7 +1142,7 @@ def test_the_new_hook_goes_in_before_the_data_copy() -> None:
     positions = [save.index(step) for step in order]
     assert positions == sorted(positions), save
     first = _ps1_function("Install-HookFirst")
-    assert first.index('(Join-Path $Slot "HOOK_FIRST")') < first.index("Install-File $staged $live")
+    assert first.index("Save-HookCloser $Slot $gateway") < first.index('(Join-Path $Slot "HOOK_FIRST")') < first.index("Install-File $staged $live")
     # An unfinished snapshot puts the old hook back before anything else.
     undo = _ps1_function("Undo-Snapshot")
     assert undo.index("Undo-HookFirst $Slot") < undo.index("Move-Path")
@@ -1240,6 +1240,7 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
     bin_dir, staging, slot = tmp_path / "bin", tmp_path / "staging", tmp_path / "slot"
     (staging / "bin").mkdir(parents=True)
     (staging / "bin" / "defenseclaw-hook.exe").write_text("new", encoding="utf-8")
+    (staging / "bin" / "defenseclaw-gateway.exe").write_text("new gateway", encoding="utf-8")
     if case != "first-install":
         bin_dir.mkdir()
         (bin_dir / "defenseclaw-hook.exe").write_text("old", encoding="utf-8")
@@ -1259,6 +1260,7 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         + _bin_dir_functions()
         + _ps1_function("Get-Sha256")
         + _ps1_function("Install-HookFirst")
+        + _ps1_function("Save-HookCloser")
         + _ps1_function("Undo-HookFirst")
         + steps
         + "\n",
@@ -1284,8 +1286,11 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         assert "after: new" in out, out
         assert (slot / "HOOK_FIRST").exists()
         assert (slot / "bin" / "defenseclaw-hook.exe").read_text(encoding="utf-8") == "old"
+        # The staged gateway is kept beside it, a hard link where the volume allows.
+        closer = slot / "closer" / "defenseclaw-gateway.exe"
+        assert closer.read_text(encoding="utf-8") == "new gateway"
     else:
-        assert not (slot / "HOOK_FIRST").exists()
+        assert not (slot / "HOOK_FIRST").exists() and not (slot / "closer").exists()
     # Undo leaves the old hook live.
     assert live.read_text(encoding="utf-8").strip() == "old", out
 
@@ -1623,125 +1628,43 @@ def _ps_functions(*names: str) -> str:
 
 
 def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
-    # rel-1-0-4 GAP-0004: renaming the old defenseclaw-hook.exe aside before
-    # the new one was in place left a gap in which an agent's registered hook
-    # found no launcher. Install-File swaps an existing file in with
-    # File.Replace first and renames only when that fails.
     assert "Publish-File" in _ps_functions("Install-File")
     publish = _ps_functions("Publish-File")
     assert publish.index("Switch-InPlace") < publish.index("Remove-Aside")
-    # The shims and the hook state the native hook reads are swapped the same
-    # way (1.0.4 review): none of them goes missing during an upgrade.
-    text = _text()
-    hook_state = text[text.index("function Write-HookState {") :]
-    hook_state = hook_state[: hook_state.index("\n}\n") + 3]
-    for writer, body in (
-        ("Write-PosixShim", _ps_functions("Write-PosixShim")),
-        ("Write-Shim", _ps_functions("Write-Shim")),
-        ("Write-HookState", hook_state),
-    ):
-        assert 'Publish-File "$path.new" $path' in body and "Remove-Aside" not in body, writer
-    assert "[IO.File]::Replace($New, $Destination, $Backup, $true)" in _ps_functions("Invoke-FileReplace")
-    # 1.0.4 review: a file ReplaceFile cannot swap is never renamed aside; the
-    # install fails and the installed launcher stays where hooks find it.
     switch = _ps_functions("Switch-InPlace")
     assert "Remove-Aside" not in switch and "Move-Path" not in switch
-    # 1.0.4 lead directive: the switch is one atomic rename of the new file
-    # over the installed one; ReplaceFile only for a launcher that runs.
-    assert switch.index("Invoke-AtomicReplace $New $Destination") < switch.index("Invoke-FileReplace $New")
-    atomic = _ps_functions("Invoke-AtomicReplace")
-    assert "MoveFileExW($New, $Destination, 0x9)" in atomic
-    # The new copy is checked whole before anything is switched.
+    assert "Invoke-AtomicReplace $New $Destination" in switch
+    assert "MoveFileExW($New, $Destination, 0x9)" in _ps_functions("Invoke-AtomicReplace")
+    assert "function Invoke-FileReplace" not in _text()
     install = _ps_functions("Install-File")
     assert install.index('(Get-Sha256 "$Destination.new") -ne (Get-Sha256 $Source)') < install.index("Publish-File")
-    assert "it was left as it was" in switch
-    # 1.0.4 review (loop round 2): an independent restore copy is made before
-    # every attempt and handed to Close-SwapGap. Loop round 3: only a verified
-    # whole copy, and Close-SwapGap copies only to a ready file that it then
-    # renames in, never into the live path.
-    assert "New-VerifiedCopy $Destination $restore" in switch
-    assert "Close-SwapGap $New $aside $restoreCopy $Destination" in switch
-    close = _ps_functions("Close-SwapGap")
-    assert "New-VerifiedCopy $old $candidate" in close and "Invoke-FileMove $ready $Destination" in close
-    assert "Invoke-FileCopy" not in close
-
-
-@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-def test_install_file_never_leaves_the_destination_missing(tmp_path: Path) -> None:
-    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
-    source.write_text("new", encoding="ascii")
-    dest.write_text("old", encoding="ascii")
-    script = f"""
-$ErrorActionPreference = 'Stop'
-function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
-function Move-Path([string]$From, [string]$To) {{ throw "rename used: $From" }}
-{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileReplace", "Invoke-FileCopy", "New-VerifiedCopy", "Switch-InPlace")}
-Install-File '{source}' '{dest}'
-"""
-    completed = _run_powershell(script)
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert dest.read_text(encoding="ascii") == "new"
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+    hook_state = _text().split("function Write-HookState {", 1)[1].split("\n}\n", 1)[0]
+    for body in (_ps_functions("Write-PosixShim"), _ps_functions("Write-Shim"), hook_state):
+        assert 'Publish-File "$path.new" $path' in body and "Remove-Aside" not in body
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_an_idle_installed_file_switches_by_one_atomic_rename(tmp_path: Path) -> None:
-    # 1.0.4 lead directive: the new launcher is written beside the old one
-    # and switched with one rename over it, so the path names the old or the
-    # new file at every instant. ReplaceFile, its backup rename and the
-    # restore copy are not used for a file that does not run.
+    # The publication mock uses an overload available in PowerShell 5.1 and 7.
     source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
     source.write_text("new", encoding="ascii")
     dest.write_text("old", encoding="ascii")
     script = f"""
 $ErrorActionPreference = 'Stop'
 $script:atomic = 0
-function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
-function Move-Path([string]$From, [string]$To) {{ throw "rename used: $From" }}
-function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{ throw "ReplaceFile used" }}
 function Invoke-AtomicReplace([string]$New, [string]$Destination) {{
     $script:atomic++
-    if (-not (Test-Path -LiteralPath $Destination)) {{ throw "the destination was missing" }}
-    [IO.File]::Move($New, $Destination, $true)
+    if ([IO.File]::ReadAllText($Destination) -cne 'old') {{ throw 'old launcher unavailable' }}
+    [IO.File]::Replace($New, $Destination, "$Destination.test-backup", $true)
+    Remove-Item -LiteralPath "$Destination.test-backup"
 }}
-{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileCopy", "New-VerifiedCopy", "Switch-InPlace")}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace")}
 Install-File '{source}' '{dest}'
 Write-Output "ATOMIC=$script:atomic"
 """
     completed = _run_powershell(script)
     out = completed.stdout + completed.stderr
-    assert completed.returncode == 0, out
-    assert "ATOMIC=1" in out, out
-    assert dest.read_text(encoding="ascii") == "new"
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
-
-
-@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-def test_a_running_launcher_that_refuses_the_rename_is_swapped_by_replacefile(tmp_path: Path) -> None:
-    # A launcher a hook runs from refuses a rename over it (access denied,
-    # nothing changes). The swap then takes ReplaceFile, and every attempt
-    # finds the old launcher at the path.
-    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
-    source.write_text("new", encoding="ascii")
-    dest.write_text("old", encoding="ascii")
-    script = f"""
-$ErrorActionPreference = 'Stop'
-$script:atomic = 0
-$script:missing = 0
-function Start-Sleep {{ }}
-function Invoke-AtomicReplace([string]$New, [string]$Destination) {{
-    $script:atomic++
-    if (-not (Test-Path -LiteralPath $Destination)) {{ $script:missing++ }}
-    throw "Access is denied."
-}}
-{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileReplace", "Invoke-FileCopy", "New-VerifiedCopy", "Switch-InPlace")}
-Install-File '{source}' '{dest}'
-Write-Output "ATOMIC=$script:atomic MISSING=$script:missing"
-"""
-    completed = _run_powershell(script)
-    out = completed.stdout + completed.stderr
-    assert completed.returncode == 0, out
-    assert "ATOMIC=1 MISSING=0" in out, out
+    assert completed.returncode == 0 and "ATOMIC=1" in out, out
     assert dest.read_text(encoding="ascii") == "new"
     assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
 
@@ -1762,7 +1685,7 @@ function Invoke-AtomicReplace([string]$New, [string]$Destination) {{ $script:swi
 function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{ $script:switches++; throw "switched" }}
 function Remove-Aside([string]$Path) {{ $script:switches++; throw "switched" }}
 function Move-Path([string]$From, [string]$To) {{ $script:switches++; throw "switched" }}
-{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileCopy", "New-VerifiedCopy", "Switch-InPlace")}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace")}
 try {{ Install-File '{source}' '{dest}'; Write-Output 'INSTALLED' }} catch {{ Write-Output "FAILED: $($_.Exception.Message)" }}
 Write-Output "SWITCHES=$script:switches"
 """
@@ -1776,296 +1699,570 @@ Write-Output "SWITCHES=$script:switches"
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-def test_a_held_file_fails_the_install_and_keeps_the_launcher(tmp_path: Path) -> None:
-    # 1.0.4 review of GAP-0004: while a running hook or a scanner holds the
-    # file, every hook call that arrives during the retries still finds the
-    # installed launcher, and when the hold never ends the install fails
-    # instead of renaming the launcher aside.
+@pytest.mark.parametrize("held", [False, True])
+def test_a_busy_launcher_is_never_opened_for_replace(tmp_path: Path, held: bool) -> None:
+    # GAP-0352: ReplaceFile can deny execution of the registered hook while
+    # it opens the destination. A busy atomic rename must only be retried.
     source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
     source.write_text("new", encoding="ascii")
     dest.write_text("old", encoding="ascii")
     script = f"""
 $ErrorActionPreference = 'Stop'
-$script:calls = 0
-$script:missing = 0
-function Start-Sleep {{ }}
-function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
-function Move-Path([string]$From, [string]$To) {{ throw "rename used: $From" }}
-{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileCopy", "New-VerifiedCopy", "Switch-InPlace")}
-function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
-    $script:calls++
-    if (-not (Test-Path -LiteralPath $Destination)) {{ $script:missing++ }}
-    throw "The process cannot access the file because it is being used by another process."
-}}
-try {{ Install-File '{source}' '{dest}'; Write-Output 'INSTALLED' }} catch {{ Write-Output "FAILED: $($_.Exception.Message)" }}
-Write-Output "CALLS=$script:calls MISSING=$script:missing"
-"""
-    completed = _run_powershell(script)
-    out = completed.stdout + completed.stderr
-    assert completed.returncode == 0, out
-    assert "FAILED: Could not replace" in out and "it was left as it was" in out, out
-    assert "MISSING=0" in out and "CALLS=21" in out, out
-    assert dest.read_text(encoding="ascii") == "old"
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
-
-
-@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-def test_a_replace_that_stops_after_the_backup_rename_finishes_the_swap(tmp_path: Path) -> None:
-    # ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: ReplaceFile renamed the old file to
-    # the backup and did not move the new one in. The swap is finished at once.
-    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
-    source.write_text("new", encoding="ascii")
-    dest.write_text("old", encoding="ascii")
-    script = f"""
-$ErrorActionPreference = 'Stop'
-function Start-Sleep {{ }}
-{_ps_functions("Get-Sha256", "Move-Path", "Install-File", "Publish-File", "Switch-InPlace", "Invoke-FileMove", "Invoke-FileCopy", "New-VerifiedCopy", "Close-SwapGap")}
-function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
-    [IO.File]::Move($Destination, $Backup)
-    throw "Unable to move the replacement file to the file to be replaced."
-}}
-Install-File '{source}' '{dest}'
-"""
-    completed = _run_powershell(script)
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert dest.read_text(encoding="ascii") == "new"
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
-
-
-@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("held_moves", [3, 1000])
-def test_a_partial_replace_with_a_held_replacement_puts_the_launcher_back_at_once(tmp_path: Path, held_moves: int) -> None:
-    # 1.0.4 review: ReplaceFile renamed the installed launcher to the backup
-    # (error 1177) while a scanner held the new copy. The old launcher goes
-    # back before any wait, so every hook call during the retries finds it;
-    # the swap then finishes when the hold ends, or the install fails with the
-    # old launcher in place.
-    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
-    source.write_text("new", encoding="ascii")
-    dest.write_text("old", encoding="ascii")
-    script = f"""
-$ErrorActionPreference = 'Stop'
+$script:attempts = 0
 $script:replaces = 0
-$script:heldMoves = 0
-$script:missingAtWait = 0
-$script:waits = 0
-function Start-Sleep {{ $script:waits++; if (-not (Test-Path -LiteralPath '{dest}')) {{ $script:missingAtWait++ }} }}
-function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
-function Move-Path([string]$From, [string]$To) {{ throw "a retried rename was used: $From" }}
-{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileCopy", "New-VerifiedCopy", "Switch-InPlace", "Close-SwapGap")}
-function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
-    $script:replaces++
-    if ($script:heldMoves -lt {held_moves}) {{
-        [IO.File]::Move($Destination, $Backup)
-        throw "Unable to move the replacement file to the file to be replaced."
-    }}
-    [IO.File]::Replace($New, $Destination, $Backup, $true)
+$script:checks = 0
+function Start-Sleep {{
+    if ([IO.File]::ReadAllText('{dest}') -cne 'old') {{ throw 'registered launcher changed during retry' }}
+    $script:checks++
 }}
-function Invoke-FileMove([string]$From, [string]$To) {{
-    if ($From.EndsWith('.new') -and $script:heldMoves -lt {held_moves}) {{
-        $script:heldMoves++
-        throw "The process cannot access the file because it is being used by another process."
-    }}
-    [IO.File]::Move($From, $To)
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace")}
+function Invoke-FileReplace {{ $script:replaces++; throw 'sharing violation' }}
+function Invoke-AtomicReplace([string]$New, [string]$Destination) {{
+    $script:attempts++
+    if ({'$true' if held else '$script:attempts -lt 3'}) {{ throw 'Access is denied.' }}
+    [IO.File]::Replace($New, $Destination, "$Destination.test-backup", $true)
+    Remove-Item -LiteralPath "$Destination.test-backup"
 }}
-try {{ Install-File '{source}' '{dest}'; Write-Output 'INSTALLED' }} catch {{ Write-Output "FAILED: $($_.Exception.Message)" }}
-Write-Output "REPLACES=$script:replaces WAITS=$script:waits MISSING_AT_WAIT=$script:missingAtWait"
+try {{ Install-File '{source}' '{dest}'; Write-Output 'INSTALLED' }}
+catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
+Write-Output "REPLACES=$script:replaces CHECKS=$script:checks"
 """
     completed = _run_powershell(script)
     out = completed.stdout + completed.stderr
     assert completed.returncode == 0, out
-    assert "MISSING_AT_WAIT=0" in out and "WAITS=0 " not in out, out
-    if held_moves == 3:
-        assert "INSTALLED" in out, out
-        assert dest.read_text(encoding="ascii") == "new"
-        assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
-    else:
-        assert "FAILED: Could not replace" in out and "it was left as it was" in out, out
-        assert dest.read_text(encoding="ascii") == "old"
-        assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+    assert "REPLACES=0" in out and "CHECKS=0" not in out, out
+    assert ("REFUSED:" if held else "INSTALLED") in out, out
+    assert dest.read_text(encoding="ascii") == ("old" if held else "new")
+    assert not list(tmp_path.glob("*.new"))
+
+
+# ── 1.0.4 (W4b loop round 1) ────────────────────────────────────────────────
+
+
+def _restore_case_functions() -> str:
+    names = (
+        "Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace", "Copy-BinDir", "Restore-BinDir",
+        "Assert-BinDirRestored", "Move-Path", "Get-DataEntries", "Test-ConnectorRecoveryArtifactName",
+        "Move-RestoreConnectorRecovery", "Undo-RestoreConnectorRecovery", "Restore-Slot", "Invoke-Quietly",
+        "Read-Text", "Restore-ExternalConfig", "Undo-HookFirst", "Undo-Snapshot",
+        "Install-HookFirst", "Save-HookCloser", "Clear-StagedRelease", "Resume-InterruptedRun",
+        "Remove-Hold", "Restore-Live", "Restore-LiveTree", "Move-LiveTo",
+    )
+    return "\n".join(_ps1_function(name) for name in names)
+
+
+def _restore_case(tmp_path: Path, body: str) -> str:
+    # The shipped functions against disposable paths. A running hook refuses
+    # the in-place switch of its file, as Windows refuses MoveFileEx over a
+    # running program; Start-Sleep returns at once.
+    data, bin_dir = tmp_path / "data", tmp_path / "bin"
+    script = tmp_path / "case.ps1"
+    script.write_text(
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data}'\n$BinDir = '{bin_dir}'\n"
+        f"$Venv = '{data / '.venv'}'\n$InstallerDir = '{data / 'installer'}'\n"
+        f"$Staging = '{data / '.staging'}'\n$SetupHookState = '{tmp_path / 'setup-hook-state.json'}'\n"
+        "$NotData = @('.venv', 'installer', 'previous.new', '.staging', '.failed-*')\n"
+        "$ManagedFiles = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')\n"
+        "$script:busy = $true\n"
+        "function Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
+        "function Start-Sleep { }\n"
+        "function Remove-Tree([string]$Path) { if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force } }\n"
+        "function Remove-Aside([string]$Path) { Remove-Item -LiteralPath $Path -Force }\n"
+        "function Remove-FailedInstall([string]$Failed) { Remove-Tree $Failed }\n"
+        "function New-FailedInstallDirectory {\n"
+        "    $failed = Join-Path $DataDir ('.failed-' + [Guid]::NewGuid().ToString('N'))\n"
+        "    New-Item -ItemType Directory -Path $failed | Out-Null\n    return $failed\n}\n"
+        "function Invoke-AtomicReplace([string]$New, [string]$Destination) {\n"
+        "    if ($script:busy -and $Destination -like '*defenseclaw-hook.exe') { throw 'Access is denied.' }\n"
+        "    [IO.File]::Copy($New, $Destination, $true); Remove-Item -LiteralPath $New -Force\n}\n"
+        + _restore_case_functions()
+        + "\n"
+        + body
+        + "\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    return out
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="ascii")
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("held_replaces", [3, 1000])
-@pytest.mark.parametrize("refused", ["new+backup", "new+backup+restore"])
-def test_a_partial_replace_with_the_new_file_and_the_backup_held_puts_the_launcher_back_at_once(
-    tmp_path: Path, held_replaces: int, refused: str
-) -> None:
-    # 1.0.4 review (loop round 2): ReplaceFile renamed the installed launcher
-    # to the backup (error 1177) and a scanner then held both the staged new
-    # file and the backup against a rename, for the whole recovery. The
-    # launcher must still be back before any wait: Close-SwapGap publishes the
-    # independent restore copy, or copies the old file in when the restore
-    # copy is held as well. Every ReplaceFile retry then runs with the
-    # launcher in place.
-    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
-    source.write_text("new", encoding="ascii")
-    dest.write_text("old", encoding="ascii")
-    restore_clause = " -or $From.EndsWith('.restore')" if refused.endswith("+restore") else ""
-    script = f"""
-$ErrorActionPreference = 'Stop'
-$script:replaces = 0
-$script:refused = 0
-$script:copiesIn = 0
-$script:waits = 0
-$script:missingAtWait = 0
-$script:missingAtReplace = 0
-function Start-Sleep {{ $script:waits++; if (-not (Test-Path -LiteralPath '{dest}')) {{ $script:missingAtWait++ }} }}
-function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
-function Move-Path([string]$From, [string]$To) {{ throw "a retried rename was used: $From" }}
-{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "New-VerifiedCopy", "Switch-InPlace", "Close-SwapGap")}
-function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
-    $script:replaces++
-    if (-not (Test-Path -LiteralPath $Destination)) {{ $script:missingAtReplace++ }}
-    if ($script:replaces -le {held_replaces}) {{
-        # A held backup cannot be replaced: ReplaceFile fails before it
-        # touches the installed file.
-        if (Test-Path -LiteralPath $Backup) {{ throw "The process cannot access the file because it is being used by another process." }}
-        [IO.File]::Move($Destination, $Backup)
-        throw "Unable to move the replacement file to the file to be replaced."
-    }}
-    # The scanner let go.
-    [IO.File]::Delete($Backup)
-    [IO.File]::Replace($New, $Destination, $Backup, $true)
-}}
-function Invoke-FileMove([string]$From, [string]$To) {{
-    if ($script:replaces -le {held_replaces} -and ($From.EndsWith('.new') -or $From -match '\\.old-[0-9T]+$'{restore_clause})) {{
-        $script:refused++
-        throw "The process cannot access the file because it is being used by another process."
-    }}
-    [IO.File]::Move($From, $To)
-}}
-function Invoke-FileCopy([string]$From, [string]$To) {{
-    if ($To -eq '{dest}') {{ $script:copiesToDest++ }}
-    if ($To -match '\\.ready[0-9]+$') {{ $script:copiesReady++ }}
-    [IO.File]::Copy($From, $To, $false)
-}}
-$script:copiesToDest = 0
-$script:copiesReady = 0
-try {{ Install-File '{source}' '{dest}'; Write-Output 'INSTALLED' }} catch {{ Write-Output "FAILED: $($_.Exception.Message)" }}
-Write-Output "REPLACES=$script:replaces REFUSED=$script:refused COPIES_READY=$script:copiesReady COPIES_TO_DEST=$script:copiesToDest WAITS=$script:waits"
-Write-Output "MISSING_AT_WAIT=$script:missingAtWait MISSING_AT_REPLACE=$script:missingAtReplace"
-"""
-    completed = _run_powershell(script)
-    out = completed.stdout + completed.stderr
-    assert completed.returncode == 0, out
-    assert "MISSING_AT_WAIT=0 MISSING_AT_REPLACE=0" in out and "WAITS=0 " not in out, out
-    refused_moves = 3 if refused.endswith("+restore") else 2
-    assert f"REFUSED={refused_moves} " in out, out
-    # The old file is copied to a ready file and renamed in, never copied
-    # into the live path (loop round 3).
-    assert ("COPIES_READY=1 " if refused.endswith("+restore") else "COPIES_READY=0 ") in out, out
-    assert "COPIES_TO_DEST=0 " in out, out
-    if held_replaces == 3:
-        assert "INSTALLED" in out, out
-        assert dest.read_text(encoding="ascii") == "new"
-    else:
-        assert "FAILED: Could not replace" in out and "it was left as it was" in out, out
-        assert dest.read_text(encoding="ascii") == "old"
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+def test_a_restore_a_running_hook_refuses_keeps_the_snapshot_and_never_claims_recovery(tmp_path: Path) -> None:
+    # W4b loop round 1: after Install-HookFirst published the new hook, a
+    # later failure restores the snapshot while that hook runs. Its in-place
+    # switch is refused; the restore used to warn, delete the snapshot and
+    # report the previous install back over the new programs.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        _write(bin_dir / name, "new " + name)
+        _write(slot / "bin" / name, "old " + name)
+    _write(slot / "COMPLETE", "")
+    _write(data / "config.yaml", "new data")
+    _write(slot / "data" / "config.yaml", "old data")
+    receipt = ".defenseclaw-cas-v2-" + "a" * 24 + ".intent"
+    _write(data / receipt, "new receipt")
+    _write(slot / "data" / receipt, "old receipt")
+    _write(data / ".venv" / "runtime.txt", "new runtime")
+    _write(slot / "venv" / "runtime.txt", "old runtime")
+    out = _restore_case(
+        tmp_path,
+        f"try {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}",
+    )
+    assert "RESTORED" not in out and "REFUSED:" in out, out
+    assert "defenseclaw-hook.exe" in out and f"kept in {slot}" in out and "Run the installer again" in out, out
+    # Nothing but the idle programs moved: the snapshot, its marker, the data,
+    # the environment and both receipts are where they were.
+    assert (slot / "COMPLETE").exists()
+    assert (bin_dir / "defenseclaw-hook.exe").read_text(encoding="ascii") == "new defenseclaw-hook.exe"
+    assert (slot / "bin" / "defenseclaw-hook.exe").read_text(encoding="ascii") == "old defenseclaw-hook.exe"
+    assert (data / "config.yaml").read_text(encoding="ascii") == "new data"
+    assert (slot / "data" / "config.yaml").read_text(encoding="ascii") == "old data"
+    assert (data / ".venv" / "runtime.txt").read_text(encoding="ascii") == "new runtime"
+    assert (slot / "venv" / "runtime.txt").read_text(encoding="ascii") == "old runtime"
+    assert (data / receipt).read_text(encoding="ascii") == "new receipt"
+    assert (slot / "data" / receipt).read_text(encoding="ascii") == "old receipt"
+    assert not list(data.glob(".failed-*"))
+    # Once the hook has finished, running the restore again finishes it.
+    out = _restore_case(tmp_path, f"$script:busy = $false\nRestore-Slot '{slot}' | Out-Null\nWrite-Output 'RESTORED'")
+    assert "RESTORED" in out, out
+    assert not slot.exists()
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        assert (bin_dir / name).read_text(encoding="ascii") == "old " + name
+    assert (data / "config.yaml").read_text(encoding="ascii") == "old data"
+    assert (data / ".venv" / "runtime.txt").read_text(encoding="ascii") == "old runtime"
+    assert (data / receipt).read_text(encoding="ascii") == "old receipt"
+    failed = list(data.glob(".failed-*"))
+    assert len(failed) == 1
+    assert (failed[0] / "data" / "config.yaml").read_text(encoding="ascii") == "new data"
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("failed_copies", [1, 1000])
-def test_a_slow_or_failing_recovery_copy_never_exposes_a_partial_launcher(tmp_path: Path, failed_copies: int) -> None:
-    # 1.0.4 review (loop round 3): with the new file, the backup and the
-    # restore copy all held against a rename, Close-SwapGap copied the old
-    # file straight into the live defenseclaw-hook.exe path. A hook bridge
-    # call during that slow copy ran an incomplete launcher, and a copy that
-    # failed halfway left a partial file there that counted as restored, so
-    # the backup and the restore copy (the only whole old launcher) were
-    # deleted. The copy now goes to a ready file, is checked, and is renamed
-    # in; a hook bridge call between every chunk written sees the whole old
-    # launcher, the whole new one or nothing, never part of one.
-    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
-    old_body = "MZ-old-launcher-" * 64
-    new_body = "MZ-new-launcher-" * 64
-    source.write_text(new_body, encoding="ascii")
-    dest.write_text(old_body, encoding="ascii")
-    held_replaces = 3 if failed_copies == 1 else 1000
-    script = f"""
-$ErrorActionPreference = 'Stop'
-$script:replaces = 0
-$script:failedCopies = 0
-$script:bridgeCalls = 0
-$script:bridgePartial = 0
-$script:waits = 0
-$script:missingAtWait = 0
-function Invoke-Bridge {{
-    # A hook the agent starts now: it opens and reads the launcher.
-    $script:bridgeCalls++
-    if (-not (Test-Path -LiteralPath '{dest}')) {{ return }}
-    $stream = [IO.File]::Open('{dest}', 'Open', 'Read', 'ReadWrite, Delete')
-    try {{ $text = (New-Object IO.StreamReader($stream)).ReadToEnd() }} finally {{ $stream.Dispose() }}
-    if ($text -cne '{old_body}' -and $text -cne '{new_body}') {{ $script:bridgePartial++ }}
-}}
-function Start-Sleep {{ $script:waits++; Invoke-Bridge; if (-not (Test-Path -LiteralPath '{dest}')) {{ $script:missingAtWait++ }} }}
-function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
-function Move-Path([string]$From, [string]$To) {{ throw "a retried rename was used: $From" }}
-{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "New-VerifiedCopy", "Switch-InPlace", "Close-SwapGap")}
-function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
-    $script:replaces++
-    Invoke-Bridge
-    if ($script:replaces -le {held_replaces}) {{
-        if (Test-Path -LiteralPath $Backup) {{ throw "The process cannot access the file because it is being used by another process." }}
-        [IO.File]::Move($Destination, $Backup)
-        throw "Unable to move the replacement file to the file to be replaced."
-    }}
-    [IO.File]::Delete($Backup)
-    [IO.File]::Replace($New, $Destination, $Backup, $true)
-}}
-function Invoke-FileMove([string]$From, [string]$To) {{
-    Invoke-Bridge
-    if ($script:replaces -le {held_replaces} -and ($From.EndsWith('.new') -or $From.EndsWith('.restore') -or $From -match '\\.old-[0-9T]+$')) {{
-        throw "The process cannot access the file because it is being used by another process."
-    }}
-    [IO.File]::Move($From, $To)
-}}
-function Invoke-FileCopy([string]$From, [string]$To) {{
-    # A slow copy, 128 bytes at a time, with a hook bridge call after each
-    # chunk; a recovery copy (not the restore copy made before the swap)
-    # fails halfway the first {failed_copies} time(s).
-    $bytes = [IO.File]::ReadAllBytes($From)
-    $failing = -not $To.EndsWith('.restore') -and $script:failedCopies -lt {failed_copies}
-    $stream = [IO.File]::Open($To, 'CreateNew', 'Write', 'ReadWrite, Delete')
-    try {{
-        for ($i = 0; $i -lt $bytes.Length; $i += 128) {{
-            $stream.Write($bytes, $i, [Math]::Min(128, $bytes.Length - $i))
-            $stream.Flush()
-            $stream.Dispose(); $stream = [IO.File]::Open($To, 'Append', 'Write', 'ReadWrite, Delete')
-            Invoke-Bridge
-            if ($failing -and $i -ge $bytes.Length / 2) {{
-                $script:failedCopies++
-                throw "The specified network name is no longer available."
-            }}
-        }}
-    }} finally {{ $stream.Dispose() }}
-}}
-try {{ Install-File '{source}' '{dest}'; Write-Output 'INSTALLED' }} catch {{ Write-Output "FAILED: $($_.Exception.Message)" }}
-Write-Output "BRIDGE_CALLS=$script:bridgeCalls BRIDGE_PARTIAL=$script:bridgePartial FAILED_COPIES=$script:failedCopies"
-Write-Output "WAITS=$script:waits MISSING_AT_WAIT=$script:missingAtWait"
-"""
-    completed = _run_powershell(script)
-    out = completed.stdout + completed.stderr
-    assert completed.returncode == 0, out
-    assert "BRIDGE_PARTIAL=0 " in out and "BRIDGE_CALLS=0 " not in out, out
-    leftovers = sorted(path.name for path in tmp_path.iterdir())
-    if failed_copies == 1:
-        # The second copy is whole: the old launcher is back before any wait,
-        # and the swap finishes when the hold ends.
-        assert "FAILED_COPIES=1\n" in out and "MISSING_AT_WAIT=0" in out, out
-        assert "INSTALLED" in out, out
-        assert dest.read_text(encoding="ascii") == new_body
-        assert leftovers == ["defenseclaw-hook.exe", "staged.exe"], leftovers
+@pytest.mark.parametrize("case", ["switch-left-new-bytes", "extra-file-stays"])
+def test_restore_bin_dir_proves_the_saved_bytes_before_it_returns(tmp_path: Path, case: str) -> None:
+    # A switch that reports success but leaves other bytes, or a file the
+    # snapshot did not hold that is still there, is not a restored install.
+    bin_dir, saved = tmp_path / "bin", tmp_path / "data" / "previous.new" / "bin"
+    _write(bin_dir / "defenseclaw-hook.exe", "new hook")
+    _write(saved / "defenseclaw-hook.exe", "old hook")
+    _write(bin_dir / "defenseclaw-gateway.exe", "new gateway")
+    if case == "switch-left-new-bytes":
+        _write(saved / "defenseclaw-gateway.exe", "old gateway")
+        override = "function Invoke-AtomicReplace([string]$New, [string]$Destination) { Remove-Item -LiteralPath $New -Force }"
     else:
-        # No copy ever completes: the install fails, nothing partial is at the
-        # launcher path, and the backup and the restore copy are kept whole.
-        assert "FAILED: Could not put" in out, out
-        assert not dest.exists()
-        assert not [name for name in leftovers if ".ready" in name], leftovers
-        kept = [tmp_path / name for name in leftovers if name.startswith("defenseclaw-hook.exe.old-")]
-        assert len(kept) == 2 and any(path.name.endswith(".restore") for path in kept), leftovers
-        assert all(path.read_text(encoding="ascii") == old_body for path in kept)
+        override = "function Remove-Aside([string]$Path) { }"
+    out = _restore_case(
+        tmp_path,
+        f"$script:busy = $false\n{override}\n"
+        f"try {{ Restore-BinDir '{saved}'; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}",
+    )
+    assert "RESTORED" not in out and "does not hold the saved copy of" in out, out
+    assert "defenseclaw-gateway.exe" in out, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_an_unfinished_snapshot_keeps_the_old_hook_copy_when_the_new_hook_is_running(tmp_path: Path) -> None:
+    # Save-Snapshot failed after Install-HookFirst: the slot holds the only
+    # copy of the previous hook. A refused switch keeps the slot (no COMPLETE
+    # marker, so the next run undoes it again) and says so; the environment
+    # it moved goes back either way.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    _write(bin_dir / "defenseclaw-hook.exe", "new hook")
+    _write(slot / "bin" / "defenseclaw-hook.exe", "old hook")
+    _write(slot / "HOOK_FIRST", "")
+    _write(slot / "venv" / "runtime.txt", "old runtime")
+    out = _restore_case(
+        tmp_path,
+        f"try {{ Undo-Snapshot '{slot}'; Write-Output 'UNDONE' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}",
+    )
+    assert "UNDONE" not in out and "Could not put the previous hook back" in out and f"kept in {slot}" in out, out
+    assert (slot / "bin" / "defenseclaw-hook.exe").read_text(encoding="ascii") == "old hook"
+    assert (bin_dir / "defenseclaw-hook.exe").read_text(encoding="ascii") == "new hook"
+    assert (data / ".venv" / "runtime.txt").read_text(encoding="ascii") == "old runtime"
+    out = _restore_case(tmp_path, f"$script:busy = $false\nUndo-Snapshot '{slot}'\nWrite-Output 'UNDONE'")
+    assert "UNDONE" in out, out
+    assert not slot.exists()
+    assert (bin_dir / "defenseclaw-hook.exe").read_text(encoding="ascii") == "old hook"
+
+
+def test_no_restore_or_undo_hides_a_refused_program_switch() -> None:
+    # Every path that puts programs back propagates the refusal: none runs
+    # under Invoke-Quietly, and a failed Save-Snapshot whose undo is
+    # unfinished never says that nothing was changed.
+    text = _text()
+    assert not re.search(r"Invoke-Quietly \{[^}]*(Restore-BinDir|Undo-Snapshot|Undo-HookFirst|Restore-Live)", text)
+    install = _ps1_function("Invoke-Install")
+    failed_save = install[install.index("if (-not $saved) {") :]
+    failed_save = failed_save[: failed_save.index("Die \"Could not save the current install; nothing was changed\"")]
+    assert "try { Undo-Snapshot $Snap }" in failed_save
+    assert failed_save.index("if (-not $undone) { Die") < failed_save.index("it was not changed, but")
+    restore = _ps1_function("Restore-BinDir")
+    assert restore.count("Assert-BinDirRestored $From") == 2
+
+
+# ── 1.0.4 (W4b loop round 2) ────────────────────────────────────────────────
+
+
+def _close_mocks(capable: str = "new ", close_rc: int = 0, running: bool = False) -> str:
+    # The gateway probe and run: a gateway file whose text starts with
+    # $capable has 'refresh-fail-modes --closed' (this release); any other
+    # (an older release) prints the help without it.
+    return (
+        "$Previous = Join-Path $DataDir 'previous'\n"
+        "function Write-Err([string]$m) { Write-Host \"err: $m\" }\n"
+        f"function Get-GatewayProcess {{ if (${str(running).lower()}) {{ return 'pid' }}; return $null }}\n"
+        "function Get-NativeProbe([string]$FilePath, [string[]]$Arguments = @()) {\n"
+        f"    $help = if ([IO.File]::ReadAllText($FilePath).StartsWith('{capable}')) {{ '--closed  close every installed hook' }} else {{ '--hold-until-exit int' }}\n"
+        "    return [pscustomobject]@{ Exit = 0; Output = $help }\n}\n"
+        "function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Quiet) {\n"
+        "    Write-Host \"RAN: $FilePath $($Arguments -join ' ')\"\n"
+        f"    return {close_rc}\n}}\n"
+        + _ps1_function("Close-UnfinishedInstallHooks")
+    )
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_refused_restore_keeps_its_gateway_and_closes_the_hooks_before_the_lock_goes(tmp_path: Path) -> None:
+    # W4b loop round 2: the installer stopped the old gateway and published
+    # the new hook; a later failure restores the snapshot while that hook
+    # runs, and its switch back is refused. The run used to exit with the
+    # gateway down, the previous gateway put back beside the failed install's
+    # data, and the hooks on their configured outage mode, an open included.
+    # Now the gateway in place stays until every other program is back, and
+    # before the lock goes it closes every hook.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        _write(bin_dir / name, "new " + name)
+        _write(slot / "bin" / name, "old " + name)
+    _write(slot / "COMPLETE", "")
+    _write(data / "hooks" / ".hookcfg", '{"fail_modes":{"codex":"open"}}')
+    _write(data / "config.yaml", "new data")
+    _write(slot / "data" / "config.yaml", "old data")
+    out = _restore_case(
+        tmp_path,
+        _close_mocks()
+        + f"\ntry {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}\n"
+        "Close-UnfinishedInstallHooks\n",
+    )
+    assert "RESTORED" not in out and "REFUSED:" in out, out
+    assert (bin_dir / "defenseclaw-gateway.exe").read_text(encoding="ascii") == "new defenseclaw-gateway.exe"
+    assert (slot / "COMPLETE").exists()
+    gateway = bin_dir / "defenseclaw-gateway.exe"
+    assert f"RAN: {gateway} connector refresh-fail-modes --closed --data-dir {data}" in out, out
+    assert "every agent hook blocks tool calls until the gateway runs again" in out, out
+    assert "err:" not in out, out
+    # Once the hook has finished, running the restore again finishes it,
+    # gateway included, and nothing is left unfinished to close.
+    out = _restore_case(
+        tmp_path,
+        _close_mocks() + f"\n$script:busy = $false\nRestore-Slot '{slot}' | Out-Null\nWrite-Output 'RESTORED'\nClose-UnfinishedInstallHooks\n",
+    )
+    assert "RESTORED" in out and "RAN:" not in out, out
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        assert (bin_dir / name).read_text(encoding="ascii") == "old " + name
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    "case",
+    ["bin-gateway", "saved-gateway", "staged-closer", "rollback-hold", "none-can-close", "close-fails", "gateway-running", "finished"],
+)
+def test_an_unfinished_install_never_leaves_the_hooks_on_an_outage_open(tmp_path: Path, case: str) -> None:
+    # Whichever restore was refused (an upgrade's snapshot, a repair, a
+    # rollback hold), the gateway in place or a saved one closes the hooks;
+    # when none can, the run says so and never claims they are closed. A
+    # running gateway guards the hooks, and a finished install has nothing
+    # to close.
+    data, bin_dir = tmp_path / "data", tmp_path / "bin"
+    slot = data / (".rollback-hold" if case == "rollback-hold" else "previous.new")
+    _write(data / "hooks" / ".hookcfg", "{}")
+    _write(bin_dir / "defenseclaw-gateway.exe", "old gateway" if case in ("saved-gateway", "staged-closer", "none-can-close") else "new gateway")
+    if case != "finished":
+        _write(slot / "bin" / "defenseclaw-gateway.exe", "new gateway" if case == "saved-gateway" else "old gateway")
+    if case == "staged-closer":
+        _write(slot / "closer" / "defenseclaw-gateway.exe", "new gateway")
+    mocks = _close_mocks(close_rc=1 if case == "close-fails" else 0, running=case == "gateway-running")
+    out = _restore_case(tmp_path, mocks + "\nClose-UnfinishedInstallHooks\n")
+    closed = "every agent hook blocks tool calls" in out
+    if case in ("gateway-running", "finished"):
+        assert "RAN:" not in out and not closed and "err:" not in out, out
+        return
+    if case in ("none-can-close", "close-fails"):
+        assert not closed and "err: The install is not finished and the agent hooks could not be closed" in out, out
+        assert ("RAN:" in out) == (case == "close-fails"), out
+        return
+    used = {
+        "saved-gateway": slot / "bin" / "defenseclaw-gateway.exe",
+        "staged-closer": slot / "closer" / "defenseclaw-gateway.exe",
+    }.get(case, bin_dir / "defenseclaw-gateway.exe")
+    assert f"RAN: {used} connector refresh-fail-modes --closed --data-dir {data}" in out and closed, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_failure_before_the_new_gateway_is_published_still_closes_the_hooks(tmp_path: Path) -> None:
+    # Install-HookFirst put the new hook in; the install failed before the new
+    # gateway was published, so the gateway in place and the saved one are
+    # both the previous release's, which cannot close the hooks. The staged
+    # gateway kept in the snapshot before the hook switched closes them after
+    # the staged release is cleared; the finished restore removes it.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    _interrupted_fixture(data, bin_dir, slot)
+    out = _restore_case(
+        tmp_path,
+        _close_mocks()
+        + _first_run(slot, complete=True)
+        + "Clear-StagedRelease\n"
+        f"try {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}\n"
+        "Close-UnfinishedInstallHooks\n",
+    )
+    assert "RESTORED" not in out and "REFUSED:" in out, out
+    closer = slot / "closer" / "defenseclaw-gateway.exe"
+    assert f"RAN: {closer} connector refresh-fail-modes --closed --data-dir {data}" in out, out
+    assert "every agent hook blocks tool calls" in out and "err:" not in out, out
+    out = _restore_case(tmp_path, _close_mocks() + f"\n$script:busy = $false\nRestore-Slot '{slot}' | Out-Null\nWrite-Output 'RESTORED'\n")
+    assert "RESTORED" in out and not slot.exists(), out
+    assert (bin_dir / "defenseclaw-hook.exe").read_text(encoding="ascii") == "old defenseclaw-hook.exe"
+
+
+
+def test_a_failed_run_closes_unfinished_hooks_while_it_still_holds_the_lock() -> None:
+    # The close runs for every failed run that took the lock, before the
+    # transcript ends and before the lock is released.
+    text = _text()
+    tail = text[text.index("$code = 1\ntry {") :]
+    final = tail[tail.index("} finally {") :]
+    call = "if ($Run.Lock -and $code -ne 0) { Invoke-Quietly { Close-UnfinishedInstallHooks } }"
+    assert call in final
+    assert final.index(call) < final.index("Stop-Transcript") < final.index("Remove-Tree $LockDir")
+    restore = _ps1_function("Restore-BinDir")
+    assert "if ($name -eq $gatewayName -and $refused.Count) { continue }" in restore
+    assert "Save-HookCloser" not in _ps1_function("Restore-Snapshot")
+    swap = _ps1_function("Complete-Swap")
+    assert swap.index('Remove-Tree (Join-Path $Snap "closer")') < swap.index("Move-Path $Snap $Previous")
+
+
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="a running Windows program refuses its replacement")
+def test_native_a_running_hook_refuses_the_restore_and_the_hooks_close(tmp_path: Path) -> None:
+    # The same chain with the real MoveFileEx switch: a copy of cmd.exe runs
+    # as the installed hook (it waits on ping), so Windows refuses to replace
+    # its file. The restore keeps its snapshot and the gateway in place, and
+    # that gateway closes the hooks.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    hook = bin_dir / "defenseclaw-hook.exe"
+    hook.parent.mkdir(parents=True)
+    shutil.copyfile(Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe", hook)
+    _write(bin_dir / "defenseclaw-gateway.exe", "new defenseclaw-gateway.exe")
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        _write(slot / "bin" / name, "old " + name)
+    _write(slot / "COMPLETE", "")
+    _write(data / "config.yaml", "new data")
+    _write(slot / "data" / "config.yaml", "old data")
+    _write(data / "hooks" / ".hookcfg", '{"fail_modes":{"codex":"open"}}')
+    running = subprocess.Popen([str(hook), "/c", "ping -n 120 127.0.0.1 >nul"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        out = _restore_case(
+            tmp_path,
+            _ps1_function("Invoke-AtomicReplace")
+            + _close_mocks()
+            + f"\ntry {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}\n"
+            "Close-UnfinishedInstallHooks\n",
+        )
+    finally:
+        running.kill()
+        running.wait(timeout=30)
+    assert "RESTORED" not in out and "REFUSED:" in out and "defenseclaw-hook.exe" in out, out
+    assert (slot / "COMPLETE").exists()
+    assert (bin_dir / "defenseclaw-gateway.exe").read_text(encoding="ascii") == "new defenseclaw-gateway.exe"
+    assert (slot / "bin" / "defenseclaw-hook.exe").read_text(encoding="ascii") == "old defenseclaw-hook.exe"
+    assert "--closed" in out and "every agent hook blocks tool calls" in out, out
+    # The program has exited; a scanner may still hold the file for a moment.
+    pause = "function Start-Sleep { [Threading.Thread]::Sleep(250) }\n"
+    out = _restore_case(
+        tmp_path,
+        _ps1_function("Invoke-AtomicReplace") + pause + f"\nRestore-Slot '{slot}' | Out-Null\nWrite-Output 'RESTORED'\n",
+    )
+    assert "RESTORED" in out, out
+    assert hook.read_text(encoding="ascii") == "old defenseclaw-hook.exe"
+
+
+
+# ── 1.0.4 (W4b loop round 3) ────────────────────────────────────────────────
+
+
+def _interrupted_fixture(data: Path, bin_dir: Path, slot: Path, hook: Path | None = None) -> None:
+    # The previous release is installed and this release is staged, its
+    # hooks on a configured outage open.
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        _write(bin_dir / name, "old " + name)
+        _write(data / ".staging" / "bin" / name, "new " + name)
+    if hook is not None:
+        shutil.copyfile(hook, data / ".staging" / "bin" / "defenseclaw-hook.exe")
+    _write(data / "hooks" / ".hookcfg", '{"fail_modes":{"codex":"open"}}')
+    _write(data / "config.yaml", "old data")
+
+
+def _first_run(slot: Path, complete: bool) -> str:
+    # The first run's Save-Snapshot up to Install-HookFirst, and its marker
+    # when the snapshot was whole. Nothing after it runs: the run was killed
+    # (or failed) before the new gateway was published.
+    steps = f"\n$script:busy = $false\nCopy-BinDir '{slot / 'bin'}'\nInstall-HookFirst '{slot}'\n"
+    if complete:
+        steps += (
+            f"New-Item -ItemType Directory -Path '{slot / 'data'}' -Force | Out-Null\n"
+            f"Copy-Item -LiteralPath (Join-Path $DataDir 'config.yaml') -Destination '{slot / 'data'}'\n"
+            f"Set-Content -LiteralPath '{slot / 'VERSION'}' -Value '1.0.3' -Encoding Ascii\n"
+            f"Set-Content -LiteralPath '{slot / 'COMPLETE'}' -Value '' -Encoding Ascii\n"
+        )
+    return steps + "$script:busy = $true\n"
+
+
+_RESUME_MOCKS = (
+    "function Stop-Gateway { return 0 }\n"
+    "function Start-Gateway { Write-Host 'STARTED'; return 0 }\n"
+    "function Find-SetupInstall { return $null }\n"
+)
+
+
+def _resume_and_finish() -> str:
+    # The retry: the recovery at the top of Invoke-Install, then what the
+    # top-level finally does for a failed run that took the lock.
+    return (
+        "try { Resume-InterruptedRun; Write-Output 'RESUMED' } catch { Write-Output \"REFUSED: $($_.Exception.Message)\" }\n"
+        "Close-UnfinishedInstallHooks\nClear-StagedRelease\n"
+    )
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("case", ["killed-after-complete", "killed-before-complete", "failed-run-cleared-staging"])
+def test_an_interrupted_upgrade_resumed_with_a_busy_hook_closes_the_hooks(tmp_path: Path, case: str) -> None:
+    # W4b loop round 3: the first run put the new hook in (HOOK_FIRST) and
+    # stopped before it published the new gateway: killed after or before
+    # COMPLETE, or failed with its finally clearing the staged release. The
+    # retry's Resume-InterruptedRun restores (or undoes) the snapshot while
+    # the new hook runs, and its switch back is refused. Only the previous
+    # release's gateways were in place and saved, none could close the
+    # hooks, and the run ended with the gateway down and the hooks on the
+    # configured open. The gateway the first run kept in the slot before the
+    # hook switched closes them, and stays until the recovery finishes.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    _interrupted_fixture(data, bin_dir, slot)
+    first = _close_mocks() + _RESUME_MOCKS + _first_run(slot, complete=case != "killed-before-complete")
+    if case == "failed-run-cleared-staging":
+        first += "Close-UnfinishedInstallHooks\nClear-StagedRelease\n"
+    out = _restore_case(tmp_path, first)
+    closer = slot / "closer" / "defenseclaw-gateway.exe"
+    closed = f"RAN: {closer} connector refresh-fail-modes --closed --data-dir {data}"
+    if case == "failed-run-cleared-staging":
+        assert closed in out and "err:" not in out, out
+    assert (bin_dir / "defenseclaw-hook.exe").read_text(encoding="ascii") == "new defenseclaw-hook.exe"
+    out = _restore_case(tmp_path, _close_mocks() + _RESUME_MOCKS + "\n" + _resume_and_finish())
+    assert "RESUMED" not in out and "REFUSED:" in out and f"kept in {slot}" in out, out
+    assert closed in out, out
+    assert "every agent hook blocks tool calls until the gateway runs again" in out and "err:" not in out, out
+    assert "STARTED" not in out, out
+    # The staged release is gone; the closer is not, and neither is the
+    # previous install's copy or its marker.
+    assert not (data / ".staging").exists() and closer.read_text(encoding="ascii") == "new defenseclaw-gateway.exe"
+    assert (slot / "bin" / "defenseclaw-hook.exe").read_text(encoding="ascii") == "old defenseclaw-hook.exe"
+    assert (slot / "COMPLETE").exists() == (case != "killed-before-complete")
+    assert (bin_dir / "defenseclaw-gateway.exe").read_text(encoding="ascii") == "old defenseclaw-gateway.exe"
+    # Busy again on the next retry: closed again, with the same kept gateway.
+    out = _restore_case(tmp_path, _close_mocks() + _RESUME_MOCKS + "\n" + _resume_and_finish())
+    assert "REFUSED:" in out and closed in out and "err:" not in out, out
+    # Once the hook is idle the recovery finishes: the previous programs are
+    # back, the closer goes with the slot, and nothing is left to close.
+    out = _restore_case(tmp_path, _close_mocks() + _RESUME_MOCKS + "\n$script:busy = $false\n" + _resume_and_finish())
+    assert "RESUMED" in out and "RAN:" not in out and "err:" not in out, out
+    assert not slot.exists()
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        assert (bin_dir / name).read_text(encoding="ascii") == "old " + name
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("case", ["linked", "copied", "in-the-way"])
+def test_the_new_hook_goes_first_only_once_its_closer_is_kept(tmp_path: Path, case: str) -> None:
+    # The closer is a hard link (no room), a proven copy where the volume
+    # cannot link, and when neither can be kept the switch stops before the
+    # marker and the hook change, and says why.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    _interrupted_fixture(data, bin_dir, slot)
+    staged = data / ".staging" / "bin" / "defenseclaw-gateway.exe"
+    body = f"Copy-BinDir '{slot / 'bin'}'\n"
+    if case == "copied":
+        body += (
+            "function New-Item { [CmdletBinding()] param([string]$ItemType, [string]$Path, [string]$Target, [switch]$Force)\n"
+            "    if ($ItemType -eq 'HardLink') { throw 'this volume cannot link' }\n"
+            "    Microsoft.PowerShell.Management\\New-Item -ItemType $ItemType -Path $Path -Force:$Force\n}\n"
+        )
+    if case == "in-the-way":
+        body += f"Set-Content -LiteralPath '{slot / 'closer'}' -Value 'a file' -Encoding Ascii\n"
+    body += f"$script:busy = $false\ntry {{ Install-HookFirst '{slot}'; Write-Output 'FIRST' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}\n"
+    out = _restore_case(tmp_path, body)
+    closer = slot / "closer" / "defenseclaw-gateway.exe"
+    live = bin_dir / "defenseclaw-hook.exe"
+    if case == "in-the-way":
+        assert "FIRST" not in out and "Could not keep the new gateway in" in out and "the installed hook was left as it was" in out, out
+        assert not (slot / "HOOK_FIRST").exists()
+        assert live.read_text(encoding="ascii") == "old defenseclaw-hook.exe"
+        return
+    assert "FIRST" in out and (slot / "HOOK_FIRST").exists(), out
+    assert live.read_text(encoding="ascii") == "new defenseclaw-hook.exe"
+    assert closer.read_text(encoding="ascii") == "new defenseclaw-gateway.exe"
+    assert os.path.samefile(closer, staged) == (case == "linked")
+
+
+def test_a_closer_that_cannot_be_kept_is_never_hidden() -> None:
+    # The snapshot save that runs Install-HookFirst propagates its error (a
+    # closer that could not be kept stops the run as "nothing was changed"),
+    # and a finished swap removes the closer before the slot becomes previous.
+    save = _ps1_function("Save-Snapshot")
+    assert "Install-HookFirst $Snap" in save and "Invoke-Quietly" not in save
+    assert not re.search(r"Invoke-Quietly \{[^}]*(Install-HookFirst|Save-HookCloser)", _text())
+    install = _ps1_function("Invoke-Install")
+    assert "try { $saved = Save-Snapshot } catch { Write-Err $_.Exception.Message" in install
+
+
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="a running Windows program refuses its replacement")
+def test_native_a_busy_hook_during_interrupted_resume_closes_the_hooks(tmp_path: Path) -> None:
+    # The interrupted-resume chain with the real MoveFileEx switch: the first
+    # run put a copy of cmd.exe in as the new hook and was killed before it
+    # published the new gateway. While that hook runs, the retry's recovery
+    # is refused, and the gateway kept in the slot closes the hooks.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    _interrupted_fixture(data, bin_dir, slot, hook=Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe")
+    real = _ps1_function("Invoke-AtomicReplace")
+    pause = "function Start-Sleep { [Threading.Thread]::Sleep(250) }\n"
+    _restore_case(tmp_path, real + pause + _close_mocks() + _RESUME_MOCKS + _first_run(slot, complete=True))
+    hook = bin_dir / "defenseclaw-hook.exe"
+    running = subprocess.Popen([str(hook), "/c", "ping -n 120 127.0.0.1 >nul"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        out = _restore_case(tmp_path, real + _close_mocks() + _RESUME_MOCKS + "\n" + _resume_and_finish())
+    finally:
+        running.kill()
+        running.wait(timeout=30)
+    closer = slot / "closer" / "defenseclaw-gateway.exe"
+    assert "RESUMED" not in out and "REFUSED:" in out and "defenseclaw-hook.exe" in out, out
+    assert f"RAN: {closer} connector refresh-fail-modes --closed" in out, out
+    assert "every agent hook blocks tool calls" in out and "err:" not in out, out
+    assert (slot / "COMPLETE").exists() and closer.exists() and not (data / ".staging").exists()
+    out = _restore_case(tmp_path, real + pause + _close_mocks() + _RESUME_MOCKS + "\n" + _resume_and_finish())
+    assert "RESUMED" in out and "RAN:" not in out, out
+    assert not slot.exists()
+    assert hook.read_text(encoding="ascii") == "old defenseclaw-hook.exe"
 
 
 def test_previous_hook_calls_drain_while_new_hook_traffic_continues() -> None:

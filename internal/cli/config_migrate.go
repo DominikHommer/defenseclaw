@@ -278,15 +278,24 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-	if state, err := configwrite.ReadGenerationState(path); err != nil && !errors.Is(err, fs.ErrNotExist) && state.Generation == 0 {
-		return fmt.Errorf("cannot prove the previous config generation from %s; restore that file from the last verified administrator backup, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", configwrite.GenerationPath(path))
-	}
 	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure"}
 	if bundleOpt, ok, err := managedStandaloneBundleGeneration(path, raw); err != nil {
 		return err
 	} else if ok {
 		opt = bundleOpt
 		opt.ExpectSHA256 = configwrite.SHA256Hex(raw)
+	}
+	// A staged bundle binds the bytes already installed through the
+	// generation record alone. An unreadable record is the only evidence of
+	// what installed them: refuse before the step migrates, records or
+	// re-permissions anything, so the transaction fails and keeps it.
+	if err := configwrite.RefuseUnprovenBundleBinding(path, opt); err != nil {
+		return err
+	}
+	// Without a bundle an unreadable record is still the only evidence of
+	// the generation the gateway enforces: never reset it (GAP-0236).
+	if state, err := configwrite.ReadGenerationState(path); err != nil && !errors.Is(err, fs.ErrNotExist) && state.Generation == 0 {
+		return fmt.Errorf("cannot prove the previous config generation from %s; restore that file from the last verified administrator backup, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", configwrite.GenerationPath(path))
 	}
 	restoreACL, err := keepConfigDACL(path)
 	if err != nil {

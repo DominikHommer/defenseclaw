@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"golang.org/x/sys/windows"
+
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -153,5 +155,53 @@ func TestWindowsAnchorsLockRefusalRecordsOneChangeEvent(t *testing.T) {
 	if err != nil || ev.Kind != enterprisestatus.ChangeKindTrustAnchors || ev.Outcome != enterprisestatus.ChangeRefused ||
 		ev.ReasonCode != "lifecycle_busy" {
 		t.Fatalf("change event = %+v, %v", ev, err)
+	}
+}
+
+// The real Windows creator must stamp both directories, including the
+// protected flag, on a never-bundled install and on an inherited parent.
+func TestWindowsChangeSpoolProtectsTheBundleParent(t *testing.T) {
+	if !windowsEnterpriseIsElevated() {
+		t.Skip("setting the Administrators owner requires elevation")
+	}
+	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, inherited := range []bool{false, true} {
+		t.Run(map[bool]string{false: "missing", true: "inherited"}[inherited], func(t *testing.T) {
+			layout := managed.StandaloneLayout{ConfigDir: filepath.Join(windowsBundleScratchDir(t), "etc")}
+			bundles := filepath.Join(layout.ConfigDir, "bundles")
+			if inherited {
+				if err := os.MkdirAll(bundles, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			spool, err := windowsChangeSpool(layout)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := spool.Prepare(spool.Dir); err != nil {
+				t.Fatal(err)
+			}
+			for path, descriptor := range map[string]string{
+				bundles:   windowsBundleDirectorySDDL(service.String()),
+				spool.Dir: windowsBundleVersionSDDL(service.String(), true),
+			} {
+				actual, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+					windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expected, err := windows.SecurityDescriptorFromString(descriptor)
+				if err != nil {
+					t.Fatal(err)
+				}
+				equal, err := windowsEnterpriseExactDescriptorMatch(actual, expected)
+				if err != nil || !equal {
+					t.Fatalf("%s ACL=%s, want %s: %v", path, actual.String(), descriptor, err)
+				}
+			}
+		})
 	}
 }

@@ -330,3 +330,72 @@ func TestRefreshFailModesHoldsUntilTheGatewayExits(t *testing.T) {
 		t.Fatal("the hold did not end after the gateway exited")
 	}
 }
+
+// W4b loop round 2: install.ps1 stops with its install unfinished (a restore
+// a running hook refused leaves the failed install's programs beside data
+// they do not match, with the gateway down). It closes every hook with
+// --closed, an open the config chooses included, so no hook follows an
+// outage open until the gateway renders them again. A managed install is
+// left alone, and --closed never takes a hold.
+func TestRefreshFailModesClosedClosesEveryHookWhateverTheConfigChooses(t *testing.T) {
+	previous := refreshFailModesClosed
+	t.Cleanup(func() { refreshFailModesClosed = previous })
+	for _, test := range []struct{ name, doc string }{
+		{"loaded config open", "config_version: 9\nguardrail:\n  mode: action\n  hook_fail_mode: open\n"},
+		{"0.8.x document open", "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: open\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			isolateHookEnvForTest(t, home)
+			if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(test.doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open","claudecode":"open"}}`)
+			refreshFailModesClosed = false
+			runRefreshFailModesForTest(t, home)
+			if got := oldHookFailMode(t, home, "codex"); got != "open" {
+				t.Fatalf("precondition: without --closed the config's open stays, got %q", got)
+			}
+			refreshFailModesClosed = true
+			if result := runRefreshFailModesForTest(t, home); !reflect.DeepEqual(result.Refreshed, []string{"claudecode", "codex"}) {
+				t.Fatalf("refresh %+v", result)
+			}
+			for _, name := range []string{"codex", "claudecode"} {
+				if got := oldHookFailMode(t, home, name); got != "closed" {
+					t.Fatalf("the old %s hook reads %q, want closed", name, got)
+				}
+				if got := buildHookOptions(name, "PreToolUse", "", "").FailMode; got != "closed" {
+					t.Fatalf("the new %s hook fails %q, want closed", name, got)
+				}
+			}
+		})
+	}
+	t.Run("managed install", func(t *testing.T) {
+		home := t.TempDir()
+		isolateHookEnvForTest(t, home)
+		if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("config_version: 7\ndeployment_mode: managed_enterprise\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		const body = `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open"}}`
+		writeHookSidecarForTest(t, home, body)
+		refreshFailModesClosed = true
+		if result := runRefreshFailModesForTest(t, home); len(result.Refreshed) != 0 {
+			t.Fatalf("refresh %+v", result)
+		}
+		if got, _ := os.ReadFile(filepath.Join(home, "hooks", ".hookcfg")); string(got) != body {
+			t.Fatalf("managed sidecar rewritten: %s", got)
+		}
+	})
+	t.Run("no hold", func(t *testing.T) {
+		previousPID, previousDir, previousJSON := refreshFailModesHoldPID, connectorFlagDataDir, connectorFlagJSON
+		t.Cleanup(func() {
+			refreshFailModesHoldPID, connectorFlagDataDir, connectorFlagJSON = previousPID, previousDir, previousJSON
+		})
+		home := t.TempDir()
+		isolateHookEnvForTest(t, home)
+		connectorFlagDataDir, connectorFlagJSON, refreshFailModesHoldPID, refreshFailModesClosed = home, false, os.Getpid(), true
+		if err := runConnectorRefreshFailModes(connectorRefreshFailModesCmd, nil); err == nil || !strings.Contains(err.Error(), "--closed does not take --hold-until-exit") {
+			t.Fatalf("--closed with a hold: %v", err)
+		}
+	})
+}

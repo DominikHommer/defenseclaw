@@ -1269,127 +1269,25 @@ public static extern bool MoveFileExW(string existingFileName, string newFileNam
     }
 }
 
-function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {
-    [IO.File]::Replace($New, $Destination, $Backup, $true)
-}
-
-function Invoke-FileMove([string]$From, [string]$To) {
-    [IO.File]::Move($From, $To)
-}
-
-function Invoke-FileCopy([string]$From, [string]$To) {
-    [IO.File]::Copy($From, $To, $false)
-}
-
-function New-VerifiedCopy([string]$From, [string]$To) {
-    # Copy $From to $To, a path no hook names, and keep it only when it is a
-    # whole copy. A copy that fails or stops partway is removed and $false
-    # returned, so a partial file is never published or counted as a copy of
-    # the old launcher.
-    try {
-        Invoke-FileCopy $From $To
-        if ((Get-Sha256 $From) -eq (Get-Sha256 $To)) { return $true }
-    } catch { }
-    Remove-Item -LiteralPath $To -Force -ErrorAction SilentlyContinue
-    return $false
-}
-
-function Close-SwapGap([string]$New, [string]$Backup, [string]$Restore, [string]$Destination) {
-    # ReplaceFile stopped after it renamed the installed file to the backup
-    # (ERROR_UNABLE_TO_MOVE_REPLACEMENT_2), so nothing is at $Destination.
-    # Put a file back at once: the new one if it moves now, else the old one
-    # from the backup, else the restore copy Switch-InPlace made before the
-    # swap (a scanner can hold both the new file and the backup against a
-    # rename), else a copy of the old file (a hold against a rename still lets
-    # it be read). Only renames reach $Destination: a copy is made to a ready
-    # file beside it, checked, and renamed in, so a hook never runs a partial
-    # launcher and a failed copy never passes for the old one. No step waits
-    # with the path missing. Returns $true when the new file is in place,
-    # $false when the old one is back.
-    $ready = ""
-    $copies = 0
-    try {
-        for ($tries = 0; ; $tries++) {
-            if (Test-Path -LiteralPath $New) { try { Invoke-FileMove $New $Destination; return $true } catch { } }
-            foreach ($old in @($Backup, $Restore)) {
-                if ($old -and (Test-Path -LiteralPath $old)) { try { Invoke-FileMove $old $Destination; return $false } catch { } }
-            }
-            if (-not $ready) {
-                foreach ($old in @($Restore, $Backup)) {
-                    if (-not $old -or -not (Test-Path -LiteralPath $old)) { continue }
-                    $copies++
-                    $candidate = "$Backup.ready$copies"
-                    if (New-VerifiedCopy $old $candidate) { $ready = $candidate; break }
-                }
-            }
-            if ($ready) { try { Invoke-FileMove $ready $Destination; $ready = ""; return $false } catch { } }
-            if ($tries -ge 200) { throw "Could not put $Destination back after a partial replace; the installed file is $Backup" }
-            Start-Sleep -Milliseconds 50
-        }
-    } finally {
-        if ($ready) { Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue }
-    }
-}
-
 function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) {
-    # Switch with one atomic rename of the new file over the installed one
-    # (Invoke-AtomicReplace), so the path always names a whole launcher. A
-    # shim, the hook state and an idle binary always switch that way. Only a
-    # launcher that runs as a program at that moment (a hook an agent
-    # started), which no rename can replace, is swapped with one ReplaceFile
-    # call, so the path is never missing. Renaming the old file aside and the
-    # new one in left a gap,
-    # often a second or more while a virus scanner held the new copy, in which
-    # a hook an agent started found no defenseclaw-hook.exe and its PowerShell
-    # bridge exited 1, which the agent does not treat as a block (rel-1-0-4
-    # GAP-0004). ReplaceFile renames the old file to the backup name, which a
-    # running program allows; the backup of a running hook stays until the
-    # next install removes it. While a scanner or another program holds a
-    # file, retry; if it never lets go, fail and leave the installed file in
-    # place (the install is then undone) rather than fall back to the rename.
-    # A ReplaceFile that stops halfway is closed at once (Close-SwapGap), and
-    # the retries then run with the installed file back in place. The restore
-    # copy, an independent copy of the installed file made before each
-    # attempt, is what Close-SwapGap publishes when a scanner holds both the
-    # new file and the backup; only a verified whole copy is used. Its name
-    # starts like the backup's, so the next install removes one this run
-    # could not.
-    $aside = "$Destination.old-" + (Get-Date -Format "yyyyMMddTHHmmssfff")
-    $restore = "$aside.restore"
-    $restoreReady = $false
-    try {
-        for ($waited = 0; ; $waited++) {
-            try {
-                Invoke-AtomicReplace $New $Destination
-                return
-            } catch {
-                $reason = $_.Exception.Message
-            }
-            # A recovery may have moved the last restore copy in: make another.
-            if (-not $restoreReady -or -not (Test-Path -LiteralPath $restore)) { $restoreReady = New-VerifiedCopy $Destination $restore }
-            try {
-                Invoke-FileReplace $New $Destination $aside
-                return
-            } catch {
-                $reason = $_.Exception.Message
-            }
-            $restoreCopy = if ($restoreReady) { $restore } else { "" }
-            if (-not (Test-Path -LiteralPath $Destination) -and (Close-SwapGap $New $aside $restoreCopy $Destination)) {
-                return
-            }
-            if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
-                Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
-                throw "Could not replace $Destination in place ($reason); it was left as it was"
-            }
-            Start-Sleep -Milliseconds 500
+    # Only one atomic rename publishes an installed file. ReplaceFile opens
+    # the old launcher for replacement and can deny a concurrent hook's
+    # execution with a sharing violation (GAP-0352); its partial-failure
+    # recovery also cannot prove uninterrupted availability. A running hook
+    # or scanner may refuse the rename. Retry while the whole old launcher
+    # remains callable, then refuse the upgrade without changing it.
+    for ($waited = 0; ; $waited++) {
+        try {
+            Invoke-AtomicReplace $New $Destination
+            return
+        } catch {
+            $reason = $_.Exception.Message
         }
-    } finally {
-        # Keep them when nothing is at $Destination: they are the old file.
-        # Only whole files are ever renamed to $Destination, so one there is a
-        # launcher.
-        if (Test-Path -LiteralPath $Destination -PathType Leaf) {
-            foreach ($leftover in @($aside, $restore)) { Remove-Item -LiteralPath $leftover -Force -ErrorAction SilentlyContinue }
+        if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
+            Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
+            throw "Could not replace $Destination in place ($reason); it was left as it was. Retry the same install command after the running hook finishes"
         }
+        Start-Sleep -Milliseconds 500
     }
 }
 
@@ -1463,15 +1361,49 @@ function Restore-BinDir([string]$From) {
                 Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
             }
         }
+        Assert-BinDirRestored $From
         return
     }
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+    # A hook still running refuses its in-place switch (Switch-InPlace): put
+    # back every file that can be, then stop on the rest, so the caller keeps
+    # the copy in $From and the run can be repeated. The gateway goes back
+    # last, and only once every other program is back: until then the one in
+    # place stays, so a refused restore keeps the gateway that can close the
+    # hooks while the install is unfinished (Close-UnfinishedInstallHooks).
+    $gatewayName = "defenseclaw-gateway.exe"
+    $order = @($ManagedFiles | Where-Object { $_ -ne $gatewayName })
+    if ($ManagedFiles -contains $gatewayName) { $order += $gatewayName }
+    $refused = @()
+    foreach ($name in $order) {
+        if ($name -eq $gatewayName -and $refused.Count) { continue }
+        $saved = Join-Path $From $name
+        $live = Join-Path $BinDir $name
+        try {
+            if (Test-Path -LiteralPath $saved -PathType Leaf) { Install-File $saved $live }
+            elseif (Test-Path -LiteralPath $live) { Remove-Aside $live }
+        } catch { $refused += $_.Exception.Message }
+    }
+    if ($refused.Count) { throw "Could not put back every program in ${BinDir}: $($refused -join '; ')" }
+    Assert-BinDirRestored $From
+}
+
+function Assert-BinDirRestored([string]$From) {
+    # A restore is claimed only when $BinDir holds exactly the files saved in
+    # $From, byte for byte: a hook or gateway of the failed install left
+    # beside the previous data is not the previous install.
+    $wrong = @()
+    $noBinDir = Test-Path -LiteralPath (Join-Path $From "NO_BINDIR")
     foreach ($name in $ManagedFiles) {
         $saved = Join-Path $From $name
         $live = Join-Path $BinDir $name
-        if (Test-Path -LiteralPath $saved -PathType Leaf) { Install-File $saved $live }
-        elseif (Test-Path -LiteralPath $live) { Remove-Aside $live }
+        if (-not $noBinDir -and (Test-Path -LiteralPath $saved -PathType Leaf)) {
+            if (-not (Test-Path -LiteralPath $live -PathType Leaf) -or (Get-Sha256 $live) -ne (Get-Sha256 $saved)) { $wrong += $name }
+        } elseif (Test-Path -LiteralPath $live) {
+            $wrong += $name
+        }
     }
+    if ($wrong.Count) { throw "$BinDir does not hold the saved copy of $($wrong -join ', ')" }
 }
 
 # $Where names the environment in the progress lines: the installer builds
@@ -1664,12 +1596,20 @@ function Install-HookFirst([string]$Slot) {
     # .install.lock, waits for the install and names it. So the new hook goes
     # in as soon as the rollback copy holds the old one. HOOK_FIRST, written
     # once that copy is whole, tells Undo-Snapshot to put the old hook back.
+    # Until the new gateway is published, the gateways in place are older and
+    # cannot close the hooks, so the slot first keeps the staged (checked)
+    # gateway in closer\: a run that stops in that window (killed, or a
+    # restore the running new hook refuses, now or in the next run's
+    # Resume-InterruptedRun) closes the hooks with it
+    # (Close-UnfinishedInstallHooks). No closer, no new hook.
     $live = Join-Path $BinDir "defenseclaw-hook.exe"
     $saved = Join-Path $Slot "bin\defenseclaw-hook.exe"
     $staged = Join-Path $Staging "bin\defenseclaw-hook.exe"
-    foreach ($path in @($live, $saved, $staged)) {
+    $gateway = Join-Path $Staging "bin\defenseclaw-gateway.exe"
+    foreach ($path in @($live, $saved, $staged, $gateway)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
     }
+    Save-HookCloser $Slot $gateway
     Set-Content -LiteralPath (Join-Path $Slot "HOOK_FIRST") -Value "" -Encoding Ascii
     Install-File $staged $live
     Wait-PreviousHookExit ([DateTime]::UtcNow)
@@ -1699,6 +1639,27 @@ function Wait-PreviousHookExit([DateTime]$PublishedAt) {
     }
 }
 
+function Save-HookCloser([string]$Slot, [string]$Gateway) {
+    # A hard link takes no room and stays when the staged release is cleared;
+    # a copy where the volume cannot link. Either is proven byte for byte, and
+    # any failure stops the run before the hook changes.
+    $closer = Join-Path $Slot "closer\defenseclaw-gateway.exe"
+    try {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $closer) -Force -ErrorAction Stop | Out-Null
+        if (Test-Path -LiteralPath $closer) { Remove-Item -LiteralPath $closer -Force -ErrorAction Stop }
+        try { New-Item -ItemType HardLink -Path $closer -Target $Gateway -ErrorAction Stop | Out-Null } catch {
+            if (Test-Path -LiteralPath $closer) { Remove-Item -LiteralPath $closer -Force -ErrorAction Stop }
+            Copy-Item -LiteralPath $Gateway -Destination $closer -ErrorAction Stop
+        }
+        if (-not (Test-Path -LiteralPath $closer -PathType Leaf) -or (Get-Sha256 $closer) -ne (Get-Sha256 $Gateway)) {
+            throw "the kept copy does not match $Gateway"
+        }
+    } catch {
+        throw ("Could not keep the new gateway in $(Split-Path -Parent $closer), which closes the agent hooks if this install stops " +
+            "unfinished ($($_.Exception.Message)); the installed hook was left as it was")
+    }
+}
+
 function Undo-HookFirst([string]$Slot) {
     $saved = Join-Path $Slot "bin\defenseclaw-hook.exe"
     if ((Test-Path -LiteralPath (Join-Path $Slot "HOOK_FIRST")) -and (Test-Path -LiteralPath $saved -PathType Leaf)) {
@@ -1712,12 +1673,17 @@ function Undo-HookFirst([string]$Slot) {
 }
 
 function Undo-Snapshot([string]$Slot) {
-    # Put back what an unfinished Save-Snapshot moved.
-    Undo-HookFirst $Slot
+    # Put back what an unfinished Save-Snapshot moved. The slot holds the
+    # only copy of the previous hook until it is back in place: when a
+    # running hook refuses that switch, the slot stays and the error says so,
+    # and the next run finishes the undo (Resume-InterruptedRun).
+    $hookRefused = ""
+    try { Undo-HookFirst $Slot } catch { $hookRefused = $_.Exception.Message }
     if ((Test-Path -LiteralPath (Join-Path $Slot "venv")) -and -not (Test-Path -LiteralPath $Venv)) { Move-Path (Join-Path $Slot "venv") $Venv 60 }
     if ((Test-Path -LiteralPath (Join-Path $Slot "installer")) -and -not (Test-Path -LiteralPath $InstallerDir)) {
         Move-Path (Join-Path $Slot "installer") $InstallerDir
     }
+    if ($hookRefused) { throw "Could not put the previous hook back in $BinDir ($hookRefused); its copy was kept in $Slot. Run the installer again to finish putting it back" }
     Remove-Tree $Slot
 }
 
@@ -2004,17 +1970,25 @@ function Move-RestoreConnectorRecovery([string]$Slot, [string]$Failed) {
             $moved.Add(@{ From = $entry.FullName; To = $to })
         }
     } catch {
-        $failure = $_.Exception.Message
-        $retained = @()
-        for ($index = $moved.Count - 1; $index -ge 0; $index--) {
-            $entry = $moved[$index]
-            try { Move-Path $entry.To $entry.From } catch { $retained += $entry.To }
-        }
-        if ($retained.Count) {
-            throw "$failure; connector receipt moves could not all be undone; keep $Slot and $Failed (retained: $($retained -join ', '))"
-        }
-        throw $failure
+        Undo-RestoreConnectorRecovery $moved $Slot $Failed $_.Exception.Message
     }
+    # The caller undoes these renames when a later step of its restore refuses.
+    return ,$moved
+}
+
+function Undo-RestoreConnectorRecovery($Moved, [string]$Slot, [string]$Failed, [string]$Failure) {
+    # Put the receipt renames of Move-RestoreConnectorRecovery back, latest
+    # first, and throw $Failure: with every one back, retrying the marked
+    # snapshot moves each receipt once.
+    $retained = @()
+    for ($index = $Moved.Count - 1; $index -ge 0; $index--) {
+        $entry = $Moved[$index]
+        try { Move-Path $entry.To $entry.From } catch { $retained += $entry.To }
+    }
+    if ($retained.Count) {
+        throw "$Failure; connector receipt moves could not all be undone; keep $Slot and $Failed (retained: $($retained -join ', '))"
+    }
+    throw $Failure
 }
 
 function Restore-Slot([string]$Slot) {
@@ -2022,11 +1996,24 @@ function Restore-Slot([string]$Slot) {
     $olderFailed = @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".failed-*" -ErrorAction SilentlyContinue)
     $failed = New-FailedInstallDirectory
     New-Item -ItemType Directory -Path (Join-Path $failed "data") | Out-Null
-    Move-RestoreConnectorRecovery $Slot $failed
+    $receipts = Move-RestoreConnectorRecovery $Slot $failed
+    # A program that cannot go back (a hook of the failed install still
+    # running refuses its in-place switch) stops the restore before any data
+    # or environment moves. $Slot keeps its COMPLETE marker and the only copy
+    # of the previous programs, and the receipts go back, so running the
+    # installer again finishes the restore; what is already back is skipped.
+    try { Restore-BinDir (Join-Path $Slot "bin") } catch {
+        $refused = "$($_.Exception.Message). The previous install was not restored; its copy was kept in $Slot. Run the installer again to finish restoring it"
+        try { Undo-RestoreConnectorRecovery $receipts $Slot $failed $refused } catch {
+            $refused = $_.Exception.Message
+        }
+        # Only this restore's empty .failed folder goes; a non-empty one stays.
+        try { [IO.Directory]::Delete((Join-Path $failed "data"), $false); [IO.Directory]::Delete($failed, $false) } catch { }
+        throw $refused
+    }
     # Only the latest failed install is kept. Do not prune an earlier copy
     # until the strict receipt phase succeeds; archive its evidence first.
     foreach ($old in $olderFailed) { Invoke-Quietly { Remove-FailedInstall $old.FullName } }
-    Invoke-Quietly { Restore-BinDir (Join-Path $Slot "bin") }
     foreach ($part in @(@($Venv, "venv"), @($InstallerDir, "installer"))) {
         Invoke-Quietly { if (Test-Path -LiteralPath $part[0]) { Move-Path $part[0] (Join-Path $failed $part[1]) 60 } }
         Invoke-Quietly { if (Test-Path -LiteralPath (Join-Path $Slot $part[1])) { Move-Path (Join-Path $Slot $part[1]) $part[0] 60 } }
@@ -2040,6 +2027,34 @@ function Restore-Slot([string]$Slot) {
     Invoke-Quietly { Restore-ExternalConfig $Slot }
     Invoke-Quietly { Remove-Tree $Slot }
     return $failed
+}
+
+function Close-UnfinishedInstallHooks {
+    # A run that stops with its install unfinished (a restore or rollback a
+    # running hook refused: Restore-Slot, Switch-WithPrevious) leaves its
+    # snapshot or rollback hold, programs and data that do not match, and the
+    # gateway down. Before the install lock goes, close every hook, an outage
+    # open the config chooses included, until the gateway renders them again
+    # (the next run of the installer, or a gateway start). The gateway in
+    # place, or a saved one, that has 'refresh-fail-modes --closed' does it.
+    $unfinished = @(@((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"), (Join-Path $DataDir ".rollback-hold")) |
+        Where-Object { Test-Path -LiteralPath $_ })
+    if (-not $unfinished.Count -or (Get-GatewayProcess)) { return }
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container)) { return }
+    $gateways = @((Join-Path $BinDir "defenseclaw-gateway.exe")) +
+        @($unfinished | ForEach-Object { (Join-Path $_ "closer\defenseclaw-gateway.exe"), (Join-Path $_ "bin\defenseclaw-gateway.exe") }) +
+        @(Join-Path $Previous "bin\defenseclaw-gateway.exe")
+    foreach ($gateway in $gateways) {
+        if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) { continue }
+        $probe = Get-NativeProbe $gateway @("connector", "refresh-fail-modes", "--help")
+        if ($probe.Exit -ne 0 -or $probe.Output -notmatch "--closed") { continue }
+        if ((Invoke-Native $gateway @("connector", "refresh-fail-modes", "--closed", "--data-dir", $DataDir.TrimEnd([char]92))) -eq 0) {
+            Write-Warn "The install is not finished, so every agent hook blocks tool calls until the gateway runs again. Run the installer again to finish it"
+            return
+        }
+    }
+    Write-Err ("The install is not finished and the agent hooks could not be closed: until the gateway runs, they follow the outage fail mode " +
+        "in your config. Run the installer again to finish it")
 }
 
 function Clear-SetupDataDir([string]$Failed) {
@@ -2247,6 +2262,8 @@ function Complete-Swap {
     # A first install has no previous install, only its staging copies (GAP-1827).
     if ($PrevVersion) { Write-Info "Cleaning up the previous install's files (this can take a minute or two)" }
     else { Write-Info "Removing the staging files" }
+    # The closer (Install-HookFirst) is only for an unfinished install.
+    Invoke-Quietly { Remove-Tree (Join-Path $Snap "closer") }
     Invoke-Quietly {
         if ($Snap -eq (Join-Path $DataDir "previous.new") -and $PrevVersion) {
             Save-RolledBackData
@@ -3146,6 +3163,9 @@ try {
     $code = if ($Run.UsageError) { 2 } else { 1 }
 } finally {
     try { [Console]::TreatControlCAsInput = $false } catch { }
+    # While this run still holds the install lock: a failed run never leaves
+    # an unfinished install's hooks on an outage open.
+    if ($Run.Lock -and $code -ne 0) { Invoke-Quietly { Close-UnfinishedInstallHooks } }
     if ($Run.Lock) { Close-InstallLock }
     if ($Run.Transcript) { try { Stop-Transcript | Out-Null } catch { } }
     if ($Run.Owner -ne [IntPtr]::Zero) { [void][DefenseClawInstall.Native]::SwapDefaultOwner($Run.Owner) }
