@@ -1287,6 +1287,9 @@ func (r *NSSResolver) groupMissDefinitive(service string, gid int) bool {
 		_, found, err := nslcdGroupByGID(r.context(), gid)
 		return err == nil && !found
 	}
+	// passwdAbsent requires SSSD and winbind to answer with every domain
+	// online: a live NSS socket returns not-found for an uncached gid
+	// while its domain is offline (GAP-0385).
 	return r.passwdAbsent(service, strconv.Itoa(gid), true) == nil
 }
 
@@ -2165,12 +2168,21 @@ func (r *NSSResolver) passwdAbsent(service, key string, byUID bool) error {
 			return fmt.Errorf("%w: %w", err, errDirectoryUnconfirmed)
 		}
 		sssd.Close()
+		if err := sssdDomainsOnline(r.context()); err != nil {
+			return fmt.Errorf("SSSD cannot confirm absence of account %s: %w: %w", key, err, errDirectoryUnconfirmed)
+		}
 		return nil
 	case service == "winbind":
 		if _, err := os.Stat(sambaConfPath); errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return winbindAnswers(r.context())
+		if err := winbindAnswers(r.context()); err != nil {
+			return err
+		}
+		if err := winbindDomainsOnline(r.context()); err != nil {
+			return fmt.Errorf("winbind cannot confirm absence of account %s: %w: %w", key, err, errDirectoryUnconfirmed)
+		}
+		return nil
 	case service == "ldap":
 		holder, found, err := nslcdPasswd(r.context(), key, byUID)
 		if err != nil {
@@ -2426,10 +2438,16 @@ func (r *NSSResolver) otherHoldersInService(service string, uid int, first Accou
 		accounts = found
 	}
 	var others []string
+	skippedOwner := false
 	for _, account := range accounts {
-		if account.Name != first.Name {
-			others = append(others, account.Name+" ("+service+")")
+		if !skippedOwner && account.Name == first.Name && account.UID == first.UID {
+			skippedOwner = true
+			continue
 		}
+		others = append(others, account.Name+" ("+service+")")
+	}
+	if len(accounts) > 0 && !skippedOwner {
+		return nil, fmt.Errorf("unixidentity: %s did not list the account NSS named for uid %d: %w", service, uid, errDirectoryUnconfirmed)
 	}
 	return others, nil
 }
