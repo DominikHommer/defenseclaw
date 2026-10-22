@@ -1308,6 +1308,7 @@ def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_an_idle_installed_file_switches_by_one_atomic_rename(tmp_path: Path) -> None:
+    # The publication mock uses an overload available in PowerShell 5.1 and 7.
     source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
     source.write_text("new", encoding="ascii")
     dest.write_text("old", encoding="ascii")
@@ -1317,7 +1318,8 @@ $script:atomic = 0
 function Invoke-AtomicReplace([string]$New, [string]$Destination) {{
     $script:atomic++
     if ([IO.File]::ReadAllText($Destination) -cne 'old') {{ throw 'old launcher unavailable' }}
-    [IO.File]::Move($New, $Destination, $true)
+    [IO.File]::Replace($New, $Destination, "$Destination.test-backup", $true)
+    Remove-Item -LiteralPath "$Destination.test-backup"
 }}
 {_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace")}
 Install-File '{source}' '{dest}'
@@ -1381,7 +1383,8 @@ function Invoke-FileReplace {{ $script:replaces++; throw 'sharing violation' }}
 function Invoke-AtomicReplace([string]$New, [string]$Destination) {{
     $script:attempts++
     if ({'$true' if held else '$script:attempts -lt 3'}) {{ throw 'Access is denied.' }}
-    [IO.File]::Move($New, $Destination, $true)
+    [IO.File]::Replace($New, $Destination, "$Destination.test-backup", $true)
+    Remove-Item -LiteralPath "$Destination.test-backup"
 }}
 try {{ Install-File '{source}' '{dest}'; Write-Output 'INSTALLED' }}
 catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
