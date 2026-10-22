@@ -255,6 +255,9 @@ def test_pull_request_suites(files, expected, py_select, go_packages) -> None:
 
 def test_managed_paths_run_every_managed_lane() -> None:
     for path in (
+        "internal/cli/provenance_cmd.go",
+        "internal/cli/provenance_unix.go",
+        "internal/cli/provenance_windows.go",
         "internal/enterpriseunix/lifecycle.go",
         "internal/enterprisestatus/result.go",
         "internal/managed/managed.go",

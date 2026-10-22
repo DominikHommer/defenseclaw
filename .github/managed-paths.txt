@@ -106,6 +106,7 @@ internal/gateway/sidecar.go
 internal/gateway/api.go
 internal/gateway/config_manager.go
 internal/gateway/connector/hookexec/
+internal/cli/provenance*
 internal/config/config.go
 internal/config/migrate_v9.go
 
