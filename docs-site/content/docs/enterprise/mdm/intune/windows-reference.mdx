@@ -19,6 +19,9 @@ Reference for [Intune on Windows](/docs/enterprise/mdm/intune/windows).
 | `-TrustMode` | `HashPinned` (default) or `Authenticode`. |
 | `-AllowedSigners` | With `Authenticode`: SHA-256 thumbprints of accepted signer certificates, comma-separated or repeated. |
 | `-ConfigPath` | The config. Without one the first install fails with `1639`. |
+| `-BundlePath` | A signed policy bundle, instead of `-ConfigPath`. Requires an installed base app and `-BaseConfigPath`. |
+| `-BaseConfigPath` | The config packaged in the base app; required with `-BundlePath`. |
+| `-TrustAnchorPath` | With `-BundlePath`, install these trust anchors with the bundle. |
 | `-OutputDirectory` | Where to write. Required. Its `content` folder must not exist yet. |
 | `-IntuneWinAppUtil` | Path to `IntuneWinAppUtil.exe`. When set, the script also builds the `.intunewin`. |
 | `-ProductVersion` | The release version. The script prints it in the detection rule and records it. |
@@ -29,6 +32,15 @@ tab, lone CR or non-ASCII byte, even in a comment; one UTF-8 byte order mark is
 allowed). It also refuses a top-level key that is not plain lowercase (a tag,
 anchor, escape or `?` key) and a quoted value or `{...}` or `[...]` that
 continues on the next line.
+
+### Signed bundles and the base config
+
+With `-BundlePath`, the packager compares the base config's entire `guardrail:`
+block with the signed bundle's, except the installed `custom_packs.<pack>.path`.
+The `claude_code:`, `codex:`, `connector_hooks:` and `application_protection:`
+blocks must also match, or be absent from both configs. No other setting is compared.
+Copy other enforcement settings, such as `asset_policy:`, into the base config too
+if they must apply before the bundle app runs.
 
 The script verifies the Setup against `-Sha256` (and, for Authenticode, its
 signer); writes `content\` with the Setup, `config.yaml`,
