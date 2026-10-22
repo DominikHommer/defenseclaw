@@ -156,6 +156,9 @@ $script:AclSelfHealMarker = 'managed_acl_self_heal'
 # misleading when triaging logs - nuclear teardown isn't a DACL repair.
 $script:NuclearUninstallMarker = 'managed_nuclear_uninstall'
 $script:SchemaVersion = 1
+# Prefix of the refusal for a deployment.json that is not a JSON object; the
+# CLI maps it to ensure_refused and Repair rebuilds the file (GAP-0629).
+$script:UnreadableMetadataMessage = 'could not read the installed deployment metadata'
 $script:AgentApplicationControlAttestationSchemaVersion = 2
 $script:AgentApplicationControlPrerequisite = 'wdac_or_applocker_approved_agent_client_rules'
 $trustedMachineRoots = Get-DefenseClawTrustedMachineRoots
@@ -10571,6 +10574,92 @@ function New-DefenseClawManagedHooksActivationRecord {
         -ExpectedDeploymentGenerationID $DeploymentGenerationID
 }
 
+function ConvertFrom-DefenseClawDeploymentMetadataText {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [AllowNull()][AllowEmptyString()][string]$Text
+    )
+    $reason = 'it is not a JSON object'
+    $metadata = $null
+    try {
+        $metadata = $Text | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    }
+    catch {
+        $reason = $_.Exception.Message
+    }
+    if ($metadata -isnot [pscustomobject]) {
+        throw "$($script:UnreadableMetadataMessage) $Path ($reason); run Setup /repair to rebuild it"
+    }
+    return $metadata
+}
+
+function Repair-DefenseClawUnreadableDeploymentMetadata {
+    <#
+        Repair rebuilds a deployment.json that is not JSON, whatever its DACL,
+        from the machine's own record: the layout roots, the registered
+        services and the authenticated payload that replaces every recorded
+        artifact. The rebuilt record has the pre-activation legacy shape, so
+        the Repair transaction re-derives the activation, target and hash
+        results from the host as it migrates such a deployment, and writes
+        the full record. A pending transaction keeps its snapshot instead.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf) -or
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath)) {
+        return $false
+    }
+    try {
+        [void](Get-DefenseClawDeploymentMetadata -Layout $Layout -Required)
+        return $false
+    }
+    catch {
+        if (-not ([string]$_.Exception.Message).StartsWith(
+                $script:UnreadableMetadataMessage,
+                [StringComparison]::Ordinal)) {
+            throw
+        }
+        $unreadable = [string]$_.Exception.Message
+    }
+    $required = @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.CLIPath -PathType Leaf) {
+        $required += 'cli'
+    }
+    $missing = @($required | Microsoft.PowerShell.Core\Where-Object { -not $Sources.ContainsKey($_) })
+    if ($missing.Count -ne 0) {
+        throw "$unreadable; only Setup /repair carries every artifact it must re-record ($($missing -join ', '))"
+    }
+    if (-not (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
+        throw "$unreadable; no $GatewayServiceName service is registered, so run Setup /install or /uninstall PURGE=1"
+    }
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $GatewayServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath
+    Write-DefenseClawJsonAtomic -Path $Layout.MetadataPath -Value ([ordered]@{
+        schema_version = $script:SchemaVersion
+        deployment_mode = 'managed_enterprise'
+        installed = $true
+        install_root = $Layout.InstallRoot
+        state_root = $Layout.StateRoot
+        gateway_service = $GatewayServiceName
+        guardian_service = $GuardianServiceName
+        hashes = [ordered]@{}
+        profile = 'standalone'
+    })
+    Set-DefenseClawPathAcl `
+        -Path $Layout.MetadataPath `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+    Microsoft.PowerShell.Utility\Write-Warning -Message (
+        "DefenseClaw enterprise repair: rebuilding the deployment metadata: $unreadable"
+    )
+    return $true
+}
+
 function Get-DefenseClawDeploymentMetadata {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -10587,11 +10676,29 @@ function Get-DefenseClawDeploymentMetadata {
         -IsDirectory:$false `
         -Kind AdminFile `
         -GatewayServiceSID $script:AdministratorsSID
-    Assert-DefenseClawCanonicalPathAcl `
-        -Path $Layout.MetadataPath `
-        -Expected $expectedMetadataAcl
     try {
-        $metadata = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.MetadataPath -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        Assert-DefenseClawCanonicalPathAcl `
+            -Path $Layout.MetadataPath `
+            -Expected $expectedMetadataAcl
+    }
+    catch {
+        # A file that is not JSON records nothing a drifted DACL could have
+        # let someone forge: report it as unreadable, which Repair rebuilds.
+        # A drifted file that parses stays refused for its DACL.
+        $aclError = $_
+        try {
+            $driftedText = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.MetadataPath -Raw
+        }
+        catch {
+            throw $aclError
+        }
+        [void](ConvertFrom-DefenseClawDeploymentMetadataText `
+            -Path $Layout.MetadataPath `
+            -Text $driftedText)
+        throw $aclError
+    }
+    try {
+        $metadataText = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.MetadataPath -Raw
     }
     catch {
         # Bulldoze: a prior scoped uninstall cycle on this box may have
@@ -10606,7 +10713,7 @@ function Get-DefenseClawDeploymentMetadata {
         # Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
         # preserves the pre-change throw.
         if (Test-DefenseClawTrustStrictAncestors) {
-            throw "cannot parse DefenseClaw enterprise deployment metadata: $($_.Exception.Message)"
+            throw "cannot read DefenseClaw enterprise deployment metadata: $($_.Exception.Message)"
         }
         $initialReadError = $_.Exception.Message
         Write-DefenseClawAclSelfHealAdvisory `
@@ -10619,10 +10726,9 @@ function Get-DefenseClawDeploymentMetadata {
         try {
             $null = & $takeownExe '/F' $Layout.MetadataPath '/A' 2>&1
             $null = & $script:IcaclsExe $Layout.MetadataPath '/reset' '/C' '/L' 2>&1
-            $metadata = Microsoft.PowerShell.Management\Get-Content `
+            $metadataText = Microsoft.PowerShell.Management\Get-Content `
                 -LiteralPath $Layout.MetadataPath `
-                -Raw |
-                Microsoft.PowerShell.Utility\ConvertFrom-Json
+                -Raw
         }
         catch {
             # Recovery read also denied. In non-strict mode this is
@@ -10645,6 +10751,9 @@ function Get-DefenseClawDeploymentMetadata {
             return $null
         }
     }
+    $metadata = ConvertFrom-DefenseClawDeploymentMetadataText `
+        -Path $Layout.MetadataPath `
+        -Text $metadataText
     if ([int]$metadata.schema_version -ne $script:SchemaVersion) {
         throw "unsupported DefenseClaw enterprise deployment metadata schema: $($metadata.schema_version)"
     }
@@ -35685,8 +35794,19 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -not $recoverProductionUninstallAcl) {
         # Protected metadata, not a caller-supplied certification path, is the
         # authority for continuing an existing core-hardening certification
-        # deployment.
-        $entryMetadata = Get-DefenseClawDeploymentMetadata -Layout $layout
+        # deployment. Repair rebuilds an unreadable one under the lock.
+        try {
+            $entryMetadata = Get-DefenseClawDeploymentMetadata -Layout $layout
+        }
+        catch {
+            if ($Action -ne 'Repair' -or
+                -not ([string]$_.Exception.Message).StartsWith(
+                    $script:UnreadableMetadataMessage,
+                    [StringComparison]::Ordinal)) {
+                throw
+            }
+            $entryMetadata = $null
+        }
         if ((Test-DefenseClawStandaloneProfile) -and
             $null -ne $entryMetadata -and
             [string]::IsNullOrWhiteSpace($PayloadManifest)) {
@@ -35892,6 +36012,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         if ($Action -in @('Install', 'Upgrade', 'Repair') -and
             $GatewayServiceName -ceq 'DefenseClawGateway') {
             Assert-DefenseClawNoOtherProfileDeployment
+        }
+        if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {
+            [void](Repair-DefenseClawUnreadableDeploymentMetadata `
+                -Layout $layout `
+                -Sources $sources `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName)
         }
 
         if ($Action -eq 'Install') {
