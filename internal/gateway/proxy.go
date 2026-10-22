@@ -1083,8 +1083,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	r = p.withProxyAgent(r)
-	if reason := profileRefusal(r.Context()); reason != "" {
-		writeOpenAIError(w, http.StatusServiceUnavailable, reason)
+	if refuseProfileProxy(w, r) {
 		return
 	}
 	// A hop the interceptor rewrote is agent traffic here too, so doctor does
@@ -2788,8 +2787,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 	r = p.withProxyAgent(r)
-	if reason := profileRefusal(r.Context()); reason != "" {
-		writeOpenAIError(w, http.StatusServiceUnavailable, reason)
+	if refuseProfileProxy(w, r) {
 		return
 	}
 

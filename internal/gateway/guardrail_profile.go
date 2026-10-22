@@ -140,6 +140,9 @@ var (
 	// profileAgentSource returns the request's verified agent identity
 	// (defenseclaw.agent.identity.id, agt-...).
 	profileAgentSource = requestAgentIdentity
+	// profileAgentLegacySource returns the 1.0.3 identity of the request's
+	// agent agent (requestLegacyAgentIdentity).
+	profileAgentLegacySource = requestLegacyAgentIdentity
 	// profileExplainSubjectLookup resolves the subject an administrator
 	// names to `guardrail profile explain --user`.
 	profileExplainSubjectLookup = lookupDirectoryProfileSubject
@@ -174,18 +177,17 @@ type profileDecision struct {
 	// Assignment is the 1-based index of the assignment that matched, 0 for
 	// the default.
 	Assignment int
-	// Refused, when set, says why the request is refused: its account's
-	// lookup failed for want of a proof only, and the facts it has if the
-	// directory holds nothing more select another profile than the failed
-	// lookup does (matchUncached). The other fields are the failed lookup's
-	// decision, so a site that does not refuse is decided as before.
+	// Refused, when set, says why the request is refused: no single profile
+	// is safe for it, because a fact that decides its profile is unproven
+	// and the profiles that may apply do not cover each other
+	// (resolveProfileUnproven). The request is refused wherever its surface
+	// can block it (guardrail_profile_refusal.go); Name is the strictest of
+	// those profiles by hook mode and block_at, for the rest.
 	Refused string
 }
 
 // profileRefusal is why the request on ctx is refused (profileDecision.Refused),
-// or "". The hook, inspect, ACP, sandbox relay and LLM proxy entry points
-// answer 503 with it: a hook then fails closed, as it does while the gateway
-// cannot decide.
+// or "".
 func profileRefusal(ctx context.Context) string {
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil {
 		return resolved.decision.Refused
@@ -562,16 +564,33 @@ func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
 	return facts.ID, facts.Verified
 }
 
+// requestLegacyAgentIdentity is the legacy identity (1.0.0 to 1.0.3,
+// agentidentity.LegacyAgentID) of agent, the agent identity of ctx, and
+// true; "" and true for an account without a domain, whose identity did not
+// change. It derives the identity again for ctx's verified user and
+// connector, as the hook path does, and returns false when that derivation
+// is not agent. Every request derives its own: no state is kept, so none
+// can be dropped.
+func requestLegacyAgentIdentity(ctx context.Context, agent string) (string, bool) {
+	connectorName := profileRequestConnector(ctx)
+	if connectorName == "" || agent == "" {
+		return "", false
+	}
+	facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName})
+	if facts.ID == "" || !strings.EqualFold(facts.ID, agent) {
+		return "", false
+	}
+	return facts.LegacyID, true
+}
+
 // guardrailProfileInspectMiddleware resolves the profile for the inspect
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), ""))
-		if reason := profileRefusal(r.Context()); reason != "" {
-			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": reason})
-			return
-		}
-		next.ServeHTTP(w, r)
+		// A refused decision is answered by each inspect handler
+		// (refuseProfileInspect), so a sandbox relay of the request is
+		// refused the same way.
+		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(r.Context(), "")))
 	})
 }
 
@@ -609,12 +628,14 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 	}
 	subject, source := profileRequestSubject(ctx)
 	agent := ""
+	var legacy profileAgentLegacy
 	if source != "" && subject != nil {
 		if id, ok := profileAgentSource(ctx); ok {
 			agent = strings.TrimSpace(id)
+			legacy = func() (string, bool) { return profileAgentLegacySource(ctx, agent) }
 		}
 	}
-	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent)
+	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent, legacy)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
 		if derived, ok := set.profiles[decision.Name]; ok {
@@ -1140,9 +1161,7 @@ func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, s
 		}) {
 			continue
 		}
-		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool {
-			return strings.EqualFold(strings.TrimSpace(v), agent) && agent != ""
-		}) {
+		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool { return agentEntryMatches(v, agent) }) {
 			continue
 		}
 		uidMatches := anyMatches(m.Users, func(v string) bool {
@@ -1217,12 +1236,36 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 		reason, group = profileMatchUser, ""
 	}
 	if len(m.Agents) > 0 {
-		if agent == "" || !anyMatches(m.Agents, func(v string) bool { return strings.EqualFold(strings.TrimSpace(v), agent) }) {
+		if !anyMatches(m.Agents, func(v string) bool { return agentEntryMatches(v, agent) }) {
 			return "", "", false
 		}
 		reason, group = profileMatchAgent, ""
 	}
 	return reason, group, true
+}
+
+// profileAgentIDSep separates the identities of match's agent argument
+// (profileAgentIDs).
+const profileAgentIDSep = "\x00"
+
+// profileAgentIDs is match's agent argument for an agent matched as each
+// of ids: its identity and the 1.0.3 identity the agent ledger links to its
+// account (profileAgent). An assignment naming any of them matches, so the
+// first such assignment applies, whichever identity it names.
+func profileAgentIDs(ids ...string) string {
+	return strings.Join(ids, profileAgentIDSep)
+}
+
+// agentEntryMatches reports whether an agents entry names agent, match's
+// agent argument: one identity, or several (profileAgentIDs).
+func agentEntryMatches(entry, agent string) bool {
+	entry = strings.TrimSpace(entry)
+	for id := range strings.SplitSeq(agent, profileAgentIDSep) {
+		if id != "" && strings.EqualFold(entry, id) {
+			return true
+		}
+	}
+	return false
 }
 
 // profileUserName is the name users entries match: the bare account, or,
@@ -1792,6 +1835,11 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	user := strings.TrimSpace(query.Get("user"))
 	connectorName := config.NormalizeConnectorName(query.Get("connector"))
 	agent := strings.TrimSpace(query.Get("agent"))
+	if strings.Contains(agent, profileAgentIDSep) {
+		// It would be matched as two identities (profileAgentIDs).
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent: an agent identity has no NUL character"})
+		return
+	}
 
 	set := a.guardrailProfileSet()
 	if connectorName != "" && !connector.IsKnownBuiltinConnector(connectorName) &&
@@ -1880,7 +1928,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if source == "" {
 		agent = ""
 	}
-	decision := set.matchAgent(subject, source, connectorName, agent)
+	decision := set.matchAgent(subject, source, connectorName, agent, nil)
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match
@@ -1896,7 +1944,8 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["assignment"] = decision.Assignment
 	warnings := profileExplainWarnings(set, decision, subject)
 	if decision.Refused != "" {
-		out["refused"] = decision.Refused
+		out["refused"] = true
+		out["refused_reason"] = decision.Refused
 		warnings = append(warnings, unprovenRefusalNote(set, subject, decision, connectorName, agent))
 	}
 	if agent != "" {

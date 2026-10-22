@@ -263,11 +263,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// and the agent identity derived from both (never the payload).
 		// No-op without profiles.
 		r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), connectorName))
-		if reason := profileRefusal(r.Context()); reason != "" {
-			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "identity_unproven", 0)
-			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": reason})
-			return
-		}
 		// What a standalone hook read in its user's home for asset_policy
 		// (skill names, the MCP server definition): claims, never authority.
 		r = r.WithContext(withClaimedAssetFacts(r.Context(), r.Header))
@@ -641,6 +636,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// before anything is evaluated; finalizeAgentHook records its
 		// outcome on the audit row.
 		sandboxGate, resp, gated := a.requireSandboxHostRun(ctx, profile, connectorName, req, b, payload, requireSandboxSurface(ctx, r.Header))
+		if !gated {
+			// A request no guardrail profile is safe for is refused where it
+			// can be blocked (guardrail_profile_refusal.go).
+			resp, gated = a.refuseProfileHook(ctx, profile, connectorName, req, b, payload)
+		}
 		panicked := false
 		if !gated {
 			resp, panicked = a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)

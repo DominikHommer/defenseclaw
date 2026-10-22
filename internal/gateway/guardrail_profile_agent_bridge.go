@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -29,14 +31,17 @@ import (
 // last one's name over the earlier one's, so the name alone does not prove
 // whose agent the assignment was written for. When the ledger holds another
 // domain's namesake of the same uid on the machine, the legacy entry is
-// linked to neither account, and it stays unresolved for both: an
-// assignment with it selects the outage default for them (matchAgent) until
-// it names the account's current identity. So does an entry that is the
-// agent's legacy identity (its own record, or the hook path's derivation)
-// while no record proves which account it was written for: a prune keeps
-// the records the bridge reads (inventory.retireLegacyAgentIdentities), but
-// 1.0.3 itself pruned those of agents idle for the retention window. Remove
-// with agentidentity.LegacyAgentID.
+// linked to neither account, and it stays unresolved for both. So does an
+// entry that is the agent's own legacy identity (the hook path derives it
+// with the request's identity) while no record proves which account it was
+// written for: the ledger cannot be read, 1.0.3 pruned the record of an
+// agent idle for the retention window (a prune now keeps the records the
+// bridge reads, inventory.retireLegacyAgentIdentities), or 1.0.3 recorded
+// the account under another spelling (alice or CORP\alice, now
+// alice@corp.example), which no record proves is the same account. An
+// assignment with an unresolved entry never resolves to a weaker profile
+// than one that may apply (matchAgent). Remove with
+// agentidentity.LegacyAgentID.
 type profileAgentBridge struct {
 	once sync.Once
 	// entries are the assignments' agents entries, lower-cased.
@@ -48,8 +53,10 @@ type profileAgentBridge struct {
 	// ambiguous maps an identity to the legacy entries it may hold but
 	// does not prove (the namesakes' records).
 	ambiguous map[string]map[string]bool
-	// derived maps an identity the ledger records to its legacy identity,
-	// when an assignment names that.
+	// derived maps every identity the ledger records to its legacy
+	// identity ("" for an account without a domain): explain names an agent
+	// by its identity only, so the hook path's derivation is not at hand
+	// there.
 	derived map[string]string
 	// readAt is when the ledger is read again: a namesake recorded later
 	// takes a link back.
@@ -79,29 +86,174 @@ var profileAgentLedger = func(filter inventory.AgentIdentityFilter) ([]inventory
 	return records, err == nil
 }
 
-// matchAgent is set.match for a request of the agent identity agent. When
-// an agents entry may be the legacy identity of agent's account but the
-// agent ledger does not prove it (it has not answered yet, or the entry was
-// recorded for more than one account), an assignment with that entry whose
-// other conditions hold selects the default profile as the outage default
-// (default_lookup_failed), as a failed directory lookup does: a later
-// assignment never applies in its place.
-func (set *guardrailProfileSet) matchAgent(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	matched, unresolved := set.profileAgent(agent)
+// profileAgentLegacy returns the legacy identity of a request's agent
+// (agentidentity.LegacyAgentID, "" for an account without a domain) and
+// true, or false when it is not known.
+type profileAgentLegacy func() (legacy string, known bool)
+
+// matchAgent is set.match for a request of the agent identity agent;
+// legacy, when not nil, derives agent's legacy identity. When an agents
+// entry may be the legacy identity of agent's account but the agent ledger
+// does not prove it, an assignment with that entry whose other conditions
+// hold may or may not apply. The request then gets, reported as
+// default_lookup_failed, a profile that enforces at least what every
+// profile that may apply enforces (profileCovers): each such assignment's
+// and the one the request matches otherwise. That is the default profile
+// when it does, else the first of those that does. Unproven ownership never
+// resolves to a weaker profile, whatever default_profile says, and a later
+// assignment never applies in its place. When none of them enforces what
+// each of the others does (another rule pack, other rules, a HILT that asks
+// less or another sandbox section where one of them blocks), no profile is
+// safe and the decision is Refused (guardrail_profile_refusal.go); its Name
+// is then the strictest of them by hook mode and block_at
+// (profileStricter), for what the request's surface cannot refuse.
+func (set *guardrailProfileSet) matchAgent(subject *profileSubject, source, connectorName, agent string, legacy profileAgentLegacy) profileDecision {
+	matched, unresolved := set.profileAgent(agent, legacy)
 	decision := set.match(subject, source, connectorName, matched)
-	if unresolved == nil || subject == nil || source == "" || decision.Match == profileMatchDefaultLookupFailed {
+	if unresolved == nil || subject == nil || source == "" {
 		return decision
 	}
 	earlier := set.assignments
 	if decision.Assignment > 0 && decision.Assignment <= len(earlier) {
 		earlier = earlier[:decision.Assignment-1]
 	}
+	var mayApply []string
 	for _, assignment := range earlier {
 		if set.unresolvedAgentMatch(assignment.Match, subject, connectorName, unresolved) {
-			return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+			mayApply = append(mayApply, strings.TrimSpace(assignment.Profile))
 		}
 	}
-	return decision
+	if len(mayApply) == 0 {
+		return decision
+	}
+	mayApply = append(mayApply, decision.Name)
+	connectors := profileCoverConnectors(connectorName)
+	for _, name := range append([]string{set.defaultProfile}, mayApply...) {
+		if !slices.ContainsFunc(mayApply, func(other string) bool { return !set.profileCovers(name, other, connectors) }) {
+			return set.decision(name, profileMatchDefaultLookupFailed, "", source)
+		}
+	}
+	strictest := set.defaultProfile
+	for _, name := range mayApply {
+		if set.profileStricter(name, strictest, connectorName) {
+			strictest = name
+		}
+	}
+	refused := set.decision(strictest, profileMatchDefaultLookupFailed, "", source)
+	refused.Refused = profileRefusedReason
+	set.agentBridge.noteRefused(agent, mayApply)
+	return refused
+}
+
+// profileCoverConnectors are the connectors the decisions of a request of
+// connectorName read: its own, and the global settings for a decision
+// taken without one.
+func profileCoverConnectors(connectorName string) []string {
+	if connectorName == "" {
+		return []string{""}
+	}
+	return []string{connectorName, ""}
+}
+
+// profileCovers reports whether profile a enforces at least what profile b
+// enforces for a request decided for connectors: the same sandbox section,
+// and wherever b blocks (action, by the hook mode or by the inspect and
+// proxy mode) a blocks too, with b's rule pack and rules, from a block
+// level at or below b's, and with a HILT that asks wherever b's asks. Where
+// b only observes it blocks nothing, so a's guardrail settings there do not
+// matter. A name that is not a profile is the base configuration. alert_at
+// and block_message enforce nothing and are not compared.
+func (set *guardrailProfileSet) profileCovers(a, b string, connectors []string) bool {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	if a == b {
+		return true
+	}
+	ca, cb := set.profileConfig(a), set.profileConfig(b)
+	if ca == nil || cb == nil || !reflect.DeepEqual(set.profileSandbox(a), set.profileSandbox(b)) {
+		return false
+	}
+	for _, name := range connectors {
+		hookB, inspectB := hookModeForConfig(cb, name) == "action", inspectMode(cb, name) == "action"
+		if !hookB && !inspectB {
+			continue
+		}
+		if (hookB && hookModeForConfig(ca, name) != "action") || (inspectB && inspectMode(ca, name) != "action") {
+			return false
+		}
+		if effectiveRulePackKey(ca, name) != effectiveRulePackKey(cb, name) ||
+			!reflect.DeepEqual(ca.Guardrail.EffectiveRulePackRef(name), cb.Guardrail.EffectiveRulePackRef(name)) {
+			return false
+		}
+		blockA, _ := guardrailThresholdRanks(resolveThresholds(ca, name))
+		blockB, _ := guardrailThresholdRanks(resolveThresholds(cb, name))
+		proxyA, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&ca.Guardrail, name))
+		proxyB, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&cb.Guardrail, name))
+		if blockA > blockB || proxyA > proxyB {
+			return false
+		}
+		if !hiltCovers(hiltEnabledForConfig(ca, name), hiltMinRankForConfig(ca, name), hiltEnabledForConfig(cb, name), hiltMinRankForConfig(cb, name)) ||
+			!hiltCovers(hiltEnabled(&ca.Guardrail, name), hiltMinRank(&ca.Guardrail, name), hiltEnabled(&cb.Guardrail, name), hiltMinRank(&cb.Guardrail, name)) {
+			return false
+		}
+	}
+	return true
+}
+
+// hiltCovers reports whether a HILT (enabledA, from severity rank minA)
+// asks wherever another one asks. A confirm stands only below the block
+// level, so asking more never allows more.
+func hiltCovers(enabledA bool, minA int, enabledB bool, minB int) bool {
+	return !enabledB || (enabledA && minA <= minB)
+}
+
+// profileSandbox is the sandbox section of profile name; nil for the base
+// configuration.
+func (set *guardrailProfileSet) profileSandbox(name string) *config.OpenShellAdminConfig {
+	if set.base == nil {
+		return nil
+	}
+	return set.base.Guardrail.Profiles[name].Sandbox
+}
+
+// profileStricter orders the profiles of a Refused decision (matchAgent),
+// for what the request's surface cannot refuse: a blocks (action) where b
+// only observes, or both block and a blocks from a lower severity
+// (block_at). A name that is not a profile is the base configuration.
+func (set *guardrailProfileSet) profileStricter(a, b, connectorName string) bool {
+	ca, cb := set.profileConfig(a), set.profileConfig(b)
+	modeA, modeB := hookModeForConfig(ca, connectorName), hookModeForConfig(cb, connectorName)
+	if modeA != modeB {
+		return modeA == "action"
+	}
+	rankA, rankB := blockAtRank(ca, connectorName), blockAtRank(cb, connectorName)
+	return rankA > 0 && rankB > 0 && rankA > rankB
+}
+
+// profileConfig is the configuration a decision for profile name applies.
+func (set *guardrailProfileSet) profileConfig(name string) *config.Config {
+	if derived, ok := set.profiles[strings.TrimSpace(name)]; ok && derived.Config != nil {
+		return derived.Config
+	}
+	return set.base
+}
+
+// blockAtRank ranks cfg's block_at for connectorName: 4 for LOW (blocks
+// most) to 1 for CRITICAL, 0 when unset (the rule pack decides).
+func blockAtRank(cfg *config.Config, connectorName string) int {
+	if cfg == nil {
+		return 0
+	}
+	switch cfg.Guardrail.EffectiveBlockAt(connectorName) {
+	case "LOW":
+		return 4
+	case "MEDIUM":
+		return 3
+	case "HIGH":
+		return 2
+	case "CRITICAL":
+		return 1
+	}
+	return 0
 }
 
 // unresolvedAgentMatch reports whether m has an unresolved agents entry and
@@ -125,12 +277,16 @@ func (set *guardrailProfileSet) unresolvedAgentMatch(m config.ProfileMatch, subj
 	return ok
 }
 
-// profileAgent is the agents entry the request's agent identity agent is
-// matched as: agent, or, when no assignment names agent, the legacy
-// identity an assignment names for the same account. unresolved, when not
-// nil, reports the entries that may be agent's legacy identity without the
-// ledger proving it.
-func (set *guardrailProfileSet) profileAgent(agent string) (matched string, unresolved func(entry string) bool) {
+// profileAgent is what the request's agent identity agent is matched as
+// (match's agent argument): agent, and the legacy identity an assignment
+// names that the ledger links to agent's account (profileAgentIDs), so an
+// assignment naming either applies in assignment order. An assignment
+// naming agent does not skip the link: it may come after one written for
+// the agent's 1.0.3 identity. unresolved, when not nil, reports the entries
+// that may be agent's legacy identity without the ledger proving it;
+// matchAgent then lets no later assignment, one naming agent included,
+// apply in place of an earlier one with such an entry.
+func (set *guardrailProfileSet) profileAgent(agent string, legacy profileAgentLegacy) (matched string, unresolved func(entry string) bool) {
 	agent = strings.TrimSpace(agent)
 	if set == nil || agent == "" {
 		return agent, nil
@@ -146,17 +302,28 @@ func (set *guardrailProfileSet) profileAgent(agent string) (matched string, unre
 			}
 		}
 	})
-	if len(bridge.entries) == 0 || bridge.entries[strings.ToLower(agent)] {
+	if len(bridge.entries) == 0 {
 		return agent, nil
 	}
-	legacy, unresolved := bridge.legacyOf(strings.ToLower(agent))
-	if legacy != "" {
-		return legacy, nil
+	own, known := "", false
+	if legacy != nil {
+		own, known = legacy()
+		own = strings.ToLower(strings.TrimSpace(own))
+	}
+	if known && (own == "" || !bridge.entries[own]) {
+		// No entry is agent's legacy identity.
+		return agent, nil
+	}
+	linked, unresolved := bridge.legacyOf(strings.ToLower(agent), own, known)
+	if linked != "" {
+		return profileAgentIDs(agent, linked), nil
 	}
 	return agent, unresolved
 }
 
-func (b *profileAgentBridge) legacyOf(agent string) (string, func(string) bool) {
+// legacyOf is profileAgent's ledger side; own is agent's legacy identity
+// when known.
+func (b *profileAgentBridge) legacyOf(agent, own string, known bool) (string, func(string) bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if now := time.Now(); !now.Before(b.readAt) {
@@ -166,36 +333,44 @@ func (b *profileAgentBridge) legacyOf(agent string) (string, func(string) bool) 
 			b.readAt = now.Add(profileAgentBridgeRetry)
 			if b.legacy == nil && !b.noted[""] {
 				b.note("")
-				fmt.Fprintf(os.Stderr, "[guardrail] the agent ledger cannot be read: an agent that a profile assignment's agents entries do not name "+
-					"gets the default profile (default_lookup_failed) where such an assignment comes first, until the ledger answers\n")
+				fmt.Fprintf(os.Stderr, "[guardrail] the agent ledger cannot be read: an agent that a profile assignment's agents entries may name "+
+					"gets the strictest profile that may apply (default_lookup_failed) where such an assignment comes first, until the ledger answers\n")
 			}
 		}
 	}
 	if b.legacy == nil {
+		if known {
+			return "", func(entry string) bool { return entry == own }
+		}
 		// Any entry may be agent's legacy identity.
 		return "", func(entry string) bool { return entry != agent }
 	}
 	if entries := b.ambiguous[agent]; len(entries) > 0 {
 		return "", func(entry string) bool { return entries[entry] }
 	}
-	if legacy := b.legacy[agent]; legacy != "" {
-		return legacy, nil
+	if linked := b.legacy[agent]; linked != "" {
+		return linked, nil
+	}
+	if !known {
+		recorded, ok := b.derived[agent]
+		if !ok {
+			// Neither the request nor the ledger says what agent's legacy
+			// identity is: any entry may be it.
+			return "", func(entry string) bool { return entry != agent }
+		}
+		own = recorded
 	}
 	// agent's own legacy identity, which no record links to it.
-	legacy := b.derived[agent]
-	if legacy == "" {
-		legacy = derivedLegacyAgentID(agent)
-	}
-	if legacy == "" || !b.entries[legacy] {
+	if own == "" || !b.entries[own] {
 		return "", nil
 	}
-	if !b.noted["?"+legacy] {
-		b.note("?" + legacy)
+	if !b.noted["?"+own] {
+		b.note("?" + own)
 		fmt.Fprintf(os.Stderr, "[guardrail] profile assignment agent %s: no record shows which account 1.0.3 recorded it for; "+
-			"agent %s gets the default profile (default_lookup_failed) where it applies until it names the account's current agent identity\n",
-			legacy, agent)
+			"agent %s gets the strictest profile that may apply (default_lookup_failed) where it applies until it names the account's current agent identity\n",
+			own, agent)
 	}
-	return "", func(entry string) bool { return entry == legacy }
+	return "", func(entry string) bool { return entry == own }
 }
 
 func (b *profileAgentBridge) note(key string) {
@@ -203,6 +378,29 @@ func (b *profileAgentBridge) note(key string) {
 		b.noted = map[string]bool{}
 	}
 	b.noted[key] = true
+}
+
+// noteRefused logs, once per agent, that no profile of those that may apply
+// to it is safe (matchAgent).
+func (b *profileAgentBridge) noteRefused(agent string, profiles []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	key := "!" + strings.ToLower(agent)
+	if b.noted[key] {
+		return
+	}
+	b.note(key)
+	names := make([]string, 0, len(profiles))
+	for _, name := range profiles {
+		if name == "" {
+			name = "(base configuration)"
+		}
+		names = append(names, name)
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] agent %s: a profile assignment's agents entry may be its 1.0.3 identity, and none of the profiles that may apply (%s) "+
+		"enforces what each of the others does (rule pack, rules, HILT or sandbox section): its requests are refused where they can be blocked "+
+		"(default_lookup_failed) until the agent ledger proves whose entry it is or the entry names the agent's current identity\n",
+		agent, strings.Join(names, ", "))
 }
 
 // profileAgentLinks is what the agent ledger says about the assignments'
@@ -213,7 +411,7 @@ type profileAgentLinks struct {
 	// ambiguous maps an identity to the legacy entries it may hold but the
 	// ledger does not prove.
 	ambiguous map[string]map[string]bool
-	// derived maps a recorded identity to its legacy identity, an entry.
+	// derived maps every recorded identity to its legacy identity.
 	derived map[string]string
 }
 
@@ -238,20 +436,17 @@ func (b *profileAgentBridge) readLedger() (profileAgentLinks, bool) {
 			Connector: rec.Connector, InstallFP: rec.InstallFP,
 		}
 		id, legacyID := strings.ToLower(rec.AgentID), strings.ToLower(agentidentity.LegacyAgentID(in))
-		if legacyID == "" || !b.entries[legacyID] {
-			continue
+		if id != legacyID && id == strings.ToLower(agentidentity.AgentID(in)) {
+			links.derived[id] = legacyID
 		}
-		if id != legacyID {
-			if id == strings.ToLower(agentidentity.AgentID(in)) {
-				links.derived[id] = legacyID
-			}
+		if legacyID == "" || id != legacyID || !b.entries[legacyID] {
 			continue
 		}
 		if namesakes := profileAgentNamesakes(rec, uidRecords[agentidentity.NormalizeUserID(rec.UserID)]); len(namesakes) > 0 {
 			if !b.noted[id] {
 				b.note(id)
 				fmt.Fprintf(os.Stderr, "[guardrail] profile assignment agent %s: recorded before the upgrade for more than one account of uid %s; "+
-					"their agents get the default profile (default_lookup_failed) where it applies until it names the account's current agent identity\n",
+					"their agents get the strictest profile that may apply (default_lookup_failed) where it applies until it names the account's current agent identity\n",
 					rec.AgentID, rec.UserID)
 			}
 			for _, account := range append(namesakes, rec.UserName) {
@@ -269,40 +464,6 @@ func (b *profileAgentBridge) readLedger() (profileAgentLinks, bool) {
 		links.legacy[strings.ToLower(agentidentity.AgentID(in))] = id
 	}
 	return links, true
-}
-
-// derivedLegacyAgentIDs maps the agent identities the hook path derived in
-// this process to their legacy identities (agentidentity.LegacyAgentID), so
-// an agent the ledger has not recorded yet is known by it too. Bounded:
-// past the cap, an identity is known by its record only.
-var derivedLegacyAgentIDs struct {
-	sync.Mutex
-	ids map[string]string
-}
-
-const derivedLegacyAgentIDsMax = 4096
-
-// noteDerivedLegacyAgentID remembers in's legacy identity for its identity.
-func noteDerivedLegacyAgentID(in agentidentity.Inputs) {
-	legacy := strings.ToLower(agentidentity.LegacyAgentID(in))
-	if legacy == "" {
-		return
-	}
-	id := strings.ToLower(agentidentity.AgentID(in))
-	derivedLegacyAgentIDs.Lock()
-	defer derivedLegacyAgentIDs.Unlock()
-	if derivedLegacyAgentIDs.ids == nil {
-		derivedLegacyAgentIDs.ids = map[string]string{}
-	}
-	if _, known := derivedLegacyAgentIDs.ids[id]; known || len(derivedLegacyAgentIDs.ids) < derivedLegacyAgentIDsMax {
-		derivedLegacyAgentIDs.ids[id] = legacy
-	}
-}
-
-func derivedLegacyAgentID(agent string) string {
-	derivedLegacyAgentIDs.Lock()
-	defer derivedLegacyAgentIDs.Unlock()
-	return derivedLegacyAgentIDs.ids[agent]
 }
 
 // profileAgentNamesakes returns the names of the accounts of another domain

@@ -111,7 +111,8 @@ func spooledAccountName(id string) string {
 		if err != nil {
 			return ""
 		}
-		record, ok = readIdentitySpoolFactsForAccount(id, strings.TrimSpace(managedHookPeerLastName(uid)), "", now)
+		// No SID is given, so no other-account error is possible.
+		record, ok, _ = readIdentitySpoolFactsForAccount(id, strings.TrimSpace(managedHookPeerLastName(uid)), "", now)
 	} else {
 		record, ok = readIdentitySpoolFacts(id, now)
 	}

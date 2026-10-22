@@ -46,6 +46,22 @@ func legacyBridgeRecord(id, account string) inventory.AgentIdentityRecord {
 	}
 }
 
+// legacyBridgeDerives stands in for the hook path's derivation of a
+// request's 1.0.3 identity, for the agents of accounts.
+func legacyBridgeDerives(t *testing.T, accounts ...agentidentity.Inputs) {
+	t.Helper()
+	previous := profileAgentLegacySource
+	t.Cleanup(func() { profileAgentLegacySource = previous })
+	profileAgentLegacySource = func(_ context.Context, agent string) (string, bool) {
+		for _, in := range accounts {
+			if agentidentity.AgentID(in) == agent {
+				return agentidentity.LegacyAgentID(in), true
+			}
+		}
+		return "", false
+	}
+}
+
 // An assignment written for a 1.0.3 agent identity keeps selecting the
 // account that identity was recorded for, under the identity that account
 // has now, and not a namesake of another domain given the same uid later
@@ -61,10 +77,10 @@ func TestLegacyAgentAssignmentSelectsOnlyItsRecordedAccount(t *testing.T) {
 	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
 	}}
-	if got, _ := set.profileAgent(corp); got != legacy {
-		t.Errorf("corp's agent matches as %q, want its legacy identity %q", got, legacy)
+	if got, _ := set.profileAgent(corp, nil); got != profileAgentIDs(corp, legacy) {
+		t.Errorf("corp's agent matches as %q, want its identity and its legacy identity %q", got, legacy)
 	}
-	if got, _ := set.profileAgent(lab); got != lab {
+	if got, _ := set.profileAgent(lab, nil); got != lab {
 		t.Errorf("the lab namesake's agent matches as %q, want its own identity %q", got, lab)
 	}
 	if *asked != 1 {
@@ -74,8 +90,10 @@ func TestLegacyAgentAssignmentSelectsOnlyItsRecordedAccount(t *testing.T) {
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
 		{Profile: "strict", Match: config.ProfileMatch{Agents: []string{corp}}},
 	}}
-	if got, _ := named.profileAgent(corp); got != corp {
-		t.Errorf("an assignment naming the current identity lost to the legacy one: %q", got)
+	// An assignment naming the current identity does not skip the link:
+	// both are matched in assignment order.
+	if got, _ := named.profileAgent(corp, nil); got != profileAgentIDs(corp, legacy) {
+		t.Errorf("with an assignment naming the current identity, corp's agent matches as %q, want both identities", got)
 	}
 }
 
@@ -92,19 +110,19 @@ func TestLegacyAgentAssignmentWithAnOverwrittenRecordSelectsNeitherAccount(t *te
 	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
 	}}
-	if got, _ := set.profileAgent(lab); got != legacy {
-		t.Fatalf("with one account recorded, lab's agent matches as %q, want %q", got, legacy)
+	if got, _ := set.profileAgent(lab, nil); got != profileAgentIDs(lab, legacy) {
+		t.Fatalf("with one account recorded, lab's agent matches as %q, want %q too", got, legacy)
 	}
 	// corp's agent is seen after the upgrade.
 	records = append(records, legacyBridgeRecord(corp, "alice@corp.example"))
-	if got, _ := set.profileAgent(lab); got != legacy {
+	if got, _ := set.profileAgent(lab, nil); got != profileAgentIDs(lab, legacy) {
 		t.Fatalf("the link was read again before its refresh: %q", got)
 	}
 	set.agentBridge.readAt = time.Time{}
-	if got, _ := set.profileAgent(lab); got != lab {
+	if got, _ := set.profileAgent(lab, nil); got != lab {
 		t.Errorf("lab's agent matches as %q after corp was recorded, want its own identity %q", got, lab)
 	}
-	if got, _ := set.profileAgent(corp); got != corp {
+	if got, _ := set.profileAgent(corp, nil); got != corp {
 		t.Errorf("corp's agent matches as %q, want its own identity %q", got, corp)
 	}
 	// Another machine's, or another uid's, namesake proves nothing here.
@@ -112,7 +130,7 @@ func TestLegacyAgentAssignmentWithAnOverwrittenRecordSelectsNeitherAccount(t *te
 	other.MachineHash = agentidentity.MachineHash("fedcba9876543210fedcba9876543210")
 	records = []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice@lab.example"), other}
 	fresh := &guardrailProfileSet{assignments: set.assignments}
-	if got, _ := fresh.profileAgent(lab); got != legacy {
+	if got, _ := fresh.profileAgent(lab, nil); got != profileAgentIDs(lab, legacy) {
 		t.Errorf("a namesake on another machine took the link: %q", got)
 	}
 }
@@ -125,10 +143,12 @@ func TestUnresolvedLegacyAgentAssignmentSelectsTheOutageDefault(t *testing.T) {
 	stubProfileSources(t)
 	legacy := agentidentity.LegacyAgentID(legacyBridgeInputs("alice@corp.example"))
 	corp, lab := agentidentity.AgentID(legacyBridgeInputs("alice@corp.example")), agentidentity.AgentID(legacyBridgeInputs("alice@lab.example"))
-	other := agentidentity.AgentID(agentidentity.Inputs{
+	bob := agentidentity.Inputs{
 		MachineHash: agentidentity.MachineHash("0123456789abcdef0123456789abcdef"), UserID: "70002",
 		Connector: "codex", InstallFP: "/home/bob/.codex", Account: "bob@corp.example",
-	})
+	}
+	other := agentidentity.AgentID(bob)
+	legacyBridgeDerives(t, legacyBridgeInputs("alice@corp.example"), legacyBridgeInputs("alice@lab.example"), bob)
 	// 1.0.3 recorded the entry for both namesakes of uid 70001.
 	records := []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice@lab.example"), legacyBridgeRecord(corp, "alice@corp.example")}
 	legacyBridgeLedger(t, &records)
@@ -155,10 +175,18 @@ func TestUnresolvedLegacyAgentAssignmentSelectsTheOutageDefault(t *testing.T) {
 	if got, mode := hook(other); got.Name != "watch" || got.Match != profileMatchConnector || mode != "observe" {
 		t.Errorf("another account's agent: profile %+v, mode %q; want its connector assignment", got, mode)
 	}
-	// The ledger cannot be read: the entry may be any agent's.
+	// The ledger cannot be read: the entry may be the agent's own legacy
+	// identity, and any agent's when the request does not derive that.
 	profileAgentLedger = func(inventory.AgentIdentityFilter) ([]inventory.AgentIdentityRecord, bool) { return nil, false }
+	if got, mode := hook(corp); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
+		t.Errorf("unreadable ledger, corp: profile %+v, mode %q; want the outage default strict (action)", got, mode)
+	}
+	if got, mode := hook(other); got.Name != "watch" || got.Match != profileMatchConnector || mode != "observe" {
+		t.Errorf("unreadable ledger, another account: profile %+v, mode %q; want its connector assignment", got, mode)
+	}
+	legacyBridgeDerives(t)
 	if got, mode := hook(other); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
-		t.Errorf("unreadable ledger: profile %+v, mode %q; want the outage default strict (action)", got, mode)
+		t.Errorf("unreadable ledger, not derived: profile %+v, mode %q; want the outage default strict (action)", got, mode)
 	}
 	// An assignment naming the agent's current identity needs no ledger.
 	cfg.Guardrail.ProfileAssignments = append([]config.ProfileAssignment{
@@ -256,17 +284,15 @@ func TestPrunedLegacyAgentAssignmentKeepsItsAccount(t *testing.T) {
 	})
 	t.Run("not recorded yet", func(t *testing.T) {
 		pruned(t)
-		previous := derivedLegacyAgentIDs.ids
-		t.Cleanup(func() { derivedLegacyAgentIDs.ids = previous })
-		derivedLegacyAgentIDs.ids = nil
-		noteDerivedLegacyAgentID(legacyBridgeInputs("alice@corp.example"))
+		bobIn := agentidentity.Inputs{
+			MachineHash: agentidentity.MachineHash("0123456789abcdef0123456789abcdef"), UserID: "70002",
+			Connector: "codex", InstallFP: "/home/bob/.codex", Account: "bob@corp.example",
+		}
+		legacyBridgeDerives(t, legacyBridgeInputs("alice@corp.example"), bobIn)
 		hook := legacyBridgeHook(t, legacy)
 		got, mode := hook(corp)
 		outage(t, "corp's agent the hook path derived", got, mode)
-		bob := agentidentity.AgentID(agentidentity.Inputs{
-			MachineHash: agentidentity.MachineHash("0123456789abcdef0123456789abcdef"), UserID: "70002",
-			Connector: "codex", InstallFP: "/home/bob/.codex", Account: "bob@corp.example",
-		})
+		bob := agentidentity.AgentID(bobIn)
 		if got, mode := hook(bob); got.Name != "watch" || got.Match != profileMatchConnector || mode != "observe" {
 			t.Errorf("another account's agent: profile %+v, mode %q; want its connector assignment", got, mode)
 		}
