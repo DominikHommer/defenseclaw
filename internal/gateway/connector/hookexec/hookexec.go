@@ -437,6 +437,17 @@ func runHook(ctx context.Context, opts Options) int {
 		sp = copilotVSCodeLocalSpec
 	}
 	if !ok {
+		if reason, removed := removedConnectorReason(opts.Connector); removed {
+			// until 1.1: a Windows hook an older release registered for a
+			// removed connector runs this launcher, not a script; it
+			// blocks the way the script's stub does.
+			if strings.EqualFold(strings.TrimSpace(opts.Connector), "openhands") {
+				body, _ := json.Marshal(map[string]string{"decision": "deny", "reason": reason})
+				fmt.Fprintln(opts.Stdout, string(body))
+			}
+			fmt.Fprintln(opts.Stderr, reason)
+			return blockExit
+		}
 		// Unknown connector is a wiring bug, not a policy decision. Fail loud
 		// so it surfaces in tests / setup rather than silently disabling the
 		// guardrail. The CLI validates --connector against the registry, so
@@ -3491,6 +3502,20 @@ func compactField(m map[string]json.RawMessage, field string) string {
 		return trimmed
 	}
 	return buf.String()
+}
+
+// removedConnectorReason is the block reason of a hook for a connector 1.0.4
+// removed (until 1.1), or false.
+func removedConnectorReason(connector string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(connector)) {
+	case "openhands":
+		return "DefenseClaw blocked this call: OpenHands support was removed in DefenseClaw 1.0.4. " +
+			"To use OpenHands without DefenseClaw, remove every DefenseClaw hook from your OpenHands hooks.json, then restart OpenHands.", true
+	case "omnigent":
+		return "DefenseClaw blocked this call: OmniGent support was removed in DefenseClaw 1.0.4. " +
+			"To use OmniGent without DefenseClaw, remove DefenseClaw's policy from your OmniGent config.yaml, then restart OmniGent.", true
+	}
+	return "", false
 }
 
 // decodeDecision pulls the `decision` string from an already-compact JSON

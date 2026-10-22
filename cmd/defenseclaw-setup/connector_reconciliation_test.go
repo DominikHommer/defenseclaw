@@ -1094,104 +1094,83 @@ func TestValidateConnectorReconciliationRejectsUnsafeState(t *testing.T) {
 	}
 }
 
-// until 1.1: while the teardown of a removed connector has left files for the
-// user, the agent still uses DefenseClaw's files under DataRoot, so the
-// uninstall keeps it as residue (DELETEUSERDATA then keeps DataRoot), and an
-// uninstall retry clears it only once the cleanup is finished.
-func writeRemovedConnectorCleanupRecord(t *testing.T, dataRoot, body string) string {
-	t.Helper()
-	path := filepath.Join(dataRoot, removedConnectorCleanupDir, "omnigent.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func TestReconcileRemovedConnectorsKeepsPendingManualCleanupAsResidue(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct{ name, body, want string }{
-		{"steps", `{"items":[{"path":"C:\\Users\\u\\.omnigent\\config.yaml","reason":"edited","step":"remove the entry"}]}`, `config.yaml: remove the entry`},
-		{"unreadable record", "not json", "see "},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			root := t.TempDir()
-			transaction := setupTransaction{
-				ID:                         strings.Repeat("9", 32),
-				DataRoot:                   filepath.Join(root, "data"),
-				PreviousConnectors:         []string{"omnigent", "codex"},
-				PreviousOmnigentConfigHome: filepath.Join(root, "omnigent"),
-				PreviousCodexHome:          filepath.Join(root, "codex"),
-			}
-			writeRemovedConnectorCleanupRecord(t, transaction.DataRoot, tc.body)
-			recorder := reconcileRemovedConnectors(transaction, filepath.Join(root, "gateway.exe"), nil,
-				func(_, _, _, _ string, _ []string) error { return nil })
-			if len(recorder.failures) != 1 {
-				t.Fatalf("failures = %+v, want the pending OmniGent cleanup only", recorder.failures)
-			}
-			failure := recorder.failures[0]
-			if failure.Connector != "omnigent" || failure.Operation != "verify" ||
-				!strings.Contains(failure.Message, tc.want) || !strings.Contains(failure.Message, "keeps its data") {
-				t.Fatalf("failure = %+v, want the OmniGent steps", failure)
-			}
-		})
-	}
-}
-
-func TestReconcileRemovedConnectorsWithoutManualCleanupHasNoResidue(t *testing.T) {
+// until 1.1: the teardown of a removed connector changes only its policy
+// module and tokens and records nothing, so a removed connector is never
+// residue that keeps DataRoot, even with a stale manual-cleanup record from
+// an earlier 1.0.4 build there; what it leaves is shown to the user instead.
+func TestReconcileRemovedConnectorsNeverKeepsDataRootForLeftovers(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	transaction := setupTransaction{
-		ID:                         strings.Repeat("8", 32),
+		ID:                         strings.Repeat("9", 32),
 		DataRoot:                   filepath.Join(root, "data"),
-		PreviousConnectors:         []string{"omnigent"},
+		PreviousConnectors:         []string{"omnigent", "codex"},
 		PreviousOmnigentConfigHome: filepath.Join(root, "omnigent"),
+		PreviousCodexHome:          filepath.Join(root, "codex"),
 	}
+	stale := filepath.Join(transaction.DataRoot, "removed_connector_cleanup", "omnigent.json")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte(`{"items":[{"path":"p","step":"s"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var actions []string
 	recorder := reconcileRemovedConnectors(transaction, filepath.Join(root, "gateway.exe"), nil,
-		func(_, _, _, _ string, _ []string) error { return nil })
+		func(_, _, connectorName, action string, _ []string) error {
+			actions = append(actions, connectorName+":"+action)
+			return nil
+		})
 	if len(recorder.failures) != 0 {
 		t.Fatalf("failures = %+v, want none", recorder.failures)
 	}
+	if !strings.Contains(strings.Join(actions, ","), "omnigent:teardown,omnigent:verify") {
+		t.Fatalf("actions = %v, want the OmniGent teardown and verify", actions)
+	}
 }
 
-func TestRetryPendingRemovedConnectorClearsOnlyFinishedManualCleanup(t *testing.T) {
-	t.Parallel()
-	for _, finished := range []bool{false, true} {
-		root := t.TempDir()
-		home := filepath.Join(root, "omnigent")
-		transaction := setupTransaction{ID: strings.Repeat("6", 32), DataRoot: filepath.Join(root, "data")}
-		record := writeRemovedConnectorCleanupRecord(t, transaction.DataRoot, `{"items":[{"path":"p","step":"s"}]}`)
-		state := &connectorReconciliationState{
-			SchemaVersion: connectorReconciliationSchemaVersion,
-			Failures: []connectorReconciliationFailure{{
-				Connector: "omnigent", Operation: "verify", ConfigHome: home,
-				Message: "manual cleanup pending", TransactionID: transaction.ID,
-			}},
+func resetRemovedConnectorNotes(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		removedConnectorNotes.Lock()
+		removedConnectorNotes.byConnector, removedConnectorNotes.order = nil, nil
+		removedConnectorNotes.Unlock()
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+// The leftovers the maintenance gateway's teardown lists reach the user: the
+// JSON line of the captured output (stderr lines around it) is read, the
+// latest teardown of a connector wins, and output without a list adds none.
+func TestRemovedConnectorTeardownLeftoversAreShown(t *testing.T) {
+	resetRemovedConnectorNotes(t)
+	if got := removedConnectorNotesText(); got != "" {
+		t.Fatalf("notes before any teardown = %q", got)
+	}
+	recordRemovedConnectorLeftovers("omnigent", []byte("[connector] warning on stderr\n"+
+		`{"connector":"omnigent","action":"teardown","ok":true,"leftovers":[{"path":"C:\\old","what":"old","step":"old"}]}`+"\n"))
+	recordRemovedConnectorLeftovers("omnigent", []byte(
+		`{"connector":"omnigent","action":"teardown","ok":true,"leftovers":[`+
+			`{"path":"C:\\Users\\u\\.omnigent\\config.yaml","what":"OmniGent still imports DefenseClaw's policy module from here","step":"remove defenseclaw_omnigent_policy from policy_modules"},`+
+			`{"path":"C:\\Users\\u\\.defenseclaw\\hooks\\defenseclaw_omnigent_policy.py","what":"the stub that blocks every OmniGent call","step":"delete it once nothing above runs it"}]}`+"\n"+
+			"trailing text\n"))
+	recordRemovedConnectorLeftovers("omnigent", []byte("not json\n"))
+	got := removedConnectorNotesText()
+	for _, want := range []string{
+		"OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:",
+		`C:\Users\u\.omnigent\config.yaml: OmniGent still imports DefenseClaw's policy module from here. To remove: remove defenseclaw_omnigent_policy from policy_modules.`,
+		`defenseclaw_omnigent_policy.py: the stub that blocks every OmniGent call. To remove: delete it once nothing above runs it.`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("notes = %q, want %q", got, want)
 		}
-		var actions []string
-		recorder := connectorReconciliationRecorder{}
-		err := retryPendingConnectorReconciliation(transaction, filepath.Join(root, "gateway.exe"), &recorder,
-			func() (*connectorReconciliationState, error) { return state, nil },
-			func(_, _, _, action string, _ []string) error {
-				actions = append(actions, action)
-				// The user did the steps: the teardown finishes and clears
-				// the record.
-				if action == "teardown" && finished {
-					return os.Remove(record)
-				}
-				return nil
-			})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := strings.Join(actions, ","); got != "verify,teardown,verify" {
-			t.Fatalf("finished=%v: retry actions = %q", finished, got)
-		}
-		if finished != (len(recorder.failures) == 0) {
-			t.Fatalf("finished=%v: retry failures = %+v", finished, recorder.failures)
-		}
+	}
+	if strings.Contains(got, `C:\old`) {
+		t.Fatalf("notes kept an earlier teardown's list: %q", got)
+	}
+	recordRemovedConnectorLeftovers("omnigent", []byte(`{"connector":"omnigent","action":"teardown","ok":true,"leftovers":[]}`))
+	if got := removedConnectorNotesText(); got != "" {
+		t.Fatalf("notes after a teardown that left nothing = %q, want none", got)
 	}
 }

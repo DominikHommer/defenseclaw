@@ -644,14 +644,13 @@ def _status_refused_detail(cfg, client, public) -> str:
 
 
 def _print_removed_connector_cleanup(cfg) -> None:
-    """until 1.1: name a removed connector whose files wait for manual cleanup."""
-    from defenseclaw.removed_connectors import pending_cleanup
+    """until 1.1: name a removed connector that left things to remove by hand."""
+    from defenseclaw.removed_connectors import leftovers
 
-    for pending in pending_cleanup(str(getattr(cfg, "data_dir", "") or "")):
-        what = pending.error or f"{len(pending.items)} file(s) to clean up by hand"
+    for left in leftovers(str(getattr(cfg, "data_dir", "") or "")):
         _status_row(
             "Cleanup",
-            ux._style(f"{pending.label} was removed in 1.0.4; {what}", fg="yellow")
+            ux._style(f"{left.label} was removed in 1.0.4; {len(left.items)} item(s) to remove by hand", fg="yellow")
             + ux.dim(" (steps: defenseclaw doctor)"),
         )
 
@@ -1904,11 +1903,11 @@ def _status_payload(app) -> dict:
             "scanners": _scanner_status_map(cfg),
         }
     )
-    from defenseclaw.removed_connectors import pending_cleanup
+    from defenseclaw.removed_connectors import leftovers
 
-    if pending := [item.as_json() for item in pending_cleanup(str(cfg.data_dir or ""))]:
-        # until 1.1: files the removed OpenHands/OmniGent teardown left.
-        payload["removed_connector_cleanup"] = pending
+    if left := [item.as_json() for item in leftovers(str(cfg.data_dir or ""))]:
+        # until 1.1: what the removed OpenHands/OmniGent teardown left.
+        payload["removed_connector_cleanup"] = left
 
     if app.store:
         try:
