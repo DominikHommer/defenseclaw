@@ -45,7 +45,7 @@ func TestWindowsBundleAnchorsInstallReadsTheSourceOnce(t *testing.T) {
 		return anchors, raw, err
 	}
 	dst := filepath.Join(t.TempDir(), "trust", enterprisebundle.AnchorsName)
-	installed, err := installWindowsBundleAnchors(e.anchors, dst)
+	installed, _, err := installWindowsBundleAnchors(e.anchors, dst)
 	if err != nil {
 		t.Fatal(err)
 	}
