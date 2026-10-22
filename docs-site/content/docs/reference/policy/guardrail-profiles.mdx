@@ -123,22 +123,25 @@ the request take the strictest profile that may apply
 enforce different rules, the request is refused until the provider answers.
 
 After upgrading from 1.0.0–1.0.3, an `agents` entry with an older ID (one
-without the account's domain) keeps applying to its account on its own when
-DefenseClaw proves the account is the one 1.0.3 saw:
+without the account's domain) keeps applying to its account on its own. The
+upgrade binds the entry to the account that holds the UID when the gateway
+first sees it after the upgrade, on every platform (local accounts, SSSD
+accounts with mapped or RFC 2307 UIDs, winbind accounts, macOS local, mobile
+and directory accounts), when:
 
-- the account that holds the UID now is the one that held it at the upgrade
-  (a local account, or a directory account whose UID SSSD maps from its SID);
+- that account still holds the UID (the gateway records which account it
+  was, and an account deleted and created again under the same UID is
+  another one);
 - 1.0.3 named it the same way, domain included, in the account list it saved
   or in its inventory row;
 - no account of that name in another domain, or without a domain, held the
   UID on that computer.
 
-Otherwise (a macOS directory record or an RFC 2307 UID cannot show the
-holder is unchanged) every agent that may own the entry gets the strictest
-profile that may apply (`default_lookup_failed`): the entry's own, the
-default, or the one it matches otherwise. When those profiles enforce
-different rules, its requests are refused. Rebind the entry to the current
-ID shown by `defenseclaw agent identities` to end this.
+For any other account that may own the entry, the entry stays unproven: the
+request gets the strictest profile that may apply (`default_lookup_failed`),
+the entry's own, the default, or the one it matches otherwise. When those
+profiles enforce different rules, its requests are refused. Rebind the entry
+to the current ID shown by `defenseclaw agent identities` to end this.
 
 How the keys combine:
 
@@ -159,14 +162,18 @@ How the keys combine:
   given yet, an uid more than one account holds, an `agents` entry from before
   1.0.4 that may be this account's), the request gets the strictest of every
   profile that could apply, the default profile and the last profile proven
-  for this account incarnation (`default_lookup_failed`). When none of them
+  for this account incarnation (`default_lookup_failed`). An account is
+  recognized by its SID (SSSD or Windows) or by its macOS local record; for
+  an account that has neither (a local or LDAP Linux account, a macOS
+  directory account with no local record) no profile is kept, so an account
+  deleted and created again under the same UID and name never gets the
+  former account's profile. When none of them
   enforces what each of the others does, the request is refused on every
   surface that can block (hook, inspect, ACP, sandbox relay, LLM proxy), and
   the refusal names the `profile explain` command for this host.
 - **Rebind 1.0.3 agent IDs.** After an upgrade from 1.0.0–1.0.3, an older
-  `agents` entry keeps applying only to an account proven to be the one
-  1.0.3 saw (above); for any other agent that may own it, it stays
-  unproven. Read the current ID with `defenseclaw agent identities`, replace
+  `agents` entry keeps applying only to the account the upgrade bound it to
+  (above); for any other agent that may own it, it stays unproven. Read the current ID with `defenseclaw agent identities`, replace
   the old `agents` entry in `config.yaml`, and run
   `defenseclaw-gateway restart`.
 - **Case and accents' encoding do not matter.** Groups, account names,
@@ -443,7 +450,7 @@ Copy the `agt-` ID into an `agents` assignment. The ID names one connector
 install for one user on one machine and stays the same across sessions and
 restarts. On upgrade from 1.0.0–1.0.3 to 1.0.4 the ID changes: it now
 includes the account's domain. The old assignment keeps applying while
-DefenseClaw proves the account is the one 1.0.3 saw; rebind it.
+the account the upgrade bound it to holds the UID; rebind it.
 See [Agent identity](/docs/enterprise/identity/authentication#agent-identity).
 
 The pin applies to every decision the gateway makes for that install: its

@@ -188,6 +188,17 @@ func listLocalAccountsStamp() (managedHookPeerListing, error) {
 
 var errNoLocalAccounts = errors.New("the local account list is empty")
 
+// accountRecordToken is the DirectoryFacts.AccountRecord of a listed local
+// node record (managedHookPeerAccountRecord): "record:" and a digest of the
+// record, "" for none.
+func accountRecordToken(record string) string {
+	if record == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(record))
+	return "record:" + hex.EncodeToString(sum[:16])
+}
+
 // localAccountsListing digests the accounts without regard to order: a
 // change of an account's name, uid, record, home or primary group changes
 // the stamp and that account's record.

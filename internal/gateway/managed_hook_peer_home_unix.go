@@ -173,9 +173,11 @@ type managedHookPeerHomeCache struct {
 // managedHookPeerIncarnations are the first and the last account token a
 // uid resolved to. base is agentIncarnationUnproven when the first account
 // this gateway saw hold the uid cannot be shown to be the one older builds
-// saw (agentIncarnation).
+// saw (agentIncarnation); upgrade is then the token of that first account,
+// the account the upgrade binds the uid's 1.0.3 agents entries to
+// (legacyProof).
 type managedHookPeerIncarnations struct {
-	base, last string
+	base, last, upgrade string
 }
 
 // agentIncarnationUnproven is the base token of a uid whose first account
@@ -242,6 +244,10 @@ type managedHookPeerLast struct {
 	// 1.0.4 ignore them.
 	BaseIncarnation string `json:"base_incarnation,omitempty"`
 	Incarnation     string `json:"incarnation,omitempty"`
+	// UpgradeIncarnation is the token of the first account seen hold a uid
+	// an older build saw, when that token showed no continuity
+	// (managedHookPeerIncarnations.upgrade).
+	UpgradeIncarnation string `json:"upgrade_incarnation,omitempty"`
 	// LegacyHolder marks a uid an older build saw for which no account
 	// token was adopted yet (managedHookPeerHomeCache.legacy).
 	LegacyHolder bool `json:"legacy_holder,omitempty"`
@@ -310,7 +316,11 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 			if c.incarnations == nil {
 				c.incarnations = make(map[int]managedHookPeerIncarnations)
 			}
-			c.incarnations[uid] = managedHookPeerIncarnations{base: last.BaseIncarnation, last: firstNonEmpty(last.Incarnation, last.BaseIncarnation)}
+			tokens := managedHookPeerIncarnations{base: last.BaseIncarnation, last: firstNonEmpty(last.Incarnation, last.BaseIncarnation)}
+			if tokens.base == agentIncarnationUnproven && validAccountToken(last.UpgradeIncarnation) {
+				tokens.upgrade = last.UpgradeIncarnation
+			}
+			c.incarnations[uid] = tokens
 		}
 	}
 }
@@ -332,7 +342,7 @@ func (c *managedHookPeerHomeCache) saveHomesLocked() {
 	}
 	for uid, tokens := range c.incarnations {
 		last := stored[strconv.Itoa(uid)]
-		last.BaseIncarnation, last.Incarnation = tokens.base, tokens.last
+		last.BaseIncarnation, last.Incarnation, last.UpgradeIncarnation = tokens.base, tokens.last, tokens.upgrade
 		stored[strconv.Itoa(uid)] = last
 	}
 	for uid := range c.legacy {
@@ -1037,7 +1047,9 @@ func (c *managedHookPeerHomeCache) accountToken(uid int) (string, bool) {
 // (review of GAP-0947, loop 3). It keeps the IDs of before only when its
 // token shows continuity (legacyContinuity); otherwise the base is
 // agentIncarnationUnproven, every account derives its own IDs, and the rows
-// of before are retired.
+// of before are retired. That first account is still the one the upgrade
+// binds the uid's 1.0.3 agents entries to (upgrade, legacyProof), so an
+// existing assignment keeps working for it.
 func (c *managedHookPeerHomeCache) agentIncarnation(uid int) string {
 	token, known := c.accountToken(uid)
 	c.mu.Lock()
@@ -1052,7 +1064,7 @@ func (c *managedHookPeerHomeCache) agentIncarnation(uid int) string {
 			}
 			tokens.base = token
 			if c.legacy[uid] && !legacyContinuity(uid, token) {
-				tokens.base = agentIncarnationUnproven
+				tokens.base, tokens.upgrade = agentIncarnationUnproven, token
 			}
 			delete(c.legacy, uid)
 		}
@@ -1191,29 +1203,41 @@ func (c *managedHookPeerHomeCache) holderHistory(uid int) (last string, changed 
 	return tokens.last, tokens.base != tokens.last || tokens.base == agentIncarnationUnproven
 }
 
-// legacyProof is what proves the account that holds uid now is the one a
-// build before 1.0.4 derived the uid's 1.0.3 agent identities for: name is
-// the name that build last gave the uid ("" when none), and bound reports
-// that the account incarnation that holds it is that build's: the token of
-// the account that holds it now is the first one this gateway adopted for
-// it, and, for a uid that build saw, that token showed continuity
-// (agentIncarnation, legacyContinuity). A uid no token was ever known for,
-// or none adopted since the upgrade, is not bound: nothing shows which
-// account holds it.
-func (c *managedHookPeerHomeCache) legacyProof(uid int) (name string, bound bool) {
+// legacyProof is what binds the account that holds uid now to the 1.0.3
+// agent identities a build before 1.0.4 derived for the uid: name is the
+// name that build last gave the uid ("" when none), and bound reports that
+// the account that holds the uid now is the one the upgrade bound them to,
+// whose current agent identities are derived with incarnation
+// (agentIncarnation). The upgrade binds them to the first account this
+// gateway sees hold the uid after the upgrade, whatever its token: its
+// token shows continuity (a local account, an SSSD id-mapped SID), or it is
+// the first token this build adopted for the uid (a macOS listed record, an
+// RFC 2307 or winbind SID; upgrade), so an existing assignment keeps working
+// automatically (review loop 3). While no token was ever known since the
+// upgrade, nothing this build sees tells one holder of the uid from another
+// (it derives the same agent identities for all of them, as 1.0.3 did), and
+// the account is bound as 1.0.3 bound it. Any later account that holds the
+// uid (another token) is not bound; the bridge also needs the account's name
+// to be the one 1.0.3 gave the uid (profileAgentBridge.provesLocked). A uid
+// no build before 1.0.4 saw is never bound here.
+func (c *managedHookPeerHomeCache) legacyProof(uid int) (name, incarnation string, bound bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.loadHomesLocked()
 	name = c.legacyNames[uid]
 	if c.legacy[uid] {
-		// No token adopted since the upgrade: continuity is not shown.
-		return name, false
+		// No token adopted since the upgrade: holders cannot differ here.
+		return name, "", true
 	}
 	tokens, seen := c.incarnations[uid]
-	if !seen {
-		return name, false
+	switch {
+	case !seen:
+		return name, "", false
+	case tokens.base == agentIncarnationUnproven:
+		return name, tokens.upgrade, tokens.upgrade != "" && tokens.last == tokens.upgrade
+	default:
+		return name, "", tokens.last == tokens.base
 	}
-	return name, tokens.base != agentIncarnationUnproven && tokens.last == tokens.base
 }
 
 // validAccountToken bounds an account token kept or read back.

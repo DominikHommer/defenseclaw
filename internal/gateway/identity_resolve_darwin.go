@@ -60,6 +60,7 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if darwinLocalNodeAccount(account.Username, account.Uid) {
 		own.Directory = useridentity.DirectoryLocal
 	}
+	own.AccountRecord = accountRecordToken(managedHookPeerAccountRecord(account.Username))
 	record, ok, _ := readIdentitySpoolFactsForAccount(key, account.Username, "", now)
 	var spool *enterprisehooks.IdentitySpoolRecord
 	if ok {

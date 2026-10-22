@@ -28,11 +28,11 @@ import (
 // continuity: its 1.0.3 assignment keeps applying, after a restart too, as
 // the homes file proves its owner. So does a qualified SSSD account whose
 // SID SSSD's default id mapping derives the uid from, by the homes file or
-// its surviving 1.0.3 ledger record. An RFC 2307 uid's token does not: its
-// 1.0.3 identity is still the one 1.0.3 derived (before, the incarnation
-// changed it and the assignment was dropped for the observe default), and
-// the request gets the strictest profile that may apply. A uid no token is
-// known for yet proves nothing either.
+// its surviving 1.0.3 ledger record. An RFC 2307 uid's token does not, and
+// its 1.0.3 identity is still the one 1.0.3 derived (before, the incarnation
+// changed it and the assignment was dropped for the observe default); since
+// review loop 3 the upgrade binds the entry to that first holder, so it
+// keeps applying too, as it does for a uid no token is known for yet.
 func TestUpgradedHomesFileProvesTheLegacyAssignmentOwner(t *testing.T) {
 	agentIdentityTestSetup(t)
 	stubProfileSources(t)
@@ -122,13 +122,15 @@ func TestUpgradedHomesFileProvesTheLegacyAssignmentOwner(t *testing.T) {
 	}
 	tight := map[string]config.GuardrailProfile{"tight": {Mode: "action", BlockAt: "low"}, "watch": {Mode: "observe"}}
 	got, mode = hook(loop2Only(rfc2307, "tight", "watch", tight), rfc2307UID)
-	if got.Name != "tight" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
-		t.Errorf("RFC 2307 uid: profile %+v, mode %q; want tight (action) as default_lookup_failed, never the observe default", got, mode)
+	if got.Name != "tight" || got.Match != profileMatchAgent || mode != "action" {
+		t.Errorf("RFC 2307 uid: profile %+v, mode %q; want the entry's tight (action) as agent, never the observe default", got, mode)
 	}
+	got, mode = hook(loop2Only(rfc2307, "relaxed", "strict", loop2Incomparable), rfc2307UID)
+	loop2Kept(t, "RFC 2307 uid, ledger unreadable", got, mode)
 
 	pending, _ := legacyOf(pendingUID)
-	got, _ = hook(loop2Only(pending, "relaxed", "strict", loop2Incomparable), pendingUID)
-	loop2Unproven(t, "no token adopted yet", got)
+	got, mode = hook(loop2Only(pending, "relaxed", "strict", loop2Incomparable), pendingUID)
+	loop2Kept(t, "no token known since the upgrade", got, mode)
 
 	// The homes file now keeps the 1.0.3 name beside the tokens.
 	stored, err := os.ReadFile(store)

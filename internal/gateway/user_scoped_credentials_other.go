@@ -57,7 +57,7 @@ var agentIdentityHolderHistory = func(string) (string, bool) { return "", false 
 
 // agentIdentityLegacyProof proves no account of a uid here: no name of
 // before is kept and no account incarnation is tracked.
-var agentIdentityLegacyProof = func(string) (string, bool) { return "", false }
+var agentIdentityLegacyProof = func(string) (name, incarnation string, bound bool) { return "", "", false }
 
 // managedHookPeerLastName keeps no last name off Linux and macOS, where no
 // sandbox runs.

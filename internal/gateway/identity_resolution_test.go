@@ -30,6 +30,16 @@ type identityTestProvider struct {
 	directory useridentity.Directory
 	domain    string
 	sid       string
+	// record is a macOS account's local node record
+	// (DirectoryFacts.AccountRecord).
+	record string
+}
+
+// keyed reports whether a proven account of the provider names its
+// incarnation: by a SID, a macOS local node record, or its Windows SID. An
+// account no token names keeps nothing proven (review loop 3).
+func (provider identityTestProvider) keyed(p identityTestPlatform) bool {
+	return provider.sid != "" || provider.record != "" || p.kind == useridentity.KindWindowsSID
 }
 
 var identityTestPlatforms = []identityTestPlatform{
@@ -40,8 +50,11 @@ var identityTestPlatforms = []identityTestPlatform{
 		{source: useridentity.SourceWinbind, directory: useridentity.DirectoryActiveDirectory, domain: "corp.example", sid: "S-1-5-21-1-2-3-1602"},
 	}},
 	{os: "darwin", id: "501", kind: useridentity.KindPOSIXUID, name: "alice", group: "eng-strict", providers: []identityTestProvider{
+		// A mobile account (a local node record), a local account, and a
+		// network account with no local record.
+		{source: useridentity.SourceMacOSOpenDirectory, directory: useridentity.DirectoryActiveDirectory, domain: "corp.example", record: "record:0a1b2c"},
+		{source: useridentity.SourceMacOSOpenDirectory, directory: useridentity.DirectoryLocal, record: "record:3d4e5f"},
 		{source: useridentity.SourceMacOSOpenDirectory, directory: useridentity.DirectoryActiveDirectory, domain: "corp.example"},
-		{source: useridentity.SourceMacOSOpenDirectory, directory: useridentity.DirectoryLocal},
 	}},
 	{os: "windows", id: "S-1-5-21-9-9-9-1105", kind: useridentity.KindWindowsSID, name: `CORP\alice`, group: "S-1-5-21-9-9-9-2201",
 		providers: []identityTestProvider{
@@ -64,6 +77,7 @@ func identityTestSubject(p identityTestPlatform, provider identityTestProvider, 
 	facts := useridentity.DirectoryFacts{
 		Directory: provider.directory, Source: provider.source, Domain: provider.domain,
 		Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now(), AccountSID: provider.sid,
+		AccountRecord: provider.record,
 	}
 	if inGroup {
 		facts.Groups = []string{p.group, "everyone"}
@@ -146,6 +160,9 @@ func TestResolveIdentityProofStatesAcrossProvidersAndPlatforms(t *testing.T) {
 					}
 					if res.Account != tc.want.account || res.Groups != tc.want.groups || res.Agent != proofProven {
 						t.Fatalf("resolution %+v; want account %s, groups %s", res, tc.want.account, tc.want.groups)
+					}
+					if tc.want.keyed && !provider.keyed(p) {
+						tc.want.keyed = false
 					}
 					if (res.Incarnation.key() != "") != tc.want.keyed {
 						t.Fatalf("incarnation %+v keyed %v; want keyed %v", res.Incarnation, res.Incarnation.key() != "", tc.want.keyed)
@@ -284,12 +301,12 @@ func TestLastProvenProfileIsKeyedByTheWholeIncarnation(t *testing.T) {
 		t.Fatalf("unproven UPN and groups: %+v; want strict", got)
 	}
 	res := resolveIdentity(&later, nil)
-	if last, ok := set.provenProfiles.get(res.Incarnation.key()); !ok || last != "strict" {
+	if last, ok := set.provenProfiles.get(res.Incarnation, true); !ok || last != "strict" {
 		t.Fatalf("last proven profile %q %v; want strict", last, ok)
 	}
 	recreated := later
 	recreated.accountToken = "S-1-5-21-1-2-3-1777"
-	if _, ok := set.provenProfiles.get(resolveIdentity(&recreated, nil).Incarnation.key()); ok {
+	if _, ok := set.provenProfiles.get(resolveIdentity(&recreated, nil).Incarnation, true); ok {
 		t.Fatal("a recreated account under the same uid and name inherited the last proven profile")
 	}
 }

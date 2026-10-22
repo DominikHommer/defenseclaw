@@ -69,10 +69,14 @@ const (
 
 // identityIncarnation names one account incarnation: the verified uid or
 // SID, the account that holds it, and a token that changes when the account
-// is recreated under the same uid and name (the SSSD or AD account SID; a
-// Windows SID is its own token). Caches of proven decisions are keyed by
-// the whole incarnation (key), never by a bare uid or a spelling. The UPN
-// is a fact of the incarnation, not part of its key.
+// is recreated under the same uid and name (the SSSD or AD account SID, a
+// macOS account's local node record; a Windows SID is its own token).
+// Caches of proven decisions are keyed by the whole incarnation (key),
+// never by a bare uid or a spelling. An account no such token names (a
+// local Linux account, an LDAP or winbind account, a macOS directory
+// account with no local record) has no key: its uid, name and domain are
+// the same for an account deleted and created again, so nothing proven is
+// kept for it. The UPN is a fact of the incarnation, not part of its key.
 type identityIncarnation struct {
 	Kind, ID          string
 	Name, Domain, UPN string
@@ -167,12 +171,8 @@ func resolveIdentity(subject *profileSubject, agentUnresolved func(string) bool)
 	if res.Account == proofProven {
 		res.Incarnation.Name, res.Incarnation.Domain, res.Incarnation.UPN = subject.UserName, subject.Domain, subject.UPN
 		res.Incarnation.Token = subject.accountToken
-		if res.Incarnation.Token == "" {
-			if subject.IDKind == useridentity.KindWindowsSID {
-				res.Incarnation.Token = subject.UserID
-			} else if subject.UserName != "" {
-				res.Incarnation.Token = "name:" + string(subject.Directory) + ":" + subject.AccountDomain
-			}
+		if res.Incarnation.Token == "" && subject.IDKind == useridentity.KindWindowsSID {
+			res.Incarnation.Token = subject.UserID
 		}
 	}
 	return res
@@ -385,7 +385,7 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 			decision = set.decision(set.defaultProfile, reason, "", source)
 		}
 		if verified && res.proven() {
-			set.provenProfiles.note(res.Incarnation.key(), decision.Name)
+			set.provenProfiles.note(res.Incarnation, decision.Name)
 		}
 		return decision
 	}
@@ -395,7 +395,7 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	// default_profile is tried first, so an outage reports the configured
 	// fallback when it is as strict as any other.
 	candidates = append(append([]string{set.defaultProfile}, candidates...), maybe...)
-	if last, ok := set.provenProfiles.get(res.Incarnation.key()); ok {
+	if last, ok := set.provenProfiles.get(res.Incarnation, res.Account == proofProven); ok {
 		candidates = append(candidates, last)
 	}
 	candidates = compactProfiles(candidates)
@@ -563,44 +563,98 @@ func profileCommandToken(value string) bool {
 // provenProfileStore holds the last profile a fully proven decision gave
 // each account incarnation (identityIncarnation.key), for the unproven
 // rule: an outage never selects a weaker profile than the one the same
-// account was last proven to have. It is per profile set, so a
-// configuration change starts it empty, and bounded.
+// account was last proven to have. It keeps one incarnation per uid or SID:
+// once another account is proven to hold it (another token, or one with no
+// token), the former one's profile is forgotten, so it never reaches the
+// new account, nor the former one's block message. It is per profile set,
+// so a configuration change starts it empty, and bounded.
 type provenProfileStore struct {
 	mu    sync.Mutex
-	byKey map[string]string
-	order []string
+	byKey map[string]provenProfile
+	// holders maps a uid or SID (provenProfileHolder) to the key of the
+	// incarnation whose profile is kept for it.
+	holders map[string]string
+	order   []string
+}
+
+type provenProfile struct {
+	profile, holder string
 }
 
 // provenProfileStoreMax bounds a provenProfileStore.
 const provenProfileStoreMax = 4096
 
-func (s *provenProfileStore) note(key, profile string) {
-	if s == nil || key == "" {
+func provenProfileHolder(inc identityIncarnation) string {
+	return inc.Kind + "\x00" + strings.ToLower(inc.ID)
+}
+
+// note keeps profile for inc, an incarnation a fully proven decision
+// resolved.
+func (s *provenProfileStore) note(inc identityIncarnation, profile string) {
+	if s == nil || inc.ID == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	key := inc.key()
+	s.forgetOtherHolderLocked(inc, key)
+	if key == "" {
+		return
+	}
 	if s.byKey == nil {
-		s.byKey = map[string]string{}
+		s.byKey, s.holders = map[string]provenProfile{}, map[string]string{}
 	}
 	if _, ok := s.byKey[key]; !ok {
 		if len(s.order) >= provenProfileStoreMax {
-			delete(s.byKey, s.order[0])
-			s.order = s.order[1:]
+			s.forgetLocked(s.order[0])
 		}
 		s.order = append(s.order, key)
 	}
-	s.byKey[key] = profile
+	holder := provenProfileHolder(inc)
+	s.byKey[key] = provenProfile{profile: profile, holder: holder}
+	s.holders[holder] = key
 }
 
-func (s *provenProfileStore) get(key string) (string, bool) {
-	if s == nil || key == "" {
+// get returns the profile kept for inc. accountProven reports that this
+// pass proved which account holds inc's ID: when that is another
+// incarnation than the one kept, the kept one is forgotten.
+func (s *provenProfileStore) get(inc identityIncarnation, accountProven bool) (string, bool) {
+	if s == nil || inc.ID == "" {
 		return "", false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	profile, ok := s.byKey[key]
-	return profile, ok
+	key := inc.key()
+	if accountProven {
+		s.forgetOtherHolderLocked(inc, key)
+	}
+	if key == "" {
+		return "", false
+	}
+	kept, ok := s.byKey[key]
+	return kept.profile, ok
+}
+
+// forgetOtherHolderLocked forgets the profile kept for inc's ID when it was
+// kept for another incarnation than key (a recreated account, or one that
+// no token names). s.mu is held.
+func (s *provenProfileStore) forgetOtherHolderLocked(inc identityIncarnation, key string) {
+	if previous, ok := s.holders[provenProfileHolder(inc)]; ok && previous != key {
+		s.forgetLocked(previous)
+	}
+}
+
+// forgetLocked drops the profile kept under key. s.mu is held.
+func (s *provenProfileStore) forgetLocked(key string) {
+	kept, ok := s.byKey[key]
+	if !ok {
+		return
+	}
+	delete(s.byKey, key)
+	if s.holders[kept.holder] == key {
+		delete(s.holders, kept.holder)
+	}
+	s.order = slices.DeleteFunc(s.order, func(k string) bool { return k == key })
 }
 
 // profileCoverConnectors are the connectors the decisions of a request of

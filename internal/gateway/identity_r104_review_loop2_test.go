@@ -14,13 +14,14 @@ import (
 )
 
 // stubLegacyProof makes every uid's agentIdentityLegacyProof name and
-// bound: the name a build before 1.0.4 gave it and whether the account
-// incarnation that holds it is that build's.
+// bound: the name a build before 1.0.4 gave it and whether the account the
+// upgrade bound its 1.0.3 identities to holds it, deriving its current
+// identities without an incarnation.
 func stubLegacyProof(t *testing.T, name string, bound bool) {
 	t.Helper()
 	previous := agentIdentityLegacyProof
 	t.Cleanup(func() { agentIdentityLegacyProof = previous })
-	agentIdentityLegacyProof = func(string) (string, bool) { return name, bound }
+	agentIdentityLegacyProof = func(string) (string, string, bool) { return name, "", bound }
 }
 
 // loop2Only assigns profile to the agents entry entry only; the default is
@@ -60,9 +61,9 @@ func loop2Unproven(t *testing.T, what string, got profileDecision) {
 }
 
 // Review loop 2, finding 1. The current identity of an account other than
-// the first one the gateway saw hold its uid, or of one an upgrade showed
-// no continuity for (a managed macOS record, an RFC 2307 uid), is keyed on
-// its account incarnation; its 1.0.3 identity is not. The 1.0.3 identity
+// the first one the gateway saw hold its uid (here: not the incarnation the
+// upgrade bound the uid's 1.0.3 identities to) is keyed on its account
+// incarnation; its 1.0.3 identity is not. The 1.0.3 identity
 // was derived with the incarnation too, so it matched no entry 1.0.3 wrote
 // and an action/LOW assignment fell to the observe default. Now the 1.0.3
 // identity is the one 1.0.3 derived, and as nothing proves the incarnation

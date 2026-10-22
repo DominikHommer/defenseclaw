@@ -128,15 +128,17 @@ var agentIdentityHolderHistory = func(identity string) (string, bool) {
 }
 
 // agentIdentityLegacyProof is the managedHookPeerHomeCache.legacyProof of a
-// uid: the name a build before 1.0.4 gave it and whether the account
-// incarnation that holds it is that build's. Tests replace it.
-var agentIdentityLegacyProof = func(identity string) (string, bool) {
+// uid: the name a build before 1.0.4 gave it, the account incarnation the
+// account the upgrade bound its 1.0.3 agent identities to derives its
+// current ones with, and whether that account holds it now. Tests replace
+// it.
+var agentIdentityLegacyProof = func(identity string) (name, incarnation string, bound bool) {
 	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
-		return "", false
+		return "", "", false
 	}
 	uid, err := strconv.Atoi(identity)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	return managedHookPeerHomes.legacyProof(uid)
 }

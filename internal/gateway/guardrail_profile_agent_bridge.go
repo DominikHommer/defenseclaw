@@ -24,11 +24,12 @@ import (
 // (profileAgentBridge.provesLocked):
 //
 //   - the request's facts derive the entry as their 1.0.3 identity;
-//   - the account incarnation that holds the uid now is the one the build
-//     before 1.0.4 saw hold it: the per-user gateway's own account, or the
-//     first account this gateway saw hold the uid, where an upgrade showed
-//     continuity (agentIncarnation, legacyContinuity), and which still holds
-//     it (profileAgentClaim.Bound);
+//   - the account incarnation that holds the uid now is the one the upgrade
+//     bound the uid's 1.0.3 identities to: the per-user gateway's own
+//     account, or the first account this gateway saw hold the uid after the
+//     upgrade, whatever its token (a local account, an SSSD SID, an RFC 2307
+//     uid, a macOS record), which still holds it
+//     (managedHookPeerHomeCache.legacyProof, profileAgentClaim.Bound);
 //   - the build before 1.0.4 named that account as the host names it now: the
 //     name its homes file kept for the uid (managedHookPeerHomeCache.legacyName),
 //     which no ledger prune or outage removes, or else the 1.0.3 ledger
@@ -101,9 +102,10 @@ type profileAgentClaim struct {
 // legacyAgentClaim is the claim of the 1.0.3 identity legacy derived for the
 // account account that holds userID on machine. incarnation is the account
 // incarnation the current identity was derived with
-// (agentidentity.Inputs.Incarnation): an account other than the first one
-// the gateway saw hold the uid, or one an upgrade did not show continuity
-// for, is never bound. self marks a per-user gateway's own account.
+// (agentidentity.Inputs.Incarnation): only the account the upgrade bound
+// the uid's 1.0.3 identities to (managedHookPeerHomeCache.legacyProof), and
+// only with its own incarnation, is bound; any other account that held or
+// holds the uid is not. self marks a per-user gateway's own account.
 func legacyAgentClaim(legacy, userID, machine, account, incarnation string, self bool) profileAgentClaim {
 	claim := profileAgentClaim{
 		ID:     strings.ToLower(strings.TrimSpace(legacy)),
@@ -116,8 +118,8 @@ func legacyAgentClaim(legacy, userID, machine, account, incarnation string, self
 		claim.Bound, claim.Name = true, account
 		return claim
 	}
-	name, bound := agentIdentityLegacyProof(claim.UserID)
-	claim.Bound, claim.Name = bound && strings.TrimSpace(incarnation) == "", name
+	name, boundIncarnation, bound := agentIdentityLegacyProof(claim.UserID)
+	claim.Bound, claim.Name = bound && strings.TrimSpace(incarnation) == boundIncarnation, name
 	return claim
 }
 

@@ -75,9 +75,10 @@ type profileSubject struct {
 	// them, but a group assignment that names a group may or may not apply
 	// (identityResolution).
 	unconfirmedGroups []string
-	// accountToken names the account incarnation that holds UserID (the
-	// SSSD or AD account SID); "" when the facts give none
-	// (identityIncarnation).
+	// accountToken names the account incarnation that holds UserID: the
+	// SID SSSD holds for it, or a macOS account's local node record
+	// (DirectoryFacts.AccountRecord); "" when the facts give none, and then
+	// nothing proven is kept for the account (identityIncarnation).
 	accountToken string
 	// upnUnproven marks guardian-backed facts whose UPN the guardian has
 	// not given yet (awaitingSpoolUPN): a users entry written as a UPN or
@@ -783,7 +784,7 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 		Groups:        s.Directory.Groups,
 		// The names of these gids are unknown, not absent.
 		unconfirmedGroups: s.Directory.UnconfirmedGroups,
-		accountToken:      s.Directory.AccountSID,
+		accountToken:      firstNonEmpty(s.Directory.AccountSID, s.Directory.AccountRecord),
 		upnUnproven:       lookupAttempted && !s.Directory.ResolvedAt.IsZero() && awaitingSpoolUPN(s.Directory),
 		GroupsUnknown:     lookupAttempted && s.Directory.GroupsPartial,
 		LookupFailed: lookupAttempted && (s.Directory.ResolvedAt.IsZero() ||
