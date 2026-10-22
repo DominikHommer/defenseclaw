@@ -69,6 +69,12 @@ func TestManagedDoctorRefusesStaleRenderedVMDriverDir(t *testing.T) {
 		}
 	}
 	writeConfig("/usr/libexec/openshell")
+	app.daemon.status.Managed.PendingRestart = true
+	if row := app.runDoctor(bg).Get("managed-driver"); row == nil || row.Status != openshell.StatusWarn || row.Fix == nil ||
+		!strings.Contains(row.Fix.Summary, "defenseclaw sandbox stop NAME") || strings.Contains(row.Fix.Summary, "ensure") {
+		t.Fatalf("authorized switch waiting for the old VM: %+v", row)
+	}
+	app.daemon.status.Managed.PendingRestart = false
 	if row := app.runDoctor(bg).Get("managed-driver"); row == nil || row.Status != openshell.StatusFail ||
 		!strings.Contains(row.Detail, "/usr/libexec/openshell") || row.Fix == nil || !strings.Contains(row.Fix.Summary, "enterprise linux ensure") {
 		t.Fatalf("stale rendered driver_dir: %+v", row)

@@ -153,12 +153,12 @@ func sandboxUnavailableText(avail sandboxAvailability) string {
 // sandboxDriverClaim checks the compute driver the caller's daemon chose
 // at sandbox start (its own KVM probe, as the user) against
 // enterprise.openshell.driver and the caller's driver_fallback under floor
-// F, and returns the driver and reason to register, or the refusal text. A
+// F, and returns the driver and reason to register, or a typed refusal. A
 // daemon that names no driver gets the gateway's own view (avail). The
 // docker fallback is only for a MicroVM configuration on Linux whose
 // fallback is docker, and only with a fallback reason; a profile's
 // driver_fallback: none refuses it.
-func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellAdminConfig, driver, reason string, avail sandboxAvailability) (string, string, string) {
+func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellAdminConfig, driver, reason string, avail sandboxAvailability) (string, string, *sandboxrelay.Refusal) {
 	want := sandboxDriverFor(cfg, goos)
 	if driver == "" {
 		driver, reason = avail.Driver, avail.DriverReason
@@ -170,20 +170,22 @@ func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellA
 			want = config.EnterpriseOpenShellDriverVM
 		}
 		if driver != want {
-			return "", "", "Your organization runs sandboxes on the " + want + " driver on this computer."
+			return "", "", &sandboxrelay.Refusal{Reason: sandboxrelay.DetailSetupChanging,
+				Message: "Your organization now runs sandboxes on the " + want + " driver on this computer, but your sandbox service still uses " + driver +
+					". Stop your sandboxes with `defenseclaw sandbox stop NAME`, then retry the command so the authorized update can finish."}
 		}
-		return driver, openshell.DriverReasonConfigured, ""
+		return driver, openshell.DriverReasonConfigured, nil
 	case driver == config.EnterpriseOpenShellDriverVM:
 		if want == config.EnterpriseOpenShellDriverAuto {
-			return driver, openshell.DriverReasonKVMAvailable, ""
+			return driver, openshell.DriverReasonKVMAvailable, nil
 		}
-		return driver, openshell.DriverReasonConfigured, ""
+		return driver, openshell.DriverReasonConfigured, nil
 	case driver != config.EnterpriseOpenShellDriverDocker || !openshell.IsFallbackReason(reason):
-		return "", "", "The sandbox request is malformed: unknown compute driver choice."
+		return "", "", &sandboxrelay.Refusal{Reason: sandboxrelay.ReasonUnavailable, Message: "The sandbox request is malformed: unknown compute driver choice."}
 	case sandboxDriverFallbackFor(cfg, goos, floor) != config.EnterpriseOpenShellFallbackDocker:
-		return "", "", sandboxUnavailableText(sandboxVMRequired(reason))
+		return "", "", &sandboxrelay.Refusal{Reason: sandboxrelay.ReasonUnavailable, Message: sandboxUnavailableText(sandboxVMRequired(reason))}
 	}
-	return driver, reason, ""
+	return driver, reason, nil
 }
 
 func sandboxOperational(cfg *config.Config, floor config.OpenShellAdminConfig) sandboxrelay.OperationalSettings {
@@ -566,8 +568,8 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	driver, driverReason, refusal := sandboxDriverClaim(cfg, runtime.GOOS, floor, req.Driver, req.DriverReason, avail)
-	if refusal != "" {
-		refuse(sandboxrelay.ReasonUnavailable, refusal, access)
+	if refusal != nil {
+		refuse(refusal.Reason, refusal.Message, access)
 		return
 	}
 	if floor.Allowed != nil && !*floor.Allowed {

@@ -185,10 +185,10 @@ func TestSandboxDriverClaim(t *testing.T) {
 	} {
 		driver, reason, refusal := sandboxDriverClaim(tc.cfg, tc.goos, tc.floor, tc.driver, tc.reason, gw)
 		switch {
-		case tc.wantRefusal != "" && !strings.Contains(refusal, tc.wantRefusal):
-			t.Errorf("%s: refusal %q, want %q", name, refusal, tc.wantRefusal)
-		case tc.wantRefusal == "" && (refusal != "" || driver != tc.wantDriver || reason != tc.wantReason):
-			t.Errorf("%s: %q %q %q, want %q %q", name, driver, reason, refusal, tc.wantDriver, tc.wantReason)
+		case tc.wantRefusal != "" && (refusal == nil || !strings.Contains(refusal.Message, tc.wantRefusal)):
+			t.Errorf("%s: refusal %+v, want %q", name, refusal, tc.wantRefusal)
+		case tc.wantRefusal == "" && (refusal != nil || driver != tc.wantDriver || reason != tc.wantReason):
+			t.Errorf("%s: %q %q %+v, want %q %q", name, driver, reason, refusal, tc.wantDriver, tc.wantReason)
 		}
 	}
 }

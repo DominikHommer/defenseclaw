@@ -978,6 +978,11 @@ func managedDriverCheck(m *sandboxapi.ManagedStatus) *openshell.Check {
 	if text == "" {
 		return nil
 	}
+	if m.PendingRestart || m.Unavailable == sandboxrelay.UnavailableSetupChanging {
+		return &openshell.Check{ID: "managed-driver", Title: "Sandbox driver", Status: openshell.StatusWarn,
+			Detail: text + "; the authorized sandbox setup update is waiting to finish",
+			Fix:    &openshell.Fix{Summary: "stop your sandboxes (" + CommandName + " stop NAME), then retry; the next command applies the update"}}
+	}
 	c := openshell.Check{ID: "managed-driver", Title: "Sandbox driver", Status: openshell.StatusPass, Detail: text}
 	if openshell.IsFallbackReason(m.DriverReason) {
 		c.Status = openshell.StatusWarn
@@ -1017,6 +1022,9 @@ var managedVMDriverGoarch = runtime.GOARCH
 // and the administrator's pinned-digest install. c is nil when the daemon
 // named no driver.
 func (a *App) withAdminVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus) *openshell.Check {
+	if m.PendingRestart || m.Unavailable == sandboxrelay.UnavailableSetupChanging {
+		return c
+	}
 	goos := a.GOOS
 	if goos == "" {
 		goos = runtime.GOOS
@@ -1064,6 +1072,9 @@ func (a *App) withAdminVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus)
 // driver_dir has gone stale; the gateway cannot use that later driver until
 // enterprise ensure refreshes the render (GAP-0573).
 func (a *App) withRenderedVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus, paths *openshell.RenderedPaths) *openshell.Check {
+	if m.PendingRestart || m.Unavailable == sandboxrelay.UnavailableSetupChanging {
+		return c
+	}
 	if c == nil || c.Status != openshell.StatusPass || m.InstallMode != config.EnterpriseOpenShellInstallPrerequisite ||
 		(m.Driver != config.EnterpriseOpenShellDriverVM && m.Driver != config.EnterpriseOpenShellDriverAuto) || openshell.IsFallbackReason(m.DriverReason) {
 		return c
