@@ -16,7 +16,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -574,63 +573,29 @@ func foreignHookSessionDenialTarget(exchange enterprisepolicy.SessionExchange) (
 	return "event", ""
 }
 
-// foreignHookRemovalCache holds the guardian's foreign-hook removal ledger
-// (enterprisepolicy.ForeignHookRemovalsFile), read again when the file
-// changes and at least every foreignHookRemovalRecheck.
-type foreignHookRemovalCache struct {
-	mu        sync.Mutex
-	path      string
-	keyID     string
-	info      os.FileInfo
-	checkedAt time.Time
-	removals  []enterprisepolicy.ForeignHookRemoval
-	err       error
-}
+// foreignHookRemovalSource reads the guardian's ledger for each call. A
+// pending cleanup denial must be visible before its file removal even when
+// the replacement ledger has the same size and timestamp as the last one.
+type foreignHookRemovalSource struct{}
 
-const foreignHookRemovalRecheck = 2 * time.Second
-
-// sameForeignHookRemovalsFile reports one ledger file, unchanged: the
-// guardian replaces the ledger with a new file, so its identity changes
-// even when its time and size do not.
-func sameForeignHookRemovalsFile(a, b os.FileInfo) bool {
-	return a != nil && b != nil && os.SameFile(a, b) && a.ModTime().Equal(b.ModTime()) && a.Size() == b.Size()
-}
-
-// forIdentity returns the removals the guardian recorded for one caller
-// identity. A missing ledger records none; one that fails its trust check
-// or does not parse is an error, which denies the call. The ledger is read
-// again when the record key changed since the cached read (keyID): the
-// guardian creates a new key after every ledger write, so an exchange that
-// read the new key never gets the ledger from before it (GAP-0352).
-func (c *foreignHookRemovalCache) forIdentity(dir, identity, keyID string) ([]enterprisepolicy.ForeignHookRemoval, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// forIdentity returns the removals the guardian recorded for one caller.
+// A missing ledger records none; one that fails its trust check or does not
+// parse is an error, which denies the call.
+func (foreignHookRemovalSource) forIdentity(dir, identity string) ([]enterprisepolicy.ForeignHookRemoval, error) {
 	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
-	info, err := os.Lstat(path)
+	_, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		c.path, c.info, c.removals, c.err = "", nil, nil, nil
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
-	// A failed read is not cached: the guardian sets the file's group only
-	// after it replaces the file, and a read in between must not deny every
-	// account's calls until the next recheck.
-	if c.err != nil || path != c.path || keyID != c.keyID || !sameForeignHookRemovalsFile(c.info, info) ||
-		now.Sub(c.checkedAt) >= foreignHookRemovalRecheck {
-		// SameFile reads the Windows file ID on first use, by path: read it
-		// now, while the path still names the file the cache describes.
-		_ = os.SameFile(info, info)
-		c.path, c.keyID, c.info, c.checkedAt = path, keyID, info, now
-		c.removals, c.err = readForeignHookRemovals(path)
-	}
-	if c.err != nil {
-		return nil, c.err
+	removals, err := readForeignHookRemovals(path)
+	if err != nil {
+		return nil, err
 	}
 	var out []enterprisepolicy.ForeignHookRemoval
-	for _, removal := range c.removals {
+	for _, removal := range removals {
 		if canonical, ok := connector.CanonicalUserScopedIdentity(removal.Identity); ok && canonical == identity {
 			out = append(out, removal)
 		}

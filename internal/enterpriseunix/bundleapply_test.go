@@ -417,6 +417,33 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 	}
 }
 
+// A repeated delivery inherits an old confirmed receipt. It must not reuse
+// that confirmation when the running gateway reports a different policy,
+// even if ensure restored the signed config bytes.
+func TestBundleRepeatRefusesCachedConfirmationWhenGatewayDigestDiffers(t *testing.T) {
+	for _, drift := range []bool{false, true} {
+		b := newBundleHost(t)
+		_, _, restart := bundleConfigs(b.testHost)
+		path := b.dir(1, restart)
+		requireOK(t, b.apply(path))
+		if drift {
+			configPath := b.env.P(b.env.Layout.ConfigPath)
+			original, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, append(original, []byte("\n# local drift\n")...), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}
+		b.frozen = "sha256:" + strings.Repeat("0", 64)
+		r := b.apply(path)
+		if r.OK || r.Bundle != nil && r.Bundle.State == enterprisebundle.StateConfirmed {
+			t.Fatalf("drift=%v: repeat reused confirmation while gateway policy differs: %+v", drift, r)
+		}
+	}
+}
+
 func TestUnixBundleRefusesDeviceKeyMoveBeforeChangingConfirmedPolicy(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {

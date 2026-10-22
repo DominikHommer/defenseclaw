@@ -226,7 +226,7 @@ func (s *guardScan) scanHermesYAML(source hookSource, data []byte) []Finding {
 // way Setup writes it; every other byte of the file is kept, and the
 // original is backed up first. An unverifiable file is reported and left
 // alone (the hook keeps denying until the user fixes it).
-func cleanHermesYAMLSource(scan *guardScan, source hookSource, backupDir string, result *CleanupResult) error {
+func cleanHermesYAMLSource(scan *guardScan, source hookSource, backupDir string, scope CleanupScope, result *CleanupResult) error {
 	req := scan.req
 	data, exists, err := scan.readSource(source)
 	if err != nil {
@@ -249,7 +249,7 @@ func cleanHermesYAMLSource(scan *guardScan, source hookSource, backupDir string,
 		remove[finding.key] = true
 		removed = append(removed, finding)
 	}
-	if len(remove) == 0 {
+	if len(remove) == 0 || !scope.edits(source.path, removed, result) {
 		return nil
 	}
 	hooks, err := hermesHookEvents(data)

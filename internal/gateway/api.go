@@ -89,15 +89,12 @@ type APIServer struct {
 	// caller identity: each identity has its own session store, so callers
 	// never wait on each other's exchanges.
 	foreignHookSessionLocks keyedMutex
-	// foreignHookRemovals caches the hook guardian foreign-hook removal
-	// ledger the session exchanges check.
-	foreignHookRemovals foreignHookRemovalCache
 	// foreignHookSessionRoot is the protected session record folder this
 	// gateway located last (foreignHookSessionRecordRoot).
 	foreignHookSessionRoot atomic.Pointer[string]
-	// foreignHookSessionKilled names the denials this gateway removed the
-	// record key for (killForeignHookSessionKey).
-	foreignHookSessionKilled foreignHookSessionKillCache
+	// foreignHookRemovals reads the hook guardian foreign-hook removal
+	// ledger on every session exchange.
+	foreignHookRemovals foreignHookRemovalSource
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter

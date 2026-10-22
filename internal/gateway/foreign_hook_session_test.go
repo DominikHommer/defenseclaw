@@ -27,6 +27,56 @@ type foreignSessionResult struct {
 	Reason string `json:"reason"`
 }
 
+func TestForeignHookRemovalSourceSeesPendingLedgerWithUnchangedMetadata(t *testing.T) {
+	dir := t.TempDir()
+	previous := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
+	const identity = "1001"
+	pendingPath := enterprisepolicy.ForeignHookCleanupPendingPrefix + "0123456789abcdef>"
+	oldPath := strings.Replace(pendingPath, "pending", "cleaner", 1)
+	at := time.Now().UTC().Format(time.RFC3339)
+	makeLedger := func(path string) []byte {
+		t.Helper()
+		data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
+			Identity: identity, Connector: "cursor", Path: path, At: at, Mark: "linux:b:100",
+		}}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	oldData, pendingData := makeLedger(oldPath), makeLedger(pendingPath)
+	if len(oldData) != len(pendingData) {
+		t.Fatalf("fixture ledger sizes differ: %d, %d", len(oldData), len(pendingData))
+	}
+	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
+	if err := os.WriteFile(path, oldData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var source foreignHookRemovalSource
+	if got, err := source.forIdentity(dir, identity); err != nil || len(got) != 1 || got[0].Path != oldPath {
+		t.Fatalf("initial ledger: %+v (%v)", got, err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, pendingData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("fixture metadata changed: before=%v after=%v err=%v", before, after, err)
+	}
+	if got, err := source.forIdentity(dir, identity); err != nil || len(got) != 1 || got[0].Path != pendingPath {
+		t.Fatalf("pending denial hidden by unchanged file metadata: %+v (%v)", got, err)
+	}
+}
+
 func TestForeignHookSessionGatewayPersistsAndBindsTheCaller(t *testing.T) {
 	ledger := &userScopedTestLedger{}
 	alice, bob := "1001", "1002"

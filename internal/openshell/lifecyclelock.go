@@ -127,6 +127,39 @@ func LockSandboxStart(dir string) (unlock func(), err error) {
 	return unlock, err
 }
 
+// WaitGatewayLifecycle gates every DefenseClaw sandbox command at entry.
+// A rollback holds the lifecycle lock exclusively through its final
+// stopped check and restart; commands wait for it to finish before reading
+// or changing sandbox state. Create and start also hold their shared lock
+// across the OpenShell call (LockSandboxStart).
+func WaitGatewayLifecycle(ctx context.Context, dir string) error {
+	path, err := lifecycleLockPath(dir, false)
+	if err != nil || path == "" {
+		return err
+	}
+	deadline := time.Now().Add(lifecycleLockWait)
+	for {
+		unlock, lockErr := tryLockFile(path, false)
+		if lockErr == nil {
+			unlock()
+			return nil
+		}
+		if !errors.Is(lockErr, errLockHeld) {
+			return lockErr
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w: wait for the gateway rollback to finish, then retry the sandbox command", ErrGatewayBusy)
+		}
+		t := time.NewTimer(lifecycleLockPoll)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
 // LifecycleDrained is the line `defenseclaw-gateway sandbox-daemon drain`
 // prints once it holds the account's lifecycle lock (LockGatewayLifecycle)
 // and found nothing a stop of the account's gateway would end with no
