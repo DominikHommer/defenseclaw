@@ -415,14 +415,7 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 		}
 		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("read enterprise.trust from %s: %w", path, err)
 	}
-	var document struct {
-		Enterprise struct {
-			Trust struct {
-				Mode           string   `yaml:"mode"`
-				AllowedSigners []string `yaml:"allowed_signers"`
-			} `yaml:"trust"`
-		} `yaml:"enterprise"`
-	}
+	var document windowsEnterpriseTrustDocument
 	if err := yaml.Unmarshal(trimWindowsJSONBOM(body), &document); err != nil {
 		if !supplied {
 			// A run that keeps the installed config cannot heal it; one given
@@ -433,6 +426,21 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 		}
 		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("the config %s does not parse %s; fix it and run again", path, windowsEnterpriseYAMLProblem(err))
 	}
+	return document.configured(path)
+}
+
+// windowsEnterpriseTrustDocument is the enterprise.trust part of a config.
+type windowsEnterpriseTrustDocument struct {
+	Enterprise struct {
+		Trust struct {
+			Mode           string   `yaml:"mode"`
+			AllowedSigners []string `yaml:"allowed_signers"`
+		} `yaml:"trust"`
+	} `yaml:"enterprise"`
+}
+
+// configured validates the enterprise.trust the config at path carries.
+func (document windowsEnterpriseTrustDocument) configured(path string) (windowsEnterpriseConfiguredTrust, error) {
 	configured := windowsEnterpriseConfiguredTrust{path: path}
 	switch mode := strings.ToLower(strings.TrimSpace(document.Enterprise.Trust.Mode)); mode {
 	case "", windowsEnterpriseTrustAuthenticode, windowsEnterpriseTrustHashPinned:
