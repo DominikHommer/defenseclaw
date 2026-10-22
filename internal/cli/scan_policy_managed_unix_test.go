@@ -8,6 +8,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,6 +86,18 @@ func TestManagedRootCodeScanKeepsServiceOwnedRedactionKey(t *testing.T) {
 	}
 	if _, err := loadCodeScanRedactor(dataDir); err == nil || !strings.Contains(err.Error(), "repair") {
 		t.Fatalf("unproven service owner did not refuse with the repair command: %v", err)
+	}
+	managedStandaloneAdminDeployment = func() (managed.StandaloneLayout, *managed.RuntimeDescriptor, error) {
+		return managed.StandaloneLayout{DataDir: dataDir}, nil, errors.New("untrusted descriptor")
+	}
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCodeScanRedactor(dataDir); err == nil || !strings.Contains(err.Error(), "repair") {
+		t.Fatalf("unproven managed deployment did not refuse with the repair command: %v", err)
+	}
+	if _, err := os.Lstat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("unproven deployment created a correlation key: %v", err)
 	}
 }
 

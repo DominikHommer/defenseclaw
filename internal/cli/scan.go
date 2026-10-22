@@ -167,9 +167,8 @@ func loadCodeScanRedactor(dataDir string) (*scanoutput.Redactor, error) {
 	// its fixed data directory; a per-user scan keeps the ordinary trust rule.
 	if managedHostCallerUID() == 0 {
 		layout, descriptor, err := managedStandaloneAdminDeployment()
-		if err == nil && descriptor != nil &&
-			filepath.Clean(dataDir) == filepath.Clean(layout.DataDir) {
-			if descriptor.ServiceUID < 0 || uint64(descriptor.ServiceUID) > math.MaxUint32 {
+		if layout.DataDir != "" && filepath.Clean(dataDir) == filepath.Clean(layout.DataDir) {
+			if err != nil || descriptor == nil || descriptor.ServiceUID < 0 || uint64(descriptor.ServiceUID) > math.MaxUint32 {
 				return nil, fmt.Errorf("managed redaction key owner is unproven; run sudo defenseclaw-gateway enterprise %s repair", runtime.GOOS)
 			}
 			key, err := observabilityredaction.LoadExistingCorrelationKeyForOwner(dataDir, uint32(descriptor.ServiceUID))
