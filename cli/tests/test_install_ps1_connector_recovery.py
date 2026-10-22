@@ -505,6 +505,7 @@ function Get-BinariesState {{ return @{{}} }}
 function Remove-LifecycleManifest {{}}
 function Assert-LifecycleRestored {{}}
 function Test-LifecycleProof {{ return @() }}
+function Wait-LifecycleProof {{ return @() }}
 function Get-Field($Object, [string]$Name) {{ return $null }}
 """
 
@@ -1046,6 +1047,7 @@ function Stop-HookFailModeHold {}
 function Update-HookFailModes { return $true }
 function Write-LifecycleManifest { return $null }
 function Assert-LifecycleRestored {}
+function Wait-LifecycleProof { return @() }
 function Save-BinarySnapshot {}
 function Undo-EarlySnapshot {}
 function Clear-StagedRelease {}

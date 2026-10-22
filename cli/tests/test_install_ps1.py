@@ -352,6 +352,7 @@ _NO_TXN = (
     "function Remove-LifecycleManifest { }\n"
     "function Assert-LifecycleRestored { param($Manifest, [switch]$KeepStopped) }\n"
     "function Test-LifecycleProof { return @() }\n"
+    "function Wait-LifecycleProof { return @() }\n"
     "function Get-LifecycleNextStep { return 'the same install command' }\n"
     "function Get-BinariesState { return @{} }\n"
     "function Start-HookFailModeHold { return $true }\n"
@@ -983,7 +984,7 @@ def _lifecycle_record(path: Path, running: bool = True) -> None:
 
 _TXN_REAL = ("Write-DurableText", "ConvertTo-Map", "Get-BinariesState", "Get-OptionalSha256", "Get-GuardedConnectors",
              "Read-LifecycleManifest", "New-RecoveryManifest", "Remove-LifecycleManifest", "Test-LifecycleProof",
-             "Set-RecoveryPending", "Set-RecoverySetupRoot", "Get-LifecycleNextStep", "Assert-LifecycleRestored",
+             "Set-RecoveryPending", "Set-RecoverySetupRoot", "Wait-LifecycleProof", "Get-LifecycleNextStep", "Assert-LifecycleRestored",
              "Get-Field", "Get-Sha256")
 
 
@@ -992,6 +993,7 @@ def _txn_real_functions() -> str:
 
 
 _TXN_PRELUDE = (
+    "$LifecycleProofSeconds = 0\n"
     "$ManagedBinaries = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')\n"
     "$LifecycleManifest = Join-Path $DataDir '.lifecycle-txn.json'\n"
     "if (-not (Get-Variable -Name Run -ErrorAction SilentlyContinue)) { $Run = @{ RestorePending = $false; UndoPending = $false } }\n"
@@ -1063,7 +1065,8 @@ function Get-GatewayDigestProblem {{ return 'unsupported' }}
 function Test-BinDirProtected {{ return $true }}
 {chr(10).join(_ps1_function(name) for name in ('Write-DurableText', 'ConvertTo-Map', 'Get-BinariesState', 'Get-OptionalSha256',
     'Get-GuardedConnectors', 'Read-LifecycleManifest', 'New-RecoveryManifest', 'Remove-LifecycleManifest', 'Test-LifecycleProof',
-    'Set-RecoveryPending', 'Set-RecoverySetupRoot', 'Get-LifecycleNextStep', 'Assert-LifecycleRestored', 'Get-Field', 'Get-Sha256'))}
+    'Set-RecoveryPending', 'Set-RecoverySetupRoot', 'Wait-LifecycleProof', 'Get-LifecycleNextStep', 'Assert-LifecycleRestored', 'Get-Field', 'Get-Sha256'))}
+$LifecycleProofSeconds = 0
 function Find-SetupInstall {{ return $null }}
 function Die([string]$Message) {{ throw $Message }}
 function Undo-HookFirst {{ }}
@@ -2900,7 +2903,7 @@ _TXN_FUNCTIONS = (
     "Write-DurableText", "ConvertTo-Map", "Get-BinariesState", "Get-OptionalSha256", "Get-GatewayHealthReport",
     "Get-GuardedConnectors", "Get-GatewayDigestProblem", "Get-LifecycleState", "Write-LifecycleManifest",
     "Read-LifecycleManifest", "Complete-LifecycleManifest", "Remove-LifecycleManifest", "Test-LifecycleProof",
-    "Set-RecoveryPending", "Get-LifecycleNextStep", "Assert-LifecycleRestored", "Get-Field", "Get-Sha256", "New-RecoveryManifest",
+    "Set-RecoveryPending", "Wait-LifecycleProof", "Get-LifecycleNextStep", "Assert-LifecycleRestored", "Get-Field", "Get-Sha256", "New-RecoveryManifest",
     "Set-RecoverySetupRoot", "Start-RecoveredGateway",
 )
 
@@ -2923,6 +2926,7 @@ def _txn_harness(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
         "$ManagedBinaries = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe', 'defenseclaw-acp.exe')\n"
         "$LifecycleManifest = Join-Path $DataDir '.lifecycle-txn.json'\n"
         "$Run = @{ RestorePending = $false; UndoPending = $false }\n"
+        "$LifecycleProofSeconds = 0\n"
         "$script:gateway = $null; $script:health = ''; $script:digest = ''; $script:digestHelp = $true; $script:protected = $true\n"
         "function Get-GatewayProcess { return $script:gateway }\n"
         "function Get-ExternalConfig { return '' }\n"
@@ -3221,7 +3225,7 @@ def test_every_lifecycle_step_proves_its_result_before_it_reports_success() -> N
     install = _ps1_function("Invoke-Install")
     record = install.index("$Manifest = Write-LifecycleManifest $operation")
     assert record < install.index("try { Save-BinarySnapshot }") < install.index("if (-not (Stop-Gateway))")
-    proof = install.index("$problems = @(Test-LifecycleProof $stagedBinaries $provenGateway $guardedBefore -RequireDigest:$provenGateway)")
+    proof = install.index("$problems = @(Wait-LifecycleProof $stagedBinaries $provenGateway $guardedBefore -RequireDigest:$provenGateway)")
     committed = install.index("Complete-LifecycleManifest", proof)
     swap = install.index("Complete-Swap", committed)
     assert proof < committed < swap < install.index("Remove-LifecycleManifest", swap)
@@ -3237,7 +3241,7 @@ def test_every_lifecycle_step_proves_its_result_before_it_reports_success() -> N
     # GAP-0486: a rollback whose gateway does not start (or is not proven) is
     # undone for a 1.x release as for a 0.x one, and never says "Now running".
     rollback = _ps1_function("Invoke-Rollback")
-    proven = rollback.index("$problems = @(Test-LifecycleProof (Get-Field $Manifest \"TargetBins\") $startAfter)")
+    proven = rollback.index("$problems = @(Wait-LifecycleProof (Get-Field $Manifest \"TargetBins\") $startAfter)")
     assert rollback.index("Write-LifecycleManifest \"rollback\"") < rollback.index("if (-not (Stop-Gateway))")
     assert proven < rollback.index("return Undo-Rollback \"DefenseClaw $backTo is not proven running") < rollback.index("Now running DefenseClaw")
     assert "The gateway did not start; run 'defenseclaw-gateway start' and check its log" not in rollback
@@ -3274,7 +3278,7 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
         "function Write-LifecycleManifest { return [pscustomobject]@{ TargetBins = @{} } }\nfunction Get-BinariesState { return @{} }\n"
         "function Remove-LifecycleManifest { $script:removed++ }\n"
         "function Start-Gateway { $script:starts++; if ($script:case -like 'start-fails*') { return 1 }; return 0 }\n"
-        "function Test-LifecycleProof { if ($script:case -eq 'not-proven') { return @('the gateway is not running') }; return @() }\n"
+        "function Wait-LifecycleProof { if ($script:case -eq 'not-proven') { return @('the gateway is not running') }; return @() }\n"
         "function Undo-Rollback { param($Reason) $script:undone++; Write-Host \"undo: $Reason\"; return 1 }\n"
         + _ps1_function("Get-Field") + _ps1_function("Read-Text") + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
         + "\n$rc = Invoke-Rollback\nWrite-Host \"rc: $rc undone: $script:undone removed: $script:removed\"\n",

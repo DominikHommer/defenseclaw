@@ -1706,6 +1706,22 @@ function Set-RecoveryPending([string]$Flag = "RestorePending") {
     if ($runState) { $runState.$Flag = $true }
 }
 
+function Wait-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors = @(), [switch]$RequireDigest,
+        [bool]$RequireProtected = $true, [string]$SetupRoot = "") {
+    # Test-LifecycleProof, asked again for a while when a running gateway is
+    # part of the proof: a gateway that just passed its start readiness can
+    # take a few seconds to report its connectors and its policy generation.
+    # $LifecycleProofSeconds (30) bounds the wait.
+    $limit = Get-Variable -Name LifecycleProofSeconds -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -eq $limit) { $limit = 30 }
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $problems = @(Test-LifecycleProof $Bins $GatewayRunning $Connectors -RequireDigest:$RequireDigest -RequireProtected $RequireProtected -SetupRoot $SetupRoot)
+        if (-not $problems.Count -or -not $GatewayRunning -or $clock.Elapsed.TotalSeconds -ge $limit) { return $problems }
+        Start-Sleep -Seconds 2
+    }
+}
+
 function Get-LifecycleNextStep {
     # The command that finishes the step: this installer again, with the
     # same release and local assets.
@@ -1730,7 +1746,7 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped) {
     # the next step.
     if (-not $Manifest) { return }
     $running = [bool](Get-Field $Manifest "GatewayWasRunning") -and -not $KeepStopped
-    $problems = @(Test-LifecycleProof (Get-Field $Manifest "Bins") $running @(Get-Field $Manifest "Connectors") `
+    $problems = @(Wait-LifecycleProof (Get-Field $Manifest "Bins") $running @(Get-Field $Manifest "Connectors") `
         -RequireProtected ([bool](Get-Field $Manifest "BinDirProtected")) -SetupRoot ([string](Get-Field $Manifest "SetupRoot")))
     $config = [string](Get-Field $Manifest "Config")
     $liveConfig = Get-OptionalSha256 (Join-Path $DataDir "config.yaml")
@@ -2638,7 +2654,7 @@ function Resume-InterruptedRun {
         # The rollback's record proves its target, not the install it left.
         if ($manifest -and (Get-Field $manifest "Operation") -eq "rollback") {
             if ($restart -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "rolled-back" }
-            $problems = @(Test-LifecycleProof (Get-Field $manifest "TargetBins") $restart)
+            $problems = @(Wait-LifecycleProof (Get-Field $manifest "TargetBins") $restart)
             if ($problems.Count) {
                 Set-RecoveryPending
                 Die "The finished rollback is not proven: $($problems -join '; '). Fix the cause, then run: $(Get-LifecycleNextStep)"
@@ -3115,7 +3131,7 @@ function Invoke-Rollback {
     # for a 0.x one (GAP-0486): never "Now running" with the gateway down.
     $problems = @()
     if ($startAfter -and (Start-Gateway) -notin @(0, 3)) { $problems += "the gateway of DefenseClaw $backTo did not start" }
-    else { $problems = @(Test-LifecycleProof (Get-Field $Manifest "TargetBins") $startAfter) }
+    else { $problems = @(Wait-LifecycleProof (Get-Field $Manifest "TargetBins") $startAfter) }
     if ($problems.Count) {
         return Undo-Rollback "DefenseClaw $backTo is not proven running ($($problems -join '; '))" $current $backTo $savedWasRunning $quarantined $conversionAttempted
     }
@@ -3593,7 +3609,7 @@ function Invoke-Install {
     # 3) already said which one. Anything else restores the previous install.
     $provenGateway = $startNew -and -not $sealOnly
     $guardedBefore = if ($startRc -eq 0) { @(Get-Field $Manifest "Connectors") } else { @() }
-    $problems = @(Test-LifecycleProof $stagedBinaries $provenGateway $guardedBefore -RequireDigest:$provenGateway)
+    $problems = @(Wait-LifecycleProof $stagedBinaries $provenGateway $guardedBefore -RequireDigest:$provenGateway)
     if ($problems.Count) {
         foreach ($problem in $problems) { Write-Err $problem }
         Write-Err "DefenseClaw $Ver is not proven installed; restoring $previousLabel"
