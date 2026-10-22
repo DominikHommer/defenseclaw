@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -43,6 +44,38 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
+
+// rel-1-0-3 GAP-0332: exercise run's status preflight, which can refuse
+// before Create returns the daemon's disabled error.
+func TestRunDisabledNamesTheMissingRuntimeBeforeCreating(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux prerequisite message")
+	}
+	oldManaged, oldRuntime := onManagedHost, hostHasSandboxRuntime
+	t.Cleanup(func() { onManagedHost, hostHasSandboxRuntime = oldManaged, oldRuntime })
+	for _, managed := range []bool{false, true} {
+		for _, hasRuntime := range []bool{false, true} {
+			onManagedHost = func() bool { return managed }
+			hostHasSandboxRuntime = func() bool { return hasRuntime }
+			ta := newTestApp(t, "")
+			ta.daemon.status.Enabled = false
+			if managed {
+				ta.daemon.status.Managed = &sandboxapi.ManagedStatus{}
+			}
+			err := ta.Run(bg, RunOptions{Harness: "claude"})
+			if err == nil || ta.creates() != 0 || len(ta.term.runs) != 0 {
+				t.Fatalf("disabled run started work: %v", err)
+			}
+			wantHint := !managed && !hasRuntime
+			if strings.Contains(err.Error(), "lacks Docker") != wantHint {
+				t.Fatalf("managed=%t runtime=%t: %v", managed, hasRuntime, err)
+			}
+			if wantHint && (!strings.Contains(err.Error(), "Docker Engine 28") || !strings.Contains(err.Error(), "defenseclaw sandbox doctor")) {
+				t.Fatalf("missing prerequisite remedy: %v", err)
+			}
+		}
+	}
+}
 
 func TestRunMountSessionKeepsChanges(t *testing.T) {
 	ta := newTestApp(t, "y\n")

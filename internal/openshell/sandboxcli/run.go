@@ -707,7 +707,7 @@ func (a *App) checkSandboxes(ctx context.Context, api API, ready bool) (*sandbox
 	}
 	a.noteManaged(st)
 	if !st.Enabled {
-		return nil, errors.New(st.OffMessage())
+		return nil, &DisabledError{Message: st.OffMessage() + sandboxRuntimeMissing()}
 	}
 	if !ready && readiesAtRun(api, st) {
 		return st, nil
