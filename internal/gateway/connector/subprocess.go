@@ -985,6 +985,9 @@ func ValidateManagedNativeHookRuntime(
 type hookRuntimeFileSnapshot struct {
 	path    string
 	existed bool
+	// regular is false for a link or another file that is not regular (the
+	// unmanaged snapshot follows it; a managed one refuses it).
+	regular bool
 	data    []byte
 }
 
@@ -999,6 +1002,9 @@ func snapshotHookRuntimeFile(path string) (hookRuntimeFileSnapshot, error) {
 	}
 	snapshot.existed = true
 	snapshot.data = data
+	if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+		snapshot.regular = true
+	}
 	return snapshot, nil
 }
 
@@ -1023,6 +1029,7 @@ func snapshotHookRuntimeFileForMode(
 		return snapshot, nil
 	}
 	snapshot.existed = true
+	snapshot.regular = true
 	snapshot.data = data
 	return snapshot, nil
 }
@@ -1051,10 +1058,10 @@ func restoreHookRuntimeFilesUsing(
 }
 
 // carryableHookConfigSidecar returns the peer state a rewrite should preserve,
-// accepting the v2 map form and the legacy scalar form. State the readers
-// close on (a malformed legacy file, JSON with a key given twice or a field
-// named in another case) is refused, never settled into a mode a reader
-// would open on.
+// accepting the v2 map form and the legacy scalar form. State a reader closes
+// on (a malformed legacy file, or JSON outside the readers' contract:
+// hookSidecarRewriteRefused, a fail_modes of null included) is refused, never
+// settled into a mode a reader would open on.
 func carryableHookConfigSidecar(data []byte) (hookConfigSidecar, error) {
 	var prior hookConfigSidecar
 	if err := json.Unmarshal(data, &prior); err != nil {
@@ -1065,8 +1072,8 @@ func carryableHookConfigSidecar(data []byte) (hookConfigSidecar, error) {
 		}
 		return hookConfigSidecar{LegacyMode: legacyMode}, nil
 	}
-	if HookSidecarJSONAmbiguous(data) {
-		return hookConfigSidecar{}, errAmbiguousHookConfigSidecar
+	if err := hookSidecarRewriteRefused(data); err != nil {
+		return hookConfigSidecar{}, err
 	}
 	if prior.Version != 2 {
 		return hookConfigSidecar{}, fmt.Errorf("unsupported hook config sidecar version %d", prior.Version)
@@ -1100,6 +1107,11 @@ func writeHookConfigSidecarUsing(
 		state := hookConfigSidecar{Version: 2, GatewayAddr: apiAddr, FailModes: map[string]string{}, Managed: managed}
 		if jsonSnapshot.existed {
 			prior, err := carryableHookConfigSidecar(jsonSnapshot.data)
+			if err == nil && !jsonSnapshot.regular {
+				// The shared hooks close on a link (or any file that is not
+				// regular); the rewrite would put a regular file there.
+				err = errHookConfigSidecarNotRegular
+			}
 			// A managed sidecar is guardian-owned and every connector reconciles
 			// on its own schedule, so unreadable content is replaced outright and
 			// at most one peer entry waits for its own pass. An unmanaged sidecar
@@ -1195,10 +1207,12 @@ func clearHookConfigSidecarEntryLocked(
 			if !ok || (legacyMode != "open" && legacyMode != "closed") {
 				return nil, fmt.Errorf("parse hook config sidecar: %w", err)
 			}
-		} else if HookSidecarJSONAmbiguous(jsonSnapshot.data) {
-			// Rewriting it would settle the ambiguity, maybe into an open
-			// mode the readers close on now.
-			return nil, errAmbiguousHookConfigSidecar
+		} else if err := hookSidecarRewriteRefused(jsonSnapshot.data); err != nil {
+			// Rewriting it would settle it, maybe into an open mode the
+			// readers close on now.
+			return nil, err
+		} else if !jsonSnapshot.regular {
+			return nil, errHookConfigSidecarNotRegular
 		} else {
 			if state.Version != 2 {
 				return nil, fmt.Errorf("unsupported hook config sidecar version %d", state.Version)
@@ -1328,15 +1342,16 @@ func decodeManagedHookConfigSidecar(data []byte, state *hookConfigSidecar) error
 		}
 		return err
 	}
-	if HookSidecarJSONAmbiguous(data) {
-		return errAmbiguousHookConfigSidecar
-	}
-	return nil
+	return hookSidecarRewriteRefused(data)
 }
 
 // errAmbiguousHookConfigSidecar is a JSON sidecar that names a key twice or
 // a field in another case (HookSidecarJSONAmbiguous).
 var errAmbiguousHookConfigSidecar = errors.New("parse hook config sidecar: a key is given twice or a field is named in another case")
+
+// errHookConfigSidecarNotRegular is a hooks/.hookcfg that is a link or
+// another file that is not regular, which the shared hooks close on.
+var errHookConfigSidecarNotRegular = errors.New("parse hook config sidecar: not a regular file")
 
 // readStableHookRuntimeSidecar bounds allocation from file metadata, rejects
 // links and non-regular objects, pins the opened file identity, and performs

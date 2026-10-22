@@ -1240,19 +1240,40 @@ function Publish-File([string]$New, [string]$Destination) {
     Move-Path $New $Destination
 }
 
+function Initialize-FileNative {
+    # MoveFileExW and CreateHardLinkW. Invoke-AtomicReplace compiles them
+    # before the first switch, so a recovery with the launcher path empty
+    # never waits for Add-Type.
+    if (-not ("DefenseClawInstall.FileNative" -as [type])) {
+        Add-Type -Namespace DefenseClawInstall -Name FileNative -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern bool MoveFileExW(string existingFileName, string newFileName, int flags);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern bool CreateHardLinkW(string fileName, string existingFileName, IntPtr securityAttributes);
+'@
+    }
+}
+
 function Invoke-AtomicReplace([string]$New, [string]$Destination) {
     # One rename of $New over $Destination (MoveFileEx with
     # MOVEFILE_REPLACE_EXISTING and MOVEFILE_WRITE_THROUGH): at every instant
     # the path names the old file or the new one. Windows refuses it, and
     # changes nothing, while the installed file runs as a program or another
     # program holds it.
-    if (-not ("DefenseClawInstall.Rename" -as [type])) {
-        Add-Type -Namespace DefenseClawInstall -Name Rename -MemberDefinition @'
-[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-public static extern bool MoveFileExW(string existingFileName, string newFileName, int flags);
-'@
+    Initialize-FileNative
+    if (-not [DefenseClawInstall.FileNative]::MoveFileExW($New, $Destination, 0x9)) {
+        throw (New-Object ComponentModel.Win32Exception ([Runtime.InteropServices.Marshal]::GetLastWin32Error()))
     }
-    if (-not [DefenseClawInstall.Rename]::MoveFileExW($New, $Destination, 0x9)) {
+}
+
+function Invoke-HardLink([string]$From, [string]$To) {
+    # Give the file at $From a second name, $To, a path nothing is at
+    # (CreateHardLinkW). No byte is copied and $From is not renamed, so a
+    # scanner that holds $From against a rename does not stop it, and $To
+    # names the whole file, which a hook can run, from the moment it exists.
+    # A volume without hard links (FAT, exFAT) refuses it and nothing changes.
+    Initialize-FileNative
+    if (-not [DefenseClawInstall.FileNative]::CreateHardLinkW($To, $From, [IntPtr]::Zero)) {
         throw (New-Object ComponentModel.Win32Exception ([Runtime.InteropServices.Marshal]::GetLastWin32Error()))
     }
 }
@@ -1329,18 +1350,24 @@ function Close-SwapGap([string]$New, [string]$Backup, [string]$Restore, [string]
     # (ERROR_UNABLE_TO_MOVE_REPLACEMENT_2), so nothing is at $Destination.
     # Put a whole launcher back at once, with no wait: the new one if it moves
     # now, else the old one from the backup or the restore copy Switch-InPlace
-    # made before the swap. A scanner can hold all three against a rename, and
-    # a copy beside the path can be held the same way, so the old launcher is
-    # then written into the empty path itself (Write-LockedCopy): a hold
-    # against a rename still lets a file be read, and no hook can open the new
-    # file before it is whole and checked. Only a path that cannot be written
-    # at all (a full disk) is retried, for a second, before the install fails
-    # and names the backup. Returns $true when the new file is in place,
-    # $false when the old one is back.
+    # made before the swap. A scanner can hold all three against a rename, so
+    # the old launcher then gets $Destination as a second name (a hard link):
+    # whole and runnable the moment it exists, with nothing copied. Only on a
+    # volume that also refuses hard links is it written into the empty path
+    # (Write-LockedCopy) through a handle that shares nothing, so no hook can
+    # open a partial file; a hook started during that copy cannot open the
+    # launcher at all and is not guarded, which is why every rename and link
+    # comes first. Only a path that cannot be written at all (a full disk) is
+    # retried, for a second, before the install fails and names the backup.
+    # Returns $true when the new file is in place, $false when the old one is
+    # back.
     for ($tries = 0; ; $tries++) {
         if (Test-Path -LiteralPath $New) { try { Invoke-FileMove $New $Destination; return $true } catch { } }
         foreach ($old in @($Backup, $Restore)) {
             if ($old -and (Test-Path -LiteralPath $old)) { try { Invoke-FileMove $old $Destination; return $false } catch { } }
+        }
+        foreach ($old in @($Backup, $Restore)) {
+            if ($old -and (Test-Path -LiteralPath $old)) { try { Invoke-HardLink $old $Destination; return $false } catch { } }
         }
         foreach ($old in @($Restore, $Backup)) {
             if ($old -and (Test-Path -LiteralPath $old) -and (Write-LockedCopy $old $Destination)) { return $false }
@@ -1404,8 +1431,9 @@ function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) 
         }
     } finally {
         # Keep them when nothing is at $Destination: they are the old file.
-        # Only whole files are ever renamed to $Destination, so one there is a
-        # launcher.
+        # Only whole files are ever renamed, linked or written to
+        # $Destination, so one there is a launcher. Removing a name a hard
+        # link shares with $Destination leaves the file at $Destination.
         if (Test-Path -LiteralPath $Destination -PathType Leaf) {
             foreach ($leftover in @($aside, $restore)) { Remove-Item -LiteralPath $leftover -Force -ErrorAction SilentlyContinue }
         }

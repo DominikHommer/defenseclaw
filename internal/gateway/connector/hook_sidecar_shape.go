@@ -13,7 +13,9 @@ package connector
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -24,6 +26,122 @@ import (
 
 // hookSidecarJSONFields are the top-level fields of the JSON sidecar.
 var hookSidecarJSONFields = [...]string{"version", "gateway_addr", "fail_modes", "legacy_fail_mode"}
+
+// HookSidecarMaxBytes bounds a hooks/.hookcfg document. Setup writes a few
+// hundred bytes; a larger file is malformed state.
+const HookSidecarMaxBytes = 64 << 10
+
+// hookSidecarMaxDepth bounds the nesting of a JSON sidecar. Setup writes two
+// levels; a deeper document is malformed state.
+const hookSidecarMaxDepth = 32
+
+// HookSidecarJSONMalformed returns why a hooks/.hookcfg document that parses
+// as JSON is not a v2 sidecar, or nil when it is one. It is the contract the
+// native Windows hook (readHookSidecar) and status (fail_mode.py) close on
+// anything outside of: one JSON object of at most HookSidecarMaxBytes,
+// nested at most hookSidecarMaxDepth levels, with no key given twice and no
+// top-level key naming a field in another case (HookSidecarJSONAmbiguous); a
+// version written as an integer from 2 to 2^63-1 (not 2.0, 2e0 or "2"); a
+// gateway_addr and legacy_fail_mode that are strings or null; and a
+// fail_modes that, when present, is an object (not null) of strings or null.
+func HookSidecarJSONMalformed(data []byte) error {
+	if len(data) > HookSidecarMaxBytes {
+		return errors.New("parse hook config sidecar: larger than 64 KiB")
+	}
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(data, &doc) != nil || doc == nil {
+		return errors.New("parse hook config sidecar: not one JSON object")
+	}
+	if HookSidecarJSONAmbiguous(data) {
+		return errAmbiguousHookConfigSidecar
+	}
+	if HookSidecarJSONDepth(data) > hookSidecarMaxDepth {
+		return errors.New("parse hook config sidecar: nested deeper than 32 levels")
+	}
+	if !hookSidecarVersionToken(doc["version"]) {
+		return errors.New("parse hook config sidecar: version is not written as an integer from 2 to 2^63-1")
+	}
+	for _, field := range [...]string{"gateway_addr", "legacy_fail_mode"} {
+		if raw, ok := doc[field]; ok && !jsonStringOrNull(raw) {
+			return errors.New("parse hook config sidecar: " + field + " is not a string")
+		}
+	}
+	if raw, ok := doc["fail_modes"]; ok {
+		var entries map[string]json.RawMessage
+		if json.Unmarshal(raw, &entries) != nil || entries == nil {
+			return errors.New("parse hook config sidecar: fail_modes is not an object")
+		}
+		for _, value := range entries {
+			if !jsonStringOrNull(value) {
+				return errors.New("parse hook config sidecar: a fail_modes entry is not a string")
+			}
+		}
+	}
+	return nil
+}
+
+// hookSidecarRewriteRefused returns why a writer must not carry a JSON
+// sidecar into a rewrite: anything a reader on any OS closes on. That is
+// HookSidecarJSONMalformed, and also a backslash anywhere in the document,
+// which the shared Unix hooks (_hardening.sh) close on so that they can read
+// every token as written; no writer emits one. A rewrite of such state would
+// settle it into a document a reader opens on.
+func hookSidecarRewriteRefused(data []byte) error {
+	if bytes.IndexByte(data, '\\') >= 0 {
+		return errors.New("parse hook config sidecar: a backslash escape, which the shared hooks close on")
+	}
+	return HookSidecarJSONMalformed(data)
+}
+
+// hookSidecarVersionToken reports a version written as an integer from 2 to
+// 2^63-1: digits only, no sign, fraction, exponent or leading zero.
+func hookSidecarVersionToken(raw json.RawMessage) bool {
+	token := bytes.TrimSpace(raw)
+	if len(token) == 0 || token[0] < '1' || token[0] > '9' {
+		return false
+	}
+	for _, c := range token {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	version, err := strconv.ParseInt(string(token), 10, 64)
+	return err == nil && version >= 2
+}
+
+// jsonStringOrNull reports a JSON string or null.
+func jsonStringOrNull(raw json.RawMessage) bool {
+	var value *string
+	return json.Unmarshal(raw, &value) == nil
+}
+
+// HookSidecarJSONDepth is the deepest object or array nesting of a JSON
+// document that already parsed.
+func HookSidecarJSONDepth(data []byte) int {
+	depth, deepest := 0, 0
+	inString, escaped := false, false
+	for _, c := range data {
+		switch {
+		case inString && escaped:
+			escaped = false
+		case inString && c == '\\':
+			escaped = true
+		case inString && c == '"':
+			inString = false
+		case inString:
+		case c == '"':
+			inString = true
+		case c == '{' || c == '[':
+			depth++
+			if depth > deepest {
+				deepest = depth
+			}
+		case c == '}' || c == ']':
+			depth--
+		}
+	}
+	return deepest
+}
 
 // HookSidecarJSONAmbiguous reports a JSON sidecar that names a key twice in
 // one object, or a top-level key that names a sidecar field in another case.

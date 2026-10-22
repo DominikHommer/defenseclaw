@@ -372,14 +372,17 @@ defenseclaw_shared_hook_token_file() {
 # connector recorded closed. The JSON is the one document the writers make:
 # a regular file (not a link) holding exactly one JSON object, no key given
 # twice in any object (readers take the last, so it reads differently to
-# each), no top-level key naming a field in another case, an integer version
-# of 2 or more, gateway_addr and legacy_fail_mode strings or null, and
-# fail_modes, when present, an object of strings or null. Anything else
-# (empty or blank text, a byte-order mark, two documents, a fractional
-# version, a field of another type, fail_modes null) is malformed; a missing
-# fail_modes is the shape every release writes for an install with no
-# connector entry yet. A connector record that is not a regular file, does
-# not name its own connector, or is not the writers' KEY=value lines (see
+# each), no top-level key naming a field in another case, a version written
+# as an integer from 2 to 2^63-1, gateway_addr and legacy_fail_mode strings
+# or null, and fail_modes, when present, an object of strings or null. It has
+# no backslash (no writer emits one), nests at most 32 levels, and writes
+# every number as JSON does. Anything else (empty or blank text, a byte-order
+# mark, two documents, a version of 2.5, 2e0 or 02, a field of another type,
+# fail_modes null, a value jq alone reads such as nan, +1 or .5) is
+# malformed, on both parser paths alike; a missing fail_modes is the shape
+# every release writes for an install with no connector entry yet. A
+# connector record that is not a regular file, does not name its own
+# connector, or is not the writers' KEY=value lines (see
 # defenseclaw_flat_hookcfg_value) is malformed too. The JSON can name a
 # connector no flat record does (a write cut short between the two, or a peer
 # an older release recorded), so JSON that no parser can read (no jq or
@@ -393,7 +396,7 @@ defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
   local config="${hook_dir}/.hookcfg"
-  local candidate suffix recorded mode selected="" summary=""
+  local candidate suffix recorded mode selected="" summary="" raw=""
   for candidate in "${hook_dir}"/.hookcfg.*; do
     [ -e "$candidate" ] || [ -L "$candidate" ] || continue
     suffix="${candidate##*.hookcfg.}"
@@ -436,9 +439,47 @@ defenseclaw_shared_runtime_fail_mode() {
       $'\xef\xbb\xbf'*) printf closed; return 0 ;;
     esac
     if command -v jq >/dev/null 2>&1; then
+      # jq reads numbers no other reader takes (nan, Infinity, +1, 01, .5)
+      # and reads 2e0 as the integer 2, so a first pass reads the raw text:
+      # with no backslash every quote opens or closes a string, so the text
+      # outside strings holds every number and literal as written, the
+      # nesting, and the top-level version token.
+      raw="$(jq -R -s -r '
+        def ws: . == 32 or . == 9 or . == 10 or . == 13;
+        def number: reduce explode[] as $c (0;
+          ($c >= 48 and $c <= 57) as $digit
+          | if . == 0 then (if $c == 45 then 1 elif $c == 48 then 2 elif $digit then 3 else -1 end)
+            elif . == 1 then (if $c == 48 then 2 elif $digit then 3 else -1 end)
+            elif . == 2 then (if $c == 46 then 4 elif $c == 101 or $c == 69 then 6 else -1 end)
+            elif . == 3 then (if $digit then 3 elif $c == 46 then 4 elif $c == 101 or $c == 69 then 6 else -1 end)
+            elif . == 4 then (if $digit then 5 else -1 end)
+            elif . == 5 then (if $digit then 5 elif $c == 101 or $c == 69 then 6 else -1 end)
+            elif . == 6 then (if $c == 43 or $c == 45 then 7 elif $digit then 8 else -1 end)
+            elif . == 7 or . == 8 then (if $digit then 8 else -1 end)
+            else -1 end)
+          | . == 2 or . == 3 or . == 5 or . == 8;
+        def tokens: explode | map(if ws or . == 123 or . == 125 or . == 91 or . == 93 or . == 44 or . == 58 then 32 else . end)
+          | implode | split(" ") | map(select(length > 0));
+        def integer: explode | length > 0 and length <= 19 and .[0] >= 49 and .[0] <= 57 and all(.[]; . >= 48 and . <= 57);
+        if index("\\") != null then "invalid" else
+          split("\"") as $parts
+          | reduce range(0; $parts | length; 2) as $i ({depth: 0, deepest: 0, ok: (($parts | length) % 2 == 1), versions: 0, version: ""};
+              $parts[$i] as $outside
+              | (if $i > 0 and .depth == 1 and $parts[$i - 1] == "version" and ([$outside | explode[] | select(ws | not)][0] == 58)
+                 then .versions += 1 | .version = (($outside | tokens)[0] // "") else . end)
+              | .ok = (.ok and ($outside | tokens | all(.[]; . == "true" or . == "false" or . == "null" or number)))
+              | reduce ($outside | explode[]) as $c (.;
+                  if $c == 123 or $c == 91 then .depth += 1 | .deepest = ([.deepest, .depth] | max)
+                  elif $c == 125 or $c == 93 then .depth -= 1 else . end))
+          | if .ok and .deepest <= 32 and .versions == 1 and (.version | integer)
+              and ((.version | length) < 19 or .version <= "9223372036854775807") and (.version | tonumber) >= 2
+            then "ok" else "invalid" end
+        end' "$config" 2>/dev/null)" || raw="invalid"
+      if [ "$raw" != "ok" ]; then
+        summary="invalid"
       # --stream sees every key as written: a path met again after its value
       # ended is a key given twice, or a second document.
-      summary="$(jq -n -r --stream --arg connector "$connector" '
+      elif ! summary="$(jq -n -r --stream --arg connector "$connector" '
         def word: if . == null or . == "" then "none" elif . == "open" then "open" else "closed" end;
         def text: . == null or type == "string";
         def fold: explode | map(if . == 383 then 115 elif . == 8490 then 107 else . end) | implode | ascii_downcase;
@@ -461,7 +502,9 @@ defenseclaw_shared_runtime_fail_mode() {
             then
               (if has("fail_modes") then .fail_modes else {} end) as $modes
               | "\($modes | length) \(if [$modes[]] | all(. == "open") then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word) end) \(.legacy_fail_mode | word)"
-            else "invalid" end end end' "$config" 2>/dev/null)" || summary="invalid"
+            else "invalid" end end end' "$config" 2>/dev/null)"; then
+        summary="invalid"
+      fi
     elif _dc_python3_usable; then
       # -I: no PYTHON* variable (PYTHONOPTIMIZE, PYTHONPATH) of the agent's
       # environment changes this check.
@@ -476,10 +519,23 @@ def unique(pairs):
   return d
 def constant(name):
   raise ValueError(name)
-d=json.loads(open(sys.argv[1],encoding="utf-8",errors="replace").read(),object_pairs_hook=unique,parse_constant=constant)
+raw=open(sys.argv[1],encoding="utf-8",errors="replace").read()
+need("\\" not in raw)
+depth=deepest=0
+quoted=False
+for ch in raw:
+  if ch=="\"":
+    quoted=not quoted
+  elif not quoted and ch in "{[":
+    depth+=1
+    deepest=max(deepest,depth)
+  elif not quoted and ch in "}]":
+    depth-=1
+need(deepest<=32)
+d=json.loads(raw,object_pairs_hook=unique,parse_constant=constant)
 t=lambda v:v is None or isinstance(v,str)
 fold=lambda k:k.replace("\u017f","s").replace("\u212a","k").encode("utf-8","surrogatepass").lower().decode("utf-8","surrogatepass")
-need(isinstance(d,dict) and type(d.get("version")) is int and d["version"]>=2)
+need(isinstance(d,dict) and type(d.get("version")) is int and 2<=d["version"]<=9223372036854775807)
 need(t(d.get("gateway_addr")) and t(d.get("legacy_fail_mode")))
 need(all(k==f or fold(k)!=f for k in d for f in ("version","gateway_addr","fail_modes","legacy_fail_mode")))
 m=d.get("fail_modes",{})

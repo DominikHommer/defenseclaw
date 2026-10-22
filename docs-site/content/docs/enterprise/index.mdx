@@ -310,9 +310,13 @@ On a managed standalone host:
   upgrade internals, `DEFENSECLAW_REPO`, and the variables that select the
   deployment, `DEFENSECLAW_DEPLOYMENT_MODE` and
   `DEFENSECLAW_ENTERPRISE_PROFILE`.
-- **`tighten_only`** variables (`DEFENSECLAW_FAIL_MODE`,
-  `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY`) are honored
-  only when they make the setting stricter.
+- **`tighten_only`** variables (`DEFENSECLAW_STRICT_AVAILABILITY`,
+  `DEFENSECLAW_HOOK_MAX_BODY`) are honored only when they make the setting
+  stricter. `DEFENSECLAW_FAIL_MODE` is in this group too, but no hook reads
+  it: a managed hook follows the administrator's installed `hook_fail_mode`,
+  so `closed` in the environment does not make an open hook block during an
+  outage. Use `hook_fail_mode: closed` or `DEFENSECLAW_STRICT_AVAILABILITY=1`
+  for that.
 - **`allow`** variables are read as set: runtime paths, credentials, and the
   values DefenseClaw's own hooks pass between processes.
 

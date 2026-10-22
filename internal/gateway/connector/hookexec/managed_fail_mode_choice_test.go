@@ -214,6 +214,93 @@ func TestManagedCopilotOutageBlockingDocsFollowTheFailMode(t *testing.T) {
 	}
 }
 
+// 1.0.4 review (loop round 4 of G-hooks-upg): the fail-modes page, the
+// enterprise overview, troubleshooting, the threat model and the source of
+// truth said DEFENSECLAW_FAIL_MODE=closed is honored on a managed host when
+// it tightens. No hook reads it (the native hook resolves the administrator's
+// mode before hookexec runs; TestManagedWindowsHookIgnoresTheEnvironmentFailMode
+// pins that on Windows), so an open managed Copilot hook still lets a call
+// run during an outage whatever the environment says. Only the installed
+// mode and strict availability decide. This pins that behavior and the docs.
+func TestManagedFailModeDocsDoNotPromiseAnEnvironmentOverride(t *testing.T) {
+	t.Setenv("DEFENSECLAW_FAIL_MODE", "closed")
+	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+	for _, tc := range []struct {
+		mode    string
+		strict  bool
+		blocked bool
+	}{
+		{mode: "open"},
+		{mode: "open", strict: true, blocked: true},
+		{mode: "closed", blocked: true},
+	} {
+		result := run(t, "copilot", &stubRT{err: notRunning}, func(o *Options) {
+			managedCodex(o)
+			o.ExplainUnenrolledAccount = true
+			o.Event = "preToolUse"
+			o.FailMode = tc.mode
+			o.StrictAvailability = tc.strict
+			o.Stdin = strings.NewReader(`{"toolName":"bash","toolArgs":"{\"command\":\"echo ok\"}"}`)
+		})
+		if got := blocked(result); got != tc.blocked {
+			t.Fatalf("installed mode %q, strict %v, DEFENSECLAW_FAIL_MODE=closed: blocked = %v, want %v: stdout=%q",
+				tc.mode, tc.strict, got, tc.blocked, result.stdout)
+		}
+	}
+	docs := filepath.Join("..", "..", "..", "..", "docs-site", "content", "docs")
+	for _, doc := range []struct {
+		path      string
+		want      []string
+		forbidden []string
+	}{
+		{filepath.Join(docs, "reference", "fail-modes.mdx"), []string{
+			"`DEFENSECLAW_FAIL_MODE` in the agent's environment does not change it: `closed` there does not close a hook the administrator set to `open`, so an outage still lets the call run.",
+			"`DEFENSECLAW_STRICT_AVAILABILITY=1`, which a managed hook honors because it can only close.",
+		}, []string{
+			"both variables are *tighten-only*",
+			"a value that makes hooks stricter is honored",
+		}},
+		{filepath.Join(docs, "enterprise", "troubleshooting.mdx"), []string{
+			"No hook reads `DEFENSECLAW_FAIL_MODE`: the fail mode is the administrator's installed `hook_fail_mode`",
+		}, []string{
+			"(`DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_HOOK_MAX_BODY` are `tighten_only`: honored only when stricter)",
+		}},
+		{filepath.Join(docs, "enterprise", "index.mdx"), []string{
+			"`DEFENSECLAW_FAIL_MODE` is in this group too, but no hook reads it",
+		}, []string{
+			"variables (`DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY`) are honored only when they make the setting stricter",
+		}},
+		{filepath.Join(docs, "enterprise", "threat-model.mdx"), []string{
+			"reads no fail mode from the environment: it follows the administrator's installed `hook_fail_mode`",
+			"and no hook reads `DEFENSECLAW_FAIL_MODE`",
+		}, []string{
+			"always fails closed, never open",
+			"Three variables (`DEFENSECLAW_FAIL_MODE`",
+		}},
+		{filepath.Join(docs, "reference", "source-of-truth.mdx"), []string{
+			"`DEFENSECLAW_FAIL_MODE`, which no hook reads",
+		}, []string{
+			"| `DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY` |",
+		}},
+	} {
+		data, err := os.ReadFile(doc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.Join(strings.Fields(string(data)), " ")
+		for _, want := range doc.want {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s: missing %q", doc.path, want)
+			}
+		}
+		for _, forbidden := range doc.forbidden {
+			if strings.Contains(text, forbidden) {
+				t.Errorf("%s still promises an environment fail-mode override: %q", doc.path, forbidden)
+			}
+		}
+	}
+}
+
 // GAP-0346: only an outage of a standalone hook in fail mode open lets the
 // call through when the foreign-hook guard cannot reach the gateway.
 func TestManagedOutageFailsOpenOnlyForAnOpenStandaloneOutage(t *testing.T) {

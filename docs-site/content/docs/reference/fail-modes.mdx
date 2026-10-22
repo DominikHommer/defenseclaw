@@ -60,9 +60,14 @@ tool input over the hook's 1 MiB limit, a gateway error status (5xx), an
 answer DefenseClaw cannot use, and any other transport error. Per-user and
 Secure Client hooks are unchanged.
 
-On a managed standalone host both variables are *tighten-only*: a value that
-makes hooks stricter is honored, and one that would loosen the administrator's
-posture is ignored. See [Environment variables](/docs/reference/env-vars).
+On a managed standalone host the fail mode is the administrator's installed
+`hook_fail_mode`, and `DEFENSECLAW_FAIL_MODE` in the agent's environment does
+not change it: `closed` there does not close a hook the administrator set to
+`open`, so an outage still lets the call run. To block during an outage, set
+`hook_fail_mode: closed` (the default) in the admin config, or use the
+separate [strict availability](#strict-availability) setting,
+`DEFENSECLAW_STRICT_AVAILABILITY=1`, which a managed hook honors because it
+can only close. See [Environment variables](/docs/reference/env-vars).
 
 <Callout type="warning" title="Older transport-only descriptions are stale">
 The effective hook fail mode now covers connection refusal, timeout, gateway

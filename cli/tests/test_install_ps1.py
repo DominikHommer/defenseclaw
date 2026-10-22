@@ -1222,6 +1222,11 @@ def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
     assert "Close-SwapGap $New $aside $restoreCopy $Destination" in switch
     close = _ps_functions("Close-SwapGap")
     assert "Write-LockedCopy $old $Destination" in close
+    # G-hooks-upg loop round 4: a hard link to the old launcher comes before
+    # the locked copy, which no hook can open while it is written.
+    assert close.index("Invoke-HardLink $old $Destination") < close.index("Write-LockedCopy $old $Destination")
+    assert "CreateHardLinkW($To, $From, [IntPtr]::Zero)" in _ps_functions("Invoke-HardLink")
+    assert "Initialize-FileNative" in atomic
     assert "Invoke-FileCopy" not in close and "New-VerifiedCopy" not in close
     locked = _ps_functions("Write-LockedCopy")
     assert "[IO.File]::Open($To, 'CreateNew', 'ReadWrite', 'None')" in locked
@@ -1414,6 +1419,8 @@ function Start-Sleep {{ $script:waits++; if (-not (Test-Path -LiteralPath '{dest
 function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
 function Move-Path([string]$From, [string]$To) {{ throw "a retried rename was used: $From" }}
 {_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileCopy", "New-VerifiedCopy", "Switch-InPlace", "Write-LockedBytes", "Write-LockedCopy", "Close-SwapGap")}
+# A volume that refuses hard links: the locked copy is the last resort.
+function Invoke-HardLink([string]$From, [string]$To) {{ throw "This volume does not support hard links." }}
 function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
     $script:replaces++
     if ($script:heldMoves -lt {held_moves}) {{
@@ -1476,6 +1483,8 @@ function Start-Sleep {{ $script:waits++; if (-not (Test-Path -LiteralPath '{dest
 function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
 function Move-Path([string]$From, [string]$To) {{ throw "a retried rename was used: $From" }}
 {_ps_functions("Get-Sha256", "Install-File", "Publish-File", "New-VerifiedCopy", "Switch-InPlace", "Write-LockedBytes", "Write-LockedCopy", "Close-SwapGap")}
+# A volume that refuses hard links: the locked copy is the last resort.
+function Invoke-HardLink([string]$From, [string]$To) {{ throw "This volume does not support hard links." }}
 function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
     $script:replaces++
     if (-not (Test-Path -LiteralPath $Destination)) {{ $script:missingAtReplace++ }}
@@ -1554,6 +1563,8 @@ function Start-Sleep {{ $script:waits++; if (-not (Test-Path -LiteralPath '{dest
 function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
 function Move-Path([string]$From, [string]$To) {{ throw "a retried rename was used: $From" }}
 {_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileCopy", "New-VerifiedCopy", "Switch-InPlace", "Write-LockedBytes", "Write-LockedCopy", "Close-SwapGap")}
+# A volume that refuses hard links: the locked copy is the last resort.
+function Invoke-HardLink([string]$From, [string]$To) {{ throw "This volume does not support hard links." }}
 function Invoke-AtomicReplace([string]$New, [string]$Destination) {{ throw "Access is denied." }}
 function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
     $script:replaces++
@@ -1579,6 +1590,90 @@ Write-Output "MISSING_AT_WAIT=$script:missingAtWait MISSING_AT_REPLACE=$script:m
     assert "REFUSED=3 " in out, out
     assert "FAILED: Could not replace" in out and "it was left as it was" in out, out
     assert dest.read_text(encoding="ascii") == "old"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("held_replaces", [3, 1000])
+def test_a_partial_replace_with_every_rename_refused_links_a_runnable_launcher_back(
+    tmp_path: Path, held_replaces: int
+) -> None:
+    # 1.0.4 review (G-hooks-upg loop round 4): with the new file, the backup
+    # and the restore copy all held against a rename, Close-SwapGap wrote the
+    # old launcher into the empty path through a handle that shares nothing.
+    # A hook bridge call during that copy could not open the launcher, so
+    # the agent let the call run (the Copilot adapter fails open). The old
+    # launcher now gets the path as a hard link, whole and runnable the
+    # moment it exists: every bridge call from then on runs a whole launcher,
+    # and no copy is written.
+    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    old_body = "MZ-old-launcher-" * 64
+    new_body = "MZ-new-launcher-" * 64
+    source.write_text(new_body, encoding="ascii")
+    dest.write_text(old_body, encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$script:replaces = 0
+$script:links = 0
+$script:lockedWrites = 0
+$script:bridgeCalls = 0
+$script:notRunnable = 0
+$script:waits = 0
+function Invoke-Bridge {{
+    # A hook the agent starts now: it opens the launcher as a program start
+    # does (read, sharing read and delete) and must find a whole one.
+    $script:bridgeCalls++
+    try {{ $stream = [IO.File]::Open('{dest}', 'Open', 'Read', 'Read, Delete') }} catch {{ $script:notRunnable++; return }}
+    try {{ $text = (New-Object IO.StreamReader($stream)).ReadToEnd() }} finally {{ $stream.Dispose() }}
+    if ($text -cne '{old_body}' -and $text -cne '{new_body}') {{ $script:notRunnable++ }}
+}}
+function Start-Sleep {{ $script:waits++; Invoke-Bridge }}
+function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
+function Move-Path([string]$From, [string]$To) {{ throw "a retried rename was used: $From" }}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "New-VerifiedCopy", "Switch-InPlace", "Write-LockedCopy", "Close-SwapGap")}
+function Invoke-AtomicReplace([string]$New, [string]$Destination) {{ throw "Access is denied." }}
+function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
+    $script:replaces++
+    Invoke-Bridge
+    if ($script:replaces -le {held_replaces}) {{
+        if (Test-Path -LiteralPath $Backup) {{ throw "The process cannot access the file because it is being used by another process." }}
+        [IO.File]::Move($Destination, $Backup)
+        throw "Unable to move the replacement file to the file to be replaced."
+    }}
+    [IO.File]::Delete($Backup)
+    [IO.File]::Replace($New, $Destination, $Backup, $true)
+}}
+function Invoke-FileMove([string]$From, [string]$To) {{
+    if ($script:replaces -le {held_replaces}) {{ throw "The process cannot access the file because it is being used by another process." }}
+    [IO.File]::Move($From, $To)
+}}
+function Invoke-FileCopy([string]$From, [string]$To) {{ [IO.File]::Copy($From, $To, $false) }}
+function Invoke-HardLink([string]$From, [string]$To) {{
+    $script:links++
+    New-Item -ItemType HardLink -Path $To -Value $From | Out-Null
+    Invoke-Bridge
+}}
+function Write-LockedBytes($Stream, [byte[]]$Bytes) {{
+    $script:lockedWrites++
+    Invoke-Bridge
+    $Stream.Write($Bytes, 0, $Bytes.Length)
+}}
+try {{ Install-File '{source}' '{dest}'; Write-Output 'INSTALLED' }} catch {{ Write-Output "FAILED: $($_.Exception.Message)" }}
+Invoke-Bridge
+Write-Output "REPLACES=$script:replaces LINKS=$script:links LOCKED_WRITES=$script:lockedWrites WAITS=$script:waits"
+Write-Output "BRIDGE_CALLS=$script:bridgeCalls NOT_RUNNABLE=$script:notRunnable"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "NOT_RUNNABLE=0\n" in out and "BRIDGE_CALLS=0 " not in out, out
+    assert "LOCKED_WRITES=0 " in out and "LINKS=0 " not in out and "WAITS=0 " not in out, out
+    if held_replaces == 3:
+        assert "INSTALLED" in out, out
+        assert dest.read_text(encoding="ascii") == new_body
+    else:
+        assert "FAILED: Could not replace" in out and "it was left as it was" in out, out
+        assert dest.read_text(encoding="ascii") == old_body
     assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
 
 
@@ -1648,6 +1743,8 @@ function Start-Sleep {{ $script:waits++; Invoke-Bridge; if (-not (Test-Path -Lit
 function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
 function Move-Path([string]$From, [string]$To) {{ throw "a retried rename was used: $From" }}
 {_ps_functions("Get-Sha256", "Install-File", "Publish-File", "New-VerifiedCopy", "Switch-InPlace", "Write-LockedBytes", "Write-LockedCopy", "Close-SwapGap")}
+# A volume that refuses hard links: the locked copy is the last resort.
+function Invoke-HardLink([string]$From, [string]$To) {{ throw "This volume does not support hard links." }}
 function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
     $script:replaces++
     Invoke-Bridge

@@ -37,6 +37,19 @@ func TestHookSidecarWritersRefuseStateTheReadersClose(t *testing.T) {
 		"json-entry-twice":             `{"version":2,"fail_modes":{"codex":"closed","codex":"open"}}`,
 		"json-key-twice":               `{"version":2,"fail_modes":{"codex":"closed"},"fail_modes":{"codex":"open"}}`,
 		"json-field-in-another-case":   `{"version":2,"FAIL_MODES":{"codex":"open"}}`,
+		// 1.0.4 review (loop round 4): the readers close on a present null
+		// fail_modes and on JSON outside their contract, which the writers
+		// rewrote into a valid map while carrying the legacy open mode, or
+		// into a document the readers open on.
+		"json-fail-modes-null-legacy-open": `{"version":2,"fail_modes":null,"legacy_fail_mode":"open"}`,
+		"json-fail-modes-null":             `{"version":2,"gateway_addr":"127.0.0.1:1","fail_modes":null}`,
+		"json-deeper-than-32":              `{"version":2,"fail_modes":{"codex":"open"},"x":` + strings.Repeat("[", 32) + strings.Repeat("]", 32) + `}`,
+		"json-larger-than-64KiB":           `{"version":2,"fail_modes":{"codex":"open"},"pad":"` + strings.Repeat("x", 64<<10) + `"}`,
+		"json-escaped-entry":               `{"version":2,"fail_modes":{"codex":"\u006fpen"}}`,
+		"json-escaped-unknown-field":       `{"version":2,"fail_modes":{"codex":"open"},"x":"a\\b"}`,
+		"json-version-exponent":            `{"version":2e0,"fail_modes":{"codex":"open"}}`,
+		"json-version-future":              `{"version":3,"fail_modes":{"codex":"open"}}`,
+		"json-nan":                         `{"version":2,"fail_modes":{"codex":"open"},"x":NaN}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			hookDir := t.TempDir()
@@ -55,6 +68,28 @@ func TestHookSidecarWritersRefuseStateTheReadersClose(t *testing.T) {
 			}
 		})
 	}
+	// A link to open JSON: the shared hooks close on it, and a rewrite would
+	// put a regular file with the carried open entry there.
+	t.Run("json-link-to-open-state", func(t *testing.T) {
+		hookDir := t.TempDir()
+		path := filepath.Join(hookDir, hookConfigSidecarName)
+		target := filepath.Join(t.TempDir(), "state.json")
+		if err := os.WriteFile(target, []byte(`{"version":2,"fail_modes":{"codex":"open"}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if err := writeHookConfigSidecar(hookDir, "127.0.0.1:1", "claudecode", "open", false); err == nil {
+			t.Fatal("the writer rewrote a link the readers close on")
+		}
+		if err := clearHookConfigSidecarEntry(hookDir, "codex"); err == nil {
+			t.Fatal("the teardown rewrote a link the readers close on")
+		}
+		if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the link was replaced: %v %v", info, err)
+		}
+	})
 	// The writers' own shapes carry over: a 0.8.x KEY=value file and a v2
 	// document.
 	for name, tc := range map[string]struct {
@@ -64,6 +99,8 @@ func TestHookSidecarWritersRefuseStateTheReadersClose(t *testing.T) {
 	}{
 		"legacy-0.8": {body: "# DefenseClaw\nDEFENSECLAW_GATEWAY_ADDR=127.0.0.1:1\nexport DEFENSECLAW_FAIL_MODE=\"open\"\n", wantLegacy: "open"},
 		"v2":         {body: `{"version":2,"gateway_addr":"127.0.0.1:1","fail_modes":{"codex":"open"},"extra":{"a":{"a":1}}}`, wantPeer: "open"},
+		"v2-null-fields": {body: `{"version":2,"gateway_addr":null,"legacy_fail_mode":null,"fail_modes":{"codex":"open","cursor":null},"n":[1e5,-0.5]}`,
+			wantPeer: "open"},
 	} {
 		t.Run("carries/"+name, func(t *testing.T) {
 			hookDir := t.TempDir()
@@ -129,7 +166,93 @@ func TestHookRuntimeStateCheckReadsFlatRecordsAsTheHooksDo(t *testing.T) {
 	}
 }
 
+// Every JSON object in the shared hooks/.hookcfg vectors that the native
+// hook and status read closed as malformed state is one the writers refuse
+// to rewrite, so no refresh of another connector turns it into a document a
+// reader opens on (1.0.4 review, loop round 4 of G-hooks-upg).
+func TestHookSidecarWritersRefuseEveryMalformedSharedVector(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "cli", "testdata", "windows_hook_sidecar_vectors.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file struct {
+		Vectors []struct {
+			Name string `json:"name"`
+			Kind string `json:"kind"`
+			Body string `json:"body"`
+			Mode string `json:"mode"`
+		} `json:"vectors"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, vector := range file.Vectors {
+		var doc map[string]json.RawMessage
+		if vector.Kind != "" || !strings.HasPrefix(vector.Name, "malformed/") || vector.Mode != "closed" ||
+			json.Unmarshal([]byte(vector.Body), &doc) != nil || doc == nil {
+			continue
+		}
+		checked++
+		t.Run(vector.Name, func(t *testing.T) {
+			hookDir := t.TempDir()
+			path := filepath.Join(hookDir, hookConfigSidecarName)
+			if err := os.WriteFile(path, []byte(vector.Body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeHookConfigSidecar(hookDir, "127.0.0.1:1", "claudecode", "open", false); err == nil {
+				t.Fatal("the writer rewrote state the native hook closes on")
+			}
+			if got, err := os.ReadFile(path); err != nil || string(got) != vector.Body {
+				t.Fatalf("sidecar changed: %q (%v)", got, err)
+			}
+		})
+	}
+	if checked < 10 {
+		t.Fatalf("only %d malformed JSON vectors", checked)
+	}
+}
+
 func TestHookSidecarShapes(t *testing.T) {
+	deep := func(levels int) string {
+		return `{"version":2,"x":` + strings.Repeat("[", levels-1) + strings.Repeat("]", levels-1) + `}`
+	}
+	for body, malformed := range map[string]bool{
+		`{"version":2}`: false,
+		`{"version":3,"gateway_addr":null,"legacy_fail_mode":null,"fail_modes":{"a":null,"b":"open"}}`: false,
+		`{"version":9223372036854775807}`:                  false,
+		`{"version" : 2 , "x":[1e5,-0.5,{"version":2e0}]}`: false,
+		deep(32):                                 false,
+		deep(33):                                 true,
+		`{"version":9223372036854775808}`:        true,
+		`{"version":2e0}`:                        true,
+		`{"version":2.0}`:                        true,
+		`{"version":02}`:                         true,
+		`{"version":-2}`:                         true,
+		`{"version":"2"}`:                        true,
+		`{"version":1}`:                          true,
+		`{"version":null}`:                       true,
+		`{}`:                                     true,
+		`[]`:                                     true,
+		`null`:                                   true,
+		`{"version":2,"fail_modes":null}`:        true,
+		`{"version":2,"fail_modes":[]}`:          true,
+		`{"version":2,"fail_modes":{"a":1}}`:     true,
+		`{"version":2,"gateway_addr":1}`:         true,
+		`{"version":2,"legacy_fail_mode":false}`: true,
+		`{"version":2,"fail_modes":{"a":"x","a":"y"}}`:              true,
+		`{"version":2,"pad":"` + strings.Repeat("x", 64<<10) + `"}`: true,
+	} {
+		if got := HookSidecarJSONMalformed([]byte(body)) != nil; got != malformed {
+			t.Errorf("HookSidecarJSONMalformed(%.60q) malformed = %v, want %v", body, got, malformed)
+		}
+	}
+	// The shared Unix hooks also close on a backslash, which the native
+	// hook reads; the writers refuse what either closes on.
+	escaped := []byte(`{"version":2,"fail_modes":{"codex":"\u006fpen"}}`)
+	if HookSidecarJSONMalformed(escaped) != nil || hookSidecarRewriteRefused(escaped) == nil {
+		t.Fatal("an escaped entry: the native contract reads it, the writers must refuse it")
+	}
 	for body, want := range map[string]bool{
 		`{"version":2,"fail_modes":{"codex":"open"}}`:                       false,
 		`{"a":{"a":1},"b":[{"a":1},{"a":2}],"c":[[{"x":1}],{"x":{"x":2}}]}`: false,
