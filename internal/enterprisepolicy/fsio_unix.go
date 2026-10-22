@@ -634,7 +634,7 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 		listed := listedPolicyDir(path, index)
 		need := publishedDirModeAccess(listed)
 		perm := info.Mode().Perm()
-		needMode := perm&need != need
+		needMode := perm&need != need || perm&0o022 != 0
 		aclProblem, err := publishedDirACLProblem(opts, dir, listed)
 		if err != nil {
 			return restored, err
@@ -671,7 +671,7 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 				return restored, err
 			}
 			perm = info.Mode().Perm()
-			needMode = perm&need != need
+			needMode = perm&need != need || perm&0o022 != 0
 		}
 		if needMode {
 			if err := os.Chmod(dir, (perm|need)&^0o022); err != nil {
