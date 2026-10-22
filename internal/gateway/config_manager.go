@@ -1030,6 +1030,19 @@ func (m *ConfigManager) noteAppliedGeneration(raw []byte) {
 	}
 }
 
+// savedWriteNotApplied reports whether raw holds a saved write the gateway
+// has not applied: bytes other than the applied ones, or a recorded
+// generation newer than the applied one. Without applied bytes only a newer
+// generation counts, so unchanged bytes never repeat the last writer's
+// config.change.applied. Callers hold mu.
+func (m *ConfigManager) savedWriteNotApplied(raw []byte) bool {
+	if m.appliedRaw != nil && !bytes.Equal(m.appliedRaw, raw) {
+		return true
+	}
+	generation, ok := appliedGenerationOf(m.path, raw)
+	return ok && m.appliedGenerationKnown && generation > m.appliedGeneration
+}
+
 // pendingBundleGeneration is true only for a new lifecycle-recorded bundle
 // whose generation has not passed through the config manager's apply path.
 func (m *ConfigManager) pendingBundleGeneration(raw []byte) bool {
@@ -1282,7 +1295,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		// holding a listener until restart, cancelling that pending change,
 		// or removing an explicit default. Attribute each saved write before
 		// advancing the source/generation watermark.
-		if m.logger != nil && !next.SecureClientIntegration() {
+		if m.logger != nil && !next.SecureClientIntegration() && m.savedWriteNotApplied(source.raw) {
 			if activity, _, recorded := configChangeActivity(m.path, m.appliedRaw, source.raw,
 				pendingRestart, pendingRestart, m.appliedGeneration, m.appliedGenerationKnown); recorded {
 				_ = m.logger.LogActivity(activity)
@@ -1340,6 +1353,12 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		clearGenerationBuildError()
 		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
+		// The startup reconcile of the boot bytes applies nothing new: they
+		// become the applied bytes, so a later event for the same bytes
+		// does not attribute their writer again.
+		if m.appliedRaw == nil && m.startupKnown && sha256.Sum256(source.raw) == m.startupSource {
+			m.appliedRaw = source.raw
+		}
 		version.SetContentHash(source.raw)
 		if m.health != nil {
 			state, msg := StateRunning, ""

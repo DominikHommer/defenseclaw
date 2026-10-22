@@ -81,3 +81,72 @@ func TestConfigManagerAttributesPendingListenerChangeOnce(t *testing.T) {
 		t.Fatalf("cancelling the pending write produced %d total audit records, want exactly two", len(records))
 	}
 }
+
+// An unchanged startup asset reconcile (errGenerationUnchanged) and a later
+// event for the same config.yaml bytes must not repeat the boot writer's
+// config.change.applied; the next real write is still attributed once.
+func TestConfigManagerUnchangedStartupDoesNotRepeatWriterAudit(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	for _, startupKnown := range []bool{true, false} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		raw := []byte("config_version: 9\ndata_dir: " + filepath.ToSlash(dir) + "\ngateway:\n  api_port: 19080\nobservability: {}\n")
+		if _, err := configwrite.Locked(t.Context(), path, configwrite.Options{Actor: "cli:operator", Reason: "defenseclaw setup"},
+			func() (bool, error) { return true, os.WriteFile(path, raw, 0o600) }); err != nil {
+			t.Fatal(err)
+		}
+		initial, err := config.LoadRuntimeV8File(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, logger := newNativeSkillRuntimeTestStore(t)
+		capture := &captureJudgeRuntimeV8Emitter{}
+		logger.SetRuntimeV8Emitter(capture)
+		mgr := newConfigManagerWithSnapshot(path, initial, logger, nil, "",
+			func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
+				if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets {
+					return errGenerationUnchanged
+				}
+				return nil
+			})
+		compiled, err := config.ParseCompileObservabilityV8(path, raw,
+			config.ObservabilityV8CompileOptions{DefaultDataDir: initial.DataDir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mgr.bindInitialObservabilityV8Plan(compiled.Plan)
+		if startupKnown {
+			mgr.setStartupSource(path, raw)
+		}
+		if err := mgr.ReloadAssets(t.Context(), "startup_reconcile"); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 2; i++ {
+			if err := mgr.Reload(t.Context(), "fsnotify"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if records := capture.snapshot(); len(records) != 0 {
+			wire, _ := json.Marshal(records)
+			t.Fatalf("startup known %v: unchanged config produced %d audit records, want none: %s", startupKnown, len(records), wire)
+		}
+		after := bytes.ReplaceAll(raw, []byte("19080"), []byte("19081"))
+		if _, err := configwrite.Locked(t.Context(), path, configwrite.Options{Actor: "cli:second", Reason: "defenseclaw config set"},
+			func() (bool, error) { return true, os.WriteFile(path, after, 0o600) }); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 2; i++ {
+			if err := mgr.Reload(t.Context(), "fsnotify"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		records := capture.snapshot()
+		if len(records) != 1 {
+			t.Fatalf("startup known %v: a new write produced %d audit records, want exactly one", startupKnown, len(records))
+		}
+		if wire, _ := json.Marshal(records[0]); !bytes.Contains(wire, []byte("cli:second")) {
+			t.Fatalf("startup known %v: new write not attributed to its writer: %s", startupKnown, wire)
+		}
+	}
+}
