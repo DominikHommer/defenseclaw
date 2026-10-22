@@ -356,8 +356,11 @@ def _guard_options(entry: dict[str, Any]) -> dict[str, str]:
 # can read or change, and that is read without following links. Contract
 # locks pin what the guard launches; they never prove who wrote an entry. Any
 # change to an entry (its --gateway, profile, env, or the agent it starts)
-# breaks the digest, and an entry DefenseClaw cannot prove is left exactly as
-# it is, with a warning that names the manual step.
+# breaks the digest, and an entry DefenseClaw cannot prove is foreign: setup
+# writes DefenseClaw's own entry next to it, removal leaves it exactly as it
+# is, and verify reports it with the manual step. That includes an entry under
+# the reserved name "DefenseClaw · <Agent>": releases through 1.0.3 wrote it
+# without a record, so it can be anyone's.
 
 _ENTRY_RECORD = "owned-entries.json"
 _ENTRY_RECORD_LIMIT = 256 << 10
@@ -367,9 +370,26 @@ _ENTRY_RECORD_FIELDS = ("client", "agent", "config_path", "name", "sha256")
 EntryRecords = dict[tuple[str, str, str, str], str]
 
 
-def _entry_digest(entry: dict[str, Any]) -> str:
-    """The digest of an entry's JSON value, whatever the file's formatting or key order."""
-    canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+# Keys an editor stores in an agent entry for choices made in its own UI, the
+# same list as editorOwnedEntryKeys in internal/acp/contract.go. Zed keeps the
+# mode or model picked in its agent panel there. That choice does not change
+# what the entry launches, so it does not make DefenseClaw's own entry foreign.
+_EDITOR_OWNED_ENTRY_KEYS = {
+    "zed": frozenset({
+        "default_mode", "default_model", "favorite_models", "default_config_options",
+        "favorite_config_option_values",
+    }),
+}
+
+
+def _entry_digest(entry: dict[str, Any], client: str) -> str:
+    """The digest of an entry's JSON value, whatever the file's formatting or key order.
+
+    The keys the editor owns for client are left out.
+    """
+    editor_owned = _EDITOR_OWNED_ENTRY_KEYS.get(client, frozenset())
+    pinned = {key: value for key, value in entry.items() if key not in editor_owned}
+    canonical = json.dumps(pinned, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -498,68 +518,79 @@ def _guarded_pair(entry: dict[str, Any], name: str, records: EntryRecords) -> tu
     client, agent = options.get("--client", ""), options.get("--agent", "")
     if client not in _CLIENTS or agent not in _AGENTS:
         return None
-    if name == _managed_name(agent):
-        # The reserved name carrying the marker for its own pair is what every
-        # release through 1.0.3 and the managed Go setup write, without a
-        # record and with whatever guard executable --guard-binary named, so
-        # the guard's filename is not part of this rule. Kept for the 0.8.10
-        # and 1.0.0-1.0.3 upgrade paths and for managed enrollments.
-        return client, agent
-    # Any other entry (an adopted picker entry, a copy) is DefenseClaw's only
-    # while it is exactly what this runtime recorded writing under that name
-    # in this editor file.
+    # Every entry, the reserved name included, is DefenseClaw's only while it
+    # is exactly what this runtime recorded writing under that name in this
+    # editor file. A reserved entry from 1.0.0-1.0.3 has no record: it is
+    # foreign, and setup writes DefenseClaw's own entry next to it.
     digest = records.get((client, agent, _editor_key(client), name))
-    return (client, agent) if digest is not None and digest == _entry_digest(entry) else None
+    return (client, agent) if digest is not None and digest == _entry_digest(entry, client) else None
 
 
 def _pair_entry_names(servers: dict[str, Any], client: str, agent: str, records: EntryRecords) -> list[str]:
+    """The pair's entries this runtime can prove it wrote, as they are now."""
     return [
         name for name, entry in servers.items()
-        if name == _managed_name(agent)
-        or isinstance(entry, dict) and _guarded_pair(entry, name, records) == (client, agent)
+        if isinstance(entry, dict) and _guarded_pair(entry, name, records) == (client, agent)
     ]
+
+
+def _free_entry_name(servers: dict[str, Any], agent: str) -> str:
+    """The reserved name for agent, or its first numbered variant no entry uses.
+
+    An entry DefenseClaw cannot prove it wrote may hold the reserved name.
+    DefenseClaw's own entry then goes next to it instead of replacing it.
+    """
+    name = _managed_name(agent)
+    number = 2
+    while name in servers:
+        name = f"{_managed_name(agent)} ({number})"
+        number += 1
+    return name
+
+
+# Why an entry of the pair is foreign (_left_pair_entries).
+_CHANGED, _DIRECT, _UNRECORDED_GUARD, _RESERVED_NAME = "changed", "direct", "guard", "name"
 
 
 def _left_pair_entries(
     servers: dict[str, Any], client: str, agent: str, records: EntryRecords
-) -> list[tuple[str, bool, bool]]:
-    """Entries of this pair DefenseClaw cannot prove it wrote as they are now.
+) -> list[tuple[str, str, bool]]:
+    """The pair's foreign entries: entries DefenseClaw cannot prove it wrote as they are now.
 
-    Each is (name, adopted, adoptable). adopted: DefenseClaw recorded an entry
-    with this name in this editor file, and it has changed since (pointed
-    back at the agent, edited, or a new file with an entry of that name).
-    Otherwise the entry starts a guard for the pair without a matching
-    record. adoptable: it launches the agent directly, so acp adopt can
-    route it through the guard. Setup, adoption and removal leave them.
+    Each is (name, why, adoptable). why is _CHANGED (DefenseClaw recorded an
+    entry with this name in this editor file and it has changed since:
+    pointed back at the agent, edited, or a new file with an entry of that
+    name), _DIRECT (it launches the agent without the guard), _UNRECORDED_GUARD
+    (it starts a guard for the pair with no matching record, as releases
+    through 1.0.3 wrote the reserved entry) or _RESERVED_NAME (it has the
+    pair's reserved name and nothing else of DefenseClaw's). adoptable: it
+    launches the agent directly, so acp adopt can route it through the guard.
+    Setup writes DefenseClaw's own entry next to them, adoption and removal
+    leave them, and verify reports them.
     """
     owned = set(_pair_entry_names(servers, client, agent, records))
     editor = _editor_key(client)
     recorded = {name for pair_client, pair_agent, key, name in records if (pair_client, pair_agent, key) == (
         client, agent, editor
     )}
-    return sorted(
-        (name, name in recorded, not _entry_is_guarded(entry) and _agent_for_entry(entry) == agent)
-        for name, entry in servers.items()
-        if name not in owned
-        and isinstance(entry, dict)
-        and (name in recorded or _carries_marker(entry, client, agent))
-    )
-
-
-def _check_reserved_entry(client: str, agent: str, data_dir: str, adopting: str | None = None) -> None:
-    path = _client_path(client)
-    servers = _read_json_object(path).get("agent_servers")
-    name = _managed_name(agent)
-    if not isinstance(servers, dict) or name not in servers or name == adopting:
-        return
-    entry = servers[name]
-    if not isinstance(entry, dict) or _guarded_pair(entry, name, _owned_entry_records(data_dir)) != (client, agent):
-        # Ask for the same command again, not a shortened one: a bare
-        # `acp setup` would rebind the pair in observe mode.
-        raise click.ClickException(
-            f"cannot identify editor entry {name!r} as DefenseClaw-owned; "
-            f"rename that entry in {path}, then run the same command again"
-        )
+    left: list[tuple[str, str, bool]] = []
+    for name, value in sorted(servers.items()):
+        if name in owned:
+            continue
+        entry = value if isinstance(value, dict) else {}
+        adoptable = bool(entry) and not _entry_is_guarded(entry) and _agent_for_entry(entry) == agent
+        if name in recorded:
+            why = _CHANGED
+        elif adoptable:
+            why = _DIRECT
+        elif _carries_marker(entry, client, agent):
+            why = _UNRECORDED_GUARD
+        elif name == _managed_name(agent):
+            why = _RESERVED_NAME
+        else:
+            continue
+        left.append((name, why, adoptable))
+    return left
 
 
 def _set_client_entry(
@@ -574,40 +605,25 @@ def _set_client_entry(
 
     Only entries DefenseClaw can prove it wrote are rewritten, plus the one
     entry an explicit adoption names. Any other entry, including one this
-    pair adopted earlier that has changed since, is left as it is.
+    pair adopted earlier that has changed since and a recordless one under
+    the reserved name, is left as it is, and the pair's entry goes next to it.
     """
     path = _client_path(client)
     document = _read_json_object(path)
     servers = document.setdefault("agent_servers", {})
     if not isinstance(servers, dict):
         raise click.ClickException(f"agent_servers must be an object in {path}")
-    records = _owned_entry_records(data_dir)
-    names = _pair_entry_names(servers, client, agent, records)
-    taken_over: set[str] = set()
+    names = _pair_entry_names(servers, client, agent, _owned_entry_records(data_dir))
     if entry_name is not None:
         adopted = servers.get(entry_name)
         if not isinstance(adopted, dict) or _agent_for_entry(adopted) != agent:
             raise click.ClickException(f"ACP entry {entry_name!r} changed before adoption; run the same command again")
-        taken_over.add(entry_name)
-    names.extend(sorted(taken_over - set(names)))
-    for name in names:
-        if name in taken_over:
-            continue
-        existing = servers[name]
-        if not isinstance(existing, dict) or _guarded_pair(existing, name, records) != (client, agent):
-            raise click.ClickException(
-                f"cannot identify editor entry {name!r} as DefenseClaw-owned; "
-                f"rename that entry in {path}, then run the same command again"
-            )
+        names.append(entry_name)
     aliases = [name for name in names if name != _managed_name(agent)]
-    if aliases and _managed_name(agent) in servers:
-        canonical = servers[_managed_name(agent)]
-        if not isinstance(canonical, dict) or _guarded_pair(canonical, _managed_name(agent), records) != (
-            client, agent
-        ):
-            raise click.ClickException("the duplicate ACP entry cannot be identified; run defenseclaw acp verify")
+    if aliases and _managed_name(agent) in names:
+        # DefenseClaw's own reserved entry gives way to the alias that replaces it.
         del servers[_managed_name(agent)]
-    written = aliases or names or [_managed_name(agent)]
+    written = aliases or names or [_free_entry_name(servers, agent)]
     for name in written:
         entry = dict(servers.get(name) or {})
         entry.update(command=command, args=args)
@@ -643,27 +659,34 @@ def _warn_redirected_acp_dir(redirected: bool, data_dir: str) -> None:
         )
 
 
-def _warn_left_entries(
-    left: list[tuple[str, bool, bool]], path: Path, client: str, agent: str, *, removing: bool
-) -> None:
-    """Name each entry DefenseClaw left unchanged, and the manual step for it.
+def _left_reason(why: str, client: str, agent: str) -> str:
+    return {
+        _CHANGED: "DefenseClaw wrote an entry with this name, but it has changed since",
+        _DIRECT: f"it launches {agent} without the DefenseClaw guard",
+        _UNRECORDED_GUARD: (
+            f"it starts a guard for {client}/{agent}, but DefenseClaw has no record that it wrote it as it is"
+        ),
+        _RESERVED_NAME: f"it has DefenseClaw's name for {agent}, but DefenseClaw has no record that it wrote it",
+    }[why]
 
+
+def _warn_left_entries(
+    left: list[tuple[str, str, bool]], path: Path, client: str, agent: str, *, own: list[str] | None
+) -> None:
+    """Name each foreign entry DefenseClaw left unchanged, and the manual step for it.
+
+    own is the pair's entries setup or adoption just wrote, or None on removal.
     Setup and adoption warn on stderr, so --json output stays one document.
     """
-    for name, adopted, adoptable in left:
-        if adopted:
-            reason = "DefenseClaw adopted an entry with this name, but it has changed since"
-        else:
-            reason = f"it starts a guard for {client}/{agent}, but DefenseClaw has no record that it wrote it as it is"
+    removing = own is None
+    for name, why, adoptable in left:
+        reason = _left_reason(why, client, agent)
         if removing:
             step = "Delete it there if you no longer use it."
         elif adoptable:
             step = f"To route it through the guard, run: defenseclaw acp adopt --client {client}"
         else:
-            step = (
-                "Delete it there if it should not start the guard; "
-                f"DefenseClaw's own entry is {_managed_name(agent)!r}."
-            )
+            step = f"Delete it there if you no longer use it; DefenseClaw's own entry is {', '.join(map(repr, own))}."
         message = f"Left editor entry {name!r} in {path}: {reason}, so DefenseClaw did not change it. {step}"
         if removing:
             ux.warn(message, indent="")
@@ -681,13 +704,6 @@ def _remove_client_entry(client: str, agent: str, records: EntryRecords) -> Path
     if not names:
         # Nothing here is this runtime's: leave the operator's file byte for byte.
         return path
-    for name in names:
-        entry = servers[name]
-        if not isinstance(entry, dict) or _guarded_pair(entry, name, records) != (client, agent):
-            raise click.ClickException(
-                f"cannot identify editor entry {name!r} as DefenseClaw-owned; "
-                f"rename that entry in {path}, then run the same command again"
-            )
     for name in names:
         servers.pop(name)
     if not servers:
@@ -716,6 +732,21 @@ def _managed_pairs(data_dir: str | None) -> set[tuple[str, str]]:
     return pairs
 
 
+def _lock_pairs(data_dir: str) -> set[tuple[str, str]]:
+    """Pairs with a contract lock in this runtime's own acp directory.
+
+    Locks reached through a linked acp directory are another runtime's.
+    """
+    if _acp_dir_is_redirected(data_dir):
+        return set()
+    return {
+        (client, agent)
+        for client in _CLIENTS
+        for agent in _AGENTS
+        if (lock := _contract_lock_path(data_dir, client, agent)).is_symlink() or lock.exists()
+    }
+
+
 def _binding_pairs(cfg: Any, data_dir: str) -> set[tuple[str, str]]:
     """Every pair bound here: editor entries, contract locks and configured bindings.
 
@@ -725,13 +756,7 @@ def _binding_pairs(cfg: Any, data_dir: str) -> set[tuple[str, str]]:
     binding remain. A managed host's central bindings name pairs for every
     user, so only this user's locks count there.
     """
-    pairs = _managed_pairs(data_dir)
-    # Locks reached through a linked acp directory are another runtime's.
-    for client in _CLIENTS if not _acp_dir_is_redirected(data_dir) else ():
-        for agent in _AGENTS:
-            lock = _contract_lock_path(data_dir, client, agent)
-            if lock.is_symlink() or lock.exists():
-                pairs.add((client, agent))
+    pairs = _managed_pairs(data_dir) | _lock_pairs(data_dir)
     if cfg.deployment_mode != "managed_enterprise":
         for key, binding in cfg.acp.bindings.items():
             client, _, agent = str(key).partition("/")
@@ -815,14 +840,20 @@ def _verify_binding(
     if not names:
         problems.append("managed editor entry is missing")
     if settings_usable:
-        # An entry this pair adopted that changed since (pointed back at the
-        # agent, edited, or deleted) is no longer DefenseClaw's to rewrite.
+        # A foreign entry of the pair never makes the binding healthy: one that
+        # DefenseClaw wrote and that changed since, one that launches the agent
+        # without the guard, or a recordless guard entry under any name. Each
+        # problem names its manual step.
+        left = _left_pair_entries(servers, client, agent, records) if isinstance(servers, dict) else []
+        problems.extend(_foreign_entry_problem(item, client, agent, client_path) for item in left)
+        # An entry this pair adopted that is gone from the file.
         problems.extend(
             f"adopted editor entry {name!r} no longer launches the DefenseClaw guard as DefenseClaw set it up"
             for pair_client, pair_agent, key, name in sorted(records)
             if (pair_client, pair_agent, key) == (client, agent, editor)
             and name != _managed_name(agent)
             and name not in names
+            and name not in {item[0] for item in left}
         )
     lock_path = _contract_lock_path(data_dir, client, agent)
     if lock_path.is_symlink() or not lock_path.is_file() or _acp_runtime_dir(data_dir) is None:
@@ -915,14 +946,27 @@ def _verify_binding(
             }.items())
         ):
             problems.append(f"editor launch command does not match the lock: {name}")
-        recorded = records.get((client, agent, editor, name))
-        if recorded is not None and recorded != _entry_digest(entry):
-            problems.append(f"editor entry {name!r} changed after DefenseClaw wrote it; re-run acp setup")
         if gateway_url is not None and options.get("--gateway") != gateway_url:
             problems.append(
                 f"editor entry {name!r} does not send verdicts to this gateway ({gateway_url}); re-run acp setup"
             )
     return problems
+
+
+def _foreign_entry_problem(item: tuple[str, str, bool], client: str, agent: str, path: Path) -> str:
+    """The verify problem for one foreign entry of the pair (_left_pair_entries), with its manual step."""
+    name, why, adoptable = item
+    if adoptable:
+        step = f"route it through the guard with: defenseclaw acp adopt --client {client}, or delete it in {path}"
+    else:
+        step = f"DefenseClaw leaves it as it is; delete it in {path} if you no longer use it"
+    if why == _CHANGED and name != _managed_name(agent):
+        return (
+            f"adopted editor entry {name!r} no longer launches the DefenseClaw guard as DefenseClaw set it up; {step}"
+        )
+    if why == _CHANGED:
+        return f"editor entry {name!r} changed after DefenseClaw wrote it; {step}"
+    return f"editor entry {name!r} is not DefenseClaw's: {_left_reason(why, client, agent)}; {step}"
 
 
 def _gateway_url(cfg: Any) -> str:
@@ -1076,7 +1120,6 @@ def setup_cmd(
             )
     client_path = _client_path(client)
     _refuse_redirected_acp_dir(data_dir)
-    _check_reserved_entry(client, agent, data_dir, entry_name)
     # Read before setup replaces the pair's record: an adopted entry that
     # changed since is named as such. An explicit adoption takes its entry.
     left = [item for item in _left_entries(client, agent, data_dir) if item[0] != entry_name]
@@ -1130,7 +1173,9 @@ def setup_cmd(
         # entries are its own. The pair's earlier records are replaced.
         records = {key: digest for key, digest in _owned_entry_records(data_dir).items() if key[:2] != (client, agent)}
         editor = _path_key(path)
-        records.update({(client, agent, editor, name): _entry_digest(entry) for name, entry in written.items()})
+        records.update(
+            {(client, agent, editor, name): _entry_digest(entry, client) for name, entry in written.items()}
+        )
         _write_entry_records(data_dir, records)
         if not managed:
             app.cfg.acp.enabled = True
@@ -1200,7 +1245,7 @@ def setup_cmd(
     )
     if not managed:
         _wait_for_gateway_acp(app, profile, mode, show)
-    _warn_left_entries(left, path, client, agent, removing=False)
+    _warn_left_entries(left, path, client, agent, own=sorted(written))
     click.echo(
         json.dumps(result, sort_keys=True)
         if json_output
@@ -1291,7 +1336,6 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
         raise click.ClickException("configuration is unavailable")
     path = _client_path(client)
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
-    _check_reserved_entry(client, agent, data_dir)
     left = _left_entries(client, agent, data_dir)
     path_snapshot = _snapshot(path)
     if managed and app.cfg.deployment_mode != "managed_enterprise":
@@ -1314,7 +1358,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
     had_policy = not managed and app.cfg.acp.binding_key(client, agent) in app.cfg.acp.bindings
     if not (had_entry or had_policy or had_lock or remaining_records != records):
         click.echo(f"Nothing to remove: no DefenseClaw {agent} entry is configured for {client} ({path})")
-        _warn_left_entries(left, path, client, agent, removing=True)
+        _warn_left_entries(left, path, client, agent, own=None)
         _warn_redirected_acp_dir(redirected, data_dir)
         return
     acp_snapshot = copy.deepcopy(app.cfg.acp)
@@ -1361,7 +1405,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
         raise click.ClickException(f"ACP removal was rolled back: {exc}{suffix}") from exc
     _progress(True, "Recording the change with the gateway...")
     _log_acp_change(app, "acp-remove", f"scope={client}/{agent} entry=removed previous=configured")
-    _warn_left_entries(left, path, client, agent, removing=True)
+    _warn_left_entries(left, path, client, agent, own=None)
     _warn_redirected_acp_dir(redirected, data_dir)
     if had_entry:
         click.echo(f"Removed the DefenseClaw {agent} entry from {path}")
@@ -1537,9 +1581,13 @@ def refresh_guard_pins(
 ) -> list[str]:
     """Re-pin DefenseClaw's own ACP guard in its contract locks.
 
-    Touches only the editor entries DefenseClaw wrote (``_managed_pairs``),
-    never a managed-custody lock, and only the guard digest and protocol
-    schema: a changed agent binary still needs ``acp setup``. ``from_sha256``
+    Touches only this runtime's own locks (``_lock_pairs``), never an editor
+    entry and never a managed-custody lock, and only the guard digest and
+    protocol schema: a changed agent binary still needs ``acp setup``. A lock
+    is not proof of who wrote an entry, but it is this runtime's file, and
+    re-pinning it keeps an entry from 1.0.0-1.0.3 starting after an upgrade
+    (fail closed until then). Verify still reports that recordless entry
+    until setup writes DefenseClaw's own. ``from_sha256``
     limits it to locks that pinned that guard digest; ``guard_path`` to
     locks whose guard is that file. With ``apply=False`` nothing is written.
     Returns the ``client/agent`` pairs re-pinned (or that would be).
@@ -1550,7 +1598,7 @@ def refresh_guard_pins(
     protocol = {"schema_version": _SCHEMA_VERSION, "schema_sha256": _SCHEMA_SHA256}
     only_path = os.path.normcase(str(Path(guard_path).expanduser().resolve())) if guard_path else ""
     repinned: list[str] = []
-    for client, agent in sorted(_managed_pairs(data_dir)):
+    for client, agent in sorted(_lock_pairs(data_dir)):
         lock_path = _contract_lock_path(data_dir, client, agent)
         try:
             if lock_path.is_symlink() or not lock_path.is_file() or lock_path.stat().st_size > 64 << 10:
@@ -1673,9 +1721,9 @@ def _registry_entry_agent(entry_name: str) -> str:
 def _detect_acp_clients(data_dir: str | None = None) -> list[dict[str, Any]]:
     """Report every known client's ACP posture without changing anything.
 
-    data_dir is the ACP runtime whose record proves an alias; without it only
-    the reserved entry is attributed to its pair. Any other entry launching
-    the guard is still reported as guarded and is never offered for adoption.
+    data_dir is the ACP runtime whose record proves an entry; without it no
+    entry is attributed to its pair. Any other entry launching the guard is
+    still reported as guarded and is never offered for adoption.
     """
 
     records = _owned_entry_records(data_dir)

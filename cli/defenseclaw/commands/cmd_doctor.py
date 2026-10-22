@@ -17268,7 +17268,9 @@ def _fix_acp_guard_pins(
 
     data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
     try:
-        pairs = sorted(cmd_acp._managed_pairs(data_dir))
+        # Locks too: refresh re-pins this runtime's own locks, also one behind an
+        # entry 1.0.0-1.0.3 wrote without a record.
+        pairs = sorted(cmd_acp._managed_pairs(data_dir) | cmd_acp._lock_pairs(data_dir))
         if not pairs:
             return ("skip", "no ACP binding is configured")
         pending = cmd_acp.refresh_guard_pins(data_dir, apply=False)
