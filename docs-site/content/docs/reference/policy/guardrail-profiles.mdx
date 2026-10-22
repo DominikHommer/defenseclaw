@@ -113,6 +113,17 @@ Each assignment has a `profile` and a `match` with at least one of four keys.
 | `connectors` | The connector the request comes from: the hook route, the connector an inspect call authenticated for, or the connector the LLM proxy serves | `codex`, `claudecode`, `cursor` and the others. |
 | `agents` | One agent install | An agent identity from `defenseclaw agent identities`: `agt-` and 16 hex digits. |
 
+On Linux, a numeric group ID remains a complete fact only when every NSS
+group provider confirms that it has no name for the ID. If a provider cannot
+be checked, the account's group lookup fails and `default_lookup_failed`
+applies until the provider answers.
+
+After upgrading from 1.0.0–1.0.3, rebind any `agents` assignment to the
+current ID shown by `defenseclaw agent identities`. The older ID did not
+include the account domain, and its inventory row could have been overwritten
+by another account with the same UID. Until rebind, an affected request uses
+`default_lookup_failed`; give that path a strict default profile.
+
 How the keys combine:
 
 - **Keys AND, values OR.** Inside one `match`, every key you list must match.
