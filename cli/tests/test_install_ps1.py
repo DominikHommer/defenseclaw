@@ -1397,6 +1397,200 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
     assert not slot.exists(), out
 
 
+_EARLY_THROW_SITES = ["stop", "fail-modes", "watchdog", "quiescence", "recovery", "restart"]
+
+
+@pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
+@pytest.mark.parametrize("shell", _POWERSHELLS)
+@pytest.mark.parametrize("block", ["none", "always"])
+@pytest.mark.parametrize("site", _EARLY_THROW_SITES)
+def test_a_step_that_throws_after_the_hook_swap_restores_the_old_install(
+    tmp_path: Path, shell: str, block: str, site: str
+) -> None:
+    # r104 W4 review, loop round 1: after the new hook went in, Stop-Gateway
+    # stopped the old gateway and then threw on its last gateway.pid read.
+    # The error skipped the undo and the restart, and the lock went with the
+    # new hook live and the gateway stopped. Every step between the hook swap
+    # and the rollback copy throws here once (the stop after the process
+    # exited, the second fail-mode refresh, the watchdog stop, each refusal);
+    # "restart" also makes the old gateway's restart throw. The old hook goes
+    # back, the old gateway runs again (or the message says it does not),
+    # and an undo that did not finish keeps .install.lock.
+    data_dir, bin_dir, staging = tmp_path / "dc", tmp_path / "bin", tmp_path / "staging"
+    (staging / "bin").mkdir(parents=True)
+    bin_dir.mkdir()
+    data_dir.mkdir()
+    (staging / "bin" / "defenseclaw-hook.exe").write_text("new", encoding="utf-8")
+    (bin_dir / "defenseclaw-hook.exe").write_text("old", encoding="utf-8")
+    (bin_dir / "defenseclaw-gateway.exe").write_text("old gateway", encoding="utf-8")
+    install = _ps1_function("Invoke-Install")
+    phase = install[install.index("    $WasRunning = [bool](Get-GatewayProcess)") : install.index("    $previousLabel =")]
+    real = "".join(
+        _ps1_function(name)
+        for name in (
+            "Invoke-Quietly", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst",
+            "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
+            "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote",
+        )
+    )
+    script = tmp_path / "case.ps1"
+    script.write_text(
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data_dir}'\n$BinDir = '{bin_dir}'\n$Staging = '{staging}'\n$Previous = Join-Path $DataDir 'previous'\n"
+        "$LockDir = Join-Path $DataDir '.install.lock'\n"
+        "$ManagedFiles = @('defenseclaw-hook.exe', 'defenseclaw-gateway.exe')\n"
+        "$Run = @{ Lock = $true; OldGatewayDown = $false; UndoPending = $false; RestorePending = $false }\n"
+        "$Setup = $null; $PrevVersion = '1.0.3'; $Ver = '1.0.4'; $versionChange = $true; $stagedGateway = 'staged'\n"
+        f"$script:site = '{site}'; $script:blocked = ${str(block == 'always').lower()}\n"
+        "$script:running = $true; $script:starts = 0; $script:modeCalls = 0\n"
+        "function Write-Info([string]$m) { Write-Host \"info: $m\" }\n"
+        "function Write-Ok([string]$m) { Write-Host \"ok: $m\" }\n"
+        "function Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
+        "function Write-Err([string]$m) { Write-Host \"err: $m\" }\n"
+        "function Die([string]$m) { throw $m }\n"
+        "function Get-UtcClock { 'clock' }\n"
+        "function New-InstallDirectory([string]$Path) { Remove-Tree $Path; New-Item -ItemType Directory -Path $Path | Out-Null }\n"
+        "function Remove-Tree([string]$Path) { if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force } }\n"
+        "function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) { Move-Item -LiteralPath $From -Destination $To }\n"
+        "function Install-File([string]$Source, [string]$Destination) {\n"
+        "    if ($script:blocked -and $Destination -eq (Join-Path $BinDir 'defenseclaw-hook.exe') -and (Get-Content -Raw -LiteralPath $Source) -eq 'old') {\n"
+        "        throw 'The process cannot access the file because it is being used by another process'\n"
+        "    }\n"
+        "    Copy-Item -LiteralPath $Source -Destination $Destination -Force\n"
+        "}\n"
+        "function Wait-PreviousHookExit([DateTime]$PublishedAt) {}\n"
+        "function Get-GatewayProcess {\n"
+        "    if ($script:site -eq 'restart' -and $script:starts -gt 0) { throw 'Exception calling ReadAllText: gateway.pid is being used by another process' }\n"
+        "    return $script:running\n"
+        "}\n"
+        "function Update-HookFailModes([string]$Gateway) {\n"
+        "    $script:modeCalls++\n"
+        "    if ($script:site -eq 'fail-modes' -and $script:modeCalls -eq 2) { throw 'connector refresh-fail-modes crashed' }\n"
+        "    return $true\n"
+        "}\n"
+        "function Stop-Gateway {\n"
+        "    # The old process exits; the last pid-file read then fails.\n"
+        "    $script:running = $false\n"
+        "    if ($script:site -in @('stop', 'restart')) { throw 'Exception calling ReadAllText: gateway.pid is being used by another process' }\n"
+        "    return $true\n"
+        "}\n"
+        "function Start-Gateway { $script:starts++; if ($script:site -eq 'restart') { throw 'Exception calling ReadAllText: gateway.pid is being used by another process' }; $script:running = $true; return 0 }\n"
+        "function Stop-Watchdog { if ($script:site -eq 'watchdog') { throw 'watchdog stop crashed' } }\n"
+        "function Assert-GatewayQuiescent([string]$Operation) { if ($script:site -eq 'quiescence') { throw \"$Operation refused: a hook is still running\" } }\n"
+        "function Assert-NoActiveConnectorRecovery([string]$Operation) { if ($script:site -eq 'recovery') { throw \"$Operation refused: a connector recovery is active\" } }\n"
+        "function Clear-StagedRelease {}\n"
+        "function Save-Snapshot { throw 'the step that throws did not stop the install' }\n"
+        "function Test-DiskFull { return $false }\n"
+        "function Stop-ProcessesUnder {}\n"
+        + real
+        + "New-Item -ItemType Directory -Path $LockDir -Force | Out-Null\n"
+        "$message = ''\n"
+        "try {\n" + phase + "    throw 'the step did not fail'\n} catch { $message = $_.Exception.Message }\n"
+        "Close-InstallLock\n"
+        "Write-Host \"message: $message\"\n"
+        "Write-Host \"pending: $(Test-RecoveryPending)\"\n"
+        "Write-Host \"running: $script:running starts: $script:starts\"\n"
+        "Write-Host \"hook: $(Get-Content -Raw -LiteralPath (Join-Path $BinDir 'defenseclaw-hook.exe'))\"\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "the step did not fail" not in out and "did not stop the install" not in out, out
+    lock = data_dir / ".install.lock"
+    # The step's own error is named.
+    reason = {
+        "stop": "gateway.pid is being used",
+        "restart": "gateway.pid is being used",
+        "fail-modes": "connector refresh-fail-modes crashed",
+        "watchdog": "watchdog stop crashed",
+        "quiescence": "a hook is still running",
+        "recovery": "a connector recovery is active",
+    }[site]
+    assert reason in out, out
+    # The old gateway is started again once, after the step failed.
+    assert "starts: 1" in out, out
+    if site == "restart":
+        assert "running: False" in out, out
+        assert "did not start again" in out, out
+    else:
+        assert "running: True" in out, out
+    if block == "always":
+        assert "pending: True" in out, out
+        assert lock.is_dir(), out
+        assert "The install stays locked" in out and "not fully back" in out, out
+        assert "Your previous install is back" not in out and "nothing was changed" not in out, out
+        assert "hook: new" in out, out
+    else:
+        assert "pending: False" in out, out
+        assert not lock.exists(), out
+        assert "hook: old" in out, out
+        if site == "restart":
+            assert "Your previous install is back, but its gateway is not running" in out, out
+        else:
+            assert "Your previous install is back." in out, out
+
+
+@pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
+@pytest.mark.parametrize("shell", _POWERSHELLS)
+@pytest.mark.parametrize("site", ["start", "stop"])
+def test_a_new_gateway_start_that_throws_restores_the_previous_install(tmp_path: Path, shell: str, site: str) -> None:
+    # The same class after the swap: a start of the new gateway (or the
+    # stop after its failed start) that throws instead of returning an exit
+    # code skipped Restore-Snapshot, so the new install stayed live with no
+    # gateway. A throw is a failed start: the previous install is restored
+    # and the swap is never completed.
+    install = _ps1_function("Invoke-Install")
+    phase = install[install.index("    $startRc = 0\n") : install.index("    Complete-Swap\n")]
+    script = tmp_path / "case.ps1"
+    script.write_text(
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{tmp_path}'\n"
+        "$Run = @{ Log = 'install.log' }\n"
+        "$Setup = $null; $PrevVersion = '1.0.3'; $Ver = '1.0.4'; $WasRunning = $true; $previousLabel = '1.0.3'\n"
+        "$env:DEFENSECLAW_CONFIG = 'config.yaml'\n"
+        f"$script:site = '{site}'; $script:restored = 0\n"
+        "function Write-Info([string]$m) { Write-Host \"info: $m\" }\n"
+        "function Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
+        "function Write-Err([string]$m) { Write-Host \"err: $m\" }\n"
+        "function Die([string]$m) { throw $m }\n"
+        "function Get-UtcClock { 'clock' }\n"
+        "function Test-ConnectorConfigured { return $true }\n"
+        "function Start-Gateway { if ($script:site -eq 'start') { throw 'Exception calling ReadAllText: gateway.pid' }; return 1 }\n"
+        "function Stop-Gateway { if ($script:site -eq 'stop') { throw 'Exception calling ReadAllText: gateway.pid' }; return $true }\n"
+        "function Restore-Snapshot { $script:restored++ }\n"
+        "function Get-RestoredNote { 'Your previous install is back.' }\n"
+        "$message = ''\n"
+        "try {\n" + phase + "    throw 'the swap would complete'\n} catch { $message = $_.Exception.Message }\n"
+        "Write-Host \"message: $message\"\n"
+        "Write-Host \"restored: $script:restored\"\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "the swap would complete" not in out, out
+    assert "restored: 1" in out, out
+    assert "message: DefenseClaw 1.0.4 was not installed. Your previous install is back." in out, out
+    assert "gateway.pid" in out, out
+
+
 # ── 1.0.4 (GAP-0004) ────────────────────────────────────────────────────────
 
 

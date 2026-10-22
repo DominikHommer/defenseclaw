@@ -1722,9 +1722,18 @@ function Restart-Old {
             $Run.RestorePending = $true
         }
     }
-    if ($Setup) { Restore-SetupInstall } elseif ($WasRunning) { [void](Start-Gateway) }
-    # Say plainly when the gateway that ran before is down now (GAP-1349).
-    $Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)
+    # A failure here (a gateway.pid that cannot be read, DefenseClaw Setup's
+    # hook state that cannot be moved back) must not end the restore it is
+    # part of: it is reported like a gateway that did not start.
+    try {
+        if ($Setup) { Restore-SetupInstall } elseif ($WasRunning) { [void](Start-Gateway) }
+        # Say plainly when the gateway that ran before is down now (GAP-1349).
+        $Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)
+    } catch {
+        Write-Err "Could not start the previous gateway again: $($_.Exception.Message)"
+        $Run.OldGatewayDown = [bool]$WasRunning
+        if ($Setup) { $Run.RestorePending = $true }
+    }
     if ($Run.OldGatewayDown) {
         Write-Warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
         Write-Info "Start it with: defenseclaw-gateway start (log: $(Join-Path $DataDir 'gateway.log')). On a large audit database its first start can take several minutes"
@@ -2828,33 +2837,47 @@ function Invoke-Install {
         Undo-EarlySnapshot $Snap
         throw
     }
-    if ($WasRunning) {
-        Write-Info "Stopping the gateway [$(Get-UtcClock)]"
-        if (-not (Stop-Gateway)) {
-            Undo-EarlySnapshot $Snap
-            if ($Setup) { Restore-SetupInstall }
-            Die "The running gateway did not stop; $(Get-UnchangedNote)"
+    # From here to the rollback copy the new hook is live while the old
+    # gateway stops. Any failure, a refusal or a thrown error (a gateway.pid
+    # read that fails after the old gateway exited), puts the old hook back
+    # and starts the old gateway again; an undo that does not finish keeps
+    # .install.lock (Close-InstallLock) for the next run to finish.
+    $stopRefused = $false
+    try {
+        if ($WasRunning) {
+            Write-Info "Stopping the gateway [$(Get-UtcClock)]"
+            if (-not (Stop-Gateway)) {
+                $stopRefused = $true
+                Die "The running gateway did not stop"
+            }
+            # Again once it is stopped: it may have rendered them while it ran.
+            if (-not (Update-HookFailModes $stagedGateway)) {
+                Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down"
+            }
         }
-        # Again once it is stopped: it may have rendered them while it ran.
-        if (-not (Update-HookFailModes $stagedGateway)) {
-            Undo-EarlySnapshot $Snap
-            Clear-StagedRelease
-            Restart-Old
-            Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down. $(Get-RestoredNote)"
-        }
-    }
-    Stop-Watchdog
-    if ($versionChange) {
-        try {
+        Stop-Watchdog
+        if ($versionChange) {
             Assert-GatewayQuiescent "Version change to $Ver"
             Assert-NoActiveConnectorRecovery "Version change to $Ver"
-        } catch {
-            Undo-EarlySnapshot $Snap
-            Restart-Old
-            throw
         }
+        if ($Setup) { Stop-ProcessesUnder $Setup.Root }
+    } catch {
+        $reason = ([string]$_.Exception.Message).TrimEnd('.', ' ')
+        Undo-EarlySnapshot $Snap
+        Clear-StagedRelease
+        if ($stopRefused) {
+            # The old gateway still runs; only DefenseClaw Setup's hook state goes back.
+            if ($Setup) {
+                try { Restore-SetupInstall } catch {
+                    Write-Err "Could not put DefenseClaw Setup's hook state back: $($_.Exception.Message)"
+                    $Run.RestorePending = $true
+                }
+            }
+            Die "${reason}; $(Get-UnchangedNote)"
+        }
+        Restart-Old
+        Die "$reason. $(Get-RestoredNote)"
     }
-    if ($Setup) { Stop-ProcessesUnder $Setup.Root }
 
     # Ctrl+C now would leave a half-swapped install; it is ignored until the swap is done.
     try { [Console]::TreatControlCAsInput = $true } catch { }
@@ -2889,16 +2912,17 @@ function Invoke-Install {
     }
     if ($startNew) {
         $startedAt = Get-Date
-        $startRc = Start-Gateway
+        # A start that throws is a start that failed: the install is restored.
+        try { $startRc = Start-Gateway } catch { Write-Err $_.Exception.Message; $startRc = 1 }
         if ($sealOnly) {
-            [void](Stop-Gateway)
+            try { [void](Stop-Gateway) } catch { Write-Warn "Could not stop the $Ver gateway after its first start: $($_.Exception.Message)" }
             if ($startRc -ne 0 -and $startRc -ne 3) {
                 Write-Warn "The $Ver gateway did not start (see above); fix what it reports, then run 'defenseclaw-gateway start'"
                 $startRc = 0
             }
         } elseif ($startRc -ne 0 -and $startRc -ne 3) {
             Write-Err ("The $Ver gateway did not become healthy within {0:N0} s [{1}]; restoring $previousLabel" -f ((Get-Date) - $startedAt).TotalSeconds, (Get-UtcClock))
-            [void](Stop-Gateway)
+            try { [void](Stop-Gateway) } catch { Write-Err "Could not stop the $Ver gateway: $($_.Exception.Message)" }
             Restore-Snapshot
             Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"
         }
