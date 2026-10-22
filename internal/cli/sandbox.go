@@ -270,7 +270,11 @@ func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Co
 	return func(cmd *cobra.Command, args []string) error {
 		app := newSandboxApp(cmd)
 		var err error
-		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		// A nested run launches the harness natively inside its existing
+		// sandbox; it cannot affect the host OpenShell gateway and may not
+		// have a writable OpenShell configuration directory.
+		if (runtime.GOOS == "linux" || runtime.GOOS == "darwin") &&
+			!(cmd.Name() == "run" && os.Getenv(openshell.EnvSandboxID) != "") {
 			var unlock func()
 			unlock, err = openshell.LockSandboxCommand(cmd.Context(), "")
 			if err == nil {
