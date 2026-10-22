@@ -563,7 +563,7 @@ rows you wrote:
 | `r1` | skill | `acme-notes` (connector `claudecode`) | `install: block` | vendor not reviewed |
 | `r2` | skill | `acme-lint` | `install: allow` | reviewed by security |
 | `r3` | mcp | `acme-wiki` | `install: block` | sends data to an unknown host |
-| `r4` | skill | `scratch-tool` | `install: block`, `file: quarantine` | `auto-block: HIGH findings` |
+| `r4` | skill | `scratch-tool` | `install: block`, `file: quarantine` | `auto-block: watch detected HIGH findings` |
 | `r5` | tool | `@claudecode/WebFetch` | `install: block` | no web fetch in CI |
 
 ```yaml title="config.yaml (v9, excerpt)"
@@ -588,10 +588,15 @@ asset_policy:
         reason: no web fetch in CI
 ```
 
-- Row `r4` stays in `audit.db`. A block that a scan verdict wrote (a reason
-  that starts `auto-block`, `post-scan:`, `post-install scan:` or `scan:`) is the
-  enforcement journal, not an operator decision. Quarantine and runtime-disable
-  state is unchanged.
+- Row `r4` stays in `audit.db` as it is. Its reason is one the scanners
+  write, so it is the enforcement journal, not an operator decision. The
+  scanner reasons are `auto-block: watch detected <SEV> findings` (it may go on
+  with ` (scanner=<name>)`, `: ` or `; `), `post-scan: <N> findings, max=<SEV>`,
+  `post-install scan: <N> findings, max=<SEV>`, `scan: <N> findings, max=<SEV>`
+  and `scan clean or within policy`, and reasons that start
+  `scanner failure (fail-closed): `, `quarantine failed: ` or `link removed: `.
+  Any other reason is moved, even one that starts `auto-block`. Quarantine and
+  runtime-disable state is unchanged.
 - A moved row loses its `install` field after `config.yaml` is committed, and a
   row left with no state is deleted. If anything fails first, the row is still
   in the table: an entry is never lost.
