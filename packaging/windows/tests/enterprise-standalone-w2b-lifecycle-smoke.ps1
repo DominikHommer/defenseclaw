@@ -171,6 +171,7 @@ $stream.Dispose()
             $openInstall = [IO.Path]::Combine($openParent, 'DefenseClaw')
             $openRetired = [IO.Path]::Combine($openParent, 'DefenseClaw.retired')
             $openBinary = [IO.Path]::Combine($openInstall, 'bin', 'defenseclaw-hook.exe')
+            $currentSID = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
             $refused = [ordered]@{
                 'Users create folders' = '(A;;0x100004;;;BU)'
                 'Users create files' = '(A;;0x100002;;;BU)'
@@ -178,6 +179,9 @@ $stream.Dispose()
                 'Everyone change permissions' = '(A;;0x140000;;;WD)'
                 'Users delete children' = '(A;;0x100040;;;BU)'
                 'an unmapped domain group create folders' = '(A;;0x100004;;;S-1-5-21-1000-2000-3000-1234)'
+            }
+            if ($currentSID -notin @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
+                $refused['current account creates folders without elevation'] = ('(A;;0x100004;;;{0})' -f $currentSID)
             }
             foreach ($case in $refused.GetEnumerator()) {
                 Set-TestFolderSddl $openParent ($adminOnly + $case.Value)
@@ -222,6 +226,22 @@ $stream.Dispose()
                 catch {
                     $failures.Add("a parent of $($case.Key) refused the retirement: $($_.Exception.Message)")
                 }
+            }
+            # Ownership lets this same account rewrite the DACL without its
+            # elevated token, even if no explicit create ACE names it.
+            if ($currentSID -notin @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
+                Set-TestFolderSddl $openParent ($adminOnly.Replace('O:BA', ('O:' + $currentSID)))
+                try {
+                    Move-DefenseClawInstallRootForRetirement -Source $openInstall -Destination $openRetired
+                    $failures.Add('the retirement trusted the current account as the parent owner')
+                }
+                catch {
+                    if ($_.Exception.Message -notlike '*not renamed aside*' -or -not [IO.File]::Exists($openBinary) -or
+                        [IO.Directory]::Exists($openRetired)) {
+                        $failures.Add("the current-account ownership refusal: $($_.Exception.Message)")
+                    }
+                }
+                Set-TestFolderSddl $openParent $adminOnly
             }
             # Every retirement rename checks the parent first: the bounded
             # rename, the committed one (through it) and the deferred

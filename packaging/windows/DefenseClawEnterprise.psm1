@@ -29044,8 +29044,8 @@ function Test-DefenseClawInstallRootInUseException {
 # a file) could take that name while it is free; then nothing can put
 # InstallRoot back, and a recovery finds both trees and stops (GAP-0149
 # review, loop round 2). Returns why another account could, or '' when only
-# SYSTEM, Administrators, TrustedInstaller and the administrator running
-# this can: the folder's owner, and every allow entry that applies to the
+# SYSTEM, Administrators and TrustedInstaller can: the folder's owner, and
+# every allow entry that applies to the
 # folder itself and grants a create, delete or permission right. A deny
 # entry is never counted as taking such a right away.
 $script:InstallRootParentChangeRights = [int64](
@@ -29063,8 +29063,7 @@ function Get-DefenseClawUntrustedFolderCreator {
     $trusted = @(
         $script:SystemSID,
         $script:AdministratorsSID,
-        $script:TrustedInstallerSID,
-        [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $script:TrustedInstallerSID
     )
     $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
     $accessSDDL = $acl.GetSecurityDescriptorSddlForm(

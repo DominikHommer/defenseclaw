@@ -4707,7 +4707,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			return err
 		}
 		failSetup := func(surface string, cause error) error {
-			failed := s.failGuardrailWithRollback(ctx, setupOpts, conn, surface, cause)
+			failed := s.failGuardrailWithRollback(ctx, setupOpts, conn, surface, cause, singleRollback)
 			return restoreSingleConnectorSetupPoint(ctx, singleRollback, failed)
 		}
 		// Both branches below treat any failure to reach a verified
@@ -5884,9 +5884,9 @@ func (s *Sidecar) notifyHookHealed(connectorName string, paths []string) {
 // setupConnectorsIsolated runs setupOneConnector for each connector in turn
 // and returns the names that came up cleanly. It is the heart of the DN1
 // failure-isolation guarantee: scoped tokens are preflighted for every
-// connector before setup mutates state; after that, a connector whose setup
-// fails is logged and skipped while remaining connectors continue. The order
-// of the returned slice matches the input order (sorted by the caller).
+// connector before setup mutates state. New connector failures are isolated;
+// a failed active connector refresh restores the transaction and refuses
+// startup. The returned names follow the input order (sorted by the caller).
 type multiConnectorSetupRollbackPoint struct {
 	conn             connector.Connector
 	opts             connector.SetupOpts
@@ -6116,6 +6116,13 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 	transaction.succeeded = make([]string, 0, len(registrations))
 	transaction.applied = make([]multiConnectorSetupRollbackPoint, 0, len(registrations))
 	for index, registration := range registrations {
+		wasActive := false
+		for _, activeName := range previouslyActive {
+			if strings.EqualFold(strings.TrimSpace(activeName), strings.TrimSpace(registration.conn.Name())) {
+				wasActive = true
+				break
+			}
+		}
 		if transaction.publishSetupProgress {
 			// GAP-1556: start and restart keep waiting while this moves.
 			s.health.SetGuardrail(StateStarting, "", map[string]interface{}{
@@ -6164,6 +6171,27 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			err = s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
 		}
 		if err != nil {
+			if wasActive && !registration.opts.ManagedEnterprise {
+				// A refresh is an upgrade of an existing guard. Teardown restores
+				// the pre-install, possibly hookless settings, not that guard.
+				// Restore its prior posture with the rest of this transaction and
+				// fail startup, even if peers succeeded: installer readiness must
+				// never accept a gateway with fewer protected connectors.
+				unchanged := errors.Is(err, ErrHookContractAdmission) || errors.Is(err, connector.ErrAgentVersionProbeTimeout) ||
+					errors.Is(err, connector.ErrExecutableAdmission) || errors.Is(err, connector.ErrSetupRefusedUnchanged)
+				if !unchanged {
+					transaction.applied = append(transaction.applied, multiConnectorSetupRollbackPoint{
+						conn: registration.conn, opts: registration.opts, previouslyActive: true,
+						previousLock: previousLock, pluginSnapshot: pluginSnapshot,
+					})
+				}
+				rollbackErr := rollbackMultiConnectorPublication(context.WithoutCancel(ctx), transaction)
+				failed := fmt.Errorf("connector %s refresh failed: %w; close the agent holding its settings, then run: defenseclaw upgrade", registration.conn.Name(), err)
+				if rollbackErr != nil {
+					failed = fmt.Errorf("%w; connector setup rollback incomplete: %v", failed, rollbackErr)
+				}
+				return multiConnectorSetupTransaction{}, failed
+			}
 			// Admission failures happen before Setup writes hook files. Tearing
 			// down here deletes a still-valid install (for example Cursor
 			// Desktop vs Agent CLI probing the same cursor-hooks-v1 contract).
@@ -6234,13 +6262,6 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", registration.conn.Name(), err)
 			continue
 		}
-		wasActive := false
-		for _, activeName := range previouslyActive {
-			if strings.EqualFold(strings.TrimSpace(activeName), strings.TrimSpace(registration.conn.Name())) {
-				wasActive = true
-				break
-			}
-		}
 		transaction.succeeded = append(transaction.succeeded, registration.conn.Name())
 		transaction.applied = append(transaction.applied, multiConnectorSetupRollbackPoint{
 			conn:             registration.conn,
@@ -6287,9 +6308,11 @@ func rollbackMultiConnectorPublication(ctx context.Context, transaction multiCon
 		// previously-active non-plugin connector may have changed delivery posture during Setup,
 		// so it must be re-applied from its prior lock rather than left paired
 		// with lock metadata that no longer describes the live registration.
-		if applied.conn != nil && applied.previouslyActive && applied.pluginSnapshot == nil {
-			if err := reapplyPreviouslyActiveConnectorRegistration(ctx, applied); err != nil {
-				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore prior connector %s registration: %w", name, err))
+		if applied.conn != nil && applied.previouslyActive {
+			if applied.pluginSnapshot == nil {
+				if err := reapplyPreviouslyActiveConnectorRegistration(ctx, applied); err != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("restore prior connector %s registration: %w", name, err))
+				}
 			}
 		} else if applied.conn != nil {
 			if err := applied.conn.Teardown(ctx, applied.opts); err != nil {
@@ -6581,9 +6604,9 @@ func connectorSetupTokensFor(dataDir string, conn connector.Connector, gatewayTo
 // setupOneConnector performs the full setup-and-verify sequence for a single
 // connector in the multi-connector boot loop. It returns an error (rather
 // than aborting boot) so the caller can isolate the failure (DN1) and keep
-// the other connectors running. On a post-Setup verification failure it rolls
-// back just this connector's Setup before returning so a half-installed
-// connector never lingers.
+// the other connectors running. On a post-Setup verification failure it
+// returns the error to its caller, which owns rollback to the pre-setup
+// registration. Teardown here would erase a previously active guard.
 func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connector, opts connector.SetupOpts, masterKey string, cache *guardrail.RulePackCache) error {
 	rulesPublished := false
 	defer func() {
@@ -6672,20 +6695,9 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		return fmt.Errorf("connector %s setup failed: %w", conn.Name(), err)
 	}
 	if err := verifyHookScriptsOrRetry(ctx, opts, conn); err != nil {
-		// Roll back just this connector so a half-installed connector
-		// does not linger; failures during rollback are non-fatal.
-		if tdErr := conn.Teardown(ctx, opts); tdErr != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] rollback teardown of %s after verification failure: %v\n", conn.Name(), tdErr)
-		}
 		return fmt.Errorf("connector %s hook verification failed: %w", conn.Name(), err)
 	}
 	if err := verifyEffectiveHookRegistration(opts, conn); err != nil {
-		// Keep the same per-connector rollback contract as missing scripts: a
-		// connector is not ready until its agent-visible registration is
-		// effective, even when Setup itself returned nil.
-		if tdErr := conn.Teardown(ctx, opts); tdErr != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] rollback teardown of %s after registration verification failure: %v\n", conn.Name(), tdErr)
-		}
 		return fmt.Errorf("connector %s registration verification failed: %w", conn.Name(), err)
 	}
 	if err := publishFreshHookRegistrationEvidence(opts, conn); err != nil {
@@ -7603,12 +7615,16 @@ func teardownRemovedConnectorCandidates(
 // runGuardrail (Setup error / hook verification error) in lockstep —
 // any change to logging, rollback ordering, or health-state shape
 // happens once and is covered by a single integration test.
-func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.SetupOpts, conn connector.Connector, surface string, err error) error {
+func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.SetupOpts, conn connector.Connector, surface string, err error, authority ...multiConnectorSetupTransaction) error {
 	if conn == nil || err == nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s %s failed: %v\n", conn.Name(), surface, err)
-	if !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
+	previouslyActive := !opts.ManagedEnterprise && len(authority) > 0 && len(authority[0].applied) > 0 && authority[0].applied[0].previouslyActive
+	if previouslyActive {
+		err = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", err)
+	}
+	if !previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
 		recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
 	}
 	if s != nil && s.health != nil {
@@ -7636,7 +7652,7 @@ func (s *Sidecar) saveSingleConnectorReadyState(
 		previousLock = connector.LoadHookContractLockEntry(opts.DataDir, conn.Name())
 	}
 	failAndRestoreLock := func(surface string, cause error) error {
-		failed := s.failGuardrailWithRollback(ctx, opts, conn, surface, cause)
+		failed := s.failGuardrailWithRollback(ctx, opts, conn, surface, cause, transaction)
 		var restoreErr error
 		if hasTransaction {
 			restoreErr = rollbackMultiConnectorPublication(ctx, transaction)

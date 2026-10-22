@@ -1048,10 +1048,10 @@ function Disable-SetupHooks {
     if (Test-Path -LiteralPath $SetupHookState) { Move-Path $SetupHookState (Join-Path $Staging "hook-runtime-state.json") }
 }
 
-function Restore-SetupInstall {
+function Restore-SetupInstall([switch]$KeepStopped) {
     $state = Join-Path $Staging "hook-runtime-state.json"
     if (Test-Path -LiteralPath $state) { Move-Path $state $SetupHookState }
-    if ($WasRunning) { Start-SetupGateway $Setup.Root }
+    if ($WasRunning -and -not $KeepStopped) { Start-SetupGateway $Setup.Root }
 }
 
 function Start-SetupGateway([string]$Root) {
@@ -1269,127 +1269,25 @@ public static extern bool MoveFileExW(string existingFileName, string newFileNam
     }
 }
 
-function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {
-    [IO.File]::Replace($New, $Destination, $Backup, $true)
-}
-
-function Invoke-FileMove([string]$From, [string]$To) {
-    [IO.File]::Move($From, $To)
-}
-
-function Invoke-FileCopy([string]$From, [string]$To) {
-    [IO.File]::Copy($From, $To, $false)
-}
-
-function New-VerifiedCopy([string]$From, [string]$To) {
-    # Copy $From to $To, a path no hook names, and keep it only when it is a
-    # whole copy. A copy that fails or stops partway is removed and $false
-    # returned, so a partial file is never published or counted as a copy of
-    # the old launcher.
-    try {
-        Invoke-FileCopy $From $To
-        if ((Get-Sha256 $From) -eq (Get-Sha256 $To)) { return $true }
-    } catch { }
-    Remove-Item -LiteralPath $To -Force -ErrorAction SilentlyContinue
-    return $false
-}
-
-function Close-SwapGap([string]$New, [string]$Backup, [string]$Restore, [string]$Destination) {
-    # ReplaceFile stopped after it renamed the installed file to the backup
-    # (ERROR_UNABLE_TO_MOVE_REPLACEMENT_2), so nothing is at $Destination.
-    # Put a file back at once: the new one if it moves now, else the old one
-    # from the backup, else the restore copy Switch-InPlace made before the
-    # swap (a scanner can hold both the new file and the backup against a
-    # rename), else a copy of the old file (a hold against a rename still lets
-    # it be read). Only renames reach $Destination: a copy is made to a ready
-    # file beside it, checked, and renamed in, so a hook never runs a partial
-    # launcher and a failed copy never passes for the old one. No step waits
-    # with the path missing. Returns $true when the new file is in place,
-    # $false when the old one is back.
-    $ready = ""
-    $copies = 0
-    try {
-        for ($tries = 0; ; $tries++) {
-            if (Test-Path -LiteralPath $New) { try { Invoke-FileMove $New $Destination; return $true } catch { } }
-            foreach ($old in @($Backup, $Restore)) {
-                if ($old -and (Test-Path -LiteralPath $old)) { try { Invoke-FileMove $old $Destination; return $false } catch { } }
-            }
-            if (-not $ready) {
-                foreach ($old in @($Restore, $Backup)) {
-                    if (-not $old -or -not (Test-Path -LiteralPath $old)) { continue }
-                    $copies++
-                    $candidate = "$Backup.ready$copies"
-                    if (New-VerifiedCopy $old $candidate) { $ready = $candidate; break }
-                }
-            }
-            if ($ready) { try { Invoke-FileMove $ready $Destination; $ready = ""; return $false } catch { } }
-            if ($tries -ge 200) { throw "Could not put $Destination back after a partial replace; the installed file is $Backup" }
-            Start-Sleep -Milliseconds 50
-        }
-    } finally {
-        if ($ready) { Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue }
-    }
-}
-
 function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) {
-    # Switch with one atomic rename of the new file over the installed one
-    # (Invoke-AtomicReplace), so the path always names a whole launcher. A
-    # shim, the hook state and an idle binary always switch that way. Only a
-    # launcher that runs as a program at that moment (a hook an agent
-    # started), which no rename can replace, is swapped with one ReplaceFile
-    # call, so the path is never missing. Renaming the old file aside and the
-    # new one in left a gap,
-    # often a second or more while a virus scanner held the new copy, in which
-    # a hook an agent started found no defenseclaw-hook.exe and its PowerShell
-    # bridge exited 1, which the agent does not treat as a block (rel-1-0-4
-    # GAP-0004). ReplaceFile renames the old file to the backup name, which a
-    # running program allows; the backup of a running hook stays until the
-    # next install removes it. While a scanner or another program holds a
-    # file, retry; if it never lets go, fail and leave the installed file in
-    # place (the install is then undone) rather than fall back to the rename.
-    # A ReplaceFile that stops halfway is closed at once (Close-SwapGap), and
-    # the retries then run with the installed file back in place. The restore
-    # copy, an independent copy of the installed file made before each
-    # attempt, is what Close-SwapGap publishes when a scanner holds both the
-    # new file and the backup; only a verified whole copy is used. Its name
-    # starts like the backup's, so the next install removes one this run
-    # could not.
-    $aside = "$Destination.old-" + (Get-Date -Format "yyyyMMddTHHmmssfff")
-    $restore = "$aside.restore"
-    $restoreReady = $false
-    try {
-        for ($waited = 0; ; $waited++) {
-            try {
-                Invoke-AtomicReplace $New $Destination
-                return
-            } catch {
-                $reason = $_.Exception.Message
-            }
-            # A recovery may have moved the last restore copy in: make another.
-            if (-not $restoreReady -or -not (Test-Path -LiteralPath $restore)) { $restoreReady = New-VerifiedCopy $Destination $restore }
-            try {
-                Invoke-FileReplace $New $Destination $aside
-                return
-            } catch {
-                $reason = $_.Exception.Message
-            }
-            $restoreCopy = if ($restoreReady) { $restore } else { "" }
-            if (-not (Test-Path -LiteralPath $Destination) -and (Close-SwapGap $New $aside $restoreCopy $Destination)) {
-                return
-            }
-            if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
-                Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
-                throw "Could not replace $Destination in place ($reason); it was left as it was"
-            }
-            Start-Sleep -Milliseconds 500
+    # Only one atomic rename publishes an installed file. ReplaceFile opens
+    # the old launcher for replacement and can deny a concurrent hook's
+    # execution with a sharing violation (GAP-0352); its partial-failure
+    # recovery also cannot prove uninterrupted availability. A running hook
+    # or scanner may refuse the rename. Retry while the whole old launcher
+    # remains callable, then refuse the upgrade without changing it.
+    for ($waited = 0; ; $waited++) {
+        try {
+            Invoke-AtomicReplace $New $Destination
+            return
+        } catch {
+            $reason = $_.Exception.Message
         }
-    } finally {
-        # Keep them when nothing is at $Destination: they are the old file.
-        # Only whole files are ever renamed to $Destination, so one there is a
-        # launcher.
-        if (Test-Path -LiteralPath $Destination -PathType Leaf) {
-            foreach ($leftover in @($aside, $restore)) { Remove-Item -LiteralPath $leftover -Force -ErrorAction SilentlyContinue }
+        if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
+            Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
+            throw "Could not replace $Destination in place ($reason); it was left as it was. Retry the same install command after the running hook finishes"
         }
+        Start-Sleep -Milliseconds 500
     }
 }
 
@@ -1774,10 +1672,20 @@ function Install-New {
     return $true
 }
 
-function Restart-Old {
-    if ($Setup) { Restore-SetupInstall } elseif ($WasRunning) { [void](Start-Gateway) }
+function Restart-Old([switch]$KeepStopped) {
+    if ($Setup) { Restore-SetupInstall -KeepStopped:$KeepStopped } elseif ($WasRunning -and -not $KeepStopped) { [void](Start-Gateway) }
     # Say plainly when the gateway that ran before is down now (GAP-1349).
     $Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)
+    if ($KeepStopped) {
+        # An old release may tear down the still-working hooks when its own
+        # setup meets the same sharing error (GAP-0407). Keep the restored
+        # registration callable in fail-closed mode until the cause is fixed.
+        $gateway = if ($Setup) { Join-Path $Setup.Root "bin\defenseclaw-gateway.exe" } else { Join-Path $BinDir "defenseclaw-gateway.exe" }
+        $gatewayCommand = "& '" + $gateway.Replace("'", "''") + "' start"
+        Write-Warn "The previous install is restored with its gateway kept stopped to preserve its hook registration"
+        Write-Info "Fix the startup error above (close the agent if its settings are in use), then run: $gatewayCommand"
+        return
+    }
     if ($Run.OldGatewayDown) {
         Write-Warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
         Write-Info "Start it with: defenseclaw-gateway start (log: $(Join-Path $DataDir 'gateway.log')). On a large audit database its first start can take several minutes"
@@ -1962,6 +1870,7 @@ function Clear-SetupDataDir([string]$Failed) {
 
 function Restore-Snapshot {
     Clear-StagedRelease
+    $keepStopped = Test-Path -LiteralPath (Join-Path $Snap "GATEWAY_RESTART_UNPROVEN")
     try { $failed = Restore-Slot $Snap } catch {
         # The snapshot stays marked complete, so the next run restores it.
         Write-Err $_.Exception.Message
@@ -1974,7 +1883,7 @@ function Restore-Snapshot {
         # (about 2 GB) held a full disk full for every account (GAP-1883).
         Invoke-Quietly { Remove-FailedInstall $failed }
     }
-    Restart-Old
+    Restart-Old -KeepStopped:$keepStopped
     if (-not $PrevVersion) { Write-KeptUvCache; return }
     if ($Setup) {
         if (Test-Path -LiteralPath $failed) {
@@ -2066,6 +1975,7 @@ function Resume-InterruptedRun {
             }
             [void](Stop-Gateway)
             $wasRunning = (Read-Text (Join-Path $slot "GATEWAY_WAS_RUNNING")) -eq "true"
+            $keepStopped = Test-Path -LiteralPath (Join-Path $slot "GATEWAY_RESTART_UNPROVEN")
             $state = Join-Path $Staging "hook-runtime-state.json"
             if ((Test-Path -LiteralPath $state) -and -not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
             $failed = Restore-Slot $slot
@@ -2075,7 +1985,13 @@ function Resume-InterruptedRun {
             if ($setupBack) { Clear-SetupDataDir $failed }
             # Nothing was installed before, so the copy holds nothing to go back to.
             if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-FailedInstall $failed } }
-            if ($wasRunning -and $setupBack) {
+            if ($keepStopped) {
+                $gateway = if ($setupBack) { Join-Path $setupInstall.Root "bin\defenseclaw-gateway.exe" } else { Join-Path $BinDir "defenseclaw-gateway.exe" }
+                $gatewayCommand = "& '" + $gateway.Replace("'", "''") + "' start"
+                $Run.OldGatewayDown = $wasRunning
+                Write-Warn "The previous install is restored with its gateway kept stopped to preserve its hook registration"
+                Write-Info "Resolve the earlier startup error (close the agent if its settings are in use), then run: $gatewayCommand"
+            } elseif ($wasRunning -and $setupBack) {
                 Start-SetupGateway $setupInstall.Root
             } elseif ($wasRunning) {
                 [void](Start-Gateway)
@@ -2914,20 +2830,22 @@ function Invoke-Install {
         Write-Warn "The gateway was running without a configuration; run 'defenseclaw init' to set it up"
     }
     if ($startNew) {
+        # A failed or interrupted start must not run an older setup against
+        # the same busy agent settings during automatic rollback. Record the
+        # refusal before starting so interrupted recovery keeps it too.
+        Set-Content -LiteralPath (Join-Path $Snap "GATEWAY_RESTART_UNPROVEN") -Value "" -Encoding Ascii
         $startedAt = Get-Date
         $startRc = Start-Gateway
         if ($sealOnly) {
             [void](Stop-Gateway)
-            if ($startRc -ne 0 -and $startRc -ne 3) {
-                Write-Warn "The $Ver gateway did not start (see above); fix what it reports, then run 'defenseclaw-gateway start'"
-                $startRc = 0
-            }
-        } elseif ($startRc -ne 0 -and $startRc -ne 3) {
+        }
+        if ($startRc -ne 0 -and $startRc -ne 3) {
             Write-Err ("The $Ver gateway did not become healthy within {0:N0} s [{1}]; restoring $previousLabel" -f ((Get-Date) - $startedAt).TotalSeconds, (Get-UtcClock))
             [void](Stop-Gateway)
             Restore-Snapshot
             Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"
         }
+        Remove-Item -LiteralPath (Join-Path $Snap "GATEWAY_RESTART_UNPROVEN") -Force -ErrorAction Stop
     }
     Complete-Swap
     Remove-DeveloperFiles
