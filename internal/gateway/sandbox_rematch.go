@@ -192,17 +192,19 @@ type sandboxRematchState struct {
 // sandboxRematchDue reads reg as stored and its run record and reports
 // whether a stop or a re-match is due for it. It only reads, so it needs no
 // lock; a registration that is revoked, or whose run record can't be read,
-// is never due.
+// is never due. The two are read in one store call: read apart, a re-match
+// stored between them paired the old registration with the new policy key,
+// and the call was answered under the old profile without the lock.
 func (a *APIServer) sandboxRematchDue(ctx context.Context, auth *sandboxAuthority, peer managedHookPeer, reg sandboxreg.Registration) (sandboxreg.Registration, sandboxRematchState) {
-	if fresh, ok, err := auth.store.Get(peer.UID, reg.ID); err == nil && ok {
+	fresh, ok, run, hasRun, err := auth.store.GetWithRun(peer.UID, reg.ID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] re-match uid=%d registration=%s: %v\n", peer.UID, reg.ID, err)
+		return reg, sandboxRematchState{}
+	}
+	if ok {
 		reg = fresh
 	}
 	if reg.State == sandboxreg.StateRevoked {
-		return reg, sandboxRematchState{}
-	}
-	run, hasRun, err := auth.store.Run(peer.UID, reg.ID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[sandbox-authority] re-match uid=%d registration=%s: %v\n", peer.UID, reg.ID, err)
 		return reg, sandboxRematchState{}
 	}
 	state := sandboxRematchState{run: run, hasRun: hasRun, cfg: a.liveBaseConfig(ctx)}

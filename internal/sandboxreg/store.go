@@ -628,6 +628,28 @@ func (s *FileStore) Run(uid int, id string) (Run, bool, error) {
 	return run, ok, nil
 }
 
+// GetWithRun is Get and Run read together: a write stores a registration
+// and its run record in one step, and the pair returned is always one
+// write's, never a registration with the run record of a later write.
+func (s *FileStore) GetWithRun(uid int, id string) (r Registration, ok bool, run Run, hasRun bool, err error) {
+	if !ValidID(id) {
+		return Registration{}, false, Run{}, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, err := s.loadLocked(uid)
+	if err != nil {
+		return Registration{}, false, Run{}, false, err
+	}
+	run, hasRun = u.runs[id]
+	for _, have := range u.regs {
+		if have.ID == id {
+			return have, true, run, hasRun, nil
+		}
+	}
+	return Registration{}, false, run, hasRun, nil
+}
+
 // Bind turns uid's pending, unexpired registration id live for the sandbox
 // b names. A binding id or sandbox id that matches a tombstone or a
 // retired sandbox, or that another registration already holds, is

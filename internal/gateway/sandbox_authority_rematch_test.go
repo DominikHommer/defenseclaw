@@ -13,6 +13,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -592,5 +593,82 @@ func TestSandboxRelayedHookBurstDoesNotQueueOnTheRematchLock(t *testing.T) {
 	}
 	if latencies[workers-1] >= budget {
 		t.Fatalf("slowest relayed hook took %v; a call with no re-match due waited for the lock (budget %v)", latencies[workers-1], budget)
+	}
+}
+
+// sandboxStoreWriteBetweenReads is a registration store on which a
+// concurrent re-match stores its result right after a relayed call's first
+// read: write runs once, after the first Get, Run or GetWithRun returns.
+type sandboxStoreWriteBetweenReads struct {
+	sandboxRegistrationStore
+	once  sync.Once
+	write func()
+}
+
+func (s *sandboxStoreWriteBetweenReads) Get(uid int, id string) (sandboxreg.Registration, bool, error) {
+	defer s.once.Do(s.write)
+	return s.sandboxRegistrationStore.Get(uid, id)
+}
+
+func (s *sandboxStoreWriteBetweenReads) Run(uid int, id string) (sandboxreg.Run, bool, error) {
+	defer s.once.Do(s.write)
+	return s.sandboxRegistrationStore.Run(uid, id)
+}
+
+func (s *sandboxStoreWriteBetweenReads) GetWithRun(uid int, id string) (sandboxreg.Registration, bool, sandboxreg.Run, bool, error) {
+	defer s.once.Do(s.write)
+	return s.sandboxRegistrationStore.GetWithRun(uid, id)
+}
+
+// GAP-0367 follow-up: the lock-free due check read the registration and
+// its run record in two store calls. A re-match that stored a new
+// registration and run between them paired the old registration with the
+// new policy key, so the call found nothing due and was answered under the
+// registration as it was before the re-match. Read together, the call sees
+// either the stale pair (due: it re-reads under the lock) or the new one.
+func TestSandboxRematchDueReadsTheRegistrationAndItsRunTogether(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.publishFirstGeneration()
+	resp := f.live(sbxAlice, 1)
+	if rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Code != http.StatusOK {
+		t.Fatalf("first hook: %d %s", rec.Code, rec.Body.String())
+	}
+	auth, _ := f.api.sandboxAuth()
+	ctx := context.Background()
+	id := resp.Registration.ID
+	stored, ok, run, hasRun, err := auth.store.GetWithRun(sbxAlice.UID, id)
+	if err != nil || !ok || !hasRun {
+		t.Fatalf("stored registration: %+v %v %v %v", stored, ok, hasRun, err)
+	}
+	key := f.api.sandboxPolicyKey(ctx, f.api.liveBaseConfig(ctx))
+	if key == "" {
+		t.Fatal("no policy key")
+	}
+	// The registration was last matched under an older policy: a re-match
+	// is due.
+	stale := run
+	stale.PolicyKey = "policy-before-the-change"
+	if err := auth.store.UpdateRun(sbxAlice.UID, stored, &stale); err != nil {
+		t.Fatal(err)
+	}
+	// The concurrent re-match stores the registration it matched and the
+	// current policy key in one write.
+	const rematched = "matched-by-the-concurrent-rematch"
+	next := stored
+	next.MatchedGroup = rematched
+	current := run
+	current.PolicyKey = key
+	writable := auth.store
+	auth.store = &sandboxStoreWriteBetweenReads{sandboxRegistrationStore: writable, write: func() {
+		if err := writable.UpdateRun(sbxAlice.UID, next, &current); err != nil {
+			t.Errorf("concurrent re-match write: %v", err)
+		}
+	}}
+	t.Cleanup(func() { auth.store = writable })
+
+	got := f.api.sandboxRematchIfDue(ctx, auth, sbxAlice, stored)
+	if got.MatchedGroup != rematched {
+		t.Fatalf("relayed call answered under the registration before the re-match (matched group %q), want %q",
+			got.MatchedGroup, rematched)
 	}
 }
