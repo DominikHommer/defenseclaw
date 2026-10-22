@@ -367,7 +367,9 @@ On top of the skill scanner, the install watcher and `defenseclaw skill scan` bo
 Two cases do not end in quarantine storage, and both say so in `defenseclaw alerts`, `defenseclaw skill list` and `defenseclaw skill info`:
 
 - **A skill folder that is a link** (a symlink, or a junction on Windows) is not copied: the watcher removes the link from a watched skills folder and never changes the folder it points to. The verdict reads `link removed` and the reason names the target. Recreate the link once you trust the skill (`defenseclaw skill allow` first). A link is scanned through its target only when the target is in a watched skills folder of the same account. For a per-user install, a link outside that account's watched skill folders is not read: the watcher removes the link and the `install-rejected` row says `reason=link-outside-own-folders user=this account target="<path>"`, with the target path quoted, whatever it holds. Managed computers do not watch users' connector skill folders: managed Windows skips profile roots, while managed Linux and macOS run no connector skill-folder watcher.
-- **A quarantine that fails** (the quarantine folder is not writable or the disk is full) leaves the files in place. The verdict reads `quarantine failed` with the error, and the install block and runtime disable stay.
+- **A quarantine that fails before publishing a copy** (for example, the quarantine folder is not writable or the disk is full) leaves the source in place. The verdict reads `quarantine failed` with the error, and the install block and runtime disable stay.
+
+A quarantine can also fail after publishing its copy if source cleanup fails. In that case, inspect both the source and the quarantine copy: the source may be partially removed. The install block and runtime disable still apply.
 
 You don't have to wire any of that yourself. To record the severity verdicts without acting on them, set `gateway.watcher.skill.take_action` to `false`; block-list matches and failed scans are still quarantined.
 
