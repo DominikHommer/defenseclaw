@@ -1504,11 +1504,12 @@ defenseclaw_unreachable_notice_json() {
 # `defenseclaw-gateway status` (GAP-0090, GAP-0093). Managed hooks print
 # nothing (their service is not the user's to start).
 defenseclaw_unreachable_next_step() {
-  # A standalone managed hook reaches only the administrator's gateway
-  # service through its socket: a refused connection there means the service
-  # is stopped (GAP-0581).
+  # The hook already proved the socket existed before sending. A later
+  # connection failure cannot prove the gateway is stopped: its identity and
+  # answer remain unverified, even if the administrator chose open for a
+  # verified absence (GAP-0518).
   if [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ]; then
-    printf '%s' 'the DefenseClaw gateway service is not running on this computer. Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. (enterprise_managed_gateway_not_running)'
+    printf '%s' 'the DefenseClaw hook socket did not provide a verified gateway answer; ask your administrator to inspect the gateway service and socket. (enterprise_managed_gateway_peer_unverified)'
     return 0
   fi
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in

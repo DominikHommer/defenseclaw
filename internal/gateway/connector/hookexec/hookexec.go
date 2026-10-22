@@ -945,13 +945,8 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		case errors.Is(cause, errGatewayStartFailing):
 			reason = errGatewayStartFailing.Error()
 		case errors.Is(cause, errGatewayRestarting):
-			// Closed, except for a standalone hook whose administrator chose
-			// open (owner decision 2026-10-20). Secure Client keeps closed.
-			restartMode := "closed"
-			if managedNativeDecision(opts) {
-				restartMode = failMode
-			}
-			return failUnreachable(withManagedOutage(opts, errGatewayRestarting), sp, restartMode, managedGatewayRestartingReason)
+			// A restart does not prove that the gateway service is stopped.
+			return failUnreachable(opts, sp, "closed", managedGatewayRestartingReason)
 		}
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
 			// Managed peer-verification failure fails closed on the transport
@@ -2662,11 +2657,9 @@ func managedPlainFailClosed(opts Options, sp spec) bool {
 }
 
 // managedPeerFailMode is the fail mode of a managed peer-verification
-// failure. A hook whose gateway service is simply not running (stopped,
-// crashed, or held stopped while Setup services the deployment) follows its
-// own fail mode, as a refused connection already does on macOS: the hook
-// contacted no peer, so nothing unverified can answer it, and only an
-// administrator can stop the service. That is an authenticated Secure Client
+// failure. A hook whose gateway service is proven not running follows its
+// own fail mode. A refused connection to an existing socket remains an
+// unverified peer failure. That is an authenticated Secure Client
 // hook (opts.SecureClient, set only on a host the strict Secure Client
 // classifier verified, and secureClientHook, #1163) or a standalone hook,
 // whose fail mode is the administrator's (owner decision 2026-10-20). Every
@@ -2685,11 +2678,8 @@ func managedPeerFailMode(opts Options, failMode string, err error) string {
 // through (GAP-0346). It holds only for a standalone hook outside Secure
 // Client (managedNativeDecision) whose administrator chose open for the
 // connector (opts.FailMode, which the managed runtime sets), without strict
-// availability or a runtime failure, and only when err says the gateway
-// service is not running, was still restarting at the end of the restart
-// budget, or gave no answer in time. The hook request that follows then
-// meets the same outage and gives the open result, with its notice and its
-// failure log line, as for every other connector. Every other error (a peer
+// availability or a runtime failure, and only when err proves the gateway
+// service is not running. Every other error (a peer
 // DefenseClaw cannot verify, another program on the gateway port, an
 // unusable answer), any failure of a call the gateway answered 429
 // (Options.gatewayBusy: the gateway is up and rate-limited it) and every
@@ -2699,18 +2689,16 @@ func ManagedOutageFailsOpen(opts Options, err error) bool {
 		strings.TrimSpace(opts.ManagedRuntimeFailure) != "" || normalizeFailMode(opts.FailMode) != "open" {
 		return false
 	}
-	if errors.Is(err, errManagedGatewayPortHeld) || errors.Is(err, errAnswerBudgetSpentLocally) {
+	if errors.Is(err, errManagedGatewayPortHeld) {
 		return false
 	}
-	return errors.Is(err, errManagedGatewayNotRunning) || errors.Is(err, errGatewayRestarting) ||
-		errors.Is(err, errGatewayNoAnswer)
+	return errors.Is(err, errManagedGatewayNotRunning)
 }
 
 // managedCopilotOpen reports a managed GitHub Copilot hook whose delivery
 // mode is open: an authenticated Secure Client hook (#1163), or a standalone
-// hook whose administrator chose open (owner decision 2026-10-20). A gateway
-// it cannot reach and a response it cannot read allow the call, as they do
-// for every other connector in fail mode open, instead of the managed deny.
+// hook whose administrator chose open. A proven stopped service may allow
+// the call under open; an unanswered or unverified gateway stays closed.
 // A closed mode (configured, strict availability, or another program on the
 // gateway port) and the enrollment and policy refusals still deny.
 func managedCopilotOpen(opts Options, sp spec, failMode string) bool {
@@ -2720,8 +2708,8 @@ func managedCopilotOpen(opts Options, sp spec, failMode string) bool {
 
 // managedPeerFailureReason is the hook-failure reason of a managed
 // peer-verification failure: every managed hook says when the gateway
-// service is simply not running (a stopped Windows service, or a Unix
-// standalone socket that is missing or refuses the connection); any other
+// service is proven not running (a stopped Windows service, or a Unix
+// standalone socket missing in a trusted directory); any other
 // Secure Client peer failure keeps managedGatewayPeerUnverifiedReason.
 func managedPeerFailureReason(opts Options, err error) string {
 	if errors.Is(err, errManagedGatewayNotRunning) {

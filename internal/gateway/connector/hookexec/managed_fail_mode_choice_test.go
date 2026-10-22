@@ -150,8 +150,8 @@ func TestManagedOutageFailsOpenOnlyForAnOpenStandaloneOutage(t *testing.T) {
 		{name: "unset", mutate: func(o *Options) { o.FailMode = "" }, err: notRunning},
 		{name: "closed", mutate: func(o *Options) { o.FailMode = "closed" }, err: notRunning},
 		{name: "open, not running", err: notRunning, want: true},
-		{name: "open, restarting", err: fmt.Errorf("session exchange: %w", errGatewayRestarting), want: true},
-		{name: "open, no answer", err: fmt.Errorf("session exchange: %w", errGatewayNoAnswer), want: true},
+		{name: "open, restarting", err: fmt.Errorf("session exchange: %w", errGatewayRestarting)},
+		{name: "open, no answer", err: fmt.Errorf("session exchange: %w", errGatewayNoAnswer)},
 		{name: "open, port held", err: fmt.Errorf("%w: %w", errManagedGatewayPortHeld, errManagedGatewayNotRunning)},
 		{name: "open, unverified peer", err: errManagedGatewayPeerUnverified},
 		{name: "open, unusable answer", err: errors.New("invalid session gateway decision")},
@@ -271,12 +271,9 @@ func TestStandaloneManagedOpenCodeAndCopilotFollowTheAdministratorsFailMode(t *t
 	}
 }
 
-// Final review P2: a missing answer counts as the gateway's outage, which
-// fail mode open lets through, only when the gateway contact had at least
-// hookGatewayAnswerFloor of the answer budget. A slow local step (a
-// foreign-hook scan close to its own budget) that leaves less fails closed,
-// for the session exchange and for the hook request.
-func TestStandaloneManagedNoAnswerAfterASlowLocalStepStaysClosed(t *testing.T) {
+// No answer cannot prove a stopped gateway, even with a full answer budget.
+// Local work consuming the budget is also recorded separately.
+func TestStandaloneManagedNoAnswerAlwaysStaysClosed(t *testing.T) {
 	shortAnswerBudget(t, 300*time.Millisecond)
 	previousFloor := hookGatewayAnswerFloor
 	hookGatewayAnswerFloor = 200 * time.Millisecond
@@ -284,12 +281,12 @@ func TestStandaloneManagedNoAnswerAfterASlowLocalStepStaysClosed(t *testing.T) {
 	addr := hungGateway(t)
 
 	for _, tc := range []struct {
-		name  string
-		spent time.Duration
-		open  bool
+		name         string
+		spent        time.Duration
+		spentLocally bool
 	}{
-		{name: "the gateway had the budget", spent: 0, open: true},
-		{name: "a local step spent the budget", spent: 250 * time.Millisecond, open: false},
+		{name: "the gateway had the budget", spent: 0},
+		{name: "a local step spent the budget", spent: 250 * time.Millisecond, spentLocally: true},
 	} {
 		t.Run("session exchange: "+tc.name, func(t *testing.T) {
 			token := "authenticated-generation-token"
@@ -302,11 +299,11 @@ func TestStandaloneManagedNoAnswerAfterASlowLocalStepStaysClosed(t *testing.T) {
 			if !errors.Is(err, errGatewayNoAnswer) {
 				t.Fatalf("err = %v, want a missing answer", err)
 			}
-			if got := errors.Is(err, errAnswerBudgetSpentLocally); got == tc.open {
-				t.Fatalf("spent locally = %v, want %v (err %v)", got, !tc.open, err)
+			if got := errors.Is(err, errAnswerBudgetSpentLocally); got != tc.spentLocally {
+				t.Fatalf("spent locally = %v, want %v (err %v)", got, tc.spentLocally, err)
 			}
-			if got := ManagedOutageFailsOpen(opts, err); got != tc.open {
-				t.Fatalf("ManagedOutageFailsOpen = %v, want %v (err %v)", got, tc.open, err)
+			if got := ManagedOutageFailsOpen(opts, err); got {
+				t.Fatalf("ManagedOutageFailsOpen = true for %v", err)
 			}
 		})
 		t.Run("hook request: "+tc.name, func(t *testing.T) {
@@ -320,8 +317,8 @@ func TestStandaloneManagedNoAnswerAfterASlowLocalStepStaysClosed(t *testing.T) {
 				// Only the simulated hook work belongs to this budget.
 				o.StartedAt = time.Now().Add(-tc.spent)
 			})
-			if blocked(result) == tc.open {
-				t.Fatalf("blocked = %v, want %v: code=%d stdout=%q stderr=%q", blocked(result), !tc.open, result.code, result.stdout, result.stderr)
+			if !blocked(result) {
+				t.Fatalf("unanswered managed call was allowed: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
 			}
 		})
 	}
