@@ -320,14 +320,28 @@ def _lock_is_private(path: Path) -> bool:
     return info.st_uid in {os.geteuid(), 0} and not stat.S_IMODE(info.st_mode) & 0o077
 
 
+# Every field the guard's lock decoder knows, per object (RuntimeContractLock
+# in internal/acp/contract.go). The guard refuses a lock with any other field
+# at any level (DisallowUnknownFields). Every DefenseClaw release since 1.0.0
+# has written only these fields, so this also covers locks from upgrades.
+_LOCK_FIELDS: dict[str, frozenset[str]] = {
+    "": frozenset({"version", "generated_at", "protocol", "client", "agent", "guard", "profile", "mode"}),
+    "protocol": frozenset({"schema_version", "schema_sha256"}),
+    "client": frozenset({"id", "config_path", "config_sha256", "adopted_entries"}),
+    "agent": frozenset({"id", "path", "sha256", "version"}),
+    "guard": frozenset({"path", "sha256", "managed_custody"}),
+}
+
+
 def _lock_is_complete(document: dict[str, Any]) -> bool:
-    """Whether a lock has every field the guard needs to start (version 1).
+    """Whether a lock is one the guard can start from (version 1).
 
     The guard refuses a lock that lacks its protocol pin, the editor file
-    digest, or the guard and agent pins, so such a lock proves nothing about
-    an entry. Values are not compared with the current schema here: after a
-    DefenseClaw upgrade a lock keeps its old protocol pin until acp refresh,
-    and it is still this runtime's lock.
+    digest, or the guard and agent pins, or that carries a field its decoder
+    does not know, so such a lock proves nothing about an entry. Values are
+    not compared with the current schema here: after a DefenseClaw upgrade a
+    lock keeps its old protocol pin until acp refresh, and it is still this
+    runtime's lock.
     """
 
     def strings(item: Any, *keys: str) -> bool:
@@ -338,8 +352,14 @@ def _lock_is_complete(document: dict[str, Any]) -> bool:
 
     client, agent, guard = document.get("client"), document.get("agent"), document.get("guard")
     adopted = client.get("adopted_entries", []) if isinstance(client, dict) else None
+    known = set(document) <= _LOCK_FIELDS[""] and all(
+        isinstance(document.get(key), dict) and set(document[key]) <= fields
+        for key, fields in _LOCK_FIELDS.items()
+        if key
+    )
     return (
-        type(document.get("version")) is int
+        known
+        and type(document.get("version")) is int
         and document["version"] == 1
         and optional_string(document, "generated_at")
         and strings(document.get("protocol"), "schema_version", "schema_sha256")
@@ -360,6 +380,35 @@ def _proven_lock(path: Path, client: str, agent: str) -> dict[str, Any] | None:
     if document is None or not _lock_is_complete(document) or not _lock_is_private(path):
         return None
     return document
+
+
+# The guard options setup writes, in every release since 1.0.0 and in the
+# managed Go setup. The guard refuses a flag it does not know.
+_GUARD_ENTRY_OPTIONS = frozenset(
+    {"--agent", "--client", "--profile", "--mode", "--token-file", "--gateway", "--contract-lock"}
+)
+
+
+def _launches_locked_agent(entry: dict[str, Any], options: dict[str, str], lock: dict[str, Any], agent: str) -> bool:
+    """Whether an entry's argv is the launch setup writes for this lock.
+
+    The guard starts only the executable the lock pins, under the lock's
+    profile and mode. Setup writes exactly its guard options, then -- and
+    the pinned executable with the catalog arguments. An entry that launches
+    anything else after -- (another binary, the same file by another path,
+    added or missing arguments, or none, which makes the guard fall back to
+    the catalog command) is not the entry setup wrote.
+    """
+    args = entry.get("args")
+    lock_agent = lock.get("agent")
+    if not isinstance(args, list) or "--" not in args or not isinstance(lock_agent, dict):
+        return False
+    return (
+        set(options) == _GUARD_ENTRY_OPTIONS
+        and options["--profile"] == lock.get("profile")
+        and options["--mode"] == lock.get("mode")
+        and args[args.index("--") + 1:] == [lock_agent.get("path"), *_AGENTS[agent][1]]
+    )
 
 
 def _is_exact_path(value: str, expected: Path) -> bool:
@@ -388,7 +437,9 @@ def _lock_names_entry(
     setup writes: a symlink elsewhere that resolves to this lock is another
     runtime's entry, and the guard will not open a symlinked lock. The lock
     must be a regular file, complete (the guard can start from it), private,
-    bind this editor file and pin exactly the executable the entry launches.
+    bind this editor file and pin the guard the entry starts, and the entry
+    must launch exactly the agent command the lock pins, under its profile
+    and mode.
     A guard-like filename proves nothing on its own: an operator's wrapper
     may also be called defenseclaw-acp. With no runtime (data_dir None) no
     alias is proven.
@@ -403,7 +454,11 @@ def _lock_names_entry(
         if not _is_exact_path(lock_value, expected_lock):
             return False
         lock = _proven_lock(expected_lock, client, agent)
-        if lock is None or lock["guard"]["path"] != entry.get("command"):
+        if (
+            lock is None
+            or lock["guard"]["path"] != entry.get("command")
+            or not _launches_locked_agent(entry, options, lock, agent)
+        ):
             return False
         token_name = f"{client}-{agent}.token" if lock["guard"].get("managed_custody") else ".token"
         if not _is_exact_path(token_value, runtime / token_name):
@@ -773,7 +828,7 @@ def _verify_binding(
             or not isinstance(args, list)
             or not options
             or not isinstance(lock_agent, dict)
-            or args[args.index("--") + 1:] != [lock_agent.get("path"), *_AGENTS[agent][1]]
+            or not _launches_locked_agent(entry, options, lock, agent)
             or any(options.get(flag) != expected for flag, expected in {
                 "--client": client, "--agent": agent,
                 "--contract-lock": str(lock_path.resolve()),
@@ -781,7 +836,6 @@ def _verify_binding(
                     f"{client}-{agent}.token" if isinstance(lock_guard, dict) and lock_guard.get("managed_custody")
                     else ".token"
                 )),
-                "--profile": lock.get("profile"), "--mode": lock.get("mode"),
             }.items())
         ):
             problems.append(f"editor launch command does not match the lock: {name}")
