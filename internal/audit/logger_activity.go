@@ -102,11 +102,6 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		TraceID:           in.TraceID,
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
-	if in.BundleReceipt != nil {
-		if finished, err := time.Parse(time.RFC3339Nano, in.BundleReceipt.FinishedAt); err == nil {
-			auditEv.Timestamp = finished.UTC()
-		}
-	}
 	stampAuditEventEnvelope(&auditEv)
 	activityMetrics, metricErr := newActivityRuntimeV8GeneratedMetrics(
 		auditEv, action, targetType, len(in.Diff),

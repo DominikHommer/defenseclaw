@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -46,7 +47,8 @@ func TestPolicyBundleReceiptReplayKeepsOneLocalRowUntilDeliveryIsConfirmed(t *te
 	e := &receiptReplayEmitter{testRuntimeV8Emitter: newTestRuntimeV8Emitter(t, l.store, router.AdmissionOrdinary), refuse: true}
 	l.SetRuntimeV8Emitter(e)
 	bundle := PolicyBundle{ID: testPolicyBundleID, Version: 5}
-	receipt := PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: PolicyBundleConfirmed}
+	receipt := PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: PolicyBundleConfirmed, FinishedAt: "2020-01-01T00:00:00Z"}
+	started := time.Now().UTC()
 	if err := l.LogPolicyBundleReceipt("operator:sample", bundle, receipt); err == nil {
 		t.Fatal("unacknowledged delivery succeeded")
 	}
@@ -94,6 +96,9 @@ func TestPolicyBundleReceiptReplayKeepsOneLocalRowUntilDeliveryIsConfirmed(t *te
 	rows, err := l.store.ListEvents(10)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("replayed receipt rows=%d, want one: %v", len(rows), err)
+	}
+	if rows[0].Timestamp.Before(started) {
+		t.Fatal("reporting an older receipt backdated its new audit row and metric retention window")
 	}
 	if e.attempts != 3 {
 		t.Fatalf("delivery attempts=%d, want 3", e.attempts)
