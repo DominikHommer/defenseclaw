@@ -80,7 +80,9 @@ var (
 //     one: a request that stops waiting for a slow directory is not given a
 //     weaker default_profile than the profile of the account's local groups;
 //   - after a lookup that failed for want of a proof only, its candidate
-//     (unixidentity.UnprovenFactsError);
+//     (unixidentity.UnprovenFactsError), or, when it names none, that the
+//     account is unknown, whose requests are refused when an assignment
+//     could select another profile;
 //   - after a uid more than one account holds (unixidentity.SharedUIDError),
 //     that ambiguity, whose requests are refused when an assignment could
 //     select another profile;
@@ -101,6 +103,8 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	switch {
 	case err == nil:
 		forgetUnprovenFacts(key)
+	case errors.As(err, &unproven) && !unproven.HasCandidate():
+		noteUnprovenFacts(key, unprovenFactsEntry{reason: err.Error(), at: time.Now(), unknown: true}, true)
 	case errors.As(err, &unproven):
 		noteUnprovenFacts(key, unprovenFactsEntry{facts: unproven.Candidate, name: early.name, reason: err.Error(), at: time.Now()}, true)
 	case errors.As(err, &shared):

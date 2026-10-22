@@ -131,7 +131,11 @@ func (r *NSSResolver) DirectoryFactsWithoutGroupsForUID(uid int, now time.Time) 
 // was served those facts; after them it got none, and a failed lookup
 // selects default_profile, which can be weaker than the profile of the
 // account's local groups (review of r104 W2B, loop 5). The guardian's
-// spool (no groups) needs no candidate.
+// spool (no groups) needs no candidate. When the facts cannot be resolved
+// even then (another failure in the candidate pass), the UnprovenFactsError
+// has no candidate (HasCandidate): which account the uid is, or its groups,
+// stay unknown, and the gateway refuses every request an assignment could
+// give another profile (review of r104 W2B, loop round 3).
 func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups bool) (useridentity.DirectoryFacts, error) {
 	facts, err := r.provenFactsForUID(uid, now, includeGroups)
 	if err == nil || !includeGroups || r.provisional() || !errors.Is(err, errDirectoryUnconfirmed) {
@@ -148,7 +152,7 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 		return useridentity.DirectoryFacts{}, candidateErr
 	}
 	if candidateErr != nil {
-		return useridentity.DirectoryFacts{}, err
+		return useridentity.DirectoryFacts{}, &UnprovenFactsError{Err: err}
 	}
 	return useridentity.DirectoryFacts{}, &UnprovenFactsError{Candidate: candidate, Err: err}
 }
@@ -206,7 +210,10 @@ func LocalCandidateForUID(uid int, now time.Time) (name string, facts useridenti
 // /etc/passwd account with its local groups, as DefenseClaw took it before
 // the proofs). It is a hypothesis, not facts: nothing may cache, record or
 // apply it. The gateway only compares the profile it selects with the one a
-// failed lookup selects, and refuses the request when they differ.
+// failed lookup selects, and refuses the request when they differ. Without
+// a candidate (HasCandidate) the facts are unknown even if those services
+// hold nothing more, and the gateway refuses every request an assignment
+// could give another profile than the failed lookup's.
 type UnprovenFactsError struct {
 	Candidate useridentity.DirectoryFacts
 	Err       error
@@ -214,6 +221,10 @@ type UnprovenFactsError struct {
 
 func (e *UnprovenFactsError) Error() string { return e.Err.Error() }
 func (e *UnprovenFactsError) Unwrap() error { return e.Err }
+
+// HasCandidate reports whether the lookup names the facts the account has
+// if every service that did not show it holds nothing more holds nothing.
+func (e *UnprovenFactsError) HasCandidate() bool { return !e.Candidate.ResolvedAt.IsZero() }
 
 // provisionalProofsKey marks the context of a resolver that computes the
 // candidate of an UnprovenFactsError (directoryFactsForUID).
@@ -2131,7 +2142,20 @@ func (r *NSSResolver) passwdOwner(uid int) (string, Account, error) {
 			return service, account, nil
 		}
 		if !IsNotFound(err) {
-			return "", Account{}, err
+			// A service that did not answer (a NIS server that times out, a
+			// module that fails) may hold the uid: glibc passed it by, and
+			// the account a later service answers is not proved to be the
+			// one the uid belongs to. The lookup fails for want of that
+			// proof, so the candidate pass passes the service by as glibc
+			// did, and the gateway refuses a request that candidate gives
+			// another profile instead of applying default_profile.
+			// rel/1.0.4 asked only the directory services and took the
+			// later account's facts (review of r104 W2B, loop round 3).
+			err = fmt.Errorf("unixidentity: NSS service %s did not answer whether it holds uid %d: %w: %w", service, uid, err, errDirectoryUnconfirmed)
+			if err = r.unproven(err); err != nil {
+				return "", Account{}, err
+			}
+			continue
 		}
 		if err := r.unproven(r.passwdAbsent(service, strconv.Itoa(uid), true)); err != nil && !errors.Is(err, errServiceUncheckable) {
 			return "", Account{}, fmt.Errorf("unixidentity: NSS service %s holds no uid %d but cannot show that it answers: %w", service, uid, err)

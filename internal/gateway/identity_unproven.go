@@ -29,7 +29,10 @@ import (
 // account holds (unixidentity.SharedUIDError) is noted as ambiguous: no
 // candidate tells which account it is, and a request is refused whenever an
 // assignment could select another profile than the failed lookup's
-// (review of r104 W2B, loop round 2).
+// (review of r104 W2B, loop round 2). So is a lookup that failed for want of
+// a proof and names no candidate (a service before the owner did not
+// answer, and the facts still could not be resolved): which account the uid
+// is, or its groups, are unknown (review of r104 W2B, loop round 3).
 var unprovenFacts = struct {
 	sync.Mutex
 	entries map[string]unprovenFactsEntry
@@ -44,6 +47,9 @@ type unprovenFactsEntry struct {
 	at     time.Time
 	// ambiguous marks a uid more than one account holds: facts is empty.
 	ambiguous bool
+	// unknown marks a lookup that failed for want of a proof and names no
+	// candidate: facts is empty.
+	unknown bool
 }
 
 // unprovenAccounts counts the accounts whose last lookup failed for want of

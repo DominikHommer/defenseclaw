@@ -83,8 +83,11 @@ type profileSubject struct {
 	unprovenReason string
 	// ownershipAmbiguous marks a subject whose uid more than one account
 	// holds (unixidentity.SharedUIDError): no candidate tells which one it
-	// is. Set by withUnprovenCandidate, for match only.
+	// is. Set by withUnprovenCandidate, for match only. ownershipUnknown
+	// marks, with it, a lookup that failed for want of a proof and named no
+	// candidate (unprovenFactsEntry.unknown).
 	ownershipAmbiguous bool
+	ownershipUnknown   bool
 	// viaProcessOwner marks a subject verified as the per-user gateway's own
 	// account, so explain and telemetry report it as process_owner.
 	viaProcessOwner bool
@@ -981,9 +984,9 @@ func withUnprovenCandidate(subject *profileSubject) *profileSubject {
 	if !ok {
 		return subject
 	}
-	if entry.ambiguous {
+	if entry.ambiguous || entry.unknown {
 		with := *subject
-		with.ownershipAmbiguous, with.unprovenReason = true, entry.reason
+		with.ownershipAmbiguous, with.ownershipUnknown, with.unprovenReason = true, entry.unknown, entry.reason
 		return &with
 	}
 	candidate := profileSubjectFromVerified(VerifiedSubject{
@@ -1008,8 +1011,14 @@ func unprovenRefusal(subject *profileSubject) string {
 }
 
 // ambiguousRefusal is the refusal of a request whose uid more than one
-// account holds (profileDecision.Refused).
+// account holds, or whose account a failed lookup could not name
+// (profileDecision.Refused).
 func ambiguousRefusal(subject *profileSubject) string {
+	if subject.ownershipUnknown {
+		return fmt.Sprintf("DefenseClaw cannot confirm which account uid %s is or which groups it is in, because a directory service "+
+			"on this computer did not answer, and an assignment could give it another guardrail profile than a failed lookup: "+
+			"the request is refused until the directory answers", subject.UserID)
+	}
 	return fmt.Sprintf("DefenseClaw cannot confirm which account uid %s is, because more than one account holds the uid, "+
 		"and that decides its guardrail profile: the request is refused until each account has its own uid", subject.UserID)
 }
@@ -1048,6 +1057,11 @@ func (set *guardrailProfileSet) anotherProfileCouldApply(subject *profileSubject
 // candidate facts select, the one the failed lookup selects, and why.
 func unprovenRefusalNote(set *guardrailProfileSet, subject *profileSubject, decision profileDecision, connectorName, agent string) string {
 	subject = withUnprovenCandidate(subject)
+	if subject != nil && subject.ownershipUnknown {
+		return fmt.Sprintf("requests from this account are refused (hooks fail closed): its directory lookup could not tell which account "+
+			"the uid is or which groups it is in (%s), and an assignment could select another profile than the failed lookup's. "+
+			"No profile applies until the directory answers; an assignment by uid selects a profile without the proof", subject.unprovenReason)
+	}
 	if subject != nil && subject.ownershipAmbiguous {
 		return fmt.Sprintf("requests from this account are refused (hooks fail closed): more than one account holds its uid (%s), "+
 			"so which account it is and which groups it is in cannot be proven, and an assignment could select another profile than "+

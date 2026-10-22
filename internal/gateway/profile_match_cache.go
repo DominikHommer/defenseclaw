@@ -91,6 +91,9 @@ func profileMatchKey(subject *profileSubject, source, connectorName, agent strin
 		}
 		if subject.ownershipAmbiguous {
 			put("ownership-ambiguous")
+			if subject.ownershipUnknown {
+				put("ownership-unknown")
+			}
 			put(subject.unprovenReason)
 		}
 	}
