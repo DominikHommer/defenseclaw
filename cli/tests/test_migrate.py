@@ -896,10 +896,10 @@ def fail_mode_upgrade(data_dir: Path, monkeypatch: pytest.MonkeyPatch):
     return run
 
 
-@pytest.mark.parametrize("flags", [[], ["--check"]])
-def test_upgrade_names_an_open_hook_whatever_its_own_environment_sets(fail_mode_upgrade, flags) -> None:
+@pytest.mark.parametrize(("flags", "code"), [([], 0), (["--check"], 3), (["--check", "--accept-fail-mode-change"], 0)])
+def test_upgrade_names_an_open_hook_whatever_its_own_environment_sets(fail_mode_upgrade, flags, code) -> None:
     result = fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.3", *flags)
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == code, result.output
     out = " ".join(result.stdout.split())
     assert "DefenseClaw 1.0.3 hooks blocked a call" in out
     assert "DEFENSECLAW_FAIL_MODE=closed" in out
@@ -909,11 +909,12 @@ def test_upgrade_names_an_open_hook_whatever_its_own_environment_sets(fail_mode_
     assert out.count("DEFENSECLAW_FAIL_MODE=closed") == 1
 
 
-@pytest.mark.parametrize("flags", [[], ["--check"]])
-def test_upgrade_json_lists_the_open_hook_notice_under_warnings(fail_mode_upgrade, flags) -> None:
+@pytest.mark.parametrize(("flags", "code"), [([], 0), (["--check"], 3), (["--check", "--accept-fail-mode-change"], 0)])
+def test_upgrade_json_lists_the_open_hook_notice_under_warnings(fail_mode_upgrade, flags, code) -> None:
     result = fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.3", "--json", *flags)
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == code, result.output
     payload = json.loads(result.stdout)
+    assert payload["fail_mode_change_not_accepted"] is (code == 3)
     assert len(payload["warnings"]) == 1
     notice = payload["warnings"][0]
     assert "claudecode is installed open" in notice
@@ -1038,7 +1039,8 @@ def test_upgrade_notice_holds_when_the_config_cannot_be_read(
 
     monkeypatch.setattr(config_module, "load", broken_load)
     result = fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.3", "--check", "--json")
-    assert result.exit_code == 0, result.output
+    # Not knowing which hooks are open is not consent (loop round 3).
+    assert result.exit_code == 3, result.output
     (notice,) = json.loads(result.stdout)["warnings"]
     assert "defenseclaw guardrail fail-mode closed" in notice and "DEFENSECLAW_STRICT_AVAILABILITY=1" in notice
 
@@ -1060,3 +1062,142 @@ def test_migrate_without_a_config_names_no_fail_mode(fail_mode_upgrade) -> None:
     result = fail_mode_upgrade(None, "--from-version", "1.0.3", "--json", from_config_version=None)
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["warnings"] == []
+
+
+# GAP-0361 (loop round 3): naming the change was not enough. The hooks of
+# 0.8.10 and 1.0.0-1.0.3 blocked during a gateway outage for an agent started
+# with DEFENSECLAW_FAIL_MODE=closed; after the swap the hooks installed open
+# let the same call through. migrate --check (which install.sh and install.ps1
+# run before the swap) now exits 3 for such an upgrade unless the change is
+# accepted, so an unattended upgrade stops with nothing changed. A persisted
+# closed mode needs no consent.
+def _consent(result) -> tuple[int, dict]:
+    payload = json.loads(result.stdout)
+    return result.exit_code, payload
+
+
+@pytest.mark.parametrize(
+    ("from_version", "from_config_version", "stops"),
+    [
+        ("0.8.10", 9, True),
+        ("1.0.0", 9, True),
+        ("v1.0.2", 9, True),
+        ("1.0.3+local", 9, True),
+        ("1.0.3.dev4", 9, True),
+        ("1.0.4", 9, False),
+        ("1.0.4.dev1", 9, False),
+        ("1.1.0", 9, False),
+        (None, 7, True),  # a 0.x config without --from-version
+        (None, 9, False),  # nothing proves an older release
+    ],
+)
+def test_check_stops_an_upgrade_from_a_reading_release_until_the_change_is_accepted(
+    fail_mode_upgrade, from_version: str | None, from_config_version: int, stops: bool
+) -> None:
+    version = ["--from-version", from_version] if from_version else []
+    code, payload = _consent(
+        fail_mode_upgrade(_OPEN_CLAUDE, "--check", "--json", *version, from_config_version=from_config_version)
+    )
+    assert (code, payload["fail_mode_change_not_accepted"]) == ((3, True) if stops else (0, False))
+    code, payload = _consent(
+        fail_mode_upgrade(
+            _OPEN_CLAUDE, "--check", "--json", "--accept-fail-mode-change", *version,
+            from_config_version=from_config_version,
+        )
+    )
+    assert (code, payload["fail_mode_change_not_accepted"]) == (0, False)
+    # The migration itself runs after the swap: the check is the only gate.
+    code, payload = _consent(fail_mode_upgrade(_OPEN_CLAUDE, "--json", *version, from_config_version=from_config_version))
+    assert (code, payload["fail_mode_change_not_accepted"]) == (0, False)
+
+
+@pytest.mark.parametrize(
+    ("config", "stops"),
+    [
+        (_OPEN_CLAUDE, True),
+        # A persisted closed mode (global, or unset, which is closed) needs no consent.
+        (_OPEN_CLAUDE.replace("hook_fail_mode: open", "hook_fail_mode: closed"), False),
+        (_OPEN_CLAUDE.replace("  hook_fail_mode: open\n", ""), False),
+        # A connector override open behind a closed global still stops.
+        (
+            "config_version: 9\nguardrail:\n  enabled: true\n  hook_fail_mode: closed\n  connectors:\n"
+            "    claudecode: {mode: action}\n    codex: {mode: action, hook_fail_mode: open}\n",
+            True,
+        ),
+        # A connector override closed behind an open global: closed was persisted for it.
+        (
+            "config_version: 9\nguardrail:\n  enabled: true\n  hook_fail_mode: open\n  connectors:\n"
+            "    claudecode: {mode: action, hook_fail_mode: closed}\n",
+            False,
+        ),
+        # Cursor in observe mode is open whatever fail-mode says.
+        (
+            "config_version: 9\nguardrail:\n  enabled: true\n  hook_fail_mode: closed\n  connectors:\n"
+            "    cursor: {mode: observe}\n",
+            True,
+        ),
+        # Connectors whose hooks never read the variable, or that have no hooks, change nothing.
+        (_OPEN_CLAUDE.replace("claudecode: {mode: action}", "opencode: {mode: action}\n    amp: {mode: action}"), False),
+        (_OPEN_CLAUDE.replace("{mode: action}", "{mode: action, enabled: false}"), False),
+        (_OPEN_CLAUDE.replace("enabled: true", "enabled: false"), False),
+        # A managed host: the administrator's open still changes the outage behavior.
+        ("deployment_mode: managed_enterprise\n" + _OPEN_CLAUDE, True),
+    ],
+)
+def test_check_stops_exactly_when_an_installed_open_hook_would_change(
+    fail_mode_upgrade, config: str, stops: bool
+) -> None:
+    code, payload = _consent(fail_mode_upgrade(config, "--from-version", "1.0.3", "--check", "--json"))
+    assert (code, payload["fail_mode_change_not_accepted"]) == ((3, True) if stops else (0, False)), payload
+    assert bool(payload["warnings"]) is stops
+
+
+@pytest.mark.parametrize("value", ["closed", "open"])
+def test_the_upgrades_own_variable_is_not_consent(fail_mode_upgrade, monkeypatch: pytest.MonkeyPatch, value) -> None:
+    # The agent's environment is not the upgrade's: what migrate's own shell
+    # sets proves nothing about the agent that relied on the old hooks.
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", value)
+    code, payload = _consent(fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.3", "--check", "--json"))
+    assert (code, payload["fail_mode_change_not_accepted"]) == (3, True)
+    # A reinstall of this release only names the variable.
+    code, payload = _consent(fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.4", "--check", "--json"))
+    assert (code, payload["fail_mode_change_not_accepted"]) == (0, False)
+    assert "DEFENSECLAW_FAIL_MODE is set in this environment" in payload["warnings"][0]
+
+
+def test_check_refusal_says_how_to_go_on_in_text(fail_mode_upgrade) -> None:
+    result = fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.3", "--check")
+    assert result.exit_code == 3, result.output
+    out = " ".join(result.output.split())
+    assert "claudecode is installed open" in out
+    assert "defenseclaw guardrail fail-mode closed" in out
+    assert "needs your consent" in out and "Nothing was changed" in out
+    assert "--accept-fail-mode-change" in out and "-AcceptFailModeChange" in out
+
+
+def test_a_notice_that_cannot_be_worked_out_still_stops_the_check(
+    fail_mode_upgrade, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from defenseclaw import fail_mode
+
+    real = fail_mode.process_fail_mode_upgrade_notice
+
+    def broken(cfg, previous=None):
+        if cfg is not None:
+            raise RuntimeError("guardrail shape this release did not expect")
+        return real(cfg, previous)
+
+    monkeypatch.setattr(fail_mode, "process_fail_mode_upgrade_notice", broken)
+    code, payload = _consent(fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.3", "--check", "--json"))
+    assert (code, payload["fail_mode_change_not_accepted"]) == (3, True)
+    assert "defenseclaw guardrail fail-mode closed" in payload["warnings"][0]
+
+
+def test_a_failing_check_keeps_its_own_exit_code(fail_mode_upgrade, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Consent is asked only for an upgrade that can otherwise go ahead.
+    def too_new(_data_dir, **_kwargs):
+        raise migrations.ConfigTooNewError("config_version 99")
+
+    monkeypatch.setattr(migrations, "migrate", too_new)
+    result = fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.3", "--check")
+    assert result.exit_code == 2, result.output
