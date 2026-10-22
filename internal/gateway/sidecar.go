@@ -4929,7 +4929,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 		publishHealth := func() {
 			policyMode, enforcementEnabled, summary, surface := modeDetails()
-			s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
+			detail := map[string]interface{}{
 				"summary":             summary,
 				"connector":           conn.Name(),
 				"mode":                policyMode,
@@ -4940,7 +4940,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 				"proxy_port":          "closed",
 				"hint":                "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path",
 				"lifecycle_manager":   lifecycleManagerForConnector(s.currentConfig(), conn),
-			})
+			}
+			if len(singleRollback.agentSettingsRefused) > 0 {
+				detail[GuardrailAgentSettingsRefused] = singleRollback.agentSettingsRefused
+			}
+			s.health.SetGuardrail(StateRunning, "", detail)
 		}
 		publishHealth()
 		fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — proxy port intentionally not bound\n", conn.Name(), policyMode, enforcementEnabled)
@@ -5290,9 +5294,10 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	}
 	succeeded := setupTransaction.succeeded
 
-	// Persist the set that actually came up so the next boot's
-	// set-difference teardown is accurate.
+	// Persist the set that actually came up, plus the registrations a
+	// refusal kept, so the next boot's set-difference teardown is accurate.
 	persisted := append(append([]string(nil), succeeded...), failedRemoved...)
+	persisted = append(persisted, setupTransaction.keptRegistrations...)
 	if err := s.publishMultiConnectorReadyState(ctx, setupTransaction, persisted, failedRemoved); err != nil {
 		return err
 	}
@@ -5919,6 +5924,11 @@ type multiConnectorSetupTransaction struct {
 	// so setup and status name it instead of only a roster mismatch
 	// (GAP-0620).
 	notStartedReasons map[string]string
+	// keptRegistrations lists the agentSettingsRefused connectors that still
+	// hold their earlier registration. They stay in the saved active set, so a
+	// later per-connector disable removes them through the non-fatal
+	// set-difference teardown instead of the orphan reconciliation (GAP-0578).
+	keptRegistrations []string
 	// publishSetupProgress reports each connector's setup step in guardrail
 	// health. Only the boot path sets it: a running guardrail stays running.
 	publishSetupProgress bool
@@ -6050,7 +6060,8 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 		)
 	}
 	removed, failed := teardownRemovedConnectorCandidates(candidates, ctx)
-	if len(failed) > 0 || len(removed) != len(previousNames) {
+	candidates, failed = keepAgentSettingsRefusedTeardowns(ctx, candidates, failed, transaction)
+	if len(failed) > 0 || len(removed)+len(transaction.keptRegistrations) != len(previousNames) {
 		// Teardown may have partially changed the old registration. Reapply the
 		// captured candidate before returning, without touching the requested
 		// connector because its Setup has not run yet.
@@ -6076,6 +6087,48 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 	return nil
 }
 
+// keepAgentSettingsRefusedTeardowns takes out of failed, and out of the
+// candidates the switch would restore, each previous connector whose teardown
+// failed and whose Setup refuses its agent's own settings (for example a
+// settings file that does not parse). Setup refused before changing anything,
+// so restoring it can never succeed and failed the start for the requested
+// connector on every boot. Like the multi-connector set-difference teardown,
+// the connector stays in the saved active set with its lock entry, its
+// teardown is retried on the next start, and the requested connector starts
+// (GAP-0578).
+func keepAgentSettingsRefusedTeardowns(
+	ctx context.Context,
+	candidates []multiConnectorSetupRollbackPoint,
+	failed []string,
+	transaction *multiConnectorSetupTransaction,
+) ([]multiConnectorSetupRollbackPoint, []string) {
+	if len(failed) == 0 {
+		return candidates, failed
+	}
+	restore := make([]multiConnectorSetupRollbackPoint, 0, len(candidates))
+	var stillFailed []string
+	for _, candidate := range candidates {
+		name := candidate.conn.Name()
+		if !containsFold(failed, name) {
+			restore = append(restore, candidate)
+			continue
+		}
+		err := reapplyPreviouslyActiveConnectorRegistration(ctx, candidate)
+		if !errors.Is(err, connector.ErrAgentConfigRefusal) {
+			restore = append(restore, candidate)
+			stillFailed = append(stillFailed, name)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: removed connector %s kept for a teardown retry on the next start (other connectors unaffected): %v\n", name, err)
+		if transaction.agentSettingsRefused == nil {
+			transaction.agentSettingsRefused = map[string]string{}
+		}
+		transaction.agentSettingsRefused[name] = err.Error()
+		transaction.keptRegistrations = append(transaction.keptRegistrations, name)
+	}
+	return restore, stillFailed
+}
+
 func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector.Connector, apiToken, proxyAddr, apiAddr, masterKey string, cache *guardrail.RulePackCache) ([]string, error) {
 	transaction, err := s.setupConnectorsIsolatedTransaction(
 		ctx, conns, apiToken, proxyAddr, apiAddr, masterKey, cache,
@@ -6097,6 +6150,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		transaction.releaseRefused = false
 		transaction.agentSettingsRefused = nil
 		transaction.notStartedReasons = nil
+		transaction.keptRegistrations = nil
 	}
 	registrations := make([]connectorRegistration, 0, len(conns))
 	for _, conn := range conns {
@@ -6191,6 +6245,9 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			}
 			transaction.agentSettingsRefused[registration.conn.Name()] = err.Error()
 			transaction.noteNotStarted(registration.conn.Name(), err)
+			if strings.TrimSpace(previousLock.Connector) != "" {
+				transaction.keptRegistrations = append(transaction.keptRegistrations, registration.conn.Name())
+			}
 			continue
 		}
 		if err != nil {
@@ -7670,7 +7727,7 @@ func (s *Sidecar) saveSingleConnectorReadyState(
 		lockErr := fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
 		return failAndRestoreLock("hook contract lock", lockErr)
 	}
-	if err := connector.SaveActiveConnector(opts.DataDir, conn.Name()); err != nil {
+	if err := connector.SaveActiveConnectors(opts.DataDir, append([]string{conn.Name()}, transaction.keptRegistrations...)); err != nil {
 		stateErr := fmt.Errorf("connector %s active state save failed after hook contract publication: %w", conn.Name(), err)
 		return failAndRestoreLock("active state", stateErr)
 	}

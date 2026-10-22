@@ -625,25 +625,37 @@ func jsonValuesEqual(left, right interface{}) bool {
 // refusing links.
 func claudeCodeUserSettingsReadPath(path string) (string, error) {
 	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 || runtime.GOOS == "windows" {
-		return path, nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("inspect settings source %s: %w", path, err)
 	}
-	target, err := filepath.EvalSymlinks(path)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 && runtime.GOOS != "windows" {
+		target, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", fmt.Errorf("settings source is a link that cannot be followed: %w", err)
+		}
+		home := filepath.Clean(userHomeDir())
+		if resolved, err := filepath.EvalSymlinks(home); err == nil {
+			home = resolved
+		}
+		if rel, err := filepath.Rel(home, target); err != nil || rel == "." || rel == ".." ||
+			strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			return "", fmt.Errorf("settings source is a link to %s, outside your home folder; link it to a file in your home folder or replace the link with the file", target)
+		}
+		if err := validatePluginOwner(target); err != nil {
+			return "", fmt.Errorf("settings source is a link to a file another account owns: %w", err)
+		}
+		return target, nil
+	}
+	// A linked parent can also carry an ordinary or absent settings.json out
+	// of the home. Inspect the full path before treating absence as safe.
+	target, outside, err := AgentConfigOutsideHome(userHomeDir(), path)
 	if err != nil {
-		return "", fmt.Errorf("settings source is a link that cannot be followed: %w", err)
+		return "", fmt.Errorf("inspect settings source %s: %w", path, err)
 	}
-	home := filepath.Clean(userHomeDir())
-	if resolved, err := filepath.EvalSymlinks(home); err == nil {
-		home = resolved
+	if outside {
+		return "", fmt.Errorf("settings source %s leads outside your home folder, to %s; move it into your home folder or replace the link", path, target)
 	}
-	if rel, err := filepath.Rel(home, target); err != nil || rel == "." || rel == ".." ||
-		strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("settings source is a link to %s, outside your home folder; link it to a file in your home folder or replace the link with the file", target)
-	}
-	if err := validatePluginOwner(target); err != nil {
-		return "", fmt.Errorf("settings source is a link to a file another account owns: %w", err)
-	}
-	return target, nil
+	return path, nil
 }
 
 func readOptionalClaudeCodeSettings(name, path string) (*claudeCodeSettingsSource, error) {

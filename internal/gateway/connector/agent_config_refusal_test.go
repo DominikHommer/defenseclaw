@@ -22,6 +22,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -145,5 +146,136 @@ func TestCheckAgentSettingsPassesUsableSettings(t *testing.T) {
 	}
 	if after, err := os.ReadFile(path); err != nil || string(after) != "[broken\n" {
 		t.Fatalf("CheckAgentSettings changed the settings: %q (%v)", after, err)
+	}
+}
+
+// A Claude Code settings file that does not parse cannot show that the
+// DefenseClaw hooks are gone. Reporting it clean let a disabled connector's
+// failed teardown drop its lock entry and active-set retry while the hooks
+// stayed in the file, so fixing the file never removed them (GAP-0578).
+func TestClaudeCodeVerifyCleanRefusesSettingsThatDoNotParse(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	prev := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = prev })
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+
+	hook := filepath.Join(dir, "hooks", "claude-code-hook.sh")
+	body := `{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"` + hook + `"}]}]}}{`
+	if err := os.WriteFile(settingsPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewClaudeCodeConnector().VerifyClean(opts); err == nil || !strings.Contains(err.Error(), "is not valid JSON") {
+		t.Fatalf("VerifyClean of settings that do not parse = %v, want a not-valid-JSON error", err)
+	}
+
+	for _, clean := range []string{"", "  \n", `{"env":{"EDITOR":"vi"}}`} {
+		if err := os.WriteFile(settingsPath, []byte(clean), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := NewClaudeCodeConnector().VerifyClean(opts); err != nil {
+			t.Fatalf("VerifyClean of %q = %v, want clean", clean, err)
+		}
+	}
+}
+
+// Setup and the CLI precheck must reject the same unreadable user settings
+// before changing the connector or stopping a gateway that serves its peers.
+func TestCheckAgentSettingsRefusesUnreadableAndEscapingPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name, connector, kind, want string
+	}{
+		{"claude directory", "claudecode", "directory", "not a regular file"},
+		{"codex directory", "codex", "directory", "config.toml"},
+		{"claude outside link", "claudecode", "outside", "outside your home folder"},
+		{"claude dangling link", "claudecode", "dangling", "cannot be followed"},
+		{"claude parent link", "claudecode", "parent outside", "outside your home folder"},
+		{"codex outside link", "codex", "outside", "leads outside the home"},
+		{"codex dangling link", "codex", "dangling", "config.toml"},
+		{"codex parent link", "codex", "parent outside", "leads outside the home"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && tc.kind != "directory" {
+				t.Skip("creating file links requires a Windows privilege")
+			}
+			home := t.TempDir()
+			settingsDir := filepath.Join(home, ".claude")
+			filename := "settings.json"
+			conn := Connector(NewClaudeCodeConnector())
+			if tc.connector == "codex" {
+				settingsDir = filepath.Join(home, ".codex")
+				filename = "config.toml"
+				conn = NewCodexConnector()
+			}
+			if tc.kind == "parent outside" {
+				if err := os.Symlink(t.TempDir(), settingsDir); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Mkdir(settingsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(settingsDir, filename)
+			switch tc.kind {
+			case "directory":
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "outside":
+				target := filepath.Join(t.TempDir(), filename)
+				body := []byte("{}")
+				if tc.connector == "codex" {
+					body = []byte("model = \"gpt-5\"\n")
+				}
+				if err := os.WriteFile(target, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			case "dangling":
+				if err := os.Symlink(filepath.Join(home, "missing", filename), path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.connector == "codex" {
+				pointCodexConfig(t, path)
+			} else {
+				previous := ClaudeCodeSettingsPathOverride
+				ClaudeCodeSettingsPathOverride = path
+				t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+			}
+			dataDir := t.TempDir()
+			if err := WithUserHomeDir(home, func() error {
+				return CheckAgentSettings(conn, SetupOpts{DataDir: dataDir})
+			}); !errors.Is(err, ErrAgentConfigRefusal) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CheckAgentSettings = %v; want refusal naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCheckAgentSettingsAllowsMissingUserSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name, file string
+		conn       Connector
+		point      func(*testing.T, string)
+	}{
+		{"claudecode", ".claude/settings.json", NewClaudeCodeConnector(), func(t *testing.T, path string) {
+			previous := ClaudeCodeSettingsPathOverride
+			ClaudeCodeSettingsPathOverride = path
+			t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+		}},
+		{"codex", ".codex/config.toml", NewCodexConnector(), pointCodexConfig},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			tc.point(t, filepath.Join(home, tc.file))
+			if err := WithUserHomeDir(home, func() error {
+				return CheckAgentSettings(tc.conn, SetupOpts{DataDir: t.TempDir()})
+			}); err != nil {
+				t.Fatalf("missing user settings = %v, want no refusal", err)
+			}
+		})
 	}
 }

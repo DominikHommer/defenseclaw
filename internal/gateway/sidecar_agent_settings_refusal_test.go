@@ -85,69 +85,8 @@ func TestRunGuardrailMultiAgentSettingsRefusalKeepsOtherConnectors(t *testing.T)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dataDir := testenv.PrivateTempDir(t)
-			agentHome := testenv.PrivateTempDir(t)
-			codexConfig := filepath.Join(agentHome, ".codex", "config.toml")
-			claudeSettings := filepath.Join(agentHome, ".claude", "settings.json")
-			for _, path := range []string{codexConfig, claudeSettings} {
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(claudeSettings, []byte(`{"env":{"EDITOR":"operator-editor"}}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(dataDir, "agent_discovery.json"),
-				[]byte(`{"agents":{"claudecode":{"version":"2.1.307 (Claude Code)"},"codex":{"version":"codex-cli 0.142.4"}}}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			prevCodex, prevClaude := connector.CodexConfigPathOverride, connector.ClaudeCodeSettingsPathOverride
-			connector.CodexConfigPathOverride, connector.ClaudeCodeSettingsPathOverride = codexConfig, claudeSettings
-			t.Cleanup(func() {
-				connector.CodexConfigPathOverride, connector.ClaudeCodeSettingsPathOverride = prevCodex, prevClaude
-			})
-			cfg := &config.Config{
-				DataDir: dataDir,
-				Gateway: config.GatewayConfig{APIPort: 18972},
-				Guardrail: config.GuardrailConfig{
-					Enabled: true,
-					Mode:    "action",
-					Connectors: map[string]config.PerConnectorGuardrailConfig{
-						"codex":      {},
-						"claudecode": {},
-					},
-				},
-			}
-			boot := func(t *testing.T) (*Sidecar, error) {
-				t.Helper()
-				s := &Sidecar{cfg: cfg, health: NewSidecarHealth(), router: routerWithDefaultRulePack(t)}
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				done := make(chan error, 1)
-				go func() { done <- s.runGuardrailMulti(ctx) }()
-				deadline := time.Now().Add(time.Minute)
-				for s.health.Snapshot().Guardrail.State != StateRunning {
-					select {
-					case err := <-done:
-						return s, err
-					case <-time.After(10 * time.Millisecond):
-					}
-					if time.Now().After(deadline) {
-						cancel()
-						<-done
-						t.Fatal("the guardrail neither ran nor failed within a minute")
-					}
-				}
-				cancel()
-				return s, <-done
-			}
-			running := func(s *Sidecar) []string {
-				names, _ := s.health.Snapshot().Guardrail.Details["connectors"].([]string)
-				return names
-			}
+			f := newAgentSettingsRefusalFixture(t)
+			dataDir, codexConfig, claudeSettings, boot, running := f.dataDir, f.codexConfig, f.claudeSettings, f.boot, f.running
 
 			s, err := boot(t)
 			if err != nil || !reflect.DeepEqual(running(s), []string{"claudecode", "codex"}) {
@@ -156,10 +95,7 @@ func TestRunGuardrailMultiAgentSettingsRefusalKeepsOtherConnectors(t *testing.T)
 			lockPath := filepath.Join(dataDir, "hook_contract_lock.json")
 			lockBefore := readAgentFile(t, lockPath)
 			tc.off(t, codexConfig, claudeSettings)
-			victimFile := codexConfig
-			if tc.victim == "claudecode" {
-				victimFile = claudeSettings
-			}
+			victimFile := f.settingsFile(tc.victim)
 			victimBefore := readAgentFile(t, victimFile)
 
 			s, err = boot(t)
@@ -194,6 +130,317 @@ func TestRunGuardrailMultiAgentSettingsRefusalKeepsOtherConnectors(t *testing.T)
 			}
 		})
 	}
+}
+
+// A connector the agent's settings refused keeps its registration, so it stays
+// in the saved active set. `guardrail disable --connector X` then removes it
+// through the per-connector removal path: a teardown that fails because the
+// same file still does not parse is retried on the next start and never stops
+// the other connector. Before, the refused connector dropped out of the active
+// set, the next start treated it as an orphan, and its failed teardown put the
+// guardrail into error for every connector on every boot.
+func TestRunGuardrailMultiDisablingARefusedConnectorKeepsOtherConnectors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("per-user Codex setup on Windows needs protected executable evidence")
+	}
+	cases := []struct {
+		name   string
+		victim string
+		peer   string
+		off    func(t *testing.T, f *agentSettingsRefusalFixture)
+		on     func(t *testing.T, f *agentSettingsRefusalFixture)
+	}{
+		{
+			name: "codex config does not parse", victim: "codex", peer: "claudecode",
+			off: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				appendAgentFile(t, f.codexConfig, "\nbroken = [\n")
+			},
+			on: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				replaceAgentFile(t, f.codexConfig, "\nbroken = [\n", "\n")
+			},
+		},
+		{
+			name: "codex features hooks false", victim: "codex", peer: "claudecode",
+			off: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				appendAgentFile(t, f.codexConfig, "\n[features]\nhooks = false\n")
+			},
+			// Teardown of the disabled connector already drops the hooks
+			// feature flag it owned along with its last hook.
+			on: func(t *testing.T, f *agentSettingsRefusalFixture) {},
+		},
+		{
+			name: "claude code settings do not parse", victim: "claudecode", peer: "codex",
+			off: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				data := readAgentFile(t, f.claudeSettings)
+				if err := os.WriteFile(f.claudeSettings, append(data, '{'), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			on: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				data := readAgentFile(t, f.claudeSettings)
+				if err := os.WriteFile(f.claudeSettings, bytes.TrimSuffix(data, []byte("{")), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAgentSettingsRefusalFixture(t)
+			s, err := f.boot(t)
+			if err != nil || !reflect.DeepEqual(f.running(s), []string{"claudecode", "codex"}) {
+				t.Fatalf("first start: err=%v running=%v", err, f.running(s))
+			}
+			tc.off(t, f)
+			s, err = f.boot(t)
+			if err != nil || !reflect.DeepEqual(f.running(s), []string{tc.peer}) {
+				t.Fatalf("start with %s refused: err=%v running=%v", tc.victim, err, f.running(s))
+			}
+			if active := connector.LoadActiveConnectors(f.dataDir); !reflect.DeepEqual(active, []string{"claudecode", "codex"}) {
+				t.Errorf("active set after the refusal = %v, want the refused %s kept with its registration", active, tc.victim)
+			}
+
+			disabled := false
+			f.cfg.Guardrail.Connectors[tc.victim] = config.PerConnectorGuardrailConfig{Enabled: &disabled}
+			for boot := 1; boot <= 2; boot++ {
+				s, err = f.boot(t)
+				if err != nil {
+					t.Fatalf("start %d after disabling the refused %s stopped the guardrail: %v", boot, tc.victim, err)
+				}
+				if snap := s.health.Snapshot(); snap.Guardrail.State != StateRunning || !reflect.DeepEqual(f.running(s), []string{tc.peer}) {
+					t.Fatalf("start %d after disabling %s: state=%s running=%v (%s), want %s running",
+						boot, tc.victim, snap.Guardrail.State, f.running(s), snap.Guardrail.LastError, tc.peer)
+				}
+			}
+
+			// Repair converges: once the file parses again the disabled
+			// connector is torn down and forgotten, and enabling it again
+			// guards both agents.
+			tc.on(t, f)
+			s, err = f.boot(t)
+			if err != nil || !reflect.DeepEqual(f.running(s), []string{tc.peer}) {
+				t.Fatalf("start after the fix with %s disabled: err=%v running=%v", tc.victim, err, f.running(s))
+			}
+			if strings.Contains(string(readAgentFile(t, f.settingsFile(tc.victim))), filepath.Join(f.dataDir, "hooks")) {
+				t.Errorf("the disabled %s still has DefenseClaw hooks after its file was fixed", tc.victim)
+			}
+			if entry := jsonConnectorEntry(t, readAgentFile(t, filepath.Join(f.dataDir, "hook_contract_lock.json")), tc.victim); entry != nil {
+				t.Errorf("the disabled %s kept its hook contract lock entry: %s", tc.victim, entry)
+			}
+			if active := connector.LoadActiveConnectors(f.dataDir); !reflect.DeepEqual(active, []string{tc.peer}) {
+				t.Errorf("active set after the disabled %s was removed = %v, want [%s]", tc.victim, active, tc.peer)
+			}
+
+			f.cfg.Guardrail.Connectors[tc.victim] = config.PerConnectorGuardrailConfig{}
+			s, err = f.boot(t)
+			if err != nil || !reflect.DeepEqual(f.running(s), []string{"claudecode", "codex"}) {
+				t.Fatalf("start after enabling %s again: err=%v running=%v", tc.victim, err, f.running(s))
+			}
+		})
+	}
+}
+
+// The single-connector start removes every other connector of the saved
+// active set. When the operator drops a connector whose agent settings no
+// longer parse, its teardown fails on that file and Setup refuses to restore
+// it, so the start stopped with "prior-registration rollback incomplete" on
+// every boot and the remaining connector was not enforced. It now keeps the
+// refused connector for a teardown retry, as the multi-connector start does,
+// and the retry removes it once the file parses again.
+func TestRunGuardrailRemovingARefusedConnectorStartsTheRemainingOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("per-user Codex setup on Windows needs protected executable evidence")
+	}
+	cases := []struct {
+		name   string
+		victim string
+		peer   string
+		off    func(t *testing.T, f *agentSettingsRefusalFixture)
+		on     func(t *testing.T, f *agentSettingsRefusalFixture)
+	}{
+		{
+			name: "claude code settings do not parse", victim: "claudecode", peer: "codex",
+			off: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				data := readAgentFile(t, f.claudeSettings)
+				if err := os.WriteFile(f.claudeSettings, append(data, '{'), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			on: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				data := readAgentFile(t, f.claudeSettings)
+				if err := os.WriteFile(f.claudeSettings, bytes.TrimSuffix(data, []byte("{")), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "codex config does not parse", victim: "codex", peer: "claudecode",
+			off: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				appendAgentFile(t, f.codexConfig, "\nbroken = [\n")
+			},
+			on: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				replaceAgentFile(t, f.codexConfig, "\nbroken = [\n", "\n")
+			},
+		},
+		{
+			name: "codex features hooks false", victim: "codex", peer: "claudecode",
+			off: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				appendAgentFile(t, f.codexConfig, "\n[features]\nhooks = false\n")
+			},
+			on: func(t *testing.T, f *agentSettingsRefusalFixture) {},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAgentSettingsRefusalFixture(t)
+			s, err := f.boot(t)
+			if err != nil || !reflect.DeepEqual(f.running(s), []string{"claudecode", "codex"}) {
+				t.Fatalf("first start: err=%v running=%v", err, f.running(s))
+			}
+			tc.off(t, f)
+			s, err = f.boot(t)
+			if err != nil || !reflect.DeepEqual(f.running(s), []string{tc.peer}) {
+				t.Fatalf("start with %s refused: err=%v running=%v", tc.victim, err, f.running(s))
+			}
+
+			delete(f.cfg.Guardrail.Connectors, tc.victim)
+			for boot := 1; boot <= 2; boot++ {
+				s, err = f.boot(t)
+				if err != nil {
+					t.Fatalf("start %d after removing the refused %s stopped the guardrail: %v", boot, tc.victim, err)
+				}
+				if snap := s.health.Snapshot(); snap.Guardrail.State != StateRunning || !reflect.DeepEqual(f.running(s), []string{tc.peer}) {
+					t.Fatalf("start %d after removing %s: state=%s running=%v (%s), want %s running",
+						boot, tc.victim, snap.Guardrail.State, f.running(s), snap.Guardrail.LastError, tc.peer)
+				}
+			}
+			kept := connector.LoadActiveConnectors(f.dataDir)
+			if tc.name != "codex features hooks false" {
+				if !reflect.DeepEqual(kept, []string{"claudecode", "codex"}) {
+					t.Errorf("active set with the removed %s still registered = %v, want it kept for a teardown retry", tc.victim, kept)
+				}
+				if refused := fmt.Sprint(s.health.Snapshot().Guardrail.Details[GuardrailAgentSettingsRefused]); !strings.Contains(refused, tc.victim+":") {
+					t.Errorf("health does not name the removed %s kept for a retry: %s", tc.victim, refused)
+				}
+			}
+
+			// Repair converges: once the file parses again the removed
+			// connector is torn down and forgotten.
+			tc.on(t, f)
+			s, err = f.boot(t)
+			if err != nil || !reflect.DeepEqual(f.running(s), []string{tc.peer}) {
+				t.Fatalf("start after the fix with %s removed: err=%v running=%v", tc.victim, err, f.running(s))
+			}
+			if strings.Contains(string(readAgentFile(t, f.settingsFile(tc.victim))), filepath.Join(f.dataDir, "hooks")) {
+				t.Errorf("the removed %s still has DefenseClaw hooks after its file was fixed", tc.victim)
+			}
+			if entry := jsonConnectorEntry(t, readAgentFile(t, filepath.Join(f.dataDir, "hook_contract_lock.json")), tc.victim); entry != nil {
+				t.Errorf("the removed %s kept its hook contract lock entry: %s", tc.victim, entry)
+			}
+			if active := connector.LoadActiveConnectors(f.dataDir); !reflect.DeepEqual(active, []string{tc.peer}) {
+				t.Errorf("active set after the removed %s was torn down = %v, want [%s]", tc.victim, active, tc.peer)
+			}
+		})
+	}
+}
+
+type agentSettingsRefusalFixture struct {
+	cfg            *config.Config
+	dataDir        string
+	codexConfig    string
+	claudeSettings string
+}
+
+// newAgentSettingsRefusalFixture is a per-user action-mode install of real
+// Codex and Claude Code connectors whose settings files live in a temp home.
+func newAgentSettingsRefusalFixture(t *testing.T) *agentSettingsRefusalFixture {
+	t.Helper()
+	dataDir := testenv.PrivateTempDir(t)
+	agentHome := testenv.PrivateTempDir(t)
+	f := &agentSettingsRefusalFixture{
+		dataDir:        dataDir,
+		codexConfig:    filepath.Join(agentHome, ".codex", "config.toml"),
+		claudeSettings: filepath.Join(agentHome, ".claude", "settings.json"),
+	}
+	for _, path := range []string{f.codexConfig, f.claudeSettings} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(f.codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.claudeSettings, []byte(`{"env":{"EDITOR":"operator-editor"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "agent_discovery.json"),
+		[]byte(`{"agents":{"claudecode":{"version":"2.1.307 (Claude Code)"},"codex":{"version":"codex-cli 0.142.4"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prevCodex, prevClaude := connector.CodexConfigPathOverride, connector.ClaudeCodeSettingsPathOverride
+	connector.CodexConfigPathOverride, connector.ClaudeCodeSettingsPathOverride = f.codexConfig, f.claudeSettings
+	t.Cleanup(func() {
+		connector.CodexConfigPathOverride, connector.ClaudeCodeSettingsPathOverride = prevCodex, prevClaude
+	})
+	f.cfg = &config.Config{
+		DataDir: dataDir,
+		Gateway: config.GatewayConfig{APIPort: 18972},
+		Guardrail: config.GuardrailConfig{
+			Enabled: true,
+			Mode:    "action",
+			Connectors: map[string]config.PerConnectorGuardrailConfig{
+				"codex":      {},
+				"claudecode": {},
+			},
+		},
+	}
+	return f
+}
+
+// boot runs one gateway start, single- or multi-connector as the gateway
+// picks, until the guardrail runs or the start fails.
+func (f *agentSettingsRefusalFixture) boot(t *testing.T) (*Sidecar, error) {
+	t.Helper()
+	s := &Sidecar{cfg: f.cfg, health: NewSidecarHealth(), router: routerWithDefaultRulePack(t)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	run := s.runGuardrailMulti
+	if len(f.cfg.ActiveConnectors()) < 2 {
+		run = s.runGuardrail
+	}
+	go func() { done <- run(ctx) }()
+	deadline := time.Now().Add(time.Minute)
+	for s.health.Snapshot().Guardrail.State != StateRunning {
+		select {
+		case err := <-done:
+			return s, err
+		case <-time.After(10 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatal("the guardrail neither ran nor failed within a minute")
+		}
+	}
+	cancel()
+	return s, <-done
+}
+
+func (f *agentSettingsRefusalFixture) running(s *Sidecar) []string {
+	details := s.health.Snapshot().Guardrail.Details
+	if name, ok := details["connector"].(string); ok {
+		return []string{name}
+	}
+	names, _ := details["connectors"].([]string)
+	return names
+}
+
+func (f *agentSettingsRefusalFixture) settingsFile(name string) string {
+	if name == "claudecode" {
+		return f.claudeSettings
+	}
+	return f.codexConfig
 }
 
 func readAgentFile(t *testing.T, path string) []byte {
