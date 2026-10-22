@@ -69,7 +69,7 @@ func TestStandaloneManagedOpenBlocksErrorStatusesThatAreNotAnOutage(t *testing.T
 						tc.mutate(o)
 					}
 				})
-				want := !(mode == "open" && tc.allowedOpen)
+				want := mode != "open" || !tc.allowedOpen
 				if blocked(result) != want {
 					t.Fatalf("blocked = %v, want %v: code=%d stdout=%q stderr=%q", blocked(result), want, result.code, result.stdout, result.stderr)
 				}
