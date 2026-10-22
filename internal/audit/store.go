@@ -3073,22 +3073,22 @@ func (s *Store) InsertFinding(id, scanID, severity, title, description, location
 	return nil
 }
 
-// hasAuditEvent reports whether audit_events holds a row with id. A store
-// without a database holds none.
-func (s *Store) hasAuditEvent(ctx context.Context, id string) (bool, error) {
+// storedAuditEventTime returns the timestamp of the audit_events row with id
+// and whether there is one. A store without a database holds none.
+func (s *Store) storedAuditEventTime(ctx context.Context, id string) (time.Time, bool, error) {
 	if s == nil || s.db == nil {
-		return false, nil
+		return time.Time{}, false, nil
 	}
-	var one int
+	var at time.Time
 	err := s.scanRow(ctx, "audit_event_exists",
-		s.db.QueryRowContext(ctx, `SELECT 1 FROM audit_events WHERE id = ? LIMIT 1`, id), &one)
+		s.db.QueryRowContext(ctx, `SELECT timestamp FROM audit_events WHERE id = ? LIMIT 1`, id), &at)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return time.Time{}, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("audit: look up audit event %s: %w", id, err)
+		return time.Time{}, false, fmt.Errorf("audit: look up audit event %s: %w", id, err)
 	}
-	return true, nil
+	return at, true, nil
 }
 
 func (s *Store) ListEvents(limit int) ([]Event, error) {

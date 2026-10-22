@@ -624,10 +624,51 @@ func (runtime *Runtime) EmitAtomicBatch(
 	return outcomes, processErr
 }
 
+// ReplayExport hands the optional destination work of a spooled
+// control-plane occurrence that SQLite already holds to this generation's
+// dispatchers, without writing it again. Its producer calls it when it offers
+// the occurrence again after a restart: the row may have committed before the
+// exporter enqueue ran, and the producer marks the occurrence reported only
+// after this returns. Only replayableControlPlaneEvent actions are accepted.
+func (runtime *Runtime) ReplayExport(
+	ctx context.Context,
+	metadata router.Metadata,
+	builder EmitBuilder,
+) error {
+	if runtime == nil || runtime.manager == nil || ctx == nil || builder == nil ||
+		!replayableControlPlaneEvent(metadata) {
+		return &Error{code: ErrorInvalidDependency}
+	}
+	lease, err := runtime.manager.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer lease.Release()
+	graph := lease.Graph()
+	component, ok := lease.Component(LocalLogComponentName)
+	if graph == nil || !ok {
+		return &Error{code: ErrorComponentUnavailable}
+	}
+	local, ok := component.(*localLogComponent)
+	if !ok || local.digest != graph.Digest() {
+		return &Error{code: ErrorComponentUnavailable}
+	}
+	baseSnapshot := EmitContext{
+		plan: graph.Plan(), digest: graph.Digest(), generation: graph.Generation(),
+	}
+	outcome, replayErr := local.ProcessExportReplay(ctx, metadata, leaseRecordBuilder(ctx, lease, baseSnapshot, builder, false))
+	if replayErr != nil {
+		return replayErr
+	}
+	runtime.dispatchOptional(lease, graph, outcome)
+	return nil
+}
+
 // These control-plane events have a durable producer spool. The producer
 // retries until the local append succeeds, so exporting a failed append
 // would send a fresh duplicate on every poll throughout a SQLite outage.
-// Live events without a spool retain their remote outage visibility.
+// Live events without a spool retain their remote outage visibility. A row
+// that committed before a restart is exported again through ReplayExport.
 func replayableControlPlaneEvent(metadata router.Metadata) bool {
 	switch metadata.Action() {
 	case "config.bundle.receipt", "config.trust_anchors.changed", "config.secret.changed", "config.secret.change_failed":

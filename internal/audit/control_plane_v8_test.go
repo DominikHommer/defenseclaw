@@ -39,6 +39,10 @@ type testRuntimeV8Emitter struct {
 	metadata []router.Metadata
 	records  []observability.Record
 	metrics  []observability.Record
+	// replayed holds the stored occurrences exported again, replayErr the
+	// error ReplayRuntimeV8Export returns instead.
+	replayed  []observability.Record
+	replayErr error
 }
 
 type rejectingRuntimeV8Emitter struct {
@@ -185,6 +189,33 @@ func (emitter *testRuntimeV8Emitter) RecordRuntimeV8GeneratedMetricBatch(
 	emitter.metrics = append(emitter.metrics, records...)
 	emitter.mu.Unlock()
 	return nil
+}
+
+func (emitter *testRuntimeV8Emitter) ReplayRuntimeV8Export(
+	_ context.Context,
+	_ router.Metadata,
+	builder RuntimeV8Builder,
+) error {
+	if emitter.replayErr != nil {
+		return emitter.replayErr
+	}
+	record, err := builder(RuntimeV8BuildContext{
+		ConfigGeneration: 23,
+		ConfigDigest:     testEventHistoryGraphDigest,
+	}, emitter.admission)
+	if err != nil {
+		return err
+	}
+	emitter.mu.Lock()
+	emitter.replayed = append(emitter.replayed, record.Clone())
+	emitter.mu.Unlock()
+	return nil
+}
+
+func (emitter *testRuntimeV8Emitter) replaySnapshot() []observability.Record {
+	emitter.mu.Lock()
+	defer emitter.mu.Unlock()
+	return append([]observability.Record(nil), emitter.replayed...)
 }
 
 func (emitter *testRuntimeV8Emitter) snapshot() ([]router.Metadata, []observability.Record) {

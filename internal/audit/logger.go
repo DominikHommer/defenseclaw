@@ -134,6 +134,7 @@ type runtimeV8Binding struct {
 	metricBatch                 RuntimeV8MetricBatchEmitter
 	assetScanTrace              RuntimeV8AssetScanTraceEmitter
 	findingContentFingerprinter RuntimeV8FindingContentFingerprinter
+	exportReplay                RuntimeV8ExportReplayer
 }
 
 // runtimeV8BindingSnapshot returns the log and generated-metric capabilities
@@ -161,6 +162,9 @@ func (l *Logger) runtimeV8BindingSnapshot() runtimeV8Binding {
 	}
 	if fingerprinter, ok := emitter.(RuntimeV8FindingContentFingerprinter); ok {
 		binding.findingContentFingerprinter = fingerprinter
+	}
+	if exportReplay, ok := emitter.(RuntimeV8ExportReplayer); ok {
+		binding.exportReplay = exportReplay
 	}
 	l.mu.RUnlock()
 	return binding
@@ -1154,7 +1158,8 @@ type ActivityInput struct {
 	ConfigChange *ConfigChange
 	// OccurrenceID, when set, is the audit event id. A record already
 	// stored under it is not written again, so a producer that re-offers
-	// the same event after a restart records it once.
+	// the same event after a restart records it once; its remote export is
+	// queued again under the same id and time (replayControlPlaneV8Export).
 	OccurrenceID string
 }
 

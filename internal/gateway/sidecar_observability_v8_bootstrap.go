@@ -545,6 +545,34 @@ func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8(
 	}, err
 }
 
+// The audit logger exports a stored spooled occurrence again only through a
+// runtime with this capability.
+var _ audit.RuntimeV8ExportReplayer = (*sidecarOwnedObservabilityV8Runtime)(nil)
+
+// ReplayRuntimeV8Export adapts audit's replay of a stored spooled occurrence
+// (audit.RuntimeV8ExportReplayer) to Runtime.ReplayExport on the generation
+// the lease pins.
+func (owner *sidecarOwnedObservabilityV8Runtime) ReplayRuntimeV8Export(
+	ctx context.Context,
+	metadata router.Metadata,
+	builder audit.RuntimeV8Builder,
+) error {
+	if owner == nil || owner.runtime == nil || builder == nil {
+		return newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	if owner.closed {
+		return newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	return owner.runtime.ReplayExport(ctx, metadata,
+		func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
+			return builder(audit.RuntimeV8BuildContext{
+				ConfigGeneration: snapshot.Generation(), ConfigDigest: snapshot.Digest(),
+			}, admission)
+		})
+}
+
 // EmitRuntimeV8LogBatch adapts audit's opaque generated operations to the
 // runtime's short-lived generation-pinned batch. Collection, local
 // persistence, redaction, and destination routing remain independent per

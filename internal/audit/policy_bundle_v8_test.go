@@ -101,9 +101,16 @@ func TestLogPolicyBundleReceiptRecordsReceiptAndMetrics(t *testing.T) {
 			Restart: true, RestartRequired: true, ConfigGeneration: 3, EnforcingVersion: 5}); err != nil {
 		t.Fatal(err)
 	}
+	metricCount := len(runtime.metricSnapshot())
 	_, replayed := runtime.snapshot()
 	if len(replayed) != len(records) {
 		t.Fatalf("receipt replay emitted %d records, want %d", len(replayed), len(records))
+	}
+	if exported := runtime.replaySnapshot(); len(exported) != 1 || exported[0].RecordID() != records[1].RecordID() {
+		t.Fatalf("receipt replay exported %d stored records, want the stored %s once", len(exported), records[1].RecordID())
+	}
+	if got := len(runtime.metricSnapshot()); got != metricCount {
+		t.Fatalf("receipt replay applied %d more metrics", got-metricCount)
 	}
 	if err := logger.LogPolicyBundleReceipt("", PolicyBundle{}, PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: "applied"}); err == nil {
 		t.Fatal("a receipt that is not terminal was recorded")

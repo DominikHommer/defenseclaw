@@ -402,6 +402,27 @@ func (pipeline *LocalLogPipeline) ProcessManagedLogFallback(
 	return outcome, nil
 }
 
+// ProcessExportReplay evaluates collection and builds the record of an
+// occurrence that is already in SQLite, then returns its optional destination
+// work without appending it again. A producer with a durable spool uses it
+// when it offers again an occurrence whose row committed before the process
+// stopped: the commit and the exporter enqueue are not one step, so the row
+// alone does not prove the remote export was ever queued. The record keeps
+// the occurrence id, so a destination that already received it sees the same
+// id again. The outcome never reports local persistence.
+func (pipeline *LocalLogPipeline) ProcessExportReplay(
+	ctx context.Context,
+	metadata router.Metadata,
+	builder router.RecordBuilder,
+) (LocalLogOutcome, error) {
+	prepared, outcome, admitted, err := pipeline.prepare(ctx, metadata, builder)
+	if err != nil || !admitted {
+		return outcome, err
+	}
+	pipeline.projectOptional(&outcome, prepared.record, prepared.optional, legacyredaction.SinkPolicyFromContext(ctx), "")
+	return outcome, nil
+}
+
 func (pipeline *LocalLogPipeline) process(
 	ctx context.Context,
 	metadata router.Metadata,

@@ -84,6 +84,13 @@ type RuntimeV8Emitter interface {
 	) (RuntimeV8EmitOutcome, error)
 }
 
+// RuntimeV8ExportReplayer is the optional capability that exports again a
+// spooled control-plane occurrence SQLite already holds, without a second
+// row (see logActivityImpl).
+type RuntimeV8ExportReplayer interface {
+	ReplayRuntimeV8Export(context.Context, router.Metadata, RuntimeV8Builder) error
+}
+
 // RuntimeV8FindingContentFingerprinter is the optional key-custody capability
 // used at the forensic persistence boundary. Implementations retain the
 // installation correlation key and return only the schema-sized keyed token;
@@ -240,6 +247,47 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 		}
 	}
 	return disposition, nil
+}
+
+// replayControlPlaneV8Export exports again a spooled control-plane occurrence
+// whose row SQLite already holds: the same record id and time, no second row
+// and no second counter application. A runtime without the capability (none
+// in production) leaves the stored row as the only copy.
+func (l *Logger) replayControlPlaneV8Export(ctx context.Context, event Event, evidence controlPlaneV8Evidence) error {
+	family := controlPlaneV8FamilyForAction(event.Action)
+	if family == controlPlaneV8FamilyNone {
+		return fmt.Errorf("audit: v8 control-plane action %q has no generated family", event.Action)
+	}
+	binding := l.runtimeV8BindingSnapshot()
+	if binding.emitter == nil {
+		return fmt.Errorf("audit: v8 control-plane runtime is unavailable")
+	}
+	if binding.exportReplay == nil {
+		return nil
+	}
+	normalized := observability.NormalizeSeverity(event.Severity)
+	if !normalized.Valid || !normalized.Present {
+		return fmt.Errorf("audit: v8 control-plane severity %q is not canonical", event.Severity)
+	}
+	source := controlPlaneV8Source(event, family)
+	classification := controlPlaneV8Classification(family, event.Severity)
+	metadata, err := router.NewClassifiedLogMetadata(
+		observability.ProducerAuditAction, observability.ProducerKey(event.Action),
+		classification, source, event.Connector, observability.ProducerKey(event.Action),
+	)
+	if err != nil {
+		return fmt.Errorf("audit: classify v8 control-plane action %q: %w", event.Action, err)
+	}
+	err = binding.exportReplay.ReplayRuntimeV8Export(ctx, metadata,
+		func(snapshot RuntimeV8BuildContext, admission router.Admission) (observability.Record, error) {
+			return buildControlPlaneV8Record(
+				event, family, source, classification, normalized, snapshot, admission, evidence,
+			)
+		})
+	if err != nil {
+		return fmt.Errorf("audit: export stored v8 control-plane action %q again: %w", event.Action, err)
+	}
+	return nil
 }
 
 func runtimeV8Disposition(outcome RuntimeV8EmitOutcome, mandatory bool) (auditV8Disposition, error) {

@@ -64,14 +64,14 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	summaryBlob, _ := json.Marshal(summary)
 
 	auditID := observability.NewTimeOrderedID()
+	var storedAt time.Time
+	stored := false
 	if in.OccurrenceID != "" {
 		auditID = in.OccurrenceID
-		stored, err := l.store.hasAuditEvent(context.Background(), auditID)
+		var err error
+		storedAt, stored, err = l.store.storedAuditEventTime(context.Background(), auditID)
 		if err != nil {
 			return err
-		}
-		if stored {
-			return nil
 		}
 	}
 	// v7 clean break: AgentInstanceID is per-session (unset for
@@ -91,6 +91,19 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
 	stampAuditEventEnvelope(&auditEv)
+	if stored {
+		// The producer offers an occurrence again only when it has not
+		// marked it reported: the process stopped after the row committed,
+		// possibly before the remote export was queued. Export the stored
+		// occurrence again under its id and time, with no second row and no
+		// second counter application, before the producer marks it.
+		auditEv.Timestamp = storedAt.UTC()
+		evidence, evidenceErr := controlPlaneV8ActivityEvidence(in)
+		if evidenceErr != nil {
+			return evidenceErr
+		}
+		return l.replayControlPlaneV8Export(context.Background(), auditEv, evidence)
+	}
 	activityMetrics, metricErr := newActivityRuntimeV8GeneratedMetrics(
 		auditEv, action, targetType, actor, len(in.Diff),
 	)

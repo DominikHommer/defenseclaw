@@ -168,3 +168,86 @@ func TestReplayableControlPlaneEventsExportOnlyAfterLocalPersistence(t *testing.
 		t.Fatalf("unexpected exported id %q", item.identity.RecordID)
 	}
 }
+
+// A spooled receipt whose row committed before the gateway stopped, before
+// the exporter enqueue, is exported again from the stored occurrence: the
+// destination receives its id, and SQLite keeps one row. Only the spooled
+// control-plane actions can be replayed this way.
+func TestRuntimeReplayExportSendsAStoredOccurrenceWithoutASecondRow(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	plan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
+		func(source *config.ObservabilityV8Source) {
+			source.Destinations = []config.ObservabilityV8DestinationSource{runtimeConsoleDestination("sink", "none", 8)}
+		})
+	sink := newRuntimeRecordingAdapter(8)
+	factory := runtimeAdapterFactoryFunc(func(context.Context, config.ObservabilityV8EffectiveDestination, telemetry.V8ResourceContext) (delivery.Adapter, DestinationAdapterCleanup, error) {
+		return sink, func(context.Context) error { return nil }, nil
+	})
+	runtime := runtimeWithAdapterFactory(t, dependencies, plan, factory, nil)
+	db, err := sql.Open("sqlite", dependencies.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	action := observability.ProducerKey("config.bundle.receipt")
+	classification := observability.ClassificationContext{RawSeverity: "INFO", EventName: observability.EventName(observability.TelemetryEventConfigBundleReceipt), Bucket: observability.BucketComplianceActivity, MandatoryFacts: observability.MandatoryFacts{ControlPlaneMutation: true}}
+	meta, err := router.NewClassifiedLogMetadata(observability.ProducerAuditAction, action, classification, observability.SourceSystem, "", action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Add(-time.Minute)
+	build := func(snapshot EmitContext, _ router.Admission) (observability.Record, error) {
+		builder, err := observability.NewFamilyBuilder(observability.ClockFunc(func() time.Time { return at }), observability.OccurrenceIDGeneratorFunc(func() (string, error) { return "receipt-stored", nil }))
+		if err != nil {
+			return observability.Record{}, err
+		}
+		severity := observability.NormalizeSeverity("INFO")
+		return builder.BuildLogConfigBundleReceipt(observability.LogConfigBundleReceiptInput{
+			Envelope: observability.FamilyEnvelopeInput{ObservedAt: observability.Present(at), Source: observability.SourceSystem, Action: "config.bundle.receipt", Phase: "apply",
+				Provenance: observability.FamilyProvenanceInput{Producer: "runtime_test", BinaryVersion: "test", ConfigGeneration: int64(snapshot.Generation()), ConfigDigest: snapshot.Digest()}},
+			Severity: observability.Present(severity.Severity), LogLevel: observability.Present(severity.LogLevel),
+			Outcome: observability.OutcomeApplied, DefenseClawAdminOperation: "config.bundle.receipt",
+			DefenseClawPolicyBundleReceiptID: "r-01JAZ3Y8Q2K7V4N6M5P0R9S8T7", DefenseClawPolicyBundleState: "confirmed", MandatoryControlPlaneMutation: true,
+		})
+	}
+	// The commit that ran before the process stopped: SQLite has the row,
+	// no exporter work was queued.
+	if _, err := runtime.EmitLocalOnly(t.Context(), meta, build); err != nil {
+		t.Fatal(err)
+	}
+	rows := func() int {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE id = ?`, "receipt-stored").Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	if got := rows(); got != 1 {
+		t.Fatalf("committed rows = %d, want 1", got)
+	}
+	health, err := runtime.DestinationHealthSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := destinationHealthByName(t, health, "sink").Counters.Accepted; got != 0 {
+		t.Fatalf("local commit queued %d remote exports", got)
+	}
+	if err := runtime.ReplayExport(t.Context(), meta, build); err != nil {
+		t.Fatal(err)
+	}
+	if item := receiveRuntimeDelivery(t, sink); item.identity.RecordID != "receipt-stored" {
+		t.Fatalf("replay exported id %q, want receipt-stored", item.identity.RecordID)
+	}
+	if got := rows(); got != 1 {
+		t.Fatalf("replay left %d rows, want 1", got)
+	}
+	live, err := router.NewClassifiedLogMetadata(observability.ProducerGatewayEvent, observability.ProducerKey("lifecycle"),
+		observability.ClassificationContext{Bucket: observability.BucketAgentLifecycle, EventName: "turn_start", RawSeverity: "INFO"},
+		observability.SourceConnector, "codex", observability.ProducerKey("lifecycle"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.ReplayExport(t.Context(), live, build); err == nil {
+		t.Fatal("a live event without a producer spool was replayed")
+	}
+}

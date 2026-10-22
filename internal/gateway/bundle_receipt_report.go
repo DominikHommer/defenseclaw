@@ -270,8 +270,10 @@ func (r *bundleReceiptReporter) reportSpool() {
 // reportChanges emits one audit event per change event not reported yet,
 // oldest first. A file that does not validate is skipped. An event is
 // marked reported only once the audit logger recorded it: one it refuses
-// is offered again at every poll, and the logger stores each change event
-// id once, so a marker lost after the audit write cannot report it twice.
+// is offered again at every poll. The logger stores each change event id
+// once: an event offered again after its row committed (the marker or the
+// exporter enqueue was lost to a restart) is exported again under the same
+// id, with no second row.
 func (r *bundleReceiptReporter) reportChanges() {
 	dir := r.changeDir()
 	for _, id := range enterprisestatus.ListChangeEventIDs(dir) {
