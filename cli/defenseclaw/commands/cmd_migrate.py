@@ -103,6 +103,11 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
         ux.err(str(exc))
         raise SystemExit(EXIT_FAILED) from None
 
+    # Notices that hold whatever this process's environment is: --check (the
+    # installer runs it before the swap) names them before the hooks are
+    # replaced, and --json lists them under "warnings".
+    with progress:
+        warnings = _process_fail_mode_notices(data_dir or _default_data_dir(), from_version, result)
     if as_json:
         # In check mode nothing ran: list the steps under "pending" and keep
         # "applied" empty so a script never mistakes a dry run for a migration.
@@ -115,6 +120,7 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
                     "pending": result.applied if check else [],
                     "changed": result.changed,
                     "check": check,
+                    "warnings": warnings,
                 },
                 sort_keys=True,
             )
@@ -138,23 +144,56 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
     if not check and not as_json and _upgraded_from_0x(result):
         _report_hook_fail_mode_changes(data_dir or _default_data_dir())
         _report_ignored_dotenv_keys(data_dir or _default_data_dir())
-    if not check and not as_json:
-        _report_ignored_process_fail_mode(data_dir or _default_data_dir())
+    with progress:
+        for notice in warnings:
+            ux.warn(notice)
 
 
-def _report_ignored_process_fail_mode(data_dir: str) -> None:
-    """Name a DEFENSECLAW_FAIL_MODE the upgrading shell exports: 1.0.4 hooks do not read it (GAP-0361)."""
-    if not any(key.upper() == "DEFENSECLAW_FAIL_MODE" for key in os.environ):
-        return
+# The first release whose hooks run only the fail mode installed with them
+# (GAP-0315): the hooks of every earlier release (0.8.10, 1.0.0-1.0.3) read
+# DEFENSECLAW_FAIL_MODE from the agent's environment.
+_FIRST_INSTALLED_FAIL_MODE_RELEASE = (1, 0, 4)
+
+
+def _previous_hooks_read_process_fail_mode(from_version: str | None, from_config_version: int | None) -> bool:
+    """Whether the install being upgraded has hooks that read DEFENSECLAW_FAIL_MODE.
+
+    The installers pass the release they replace as --from-version; without
+    it, only a 0.x config (below config_version 8) proves an older release.
+    """
+    match = re.match(r"v?(\d+)\.(\d+)\.(\d+)", (from_version or "").strip())
+    if match:
+        return tuple(int(part) for part in match.groups()) < _FIRST_INSTALLED_FAIL_MODE_RELEASE
+    return from_config_version is not None and from_config_version < _FIRST_1X_CONFIG_VERSION
+
+
+def _process_fail_mode_notices(data_dir: str, from_version: str | None, result) -> list[str]:
+    """The DEFENSECLAW_FAIL_MODE notices of this run (GAP-0361); a notice never fails the migration.
+
+    An upgrade from a release whose hooks read the variable names each
+    connector installed open, whatever the upgrade's environment is: the
+    agent that set the variable runs elsewhere. Otherwise a variable this
+    process sets is named, as doctor does.
+    """
+    if result.from_config_version is None:
+        return []
     try:
         from defenseclaw.config import load
-        from defenseclaw.fail_mode import ignored_process_fail_mode
 
-        detail = ignored_process_fail_mode(load(data_dir=data_dir))
+        cfg = load(data_dir=data_dir)
+    except Exception:  # noqa: BLE001 - an unreadable config still gets the upgrade notice
+        cfg = None
+    try:
+        from defenseclaw.fail_mode import ignored_process_fail_mode, process_fail_mode_upgrade_notice
+
+        if _previous_hooks_read_process_fail_mode(from_version, result.from_config_version):
+            notice = process_fail_mode_upgrade_notice(cfg, from_version)
+            if notice:
+                return [notice]
+        detail = ignored_process_fail_mode(cfg) if cfg is not None else None
     except Exception:  # noqa: BLE001 - a notice must never fail the migration
-        return
-    if detail:
-        ux.warn(detail)
+        return []
+    return [detail] if detail else []
 
 
 def _report_ignored_dotenv_keys(data_dir: str) -> None:

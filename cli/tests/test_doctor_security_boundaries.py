@@ -123,7 +123,6 @@ def _fail_mode_cfg(*, secure_client: bool = False) -> SimpleNamespace:
 )
 def test_process_fail_mode_variable_is_named_as_unread_with_its_persistent_command(
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
     name: str,
     value: str,
     command: str,
@@ -131,9 +130,11 @@ def test_process_fail_mode_variable_is_named_as_unread_with_its_persistent_comma
     # GAP-0361: 1.0.3 hooks read DEFENSECLAW_FAIL_MODE=closed as a process
     # override; 1.0.4 hooks run only their installed mode, so an upgraded
     # shell that still exports it silently runs open hooks open. Doctor and
-    # every migrate (each upgrade) name it with the command that persists it.
+    # a migrate that is no upgrade from such a release (test_migrate covers
+    # the upgrade notice) name it with the command that persists it.
     from defenseclaw.commands import cmd_migrate
     from defenseclaw.fail_mode import ignored_process_fail_mode
+    from defenseclaw.migrations import MigrateResult
 
     for key in [key for key in os.environ if key.upper() == "DEFENSECLAW_FAIL_MODE"]:
         monkeypatch.delenv(key)
@@ -150,8 +151,8 @@ def test_process_fail_mode_variable_is_named_as_unread_with_its_persistent_comma
     assert [row["status"] for row in result.checks] == ["warn"]
     assert command in str(result.checks[0])
     monkeypatch.setattr(config_module, "load", lambda **_kwargs: _fail_mode_cfg())
-    cmd_migrate._report_ignored_process_fail_mode("/nonexistent-data-dir")
-    assert command in capsys.readouterr().out.replace("\n", " ")
+    (notice,) = cmd_migrate._process_fail_mode_notices("/nonexistent-data-dir", "1.0.4", MigrateResult(9, 9))
+    assert command in notice
 
     monkeypatch.delenv(name)
     result = cmd_doctor._DoctorResult()

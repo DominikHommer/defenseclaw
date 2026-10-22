@@ -863,3 +863,200 @@ def test_set_aside_key_that_cannot_be_put_back_is_named_with_its_command(
     assert record.exists()
     captured = capsys.readouterr()
     assert "defenseclaw config set openshell.trusted_ca_bundle relative.pem" in captured.out + captured.err
+
+
+# GAP-0361 (loop round 2): the hooks of 0.8.10 and 1.0.0-1.0.3 blocked a call
+# during a gateway outage when the *agent's* environment set
+# DEFENSECLAW_FAIL_MODE=closed; 1.0.4 hooks run only their installed mode. The
+# agent's environment is not the upgrade's, so the upgrade names every
+# connector installed open whatever its own environment is, in text, --check
+# (run before the swap) and --json alike.
+_OPEN_CLAUDE = "config_version: 9\nguardrail:\n  enabled: true\n  hook_fail_mode: open\n  connectors:\n    claudecode: {mode: action}\n"
+
+
+@pytest.fixture()
+def fail_mode_upgrade(data_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    """Run migrate_cmd over a real config with the migration chain stubbed and no fail-mode variable."""
+    for key in [key for key in os.environ if key.upper() in {"DEFENSECLAW_FAIL_MODE", "DEFENSECLAW_DEPLOYMENT_MODE"}]:
+        monkeypatch.delenv(key)
+    state = {"from_config_version": 9}
+
+    def fake_migrate(_data_dir, **_kwargs):
+        version = state["from_config_version"]
+        return migrations.MigrateResult(from_config_version=version, to_config_version=9)
+
+    monkeypatch.setattr(migrations, "migrate", fake_migrate)
+
+    def run(config: str | None, *args: str, from_config_version: int | None = 9):
+        state["from_config_version"] = from_config_version
+        if config is not None:
+            _write_config(data_dir, config)
+        return CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), *args])
+
+    return run
+
+
+@pytest.mark.parametrize("flags", [[], ["--check"]])
+def test_upgrade_names_an_open_hook_whatever_its_own_environment_sets(fail_mode_upgrade, flags) -> None:
+    result = fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.3", *flags)
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.stdout.split())
+    assert "DefenseClaw 1.0.3 hooks blocked a call" in out
+    assert "DEFENSECLAW_FAIL_MODE=closed" in out
+    assert "claudecode is installed open" in out
+    assert "defenseclaw guardrail fail-mode closed" in out
+    assert "DEFENSECLAW_STRICT_AVAILABILITY=1" in out
+    assert out.count("DEFENSECLAW_FAIL_MODE=closed") == 1
+
+
+@pytest.mark.parametrize("flags", [[], ["--check"]])
+def test_upgrade_json_lists_the_open_hook_notice_under_warnings(fail_mode_upgrade, flags) -> None:
+    result = fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.3", "--json", *flags)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert len(payload["warnings"]) == 1
+    notice = payload["warnings"][0]
+    assert "claudecode is installed open" in notice
+    assert "defenseclaw guardrail fail-mode closed" in notice
+    assert "DEFENSECLAW_STRICT_AVAILABILITY=1" in notice
+    # stdout stays one JSON document; the human copy goes to stderr.
+    assert "claudecode is installed open" in " ".join(result.stderr.split())
+
+
+@pytest.mark.parametrize(
+    ("from_version", "from_config_version", "warned"),
+    [
+        ("0.8.10", 9, True),
+        ("1.0.0", 9, True),
+        ("v1.0.2", 9, True),
+        ("1.0.3+local", 9, True),
+        ("1.0.3.dev4", 9, True),
+        ("1.0.4", 9, False),
+        ("1.0.4.dev1", 9, False),
+        ("1.0.5", 9, False),
+        ("1.1.0", 9, False),
+        (None, 7, True),  # a 0.x config without --from-version
+        (None, 9, False),  # nothing proves an older release
+    ],
+)
+def test_only_an_upgrade_from_a_release_whose_hooks_read_the_variable_is_warned(
+    fail_mode_upgrade, from_version: str | None, from_config_version: int, warned: bool
+) -> None:
+    args = ["--json"] + (["--from-version", from_version] if from_version else [])
+    result = fail_mode_upgrade(_OPEN_CLAUDE, *args, from_config_version=from_config_version)
+    assert result.exit_code == 0, result.output
+    assert bool(json.loads(result.stdout)["warnings"]) is warned
+
+
+@pytest.mark.parametrize(
+    ("config", "expected", "absent"),
+    [
+        # Every hook closed: the variable changed nothing.
+        (_OPEN_CLAUDE.replace("hook_fail_mode: open", "hook_fail_mode: closed"), None, ()),
+        # Unset is closed outside Secure Client.
+        (_OPEN_CLAUDE.replace("  hook_fail_mode: open\n", ""), None, ()),
+        # A connector override open behind a closed global: name it and scope the command.
+        (
+            "config_version: 9\nguardrail:\n  enabled: true\n  hook_fail_mode: closed\n  connectors:\n"
+            "    claudecode: {mode: action}\n    codex: {mode: action, hook_fail_mode: open}\n",
+            "defenseclaw guardrail fail-mode closed --connector codex",
+            ("claudecode",),
+        ),
+        # Cursor's hooks follow its guardrail mode: observe is open, fail-mode cannot close it.
+        (
+            "config_version: 9\nguardrail:\n  enabled: true\n  hook_fail_mode: closed\n  connectors:\n"
+            "    cursor: {mode: observe}\n",
+            "defenseclaw setup cursor --mode action",
+            ("fail-mode closed",),
+        ),
+        # Several open connectors are all named.
+        (
+            _OPEN_CLAUDE + "    codex: {mode: observe}\n    devin: {mode: action}\n",
+            "claudecode, codex, devin are installed open",
+            (),
+        ),
+        # Plugins that bake their mode never read the variable.
+        (
+            _OPEN_CLAUDE.replace("claudecode: {mode: action}", "opencode: {mode: action}\n    amp: {mode: action}"),
+            None,
+            (),
+        ),
+        # A disabled connector or guardrail has no hooks.
+        (_OPEN_CLAUDE.replace("{mode: action}", "{mode: action, enabled: false}"), None, ()),
+        (_OPEN_CLAUDE.replace("enabled: true", "enabled: false"), None, ()),
+    ],
+)
+def test_upgrade_notice_names_exactly_the_hooks_installed_open(
+    fail_mode_upgrade, config: str, expected: str | None, absent: tuple[str, ...]
+) -> None:
+    result = fail_mode_upgrade(config, "--from-version", "1.0.3", "--json")
+    assert result.exit_code == 0, result.output
+    warnings = json.loads(result.stdout)["warnings"]
+    if expected is None:
+        assert warnings == []
+        return
+    assert len(warnings) == 1 and expected in warnings[0]
+    for text in absent:
+        assert text not in warnings[0]
+
+
+def test_upgrade_notice_on_a_managed_host_points_at_the_administrator(fail_mode_upgrade) -> None:
+    result = fail_mode_upgrade(
+        "deployment_mode: managed_enterprise\n" + _OPEN_CLAUDE, "--from-version", "1.0.3", "--json"
+    )
+    assert result.exit_code == 0, result.output
+    (notice,) = json.loads(result.stdout)["warnings"]
+    assert "claudecode is installed open" in notice and "administrator" in notice
+    assert "defenseclaw guardrail fail-mode closed" not in notice
+    assert "DEFENSECLAW_STRICT_AVAILABILITY=1" in notice
+
+
+def test_upgrade_notice_is_not_given_on_secure_client(fail_mode_upgrade, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Secure Client's shell hooks still read the variable.
+    from defenseclaw import config as config_module
+
+    real_load = config_module.load
+
+    def secure_client_load(**kwargs):
+        cfg = real_load(**kwargs)
+        object.__setattr__(cfg.guardrail, "_secure_client", True)
+        return cfg
+
+    monkeypatch.setattr(config_module, "load", secure_client_load)
+    result = fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.3", "--json")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["warnings"] == []
+
+
+def test_upgrade_notice_holds_when_the_config_cannot_be_read(
+    fail_mode_upgrade, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from defenseclaw import config as config_module
+
+    def broken_load(**_kwargs):
+        raise ValueError("unreadable")
+
+    monkeypatch.setattr(config_module, "load", broken_load)
+    result = fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.3", "--check", "--json")
+    assert result.exit_code == 0, result.output
+    (notice,) = json.loads(result.stdout)["warnings"]
+    assert "defenseclaw guardrail fail-mode closed" in notice and "DEFENSECLAW_STRICT_AVAILABILITY=1" in notice
+
+
+def test_upgrade_notice_replaces_the_variable_notice_and_a_reinstall_keeps_it(
+    fail_mode_upgrade, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "closed")
+    upgrade = fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.3", "--json")
+    (notice,) = json.loads(upgrade.stdout)["warnings"]
+    assert "claudecode is installed open" in notice
+    # No upgrade from a reading release: the variable this shell sets is still named.
+    reinstall = fail_mode_upgrade(_OPEN_CLAUDE, "--from-version", "1.0.4", "--json")
+    (detail,) = json.loads(reinstall.stdout)["warnings"]
+    assert "DEFENSECLAW_FAIL_MODE is set in this environment" in detail
+
+
+def test_migrate_without_a_config_names_no_fail_mode(fail_mode_upgrade) -> None:
+    result = fail_mode_upgrade(None, "--from-version", "1.0.3", "--json", from_config_version=None)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["warnings"] == []
