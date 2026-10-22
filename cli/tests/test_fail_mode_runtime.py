@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,8 +25,10 @@ from defenseclaw.fail_mode import (
 
 _WINDOWS_REGISTRATION_FRESHNESS = fail_mode_runtime._windows_registration_freshness
 
-# The fail-mode lines of real per-user Unix hook renders; the Go test
-# TestUnixHookFailModeLinesMatchTheSharedGolden checks them against Setup.
+# The fail-mode lines of real Unix hook renders, per-user ("<script>/<mode>")
+# and authenticated Secure Client delivery ("<script>/secure-client/<mode>");
+# the Go test TestUnixHookFailModeLinesMatchTheSharedGolden checks them against
+# Setup.
 _HOOK_FAIL_MODE_LINES = json.loads(
     (
         Path(__file__).resolve().parents[2] / "internal/gateway/connector/testdata/unix_hook_fail_mode_lines.json"
@@ -1121,11 +1125,56 @@ def test_hermes_reports_its_configured_fail_mode_on_every_os(
 
 @pytest.mark.parametrize("key", sorted(_HOOK_FAIL_MODE_LINES))
 def test_unix_resolver_reads_the_installed_mode_of_a_real_render(key: str, tmp_path: Path) -> None:
-    # A 1.0.4 render bakes FAIL_MODE="<mode>" and may tighten it from the
-    # environment; reading it as missing made a refresh fail verification.
+    # A 1.0.4 per-user render bakes FAIL_MODE="<mode>"; reading it as missing
+    # made a refresh fail verification. Only the documented Secure Client
+    # renders take the environment.
     script = tmp_path / "hook.sh"
     script.write_text("#!/bin/bash\n" + "\n".join(_HOOK_FAIL_MODE_LINES[key]) + "\n", encoding="utf-8")
-    assert fail_mode_runtime._read_baked_hook_mode(script) == key.rsplit("/", 1)[1]
+    installed, reads_environment = fail_mode_runtime._read_baked_hook_render(script)
+    assert installed in {"open", "closed"}
+    if "/secure-client/" not in key:
+        assert installed == key.rsplit("/", 1)[1] and not reads_environment
+
+
+def test_only_the_documented_secure_client_renders_read_the_environment() -> None:
+    # docs (fail-modes, env-vars) name exactly these four Secure Client hooks
+    # as keeping DEFENSECLAW_FAIL_MODE; a render that starts or stops reading
+    # it must change the docs and the resolver with it.
+    readers = {key for key, lines in _HOOK_FAIL_MODE_LINES.items() if "${DEFENSECLAW_FAIL_MODE:-" in "\n".join(lines)}
+    assert readers == {
+        f"{script}/secure-client/{mode}"
+        for script in ("antigravity-hook.sh", "devin-hook.sh", "hermes-hook.sh", "kiro-hook.sh")
+        for mode in ("open", "closed")
+    }
+
+
+_ENVIRONMENT_VALUES = (None, "", "open", "closed", "Open", " open", "bogus")
+
+
+@pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None, reason="runs the rendered lines under bash")
+@pytest.mark.parametrize("key", sorted(_HOOK_FAIL_MODE_LINES))
+def test_resolver_reports_the_mode_every_real_render_runs_in_any_environment(key: str, tmp_path: Path) -> None:
+    # Run each render's fail-mode lines as the hook does, with each
+    # DEFENSECLAW_FAIL_MODE value, and check the resolver predicts the mode
+    # they leave (the hooks open only on an exact "open"). A Secure Client
+    # Devin hook installed closed runs open under DEFENSECLAW_FAIL_MODE=open,
+    # so status must not report it closed.
+    script = tmp_path / "hook.sh"
+    script.write_text("#!/bin/bash\n" + "\n".join(_HOOK_FAIL_MODE_LINES[key]) + "\n", encoding="utf-8")
+    installed, reads_environment = fail_mode_runtime._read_baked_hook_render(script)
+    for value in _ENVIRONMENT_VALUES:
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        if value is not None:
+            env["DEFENSECLAW_FAIL_MODE"] = value
+        ran = subprocess.run(
+            ["bash", "-c", '. "$1"; if [ "$FAIL_MODE" = open ]; then printf open; else printf closed; fi', "_", str(script)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        reported = (fail_mode_runtime._hook_environment_mode(value) if reads_environment else None) or installed
+        assert reported == ran, (key, value)
 
 
 @pytest.mark.parametrize("mode", ["open", "closed"])
@@ -1133,7 +1182,138 @@ def test_unix_resolver_still_reads_a_legacy_render(mode: str, tmp_path: Path) ->
     # 1.0.3 and older renders (and Secure Client renders) keep the override.
     script = tmp_path / "hook.sh"
     script.write_text(f'#!/bin/bash\nFAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"\n', encoding="utf-8")
-    assert fail_mode_runtime._read_baked_hook_mode(script) == mode
+    assert fail_mode_runtime._read_baked_hook_render(script) == (mode, True)
+
+
+def _env_reading_hook(cfg: SimpleNamespace, connector: str, lines: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install *lines* as *connector*'s Unix hook, with a current registration and lock."""
+
+    script = "claude-code-hook.sh" if connector == "claudecode" else f"{connector}-hook.sh"
+    (Path(cfg.data_dir) / "hooks" / script).write_text("#!/bin/bash\n" + "\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    monkeypatch.setattr(fail_mode_runtime, "_native_deny_registration_freshness", lambda *_args: None)
+    monkeypatch.setattr(fail_mode_runtime, "_codex_registration_current", lambda *_args: True)
+    monkeypatch.setattr(
+        fail_mode_runtime,
+        "_registration_lock_state",
+        lambda cfg, name: (cfg.guardrail.effective_hook_fail_mode(name), None),
+    )
+
+
+_LEGACY_CLOSED = ['FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"']
+
+
+@pytest.mark.parametrize(
+    "connector,lines,secure_client",
+    [
+        # The real authenticated Secure Client renders that keep the override.
+        ("devin", _HOOK_FAIL_MODE_LINES["devin-hook.sh/secure-client/closed"], True),
+        ("kiro", _HOOK_FAIL_MODE_LINES["kiro-hook.sh/secure-client/closed"], True),
+        # A hook rendered by 1.0.3 or earlier, before the upgrade refresh.
+        ("devin", _LEGACY_CLOSED, False),
+        ("codex", _LEGACY_CLOSED, False),
+        ("claudecode", _LEGACY_CLOSED, False),
+        ("hermes", _LEGACY_CLOSED, False),
+        ("antigravity", _LEGACY_CLOSED, False),
+        ("kiro", _LEGACY_CLOSED, False),
+    ],
+)
+@pytest.mark.parametrize("env_value,want", [(None, "closed"), ("closed", "closed"), ("bogus", "closed"), ("open", "open")])
+def test_an_env_reading_hook_reports_the_mode_the_environment_gives_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    connector: str,
+    lines: list[str],
+    secure_client: bool,
+    env_value: str | None,
+    want: str,
+) -> None:
+    # A Secure Client Devin hook installed closed lets a call run during an
+    # outage when DEFENSECLAW_FAIL_MODE=open: status and doctor report open
+    # with process-env-open drift, never closed and current.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    if secure_client:
+        cfg.deployment_mode = "managed_enterprise"
+        cfg.managed_outside_secure_client = lambda: False
+    if connector == "claudecode":
+        _write_current_runtime(cfg, home, {"claudecode": "closed"})
+        settings = home / ".claude" / "settings.json"
+        payload = json.loads(settings.read_text(encoding="utf-8"))
+        del payload["env"]["DEFENSECLAW_FAIL_MODE"]
+        settings.write_text(json.dumps(payload), encoding="utf-8")
+    _env_reading_hook(cfg, connector, lines, monkeypatch)
+    if env_value is not None:
+        monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", env_value)
+    with patch("defenseclaw.fail_mode.Path.home", return_value=home):
+        report = connector_fail_mode_report(cfg, connector)
+        state = resolve_connector_fail_mode(cfg, connector)
+    assert report["desired"] == "closed"
+    assert report["effective"] == want and state.effective == want
+    assert "takes DEFENSECLAW_FAIL_MODE from the agent's environment" in report["note"]
+    if want == "open":
+        assert report["provenance"] == "process-env" and state.provenance == "process-env"
+        assert report["current"] is False and not state.current
+        assert "process-env-open" in report["drift"] and "process-env-open" in state.drift
+    else:
+        assert "process-env-open" not in state.drift
+        if connector != "claudecode":
+            assert state.current, state.drift
+
+
+def test_claude_settings_env_drives_a_legacy_env_reading_claude_hook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Claude Code passes its settings env to its hooks over the inherited one:
+    # an un-refreshed 1.0.3 render with settings env open runs open even from
+    # a shell with DEFENSECLAW_FAIL_MODE=closed.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "open"})
+    _env_reading_hook(cfg, "claudecode", _LEGACY_CLOSED, monkeypatch)
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "closed")
+    with patch("defenseclaw.fail_mode.Path.home", return_value=home):
+        state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert state.effective == "open" and state.provenance == "claude-settings-env"
+    assert "claude-settings-env-open" in state.drift and not state.current
+
+
+@pytest.mark.parametrize("connector", ["devin", "kiro"])
+def test_doctor_fails_a_secure_client_hook_the_environment_opens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str
+) -> None:
+    # The Mode row and Setup readiness must not pass a closed Secure Client
+    # hook that DEFENSECLAW_FAIL_MODE=open opens, and the fix names the
+    # environment, not a re-render that keeps the same override.
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: False
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.mode = "action"
+    cfg.skill_dirs = lambda connector=None: []
+    cfg.plugin_dirs = lambda connector=None: []
+    cfg.mcp_servers = lambda connector=None, **_: []
+    _env_reading_hook(cfg, connector, _HOOK_FAIL_MODE_LINES[f"{connector}-hook.sh/secure-client/closed"], monkeypatch)
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "open")
+    emitted: list[tuple[str, str, str, str]] = []
+    with (
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(
+            cmd_doctor,
+            "_emit",
+            side_effect=lambda tag, label, detail="", **kw: emitted.append(
+                (tag, label, detail, str(kw.get("remediation") or ""))
+            ),
+        ),
+    ):
+        cmd_doctor._check_connector_inventory(cfg, connector, cmd_doctor._DoctorResult())
+    mode_rows = [row for row in emitted if row[1] == "Mode"]
+    assert len(mode_rows) == 1 and mode_rows[0][0] == "fail", mode_rows
+    assert "fail-mode=open" in mode_rows[0][2] and "provenance=process-env" in mode_rows[0][2]
+    assert "DEFENSECLAW_FAIL_MODE in this environment" in mode_rows[0][2]
+    assert "start the agent without DEFENSECLAW_FAIL_MODE" in mode_rows[0][3]
 
 
 @pytest.mark.parametrize("windows", [False, True])

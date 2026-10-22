@@ -38,9 +38,11 @@ _MAX_RUNTIME_FILE = 2 * 1024 * 1024
 # registration-digest-stale on every check (GAP-1922).
 _MAX_DIGEST_FILE = 1024 * 1024 * 1024
 # The installed mode of a rendered Unix hook: FAIL_MODE="closed" since 1.0.4
-# (the hook reads no fail mode from the environment, GAP-0315),
+# (the hook reads no fail mode from the environment, GAP-0315), and
 # FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}" in 1.0.3 and older renders and
-# in Secure Client renders (#1163).
+# in the Antigravity, Devin, Hermes and Kiro renders of an authenticated Secure
+# Client deployment (#1163). That second form takes the agent's
+# DEFENSECLAW_FAIL_MODE as a full override (_hook_environment_source).
 _FAIL_MODE_PATTERN = re.compile(
     r"^FAIL_MODE=\"(?:(open|closed)|\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\})\"", re.MULTILINE
 )
@@ -140,6 +142,9 @@ class ConnectorFailModeState:
     # The vendor limit a closed hook of this connector keeps
     # (upstream_hook_limit), or "".
     limit: str = ""
+    # Whether the installed hook takes DEFENSECLAW_FAIL_MODE from the agent's
+    # environment (_hook_environment_source).
+    reads_environment: bool = False
 
     @property
     def current(self) -> bool:
@@ -199,6 +204,8 @@ class ConnectorFailModeState:
                 f"observe mode keeps hooks fail-{self.desired}; "
                 f"guardrail.hook_fail_mode={self.configured} applies in action mode"
             )
+        if self.reads_environment:
+            notes.append(_HOOK_ENVIRONMENT_NOTE)
         return "; ".join(notes)
 
     def to_report(self) -> dict[str, Any]:
@@ -251,11 +258,12 @@ def resolve_connector_fail_mode(
         # fails closed when the file is missing or unreadable or names no mode
         # for the connector (readHookSidecar), so status reports that.
         runtime = "closed"
-    # The hooks read no fail mode from any environment (GAP-0315): not this
-    # shell's, which is not the agent's, and not the agent's either, so
-    # neither is an input here.
+    # A 1.0.4 hook reads no fail mode from any environment (GAP-0315); only a
+    # hook installed in the env-reading form does (_hook_environment_source,
+    # after the Claude Code settings below).
 
     workspace = _connector_workspace(cfg)
+    claude_env = None
     if name == "claudecode":
         claude_env, registered = _claude_registration_state(workspace)
         # Setup still writes the mode into Claude Code's settings env, which
@@ -270,6 +278,11 @@ def resolve_connector_fail_mode(
     # trust, and file identities, so the text probe is not used there.
     elif name == "codex" and not _is_windows() and not _codex_registration_current(workspace):
         drift.append("registration-missing")
+
+    reads_environment, environment_source = _hook_environment_source(cfg, name, claude_env)
+    if environment_source is not None:
+        sources.append(environment_source)
+        runtime = environment_source[1]
 
     lock_mode, lock_drift = _registration_lock_state(cfg, name)
     sources.append(("registration-lock", lock_mode))
@@ -315,6 +328,7 @@ def resolve_connector_fail_mode(
         runtime=runtime,
         sources=tuple(sources),
         drift=tuple(dict.fromkeys(drift)),
+        reads_environment=reads_environment,
     )
 
 
@@ -340,8 +354,13 @@ def _resolve_native_deny_fail_mode(cfg: Any, name: str, configured: str, desired
         # As for every other connector: the native Windows hook fails closed
         # when its sidecar is missing or names no mode (readHookSidecar).
         runtime = "closed"
-    # No hook reads a fail mode from any environment (GAP-0315), so neither
-    # this shell's DEFENSECLAW_FAIL_MODE nor the agent's is an input here.
+    # Only a hook installed in the env-reading form (an authenticated Secure
+    # Client Antigravity or Hermes render, or one from 1.0.3 or earlier) takes
+    # DEFENSECLAW_FAIL_MODE from the agent's environment.
+    reads_environment, environment_source = _hook_environment_source(cfg, name)
+    if environment_source is not None:
+        sources.append(environment_source)
+        runtime = environment_source[1]
     lock_mode, lock_drift = _registration_lock_state(cfg, name)
     sources.append(("registration-lock", lock_mode))
     if lock_mode != desired:
@@ -367,6 +386,7 @@ def _resolve_native_deny_fail_mode(cfg: Any, name: str, configured: str, desired
         sources=tuple(sources),
         drift=tuple(dict.fromkeys(drift)),
         limit=upstream_hook_limit(name),
+        reads_environment=reads_environment,
     )
 
 
@@ -456,8 +476,11 @@ def report_renders_fail_mode(report: dict[str, Any]) -> bool:
 def rendered_fail_mode(report: dict[str, Any]) -> str | None:
     """The fail mode the installed hook of a connector_fail_mode_report was rendered with, or None.
 
-    The agent environment does not change the installed mode. A hook rendered
-    open stays open until the fail-mode command refreshes its installed policy.
+    A hook rendered open stays open until the fail-mode command refreshes its
+    installed policy. Only a hook installed in the env-reading form (Secure
+    Client delivery, or a render from 1.0.3 or earlier) also takes
+    DEFENSECLAW_FAIL_MODE from the agent's environment; ``effective`` counts
+    that, this does not.
     """
 
     for source in report.get("sources") or ():
@@ -500,7 +523,7 @@ def connector_fail_mode_report(
             name,
             inspect_effective_policy=inspect_effective_policy,
         ).to_report()
-    return {
+    report: dict[str, Any] = {
         "effective": configured,
         "provenance": "config",
         "note": "",
@@ -511,6 +534,70 @@ def connector_fail_mode_report(
         "drift": [],
         "sources": [{"name": "config", "mode": configured}],
     }
+    reads_environment, environment_source = _hook_environment_source(cfg, name)
+    if reads_environment:
+        # Kiro's authenticated Secure Client hook takes DEFENSECLAW_FAIL_MODE
+        # from the agent's environment: a value that changes the configured
+        # mode is what it runs, so the report never shows config alone.
+        report["note"] = _HOOK_ENVIRONMENT_NOTE
+    if environment_source is not None:
+        source, mode = environment_source
+        report["sources"].append({"name": source, "mode": mode})
+        if mode != configured:
+            report.update(effective=mode, provenance=source, runtime=mode, current=False, drift=[f"{source}-{mode}"])
+    return report
+
+
+_HOOK_ENVIRONMENT_NOTE = (
+    "the installed hook takes DEFENSECLAW_FAIL_MODE from the agent's environment "
+    "(authenticated Secure Client delivery, or a hook rendered by 1.0.3 or earlier)"
+)
+# The sources an env-reading hook takes its mode from (_hook_environment_source).
+HOOK_ENVIRONMENT_SOURCES = frozenset({"process-env", "claude-settings-env"})
+
+
+def _hook_environment_mode(value: str | None) -> str | None:
+    """The mode FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-<installed>}" takes from *value*, or None to keep the installed one.
+
+    ``${VAR:-x}`` keeps x for an unset or empty value. The hooks then open only
+    on an exact ``open`` ([ "$FAIL_MODE" = "open" ],
+    defenseclaw_should_fail_closed_on_unreachable) and close on any other value.
+    """
+
+    if not value:
+        return None
+    return "open" if value == "open" else "closed"
+
+
+def _hook_environment_source(
+    cfg: Any, connector: str, claude_env: str | None = None
+) -> tuple[bool, tuple[str, str] | None]:
+    """Whether *connector*'s installed Unix hook reads DEFENSECLAW_FAIL_MODE, and the mode it would take here.
+
+    The authenticated Secure Client Antigravity, Devin, Hermes and Kiro renders
+    and every render from 1.0.3 or earlier keep the environment as a full
+    override (#1163). This process is not the agent, but an agent started from
+    it inherits its environment, so its value is the one reported: a Secure
+    Client hook installed closed that DEFENSECLAW_FAIL_MODE=open opens reports
+    open with process-env-open drift, never closed and current. Claude Code
+    passes its settings env to its hooks over the inherited one. Windows hooks,
+    Amp and OpenCode read no fail mode from the environment.
+    """
+
+    if _is_windows() or connector in {"amp", "opencode"}:
+        return False, None
+    _mode, reads_environment = _read_baked_hook_render(_unix_hook_script_path(cfg, connector))
+    if not reads_environment:
+        return False, None
+    if connector == "claudecode" and claude_env is not None:
+        return True, ("claude-settings-env", claude_env)
+    mode = _hook_environment_mode(os.environ.get("DEFENSECLAW_FAIL_MODE"))
+    return True, (("process-env", mode) if mode is not None else None)
+
+
+def _unix_hook_script_path(cfg: Any, connector: str) -> Path:
+    script_name = "claude-code-hook.sh" if connector == "claudecode" else f"{connector}-hook.sh"
+    return Path(cfg.data_dir) / "hooks" / script_name
 
 
 def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]:
@@ -523,8 +610,7 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
         if legacy:
             return "windows-sidecar-legacy", mode
         return "windows-sidecar", mode
-    script_name = "claude-code-hook.sh" if connector == "claudecode" else f"{connector}-hook.sh"
-    return "hook-script", _read_baked_hook_mode(Path(cfg.data_dir) / "hooks" / script_name)
+    return "hook-script", _read_baked_hook_render(_unix_hook_script_path(cfg, connector))[0]
 
 
 def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, bool]:
@@ -660,12 +746,19 @@ def _go_unquote_or_trim(value: str) -> str:
     return value.strip("\"'")
 
 
-def _read_baked_hook_mode(path: Path) -> str | None:
+def _read_baked_hook_render(path: Path) -> tuple[str | None, bool]:
+    """The mode a rendered Unix hook was installed with, and whether it reads DEFENSECLAW_FAIL_MODE.
+
+    Both come from its FAIL_MODE line (_FAIL_MODE_PATTERN).
+    """
+
     data = _read_small_file(path)
     if data is None:
-        return None
+        return None, False
     match = _FAIL_MODE_PATTERN.search(data)
-    return (match.group(1) or match.group(2)) if match else None
+    if match is None:
+        return None, False
+    return (match.group(1) or match.group(2)), match.group(2) is not None
 
 
 def _read_opencode_plugin_mode(cfg: Any) -> str | None:

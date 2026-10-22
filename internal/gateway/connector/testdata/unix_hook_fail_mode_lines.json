@@ -9,6 +9,14 @@
     "case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_BOOT_FAIL_MODE=\"closed\" ;; esac",
     "FAIL_MODE=\"open\""
   ],
+  "antigravity-hook.sh/secure-client/closed": [
+    "_DC_BOOT_FAIL_MODE=\"open\"",
+    "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-open}\""
+  ],
+  "antigravity-hook.sh/secure-client/open": [
+    "_DC_BOOT_FAIL_MODE=\"open\"",
+    "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-open}\""
+  ],
   "claude-code-hook.sh/closed": [
     "  _DC_HOME_FAIL_MODE=\"closed\"",
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
@@ -17,6 +25,12 @@
   "claude-code-hook.sh/open": [
     "  _DC_HOME_FAIL_MODE=\"open\"",
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"open\""
+  ],
+  "claude-code-hook.sh/secure-client/closed": [
+    "FAIL_MODE=\"closed\""
+  ],
+  "claude-code-hook.sh/secure-client/open": [
     "FAIL_MODE=\"open\""
   ],
   "codex-hook.sh/closed": [
@@ -31,6 +45,14 @@
     "FAIL_MODE=\"open\"",
     "# explicitly set FAIL_MODE=closed is told about a real problem."
   ],
+  "codex-hook.sh/secure-client/closed": [
+    "FAIL_MODE=\"closed\"",
+    "# explicitly set FAIL_MODE=closed is told about a real problem."
+  ],
+  "codex-hook.sh/secure-client/open": [
+    "FAIL_MODE=\"open\"",
+    "# explicitly set FAIL_MODE=closed is told about a real problem."
+  ],
   "copilot-hook.sh/closed": [
     "FAIL_MODE=\"closed\"",
     "case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) FAIL_MODE=\"closed\" ;; esac"
@@ -38,6 +60,12 @@
   "copilot-hook.sh/open": [
     "FAIL_MODE=\"open\"",
     "case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) FAIL_MODE=\"closed\" ;; esac"
+  ],
+  "copilot-hook.sh/secure-client/closed": [
+    "FAIL_MODE=\"open\""
+  ],
+  "copilot-hook.sh/secure-client/open": [
+    "FAIL_MODE=\"open\""
   ],
   "devin-hook.sh/closed": [
     "  _DC_HOME_FAIL_MODE=\"closed\"",
@@ -49,6 +77,12 @@
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
     "FAIL_MODE=\"open\""
   ],
+  "devin-hook.sh/secure-client/closed": [
+    "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-closed}\""
+  ],
+  "devin-hook.sh/secure-client/open": [
+    "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-open}\""
+  ],
   "hermes-hook.sh/closed": [
     "  _DC_HOME_FAIL_MODE=\"closed\"",
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
@@ -58,5 +92,27 @@
     "  _DC_HOME_FAIL_MODE=\"open\"",
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
     "FAIL_MODE=\"open\""
+  ],
+  "hermes-hook.sh/secure-client/closed": [
+    "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-open}\""
+  ],
+  "hermes-hook.sh/secure-client/open": [
+    "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-open}\""
+  ],
+  "kiro-hook.sh/closed": [
+    "  _DC_HOME_FAIL_MODE=\"closed\"",
+    "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"closed\""
+  ],
+  "kiro-hook.sh/open": [
+    "  _DC_HOME_FAIL_MODE=\"open\"",
+    "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"open\""
+  ],
+  "kiro-hook.sh/secure-client/closed": [
+    "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-closed}\""
+  ],
+  "kiro-hook.sh/secure-client/open": [
+    "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-open}\""
   ]
 }
