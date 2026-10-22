@@ -1237,6 +1237,7 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         "function Wait-PreviousHookExit([DateTime]$PublishedAt) {}\n"
         "function Remove-Aside([string]$Path) { Remove-Item -LiteralPath $Path -Force }\n"
         + _bin_dir_functions()
+        + _ps1_function("Get-Sha256")
         + _ps1_function("Install-HookFirst")
         + _ps1_function("Undo-HookFirst")
         + steps
@@ -1267,6 +1268,132 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         assert not (slot / "HOOK_FIRST").exists()
     # Undo leaves the old hook live.
     assert live.read_text(encoding="utf-8").strip() == "old", out
+
+
+_EARLY_UNDO_SITES = ["hook-drain", "stop", "fail-modes", "quiescence", "save"]
+
+
+@pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
+@pytest.mark.parametrize("shell", _POWERSHELLS)
+@pytest.mark.parametrize("block", ["none", "once", "always", "silent"])
+@pytest.mark.parametrize("site", _EARLY_UNDO_SITES)
+def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, shell: str, block: str, site: str) -> None:
+    # r104 W4 loop 3: the new hook goes in before the gateway stops. A later
+    # step that refused the upgrade put the old hook back through
+    # Invoke-Quietly; a hook reader or a scanner holding the file hid that
+    # failure, Restart-Old's retry threw before the old gateway started, and
+    # the lock went with the new hook live and the gateway stopped. Every
+    # refusal after the swap runs here with the restore blocked once, always,
+    # or "copied" without the bytes changing. A restore that is not verified
+    # keeps .install.lock and the slot for the next run, never says nothing
+    # was changed, and the old gateway runs either way.
+    data_dir, bin_dir, staging = tmp_path / "dc", tmp_path / "bin", tmp_path / "staging"
+    (staging / "bin").mkdir(parents=True)
+    bin_dir.mkdir()
+    data_dir.mkdir()
+    (staging / "bin" / "defenseclaw-hook.exe").write_text("new", encoding="utf-8")
+    (bin_dir / "defenseclaw-hook.exe").write_text("old", encoding="utf-8")
+    (bin_dir / "defenseclaw-gateway.exe").write_text("old gateway", encoding="utf-8")
+    install = _ps1_function("Invoke-Install")
+    phase = install[install.index("    $WasRunning = [bool](Get-GatewayProcess)") : install.index("    $previousLabel =")]
+    blocks = {"none": 0, "once": 1, "always": 99, "silent": 99}[block]
+    real = "".join(
+        _ps1_function(name)
+        for name in (
+            "Invoke-Quietly", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst",
+            "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
+            "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote", "Resume-InterruptedRun",
+        )
+    )
+    script = tmp_path / "case.ps1"
+    script.write_text(
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data_dir}'\n$BinDir = '{bin_dir}'\n$Staging = '{staging}'\n$Previous = Join-Path $DataDir 'previous'\n"
+        "$LockDir = Join-Path $DataDir '.install.lock'\n"
+        "$ManagedFiles = @('defenseclaw-hook.exe', 'defenseclaw-gateway.exe')\n"
+        "$Run = @{ Lock = $true; OldGatewayDown = $false; UndoPending = $false; RestorePending = $false }\n"
+        "$Setup = $null; $PrevVersion = '1.0.2'; $Ver = '1.0.4'; $versionChange = $true; $stagedGateway = 'staged'\n"
+        f"$script:site = '{site}'; $script:blocks = {blocks}; $script:silent = ${str(block == 'silent').lower()}\n"
+        "$script:running = $true; $script:starts = 0; $script:modeCalls = 0\n"
+        "function Write-Info([string]$m) { Write-Host \"info: $m\" }\n"
+        "function Write-Ok([string]$m) { Write-Host \"ok: $m\" }\n"
+        "function Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
+        "function Write-Err([string]$m) { Write-Host \"err: $m\" }\n"
+        "function Die([string]$m) { throw $m }\n"
+        "function Get-UtcClock { 'clock' }\n"
+        "function New-InstallDirectory([string]$Path) { Remove-Tree $Path; New-Item -ItemType Directory -Path $Path | Out-Null }\n"
+        "function Remove-Tree([string]$Path) { if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force } }\n"
+        "function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) { Move-Item -LiteralPath $From -Destination $To }\n"
+        "function Install-File([string]$Source, [string]$Destination) {\n"
+        "    if ($Destination -eq (Join-Path $BinDir 'defenseclaw-hook.exe') -and (Get-Content -Raw -LiteralPath $Source) -eq 'old' -and $script:blocks -gt 0) {\n"
+        "        $script:blocks--\n"
+        "        if ($script:silent) { return }\n"
+        "        throw 'The process cannot access the file because it is being used by another process'\n"
+        "    }\n"
+        "    Copy-Item -LiteralPath $Source -Destination $Destination -Force\n"
+        "}\n"
+        "function Wait-PreviousHookExit([DateTime]$PublishedAt) { if ($script:site -eq 'hook-drain') { throw 'Previous hook calls did not finish within 30 seconds' } }\n"
+        "function Get-GatewayProcess { return $script:running }\n"
+        "function Update-HookFailModes([string]$Gateway) { $script:modeCalls++; return -not ($script:site -eq 'fail-modes' -and $script:modeCalls -eq 2) }\n"
+        "function Stop-Gateway { if ($script:site -eq 'stop') { return $false }; $script:running = $false; return $true }\n"
+        "function Start-Gateway { $script:starts++; $script:running = $true; return 0 }\n"
+        "function Stop-Watchdog {}\n"
+        "function Assert-GatewayQuiescent([string]$Operation) { if ($script:site -eq 'quiescence') { throw \"$Operation refused: a hook is still running\" } }\n"
+        "function Assert-NoActiveConnectorRecovery([string]$Operation) {}\n"
+        "function Clear-StagedRelease {}\n"
+        "function Save-Snapshot { return $false }\n"
+        "function Test-DiskFull { return $false }\n"
+        "function Stop-ProcessesUnder {}\n"
+        + real
+        + "New-Item -ItemType Directory -Path $LockDir -Force | Out-Null\n"
+        "$message = ''\n"
+        "try {\n" + phase + "    throw 'the refusal did not happen'\n} catch { $message = $_.Exception.Message }\n"
+        "Close-InstallLock\n"
+        "Write-Host \"message: $message\"\n"
+        "Write-Host \"pending: $(Test-RecoveryPending)\"\n"
+        "Write-Host \"running: $script:running starts: $script:starts\"\n"
+        "Write-Host \"hook: $(Get-Content -Raw -LiteralPath (Join-Path $BinDir 'defenseclaw-hook.exe'))\"\n"
+        "# The next run, with the file free again, finishes the undo.\n"
+        "$script:blocks = 0\n"
+        "Resume-InterruptedRun\n"
+        "Write-Host \"resumed hook: $(Get-Content -Raw -LiteralPath (Join-Path $BinDir 'defenseclaw-hook.exe'))\"\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "the refusal did not happen" not in out, out
+    # Only Restart-Old retries; the two refusals before the gateway stopped
+    # have no second try.
+    pending = block in ("always", "silent") or (block == "once" and site in ("hook-drain", "stop"))
+    slot = data_dir / "previous.new"
+    lock = data_dir / ".install.lock"
+    assert f"pending: {pending}" in out, out
+    # The old gateway runs whether or not the old hook is back.
+    assert "running: True" in out, out
+    if site in ("fail-modes", "quiescence", "save"):
+        assert "starts: 1" in out, out
+    if pending:
+        assert lock.is_dir(), out
+        assert "The install stays locked" in out, out
+        assert "nothing was changed" not in out and "Your previous install is back" not in out, out
+        if site in ("stop", "fail-modes", "save"):
+            assert "not fully back" in out, out
+        assert "hook: new" in out, out
+    else:
+        assert not lock.exists(), out
+        assert "hook: old" in out, out
+    # Either way the next run leaves the old hook live and no slot.
+    assert "resumed hook: old" in out, out
+    assert not slot.exists(), out
 
 
 # ── 1.0.4 (GAP-0004) ────────────────────────────────────────────────────────
