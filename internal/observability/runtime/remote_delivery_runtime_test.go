@@ -5,12 +5,16 @@ package runtime
 
 import (
 	"context"
+	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -46,7 +50,7 @@ func TestRuntimeReplaysAStoredChangeOnlyToDestinationsThatLackIt(t *testing.T) {
 		t.Helper()
 		ctx := observability.WithExportAfterLocalWrite(t.Context())
 		if replay {
-			ctx = observability.WithStoredReplay(t.Context())
+			ctx = observability.WithStoredReplay(t.Context(), storedRuntimeRecord(t, dependencies, recordID))
 		}
 		tracker.BeginAttempt()
 		_, err := runtime.Emit(observability.WithRemoteDelivery(ctx, tracker), diagnosticMetadata(t),
@@ -108,10 +112,111 @@ func TestRuntimeReplaysAStoredChangeOnlyToDestinationsThatLackIt(t *testing.T) {
 	// A replay writes nothing, so it cannot be one item of an atomic batch,
 	// which writes every item.
 	if _, err := runtime.EmitAtomicBatch(t.Context(), []LogBatchItem{{
-		Context: observability.WithStoredReplay(t.Context()), Metadata: diagnosticMetadata(t),
+		Context: observability.WithStoredReplay(t.Context(), storedRuntimeRecord(t, dependencies, recordID)), Metadata: diagnosticMetadata(t),
 		Builder: runtimeContentRecordBuilder("runtime-change-batch-replay", "change"),
 	}}); err == nil {
 		t.Fatal("an atomic batch took a stored replay")
 	}
 	assertNoRuntimeDelivery(t, adapters["acks"])
+}
+
+// storedRuntimeRecord is the projected record of the local row recordID.
+func storedRuntimeRecord(t *testing.T, dependencies runtimeTestDependencies, recordID string) []byte {
+	t.Helper()
+	reader, err := sql.Open("sqlite", dependencies.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close() //nolint:errcheck
+	var record string
+	if err := reader.QueryRowContext(t.Context(),
+		`SELECT projected_record_json FROM audit_events WHERE id = ?`, recordID).Scan(&record); err != nil {
+		t.Fatal(err)
+	}
+	return []byte(record)
+}
+
+// A stored change keeps the config generation and digest of the process
+// that stored it. Before, a replay had to name the generation of the
+// current graph, so once a reload (or a restart) replaced it, every replay
+// of a change a destination had refused failed and the change stayed
+// queued, filling the change spool. Now a replay keeps the stored
+// provenance and is sent only when it is the stored record; another record
+// under the stored id (this generation, another body) is refused, and a
+// new record must still name this generation.
+func TestRuntimeReplaysAStoredChangeAfterAReload(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	makePlan := func(generation string) *config.ObservabilityV8Plan {
+		return runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
+			func(source *config.ObservabilityV8Source) {
+				source.Resource.Attributes = map[string]string{"team.generation": generation}
+				source.Destinations = []config.ObservabilityV8DestinationSource{
+					runtimeConsoleDestination("refuses", "none", 8),
+				}
+			},
+		)
+	}
+	adapter := newRuntimeRecordingAdapter(16)
+	adapter.outcome = delivery.OutcomePermanentPayload
+	factory := runtimeAdapterFactoryFunc(func(
+		context.Context, config.ObservabilityV8EffectiveDestination, telemetry.V8ResourceContext,
+	) (delivery.Adapter, DestinationAdapterCleanup, error) {
+		return adapter, func(context.Context) error { return nil }, nil
+	})
+	runtime := runtimeWithAdapterFactory(t, dependencies, makePlan("one"), factory, nil)
+	const recordID = "runtime-change-reload"
+	var first EmitContext
+	storing := func(snapshot EmitContext, admission router.Admission) (observability.Record, error) {
+		first = snapshot
+		return runtimeContentRecordBuilder(recordID, "change")(snapshot, admission)
+	}
+	if _, err := runtime.Emit(observability.WithExportAfterLocalWrite(t.Context()), diagnosticMetadata(t), storing); err != nil {
+		t.Fatal(err)
+	}
+	_ = receiveRuntimeDelivery(t, adapter)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	result, graphErr := runtime.Reload(ctx, runtimegraph.ConfigFromPlan(makePlan("two"), false))
+	if graphErr != nil || result.Status() != runtimegraph.ReloadApplied {
+		t.Fatalf("reload status=%v err=%v", result.Status(), graphErr)
+	}
+	if active := runtime.Active(); active.Generation() == first.Generation() || active.Digest() == first.Digest() {
+		t.Fatal("the reload kept the generation and digest")
+	}
+	stored := storedRuntimeRecord(t, dependencies, recordID)
+	replay := func(builder EmitBuilder) error {
+		t.Helper()
+		_, err := runtime.Emit(observability.WithStoredReplay(t.Context(), stored), diagnosticMetadata(t), builder)
+		return err
+	}
+	asStored := func(content string) EmitBuilder {
+		return func(_ EmitContext, admission router.Admission) (observability.Record, error) {
+			return runtimeContentRecordBuilder(recordID, content)(first, admission)
+		}
+	}
+
+	if err := replay(asStored("change")); err != nil {
+		t.Fatalf("a replay of the stored change after a reload: %v", err)
+	}
+	item := receiveRuntimeDelivery(t, adapter)
+	if item.identity.RecordID != recordID || !strings.Contains(string(item.bytes), first.Digest()) {
+		t.Fatalf("the replay is not the stored record: %s", item.bytes)
+	}
+	for name, builder := range map[string]EmitBuilder{
+		"this generation": runtimeContentRecordBuilder(recordID, "change"),
+		"another body":    asStored("another change"),
+	} {
+		if err := replay(builder); err == nil {
+			t.Fatalf("a replay with %s was accepted", name)
+		}
+		assertNoRuntimeDelivery(t, adapter)
+	}
+	stale := func(_ EmitContext, admission router.Admission) (observability.Record, error) {
+		return runtimeContentRecordBuilder("runtime-change-stale", "stale")(first, admission)
+	}
+	if _, err := runtime.Emit(t.Context(), diagnosticMetadata(t), stale); err == nil {
+		t.Fatal("a new record of the replaced generation was accepted")
+	}
+	assertNoRuntimeDelivery(t, adapter)
 }

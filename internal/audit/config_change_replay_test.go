@@ -92,24 +92,26 @@ func TestLogConfigChangeReplaysTheStoredRecordAfterARestart(t *testing.T) {
 		breakRow string
 		floor    bool
 	}{
-		"record schema of another build":  {breakRow: `UPDATE audit_events SET record_schema_version = record_schema_version + 1`},
-		"bucket catalog of another build": {breakRow: `UPDATE audit_events SET bucket_catalog_version = bucket_catalog_version + 1`},
-		"another event":                   {breakRow: `UPDATE audit_events SET event_name = 'config.trust_anchors.changed'`},
-		"no valid time":                   {breakRow: `UPDATE audit_events SET timestamp = 'yesterday'`},
-		"floor form now":                  {floor: true},
+		"record schema of another build": {breakRow: `UPDATE audit_events
+			SET projected_record_json = json_set(projected_record_json, '$.schema_version', 0)`},
+		"bucket catalog of another build": {breakRow: `UPDATE audit_events
+			SET projected_record_json = json_set(projected_record_json, '$.bucket_catalog_version', 0)`},
+		"another event": {breakRow: `UPDATE audit_events
+			SET projected_record_json = json_set(projected_record_json, '$.event_name', 'config.trust_anchors.changed')`},
+		"no valid time":  {breakRow: `UPDATE audit_events SET timestamp = 'yesterday'`},
+		"floor form now": {floor: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			before := len(sent(runtime))
-			var stamp, event string
-			var schema, catalog int
-			if err := store.db.QueryRow(`SELECT timestamp, event_name, record_schema_version, bucket_catalog_version
-				FROM audit_events`).Scan(&stamp, &event, &schema, &catalog); err != nil {
+			var stamp, record string
+			if err := store.db.QueryRow(`SELECT timestamp, projected_record_json FROM audit_events`).
+				Scan(&stamp, &record); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() {
 				runtime.admission = router.AdmissionOrdinary
-				if _, err := store.db.Exec(`UPDATE audit_events SET timestamp = ?, event_name = ?,
-					record_schema_version = ?, bucket_catalog_version = ?`, stamp, event, schema, catalog); err != nil {
+				if _, err := store.db.Exec(`UPDATE audit_events SET timestamp = ?, projected_record_json = ?`,
+					stamp, record); err != nil {
 					t.Fatal(err)
 				}
 			})
@@ -135,5 +137,68 @@ func TestLogConfigChangeReplaysTheStoredRecordAfterARestart(t *testing.T) {
 	}
 	if got := sent(runtime); got[len(got)-1] != stored[0] {
 		t.Fatalf("the replay is not the stored record: %s", got[len(got)-1])
+	}
+}
+
+// A change event id names one change. When the spool offers another event
+// under an id the store already holds (the interrupted reservation of a
+// change whose applied event the store has, after a power loss took the
+// event file), the replay used to be built from the offered event and
+// checked only for its schema, event, time and provenance, so the store's
+// applied anchor record went out as failed (interrupted) under its id, and
+// a body change (another hash, key or actor) went out too. Now the rebuilt
+// record must be the stored one, outcome and body included, and nothing
+// else is sent under its id; the stored change still replays.
+func TestLogConfigChangeRefusesAnotherChangeUnderTheStoredID(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	logger := NewLogger(store)
+	runtime := newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	sent := func() int {
+		_, records := runtime.snapshot()
+		return len(records)
+	}
+	applied := ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeTrustAnchors, Action: "install",
+		Outcome: ConfigChangeApplied, Actor: "os:uid:0:root", ChangedAt: "2026-10-21T10:00:00Z",
+		SHA256: strings.Repeat("a", 64), PreviousSHA256: strings.Repeat("b", 64),
+		KeyIDsAdded: []string{"bundle-key-2"}, KeyIDsRemoved: []string{"bundle-key-1"}}
+	if err := logger.LogConfigChange(applied, nil); err != nil {
+		t.Fatal(err)
+	}
+	if sent() != 1 {
+		t.Fatal("the applied change was not sent")
+	}
+	interrupted := ConfigChange{EventID: applied.EventID, Kind: ConfigChangeTrustAnchors, Action: "install",
+		Outcome: ConfigChangeFailed, ReasonCode: "interrupted", Actor: applied.Actor, ChangedAt: applied.ChangedAt}
+	for name, change := range map[string]ConfigChange{
+		"the interrupted reservation": interrupted,
+		"a refusal":                   {EventID: applied.EventID, Kind: ConfigChangeTrustAnchors, Action: "install", Outcome: ConfigChangeRefused, ReasonCode: "bundle_signature_invalid", Actor: applied.Actor, ChangedAt: applied.ChangedAt},
+		"another anchor file":         func() ConfigChange { c := applied; c.SHA256 = strings.Repeat("c", 64); return c }(),
+		"another replaced file":       func() ConfigChange { c := applied; c.PreviousSHA256 = ""; return c }(),
+		"another added key":           func() ConfigChange { c := applied; c.KeyIDsAdded = []string{"bundle-key-3"}; return c }(),
+		"no removed key":              func() ConfigChange { c := applied; c.KeyIDsRemoved = nil; return c }(),
+		"another account":             func() ConfigChange { c := applied; c.Actor = "os:uid:501:alice"; return c }(),
+		"another time":                func() ConfigChange { c := applied; c.ChangedAt = "2026-10-21T11:00:00Z"; return c }(),
+	} {
+		before := sent()
+		if err := logger.LogConfigChange(change, nil); err == nil {
+			t.Fatalf("%s under the stored id was accepted", name)
+		}
+		if sent() != before {
+			t.Fatalf("%s was sent under the stored id", name)
+		}
+	}
+	if err := logger.LogConfigChange(applied, nil); err != nil {
+		t.Fatalf("the stored change does not replay: %v", err)
+	}
+	if sent() != 2 {
+		t.Fatal("the stored change was not sent again")
 	}
 }

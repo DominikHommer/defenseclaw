@@ -74,6 +74,15 @@ var (
 	syncChangeDir    = configwrite.SyncDir
 	syncChangeFile   = configwrite.SyncFile
 	syncChangeHandle = (*os.File).Sync
+	// flushEndedReservation flushes a reservation the gateway read through
+	// its read-only handle (POSIX fsync needs no write access; Windows
+	// cannot flush a read-only handle and journals the file).
+	flushEndedReservation = func(file *os.File) error {
+		if runtime.GOOS == "windows" {
+			return nil
+		}
+		return file.Sync()
+	}
 )
 
 // ChangeReservation is the room in the spool for the event of one change in
@@ -100,6 +109,12 @@ func (s ChangeSpool) Reserve(kind, action, name string) (*ChangeReservation, err
 	if kind == ChangeKindSecret && ValidChangeSecretName(name) {
 		ev.SecretName = name
 	}
+	return s.reserve(ev)
+}
+
+// reserve holds room for ev under its id; ev is what the spool records if
+// its command ends before it writes its outcome.
+func (s ChangeSpool) reserve(ev ChangeEvent) (*ChangeReservation, error) {
 	data, err := marshalChangeEvent(ev)
 	if err != nil {
 		return nil, err
@@ -355,14 +370,19 @@ func (s ChangeSpool) recordInterrupted(id string, file *os.File) error {
 	}
 	path := filepath.Join(s.Dir, id+".json")
 	if ev, err := ReadChangeEvent(path); err == nil && ev.EventID == id {
-		if s.Publish == nil {
-			return nil
+		if s.Publish != nil {
+			if err := s.Publish(path); err != nil {
+				return err
+			}
+			// The access is durable before the reservation goes.
+			if err := syncChangeFile(path); err != nil {
+				return err
+			}
 		}
-		if err := s.Publish(path); err != nil {
-			return err
-		}
-		// The access is durable before the reservation goes.
-		return syncChangeFile(path)
+		// Its command may have stopped after the rename and before it
+		// flushed the spool: the event's entry is durable before the
+		// reservation goes.
+		return syncChangeDir(s.Dir)
 	}
 	raw, _, ok := readReservation(file, id)
 	if !ok {
@@ -435,5 +455,30 @@ func readEndedReservation(dir, path, id string) (ChangeEvent, bool) {
 		return ChangeEvent{}, false
 	}
 	_, ev, ok := readReservation(file, id)
-	return ev, ok
+	// A command that stopped inside Reserve may not have flushed its
+	// reservation: it is reported only once it is on disk to stay.
+	if !ok || flushEndedReservation(file) != nil || syncChangeDir(filepath.Dir(path)) != nil {
+		return ChangeEvent{}, false
+	}
+	return ev, true
+}
+
+// changeReservationHeld reports whether the reservation at path exists and
+// its command holds it. A reservation the gateway cannot open or lock is
+// counted as held.
+func changeReservationHeld(path string) bool {
+	file, err := openChangeFile(path, os.O_RDONLY)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	defer file.Close()
+	locked, err := tryLockChangeFile(file)
+	if err != nil || !locked {
+		return true
+	}
+	unlockChangeFile(file)
+	return false
 }

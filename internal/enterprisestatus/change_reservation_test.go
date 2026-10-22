@@ -908,3 +908,184 @@ func reservationFiles(t *testing.T, spool ChangeSpool) []string {
 	}
 	return out
 }
+
+// Every event is written under a reservation held until its entry in the
+// spool is flushed, a refusal (Write) included, and the reservation holds
+// the refusal itself. Before, Write renamed a refusal into the spool with
+// no reservation: the gateway could read and report it before the folder
+// was flushed, and a power loss then took the event back with nothing left
+// to record it again.
+func TestChangeSpoolWritesARefusalUnderItsReservation(t *testing.T) {
+	spool := newTestSpool(t)
+	refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation := filepath.Join(spool.reservedDir(), refusal.EventID+".json")
+	held := false
+	pub := &publishLog{onCall: func(path string) {
+		if !strings.HasPrefix(filepath.Base(path), "."+refusal.EventID+".json.") {
+			return
+		}
+		held = changeReservationHeld(reservation)
+		file, err := os.Open(reservation)
+		if err != nil {
+			t.Errorf("no reservation while the refusal is written: %v", err)
+			return
+		}
+		defer file.Close()
+		if _, ev, ok := readReservation(file, refusal.EventID); !ok || ev.Outcome != ChangeRefused ||
+			ev.ReasonCode != "invalid_arguments" {
+			t.Errorf("the reservation does not hold the refusal: %+v", ev)
+		}
+	}}
+	spool.Publish = pub.publish
+	if err := spool.Write(refusal); err != nil {
+		t.Fatal(err)
+	}
+	if !held {
+		t.Fatal("the refusal was written without a held reservation")
+	}
+	if files := reservationFiles(t, spool); len(files) != 0 {
+		t.Fatalf("reservations left after the write: %v", files)
+	}
+	if got := readSpool(t, spool); len(got) != 1 || got[0].EventID != refusal.EventID {
+		t.Fatalf("spool = %+v", got)
+	}
+}
+
+// The gateway reports an event only once it is on disk to stay: not while
+// its writer still holds its reservation (the rename is not flushed yet),
+// and only after the spool folder is flushed, for a writer that stopped
+// between its rename and its flush. A reported event is skipped without a
+// flush. Before, the gateway reported every event it could read.
+func TestReportableChangeEventIDsAreOnDiskToStay(t *testing.T) {
+	spool := newTestSpool(t)
+	r, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "splunk-hec-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := appliedSecretChange(t, "splunk-hec-token")
+	ev.EventID = r.id
+	data, err := marshalChangeEvent(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Renamed into the spool; the writer has not flushed it nor let go.
+	if err := os.WriteFile(filepath.Join(spool.Dir, r.id+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ids := ReportableChangeEventIDs(spool.Dir, nil); len(ids) != 0 {
+		t.Fatalf("an event its writer still holds is reportable: %v", ids)
+	}
+	r.abandon() // The writer stopped after the rename.
+	flushErr := errors.New("flush failed")
+	failing := true
+	log := recordChangeSyncs(t, func(entry string) error {
+		if failing && entry == "dir "+spool.Dir {
+			return flushErr
+		}
+		return nil
+	})
+	if ids := ReportableChangeEventIDs(spool.Dir, nil); len(ids) != 0 {
+		t.Fatalf("an event whose folder cannot be flushed is reportable: %v", ids)
+	}
+	failing = false
+	if ids := ReportableChangeEventIDs(spool.Dir, nil); len(ids) != 1 || ids[0] != r.id {
+		t.Fatalf("reportable = %v, want %s", ids, r.id)
+	}
+	if strings.Join(*log, "|") != "dir "+spool.Dir+"|dir "+spool.Dir {
+		t.Fatalf("flushed %v, want the spool folder", *log)
+	}
+	*log = nil
+	if ids := ReportableChangeEventIDs(spool.Dir, func(string) bool { return true }); len(ids) != 0 || len(*log) != 0 {
+		t.Fatalf("reported events are reportable %v, flushed %v", ids, *log)
+	}
+}
+
+// A reservation is reported only once it is on disk to stay: a command
+// that stopped inside Reserve may not have flushed its file or its folder,
+// so the gateway flushes both first and reports nothing when it cannot.
+// Before, it reported the reservation as read, and a power loss could take
+// it back after the gateway stored it, with nothing left to offer again.
+func TestEndedChangeReservationsAreFlushedBeforeTheyAreReported(t *testing.T) {
+	for _, fail := range []string{"", "file", "folder"} {
+		t.Run("fail "+fail, func(t *testing.T) {
+			spool := newTestSpool(t)
+			r, err := spool.Reserve(ChangeKindTrustAnchors, ChangeActionInstall, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.abandon() // The command ended before it wrote its event.
+			flushErr := errors.New("flush failed")
+			savedFlush := flushEndedReservation
+			t.Cleanup(func() { flushEndedReservation = savedFlush })
+			flushed := 0
+			flushEndedReservation = func(file *os.File) error {
+				flushed++
+				if fail == "file" {
+					return flushErr
+				}
+				return savedFlush(file)
+			}
+			log := recordChangeSyncs(t, func(entry string) error {
+				if fail == "folder" && entry == "dir "+spool.reservedDir() {
+					return flushErr
+				}
+				return nil
+			})
+			got := EndedChangeReservations(spool.Dir)
+			if fail != "" {
+				if len(got) != 0 {
+					t.Fatalf("a reservation that cannot be flushed was reported: %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].EventID != r.id || flushed != 1 ||
+				strings.Join(*log, "|") != "dir "+spool.reservedDir() {
+				t.Fatalf("reported %+v after flushing the file %d times and %v", got, flushed, *log)
+			}
+		})
+	}
+}
+
+// A writer that keeps the event a stopped command renamed into the spool
+// flushes the spool folder before it removes that command's reservation.
+// Before, it removed the reservation with the rename maybe not on disk, so
+// a power loss could lose both the event and its reservation.
+func TestChangeSpoolFlushesAKeptEventBeforeItRemovesTheReservation(t *testing.T) {
+	spool := newTestSpool(t)
+	r, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "splunk-hec-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := appliedSecretChange(t, "splunk-hec-token")
+	ev.EventID = r.id
+	data, err := marshalChangeEvent(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spool.Dir, r.id+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.abandon() // The command stopped after its rename, before its flush.
+	reservation := filepath.Join(spool.reservedDir(), r.id+".json")
+	flushedFirst := false
+	recordChangeSyncs(t, func(entry string) error {
+		if entry == "dir "+spool.Dir && !flushedFirst {
+			if _, err := os.Lstat(reservation); err == nil {
+				flushedFirst = true
+			}
+		}
+		return nil
+	})
+	if _, err := spool.Reserve(ChangeKindTrustAnchors, ChangeActionInstall, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !flushedFirst {
+		t.Fatal("the reservation went before the kept event was flushed")
+	}
+	if _, err := os.Lstat(reservation); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the settled reservation is still there: %v", err)
+	}
+}

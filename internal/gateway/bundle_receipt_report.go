@@ -282,8 +282,10 @@ func (r *bundleReceiptReporter) reportSpool() {
 }
 
 // reportChanges emits one audit event per change event not reported yet,
-// oldest first, then one per reservation whose command ended before it
-// wrote its event (failed, interrupted): a change interrupted after it was
+// oldest first, once the event is on disk to stay (its writer flushed it;
+// enterprisestatus.ReportableChangeEventIDs), then one per reservation
+// whose command ended before it wrote its event (failed, interrupted),
+// also once it is flushed: a change interrupted after it was
 // made is reported at the next poll, a gateway restart included, even when
 // no later command writes the spool. A file that does not validate is
 // skipped. A reservation the next command moves into the spool keeps its
@@ -293,10 +295,7 @@ func (r *bundleReceiptReporter) reportSpool() {
 // remote destination acknowledged it.
 func (r *bundleReceiptReporter) reportChanges() {
 	dir := r.changeDir()
-	for _, id := range enterprisestatus.ListChangeEventIDs(dir) {
-		if r.hasSeen(id) {
-			continue
-		}
+	for _, id := range enterprisestatus.ReportableChangeEventIDs(dir, r.hasSeen) {
 		ev, err := enterprisestatus.ReadChangeEvent(filepath.Join(dir, id+".json"))
 		if err != nil || ev.EventID != id {
 			continue

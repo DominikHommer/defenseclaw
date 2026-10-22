@@ -372,6 +372,9 @@ func (pipeline *LocalLogPipeline) ProcessManagedLogFallback(
 	if !ok {
 		return outcome, nil
 	}
+	if err := matchStoredReplay(ctx, record); err != nil {
+		return LocalLogOutcome{}, err
+	}
 	delivery, ok := result.Delivery()
 	if !ok || delivery.DestinationName != config.ObservabilityV8ManagedAIDDestinationName ||
 		delivery.DestinationKind != config.ObservabilityV8DestinationOTLP ||
@@ -424,7 +427,11 @@ func (pipeline *LocalLogPipeline) process(
 	sinkPolicy := legacyredaction.SinkPolicyFromContext(ctx)
 	if replay {
 		// The store already holds this occurrence under its stable id
-		// (observability.WithStoredReplay): hand back its remote work only.
+		// (observability.WithStoredReplay): hand back its remote work only,
+		// and only when the rebuilt record is the stored one.
+		if err := matchStoredReplay(ctx, prepared.record); err != nil {
+			return LocalLogOutcome{}, err
+		}
 		outcome.localPersisted = true
 		pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, "")
 		return outcome, nil
@@ -454,6 +461,21 @@ func (pipeline *LocalLogPipeline) process(
 	}
 	pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, originDestination)
 	return outcome, nil
+}
+
+// matchStoredReplay refuses a stored replay whose rebuilt record is not the
+// record the local store holds under its id (v8redaction.MatchStoredProjection):
+// every path that exports a replay checks it, so no other record goes out
+// under the stored id. Another offer is not a replay and passes.
+func matchStoredReplay(ctx context.Context, record observability.Record) error {
+	stored, replay := observability.StoredReplayRecord(ctx)
+	if !replay {
+		return nil
+	}
+	if v8redaction.MatchStoredProjection(record, stored) != nil {
+		return &Error{code: ErrorRecordBuild}
+	}
+	return nil
 }
 
 // preparedLocalLog is an admitted occurrence ready for the local append.

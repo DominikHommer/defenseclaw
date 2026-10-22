@@ -181,3 +181,51 @@ func TestBundleReceiptReporterReportsAnInterruptedChangeAtRestart(t *testing.T) 
 		t.Fatalf("changes = %+v, want the interrupted set once, then the refusal", sink.changes)
 	}
 }
+
+// The gateway reports a change event only once it is on disk to stay. While
+// the command that writes it still holds its reservation, the rename may
+// not be flushed: a power loss could take the event back after the
+// gateway stored and offered it, and a destination that refused it would
+// never be offered it again. Before, the gateway reported every event it
+// could read, so it reported this one at once.
+func TestBundleReceiptReporterWaitsForTheWriterToFlushAChangeEvent(t *testing.T) {
+	dir := t.TempDir()
+	spool := enterprisestatus.ChangeSpool{Dir: enterprisestatus.ChangeEventsDir(dir), StateDir: t.TempDir()}
+	reservation, err := spool.Reserve(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(spool.Dir, enterprisestatus.ChangeReservedDirName))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("reservations %v err %v", entries, err)
+	}
+	id := strings.TrimSuffix(entries[0].Name(), ".json")
+	ev, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall,
+		enterprisestatus.ChangeApplied, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.EventID, ev.SHA256 = id, strings.Repeat("a", 64)
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The writer renamed the event into the spool and has not flushed it.
+	if err := os.WriteFile(filepath.Join(spool.Dir, id+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sink := &fakeBundleReceiptSink{}
+	reporter := &bundleReceiptReporter{receiptPath: enterprisestatus.PublicReceiptPath(dir),
+		markerPath: filepath.Join(dir, bundleReceiptMarkerName), sink: sink, enforcedVersion: func() uint64 { return 0 }}
+	reporter.poll(context.Background())
+	if len(sink.changes) != 0 {
+		t.Fatalf("an event its writer still holds was reported: %+v", sink.changes)
+	}
+	if err := reservation.Write(ev); err != nil {
+		t.Fatal(err)
+	}
+	reporter.poll(context.Background())
+	if len(sink.changes) != 1 || sink.changes[0].EventID != id || sink.changes[0].Outcome != enterprisestatus.ChangeApplied {
+		t.Fatalf("changes = %+v", sink.changes)
+	}
+}

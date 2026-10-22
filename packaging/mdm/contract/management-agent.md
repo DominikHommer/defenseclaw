@@ -46,10 +46,12 @@ gateway.
   event goes to every destination again, so a destination can receive it
   twice with the same id. Every copy is the stored record: the same time,
   run, sidecar, binary and config values, whichever gateway process sends
-  it. A gateway that cannot rebuild the stored record exactly (it was
-  upgraded to a build with another record schema, or collection now keeps
-  only the mandatory floor for it) does not send it, and the event stays in
-  the spool. A command that cannot record
+  it, also after a config reload. A gateway that cannot rebuild the stored
+  record exactly (it was upgraded to a build with another record schema,
+  or collection now keeps only the mandatory floor for it), or that finds
+  another outcome or other values under a stored event's id, does not send
+  it, and the event stays in the spool. The gateway reports an event only
+  once it is on disk to stay (its command has flushed it). A command that cannot record
   its change (the spool cannot be written, or holds 4096 events the gateway
   has not reported) refuses it with `state_invalid` before anything is
   changed. The command holds room for its event from that check until the

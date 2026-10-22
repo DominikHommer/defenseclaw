@@ -131,11 +131,13 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 		return RuntimeV8EmitOutcome{}, err
 	}
 	// A stored replay is not written again (the runtime's pipeline skips
-	// its local append).
-	if !observability.StoredReplay(ctx) {
-		if err := emitter.writer.AppendContext(ctx, record, projection); err != nil {
+	// its local append), and is sent only when it is the stored record.
+	if stored, replay := observability.StoredReplayRecord(ctx); replay {
+		if err := observabilityredaction.MatchStoredProjection(record, stored); err != nil {
 			return RuntimeV8EmitOutcome{}, err
 		}
+	} else if err := emitter.writer.AppendContext(ctx, record, projection); err != nil {
+		return RuntimeV8EmitOutcome{}, err
 	}
 	emitter.mu.Lock()
 	emitter.metadata = append(emitter.metadata, metadata)

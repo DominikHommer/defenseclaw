@@ -516,7 +516,8 @@ func (runtime *Runtime) emitWithLeaseControls(
 
 // leaseRecordBuilder builds one occurrence's record on the pinned generation:
 // it stamps the runtime correlation and checks the record names that
-// generation. Emit and EmitAtomicBatch share it.
+// generation (a stored replay names the generation that stored it). Emit
+// and EmitAtomicBatch share it.
 func leaseRecordBuilder(
 	ctx context.Context,
 	lease *runtimegraph.Lease,
@@ -556,8 +557,16 @@ func leaseRecordBuilder(
 			return observability.Record{}, &emitBuilderError{}
 		}
 		provenance := record.Provenance()
-		if provenance.ConfigDigest != snapshot.Digest() || provenance.ConfigGeneration < 0 ||
-			uint64(provenance.ConfigGeneration) != snapshot.Generation() {
+		if provenance.ConfigGeneration < 0 {
+			return observability.Record{}, &emitBuilderError{}
+		}
+		// A stored replay keeps the config generation and digest of the
+		// process that stored it, which a reload or a restart has replaced;
+		// the pipeline sends it only when it is the stored record
+		// (observability.WithStoredReplay). Every other record names this
+		// generation.
+		if !observability.StoredReplay(ctx) && (provenance.ConfigDigest != snapshot.Digest() ||
+			uint64(provenance.ConfigGeneration) != snapshot.Generation()) {
 			return observability.Record{}, &emitBuilderError{}
 		}
 		return record, nil

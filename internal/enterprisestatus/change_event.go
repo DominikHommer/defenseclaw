@@ -272,21 +272,20 @@ type ChangeSpool struct {
 // Write validates ev and writes it as <Dir>/<event_id>.json when the spool
 // has room for one more event beside the reservations held. It is for an
 // event no reservation holds room for: a refusal, which changed nothing. A
-// change reserves its room before it is made (Reserve).
+// change reserves its room before it is made (Reserve). The event is
+// written as every event is, under a reservation held until its entry in
+// the spool is flushed (the reservation holds ev itself, so a command that
+// stops in between still records the refusal): the gateway reports an
+// event only once its reservation is gone (ReportableChangeEventIDs).
 func (s ChangeSpool) Write(ev ChangeEvent) error {
-	data, err := marshalChangeEvent(ev)
+	if _, err := marshalChangeEvent(ev); err != nil {
+		return err
+	}
+	reservation, err := s.reserve(ev)
 	if err != nil {
 		return err
 	}
-	unlock, err := s.lock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	if err := s.ready(); err != nil {
-		return err
-	}
-	return s.writeEvent(ev.EventID, data)
+	return reservation.Write(ev)
 }
 
 func marshalChangeEvent(ev ChangeEvent) ([]byte, error) {
@@ -304,7 +303,9 @@ func marshalChangeEvent(ev ChangeEvent) ([]byte, error) {
 // Publish runs on the temp file before the rename, so <event_id>.json never
 // exists with an access the gateway cannot read. A command that stops in
 // between leaves only the temp file (removeWriteLeftovers) and keeps its
-// reservation, which the gateway and the next writer then report.
+// reservation, which the gateway and the next writer then report. Its
+// caller holds the event's reservation until the write returns, so the
+// gateway does not report the event before its entry is flushed.
 func (s ChangeSpool) writeEvent(id string, data []byte) error {
 	return configwrite.WriteFileDurablePublished(filepath.Join(s.Dir, id+".json"), data, 0o640, s.Publish)
 }
@@ -406,6 +407,31 @@ func (s ChangeSpool) prune(held int) error {
 		return ErrChangeSpoolFull
 	}
 	return nil
+}
+
+// ReportableChangeEventIDs is for the gateway, which reads the change spool
+// dir and cannot write it: the ids of the events it has not reported
+// (reported, nil for none) and may report now, oldest first. An event is
+// reportable once it is on disk to stay. Its writer
+// holds its reservation from before the event is in the spool until the
+// spool's entry for it is flushed, so an event whose reservation is held
+// is skipped until the next poll. The spool folder is then flushed here
+// (POSIX), for an event whose writer stopped after the rename and before
+// its flush; when that fails no event is reportable, so none is reported
+// that a power loss could take back. On Windows the rename is written
+// through (configwrite), and the folder cannot be flushed.
+func ReportableChangeEventIDs(dir string, reported func(id string) bool) []string {
+	var ids []string
+	for _, id := range ListChangeEventIDs(dir) {
+		if (reported == nil || !reported(id)) &&
+			!changeReservationHeld(filepath.Join(dir, ChangeReservedDirName, id+".json")) {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 || syncChangeDir(dir) != nil {
+		return nil
+	}
+	return ids
 }
 
 // ListChangeEventIDs lists the change event ids in dir, oldest first. A

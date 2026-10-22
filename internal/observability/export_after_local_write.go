@@ -47,19 +47,29 @@ type storedReplayKey struct{}
 
 // WithStoredReplay marks an offer of an occurrence the local store already
 // holds under its stable id (an earlier offer stored it, then a destination
-// failed or the process stopped before every destination had it). The
-// pipeline does not write it locally again and hands back only its
-// optional-destination projections; the producer emits no metric for it.
+// failed or the process stopped before every destination had it). stored
+// is the projected record its local row holds (projected_record_json). The
+// pipeline does not write the occurrence locally again; it hands back its
+// optional-destination projections only when the rebuilt record is the
+// stored one (redaction.MatchStoredProjection), so a replay never sends
+// another record under the stored id. The producer emits no metric for it.
 // It implies WithExportAfterLocalWrite.
-func WithStoredReplay(ctx context.Context) context.Context {
-	return context.WithValue(WithExportAfterLocalWrite(ctx), storedReplayKey{}, true)
+func WithStoredReplay(ctx context.Context, stored []byte) context.Context {
+	return context.WithValue(WithExportAfterLocalWrite(ctx), storedReplayKey{}, append([]byte(nil), stored...))
 }
 
 // StoredReplay reports whether ctx carries WithStoredReplay.
 func StoredReplay(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	marked, _ := ctx.Value(storedReplayKey{}).(bool)
+	_, marked := StoredReplayRecord(ctx)
 	return marked
+}
+
+// StoredReplayRecord returns the stored projected record of a
+// WithStoredReplay offer.
+func StoredReplayRecord(ctx context.Context) ([]byte, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	stored, marked := ctx.Value(storedReplayKey{}).([]byte)
+	return append([]byte(nil), stored...), marked
 }
