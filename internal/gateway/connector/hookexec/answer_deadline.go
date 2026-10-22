@@ -6,6 +6,8 @@ package hookexec
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
@@ -262,7 +264,33 @@ func failNoAnswer(opts Options, sp spec, failMode string) int {
 	if opts.ManagedEnterprise {
 		return failUnreachable(opts, sp, failMode, managedGatewayNoAnswerReason)
 	}
-	return failUnreachable(opts, sp, failMode, perUserGatewayNoAnswerReason)
+	return failUnreachable(opts, sp, failMode, noAnswerReason(opts))
+}
+
+// noAnswerReason is the hook-failure reason of a call whose gateway gave no
+// decision in time.
+func noAnswerReason(opts Options) string {
+	if opts.ManagedEnterprise {
+		return managedGatewayNoAnswerReason
+	}
+	return perUserGatewayNoAnswerReason
+}
+
+// errGatewayTookCallNoAnswer wraps the error of a hook request whose
+// connection to the gateway was made and whose own timeout then ran out
+// while it waited for the answer: the gateway was reached and stalled, it
+// was not unreachable. A stop or session event has no answer budget, so
+// this is how its stall ends (GAP-0527).
+var errGatewayTookCallNoAnswer = errors.New("the gateway took the call and did not answer before the request timed out")
+
+// markConnectedTimeout wraps err with errGatewayTookCallNoAnswer when the
+// request had its connection and then timed out.
+func markConnectedTimeout(err error, connected bool) error {
+	var netErr net.Error
+	if err == nil || !connected || !errors.As(err, &netErr) || !netErr.Timeout() {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errGatewayTookCallNoAnswer, err)
 }
 
 // retryFitsAnswer reports whether a resend that starts after delay still

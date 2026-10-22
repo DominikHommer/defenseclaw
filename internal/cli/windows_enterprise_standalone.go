@@ -2617,8 +2617,10 @@ func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 	if err == nil {
 		return false, nil
 	}
-	return true, writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script,
-		fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err))
+	if !opts.suppliedConfigUnreadable {
+		err = fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)
+	}
+	return true, writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
 }
 
 // writeWindowsEnterpriseStandaloneRefusal writes the schema-2 result of a
@@ -2870,8 +2872,6 @@ func windowsEnterpriseFootprintUserCreated(path string) bool {
 	return err == nil && owner != nil && !windowsEnterpriseAdminSID(owner)
 }
 
-// readWindowsEnterpriseStandaloneEnrollment summarizes the installed
-// guardian manifest when this token can read it.
 // readWindowsEnterpriseStandaloneDestinations lists, for status, the
 // observability destinations the installed config.yaml compiles to with each
 // one's effective redaction profiles. `defenseclaw observability plan` is a
@@ -2893,8 +2893,10 @@ func readWindowsEnterpriseStandaloneDestinations() []enterprisestatus.Destinatio
 	return enterprisestatus.DestinationsFromSummaries(summaries)
 }
 
+// readWindowsEnterpriseStandaloneEnrollment summarizes the installed
+// guardian manifest when this token can read it.
 func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
 		return enterprisestatus.Enrollment{}, err
 	}

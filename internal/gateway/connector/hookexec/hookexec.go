@@ -36,6 +36,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,6 +44,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
@@ -997,6 +999,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// managedPeerFailMode).
 			return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 		}
+		if reason == "gateway unreachable" && !opts.SecureClient && !secureClientHook(opts) && errors.Is(err, errGatewayTookCallNoAnswer) {
+			// Same fail mode; the record says the gateway stalled, not that
+			// it could not be reached. Secure Client keeps its reason.
+			reason = noAnswerReason(opts)
+		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
 	defer func() {
@@ -1271,12 +1278,17 @@ func sendHookRequest(
 	if wantsHookDeliveryReceipt(opts) {
 		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts))
 	}
+
+	var connected atomic.Bool
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	}))
 	resp, err := opts.HTTPClient.Do(req)
 	if err != nil {
 		if delivery != nil {
 			delivery.close()
 		}
-		return nil, err
+		return nil, markConnectedTimeout(err, connected.Load())
 	}
 	if delivery != nil {
 		// A 103 after the capability wait still asks for a receipt; the

@@ -2599,6 +2599,33 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
         self.assertEqual(len(rows), 1, result.checks)
         self.assertEqual(rows[0]["status"], "pass")
 
+    def test_listener_second_owner_fails_at_once_and_names_the_owners(self):
+        # GAP-0535: the brief second holder was the gateway's own fork, which
+        # the listener evidence now recognizes. A second owner that remains
+        # is reported at once, with its PIDs, without a settle wait.
+        from defenseclaw.commands import cmd_doctor
+
+        process = cmd_doctor._GatewayTrust("trusted", "verified", 4321, home_bound=True)
+        ambiguous = cmd_doctor.ListenerEvidence(
+            "ambiguous", reason="multiple processes own listeners for the configured API endpoint: PIDs 4321, 9001"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            result = _DoctorResult()
+            with (
+                patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+                patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=process),
+                patch.object(cmd_doctor, "_managed_gateway_listener_evidence", return_value=ambiguous) as listener,
+                patch.object(cmd_doctor.time, "sleep") as sleep,
+            ):
+                cmd_doctor._check_gateway_home_mismatch(cfg, result)
+
+        rows = [c for c in result.checks if c["label"] == "Gateway home"]
+        self.assertEqual([row["status"] for row in rows], ["fail"], result.checks)
+        self.assertIn("PIDs 4321, 9001", rows[0]["detail"])
+        listener.assert_called_once()
+        sleep.assert_not_called()
+
     def test_silent_when_api_not_reachable(self):
         from defenseclaw.commands import cmd_doctor
 

@@ -4,6 +4,7 @@
 """A refused local Splunk setup is a failure in scripts and at a terminal."""
 
 import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -72,5 +73,30 @@ def test_actual_missing_docker_preflight_returns_nonzero():
             result = CliRunner().invoke(setup, ["splunk", "--logs", "--accept-splunk-license"], obj=app)
         assert "Docker installed... NOT FOUND" in result.output
         assert result.exit_code == 1, result.output
+    finally:
+        shutil.rmtree(app.cfg.data_dir)
+
+
+def test_docker_socket_permission_denied_is_not_reported_as_a_stopped_daemon():
+    app, _ = _make_app()
+    denied = subprocess.CompletedProcess(
+        ["docker", "info"],
+        1,
+        "",
+        "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock\n",
+    )
+    try:
+        with (
+            patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=False),
+            patch("defenseclaw.commands.cmd_setup.shutil.which", return_value="/usr/bin/docker"),
+            patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=denied),
+            patch("defenseclaw.platform_support.host_os", return_value="linux"),
+        ):
+            result = CliRunner().invoke(setup, ["splunk", "--logs", "--accept-splunk-license"], obj=app)
+        assert result.exit_code == 1, result.output
+        assert "cannot use the Docker daemon socket (permission denied)" in result.output
+        assert "docker group" in result.output
+        assert "NOT RUNNING" not in result.output
+        assert "Docker daemon is not running" not in result.output
     finally:
         shutil.rmtree(app.cfg.data_dir)

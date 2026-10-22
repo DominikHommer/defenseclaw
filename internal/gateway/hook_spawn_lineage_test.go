@@ -756,3 +756,45 @@ func TestReconcileHookParentRequiresSameAgentIdentity(t *testing.T) {
 		t.Fatalf("same-identity parent session did not resolve: %+v", got)
 	}
 }
+
+// GAP-0533: Codex announces a spawned agent with SubagentStart in the caller's
+// session, before or after the spawn call's PostToolUse. A result that came
+// after the child's start re-created the call's intent, which tied with the
+// next spawn's, and that child's subagent_start became a root at depth 0.
+func TestCodexSubagentStartIsLinkedWhicheverOfItAndTheSpawnResultComesFirst(t *testing.T) {
+	api := &APIServer{}
+	const sessionID = "01a112f0-847b-7161-9d89-41cd7dba0533"
+	const identity = "agt-0000000000000533"
+	ctx := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: identity})
+	parentAgent := agentNodeID(identity, "codex", sessionID, "root")
+	emit := func(req codexHookRequest) {
+		req.SessionID = sessionID
+		api.emitCodexHookLLMEvent(ctx, req, nil, nil)
+	}
+	emit(codexHookRequest{HookEventName: "SessionStart", Payload: map[string]any{"source": "startup"}})
+	for i, resultFirst := range []bool{false, true, false, true} {
+		child := fmt.Sprintf("019a0000-0000-7000-8000-0000000005%02d", i)
+		turn, call := fmt.Sprintf("turn-%d", i), fmt.Sprintf("call-%d", i)
+		input := map[string]any{"message": "run echo ok and report"}
+		result := func() {
+			emit(codexHookRequest{HookEventName: "PostToolUse", TurnID: turn, ToolName: "spawn_agent", ToolUseID: call,
+				ToolInput: input, ToolResponse: map[string]any{"agent_id": child}, Payload: map[string]any{}})
+		}
+		emit(codexHookRequest{HookEventName: "PreToolUse", TurnID: turn, ToolName: "spawn_agent", ToolUseID: call,
+			ToolInput: input, Payload: map[string]any{}})
+		if resultFirst {
+			result()
+		}
+		emit(codexHookRequest{HookEventName: "SubagentStart", TurnID: turn, AgentID: child, AgentType: "default",
+			Payload: map[string]any{"agent_id": child, "agent_type": "default"}})
+		if !resultFirst {
+			result()
+		}
+		start, ok := api.hookLifecycleSnapshot("codex", sessionID, child)
+		if !ok || start.LifecycleEvent != "subagent_start" || start.AgentDepth != 1 || start.ParentAgentID != parentAgent ||
+			start.ParentSessionID != sessionID {
+			t.Fatalf("spawn %d (result first %v): subagent_start = %+v (retained %v), want depth 1 under %s",
+				i, resultFirst, start, ok, parentAgent)
+		}
+	}
+}

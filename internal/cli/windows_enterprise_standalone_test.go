@@ -803,6 +803,66 @@ func TestWindowsEnterpriseUnparseableConfigRefusalReportsTheRunningDeployment(t 
 	}
 }
 
+// GAP-0537: a --config that does not exist is refused like one that does not
+// parse, after the status probe, so the refusal reports the running
+// deployment instead of health_not_checked and no enrollment. It stays a
+// preflight failure (1603).
+func TestWindowsEnterpriseMissingConfigRefusalReportsTheRunningDeployment(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
+	// The running deployment enrolls one target.
+	state := t.TempDir()
+	layout := managed.StandaloneLayout{
+		ConfigPath:      filepath.Join(state, "config.yaml"),
+		ManifestPath:    filepath.Join(state, "targets.yaml"),
+		DataDir:         filepath.Join(state, "runtime"),
+		GuardianAuthDir: filepath.Join(state, "hook-guardian-state"),
+	}
+	if err := os.WriteFile(layout.ManifestPath, []byte("version: 1\ntargets:\n"+
+		"  - {sid: S-1-12-1-1-2-3-1001, connector: cursor, enabled: true, deferred: true}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousLayout := windowsEnterpriseHotConfigLayout
+	t.Cleanup(func() { windowsEnterpriseHotConfigLayout = previousLayout })
+	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
+	opts := ensureTestOptions()
+	opts.configPath = filepath.Join(t.TempDir(), "absent.yaml")
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", opts); err != nil || opts.suppliedConfigRefusal == nil {
+		t.Fatalf("missing config: %v, deferred refusal %v", err, opts.suppliedConfigRefusal)
+	}
+	status := installedStatus("status")
+	status["cursor_target_enabled"] = true
+	stub := &ensureStub{t: t, replies: []map[string]any{status}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(context.Background(), command, "ensure", opts, `C:\stage\install-enterprise.ps1`)
+	if !refused || commandExitCode(err) != 1603 || len(stub.calls) != 1 || stub.calls[0][1] != "Status" {
+		t.Fatalf("refused=%v exit %d, installer runs %q", refused, commandExitCode(err), stub.calls)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Installed || len(result.Errors) != 1 || result.Errors[0].Code != "preflight_failed" ||
+		!strings.Contains(result.Errors[0].Message, "absent.yaml") ||
+		windowsBundleHasCode(result.Warnings, windowsEnterpriseHealthNotChecked) {
+		t.Fatalf("result %+v", result)
+	}
+	if result.Enrollment.Targets != 1 {
+		t.Fatalf("enrollment %+v, want the running deployment's 1 target", result.Enrollment)
+	}
+	// The running deployment's advisory is reported, labelled as its own.
+	if !windowsBundleHasCode(result.Warnings, "cursor_agent_prompt_hook_unavailable") {
+		t.Fatalf("warnings %+v lack the running deployment's advisory", result.Warnings)
+	}
+	for _, warning := range result.Warnings {
+		if !strings.HasPrefix(warning.Message, enterprisestatus.RunningDeploymentPrefix) {
+			t.Fatalf("warning %s is not labelled as the running deployment's: %q", warning.Code, warning.Message)
+		}
+	}
+}
+
 // GAP-1433: an ensure or upgrade whose config is refused first recovers a
 // pending transaction with a repair that carries no sources, so the refusal
 // reports the restored deployment instead of leaving the services stopped.

@@ -18358,6 +18358,7 @@ def _preflight_docker() -> tuple[bool, str]:
     Returns ``(ok, reason)``. ``reason`` is an empty string on success
     and a short, machine-readable failure code on failure
     (``"docker_not_installed"``, ``"docker_daemon_not_running"``,
+    ``"docker_socket_permission_denied"``, ``"docker_daemon_no_answer"``,
     ``"port_<n>_in_use"``). Callers surface ``reason`` verbatim in
     non-interactive error output so operators can tell *which* check
     failed without having to re-read the human-readable lines printed
@@ -18378,12 +18379,26 @@ def _preflight_docker() -> tuple[bool, str]:
             text=True,
             timeout=10,
         )
-        if result.returncode != 0:
-            click.echo("    Docker daemon running... NOT RUNNING")
-            click.echo("    Start Docker and try again.")
-            return False, "docker_daemon_not_running"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
+        click.echo("    Docker installed... NOT FOUND")
+        click.echo("    Install Docker: https://docs.docker.com/get-docker/")
+        return False, "docker_not_installed"
+    except subprocess.TimeoutExpired:
+        click.echo("    Docker daemon running... NO ANSWER (docker info did not return within 10 s)")
+        return False, "docker_daemon_no_answer"
+    if result.returncode != 0:
+        # docker info also fails when the daemon runs but this account may
+        # not use its socket; say which, as local-observability does (GAP-0529).
+        from defenseclaw.observability.local_stack import docker_daemon_unreachable_message
+
+        detail = (result.stderr or result.stdout or "").strip()
+        message = docker_daemon_unreachable_message(detail, platform_support.host_os())
+        if "permission denied" in message:
+            click.echo("    Docker daemon access... PERMISSION DENIED")
+            click.echo(f"    {message}.")
+            return False, "docker_socket_permission_denied"
         click.echo("    Docker daemon running... NOT RUNNING")
+        click.echo(f"    {message}.")
         return False, "docker_daemon_not_running"
     click.echo("    Docker daemon running... ok")
 
@@ -18413,6 +18428,8 @@ def _require_local_splunk_docker() -> None:
     detail = {
         "docker_not_installed": "Docker is not installed",
         "docker_daemon_not_running": "Docker daemon is not running",
+        "docker_socket_permission_denied": "this account cannot use the Docker daemon socket (permission denied)",
+        "docker_daemon_no_answer": "Docker daemon did not answer docker info within 10 s",
     }.get(reason)
     if detail is None and reason.startswith("port_") and reason.endswith("_in_use"):
         port = reason.split("_", 2)[1]

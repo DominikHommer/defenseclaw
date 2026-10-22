@@ -50,7 +50,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 | Project hooks (pinned workspace only) | `<workspace>/.devin/hooks.v1.json` | same |
 | Hook program | `~/.defenseclaw/hooks` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
-Other hooks and JSONC content in those files are kept.
+Setup reads JSONC and keeps other hooks and settings in those files, but writes a changed file back as JSON, so comments and formatting are removed. The pre-edit backup keeps the original bytes.
 
 ## Limits
 
