@@ -212,10 +212,32 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 		return auditV8Persisted, fmt.Errorf("audit: classify v8 control-plane action %q: %w", event.Action, err)
 	}
 
+	row, replay := storedOccurrenceFrom(ctx)
+	if observability.StoredReplay(ctx) && !replay {
+		return auditV8Persisted, fmt.Errorf("audit: a stored replay of %q has no stored record", event.Action)
+	}
 	build := func(snapshot RuntimeV8BuildContext, admission router.Admission) (observability.Record, error) {
-		return buildControlPlaneV8Record(
-			event, family, source, classification, normalized, snapshot, admission, evidence,
+		if !replay {
+			return buildControlPlaneV8Record(
+				event, family, source, classification, normalized, snapshot, admission, evidence,
+			)
+		}
+		// A replay is built with the config the stored record was built
+		// with, not this process's, and must come out as the stored record.
+		stored, err := row.buildContext()
+		if err != nil {
+			return observability.Record{}, err
+		}
+		record, err := buildControlPlaneV8Record(
+			event, family, source, classification, normalized, stored, admission, evidence,
 		)
+		if err != nil {
+			return observability.Record{}, err
+		}
+		if err := row.matches(record); err != nil {
+			return observability.Record{}, err
+		}
+		return record, nil
 	}
 	result, err := binding.emitter.EmitRuntimeV8(
 		contextWithLegacyEventProjection(ctx, event), metadata, build,
@@ -227,7 +249,10 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 	if outcomeErr != nil {
 		return auditV8Persisted, fmt.Errorf("audit: v8 control-plane action %q: %w", event.Action, outcomeErr)
 	}
-	if disposition == auditV8Persisted {
+	// A stored replay (observability.WithStoredReplay) only sends the
+	// record to the remote destinations again: its metrics were recorded
+	// when it was stored.
+	if disposition == auditV8Persisted && !observability.StoredReplay(ctx) {
 		auditMetric, metricErr := newAuditEventRuntimeV8GeneratedMetric(event)
 		if metricErr == nil {
 			metrics := make([]RuntimeV8GeneratedMetric, 0, 1+len(companionMetrics))

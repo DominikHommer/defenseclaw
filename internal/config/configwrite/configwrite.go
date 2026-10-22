@@ -286,6 +286,21 @@ func WriteFileDurable(path string, data []byte, mode os.FileMode) error {
 	return cfgtxn.WriteFileDurable(path, data, mode)
 }
 
+// WriteFileDurablePublished is WriteFileDurable with publish run on the
+// temp file before the rename (its final owner and access), so path never
+// exists with the temp file's. A publish error leaves path as it was.
+func WriteFileDurablePublished(path string, data []byte, mode os.FileMode, publish func(tmp string) error) error {
+	return cfgtxn.WriteFileDurablePublished(path, data, mode, publish)
+}
+
+// SyncDir flushes dir so a file created or removed in it is durable (fsync
+// on POSIX; a no-op on Windows, where NTFS journals the directory).
+func SyncDir(dir string) error { return cfgtxn.SyncDir(dir) }
+
+// SyncFile flushes path, its owner and access included, after they were
+// changed on a file already written.
+func SyncFile(path string) error { return cfgtxn.SyncFile(path) }
+
 // CurrentActor returns prefix + the OS user name ("cli:alice").
 func CurrentActor(prefix string) string {
 	name := ""

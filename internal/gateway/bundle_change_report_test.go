@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -120,5 +121,63 @@ func TestBundleReceiptReporterMarkersFolderIsStable(t *testing.T) {
 	reporter := &bundleReceiptReporter{markerPath: filepath.Join(dir, bundleReceiptMarkerName)}
 	if got, want := reporter.seenDir(), filepath.Join(dir, bundleReceiptMarkerName)+".d"; got != want {
 		t.Fatalf("markers folder = %s, want %s", got, want)
+	}
+}
+
+// A command that ends after its change and before its event leaves only
+// its reservation. The gateway reports it (failed, interrupted) at its
+// next start, with no other change command run since, and once: not again
+// after a restart, nor once a later command moves it into the spool. A
+// reservation still held is not reported. Before, only the next change
+// command recorded it, so a gateway restart alone left the change
+// unaudited.
+func TestBundleReceiptReporterReportsAnInterruptedChangeAtRestart(t *testing.T) {
+	dir := t.TempDir()
+	spoolDir := enterprisestatus.ChangeEventsDir(dir)
+	spool := enterprisestatus.ChangeSpool{Dir: spoolDir, StateDir: t.TempDir(),
+		Reported: func(id string) bool { return enterprisestatus.ChangeReported(dir, id) }}
+	held, err := spool.Reserve(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+	// The reservation of a command that was killed after it changed the
+	// credential: the provisional event, with no lock on it.
+	ended, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet,
+		enterprisestatus.ChangeFailed, enterprisestatus.ChangeInterrupted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended.SecretName = "splunk-hec-token"
+	raw, err := json.Marshal(ended)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spoolDir, enterprisestatus.ChangeReservedDirName, ended.EventID+".json"), raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	sink := &fakeBundleReceiptSink{}
+	newReporter := func() *bundleReceiptReporter {
+		return &bundleReceiptReporter{receiptPath: enterprisestatus.PublicReceiptPath(dir),
+			markerPath: filepath.Join(dir, bundleReceiptMarkerName), sink: sink, enforcedVersion: func() uint64 { return 0 }}
+	}
+	newReporter().poll(context.Background()) // The gateway restarts.
+	if len(sink.changes) != 1 || sink.changes[0].EventID != ended.EventID || sink.changes[0].Outcome != enterprisestatus.ChangeFailed ||
+		sink.changes[0].ReasonCode != enterprisestatus.ChangeInterrupted || sink.changes[0].SecretName != "splunk-hec-token" {
+		t.Fatalf("changes = %+v, want the interrupted secret set only", sink.changes)
+	}
+	newReporter().poll(context.Background())
+	// The next change command moves the reservation into the spool.
+	refusal, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionRemove,
+		enterprisestatus.ChangeRefused, "invalid_arguments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.Write(refusal); err != nil {
+		t.Fatal(err)
+	}
+	newReporter().poll(context.Background())
+	if len(sink.changes) != 2 || sink.changes[1].EventID != refusal.EventID {
+		t.Fatalf("changes = %+v, want the interrupted set once, then the refusal", sink.changes)
 	}
 }

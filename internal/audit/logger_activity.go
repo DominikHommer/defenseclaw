@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/google/uuid"
 )
 
 // logActivityImpl contains the Track 5 LogActivity body.
@@ -43,6 +44,45 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	}
 
 	activityID := observability.NewTimeOrderedID()
+	auditID := observability.NewTimeOrderedID()
+	timestamp := time.Now().UTC()
+	ctx := context.Background()
+	stored := false
+	var row storedOccurrence
+	delivery := in.RemoteDelivery
+	if in.OccurrenceID != "" {
+		// The producer keeps this occurrence queued under its stable id and
+		// offers it until it is stored durably and every remote destination
+		// has it. The first offer stores it and exports it only after the
+		// local write (a failed write exports nothing). A later offer finds
+		// it stored and sends the stored record, with its stable ids, time
+		// and the run, sidecar, binary and config of the process that stored
+		// it, to the destinations that do not have it yet.
+		auditID = in.OccurrenceID
+		activityID = uuid.NewSHA1(stableOccurrenceNamespace, []byte("activity\x00"+auditID)).String()
+		if delivery == nil {
+			delivery = observability.NewRemoteDelivery()
+		}
+		found := false
+		var err error
+		row, found, err = l.store.storedOccurrence(ctx, auditID)
+		if err != nil {
+			return err
+		}
+		if found {
+			stored, timestamp = true, row.timestamp
+			// A row a stopped process committed may not be on disk yet.
+			if err := l.syncOccurrence(ctx, delivery); err != nil {
+				return err
+			}
+			ctx = withStoredOccurrence(observability.WithStoredReplay(ctx), row)
+		} else {
+			ctx = observability.WithExportAfterLocalWrite(ctx)
+		}
+		ctx = observability.WithRemoteDelivery(ctx, delivery)
+		delivery.BeginAttempt()
+		defer delivery.EndAttempt()
+	}
 	runID := in.RunID
 	if runID == "" {
 		runID = currentRunID()
@@ -63,23 +103,12 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	}
 	summaryBlob, _ := json.Marshal(summary)
 
-	auditID := observability.NewTimeOrderedID()
-	if in.OccurrenceID != "" {
-		auditID = in.OccurrenceID
-		stored, err := l.store.hasAuditEvent(context.Background(), auditID)
-		if err != nil {
-			return err
-		}
-		if stored {
-			return nil
-		}
-	}
 	// v7 clean break: AgentInstanceID is per-session (unset for
 	// activity/mutation events that have no session anchor);
 	// SidecarInstanceID carries the process UUID.
 	auditEv := Event{
 		ID:                auditID,
-		Timestamp:         time.Now().UTC(),
+		Timestamp:         timestamp,
 		Action:            action,
 		Target:            targetType + ":" + targetID,
 		Actor:             actor,
@@ -91,8 +120,20 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
 	stampAuditEventEnvelope(&auditEv)
+	if stored {
+		// A replay is the stored record: after a restart this process has
+		// another run id, sidecar id, maybe binary, and the stamp fills an
+		// empty value from this process.
+		row.pin(&auditEv)
+	}
+	metricActor := actor
+	if in.ConfigChange != nil {
+		// The audit record keeps the OS account of a change; its counters
+		// carry a fixed actor label, never an account name or SID.
+		metricActor = configChangeMetricActor
+	}
 	activityMetrics, metricErr := newActivityRuntimeV8GeneratedMetrics(
-		auditEv, action, targetType, actor, len(in.Diff),
+		auditEv, action, targetType, metricActor, len(in.Diff),
 	)
 	if metricErr != nil {
 		return metricErr
@@ -103,7 +144,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		return evidenceErr
 	}
 	disposition, emitErr := l.emitControlPlaneV8WithEvidenceAndMetrics(
-		context.Background(), auditEv, evidence, activityMetrics,
+		ctx, auditEv, evidence, activityMetrics,
 	)
 	if emitErr != nil {
 		return emitErr
@@ -114,10 +155,13 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	// metrics are emitted in one generated batch on the same runtime binding as
 	// the canonical occurrence and remain exactly once for dashboard continuity.
 	if disposition != auditV8Unhandled {
-		return nil
+		return l.occurrenceStored(ctx, in.OccurrenceID != "" && !stored, delivery)
+	}
+	if stored {
+		return fmt.Errorf("audit: no generated v8 family replays activity action %q", action)
 	}
 	disposition, emitErr = l.emitCompatibilityAuditV8(
-		context.Background(), auditEv,
+		ctx, auditEv,
 		compatibilityAuditV8Options{
 			classification: observability.ClassificationContext{
 				MandatoryFacts: observability.MandatoryFacts{ControlPlaneMutation: true},
@@ -130,7 +174,29 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		return emitErr
 	}
 	if disposition != auditV8Unhandled {
-		return nil
+		return l.occurrenceStored(ctx, in.OccurrenceID != "", delivery)
 	}
 	return fmt.Errorf("audit: no generated v8 family handled activity action %q", action)
+}
+
+// occurrenceStored makes a newly stored occurrence power-loss durable
+// before its producer may mark it reported.
+func (l *Logger) occurrenceStored(ctx context.Context, newlyStored bool, delivery *observability.RemoteDelivery) error {
+	if !newlyStored {
+		return nil
+	}
+	return l.syncOccurrence(ctx, delivery)
+}
+
+// syncOccurrence flushes the audit store once per delivery: the pool
+// commits with synchronous=NORMAL, which a power loss can take back.
+func (l *Logger) syncOccurrence(ctx context.Context, delivery *observability.RemoteDelivery) error {
+	if delivery.LocalDurable() {
+		return nil
+	}
+	if err := l.store.syncCommittedWrites(ctx); err != nil {
+		return err
+	}
+	delivery.MarkLocalDurable()
+	return nil
 }

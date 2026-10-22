@@ -68,6 +68,10 @@ type AnchorsInstall struct {
 	// Unrecorded is set when the change event of this install could not be
 	// written: the caller reports it as the warning change_unrecorded.
 	Unrecorded error
+	// ReleaseUnflushed is set when this install recorded nothing and its
+	// change event reservation could not be removed durably: the caller
+	// reports it as the warning change_release_unflushed.
+	ReleaseUnflushed error
 }
 
 // InstallBundleAnchors installs the anchor file src as the device trust
@@ -77,10 +81,13 @@ type AnchorsInstall struct {
 // anchor_restore_failed.
 func (e *Env) InstallBundleAnchors(ctx context.Context, src string) (*AnchorsInstall, error) {
 	var reservation *enterprisestatus.ChangeReservation
-	defer func() { reservation.Release() }()
+	defer func() { _ = reservation.Release() }()
 	out, err := e.installBundleAnchors(ctx, src, &reservation)
 	if recordErr := e.recordAnchorsChange(reservation, out, err); recordErr != nil && out != nil {
 		out.Unrecorded = recordErr
+	}
+	if releaseErr := reservation.Release(); releaseErr != nil && out != nil {
+		out.ReleaseUnflushed = releaseErr
 	}
 	return out, err
 }

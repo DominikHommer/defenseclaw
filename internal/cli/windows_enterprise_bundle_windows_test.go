@@ -683,7 +683,7 @@ func TestWindowsBundleRetryProtectsInstalledUnconfirmedVersion(t *testing.T) {
 		t.Fatalf("sign exit %d: %s", code, out)
 	}
 	layout := stubWindowsBundleHost(t)
-	if _, err := installWindowsBundleAnchors(e.anchors, newWindowsBundleDriver(layout).AnchorsPath); err != nil {
+	if _, _, err := installWindowsBundleAnchors(e.anchors, newWindowsBundleDriver(layout).AnchorsPath); err != nil {
 		t.Fatal(err)
 	}
 	anchorsBefore := readWindowsBundleAnchors(t, newWindowsBundleDriver(layout).AnchorsPath)
@@ -1109,7 +1109,7 @@ func TestWindowsEnsureRefusesCrossHostDigestMismatch(t *testing.T) {
 			})
 			layout := stubWindowsBundleHost(t)
 			installed := newWindowsBundleDriver(layout).AnchorsPath
-			if _, err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
+			if _, _, err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.ReadFile(installed)
@@ -1258,7 +1258,7 @@ func TestWindowsRefusedBundleKeepsInstalledAnchors(t *testing.T) {
 			}
 			layout := stubWindowsBundleHost(t)
 			installed := newWindowsBundleDriver(layout).AnchorsPath
-			if _, err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
+			if _, _, err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.ReadFile(installed)

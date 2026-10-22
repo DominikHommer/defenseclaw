@@ -71,14 +71,15 @@
                   "key_unknown",
                   "key_revoked",
                   "anchor_unreadable",
-                  "change_unrecorded"
+                  "change_unrecorded",
+                  "change_release_unflushed"
                 ]
               }
             }
           }
         ]
       },
-      "description": "The codes bundleCurrentSignerWarning emits (internal/cli/enterprise_bundle_status.go), checked against the new file: key_unknown (the confirmed bundle's signer is not in it), key_revoked (it is revoked there), anchor_unreadable. The current bundle keeps enforcing; the next bundle must be signed by an active key. change_unrecorded: the change event of this run could not be written, so the gateway will not report it."
+      "description": "The codes bundleCurrentSignerWarning emits (internal/cli/enterprise_bundle_status.go), checked against the new file: key_unknown (the confirmed bundle's signer is not in it), key_revoked (it is revoked there), anchor_unreadable. The current bundle keeps enforcing; the next bundle must be signed by an active key. change_unrecorded: the change event of this run could not be written, so the gateway will not report it. change_release_unflushed: the run changed nothing, but the room it reserved for its change event could not be removed durably, so after a power loss the gateway may report it as an interrupted change."
     },
     "errors": {
       "type": "array",

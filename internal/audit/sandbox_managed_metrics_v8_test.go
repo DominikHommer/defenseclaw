@@ -142,3 +142,63 @@ func TestSandboxManagedRecordsMoveTheirFleetCounter(t *testing.T) {
 		})
 	}
 }
+
+// A reason, a setting field or a connector the counters take from a record
+// can come from the sandbox daemon, which runs as the managed user. A value
+// outside the closed lists (here one shaped like a code but naming an
+// account) is counted as other, or left out for a connector, and never
+// becomes a label. Before, any value that matched the code pattern was the
+// label.
+func TestSandboxManagedCountersTakeOnlyClosedValues(t *testing.T) {
+	harness := newSandboxHarness(t)
+	identity, subject := testManagedIdentity(), testManagedSubject()
+	unknownConnector := SandboxIdentity{Connector: "jdoe_agent", Driver: SandboxDriverDocker, Managed: identity.Managed}
+	cases := []struct {
+		name, instrument, key string
+		event                 any
+		want                  any
+	}{
+		{"access refusal reason", observability.TelemetryInstrumentDefenseClawSandboxManagedRefusals, "defenseclaw.sandbox.managed.reason",
+			SandboxAccessRefusedEvent{Sandbox: identity, Subject: subject, Host: "blocked.example.com", Port: 443, Reason: "acct_jdoe_4021"},
+			SandboxManagedMetricOther},
+		{"ask reason", observability.TelemetryInstrumentDefenseClawSandboxManagedAsks, "defenseclaw.sandbox.managed.reason",
+			SandboxAskDecidedEvent{Sandbox: identity, Subject: subject, ApprovalID: "ask-3", Result: SandboxApprovalDenied,
+				Reason: "user_jdoe", Host: "api.example.com", Port: 443},
+			SandboxManagedMetricOther},
+		{"drift field", observability.TelemetryInstrumentDefenseClawSandboxManagedDrift, "defenseclaw.openshell.settings.field",
+			SandboxSettingsDriftEvent{Sandbox: identity, Subject: subject, Field: "home.jdoe.token_path"},
+			SandboxManagedMetricOther},
+		{"connector", observability.TelemetryInstrumentDefenseClawSandboxManagedRefusals, "defenseclaw.connector.source",
+			SandboxHostRunRefusedEvent{Sandbox: unknownConnector, Subject: subject, Reason: "required_for"},
+			nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+			if err := recordManagedEvent(context.Background(), recorder, tc.event); err != nil {
+				t.Fatal(err)
+			}
+			got := sandboxMetrics(t, runtime, tc.instrument)
+			if len(got) != 1 {
+				t.Fatalf("%s points=%d, want one increment", tc.instrument, len(got))
+			}
+			value, present := metricAttributes(t, got[0])[tc.key]
+			if tc.want == nil {
+				if present {
+					t.Fatalf("%s carries %s=%v, want none", tc.instrument, tc.key, value)
+				}
+				return
+			}
+			if value != tc.want {
+				t.Fatalf("%s %s=%v, want %v", tc.instrument, tc.key, value, tc.want)
+			}
+		})
+	}
+	for _, code := range []string{"required_for", "no_kvm", "floor_denied", "account_busy",
+		// The access refusals of the openshell manager (accessRefused*).
+		"egress_proxy", "egress_proposal", "approved_rule_removed"} {
+		if got := SandboxManagedMetricReason(code); got != code {
+			t.Fatalf("registered reason %q counted as %q", code, got)
+		}
+	}
+}

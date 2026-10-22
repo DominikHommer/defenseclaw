@@ -480,12 +480,14 @@ func (runtime *Runtime) emitWithLeaseControls(
 		// A failed SQLite write (disk full) still hands back the remote
 		// projections: export this gateway's own records so the decision and
 		// the outage stay visible remotely while the local store is down
-		// (GAP-1536). Imported records stay SQLite-first.
+		// (GAP-1536). Imported records, and records marked
+		// observability.WithExportAfterLocalWrite (Process returns no
+		// remote work for them), stay SQLite-first.
 		if len(outcome.OptionalWork()) > 0 {
 			if inbound {
 				return pipeline.LocalLogOutcome{}, processErr
 			}
-			runtime.dispatchOptional(lease, graph, outcome)
+			runtime.dispatchOptional(ctx, lease, graph, outcome)
 		}
 		return outcome, processErr
 	}
@@ -508,7 +510,7 @@ func (runtime *Runtime) emitWithLeaseControls(
 	if localOnly || suppressAll {
 		return outcome, nil
 	}
-	runtime.dispatchOptional(lease, graph, outcome)
+	runtime.dispatchOptional(ctx, lease, graph, outcome)
 	return outcome, nil
 }
 
@@ -567,7 +569,8 @@ func leaseRecordBuilder(
 // hands each persisted record's optional work to that generation's
 // dispatchers, as Emit does for one. A dropped item takes Emit's
 // managed-destination fallback. When the commit fails nothing is persisted and
-// the remote projections are dispatched, as Emit does on a failed write.
+// the remote projections are dispatched, as Emit does on a failed write,
+// except those of an item marked observability.WithExportAfterLocalWrite.
 func (runtime *Runtime) EmitAtomicBatch(
 	ctx context.Context,
 	items []LogBatchItem,
@@ -577,7 +580,10 @@ func (runtime *Runtime) EmitAtomicBatch(
 		return nil, &Error{code: ErrorInvalidDependency}
 	}
 	for index := range items {
-		if items[index].Context == nil || items[index].Builder == nil {
+		// A stored-record replay goes through Emit, which skips its local
+		// write; a batch always writes every item.
+		if items[index].Context == nil || items[index].Builder == nil ||
+			observability.StoredReplay(items[index].Context) {
 			return nil, &Error{code: ErrorInvalidDependency}
 		}
 	}
@@ -617,20 +623,25 @@ func (runtime *Runtime) EmitAtomicBatch(
 		}
 		outcome := outcomes[index]
 		if outcome.LocalPersisted() || outcome.ManagedOnly() ||
-			(processErr != nil && len(outcome.OptionalWork()) > 0) {
-			runtime.dispatchOptional(lease, graph, outcome)
+			(processErr != nil && len(outcome.OptionalWork()) > 0 &&
+				!observability.ExportAfterLocalWrite(items[index].Context)) {
+			runtime.dispatchOptional(items[index].Context, lease, graph, outcome)
 		}
 	}
 	return outcomes, processErr
 }
 
 // dispatchOptional enqueues a log outcome's optional-destination work and
-// records its projection failures.
+// records its projection failures. The observability.RemoteDelivery of ctx,
+// if any, gets every outcome; a destination that acknowledged an earlier
+// offer of the occurrence is not sent it again.
 func (runtime *Runtime) dispatchOptional(
+	ctx context.Context,
 	lease *runtimegraph.Lease,
 	graph *runtimegraph.Graph,
 	outcome pipeline.LocalLogOutcome,
 ) {
+	tracker := observability.RemoteDeliveryFrom(ctx)
 	dispatchValue, dispatchOK := lease.Component(DestinationDispatchComponentName)
 	dispatch, typedDispatch := dispatchValue.(*destinationDispatchComponent)
 	if !dispatchOK || !typedDispatch || dispatch == nil || dispatch.digest != graph.Digest() {
@@ -640,17 +651,23 @@ func (runtime *Runtime) dispatchOptional(
 			observeBoundedDestinationFailure(
 				runtime.destinationObserver, work.Delivery().DestinationName,
 			)
+			tracker.Fail(work.Delivery().DestinationName)
 		}
 		for _, failure := range outcome.OptionalFailures() {
 			observeBoundedDestinationFailure(runtime.destinationObserver, failure.DestinationName())
+			tracker.Fail(failure.DestinationName())
 		}
 		return
 	}
 	for _, failure := range outcome.OptionalFailures() {
 		dispatch.ObserveProjectionFailure(failure)
+		tracker.Fail(failure.DestinationName())
 	}
 	for _, work := range outcome.OptionalWork() {
-		dispatch.Enqueue(work)
+		if tracker.Acknowledged(work.Delivery().DestinationName) {
+			continue
+		}
+		dispatch.Enqueue(work, tracker)
 	}
 }
 

@@ -17,6 +17,7 @@
 package audit
 
 import (
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
@@ -27,7 +28,60 @@ import (
 // profile name, the sandbox driver, the harness connector and one closed
 // code; the host OS is the os.type resource attribute every record carries.
 // No user, account, subject key, sandbox, registration, host or path is
-// ever a label.
+// ever a label. A reason or a setting field can come from the sandbox
+// daemon, which runs as the managed user, so the counters take them from
+// the closed lists below: any other value is counted as other (the record
+// keeps the value), and a connector that is not a built-in one is left out.
+
+// SandboxManagedMetricOther is the counter label of a reason or setting
+// field outside the closed lists.
+const SandboxManagedMetricOther = "other"
+
+// sandboxManagedMetricReasons are the reason codes the gateway and the
+// daemon register: the require-sandbox gate and the sandbox availability
+// probe (gateway), the access refusals (openshell manager), the ask
+// decisions and the busy account.
+var sandboxManagedMetricReasons = map[string]bool{
+	"required_for": true, "os_unsupported": true, "sandboxes_off": true, "root_account": true,
+	"account_unverified": true, "no_docker": true, "no_docker_access": true, "no_docker_group": true,
+	"driver_unsupported": true, "prerequisite_missing": true, "no_kvm": true, "no_kvm_access": true,
+	"no_kvm_group": true, "account_busy": true, "floor_denied": true,
+	"egress_proxy": true, "egress_proposal": true, "approved_rule_removed": true,
+}
+
+// sandboxManagedMetricDriftFields are the OpenShell settings the daemon
+// compares (openshell.GatewayConfigState.Drift and the daemon's own
+// checks), as the daemon names them in a settings_drift event.
+var sandboxManagedMetricDriftFields = map[string]bool{
+	"compute_driver": true, "gateway_listener": true, "microvm_workload_identity": true,
+	"docker_sandbox_namespace": true, "openshell_telemetry": true, "gateway_configuration": true,
+	"gateway_command": true,
+}
+
+// SandboxManagedMetricReason is the counter label of a managed record's
+// reason code.
+func SandboxManagedMetricReason(code string) string {
+	if sandboxManagedMetricReasons[code] {
+		return code
+	}
+	return SandboxManagedMetricOther
+}
+
+// SandboxManagedMetricDriftField is the counter label of a drifted
+// OpenShell setting.
+func SandboxManagedMetricDriftField(field string) string {
+	if sandboxManagedMetricDriftFields[field] {
+		return field
+	}
+	return SandboxManagedMetricOther
+}
+
+func sandboxManagedMetricReason(reason observability.Optional[string]) observability.Optional[string] {
+	if code, ok := reason.Get(); ok {
+		return observability.Present(SandboxManagedMetricReason(code))
+	}
+	return reason
+}
 
 // Values of defenseclaw.metric.kind on defenseclaw.sandbox.managed.foreign_items.
 const (
@@ -58,8 +112,15 @@ func sandboxManagedLabelsFor(identity SandboxIdentity, fields sandboxV8Fields) s
 		connector: identity.Connector,
 		profile:   fields.guardrailProfile,
 		driver:    fields.driver,
-		conn:      optionalSandboxEnum(identity.Connector),
+		conn:      sandboxManagedMetricConnector(identity.Connector),
 	}
+}
+
+func sandboxManagedMetricConnector(name string) observability.Optional[string] {
+	if name == "" || !connector.IsKnownBuiltinConnector(name) {
+		return observability.Absent[string]()
+	}
+	return observability.Present(name)
 }
 
 func sandboxManagedMetric(
@@ -89,7 +150,7 @@ func newSandboxManagedRefusalMetric(event Event, labels sandboxManagedLabels, re
 	return []RuntimeV8GeneratedMetric{sandboxManagedMetric(event, labels, observability.TelemetryInstrumentDefenseClawSandboxManagedRefusals,
 		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 			return builder.BuildMetricDefenseClawSandboxManagedRefusals(observability.MetricDefenseClawSandboxManagedRefusalsInput{
-				Envelope: envelope, Value: 1, DefenseClawSandboxManagedReason: reason,
+				Envelope: envelope, Value: 1, DefenseClawSandboxManagedReason: sandboxManagedMetricReason(reason),
 				DefenseClawGuardrailProfileName: labels.profile, DefenseClawSandboxDriver: labels.driver,
 				DefenseClawConnectorSource: labels.conn,
 			})
@@ -101,7 +162,7 @@ func newSandboxManagedAskMetric(event Event, labels sandboxManagedLabels, result
 		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 			return builder.BuildMetricDefenseClawSandboxManagedAsks(observability.MetricDefenseClawSandboxManagedAsksInput{
 				Envelope: envelope, Value: 1, DefenseClawApprovalResult: observability.Present(result),
-				DefenseClawSandboxManagedReason: reason,
+				DefenseClawSandboxManagedReason: sandboxManagedMetricReason(reason),
 				DefenseClawGuardrailProfileName: labels.profile, DefenseClawSandboxDriver: labels.driver,
 				DefenseClawConnectorSource: labels.conn,
 			})
@@ -135,7 +196,7 @@ func newSandboxManagedDriftMetric(event Event, labels sandboxManagedLabels, fiel
 	return []RuntimeV8GeneratedMetric{sandboxManagedMetric(event, labels, observability.TelemetryInstrumentDefenseClawSandboxManagedDrift,
 		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 			return builder.BuildMetricDefenseClawSandboxManagedDrift(observability.MetricDefenseClawSandboxManagedDriftInput{
-				Envelope: envelope, Value: 1, DefenseClawOpenshellSettingsField: observability.Present(field),
+				Envelope: envelope, Value: 1, DefenseClawOpenshellSettingsField: observability.Present(SandboxManagedMetricDriftField(field)),
 				DefenseClawGuardrailProfileName: labels.profile, DefenseClawSandboxDriver: labels.driver,
 				DefenseClawConnectorSource: labels.conn,
 			})
