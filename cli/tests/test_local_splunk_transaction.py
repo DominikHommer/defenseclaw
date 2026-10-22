@@ -542,8 +542,9 @@ def _write_bridge_contract(data_dir: Path, token: str, url: str | None) -> None:
 def test_remote_splunk_through_a_loopback_tunnel_is_not_the_local_sink(
     tmp_path: Path, monkeypatch, local_stack: bool
 ) -> None:
-    # An SSH tunnel to a remote Splunk listens on loopback too. Only the
-    # bridge credential or the port the bridge owns marks the local sink.
+    # An SSH tunnel to a remote Splunk listens on loopback too, even on the
+    # port of a stopped local stack. Only the bridge credential marks the
+    # local sink.
     app = _app(tmp_path)
     monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", raising=False)
     monkeypatch.delenv(LOCAL_TOKEN_ENV, raising=False)
@@ -554,6 +555,7 @@ def test_remote_splunk_through_a_loopback_tunnel_is_not_the_local_sink(
         )
     tunnels = {
         "tunnel-a": ("https://127.0.0.1:18088/services/collector/event", remote_token),
+        "tunnel-8088": ("https://127.0.0.1:8088/services/collector/event", remote_token),
         "tunnel-b": ("https://localhost:18089/services/collector/event", remote_token),
         # A further endpoint in the same cluster may reuse the saved token.
         "tunnel-c": ("https://[::1]:18090/services/collector/event", None),
@@ -572,17 +574,18 @@ def test_remote_splunk_through_a_loopback_tunnel_is_not_the_local_sink(
 
 
 @pytest.mark.parametrize(
-    ("endpoint", "saved_token"),
+    ("endpoint", "where"),
     [
-        # The shared reference still holds the bridge credential, on any port.
-        ("https://localhost:28088/services/collector/event", "local fixture credential"),
-        # The sink sends to the port the bridge owns, even with a stale value.
-        ("https://127.0.0.1:8088/services/collector/event", "stale fixture credential"),
+        ("https://127.0.0.1:8088/services/collector/event", "dotenv"),
+        # The bridge credential marks the sink on any host name and port.
+        ("https://localhost:28088/services/collector/event", "dotenv"),
+        # A credential exported in the environment counts as saved.
+        ("https://127.0.0.1:8088/services/collector/event", "environment"),
     ],
-    ids=["bridge-credential", "owned-port"],
+    ids=["dotenv", "other-port", "environment"],
 )
 def test_older_local_sink_sharing_the_remote_reference_is_refused(
-    tmp_path: Path, monkeypatch, endpoint: str, saved_token: str
+    tmp_path: Path, monkeypatch, endpoint: str, where: str
 ) -> None:
     app = _app(tmp_path)
     monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", raising=False)
@@ -610,9 +613,13 @@ def test_older_local_sink_sharing_the_remote_reference_is_refused(
             endpoint=endpoint, token_env="DEFENSECLAW_SPLUNK_HEC_TOKEN"
         )
         atomic_write_private_bytes(tmp_path / "config.yaml", yaml.safe_dump(legacy).encode())
-        atomic_write_private_bytes(
-            tmp_path / ".env", f"DEFENSECLAW_SPLUNK_HEC_TOKEN='{saved_token}'\n".encode()
-        )
+        if where == "dotenv":
+            atomic_write_private_bytes(
+                tmp_path / ".env", f"DEFENSECLAW_SPLUNK_HEC_TOKEN='{local_token}'\n".encode()
+            )
+        else:
+            atomic_write_private_bytes(tmp_path / ".env", b"KEEP_ME=unchanged\n")
+            monkeypatch.setenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", local_token)
         config_before = (tmp_path / "config.yaml").read_bytes()
         dotenv_before = (tmp_path / ".env").read_bytes()
         with pytest.raises(ValueError, match="defenseclaw setup splunk --logs"):
