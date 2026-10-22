@@ -213,6 +213,63 @@ def test_stale_pin_is_replaced_only_by_a_confirmed_repin(env, monkeypatch, by_na
     assert _run(app, ["use-pack", pack, "--repin", "--yes", "--json"]).exit_code == 2 and writes == []
 
 
+@pytest.mark.parametrize(
+    ("args", "setup", "named"),
+    [
+        (["--connector", "codex"], "peer", "Claude Code"),
+        (["--connector", "codex"], "global", "the global pack"),
+        (["--connector", "codex"], "profile", "profile engineering"),
+        (["--connector", "codex"], "profile_connector", "Codex in profile engineering"),
+        ([], "profile_connector", "Codex in profile engineering"),
+    ],
+)
+def test_repin_names_every_other_scope_that_shares_the_pin(env, args, setup, named):
+    """W4 review round 3: the digest pin is one custom_packs key, so a scoped
+    --repin changes every scope that selects it; the prompt and the result name them."""
+    app, _root, custom, writes = env
+    gc = app.cfg.guardrail
+    gc.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)}
+    gc.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="team")}
+    if setup == "peer":
+        gc.connectors["claudecode"] = PerConnectorGuardrailConfig(rule_pack="team")
+    elif setup == "global":
+        gc.rule_pack = "team"
+    elif setup == "profile":
+        gc.profiles = {"engineering": GuardrailProfile(rule_pack="team")}
+    else:
+        gc.profiles = {
+            "engineering": GuardrailProfile(connectors={"codex": PerConnectorGuardrailConfig(rule_pack="team")})
+        }
+    note = f"The pin is shared, so the edited pack also applies to {named}"
+
+    unattended = _run(app, ["use-pack", "team", *args, "--repin", "--json"])
+    assert unattended.exit_code == 2 and writes == [], unattended.output
+    assert note in json.loads(unattended.output)["message"]
+
+    declined = CliRunner().invoke(cmd_guardrail.guardrail, ["use-pack", "team", *args, "--repin"], obj=app, input="n\n")
+    assert declined.exit_code == 1 and writes == [], declined.output
+    assert note in " ".join(declined.output.split())
+
+    scripted = _run(app, ["use-pack", "team", *args, "--repin", "--yes", "--json"])
+    assert scripted.exit_code == 0, scripted.output
+    assert note in json.loads(scripted.output)["message"]
+    assert "repin_shared=" in app.logger.log_config_change.call_args.args[-1]
+
+
+def test_repin_of_a_pin_no_other_scope_uses_names_no_one_else(env):
+    app, _root, custom, _writes = env
+    gc = app.cfg.guardrail
+    gc.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)}
+    gc.connectors = {
+        "codex": PerConnectorGuardrailConfig(rule_pack="team"),
+        "claudecode": PerConnectorGuardrailConfig(rule_pack="strict"),
+    }
+    for args in (["--connector", "codex"], []):
+        result = _run(app, ["use-pack", "team", *args, "--repin", "--yes", "--json"])
+        assert result.exit_code == 0, result.output
+        assert "shared" not in json.loads(result.output)["message"]
+
+
 def test_repin_of_an_unchanged_or_new_pack_needs_no_confirmation(env):
     app, _root, custom, writes = env
     first = _run(app, ["use-pack", str(custom), "--repin", "--json"])

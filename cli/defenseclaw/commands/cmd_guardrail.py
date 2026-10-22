@@ -3622,6 +3622,38 @@ def _scope_rules(cfg, connector_key: str | None, profile: str | None):
     return getattr(block, "rules", None) if block is not None else None
 
 
+def _scope_pack_selections(cfg) -> dict[str, tuple[str | None, str | None, str]]:
+    """Every guardrail scope block: config path -> (connector, profile, its ``rule_pack``)."""
+    gc = cfg.guardrail
+    selected = {"guardrail": (None, None, str(getattr(gc, "rule_pack", "") or "").strip())}
+    for connector, block in sorted((getattr(gc, "connectors", None) or {}).items()):
+        selected[_scope_key(connector, None)] = (connector, None, str(getattr(block, "rule_pack", "") or "").strip())
+    for profile, block in sorted((getattr(gc, "profiles", None) or {}).items()):
+        selected[_scope_key(None, profile)] = (None, profile, str(getattr(block, "rule_pack", "") or "").strip())
+        for connector, sub in sorted((getattr(block, "connectors", None) or {}).items()):
+            selected[_scope_key(connector, profile)] = (
+                connector,
+                profile,
+                str(getattr(sub, "rule_pack", "") or "").strip(),
+            )
+    return selected
+
+
+def _repin_shared_scopes(cfg, name: str, written: set[str]) -> list[str]:
+    """The scopes outside *written* (config paths) that select custom pack
+    *name*: re-pinning its digest changes their policy too, so the prompt
+    and the result name them."""
+    shared = []
+    for path, (connector, profile, selected) in _scope_pack_selections(cfg).items():
+        if path in written or selected != name:
+            continue
+        if connector is None and profile is None:
+            shared.append("the global pack (every connector without its own pack)")
+        else:
+            shared.append(_scope_words(connector, profile))
+    return shared
+
+
 def _unused_pin_changes(cfg, after: dict[str, str]) -> tuple[list, list[str]]:
     """Unset the ``guardrail.custom_packs`` pins no scope selects once the
     scopes in *after* (config path -> its new ``rule_pack``, "" when unset)
@@ -3630,13 +3662,7 @@ def _unused_pin_changes(cfg, after: dict[str, str]) -> tuple[list, list[str]]:
     from defenseclaw import config_writer
 
     gc = cfg.guardrail
-    selected = {"guardrail": getattr(gc, "rule_pack", "")}
-    for connector, block in (getattr(gc, "connectors", None) or {}).items():
-        selected[_scope_key(connector, None)] = getattr(block, "rule_pack", "")
-    for profile, block in (getattr(gc, "profiles", None) or {}).items():
-        selected[_scope_key(None, profile)] = getattr(block, "rule_pack", "")
-        for connector, sub in (getattr(block, "connectors", None) or {}).items():
-            selected[_scope_key(connector, profile)] = getattr(sub, "rule_pack", "")
+    selected = {path: pack for path, (_c, _p, pack) in _scope_pack_selections(cfg).items()}
     selected.update(after)
     used = {str(name or "").strip() for name in selected.values()}
     dropped = sorted(name for name in (getattr(gc, "custom_packs", None) or {}) if name not in used)
@@ -4104,17 +4130,28 @@ def use_pack_cmd(
                 {"path": str(getattr(registered, "path", "") or ""), "digest": repinned[1]},
             )
         )
+    shared: list[str] = []
+    if repinned is not None:
+        # The pin is one guardrail.custom_packs key: every other scope that
+        # selects it enforces the edited pack too, so name them before asking.
+        written = {_scope_key(connector_key, None)}
+        if connector_key is None:
+            written |= {_scope_key(other, None) for other in (getattr(gc, "connectors", None) or {})}
+        shared = _repin_shared_scopes(app.cfg, name, written)
+    shared_note = (
+        f" The pin is shared, so the edited pack also applies to {', '.join(shared)}." if shared else ""
+    )
     if repinned is not None:
         if json_out and not yes:
             _fail(
                 2,
                 f"Re-pinning {name!r} from {repinned[0] or 'none'} to {repinned[1]} needs your confirmation; "
-                "pass --yes with --json. Nothing was changed.",
+                f"pass --yes with --json.{shared_note} Nothing was changed.",
             )
         if not json_out:
             ux.warn(
                 f"Re-pin {name!r} at {path}: pinned {repinned[0] or 'none'}, the pack is now {repinned[1]}. "
-                "The gateway then enforces the edited pack.",
+                f"The gateway then enforces the edited pack.{shared_note}",
                 indent="  ",
             )
             if not yes and not _confirm_proceed():
@@ -4153,13 +4190,14 @@ def use_pack_cmd(
     if dropped:
         message += f" Dropped rule references the pack does not have: {'; '.join(dropped)}."
     if repinned is not None:
-        message += f" Re-pinned {name!r} from {repinned[0] or 'none'} to {repinned[1]}."
+        message += f" Re-pinned {name!r} from {repinned[0] or 'none'} to {repinned[1]}.{shared_note}"
     _log_guardrail_change(
         app,
         "guardrail-use-pack",
         f"scope={connector_key or scope} pack={name} previous={previous_pack}"
         + (f" cleared={','.join(cleared)}" if cleared else "")
-        + (f" repinned={repinned[0] or 'none'}->{repinned[1]}" if repinned is not None else ""),
+        + (f" repinned={repinned[0] or 'none'}->{repinned[1]}" if repinned is not None else "")
+        + (f" repin_shared={';'.join(shared)}" if shared else ""),
     )
     _finish(
         ok=True,
