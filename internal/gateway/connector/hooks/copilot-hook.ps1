@@ -96,7 +96,25 @@ try {
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
     if ($process.ExitCode -ne 0) {
-        throw "DefenseClaw hook launcher exited with status $($process.ExitCode)"
+        # A launcher that wrote one complete denial for this event before
+        # exiting nonzero has decided: forward it in either fail mode. Any
+        # other output with a nonzero status is a failure.
+        $denial = $null
+        $text = $stdout.Trim()
+        if ($text.StartsWith('{') -and $text.EndsWith('}')) {
+            try {
+                $denial = ConvertFrom-Json -InputObject $text -ErrorAction Stop
+            }
+            catch {
+                $denial = $null
+            }
+        }
+        $denied = ($denial -is [System.Management.Automation.PSCustomObject]) -and (
+            ($Event -eq 'preToolUse' -and $denial.permissionDecision -ceq 'deny') -or
+            ($Event -eq 'permissionRequest' -and $denial.behavior -ceq 'deny'))
+        if (-not $denied) {
+            throw "DefenseClaw hook launcher exited with status $($process.ExitCode)"
+        }
     }
     if ($stdout.Length -gt 0) {
         [Console]::Out.Write($stdout)

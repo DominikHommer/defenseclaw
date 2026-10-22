@@ -40,6 +40,7 @@ const cursorAdapterHelperMode = "TEST_CURSOR_ADAPTER_MODE"
 const cursorAdapterPIDFileEnv = "TEST_CURSOR_ADAPTER_PID_FILE"
 const copilotAdapterHelperMode = "TEST_COPILOT_ADAPTER_MODE"
 const copilotAdapterPIDFileEnv = "TEST_COPILOT_ADAPTER_PID_FILE"
+const copilotAdapterChildStdoutEnv = "TEST_COPILOT_ADAPTER_CHILD_STDOUT"
 
 func TestMain(m *testing.M) {
 	switch os.Getenv(copilotAdapterHelperMode) {
@@ -62,6 +63,9 @@ func TestMain(m *testing.M) {
 		time.Sleep(2 * time.Duration(copilotWindowsHookContractTimeoutMS) * time.Millisecond)
 		os.Exit(0)
 	case "crash":
+		os.Exit(7)
+	case "crash-with-output":
+		fmt.Print(os.Getenv(copilotAdapterChildStdoutEnv))
 		os.Exit(7)
 	}
 	switch os.Getenv(cursorAdapterHelperMode) {
@@ -165,10 +169,20 @@ func runCopilotAdapterTest(
 	payload string,
 ) (stdout, stderr string, exitCode int) {
 	t.Helper()
+	return runCopilotAdapterEventTest(t, adapterPath, payload, "preToolUse")
+}
+
+func runCopilotAdapterEventTest(
+	t *testing.T,
+	adapterPath string,
+	payload string,
+	event string,
+) (stdout, stderr string, exitCode int) {
+	t.Helper()
 	quoted := strings.ReplaceAll(adapterPath, "'", "''")
 	cmd := exec.Command(
 		"powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-		"& '"+quoted+"' -Event 'preToolUse'",
+		"& '"+quoted+"' -Event '"+event+"'",
 	)
 	cmd.Stdin = strings.NewReader(payload)
 	var out, errOut bytes.Buffer
@@ -269,6 +283,77 @@ func TestCopilotAdapterExplicitOpenKeepsOpenAnswer(t *testing.T) {
 	stdout, stderr, code := runCopilotAdapterTest(t, adapter, `{}`)
 	if code != 0 || stdout != "" || !strings.Contains(stderr, "failed open") {
 		t.Fatalf("explicit open: exit %d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+// TestCopilotAdapterKeepsChildDenialWhenChildExitsNonzero: a launcher that
+// printed one complete denial for its event and then exited nonzero has
+// decided, in either fail mode; anything else with a nonzero status is a
+// failure the fail mode answers.
+func TestCopilotAdapterKeepsChildDenialWhenChildExitsNonzero(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(copilotAdapterHelperMode, "crash-with-output")
+	ownDenial := map[string]string{
+		"preToolUse":        `{"permissionDecision":"deny","permissionDecisionReason":"matched: test"}`,
+		"permissionRequest": `{"behavior":"deny","message":"matched: test"}`,
+	}
+	failClosed := map[string]string{
+		"preToolUse":        `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}`,
+		"permissionRequest": `{"behavior":"deny","message":"DefenseClaw hook failed closed"}`,
+	}
+	other := map[string]string{"preToolUse": "permissionRequest", "permissionRequest": "preToolUse"}
+	released, err := os.ReadFile(filepath.Join("testdata", "released-hooks", "1.0.3", "copilot-hook.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshed := filepath.Join(t.TempDir(), "copilot-hook.ps1")
+	text := strings.ReplaceAll(string(released), "{{.HookBinaryPS}}", strings.ReplaceAll(executable, "'", "''"))
+	if err := os.WriteFile(refreshed, []byte(strings.ReplaceAll(text, "{{.CopilotHookTimeoutMS}}", "10000")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := closeReleasedCopilotAdapter(refreshed); err != nil || !changed {
+		t.Fatalf("refresh released Copilot adapter: changed=%v error=%v", changed, err)
+	}
+	adapters := map[string]string{
+		"closed":            renderCopilotAdapterForTest(t, executable, 10_000, "closed"),
+		"open":              renderCopilotAdapterForTest(t, executable, 10_000, "open"),
+		"refreshed release": refreshed,
+	}
+	for _, mode := range []string{"closed", "open", "refreshed release"} {
+		for _, event := range []string{"preToolUse", "permissionRequest"} {
+			cases := []struct{ name, child string }{
+				{"own denial", ownDenial[event]},
+				{"other event's denial", ownDenial[other[event]]},
+				{"two denials", ownDenial[event] + "\n" + ownDenial[event]},
+				{"allow", `{"permissionDecision":"allow","behavior":"allow"}`},
+				{"truncated denial", strings.TrimSuffix(ownDenial[event], "}")},
+			}
+			if mode == "refreshed release" {
+				cases = cases[:1]
+			}
+			for _, tc := range cases {
+				t.Run(mode+"/"+event+"/"+tc.name, func(t *testing.T) {
+					t.Setenv(copilotAdapterChildStdoutEnv, tc.child)
+					stdout, stderr, code := runCopilotAdapterEventTest(t, adapters[mode], `{"source":"copilot-adapter-probe"}`, event)
+					want := ""
+					switch {
+					case tc.name == "own denial":
+						want = tc.child
+					case mode != "open":
+						want = failClosed[event]
+					}
+					if code != 0 || strings.TrimSpace(stdout) != want {
+						t.Fatalf("exit %d stdout=%q want %q stderr=%q", code, stdout, want, stderr)
+					}
+					if tc.name != "own denial" && !strings.Contains(stderr, "exited with status 7") {
+						t.Fatalf("stderr = %q, want the launcher status", stderr)
+					}
+				})
+			}
+		}
 	}
 }
 
