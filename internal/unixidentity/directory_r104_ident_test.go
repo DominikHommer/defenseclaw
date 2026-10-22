@@ -150,6 +150,7 @@ func TestLocalAccountKeepsMemberListDirectoryGroups(t *testing.T) {
 // GAP-1247: the lookup budget names the largest supported membership one
 // cold SSSD answer at a time; the old fixed budget ran out at about 700.
 func TestDirectoryLookupBudgetNamesAColdLargeMembership(t *testing.T) {
+	accountHost(t, "", "", "group: files\n")
 	oldCold, oldBase := coldGroupLookup, directoryLookupBase
 	t.Cleanup(func() { coldGroupLookup, directoryLookupBase = oldCold, oldBase })
 	coldGroupLookup, directoryLookupBase = time.Millisecond, 100*time.Millisecond
@@ -176,6 +177,24 @@ func TestDirectoryLookupBudgetNamesAColdLargeMembership(t *testing.T) {
 	}
 	if err := run(directoryLookupBase); err == nil {
 		t.Fatal("the fixed base budget named 700 cold groups; the control does not reproduce the timeout")
+	}
+}
+
+// A numeric initgroups GID is not a definitive miss when a configured NSS
+// provider cannot show that its group database answered the name lookup.
+func TestUnnamedGroupNeedsAProvenMissFromEveryNSSProvider(t *testing.T) {
+	accountHost(t, "", "", "passwd: files himmelblau\ninitgroups: files himmelblau\ngroup: files himmelblau\n")
+	r := newFakeNSS(&fakeRun{})
+	if names, err := r.groupNames([]int{7000}); err == nil {
+		t.Fatalf("uncheckable NSS provider gave groups %v as resolved facts", names)
+	}
+}
+
+func TestUnnamedGroupKeepsNumericIDWhenLocalNSSProviderAnswers(t *testing.T) {
+	accountHost(t, "", "", "group: files systemd\n")
+	r := newFakeNSS(&fakeRun{})
+	if names, err := r.groupNames([]int{7000}); err != nil || !reflect.DeepEqual(names, []string{"7000"}) {
+		t.Fatalf("confirmed local NSS miss = %v, %v", names, err)
 	}
 }
 

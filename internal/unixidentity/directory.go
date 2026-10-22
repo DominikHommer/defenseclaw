@@ -1073,9 +1073,23 @@ func (r *NSSResolver) groupNames(ids []int) ([]string, error) {
 	}
 	names := make(map[int]string, len(ids))
 	for start := 0; start < len(ids); start += groupQueryBatch {
-		found, queryErr := r.groupBatchNames(ids[start:min(start+groupQueryBatch, len(ids))])
+		batch := ids[start:min(start+groupQueryBatch, len(ids))]
+		found, queryErr := r.groupBatchNames(batch)
 		if queryErr != nil {
 			return nil, queryErr
+		}
+		var unnamed []int
+		for _, id := range batch {
+			if found[id] == "" {
+				unnamed = append(unnamed, id)
+			}
+		}
+		if len(unnamed) > 0 {
+			confirmed, err := r.confirmUnnamedGroupIDs(unnamed)
+			if err != nil {
+				return nil, err
+			}
+			maps.Copy(found, confirmed)
 		}
 		maps.Copy(names, found)
 	}
@@ -1088,6 +1102,52 @@ func (r *NSSResolver) groupNames(ids []int) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// confirmUnnamedGroupIDs requires every configured directory group service
+// to answer a GID miss before the gateway can treat a numeric group as a
+// complete fact. A composite getent miss alone cannot distinguish a missing
+// group from one NSS provider that stopped answering.
+func (r *NSSResolver) confirmUnnamedGroupIDs(ids []int) (map[int]string, error) {
+	data, err := readSmallFile(nsswitchPath, 1<<20)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("unixidentity: read NSS group services: %w", err)
+	}
+	services := nssServicesInUse(string(data), "group", localGroupPath)
+	confirmed := make(map[int]string)
+	for _, service := range services {
+		if service == "files" {
+			continue
+		}
+		if !validServiceName(service) {
+			return nil, fmt.Errorf("unixidentity: cannot confirm unnamed groups through NSS service %q", service)
+		}
+		args := []string{"-s", service, "group"}
+		for _, id := range ids {
+			args = append(args, strconv.Itoa(id))
+		}
+		result, err := r.runner(r.context(), r.path, args, withoutGroupMembers)
+		if err != nil {
+			return nil, fmt.Errorf("unixidentity: confirm group GIDs through %s: %w", service, err)
+		}
+		if result.exitCode != getentExitOK && result.exitCode != getentExitNotFound {
+			return nil, fmt.Errorf("unixidentity: confirm group GIDs through %s: getent exited %d", service, result.exitCode)
+		}
+		found := make(map[int]bool)
+		for _, line := range nonEmptyLines(string(result.stdout)) {
+			id, name, ok := parseGroupName(line)
+			if !ok || !slices.Contains(ids, id) {
+				return nil, fmt.Errorf("unixidentity: NSS service %s returned an invalid group GID answer", service)
+			}
+			confirmed[id], found[id] = name, true
+		}
+		if len(found) < len(ids) {
+			if err := r.passwdServiceAnswers(service); err != nil {
+				return nil, fmt.Errorf("unixidentity: NSS service %s could not confirm unnamed group GIDs: %w", service, err)
+			}
+		}
+	}
+	return confirmed, nil
 }
 
 // groupBatchNames asks one getent group call for the names of ids. The
