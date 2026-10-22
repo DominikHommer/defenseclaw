@@ -207,8 +207,8 @@ func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts
 // read one (guardrail.PythonStringsMayRun: exec, a child process, a file it
 // writes, its docstrings, an import of a module that may be a file of the
 // working directory, ...), both views are the code whole, so such a string
-// still proves its write. An unused import of a preloaded module (os, sys)
-// runs nothing.
+// still proves its write. So does every program when its working directory
+// is not known or may hold a module: the interpreter imports on its own.
 func trustedPythonExecutedViews(code, dir string, importPathOverride bool) (text, calls string) {
 	calls = guardrail.MaskPythonStrings(code)
 	if importPathOverride || guardrail.PythonStringsMayRun(calls, dir) {

@@ -47,4 +47,15 @@ func TestTrustedPythonImportDirNeedsTheCommandsFilesystem(t *testing.T) {
 	if text, _ := trustedPythonExecutedViews(code, dir, true); text != code {
 		t.Errorf("PYTHONPATH on the command: text view %q, want the code whole", text)
 	}
+	// sys under another name moves the import path, and a program with no
+	// import statement still imports (a codec lookup): the docstring counts.
+	for _, tc := range []struct{ code, dir string }{
+		{`"""p.write_text("k")"""` + "\nimport sys; s = sys; s.path.insert(0, '/tmp/shadow'); import json", dir},
+		{`"""p.write_text("k")"""` + "\nimport os; os.sys.meta_path.clear(); import json", dir},
+		{`"""p.write_text("k")"""` + "\n'a'.encode('idna')", ""},
+	} {
+		if text, _ := trustedPythonExecutedViews(tc.code, tc.dir, false); text != tc.code {
+			t.Errorf("trustedPythonExecutedViews(%q, %q): text view %q, want the code whole", tc.code, tc.dir, text)
+		}
+	}
 }

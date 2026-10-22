@@ -271,8 +271,10 @@ func maskPythonStrings(out []byte, from, to, depth int) bool {
 // identifier) through which code can turn string text into code that runs,
 // or reach a string that does not run: dynamic evaluation and name lookup,
 // child processes, serializers that call, introspection of code, frames and
-// docstrings, the program's own command line, and a file the code writes
-// (and may import or run later).
+// docstrings, the program's own command line, and a file the code writes,
+// renames, links, moves, unpacks or fetches into place (and may import or
+// run later: os.symlink(staged, "json.py") puts a module before the
+// standard library).
 var pythonStringRunFragments = []string{
 	"exec", "eval", "compile", "getattr", "attrgetter", "methodcaller",
 	"globals", "locals", "vars", "__dict__", "__import__", "importlib",
@@ -283,7 +285,8 @@ var pythonStringRunFragments = []string{
 	"co_consts", "co_code", "frame", "inspect", "modules", "subclasses",
 	"__base", "argv", "cmdline", "commandline", "procargs", "psutil",
 	"sysctl", "linecache", "source", "write", "open", "dump", "copy",
-	"logging", "handler",
+	"logging", "handler", "rename", "replace", "link", "move", "extract",
+	"unpack", "retrieve", "mkfifo", "mknod",
 }
 
 // pythonStringRunNames are short names matched whole.
@@ -300,13 +303,15 @@ var pythonStringRunNames = map[string]bool{
 // A module an import loads may run any string of the program: a file such as
 // subprocess.py, json.py or helper.py on sys.path reads the program's
 // docstring through sys.modules["__main__"] and its command line through
-// sys.orig_argv. So the strings count when code imports a module outside
-// pythonPreloadedModules, unless the import loads only standard-library code
-// (pythonImportPathOrdinary): every module it names is in the standard
-// library, dir is known and holds nothing an import can load, and nothing
-// moves the import path. An "import" the scan cannot read as a statement
-// counts, and so does any non-ASCII byte in code: Python reads identifiers
-// in NFKC form, so a fullwidth ｅｘｅｃ is exec and import ｊｓｏｎ imports
+// sys.orig_argv. Every program may import, with or without an import
+// statement: the interpreter imports on its own ("a".encode("idna") imports
+// stringprep and re, help() imports pydoc), first from dir. So the strings
+// count unless every import loads only standard-library code
+// (pythonImportPathOrdinary): every module an import statement names is in
+// the standard library, dir is known and holds nothing an import can load,
+// and nothing moves the import path. An "import" the scan cannot read as a
+// statement counts, and so does any non-ASCII byte in code: Python reads
+// identifiers in NFKC form, so a fullwidth ｅｘｅｃ is exec and import ｊｓｏｎ imports
 // json, names this scan cannot match. A name of pythonStringRunFragments or
 // pythonStringRunNames in code counts too. A name an import binds does not
 // count when the program uses no name that statement binds. Nor does a
@@ -329,23 +334,11 @@ func pythonStringsMayRun(code, dir, self string) bool {
 	}
 	names := pythonName.FindAllStringIndex(code, -1)
 	var statements, unused [][2]int
-	ordinary := -1 // pythonImportPathOrdinary, read once: -1 not yet, 0 no, 1 yes
 	imported, star := map[string]bool{}, false
 	for _, statement := range pythonImports(code) {
 		text := code[statement.span[0]:statement.span[1]]
-		if !pythonImportsPreloaded(text) {
-			if !pythonImportsStandardLibrary(text) {
-				return true
-			}
-			if ordinary < 0 {
-				ordinary = 0
-				if pythonImportPathOrdinary(code, dir, self) {
-					ordinary = 1
-				}
-			}
-			if ordinary == 0 {
-				return true
-			}
+		if !pythonImportsStandardLibrary(text) {
+			return true
 		}
 		statements = append(statements, statement.span)
 		if statement.bound == nil {
@@ -375,22 +368,15 @@ func pythonStringsMayRun(code, dir, self string) bool {
 		}
 		return true
 	}
-	return false
-}
-
-// pythonPreloadedModules are the modules an import never loads from the
-// working directory or the script's directory: built into every interpreter
-// (sys, builtins), or frozen and already imported at startup (os, its path
-// module, io, abc, codecs, stat). Any other module, standard library or not,
-// is looked up on sys.path, whose first entry is that directory.
-var pythonPreloadedModules = map[string]bool{
-	"sys": true, "builtins": true, "os": true, "os.path": true,
-	"io": true, "abc": true, "codecs": true, "stat": true,
+	// Read last: it reads dir.
+	return !pythonImportPathOrdinary(code, dir, self)
 }
 
 // pythonStandardModules are the top-level public modules of the standard
 // library (sys.stdlib_module_names of Python 3.12, less the modules Python
-// 3.13 removed and tomllib, which Python 3.10 lacks, plus __future__). A
+// 3.13 removed and tomllib, which Python 3.10 lacks, plus __future__), less
+// site and zipimport, which load code from any directory or archive they are
+// given (site.addsitedir runs the import lines of a .pth file there). A
 // missing one would be looked up past the standard library, in
 // site-packages; so would a module only one platform ships (winreg on
 // Linux), the same residual as any installed module.
@@ -411,13 +397,13 @@ var pythonStandardModules = func() map[string]bool {
 		poplib posix posixpath pprint profile pstats pty pwd py_compile pyclbr
 		pydoc pydoc_data pyexpat queue quopri random re readline reprlib
 		resource rlcompleter runpy sched secrets select selectors shelve shlex
-		shutil signal site smtplib socket socketserver sqlite3 sre_compile
+		shutil signal smtplib socket socketserver sqlite3 sre_compile
 		sre_constants sre_parse ssl stat statistics string stringprep struct
 		subprocess symtable sys sysconfig syslog tabnanny tarfile tempfile
 		termios textwrap this threading time timeit tkinter token tokenize trace
 		traceback tracemalloc tty turtle turtledemo types typing unicodedata
 		unittest urllib uuid venv warnings wave weakref webbrowser winreg
-		winsound wsgiref xml xmlrpc zipapp zipfile zipimport zlib zoneinfo`) {
+		winsound wsgiref xml xmlrpc zipapp zipfile zlib zoneinfo`) {
 		set[name] = true
 	}
 	return set
@@ -462,26 +448,102 @@ func pythonImportsStandardLibrary(statement string) bool {
 	return len(modules) > 0
 }
 
-// pythonImportPathOrdinary reports whether a standard-library import of
-// code loads only standard-library code. A standard-library module imports
-// others in turn, so any module of dir can shadow one of them: dir must be
-// known, absolute and hold nothing an import can load
-// (pythonDirectoryMayLoadCode). PYTHONPATH or PYTHONHOME in the environment
-// puts other directories first, and code that changes sys.path or the
-// import hooks, or the working directory an -c program imports from
-// (os.chdir), loads from anywhere (pythonImportPathChange).
+// pythonImportPathOrdinary reports whether an import of code, by a
+// statement or by the interpreter itself, loads only standard-library code.
+// A standard-library module imports others in turn, so any module of dir can
+// shadow one of them: dir must be known, absolute and hold nothing an import
+// can load (pythonDirectoryMayLoadCode). PYTHONPATH or PYTHONHOME in the
+// environment puts other directories first, and code that may change
+// sys.path, a package's search path or the import hooks, or the working
+// directory an -c program imports from (os.chdir), loads from anywhere
+// (pythonImportPathMoves).
 func pythonImportPathOrdinary(code, dir, self string) bool {
 	return dir != "" && filepath.IsAbs(dir) &&
 		os.Getenv("PYTHONPATH") == "" && os.Getenv("PYTHONHOME") == "" &&
-		!pythonImportPathChange.MatchString(code) &&
+		!pythonImportPathMoves(code) &&
 		!pythonDirectoryMayLoadCode(dir, self)
 }
 
-// pythonImportPathChange matches code that may move the import path: sys's
-// path, meta_path, path_hooks or path_importer_cache (also as os.sys.path),
-// any "from sys import" or a renamed sys, and a change of directory.
+// pythonImportPathMoves reports whether code may change where an import
+// looks or what it finds there: pythonImportPathChange matches, or code
+// reaches the sys module other than through one of pythonSysAttributes
+// (pythonSysEscapes).
+func pythonImportPathMoves(code string) bool {
+	return pythonImportPathChange.MatchString(code) || pythonSysEscapes(code)
+}
+
+// pythonImportPathChange matches code that may move the import path under a
+// name other than sys: a package's search path (__path__, the
+// submodule_search_locations of its spec), the __self__ of a module's
+// function (sys.exit.__self__ is sys), and a change of the directory an -c
+// program imports from (chdir, fchdir, chroot).
 var pythonImportPathChange = regexp.MustCompile(
-	`\bsys\s*\.\s*(?:path|meta_path|path_hooks|path_importer_cache)\b|\bfrom\s+sys\s+import\b|\bsys\s+as\b|\bf?chdir\b`)
+	`\b(?:f?chdir|chroot|__path__|submodule_search_locations|__self__)\b`)
+
+// pythonSysAttributes are the attributes of sys that neither hold nor change
+// the import system: the program's streams, exit and exception state, and
+// facts about the interpreter. Any other attribute may (path, meta_path,
+// path_hooks, path_importer_cache, modules, pycache_prefix, implementation,
+// a frame, a hook, remote_exec, or one a later Python adds).
+var pythonSysAttributes = func() map[string]bool {
+	set := map[string]bool{}
+	for _, name := range strings.Fields(`abiflags api_version argv
+		base_exec_prefix base_prefix builtin_module_names byteorder copyright
+		dont_write_bytecode exc_info exception exec_prefix executable exit flags
+		float_info float_repr_style getallocatedblocks getdefaultencoding
+		getfilesystemencodeerrors getfilesystemencoding getrecursionlimit
+		getrefcount getsizeof getswitchinterval getwindowsversion hash_info
+		hexversion int_info intern is_finalizing last_exc maxsize maxunicode
+		orig_argv platform platlibdir prefix ps1 ps2 setrecursionlimit
+		setswitchinterval stderr stdin stdlib_module_names stdout thread_info
+		version version_info warnoptions winver`) {
+		set[name] = true
+	}
+	return set
+}()
+
+// pythonSysEscapes reports whether code reaches the sys module other than to
+// read or set one of pythonSysAttributes (sys.exit, os.sys.version): through
+// any other attribute (sys.path, os.sys.meta_path), or as a value (s = sys,
+// f(sys), [sys][0], (sys).path, import sys as s, from sys import path),
+// through which code may move the import path under a name no pattern of the
+// path's own finds. An import statement that binds sys as sys (import sys,
+// from os import sys) is not a use.
+func pythonSysEscapes(code string) bool {
+	imports := pythonImports(code)
+	for _, name := range pythonName.FindAllStringIndex(code, -1) {
+		if code[name[0]:name[1]] != "sys" {
+			continue
+		}
+		next := pythonSkipBlank(code, name[1])
+		if i := slices.IndexFunc(imports, func(statement pythonImport) bool {
+			return name[0] >= statement.span[0] && name[1] <= statement.span[1]
+		}); i >= 0 {
+			if !slices.Contains(imports[i].bound, "sys") || pythonName.FindString(code[next:]) == "as" {
+				return true
+			}
+			continue
+		}
+		if next >= len(code) || code[next] != '.' {
+			return true
+		}
+		from := pythonSkipBlank(code, next+1)
+		attr := pythonName.FindStringIndex(code[from:])
+		if attr == nil || attr[0] != 0 || !pythonSysAttributes[code[from:from+attr[1]]] {
+			return true
+		}
+	}
+	return false
+}
+
+// pythonSkipBlank returns the offset of the first byte of code from i on
+// that is not white space or a line continuation.
+func pythonSkipBlank(code string, i int) int {
+	for i < len(code) && strings.IndexByte(" \t\r\n\f\\", code[i]) >= 0 {
+		i++
+	}
+	return i
+}
 
 // Bounds of pythonDirectoryMayLoadCode, which runs on the hook path.
 const (
@@ -568,33 +630,6 @@ func pythonModuleName(name string) bool {
 		}
 	}
 	return true
-}
-
-// pythonImportsPreloaded reports whether statement, an import statement,
-// loads only modules of pythonPreloadedModules. A relative import, a
-// trailing comma or a shape the scan cannot read loads an unknown module.
-func pythonImportsPreloaded(statement string) bool {
-	words := strings.Fields(strings.NewReplacer("(", " ", ")", " ", ",", " , ", "\\", " ").Replace(statement))
-	switch {
-	case len(words) >= 4 && words[0] == "from" && slices.Contains(words[2:], "import"):
-		return pythonPreloadedModules[words[1]]
-	case len(words) >= 2 && words[0] == "import":
-		for items := words[1:]; ; {
-			end := slices.Index(items, ",")
-			if end < 0 {
-				end = len(items)
-			}
-			item := items[:end]
-			if len(item) != 1 && (len(item) != 3 || item[1] != "as") || !pythonPreloadedModules[item[0]] {
-				return false
-			}
-			if end == len(items) {
-				return true
-			}
-			items = items[end+1:]
-		}
-	}
-	return false
 }
 
 // pythonProgramVariable reports whether the name word at code[at] is a plain

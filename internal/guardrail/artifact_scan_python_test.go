@@ -119,32 +119,34 @@ func TestMaskPythonStringsFieldExpressions(t *testing.T) {
 }
 
 // Code may run a string only through a sink it names in code, or through a
-// module it imports that the interpreter may load from the working directory
-// (a shadowed subprocess.py or helper.py can run __main__.__doc__). An
-// import of preloaded modules no name of which is used runs nothing, nor does
-// a variable of the program's own whose name holds a sink word.
+// module an import may load from the working directory (a shadowed
+// subprocess.py or helper.py can run __main__.__doc__). In a directory that
+// holds no module, an import of standard-library modules no name of which is
+// used runs nothing, nor does a variable of the program's own whose name
+// holds a sink word. With the directory not known every program counts: the
+// interpreter imports on its own ("a".encode("idna") imports stringprep).
 func TestPythonStringsMayRun(t *testing.T) {
+	t.Setenv("PYTHONPATH", "")
+	t.Setenv("PYTHONHOME", "")
+	clean := t.TempDir()
 	for _, tc := range []struct {
 		source string
 		want   bool
 	}{
-		{`import subprocess; """x"""; print("ok")`, true},
-		{"import subprocess as sp, ctypes\nfrom os import system as run, popen\nprint('ok')", true},
+		{`import subprocess; """x"""; print("ok")`, false},
+		{"import subprocess as sp, ctypes\nfrom os import system as run, popen\nprint('ok')", false},
 		{"from os import system as run, popen\nprint('ok')", false},
-		{`if x: import subprocess`, true},
+		{`if x: import subprocess`, false},
 		{`if x: import os`, false},
-		{"from importlib import (util,\n    machinery)", true},
+		{"from importlib import (util,\n    machinery)", false},
 		{"from os import (path,\n    sep)", false},
-		// Any module but a preloaded one may be a file of the working
+		// A module outside the standard library may be a file of the working
 		// directory, used or not.
 		{`import helper`, true},
-		{`import json; json.dumps(1)`, true},
-		{`import os, json`, true},
 		{`import os.path as p; p.join("a")`, false},
 		{`from os.path import join; join("a")`, false},
 		{`import sys, io, abc, codecs, stat`, false},
 		{`import builtins`, false},
-		{`from __future__ import annotations`, true},
 		{`from . import helper`, true},
 		{`from .helper import x`, true},
 		{`from.helper import x`, true},
@@ -172,7 +174,7 @@ func TestPythonStringsMayRun(t *testing.T) {
 		{`open("m.py", "w").write("x"); import m`, true},
 		{`import sys; sys.modules["subprocess"]`, true},
 		{`().__class__.__base__.__subclasses__()`, true},
-		{`import pty`, true},
+		{`import pty`, false},
 		{`import pty; pty.spawn("sh")`, true},
 		// A variable of the program's own is not a sink.
 		{`source = 1; print(source)`, false},
@@ -197,8 +199,11 @@ func TestPythonStringsMayRun(t *testing.T) {
 		{`from os import *; system("x")`, true},
 		{`import os as source; source.getcwd()`, true},
 	} {
-		if got := PythonStringsMayRun(MaskPythonStrings(tc.source), ""); got != tc.want {
-			t.Errorf("PythonStringsMayRun(%q) = %t, want %t", tc.source, got, tc.want)
+		if got := PythonStringsMayRun(MaskPythonStrings(tc.source), clean); got != tc.want {
+			t.Errorf("PythonStringsMayRun(%q, clean dir) = %t, want %t", tc.source, got, tc.want)
+		}
+		if !PythonStringsMayRun(MaskPythonStrings(tc.source), "") {
+			t.Errorf("PythonStringsMayRun(%q, unknown dir) = false: the interpreter imports on its own", tc.source)
 		}
 	}
 }
@@ -328,12 +333,68 @@ func TestPythonStringsMayRunInAKnownDirectory(t *testing.T) {
 		{`import os; os.chdir("/tmp"); import json`, true},
 		{`from os import chdir as cd; cd("/tmp"); import json`, true},
 		{`import os; os.fchdir(3); import json`, true},
+		{`import os; os.chroot("x"); import json`, true},
+		// sys by another name, or an attribute that holds the import system.
+		{`import sys; s = sys; s.path.insert(0, "x"); import json`, true},
+		{`import sys; (sys).path.insert(0, "x"); import json`, true},
+		{`import sys; [sys][0].path.insert(0, "x"); import json`, true},
+		{`import sys; m = {"m": sys}; import json`, true},
+		{`import sys; f(sys); import json`, true},
+		{`import sys; (s := sys); import json`, true},
+		{`import sys; f"{sys}"; import json`, true},
+		{"import sys\nmatch sys:\n    case _: pass\nimport json", true},
+		{"import os\nmatch os:\n    case object(sys=s): pass\nimport json", true},
+		{`import sys; sys.exit.__self__.path.insert(0, "x"); import json`, true},
+		{`import os; p = os.sys; p.path.insert(0, "x"); import json`, true},
+		{`import codecs; codecs.sys.path.insert(0, "x"); import json`, true},
+		{`import os; os.path.sys.path.insert(0, "x"); import json`, true},
+		{`import sys as s, sys; s.path.insert(0, "x"); import json`, true},
+		{"import sys \\\n    as s; import json", true},
+		{"from sys \\\n    import path; import json", true},
+		{`from os import sys as s; import json`, true},
+		{`from os import (sys as s); import json`, true},
+		{`import sys; sys = None; import json`, true},
+		{`import sys; sys.pycache_prefix = "x"; import json`, true},
+		{`import sys; sys.implementation.cache_tag = "x"; import json`, true},
+		{`import sys; sys.remote_exec(1, "x"); import json`, true},
+		{`import sys; sys.path_importer_cache.clear(); import json`, true},
+		{`import sys; sys.`, true},
+		// A package's search path, or a module that loads from any directory.
+		{`import json; json.__path__.insert(0, "x"); import json.evil`, true},
+		{`import json; json.__spec__.submodule_search_locations.append("x")`, true},
+		{`import site; site.addsitedir("x")`, true},
+		{`from site import addsitedir; addsitedir("x")`, true},
+		{`import zipimport`, true},
+		// A module the code puts in the directory before it imports.
+		{`import os; os.symlink("x", "json.py"); import json`, true},
+		{`import os; os.link("x", "json.py"); import json`, true},
+		{`import os; os.rename("x", "json.py"); import json`, true},
+		{`import os; os.replace("x", "json.py"); import json`, true},
+		{`from pathlib import Path; Path("json.py").symlink_to("x"); import json`, true},
+		{`from pathlib import Path; Path("x").rename("json.py"); import json`, true},
+		{`import shutil; shutil.move("x", "json.py"); import json`, true},
+		{`import shutil; shutil.unpack_archive("x"); import json`, true},
+		{`import zipfile; zipfile.ZipFile("x").extractall(); import json`, true},
+		{`import urllib.request; urllib.request.urlretrieve("x", "json.py"); import json`, true},
+		{`import os; os.mkfifo("json.py"); import json`, true},
+		// sys read through attributes that hold nothing of the import system.
+		{`import sys; sys.exit(0); import json`, false},
+		{`import os, sys; print(os.sys.version_info, sys.platform); import json`, false},
+		{"import sys\nsys.stderr.flush()\nsys . maxsize\nimport json", false},
+		{`from os import sys; sys.exit(0)`, false},
+		{`import sys.monitoring`, false},
+		// No import statement: the interpreter's own imports load from the
+		// directory too, and it holds nothing.
+		{`"a".encode("idna")`, false},
 	} {
 		if got := PythonStringsMayRun(MaskPythonStrings(tc.source), clean); got != tc.want {
 			t.Errorf("PythonStringsMayRun(%q, clean dir) = %t, want %t", tc.source, got, tc.want)
 		}
 	}
 	const program = `import json; """x"""; print("ok")`
+	// The interpreter imports on its own ("a".encode("idna") imports
+	// stringprep and re, help() imports pydoc), with no import statement.
+	const implicit = `"""x"""; "a".encode("idna"); help(len)`
 	// Anything an import may load, in the directory.
 	for _, entry := range []string{
 		"helper.py", "JSON.PY", "tool.pyw", "cached.pyc", "old.pyo", "native.so",
@@ -348,8 +409,10 @@ func TestPythonStringsMayRunInAKnownDirectory(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, entry), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if !PythonStringsMayRun(MaskPythonStrings(program), dir) {
-			t.Errorf("PythonStringsMayRun beside %s = false: an import may load it", entry)
+		for _, code := range []string{program, implicit} {
+			if !PythonStringsMayRun(MaskPythonStrings(code), dir) {
+				t.Errorf("PythonStringsMayRun(%q) beside %s = false: an import may load it", code, entry)
+			}
 		}
 	}
 	if runtime.GOOS != "windows" {
@@ -386,8 +449,10 @@ func TestPythonStringsMayRunInAKnownDirectory(t *testing.T) {
 		t.Error("PythonStringsMayRun past the package entry bound = false")
 	}
 	for _, dir := range []string{"", "relative/dir", filepath.Join(clean, "missing")} {
-		if !PythonStringsMayRun(MaskPythonStrings(program), dir) {
-			t.Errorf("PythonStringsMayRun(%q) = false: the directory is not known", dir)
+		for _, code := range []string{program, implicit} {
+			if !PythonStringsMayRun(MaskPythonStrings(code), dir) {
+				t.Errorf("PythonStringsMayRun(%q, %q) = false: the directory is not known", code, dir)
+			}
 		}
 	}
 	if !PythonStringsMayRun(MaskPythonStrings(program), clean+string(filepath.Separator)+"notes.txt") {
