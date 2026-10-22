@@ -7604,8 +7604,8 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s %s failed: %v\n", conn.Name(), surface, err)
-	previouslyActive := len(authority) > 0 && len(authority[0].applied) > 0 && authority[0].applied[0].previouslyActive
-	if previouslyActive && !opts.ManagedEnterprise {
+	previouslyActive := !opts.ManagedEnterprise && len(authority) > 0 && len(authority[0].applied) > 0 && authority[0].applied[0].previouslyActive
+	if previouslyActive {
 		err = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", err)
 	}
 	if !previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
