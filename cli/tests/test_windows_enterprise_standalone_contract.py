@@ -955,6 +955,79 @@ def test_timeout_recovery_reports_settled_only_when_no_lifecycle_record_remains(
     assert "existing pending transaction" in cases["replay kept pending"]["purge"]
 
 
+_STATUS_ARTIFACT_HARNESS = r"""
+# The status collaborators are healthy; any other one is a no-op.
+$ExecutionContext.InvokeCommand.CommandNotFoundAction = {
+    param($name, $event)
+    $event.CommandScriptBlock = {}
+    $event.StopSearch = $true
+}
+function Get-DefenseClawServiceState { 'running' }
+function Test-DefenseClawMetadataInstalled { $true }
+function Test-DefenseClawStandaloneProfile { $true }
+function Test-DefenseClawAdministrator { $true }
+function Test-DefenseClawGatewayReady { $true }
+function Test-DefenseClawGuardianReady { $true }
+function Invoke-DefenseClawCodexRequirementsCommand { [pscustomobject]@{ ok = $true } }
+$root = '__ROOT__'
+$layout = @{ PendingPath = (Join-Path $root 'pending.json') }
+$hashes = [ordered]@{}
+foreach ($name in 'cli', 'gateway') {
+    $path = Join-Path $root "$name.exe"
+    [IO.File]::WriteAllText($path, $name)
+    $layout[$(if ($name -eq 'cli') { 'CLIPath' } else { 'GatewayPath' })] = $path
+    $hashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+}
+$global:Metadata = [pscustomobject]@{ hashes = [pscustomobject]$hashes }
+function Get-DefenseClawDeploymentMetadata { $global:Metadata }
+function Get-Case([string]$Name) {
+    $status = Get-DefenseClawLifecycleStatus -Action Status -Layout $layout -GatewayServiceName gateway -GuardianServiceName guardian
+    [pscustomobject]@{ name = $Name; ok = [bool]$status.ok; errors = [string[]]@($status.errors) } | ConvertTo-Json -Compress
+}
+Get-Case 'healthy'
+[IO.File]::WriteAllText($layout.GatewayPath, 'replaced')
+Get-Case 'gateway replaced'
+[IO.File]::WriteAllText($layout.GatewayPath, 'gateway')
+[IO.File]::Move($layout.CLIPath, "$($layout.CLIPath).quarantined")
+Get-Case 'cli missing'
+"""
+
+
+def test_standalone_status_fails_while_a_recorded_payload_file_is_missing(tmp_path: Path) -> None:
+    """GAP-0665: with bin\\defenseclaw.exe quarantined, verify failed naming
+    cli while status stayed ok. Status checks every payload file the metadata
+    records, as verify does."""
+    import json
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    module = _text(MODULE)
+    names = ["Get-DefenseClawLifecycleStatus", "Assert-DefenseClawInstalledArtifacts"]
+    functions = "\n".join(_function_body(module, name) for name in names if f"function {name} {{\n" in module)
+    harness = tmp_path / "status-artifacts.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + functions
+        + "\n"
+        + _STATUS_ARTIFACT_HARNESS.replace("__ROOT__", str(tmp_path)),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    cases = {case["name"]: case for case in map(json.loads, completed.stdout.strip().splitlines())}
+    assert cases["healthy"]["ok"] is True and not cases["healthy"]["errors"], cases["healthy"]
+    for name, artifact in (("gateway replaced", "gateway"), ("cli missing", "cli")):
+        assert cases[name]["ok"] is False, cases[name]
+        assert any(error.endswith(f": {artifact}") for error in cases[name]["errors"]), cases[name]
+
+
 _FAKE_RENAME_NATIVE = r"""
 class FakeNative {
     static [object[]] GetFileHolders([string[]]$Paths) {

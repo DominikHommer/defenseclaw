@@ -22798,6 +22798,39 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
     return $true
 }
 
+function Assert-DefenseClawInstalledArtifacts {
+    <#
+        Every payload file the deployment metadata records is present and
+        matches its recorded hash. Verify and status share it.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata
+    )
+    foreach ($property in $Metadata.hashes.PSObject.Properties) {
+        # Must cover every key the hash writer emits.
+        $path = switch ($property.Name) {
+            'broker' { if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) { $Layout.BrokerPath } else { $null } }
+            'gateway' { $Layout.GatewayPath }
+            'acp' { $Layout.ACPPath }
+            'hook' { $Layout.HookPath }
+            'sensor_helper' { $Layout.SensorHelperPath }
+            'compiler' { Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath }
+            'cli' { $Layout.CLIPath }
+            'installer' { $Layout.InstallerPath }
+            'module' { $Layout.ModulePath }
+            default { $null }
+        }
+        if ($null -eq $path -or -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "installed artifact recorded in metadata is missing: $($property.Name)"
+        }
+        $actualHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -cne ([string]$property.Value).ToLowerInvariant()) {
+            throw "installed artifact hash drift: $($property.Name)"
+        }
+    }
+}
+
 function Assert-DefenseClawEnterpriseDeployment {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -23461,28 +23494,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         $null -eq $metadata.hashes.PSObject.Properties['cli']) {
         throw 'deployment metadata is missing the installed CLI artifact hash'
     }
-    foreach ($property in $metadata.hashes.PSObject.Properties) {
-        # Must cover every key the hash writer emits.
-        $path = switch ($property.Name) {
-            'broker' { if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) { $Layout.BrokerPath } else { $null } }
-            'gateway' { $Layout.GatewayPath }
-            'acp' { $Layout.ACPPath }
-            'hook' { $Layout.HookPath }
-            'sensor_helper' { $Layout.SensorHelperPath }
-            'compiler' { Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath }
-            'cli' { $Layout.CLIPath }
-            'installer' { $Layout.InstallerPath }
-            'module' { $Layout.ModulePath }
-            default { $null }
-        }
-        if ($null -eq $path -or -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "installed artifact recorded in metadata is missing: $($property.Name)"
-        }
-        $actualHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualHash -cne ([string]$property.Value).ToLowerInvariant()) {
-            throw "installed artifact hash drift: $($property.Name)"
-        }
-    }
+    Assert-DefenseClawInstalledArtifacts -Layout $Layout -Metadata $metadata
 
     $gatewayEnvironment = [Collections.Generic.List[string]]::new()
     foreach ($value in @(
@@ -24247,6 +24259,14 @@ function Get-DefenseClawLifecycleStatus {
             Assert-DefenseClawGatewayServiceAccess `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
+        }
+        catch {
+            $errors.Add($_.Exception.Message)
+        }
+        # Status said ok while verify failed on a missing payload file such
+        # as a quarantined bin\defenseclaw.exe (GAP-0665).
+        try {
+            Assert-DefenseClawInstalledArtifacts -Layout $Layout -Metadata $metadata
         }
         catch {
             $errors.Add($_.Exception.Message)

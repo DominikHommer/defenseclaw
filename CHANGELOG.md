@@ -40,6 +40,7 @@ for current behavior.
 ### Security
 
 - Windows signed-bundle rollback now requires the confirmed bundle ID and version as well as its policy and generation; a failed nested ensure cannot report a successful rollback (GAP-0445).
+- Standalone Windows `enterprise windows status` fails, naming the file, while a payload file the deployment records (such as a quarantined `bin\defenseclaw.exe`) is missing or replaced, as verify does (GAP-0665).
 
 - **Secure Client hooks use their installed fail mode.** The Antigravity, Devin, Hermes and Kiro shell hooks no longer let an agent's `DEFENSECLAW_FAIL_MODE` environment value reopen a closed installed hook. Secure Client delivery requires a root-owned macOS or SYSTEM-owned Windows installation marker; an unverified host keeps the closed posture.
 - **Windows scanner Python imports require protected access lists.** Before an elevated prepare or a service scan runs Python, DefenseClaw checks every runnable file and folder in the scanner runtime, including `Lib\site-packages`, and refuses a standard user's create-file or write grant. Status reports the offending path and the standalone Setup `/repair` route.
