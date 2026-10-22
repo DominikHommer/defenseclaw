@@ -734,19 +734,6 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")
         self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
-    def test_action_downgrade_cannot_stage_unsupported_codex(self) -> None:
-        with patch(
-            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-            return_value=_discovery("codex", installed=True, version="codex 0.124.0"),
-        ):
-            ok = _apply_hook_connector_setup(
-                self.app, connector="codex", mode="action", restart=False,
-                _downgrade_refused_action=True,
-            )
-        self.assertFalse(ok)
-        self.assertEqual(self.save_calls, 0)
-        self.assertEqual(self.app.cfg.claw.mode, "openclaw")
-
     def test_hermes_action_mode_detects_but_rejects_v017_before_save(self) -> None:
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",

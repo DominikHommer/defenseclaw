@@ -34,7 +34,6 @@ import hashlib
 import io
 import json
 import os
-import shlex
 import stat
 import sys
 import unittest
@@ -50,7 +49,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from click.testing import CliRunner
 
 pytestmark = pytest.mark.supported_connector_host
-from defenseclaw.agent_selection import SetupAgentSelection
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import (
     _configured_connector_set,
@@ -178,6 +176,39 @@ def _setup_patches(prompt=None):
         if prompt is not None:
             stack.enter_context(patch("defenseclaw.commands.cmd_setup.click.prompt", return_value=prompt))
         yield restart
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_refused_action_setup_does_not_stage_observe_or_report_success(batch):
+    app, root, db_path = make_app_context()
+    try:
+        before = cmd_setup._capture_setup_config_snapshot(app.cfg)
+        with (
+            _setup_patches() as restart,
+            patch.object(cmd_setup, "_check_connector_version_supported_for_setup", return_value=False),
+            patch.object(app.cfg, "save") as save,
+        ):
+            if batch:
+                ctx = click.Context(setup_group, obj=app)
+                with ctx, pytest.raises(click.ClickException, match="did not pass setup preflight"):
+                    cmd_setup._apply_setup_batch(
+                        ctx, app, ["claudecode", "cursor"], mode="action", restart=False,
+                        prompt_per_connector=False,
+                    )
+            else:
+                for _ in range(2):
+                    result = CliRunner().invoke(
+                        setup_group,
+                        ["cursor", "--yes", "--mode", "action", "--no-human-approval", "--no-restart"],
+                        obj=app,
+                    )
+                    assert result.exit_code != 0, result.output
+            save.assert_not_called()
+            restart.assert_not_called()
+        after = cmd_setup._capture_setup_config_snapshot(app.cfg)
+        assert after == before
+    finally:
+        cleanup_app(app, db_path, root)
 
 
 class TestAdditiveSetupCommand(unittest.TestCase):

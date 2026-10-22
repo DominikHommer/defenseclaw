@@ -840,7 +840,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        'Gateway is not running - press : and run "start" (or run defenseclaw-gateway start)',
+                        "Gateway is not running. Run: defenseclaw-gateway start",
                     )
                 )
         elif gateway_state in {"starting", "reconnecting"}:

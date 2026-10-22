@@ -140,11 +140,14 @@ func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 		name     string
 		failMode string
 		prearm   bool
+		event    string
 	}{
-		{"watchdog started by Run, fail mode closed", "closed", false},
-		{"watchdog started by Run, fail mode open", "open", false},
-		{"watchdog armed before Run, fail mode closed", "closed", true},
-		{"watchdog armed before Run, fail mode open", "open", true},
+		{"watchdog started by Run, fail mode closed", "closed", false, "PreToolUse"},
+		{"watchdog started by Run, fail mode open", "open", false, "PreToolUse"},
+		{"watchdog armed before Run, fail mode closed", "closed", true, "PreToolUse"},
+		{"watchdog armed before Run, fail mode open", "open", true, "PreToolUse"},
+		{"prompt watchdog retains closed in outage mode open", "open", false, "UserPromptSubmit"},
+		{"result watchdog retains closed in outage mode open", "open", true, "PostToolUse"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			shortAnswerBudget(t, 800*time.Millisecond)
@@ -170,6 +173,8 @@ func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 				defer close(returned)
 				run(t, "codex", nil, func(o *Options) {
 					managedWindowsStandalone(o)
+					o.Event = tc.event
+					o.Stdin = strings.NewReader(`{"hook_event_name":"` + tc.event + `","tool_name":"shell","prompt":"echo ok"}`)
 					o.FailMode = tc.failMode
 					o.StartedAt = started
 					o.HTTPClient = &http.Client{Transport: ignoringContextRT{release: hung}}
@@ -179,10 +184,10 @@ func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 						return
 					}
 					watchdog := ArmAnswerWatchdog(Options{
-						Connector: "codex", Event: "PreToolUse", ManagedEnterprise: true,
+						Connector: "codex", Event: tc.event, ManagedEnterprise: true,
 						StartedAt: started, Exit: exit, Stdout: &strings.Builder{}, Stderr: &strings.Builder{},
 						FailureLogHome: resolve,
-					}, []byte(`{"hook_event_name":"PreToolUse"}`))
+					}, []byte(`{"hook_event_name":"`+tc.event+`"}`))
 					if watchdog == nil {
 						t.Error("the managed tool call armed no watchdog")
 						return
@@ -194,6 +199,10 @@ func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 			case row := <-rowAtExit:
 				if strings.Count(row, "\n") != 1 || !strings.Contains(row, managedGatewayNoAnswerReason) {
 					t.Fatalf("hook-failures.jsonl when the process ended = %q, want one %s row", row, managedGatewayNoAnswerReason)
+				}
+				if tc.event != "PreToolUse" && (!strings.Contains(row, `"fail_mode":"closed"`) ||
+					!strings.Contains(row, `"outcome":"fail_closed"`)) {
+					t.Fatalf("prompt/result watchdog row = %q, want fail_closed", row)
 				}
 			case <-time.After(10 * time.Second):
 				t.Fatal("the watchdog did not answer")
