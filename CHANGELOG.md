@@ -24,6 +24,8 @@ for current behavior.
 
 ### Fixed
 
+- **HILT previews explain observe mode.** A connector in observe mode does not pause actions for approval; the preview distinguishes the saved policy from action-mode prompts.
+
 - **Rule-pack switches preserve existing pins.** Selecting a directory keeps its registered identity and refuses a stale digest through any alias. Pins used by application protection survive a global pack switch.
 
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.

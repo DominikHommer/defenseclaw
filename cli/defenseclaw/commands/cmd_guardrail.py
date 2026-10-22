@@ -2285,7 +2285,13 @@ def _set_connector_hilt(
         f"enabled={ux.accent(str(new_enabled).lower())} "
         f"min_severity={ux.accent(new_min)}"
     )
-    if new_enabled:
+    if gc.effective_mode(key) != "action":
+        ux.subhead(
+            f"{label} is in {gc.effective_mode(key)} mode, which does not pause actions for approval. "
+            "The saved HILT policy applies when the connector uses action mode.",
+            indent="  ",
+        )
+    elif new_enabled:
         ux.subhead(
             f"{label} will prompt for approval on confirmable actions at/above "
             f"{new_min} (CRITICAL findings still block outright).",

@@ -1462,6 +1462,25 @@ class PerConnectorFailModeTests(unittest.TestCase):
 class HILTCommandTests(unittest.TestCase):
     """`guardrail hilt [on|off] [--min-severity X] [--connector Y]`."""
 
+    def test_connector_preview_explains_effective_observe_mode(self):
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.mode = "action"
+        app.cfg.guardrail.connectors["claudecode"].mode = "observe"
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["on", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("observe mode", result.output)
+        self.assertIn("does not pause actions for approval", result.output)
+        self.assertNotIn("will prompt for approval", result.output)
+        app.cfg.save.assert_not_called()
+
+        app.cfg.guardrail.connectors["claudecode"].mode = "action"
+        result = CliRunner().invoke(
+            cmd_guardrail.hilt_cmd, ["on", "--connector", "claudecode"], obj=app, input="n\n",
+        )
+        self.assertIn("will prompt for approval", result.output)
+
     def test_show_global_when_no_args(self):
         runner = CliRunner()
         app = make_multi_ctx({})  # single-connector / global path
