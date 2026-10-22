@@ -184,7 +184,7 @@ func (s *relayTestStore) GetWithRun(uid int, id string) (sandboxreg.Registration
 	if err != nil {
 		return sandboxreg.Registration{}, false, sandboxreg.Run{}, false, err
 	}
-	run, hasRun, err := s.sandboxRegistrationStore.Run(uid, id)
+	run, hasRun, err := s.Run(uid, id)
 	return reg, ok, run, hasRun, err
 }
 
