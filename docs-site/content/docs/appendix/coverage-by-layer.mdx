@@ -190,7 +190,7 @@ The layers divide the work so that two of them never make the same decision:
 | Layer and failure | What happens |
 | --- | --- |
 | A hook cannot reach the gateway, in observe or action mode | Follows the effective hook fail mode: `closed` by default outside Secure Client; an explicit `open` allows the call on supported hooks |
-| Managed Claude Code and Codex hooks | Closed by default. An administrator's explicit `open` allows an outage; integrity and credential refusals still block |
+| Managed standalone Claude Code and Codex hooks | Closed by default. An administrator's explicit `open` allows an outage; integrity and credential refusals still block |
 | Sandbox hooks | Always closed; silence is detected and can stop the sandbox |
 | The judge is unavailable | Falls back to the local verdict |
 | The egress proxy, credential revoked or deny mode | Closed: 403 or 407, and open tunnels are closed |
