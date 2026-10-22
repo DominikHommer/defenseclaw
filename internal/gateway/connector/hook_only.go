@@ -5048,14 +5048,16 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 		// re-added entry (rel-1-0-4 GAP-0600). The event holds the render alone.
 		hooks[event] = []interface{}{copilotHookRegistration(goos, event, hookScript)}
 	}
-	// A version downgrade must remove only the now-out-of-contract managed
-	// handler (currently userPromptTransformed), while retaining operator hooks
-	// registered for that event and every unknown/future event verbatim.
-	for _, event := range copilotCurrentHookEvents {
+	// Remove DefenseClaw's handler from events outside this contract too. An
+	// operator's own handlers on those events stay intact.
+	for event, raw := range hooks {
 		if selected[event] {
 			continue
 		}
-		remaining := removeOwnedFlatHooks(hooks[event], hookScript)
+		if _, ok := raw.([]interface{}); !ok {
+			continue
+		}
+		remaining := removeOwnedFlatHooks(raw, hookScript)
 		if len(remaining) == 0 {
 			delete(hooks, event)
 		} else {

@@ -527,6 +527,47 @@ def test_windows_copilot_doctor_rejects_a_changed_defenseclaw_handler(tmp_path: 
     assert key in check.detail
 
 
+@pytest.mark.parametrize("tamper", ["command-whitespace", "command-case"])
+def test_windows_copilot_doctor_requires_the_exact_setup_command(tmp_path: Path, tamper: str) -> None:
+    install, data, config = _fixture(tmp_path)
+    document = json.loads(config.read_text(encoding="utf-8"))
+    entry = document["hooks"]["preToolUse"][0]
+    original = entry["powershell"]
+    entry["powershell"] = f" {original} " if tamper == "command-whitespace" else original.replace(" -Event ", " -event ")
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    check = _validate(install, data, config)
+
+    assert check.state == "foreign", check
+    assert "Setup's command" in check.detail
+
+
+def test_windows_copilot_command_tamper_degrades_status_and_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from defenseclaw import bootstrap, fail_mode, hook_integrity
+    from defenseclaw.commands import cmd_doctor, cmd_status
+
+    install, data, config = _fixture(tmp_path)
+    cfg = SimpleNamespace(data_dir=str(data), claw=SimpleNamespace(workspace_dir=""), deployment_mode="single_user")
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    monkeypatch.setattr(fail_mode, "_is_windows", lambda: True)
+    monkeypatch.setattr(cmd_doctor, "_packaged_windows_install_root", lambda _data: str(install))
+    monkeypatch.setattr("defenseclaw.inventory.agent_discovery._windows_acl_write_error", lambda _path: None)
+    monkeypatch.setenv("PATH", str(install))
+    monkeypatch.setenv("PATHEXT", ".EXE;.CMD")
+
+    assert cmd_status._hook_runtime_degraded_suffix(cfg, "copilot") == ""
+    document = json.loads(config.read_text(encoding="utf-8"))
+    document["hooks"]["preToolUse"][0]["powershell"] += " "
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    assert "DEGRADED" in cmd_status._hook_runtime_degraded_suffix(cfg, "copilot")
+    step = bootstrap._connector_runtime_readiness(cfg, "copilot")
+    assert step is not None and step.status == "fail", step
+    assert fail_mode.registration_integrity_drift(cfg, "copilot") == ["registration-foreign"]
+
+
 @pytest.mark.parametrize(
     "tamper, drift",
     [

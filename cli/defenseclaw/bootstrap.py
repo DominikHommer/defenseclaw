@@ -1777,7 +1777,8 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
     # can change, or a hook entry edited so tool calls run unchecked is not
     # repaired by a gateway restart (rel-1-0-4 GAP-0580, GAP-0600).
     blocking = (
-        problems[0].startswith("hook command ")
+        getattr(problems[0], "blocking", False)
+        or problems[0].startswith("hook command ")
         or "another account can change" in problems[0]
         or problems[0] in agent_hook_switch_problems(cfg, connector)
         or problems[0] in unguarded_tool_call_hooks(cfg, connector)

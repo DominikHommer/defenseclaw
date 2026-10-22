@@ -15,7 +15,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -496,8 +495,7 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 				// its render on a bound event (patchCopilotHooksForOS).
 				return true
 			}
-			return slices.Contains(copilotCurrentHookEvents, event) &&
-				(containsHookScript(entry, hookCommand) || editedDefenseClawHookEntry(entry, edited))
+			return containsHookScript(entry, hookCommand) || editedDefenseClawHookEntry(entry, edited)
 		})
 	case "antigravity":
 		// Setup rewrites each DefenseClaw-owned outer key whole.

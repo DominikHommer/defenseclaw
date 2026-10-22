@@ -828,3 +828,56 @@ func TestOwnedHookFileEntryIsTheWholeSetupRender(t *testing.T) {
 		})
 	}
 }
+
+func TestCopilotSetupRemovesOwnHandlerFromUnexpectedEvent(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "defenseclaw.json")
+			dataDir := t.TempDir()
+			script := filepath.Join(dataDir, "hooks", "copilot-hook.sh")
+			if goos == "windows" {
+				script = windowsCopilotPowerShellAdapterCommand(script)
+			}
+			command := copilotHookInvocationCommandForEvent(goos, "preToolUse", script)
+			field := "bash"
+			if goos == "windows" {
+				field = "powershell"
+			}
+			document := map[string]interface{}{
+				"hooks": map[string]interface{}{
+					"unexpectedEvent": []interface{}{
+						map[string]interface{}{"type": "command", field: command},
+						map[string]interface{}{"type": "command", field: "echo operator"},
+					},
+				},
+			}
+			data, err := json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := patchCopilotHooksForOS(path, script, []string{"preToolUse"}, goos); err != nil {
+				t.Fatal(err)
+			}
+			got := decodeHookFileForTest(t, path)["hooks"].(map[string]interface{})["unexpectedEvent"]
+			want := []interface{}{map[string]interface{}{"type": "command", field: "echo operator"}}
+			if !sameHookJSON(got, want) {
+				t.Fatalf("unexpected event handlers = %v, want %v", got, want)
+			}
+			if goos == runtime.GOOS {
+				if err := patchCopilotHooksForOS(path, script, copilotCurrentHookEvents, goos); err != nil {
+					t.Fatal(err)
+				}
+				complete := decodeHookFileForTest(t, path)
+				complete["hooks"].(map[string]interface{})["unexpectedEvent"] = []interface{}{
+					map[string]interface{}{"type": "command", field: command},
+				}
+				if NewCopilotConnector().renderedHookEntriesPresent(SetupOpts{DataDir: dataDir}, complete) {
+					t.Fatal("unexpected DefenseClaw event handler counted as current")
+				}
+			}
+		})
+	}
+}

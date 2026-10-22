@@ -319,3 +319,16 @@ def test_a_changed_defenseclaw_entry_in_its_own_hook_file_fails_every_check(tmp_
     problems = hook_integrity.edited_hook_problems(cfg, case["connector"])
     assert problems and "preToolUse".casefold() in problems[0].casefold(), problems
     _assert_every_check_fails(cfg, case["connector"], monkeypatch, "registration-foreign")
+
+
+@pytest.mark.parametrize("case", _COPILOT, ids=_case_id)
+def test_copilot_handler_on_an_unexpected_event_fails_every_check(tmp_path, monkeypatch, case):
+    cfg, paths = _install(tmp_path, monkeypatch, case)
+    config = Path(paths[0])
+    document = json.loads(config.read_text(encoding="utf-8"))
+    document["hooks"]["unexpectedEvent"] = [document["hooks"]["preToolUse"][0]]
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    problems = hook_integrity.edited_hook_problems(cfg, "copilot")
+    assert problems and "unexpectedEvent" in problems[0], problems
+    _assert_every_check_fails(cfg, "copilot", monkeypatch, "registration-foreign")

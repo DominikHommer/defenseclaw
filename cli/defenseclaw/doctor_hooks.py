@@ -3102,7 +3102,7 @@ def _copilot_powershell_binding(command: str) -> tuple[str, str] | None:
 def _validate_copilot_hook_matrix(
     document: dict[str, Any],
     contract_id: str,
-) -> tuple[str, str, int]:
+) -> tuple[str, str, int, dict[str, str]]:
     if type(document.get("version")) is not int or document.get("version") != 1:
         raise _InspectionError("malformed", "Copilot hook registration version must be integer 1")
     if "disableAllHooks" in document:
@@ -3136,7 +3136,7 @@ def _validate_copilot_hook_matrix(
             binding = _copilot_powershell_binding(command)
             if binding is not None:
                 target, bound_event = binding
-                owned.append((entry, command.strip(), target))
+                owned.append((entry, command, target))
                 if bound_event != event:
                     raise _InspectionError(
                         "stale",
@@ -3195,7 +3195,7 @@ def _validate_copilot_hook_matrix(
     if len(targets) != 1:
         raise _InspectionError("stale", "Copilot DefenseClaw hook events use inconsistent PowerShell targets")
     first_event = required_hooks[0]
-    return commands[first_event], next(iter(targets)), count
+    return commands[first_event], next(iter(targets)), count, commands
 
 
 def validate_windows_copilot_hook_registration(
@@ -3231,16 +3231,20 @@ def validate_windows_copilot_hook_registration(
             )
         document = _read_config(config_path, "copilot")
         evidence, _runtime_version, contract_id = _contract_evidence(data_dir, "copilot", config_path)
-        command, raw_adapter, matrix_entries = _validate_copilot_hook_matrix(document, contract_id)
+        expected_adapter = os.path.join(data_dir, "hooks", "copilot-hook.ps1")
+        command, raw_adapter, matrix_entries, commands = _validate_copilot_hook_matrix(document, contract_id)
         resolved_adapter = _resolve_target(raw_adapter, "powershell", search_path=search_path, pathext=pathext)
         if not resolved_adapter:
             raise _InspectionError("missing", f"registered Copilot adapter cannot be resolved: {raw_adapter}")
-        expected_adapter = os.path.join(data_dir, "hooks", "copilot-hook.ps1")
         if not _same_windows_path(resolved_adapter, expected_adapter):
             raise _InspectionError(
                 "foreign",
                 f"registered Copilot adapter is outside the DefenseClaw runtime: {resolved_adapter}",
             )
+        quoted_adapter = expected_adapter.replace("'", "''")
+        for event, registered in commands.items():
+            if registered != f"& '{quoted_adapter}' -Event '{event}'":
+                raise _InspectionError("foreign", f"Copilot event {event} handler differs from Setup's command")
         adapter_bytes = _stable_regular_file(
             resolved_adapter,
             data_dir,

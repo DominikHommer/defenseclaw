@@ -63,10 +63,12 @@ class HookProblem(str):
     """A problem sentence that carries the one step that repairs it."""
 
     repair: str
+    blocking: bool
 
-    def __new__(cls, text: str, repair: str) -> HookProblem:
+    def __new__(cls, text: str, repair: str, *, blocking: bool = False) -> HookProblem:
         problem = super().__new__(cls, text)
         problem.repair = repair
+        problem.blocking = blocking
         return problem
 
 
@@ -622,7 +624,30 @@ def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
         return [f"no DefenseClaw hooks are registered in {unregistered[0]}"]
     if registered:
         commands = [] if windows else hook_command_problems(cfg, connector)
-        return commands or unguarded_tool_call_hooks(cfg, connector) or agent_hook_switch_problems(cfg, connector)
+        problems = commands or unguarded_tool_call_hooks(cfg, connector) or agent_hook_switch_problems(cfg, connector)
+        if problems:
+            return problems
+        if windows and connector == "copilot":
+            # Status and Setup read-back use this function; the Windows native
+            # validator already supplies Doctor and fail-mode's deeper check.
+            from defenseclaw.commands.cmd_doctor import _windows_native_hook_check
+
+            try:
+                native = _windows_native_hook_check(cfg, connector)
+            except Exception as exc:  # noqa: BLE001 - an uninspectable hook is not healthy.
+                detail = f"inspection failed: {type(exc).__name__}"
+            else:
+                if native.healthy:
+                    return []
+                detail = f"{native.state}: {native.detail}"
+            return [
+                HookProblem(
+                    f"Windows Copilot hook registration is not current: {detail}",
+                    "run `defenseclaw setup copilot --yes --restart`",
+                    blocking=True,
+                )
+            ]
+        return []
     return agent_hook_switch_problems(cfg, connector)
 
 
@@ -1255,6 +1280,13 @@ def _foreign_owned_file_entry(
     hooks = document.get("hooks")
     if connector == "copilot" and isinstance(hooks, dict):
         bound = [(event, entry) for event in renders if isinstance(hooks.get(event), list) for entry in hooks[event]]
+        for event, raw in hooks.items():
+            if event in renders:
+                continue
+            entries = raw if isinstance(raw, list) else [raw]
+            for entry in entries:
+                if any(current in command for command in _hook_command_strings(entry)):
+                    return f"unexpected Copilot event {event}: {json.dumps(entry, sort_keys=True)}", False
     elif connector == "kiro" and isinstance(hooks, list):
         bound = [
             (entry.get("trigger"), entry)
