@@ -45,6 +45,43 @@ describe('managed outage documentation', () => {
     }
     assert.ok(page('appendix/coverage-by-layer.mdx').includes('/docs/reference/apis/capability-matrix#gateway-outage'));
   });
+
+  it('scopes generic fail-mode guidance to delivery failures', () => {
+    const guide = page('features/guardrail.mdx');
+    const failMode = guide.split('## Fail mode')[1]?.split('## ')[0];
+    assert.ok(failMode, 'guardrail fail-mode section');
+    assert.match(failMode, /default is `closed`/);
+    assert.match(failMode, /managed.*`open`.*gateway outage/i);
+    assert.ok(failMode.includes('/docs/reference/apis/capability-matrix#gateway-outage'));
+    assert.doesNotMatch(failMode, /authentication failure.*`open` allows/i);
+    assert.doesNotMatch(guide, /Observe mode never blocks/i);
+
+    const layers = page('appendix/coverage-by-layer.mdx');
+    assert.match(layers, /A hook cannot reach the gateway \| The hook's fail mode decides, in observe and action mode alike/);
+    assert.doesNotMatch(layers, /A hook cannot reach the gateway, in observe mode \| Open:/);
+    assert.doesNotMatch(layers, /Managed Claude Code and Codex hooks \| Always closed/);
+  });
+
+  it('states the Hermes guard boundary on each managed OS', () => {
+    const source = readFileSync(join(repo, 'internal/enterprisepolicy/publicpolicy.go'), 'utf8');
+    assert.match(source, /ConnectorHermes: true/);
+    const scope = source.split('func GuardApplies')[1]?.split('func BuildPublicPolicy')[0];
+    assert.match(scope ?? '', /if unixGuardConnectors\[connector\] {\s*return goos != "windows"/);
+    const matrix = page('reference/apis/capability-matrix.mdx');
+    const guard = matrix.split('**The foreign-hook guard can still block.**')[1]?.split('- **Unix socket trust')[0];
+    assert.ok(guard, 'foreign-hook guard note');
+    assert.match(guard, /Hermes on Linux and macOS/);
+    assert.match(guard, /Windows.*Hermes.*administrator.*outage mode/i);
+  });
+
+  it('does not promise a closed Unix socket trust failure before its fix', () => {
+    const source = readFileSync(join(repo, 'internal/gateway/connector/hook_socket_transport.go'), 'utf8');
+    assert.match(source, /if ! defenseclaw_hook_socket_trusted; then\s+fail_unreachable/);
+    const modes = page('reference/configuration/fail-modes.mdx');
+    assert.doesNotMatch(modes, /unverified gateway peer or missing or refused credentials in every fail mode/);
+    assert.match(modes, /Unix shell hooks.*socket.*installed fail mode/i);
+    assert.match(page('reference/apis/capability-matrix.mdx'), /socket ownership.*installed fail mode/i);
+  });
 });
 
 describe('installed fail mode environment contract', () => {
@@ -60,6 +97,24 @@ describe('installed fail mode environment contract', () => {
     assert.doesNotMatch(truth, /\| `tighten_only` \|[^|]*\|[^|]*DEFENSECLAW_FAIL_MODE/);
     const threat = page('enterprise/plan/threat-model.mdx');
     assert.doesNotMatch(threat, /`DEFENSECLAW_FAIL_MODE`, .*count only when stricter/);
+
+    const managed = page('enterprise/plan/managed-policy.mdx');
+    assert.doesNotMatch(managed, /`tighten_only` variables \(`DEFENSECLAW_FAIL_MODE`/);
+    assert.match(managed, /`DEFENSECLAW_FAIL_MODE`.*1\.0\.4.*not read/);
+    assert.ok(managed.includes('/docs/reference/apis/capability-matrix#gateway-outage'));
+  });
+});
+
+describe('guardrail setup prompt mapping', () => {
+  it('maps the action-mode judge picker and its initial empty selection', () => {
+    const source = readFileSync(join(repo, 'cli/defenseclaw/commands/cmd_setup.py'), 'utf8');
+    assert.ok(source.includes('title="Select action connector(s) for LLM judge."'));
+    assert.ok(source.includes('default_selected=_default_batch_judge_labels(judge_targets, gc, display_by_connector)'));
+    const reference = page('reference/commands/guardrail-setup.mdx');
+    assert.match(reference, /Select action connector\(s\) for LLM judge\./);
+    assert.match(reference, /none selected on first setup/i);
+    assert.match(reference, /--judge-hook-connectors/);
+    assert.doesNotMatch(reference, /\| \*\*Add LLM judge on top of rule scanning\?\*\*/);
   });
 });
 

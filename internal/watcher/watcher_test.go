@@ -1403,6 +1403,46 @@ func TestLinkedOrUnmovableSkillReportsWhatHappened(t *testing.T) {
 	})
 }
 
+func TestQuarantineFailureAuditDoesNotClaimTheSourceRemains(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "before publication", err: errors.New("copy failed"), want: "inspect the source and quarantine storage"},
+		{name: "after publication", err: fmt.Errorf("source cleanup failed: %w", enforce.ErrQuarantinePublished), want: "verified copy was published"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, store, logger, skillDir := setupTestEnv(t)
+			runtime := &watcherTestRuntime{}
+			logger.SetRuntimeV8Emitter(runtime)
+			w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+			evt := InstallEvent{Type: InstallSkill, Name: "risky", Path: filepath.Join(skillDir, "risky"), Timestamp: time.Now()}
+			w.emitQuarantineFailure(context.Background(), evt, tc.err)
+			logs, _ := runtime.snapshot()
+			for _, record := range logs {
+				if record.Action() != string(audit.ActionWatcherBlock) {
+					continue
+				}
+				body, ok := record.Body()
+				if !ok {
+					t.Fatal("watcher-block audit body is absent")
+				}
+				fields, err := body.Object()
+				if err != nil {
+					t.Fatal(err)
+				}
+				details, _ := fields["details"].(string)
+				if !strings.Contains(details, tc.want) || strings.Contains(details, "stays in place") {
+					t.Fatalf("quarantine failure audit = %q, want %q and no source-location claim", details, tc.want)
+				}
+				return
+			}
+			t.Fatal("no watcher-block audit event")
+		})
+	}
+}
+
 // GAP-0133: a skill on asset_policy.skill.denied whose quarantine folder the
 // gateway cannot enter stays in place and blocked. skill info said
 // quarantined: a pending quarantine record stayed and the journal did not

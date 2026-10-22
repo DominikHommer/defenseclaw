@@ -3220,10 +3220,9 @@ func (w *InstallWatcher) settleAdmissionIssue(evt InstallEvent, res AdmissionRes
 	w.state.setIssue(issue)
 }
 
-// emitQuarantineFailure reports an asset the verdict blocked but the watcher
-// could not move: it stays in place, so besides the log line and the metric
-// the audit log records an enforcement failure the administrator can find
-// (GAP-0133).
+// emitQuarantineFailure reports a blocked asset the watcher could not fully
+// quarantine. Source cleanup may have failed after a verified copy was
+// published, so the audit record does not assume the source is intact.
 func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallEvent, err error) {
 	// A removal the hook guardian deferred to the user's next sign-in is the
 	// guardian's to finish; status reports it from the guardian's list.
@@ -3241,11 +3240,15 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 				"path": evt.Path, "error": err.Error(), "connector": w.eventConnector(evt),
 			})
 		}
+		details := "quarantine failed; inspect the source and quarantine storage"
+		if errors.Is(err, enforce.ErrQuarantinePublished) {
+			details = "quarantine failed after a verified copy was published; inspect the retained copy and source"
+		}
 		_ = w.logger.LogEventCtx(ctx, audit.Event{
 			Action:   string(audit.ActionWatcherBlock),
 			Target:   evt.Path,
 			Actor:    "defenseclaw",
-			Details:  fmt.Sprintf("type=%s quarantine failed, the blocked asset stays in place: %v", evt.Type, err),
+			Details:  fmt.Sprintf("type=%s %s: %v", evt.Type, details, err),
 			Severity: "HIGH",
 		})
 	}

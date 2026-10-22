@@ -13,7 +13,7 @@ The guardrail checks what your agent is about to do (a prompt, a shell command, 
 
 You choose how strict it is per agent with a mode:
 
-- **Observe** records every finding and blocks nothing. Start here.
+- **Observe** records findings without enforcing policy blocks. Start here.
 - **Action** applies the block and alert levels below.
 - **Human approval (HITL)** is an option in action mode. A risky call below the block level pauses and asks you first, on agents that can ask.
 
@@ -21,7 +21,7 @@ You choose how strict it is per agent with a mode:
 
 <Flow
   direction="TB"
-  caption="How the gateway picks a verdict for a tool call in action mode, and whether that verdict can pause the agent. The levels shown are the default rule pack's. Observe mode records the verdict and lets the call run."
+  caption="How the gateway picks a verdict for a tool call in action mode, and whether that verdict can pause the agent. The levels shown are the default rule pack's. Observe mode records a valid policy verdict and lets the call run."
 >
   <Node id="call" kind="gateway">{`Gateway rates the call\nby its worst finding`}</Node>
   <Node id="block" kind="decision">{`At the block level?\nCRITICAL by default`}</Node>
@@ -63,7 +63,7 @@ Human approval is off by default. Its default minimum severity is HIGH. Change t
 
 ## Fail mode
 
-The hook fail mode decides what happens when the gateway cannot answer (unreachable, bad response, authentication failure). The default is `closed`: the agent blocks the call where the event can carry a block response. `open` allows the call and logs the failure.
+The hook fail mode controls delivery failures. The default is `closed`, including in observe mode, except under Secure Client. A closed hook blocks where the event can carry a block response. On a managed standalone host, an administrator's `open` covers a classified gateway outage; authentication failures and unusable answers still block. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for each installed route and event.
 
 ## Which agents can ask
 
@@ -82,7 +82,7 @@ Codex, Cursor, Hermes, OpenCode, Devin, Kiro and ZeptoClaw cannot ask. The [capa
 ## What it does not do
 
 - It cannot see what a child program writes after a command starts. For protected files, add a sandbox or file permissions.
-- Observe mode never blocks, whatever the levels say.
+- Observe mode does not enforce policy findings. A closed hook can still block when the gateway cannot answer.
 - The TUI does not hold or resume a paused call. Approval happens in the agent.
 
 ## Do it
