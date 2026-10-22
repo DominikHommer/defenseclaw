@@ -183,9 +183,9 @@ export function SandboxHarnessTable() {
   );
 }
 
-// What a connector's hooks do with a call they cannot check because the
-// gateway is down, still restarting or gives no answer in time. This table
-// is the one place the docs state it per connector; every other page links
+// What a connector's hooks do with a call they cannot check when the gateway
+// is proven not running. A managed restart refusal or no answer blocks.
+// This table is the one place the docs state it per connector; other pages link
 // here (#gateway-outage). The values are checked against the code by
 // TestDocsCapabilityMatrixOutageMatchesTheHooks (internal/enterprisepolicy).
 interface OutageRow {
@@ -240,7 +240,7 @@ export function OutageMatrix() {
             <Th>Connector</Th>
             <Th>Per-user, fail mode closed</Th>
             <Th>Per-user, fail mode open</Th>
-            <Th>Managed standalone, administrator chose open</Th>
+            <Th>Managed standalone, administrator open, proven not-running gateway</Th>
             <Th>Secure Client, fail mode closed</Th>
             <Th>DEFENSECLAW_STRICT_AVAILABILITY</Th>
             <Th>DEFENSECLAW_FAIL_MODE</Th>

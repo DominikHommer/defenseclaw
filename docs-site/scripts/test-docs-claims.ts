@@ -89,18 +89,44 @@ describe('managed outage documentation', () => {
     assert.match(modes, /- Another program answers in place of the gateway service\./);
   });
 
-  it('scopes the administrator outage mode to a missing socket on Linux and macOS', () => {
-    // A Linux or macOS hook opens only when its trusted socket directory has
-    // no socket. Once the socket exists, the hook forces FAIL_MODE=closed
-    // (hook_socket_transport.go shellHookSocketTransportBlock), and the native
-    // hook turns a refused dial into a peer error (managedStandaloneHTTPClient).
-    const outage = /`?open`?[^.]*(stopped|not running)[^.]*restart[^.]*no answer in time/i;
-    const scope = /On Linux and macOS a hook treats only a missing gateway socket as an outage; once the socket exists, every later failure blocks, `open` included\./;
-    const pages = docPages().filter((path) => outage.test(readFileSync(path, 'utf8').split(/\s+/).join(' ')));
-    assert.ok(pages.length >= 5, 'outage-mode pages');
-    for (const path of pages) {
-      assert.match(readFileSync(path, 'utf8').split(/\s+/).join(' '), scope, path);
+  it('limits administrator open to a proven not-running gateway on every OS', () => {
+    // W7b accepts only errManagedGatewayNotRunning in ManagedOutageFailsOpen.
+    // A trusted Unix socket directory with no socket, or a Windows service
+    // reported not running with no port listener, can establish that case.
+    // A restart refusal and an unanswered request close even under open.
+    const pages = [
+      'reference/configuration/fail-modes.mdx',
+      'reference/apis/capability-matrix.mdx',
+      'enterprise/operate/lifecycle.mdx',
+      'enterprise/operate/reference.mdx',
+      'appendix/coverage-by-layer.mdx',
+      'enterprise/configure/reference.mdx',
+      'features/guardrail.mdx',
+    ];
+    for (const name of pages) {
+      const text = page(name);
+      assert.match(text, /administrator(?:'s)? `open` applies only when the gateway is proven not running/i, name);
+      assert.doesNotMatch(text, /(?:stopped|not running),? (?:is )?restarting or (?:gives )?no answer in time/i, name);
     }
+    const staleManagedOpen = /(?:administrator|managed)[^.]{0,120}`open`[^.]{0,160}(?:allows?|covers?)[^.]{0,160}(?:restart|no answer in time)|gateway service stopped, restarting or no answer in time/i;
+    for (const path of docPages()) {
+      assert.doesNotMatch(readFileSync(path, 'utf8').split(/\s+/).join(' '), staleManagedOpen, path);
+    }
+
+    const modes = page('reference/configuration/fail-modes.mdx');
+    const matrix = page('reference/apis/capability-matrix.mdx');
+    for (const [name, text] of [['fail modes', modes], ['capability matrix', matrix]] as const) {
+      assert.match(text, /Linux and macOS[^.]*trusted directory[^.]*socket[^.]*missing/i, name);
+      assert.match(text, /Windows[^.]*service manager[^.]*not running[^.]*no listener/i, name);
+      assert.match(text, /`enterprise_managed_gateway_restarting`[^.]*`enterprise_managed_gateway_no_answer`[^.]*block[^.]*`open`/i, name);
+    }
+    assert.match(modes, /no-answer deadline blocks even under `open`, including Secure Client/);
+    const component = readFileSync(join(site, 'components/capability-matrix.tsx'), 'utf8');
+    assert.match(component, /Managed standalone, administrator open, proven not-running gateway/);
+
+    const threat = readFileSync(join(repo, 'docs/ENTERPRISE-THREAT-MODEL.md'), 'utf8').split(/\s+/).join(' ');
+    assert.match(threat, /administrator(?:'s)? `open` applies only when the gateway is proven not running/i);
+    assert.doesNotMatch(threat, /gateway service stopped, restarting or no answer in time/i);
   });
 });
 

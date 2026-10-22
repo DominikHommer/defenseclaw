@@ -9,17 +9,17 @@ keywords:
   - DEFENSECLAW_FAIL_MODE
 ---
 
-One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows (`open`) or blocks (`closed`) when the gateway cannot give a usable answer. It covers transport failures and invalid responses alike. The mode is the one installed with the hooks: the environment does not set it, and one variable, `DEFENSECLAW_STRICT_AVAILABILITY`, can only make an outage stricter ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
+One persisted setting, `guardrail.hook_fail_mode`, sets the mode installed with a hook. The default is `closed`, except under Secure Client. On a per-user install, `open` can allow a transport failure or unusable answer. On a managed standalone host, only a proven not-running gateway can follow an administrator's `open`; the other failures below block. The environment does not set the installed mode, and `DEFENSECLAW_STRICT_AVAILABILITY` can only make it stricter ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
 
 ## Controls
 
 | Control | Effect | Default and scope |
 | --- | --- | --- |
-| `guardrail.hook_fail_mode` | `open` allows, `closed` blocks supported hook events when delivery or the gateway response fails. | `closed`. Under Secure Client an unset value is `open` ([Secure Client](#secure-client)). Per connector: `guardrail.connectors.<name>.hook_fail_mode`. |
+| `guardrail.hook_fail_mode` | `closed` blocks supported hook events on a delivery failure. `open` follows the failure rules for the install: a managed standalone hook can allow only a proven not-running gateway. | `closed`. Under Secure Client an unset value is `open` ([Secure Client](#secure-client)). Per connector: `guardrail.connectors.<name>.hook_fail_mode`. |
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force a closed connector open. | Unset. Per agent process. |
 | `DEFENSECLAW_FAIL_MODE` | Not read by 1.0.4 hooks: the installed mode is the fail mode. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again; Secure Client shell hooks keep it ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)). | Set the mode with `defenseclaw guardrail fail-mode`. |
 
-An explicit value always wins, on every install: the OSS per-user install, the standalone enterprise profile, MDM-managed standalone hosts and Secure Client. On a managed computer the value comes from the administrator's config, so an `open` there is the administrator's choice and the managed hooks follow it. On a managed standalone host `DEFENSECLAW_STRICT_AVAILABILITY` is tighten-only: a stricter value is honored, a looser one is ignored ([Environment variables](/docs/reference/configuration/env-vars)).
+An explicit value sets the installed mode on every install: OSS per-user, standalone enterprise, MDM-managed standalone and Secure Client. On a managed computer the value comes from the administrator's config. An installed `open` still blocks failures that are not the proven outage below. On a managed standalone host `DEFENSECLAW_STRICT_AVAILABILITY` is tighten-only: a stricter value is honored, a looser one is ignored ([Environment variables](/docs/reference/configuration/env-vars)).
 
 On a per-user install, `defenseclaw status --json` returns a `connectors` array: identify the entry by `name` and read `connectors[].fail_mode.effective`. On a standalone enterprise install, `enterprise <os> status --json` and `verify --json` use a connector map: read `connectors.<id>.effective_hook_fail_mode`.
 
@@ -45,13 +45,13 @@ These are not an outage, so they block in every fail mode on a managed computer:
 - The account is not enrolled.
 - A foreign hook the guard finds, or a session record it cannot verify. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#gateway-outages).
 
-On a managed standalone host `open` applies only to an outage: the gateway service is not running, is restarting, or gives no answer in time. Every other failure blocks in `open` too: input over the hook's 1 MiB limit, a gateway 5xx, an unusable answer and any other transport error. On Linux and macOS a hook treats only a missing gateway socket as an outage; once the socket exists, every later failure blocks, `open` included. Per-user and Secure Client hooks are unchanged.
+On managed standalone hosts, the administrator's `open` applies only when the gateway is proven not running. On Linux and macOS the trusted directory must have no gateway hook socket: the socket is missing before dialing. Once the socket exists, a refused connection or its removal during dialing blocks even under `open`. On Windows the service manager must report the gateway not running and the port must have no listener. A running service with no listener, an unreadable listener table or a different listener blocks. A refusal with `enterprise_managed_gateway_restarting` or `enterprise_managed_gateway_no_answer` blocks under `open` on every OS. Input over the hook's 1 MiB limit, a gateway 5xx, an unusable answer and other transport errors block too. Per-user hooks keep their separate failure rules.
 
 Event-specific outage limits are in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
 
 ### Secure Client
 
-Under the Secure Client integration only, hooks fail open: an unset `guardrail.hook_fail_mode` resolves to `open` for every connector (Codex and Claude Code included), independent of the guardrail mode, and an explicit `closed` (global or per connector) is kept. With `open`, a Secure Client hook allows the call when the gateway is unreachable, its service is stopped or its answer cannot be used, and records the failure. Only an authenticated Secure Client deployment gets this: the profile the protected config resolves and, for the native Windows hook, a host whose Secure Client installation, deployment record and gateway service check out. Every other install keeps the closed default.
+Under the Secure Client integration only, an unset `guardrail.hook_fail_mode` resolves to `open` for every connector (Codex and Claude Code included), independent of the guardrail mode, and an explicit `closed` (global or per connector) is kept. Its authenticated hook can follow that mode when the gateway is unreachable or returns an unusable answer, and records the failure. A managed hook whose request reaches the no-answer deadline blocks even under `open`, including Secure Client. Only an authenticated Secure Client deployment gets the open default: the profile the protected config resolves and, for the native Windows hook, a host whose Secure Client installation, deployment record and gateway service check out. Every other install keeps the closed default.
 
 ### Connector limits
 
@@ -60,7 +60,7 @@ See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-ou
 ## Effective behavior
 
 The failure rows below describe per-user hooks. On a managed standalone host,
-only a classified gateway outage can open a hook: the
+only a proven not-running gateway can open a hook: the
 [refusals above](#refusals-that-ignore-the-fail-mode) still block under `open`.
 
 | Failure | Effective `open` | Effective `closed` |
@@ -73,7 +73,7 @@ only a classified gateway outage can open a hook: the
 | Internal evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic` and telemetry. | Block when the event supports a block response, otherwise allow with `would_block`; audit row and telemetry either way. Secure Client allows and audits. |
 | Ordered-chain state unavailable or inconsistent | Keep the current event's standalone verdict; skip only the chain join. | Same. Chain storage never creates or removes a single-event block. |
 
-Observe mode never enforces. A standalone managed host is the exception for a recovered error: it gives no verdict, so the call is blocked as when the gateway is down, in observe mode too and whatever `hook_fail_mode` says, for every event that supports a block response. A stop or session-end event is allowed there. That block is a fail-closed answer without a policy finding: alert on the `defenseclaw.panics.total` counter and on audit rows with result `panic`, and inspect gateway health.
+Observe mode does not enforce policy findings. A standalone managed host blocks a recovered error that gives no verdict, in observe mode too and whatever `hook_fail_mode` says, for every event that supports a block response. A stop or session-end event is allowed there. That block is a fail-closed answer without a policy finding: alert on the `defenseclaw.panics.total` counter and on audit rows with result `panic`, and inspect gateway health.
 
 An exact unexpired deny receipt can replay its stable denial without duplicate finding telemetry.
 
@@ -128,7 +128,7 @@ Use the [capability matrix](/docs/reference/apis/capability-matrix#gateway-outag
 
 `DEFENSECLAW_STRICT_AVAILABILITY=1` is an unconditional closed override for transport and missing-token failures, for managed or compatibility deployments that must never open during a gateway outage. It does not add a missing hook, turn native OTLP into enforcement, or make an unsupported connector block-capable. A strict outage can make the agent unavailable, so use status, gateway monitoring and a tested restart path before applying it broadly. On native Windows, set normal posture with `guardrail fail-mode` so setup, doctor and status can reconcile and report it.
 
-On a managed standalone computer, hooks reject an invalid runtime, an unverified gateway peer or missing or refused credentials in every fail mode. The administrator's `open` covers only classified outages; `DEFENSECLAW_STRICT_AVAILABILITY=1` closes those too.
+On a managed standalone computer, hooks reject an invalid runtime, an unverified gateway peer or missing or refused credentials in every fail mode. The classified outages that can follow administrator `open` are limited to a gateway proven not running; `DEFENSECLAW_STRICT_AVAILABILITY=1` closes that case too.
 
 ## The environment does not set the fail mode
 

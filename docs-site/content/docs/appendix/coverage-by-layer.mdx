@@ -54,11 +54,14 @@ A sandboxed agent's hooks run inside the sandbox and reach the gateway through a
 | **Windows** | Yes; native hook runner | No: sandboxes are refused | A and B. C needs an elevated token and the Advanced Audit Policy | Not available |
 
 Hooks fail closed by default everywhere except Secure Client. On a managed
-standalone computer, the administrator may choose `hook_fail_mode: open`, an
-outage-only exception for a gateway service that is stopped, restarting or gives
-no answer in time. On Linux and macOS a hook treats only a missing gateway
-socket as an outage; once the socket exists, every later failure blocks, `open`
-included. The [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)
+standalone computer, the administrator may choose `hook_fail_mode: open` as an
+outage-only exception.
+The administrator's `open` applies only when the gateway is proven not running:
+on Linux and macOS, no hook socket exists in its trusted directory; on Windows,
+the service manager reports it not running and no process listens on its port.
+A refused connection to an existing Unix socket, a running Windows service
+without a listener, a restarting refusal and a request with no answer block
+under `open`. The [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)
 lists the installed routes and foreign-hook guard limits.
 A missing or invalid administrator-owned runtime, an unverified gateway peer,
 missing or refused credentials, rate limits (HTTP 429, also when the resends
