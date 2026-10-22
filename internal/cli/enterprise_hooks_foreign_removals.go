@@ -25,6 +25,11 @@ import (
 // through the read and publish, never through the wait for exchanges.
 var enterpriseForeignHookRemovalsMu sync.Mutex
 
+// enterpriseForeignHookRemovalsLogMu serializes the commit's error lines,
+// which concurrent workers write outside enterpriseForeignHookRemovalsMu to
+// one stderr.
+var enterpriseForeignHookRemovalsLogMu sync.Mutex
+
 // foreignHookRemovalLedgerLockWait bounds the wait for another guardian
 // process's ledger publication; tests shorten it.
 var foreignHookRemovalLedgerLockWait = 5 * time.Second
@@ -58,6 +63,8 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, mark, account, home, 
 		return
 	}
 	if err := commitEnterpriseForeignHookRemovals(stderr, mark, identity, home, connectorName, paths); err != nil {
+		enterpriseForeignHookRemovalsLogMu.Lock()
+		defer enterpriseForeignHookRemovalsLogMu.Unlock()
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s: %v\n",
 			connectorName, foreignGuardLogField(account, 256), err)
 	}
@@ -134,7 +141,9 @@ func publishEnterpriseForeignHookRemovals(stderr io.Writer, mark, identity, home
 	if loadErr != nil {
 		// The gateway cannot use this ledger either; replacing it keeps
 		// the new removals.
+		enterpriseForeignHookRemovalsLogMu.Lock()
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: replacing the removal ledger: %v\n", loadErr)
+		enterpriseForeignHookRemovalsLogMu.Unlock()
 	}
 	data, err := enterprisepolicy.EncodeForeignHookRemovals(existing, added, now)
 	if err != nil {
