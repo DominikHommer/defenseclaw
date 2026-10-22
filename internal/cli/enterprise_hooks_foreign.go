@@ -45,6 +45,12 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		return enterprisepolicy.CleanupResult{}, err
 	}
 	policy := enterprisepolicy.BuildPublicPolicy(opts, []string{name}).Connectors[name]
+	account := enterpriseForeignHookAccountID(target.SID, target.UID)
+	if policy.Guard {
+		if _, err := prepareEnterpriseForeignHookFence(cfg.DataDir, account); err != nil {
+			return enterprisepolicy.CleanupResult{}, fmt.Errorf("prepare the foreign-hook exchange fence for %s: %w", name, err)
+		}
+	}
 	if !policy.Guard || policy.ForeignHooks != config.ForeignHooksRemove {
 		return enterprisepolicy.CleanupResult{}, nil
 	}
@@ -56,10 +62,6 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		HookBinary:    opts.HookBinary,
 		Policy:        policy,
 		OwnedCommands: perUserOwnedHookCommandsForBinary(name, target.UserHome, dataDir, opts.HookBinary),
-	}
-	account := enterpriseForeignHookAccountID(target.SID, target.UID)
-	if _, err := prepareEnterpriseForeignHookFence(cfg.DataDir, account); err != nil {
-		return enterprisepolicy.CleanupResult{}, fmt.Errorf("prepare the foreign-hook exchange fence for %s: %w", name, err)
 	}
 	// Plan first, editing nothing: a cleanup with nothing to remove
 	// publishes no denial. Then publish the denial for the agents that may

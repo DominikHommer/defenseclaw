@@ -85,6 +85,28 @@ func foreignTxPending(entries []enterprisepolicy.ForeignHookRemoval) []enterpris
 	})
 }
 
+func TestGuardedReportModePreparesForeignHookExchangeFence(t *testing.T) {
+	dataDir := useUserCleanupStateDir(t)
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+	cfg = standaloneTestConfig(dataDir)
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{
+		"cursor": {ForeignHooks: config.ForeignHooksReport},
+	}
+	target := enterprisehooks.TargetCredentials{UserHome: t.TempDir(), UID: os.Getuid(), GID: os.Getgid()}
+	result, err := enterpriseForeignHookCleanup(target, "cursor", "")
+	if err != nil || len(result.Removed) != 0 {
+		t.Fatalf("report-mode fence preparation: %+v %v", result, err)
+	}
+	identity := strconv.Itoa(target.UID)
+	admission, active := enterprisepolicy.ForeignHookFencePaths(managed.HookGuardianAuthorizationDir(dataDir), identity)
+	for _, path := range []string{admission, active} {
+		if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
+			t.Fatalf("guarded report-mode exchange has no trusted fence at %s: %v", path, err)
+		}
+	}
+}
+
 // foreignTxCall is the gateway's decision for an agent process of account
 // and connector that started at start, given the ledger.
 func foreignTxCall(t *testing.T, entries []enterprisepolicy.ForeignHookRemoval, account, connectorName, process string) enterprisepolicy.GuardDecision {
