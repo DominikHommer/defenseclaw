@@ -121,7 +121,11 @@ fail_unreachable() {
 }
 
 fail_response() {
-  defenseclaw_log_hook_delivery_failure inspect inspect-response "$1" response "$FAIL_MODE"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
+  # outage only (no answer or a 5xx, fail_unreachable). A refusal (4xx,
+  # 429) or an unusable answer blocks: the agent can provoke either.
+  FAIL_MODE="closed"
+{{end}}  defenseclaw_log_hook_delivery_failure inspect inspect-response "$1" response "$FAIL_MODE"
   echo "defenseclaw: inspect-response hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
