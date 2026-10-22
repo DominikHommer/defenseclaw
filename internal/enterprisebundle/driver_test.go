@@ -102,6 +102,8 @@ func TestDriverInterruptedIdenticalConfigKeepsConfirmedBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The run that staged B started from A's installed config.
+	d.EnforcedConfig = current.Config
 	staged, err := d.Prepare(t.Context(), f.signed(t, raw), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -488,6 +490,15 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 			}
 			f := newFixture(t, settings, nil)
 			d := driverFor(t, f)
+			if tc.uncommitted != "" {
+				// The identical bytes were installed before the run: it
+				// started from them (the receipt's base record).
+				base, err := enterprisebundle.RenderConfig(f.bundle, d.Store.VersionDir("unused"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				d.EnforcedConfig = base
+			}
 			p, err := d.Prepare(ctx, f.bundle, nil)
 			if err != nil {
 				t.Fatal(err)
