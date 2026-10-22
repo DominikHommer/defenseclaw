@@ -55,15 +55,20 @@ var managedHookPeerAccountIncarnation = func(account unixidentity.Account) (stri
 // guardian's), or an incarnation that cannot be told now, proves nothing:
 // the facts are then the gateway's own, as without a guardian, and the
 // cache looks them up again soon (awaitingSpoolUPN).
-func holderSpoolRecord(key string, account unixidentity.Account, accountSID string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool) {
-	record, ok := readIdentitySpoolFactsForAccount(key, account.Name, accountSID, now)
+// A record of another SID is an error (readIdentitySpoolFactsForAccount): the
+// account's own facts are then unproven.
+func holderSpoolRecord(key string, account unixidentity.Account, accountSID string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool, error) {
+	record, ok, err := readIdentitySpoolFactsForAccount(key, account.Name, accountSID, now)
+	if err != nil {
+		return enterprisehooks.IdentitySpoolRecord{}, false, err
+	}
 	if !ok || record.AccountIncarnation == "" {
-		return enterprisehooks.IdentitySpoolRecord{}, false
+		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
 	if incarnation, known := managedHookPeerAccountIncarnation(account); !known || incarnation != record.AccountIncarnation {
-		return enterprisehooks.IdentitySpoolRecord{}, false
+		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
-	return record, true
+	return record, true, nil
 }
 
 // peerLocalCandidate and peerNSSFacts are the two halves of
@@ -233,7 +238,10 @@ func resolveNSSPeerFacts(key string) (useridentity.DirectoryFacts, error) {
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
-	record, ok := holderSpoolRecord(key, account, facts.AccountSID, now)
+	record, ok, err := holderSpoolRecord(key, account, facts.AccountSID, now)
+	if err != nil {
+		return useridentity.DirectoryFacts{}, err
+	}
 	var spool *enterprisehooks.IdentitySpoolRecord
 	if ok {
 		spool = &record

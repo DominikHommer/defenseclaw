@@ -84,11 +84,13 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // partial, and one lookup can miss an account its directory still holds;
 // removing those records would lose their UPN facts, and a profile assigned
 // by UPN would fall to the default (GAP-0145, GAP-1228, GAP-1236). An account
-// marked Left goes at once. A failed pass removes nothing else young. The
-// checks end with ctx: a record whose check did not finish stays, with its
-// mark, for the next pass.
+// marked Left goes at once, and so does the young record of an unlisted
+// account withdraw takes (when it is set): every record in dir is checked,
+// so a spool of any size leaves none out. A failed pass removes nothing else
+// young. The checks end with ctx: a record whose check did not finish stays,
+// with its mark, for the next pass.
 func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoolAccount, setOwnership func(string) error,
-	logf func(string, ...any)) error {
+	logf func(string, ...any), withdraw IdentitySpoolWithdraw) error {
 	if dir == "" {
 		return nil
 	}
@@ -132,10 +134,26 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		cancel()
 		if err == nil {
 			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil {
+				binding := UPNBindingUnknown
+				bind := func(upn string) UPNBinding {
+					// Without a SID on the record it would be checked against,
+					// a not-found answer shows only that the directory cannot
+					// find the account by UPN (an LDAP directory without a UPN
+					// search): it binds nothing either way.
+					binding = identitySpoolBindUPN(ctx, account.UID, record.SSSDDomain, upn, record.AccountSID != "")
+					return binding
+				}
 				var kept bool
-				record, kept = KeepVerifiedInfoPipeUPN(record, previous)
+				record, kept = KeepVerifiedInfoPipeUPN(record, previous, bind)
 				switch {
 				case logf == nil:
+				case kept && binding == UPNBindingUnknown && record.AccountSID == "" && previous.AccountSID == "" && previous.Facts.UPN != "":
+					logf("[hook-guardian] identity facts for uid %d: SSSD InfoPipe answered without userPrincipalName, and the directory did not "+
+						"answer which account holds the UPN reported before; keeping it, for at most %s, and asking again at the next pass. "+
+						"Check that user_attributes in the [ifp] section of sssd.conf lists +userPrincipalName", account.UID, IdentitySpoolKeptUPNMaxAge)
+				case !kept && binding == UPNBindingOther:
+					logf("[hook-guardian] identity facts for uid %d: SSSD InfoPipe answered without userPrincipalName, and the directory gives "+
+						"the UPN reported before to another account or to none; no longer keeping it", account.UID)
 				case kept && previous.UPNSource != UPNSourceInfoPipeKept:
 					logf("[hook-guardian] identity facts for uid %d: SSSD InfoPipe answered without userPrincipalName; keeping the UPN "+
 						"it reported before for at most %s. Check that user_attributes in the [ifp] section of sssd.conf lists +userPrincipalName",
@@ -188,7 +206,8 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		if keep[entry.Name()] {
 			continue
 		}
-		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge && !left[entry.Name()] {
+		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge && !left[entry.Name()] &&
+			!identitySpoolWithdrawn(dir, entry, withdraw) {
 			gone, directory := identitySpoolRecordLeft(dir, entry, answeredDirectories)
 			if directory {
 				departure := identitySpoolDirectoryDeparture(ctx, dir, entry.Name())
@@ -243,8 +262,37 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	return passErr
 }
 
+// IdentitySpoolWithdraw reports whether the record of an account a pass does
+// not list goes at once: the account left the enrollment, and nothing still
+// calls with its identity.
+type IdentitySpoolWithdraw func(uid int, record IdentitySpoolRecord) bool
+
+// identitySpoolWithdrawn reports whether withdraw takes the unlisted record
+// of entry.
+func identitySpoolWithdrawn(dir string, entry os.DirEntry, withdraw IdentitySpoolWithdraw) bool {
+	if withdraw == nil {
+		return false
+	}
+	key, ok := strings.CutSuffix(entry.Name(), ".json")
+	if !ok || !entry.Type().IsRegular() {
+		return false
+	}
+	uid, err := strconv.Atoi(key)
+	if err != nil || uid <= 0 {
+		return false
+	}
+	record, err := ReadIdentitySpoolRecord(dir, key, nil)
+	return err == nil && withdraw(uid, record)
+}
+
 // identitySpoolCollect is collectIdentitySpoolRecord; tests replace it.
 var identitySpoolCollect = collectIdentitySpoolRecord
+
+// identitySpoolBindUPN asks the directory whether it gives upn to the
+// account with uid in its SSSD domain sssdDomain (KeepVerifiedInfoPipeUPN);
+// notFoundIsOther says a not-found answer means the UPN is no longer this
+// account's. Tests replace it.
+var identitySpoolBindUPN = bindIdentitySpoolUPN
 
 // identitySpoolDeparture is what the directory shows about the account of a
 // young directory record that a pass did not list.
