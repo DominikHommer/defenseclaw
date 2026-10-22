@@ -748,19 +748,14 @@ if [[ "${ROLLBACK}" == true ]]; then
             *) rollback_rc=1 ;;
         esac
     fi
-    # A 0.x release has no rollback command, and its gateway writes its own
-    # connector registrations only once it runs: never leave it down.
-    if [[ ${rollback_rc} -eq 1 ]] && version_lt "${back_to}" 1.0.0; then
+    # A rollback is done only once its gateway runs: one that does not start
+    # is undone for a 1.x release as for a 0.x one, which has no rollback
+    # command and writes its own connector registrations only once it runs
+    # (GAP-0486, the Windows twin). undo_rollback exits 1.
+    if [[ ${rollback_rc} -eq 1 ]]; then
         undo_rollback "The gateway of DefenseClaw ${back_to} did not start"
     fi
-    if [[ ${rollback_rc} -eq 1 ]]; then
-        # The swap is done, but the hooks are unguarded: say so, and exit 1.
-        warn "Now running DefenseClaw ${back_to}, but its gateway is not up, so agent hooks are not guarded until it is"
-        # A start that said why it failed already printed the command that fixes it.
-        [[ -n "${START_EXPLAINED:-}" ]] || info "Start it with: defenseclaw-gateway start (its log: ${DEFENSECLAW_HOME}/gateway.log)"
-    else
-        ok "Now running DefenseClaw ${back_to}."
-    fi
+    ok "Now running DefenseClaw ${back_to}."
     forward="defenseclaw rollback"
     if version_lt "${back_to}" 1.0.0; then
         forward="bash ${PREVIOUS}/installer/install.sh --rollback"

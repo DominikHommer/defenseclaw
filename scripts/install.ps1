@@ -122,7 +122,8 @@ $DeveloperFiles = @("litellm.exe", "skill-scanner.exe", "skill-scanner-api.exe",
     "skill-scanner-pre-commit.exe", "mcp-scanner.exe", "mcp-scanner-api.exe", ".defenseclaw-source-root")
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*",
-    "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done", ".gateway-recovery")
+    "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done",
+    ".lifecycle-txn.json", ".lifecycle-txn.json.new")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
 $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity",
     "opencode", "amp", "kiro", "none")
@@ -1448,6 +1449,307 @@ function Invoke-UvPipInstall([string[]]$UvArgs) {
     return $false
 }
 
+# Lifecycle transaction (fix/r104-windows)
+# Every step that changes an install (upgrade, repair, rollback, and the
+# restore of an interrupted one) is one transaction:
+#   1. Before acting, Write-LifecycleManifest records the working state it
+#      starts from (the managed binaries' SHA-256, the hook outage modes, the
+#      config bytes, the bin folder's ACL, whether the gateway ran and which
+#      connectors it guarded) in .lifecycle-txn.json, flushed to the disk.
+#   2. The step runs.
+#   3. Test-LifecycleProof proves the result from the live install: the
+#      gateway runs from this install with the expected bytes and answers its
+#      health check, every connector it guarded before is guarded again, the
+#      gateway reports the policy digest of the live config, and the bin
+#      folder is protected.
+#   4. Only then the step reports success (Complete-LifecycleManifest, then
+#      Remove-LifecycleManifest).
+#   5. On a failure or an interruption the previous install is restored and
+#      proven against the manifest (Assert-LifecycleRestored), its gateway
+#      started. The manifest stays until that proof passes; until then the
+#      install stays locked and its hooks closed, and the run exits non-zero
+#      with the next step.
+$LifecycleManifest = Join-Path $DataDir ".lifecycle-txn.json"
+
+function Write-DurableText([string]$Path, [string]$Text) {
+    # A crash leaves the old file or the whole new one: the bytes are flushed
+    # to the disk (FlushFileBuffers) before one rename publishes them.
+    $tmp = "$Path.new"
+    $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($Text)
+    $stream = New-Object IO.FileStream($tmp, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+    if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($tmp, $Path, [NullString]::Value) }
+    else { [IO.File]::Move($tmp, $Path) }
+}
+
+function ConvertTo-Map($Value) {
+    # A JSON object read back (PSCustomObject) or a hashtable, as a hashtable.
+    $map = [ordered]@{}
+    if ($null -eq $Value) { return $map }
+    if ($Value -is [Collections.IDictionary]) { foreach ($key in $Value.Keys) { $map[[string]$key] = [string]$Value[$key] }; return $map }
+    foreach ($property in $Value.PSObject.Properties) { $map[$property.Name] = [string]$property.Value }
+    return $map
+}
+
+function Get-BinariesState([string]$Dir) {
+    # SHA-256 of each managed binary in $Dir.
+    $bins = [ordered]@{}
+    foreach ($name in $ManagedBinaries) {
+        $path = Join-Path $Dir $name
+        if (Test-Path -LiteralPath $path -PathType Leaf) { $bins[$name] = Get-Sha256 $path }
+    }
+    return $bins
+}
+
+function Get-OptionalSha256([string]$Path) {
+    if ($Path -and (Test-Path -LiteralPath $Path -PathType Leaf)) { return Get-Sha256 $Path }
+    return ""
+}
+
+function Get-GatewayHealthReport([string]$Gateway) {
+    # status --json of $Gateway, or $null when it does not answer with JSON
+    # (a release without --json, or no gateway).
+    if (-not (Test-Path -LiteralPath $Gateway -PathType Leaf)) { return $null }
+    $probe = Get-NativeProbe $Gateway @("status", "--json")
+    if (-not $probe.Output) { return $null }
+    try { return ($probe.Output | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
+}
+
+function Get-GuardedConnectors($Report) {
+    # The connectors the gateway's health reports running.
+    $names = @()
+    foreach ($entry in @(Get-Field (Get-Field $Report "health") "connectors")) {
+        if ($entry -and [string](Get-Field $entry "state") -eq "running") { $names += [string](Get-Field $entry "name") }
+    }
+    return $names
+}
+
+function Get-GatewayDigestProblem([string]$Gateway) {
+    # "" when the running gateway reports the effective policy digest of the
+    # live config (policy digest --json --check-gateway: the digest is read
+    # back from the live config and the gateway, never from matching bytes),
+    # "unsupported" when this gateway cannot say, else what is wrong.
+    $help = Get-NativeProbe $Gateway @("policy", "digest", "--help")
+    if ($help.Exit -ne 0 -or $help.Output -notmatch "check-gateway") { return "unsupported" }
+    $probe = Get-NativeProbe $Gateway @("policy", "digest", "--json", "--check-gateway")
+    $report = $null
+    try { $report = $probe.Output | ConvertFrom-Json -ErrorAction Stop } catch { }
+    if (-not $report) { return "the policy digest of the live config could not be read (exit $($probe.Exit))" }
+    $reloadError = [string](Get-Field $report "gateway_last_reload_error")
+    if ($reloadError) { return "the gateway rejected the live config and keeps its previous policy: $reloadError" }
+    $live = [string](Get-Field $report "effective_digest")
+    $reported = [string](Get-Field $report "gateway_reported_digest")
+    if (-not $reported) { return "unsupported" }
+    if ($probe.Exit -ne 0 -or -not $live -or $live -ne $reported) {
+        return "the gateway does not enforce the live config (its policy digest $reported, the live config's $live)"
+    }
+    return ""
+}
+
+function Get-BinDirOpenRules {
+    # Allow entries that give an account other than this one, LocalSystem,
+    # CREATOR OWNER or Administrators (matched by SID) a write right the
+    # CLI's custody check counts (GENERIC_ALL/WRITE included).
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $trusted = @($user.Value, "S-1-5-18", "S-1-3-4", "S-1-5-32-544")
+    $write = 0x500D0156
+    $acl = Get-Acl -LiteralPath $BinDir
+    return @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
+        $_.AccessControlType -eq "Allow" -and ([int]$_.FileSystemRights -band $write) -and $trusted -notcontains $_.IdentityReference.Value
+    })
+}
+
+function Test-BinDirProtected {
+    if (-not (Test-Path -LiteralPath $BinDir -PathType Container)) { return $false }
+    try { return -not @(Get-BinDirOpenRules).Count } catch { return $false }
+}
+
+function Get-LifecycleState {
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    $running = [bool](Get-GatewayProcess)
+    $connectors = @()
+    if ($running) {
+        $report = Get-GatewayHealthReport $gateway
+        if ($report) { $connectors = @(Get-GuardedConnectors $report) }
+    }
+    $external = Get-ExternalConfig
+    return [ordered]@{
+        Bins = Get-BinariesState $BinDir
+        GatewayWasRunning = $running
+        Connectors = $connectors
+        Config = Get-OptionalSha256 (Join-Path $DataDir "config.yaml")
+        ExternalConfig = $external
+        ExternalConfigSha256 = Get-OptionalSha256 $external
+        HookFailModes = Get-OptionalSha256 (Join-Path $DataDir "hooks\.hookcfg")
+        BinDirProtected = Test-BinDirProtected
+    }
+}
+
+function Write-LifecycleManifest([string]$Operation, [string]$From, [string]$To, [string]$Slot, [hashtable]$Extra = @{}) {
+    # Step 1: the working state this step starts from, durable before
+    # anything changes. A manifest an earlier run left is still being
+    # restored: Resume-InterruptedRun finished it before this run got here.
+    $state = Get-LifecycleState
+    $state["Schema"] = 1
+    $state["Operation"] = $Operation
+    $state["From"] = $From
+    $state["To"] = $To
+    $state["Slot"] = $Slot
+    $state["SetupRoot"] = $(if ($Setup) { [string]$Setup.Root } else { "" })
+    $state["Committed"] = $false
+    $state["Created"] = (Get-Date).ToUniversalTime().ToString("o")
+    foreach ($key in $Extra.Keys) { $state[$key] = $Extra[$key] }
+    Write-DurableText $LifecycleManifest ($state | ConvertTo-Json -Depth 4)
+    return $state
+}
+
+function Read-LifecycleManifest {
+    if (-not (Test-Path -LiteralPath $LifecycleManifest -PathType Leaf)) { return $null }
+    try { $manifest = [IO.File]::ReadAllText($LifecycleManifest) | ConvertFrom-Json -ErrorAction Stop } catch {
+        throw "The lifecycle record $LifecycleManifest cannot be read, so the install it protects cannot be proven; restore it from a backup or reinstall the release named in it, then run the installer again"
+    }
+    if ((Get-Field $manifest "Schema") -ne 1) { throw "The lifecycle record $LifecycleManifest is from a newer installer; run that installer again to finish its step" }
+    return $manifest
+}
+
+function New-RecoveryManifest([string]$Slot, [bool]$WasRunning, [string]$BinsFrom = "", [switch]$NoConfig) {
+    # A run of an installer from before the lifecycle record (1.0.3 and
+    # earlier) left only its snapshot: record what the snapshot holds, so a
+    # restore that fails is retried, and proven, by every later run.
+    $complete = Test-Path -LiteralPath (Join-Path $Slot "COMPLETE")
+    $savedBin = Join-Path $Slot "bin"
+    $binSaved = (Test-Path -LiteralPath $savedBin -PathType Container) -and ($complete -or
+        (Test-Path -LiteralPath (Join-Path $Slot "BIN_SAVED")) -or (Test-Path -LiteralPath (Join-Path $Slot "HOOK_FIRST")))
+    $config = if ($complete) { Join-Path $Slot "data\config.yaml" } else { Join-Path $DataDir "config.yaml" }
+    $state = [ordered]@{
+        Schema = 1; Operation = "recover"; From = (Read-Text (Join-Path $Slot "VERSION")); To = ""; Slot = $Slot; SetupRoot = ""
+        Bins = $(if ($BinsFrom) { Get-BinariesState $BinsFrom } elseif ($binSaved) { Get-BinariesState $savedBin } else { Get-BinariesState $BinDir })
+        GatewayWasRunning = $WasRunning; Connectors = @(); Config = $(if ($NoConfig) { "" } else { Get-OptionalSha256 $config })
+        ExternalConfig = ""; ExternalConfigSha256 = ""; HookFailModes = ""; BinDirProtected = $false
+        Committed = $false; Created = (Get-Date).ToUniversalTime().ToString("o")
+    }
+    Write-DurableText $LifecycleManifest ($state | ConvertTo-Json -Depth 4)
+    return Read-LifecycleManifest
+}
+
+function Complete-LifecycleManifest {
+    # The new state is proven: an interruption from here on keeps it.
+    $manifest = Read-LifecycleManifest
+    if (-not $manifest) { return }
+    $manifest.Committed = $true
+    Write-DurableText $LifecycleManifest ($manifest | ConvertTo-Json -Depth 4)
+}
+
+function Remove-LifecycleManifest {
+    if (Test-Path -LiteralPath $LifecycleManifest) { Remove-Item -LiteralPath $LifecycleManifest -Force -ErrorAction Stop }
+}
+
+function Test-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors = @(), [switch]$RequireDigest, [bool]$RequireProtected = $true,
+        [string]$SetupRoot = "") {
+    # Step 3: what is wrong with the live install, empty when it is proven.
+    # $Bins: the SHA-256 each managed binary must have. $GatewayRunning: the
+    # gateway must run from this install. $Connectors: those it must guard.
+    # -RequireDigest: a gateway that cannot report the live config's policy
+    # digest fails too (this release's gateway can; an older restored one
+    # may not).
+    $problems = @()
+    $expected = ConvertTo-Map $Bins
+    foreach ($name in $ManagedBinaries) {
+        $live = Join-Path $BinDir $name
+        $present = Test-Path -LiteralPath $live -PathType Leaf
+        if ($expected.Contains($name)) {
+            if (-not $present) { $problems += "$live is missing" }
+            elseif ((Get-Sha256 $live) -ne $expected[$name]) { $problems += "$live is not the expected $name" }
+        } elseif ($present) {
+            $problems += "$live does not belong to this install"
+        }
+    }
+    # A restore never needs a tighter folder than the one it started from.
+    if ($RequireProtected -and -not (Test-BinDirProtected)) { $problems += "$BinDir can be written by another account" }
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not $GatewayRunning) { return $problems }
+    if ($SetupRoot) {
+        # A restored DefenseClaw Setup install runs its own gateway (GAP-1839).
+        $setupGateway = Join-Path $SetupRoot "bin\defenseclaw-gateway.exe"
+        if (-not (Test-Path -LiteralPath $setupGateway -PathType Leaf) -or (Invoke-Native $setupGateway @("status") -Quiet) -ne 0) {
+            $problems += "the DefenseClaw Setup gateway in $SetupRoot does not answer its health check"
+        }
+        return $problems
+    }
+    $process = Get-GatewayProcess
+    if (-not $process) { return ($problems + "the gateway is not running") }
+    $path = [string](Get-Field $process "Path")
+    if (-not $path -or -not [string]::Equals([IO.Path]::GetFullPath($path), [IO.Path]::GetFullPath($gateway), [StringComparison]::OrdinalIgnoreCase)) {
+        return ($problems + "the running gateway is $path, not $gateway")
+    }
+    $report = Get-GatewayHealthReport $gateway
+    if ($report) {
+        if (-not (Get-Field $report "running")) { $problems += "the gateway does not answer its health check" }
+        $guarded = @(Get-GuardedConnectors $report)
+        foreach ($name in @($Connectors | Where-Object { $_ })) {
+            if ($guarded -notcontains $name) { $problems += "connector $name is not guarded again: the gateway does not report its hooks running" }
+        }
+    } elseif ((Invoke-Native $gateway @("status") -Quiet) -ne 0) {
+        $problems += "the gateway does not answer its health check"
+    }
+    $digest = Get-GatewayDigestProblem $gateway
+    if ($digest -eq "unsupported") {
+        if ($RequireDigest) { $problems += "the gateway does not report the policy digest of the live config" }
+    } elseif ($digest) {
+        $problems += $digest
+    }
+    return $problems
+}
+
+function Set-RecoveryPending([string]$Flag = "RestorePending") {
+    $runState = Get-Variable -Name Run -ValueOnly -ErrorAction SilentlyContinue
+    if ($runState) { $runState.$Flag = $true }
+}
+
+function Get-LifecycleNextStep {
+    # The command that finishes the step: this installer again, with the
+    # same release and local assets.
+    $retry = "defenseclaw upgrade --yes"
+    if ($PSCommandPath) {
+        $retry = "& '$($PSCommandPath.Replace("'", "''"))'"
+        $version = [string](Get-Variable -Name Ver -ValueOnly -ErrorAction SilentlyContinue)
+        if ($version) { $retry += " -Version '$version'" }
+        $retry += " -Yes"
+        $local = [string](Get-Variable -Name Local -ValueOnly -ErrorAction SilentlyContinue)
+        if ($local) { $retry += " -Local '$($local.Replace("'", "''"))'" }
+    }
+    return $retry
+}
+
+function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped) {
+    # Step 5: the restored install is the one the manifest recorded, and its
+    # gateway runs again when it ran (unless the restore keeps it stopped on
+    # purpose, GAP-0407). The manifest goes only once that is proven; on a
+    # failure it stays, the install stays locked and its hooks closed
+    # (Close-InstallLock, Close-UnfinishedInstallHooks), and the error names
+    # the next step.
+    if (-not $Manifest) { return }
+    $running = [bool](Get-Field $Manifest "GatewayWasRunning") -and -not $KeepStopped
+    $problems = @(Test-LifecycleProof (Get-Field $Manifest "Bins") $running @(Get-Field $Manifest "Connectors") `
+        -RequireProtected ([bool](Get-Field $Manifest "BinDirProtected")) -SetupRoot ([string](Get-Field $Manifest "SetupRoot")))
+    $config = [string](Get-Field $Manifest "Config")
+    $liveConfig = Get-OptionalSha256 (Join-Path $DataDir "config.yaml")
+    if ($config -and $liveConfig -ne $config) { $problems += "$(Join-Path $DataDir 'config.yaml') is not the config the previous install ran with" }
+    $external = [string](Get-Field $Manifest "ExternalConfig")
+    if ($external -and (Get-OptionalSha256 $external) -ne [string](Get-Field $Manifest "ExternalConfigSha256")) {
+        $problems += "$external is not the config the previous install ran with"
+    }
+    if ([string](Get-Field $Manifest "HookFailModes") -and -not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) {
+        $problems += "the hooks' outage modes ($(Join-Path $DataDir 'hooks\.hookcfg')) are missing"
+    }
+    if ($problems.Count) {
+        Set-RecoveryPending
+        throw ("The previous install is not proven back: $($problems -join '; '). The record of it stays in $LifecycleManifest and the install stays locked; " +
+            "fix the cause, then run: $(Get-LifecycleNextStep)")
+    }
+    Remove-LifecycleManifest
+}
+
 function Save-BinarySnapshot {
     # Only immutable binaries are copied while the gateway runs. The new
     # hook understands .install.lock, including when upgrading from 1.0.2.
@@ -1726,14 +2028,7 @@ function Protect-BinDir {
     # the gateway installed there. Keep only this account and LocalSystem on
     # such a folder; what it holds inherits that.
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $trusted = @($user.Value, "S-1-5-18", "S-1-3-4", "S-1-5-32-544")
-    # The write rights the CLI's custody check counts (GENERIC_ALL/WRITE included).
-    $write = 0x500D0156
-    $acl = Get-Acl -LiteralPath $BinDir
-    $open = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
-        $_.AccessControlType -eq "Allow" -and ([int]$_.FileSystemRights -band $write) -and $trusted -notcontains $_.IdentityReference.Value
-    })
-    if (-not $open.Count) { return }
+    if (-not @(Get-BinDirOpenRules).Count) { return }
     $secure = New-Object Security.AccessControl.DirectorySecurity
     $secure.SetAccessRuleProtection($true, $false)
     foreach ($sid in @($user, (New-Object Security.Principal.SecurityIdentifier "S-1-5-18"))) {
@@ -2090,17 +2385,12 @@ function Restore-Slot([string]$Slot) {
         }
         return $failed
     } catch {
-        $retry = "defenseclaw upgrade --yes"
-        if ($PSCommandPath) {
-            $retry = "& '$($PSCommandPath.Replace("'", "''"))' -Version '$Ver' -Yes"
-            if ($Local) { $retry += " -Local '$($Local.Replace("'", "''"))'" }
-        }
-        # The slot keeps COMPLETE: the install stays locked (Close-InstallLock)
-        # and the hooks closed (Close-UnfinishedInstallHooks) until a run
-        # proves the restore.
-        $Run.RestorePending = $true
-        $kept = if ($failed) { "Keep $Slot and $failed" } else { "Keep $Slot" }
-        throw "$($_.Exception.Message); restoration is incomplete. $kept. Close the program holding the reported path, then run: $retry"
+        $retry = Get-LifecycleNextStep
+        # The slot keeps COMPLETE: the caller keeps the install locked
+        # (RestorePending, Close-InstallLock) and the hooks closed
+        # (Close-UnfinishedInstallHooks) until a run proves the restore.
+        throw ("$($_.Exception.Message); restoration is incomplete: the previous install's copy was kept in $Slot$(if ($failed) { " and the failed install in $failed" }). " +
+            "Close the program holding the reported path. Run the installer again to finish restoring it: $retry")
     }
 }
 
@@ -2158,6 +2448,10 @@ function Restore-Snapshot {
         Invoke-Quietly { Remove-FailedInstall $failed }
     }
     Restart-Old -KeepStopped:$keepStopped
+    try { Assert-LifecycleRestored (Get-Variable -Name Manifest -ValueOnly -ErrorAction SilentlyContinue) -KeepStopped:$keepStopped } catch {
+        Write-Err $_.Exception.Message
+        Die "DefenseClaw $Ver was not installed, and the previous install is not proven back (see above). Log: $($Run.Log)"
+    }
     if (-not $PrevVersion) { Write-KeptUvCache; return }
     if ($Setup) {
         if (Test-Path -LiteralPath $failed) {
@@ -2236,8 +2530,30 @@ function Move-LiveTo([string]$Slot) {
 function Resume-InterruptedRun {
     # A run killed mid-swap (closed laptop, power loss) leaves its snapshot
     # behind. Put the install it saved back before doing anything else, so
-    # re-running the installer is always the recovery.
-    $pendingGateway = Join-Path $DataDir ".gateway-recovery"
+    # re-running the installer is always the recovery. The lifecycle record
+    # (Write-LifecycleManifest) says what that install was; it goes only once
+    # the restore is proven against it (Assert-LifecycleRestored).
+    $manifest = Read-LifecycleManifest
+    if ($manifest -and (Get-Field $manifest "Committed")) {
+        # The new install was proven before the run stopped: finish moving
+        # the previous one aside (Complete-Swap) instead of undoing it.
+        foreach ($slot in @((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"))) {
+            if (-not (Test-Path -LiteralPath $slot)) { continue }
+            Write-Warn "An earlier install finished but was interrupted while it cleaned up; finishing that"
+            foreach ($marker in @("COMPLETE", "HOOK_FIRST", "GATEWAY_RESTART_UNPROVEN")) {
+                Remove-Item -LiteralPath (Join-Path $slot $marker) -Force -ErrorAction SilentlyContinue
+            }
+            Invoke-Quietly { Remove-Tree (Join-Path $slot "closer") }
+            if ($slot -eq (Join-Path $DataDir "previous.new") -and (Read-Text (Join-Path $slot "VERSION"))) {
+                Remove-Tree $Previous
+                Move-Path $slot $Previous
+            } else {
+                Remove-Tree $slot
+            }
+        }
+        Remove-LifecycleManifest
+        $manifest = $null
+    }
     foreach ($slot in @((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"))) {
         if (-not (Test-Path -LiteralPath $slot)) { continue }
         $runningState = Read-Text (Join-Path $slot "GATEWAY_WAS_RUNNING")
@@ -2246,7 +2562,8 @@ function Resume-InterruptedRun {
         # purpose: require recovery health instead of skipping the gate.
         $wasRunning = $runningState -eq "true" -or ($runningState -ne "false" -and
             ((Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe") -PathType Leaf) -or (Find-SetupInstall)))
-        if ($wasRunning) { Set-Content -LiteralPath $pendingGateway -Value "true" -Encoding Ascii }
+        if ($manifest) { $wasRunning = [bool](Get-Field $manifest "GatewayWasRunning") }
+        else { $manifest = New-RecoveryManifest $slot $wasRunning }
         $state = Join-Path $Staging "hook-runtime-state.json"
         if ((Test-Path -LiteralPath $state) -and -not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
         if (Test-Path -LiteralPath (Join-Path $slot "COMPLETE")) {
@@ -2279,6 +2596,9 @@ function Resume-InterruptedRun {
                     Die "The restored gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again"
                 }
             }
+            if ($setupBack -and $manifest) { $manifest.SetupRoot = [string]$setupInstall.Root }
+            Assert-LifecycleRestored $manifest -KeepStopped:$keepStopped
+            $manifest = $null
             if ($firstInstall -and -not $setupBack) {
                 Write-Info "Nothing was left installed"
             } elseif (-not $setupBack) {
@@ -2286,27 +2606,49 @@ function Resume-InterruptedRun {
             }
         } else {
             # The snapshot never finished, so live data was only copied, not changed.
-            Undo-Snapshot $slot
+            try { Undo-Snapshot $slot } catch { Set-RecoveryPending "UndoPending"; throw }
             if ($wasRunning -and -not (Get-GatewayProcess) -and (Start-Gateway) -notin @(0, 3)) {
                 Die "The recovered gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again"
             }
+            Assert-LifecycleRestored $manifest
+            $manifest = $null
         }
     }
     $hold = Join-Path $DataDir ".rollback-hold"
     # A hold is deleted by renaming it first, so a half-deleted one is never read.
     Remove-Tree "$hold.done"
     $restart = (Read-Text (Join-Path $hold "GATEWAY_WAS_RUNNING")) -eq "true"
+    if (-not $manifest -and (Test-Path -LiteralPath $hold)) {
+        # A rollback hold an installer from before the lifecycle record left:
+        # record the install it goes back to, so a failed restart is retried.
+        $finished = Test-Path -LiteralPath (Join-Path $hold "ROLLED_BACK")
+        $from = if (-not $finished -and (Test-Path -LiteralPath (Join-Path $hold "STASHED"))) { Join-Path $hold "bin" } else { $BinDir }
+        $wanted = $restart -or ($finished -and (Read-Text (Join-Path $hold "START_AFTER")) -eq "true")
+        $manifest = New-RecoveryManifest $hold $wanted -BinsFrom $from -NoConfig
+    }
     if (Test-Path -LiteralPath (Join-Path $hold "ROLLED_BACK")) {
         # The rollback itself had finished; only renaming its hold was left.
         # START_AFTER is its own decision; previous\ may be half deleted.
         Write-Warn "An earlier rollback was interrupted; finishing it"
         $restart = $restart -or (Read-Text (Join-Path $hold "START_AFTER")) -eq "true"
-        if ($restart) { Set-Content -LiteralPath $pendingGateway -Value "true" -Encoding Ascii }
         Remove-Tree $Previous
         Move-Path $hold $Previous
+        # The rollback's record proves its target, not the install it left.
+        if ($manifest -and (Get-Field $manifest "Operation") -eq "rollback") {
+            if ($restart -and -not (Get-GatewayProcess) -and (Start-Gateway) -notin @(0, 3)) {
+                Set-RecoveryPending
+                Die "The rolled-back gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again"
+            }
+            $problems = @(Test-LifecycleProof (Get-Field $manifest "TargetBins") $restart)
+            if ($problems.Count) {
+                Set-RecoveryPending
+                Die "The finished rollback is not proven: $($problems -join '; '). Fix the cause, then run: $(Get-LifecycleNextStep)"
+            }
+            Remove-LifecycleManifest
+            $manifest = $null
+        }
     } elseif (Test-Path -LiteralPath $hold) {
         Write-Warn "An earlier rollback was interrupted; restoring the install it started from"
-        if ($restart) { Set-Content -LiteralPath $pendingGateway -Value "true" -Encoding Ascii }
         [void](Stop-Gateway)
         if (Test-Path -LiteralPath (Join-Path $hold "STASHED")) {
             # The live install was set aside in full, so anything live now came
@@ -2325,11 +2667,13 @@ function Resume-InterruptedRun {
     } else {
         $restart = $false
     }
-    $restart = $restart -or (Test-Path -LiteralPath $pendingGateway)
+    # A record with no snapshot left: the run stopped after its record and
+    # before its first change, or after its restore and before the proof.
+    if ($manifest) { $restart = $restart -or [bool](Get-Field $manifest "GatewayWasRunning") }
     if ($restart -and -not (Get-GatewayProcess) -and (Start-Gateway) -notin @(0, 3)) {
         Die "The recovered gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again"
     }
-    if ($restart) { Remove-Item -LiteralPath $pendingGateway -Force -ErrorAction SilentlyContinue }
+    Assert-LifecycleRestored $manifest
 }
 
 function Remove-Hold([string]$Hold) {
@@ -2588,6 +2932,7 @@ function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [stri
     # The same swap the other way: previous\ holds the install just left.
     $undone = @(Switch-WithPrevious $BackTo $false $true)[-1]
     if ($undone -ne 0) {
+        $Run.RestorePending = $true
         Write-Err "DefenseClaw $BackTo is installed, but its gateway is not running, so agent hooks are not guarded"
         if ($undone -eq 1) {
             Write-Info "To return to $forward, run: powershell -ExecutionPolicy Bypass -File `"$Previous\installer\install.ps1`" -Rollback"
@@ -2622,10 +2967,14 @@ function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [stri
             Write-Warn "The saved $BackTo audit store is still $kept; before 'defenseclaw rollback' again, move it and its -wal and -shm files to $audit"
         }
     }
-    if ((Start-Gateway) -in @(0, 3)) {
+    [void](Start-Gateway)
+    # The install the rollback left is back only once it is proven against
+    # the rollback's record (its binaries, config and running gateway).
+    try {
+        Assert-LifecycleRestored (Get-Variable -Name Manifest -ValueOnly -ErrorAction SilentlyContinue)
         Write-Ok "DefenseClaw $forward is back, with its gateway"
-    } else {
-        Write-Warn "DefenseClaw $forward is back, but its gateway did not start; run 'defenseclaw-gateway start' and check its log"
+    } catch {
+        Write-Err $_.Exception.Message
     }
     # Paths in the older release's errors above now hold this install's files.
     Write-Info "The files of DefenseClaw $BackTo are in $Previous\data again; fix them there (paths above under $DataDir named them)"
@@ -2668,7 +3017,16 @@ function Invoke-Rollback {
     $wasRunning = [bool](Get-GatewayProcess)
     $savedWasRunning = Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")
     $startAfter = $wasRunning -or $savedWasRunning -eq "true"
-    if (-not (Stop-Gateway)) { Die "The gateway did not stop; nothing was changed" }
+    # The rollback's lifecycle transaction: the install it leaves (proven
+    # back by Undo-Rollback on any failure) and the one it goes to, which
+    # stays in previous\ until this rollback is proven.
+    try {
+        $Manifest = Write-LifecycleManifest "rollback" $current $backTo "" @{ TargetBins = (Get-BinariesState (Join-Path $Previous "bin")) }
+    } catch { Die "Could not record the current install before the rollback ($($_.Exception.Message)); nothing was changed" }
+    if (-not (Stop-Gateway)) {
+        Remove-LifecycleManifest
+        Die "The gateway did not stop; nothing was changed"
+    }
     $conversionAttempted = $false
     try {
         Stop-Watchdog
@@ -2692,6 +3050,7 @@ function Invoke-Rollback {
         if ($wasRunning) {
             try { [void](Start-Gateway) } catch { Write-Warn "The current gateway could not restart: $($_.Exception.Message)" }
         }
+        try { Assert-LifecycleRestored $Manifest } catch { Write-Err $_.Exception.Message }
         throw $abort
     }
     $swapped = @(Switch-WithPrevious $current $wasRunning $startAfter)[-1]
@@ -2699,6 +3058,11 @@ function Invoke-Rollback {
         # 1: the swap undid itself, so this install is back and may run again.
         if ($swapped -eq 1 -and $conversionAttempted) { Restore-HooksAfterAbortedRollback }
         if ($swapped -eq 1 -and $wasRunning) { [void](Start-Gateway) }
+        if ($swapped -eq 1) {
+            try { Assert-LifecycleRestored $Manifest } catch { Die "Rollback failed part-way. $($_.Exception.Message)" }
+        } else {
+            $Run.RestorePending = $true
+        }
         Die "Rollback failed part-way; see $($Run.Log)"
     }
     # Homes upgraded before the uv folder was protected (GAP-1988).
@@ -2713,11 +3077,17 @@ function Invoke-Rollback {
             return Undo-Rollback $why $current $backTo $savedWasRunning "" $conversionAttempted
         }
     }
-    if ($startAfter -and (Start-Gateway) -notin @(0, 3)) {
-        # A 0.x release has no rollback command: never leave it down.
-        if ($toLegacy) { return Undo-Rollback "The gateway of DefenseClaw $backTo did not start" $current $backTo $savedWasRunning $quarantined $conversionAttempted }
-        Write-Warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
+    # Prove the rollback: the binaries of $backTo, its gateway running when
+    # one ran before, and the bin folder protected. A gateway that does not
+    # start or a rollback that is not proven is undone, for a 1.x release as
+    # for a 0.x one (GAP-0486): never "Now running" with the gateway down.
+    $problems = @()
+    if ($startAfter -and (Start-Gateway) -notin @(0, 3)) { $problems += "the gateway of DefenseClaw $backTo did not start" }
+    else { $problems = @(Test-LifecycleProof (Get-Field $Manifest "TargetBins") $startAfter) }
+    if ($problems.Count) {
+        return Undo-Rollback "DefenseClaw $backTo is not proven running ($($problems -join '; '))" $current $backTo $savedWasRunning $quarantined $conversionAttempted
     }
+    Remove-LifecycleManifest
     $forward = if ($current) { $current } else { "1.x" }
     # Each install shows only its own audit window, so say how to read the
     # other one (GAP-0126). The newer build's gateway reads either log.
@@ -3024,6 +3394,8 @@ function Invoke-Install {
         default { Die "Your configuration cannot be migrated to $Ver; nothing was changed (see above)" }
     }
     Write-Ok "DefenseClaw $Ver is staged and checked"
+    # What the proof of this install compares the live binaries with.
+    $stagedBinaries = Get-BinariesState (Join-Path $Staging "bin")
 
     # Swap.
     if ($PrevVersion -and $PrevVersion -eq $Ver) {
@@ -3061,14 +3433,20 @@ function Invoke-Install {
             if ($Setup) { Restore-SetupInstall }
             Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
         }
-        # Retain the health requirement if this run dies before the snapshot
-        # can even start. Only a confirmed new gateway retires it.
-        Set-Content -LiteralPath (Join-Path $DataDir ".gateway-recovery") -Value "true" -Encoding Ascii
     } elseif (-not (Update-HookFailModes $stagedGateway)) {
         if ($Setup) { Restore-SetupInstall }
         Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
     }
     $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
+    # The lifecycle transaction starts here: the working state is on the
+    # disk before the first program changes (the hook swap). The outage
+    # modes the hold or the refresh above set only ever tighten.
+    $operation = if ($PrevVersion -and $PrevVersion -eq $Ver) { "repair" } elseif ($PrevVersion) { "upgrade" } else { "install" }
+    try { $Manifest = Write-LifecycleManifest $operation $PrevVersion $Ver $Snap } catch {
+        Stop-HookFailModeHold
+        if ($Setup) { Restore-SetupInstall }
+        Die "Could not record the current install before changing it ($($_.Exception.Message)); nothing was changed"
+    }
     try { Save-BinarySnapshot } catch {
         Stop-HookFailModeHold
         Undo-EarlySnapshot $Snap
@@ -3114,9 +3492,13 @@ function Invoke-Install {
                     $Run.RestorePending = $true
                 }
             }
+            if (-not (Test-RecoveryPending)) { Assert-LifecycleRestored $Manifest }
             Die "${reason}; $(Get-UnchangedNote)"
         }
         Restart-Old
+        if (-not (Test-RecoveryPending)) {
+            try { Assert-LifecycleRestored $Manifest } catch { Die "$reason. $($_.Exception.Message)" }
+        }
         Die "$reason. $(Get-RestoredNote)"
     }
 
@@ -3127,7 +3509,9 @@ function Invoke-Install {
         Undo-EarlySnapshot $Snap
         Clear-StagedRelease
         Restart-Old
-        if ($Run.OldGatewayDown -and -not (Test-RecoveryPending)) { Die "Could not save the current install; it was not changed, but its gateway is not running (see above)" }
+        if (-not (Test-RecoveryPending)) {
+            try { Assert-LifecycleRestored $Manifest } catch { Die "Could not save the current install; it was not changed, but it is not proven back: $($_.Exception.Message)" }
+        }
         Die "Could not save the current install; $(Get-UnchangedNote)"
     }
     $previousLabel = if ($PrevVersion) { $PrevVersion } else { "the previous state" }
@@ -3168,11 +3552,28 @@ function Invoke-Install {
             Restore-Snapshot
             Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"
         }
-        Remove-Item -LiteralPath (Join-Path $Snap "GATEWAY_RESTART_UNPROVEN") -Force -ErrorAction Stop
     }
+    # Prove the new install before anything of the previous one goes: the
+    # gateway runs from this install with the checked bytes and answers its
+    # health check, every connector it guarded before is guarded again, it
+    # enforces the policy digest of the live config, and the bin folder is
+    # protected. A start that reported a connector needing attention (exit
+    # 3) already said which one. Anything else restores the previous install.
+    $provenGateway = $startNew -and -not $sealOnly
+    $guardedBefore = if ($startRc -eq 0) { @(Get-Field $Manifest "Connectors") } else { @() }
+    $problems = @(Test-LifecycleProof $stagedBinaries $provenGateway $guardedBefore -RequireDigest:$provenGateway)
+    if ($problems.Count) {
+        foreach ($problem in $problems) { Write-Err $problem }
+        Write-Err "DefenseClaw $Ver is not proven installed; restoring $previousLabel"
+        try { [void](Stop-Gateway) } catch { Write-Err "Could not stop the $Ver gateway: $($_.Exception.Message)" }
+        Restore-Snapshot
+        Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"
+    }
+    if ($startNew) { Remove-Item -LiteralPath (Join-Path $Snap "GATEWAY_RESTART_UNPROVEN") -Force -ErrorAction Stop }
+    Complete-LifecycleManifest
     Complete-Swap
+    Remove-LifecycleManifest
     Remove-DeveloperFiles
-    Remove-Item -LiteralPath (Join-Path $DataDir ".gateway-recovery") -Force -ErrorAction SilentlyContinue
     try { [Console]::TreatControlCAsInput = $false } catch { }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }

@@ -748,9 +748,11 @@ def test_a_restored_0_8_gateway_is_launched_and_waited_for(tmp_path: Path) -> No
     assert "rc=0" in out
 
 
-def test_a_rollback_whose_gateway_does_not_start_says_so_and_exits_1(tmp_path: Path) -> None:
+def test_a_rollback_whose_gateway_does_not_start_is_undone_and_exits_1(tmp_path: Path) -> None:
     # GAP-1076: the restored gateway stayed down, yet the rollback printed a
-    # green "Now running" and exited 0. GAP-1077: rolling forward was headed
+    # green "Now running" and exited 0. GAP-0486 (fix/r104-windows): a 1.x
+    # rollback whose gateway does not start is undone, as a 0.x one is, so
+    # the install it left runs again. GAP-1077: rolling forward was headed
     # "Rolling back".
     home = tmp_path / "home"
     dc_home, bin_dir = home / ".defenseclaw", home / ".local" / "bin"
@@ -772,9 +774,19 @@ def test_a_rollback_whose_gateway_does_not_start_says_so_and_exits_1(tmp_path: P
 
     assert back.returncode == 1, back.stdout + back.stderr
     assert "Rolling back to DefenseClaw 1.0.1" in back.stdout
-    assert "Now running DefenseClaw 1.0.1, but its gateway is not up" in back.stdout
-    assert "✓ Now running" not in back.stdout
+    assert "The gateway of DefenseClaw 1.0.1 did not start, so the rollback is being undone" in back.stdout, back.stdout
+    assert "Now running" not in back.stdout
+    # The install the rollback left is live again, and previous/ still holds
+    # the rollback target.
+    assert "1.0.2" in (bin_dir / "defenseclaw-gateway").read_text(encoding="utf-8")
+    assert (dc_home / "previous" / "VERSION").read_text(encoding="utf-8").strip() == "1.0.1"
 
+    # Once the older gateway starts, the same rollback goes through, and a
+    # second one rolls forward.
+    older = dc_home / "previous" / "bin" / "defenseclaw-gateway"
+    older.write_text(older.read_text(encoding="utf-8").replace("start) exit 1", "start) exit 0"), encoding="utf-8")
+    back = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
+    assert back.returncode == 0, back.stdout + back.stderr
     forward = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
 
     assert forward.returncode == 0, forward.stdout + forward.stderr

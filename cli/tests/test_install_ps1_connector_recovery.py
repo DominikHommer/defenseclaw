@@ -52,8 +52,8 @@ def _helpers() -> str:
         "Remove-FailedInstall",
         "New-FailedInstallDirectory",
         "Get-DataEntries",
-        "Move-RestoreConnectorRecovery",
-        "Undo-RestoreConnectorRecovery",
+        "Get-Sha256",
+        "Get-LifecycleNextStep",
         "Restore-Slot",
         "Clear-SetupDataDir",
         "Invoke-Quietly",
@@ -500,6 +500,12 @@ function Restore-HooksAfterAbortedRollback {{ $script:restores++ }}
 function Switch-WithPrevious {{ $script:swaps++; return 0 }}
 function Protect-UvDirectory {{}}
 function Invoke-PruneOrphanedHooks {{}}
+function Write-LifecycleManifest {{ return $null }}
+function Get-BinariesState {{ return @{{}} }}
+function Remove-LifecycleManifest {{}}
+function Assert-LifecycleRestored {{}}
+function Test-LifecycleProof {{ return @() }}
+function Get-Field($Object, [string]$Name) {{ return $null }}
 """
 
 
@@ -959,7 +965,9 @@ def test_direct_installer_guards_version_changes_before_staging_and_after_quiesc
     assert early < install.index('Assert-InstallRoom $InstallRoom') < install.index('New-InstallDirectory $Staging')
     assert install.index('Wait-VenvFree', early) < install.index('Stop-Watchdog', early) < late
     assert late < install.index('Save-Snapshot')
-    assert 'Restart-Old\n        Die "$reason. $(Get-RestoredNote)"' in install[late:]
+    tail = install[late:]
+    restart = tail.index("        Restart-Old\n        if (-not (Test-RecoveryPending)) {")
+    assert restart < tail.index("Assert-LifecycleRestored $Manifest", restart) < tail.index('Die "$reason. $(Get-RestoredNote)"')
 
 
 @WINDOWS_POWERSHELL
@@ -1021,11 +1029,29 @@ def test_a_surviving_watchdog_refuses_older_readers_and_restarts_the_current_gat
         unchanged = "$script:swaps -eq 0 -and $script:conversions -eq 0"
     else:
         install = _function("Invoke-Install")
+        # Since r104 the new hook goes in before the gateway stops, so the
+        # quiescence refusal runs inside the step that undoes the hook swap
+        # and restarts the current gateway (fix/r104-windows).
         start = install.index("    Assert-InstallRoom $FinalEnvRoom")
-        end = install.index("    $Snap =", start)
+        end = install.index("    # Ctrl+C now would leave", start)
         call = install[start:end] + "\n$script:snapshots++"
         stubs = """
 $versionChange = $true
+$PrevVersion = 1.0.2
+$stagedGateway = staged
+$Run = @{ UndoPending = $false; RestorePending = $false }
+function Start-HookFailModeHold { return $true }
+function Complete-HookFailModeHold { return $true }
+function Stop-HookFailModeHold {}
+function Update-HookFailModes { return $true }
+function Write-LifecycleManifest { return $null }
+function Assert-LifecycleRestored {}
+function Save-BinarySnapshot {}
+function Undo-EarlySnapshot {}
+function Clear-StagedRelease {}
+function Test-RecoveryPending { return $false }
+function Get-RestoredNote { return Your previous install is back. }
+function Get-UnchangedNote { return nothing was changed }
 $Setup = $null
 $Ver = '1.0.1'
 $BinDir = Join-Path $DataDir 'bin'
@@ -1461,17 +1487,18 @@ def test_every_automatic_failed_tree_removal_preserves_receipts_first() -> None:
     assert "Remove-Tree $old.FullName" not in slot
     cleanup = _function("Remove-FailedInstall")
     assert cleanup.index("Save-FailedConnectorRecovery $Failed") < cleanup.index("Remove-Tree $Failed")
-    # Both strict receipt directions precede all live runtime/data exchange.
-    phase = slot.index("Move-RestoreConnectorRecovery $Slot $failed")
-    assert phase < slot.index("Restore-BinDir") < slot.index("foreach ($part")
+    # The programs go back first: a refused program restore stops before any
+    # receipt or data moves (W4b loop round 1). Then the write-ahead restore
+    # plan (GAP-0450) moves both receipt directions before the environment
+    # and the ordinary data, and never removes a receipt.
+    programs = slot.index('Restore-BinDir (Join-Path $Slot "bin")')
+    assert programs < slot.index("$moves = New-Object")
+    receipts_out = slot.index("foreach ($entry in @($liveData | Where-Object { Test-ConnectorRecoveryArtifactName $_.Name }))")
+    receipts_in = slot.index("foreach ($entry in @($savedData | Where-Object { Test-ConnectorRecoveryArtifactName $_.Name }))")
+    assert receipts_out < receipts_in < slot.index("foreach ($part") < slot.index("-not (Test-ConnectorRecoveryArtifactName $_.Name)")
     assert slot.count("-not (Test-ConnectorRecoveryArtifactName $_.Name)") == 2
-    receipts = _function("Move-RestoreConnectorRecovery")
-    assert "Remove-Tree" not in receipts
-    assert "Undo-RestoreConnectorRecovery $moved $Slot $Failed" in receipts
-    assert "Move-Path $entry.To $entry.From" in _function("Undo-RestoreConnectorRecovery")
-    # A refused program restore puts the receipts back too (W4b loop round 1).
-    refused = slot[slot.index('try { Restore-BinDir (Join-Path $Slot "bin") } catch {') :]
-    assert refused.index("Undo-RestoreConnectorRecovery $receipts $Slot $failed") < refused.index("throw $refused")
+    plan = slot[slot.index("$moves = New-Object") : slot.index("Restore-ExternalConfig $Slot")]
+    assert "Remove-Tree" not in plan
 
 
 def _restore_stubs(data: Path, slot: Path) -> str:
@@ -1480,6 +1507,7 @@ $Venv = {_literal(data / '.venv')}
 $InstallerDir = {_literal(data / 'installer')}
 $NotData = @('.venv', 'installer', 'backups', 'previous.new', '.failed-*')
 function Restore-BinDir([string]$From) {{}}
+function Assert-BinDirRestored([string]$From) {{}}
 function Restore-ExternalConfig([string]$Slot) {{}}
 """
 
