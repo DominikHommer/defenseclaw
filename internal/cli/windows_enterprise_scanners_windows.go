@@ -149,13 +149,14 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			// Such a run can only take trust away: an admission record that
 			// does not prove a production admission (the record a 1.0.3
 			// --allow-unsigned certification install wrote for its unsigned
-			// scanner) is removed when the production deployment's own trust
-			// settings refuse the executable it names, so no gateway runs that
+			// scanner) is removed unless the production deployment's own trust
+			// settings prove the executable it names, so no gateway runs that
 			// scanner (W2B-G-win review loop round 1). A record those settings
-			// admit is the production deployment's and stays, whether this run
+			// prove is the production deployment's and stays, whether this run
 			// failed or not: a 1.0.3 gateway keeps scanning with it (loop
-			// round 2).
-			quarantined, unsettled, err := quarantineUnprovenWindowsScannerRuntimeAdmission()
+			// round 2). One they cannot prove is removed too: a 1.0.3 gateway
+			// runs whatever a schema 1 record names (loop round 3).
+			quarantined, err := quarantineUnprovenWindowsScannerRuntimeAdmission()
 			switch {
 			case err != nil:
 				result.AddError("scanner_runtime_admission_unproven",
@@ -164,8 +165,6 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 						" from the scanner runtime folder as an administrator, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair")
 			case quarantined != "":
 				result.AddWarning("scanner_runtime_admission_quarantined", windowsScannerRuntimeAdmissionQuarantined+" (not proven: "+quarantined+")")
-			case unsettled != "":
-				result.AddWarning("scanner_runtime_admission_unsettled", windowsScannerRuntimeAdmissionUnsettled+" ("+unsettled+")")
 			}
 			if len(result.Errors) == 0 {
 				result.AddWarning("scanner_runtime_not_scoped", windowsScannerRuntimeNotScoped)
@@ -286,15 +285,7 @@ const windowsScannerRuntimeNotScoped = "this certification scope does not instal
 const windowsScannerRuntimeAdmissionQuarantined = "the shared scanner runtime had an admission record that does not prove the production deployment admitted it " +
 	"(DefenseClaw 1.0.3 and earlier wrote the same record for an --allow-unsigned or certification run's unsigned scanner), " +
 	"so the record was removed and no gateway runs that scanner; every scan fails closed until " +
-	"DefenseClawSetup-Enterprise-Standalone-x64.exe /repair admits the production payload copy again"
-
-// windowsScannerRuntimeAdmissionUnsettled is the warning of a certification
-// run that could neither prove nor disprove a 1.0.3-or-earlier admission
-// record by the production deployment's trust settings, and left it.
-const windowsScannerRuntimeAdmissionUnsettled = "the shared scanner runtime has an admission record from DefenseClaw 1.0.3 or earlier " +
-	"that this certification run cannot prove or disprove by the production deployment's trust settings, so it was left as it was; " +
-	"run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, or enterprise windows ensure, for the production deployment, " +
-	"which proves it by the production payload trust policy or quarantines it"
+	"DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, or its upgrade, admits the production payload copy again"
 
 // quarantineUnprovenWindowsScannerRuntimeAdmission is the certification-run
 // step for an admission record in the shared runtime root that does not
@@ -302,69 +293,53 @@ const windowsScannerRuntimeAdmissionUnsettled = "the shared scanner runtime has 
 // wrote alike for its unsigned scanner). A certification or --allow-unsigned
 // run cannot admit anything for the production deployment, so it never
 // writes the record; it checks the executable against the production
-// deployment's own trust settings (windowsScannerRuntimeProductionVerdict).
-// A record they refuse is removed under the scanner runtime lock, so every
-// gateway, a 1.0.3 one included, refuses the executable it named, and the
-// reason is returned as quarantined. A record they admit stays as it is, and
-// one they cannot settle stays too, its reason returned as unsettled: the
-// production deployment's next repair or ensure settles it by its payload
-// trust policy. A root that is not the runtime's own real folder is refused.
-// A record that already proves a production admission, or none, leaves the
+// deployment's own trust settings (windowsScannerRuntimeProductionProves). A
+// record they prove stays as it is. Any other record is removed under the
+// scanner runtime lock, so every gateway, a 1.0.3 one included, refuses the
+// executable it named, and the reason is returned: one they refuse, and one
+// they cannot prove (an unsigned scanner under a hash-pinned deployment,
+// whose pins only the production Setup's payload manifest has, or trust
+// settings that cannot be read). A 1.0.3 gateway runs any executable whose
+// digest a schema 1 record names, so a record nothing proves was kept for it
+// to run, a certification run's unsigned scanner included (W2B-G-win review
+// loop round 3); the production Setup's /repair or upgrade admits the payload
+// copy again. A root that is not the runtime's own real folder is refused. A
+// record that already proves a production admission, or none, leaves the
 // root untouched (no lock file is made).
-func quarantineUnprovenWindowsScannerRuntimeAdmission() (quarantined, unsettled string, err error) {
+func quarantineUnprovenWindowsScannerRuntimeAdmission() (string, error) {
 	root, err := windowsScannerRuntimeDir()
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	recorded, unproven, err := managed.UnprovenScannerRuntimeAdmission(root)
 	if err != nil || !unproven {
-		return "", "", err
+		return "", err
 	}
-	verdict, why := windowsScannerRuntimeProductionVerdict(root, recorded)
-	switch verdict {
-	case windowsScannerRuntimeProductionAdmits:
-		return "", "", nil
-	case windowsScannerRuntimeProductionUnsettled:
-		return "", why, nil
+	why := windowsScannerRuntimeProductionProves(root, recorded)
+	if why == "" {
+		return "", nil
 	}
 	if err := checkWindowsScannerRuntimeRootForRemoval(root); err != nil {
-		return "", "", err
+		return "", err
 	}
 	if err := winpath.RejectReparseChain(root); err != nil {
-		return "", "", err
+		return "", err
 	}
 	release, err := lockWindowsScannerRuntime(root)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	defer release()
 	// Another run may have settled or replaced the record meanwhile; that
 	// record is the next run's to check.
 	if current, unproven, err := managed.UnprovenScannerRuntimeAdmission(root); err != nil || !unproven || current != recorded {
-		return "", "", err
+		return "", err
 	}
 	if err := managed.RemoveScannerRuntimeAdmission(root); err != nil {
-		return "", "", err
+		return "", err
 	}
-	return why, "", nil
+	return why, nil
 }
-
-// windowsScannerRuntimeVerdict is what the production deployment's
-// own trust settings say of the executable a record names.
-type windowsScannerRuntimeVerdict int
-
-const (
-	// windowsScannerRuntimeProductionRefuses: no production admission can
-	// have admitted it; the record is quarantined.
-	windowsScannerRuntimeProductionRefuses windowsScannerRuntimeVerdict = iota
-	// windowsScannerRuntimeProductionAdmits: the production payload trust
-	// policy admits it; the record is the production deployment's.
-	windowsScannerRuntimeProductionAdmits
-	// windowsScannerRuntimeProductionUnsettled: only a production run can
-	// tell (its payload manifest pins an unsigned scanner), or the
-	// production trust settings cannot be read.
-	windowsScannerRuntimeProductionUnsettled
-)
 
 // windowsScannerRuntimeProductionSigners is enterprise.trust.allowed_signers
 // of the production deployment's installed config, the signer pin every
@@ -397,59 +372,56 @@ var windowsScannerRuntimeProductionSigners = func() ([]string, error) {
 	return configured.allowedSigners, nil
 }
 
-// windowsScannerRuntimeProductionVerdict checks, for a certification run,
+// windowsScannerRuntimeProductionProves checks, for a certification run,
 // the executable an unproven record in root names against the production
-// deployment, not against this run: the root and the executable must pass
-// the trust check every run makes and the executable must still have the
-// recorded digest; the production deployment record must be installed (an
-// absent, untrusted or tombstoned one admitted nothing); and the executable
-// must carry a valid Authenticode signature from a signer the production
-// config pins, when it pins any. An unsigned executable is refused when the
-// production deployment admits only Authenticode-signed payloads, and left
-// unsettled when it is hash-pinned: its pins come from the Setup's payload
-// manifest, which only a production run has. It returns the reason for any
-// verdict but an admission.
-func windowsScannerRuntimeProductionVerdict(root, recorded string) (windowsScannerRuntimeVerdict, string) {
+// deployment, not against this run, and returns why it is not proven, or ""
+// when it is. Proof needs all of these: the root and the executable pass the
+// trust check every run makes and the executable still has the recorded
+// digest; the production deployment record is installed (an absent,
+// untrusted or tombstoned one admitted nothing); and the executable carries
+// a valid Authenticode signature from a signer the production config pins,
+// when it pins any. An unsigned executable is never proven here: an
+// Authenticode-only deployment refuses it, and a hash-pinned one pins it only
+// in its Setup's payload manifest, which only a production run has. Anything
+// that cannot be read proves nothing.
+func windowsScannerRuntimeProductionProves(root, recorded string) string {
 	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
 	if err := windowsScannerRuntimeACLCheck(root, target); err != nil {
-		return windowsScannerRuntimeProductionRefuses, err.Error()
+		return err.Error()
 	}
 	got, err := windowsEnterpriseFileSHA256(target)
 	if err != nil {
-		return windowsScannerRuntimeProductionUnsettled, "hash " + target + ": " + err.Error()
+		return "hash " + target + ": " + err.Error()
 	}
 	if got != recorded {
-		return windowsScannerRuntimeProductionRefuses,
-			fmt.Sprintf("%s (SHA-256 %s) is not the executable its record names (SHA-256 %s)", target, got, recorded)
+		return fmt.Sprintf("%s (SHA-256 %s) is not the executable its record names (SHA-256 %s)", target, got, recorded)
 	}
 	deployment, err := windowsScannerRuntimeDeployment(nil)
 	if err != nil {
-		return windowsScannerRuntimeProductionUnsettled, "read the production deployment record: " + err.Error()
+		return "read the production deployment record: " + err.Error()
 	}
 	switch deployment.State {
 	case winpath.EnterpriseDeploymentInstalled:
 	case winpath.EnterpriseDeploymentAbsent, winpath.EnterpriseDeploymentTombstone:
-		return windowsScannerRuntimeProductionRefuses, "no production deployment is installed, so none admitted " + target
+		return "no production deployment is installed, so none admitted " + target
 	default:
-		return windowsScannerRuntimeProductionUnsettled, "the production deployment record " + deployment.MetadataPath + " cannot be read"
+		return "the production deployment record " + deployment.MetadataPath + " cannot be read"
 	}
 	if _, certificate, err := windowsScannerRuntimeAuthenticode(target); err == nil {
 		signers, err := windowsScannerRuntimeProductionSigners()
 		if err != nil {
-			return windowsScannerRuntimeProductionUnsettled, "read the production signer pins: " + err.Error()
+			return "read the production signer pins: " + err.Error()
 		}
 		if windowsScannerRuntimeSignerPinned(certificate, signers) {
-			return windowsScannerRuntimeProductionAdmits, ""
+			return ""
 		}
-		return windowsScannerRuntimeProductionRefuses,
-			target + " is signed by a signer the production config's enterprise.trust.allowed_signers does not pin"
+		return target + " is signed by a signer the production config's enterprise.trust.allowed_signers does not pin"
 	}
 	if deployment.TrustMode == windowsEnterpriseTrustAuthenticode {
-		return windowsScannerRuntimeProductionRefuses,
-			target + " has no valid Authenticode signature, and the production deployment admits only Authenticode-signed payloads"
+		return target + " has no valid Authenticode signature, and the production deployment admits only Authenticode-signed payloads"
 	}
-	return windowsScannerRuntimeProductionUnsettled,
-		target + " has no valid Authenticode signature, and the production deployment is hash-pinned by its Setup's payload manifest, which only a production run has"
+	return target + " has no valid Authenticode signature, and the production deployment is hash-pinned by its Setup's payload manifest, " +
+		"which only a production run has, so this certification run cannot prove it"
 }
 
 // proveWindowsScannerRuntimeAdmissionLocked settles, under the scanner

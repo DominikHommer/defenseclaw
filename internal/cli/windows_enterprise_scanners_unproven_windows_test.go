@@ -9,6 +9,7 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -38,20 +39,44 @@ func writeLegacyWindowsScannerRuntimeAdmission(t *testing.T, root, path string) 
 	return record, digest
 }
 
-// W2B-G-win review loops 1 and 2: on 1.0.3 an --allow-unsigned
+// legacyWindowsScannerRuntimeAdmits is the check a DefenseClaw 1.0.3 gateway
+// makes before it runs the scanner: the record in root names the SHA-256 of
+// path, whatever its schema or trust.
+func legacyWindowsScannerRuntimeAdmits(t *testing.T, root, path string) bool {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(root, managed.StandaloneWindowsScannerRuntimeAdmissionName))
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		SHA256 string `json:"sha256"`
+	}
+	if json.Unmarshal(body, &record) != nil || record.SHA256 == "" {
+		return false
+	}
+	digest, err := windowsEnterpriseFileSHA256(path)
+	return err == nil && digest == record.SHA256
+}
+
+// W2B-G-win review loops 1 to 3: on 1.0.3 an --allow-unsigned
 // certification install published its unsigned scanner and a schema 1
 // admission record into the shared production runtime. Since round 3 a
 // certification run leaves that folder alone, so its uninstall no longer
 // removed the scanner and the production gateway kept running it. Every
 // mutating certification run, of every scope, failed or not, checks such a
 // record against the production deployment's own trust settings, never this
-// run's: a record they refuse is quarantined (a 1.0.3 gateway refuses the
-// scanner then too); one they admit, the record of a signed production
-// scanner, stays byte-identical, so a failed certification run no longer
-// disables a healthy 1.0.3 production runtime (round 2); and one only a
-// production run can settle stays, with a warning. It never touches a record
-// that proves a production admission, makes no lock file unless it
-// quarantines, and status and verify stay read-only.
+// run's. One they prove, the record of a signed production scanner, stays
+// byte-identical, so a failed certification run no longer disables a healthy
+// 1.0.3 production runtime (round 2). Every other one is quarantined, and a
+// 1.0.3 gateway refuses the scanner then too: one they refuse, and one they
+// cannot prove, which round 2 left for the 1.0.3 gateway to run (an unsigned
+// scanner under a hash-pinned production deployment, which may be the
+// certification install's own, and trust settings or files that cannot be
+// read; round 3). It never touches a record that proves a production
+// admission, makes no lock file unless it quarantines, and status and verify
+// stay read-only.
 func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *testing.T) {
 	root, runtimeFile := newWindowsScannerRuntimeRemovalTest(t)
 	aclSeam, authenticodeSeam, signersSeam := windowsScannerRuntimeACLCheck, windowsScannerRuntimeAuthenticode, windowsScannerRuntimeProductionSigners
@@ -123,14 +148,13 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 	const (
 		kept = iota
 		quarantined
-		unsettled
 	)
 	for _, tc := range []struct {
-		name    string
-		setup   func()
-		changed bool
-		want    int
-		reason  string
+		name             string
+		setup            func()
+		changed, missing bool
+		want             int
+		reason           string
 	}{
 		{name: "signed, production pins no signer", setup: func() { signed, deployment = true, installed("authenticode") }, want: kept},
 		{name: "signed by the signer production pins", setup: func() { signed, signers, deployment = true, []string{pin}, installed("authenticode") }, want: kept},
@@ -141,8 +165,10 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 			}},
 		{name: "unsigned, authenticode production", setup: func() { deployment = installed("authenticode") }, want: quarantined,
 			reason: "admits only Authenticode-signed payloads"},
-		{name: "unsigned, hash-pinned production", setup: func() { deployment = installed("hash_pinned") }, want: unsettled, reason: "hash-pinned"},
-		{name: "unsigned, production trust not recorded", setup: func() { deployment = installed("") }, want: unsettled, reason: "hash-pinned"},
+		{name: "unsigned, hash-pinned production", setup: func() { deployment = installed("hash_pinned") }, want: quarantined,
+			reason: "cannot prove it"},
+		{name: "unsigned, production trust not recorded", setup: func() { deployment = installed("") }, want: quarantined,
+			reason: "cannot prove it"},
 		{name: "no production deployment", want: quarantined, reason: "no production deployment is installed",
 			setup: func() {
 				signed, deployment = true, winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentAbsent}
@@ -151,13 +177,13 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 			setup: func() {
 				signed, deployment = true, winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentTombstone}
 			}},
-		{name: "production record unreadable", want: unsettled, reason: "cannot be read",
+		{name: "production record unreadable", want: quarantined, reason: "cannot be read",
 			setup: func() {
 				signed, deployment = true, winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentUnknown}
 			}},
-		{name: "production record read fails", want: unsettled, reason: "read the production deployment record",
+		{name: "production record read fails", want: quarantined, reason: "read the production deployment record",
 			setup: func() { signed, deploymentErr = true, errors.New("access denied") }},
-		{name: "production signer pins unreadable", want: unsettled, reason: "read the production signer pins",
+		{name: "production signer pins unreadable", want: quarantined, reason: "read the production signer pins",
 			setup: func() {
 				signed, signersErr, deployment = true, errors.New("config is writable by Users"), installed("authenticode")
 			}},
@@ -166,6 +192,8 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 				signed, aclErr, deployment = true, errors.New("Users can write the runtime folder"), installed("authenticode")
 			}},
 		{name: "executable changed since its record", changed: true, want: quarantined, reason: "is not the executable its record names",
+			setup: func() { signed, deployment = true, installed("authenticode") }},
+		{name: "executable missing", missing: true, want: quarantined, reason: "hash ",
 			setup: func() { signed, deployment = true, installed("authenticode") }},
 	} {
 		for name := range scopes {
@@ -186,6 +214,11 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 							t.Fatal(err)
 						}
 					}
+					if tc.missing {
+						if err := os.Remove(runtimeFile); err != nil {
+							t.Fatal(err)
+						}
+					}
 					before, err := os.ReadFile(record)
 					if err != nil {
 						t.Fatal(err)
@@ -194,7 +227,7 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 					if windowsEnterpriseResultHasError(result, "scanner_runtime_admission_unproven") {
 						t.Fatalf("%s: errors %+v", label, result.Errors)
 					}
-					if _, err := os.Stat(runtimeFile); err != nil {
+					if _, err := os.Stat(runtimeFile); err != nil && !tc.missing {
 						t.Fatalf("%s removed the production runtime: %v", label, err)
 					}
 					after, readErr := os.ReadFile(record)
@@ -206,8 +239,11 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 						if message := warning(result, "scanner_runtime_admission_quarantined"); !strings.Contains(message, tc.reason) {
 							t.Fatalf("%s: quarantine warning %q, want the reason %q", label, message, tc.reason)
 						}
-						if err := managed.CheckScannerRuntimeAdmitted(root, runtimeFile); !errors.Is(err, managed.ErrScannerRuntimeNotAdmitted) {
+						if err := managed.CheckScannerRuntimeAdmitted(root, runtimeFile); !tc.missing && !errors.Is(err, managed.ErrScannerRuntimeNotAdmitted) {
 							t.Fatalf("%s: the scanner is still admitted: %v", label, err)
+						}
+						if legacyWindowsScannerRuntimeAdmits(t, root, runtimeFile) {
+							t.Fatalf("%s: a 1.0.3 gateway still runs the scanner the record named", label)
 						}
 					default:
 						if readErr != nil || string(after) != string(before) {
@@ -216,9 +252,8 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 						if message := warning(result, "scanner_runtime_admission_quarantined"); message != "" {
 							t.Fatalf("%s: %s", label, message)
 						}
-						message := warning(result, "scanner_runtime_admission_unsettled")
-						if (tc.want == unsettled) != (message != "") || !strings.Contains(message, tc.reason) {
-							t.Fatalf("%s: unsettled warning %q, want unsettled=%v (%q)", label, message, tc.want == unsettled, tc.reason)
+						if !legacyWindowsScannerRuntimeAdmits(t, root, runtimeFile) {
+							t.Fatalf("%s: a 1.0.3 gateway no longer runs the production scanner", label)
 						}
 						if _, err := os.Lstat(lock); !errors.Is(err, os.ErrNotExist) {
 							t.Fatalf("%s made a lock file in the production runtime (%v)", label, err)
