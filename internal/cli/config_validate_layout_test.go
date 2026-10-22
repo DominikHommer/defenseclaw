@@ -102,3 +102,26 @@ func TestConfigValidateDefaultsToTheManagedInstalledConfig(t *testing.T) {
 		t.Fatalf("config validate output = %q, want %s validated", out.String(), layout.ConfigPath)
 	}
 }
+
+// GAP-0605: a path with no file is reported as not found, with the path and
+// the next step, not as a config that "could not be compiled safely"; the
+// JSON failure carries the same code.
+func TestConfigValidateMissingFileIsNotFound(t *testing.T) {
+	dir := t.TempDir()
+	useConfigValidateLayout(t, dir, false)
+	missing := filepath.Join(dir, "no", "such.yaml")
+	for _, asJSON := range []bool{false, true} {
+		configValidateJSON = asJSON
+		out := &strings.Builder{}
+		configValidateCmd.SetOut(out)
+		err := configValidateCmd.RunE(configValidateCmd, []string{missing})
+		if err == nil || !strings.Contains(err.Error(), "cannot read "+missing) ||
+			!strings.Contains(err.Error(), "[config_not_found]") || !strings.Contains(err.Error(), "check the path") ||
+			strings.Contains(err.Error(), "compiled safely") {
+			t.Fatalf("config validate %s (json %v) = %v, want a not-found error naming the path", missing, asJSON, err)
+		}
+		if asJSON && !strings.Contains(out.String(), "[config_not_found]") {
+			t.Fatalf("config validate --json output = %q, want the config_not_found reason", out.String())
+		}
+	}
+}

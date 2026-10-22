@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -195,10 +196,13 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 	var profileError *config.UnknownGuardrailProfileError
 	var settingError *config.SettingError
 	var sourceError *configV8SourceError
+	var readError *configV8ReadError
 	if errors.As(err, &sourceError) && sourceError.version >= config.ObservabilityV8ConfigVersion {
 		result.ConfigVersion = sourceError.version
 	}
 	switch {
+	case errors.As(err, &readError):
+		result.Reason = readError.reason()
 	case errors.As(err, &settingError):
 		// A runtime-loader refusal of a profile, its sandbox section or the
 		// openshell section: name the setting and the rule, so the fix is to
@@ -260,6 +264,32 @@ type configV8SourceError struct {
 
 func (e *configV8SourceError) Error() string { return e.err.Error() }
 func (e *configV8SourceError) Unwrap() error { return e.err }
+
+// configV8ReadError is a config file that could not be read at all: not a
+// file that failed to compile, so validate names the read problem and the
+// path instead of "could not be compiled safely" (GAP-0605).
+type configV8ReadError struct {
+	path string
+	err  error
+}
+
+func (e *configV8ReadError) Error() string { return fmt.Sprintf("read config %s: %v", e.path, e.err) }
+func (e *configV8ReadError) Unwrap() error { return e.err }
+
+// reason is the bounded diagnostic of the read failure: its code, what
+// happened and the next step.
+func (e *configV8ReadError) reason() string {
+	switch {
+	case errors.Is(e.err, fs.ErrNotExist):
+		return configV8DiagnosticReason("config_not_found", "no file exists at this path", "",
+			"check the path, or pass the config.yaml to check")
+	case errors.Is(e.err, fs.ErrPermission):
+		return configV8DiagnosticReason("config_unreadable", "this account may not read the file", "",
+			"run the command as an account that can read it, such as an administrator")
+	}
+	return configV8DiagnosticReason("config_unreadable", "the file could not be read", "",
+		"check that the path names a readable file")
+}
 
 // configV8SourceVersion is the config_version a parsed document declares, or
 // the compiler's own when it declares none that reads as an integer.
@@ -679,13 +709,13 @@ func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate
 func readConfigV8Source(path string) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config %s: %w", path, err)
+		return nil, &configV8ReadError{path: path, err: err}
 	}
 	defer file.Close()
 	limit := int64(config.ObservabilityV8MaxSourceBytes) + 1
 	raw, err := io.ReadAll(io.LimitReader(file, limit))
 	if err != nil {
-		return nil, fmt.Errorf("read config %s: %w", path, err)
+		return nil, &configV8ReadError{path: path, err: err}
 	}
 	if len(raw) > config.ObservabilityV8MaxSourceBytes {
 		// Feed a bounded over-limit value to the canonical parser so callers get

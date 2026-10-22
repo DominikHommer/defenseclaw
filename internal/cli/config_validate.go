@@ -12,6 +12,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -80,6 +81,10 @@ var configValidateCmd = &cobra.Command{
 			}
 			if configValidateJSON {
 				_ = json.NewEncoder(out).Encode(failure)
+			}
+			var readError *configV8ReadError
+			if errors.As(err, &readError) {
+				return fmt.Errorf("cannot read %s: %s", configValidateShownPath(path), failure.Reason)
 			}
 			return fmt.Errorf("%s is not valid at %s: %s", configValidateShownPath(path), failure.Path, failure.Reason)
 		}
