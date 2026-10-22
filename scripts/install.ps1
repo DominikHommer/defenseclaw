@@ -1586,14 +1586,43 @@ function Install-HookFirst([string]$Slot) {
     # .install.lock, waits for the install and names it. So the new hook goes
     # in as soon as the rollback copy holds the old one. HOOK_FIRST, written
     # once that copy is whole, tells Undo-Snapshot to put the old hook back.
+    # Until the new gateway is published, the gateways in place are older and
+    # cannot close the hooks, so the slot first keeps the staged (checked)
+    # gateway in closer\: a run that stops in that window (killed, or a
+    # restore the running new hook refuses, now or in the next run's
+    # Resume-InterruptedRun) closes the hooks with it
+    # (Close-UnfinishedInstallHooks). No closer, no new hook.
     $live = Join-Path $BinDir "defenseclaw-hook.exe"
     $saved = Join-Path $Slot "bin\defenseclaw-hook.exe"
     $staged = Join-Path $Staging "bin\defenseclaw-hook.exe"
-    foreach ($path in @($live, $saved, $staged)) {
+    $gateway = Join-Path $Staging "bin\defenseclaw-gateway.exe"
+    foreach ($path in @($live, $saved, $staged, $gateway)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
     }
+    Save-HookCloser $Slot $gateway
     Set-Content -LiteralPath (Join-Path $Slot "HOOK_FIRST") -Value "" -Encoding Ascii
     Install-File $staged $live
+}
+
+function Save-HookCloser([string]$Slot, [string]$Gateway) {
+    # A hard link takes no room and stays when the staged release is cleared;
+    # a copy where the volume cannot link. Either is proven byte for byte, and
+    # any failure stops the run before the hook changes.
+    $closer = Join-Path $Slot "closer\defenseclaw-gateway.exe"
+    try {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $closer) -Force -ErrorAction Stop | Out-Null
+        if (Test-Path -LiteralPath $closer) { Remove-Item -LiteralPath $closer -Force -ErrorAction Stop }
+        try { New-Item -ItemType HardLink -Path $closer -Target $Gateway -ErrorAction Stop | Out-Null } catch {
+            if (Test-Path -LiteralPath $closer) { Remove-Item -LiteralPath $closer -Force -ErrorAction Stop }
+            Copy-Item -LiteralPath $Gateway -Destination $closer -ErrorAction Stop
+        }
+        if (-not (Test-Path -LiteralPath $closer -PathType Leaf) -or (Get-Sha256 $closer) -ne (Get-Sha256 $Gateway)) {
+            throw "the kept copy does not match $Gateway"
+        }
+    } catch {
+        throw ("Could not keep the new gateway in $(Split-Path -Parent $closer), which closes the agent hooks if this install stops " +
+            "unfinished ($($_.Exception.Message)); the installed hook was left as it was")
+    }
 }
 
 function Undo-HookFirst([string]$Slot) {
@@ -1946,23 +1975,7 @@ function Clear-SetupDataDir([string]$Failed) {
     Invoke-Quietly { Remove-Tree (Join-Path $DataDir ".uv") }
 }
 
-function Save-HookCloser([string]$Slot) {
-    # A failure before the new gateway is published (after Install-HookFirst
-    # put the new hook in) leaves only gateways older than this release in
-    # place, and none of them can close the hooks if the restore is refused.
-    # Keep the staged gateway, which can, in the snapshot before the staged
-    # release is cleared: a rename, so it takes no room, and it goes with the
-    # snapshot once the restore finishes (Close-UnfinishedInstallHooks).
-    $staged = Join-Path $Staging "bin\defenseclaw-gateway.exe"
-    $closer = Join-Path $Slot "closer\defenseclaw-gateway.exe"
-    if (-not (Test-Path -LiteralPath $staged -PathType Leaf) -or -not (Test-Path -LiteralPath $Slot -PathType Container) -or
-        (Test-Path -LiteralPath $closer)) { return }
-    New-Item -ItemType Directory -Path (Split-Path -Parent $closer) -Force | Out-Null
-    Move-Path $staged $closer
-}
-
 function Restore-Snapshot {
-    Invoke-Quietly { Save-HookCloser $Snap }
     Clear-StagedRelease
     try { $failed = Restore-Slot $Snap } catch {
         # The snapshot stays marked complete, so the next run restores it.
@@ -2153,6 +2166,8 @@ function Complete-Swap {
     # A first install has no previous install, only its staging copies (GAP-1827).
     if ($PrevVersion) { Write-Info "Cleaning up the previous install's files (this can take a minute or two)" }
     else { Write-Info "Removing the staging files" }
+    # The closer (Install-HookFirst) is only for an unfinished install.
+    Invoke-Quietly { Remove-Tree (Join-Path $Snap "closer") }
     Invoke-Quietly {
         if ($Snap -eq (Join-Path $DataDir "previous.new") -and $PrevVersion) {
             Save-RolledBackData
