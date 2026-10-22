@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -165,6 +167,18 @@ def test_wheel_resolves_complete_stack_outside_source_checkout(tmp_path: Path) -
         assert not any(name.startswith("defenseclaw/_data/edge-connector/") for name in names)
         assert not any(_is_generated_grafana_credential(name) for name in packaged_assets)
         assert expected_assets <= packaged_assets
+        dashboard_uids = {
+            json.loads(archive.read(prefix + name))["uid"]
+            for name in packaged_assets
+            if name.startswith("grafana/dashboards/") and name.endswith(".json")
+        }
+        docs = REPO_ROOT / "docs-site/content/docs"
+        reference = (docs / "reference/observability/dashboards.mdx").read_text(encoding="utf-8")
+        documented_uids = set(re.findall(r"^\| \*\*.+?\*\* \(`([^`]+)`\)", reference, re.MULTILINE))
+        assert documented_uids == dashboard_uids
+        for page in (reference, (docs / "how-to/observability/run-grafana-locally.mdx").read_text(encoding="utf-8")):
+            counts = re.findall(r"\b(\d+) (?:bundled )?(?:Grafana |DefenseClaw )?dashboards\b", page)
+            assert counts and all(int(count) == len(dashboard_uids) for count in counts)
         for relative_path in expected_assets:
             assert archive.read(prefix + relative_path) == (BUNDLE / Path(relative_path)).read_bytes(), (
                 f"packaged local-observability asset drifted: {relative_path}"

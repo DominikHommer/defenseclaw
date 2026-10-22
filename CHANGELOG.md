@@ -24,6 +24,7 @@ for current behavior.
 
 ### Fixed
 
+- **The local Grafana guide matches core installs.** It lists the 18 dashboards bundled in the wheel and identifies the separate optional Fleet dashboard asset.
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
 
 ### Removed
