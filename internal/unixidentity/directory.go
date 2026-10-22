@@ -1089,7 +1089,8 @@ func (r *NSSResolver) groupBatchNames(ids []int) (map[int]string, error) {
 // was dropped (review of GAP-0212, loop 4). Each directory service of the
 // group line must show it: nslcd is asked for the gid itself, and its
 // completed search names the group or shows that none has the gid; SSSD
-// and winbind must answer (passwdAbsent); getent cannot show it for NIS, so
+// and winbind must answer for the GID while their domains are online;
+// getent cannot show it for NIS, so
 // a gid NIS names no group for fails the lookup (fail closed). Local
 // sources answer definitively, and a service DefenseClaw has no check for
 // is taken at its word, as passwdOwner takes it.
@@ -1984,10 +1985,10 @@ func ConfirmLocalAccount(r Resolver, uid int, name string) error {
 // service to a lookup of key (an account name, or a uid when byUID) is
 // definitive: the service reads local files, the directory it reaches is
 // not configured on this host (no SSSD configuration, no smb.conf), SSSD's
-// NSS responder or winbindd accepts a connection, or nslcd completes the
-// same search and finds nothing (LDAP). getent cannot show it for NIS, nor
-// for a service DefenseClaw has no check for. SameNameAccounts also asks
-// SSSD and winbind whether their domains are online.
+// NSS responder or winbindd accepts a connection and every served domain
+// answers online, or nslcd completes the same search and finds nothing
+// (LDAP). getent cannot show it for NIS, nor for a service DefenseClaw has
+// no check for.
 func (r *NSSResolver) passwdAbsent(service, key string, byUID bool) error {
 	switch {
 	case nssLocalPasswdSources[service]:
