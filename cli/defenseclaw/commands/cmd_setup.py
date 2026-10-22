@@ -17648,6 +17648,8 @@ def _apply_logs_config(
     refresh_bundle: bool = True,
 ) -> None:
     """Configure the local Splunk bridge as a canonical HEC destination."""
+    from defenseclaw.observability.local_splunk import LOCAL_TOKEN_ENV
+
     native_windows = bootstrap_bridge and _native_windows_local_splunk()
     gateway_token_env = (
         _validated_splunk_gateway_token_env_name(
@@ -17688,11 +17690,8 @@ def _apply_logs_config(
 
     hec_url = (contract or {}).get("hec_url", _SPLUNK_LOCAL_HEC_DEFAULTS["hec_endpoint"])
     hec_token = (contract or {}).get("hec_token", "")
-
     # Pull host/port from the contract URL so the preset writer derives a
     # stable name ("splunk-hec-127-0-0-1") and the endpoint matches exactly.
-    from urllib.parse import urlparse
-
     parsed = urlparse(hec_url)
     host = parsed.hostname or "127.0.0.1"
     port = str(parsed.port or 8088)
@@ -17713,6 +17712,7 @@ def _apply_logs_config(
             "verify_tls": "false",
         },
         secret_value=hec_token or None,
+        secret_env_name=LOCAL_TOKEN_ENV,
         # The local Splunk container listens on this computer.
         allow_private_networks=True,
     )

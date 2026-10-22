@@ -425,29 +425,54 @@ def test_macos_linux_keep_the_existing_bridge_path(tmp_path: Path, os_name: str)
     native.assert_not_called()
 
 
-def test_local_and_remote_splunk_tokens_remain_independent(tmp_path: Path) -> None:
+def test_local_and_remote_splunk_tokens_remain_independent(tmp_path: Path, monkeypatch) -> None:
     app = _app(tmp_path)
+    monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", raising=False)
+    local_token = "local fixture credential"
+    bridge_env = tmp_path / "splunk-bridge" / "env" / ".env"
+    bridge_env.parent.mkdir(parents=True)
+    atomic_write_private_bytes(bridge_env, f"DEFENSECLAW_HEC_TOKEN='{local_token}'\n".encode())
     with (
+        patch.object(cmd_setup, "_native_windows_local_splunk", return_value=False),
+        patch.object(cmd_setup, "_bootstrap_bridge", return_value={
+            "hec_url": "https://127.0.0.1:8088/services/collector/event",
+            "hec_token": local_token,
+        }),
+        patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
         patch(
             "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
             return_value=SimpleNamespace(destinations=()),
         ),
         patch("defenseclaw.observability.v8_writer._validate_candidate"),
     ):
-        cmd_setup._apply_v8_observability_preset(
+        cmd_setup._apply_logs_config(
             app,
-            "splunk-hec",
-            {
-                "endpoint": "https://127.0.0.1:8088/services/collector/event",
-                "index": "defenseclaw_local",
-                "source": "defenseclaw",
-                "sourcetype": "defenseclaw:json",
-            },
-            name="local-splunk",
-            secret_value="local-" + "a" * 32,
-            secret_env_name=LOCAL_TOKEN_ENV,
-            allow_private_networks=True,
+            index="defenseclaw_local", source="defenseclaw", sourcetype="defenseclaw:json",
+            bootstrap_bridge=True,
         )
+        saved = (tmp_path / "config.yaml").read_bytes()
+        with pytest.raises(SystemExit):
+            cmd_setup._setup_enterprise(
+                app, hec_endpoint="https://splunk.example.test:8088/services/collector/event",
+                hec_token=None, non_interactive=True, skip_test=True,
+            )
+        assert (tmp_path / "config.yaml").read_bytes() == saved
+        # An older Unix local setup saved its generated token under the remote
+        # name. That ambiguous credential must also be refused after upgrade.
+        monkeypatch.setenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", local_token)
+        with pytest.raises(SystemExit) as refused:
+            cmd_setup._setup_enterprise(
+                app, hec_endpoint="https://splunk.example.test:8088/services/collector/event",
+                hec_token=None, non_interactive=True, skip_test=True,
+            )
+        assert refused.value.code == 2
+        assert (tmp_path / "config.yaml").read_bytes() == saved
+        with pytest.raises(ValueError, match="local.*credential"):
+            cmd_setup._apply_v8_observability_preset(
+                app, "splunk-enterprise",
+                {"endpoint": "https://splunk.example.test:8088/services/collector/event"},
+            )
+        assert (tmp_path / "config.yaml").read_bytes() == saved
         cmd_setup._apply_v8_observability_preset(
             app,
             "splunk-enterprise",
@@ -463,7 +488,7 @@ def test_local_and_remote_splunk_tokens_remain_independent(tmp_path: Path) -> No
     raw = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
     sinks = {item["name"]: item["token_env"] for item in raw["observability"]["destinations"]}
     assert sinks == {
-        "local-splunk": LOCAL_TOKEN_ENV,
+        "splunk-hec-127-0-0-1": LOCAL_TOKEN_ENV,
         "remote-splunk": "DEFENSECLAW_SPLUNK_HEC_TOKEN",
     }
     dotenv = (tmp_path / ".env").read_text(encoding="utf-8")

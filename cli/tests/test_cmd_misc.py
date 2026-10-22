@@ -1700,7 +1700,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertTrue(destination["enabled"])
         self.assertEqual(destination["endpoint"], "http://127.0.0.1:8088/services/collector/event")
-        self.assertEqual(destination["token_env"], "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+        self.assertEqual(destination["token_env"], "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN")
         self.assertIn("Local Splunk is ready", result.output)
         self.assertIn("License: Free", result.output)
         self.assertIn("Splunk Web login:", result.output)

@@ -14,6 +14,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
+from defenseclaw.file_permissions import MAX_DOTENV_BYTES, read_regular_file_no_follow
 from defenseclaw.observability.presets import Preset
 from defenseclaw.observability.v8_activation import update_private_file
 from defenseclaw.safety import sanitize_dotenv_value
@@ -127,6 +128,8 @@ def apply_secret(
 ) -> list[str]:
     if not preset.token_env:
         return []
+    if preset.adapter_kind == "splunk_hec":
+        _validate_splunk_credential_isolation(data_dir, preset, secret_value)
     path = os.path.join(data_dir, DOTENV_FILE_NAME)
     if not secret_value:
         existing: dict[str, str] = {}
@@ -161,6 +164,41 @@ def apply_secret(
     )
     os.environ[preset.token_env] = secret_value
     return [f"{preset.token_env}: written to {path}"]
+
+
+def _validate_splunk_credential_isolation(data_dir: str, preset: Preset, supplied: str | None) -> None:
+    from defenseclaw.observability.local_splunk import LOCAL_TOKEN_ENV
+
+    if preset.token_env == LOCAL_TOKEN_ENV:
+        return
+    # Earlier Unix local setups used the remote name. A saved or ambient
+    # value is not a remote credential if it belongs to the local container.
+    local_tokens = {os.environ.get(LOCAL_TOKEN_ENV, "")}
+    saved: dict[str, str] = {}
+    for relative, keys in (
+        (DOTENV_FILE_NAME, (LOCAL_TOKEN_ENV,)),
+        (os.path.join("splunk-bridge", "env", ".env"), ("DEFENSECLAW_HEC_TOKEN", "SPLUNK_HEC_TOKEN")),
+    ):
+        try:
+            payload = read_regular_file_no_follow(os.path.join(data_dir, relative), max_bytes=MAX_DOTENV_BYTES)
+            values = _load_dotenv(payload)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                "Cannot verify Splunk credential isolation; repair the private Splunk .env files, "
+                "then rerun defenseclaw setup splunk --enterprise."
+            ) from exc
+        if relative == DOTENV_FILE_NAME:
+            saved = values
+        local_tokens.update(values.get(key, "") for key in keys)
+    token = supplied or os.environ.get(preset.token_env) or saved.get(preset.token_env)
+    if token and token in local_tokens:
+        raise ValueError(
+            "A local Splunk credential cannot authenticate a remote destination. Set "
+            "DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN to the remote collector's token, then rerun "
+            "defenseclaw setup splunk --enterprise."
+        )
 
 
 def restore_secret(

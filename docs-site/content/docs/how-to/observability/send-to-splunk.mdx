@@ -9,6 +9,8 @@ keywords:
 
 `defenseclaw setup splunk` has three independent modes. Each adds its own destination, so you can run more than one.
 
+Local Splunk keeps its generated HEC credential separate from your remote collector's token. Remote setup refuses a local credential, including one saved by an older local setup; supply the remote collector's token as shown below.
+
 | Mode | Use it for | What it sends |
 | --- | --- | --- |
 | `--logs` | A local demo | Logs to a Splunk container in Docker, with the bundled app |
