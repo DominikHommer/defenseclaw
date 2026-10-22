@@ -55,6 +55,7 @@ class PolicyCompilerExitTest(unittest.TestCase):
                 ('unsupported_canary', 'iot_extensions:\n  canary:\n    enabled: true\n', ()),
                 ('unsupported_rate', 'iot_extensions:\n  rate_limits:\n    tool_calls_per_minute: 1\n', ()),
                 ('unsupported_escalation', 'iot_extensions:\n  escalation_mode:\n    net_fetch: sync_block\n', ()),
+                ('policy_name', 'name: 1\n', ()),
                 ('sequence_action', 'iot_extensions:\n  capability_sequences:\n    - sequence: [read_fs, send_msg]\n      action: typo\n', ()),
                 ('sequence_type', 'iot_extensions:\n  capability_sequences:\n    - sequence: read_fs\n', ()),
                 ('unknown_capability', 'iot_extensions:\n  capability_sequences:\n    - sequence: [read_fs, typo]\n', ()),

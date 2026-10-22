@@ -770,6 +770,9 @@ def main():
         policy = parse_policy(Path(args.input))
         if not isinstance(policy, dict):
             raise ValueError("policy root must be a YAML mapping")
+        for field in ("name", "description"):
+            if field in policy and not isinstance(policy[field], str):
+                raise ValueError(f"{field} must be a string")
         validate_policy_extensions(policy)
         c_header = generate_c_header(policy, args.version)
         blob = generate_binary_blob(policy, args.version)
