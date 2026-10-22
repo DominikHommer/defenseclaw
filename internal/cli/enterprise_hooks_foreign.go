@@ -58,7 +58,7 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		OwnedCommands: perUserOwnedHookCommandsForBinary(name, target.UserHome, dataDir, opts.HookBinary),
 	}
 	account := enterpriseForeignHookAccountID(target.SID, target.UID)
-	pending, err := beginEnterpriseForeignHookCleanup(os.Stderr, account, target.UserHome)
+	pending, err := beginEnterpriseForeignHookCleanup(os.Stderr, account, target.UserHome, name)
 	if err != nil {
 		return enterprisepolicy.CleanupResult{}, fmt.Errorf("publish the foreign-hook cleanup denial before editing hooks: %w", err)
 	}

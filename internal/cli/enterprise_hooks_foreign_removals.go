@@ -44,13 +44,16 @@ func enterpriseForeignHookAccountID(sid string, uid int) string {
 // account's agent processes of that connector, and of any other that loads
 // the same file, that started before now stay denied: they may still run a
 // hook they loaded. It runs after the files were cleaned, so every process
-// that could have loaded one started before the recorded time. Failures are
-// logged; the per-call check still applies.
+// that could have loaded one started before the recorded time. A failed
+// ledger write leaves the pending cleanup denial in place.
 func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connectorName string, paths []string) error {
 	identity, ok := connector.CanonicalUserScopedIdentity(account)
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
-	if !ok || connectorName == "" || len(paths) == 0 || cfg == nil || !cfg.StandaloneEnterprise() {
+	if len(paths) == 0 || cfg == nil || !cfg.StandaloneEnterprise() {
 		return nil
+	}
+	if !ok || connectorName == "" {
+		return errors.New("cannot bind the hook removal to an account and connector")
 	}
 	enterpriseForeignHookRemovalsMu.Lock()
 	defer enterpriseForeignHookRemovalsMu.Unlock()
@@ -125,7 +128,7 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 // beginEnterpriseForeignHookCleanup publishes a denial before any user hook
 // file can be removed. All governed connectors are covered because several
 // can load the same file. A failed publication refuses cleanup.
-func beginEnterpriseForeignHookCleanup(stderr io.Writer, account, home string) (string, error) {
+func beginEnterpriseForeignHookCleanup(stderr io.Writer, account, home, connectorName string) (string, error) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return "", nil
 	}
@@ -134,7 +137,13 @@ func beginEnterpriseForeignHookCleanup(stderr io.Writer, account, home string) (
 		return "", err
 	}
 	token := enterprisepolicy.ForeignHookCleanupPendingPrefix + hex.EncodeToString(id[:]) + ">"
-	for _, name := range enterprisepolicy.StandaloneConnectors(cfg) {
+	connectors := append(enterprisepolicy.StandaloneConnectors(cfg), connectorName)
+	seen := map[string]bool{}
+	for _, name := range connectors {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
 		if err := recordEnterpriseForeignHookRemovals(stderr, account, home, name, []string{token}); err != nil {
 			return "", err
 		}

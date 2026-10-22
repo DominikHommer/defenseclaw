@@ -346,7 +346,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		account := &jobs[i].Account
 		kept := jobs[i].Request.ForeignCleanup[:0:0]
 		for _, cleanup := range jobs[i].Request.ForeignCleanup {
-			token, err := beginEnterpriseForeignHookCleanup(stderr, strconv.Itoa(account.UID), account.Home)
+			token, err := beginEnterpriseForeignHookCleanup(stderr, strconv.Itoa(account.UID), account.Home, cleanup.Connector)
 			if err != nil {
 				clean = false
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s %s refused before file removal: %v\n", account.User, cleanup.Connector, err)

@@ -47,7 +47,7 @@ func TestForeignHookRemovalIsDeniedBeforeItsLedgerCommit(t *testing.T) {
 	if err := os.WriteFile(hook, []byte("foreign hook"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	token, err := beginEnterpriseForeignHookCleanup(io.Discard, "1000", home)
+	token, err := beginEnterpriseForeignHookCleanup(io.Discard, "1000", home, "cursor")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +69,16 @@ func TestForeignHookRemovalIsDeniedBeforeItsLedgerCommit(t *testing.T) {
 	if err != nil || slices.ContainsFunc(committed, func(r enterprisepolicy.ForeignHookRemoval) bool { return r.Path == token }) ||
 		!slices.ContainsFunc(committed, func(r enterprisepolicy.ForeignHookRemoval) bool { return r.Path == hook && r.Connector == "cursor" }) {
 		t.Fatalf("cleanup did not commit the exact removal: %+v (%v)", committed, err)
+	}
+}
+
+func TestForeignHookCleanupRefusesUnboundAccount(t *testing.T) {
+	dataDir := useUserCleanupStateDir(t)
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+	cfg = standaloneTestConfig(dataDir)
+	if _, err := beginEnterpriseForeignHookCleanup(io.Discard, "unverified-account", t.TempDir(), "cursor"); err == nil {
+		t.Fatal("cleanup can remove hooks without a denial bound to a verified account")
 	}
 }
 
