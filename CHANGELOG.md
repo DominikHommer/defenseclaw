@@ -24,6 +24,11 @@ for current behavior.
 
 ### Fixed
 
+- **Ordinary Claude Code settings edits keep exporter custody verified.** Doctor compares the managed exporter environment and credential helper with Setup's exact snapshot; changed endpoints, headers, helpers or intentional absences still report drift.
+- **Disabling an unused Local Splunk integration needs no Docker installation.** On Windows, the bundle seeded during installation does not count as a configured stack. Existing runtime credentials and configured destinations still require ownership verification before stopping anything.
+- **Rejected reloads appear in local audit history.** Schema and policy generation refusals emit the mandatory `config.reload.rejected` event through the active configuration, without recording rejected values.
+- **Validation errors name a profile selector once.** Structured errors carry the selector path separately from the correction text.
+- **Disconnected closed hooks retain a truthful denial audit.** A client that disconnects before finalization gets the fail-mode decision in its audit row; stop events and Secure Client retain their existing behavior. A gateway decision still does not prove that the agent received it.
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
 
 ### Removed
