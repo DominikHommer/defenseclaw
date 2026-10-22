@@ -334,8 +334,7 @@ func foreignHookSessionDenialTarget(exchange enterprisepolicy.SessionExchange) (
 type foreignHookRemovalCache struct {
 	mu        sync.Mutex
 	path      string
-	modTime   time.Time
-	size      int64
+	info      fs.FileInfo
 	checkedAt time.Time
 	removals  []enterprisepolicy.ForeignHookRemoval
 	err       error
@@ -352,16 +351,17 @@ func (c *foreignHookRemovalCache) forIdentity(dir, identity string) ([]enterpris
 	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		c.path, c.removals, c.err = "", nil, nil
+		c.path, c.info, c.removals, c.err = "", nil, nil, nil
 		return nil, nil
 	}
 	now := time.Now()
 	// A failed read is not cached: the guardian sets the file's group only
 	// after it replaces the file, and a read in between must not deny every
 	// account's calls until the next recheck.
-	if err == nil && (c.err != nil || path != c.path || !info.ModTime().Equal(c.modTime) || info.Size() != c.size ||
+	if err == nil && (c.err != nil || path != c.path || c.info == nil || !os.SameFile(info, c.info) ||
+		!info.ModTime().Equal(c.info.ModTime()) || info.Size() != c.info.Size() ||
 		now.Sub(c.checkedAt) >= foreignHookRemovalRecheck) {
-		c.path, c.modTime, c.size, c.checkedAt = path, info.ModTime(), info.Size(), now
+		c.path, c.info, c.checkedAt = path, info, now
 		c.removals, c.err = readForeignHookRemovals(path)
 	}
 	if err != nil {

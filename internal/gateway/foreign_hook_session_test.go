@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 type foreignSessionResult struct {
@@ -268,5 +269,56 @@ func TestForeignHookSessionAllowResponseFencesRemovalCommit(t *testing.T) {
 		unlock()
 	case <-time.After(3 * time.Second):
 		t.Fatal("guardian did not acquire the fence after the response")
+	}
+}
+
+// An atomic guardian commit can have the same length and mtime as the old
+// ledger. Its new file identity must invalidate the cache under the fence.
+func TestForeignHookRemovalCacheSeesEqualSizeEqualTimeReplacement(t *testing.T) {
+	dir := t.TempDir()
+	previous := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
+	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
+	at := time.Now().UTC().Format(time.RFC3339)
+	makeLedger := func(identity string) []byte {
+		t.Helper()
+		data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
+			Identity: identity, Connector: "claudecode", Path: "/home/alice/.claude/settings.json",
+			At: at, Mark: runtime.GOOS + ":b:200",
+		}}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	alice, bob := "1001", "1002"
+	first, second := makeLedger(bob), makeLedger(alice)
+	if len(first) != len(second) {
+		t.Fatal("the replacement is not the same size")
+	}
+	if err := os.WriteFile(path, first, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	cache := &foreignHookRemovalCache{}
+	if got, err := cache.forIdentity(dir, alice); err != nil || len(got) != 0 {
+		t.Fatalf("first ledger = %+v, %v", got, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(dir, "replacement")
+	if err := os.WriteFile(tmp, second, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(tmp, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.ReplaceFile(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := cache.forIdentity(dir, alice); err != nil || len(got) != 1 || got[0].Identity != alice {
+		t.Fatalf("same-size and same-mtime removal was missed: %+v, %v", got, err)
 	}
 }
