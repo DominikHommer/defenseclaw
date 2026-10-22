@@ -99,7 +99,7 @@ func (c *failingClaudeRefresh) HookRuntimeArtifacts(opts connector.SetupOpts) []
 	if c.verifyFails && c.setups == 1 {
 		return []string{filepath.Join(opts.DataDir, "missing-runtime-artifact")}
 	}
-	return c.ClaudeCodeConnector.HookScripts(opts)
+	return c.HookScripts(opts)
 }
 
 func (c *failingClaudeRefresh) Teardown(ctx context.Context, opts connector.SetupOpts) error {
