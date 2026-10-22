@@ -63,6 +63,17 @@ describe('installed fail mode environment contract', () => {
   });
 });
 
+describe('quarantine publication and cleanup', () => {
+  it('distinguishes an unpublished copy from failed source removal', () => {
+    const text = page('reference/scanning/scanners.mdx');
+    assert.doesNotMatch(text, /Two cases do not end in quarantine storage/);
+    assert.match(text, /Before a verified copy is published.*files stay in place/i);
+    assert.match(text, /After publication.*verified copy stays in quarantine storage/i);
+    assert.match(text, /source.*partly or completely removed/i);
+    assert.match(text, /`quarantine failed`.*install block and runtime disable stay/i);
+  });
+});
+
 describe('Intune base config versus the signed bundle', () => {
   it('names exactly the blocks the packager compares', () => {
     const packager = readFileSync(
