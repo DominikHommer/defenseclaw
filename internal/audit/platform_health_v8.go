@@ -869,7 +869,6 @@ func newActivityRuntimeV8GeneratedMetrics(
 	event Event,
 	action string,
 	targetType string,
-	actor string,
 	diffEntries int,
 ) ([]RuntimeV8GeneratedMetric, error) {
 	if event.Timestamp.IsZero() || diffEntries < 0 {
@@ -882,7 +881,9 @@ func newActivityRuntimeV8GeneratedMetrics(
 	}{
 		action:     optionalAuditMetricDimension(action),
 		targetType: optionalAuditMetricDimension(targetType),
-		actor:      optionalAuditMetricDimension(actor),
+		// Account references belong in the protected audit occurrence, never
+		// in metric dimensions (including bundle and ordinary activity).
+		actor: observability.Present("local_account"),
 	}
 	build := func(
 		family observability.EventName,
