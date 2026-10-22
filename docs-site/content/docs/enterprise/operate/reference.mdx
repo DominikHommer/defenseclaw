@@ -81,18 +81,82 @@ the run warns `retry limit reached`; run `ensure` once the cause is fixed.
 
 ### Release floor limits
 
-On Linux and macOS, `ensure` checks the confirmed bundle's release floor before
-applying a payload, including a reinstall or repair. Package scripts shipped in
-1.0.4 and later check before replacing files. The apt hook of an installed
-1.0.4 or later package also checks older packages installed through `apt` or
-`apt-get`. A non-purge uninstall keeps a retained floor checker for later
-packages that support this check; a check that cannot prove the floor refuses.
+On Linux and macOS, `install`, `upgrade`, `repair` and `ensure` check the
+confirmed bundle's release floor before they change anything when:
+
+- there is no deployment record (a first install, or a reinstall after
+  `uninstall --keep-state`),
+- the version changes, up or down, or
+- the version is not a release (for example `dev`).
+
+If that check cannot read the floor, the run refuses (`product_floor_refused`).
+
+A run that keeps the recorded release (a repair, or a reinstall of the same
+version while the deployment record is there) does not check the floor again:
+the bundle was checked against that release when it was applied. If the
+confirmed bundle cannot be read, such a run keeps the config the last deployment
+committed, repairs the host and warns `bundle_state_unreadable`. With
+`--config`, or with no committed config, it stops with that code as an error
+instead. Deliver a new signed bundle to replace the damaged one.
+
+Package scripts shipped in 1.0.4 and later run the same check with the installed
+gateway before they replace files. When that gateway is gone (after
+`uninstall --keep-state`, or an uninstall that failed after it removed the
+binaries), they use the retained floor checker: a copy of the gateway that a
+non-purge uninstall keeps in the lifecycle directory. A checker that is there
+but cannot be read, is not a root-owned file only root can change, or does not
+run, refuses the install. If the uninstall could not keep the copy, it warns
+`floor_checker_not_kept`. The next package's preinstall then has nothing to
+check with and installs its files; only its postinstall `ensure` refuses a
+release below the floor, after the files are in place. The apt hook of an
+installed 1.0.4 or later package runs the check for older packages installed
+through `apt` or `apt-get`.
 
 Packages older than 1.0.4 installed through `rpm`, `dnf`, `dpkg -i` or the
 macOS Installer run their own older scripts, which do not check the floor.
 `dpkg -i` does not run the apt hook. Windows Setup does not check the floor.
 Keep package deployment under administrator control. See [Roll
 back](/docs/enterprise/operate/lifecycle#roll-back) for the supported procedure.
+
+### Lower the release floor
+
+To install a release below the confirmed bundle's `min_product_version`, first
+replace that bundle with one signed with a lower floor. The rollback marker and
+`--allow-downgrade` do not lift the floor.
+
+1. Sign your policy directory again with your bundle signing key. Give a
+   `--version` above the confirmed bundle's version, and the oldest release you
+   need as `--min-product-version` (leave the flag out for no floor). Sign with
+   the release the devices run now.
+
+   ```bash
+   defenseclaw-gateway enterprise bundle sign --in ./policy --out v13.dcbundle \
+     --key signing.pem --key-id acme-2026a --tenant acme --device-group eng-laptops \
+     --version 13 --created-by operator:alice --min-product-version 1.0.3 \
+     --summary "Allow rollback to 1.0.3"
+   ```
+
+2. Check it on a device, as root. On macOS the gateway is
+   `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`.
+
+   ```bash
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise bundle verify --bundle v13.dcbundle --json
+   ```
+
+3. Deliver it the way you deliver your bundles, or apply it as root:
+
+   ```bash
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise bundle apply --bundle v13.dcbundle --json
+   ```
+
+4. Check that the new floor allows the release. Exit `0` allows it; exit `3`
+   refuses it and says why.
+
+   ```bash
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise bundle floor-check --product-version 1.0.3
+   ```
+
+5. Roll back as in [Roll back](/docs/enterprise/operate/lifecycle#roll-back).
 
 ### Applying a config change
 
