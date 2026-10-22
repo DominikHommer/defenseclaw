@@ -191,7 +191,7 @@ func TestForeignHookAllowKeepsDeadlineAfterFailedFlush(t *testing.T) {
 	}
 	// A successful flush clears the deadline; an unsuccessful one must not
 	// leave a complete response that the connection may send after removal.
-	if writer.ResponseRecorder.Body.Len() == 0 {
+	if writer.Body.Len() == 0 {
 		t.Fatal("test writer did not buffer the response")
 	}
 	if writer.deadline.IsZero() {
