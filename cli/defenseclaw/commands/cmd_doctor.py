@@ -272,6 +272,7 @@ class _DoctorResult:
         "quiet",
         "gateway_down",
         "sidecar_unverified",
+        "gateway_start_waited",
     )
 
     def __init__(
@@ -306,6 +307,9 @@ class _DoctorResult:
         # True once the Sidecar API row found a listener on the API port that
         # is not this account's verified gateway (its /health still answers).
         self.sidecar_unverified = False
+        # True once a gateway row waited for the gateway start lock, so a
+        # start, restart or stop that outlasts the wait is waited for once.
+        self.gateway_start_waited = False
 
     @property
     def passive_reason(self) -> str:
@@ -3990,8 +3994,24 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
     )
     if code == 200:
         trust = _trusted_gateway_listener(cfg)
-        holder = "" if trust.trusted else _gateway_port_holder(cfg)
-        if trust.trusted and _replaced_gateway_executable(trust.record, trust.process, platform_name=sys.platform):
+        lock_holder = None
+        if not trust.trusted:
+            locked, lock_holder = _gateway_start_in_progress(cfg, r)
+            if locked and lock_holder is None:
+                trust = _trusted_gateway_listener(cfg)
+        holder = "" if trust.trusted or lock_holder is not None else _gateway_port_holder(cfg)
+        if lock_holder is not None:
+            # The listener can be mid-handover (GAP-0535): it is neither this
+            # account's verified gateway nor shown to be another process's.
+            _emit(
+                "warn",
+                "Sidecar API",
+                f"{bind}:{cfg.gateway.api_port} answers, but {_gateway_start_in_progress_detail(lock_holder)}",
+                r=r,
+                remediation=_GATEWAY_START_IN_PROGRESS_REMEDIATION,
+            )
+            r.sidecar_unverified = True
+        elif trust.trusted and _replaced_gateway_executable(trust.record, trust.process, platform_name=sys.platform):
             _emit(
                 "warn",
                 "Sidecar API",
@@ -4257,6 +4277,19 @@ def _check_gateway_auth(cfg, r: _DoctorResult) -> bool:
         return True
 
     trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        locked, holder = _gateway_start_in_progress(cfg, r)
+        if holder is not None:
+            _emit(
+                "warn",
+                "Gateway authentication",
+                f"{_gateway_start_in_progress_detail(holder)}; the gateway token was not sent",
+                r=r,
+                remediation=_GATEWAY_START_IN_PROGRESS_REMEDIATION,
+            )
+            return True
+        if locked:
+            trust = _trusted_gateway_listener(cfg)
     if not trust.trusted:
         _emit(
             "fail",
@@ -5939,13 +5972,16 @@ def _managed_gateway_listener_evidence(
     return _lsof_gateway_listener_evidence(port, host=host)
 
 
-#: How long doctor waits for a gateway start or restart in progress to finish
-#: before it reports the restart instead of listener ownership.
+#: How long doctor waits for a gateway start, restart or stop in progress to
+#: finish before it reports it instead of listener ownership.
 _GATEWAY_RESTART_WAIT_SECONDS = 20.0
 
 #: The lock ``defenseclaw-gateway start`` and ``restart`` hold until the
-#: gateway is ready (internal/cli/gateway_cold_start.go gatewayStartLockName).
+#: gateway is ready, and ``stop`` holds while it stops the gateway
+#: (internal/cli/gateway_cold_start.go gatewayStartLockName).
 _GATEWAY_START_LOCK_NAME = "gateway.start.lock"
+
+_GATEWAY_START_IN_PROGRESS_REMEDIATION = "rerun `defenseclaw doctor` when the gateway start, restart or stop finishes"
 
 
 def _gateway_start_lock_holder(data_dir: str, *, proc_locks: str = "/proc/locks") -> int | None:
@@ -5995,13 +6031,43 @@ def _gateway_start_lock_holder(data_dir: str, *, proc_locks: str = "/proc/locks"
 
 
 def _wait_for_gateway_start_lock(data_dir: str, timeout: float) -> bool:
-    """Wait until no start or restart holds the gateway start lock."""
+    """Wait until no start, restart or stop holds the gateway start lock."""
     deadline = time.monotonic() + timeout
     while _gateway_start_lock_holder(data_dir) is not None:
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.2)
     return True
+
+
+def _gateway_start_in_progress(cfg, r: _DoctorResult) -> tuple[bool, int | None]:
+    """Return whether the start lock was held, and its holder if it still is.
+
+    A start, restart or stop holds the gateway start lock while the listener
+    can be mid-handover (GAP-0535), so listener ownership is read once it has
+    finished. One doctor run waits for it once; a later row reports the same
+    one still running without waiting again. The holder is 0 when unknown.
+    """
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return False, None
+    holder = _gateway_start_lock_holder(data_dir)
+    if holder is None:
+        return False, None
+    if r.gateway_start_waited:
+        return True, holder
+    r.gateway_start_waited = True
+    if _wait_for_gateway_start_lock(data_dir, _GATEWAY_RESTART_WAIT_SECONDS):
+        return True, None
+    return True, holder
+
+
+def _gateway_start_in_progress_detail(holder: int) -> str:
+    by = f" (PID {holder})" if holder else ""
+    return (
+        f"a gateway start, restart or stop{by} was still in progress after "
+        f"{_GATEWAY_RESTART_WAIT_SECONDS:g} s; listener ownership was not checked"
+    )
 
 
 def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
@@ -6015,22 +6081,19 @@ def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
         return
 
     trust = _trusted_gateway_listener(cfg)
-    data_dir = _configured_gateway_data_dir(cfg)
-    if not trust.trusted and data_dir and (holder := _gateway_start_lock_holder(data_dir)) is not None:
-        # A start or restart holds the gateway start lock, so the listener can
-        # be mid-handover (GAP-0535). Check ownership once it has finished.
-        if not _wait_for_gateway_start_lock(data_dir, _GATEWAY_RESTART_WAIT_SECONDS):
-            by = f" (PID {holder})" if holder else ""
+    if not trust.trusted:
+        locked, holder = _gateway_start_in_progress(cfg, r)
+        if holder is not None:
             _emit(
                 "warn",
                 "Gateway home",
-                f"a gateway start or restart{by} was still in progress after "
-                f"{_GATEWAY_RESTART_WAIT_SECONDS:.0f} s; listener ownership was not checked",
+                _gateway_start_in_progress_detail(holder),
                 r=r,
-                remediation="rerun `defenseclaw doctor` when the gateway start or restart finishes",
+                remediation=_GATEWAY_START_IN_PROGRESS_REMEDIATION,
             )
             return
-        trust = _trusted_gateway_listener(cfg)
+        if locked:
+            trust = _trusted_gateway_listener(cfg)
     if trust.trusted:
         _emit(
             "pass",
