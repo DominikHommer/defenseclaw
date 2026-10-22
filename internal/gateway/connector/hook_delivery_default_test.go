@@ -195,8 +195,9 @@ func TestNormalizeHookFailModeOpenIgnoresCase(t *testing.T) {
 // TestManagedHookDeliveryOutsideSecureClientFailsClosed keeps origin/main's
 // managed contract for every profile but Secure Client: an unset mode renders
 // closed, and a managed hook blocks on a gateway outage or a missing token
-// even when its baked mode is open. Response failures follow the baked mode;
-// a binding error (stdin naming another event) is integrity and blocks.
+// even when its baked mode is open. A baked open covers a gateway outage only
+// (r104 W8 review P2): an unusable answer, a missing token and a binding
+// error (stdin naming another event) block in every mode.
 func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("native Windows uses the authenticated hook executor")
@@ -252,9 +253,8 @@ func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 				out, err := cmd.CombinedOutput()
 				blocked := err != nil || strings.Contains(string(out), `"decision":"block"`)
 				// The baked mode is the administrator's (owner decision
-				// 2026-10-20): open lets an outage and an unusable answer
-				// through; a missing token is a broken install and blocks.
-				wantBlocked := scenario == "missing-token" || scenario == "binding-error" || wantBaked == "closed"
+				// 2026-10-20): open lets an outage through, nothing else.
+				wantBlocked := scenario != "outage" || wantBaked == "closed"
 				if blocked != wantBlocked {
 					t.Fatalf("blocked=%t want=%t err=%v output=%s", blocked, wantBlocked, err, out)
 				}
