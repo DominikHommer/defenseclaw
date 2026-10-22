@@ -68,6 +68,15 @@ func TestAuditExportManagedEnvironmentPointsAnAdministratorAtTheDeployment(t *te
 			t.Fatalf("enterprise acp: %s = %q, want %q", key, got, value)
 		}
 	}
+	withAuditExportManagedSeams(t, true, true)
+	if err := prepareProvenanceEnvironment(); err != nil {
+		t.Fatalf("provenance: %v", err)
+	}
+	for key, value := range want {
+		if got := os.Getenv(key); got != value {
+			t.Fatalf("provenance: %s = %q, want %q", key, got, value)
+		}
+	}
 }
 
 // GAP-2039: a standard account's read-only managed view (AI Discovery,
@@ -104,6 +113,9 @@ func TestManagedAdministratorViewRefusesAStandardAccountWithElevationRequired(t 
 	}
 	if err := prepareManagedAuditExportEnvironment(); commandExitCode(err) != 5 || !strings.Contains(fmt.Sprint(err), "audit export -o <file>") {
 		t.Fatalf("audit export refusal = %v", err)
+	}
+	if err := prepareProvenanceEnvironment(); commandExitCode(err) != 5 || !strings.Contains(fmt.Sprint(err), "provenance show") {
+		t.Fatalf("provenance refusal = %v", err)
 	}
 	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
 		return enterpriseGatewayAIUsage{}, "", pinManagedAdministratorEnvironment("enterprise windows discovery", refusal)

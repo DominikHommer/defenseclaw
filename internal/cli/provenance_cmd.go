@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +18,19 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+// Use the service manager for a standalone deployment, and the existing
+// process-identity record for a per-user gateway. Never trust a loopback
+// listener merely because it answers on the configured port.
+var provenanceGatewayPID = func(ctx context.Context) (int, error) {
+	if cfg.StandaloneEnterprise() {
+		return provenanceManagedGatewayPID(ctx)
+	}
+	if running, pid := gatewayManagedState(); running && pid > 0 {
+		return pid, nil
+	}
+	return 0, fmt.Errorf("gateway process identity is unavailable")
+}
 
 var provenanceCmd = &cobra.Command{
 	Use:   "provenance",
@@ -31,6 +45,9 @@ var provenanceShowCmd = &cobra.Command{
 		if err := managedStandardUserGatewayRefusal(); err != nil {
 			return err
 		}
+		if err := prepareProvenanceEnvironment(); err != nil {
+			return err
+		}
 		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 		if err := loadGatewayCommandConfigFor(cmd); err != nil {
 			return fmt.Errorf("cannot locate the running gateway: %w; run `defenseclaw-gateway status`", err)
@@ -43,6 +60,12 @@ var provenanceShowCmd = &cobra.Command{
 func init() {
 	provenanceCmd.AddCommand(provenanceShowCmd)
 	rootCmd.AddCommand(provenanceCmd)
+}
+
+func prepareProvenanceEnvironment() error {
+	return pinManagedAdministratorEnvironment("provenance show", func() string {
+		return windowsManagedStandardUserViewAnswer("the managed provenance", "provenance show")
+	})
 }
 
 func runProvenanceShow(cmd *cobra.Command, _ []string) error {
@@ -77,7 +100,13 @@ func runningGatewayProvenance(cmd *cobra.Command) (version.Provenance, error) {
 	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
 		return version.Provenance{}, fmt.Errorf("the gateway API address must be a loopback IP")
 	}
-	req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, sidecarStatusURL(cfg), nil)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+	defer cancel()
+	pid, err := provenanceGatewayPID(ctx)
+	if err != nil || pid <= 0 {
+		return version.Provenance{}, fmt.Errorf("gateway process identity is unavailable")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sidecarStatusURL(cfg), nil)
 	if err != nil {
 		return version.Provenance{}, err
 	}
@@ -85,8 +114,23 @@ func runningGatewayProvenance(cmd *cobra.Command) (version.Provenance, error) {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	client := &http.Client{
-		Timeout:       2 * time.Second,
-		Transport:     &http.Transport{Proxy: nil},
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			Proxy: nil,
+			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+				if err != nil {
+					return nil, err
+				}
+				// Check after connecting, before HTTP can send the token.
+				holder, err := gatewayPortHolder(host, cfg.Gateway.APIPort)
+				if err != nil || holder.PID <= 0 || holder.PID != pid {
+					_ = conn.Close()
+					return nil, fmt.Errorf("gateway listener identity is unproven; the gateway token was not sent")
+				}
+				return conn, nil
+			},
+		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	defer client.CloseIdleConnections()
