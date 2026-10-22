@@ -185,7 +185,13 @@ func (b *profileAgentBridge) legacyOf(agent string) (string, func(string) bool) 
 	// agent's own legacy identity, which no record links to it.
 	legacy := b.derived[agent]
 	if legacy == "" {
-		legacy = derivedLegacyAgentID(agent)
+		var exhausted bool
+		legacy, exhausted = derivedLegacyAgentID(agent)
+		if exhausted && legacy == "" {
+			// The bounded derivation cache dropped this identity. Its
+			// legacy owner cannot be excluded, even with a readable ledger.
+			return "", func(entry string) bool { return entry != agent }
+		}
 	}
 	if legacy == "" || !b.entries[legacy] {
 		return "", nil
@@ -291,7 +297,8 @@ func (b *profileAgentBridge) readLedger() (profileAgentLinks, bool) {
 // past the cap, an identity is known by its record only.
 var derivedLegacyAgentIDs struct {
 	sync.Mutex
-	ids map[string]string
+	ids       map[string]string
+	exhausted bool
 }
 
 const derivedLegacyAgentIDsMax = 4096
@@ -310,13 +317,15 @@ func noteDerivedLegacyAgentID(in agentidentity.Inputs) {
 	}
 	if _, known := derivedLegacyAgentIDs.ids[id]; known || len(derivedLegacyAgentIDs.ids) < derivedLegacyAgentIDsMax {
 		derivedLegacyAgentIDs.ids[id] = legacy
+	} else {
+		derivedLegacyAgentIDs.exhausted = true
 	}
 }
 
-func derivedLegacyAgentID(agent string) string {
+func derivedLegacyAgentID(agent string) (string, bool) {
 	derivedLegacyAgentIDs.Lock()
 	defer derivedLegacyAgentIDs.Unlock()
-	return derivedLegacyAgentIDs.ids[agent]
+	return derivedLegacyAgentIDs.ids[agent], derivedLegacyAgentIDs.exhausted
 }
 
 // profileAgentNamesakes returns the names of the accounts of another domain

@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -54,9 +55,10 @@ func TestBareReplacementCannotInheritUnprovenLegacyAssignmentInEitherOrder(t *te
 	if legacy == current {
 		t.Fatal("test needs distinct legacy and bare current IDs")
 	}
-	previous := derivedLegacyAgentIDs.ids
-	t.Cleanup(func() { derivedLegacyAgentIDs.ids = previous })
+	previous, previousExhausted := derivedLegacyAgentIDs.ids, derivedLegacyAgentIDs.exhausted
+	t.Cleanup(func() { derivedLegacyAgentIDs.ids, derivedLegacyAgentIDs.exhausted = previous, previousExhausted })
 	derivedLegacyAgentIDs.ids = nil
+	derivedLegacyAgentIDs.exhausted = false
 	noteDerivedLegacyAgentID(bare)
 	for _, recordedAccount := range []string{"CORP\\alice", "alice"} {
 		records := []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, recordedAccount)}
@@ -98,9 +100,10 @@ func TestUnprovenLegacyAgentBlocksWithWeakDefault(t *testing.T) {
 	current := agentidentity.AgentID(bare)
 	records := []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice")}
 	legacyBridgeLedger(t, &records)
-	previous := derivedLegacyAgentIDs.ids
-	t.Cleanup(func() { derivedLegacyAgentIDs.ids = previous })
+	previous, previousExhausted := derivedLegacyAgentIDs.ids, derivedLegacyAgentIDs.exhausted
+	t.Cleanup(func() { derivedLegacyAgentIDs.ids, derivedLegacyAgentIDs.exhausted = previous, previousExhausted })
 	derivedLegacyAgentIDs.ids = nil
+	derivedLegacyAgentIDs.exhausted = false
 	noteDerivedLegacyAgentID(bare)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "observe"
@@ -120,6 +123,31 @@ func TestUnprovenLegacyAgentBlocksWithWeakDefault(t *testing.T) {
 	response := api.evaluateAgentHook(ctx, agentHookRequest{ConnectorName: "codex", HookEventName: "PreToolUse"})
 	if response.Action != "block" || response.Mode != "action" {
 		t.Fatalf("weak default let unproven legacy call through: action=%q mode=%q", response.Action, response.Mode)
+	}
+}
+
+func TestLegacyBridgeTreatsAnExhaustedDerivationCacheAsUnproven(t *testing.T) {
+	bare := legacyBridgeInputs("alice")
+	legacy, current := agentidentity.LegacyAgentID(bare), agentidentity.AgentID(bare)
+	previous, previousExhausted := derivedLegacyAgentIDs.ids, derivedLegacyAgentIDs.exhausted
+	t.Cleanup(func() { derivedLegacyAgentIDs.ids, derivedLegacyAgentIDs.exhausted = previous, previousExhausted })
+	derivedLegacyAgentIDs.ids = make(map[string]string, derivedLegacyAgentIDsMax)
+	derivedLegacyAgentIDs.exhausted = false
+	for i := range derivedLegacyAgentIDsMax {
+		derivedLegacyAgentIDs.ids[fmt.Sprintf("filler-%d", i)] = "agt-placeholder"
+	}
+	noteDerivedLegacyAgentID(bare)
+	if _, exhausted := derivedLegacyAgentID(current); !exhausted {
+		t.Fatal("a dropped legacy derivation was not marked unproven")
+	}
+	records := []inventory.AgentIdentityRecord{}
+	legacyBridgeLedger(t, &records)
+	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
+		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
+	}}
+	matched, unresolved := set.profileAgent(current)
+	if matched != current || unresolved == nil || !unresolved(legacy) {
+		t.Fatalf("exhausted derivation matched=%q unresolved=%v, want guarded legacy %q", matched, unresolved != nil, legacy)
 	}
 }
 
@@ -333,9 +361,10 @@ func TestPrunedLegacyAgentAssignmentKeepsItsAccount(t *testing.T) {
 	})
 	t.Run("not recorded yet", func(t *testing.T) {
 		pruned(t)
-		previous := derivedLegacyAgentIDs.ids
-		t.Cleanup(func() { derivedLegacyAgentIDs.ids = previous })
+		previous, previousExhausted := derivedLegacyAgentIDs.ids, derivedLegacyAgentIDs.exhausted
+		t.Cleanup(func() { derivedLegacyAgentIDs.ids, derivedLegacyAgentIDs.exhausted = previous, previousExhausted })
 		derivedLegacyAgentIDs.ids = nil
+		derivedLegacyAgentIDs.exhausted = false
 		noteDerivedLegacyAgentID(legacyBridgeInputs("alice@corp.example"))
 		hook := legacyBridgeHook(t, legacy)
 		got, mode := hook(corp)
