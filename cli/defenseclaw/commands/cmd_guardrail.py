@@ -319,6 +319,17 @@ def _toggle_connector_guardrail(
 
     label = _connector_label(key.strip().lower())
 
+    # With the global switch off the connector stays off whatever its own
+    # flag says: this said "already enabled", or saved the flag and reported
+    # setup complete, and changed nothing (GAP-0550).
+    if enable and not app.cfg.guardrail.enabled:
+        ux.err(f"The guardrail is off for every agent, so {label} stays off.", indent="  ")
+        ux.subhead(
+            "Run 'defenseclaw guardrail enable' to turn it back on; nothing was changed.",
+            indent="    ",
+        )
+        raise SystemExit(1)
+
     # No-op if already in the requested state.
     if app.cfg.guardrail.effective_enabled(key) == enable:
         state = "enabled" if enable else "disabled"

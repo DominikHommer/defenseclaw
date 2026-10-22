@@ -5583,9 +5583,9 @@ def _check_connector_version_supported_for_setup(
     """Verify the selected connector's installed version before setup.
 
     Runtime enforcement happens in the Go gateway too, but setup should tell
-    the operator before it writes config and restarts services. Unknown hook
-    contracts are fatal in action mode unless the explicit exploratory
-    override used by the gateway is set.
+    the operator before it writes config and restarts services. A version with
+    no hook contract is fatal in observe and action mode unless the explicit
+    exploratory override used by the gateway is set.
 
     ``_allow_prompt`` gates the interactive "trust this directory" remediation.
     It defaults to ``True`` so direct CLI use is unchanged, but callers that
@@ -5802,25 +5802,29 @@ def _check_connector_version_supported_for_setup(
         label,
         compatibility.normalized_version,
     )
-    strict_unknown = connector == "opencode"
-    if compatibility.status == STATUS_UNKNOWN and not allow_drift and (action_mode or strict_unknown):
+    # Refused in observe mode too: the gateway does not start a connector
+    # whose version has no contract (Claude Code and Codex render their hooks
+    # from it), so "continuing in observe mode" left the gateway down for
+    # every connector after the restart (GAP-0554).
+    if compatibility.status == STATUS_UNKNOWN and not allow_drift:
         if emit:
             ux.err(detail)
             ux.subhead(upgrade_guidance)
-            if strict_unknown:
+            if connector == "opencode":
                 ux.subhead(
                     "OpenCode requires a bounded validated plugin contract in both observe and action mode; "
                     "refusing setup before activation."
                 )
             else:
-                ux.subhead("Refusing action-mode connector setup before activation.")
+                mode_name = "action" if action_mode else "observe"
+                ux.subhead(
+                    f"Refusing {mode_name}-mode connector setup before activation: the gateway installs no "
+                    "hooks for a version without a hook contract. Nothing was changed."
+                )
             ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
         return False
     if emit:
-        if allow_drift:
-            ux.warn(detail + " Continuing because the explicit drift override is set.")
-        else:
-            ux.warn(detail + " Continuing in observe mode under the connector's established warning policy.")
+        ux.warn(detail + " Continuing because the explicit drift override is set.")
         ux.subhead(upgrade_guidance)
     return True
 

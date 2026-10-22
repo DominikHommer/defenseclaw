@@ -138,4 +138,4 @@ The ACP credential works on the two signed routes only; it gets `401` on the two
 
 ## Managed computers
 
-`defenseclaw-gateway enterprise acp` has `enroll`, `verify` and `revoke`, each taking `--user`, `--client`, `--agent` and `--profile`. Each enrollment is a unique credential for one user, editor, agent and central profile. The administrator commands never write an editor profile; the enrolled user runs the setup command the enrollment reports.
+`defenseclaw-gateway enterprise acp` has `enroll`, `verify` and `revoke`, each taking `--user`, `--client`, `--agent` and `--profile`, and `list`. Each enrollment is a unique credential for one user, editor, agent and central profile. `list` shows every enrollment with its user, editor, agent, profile and whether the user has run setup (`--json` for the same rows). The administrator commands never write an editor profile. The enrolled user runs the command the enrollment reports, `defenseclaw-gateway enterprise acp setup --client --agent --profile`, which writes the editor entry and the contract lock as that user.

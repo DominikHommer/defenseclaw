@@ -750,6 +750,25 @@ class PerConnectorToggleTests(unittest.TestCase):
         restart_mock.assert_called_once()
         self.assertEqual(restart_mock.call_args.kwargs.get("connector"), "codex")
 
+    def test_enable_one_connector_after_global_disable_says_run_enable(self):
+        # GAP-0550: after `setup guardrail --disable` this said "Connector
+        # Codex is already enabled." and left every agent off.
+        runner = CliRunner()
+        for own in (None, False):
+            app = make_multi_ctx({"codex": own, "claudecode": None}, enabled=False)
+            with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+                result = runner.invoke(
+                    cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes"], obj=app
+                )
+            self.assertEqual(result.exit_code, 1, msg=result.output)
+            self.assertNotIn("already enabled", result.output)
+            self.assertIn("defenseclaw guardrail enable", result.output)
+            self.assertIn("nothing was changed", result.output)
+            self.assertFalse(app.cfg.guardrail.enabled)
+            self.assertEqual(app.cfg.guardrail.connectors["codex"].enabled, own)
+            app.cfg.save.assert_not_called()
+            restart_mock.assert_not_called()
+
     def test_enable_one_connector_flips_back(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": False, "claudecode": None})

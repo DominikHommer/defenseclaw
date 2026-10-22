@@ -481,7 +481,7 @@ func runHook(ctx context.Context, opts Options) int {
 		resolveManagedStandaloneFailureEvent(&opts, sp)
 		if opts.ExplainUnenrolledAccount && !sp.failOpenOnly &&
 			(reason == managedSIDUnregisteredReason || reason == managedEnrollmentPendingReason) {
-			return failUnenrolled(opts, sp, reason)
+			return failEnrollmentRefusal(opts, sp, reason)
 		}
 		return failUnreachable(
 			opts,
@@ -1015,7 +1015,15 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		if strings.TrimSpace(opts.Event) == "" {
 			opts.Event = resolveHookEvent("", payload)
 		}
-		return failUnenrolled(opts, sp, managedUIDUnregisteredReason)
+		return failEnrollmentRefusal(opts, sp, managedUIDUnregisteredReason)
+	case resp.StatusCode == http.StatusForbidden && managedStandaloneHook(opts) &&
+		refusalReason(body) == managedRootDeniedReason:
+		// enrollment.root: deny refuses root: say so, not "an answer
+		// DefenseClaw could not use" (GAP-0556).
+		if strings.TrimSpace(opts.Event) == "" {
+			opts.Event = resolveHookEvent("", payload)
+		}
+		return failEnrollmentRefusal(opts, sp, managedRootDeniedReason)
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		// An authentication refusal is integrity, not an outage.
 		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
@@ -2129,6 +2137,15 @@ const managedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
 // account, but it has not signed in since, so it has no runtime yet.
 const managedEnrollmentPendingReason = "enterprise_managed_enrollment_pending"
 
+// managedRootDeniedReason is the Unix standalone gateway refusal of uid 0
+// under enrollment.root: deny (internal/gateway managedHookReasonRootDenied).
+const managedRootDeniedReason = "enterprise_managed_root_denied"
+
+// rootDeniedExplanation is why root's call is blocked while the
+// administrator's policy refuses root.
+const rootDeniedExplanation = "your organization does not allow agents to run as root on this computer. " +
+	"Run the agent from your own account (" + managedRootDeniedReason + ")"
+
 // managedUIDUnregisteredReason is the Unix standalone gateway refusal of an
 // account that is not enrolled (internal/gateway managedHookReasonUIDUnregistered).
 const managedUIDUnregisteredReason = "enterprise_managed_uid_unregistered"
@@ -2152,13 +2169,14 @@ const unenrolledAccountExplanation = "this account is not enrolled yet; restart 
 	"For Claude Code, the wait starts at its first start if that is later. " +
 	"If this continues, the policy may exclude this account: ask your administrator"
 
-// failUnenrolled blocks, like failUnreachable in closed mode, a tool call of
-// an account the administrator has not enrolled (yet) or excludes, and says
-// so: the gateway is up, and the refusal is the enrollment policy. An agent
+// failEnrollmentRefusal blocks, like failUnreachable in closed mode, a tool
+// call of an account the administrator has not enrolled (yet) or excludes, or
+// of root under enrollment.root: deny, and says so: the gateway is up, and
+// the refusal is the enrollment policy. An agent
 // that shows its structured denial rather than stderr (Codex, Cursor and
 // the JSON-bodied hooks) gets the same explanation instead of the generic
 // failed-closed text.
-func failUnenrolled(opts Options, sp spec, reason string) int {
+func failEnrollmentRefusal(opts Options, sp spec, reason string) int {
 	if !sp.failOpenOnly && failClosedStopEvent(opts, sp) {
 		// Nothing is refused, so no refusal is reported.
 		return allowFailClosedStop(opts, sp, reason, "transport")
@@ -2169,11 +2187,14 @@ func failUnenrolled(opts Options, sp spec, reason string) int {
 		return code
 	}
 	why := unenrolledAccountExplanation
-	if reason == managedUIDUnregisteredReason {
+	switch reason {
+	case managedUIDUnregisteredReason:
 		why = unixUnenrolledAccountExplanation
+	case managedRootDeniedReason:
+		why = rootDeniedExplanation
 	}
 	explanation := "DefenseClaw: " + why
-	if managedStandaloneHook(opts) && reason == managedUIDUnregisteredReason {
+	if managedStandaloneHook(opts) && (reason == managedUIDUnregisteredReason || reason == managedRootDeniedReason) {
 		explanation = "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + why + "."
 	}
 	// Claude Code shows a structured block without its hook-command prefix

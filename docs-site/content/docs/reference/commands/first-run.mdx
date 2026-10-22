@@ -35,7 +35,7 @@ On a terminal, `init` runs local agent discovery, pre-selects every installed ho
 
 Proxy connectors are detected but left out of the observe-all set, because they own the single LLM proxy port. Use `defenseclaw setup <proxy>` for them.
 
-An agent version newer than DefenseClaw's tested versions keeps action mode and is reported as untested. An action connector whose installed version has no hook contract is downgraded to observe with a warning. See [Hook contracts](/docs/reference/apis/hook-contracts).
+An agent version newer than DefenseClaw's tested versions keeps action mode and is reported as untested. An action connector whose installed version has no hook contract is downgraded to observe with a warning. For Claude Code and Codex the gateway then does not start, because their hooks are built from the contract: upgrade the agent and run `defenseclaw setup <connector>`. See [Hook contracts](/docs/reference/apis/hook-contracts).
 
 Scripted use skips the wizard:
 

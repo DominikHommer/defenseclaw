@@ -121,6 +121,8 @@ func hermesFailClosed(opts Options, sp spec, layer, reason string) (int, bool) {
 		text = "DefenseClaw blocked this tool call: " + unenrolledAccountExplanation + "."
 	case managedUIDUnregisteredReason:
 		text = "DefenseClaw blocked this tool call: " + unixUnenrolledAccountExplanation + "."
+	case managedRootDeniedReason:
+		text = "DefenseClaw blocked this tool call: " + rootDeniedExplanation + "."
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s\n", sp.subject, reason)
 	fmt.Fprintln(opts.Stdout, `{"action":"block","message":`+mustJSONString(text)+`}`)

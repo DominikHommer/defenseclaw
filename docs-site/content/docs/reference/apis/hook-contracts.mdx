@@ -53,7 +53,7 @@ DefenseClaw assumes a connector version works unless it knows otherwise.
 | Case | What happens |
 | --- | --- |
 | Untested newer version: above every tested range, or between two exact pins of one contract | Uses the newest contract. Setup keeps your mode. Doctor and setup print an informational "untested newer version" line. |
-| Below the lowest tested version, in a gap between ranges, or the same version as an exact-build pin with another build ID | No contract. Setup keeps observe mode and refuses action mode. |
+| Below the lowest tested version, in a gap between ranges, or the same version as an exact-build pin with another build ID | No contract. Setup refuses the connector in observe and action mode and changes nothing. |
 | Known broken: listed in `known_broken_versions` with a reason and an issue link | Treated like a version below the floor. The list is empty today. |
 | Compatible update after setup | Doctor reports information. `defenseclaw setup <connector>` or the next gateway start refreshes the lock. |
 | Enterprise standalone profile | Same rules. A version with no contract gets no hooks in any guardrail mode, and `status` and `verify` report `hook_contract_unverified` with `coverage_complete: false`. |
@@ -62,8 +62,8 @@ DefenseClaw assumes a connector version works unless it knows otherwise.
 
 Every `defenseclaw setup` path that chooses a connector refreshes agent discovery, reads the installed version and checks it against the manifest before it writes config.
 
-- A version with no contract is allowed in observe mode with a warning. Action mode fails unless `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing.
-- OpenCode is the exception. A detected version with no contract (below `1.18.10`, or known broken) is refused in both modes before any change, because its plugin and contract lock must change together.
+- A version with no contract is refused in observe and action mode before any change, with the version to upgrade to. The gateway installs no hooks for such a version: Claude Code and Codex build their hooks from the contract. Upgrade the agent, then run `defenseclaw setup <connector>` again. `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` skips this check for exploratory testing only.
+- OpenCode is refused the same way. A detected version with no contract is below `1.18.10` or known broken; its plugin and contract lock must change together.
 - If the agent is not installed on the host, action mode accepts the harness image DefenseClaw built for it. The image must be the one a sandbox would run now: built by this release for this user from the current `openshell.image` settings, hook-fire verified, and with a harness version that resolves to a known contract. Run `defenseclaw sandbox image build <harness>` if it is refused.
 - If the version cannot be read because the binary is outside a trusted install prefix, interactive setup offers to trust the directory. Non-interactive runs print `defenseclaw setup trusted-paths add <dir>`. Trusting a path never bypasses the version gate.
 

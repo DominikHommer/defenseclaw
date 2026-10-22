@@ -183,6 +183,21 @@ func TestStandaloneUnenrolledAccountGetsEnrollmentDecision(t *testing.T) {
 	}
 }
 
+// GAP-0556: root's call under enrollment.root: deny said "the DefenseClaw
+// gateway returned an answer DefenseClaw could not use". It names the policy
+// and the code.
+func TestStandaloneRootDeniedSaysRootIsNotAllowed(t *testing.T) {
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
+	startStandaloneHookServer(t, socket, `{"error":"forbidden","reason":"enterprise_managed_root_denied"}`, http.StatusForbidden)
+	result := standaloneRun(t, socket, os.Getuid())
+	if result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
+		!strings.Contains(result.stdout, "does not allow agents to run as root") ||
+		!strings.Contains(result.stdout, managedRootDeniedReason) ||
+		strings.Contains(result.stdout+result.stderr, "could not use") {
+		t.Fatalf("root refusal: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
 func TestStandaloneHookSocketTrustedListenerGetsRequestWithoutToken(t *testing.T) {
 	dir := shortSocketDir(t)
 	socket := filepath.Join(dir, "hook.sock")

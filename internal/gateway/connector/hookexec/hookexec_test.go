@@ -2879,9 +2879,13 @@ func TestSecureClientCopilotHookFollowsItsDeliveryMode(t *testing.T) {
 	if _, stdout, _ := run(strict, unreachable); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
 		t.Fatalf("strict availability allowed a stopped gateway: %q", stdout)
 	}
-	unenrolled := func(opts Options) int { return failUnenrolled(opts, sp, managedUIDUnregisteredReason) }
+	unenrolled := func(opts Options) int { return failEnrollmentRefusal(opts, sp, managedUIDUnregisteredReason) }
 	if _, stdout, _ := run(open, unenrolled); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
 		t.Fatalf("an unenrolled account's call was allowed: %q", stdout)
+	}
+	rootDenied := func(opts Options) int { return failEnrollmentRefusal(opts, sp, managedRootDeniedReason) }
+	if _, stdout, _ := run(open, rootDenied); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("root's refused call was allowed: %q", stdout)
 	}
 	// A standalone hook follows the administrator's mode (owner decision
 	// 2026-10-20): open allows a stopped gateway, closed denies it.
