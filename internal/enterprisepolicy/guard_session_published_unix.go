@@ -191,6 +191,81 @@ func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) erro
 	}
 }
 
+// publishedSessionFolderLocked reports a folder with a flag or access-list
+// entry that keeps its owner from adding or removing a file
+// (publishedSessionFolderIsLocked; replaceable in tests, which cannot set
+// one).
+var publishedSessionFolderLocked = publishedSessionFolderIsLocked
+
+// publishedSessionRevocableCheck reports why the gateway that wrote the
+// records in the account folder accountDir (its owner: the gateway makes
+// that folder as itself) might not be able to revoke them now. The folder
+// of the account's key and revocation marks (the key folder of root) must
+// be a real folder that this writer owns with write and search for its
+// owner (any folder, for root), with no immutable or append-only flag or
+// deny entry (publishedSessionFolderLocked), on a volume that is not
+// read-only. Then the key's removal or its mark takes, and a block the
+// gateway decides ends every earlier allow of the account. Anything that
+// cannot be read is an error.
+func publishedSessionRevocableCheck(root, accountDir string) error {
+	writer, err := publishedSessionFolderOwnerUID(accountDir)
+	if err != nil {
+		return err
+	}
+	keyDir, ok := PublishedSessionKeyDir(root)
+	if !ok {
+		return fmt.Errorf("no key folder for the record folder %q", root)
+	}
+	dir := publishedSessionMarkDir(filepath.Clean(root), keyDir)
+	owner, err := publishedSessionFolderOwnerUID(dir)
+	if err != nil {
+		return err
+	}
+	if writer != 0 {
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return err
+		}
+		if owner != writer {
+			return fmt.Errorf("%s is owned by uid %d, not by uid %d, which wrote the records", dir, owner, writer)
+		}
+		if info.Mode().Perm()&0o300 != 0o300 {
+			return fmt.Errorf("%s does not let its owner add or remove a file (%04o)", dir, info.Mode().Perm())
+		}
+	}
+	locked, err := publishedSessionFolderLocked(dir)
+	if err != nil {
+		return fmt.Errorf("%s: its flags or access list cannot be read: %w", dir, err)
+	}
+	if locked {
+		return fmt.Errorf("%s is immutable or append-only, or an access-list entry denies a change", dir)
+	}
+	readOnly, err := publishedSessionVolumeReadOnly(dir)
+	if err != nil {
+		return fmt.Errorf("%s: its volume state cannot be read: %w", dir, err)
+	}
+	if readOnly {
+		return fmt.Errorf("%s is on a read-only volume", dir)
+	}
+	return nil
+}
+
+// publishedSessionFolderOwnerUID is the owner of the real folder path.
+func publishedSessionFolderOwnerUID(path string) (uint32, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return 0, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return 0, fmt.Errorf("%s is not a folder", path)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("%s: cannot read its owner", path)
+	}
+	return st.Uid, nil
+}
+
 // publishedSessionMarkDir is the folder of the revocation marks of the
 // record folder root: its key folder (the hook socket folder, which every
 // account can list and only root and the gateway service can add a file

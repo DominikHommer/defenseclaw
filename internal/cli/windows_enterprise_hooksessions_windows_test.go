@@ -70,9 +70,13 @@ func windowsHookSessionTestHost(t *testing.T) (root, identity string) {
 		}
 		return info.Mode().IsRegular(), nil
 	})
+	// The test account writes the records in place of the gateway service,
+	// which the record folder's access list names.
+	restoreRevocable := enterprisepolicy.OverridePublishedSessionRevocableForTest(func(string, string) error { return nil })
 	t.Cleanup(func() {
 		windowsHookSessionDir, windowsEnterpriseIsElevated = previousDir, previousElevated
 		restoreOwner()
+		restoreRevocable()
 	})
 	return root, identity
 }

@@ -89,8 +89,12 @@ import (
 // mark names is no key, and an account with a revoked-any mark has none.
 // So an earlier allow outlives a revocation only when that folder takes
 // neither an unlink nor a new file (and the gateway's block, published in
-// another folder, fails too). A rotation that made a new key removes the
-// marks it listed before it changed anything.
+// another folder, fails too). The hook does not trust that it will: during
+// an outage it allows only while the mark folder still lets the gateway
+// that wrote the records add a file (publishedSessionRevocable), and the
+// gateway keeps a revocation that did not take owed until it takes. A
+// rotation that made a new key removes the marks it listed before it
+// changed anything.
 //
 // A new key never brings an earlier record back: its name is random, and
 // no account but root or SYSTEM can give a file that name. So no revocation
@@ -112,7 +116,15 @@ import (
 //     needs that is missing, untrusted, corrupt or dead blocks. A blocking
 //     record denies with the gateway's reason, whatever its MAC;
 //   - the volume of the record folder is not read-only (where no key could
-//     be removed), and the key is the same at the end of the check.
+//     be removed);
+//   - the folder of the account's revocation marks lets the gateway that
+//     wrote the records (the owner of the account's folder) add a file
+//     there: it is that account's, with write and search for its owner (or
+//     the gateway is root), has no immutable or append-only flag and no
+//     deny entry, and is on a writable volume (publishedSessionRevocable).
+//     Otherwise a block the gateway decided may have changed nothing the
+//     hook reads, so no allow of the account proves anything;
+//   - the key is the same at the end of the check.
 //
 // Any error reading the key, a record or a folder above them blocks. No
 // removal state lives in this tree: the guardian's ledger is in its
@@ -214,6 +226,22 @@ func publishedSessionKeyOwned(path string) (bool, error) {
 // publishedSessionVolumeReadOnly reports whether the volume of a path is
 // mounted read-only (replaceable in tests, which cannot mount one).
 var publishedSessionVolumeReadOnly = publishedSessionVolumeIsReadOnly
+
+// publishedSessionRevocable reports why the gateway that wrote the records
+// in an account folder (its owner) might not be able to revoke them now,
+// nil when it can add a revocation mark: publishedSessionRevocableCheck
+// (replaceable in tests).
+var publishedSessionRevocable = publishedSessionRevocableCheck
+
+// OverridePublishedSessionRevocableForTest replaces the check that the
+// gateway that wrote an account's records could still revoke them, for
+// tests in other packages whose test account stands in for the gateway
+// service a record folder's access list names.
+func OverridePublishedSessionRevocableForTest(check func(root, accountDir string) error) (restore func()) {
+	previous := publishedSessionRevocable
+	publishedSessionRevocable = check
+	return func() { publishedSessionRevocable = previous }
+}
 
 // ErrPublishedSessionUnavailable is a protected session record that does
 // not prove the session unblocked: missing, unreadable, untrusted, corrupt,
@@ -1128,8 +1156,9 @@ func WritePublishedSessionRecordsForTest(root, identity string, key SessionKey, 
 // outage from the protected records of identity under root. It returns the
 // scan's decision when the records of the agent process and of the session
 // (each the call names) are trusted, not blocked, fresh, and carry a MAC
-// that verifies with the record folder's one key, and the volume is not
-// read-only; a denial with the gateway's reason when a record blocks it;
+// that verifies with the record folder's one key, the volume is not
+// read-only, and the gateway that wrote them could still revoke them
+// (publishedSessionRevocable); a denial with the gateway's reason when a record blocks it;
 // and ErrPublishedSessionUnavailable otherwise. An agent process the hook
 // cannot name is never proven: it may be one that started during the
 // outage and resumed the session ID. trust checks a record or key file path
@@ -1187,6 +1216,14 @@ func CheckPublishedForeignHookSession(root, identity string, key SessionKey, dec
 	// could be removed there.
 	if readOnly, err := publishedSessionVolumeReadOnly(root); err != nil || readOnly {
 		return decision, fmt.Errorf("%w: the record folder's volume is read-only, or its state cannot be read: %v", ErrPublishedSessionUnavailable, err)
+	}
+	// An allow passes an outage only while the gateway that wrote it could
+	// still end it: when the folder its revocation marks go in no longer
+	// lets that gateway add a file, a block it decided since may have
+	// changed nothing on disk, so no allow of the account proves anything
+	// (any doubt blocks).
+	if err := publishedSessionRevocable(root, dir); err != nil {
+		return decision, fmt.Errorf("%w: a revocation of the account's records might not take: %v", ErrPublishedSessionUnavailable, err)
 	}
 	// Last, the key again: one removed while this check ran ends the allow.
 	if again, err := readPublishedSessionKeyForHook(root, identity, trust); err != nil || again.ID() != recordKey.ID() {

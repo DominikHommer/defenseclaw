@@ -115,7 +115,14 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	// holds the lock exclusively, so an allow made with the key read here was
 	// decided from removals at least as new as that key, and one made with a
 	// key read before a removal proves nothing during an outage.
+	// A revocation of the account that the operating system refused before
+	// is owed: it is tried again first, and while it is still owed no allow
+	// carries a key, so none passes an outage (foreign_hook_revocation_owed.go).
+	paid := a.payForeignHookRevocation(places, identity, connector)
 	recordKey := places.key(identity)
+	if !paid {
+		recordKey = enterprisepolicy.SessionRecordKey{}
+	}
 	removals, ledgerErr := a.foreignHookRemovals.forIdentity(places.removalsDir, identity)
 	// A removal in progress keeps its own reason through the join
 	// (ApplyForeignHookRemovals checks it first).
@@ -134,17 +141,17 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		// gateway that stops in between, or whose publication fails, must
 		// not leave an allow the hook honors during the outage (the kill
 		// switch, GAP-0352).
-		BeforeBlock: func() { killed = a.killForeignHookSessionKey(places, identity, exchange.Key) },
+		BeforeBlock: func() { killed = a.killForeignHookSessionKey(places, identity, exchange.Key.Connector) },
 	})
 	if decision.Deny && !killed {
 		// Every denial is published only after the key is gone.
-		a.killForeignHookSessionKey(places, identity, exchange.Key)
+		a.killForeignHookSessionKey(places, identity, exchange.Key.Connector)
 	}
 	if !decision.Deny && !time.Now().Before(answerBy) {
 		// Too late to answer allow: a removal of the account may already
 		// have stopped waiting for this exchange. Nothing is published.
 		decision = enterprisepolicy.ApplyForeignHookRemovals(decision, exchange.Key, nil, errForeignHookExchangeExpired, time.Now())
-		a.killForeignHookSessionKey(places, identity, exchange.Key)
+		a.killForeignHookSessionKey(places, identity, exchange.Key.Connector)
 	}
 	// Under the same locks, so the protected record follows the store's
 	// order: the hook reads it when the gateway is down.
@@ -244,18 +251,21 @@ var (
 
 // foreignHookSessionPlaces are where one exchange reads the guardian's
 // removals and writes its protected session record: the guardian's ledger
-// folder (managed.HookGuardianAuthorizationDir) and the protected session
+// folder (managed.HookGuardianAuthorizationDir), the protected session
 // record root ("" where this gateway publishes none,
-// foreignHookSessionRecordRoot).
+// foreignHookSessionRecordRoot), and the gateway's data directory, which
+// keeps the owed revocations (foreignHookRevocationOwedPath).
 type foreignHookSessionPlaces struct {
 	removalsDir string
 	recordRoot  string
+	dataDir     string
 }
 
 func (a *APIServer) foreignHookSessionPlaces(dataDir string) foreignHookSessionPlaces {
 	return foreignHookSessionPlaces{
 		removalsDir: managed.HookGuardianAuthorizationDir(dataDir),
 		recordRoot:  a.foreignHookSessionRecordRoot(dataDir),
+		dataDir:     dataDir,
 	}
 }
 
@@ -323,23 +333,26 @@ func (a *APIServer) publishForeignHookSessionDecision(root, identity string, key
 // (enterprisepolicy.RevokePublishedSessionKey). Every allow of the account
 // written before proves nothing during an outage from then on, until the
 // hook guardian makes a new key (it does at every pass). Other accounts
-// keep theirs. A revocation that took neither way is logged; the block is
-// still recorded and published, and the published block denies during an
-// outage. It reports whether the key is gone or marked revoked.
-func (a *APIServer) killForeignHookSessionKey(places foreignHookSessionPlaces, identity string, key enterprisepolicy.SessionKey) bool {
+// keep theirs. A revocation that took neither way is owed
+// (oweForeignHookRevocation): it is tried again until it takes, and until
+// then no allow of the account carries a key; the block is still recorded
+// and published. A revocation that took settles one owed before. It
+// reports whether the key is gone or marked revoked.
+func (a *APIServer) killForeignHookSessionKey(places foreignHookSessionPlaces, identity, connectorName string) bool {
 	if places.recordRoot == "" {
 		return false
 	}
 	err := foreignHookSessionKill(places.recordRoot, identity)
-	if err == nil {
+	connectorName = clipForeignHookAuditField(connectorName, 64)
+	if err == nil || !errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive) {
+		a.settleForeignHookRevocation(places, identity)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record key for %s could not be removed, so it was marked revoked: %v\n", connectorName, err)
+		}
 		return true
 	}
-	connectorName := clipForeignHookAuditField(key.Connector, 64)
-	if !errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive) {
-		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record key for %s could not be removed before a block, so it was marked revoked: %v\n", connectorName, err)
-		return true
-	}
-	fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record key for %s could be neither removed nor marked revoked before a block, so only the published block denies during a gateway outage: %v\n",
+	a.oweForeignHookRevocation(places, identity)
+	fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record key for %s could be neither removed nor marked revoked; the revocation is owed and tried again until it takes, no allow of the account carries a key until then, and the hook blocks the account's calls during a gateway outage while the folder takes no change: %v\n",
 		connectorName, err)
 	return false
 }

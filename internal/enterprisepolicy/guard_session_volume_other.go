@@ -11,3 +11,8 @@ import "errors"
 func publishedSessionVolumeIsReadOnly(string) (bool, error) {
 	return false, errors.New("the volume state cannot be read on this platform")
 }
+
+// publishedSessionFolderIsLocked cannot tell here, which blocks.
+func publishedSessionFolderIsLocked(string) (bool, error) {
+	return false, errors.New("the folder flags cannot be read on this platform")
+}

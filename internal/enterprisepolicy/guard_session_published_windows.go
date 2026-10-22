@@ -261,6 +261,89 @@ func publishedSessionKeyOwnerCheck(path string) (bool, error) {
 // flushed when it is created.
 func publishedSessionSyncDir(string) error { return nil }
 
+// publishedSessionRevocableCheck reports why the gateway that wrote the
+// records in the account folder accountDir (its owner: the gateway service
+// creates it as itself) might not be able to revoke them now. The folder its
+// revocation marks go in (the record folder root, whose volume the caller
+// checks) must give that owner the right to add a file in an entry that
+// applies to the folder itself, and must carry no entry this check cannot
+// read as a grant: a deny entry (whom a group entry covers cannot be told
+// here) or an entry of another type. Then a mark takes, and a block the
+// gateway decides ends every earlier allow of the account. Anything that
+// cannot be read is an error.
+func publishedSessionRevocableCheck(root, accountDir string) error {
+	writer, err := publishedSessionFolderOwnerSID(accountDir)
+	if err != nil {
+		return err
+	}
+	dir := publishedSessionMarkDir(filepath.Clean(root), "")
+	extended, err := winpath.Extended(dir)
+	if err != nil {
+		return err
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("read the access list of %s: %w", dir, err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return fmt.Errorf("read the access list of %s: %w", dir, err)
+	}
+	return publishedSessionDACLLetsAddAFile(dir, dacl, writer)
+}
+
+// publishedSessionFolderOwnerSID is the owner of the folder path.
+func publishedSessionFolderOwnerSID(path string) (*windows.SID, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return nil, err
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, fmt.Errorf("read the owner of %s: %w", path, err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil {
+		return nil, fmt.Errorf("%s has no owner", path)
+	}
+	return owner, nil
+}
+
+// publishedSessionAddFile is FILE_ADD_FILE, the right to create a file in
+// a folder.
+const publishedSessionAddFile = 0x2
+
+// publishedSessionDACLLetsAddAFile reports why the access list dacl of the
+// folder path might keep writer from adding a file there: nil when an
+// allow entry that applies to the folder grants writer FILE_ADD_FILE and
+// no entry that applies to it is anything but an allow entry.
+func publishedSessionDACLLetsAddAFile(path string, dacl *windows.ACL, writer *windows.SID) error {
+	if dacl == nil {
+		return fmt.Errorf("%s has no access list", path)
+	}
+	granted := false
+	for i := uint16(0); i < dacl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+			return fmt.Errorf("%s: read access entry %d: %w", path, i, err)
+		}
+		if ace == nil || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			return fmt.Errorf("%s has an access entry of type 0x%x, which may refuse the gateway a change", path, ace.Header.AceType)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if sid.Equals(writer) && ace.Mask&(publishedSessionAddFile|windows.GENERIC_WRITE|windows.GENERIC_ALL) != 0 {
+			granted = true
+		}
+	}
+	if !granted {
+		return fmt.Errorf("%s does not let %s, which wrote the records, add a file", path, writer.String())
+	}
+	return nil
+}
+
 // publishedSessionMarkDir is the folder of the revocation marks of the
 // record folder root: the record folder itself, which every account can
 // list and only SYSTEM, Administrators and the gateway service can add a

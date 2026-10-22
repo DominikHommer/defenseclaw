@@ -537,10 +537,12 @@ func TestForeignHookSessionBlockKillsTheAccountKeyBeforeTheStoreWrite(t *testing
 				t.Fatalf("a later call of the blocked process: %+v", got)
 			}
 			// The block is carried to the new session: the write runs the
-			// kill first, which (when it failed) is tried again after.
+			// kill first, which (when it failed) is tried again after. A
+			// kill that failed is owed, so the exchange tries it once more
+			// before anything else.
 			later := tc.later
 			if tc.killErr != nil {
-				later = append([]string{"kill failed (store has the block)"}, later...)
+				later = append([]string{"kill failed (store has the block)", "kill failed (store has the block)"}, later...)
 			}
 			if strings.Join(events, ",") != strings.Join(later, ",") {
 				t.Fatalf("later events %v, want %v", events, later)
