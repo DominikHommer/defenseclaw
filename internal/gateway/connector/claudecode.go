@@ -68,11 +68,8 @@ func (c *ClaudeCodeConnector) ToolInspectionMode() ToolInspectionMode { return T
 func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
-	if !opts.ManagedEnterprise {
-		// Managed installs, Secure Client included, keep their setup path.
-		if err := refuseClaudeCodeUserSettings(opts); err != nil {
-			return err
-		}
+	if err := c.checkAgentSettings(opts); err != nil {
+		return err
 	}
 	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeClaude, opts.OTLPPathToken)
 	if err != nil {
@@ -121,13 +118,17 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	return nil
 }
 
-// refuseClaudeCodeUserSettings refuses, before Setup changes anything, user
+// checkAgentSettings refuses, before Setup changes anything, user
 // settings Setup must not rewrite: a settings file that does not parse, or a
 // disableAllHooks=true that switches every hook off (the user's choice,
 // GAP-1066). The registration verifier rejects the second after Setup, and
 // rolling back then removed the hooks an earlier setup installed. A gateway
-// start keeps the other connectors (GAP-0578).
-func refuseClaudeCodeUserSettings(opts SetupOpts) error {
+// start keeps the other connectors (GAP-0578). Managed installs, Secure
+// Client included, keep their setup path.
+func (c *ClaudeCodeConnector) checkAgentSettings(opts SetupOpts) error {
+	if opts.ManagedEnterprise {
+		return nil
+	}
 	if err := claudeCodeSettingsParseable(claudeCodeSettingsPath()); err != nil {
 		return refuseForAgentConfig(err)
 	}

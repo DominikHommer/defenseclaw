@@ -87,6 +87,11 @@ func TestSetupRefusesAgentSettingsBeforeAnyChange(t *testing.T) {
 				t.Fatal(err)
 			}
 			tc.point(t, path)
+			// Setup's own check, which `defenseclaw setup` asks before it
+			// restarts the gateway, refuses the same settings (GAP-0615).
+			if err := CheckAgentSettings(tc.conn(), SetupOpts{DataDir: dataDir}); !errors.Is(err, ErrAgentConfigRefusal) || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("CheckAgentSettings = %v; want the refusal Setup gives, saying %q", err, tc.reason)
+			}
 			err := tc.conn().Setup(context.Background(), SetupOpts{
 				DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok",
 			})
@@ -114,4 +119,31 @@ func pointCodexConfig(t *testing.T, path string) {
 	previous := CodexConfigPathOverride
 	CodexConfigPathOverride = path
 	t.Cleanup(func() { CodexConfigPathOverride = previous })
+}
+
+// GAP-0615: the check changes nothing and passes settings that let the hooks
+// run, and a managed install or a connector without such a refusal is not
+// asked.
+func TestCheckAgentSettingsPassesUsableSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	body := []byte("model = \"gpt-5\"\n\n[features]\nhooks = true\n")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pointCodexConfig(t, path)
+	if err := CheckAgentSettings(NewCodexConnector(), SetupOpts{DataDir: t.TempDir()}); err != nil {
+		t.Fatalf("CheckAgentSettings(usable codex config) = %v", err)
+	}
+	if err := os.WriteFile(path, []byte("[broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckAgentSettings(NewCodexConnector(), SetupOpts{DataDir: t.TempDir(), ManagedEnterprise: true}); err != nil {
+		t.Fatalf("CheckAgentSettings(managed) = %v; managed requirements decide there", err)
+	}
+	if err := CheckAgentSettings(NewCursorConnector(), SetupOpts{DataDir: t.TempDir()}); err != nil {
+		t.Fatalf("CheckAgentSettings(cursor) = %v; cursor has no agent-settings refusal", err)
+	}
+	if after, err := os.ReadFile(path); err != nil || string(after) != "[broken\n" {
+		t.Fatalf("CheckAgentSettings changed the settings: %q (%v)", after, err)
+	}
 }

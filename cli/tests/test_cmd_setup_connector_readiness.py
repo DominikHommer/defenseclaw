@@ -1374,3 +1374,149 @@ def test_only_the_rollback_restart_accepts_agent_settings_refusals(monkeypatch, 
         str(tmp_path), connector="codex", wait_for_connector_ready=True, title=cmd_setup._ROLLBACK_RESTART_TITLE
     )
     assert seen == [False, True]
+
+
+def _not_started_runtime(monkeypatch, tmp_path: Path, reason: str) -> None:
+    """Codex skipped by the restarted gateway with *reason*, Claude Code running (GAP-0620)."""
+    cfg = _config(tmp_path)
+    entries = {name: _entry(name, tmp_path) for name in ("claudecode", "codex")}
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": entries}),
+        encoding="utf-8",
+    )
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["claudecode"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    health = {
+        "started_at": "2026-10-22T19:52:00Z",
+        "guardrail": {"state": "running", "details": {
+            "connectors": ["claudecode"],
+            "connectors_not_started": ["codex"],
+            "connectors_not_started_reasons": {"codex": reason},
+        }},
+    }
+    monkeypatch.setattr(cmd_setup, "_read_gateway_health", lambda *_args, **_kwargs: health)
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+    monkeypatch.setattr(
+        cmd_doctor, "connector_setup_readiness", lambda _cfg, name: cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
+    )
+
+
+def test_setup_wait_names_why_the_gateway_did_not_start_the_added_connector(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0620: `setup codex` (Add) with Codex not on PATH failed with only
+    "roster: active=claudecode; expected=claudecode,codex" after the whole wait."""
+    reason = (
+        "inspect effective Codex managed requirements: exec: \"codex\": executable file not found in $PATH"
+    )
+    _not_started_runtime(monkeypatch, tmp_path, reason)
+    monkeypatch.setattr(cmd_setup.agent_discovery, "_binary_path_for_agent", lambda *_args: "")
+    started = time.monotonic()
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["claudecode", "codex"], None, None, timeout=2.0,
+        require_gateway_health=True, required={"codex"},
+    )
+    assert not result
+    assert (result.connector, result.invariant) == ("codex", "not-started")
+    assert "Codex (codex) is not on PATH" in result.detail
+    assert reason in result.detail
+    assert time.monotonic() - started < 1.5
+
+
+def test_setup_wait_names_a_peer_the_gateway_did_not_start(monkeypatch, tmp_path: Path, capsys) -> None:
+    """GAP-0620: a skipped peer is named with the gateway's reason, not only "gateway.log"."""
+    _not_started_runtime(monkeypatch, tmp_path, "connector codex agent version \"\" is not verified")
+    monkeypatch.setattr(cmd_setup.agent_discovery, "_binary_path_for_agent", lambda *_args: "/usr/bin/codex")
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["claudecode", "codex"], None, None, timeout=2.0,
+        require_gateway_health=True, required={"claudecode"},
+    )
+    assert result
+    out = capsys.readouterr().out
+    assert "skipping codex" in out
+    assert 'connector codex agent version "" is not verified' in out
+    assert "not on PATH" not in out
+
+
+def test_roster_failure_names_an_agent_that_is_not_on_path(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0620: without a gateway reason, the roster mismatch still names the missing agent."""
+    monkeypatch.setattr(cmd_setup.agent_discovery, "_binary_path_for_agent", lambda *_args: "")
+    failure = cmd_setup._connector_runtime_snapshot_failure(
+        {"version": 3, "names": ["claudecode"], "inactive_names": []}, 1, {"connectors": {}}, 1,
+        expected={"claudecode", "codex"}, previous_state_marker=None, previous_lock_marker=None,
+    )
+    assert (failure.connector, failure.invariant) == ("codex", "roster")
+    assert failure.detail.startswith("Codex (codex) is not on PATH")
+    assert "active=claudecode; expected=claudecode,codex" in failure.detail
+
+
+def test_setup_wait_names_the_gateway_error_when_the_guardrail_stopped(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0620: "restarted gateway guardrail is error" now carries the gateway's error."""
+    cfg = _config(tmp_path)
+    health = {
+        "started_at": "2026-10-22T19:52:00Z",
+        "guardrail": {"state": "error", "last_error": "connector codex setup failed: codex not found"},
+    }
+    monkeypatch.setattr(cmd_setup, "_read_gateway_health", lambda *_args, **_kwargs: health)
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["codex"], None, None, timeout=2.0, require_gateway_health=True, required={"codex"},
+    )
+    assert not result
+    assert result.invariant == "gateway-state"
+    assert result.detail == "restarted gateway guardrail is error: connector codex setup failed: codex not found"
+
+
+def _gateway_check_agent_settings(monkeypatch, payload: dict) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def run(argv, **_kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=1 if payload.get("refused") else 0, stdout=json.dumps(payload) + "\n",
+                               stderr="")
+
+    monkeypatch.setattr(cmd_setup, "_gateway_lifecycle_executable", lambda: "/opt/dc/defenseclaw-gateway")
+    monkeypatch.setattr(cmd_setup, "run_pinned_executable", run)
+    return calls
+
+
+def test_setup_refuses_agent_settings_before_it_changes_anything(monkeypatch, tmp_path: Path, capsys) -> None:
+    """GAP-0615: `setup codex --restart` with a config.toml that does not parse
+    restarted the gateway, which could not start Codex, and the rollback left
+    the gateway stopped. Setup now asks the gateway's check first and stops
+    before it changes anything or restarts the gateway."""
+    reason = (
+        "Codex config C:\\Users\\u\\.codex\\config.toml does not parse (toml: line 180 (last key \"t6z2_broken\"): "
+        "expected character ]); fix the file, then run: defenseclaw-gateway restart"
+    )
+    calls = _gateway_check_agent_settings(
+        monkeypatch, {"connector": "codex", "action": "check-agent-settings", "refused": True, "reason": reason}
+    )
+    touched: list[str] = []
+    monkeypatch.setattr(
+        cmd_setup, "_check_connector_version_supported_for_setup", lambda *_a, **_k: touched.append("version")
+    )
+    monkeypatch.setattr(cmd_setup, "_capture_setup_config_snapshot", lambda *_a, **_k: touched.append("snapshot"))
+    monkeypatch.setattr(cmd_setup, "_restart_services", lambda *_a, **_k: touched.append("restart"))
+    app = SimpleNamespace(cfg=_config(tmp_path))
+    ok = cmd_setup._apply_hook_connector_setup(app, connector="codex", mode="action", restart=True)
+    assert ok is False
+    assert touched == []
+    assert calls and calls[0][1:5] == ["connector", "check-agent-settings", "--connector", "codex"]
+    err = capsys.readouterr().err
+    assert "config.toml does not parse" in err
+    assert "Setup changed nothing and the gateway keeps running as it was" in err
+    assert "defenseclaw-gateway restart" not in err
+
+
+def test_setup_continues_when_the_agent_settings_let_hooks_run(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0615: usable settings, an older gateway without the check, or a
+    connector without such settings change nothing about setup."""
+    _gateway_check_agent_settings(monkeypatch, {"connector": "codex", "refused": False})
+    assert cmd_setup._agent_settings_refusal(_config(tmp_path), "codex") == ""
+    calls = _gateway_check_agent_settings(monkeypatch, {})
+    assert cmd_setup._agent_settings_refusal(_config(tmp_path), "codex") == ""
+    assert cmd_setup._agent_settings_refusal(_config(tmp_path), "cursor") == ""
+    assert len(calls) == 1
+    monkeypatch.setattr(cmd_setup, "_gateway_lifecycle_executable", lambda: "")
+    assert cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode") == ""

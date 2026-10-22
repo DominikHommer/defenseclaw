@@ -332,7 +332,7 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return errors.New("managed Windows Codex hooks require the administrator-owned machine requirements installer")
 	}
 	return withCodexLifecycleTransaction(opts, func() error {
-		if err := refuseCodexUserConfig(opts); err != nil {
+		if err := c.checkAgentSettings(opts); err != nil {
 			return err
 		}
 		if previous, err := codexPreviousSetupRoot(opts.DataDir); err != nil {
@@ -364,13 +364,13 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	})
 }
 
-// refuseCodexUserConfig refuses, before Setup changes anything, a per-user
+// checkAgentSettings refuses, before Setup changes anything, a per-user
 // config.toml that Setup must not rewrite: one that turns Codex hooks off
 // (the user's choice, GAP-1094) or that does not parse. The earlier hooks and
 // the user's setting stay as they are, and a gateway start keeps the other
 // connectors (GAP-0578). Managed installs keep their hooks in protected
 // requirements, so their patch decides.
-func refuseCodexUserConfig(opts SetupOpts) error {
+func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 	if opts.ManagedEnterprise {
 		return nil
 	}

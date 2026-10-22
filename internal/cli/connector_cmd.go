@@ -171,6 +171,25 @@ mutations. It does not restart the gateway and does not setup peer connectors.`,
 	RunE: runConnectorReconcile,
 }
 
+var connectorCheckAgentSettingsCmd = &cobra.Command{
+	Use:   "check-agent-settings",
+	Short: "Check that the agent's own settings let DefenseClaw hooks run (run by setup)",
+	Long: `Run the check the named connector's Setup starts with: the agent's own
+settings must not turn its hooks off or fail to parse (for example a Codex
+config.toml with a syntax error, or Claude Code disableAllHooks). It changes
+nothing. 'defenseclaw setup' runs it before it restarts the gateway, so such
+settings stop setup with the reason while the running gateway keeps enforcing
+(GAP-0615).
+
+Exit codes:
+  0   the settings let the hooks run
+  1   the settings refuse the hooks (the reason names the file and the fix)
+  2   connector unknown / config error`,
+	Hidden:      true,
+	Annotations: map[string]string{auditOptionalAnnotation: "true"},
+	RunE:        runConnectorCheckAgentSettings,
+}
+
 var connectorLaunchCmd = &cobra.Command{
 	Use:   "launch -- [openhands arguments...]",
 	Short: "Launch the protected OpenHands executable with scoped native telemetry",
@@ -262,6 +281,7 @@ func init() {
 	connectorCmd.AddCommand(connectorPruneOrphansCmd)
 	connectorCmd.AddCommand(connectorVerifyCmd)
 	connectorCmd.AddCommand(connectorReconcileCmd)
+	connectorCmd.AddCommand(connectorCheckAgentSettingsCmd)
 	connectorCmd.AddCommand(connectorLaunchCmd)
 	connectorCmd.AddCommand(connectorListBackupsCmd)
 
@@ -542,6 +562,52 @@ func runConnectorLaunch(cmd *cobra.Command, args []string) error {
 		cmd.ErrOrStderr(),
 	); err != nil {
 		return fmt.Errorf("connector launch openhands: %w", err)
+	}
+	return nil
+}
+
+func runConnectorCheckAgentSettings(cmd *cobra.Command, _ []string) error {
+	dataDir := resolveConnectorDataDir()
+	if dataDir == "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "connector check-agent-settings: no data directory configured (set --data-dir or run 'defenseclaw init')")
+		connectorExit(2)
+		return nil
+	}
+	name := resolveActiveConnectorName(dataDir)
+	if name == "codex" && connectorFlagConfigHome == "" {
+		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
+	}
+	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "connector check-agent-settings: %v\n", err)
+		connectorExit(2)
+		return nil
+	}
+	defer restoreConfigHome()
+	conn, ok := newConnectorRegistryWithPlugins().Get(name)
+	if !ok {
+		fmt.Fprintf(cmd.ErrOrStderr(), "connector check-agent-settings: unknown connector %q\n", name)
+		connectorExit(2)
+		return nil
+	}
+	opts := resolveConnectorOptsFor(dataDir, name)
+	if cfg != nil {
+		opts.ManagedEnterprise = managed.IsManagedEnterprise(cfg.DeploymentMode)
+	}
+	refusal := connector.CheckAgentSettings(conn, opts)
+	if connectorFlagJSON {
+		payload := map[string]any{"connector": name, "action": "check-agent-settings", "refused": refusal != nil}
+		if refusal != nil {
+			payload["reason"] = refusal.Error()
+		}
+		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
+	} else if refusal != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "connector %s: %v\n", name, refusal)
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(), "connector %s: the agent's settings let DefenseClaw hooks run\n", name)
+	}
+	if refusal != nil {
+		connectorExit(1)
 	}
 	return nil
 }
