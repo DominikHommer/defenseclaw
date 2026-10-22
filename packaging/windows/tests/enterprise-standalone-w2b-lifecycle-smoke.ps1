@@ -300,15 +300,28 @@ $stream.Dispose()
             $deniedRetired = [IO.Path]::Combine($deniedParent, 'DefenseClaw.retired')
             [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($denied, 'bin'))
             [IO.File]::WriteAllText([IO.Path]::Combine($denied, 'bin', 'defenseclaw-hook.exe'), 'stand-in')
+            # Loop round 2: the same deny while a program also holds a file
+            # in InstallRoot fails too; the holder exiting would not end it.
             Set-TestFolderSddl $deniedParent 'O:BAG:BAD:P(D;;0x44;;;WD)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
             try {
-                $deferred = Invoke-DefenseClawCommittedInstallRootRetirement -Source $denied -Destination $deniedRetired
-                $failures.Add("an access-list refusal of the InstallRoot rename was deferred as a holder: '$deferred'")
-            }
-            catch {
-                if ($_.Exception.Message -notlike '*no program holds a file in it*' -or
-                    -not [IO.Directory]::Exists($denied) -or [IO.Directory]::Exists($deniedRetired)) {
-                    $failures.Add("an access-list refusal of the InstallRoot rename: $($_.Exception.Message)")
+                foreach ($withHolder in @($false, $true)) {
+                    $holder = $null
+                    if ($withHolder) {
+                        $holder = Start-TestHolder -Path ([IO.Path]::Combine($denied, 'bin', 'defenseclaw-hook.exe')) -Mode Read -HoldMilliseconds 8000
+                    }
+                    try {
+                        $deferred = Invoke-DefenseClawCommittedInstallRootRetirement -Source $denied -Destination $deniedRetired
+                        $failures.Add("an access-list refusal of the InstallRoot rename (holder: $withHolder) was deferred: '$deferred'")
+                    }
+                    catch {
+                        if ($_.Exception.Message -notlike '*may not create a folder in*does not end when a program exits*' -or
+                            -not [IO.Directory]::Exists($denied) -or [IO.Directory]::Exists($deniedRetired)) {
+                            $failures.Add("an access-list refusal of the InstallRoot rename (holder: $withHolder): $($_.Exception.Message)")
+                        }
+                    }
+                    finally {
+                        if ($null -ne $holder) { [void]$holder.WaitForExit(30000) }
+                    }
                 }
             }
             finally {
