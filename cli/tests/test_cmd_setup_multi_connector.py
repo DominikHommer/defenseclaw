@@ -327,6 +327,48 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(restart.call_count, 2)
         self.assertEqual(restart.call_args_list[1].kwargs["connectors"], ["claudecode"])
 
+    def test_failed_restart_restores_the_discovery_cache_from_before_the_version_check(self):
+        # GAP-0547: `setup codex --mode action` republished agent_discovery.json
+        # in its version check, before the rollback point was taken. The
+        # restart failed on a peer the new cache left unversioned, and the
+        # rollback put that same cache back, so the gateway still could not
+        # start on the restored configuration.
+        self._seed_map("claudecode", "codex")
+        for name in ("claudecode", "codex"):
+            self.app.cfg.guardrail.connectors[name].mode = "action"
+        cache = os.path.join(self.app.cfg.data_dir, "agent_discovery.json")
+        prior = b'{"agents":{"claudecode":{"version":"2.1.304 (Claude Code)"}}}\n'
+        atomic_write_private_bytes(cache, prior)
+
+        def version_check(*_args, **_kwargs):
+            atomic_write_private_bytes(cache, b'{"agents":{"claudecode":{"version":""}}}\n')
+            return True
+
+        seen_by_restart: list[bytes] = []
+
+        def _restart(*_args, **_kwargs):
+            with open(cache, "rb") as handle:
+                seen_by_restart.append(handle.read())
+            if len(seen_by_restart) == 1:
+                raise click.ClickException("connector claudecode refresh failed: agent version not probed")
+
+        with (
+            _setup_patches() as restart,
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=version_check,
+            ),
+        ):
+            restart.side_effect = _restart
+            result = _invoke(["codex", "--yes", "--mode", "action"], self.app)
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("restored the prior connector configuration and runtime", result.output)
+        self.assertEqual(len(seen_by_restart), 2)
+        self.assertEqual(seen_by_restart[1], prior)
+        with open(cache, "rb") as handle:
+            self.assertEqual(handle.read(), prior)
+
     def test_replace_readiness_failure_restores_prior_connector_set(self):
         self._seed_map("claudecode", "codex")
         prior = tuple(self.app.cfg.active_connectors())

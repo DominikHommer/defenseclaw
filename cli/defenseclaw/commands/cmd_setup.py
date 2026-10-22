@@ -8291,6 +8291,14 @@ def _setup_applied_runtime_difference(
     return "unknown"
 
 
+def _capture_setup_agent_discovery_file(data_dir) -> tuple[bool, bytes, tuple[int, int, int, int] | None]:
+    return _capture_protected_setup_file(
+        os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_DISCOVERY_FILENAME),
+        _AGENT_DISCOVERY_MAX_BYTES,
+        "agent_discovery.json",
+    )
+
+
 def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
     data_dir = getattr(cfg, "data_dir", None)
     config_existed = False
@@ -8328,11 +8336,7 @@ def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
             _AGENT_SELECTION_MAX_BYTES,
             "agent_selection.json",
         )
-        discovery_existed, discovery_body, discovery_generation = _capture_protected_setup_file(
-            os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_DISCOVERY_FILENAME),
-            _AGENT_DISCOVERY_MAX_BYTES,
-            "agent_discovery.json",
-        )
+        discovery_existed, discovery_body, discovery_generation = _capture_setup_agent_discovery_file(data_dir)
         lock_existed, lock_body, lock_generation = _capture_protected_setup_file(
             os.path.join(os.path.abspath(os.fspath(data_dir)), _HOOK_CONTRACT_LOCK_FILENAME),
             _HOOK_CONTRACT_LOCK_MAX_BYTES,
@@ -9959,7 +9963,23 @@ def _apply_hook_connector_setup(
     # generic version admission still precedes rule-pack validation and the
     # setup snapshot. Only native-Windows OpenCode takes the exact-selection
     # branch below.
+    prior_discovery = None
     if not _version_preflighted and not exact_windows_opencode:
+        # The version check republishes agent_discovery.json, the peer
+        # versions the gateway reads when it restarts. A failed setup must
+        # put back the cache the running gateway started with, not the one
+        # this check wrote (GAP-0547), so it is captured first.
+        data_dir = getattr(app.cfg, "data_dir", None)
+        if data_dir:
+            try:
+                prior_discovery = _capture_setup_agent_discovery_file(data_dir)
+            except OSError as exc:
+                ux.echo(
+                    f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
+                    f"    {_SETUP_ROLLBACK_POINT_NEXT_STEP}",
+                    err=True,
+                )
+                return False
         version_check_kwargs = {
             "mode": desired_mode,
             "data_dir": getattr(app.cfg, "data_dir", None),
@@ -10000,6 +10020,13 @@ def _apply_hook_connector_setup(
             err=True,
         )
         return False
+    if prior_discovery is not None:
+        setup_snapshot = replace(
+            setup_snapshot,
+            agent_discovery_existed=prior_discovery[0],
+            agent_discovery_bytes=prior_discovery[1],
+            agent_discovery_generation=prior_discovery[2],
+        )
 
     verified = _protected_selection
     selection_roster = (connector,)
