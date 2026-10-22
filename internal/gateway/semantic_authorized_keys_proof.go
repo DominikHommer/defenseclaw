@@ -32,7 +32,7 @@ var (
 	trustedPythonSimpleChdir             = regexp.MustCompile(`^os\.chdir\s*\(\s*(?:Path\.home\(\)\s*/\s*['"]\.ssh['"]|['"][^'"\\]*['"])\s*\)$`)
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
-	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
+	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+(?:/d\s+)?/c\s+(.+)$`)
 	trustedOutFileAppend                 = regexp.MustCompile(`(?is)^\s*(?:"[^"\r\n]*"|'[^'\r\n]*')\s*\|\s*out-file\s+-append\s+-filepath\s+(.+?)\s*$`)
 	trustedInterpreterKeysPath           = regexp.MustCompile(`(?:~|\$HOME|\$ENV\{HOME\}|/[A-Za-z0-9_./ -]+)/\.ssh/authorized_keys(?:2)?`)
 	trustedInterpreterOpenCall           = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync)\s*\(`)
@@ -42,7 +42,7 @@ var (
 
 func trustedCMDBody(input actionfacts.Input) (string, bool) {
 	if len(input.Command) > 64<<10 || input.Command == "" ||
-		!strings.Contains(input.ActiveHome, ":/") {
+		!windowsLocationAbsolute(input.ActiveHome) {
 		return "", false
 	}
 	parts := trustedCMDInvoke.FindStringSubmatch(strings.TrimSpace(input.Command))
@@ -989,6 +989,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// A relative path fact (the gateway could not validate the event
 		// cwd) is placed in the client's cwd, as the client keyed it.
 		target = hookpaths.OperandPath(target, clientCWD)
+		if request.patchTarget && (request.SandboxGuestCWD == "" || request.patchHostView) {
+			if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok {
+				return true
+			}
+		}
 		// Only the event cwd can interpret the process-dependent alias.
 		if hookpaths.ProcCWDWriteOperand(target) {
 			if !strings.HasPrefix(target, "/proc/self/cwd/") {

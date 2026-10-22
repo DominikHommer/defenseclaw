@@ -2333,6 +2333,13 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 				actionTool, trustedArgs, hermesWriteViews = views[0].Tool, views[0].Args, views
 			}
 		}
+		hermesV4APatch := false
+		if strings.EqualFold(req.ConnectorName, "hermes") && req.ToolName == "patch" && len(hermesWriteViews) > 0 {
+			var mode struct {
+				Mode string `json:"mode"`
+			}
+			hermesV4APatch = json.Unmarshal(req.ToolArgs, &mode) == nil && mode.Mode == "patch"
+		}
 		if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "kiro") && actionTool == fallbackTool {
 			// Kiro native file writes (fs_write in the kiro-cli and IDE
 			// shapes, fs_append, str_replace) are judged as the reviewed
@@ -2369,6 +2376,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Connector:            req.ConnectorName,
 			EnforcementCapable:   enforcementCapable,
 			ResolvedWriteTargets: resolvedWritesFromContext(ctx),
+			patchTarget:          hermesV4APatch,
 			SandboxGuestCWD:      sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
 			windowsShellDialect:  dialectHint,
 			record:               toolChainRecorder(req.toolChain),
@@ -2470,8 +2478,8 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 // native program such as curl incomplete, because Windows PowerShell aliases
 // it; such a command keeps its inferred grammar, as before GAP-1134, so its
 // POSIX reading can still enforce instead of every finding turning into
-// detection-only. An exact cmd /d /c wrapper may instead use CMD grammar:
-// /d disables ambient AutoRun commands before the quoted body.
+// detection-only. An explicit cmd /c wrapper uses CMD grammar, including
+// cmd.exe and the optional /d switch.
 func selectWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
 	tool = strings.ToLower(strings.TrimSpace(tool))
 	switch tool {
@@ -2483,16 +2491,13 @@ func selectWindowsShellDialect(tool, command string, input actionfacts.Input) ac
 	if command == "" {
 		return ""
 	}
+	if trustedCMDInvoke.MatchString(strings.TrimSpace(command)) {
+		return actionfacts.DialectCMD
+	}
 	input.DialectHint = actionfacts.DialectPowerShell
 	if actionfacts.Analyze(input).Authoritative() ||
 		actionfacts.InferredRawCommandDialect(command) == actionfacts.DialectPowerShell {
 		return actionfacts.DialectPowerShell
-	}
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(command)), "cmd /d /c ") {
-		input.DialectHint = actionfacts.DialectCMD
-		if actionfacts.Analyze(input).Authoritative() {
-			return actionfacts.DialectCMD
-		}
 	}
 	return ""
 }

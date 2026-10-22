@@ -441,11 +441,14 @@ func literalPipelineOperands(file *syntax.File, called map[string]bool, cwd, hom
 			return true
 		}
 		index, replacement := 1, ""
-		if consumer[index] == "-I" && len(consumer) > index+1 {
+		if (consumer[index] == "-I" || consumer[index] == "--replace") && len(consumer) > index+1 {
 			replacement = consumer[index+1]
 			index += 2
 		} else if strings.HasPrefix(consumer[index], "-I") {
 			replacement = consumer[index][2:]
+			index++
+		} else if strings.HasPrefix(consumer[index], "--replace=") {
+			replacement = strings.TrimPrefix(consumer[index], "--replace=")
 			index++
 		}
 		if replacement == "" || index >= len(consumer) {

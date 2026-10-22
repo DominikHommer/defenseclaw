@@ -180,7 +180,8 @@ func trustedActionActiveSSHPrivateKeyContentRead(facts actionfacts.Facts) bool {
 				continue
 			}
 			return true
-		case "cat", "base64", "cp", "copy", "copy-item", "cpi",
+		case "sed", "gsed", "awk", "gawk", "mawk", "nawk",
+			"cat", "base64", "cp", "copy", "copy-item", "cpi",
 			"get-content", "gc", "type", "read", "readfile", "read_file", "read-file",
 			"fsread", "fs_read", "fs-read", "fs.read", "fs.read_file",
 			"fileread", "file_read", "file-read", "catfile", "cat_file", "cat-file",

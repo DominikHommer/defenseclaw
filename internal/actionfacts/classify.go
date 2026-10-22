@@ -475,9 +475,11 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "tee":
 		classifyTee(out, command)
-	case "sed":
+	case "sed", "gsed":
 		classifyPOSIXSed(out, command)
 		classifyPOSIXLoggingHardeningControl(out, command)
+	case "awk", "gawk", "mawk", "nawk":
+		classifyPOSIXAwkRead(out, command)
 	case "add-content":
 		classifyStructuredPowerShellPathMutator(out, command, program)
 	case "ac":
@@ -3240,6 +3242,32 @@ func ApplyStaticPOSIXSedInPlaceLiteralMutation(
 	}
 }
 
+// classifyPOSIXAwkRead accepts a bounded read-only AWK program and its fixed
+// file operands. An unrecognized program or option does not acquire a
+// complete file-read proof.
+func classifyPOSIXAwkRead(out *parseOutput, command *CommandFact) {
+	if command.Dialect != DialectPOSIX || !command.ArgvComplete || len(command.Argv) < 2 {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	program := command.Argv[1]
+	if program != "NR==1 {print}" && program != "{print}" && program != "{print $0}" {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	addOperation(command, OperationRead)
+	for _, operand := range command.Argv[2:] {
+		if operand == "-" {
+			continue
+		}
+		if operand == "" || strings.HasPrefix(operand, "-") || strings.Contains(operand, "=") {
+			out.markPartial(IssueUnknownOperandGrammar)
+			return
+		}
+		appendCommandPath(out, command, PathAccessRead, operand)
+	}
+}
+
 func classifyPOSIXSed(out *parseOutput, command *CommandFact) {
 	_, target, ok := StaticPOSIXSedInPlaceLiteralMutation(*command)
 	if ok {
@@ -3308,8 +3336,8 @@ func staticPOSIXSedNumericPrintTargets(command CommandFact) ([]string, bool) {
 	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
 		!command.ArgvComplete || len(command.Argv) < 4 ||
 		len(command.Arguments) != len(command.Argv) ||
-		command.Program != "sed" ||
-		!exactCaseSensitivePOSIXProgram(&command, "sed") ||
+		(command.Program != "sed" && command.Program != "gsed") ||
+		!exactCaseSensitivePOSIXProgram(&command, command.Program) ||
 		(command.Argv[1] != "-n" && command.Argv[1] != "--quiet" &&
 			command.Argv[1] != "--silent") {
 		return nil, false

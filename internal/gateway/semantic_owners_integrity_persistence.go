@@ -1466,7 +1466,8 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(request, facts)
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
-		!strings.Contains(commandText, "base64") && !symlinkWrite {
+		!strings.Contains(commandText, "base64") && !symlinkWrite &&
+		!trustedWindowsLocationAuthorizedKeysWrite(input) {
 		return appendTrustedCMDPrivateKeyReadFinding(
 			appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
 			generation, request, input,

@@ -72,8 +72,15 @@ type trustedActionRequest struct {
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
 	ResolvedWriteTargets map[string]string
-	record               func(actionfacts.Facts, []RuleFinding)
-	recordTelemetry      func(trustedActionTelemetry)
+	// Hermes' native patch parser can reinterpret a symlink target containing
+	// a line break as another file directive. Its write views require the
+	// narrower patch-target proof, including in guest-directory views.
+	patchTarget bool
+	// Sandbox absolute targets are guest names; their host-directory views
+	// carry the filesystem proof.
+	patchHostView   bool
+	record          func(actionfacts.Facts, []RuleFinding)
+	recordTelemetry func(trustedActionTelemetry)
 	// SandboxGuestCWD is a sandbox call's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); Input.CWD is its host mount. Only
 	// the authorized-keys proofs read it, and only to add a match.
@@ -482,6 +489,7 @@ func dispatchTrustedAction(
 	findings = append(semanticFindings, legacyFindings...)
 	finalized := finalizeTrustedActionFindings(generation, request, contextFacts, findings)
 	finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
+	finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
 	if staticTargetTwin == nil {
 		return finalized
 	}
@@ -2148,7 +2156,8 @@ func dispatchTrustedFallback(
 		findings = withSequenceProvenFindings(findings, viewFindings)
 	}
 	findings = finalizeTrustedActionFindings(generation, request, contextFacts, findings)
-	return appendTrustedWriteTargetFindings(findings, generation, request, facts), fallbackTelemetry
+	findings = appendTrustedWriteTargetFindings(findings, generation, request, facts)
+	return appendTrustedPrivateKeyReaderFinding(findings, generation, request, facts), fallbackTelemetry
 }
 
 // trustedFallbackLanes runs the recovery lanes over findings, the legacy scan
