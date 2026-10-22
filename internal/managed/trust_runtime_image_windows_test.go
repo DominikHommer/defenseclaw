@@ -145,12 +145,32 @@ func TestValidateTrustedRuntimeCodeTreeIgnoresRetiredUnpack(t *testing.T) {
 }
 
 func TestValidateTrustedInstallMarkerDirRefusesReplaceableAncestor(t *testing.T) {
-	cisco, marker := testenv.CiscoRuntimeTree(t, "DefenseClaw")
+	cisco, root := testenv.CiscoRuntimeTree(t, "DefenseClaw")
+	marker := filepath.Join(root, "secure-client.install")
+	if err := os.Mkdir(marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testenv.SetSecurity(t, marker, testenv.AdminOnlySDDL)
 	if err := ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker"); err == nil || !strings.Contains(err.Error(), marker) {
 		t.Fatalf("Administrators-owned marker = %v, want SYSTEM owner refusal", err)
 	}
 	testenv.SetSecurity(t, cisco, "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;;0x1200e9;;;BU)")
 	if err := ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker"); err == nil || !strings.Contains(err.Error(), cisco) {
 		t.Fatalf("replaceable marker ancestor = %v, want refusal naming %s", err, cisco)
+	}
+}
+
+func TestValidateTrustedInstallMarkerDirAcceptsSystemOwnedLeaf(t *testing.T) {
+	_, root := testenv.CiscoRuntimeTree(t, "DefenseClaw")
+	marker := filepath.Join(root, "secure-client.install")
+	if err := os.Mkdir(marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if testenv.CurrentUserSID(t) != "S-1-5-18" {
+		t.Skip("setting a SYSTEM owner requires the native LocalSystem installer test cell")
+	}
+	testenv.SetSecurity(t, marker, "O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)")
+	if err := ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker"); err != nil {
+		t.Fatalf("SYSTEM-owned marker refused: %v", err)
 	}
 }

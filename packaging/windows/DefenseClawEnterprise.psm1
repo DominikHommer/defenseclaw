@@ -3938,7 +3938,7 @@ function New-DefenseClawCanonicalPathAcl {
     param(
         [Parameter(Mandatory)][bool]$IsDirectory,
         [Parameter(Mandatory)]
-        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'BundleDirectory', 'BundleReceipt', 'BundleVersionDirectory', 'BundleVersionFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'SecureClientMarkerDirectory', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'BundleDirectory', 'BundleReceipt', 'BundleVersionDirectory', 'BundleVersionFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
         [string]$Kind,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
@@ -3946,6 +3946,7 @@ function New-DefenseClawCanonicalPathAcl {
     $directoryKinds = @(
         'InstallDirectory',
         'ServiceInstallDirectory',
+        'SecureClientMarkerDirectory',
         'StateDirectory',
         'AdminDirectory',
         'ConfigDirectory',
@@ -3989,6 +3990,9 @@ function New-DefenseClawCanonicalPathAcl {
         $script:AdministratorsSID
     )
     $security.SetOwner($administrators)
+    if ($Kind -eq 'SecureClientMarkerDirectory') {
+        $security.SetOwner([Security.Principal.SecurityIdentifier]::new($script:SystemSID))
+    }
     $security.SetGroup($administrators)
     # Start from a new descriptor and discard inheritance. AddAccessRule below
     # therefore defines the whole DACL; unlike icacls /grant:r, this cannot
@@ -4024,6 +4028,12 @@ function New-DefenseClawCanonicalPathAcl {
             })
             $entries.Add([pscustomobject]@{
                 sid = $GatewayServiceSID
+                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            })
+        }
+        'SecureClientMarkerDirectory' {
+            $entries.Add([pscustomobject]@{
+                sid = $script:UsersSID
                 rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
             })
         }
@@ -4430,7 +4440,7 @@ function Set-DefenseClawPathAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]
-        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'BundleDirectory', 'BundleReceipt', 'BundleVersionDirectory', 'BundleVersionFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'SecureClientMarkerDirectory', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'BundleDirectory', 'BundleReceipt', 'BundleVersionDirectory', 'BundleVersionFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
         [string]$Kind,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
@@ -9024,6 +9034,41 @@ function Invoke-DefenseClawBundleAclContract {
     }
 }
 
+function Set-DefenseClawSecureClientInstallMarker {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceSID
+    )
+    if (-not ($Layout.Contains('BrokerEnabled') -and [bool]$Layout['BrokerEnabled'])) {
+        return
+    }
+    # The install root itself has the canonical Administrators owner. Profile
+    # selection needs a separate SYSTEM-owned fact; an agent environment or
+    # an Administrators-owned directory is not that fact (GAP-0461).
+    $marker = Microsoft.PowerShell.Management\Join-Path `
+        $Layout.InstallRoot 'secure-client.install'
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $marker) {
+        Assert-DefenseClawNoReparsePath -Path $marker
+        if (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $marker -PathType Container)) {
+            throw "Secure Client install marker is not a directory: $marker"
+        }
+    }
+    else {
+        [void](Microsoft.PowerShell.Management\New-Item `
+            -ItemType Directory -Path $marker -ErrorAction Stop)
+        Assert-DefenseClawNoReparsePath -Path $marker
+    }
+    if (@(Microsoft.PowerShell.Management\Get-ChildItem `
+            -LiteralPath $marker -Force -ErrorAction Stop).Count -ne 0) {
+        throw "Secure Client install marker must be empty: $marker"
+    }
+    Set-DefenseClawPathAcl `
+        -Path $marker `
+        -Kind SecureClientMarkerDirectory `
+        -GatewayServiceSID $GatewayServiceSID
+}
+
 function Set-DefenseClawManagedAcls {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -9036,6 +9081,7 @@ function Set-DefenseClawManagedAcls {
     )
     $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
     Set-DefenseClawPathAcl -Path $Layout.InstallRoot -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
+    Set-DefenseClawSecureClientInstallMarker -Layout $Layout -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.BinDirectory -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.LibexecDirectory -Kind InstallDirectory -GatewayServiceSID $gatewaySID
     # A kept 1.0.2 Fleet compiler (GAP-0274) and its directories, when present.
@@ -24996,9 +25042,13 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.LibexecDirectory,
         $Layout.ManagedIPCDirectory
     )
+    if ($Layout.Contains('BrokerEnabled') -and [bool]$Layout['BrokerEnabled']) {
+        $allowedDirectories += (Microsoft.PowerShell.Management\Join-Path `
+            $Layout.InstallRoot 'secure-client.install')
+    }
     # Standalone keeps its managed IPC directory (sensor helper socket)
     # under InstallRoot; only that directory and its exact socket leaves are
-    # added. The Secure Client allow-list is unchanged.
+    # added. Secure Client also carries the empty install-marker directory.
     $standaloneIPCLeaves = @(Get-DefenseClawStandaloneIPCSocketLeaves -Layout $Layout)
     if ($standaloneIPCLeaves.Count -gt 0) {
         $allowedDirectories += [IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')
@@ -25798,6 +25848,10 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
         # the canonical validator was tripping on pre-fix.
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'ipc')
     )
+    if ($Layout.Contains('BrokerEnabled') -and [bool]$Layout['BrokerEnabled']) {
+        $directories += (Microsoft.PowerShell.Management\Join-Path `
+            $RetiredRoot 'secure-client.install')
+    }
     # Both profiles' payloads install the ACP bridge and the sensor helper
     # under bin. Without them a committed uninstall could never retire its
     # InstallRoot ("committed InstallRoot contains unexpected content:
@@ -28811,6 +28865,12 @@ function Remove-DefenseClawCommittedEmptyInstallRoot {
         # runs.
         [IO.Path]::GetFullPath($Layout.ManagedIPCDirectory).TrimEnd('\')
     )
+    if ($Layout.Contains('BrokerEnabled') -and [bool]$Layout['BrokerEnabled']) {
+        $allowed += [IO.Path]::GetFullPath(
+            (Microsoft.PowerShell.Management\Join-Path `
+                $Layout.InstallRoot 'secure-client.install')
+        ).TrimEnd('\')
+    }
     if (Test-DefenseClawStandaloneProfile) {
         $allowed += @(Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot)
     }
