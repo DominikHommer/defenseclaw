@@ -93,7 +93,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	if !on {
 		for _, entry := range state.sortedPending() {
 			if entry.Kind == "stop" {
-				l.describePending(entry)
+				l.describePending(ctx, entry)
 			}
 		}
 		l.noteOpenShellCapability(ctx, settings, false, nil, nil)
@@ -161,7 +161,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 		}
 	}
 	for _, entry := range state.sortedPending() {
-		l.describePending(entry)
+		l.describePending(ctx, entry)
 	}
 	l.describeMacOSAgents(ctx)
 	// The gateway reads this to say, in its own words, why a host run of a
@@ -219,7 +219,7 @@ func versionNote(version string) string {
 }
 
 // describePending reports a change that waits for an account's sandboxes.
-func (l *lifecycle) describePending(entry pending) {
+func (l *lifecycle) describePending(ctx context.Context, entry pending) {
 	waiting := fmt.Sprintf("%d sandboxes run", entry.Sandboxes)
 	switch {
 	case entry.Sandboxes < 0:
@@ -228,6 +228,11 @@ func (l *lifecycle) describePending(entry pending) {
 		waiting = "1 sandbox runs"
 	case entry.Sandboxes == 0:
 		waiting = "waiting to be tried again"
+	}
+	if l.env.GOOS == "darwin" && entry.Kind == "launchd" {
+		if active, err := l.env.activeMacOSConsoleSession(ctx, entry.UID); err == nil && !active {
+			waiting = "no active GUI console session; the reload is deferred until this user's next login or sandbox command"
+		}
 	}
 	l.result.Services = append(l.result.Services, enterprisestatus.Service{
 		Name: "sandbox pending " + entry.User, Kind: sandboxRowKind, State: fmt.Sprintf("%s since %s: %s", entry.Kind, entry.Since, waiting),

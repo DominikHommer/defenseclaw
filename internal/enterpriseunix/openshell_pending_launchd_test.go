@@ -6,6 +6,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -14,10 +15,11 @@ import (
 )
 
 func TestMacOSPendingLaunchAgentAdvice(t *testing.T) {
-	h := newOSHost(t, "darwin")
+	h, _, _ := newLaunchdTestHost(t)
+	setConsoleOwner(h, h.alice.UID)
 	entry := pending{Kind: "launchd", User: "sample-user", UID: h.alice.UID, Since: "2026-10-14T12:00:00Z", Reason: "the signed gateway binary changed", Sandboxes: 2}
 	r := &enterprisestatus.Result{}
-	(&lifecycle{env: h.env, result: r}).describePending(entry)
+	(&lifecycle{env: h.env, result: r}).describePending(context.Background(), entry)
 	message := messagesOf(r.Warnings, codeSandboxPending)
 	for _, want := range []string{"sudo " + h.env.lifecycleCommand(ActionRepair), "root ensure, repair or reconcile", "first sandbox started after the running ones stop", "reloads the job itself", "If that reload fails, the start reports it"} {
 		if !strings.Contains(message, want) {
@@ -30,7 +32,7 @@ func TestMacOSPendingLaunchAgentAdvice(t *testing.T) {
 
 	entry.Kind = "restart"
 	r = &enterprisestatus.Result{}
-	(&lifecycle{env: h.env, result: r}).describePending(entry)
+	(&lifecycle{env: h.env, result: r}).describePending(context.Background(), entry)
 	want := fmt.Sprintf("pending restart for user sample-user since %s (the signed gateway binary changed): 2 sandboxes run; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running\n",
 		entry.Since, h.env.lifecycleCommand(ActionEnsure))
 	if got := messagesOf(r.Warnings, codeSandboxPending); got != want {
