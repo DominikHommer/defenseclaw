@@ -33,15 +33,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// On Linux, RunContained runs cmd under a supervisor: this binary, run again
-// with containSupervisorArg0 and containSupervisorEnv. The supervisor is a child
-// subreaper (PR_SET_CHILD_SUBREAPER), so a descendant that leaves the
-// command's process group or session (setsid, setpgid, a double fork) is
-// reparented to it, not to init. When the command exits or is canceled the
-// supervisor kills and reaps every descendant until it has none.
+// On Linux, RunContained runs cmd below a child subreaper custodian and a
+// separate runner. A command that kills its immediate parent kills the runner;
+// its descendants are then reparented to the custodian, which kills and reaps
+// them. The custodian is a separate process so gateway children are never
+// included in its sweep.
 const (
 	containSupervisorArg0 = "defenseclaw-contained-run"
 	containSupervisorEnv  = "DEFENSECLAW_CONTAINED_RUN_SUPERVISOR"
+	containCustodianMode  = "custodian"
+	containRunnerMode     = "runner"
 )
 
 // Supervisor exit codes. Any other code is the command's own (128+signal
@@ -62,15 +63,22 @@ const (
 var containSweepBudget = 2 * time.Second
 
 func init() {
-	if len(os.Args) < 4 || os.Args[0] != containSupervisorArg0 || os.Args[2] != "--" ||
+	if len(os.Args) < 5 || os.Args[0] != containSupervisorArg0 || os.Args[3] != "--" ||
 		os.Getenv(containSupervisorEnv) != "1" {
 		return
 	}
-	budget, err := time.ParseDuration(os.Args[1])
+	budget, err := time.ParseDuration(os.Args[2])
 	if err != nil || budget < 0 {
 		os.Exit(containExitNotContained)
 	}
-	os.Exit(superviseContained(os.Args[3:], budget))
+	switch os.Args[1] {
+	case containCustodianMode:
+		os.Exit(superviseContained(os.Args[4:], budget))
+	case containRunnerMode:
+		os.Exit(runContainedCommand(os.Args[4:]))
+	default:
+		os.Exit(containExitNotContained)
+	}
 }
 
 func runContained(cmd *exec.Cmd) error {
@@ -79,7 +87,7 @@ func runContained(cmd *exec.Cmd) error {
 	}
 	target := cmd.Path
 	cmd.Path = "/proc/self/exe"
-	cmd.Args = append([]string{containSupervisorArg0, containSweepBudget.String(), "--", target}, cmd.Args[1:]...)
+	cmd.Args = append([]string{containSupervisorArg0, containCustodianMode, containSweepBudget.String(), "--", target}, cmd.Args[1:]...)
 	env := cmd.Env
 	if env == nil {
 		env = os.Environ()
@@ -107,8 +115,9 @@ func runContained(cmd *exec.Cmd) error {
 	return err
 }
 
-// superviseContained runs argv as a child subreaper and returns the exit
-// code for its parent (see the containExit codes).
+// superviseContained owns the tree after the runner exits, including when a
+// hook sends SIGKILL to the runner. Its own wait and sweep are confined to this
+// process, never to the gateway that launched it.
 func superviseContained(argv []string, budget time.Duration) int {
 	runtime.LockOSThread()
 	terms := make(chan os.Signal, 1)
@@ -120,8 +129,9 @@ func superviseContained(argv []string, budget time.Duration) int {
 		// The parent died before the parent-death signal was armed.
 		return containExitTerminated
 	}
-	child := exec.Command(argv[0], argv[1:]...)
-	child.Env = withoutEnv(os.Environ(), containSupervisorEnv)
+	child := exec.Command("/proc/self/exe", argv...)
+	child.Args = append([]string{containSupervisorArg0, containRunnerMode, budget.String(), "--"}, argv...)
+	child.Env = os.Environ()
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
 	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	if err := child.Start(); err != nil {
@@ -158,6 +168,36 @@ func superviseContained(argv []string, budget time.Duration) int {
 	case waitErr == nil:
 		return 0
 	case errors.As(waitErr, &exitErr):
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			return containExitNotContained
+		}
+		return exitErr.ExitCode()
+	default:
+		return containExitNotContained
+	}
+}
+
+// runContainedCommand is the hook's immediate parent. It is deliberately not
+// a subreaper: if the hook kills it, every orphan moves to the custodian.
+func runContainedCommand(argv []string) int {
+	runtime.LockOSThread()
+	if os.Getppid() == 1 {
+		return containExitNotContained
+	}
+	child := exec.Command(argv[0], argv[1:]...)
+	child.Env = withoutEnv(os.Environ(), containSupervisorEnv)
+	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	if err := child.Start(); err != nil {
+		return containExitNotStarted
+	}
+	releaseStdio()
+	err := child.Wait()
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, &exitErr):
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 			return 128 + int(status.Signal())
 		}

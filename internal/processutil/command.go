@@ -69,12 +69,14 @@ var ErrNotContained = errors.New("processutil: could not establish that the comm
 // start a child in a session of its own (setsid), out of the process group
 // RunTree kills, and Verify passed while the child kept running (r104 W5b).
 //
-// On Linux a child-subreaper supervisor follows every descendant, also one
-// that left the group or session, and kills and reaps them all; when it
-// cannot, RunContained returns ErrNotContained. macOS has no subreaper: a
-// descendant outside the group that kept an inherited descriptor fails the
-// run with ErrNotContained, and one that also closed its descriptors is not
-// seen. On Windows it is RunTree: the Job Object refuses breakaway. Other
+// On Linux a child-subreaper custodian follows every descendant, also one
+// that left the group or session or killed its immediate parent, and kills
+// and reaps them all; when it cannot, RunContained returns ErrNotContained.
+// On macOS a short-lived launcher irreversibly drops real root credentials
+// (if any), checks that RLIMIT_NPROC prevents forks, and then executes the
+// command with that limit. A descendant cannot start, including one that
+// would close inherited descriptors. On Windows it is RunTree: the Job
+// Object refuses breakaway. Other
 // platforms never run cmd and return ErrNotContained.
 //
 // cmd must not have been started. On Linux, cmd.Cancel asks the supervisor

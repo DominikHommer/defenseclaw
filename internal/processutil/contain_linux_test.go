@@ -104,6 +104,16 @@ func TestRunContainedFailsClosedWhenItCannotEndTheTree(t *testing.T) {
 // A command that kills its supervisor cannot pass.
 func TestRunContainedFailsWhenTheSupervisorIsKilled(t *testing.T) {
 	requireContainTools(t)
+	// RunContained is also called by the long-lived gateway. Its custodian
+	// must never sweep another child of the gateway while ending this probe.
+	unrelated := exec.Command("sleep", "60")
+	if err := unrelated.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = unrelated.Process.Kill()
+		_ = unrelated.Wait()
+	})
 	pidFile := filepath.Join(t.TempDir(), "escaped.pid")
 	err := RunContained(CommandContext(context.Background(), "/bin/sh", "-c",
 		"setsid "+containChild+" &\n"+containWaitPID+"\n"+
@@ -111,9 +121,15 @@ func TestRunContainedFailsWhenTheSupervisorIsKilled(t *testing.T) {
 			`case "$(tr '\0' ' ' < /proc/$PPID/cmdline)" in `+containSupervisorArg0+`*) kill -9 $PPID ;; esac`+
 			"\nexit 0", "sh", pidFile))
 	pid := readContainPID(t, pidFile)
-	_ = syscall.Kill(pid, syscall.SIGKILL)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 	if err == nil {
 		t.Fatal("RunContained passed after the command killed its supervisor")
+	}
+	if helperRunning(pid) {
+		t.Fatalf("RunContained returned after its supervisor died while descendant %d still runs", pid)
+	}
+	if !helperRunning(unrelated.Process.Pid) {
+		t.Fatalf("RunContained killed unrelated gateway child %d", unrelated.Process.Pid)
 	}
 }
 

@@ -13,6 +13,7 @@ import sys
 import time
 import tracemalloc
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -231,7 +232,7 @@ def test_windows_hermes_probe_requires_active_runtime_response(tmp_path):
 _PROOF = "printf 'defenseclaw-execution-probe-ok\\n'\n"
 _OVERSIZED_OUTPUTS = {
     "proof-then-64MiB": _PROOF + "head -c 67108864 /dev/zero\n",
-    "64MiB-then-proof": "head -c 67108864 /dev/zero\n" + _PROOF,
+    "64MiB-then-proof": "set -e\nhead -c 67108864 /dev/zero\n" + _PROOF,
     "endless-stream": _PROOF + "exec yes\n",
 }
 
@@ -379,6 +380,13 @@ def test_hermes_execution_probe_ends_what_the_hook_started(tmp_path, monkeypatch
     monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)
     target, pid_file = _descendant_stub(tmp_path, body)
     cmd_doctor._run_hermes_execution_probe([str(target)])
+    if not _LINUX:
+        try:
+            assert not pid_file.exists(), "forkless probe started a descendant"
+        finally:
+            if pid_file.exists():
+                _kill_quietly(_read_pid(pid_file))
+        return
     descendant = _read_pid(pid_file)
     try:
         assert _process_gone(descendant), f"probe left descendant {descendant} running"
@@ -572,13 +580,20 @@ def _probe_escape(tmp_path, monkeypatch, body: str, timeout: float = 20.0):
 @pytest.mark.parametrize("case", list(_ESCAPE_CASES), ids=list(_ESCAPE_CASES))
 def test_hermes_execution_probe_ends_descendants_that_leave_its_session(tmp_path, monkeypatch, case):
     body, timeout, proves = _ESCAPE_CASES[case]
-    if case == "new-session-descriptors-closed" and not _LINUX:
-        pytest.skip("macOS cannot follow a descendant outside the session that closed its descriptors")
+    if not _LINUX:
+        # The macOS launcher disallows all forks. The child cannot reach its
+        # PID write, regardless of its new session or closed descriptors.
+        monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_TIMEOUT", min(timeout, 1.0))
+        target, pid_file = _descendant_stub(tmp_path, body)
+        cmd_doctor._run_hermes_execution_probe([str(target)])
+        try:
+            assert not pid_file.exists(), "the forkless probe started a child"
+        finally:
+            if pid_file.exists():
+                _kill_quietly(_read_pid(pid_file))
+        return
     returncode, stdout, descendant = _probe_escape(tmp_path, monkeypatch, body, timeout)
     try:
-        if not _LINUX:
-            assert returncode is None, f"the probe passed while descendant {descendant} outside its session ran"
-            return
         assert _process_gone(descendant, wait=0.2), f"probe left descendant {descendant} running"
         proved = returncode == 0 and stdout == cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE
         assert proved is proves, (returncode, stdout)
@@ -587,28 +602,86 @@ def test_hermes_execution_probe_ends_descendants_that_leave_its_session(tmp_path
 
 
 @_needs_perl
-@pytest.mark.parametrize(
-    ("body", "escaped"),
-    [
-        (_PROOF + _ESCAPED_CHILD + " &\n" + _WAIT_PID + "exit 0\n", False),
-        (_ESCAPE_CASES["new-session"][0], True),
-        (_ESCAPE_CASES["double-fork-into-new-session"][0], True),
-        (_ESCAPE_CASES["own-process-group"][0], True),
-    ],
-    ids=["child-in-session", "new-session", "double-fork-into-new-session", "own-process-group"],
-)
-def test_hermes_lifeline_probe_fails_closed_for_descendant_outside_its_session(tmp_path, monkeypatch, body, escaped):
-    """The macOS containment, exercised on any POSIX host."""
-    monkeypatch.setattr(cmd_doctor, "_HERMES_PROBE_UNIX_CONTAINMENT", "lifeline")
-    returncode, _stdout, descendant = _probe_escape(tmp_path, monkeypatch, body)
+def test_hermes_forkless_probe_preserves_a_simple_proof(tmp_path, monkeypatch):
+    """Exercise the macOS launcher on a non-root POSIX host."""
+    monkeypatch.setattr(cmd_doctor, "_HERMES_PROBE_UNIX_CONTAINMENT", "forkless")
+    target = _probe_stub(tmp_path, _PROOF)
+    assert cmd_doctor._run_hermes_execution_probe([str(target)]) == (
+        0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_forkless_probe_reaches_the_installed_hook_template(tmp_path, monkeypatch):
+    """The real hook's early proof must work with forks forbidden."""
+    source = Path(__file__).resolve().parents[2] / "internal/gateway/connector/hooks"
+    hook = tmp_path / "hermes-hook.sh"
+    helper = tmp_path / "_hardening.sh"
+    template = (source / hook.name).read_text(encoding="utf-8")
+    # The Go renderer removes this host-only guard. The probe exits before
+    # the later template branches are parsed by bash.
+    template = template.replace("{{if not .Sandbox}}", "", 1).replace("{{end}}# Windows", "# Windows", 1)
+    hook.write_text(template, encoding="utf-8")
+    shutil.copyfile(source / helper.name, helper)
+    hook.chmod(0o700)
+    monkeypatch.setattr(cmd_doctor, "_HERMES_PROBE_UNIX_CONTAINMENT", "forkless")
+    args = [str(hook), "--defenseclaw-execution-probe", "--forkless"]
+    assert cmd_doctor._run_hermes_execution_probe(args) == (
+        0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE,
+    )
+    helper.write_text("exit 7\n", encoding="utf-8")
+    assert cmd_doctor._run_hermes_execution_probe(args)[0] != 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_forkless_probe_ignores_inherited_bash_startup(tmp_path, monkeypatch):
+    hook = tmp_path / "hermes-hook.sh"
+    hook.write_text("#!/bin/bash\nprintf 'ordinary\\n'\nexit 9\n", encoding="utf-8")
+    hook.chmod(0o700)
+    startup = tmp_path / "startup.sh"
+    startup.write_text(_PROOF + "exit 0\n", encoding="utf-8")
+    monkeypatch.setenv("BASH_ENV", str(startup))
+    monkeypatch.setenv(
+        "BASH_FUNC_printf%%",
+        "() { builtin printf 'defenseclaw-execution-probe-ok\\n'; exit 0; }",
+    )
+    monkeypatch.setattr(cmd_doctor, "_HERMES_PROBE_UNIX_CONTAINMENT", "forkless")
+    assert cmd_doctor._run_hermes_execution_probe([str(hook)]) == (9, b"ordinary\n")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_doctor_adds_forkless_arg_only_for_darwin(tmp_path, monkeypatch):
+    hook, _check = _registered_unix_hermes(tmp_path, monkeypatch)
+    seen = []
+
+    def probe(argv):
+        seen.append(argv)
+        return 0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE
+
+    monkeypatch.setattr(cmd_doctor, "_run_hermes_execution_probe", probe)
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+    config = str(tmp_path / "hermes" / "config.yaml")
+    assert not cmd_doctor._hermes_registered_execution_problem(cfg, config)
+    assert seen == [[str(hook), "--defenseclaw-execution-probe"]]
+    seen.clear()
+    monkeypatch.setattr(cmd_doctor, "sys", _ProxyModule(sys, platform="darwin"))
+    assert not cmd_doctor._hermes_registered_execution_problem(cfg, config)
+    assert seen == [[str(hook), "--defenseclaw-execution-probe", "--forkless"]]
+
+
+@_needs_perl
+def test_hermes_forkless_probe_cannot_leave_a_closed_fd_child(tmp_path, monkeypatch):
+    """The old lifeline passed after a detached child closed its descriptors."""
+    monkeypatch.setattr(cmd_doctor, "_HERMES_PROBE_UNIX_CONTAINMENT", "forkless")
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_TIMEOUT", 1.0)
+    body = _PROOF + _ESCAPE_SESSION + _ESCAPED_CHILD_FDS_CLOSED + " &\nsleep 0.2\nexit 0\n"
+    target, pid_file = _descendant_stub(tmp_path, body)
+    cmd_doctor._run_hermes_execution_probe([str(target)])
     try:
-        if escaped:
-            assert returncode is None, f"the probe passed while descendant {descendant} outside its session ran"
-        else:
-            assert returncode == 0
-            assert _process_gone(descendant), f"probe left descendant {descendant} running"
+        assert not pid_file.exists(), "the probe started a child that closed every inherited descriptor"
     finally:
-        _kill_quietly(descendant)
+        if pid_file.exists():
+            _kill_quietly(_read_pid(pid_file))
 
 
 @pytest.mark.skipif(not _LINUX or not shutil.which("perl"), reason="Linux subreaper supervisor")
@@ -624,8 +697,12 @@ def test_hermes_probe_supervisor_fails_closed_when_cleanup_is_unproven(tmp_path,
             "exit 0\n"
         ))
     returncode, _stdout, descendant = _probe_escape(tmp_path, monkeypatch, body)
-    _kill_quietly(descendant)
-    assert returncode is None, "a probe whose descendants could not be proven ended must not pass"
+    try:
+        assert returncode is None, "a probe whose descendants could not be proven ended must not pass"
+        if fail == "supervisor-killed":
+            assert _process_gone(descendant, wait=0.2), f"Doctor left descendant {descendant} after supervisor death"
+    finally:
+        _kill_quietly(descendant)
 
 
 @pytest.mark.skipif(not _LINUX, reason="Linux subreaper supervisor")
@@ -645,12 +722,17 @@ def test_hermes_doctor_ends_hook_child_in_new_session(tmp_path, monkeypatch):
     )
     script.chmod(0o700)
     row = check()
+    if not _LINUX:
+        try:
+            assert not pid_file.exists(), "Doctor started a child outside its session"
+            assert row["status"] == "fail", row
+        finally:
+            if pid_file.exists():
+                _kill_quietly(_read_pid(pid_file))
+        return
     descendant = _read_pid(pid_file)
     try:
-        if _LINUX:
-            assert _process_gone(descendant, wait=0.2), f"Doctor left hook child {descendant} running"
-            assert row["status"] == "pass", row
-        else:
-            assert row["status"] == "fail", row
+        assert _process_gone(descendant, wait=0.2), f"Doctor left hook child {descendant} running"
+        assert row["status"] == "pass", row
     finally:
         _kill_quietly(descendant)

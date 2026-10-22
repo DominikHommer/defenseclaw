@@ -5969,13 +5969,13 @@ _HERMES_EXECUTION_PROBE_SWEEP = 2.0
 # How Doctor ends what a Unix probe started. A hook could start a child in a
 # session of its own (setsid) or another process group, out of the session
 # Doctor killed, and Doctor passed while the child kept running (r104 W5b).
-# "subreaper" (Linux): a supervisor that is a child subreaper, so every
-# orphaned descendant becomes its child, kills and reaps them all and fails
-# the proof when it cannot. "lifeline" (macOS, which has no subreaper): the
-# probe's session is killed and a pipe every descendant inherits must then
-# close, or the proof fails; a descendant that left the session and closed
-# its inherited descriptors is not seen.
-_HERMES_PROBE_UNIX_CONTAINMENT = "subreaper" if sys.platform.startswith("linux") else "lifeline"
+# "subreaper" (Linux): a custodian child subreaper owns a separate runner,
+# so killing the hook's immediate parent still leaves cleanup in the
+# custodian. "forkless" (macOS): the probe drops any inherited real root UID
+# and fixes RLIMIT_NPROC at zero before it executes the registered command.
+_HERMES_PROBE_UNIX_CONTAINMENT = (
+    "subreaper" if sys.platform.startswith("linux") else "forkless" if sys.platform == "darwin" else "unsupported"
+)
 # The supervisor's exit code when it cannot establish that nothing is left;
 # any other code is the probe's own (124 when Doctor ended it).
 _HERMES_PROBE_NOT_CONTAINED = 125
@@ -6020,13 +6020,30 @@ def reap_all(budget):
 
 
 def main():
-    budget = float(sys.argv[1])
+    mode, budget = sys.argv[1], float(sys.argv[2])
     parent = os.getppid()
     libc = ctypes.CDLL(None, use_errno=True)
-    # PR_SET_CHILD_SUBREAPER, then PR_SET_PDEATHSIG: end the tree if Doctor dies.
+    if mode == "runner":
+        # A killed runner's children move to the separate custodian, never
+        # to Doctor (which may have unrelated gateway children).
+        if parent == 1 or libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != parent:
+            return 125
+        try:
+            proc = subprocess.Popen(sys.argv[5:], start_new_session=True)
+        except (OSError, ValueError):
+            return 127
+        null = os.open(os.devnull, os.O_RDWR)
+        os.dup2(null, 1)
+        os.close(null)
+        code = proc.wait()
+        return code if code >= 0 else 128 - code
+    if mode != "custodian":
+        return 125
+    # PR_SET_CHILD_SUBREAPER, then PR_SET_PDEATHSIG: the custodian alone owns
+    # all orphans. The hook's immediate parent never owns cleanup.
     if libc.prctl(36, 1, 0, 0, 0) != 0 or libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
         return 125
-    if os.getppid() != parent:
+    if parent == 1 or os.getppid() != parent:
         return 124
     state = {"proc": None, "ended": False}
 
@@ -6040,7 +6057,9 @@ def main():
 
     signal.signal(signal.SIGTERM, end)
     try:
-        state["proc"] = subprocess.Popen(sys.argv[2:], start_new_session=True)
+        state["proc"] = subprocess.Popen([
+            sys.executable, "-I", "-S", "-c", sys.argv[3], "runner", sys.argv[2], sys.argv[3], "--", *sys.argv[5:],
+        ], start_new_session=True)
     except (OSError, ValueError):
         return 127
     if state["ended"]:
@@ -6054,7 +6073,57 @@ def main():
         return 125
     if state["ended"]:
         return 124
-    return code if code >= 0 else 128 - code
+    return code if code >= 0 else 125
+
+
+sys.exit(main())
+"""
+
+_HERMES_PROBE_FORKLESS = r"""
+import errno, os, resource, signal, sys
+
+
+def main():
+    uid, euid, egid = os.getuid(), os.geteuid(), os.getegid()
+    if euid <= 0:
+        return 125
+    if uid == 0:
+        try:
+            os.seteuid(0)
+            os.setgid(egid)
+            os.setuid(euid)
+        except OSError:
+            return 125
+    elif uid != euid:
+        return 125
+    if os.getuid() != euid or os.geteuid() != euid:
+        return 125
+    try:
+        resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+    except (OSError, ValueError):
+        return 125
+    # The XNU limit checks the real UID. A kernel or host where it is not
+    # enforced must fail before running the registered hook.
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        if exc.errno != errno.EAGAIN:
+            return 125
+    else:
+        if pid == 0:
+            os._exit(125)
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        return 125
+    # Noninteractive bash reads BASH_ENV and imports exported functions
+    # before the registered script starts.
+    for name in tuple(os.environ):
+        if name in {"BASH_ENV", "ENV"} or name.startswith("BASH_FUNC_"):
+            os.environ.pop(name, None)
+    try:
+        os.execv(sys.argv[1], sys.argv[1:])
+    except OSError:
+        return 125
 
 
 sys.exit(main())
@@ -6071,8 +6140,8 @@ def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
     never accumulates in Doctor. Whatever the command started ends with it on
     exit, overflow and timeout: on Linux a subreaper supervisor ends every
     descendant, also one in a session of its own; on macOS the probe's
-    session is killed and a descendant outside it that kept the lifeline
-    fails the proof (_HERMES_PROBE_UNIX_CONTAINMENT); on Windows its
+    session is killed after a forkless launcher has refused descendant
+    creation; on Windows its
     kill-on-close job is terminated. A launcher that started a long-lived
     child left it running, one more for each Doctor run (r104 W5b).
     """
@@ -6090,11 +6159,17 @@ def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
         if not sys.executable:
             return None, b""
         command = [
-            sys.executable, "-I", "-S", "-c", _HERMES_PROBE_SUPERVISOR, str(_HERMES_EXECUTION_PROBE_SWEEP), *argv,
+            sys.executable, "-I", "-S", "-c", _HERMES_PROBE_SUPERVISOR, "custodian",
+            str(_HERMES_EXECUTION_PROBE_SWEEP), _HERMES_PROBE_SUPERVISOR, "--", *argv,
         ]
         supervised = True
-    else:
+    elif _HERMES_PROBE_UNIX_CONTAINMENT == "forkless":
+        if not sys.executable:
+            return None, b""
+        command = [sys.executable, "-I", "-S", "-c", _HERMES_PROBE_FORKLESS, *argv]
         lifeline = os.pipe()
+    else:
+        return None, b""
     try:
         proc = subprocess.Popen(
             command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -6230,7 +6305,7 @@ def _collect_hermes_execution_probe(
     if reader.is_alive() or overflow.is_set():
         return None, bytes(captured[:limit])
     if lifeline is not None and not _hermes_probe_lifeline_closed(lifeline, _HERMES_EXECUTION_PROBE_PIPE_WAIT):
-        # A descendant outside the killed session still holds the lifeline.
+        # The forkless launcher or registered command still holds a stream.
         return None, bytes(captured)
     return returncode, bytes(captured)
 
@@ -8865,7 +8940,10 @@ def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
     for event in _HERMES_REQUIRED_HOOKS:
         if event not in approved:
             return f"Hermes hook approval for {event} is missing at {allowlist_path}"
-    returncode, stdout = _run_hermes_execution_probe([expected, "--defenseclaw-execution-probe"])
+    probe_argv = [expected, "--defenseclaw-execution-probe"]
+    if sys.platform == "darwin":
+        probe_argv.append("--forkless")
+    returncode, stdout = _run_hermes_execution_probe(probe_argv)
     if returncode is None:
         return "Hermes registered hook execution probe could not run"
     if returncode != 0 or stdout != _HERMES_EXECUTION_PROBE_RESPONSE:

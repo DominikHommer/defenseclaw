@@ -91,7 +91,7 @@ func TestHermesExecutionProbeCapsCapturedOutput(t *testing.T) {
 	setHermesExecutionProbeBounds(t, 20*time.Second, time.Second)
 	for name, body := range map[string]string{
 		"proof then 64 MiB": "printf 'defenseclaw-execution-probe-ok\\n'\nhead -c 67108864 /dev/zero\n",
-		"64 MiB then proof": "head -c 67108864 /dev/zero\nprintf 'defenseclaw-execution-probe-ok\\n'\n",
+		"64 MiB then proof": "set -e\nhead -c 67108864 /dev/zero\nprintf 'defenseclaw-execution-probe-ok\\n'\n",
 		"endless stream":    "printf 'defenseclaw-execution-probe-ok\\n'\nexec yes\n",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -165,10 +165,21 @@ func TestHermesExecutionProbeEndsWhatTheHookStarted(t *testing.T) {
 		"exits, child ignores hangup/term": {proof + "( trap '' HUP TERM; exec sleep 60 ) & echo $! > \"$PIDFILE\"\nexit 0\n", 20 * time.Second},
 	} {
 		t.Run(name, func(t *testing.T) {
-			setHermesExecutionProbeBounds(t, tc.timeout, 500*time.Millisecond)
+			timeout := tc.timeout
+			if runtime.GOOS == "darwin" {
+				timeout = 500 * time.Millisecond
+			}
+			setHermesExecutionProbeBounds(t, timeout, 500*time.Millisecond)
 			pidFile := filepath.Join(testenv.PrivateTempDir(t), "descendant.pid")
 			script := writeHermesProbeScript(t, "PIDFILE='"+pidFile+"'\n"+tc.body)
 			runHermesExecutionProbe(script, []string{"--defenseclaw-execution-probe"})
+			if runtime.GOOS == "darwin" {
+				if pid := optionalHermesProbePID(pidFile); pid > 0 && hermesProbeProcessRunning(pid) {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+					t.Fatalf("forkless Verify started descendant %d", pid)
+				}
+				return
+			}
 			pid := readHermesProbePID(t, pidFile)
 			deadline := time.Now().Add(5 * time.Second)
 			for hermesProbeProcessRunning(pid) {
@@ -180,6 +191,15 @@ func TestHermesExecutionProbeEndsWhatTheHookStarted(t *testing.T) {
 			}
 		})
 	}
+}
+
+func optionalHermesProbePID(path string) int {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	return pid
 }
 
 func readHermesProbePID(t *testing.T, path string) int {
@@ -214,8 +234,8 @@ func hermesProbeProcessRunning(pid int) bool {
 // r104 W5b: a sealed, approved hook can start a child out of the process
 // group (a new session, its own group, a double fork) and redirect its
 // streams; Verify passed while the child kept running. On Linux the probe
-// must end it and may pass only once nothing is left; on macOS, which has
-// no subreaper, a child it cannot end fails the proof.
+// must end it and may pass only once nothing is left. On macOS the probe
+// cannot create a child in the first place.
 func TestHermesExecutionProbeEndsDescendantsThatLeaveTheGroup(t *testing.T) {
 	if _, err := exec.LookPath("perl"); err != nil {
 		t.Skip("perl not installed")
@@ -230,38 +250,39 @@ func TestHermesExecutionProbeEndsDescendantsThatLeaveTheGroup(t *testing.T) {
 		exitZero = "exit 0\n"
 	)
 	for name, tc := range map[string]struct {
-		body      string
-		timeout   time.Duration
-		proves    bool
-		linuxOnly bool
+		body    string
+		timeout time.Duration
+		proves  bool
 	}{
-		"new session":                    {proof + session + child + " &\n" + waitPID + exitZero, 20 * time.Second, true, false},
-		"double fork into a new session": {proof + "( " + session + child + " & )\n" + waitPID + exitZero, 20 * time.Second, true, false},
-		"own process group":              {proof + group + child + " &\n" + waitPID + exitZero, 20 * time.Second, true, false},
+		"new session":                    {proof + session + child + " &\n" + waitPID + exitZero, 20 * time.Second, true},
+		"double fork into a new session": {proof + "( " + session + child + " & )\n" + waitPID + exitZero, 20 * time.Second, true},
+		"own process group":              {proof + group + child + " &\n" + waitPID + exitZero, 20 * time.Second, true},
 		"new session, descriptors closed": {
-			proof + session + closed + " &\n" + waitPID + exitZero, 20 * time.Second, true, true,
+			proof + session + closed + " &\n" + waitPID + exitZero, 20 * time.Second, true,
 		},
-		"new session, then times out":  {session + child + " &\n" + waitPID + "sleep 60\n", 500 * time.Millisecond, false, false},
-		"new session, then overflows":  {proof + session + child + " &\n" + waitPID + "exec yes\n", 20 * time.Second, false, false},
-		"new session, then hook fails": {proof + session + child + " &\n" + waitPID + "exit 1\n", 20 * time.Second, false, false},
+		"new session, then times out":  {session + child + " &\n" + waitPID + "sleep 60\n", 500 * time.Millisecond, false},
+		"new session, then overflows":  {proof + session + child + " &\n" + waitPID + "exec yes\n", 20 * time.Second, false},
+		"new session, then hook fails": {proof + session + child + " &\n" + waitPID + "exit 1\n", 20 * time.Second, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if tc.linuxOnly && runtime.GOOS != "linux" {
-				t.Skip("macOS cannot follow a descendant outside the group that closed its descriptors")
+			timeout := tc.timeout
+			if runtime.GOOS == "darwin" {
+				timeout = 500 * time.Millisecond
 			}
-			setHermesExecutionProbeBounds(t, tc.timeout, 500*time.Millisecond)
+			setHermesExecutionProbeBounds(t, timeout, 500*time.Millisecond)
 			pidFile := filepath.Join(testenv.PrivateTempDir(t), "escaped.pid")
 			script := writeHermesProbeScript(t, "PIDFILE='"+pidFile+"'\n"+tc.body)
 			ok := runHermesExecutionProbe(script, []string{"--defenseclaw-execution-probe"})
-			pid := readHermesProbePID(t, pidFile)
-			running := hermesProbeProcessRunning(pid)
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-			if runtime.GOOS != "linux" {
-				if ok {
-					t.Fatalf("Verify's probe passed while descendant %d outside the group ran", pid)
+			if runtime.GOOS == "darwin" {
+				if pid := optionalHermesProbePID(pidFile); pid > 0 && hermesProbeProcessRunning(pid) {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+					t.Fatalf("forkless Verify started descendant %d", pid)
 				}
 				return
 			}
+			pid := readHermesProbePID(t, pidFile)
+			running := hermesProbeProcessRunning(pid)
+			_ = syscall.Kill(pid, syscall.SIGKILL)
 			if running {
 				t.Fatalf("Verify's probe left descendant %d running", pid)
 			}
