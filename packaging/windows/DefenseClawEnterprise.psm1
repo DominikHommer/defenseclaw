@@ -16575,9 +16575,24 @@ function Complete-DefenseClawTransaction {
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf) {
         Microsoft.PowerShell.Management\Remove-Item -LiteralPath $Layout.PendingPath -Force
     }
+    # Removing pending.json is the commit (after a rollback: the end of the
+    # recovery), so the outcome is decided here. A snapshot directory that
+    # cannot be removed afterwards (a scanner holds one of its copies) must
+    # not fail the run: the caller would roll a proven deployment back from
+    # a snapshot this removal already partly deleted, with no pending record
+    # left to recover it (fix/r104-windows). The directory stays behind,
+    # administrator-only under StateRoot, and the warning names it.
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory -PathType Container) {
-        Assert-DefenseClawNoReparsePath -Path $directory
-        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $directory -Recurse -Force
+        try {
+            Assert-DefenseClawNoReparsePath -Path $directory
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction Stop
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Warning (
+                "the finished lifecycle transaction left its snapshot directory $directory " +
+                "($($_.Exception.Message)); it holds no pending work: an administrator can delete it"
+            )
+        }
     }
     if ($null -ne $rollbackIntent) {
         Complete-DefenseClawInstallRollbackIntent `
