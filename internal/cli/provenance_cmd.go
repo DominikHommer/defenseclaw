@@ -210,7 +210,18 @@ func provenancePerUserEndpoint(ctx context.Context, c *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("list the listeners of the gateway process: %w", err)
 	}
-	slices.SortStableFunc(listeners, func(a, b daemon.TCPListenAddr) int { return a.Port - b.Port })
+	// The default API port first, then by port, so a slow listener of
+	// another kind is asked last where it can be.
+	defaultPort := config.DefaultConfig().Gateway.APIPort
+	slices.SortStableFunc(listeners, func(a, b daemon.TCPListenAddr) int {
+		if (a.Port == defaultPort) != (b.Port == defaultPort) {
+			if a.Port == defaultPort {
+				return -1
+			}
+			return 1
+		}
+		return a.Port - b.Port
+	})
 	for _, listener := range listeners {
 		for _, ip := range provenanceLoopbackOf(listener.IP) {
 			if provenanceListenerServesAPI(ctx, ip, listener.Port, gateway) {

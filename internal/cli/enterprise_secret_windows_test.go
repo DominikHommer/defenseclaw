@@ -873,6 +873,11 @@ func TestWindowsSecretSetThatFailsTheTrustCheckKeepsThePreviousCredential(t *tes
 	previousVerify := windowsSecretVerifyStored
 	t.Cleanup(func() { windowsSecretVerifyStored = previousVerify })
 	windowsSecretVerifyStored = func(string, string) error { return errors.New("the credential owner is not trusted") }
+	// A kept copy a stopped run left behind is cleaned up, not left beside
+	// the credential.
+	if err := os.WriteFile(filepath.Join(dir, "."+name+".kept-0123456789abcdef"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true, json: true}, "rotated-value")
 	windowsSecretFailureDoc(t, out, err, "set", "change_failed")

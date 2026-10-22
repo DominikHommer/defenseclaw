@@ -797,9 +797,16 @@ func writeWindowsSecret(store *windowsSecretStore, name string, value []byte) er
 // new hidden name (not a credential name, so neither the gateway nor status
 // lists it) and returns that path; "" when there is none to keep. A link,
 // not a copy: the kept file is the same file, with its DACL, and putting it
-// back restores the file the change reservation marked.
+// back restores the file the change reservation marked. A kept file a run
+// that was stopped left behind is removed first (the change runs under the
+// locks, so no other run is using it).
 func keepWindowsSecret(dir, name string) (string, error) {
 	final := filepath.Join(dir, name)
+	if stale, err := filepath.Glob(filepath.Join(dir, "."+name+".kept-*")); err == nil {
+		for _, path := range stale {
+			_ = os.Remove(path)
+		}
+	}
 	info, err := os.Lstat(final)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
