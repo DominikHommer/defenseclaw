@@ -1143,6 +1143,64 @@ Invoke-Case 'a window on InstallRoot with a holder' 'denied' @($hook) @() $false
     assert "-SelfUninstallCallerPID $SelfUninstallCallerPID" in uninstall[call : call + 300]
 
 
+def test_an_uninstall_refuses_a_lasting_install_root_holder_before_its_commit(tmp_path) -> None:
+    # GAP-0625: a program that held bin\defenseclaw-hook.exe open past the
+    # rename retry made the CLI uninstall fail after its commit, with the
+    # services and hooks already removed. The standalone uninstall now looks
+    # for InstallRoot holders before it changes anything, while the services
+    # and hooks still enforce, and refuses only a holder seen at every look;
+    # the services, hook calls with new pids and a holder that exits pass.
+    source = tmp_path / "DefenseClaw"
+    _run_lifecycle_functions(
+        tmp_path,
+        [
+            "Format-DefenseClawProcessInUse",
+            "Get-DefenseClawInstallRootHolders",
+            "Assert-DefenseClawStandaloneInstallRootNotHeld",
+        ],
+        _FAKE_RENAME_NATIVE
+        + r"""
+function Initialize-DefenseClawNativeSecurity { return [FakeNative] }
+function Test-DefenseClawStandaloneProfile { return $true }
+function Get-DefenseClawUninstallOwnProcessIds { return , [Collections.Generic.HashSet[int]]@([int]$PID, 777, 900) }
+$script:StateFileInUseCheckLimit = 16384
+$script:InstallRootRetirementRetryMilliseconds = 400
+$script:InstallTreeUseRecheckMilliseconds = 20
+$layout = @{ InstallRoot = '""" + str(source) + r"""' }
+[void][IO.Directory]::CreateDirectory([IO.Path]::Combine($layout.InstallRoot, 'bin'))
+[IO.File]::WriteAllText([IO.Path]::Combine($layout.InstallRoot, 'bin', 'defenseclaw-hook.exe'), 'stand-in')
+$global:RmThrows = $false
+function Get-DefenseClawProcessImages {
+    $global:Look++
+    $global:RmHolders = [object[]]@(& $global:Holders $global:Look | Where-Object { $_.ProcessId })
+    return @(& $global:Holders $global:Look | Where-Object { $_.Path })
+}
+function Invoke-Case([string]$Name, [scriptblock]$Holders, [string]$Expect) {
+    $global:Look = 0
+    $global:Holders = $Holders
+    $outcome = 'passed'
+    try { Assert-DefenseClawStandaloneInstallRootNotHeld -Layout $layout -GatewayServiceName gateway -GuardianServiceName guardian -SelfUninstallCallerPID 777 }
+    catch { $outcome = $_.Exception.Message }
+    if ($outcome -notlike $Expect) { throw "${Name}: '$outcome' (want $Expect)" }
+    Write-Host "${Name}: $outcome"
+}
+$hook = $layout.InstallRoot + '\bin\defenseclaw-hook.exe'
+Invoke-Case 'no holder' { param($n) } 'passed'
+Invoke-Case 'only the caller' { param($n) [pscustomobject]@{ ProcessId = 777; AppName = 'defenseclaw' } } 'passed'
+Invoke-Case 'a service' { param($n) [pscustomobject]@{ ProcessId = 900; AppName = 'DefenseClawGateway' } } 'passed'
+Invoke-Case 'hook calls' { param($n) [pscustomobject]@{ Id = 4000 + $n; Path = $hook; UserName = 'CORP\alice'; Parent = 'claude' } } 'passed'
+Invoke-Case 'a holder that exits' { param($n) if ($n -lt 4) { [pscustomobject]@{ ProcessId = 5151; AppName = 'Scanner' } } } 'passed'
+Invoke-Case 'a lasting holder' { param($n) [pscustomobject]@{ ProcessId = 5151; AppName = 'pwsh' } } 'uninstall_in_use: pwsh (pid 5151)*nothing was changed*'
+""",
+    )
+    uninstall = _function_body(_text(MODULE), "Invoke-DefenseClawUninstallLifecycle")
+    check = uninstall.index("Assert-DefenseClawStandaloneInstallRootNotHeld `")
+    assert check < uninstall.index("$snapshot = New-DefenseClawTransaction")
+    assert check < uninstall.index("Invoke-DefenseClawManagedHooksTeardownCommand")
+    assert check < uninstall.index("Remove-DefenseClawService -Name")
+    assert "-SelfUninstallCallerPID $SelfUninstallCallerPID" in uninstall[check : check + 300]
+
+
 def test_the_deferred_retirement_stops_at_once_on_a_rename_this_account_may_not_do(tmp_path) -> None:
     # W4 review, loop round 2: the finalizer waited out its deadline on any
     # access denied, though a deny entry set after the deferral does not end

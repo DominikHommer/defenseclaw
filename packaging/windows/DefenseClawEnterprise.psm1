@@ -29323,16 +29323,21 @@ function Move-DefenseClawInstallRootForRetirement {
 # lifecycle and the installed CLI that asked for its own removal do not
 # count: the CLI's own image does not keep the folder from being renamed
 # (the uninstall moved its working folder out of InstallRoot first), and
-# the finalizer waits for it to exit anyway. Restart Manager failing finds
-# no holder. Each holder is one string, "name (pid N, ...)".
+# the finalizer waits for it to exit anyway, nor do the processes in
+# ExcludedProcessIds (the running services an uninstall stops itself). Restart Manager
+# failing finds no holder. Each holder is one string, "name (pid N, ...)".
 function Get-DefenseClawInstallRootHolders {
     param(
         [Parameter(Mandatory)][string]$InstallRoot,
-        [int]$SelfUninstallCallerPID
+        [int]$SelfUninstallCallerPID,
+        [AllowNull()][int[]]$ExcludedProcessIds
     )
     $root = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\') + '\'
     $excluded = [Collections.Generic.HashSet[int]]::new()
     [void]$excluded.Add([int]$PID)
+    foreach ($id in @($ExcludedProcessIds)) {
+        [void]$excluded.Add([int]$id)
+    }
     if ($SelfUninstallCallerPID -gt 0) {
         [void]$excluded.Add([int]$SelfUninstallCallerPID)
     }
@@ -29404,6 +29409,59 @@ function Get-DefenseClawInstallRootHolders {
         }
     }
     return [string[]]@($named.Values)
+}
+
+# Standalone uninstall refuses, before it changes anything, while a program
+# other than this lifecycle, the self-uninstall caller and the DefenseClaw
+# services holds a file in InstallRoot: a process that held
+# bin\defenseclaw-hook.exe open without delete sharing past the retirement
+# retry made the committed uninstall fail with the services and hooks
+# already gone (GAP-0625). It waits that retry window and refuses only a
+# holder seen at every look, so a hook call (a new pid each time) or a short
+# scan does not. The services and hooks stay in place while it waits. A
+# holder Restart Manager does not report still meets the committed
+# retirement.
+function Assert-DefenseClawStandaloneInstallRootNotHeld {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [int]$SelfUninstallCallerPID
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $own = Get-DefenseClawUninstallOwnProcessIds `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
+    $services = [int[]]@($own)
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $still = $null
+    while ($true) {
+        $seen = @(Get-DefenseClawInstallRootHolders `
+                -InstallRoot $Layout.InstallRoot `
+                -SelfUninstallCallerPID $SelfUninstallCallerPID `
+                -ExcludedProcessIds $services)
+        if ($null -ne $still) {
+            $seen = @($still | Microsoft.PowerShell.Core\Where-Object { $seen -contains $_ })
+        }
+        $still = $seen
+        if ($still.Count -eq 0) {
+            return
+        }
+        if ($clock.ElapsedMilliseconds -ge $script:InstallRootRetirementRetryMilliseconds) {
+            break
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $script:InstallTreeUseRecheckMilliseconds
+    }
+    $root = [IO.Path]::GetFullPath([string]$Layout.InstallRoot).TrimEnd('\')
+    $seconds = [int][Math]::Ceiling($script:InstallRootRetirementRetryMilliseconds / 1000)
+    throw (
+        'uninstall_in_use: ' + ($still -join '; ') + " held a file in $root for $seconds seconds, so DefenseClaw " +
+        'cannot remove that folder; nothing was changed. ' +
+        'Close the program, then run the uninstall again'
+    )
 }
 
 # Why this account may not rename InstallRoot aside whichever program
@@ -34129,6 +34187,11 @@ function Invoke-DefenseClawUninstallLifecycle {
         -AnyStartMode
     Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $Layout
     Assert-DefenseClawStandaloneInstallTreeNotInUse `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
+    Assert-DefenseClawStandaloneInstallRootNotHeld `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
