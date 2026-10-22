@@ -1775,7 +1775,8 @@ def _apply_global_fail_mode_transaction(
 @click.option(
     "--restart/--no-restart",
     default=True,
-    help="Restart the gateway so hooks are regenerated with the new fail mode (default: on).",
+    help="Refresh and verify runtime registrations, restarting a running gateway only when full connector setup "
+    "is needed (default: on). --no-restart saves the desired value without refreshing registrations.",
 )
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 @click.option(
@@ -1812,8 +1813,12 @@ def fail_mode_cmd(
 
     Without an argument this prints the current value. With
     ``open`` or ``closed`` it persists the choice to ~/.defenseclaw/
-    config.yaml and (when --restart is on) restarts the gateway so
-    the regenerated hooks pick up the new value immediately.
+    config.yaml. With --restart (the default), enabled connectors'
+    runtime registrations are refreshed and verified directly where
+    supported. A running gateway restarts only when full connector setup
+    is needed; a stopped gateway stays stopped. --no-restart saves the
+    desired value without refreshing runtime registrations; check
+    ``guardrail status`` for drift until reconciliation succeeds.
 
     With ``--connector X`` it scopes the fail mode to a single connector
     (multi-connector installs only), writing a per-connector override

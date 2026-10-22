@@ -1018,6 +1018,23 @@ def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_m
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
 
 
+def test_fail_mode_help_and_docs_describe_registration_refresh() -> None:
+    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["--help"])
+    assert result.exit_code == 0, result.output
+    help_text = " ".join(result.output.split())
+    docs = " ".join(
+        (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/configuration/fail-modes.mdx")
+        .read_text(encoding="utf-8").split()
+    )
+    persisted = docs.split("## Persisted fail mode", 1)[1].split("## ", 1)[0]
+    for text in (help_text, persisted):
+        assert "runtime registrations" in text and "refresh" in text
+        assert "--restart" in text and "--no-restart" in text
+        assert "stopped gateway" in text
+        assert "restarts the gateway so" not in text
+        assert "restarts the gateway by default" not in text
+
+
 def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
