@@ -135,7 +135,7 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		// Every denial is published only after the key is gone.
 		a.killForeignHookSessionKey(places, identity, exchange.Key)
 	}
-	if !decision.Deny && !time.Now().Before(answerBy) {
+	if places.standalone && !decision.Deny && !time.Now().Before(answerBy) {
 		// Too late to answer allow: a removal of the account may already
 		// have stopped waiting for this exchange. Nothing is published.
 		decision = enterprisepolicy.ApplyForeignHookRemovals(decision, exchange.Key, nil, errForeignHookExchangeExpired, time.Now())
