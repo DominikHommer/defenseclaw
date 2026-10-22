@@ -1749,7 +1749,12 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
     if connector in ("", "none"):
         return None
     from defenseclaw.commands.cmd_setup import _CONNECTOR_META
-    from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, repair_command
+    from defenseclaw.hook_integrity import (
+        agent_hook_switch_problems,
+        hook_registration_problems,
+        hook_runtime_problems,
+        repair_command,
+    )
 
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
     roster = _running_connectors_from_state_file(cfg.data_dir)
@@ -1766,10 +1771,13 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
         return None
     if not problems:
         return None
+    # A hook command the shell cannot run guards nothing (GAP-0382), and an
+    # agent setting that turns its hooks off is not repaired by a gateway
+    # restart (rel-1-0-4 GAP-0580).
+    blocking = problems[0].startswith("hook command ") or problems[0] in agent_hook_switch_problems(cfg, connector)
     return StepResult(
         "Connector runtime",
-        # A hook command the shell cannot run guards nothing (GAP-0382).
-        "fail" if problems[0].startswith("hook command ") else "warn",
+        "fail" if blocking else "warn",
         f"{label} is not guarded: {problems[0]}",
         repair_command(connector, problems[0]),
     )

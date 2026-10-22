@@ -747,7 +747,9 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
     the current folder, GAP-1067) or Codex with ``[features] hooks = false``
     (GAP-1094). Codex also refuses to start when hook entries have lost their
     command, for example after hook lines were deleted by hand (GAP-1102).
-    Managed installs keep the hooks in machine policy that these settings
+    Copilot reads ``disableAllHooks`` from its user and repository settings
+    (rel-1-0-4 GAP-0580); settings that cannot be read fail too, since what
+    Copilot does with them is unknown. Managed installs keep the hooks in machine policy that these settings
     cannot turn off, so they are not checked here.
     """
 
@@ -792,6 +794,29 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
                         f"run `{setup_command(connector)} --yes`; it removes the entries without a command",
                     )
                 )
+    elif connector == "copilot":
+        from defenseclaw.connector_paths import copilot_settings_resolution
+
+        if workspace_dir is None:
+            resolver = getattr(cfg, "connector_workspace_dir", None)
+            workspace_dir = resolver() if callable(resolver) else ""
+        settings = copilot_settings_resolution(workspace_dir)
+        if settings.errors:
+            problems.append(
+                HookProblem(
+                    "Copilot settings cannot be read (" + "; ".join(settings.errors) + "), so DefenseClaw cannot "
+                    "tell whether Copilot runs its hooks",
+                    "fix or remove the settings file named, then run `defenseclaw doctor` again",
+                )
+            )
+        elif settings.disable_all_hooks:
+            problems.append(
+                HookProblem(
+                    f"Copilot disableAllHooks is true in {settings.source}, so Copilot runs none of its hooks "
+                    "and DefenseClaw is not guarding its tool calls",
+                    f"remove disableAllHooks from {settings.source} (or set it to false), then restart Copilot",
+                )
+            )
     return problems
 
 
