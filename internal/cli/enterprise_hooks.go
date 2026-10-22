@@ -3703,6 +3703,11 @@ func hardenEnterpriseHookAuthorizationDir(dataDir string) (string, error) {
 	if err := enterpriseHookAuthorizationDirTrustCheck(authorizationDir); err != nil {
 		return "", err
 	}
+	if cfg != nil && cfg.StandaloneEnterprise() {
+		if err := ensureEnterpriseForeignHookRemovalFence(authorizationDir); err != nil {
+			return "", err
+		}
+	}
 	return authorizationDir, nil
 }
 

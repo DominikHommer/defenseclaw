@@ -13,15 +13,9 @@ import (
 	"time"
 )
 
-// lockForeignHookRemovalFile takes a shared or exclusive flock within ctx,
-// trying again every poll.
-func lockForeignHookRemovalFile(ctx context.Context, file *os.File, exclusive bool, poll time.Duration) error {
-	how := syscall.LOCK_SH
-	if exclusive {
-		how = syscall.LOCK_EX
-	}
+func lockForeignHookRemovalFile(ctx context.Context, file *os.File) error {
 	for {
-		err := syscall.Flock(int(file.Fd()), how|syscall.LOCK_NB)
+		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			return nil
 		}
@@ -31,7 +25,7 @@ func lockForeignHookRemovalFile(ctx context.Context, file *os.File, exclusive bo
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(poll):
+		case <-time.After(5 * time.Millisecond):
 		}
 	}
 }

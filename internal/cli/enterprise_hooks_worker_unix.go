@@ -169,6 +169,13 @@ type enterpriseHookWorkerRequest struct {
 	// TimeoutSeconds replaces enterpriseHookWorkerTimeout for this worker
 	// (remove-all's retry of a worker that timed out).
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// CleanupFence tells a foreign_cleanup worker that the guardian passed
+	// the cleanup fence pipes (enterprise_hooks_worker_fence_unix.go). The
+	// guardian sets it from cleanupFence.
+	CleanupFence bool `json:"cleanup_fence,omitempty"`
+	// cleanupFence is the guardian's side of those pipes; it never leaves
+	// the guardian.
+	cleanupFence *enterpriseForeignHookFenceSession
 }
 
 // enterpriseHookWorkerCopilotVSCode is what the user's home should hold
@@ -463,8 +470,16 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 				return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("the foreign cleanup does not take mode %q", target.Mode)}, 3)
 			}
 		}
+		var fence enterpriseForeignHookCleanupFence
+		if request.CleanupFence {
+			pipe, err := openEnterpriseHookWorkerFencePipe()
+			if err != nil {
+				return respond(enterpriseHookWorkerResponse{Error: err.Error()}, 3)
+			}
+			fence = pipe
+		}
 		now := time.Now()
-		response := enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, now)}
+		response := enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, now, fence)}
 		if request.CopilotVSCode != nil {
 			response.CopilotVSCode = runEnterpriseHookWorkerCopilotVSCode(request)
 		}
@@ -1189,6 +1204,7 @@ func runEnterpriseHookWorker(
 	request.Version = enterpriseHookWorkerProtocolVersion
 	request.UID, request.GID = account.UID, account.GID
 	request.User, request.Home = account.User, account.Home
+	request.CleanupFence = request.cleanupFence != nil
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return notStarted(err)
@@ -1227,10 +1243,12 @@ func runEnterpriseHookWorker(
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 2 * time.Second
-	if err := cmd.Start(); err != nil {
-		return notStarted(fmt.Errorf("start the worker for uid %d: %w", account.UID, err))
+	stopFence, err := attachEnterpriseHookWorkerFence(ctx, cmd, request)
+	if err != nil {
+		return enterpriseHookWorkerResponse{}, err
 	}
-	runErr := cmd.Wait()
+	runErr := cmd.Run()
+	stopFence()
 	forwardEnterpriseHookWorkerStderr(account, stderr)
 	if ctx.Err() != nil {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w", account.UID, ctx.Err())

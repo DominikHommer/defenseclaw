@@ -14,17 +14,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// lockForeignHookRemovalFile takes a shared or exclusive lock on the file's
-// first byte within ctx, trying again every poll. Locks of different handles
-// exclude each other, as flocks of different opens do.
-func lockForeignHookRemovalFile(ctx context.Context, file *os.File, exclusive bool, poll time.Duration) error {
-	flags := uint32(windows.LOCKFILE_FAIL_IMMEDIATELY)
-	if exclusive {
-		flags |= windows.LOCKFILE_EXCLUSIVE_LOCK
-	}
+func lockForeignHookRemovalFile(ctx context.Context, file *os.File) error {
 	for {
 		var overlapped windows.Overlapped
-		err := windows.LockFileEx(windows.Handle(file.Fd()), flags, 0, 1, 0, &overlapped)
+		err := windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped)
 		if err == nil {
 			return nil
 		}
@@ -34,7 +27,7 @@ func lockForeignHookRemovalFile(ctx context.Context, file *os.File, exclusive bo
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(poll):
+		case <-time.After(5 * time.Millisecond):
 		}
 	}
 }
