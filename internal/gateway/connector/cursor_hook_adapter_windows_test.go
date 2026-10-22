@@ -97,7 +97,7 @@ func TestMain(m *testing.M) {
 		codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
 			return codexEffectivePolicy{Source: "connector unit-test policy fixture"}, nil
 		}
-		os.Exit(m.Run())
+		os.Exit(runIsolatedFromTheHostsHermes(m))
 	}
 }
 

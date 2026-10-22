@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -35,17 +36,21 @@ func accountHomeDir(userHome string) (string, error) {
 var (
 	accountSystemRoot        = "/"
 	accountLaunchdHermesHome = launchdHermesHome
+	accountProcessEvidence   = runningProcessEvidence
 )
 
 // OverrideAccountEnvironmentForTest reads the host-wide environment files and
-// the running processes under root instead of /, and the launchd environment
-// as empty, for tests that must not see the host's. It returns the function
-// that restores them.
+// the running processes under root instead of / (<root>/proc, on macOS
+// too), and the launchd environment as empty, for tests that must not see
+// the host's. It returns the function that restores them.
 func OverrideAccountEnvironmentForTest(root string) (restore func()) {
-	previousRoot, previousLaunchd := accountSystemRoot, accountLaunchdHermesHome
+	previousRoot, previousLaunchd, previousProcesses := accountSystemRoot, accountLaunchdHermesHome, accountProcessEvidence
 	accountSystemRoot = root
 	accountLaunchdHermesHome = func(int) (string, error) { return "", nil }
-	return func() { accountSystemRoot, accountLaunchdHermesHome = previousRoot, previousLaunchd }
+	accountProcessEvidence = procProcessEvidence
+	return func() {
+		accountSystemRoot, accountLaunchdHermesHome, accountProcessEvidence = previousRoot, previousLaunchd, previousProcesses
+	}
 }
 
 const (
@@ -64,7 +69,9 @@ const (
 //   - shell startup files, which only the shell can evaluate, so any line
 //     naming HERMES_HOME is a value that cannot be resolved;
 //   - on macOS the account's launchd environment (launchctl setenv);
-//   - on Linux the environment of every running process of the account.
+//   - the environment of every running process of the account (Linux
+//     /proc, macOS kern.procargs2), which shows what a file a startup file
+//     sources, a terminal profile or an IDE set.
 func accountEnvironmentEvidence(userHome string) ([]homeEvidence, error) {
 	info, err := os.Stat(userHome)
 	if err != nil {
@@ -127,8 +134,7 @@ func accountEnvironmentEvidence(userHome string) ([]homeEvidence, error) {
 			return nil, err
 		}
 	}
-	switch runtime.GOOS {
-	case "darwin":
+	if runtime.GOOS == "darwin" {
 		value, err := accountLaunchdHermesHome(uid)
 		if err != nil {
 			return nil, fmt.Errorf("read the launchd environment of uid %d: %w", uid, err)
@@ -136,10 +142,9 @@ func accountEnvironmentEvidence(userHome string) ([]homeEvidence, error) {
 		if strings.TrimSpace(value) != "" {
 			out = append(out, homeEvidence{source: "the launchd environment of uid " + strconv.Itoa(uid), home: absoluteHome(value)})
 		}
-	case "linux":
-		if err := add(processEvidence(uid)); err != nil {
-			return nil, err
-		}
+	}
+	if err := add(accountProcessEvidence(uid)); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -248,13 +253,13 @@ func startupFileEvidence(path string) ([]homeEvidence, error) {
 	return nil, nil
 }
 
-// processEvidence reads HERMES_HOME from the environment of every running
-// process of uid (Linux /proc). A process that exits or cannot be read is
-// skipped; a caller that is neither root nor uid can read none, which
-// fails.
-func processEvidence(uid int) ([]homeEvidence, error) {
-	if euid := os.Geteuid(); euid != 0 && euid != uid {
-		return nil, fmt.Errorf("the environment of the processes of uid %d cannot be read without root", uid)
+// procProcessEvidence reads HERMES_HOME from the environment of every
+// running process of uid (Linux /proc). A process that exits or cannot be
+// read is skipped; a caller that is neither root nor uid can read none,
+// which fails.
+func procProcessEvidence(uid int) ([]homeEvidence, error) {
+	if err := canReadProcessesOf(uid); err != nil {
+		return nil, err
 	}
 	proc := filepath.Join(accountSystemRoot, "proc")
 	entries, err := os.ReadDir(proc)
@@ -277,22 +282,76 @@ func processEvidence(uid int) ([]homeEvidence, error) {
 		if stat, ok := info.Sys().(*syscall.Stat_t); !ok || int(stat.Uid) != uid {
 			continue
 		}
+		source := func() string {
+			name, _ := readProcessFile(filepath.Join(dir, "comm"), 256)
+			return fmt.Sprintf("running process %s (%s)", entry.Name(), strings.TrimSpace(string(name)))
+		}
 		environ, err := readProcessFile(filepath.Join(dir, "environ"), accountProcessEnvironLimit)
+		if errors.Is(err, errProcessFileTooLarge) {
+			// An environment too large to read can set any home.
+			out = append(out, homeEvidence{source: source()})
+			continue
+		}
 		if err != nil {
 			continue
 		}
-		for _, variable := range bytes.Split(environ, []byte{0}) {
-			value, ok := bytes.CutPrefix(variable, []byte("HERMES_HOME="))
-			if !ok || len(bytes.TrimSpace(value)) == 0 {
-				continue
-			}
-			name, _ := readProcessFile(filepath.Join(dir, "comm"), 256)
-			source := fmt.Sprintf("running process %s (%s)", entry.Name(), strings.TrimSpace(string(name)))
-			out = append(out, homeEvidence{source: source, home: absoluteHome(string(value))})
-		}
+		out = append(out, environEvidence(bytes.Split(environ, []byte{0}), source)...)
 	}
 	return out, nil
 }
+
+// canReadProcessesOf fails unless the caller is root or uid: another
+// account's process environments cannot be read.
+func canReadProcessesOf(uid int) error {
+	if euid := os.Geteuid(); euid != 0 && euid != uid {
+		return fmt.Errorf("the environment of the processes of uid %d cannot be read without root", uid)
+	}
+	return nil
+}
+
+// environEvidence returns the HERMES_HOME values of a process environment;
+// source names the process.
+func environEvidence(environ [][]byte, source func() string) []homeEvidence {
+	var out []homeEvidence
+	for _, variable := range environ {
+		value, ok := bytes.CutPrefix(variable, []byte("HERMES_HOME="))
+		if !ok || len(bytes.TrimSpace(value)) == 0 {
+			continue
+		}
+		out = append(out, homeEvidence{source: source(), home: absoluteHome(string(value))})
+	}
+	return out
+}
+
+// procargs2Environment returns the environment in a macOS kern.procargs2
+// buffer: argc as a 32-bit integer, the executable path, NUL padding, argc
+// arguments and then the environment, each NUL-terminated, up to an empty
+// string. A buffer that does not hold argc arguments has none.
+func procargs2Environment(buf []byte) [][]byte {
+	if len(buf) < 4 {
+		return nil
+	}
+	argc := int(int32(binary.LittleEndian.Uint32(buf)))
+	end := bytes.IndexByte(buf[4:], 0)
+	if argc < 0 || end < 0 {
+		return nil
+	}
+	fields := bytes.Split(bytes.TrimLeft(buf[4+end:], "\x00"), []byte{0})
+	if len(fields) < argc {
+		return nil
+	}
+	var environ [][]byte
+	for _, field := range fields[argc:] {
+		if len(field) == 0 {
+			break
+		}
+		environ = append(environ, field)
+	}
+	return environ
+}
+
+// errProcessFileTooLarge reports a /proc file over its read limit.
+var errProcessFileTooLarge = errors.New("exceeds the read limit")
 
 // readProcessFile reads a /proc file, whose size stat does not report, and
 // fails when it holds more than limit bytes.
@@ -307,7 +366,7 @@ func readProcessFile(path string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("%s exceeds %d bytes", path, limit)
+		return nil, fmt.Errorf("%s: %w (%d bytes)", path, errProcessFileTooLarge, limit)
 	}
 	return data, nil
 }

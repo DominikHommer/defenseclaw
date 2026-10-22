@@ -1068,7 +1068,13 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 					return fmt.Errorf("hermes release the earlier Hermes home %s: %s", bound, strings.Join(errs, "; "))
 				}
 			}
-			return c.setup(ctx, opts, configPath)
+			if err := c.setup(ctx, opts, configPath); err != nil {
+				return err
+			}
+			// Best effort: without the record Verify counts every redirect
+			// the hooks recorded, which only fails more.
+			_ = recordHermesHomeSetUp(opts.DataDir, filepath.Dir(configPath), time.Now())
+			return nil
 		})
 	}
 	return c.setup(ctx, opts, "")
@@ -2675,7 +2681,8 @@ func hermesVerifiedConfigPath(opts SetupOpts) (string, error) {
 		return "", fmt.Errorf("hermes hooks not verified: %w", err)
 	}
 	if home := activeUserHomeOverride(); HermesConfigPathOverride == "" && home != "" && (runtime.GOOS == "windows" || !isProcessUserHome(home)) {
-		if err := hermespath.VerifyAccountHome(home, filepath.Dir(configPath)); err != nil {
+		hermesHome := filepath.Dir(configPath)
+		if err := hermespath.VerifyAccountHome(home, hermesHome, hermesHomeSetUpAt(opts.DataDir, hermesHome)); err != nil {
 			return "", fmt.Errorf("hermes hooks not verified: %w", err)
 		}
 	}
@@ -2686,6 +2693,47 @@ func hermesVerifiedConfigPath(opts SetupOpts) (string, error) {
 		return "", fmt.Errorf("hermes hooks not verified: %w", err)
 	}
 	return configPath, nil
+}
+
+// hermesHomeSetUpFileName records the Hermes home the last successful Setup
+// registered the hooks in, and when. A redirect the DefenseClaw hooks last
+// saw long enough before that no longer fails Verify
+// (hermespath.VerifyAccountHome).
+const hermesHomeSetUpFileName = "hermes-home-setup.json"
+
+type hermesHomeSetUp struct {
+	Home    string `json:"home"`
+	SetUpAt string `json:"set_up_at"`
+}
+
+func recordHermesHomeSetUp(dataDir, home string, now time.Time) error {
+	data, err := json.Marshal(hermesHomeSetUp{Home: home, SetUpAt: now.UTC().Format(time.RFC3339)})
+	if err != nil {
+		return err
+	}
+	return atomicWriteFileNoFollow(filepath.Join(dataDir, hermesHomeSetUpFileName), data, 0o600)
+}
+
+// hermesHomeSetUpAt is when Setup last registered the hooks in home, or
+// zero when no readable record names home or its time is in the future.
+func hermesHomeSetUpAt(dataDir, home string) time.Time {
+	path := filepath.Join(dataDir, hermesHomeSetUpFileName)
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Size() > 64<<10 {
+		return time.Time{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return time.Time{}
+	}
+	var record hermesHomeSetUp
+	if json.Unmarshal(data, &record) != nil || !sameManagedTarget(record.Home, home) {
+		return time.Time{}
+	}
+	at, err := time.Parse(time.RFC3339, record.SetUpAt)
+	if err != nil || at.After(time.Now()) {
+		return time.Time{}
+	}
+	return at
 }
 
 // isProcessUserHome reports whether home is this process's own home folder.

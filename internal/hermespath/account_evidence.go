@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 // homeEvidence is one place that sets the Hermes home a process of the
@@ -30,13 +31,17 @@ type homeEvidence struct {
 // on Linux and macOS, the environment files the sign-in reads
 // (environment.d, pam_environment, /etc/environment), the shell startup
 // files, the account's launchd environment on macOS and the environment of
-// its running processes on Linux. Evidence it cannot read fails too.
-func VerifyAccountHome(userHome, home string) error {
+// the environment of its running processes. Evidence it cannot read fails
+// too. setUpAt is when Setup last registered the hooks in home (zero when
+// unknown): a recorded redirect last seen RecordRefreshInterval or more
+// before it no longer counts, because a hook that ran with it since would
+// have refreshed it.
+func VerifyAccountHome(userHome, home string, setUpAt time.Time) error {
 	userHome = strings.TrimSpace(userHome)
 	if userHome == "" || !filepath.IsAbs(userHome) {
 		return errors.New("HERMES_HOME unproven: the account home is not absolute")
 	}
-	evidence, err := recordedHomeEvidence(userHome)
+	evidence, err := recordedHomeEvidence(userHome, setUpAt)
 	if err != nil {
 		return fmt.Errorf("HERMES_HOME unproven: %w", err)
 	}
@@ -62,17 +67,33 @@ type envRedirectRecord struct {
 	Connectors map[string][]struct {
 		Homes []string          `json:"homes"`
 		Vars  map[string]string `json:"vars"`
+		Seen  string            `json:"seen"`
 	} `json:"connectors"`
 }
 
 // envRedirectRecordLimit bounds the record read, as its writer does.
 const envRedirectRecordLimit = 64 << 10
 
+// RecordRefreshInterval is how long a hook leaves a recorded redirect it
+// sees again before it records the new sighting
+// (enterprisepolicy.RecordEnvRedirect).
+const RecordRefreshInterval = 24 * time.Hour
+
+// supersededRedirect reports whether a redirect last seen at seen predates
+// the Setup at setUpAt by RecordRefreshInterval or more: a hook that ran
+// with it after that Setup would have refreshed seen, so no agent has. A
+// redirect with no readable time is current.
+func supersededRedirect(seen string, setUpAt time.Time) bool {
+	at, err := time.Parse(time.RFC3339, seen)
+	return err == nil && !setUpAt.IsZero() && setUpAt.Sub(at) >= RecordRefreshInterval
+}
+
 // recordedHomeEvidence returns the Hermes homes DefenseClaw hooks saw the
 // account's agents run with: a HERMES_HOME any of them recorded, and a HOME
 // the Hermes hook ran with (Hermes then reads its .hermes on Linux and
-// macOS). A record that cannot be read fails.
-func recordedHomeEvidence(userHome string) ([]homeEvidence, error) {
+// macOS), except a redirect the Setup at setUpAt superseded
+// (supersededRedirect). A record that cannot be read fails.
+func recordedHomeEvidence(userHome string, setUpAt time.Time) ([]homeEvidence, error) {
 	path := filepath.Join(userHome, ".defenseclaw", "foreign-hook-env.json")
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -101,6 +122,9 @@ func recordedHomeEvidence(userHome string) ([]homeEvidence, error) {
 	var out []homeEvidence
 	for _, name := range names {
 		for _, redirect := range record.Connectors[name] {
+			if supersededRedirect(redirect.Seen, setUpAt) {
+				continue
+			}
 			if value, ok := redirect.Vars["HERMES_HOME"]; ok {
 				out = append(out, homeEvidence{source: source, home: absoluteHome(value)})
 				continue

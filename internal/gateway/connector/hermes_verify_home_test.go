@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -181,6 +182,64 @@ func TestManagedHermesVerifyFailsWhenTheAccountNamesAnotherHermesHome(t *testing
 			}
 			if err := os.Remove(tc.file); err != nil {
 				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A recorded redirect stops failing Verify once a Setup of the home
+// supersedes it: the DefenseClaw hooks refresh a redirect they see again
+// after a day, so one last seen a day or more before Setup has not been
+// used since. One `HERMES_HOME=/tmp/h hermes` run left Hermes unverified
+// forever. A redirect seen since, or less than a day before Setup, still
+// fails.
+func TestManagedHermesVerifyIgnoresARedirectSetupSuperseded(t *testing.T) {
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = ""
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+	root := testenv.PrivateTempDir(t)
+	t.Cleanup(hermespath.OverrideAccountHomeForTest(nil))
+	t.Cleanup(hermespath.OverrideAccountEnvironmentForTest(filepath.Join(root, "system")))
+	home := filepath.Join(root, "Users", "target")
+	other := filepath.Join(root, "tmp", "h")
+	record := filepath.Join(home, ".defenseclaw", "foreign-hook-env.json")
+	opts := prepareHermesSetupAdmissionFixture(t, SetupOpts{
+		DataDir:  filepath.Join(home, ".defenseclaw"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	})
+	stubHermesAdmissionInstalledVersion(t)
+	conn := NewHermesConnector()
+	writeRecord := func(seen time.Time) error {
+		body := `{"v":1,"connectors":{"hermes":[{"vars":{"HERMES_HOME":"` + strings.ReplaceAll(other, `\`, `\\`) + `"},"seen":"` + seen.UTC().Format(time.RFC3339) + `"}]}}`
+		if err := os.MkdirAll(filepath.Dir(record), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(record, []byte(body), 0o600)
+	}
+	if err := WithUserHomeDir(home, func() error {
+		if err := writeRecord(time.Now().Add(-48 * time.Hour)); err != nil {
+			return err
+		}
+		if err := conn.Setup(context.Background(), opts); err != nil {
+			return err
+		}
+		if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+			t.Errorf("a redirect last seen two days before Setup: OwnedHooksPresent = %v, %v; want present", present, err)
+		}
+		for name, seen := range map[string]time.Time{
+			"seen after Setup":          time.Now(),
+			"seen an hour before Setup": time.Now().Add(-time.Hour),
+		} {
+			if err := writeRecord(seen); err != nil {
+				return err
+			}
+			present, err := OwnedHooksPresent(conn, opts)
+			if present || err == nil || !strings.Contains(err.Error(), "HERMES_HOME unproven") || !strings.Contains(err.Error(), other) {
+				t.Errorf("%s: OwnedHooksPresent = %v, %v; want not verified naming %s", name, present, err, other)
 			}
 		}
 		return nil

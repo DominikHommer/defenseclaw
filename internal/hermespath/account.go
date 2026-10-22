@@ -6,6 +6,7 @@ package hermespath
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -170,4 +171,27 @@ func expandAccountValue(value string, vars map[string]string) string {
 	}
 	out.WriteString(value)
 	return out.String()
+}
+
+// IsolateHostForTests keeps a test binary off the host's Hermes setup: it
+// unsets every HERMES_* variable of the process and reads the account
+// environment under an empty directory (OverrideAccountEnvironmentForTest).
+// A package whose tests reach Hermes calls it from TestMain; without it a
+// developer's exported HERMES_HOME, the host's /etc/profile.d, the
+// environment of the test's own processes or the launchd environment failed
+// them. It returns the function that removes the directory.
+func IsolateHostForTests() (cleanup func(), err error) {
+	for _, variable := range os.Environ() {
+		if name, _, _ := strings.Cut(variable, "="); strings.HasPrefix(name, "HERMES_") {
+			if err := os.Unsetenv(name); err != nil {
+				return nil, err
+			}
+		}
+	}
+	root, err := os.MkdirTemp("", "hermes-host-")
+	if err != nil {
+		return nil, err
+	}
+	restore := OverrideAccountEnvironmentForTest(root)
+	return func() { restore(); _ = os.RemoveAll(root) }, nil
 }
