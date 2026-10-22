@@ -755,54 +755,70 @@ func TestSetupConnectorsIsolated_FailedRefreshPreservesGuardsAndFails(t *testing
 }
 
 func TestSetupConnectorsIsolated_OpenCodeFailureRestoresPluginAndLock(t *testing.T) {
-	s := multiBootSidecar(t)
-	s.cfg.DataDir = testenv.PrivateTempDir(t)
-	configDir := testenv.PrivateTempDir(t)
-	t.Setenv("OPENCODE_CONFIG_DIR", configDir)
-	pluginPath := filepath.Join(configDir, "plugins", "defenseclaw.js")
-	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	priorPlugin := []byte("// prior managed OpenCode plugin\n")
-	if err := os.WriteFile(pluginPath, priorPlugin, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	priorOpts := prepareOpenCodeSetupAuthorityFixture(t, s.cfg.DataDir)
-	priorLock := connector.NewHookContractLockEntry(
-		priorOpts,
-		connector.NewOpenCodeConnector(),
-		"prior-test-build",
-	)
-	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, priorLock); err != nil {
-		t.Fatal(err)
-	}
-	failed := &failingOpenCodeConnector{
-		bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "opencode"}},
-		pluginPath:        pluginPath,
-	}
+	for _, active := range []bool{false, true} {
+		t.Run(fmt.Sprintf("previously active=%t", active), func(t *testing.T) {
+			s := multiBootSidecar(t)
+			s.cfg.DataDir = testenv.PrivateTempDir(t)
+			configDir := testenv.PrivateTempDir(t)
+			t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+			pluginPath := filepath.Join(configDir, "plugins", "defenseclaw.js")
+			if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			priorPlugin := []byte("// prior managed OpenCode plugin\n")
+			if err := os.WriteFile(pluginPath, priorPlugin, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			priorOpts := prepareOpenCodeSetupAuthorityFixture(t, s.cfg.DataDir)
+			priorLock := connector.NewHookContractLockEntry(
+				priorOpts,
+				connector.NewOpenCodeConnector(),
+				"prior-test-build",
+			)
+			if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, priorLock); err != nil {
+				t.Fatal(err)
+			}
+			if active {
+				if err := connector.SaveActiveConnectors(s.cfg.DataDir, []string{"opencode"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			failed := &failingOpenCodeConnector{
+				bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "opencode"}},
+				pluginPath:        pluginPath,
+			}
 
-	got, err := s.setupConnectorsIsolated(
-		context.Background(), []connector.Connector{failed}, "tok", "a", "b", "master",
-		guardrail.NewRulePackCache(),
-	)
-	if err != nil {
-		t.Fatalf("setupConnectorsIsolated: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("succeeded = %v, want failed OpenCode skipped", got)
-	}
-	plugin, err := os.ReadFile(pluginPath)
-	if err != nil {
-		t.Fatalf("read restored plugin: %v", err)
-	}
-	if !reflect.DeepEqual(plugin, priorPlugin) {
-		t.Fatalf("restored plugin = %q, want exact prior bytes %q", plugin, priorPlugin)
-	}
-	if lock := connector.LoadHookContractLockEntry(s.cfg.DataDir, "opencode"); lock.ContractID != priorLock.ContractID || lock.RawAgentVersion != priorLock.RawAgentVersion {
-		t.Fatalf("restored lock = %+v, want prior contract/version", lock)
-	}
-	if active := connector.LoadActiveConnector(s.cfg.DataDir); active != "" {
-		t.Fatalf("active connector = %q, want failed OpenCode absent", active)
+			got, err := s.setupConnectorsIsolated(
+				context.Background(), []connector.Connector{failed}, "tok", "a", "b", "master",
+				guardrail.NewRulePackCache(),
+			)
+			if (err != nil) != active {
+				t.Fatalf("previously active=%t: error=%v, want only a new connector failure isolated", active, err)
+			}
+			if active && failed.teardownCalls != 0 {
+				t.Fatalf("active plugin was unregistered %d times before restoration", failed.teardownCalls)
+			}
+			if len(got) != 0 {
+				t.Fatalf("succeeded = %v, want failed OpenCode skipped", got)
+			}
+			plugin, err := os.ReadFile(pluginPath)
+			if err != nil {
+				t.Fatalf("read restored plugin: %v", err)
+			}
+			if !reflect.DeepEqual(plugin, priorPlugin) {
+				t.Fatalf("restored plugin = %q, want exact prior bytes %q", plugin, priorPlugin)
+			}
+			if lock := connector.LoadHookContractLockEntry(s.cfg.DataDir, "opencode"); lock.ContractID != priorLock.ContractID || lock.RawAgentVersion != priorLock.RawAgentVersion {
+				t.Fatalf("restored lock = %+v, want prior contract/version", lock)
+			}
+			wantActive := ""
+			if active {
+				wantActive = "opencode"
+			}
+			if gotActive := connector.LoadActiveConnector(s.cfg.DataDir); gotActive != wantActive {
+				t.Fatalf("active connector = %q, want %q", gotActive, wantActive)
+			}
+		})
 	}
 }
 

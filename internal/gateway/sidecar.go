@@ -6311,9 +6311,11 @@ func rollbackMultiConnectorPublication(ctx context.Context, transaction multiCon
 		// previously-active non-plugin connector may have changed delivery posture during Setup,
 		// so it must be re-applied from its prior lock rather than left paired
 		// with lock metadata that no longer describes the live registration.
-		if applied.conn != nil && applied.previouslyActive && applied.pluginSnapshot == nil {
-			if err := reapplyPreviouslyActiveConnectorRegistration(ctx, applied); err != nil {
-				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore prior connector %s registration: %w", name, err))
+		if applied.conn != nil && applied.previouslyActive {
+			if applied.pluginSnapshot == nil {
+				if err := reapplyPreviouslyActiveConnectorRegistration(ctx, applied); err != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("restore prior connector %s registration: %w", name, err))
+				}
 			}
 		} else if applied.conn != nil {
 			if err := applied.conn.Teardown(ctx, applied.opts); err != nil {
