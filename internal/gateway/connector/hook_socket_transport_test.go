@@ -85,7 +85,10 @@ func TestShellHookTemplatesCarryTheSocketTransportOnlyWhenConfigured(t *testing.
 // recordingHookSocketGateway records each request and answers with response
 // (by default an allow that names the hook socket).
 type recordingHookSocketGateway struct {
-	response      any
+	response any
+	// serve, when set, answers the n-th request (from 1) itself unless it
+	// returns false.
+	serve         func(n int, w http.ResponseWriter) bool
 	mu            sync.Mutex
 	authorization []string
 	paths         []string
@@ -98,7 +101,11 @@ func (g *recordingHookSocketGateway) ServeHTTP(w http.ResponseWriter, r *http.Re
 	g.authorization = append(g.authorization, r.Header.Get("Authorization"))
 	g.paths = append(g.paths, r.URL.Path)
 	g.bodies = append(g.bodies, string(body))
+	n := len(g.paths)
 	g.mu.Unlock()
+	if g.serve != nil && g.serve(n, w) {
+		return
+	}
 	response := g.response
 	if response == nil {
 		response = map[string]interface{}{

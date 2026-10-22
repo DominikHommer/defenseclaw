@@ -176,6 +176,24 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
 }
 
+// closeForBusyGateway makes the watchdog's answer the closed one of a call
+// the gateway answered 429 (opts.gatewayBusy): a deadline that passes while
+// the call waits to resend, or on a resend, is no outage. Safe on a nil
+// watchdog.
+func (w *answerWatchdog) closeForBusyGateway(opts Options, sp spec) {
+	if w == nil {
+		return
+	}
+	stdout, stderr, code, logFailure := renderNoAnswer(opts, sp, "closed")
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired {
+		return
+	}
+	w.closedKnown = true
+	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
+}
+
 // claimFailureLog runs first in logHookFailure, before anything there can
 // block (the account lookup of a managed row, a stalled disk). A failure
 // that is closed makes the watchdog's answer closed: an administrator's

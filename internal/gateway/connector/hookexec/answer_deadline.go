@@ -225,10 +225,14 @@ func gatewayNoAnswer(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), errGatewayNoAnswer)
 }
 
-// noAnswerFailMode keeps managed non-tool events and locally spent budgets
-// closed. Only a proven tool-gate outage uses the administrator's fail mode.
+// noAnswerFailMode keeps managed non-tool events, locally spent budgets and a
+// call the gateway answered 429 first (Options.gatewayBusy,
+// ManagedOutageFailsOpen) closed. Only a proven tool-gate outage uses the
+// administrator's fail mode (owner decision 2026-10-20) or, per-user, the
+// installed fail mode. failNoAnswer and renderNoAnswer both use it, so the
+// rendered decision and its failure row agree.
 func noAnswerFailMode(opts Options, failMode string) string {
-	if opts.answerSpentLocally || (opts.ManagedEnterprise &&
+	if opts.answerSpentLocally || opts.gatewayBusy || (opts.ManagedEnterprise &&
 		(!managedNativeDecision(opts) || !toolGateEvent(opts.Connector, opts.Event))) {
 		return "closed"
 	}

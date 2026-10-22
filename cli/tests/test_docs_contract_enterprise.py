@@ -33,6 +33,83 @@ def _flat(page: str) -> str:
     return " ".join((DOCS / page).read_text(encoding="utf-8").split())
 
 
+def test_managed_hook_docs_distinguish_outages_from_refusals() -> None:
+    threat_model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text(encoding="utf-8")
+    rate_limit = next(line for line in threat_model.splitlines() if line.startswith("| R31 |"))
+    coverage = _flat("appendix/coverage-by-layer.mdx")
+    for text in (rate_limit, coverage):
+        assert not re.search(r"always fails?[ -]closed", text, re.IGNORECASE)
+        assert all(term in text for term in ("default", "closed", "administrator", "open", "outage", "Secure Client"))
+        assert all(term in text for term in ("runtime", "peer", "credential"))
+    assert "429" in rate_limit and "block" in rate_limit
+    assert "outage-only" in rate_limit and "outage-only" in coverage
+
+    fail_modes = _flat("reference/configuration/fail-modes.mdx")
+    strict = fail_modes.split("## Strict availability", 1)[1].split("## ", 1)[0]
+    assert "classified outages" in strict
+    assert "force the unavailable-home and transport failures closed" not in strict
+    assert "force the relevant unavailable-home and transport failures closed" not in strict
+
+    guidance = (
+        _flat("enterprise/plan/threat-model.mdx").split("### Disable hooks", 1)[1].split("### ", 1)[0],
+        _flat("enterprise/configure/reference.mdx").split("### Hook commands by route", 1)[1].split("## ", 1)[0],
+        _flat("enterprise/operate/lifecycle.mdx").split("## Restart the managed gateway", 1)[1].split("## ", 1)[0],
+        _flat("enterprise/operate/reference.mdx")
+        .split("### Gateway restarts and hook timing", 1)[1].split("### ", 1)[0],
+    )
+    for text in guidance:
+        assert not re.search(r"always fails?[ -]closed|never allows a call because", text, re.IGNORECASE)
+        assert "hook_fail_mode: open" in text and "outage" in text
+
+    troubleshooting = (DOCS / "troubleshooting/enterprise/index.mdx").read_text(encoding="utf-8")
+    for reason in ("enterprise_managed_rate_limited", "enterprise_managed_overloaded"):
+        row = next(line for line in troubleshooting.splitlines() if line.startswith(f"| `{reason}` |"))
+        assert "not a classified" in row and "block" in row
+        assert "always fails closed" not in row
+
+
+
+def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check() -> None:
+    """r104 W4b2 review: a rate limit blocks also when the resends run out; the
+    administrator's open does not reach a connector whose foreign-hook guard
+    checks the session with the gateway; observe mode is not a fail mode."""
+    threat_model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text(encoding="utf-8")
+    r31 = next(line for line in threat_model.splitlines() if line.startswith("| R31 |"))
+    assert "including for Claude Code, Codex and Devin" not in r31
+    assert "If no verdict follows" in r31 and "every fail mode" in r31
+    for name in ("Cursor", "GitHub Copilot", "Devin", "OpenCode", "Amp", "Hermes", "managed_hooks_only: preserve"):
+        assert name in r31
+
+    coverage = _flat("appendix/coverage-by-layer.mdx")
+    guarded = (
+        r31,
+        coverage.split("Secure Client keeps its separate open default", 1)[0],
+        _flat("enterprise/configure/reference.mdx").split("### Hook commands by route", 1)[1].split("## ", 1)[0],
+        _flat("reference/configuration/fail-modes.mdx").split("## Effective behavior", 1)[0],
+        _flat("enterprise/operate/lifecycle.mdx").split("## Restart the managed gateway", 1)[1].split("## ", 1)[0],
+        _flat("enterprise/operate/reference.mdx")
+        .split("### Gateway restarts and hook timing", 1)[1].split("### ", 1)[0],
+        _flat("enterprise/plan/threat-model.mdx").split("### Disable hooks", 1)[1].split("### ", 1)[0],
+    )
+    for text in guarded:
+        assert "foreign_hooks: remove" in text
+
+    per_layer = coverage.split("## Fail-open and fail-closed, per layer", 1)[1].split("## ", 1)[0]
+    assert "in observe mode | Open" not in per_layer
+    assert "Managed Claude Code and Codex hooks | Always closed" not in per_layer
+    assert "observe and action mode alike" in per_layer and "outage only" in per_layer
+    assert "observe mode fails open" not in coverage
+
+    troubleshooting = (DOCS / "troubleshooting/enterprise/index.mdx").read_text(encoding="utf-8")
+    for reason in ("enterprise_managed_rate_limited", "enterprise_managed_overloaded"):
+        row = next(line for line in troubleshooting.splitlines() if line.startswith(f"| `{reason}` |"))
+        assert "resends" in row and "if no verdict follows" in row
+    no_answer = next(
+        line for line in troubleshooting.splitlines() if line.startswith("| `enterprise_managed_gateway_no_answer` |")
+    )
+    assert "HTTP 429" in no_answer and "foreign_hooks: remove" in no_answer
+
+
 # (fact, [(pages that may hold the phrase, phrase), ...])
 FACTS = [
     ('account_outage_refusal_matches_the_cli', [

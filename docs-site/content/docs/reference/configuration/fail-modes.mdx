@@ -63,9 +63,13 @@ Under the Secure Client integration only, hooks fail open: an unset `guardrail.h
 
 A GitHub Copilot hook whose registered command names no event DefenseClaw reviewed is refused in fail mode `closed`, and a managed one in every fail mode. Copilot can block only `preToolUse` and `permissionRequest`, and its payload does not name the event, so the hook answers with both of Copilot's deny fields. An Antigravity hook registered without its event denies a tool call in fail mode `closed` and gives anything else its no-op answer. `verify` reports a DefenseClaw hook registered for an event DefenseClaw does not publish, and `ensure` rewrites the drop-in. On a per-user install `defenseclaw doctor` names the entry, and `defenseclaw setup <connector>` registers it again.
 
-On a managed standalone host the administrator-owned hooks of GitHub Copilot CLI and Hermes follow the effective mode on every OS: `closed` blocks a tool call DefenseClaw cannot check (service not running, unusable answer, or a call too large to inspect), and the agent shows why. Only the administrator's `hook_fail_mode: open` lets such a call through.
+On a managed standalone host the administrator-owned hooks of GitHub Copilot CLI and Hermes follow the effective mode on every OS: `closed` blocks a tool call DefenseClaw cannot check, and the agent shows why. The administrator's `hook_fail_mode: open` allows only a classified gateway outage; unusable answers and calls too large to inspect still block. With `foreign_hooks: remove` (the default) the guard checks the session of Copilot calls on every OS and of Hermes calls on Linux and macOS with the gateway, so an outage blocks those calls too ([Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#gateway-outages)).
 
 ## Effective behavior
+
+The failure rows below describe per-user hooks. On a managed standalone host,
+only a classified gateway outage can open a hook: the
+[refusals above](#refusals-that-ignore-the-fail-mode) still block under `open`.
 
 | Failure | Effective `open` | Effective `closed` |
 | --- | --- | --- |
@@ -128,7 +132,9 @@ Run bare, `guardrail fail-mode` prints the global value and each active connecto
 
 Claude Code shows `open` because it has no value of its own; Codex shows `closed` because of its override. Omitting `--connector` writes the broad posture and reconciles active connector overrides, so an old per-connector value cannot keep one peer on the prior mode.
 
-The mode is written to `guardrail.hook_fail_mode` (or the connector's `hook_fail_mode`) in `config.yaml` and baked into the generated hook scripts, each with a `# defenseclaw-derived: sha256=... fail_mode=closed` header. The command restarts the gateway by default to render them again. The key is not a [restart-required key](/docs/reference/commands/cli#restart-required-keys): with `--no-restart` the running gateway still reloads the mode and, with hook self-heal on, renders the scripts itself. `guardrail status` shows configured and runtime values, and `defenseclaw doctor` warns with `stale generated script (... bakes hook fail mode open; config.yaml says closed)` and names the repair.
+The mode is written to `guardrail.hook_fail_mode` (or the connector's `hook_fail_mode`) in `config.yaml` and installed in the connector's runtime registrations: generated scripts or plugins, or `hooks/.hookcfg` for the native hook. With `--restart` (the default) and the guardrail enabled, the command refreshes and verifies those registrations directly where supported, including Claude Code and Codex. It restarts a running gateway only when full connector setup is needed; a stopped gateway stays stopped.
+
+The key is not a [restart-required key](/docs/reference/commands/cli#restart-required-keys), but a policy reload alone does not prove the installed hooks match it. With `--no-restart`, the command saves the desired value without refreshing runtime registrations. `guardrail status` shows configured and runtime values and reports drift until reconciliation succeeds; `defenseclaw doctor` names the repair. Run the same `guardrail fail-mode` command without `--no-restart` to refresh and verify the registrations. A disabled guardrail keeps the saved value for its next enable.
 
 Hooks follow an open fail mode only when your config sets it. On Windows an open that an earlier release left in the hook config is treated as closed until the gateway renders the hooks again. On Linux and macOS the earlier release's hook scripts keep the mode baked into them until the new gateway renders them. See [Upgrade](/docs/get-started/upgrade#upgrade).
 
@@ -155,9 +161,9 @@ An already-completed result event cannot undo its side effect, and an observatio
 
 ## Strict availability
 
-`DEFENSECLAW_STRICT_AVAILABILITY=1` is an unconditional closed override for transport and missing-token failures, for managed or compatibility deployments that must never open during a gateway outage. It does not add a missing hook, turn native OTLP into enforcement, or make an unsupported connector block-capable. A strict outage can make the agent unavailable, so use status, gateway monitoring and a tested restart path before applying it broadly. On native Windows, set normal posture with `guardrail fail-mode` so setup, doctor and status can reconcile and report it. Administrator-managed hooks force the unavailable-home and transport failures closed rather than trusting a user-controlled environment.
+`DEFENSECLAW_STRICT_AVAILABILITY=1` is an unconditional closed override for transport and missing-token failures, for managed or compatibility deployments that must never open during a gateway outage. It does not add a missing hook, turn native OTLP into enforcement, or make an unsupported connector block-capable. A strict outage can make the agent unavailable, so use status, gateway monitoring and a tested restart path before applying it broadly. On native Windows, set normal posture with `guardrail fail-mode` so setup, doctor and status can reconcile and report it.
 
-Administrator-managed hooks force the relevant unavailable-home and transport failures closed rather than trusting a user-controlled process environment.
+On a managed standalone computer, hooks reject an invalid runtime, an unverified gateway peer or missing or refused credentials in every fail mode. The administrator's `open` covers only classified outages; `DEFENSECLAW_STRICT_AVAILABILITY=1` closes those too.
 
 ## The environment does not set the fail mode
 
