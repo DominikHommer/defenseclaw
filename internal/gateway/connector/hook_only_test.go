@@ -2070,6 +2070,7 @@ func TestHermesSetupAdoptsConsentRecordedUnder08x(t *testing.T) {
 	// including consent retained in the pristine 0.8.x backup.
 	managed := opts
 	managed.ManagedEnterprise = true
+	managed.ManagedHookSocket = filepath.Join(root, "hook.sock")
 	if err := teardownHermesAllowlist(managed, configPath, command); err != nil {
 		t.Fatal(err)
 	}
@@ -2080,7 +2081,6 @@ func TestHermesSetupAdoptsConsentRecordedUnder08x(t *testing.T) {
 	if len(cleaned["approvals"].([]interface{})) != 0 {
 		t.Fatal("managed uninstall retained DefenseClaw hook approvals")
 	}
-
 }
 
 func TestHermesAllowlistTamperedOwnedCommandRefusesNonExactCleanup(t *testing.T) {
