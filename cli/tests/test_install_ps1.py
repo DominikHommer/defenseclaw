@@ -1572,3 +1572,196 @@ def test_no_restore_or_undo_hides_a_refused_program_switch() -> None:
     assert failed_save.index("if (-not $undone) { Die") < failed_save.index("it was not changed, but")
     restore = _ps1_function("Restore-BinDir")
     assert restore.count("Assert-BinDirRestored $From") == 2
+
+
+# ── 1.0.4 (W4b loop round 2) ────────────────────────────────────────────────
+
+
+def _close_mocks(capable: str = "new ", close_rc: int = 0, running: bool = False) -> str:
+    # The gateway probe and run: a gateway file whose text starts with
+    # $capable has 'refresh-fail-modes --closed' (this release); any other
+    # (an older release) prints the help without it.
+    return (
+        "$Previous = Join-Path $DataDir 'previous'\n"
+        "function Write-Err([string]$m) { Write-Host \"err: $m\" }\n"
+        f"function Get-GatewayProcess {{ if (${str(running).lower()}) {{ return 'pid' }}; return $null }}\n"
+        "function Get-NativeProbe([string]$FilePath, [string[]]$Arguments = @()) {\n"
+        f"    $help = if ([IO.File]::ReadAllText($FilePath).StartsWith('{capable}')) {{ '--closed  close every installed hook' }} else {{ '--hold-until-exit int' }}\n"
+        "    return [pscustomobject]@{ Exit = 0; Output = $help }\n}\n"
+        "function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Quiet) {\n"
+        "    Write-Host \"RAN: $FilePath $($Arguments -join ' ')\"\n"
+        f"    return {close_rc}\n}}\n"
+        + _ps1_function("Close-UnfinishedInstallHooks")
+    )
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_refused_restore_keeps_its_gateway_and_closes_the_hooks_before_the_lock_goes(tmp_path: Path) -> None:
+    # W4b loop round 2: the installer stopped the old gateway and published
+    # the new hook; a later failure restores the snapshot while that hook
+    # runs, and its switch back is refused. The run used to exit with the
+    # gateway down, the previous gateway put back beside the failed install's
+    # data, and the hooks on their configured outage mode, an open included.
+    # Now the gateway in place stays until every other program is back, and
+    # before the lock goes it closes every hook.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        _write(bin_dir / name, "new " + name)
+        _write(slot / "bin" / name, "old " + name)
+    _write(slot / "COMPLETE", "")
+    _write(data / "hooks" / ".hookcfg", '{"fail_modes":{"codex":"open"}}')
+    _write(data / "config.yaml", "new data")
+    _write(slot / "data" / "config.yaml", "old data")
+    out = _restore_case(
+        tmp_path,
+        _close_mocks()
+        + f"\ntry {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}\n"
+        "Close-UnfinishedInstallHooks\n",
+    )
+    assert "RESTORED" not in out and "REFUSED:" in out, out
+    assert (bin_dir / "defenseclaw-gateway.exe").read_text(encoding="ascii") == "new defenseclaw-gateway.exe"
+    assert (slot / "COMPLETE").exists()
+    gateway = bin_dir / "defenseclaw-gateway.exe"
+    assert f"RAN: {gateway} connector refresh-fail-modes --closed --data-dir {data}" in out, out
+    assert "every agent hook blocks tool calls until the gateway runs again" in out, out
+    assert "err:" not in out, out
+    # Once the hook has finished, running the restore again finishes it,
+    # gateway included, and nothing is left unfinished to close.
+    out = _restore_case(
+        tmp_path,
+        _close_mocks() + f"\n$script:busy = $false\nRestore-Slot '{slot}' | Out-Null\nWrite-Output 'RESTORED'\nClose-UnfinishedInstallHooks\n",
+    )
+    assert "RESTORED" in out and "RAN:" not in out, out
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        assert (bin_dir / name).read_text(encoding="ascii") == "old " + name
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    "case",
+    ["bin-gateway", "saved-gateway", "staged-closer", "rollback-hold", "none-can-close", "close-fails", "gateway-running", "finished"],
+)
+def test_an_unfinished_install_never_leaves_the_hooks_on_an_outage_open(tmp_path: Path, case: str) -> None:
+    # Whichever restore was refused (an upgrade's snapshot, a repair, a
+    # rollback hold), the gateway in place or a saved one closes the hooks;
+    # when none can, the run says so and never claims they are closed. A
+    # running gateway guards the hooks, and a finished install has nothing
+    # to close.
+    data, bin_dir = tmp_path / "data", tmp_path / "bin"
+    slot = data / (".rollback-hold" if case == "rollback-hold" else "previous.new")
+    _write(data / "hooks" / ".hookcfg", "{}")
+    _write(bin_dir / "defenseclaw-gateway.exe", "old gateway" if case in ("saved-gateway", "staged-closer", "none-can-close") else "new gateway")
+    if case != "finished":
+        _write(slot / "bin" / "defenseclaw-gateway.exe", "new gateway" if case == "saved-gateway" else "old gateway")
+    if case == "staged-closer":
+        _write(slot / "closer" / "defenseclaw-gateway.exe", "new gateway")
+    mocks = _close_mocks(close_rc=1 if case == "close-fails" else 0, running=case == "gateway-running")
+    out = _restore_case(tmp_path, mocks + "\nClose-UnfinishedInstallHooks\n")
+    closed = "every agent hook blocks tool calls" in out
+    if case in ("gateway-running", "finished"):
+        assert "RAN:" not in out and not closed and "err:" not in out, out
+        return
+    if case in ("none-can-close", "close-fails"):
+        assert not closed and "err: The install is not finished and the agent hooks could not be closed" in out, out
+        assert ("RAN:" in out) == (case == "close-fails"), out
+        return
+    used = {
+        "saved-gateway": slot / "bin" / "defenseclaw-gateway.exe",
+        "staged-closer": slot / "closer" / "defenseclaw-gateway.exe",
+    }.get(case, bin_dir / "defenseclaw-gateway.exe")
+    assert f"RAN: {used} connector refresh-fail-modes --closed --data-dir {data}" in out and closed, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_failure_before_the_new_gateway_is_published_still_closes_the_hooks(tmp_path: Path) -> None:
+    # Install-HookFirst put the new hook in; the install failed before the new
+    # gateway was published, so the gateway in place and the saved one are
+    # both the previous release's, which cannot close the hooks. The restore
+    # keeps the staged gateway in the snapshot before it clears the staged
+    # release (a rename), and that one closes them; the finished restore
+    # removes it with the snapshot.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    _write(bin_dir / "defenseclaw-gateway.exe", "old defenseclaw-gateway.exe")
+    _write(bin_dir / "defenseclaw-hook.exe", "new defenseclaw-hook.exe")
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        _write(slot / "bin" / name, "old " + name)
+    _write(data / ".staging" / "bin" / "defenseclaw-gateway.exe", "new defenseclaw-gateway.exe")
+    _write(slot / "COMPLETE", "")
+    _write(data / "hooks" / ".hookcfg", '{"fail_modes":{"codex":"open"}}')
+    _write(data / "config.yaml", "new data")
+    _write(slot / "data" / "config.yaml", "old data")
+    staging = "$Staging = Join-Path $DataDir '.staging'\n" + _ps1_function("Save-HookCloser")
+    out = _restore_case(
+        tmp_path,
+        _close_mocks()
+        + staging
+        + f"\nSave-HookCloser '{slot}'\nRemove-Tree $Staging\n"
+        f"try {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}\n"
+        "Close-UnfinishedInstallHooks\n",
+    )
+    assert "RESTORED" not in out and "REFUSED:" in out, out
+    closer = slot / "closer" / "defenseclaw-gateway.exe"
+    assert f"RAN: {closer} connector refresh-fail-modes --closed --data-dir {data}" in out, out
+    assert "every agent hook blocks tool calls" in out and "err:" not in out, out
+    out = _restore_case(tmp_path, _close_mocks() + f"\n$script:busy = $false\nRestore-Slot '{slot}' | Out-Null\nWrite-Output 'RESTORED'\n")
+    assert "RESTORED" in out and not slot.exists(), out
+    assert (bin_dir / "defenseclaw-hook.exe").read_text(encoding="ascii") == "old defenseclaw-hook.exe"
+
+
+def test_a_failed_run_closes_unfinished_hooks_while_it_still_holds_the_lock() -> None:
+    # The close runs for every failed run that took the lock, before the
+    # transcript ends and before the lock is released.
+    text = _text()
+    tail = text[text.index("$code = 1\ntry {") :]
+    final = tail[tail.index("} finally {") :]
+    call = "if ($Run.Lock -and $code -ne 0) { Invoke-Quietly { Close-UnfinishedInstallHooks } }"
+    assert call in final
+    assert final.index(call) < final.index("Stop-Transcript") < final.index("Remove-Tree $LockDir")
+    restore = _ps1_function("Restore-BinDir")
+    assert "if ($name -eq $gatewayName -and $refused.Count) { continue }" in restore
+    snapshot = _ps1_function("Restore-Snapshot")
+    assert snapshot.index("Save-HookCloser $Snap") < snapshot.index("Clear-StagedRelease")
+
+
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="a running Windows program refuses its replacement")
+def test_native_a_running_hook_refuses_the_restore_and_the_hooks_close(tmp_path: Path) -> None:
+    # The same chain with the real MoveFileEx switch: a copy of cmd.exe runs
+    # as the installed hook (it waits on ping), so Windows refuses to replace
+    # its file. The restore keeps its snapshot and the gateway in place, and
+    # that gateway closes the hooks.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    hook = bin_dir / "defenseclaw-hook.exe"
+    hook.parent.mkdir(parents=True)
+    shutil.copyfile(Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe", hook)
+    _write(bin_dir / "defenseclaw-gateway.exe", "new defenseclaw-gateway.exe")
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        _write(slot / "bin" / name, "old " + name)
+    _write(slot / "COMPLETE", "")
+    _write(data / "config.yaml", "new data")
+    _write(slot / "data" / "config.yaml", "old data")
+    _write(data / "hooks" / ".hookcfg", '{"fail_modes":{"codex":"open"}}')
+    running = subprocess.Popen([str(hook), "/c", "ping -n 120 127.0.0.1 >nul"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        out = _restore_case(
+            tmp_path,
+            _ps1_function("Invoke-AtomicReplace")
+            + _close_mocks()
+            + f"\ntry {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}\n"
+            "Close-UnfinishedInstallHooks\n",
+        )
+    finally:
+        running.kill()
+        running.wait(timeout=30)
+    assert "RESTORED" not in out and "REFUSED:" in out and "defenseclaw-hook.exe" in out, out
+    assert (slot / "COMPLETE").exists()
+    assert (bin_dir / "defenseclaw-gateway.exe").read_text(encoding="ascii") == "new defenseclaw-gateway.exe"
+    assert (slot / "bin" / "defenseclaw-hook.exe").read_text(encoding="ascii") == "old defenseclaw-hook.exe"
+    assert "--closed" in out and "every agent hook blocks tool calls" in out, out
+    # The program has exited; a scanner may still hold the file for a moment.
+    pause = "function Start-Sleep { [Threading.Thread]::Sleep(250) }\n"
+    out = _restore_case(
+        tmp_path,
+        _ps1_function("Invoke-AtomicReplace") + pause + f"\nRestore-Slot '{slot}' | Out-Null\nWrite-Output 'RESTORED'\n",
+    )
+    assert "RESTORED" in out, out
+    assert hook.read_text(encoding="ascii") == "old defenseclaw-hook.exe"

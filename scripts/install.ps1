@@ -1367,9 +1367,16 @@ function Restore-BinDir([string]$From) {
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     # A hook still running refuses its in-place switch (Switch-InPlace): put
     # back every file that can be, then stop on the rest, so the caller keeps
-    # the copy in $From and the run can be repeated.
+    # the copy in $From and the run can be repeated. The gateway goes back
+    # last, and only once every other program is back: until then the one in
+    # place stays, so a refused restore keeps the gateway that can close the
+    # hooks while the install is unfinished (Close-UnfinishedInstallHooks).
+    $gatewayName = "defenseclaw-gateway.exe"
+    $order = @($ManagedFiles | Where-Object { $_ -ne $gatewayName })
+    if ($ManagedFiles -contains $gatewayName) { $order += $gatewayName }
     $refused = @()
-    foreach ($name in $ManagedFiles) {
+    foreach ($name in $order) {
+        if ($name -eq $gatewayName -and $refused.Count) { continue }
         $saved = Join-Path $From $name
         $live = Join-Path $BinDir $name
         try {
@@ -1902,6 +1909,34 @@ function Restore-Slot([string]$Slot) {
     return $failed
 }
 
+function Close-UnfinishedInstallHooks {
+    # A run that stops with its install unfinished (a restore or rollback a
+    # running hook refused: Restore-Slot, Switch-WithPrevious) leaves its
+    # snapshot or rollback hold, programs and data that do not match, and the
+    # gateway down. Before the install lock goes, close every hook, an outage
+    # open the config chooses included, until the gateway renders them again
+    # (the next run of the installer, or a gateway start). The gateway in
+    # place, or a saved one, that has 'refresh-fail-modes --closed' does it.
+    $unfinished = @(@((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"), (Join-Path $DataDir ".rollback-hold")) |
+        Where-Object { Test-Path -LiteralPath $_ })
+    if (-not $unfinished.Count -or (Get-GatewayProcess)) { return }
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container)) { return }
+    $gateways = @((Join-Path $BinDir "defenseclaw-gateway.exe")) +
+        @($unfinished | ForEach-Object { (Join-Path $_ "closer\defenseclaw-gateway.exe"), (Join-Path $_ "bin\defenseclaw-gateway.exe") }) +
+        @(Join-Path $Previous "bin\defenseclaw-gateway.exe")
+    foreach ($gateway in $gateways) {
+        if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) { continue }
+        $probe = Get-NativeProbe $gateway @("connector", "refresh-fail-modes", "--help")
+        if ($probe.Exit -ne 0 -or $probe.Output -notmatch "--closed") { continue }
+        if ((Invoke-Native $gateway @("connector", "refresh-fail-modes", "--closed", "--data-dir", $DataDir.TrimEnd([char]92))) -eq 0) {
+            Write-Warn "The install is not finished, so every agent hook blocks tool calls until the gateway runs again. Run the installer again to finish it"
+            return
+        }
+    }
+    Write-Err ("The install is not finished and the agent hooks could not be closed: until the gateway runs, they follow the outage fail mode " +
+        "in your config. Run the installer again to finish it")
+}
+
 function Clear-SetupDataDir([string]$Failed) {
     # DefenseClaw Setup's gateway re-applies the permissions of its whole data
     # folder before it starts and gives its child 5 seconds, so the failed
@@ -1911,7 +1946,23 @@ function Clear-SetupDataDir([string]$Failed) {
     Invoke-Quietly { Remove-Tree (Join-Path $DataDir ".uv") }
 }
 
+function Save-HookCloser([string]$Slot) {
+    # A failure before the new gateway is published (after Install-HookFirst
+    # put the new hook in) leaves only gateways older than this release in
+    # place, and none of them can close the hooks if the restore is refused.
+    # Keep the staged gateway, which can, in the snapshot before the staged
+    # release is cleared: a rename, so it takes no room, and it goes with the
+    # snapshot once the restore finishes (Close-UnfinishedInstallHooks).
+    $staged = Join-Path $Staging "bin\defenseclaw-gateway.exe"
+    $closer = Join-Path $Slot "closer\defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $staged -PathType Leaf) -or -not (Test-Path -LiteralPath $Slot -PathType Container) -or
+        (Test-Path -LiteralPath $closer)) { return }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $closer) -Force | Out-Null
+    Move-Path $staged $closer
+}
+
 function Restore-Snapshot {
+    Invoke-Quietly { Save-HookCloser $Snap }
     Clear-StagedRelease
     try { $failed = Restore-Slot $Snap } catch {
         # The snapshot stays marked complete, so the next run restores it.
@@ -2975,6 +3026,9 @@ try {
     $code = if ($Run.UsageError) { 2 } else { 1 }
 } finally {
     try { [Console]::TreatControlCAsInput = $false } catch { }
+    # While this run still holds the install lock: a failed run never leaves
+    # an unfinished install's hooks on an outage open.
+    if ($Run.Lock -and $code -ne 0) { Invoke-Quietly { Close-UnfinishedInstallHooks } }
     if ($Run.Transcript) { try { Stop-Transcript | Out-Null } catch { } }
     if ($Run.Lock) {
         Invoke-Quietly { Clear-StagedRelease }

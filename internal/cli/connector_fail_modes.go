@@ -40,7 +40,11 @@ has exited, before it lets go: the old gateway cannot render its open again
 while it stops. So no hook follows an open an earlier release recorded for a
 mode nobody set. An open the config sets stays open. A config this release cannot
 load yet (a 0.8.x one before 'defenseclaw migrate') is read for its explicit
-fail modes only. Managed installs are not changed.`,
+fail modes only. With --closed every hook is closed instead, whatever the
+config chooses, until the gateway renders them again: install.ps1 runs it
+when it stops with its install unfinished (a restore a running hook refused),
+so no hook follows an outage open while its programs and data do not match.
+Managed installs are not changed.`,
 	Hidden: true,
 	// It runs beside the gateway it is about to replace: RunE loads the
 	// config only (and still reads one it cannot load), never a second audit
@@ -58,6 +62,7 @@ const hookFailModeHoldMarker = "Holding the hook fail modes"
 var (
 	refreshFailModesHoldPID     int
 	refreshFailModesHoldTimeout time.Duration
+	refreshFailModesClosed      bool
 )
 
 func init() {
@@ -65,6 +70,8 @@ func init() {
 		"hold the hook fail modes until the gateway with this process ID exits, then refresh them again")
 	connectorRefreshFailModesCmd.Flags().DurationVar(&refreshFailModesHoldTimeout, "hold-timeout", 2*time.Minute,
 		"longest wait for that gateway to exit")
+	connectorRefreshFailModesCmd.Flags().BoolVar(&refreshFailModesClosed, "closed", false,
+		"close every installed hook, whatever the config chooses, until the gateway renders them again")
 	connectorCmd.AddCommand(connectorRefreshFailModesCmd)
 }
 
@@ -75,6 +82,9 @@ var refreshFailModesProcessRunning = watchdogChildRunning
 
 func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 	mode, read, managedInstall := refreshFailModeResolver(cmd)
+	if refreshFailModesClosed {
+		mode = func(string) string { return "closed" }
+	}
 	dataDir := resolveConnectorDataDir()
 	if dataDir == "" {
 		dataDir = config.DefaultDataPath()
@@ -83,6 +93,9 @@ func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 	if refreshFailModesHoldPID != 0 {
 		if connectorFlagJSON {
 			return errors.New("connector refresh-fail-modes: --hold-until-exit does not take --json")
+		}
+		if refreshFailModesClosed {
+			return errors.New("connector refresh-fail-modes: --closed does not take --hold-until-exit")
 		}
 		if refreshFailModesHoldPID < 0 || refreshFailModesHoldTimeout <= 0 {
 			return errors.New("connector refresh-fail-modes: --hold-until-exit takes a process ID and --hold-timeout a positive time")
@@ -137,9 +150,14 @@ func holdConnectorFailModes(cmd *cobra.Command, hookDir string, mode func(string
 }
 
 func printHookFailModeRefresh(cmd *cobra.Command, result connector.HookFailModeRefresh) {
-	if len(result.Sidecar) > 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "Hook fail modes set from the config: %s\n", strings.Join(result.Sidecar, ", "))
+	if len(result.Sidecar) == 0 {
+		return
 	}
+	if refreshFailModesClosed {
+		fmt.Fprintf(cmd.OutOrStdout(), "Hooks closed until the gateway renders them: %s\n", strings.Join(result.Sidecar, ", "))
+		return
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Hook fail modes set from the config: %s\n", strings.Join(result.Sidecar, ", "))
 }
 
 // refreshFailModeResolver returns the outage fail mode the config chooses for
