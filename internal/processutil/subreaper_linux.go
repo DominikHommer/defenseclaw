@@ -50,6 +50,10 @@ func RunTreeIsolated(ctx context.Context, cmd *exec.Cmd) error {
 	if cmd.Err != nil {
 		return cmd.Err
 	}
+	path, err := commandPathFromDir(cmd.Path, cmd.Dir)
+	if err != nil {
+		return err
+	}
 	controlRead, controlWrite, err := os.Pipe()
 	if err != nil {
 		return err
@@ -84,7 +88,7 @@ func RunTreeIsolated(ctx context.Context, cmd *exec.Cmd) error {
 	if len(args) > 0 {
 		args = args[1:]
 	}
-	writeErr := json.NewEncoder(requestWrite).Encode(subreaperCommand{Path: cmd.Path, Args: args})
+	writeErr := json.NewEncoder(requestWrite).Encode(subreaperCommand{Path: path, Args: args})
 	_ = requestWrite.Close()
 	if writeErr != nil {
 		_ = controlWrite.Close()
@@ -94,6 +98,29 @@ func RunTreeIsolated(ctx context.Context, cmd *exec.Cmd) error {
 	err = wrapper.Wait()
 	_ = controlWrite.Close()
 	return err
+}
+
+// commandPathFromDir is the file exec starts for path: a relative path is
+// relative to dir, and a relative or empty dir to this process's folder.
+// The helper takes only an absolute path, so a relative scanner command
+// (scanners.mcp_scanner.binary: ./bin/...) is resolved here. The parts are
+// joined, not cleaned, so ".." after a symlinked folder still names the
+// file the kernel opens from that folder.
+func commandPathFromDir(path, dir string) (string, error) {
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+	if !filepath.IsAbs(dir) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("scanner: resolve %q: %w", path, err)
+		}
+		if dir != "" {
+			wd += "/" + dir
+		}
+		dir = wd
+	}
+	return dir + "/" + path, nil
 }
 
 func runSubreaperHelper() int {
