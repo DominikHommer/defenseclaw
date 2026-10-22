@@ -1373,8 +1373,10 @@ func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterprise
 		go func(i int) {
 			defer wg.Done()
 			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
 			response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
+			// The slot is free before done runs: a removal record that waits
+			// for its account's lock never holds off another account's worker.
+			<-semaphore
 			outcomes[i] = enterpriseHookWorkerOutcome{Job: jobs[i], Response: response, Err: err}
 			if done != nil {
 				done(outcomes[i])

@@ -520,8 +520,12 @@ type foreignHookRemovalOrderCase struct {
 	// logsChange: run logs the change itself; otherwise the trace inserts
 	// "change" before the first event that finds the file changed.
 	logsChange bool
-	home func(t *testing.T) string
-	run  func(t *testing.T, trace *foreignHookRemovalTrace, home, path string)
+	// markAtEnd: the change was made before the commit opened (the
+	// fallback), so its first record carries the mark of when the cleanup
+	// ended, not one ahead.
+	markAtEnd bool
+	home      func(t *testing.T) string
+	run       func(t *testing.T, trace *foreignHookRemovalTrace, home, path string)
 }
 
 // runForeignHookRemovalOrderCases holds each entry point to the commit
@@ -560,7 +564,7 @@ func runForeignHookRemovalOrderCases(t *testing.T, cases []foreignHookRemovalOrd
 					if g.proves(identity, process) {
 						t.Errorf("ledger write %d published while the account's earlier outage allow still proves its process", ledgers)
 					}
-					if ledgers == 2 && changed {
+					if ledgers == 2 && changed && !tc.markAtEnd {
 						// The ledger on disk is the first record: it held the
 						// file's entry, ahead of now, while the file changed.
 						// (This may run on the fence session's goroutine: no
@@ -646,8 +650,9 @@ func TestForeignHookRemovalRotatesTheKeyBeforeItPublishes(t *testing.T) {
 			},
 		},
 		{
-			name: "the fallback for a removal no commit recorded",
-			want: "change,lock,rotate,ledger,ledger,release",
+			name:      "the fallback for a removal no commit recorded",
+			want:      "change,lock,rotate,ledger,ledger,release",
+			markAtEnd: true,
 			run: func(t *testing.T, trace *foreignHookRemovalTrace, home, path string) {
 				if err := foreignHookTestRemoveHook(path); err != nil {
 					t.Fatal(err)

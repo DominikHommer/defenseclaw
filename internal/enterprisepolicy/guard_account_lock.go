@@ -229,3 +229,25 @@ func (l *foreignHookAccountLock) release() {
 	l.unlock()
 	l.close()
 }
+
+// ForeignHookRemovalsLedgerLockFile is the hook guardian's lock of the
+// removal ledger, next to it in the guardian's authorization folder. Every
+// guardian process takes it exclusively around its read, merge and atomic
+// replacement of the ledger, so a removal one process recorded is never
+// lost to another process's write that read the ledger before it. The
+// gateway reads the ledger without it (the ledger is replaced in one
+// rename), so it never delays an online answer.
+const ForeignHookRemovalsLedgerLockFile = "foreign-hook-removals-ledger.lock"
+
+// LockForeignHookRemovalLedger holds the ledger lock in dir within ctx.
+func LockForeignHookRemovalLedger(ctx context.Context, dir string) (func(), error) {
+	lock, err := openForeignHookAccountLock(filepath.Join(dir, ForeignHookRemovalsLedgerLockFile), dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := lock.lock(ctx, true, foreignHookLockRemovalPoll); err != nil {
+		lock.close()
+		return nil, fmt.Errorf("take the foreign-hook removal ledger lock: %w", err)
+	}
+	return sync.OnceFunc(lock.release), nil
+}

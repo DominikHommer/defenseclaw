@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 )
 
 // A per-user foreign-cleanup worker runs as the user and cannot take its
@@ -151,16 +153,18 @@ func (s *enterpriseForeignHookFenceSession) uncommitted(connector string, remove
 }
 
 // release ends a commit the worker opened and never committed (it failed
-// or timed out after its lock): the worker has ended, so recording its
-// files with the mark of now covers every process that may have loaded
-// one.
-func (s *enterpriseForeignHookFenceSession) release() {
+// or timed out after its lock), with the mark of now.
+func (s *enterpriseForeignHookFenceSession) release() { s.releaseAt(agentprocess.Now()) }
+
+// releaseAt is release with mark, taken when the worker ended: every
+// process that may have loaded a file the worker changed started before it.
+func (s *enterpriseForeignHookFenceSession) releaseAt(mark string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.tx != nil {
 		tx, name := s.tx, s.holder
 		s.tx, s.holder = nil, ""
-		_ = tx.commit(nil)
+		_ = tx.commitAt(mark, nil)
 		if s.committed[name] == nil {
 			s.committed[name] = map[string]bool{}
 		}

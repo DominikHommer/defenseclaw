@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -71,8 +72,9 @@ func cleanEnterpriseForeignHooksFenced(target enterprisehooks.TargetCredentials,
 	fence := newEnterpriseForeignHookInProcessFence(account, target.UserHome)
 	request.GuardRemoval = enterpriseForeignHookRemovalGuard(request.Connector, fence)
 	result, err := cleanEnterpriseForeignHooksAsTarget(target, request, now)
+	mark := agentprocess.Now()
 	fence.release()
-	recordEnterpriseForeignHookRemovals(os.Stderr, account, target.UserHome, request.Connector, fence.uncommitted(removedForeignHookPaths(result)))
+	recordEnterpriseForeignHookRemovalsAt(os.Stderr, mark, account, target.UserHome, request.Connector, fence.uncommitted(removedForeignHookPaths(result)))
 	return result, err
 }
 

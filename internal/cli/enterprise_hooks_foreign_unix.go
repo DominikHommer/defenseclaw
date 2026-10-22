@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -354,9 +355,12 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	// so the record of the rest can take the lock. Only the connectors the
 	// job asked for count: the worker runs as the user.
 	recordRemovals := func(outcome enterpriseHookWorkerOutcome) {
+		// The mark is taken once, as the worker ended, before any lock
+		// wait: a commit that waits never makes a later agent look old.
+		mark := agentprocess.Now()
 		session := outcome.Job.Request.cleanupFence
 		if session != nil {
-			session.release()
+			session.releaseAt(mark)
 		}
 		for _, cleanup := range outcome.Job.Request.ForeignCleanup {
 			report, ok := outcome.Response.Cleanup[cleanup.Connector]
@@ -367,7 +371,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			if session != nil {
 				removed = session.uncommitted(cleanup.Connector, removed)
 			}
-			recordEnterpriseForeignHookRemovals(stderr, strconv.Itoa(outcome.Job.Account.UID), outcome.Job.Account.Home,
+			recordEnterpriseForeignHookRemovalsAt(stderr, mark, strconv.Itoa(outcome.Job.Account.UID), outcome.Job.Account.Home,
 				cleanup.Connector, removed)
 		}
 	}

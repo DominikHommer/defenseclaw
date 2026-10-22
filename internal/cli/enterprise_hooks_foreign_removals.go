@@ -80,6 +80,14 @@ type enterpriseForeignHookRemovalTx struct {
 // keeps blocking, and the next pass tries again. The caller changes the
 // files and then commits (enterpriseForeignHookRemovalTx.commit).
 func beginEnterpriseForeignHookRemoval(ctx context.Context, stderr io.Writer, account, home, connectorName string, paths []string) (*enterpriseForeignHookRemovalTx, error) {
+	return beginEnterpriseForeignHookRemovalMarked(ctx, stderr, account, home, connectorName, paths, "")
+}
+
+// beginEnterpriseForeignHookRemovalMarked is beginEnterpriseForeignHookRemoval
+// whose first record has firstMark ("" for the mark ahead): a record of a
+// change already made (recordEnterpriseForeignHookRemovalsAt) takes the
+// mark of when that change was known to be done.
+func beginEnterpriseForeignHookRemovalMarked(ctx context.Context, stderr io.Writer, account, home, connectorName string, paths []string, firstMark string) (*enterpriseForeignHookRemovalTx, error) {
 	identity, ok := connector.CanonicalUserScopedIdentity(account)
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	if cfg == nil || !cfg.StandaloneEnterprise() {
@@ -104,7 +112,10 @@ func beginEnterpriseForeignHookRemoval(ctx context.Context, stderr io.Writer, ac
 		release()
 		return nil, err
 	}
-	mark := agentprocess.NowAfter(enterpriseForeignHookRemovalMarkAhead)
+	mark := firstMark
+	if mark == "" {
+		mark = agentprocess.NowAfter(enterpriseForeignHookRemovalMarkAhead)
+	}
 	if err := tx.record(mark); err != nil {
 		release()
 		return nil, fmt.Errorf("record the removal before it is made: %w", err)
@@ -146,7 +157,11 @@ func (tx *enterpriseForeignHookRemovalTx) rotate() error {
 	return nil
 }
 
-// record writes the transaction's files to the ledger with mark.
+// record writes the transaction's files to the ledger with mark. The time
+// of each entry has nanoseconds: the ledger keeps, per account, connector
+// and file, the entry recorded last, and records of one account are made
+// in commit order under its removal lock, so the second record of a commit
+// always replaces its first, and a later commit an earlier one.
 func (tx *enterpriseForeignHookRemovalTx) record(mark string) error {
 	if mark == "" {
 		return errors.New("the process clock is unavailable")
@@ -158,7 +173,7 @@ func (tx *enterpriseForeignHookRemovalTx) record(mark string) error {
 		for _, name := range enterprisepolicy.ForeignHookRemovalConnectors(tx.home, path, tx.connector, connectors) {
 			added = append(added, enterprisepolicy.ForeignHookRemoval{
 				Identity: tx.identity, Connector: name, Path: foreignGuardLogField(path, 512),
-				At: now.Format(time.RFC3339), Mark: mark,
+				At: now.Format(time.RFC3339Nano), Mark: mark,
 			})
 		}
 	}
@@ -173,8 +188,16 @@ func (tx *enterpriseForeignHookRemovalTx) record(mark string) error {
 // account's lock. It runs whether or not the change worked. A record that
 // fails leaves the first one, which denies longer.
 func (tx *enterpriseForeignHookRemovalTx) commit(removed []string) error {
+	return tx.commitAt(agentprocess.Now(), removed)
+}
+
+// commitAt is commit with the mark of when the change was known to be done:
+// taken before any wait, so a lock this process waits for never makes an
+// agent process that started after the change count as one that started
+// before it.
+func (tx *enterpriseForeignHookRemovalTx) commitAt(mark string, removed []string) error {
 	defer tx.release()
-	err := tx.record(agentprocess.Now())
+	err := tx.record(mark)
 	if err != nil {
 		fmt.Fprintf(tx.stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s after it was made (the record made before it still denies): %v\n",
 			tx.connector, foreignGuardLogField(tx.identity, 256), err)
@@ -189,14 +212,27 @@ func (tx *enterpriseForeignHookRemovalTx) commit(removed []string) error {
 // left to change, so the key is rotated first as for every removal.
 // Failures are logged; the per-call check still applies.
 func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connectorName string, paths []string) {
+	recordEnterpriseForeignHookRemovalsAt(stderr, agentprocess.Now(), account, home, connectorName, paths)
+}
+
+// recordEnterpriseForeignHookRemovalsAt is recordEnterpriseForeignHookRemovals
+// with the mark of when the cleanup that made the removals ended (taken
+// before any lock wait): every agent process that may have loaded a removed
+// file started before it.
+func recordEnterpriseForeignHookRemovalsAt(stderr io.Writer, mark, account, home, connectorName string, paths []string) {
 	if len(paths) == 0 || cfg == nil || !cfg.StandaloneEnterprise() {
+		return
+	}
+	if mark == "" {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s: the process clock is unavailable\n",
+			connectorName, foreignGuardLogField(account, 256))
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), enterpriseForeignHookInProcessQueueWait)
 	defer cancel()
-	tx, err := beginEnterpriseForeignHookRemoval(ctx, stderr, account, home, connectorName, paths)
+	tx, err := beginEnterpriseForeignHookRemovalMarked(ctx, stderr, account, home, connectorName, paths, mark)
 	if err == nil {
-		err = tx.commit(paths)
+		err = tx.commitAt(mark, paths)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s: %v\n",
@@ -237,7 +273,18 @@ func writeEnterpriseForeignHookRemovalLedger(added []enterprisepolicy.ForeignHoo
 	if !filepath.IsAbs(managed.HookGuardianAuthorizationDir(dataDir)) {
 		return errors.New("the data directory is not an absolute path")
 	}
-	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile)
+	dir := managed.HookGuardianAuthorizationDir(dataDir)
+	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
+	if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), enterpriseForeignHookLedgerLockWait)
+	release, err := enterpriseForeignHookLockLedger(ctx, dir)
+	cancel()
+	if err != nil {
+		return err
+	}
+	defer release()
 	existing, err := loadEnterpriseForeignHookRemovals(path)
 	if err != nil {
 		return fmt.Errorf("the removal ledger cannot be read and is kept until it can be read again or an administrator removes %s: %w", path, err)
@@ -246,11 +293,13 @@ func writeEnterpriseForeignHookRemovalLedger(added []enterprisepolicy.ForeignHoo
 	if err != nil {
 		return err
 	}
-	if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
-		return err
-	}
 	return writeEnterpriseHookGatewayRecord(path, data)
 }
+
+// enterpriseForeignHookLedgerLockWait bounds the wait for the ledger lock,
+// which another guardian process holds only for one ledger write; past it
+// the removal is refused (the hook stays and the scan keeps blocking).
+const enterpriseForeignHookLedgerLockWait = 30 * time.Second
 
 // enterpriseForeignHookSessionRoot is the folder of the protected session
 // records (managed.StandaloneLayout.HookSessionDir): from the standalone
@@ -316,6 +365,7 @@ var enterpriseForeignHookSessionRootForDataDir = func(dataDir string) (string, b
 // reports a guardian that runs as root or SYSTEM (replaceable in tests).
 var (
 	enterpriseForeignHookLockAccount       = enterprisepolicy.LockForeignHookAccountRemoval
+	enterpriseForeignHookLockLedger        = enterprisepolicy.LockForeignHookRemovalLedger
 	enterpriseForeignHookRotateSessionKey  = enterprisepolicy.RotatePublishedSessionKey
 	enterpriseForeignHookEnsureSessionKeys = enterprisepolicy.EnsurePublishedSessionKeys
 	enterpriseForeignHookSessionKeyTrust   = func() enterprisepolicy.PublishedSessionTrust {
