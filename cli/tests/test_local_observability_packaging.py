@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,59 @@ FLEET_TEMPLATES = {
     "prometheus/examples/fleet.yml",
     "grafana/dashboards/defenseclaw-fleet.json",
 }
+
+
+@pytest.mark.skipif(os.name == "nt", reason="documented POSIX shell recipe")
+def test_fleet_dashboard_recipe_works_without_source_checkout(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    stack = home / ".defenseclaw/observability-stack"
+    shutil.copytree(BUNDLE, stack)
+    assets = tmp_path / "extracted-assets"
+    for relative in FLEET_TEMPLATES:
+        source = stack / relative
+        target = assets / "bundles/local_observability_stack" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        source.unlink()
+    shutil.rmtree(stack / "prometheus/scrape.d", ignore_errors=True)
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    docker = commands / "docker"
+    docker.write_text(
+        "#!/bin/sh\nset -eu\n"
+        'test "$1" = compose\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = -f ]; then shift; test -f "$1"; fi\n'
+        '  shift\ndone\n'
+        "test -f grafana/dashboards/defenseclaw-fleet.json\n"
+        "test -f prometheus/scrape.d/fleet.yml\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    page = (REPO_ROOT / "docs-site/content/docs/reference/edge-connector/configuration.mdx").read_text(
+        encoding="utf-8"
+    )
+    section = page.split("## Grafana dashboard\n", 1)[1].split("## Benchmark\n", 1)[0]
+    recipe = re.search(r"```bash\n(.*?)```", section, re.DOTALL)
+    assert recipe is not None
+    environment = os.environ.copy()
+    environment.update(
+        HOME=str(home),
+        PATH=str(commands) + os.pathsep + environment["PATH"],
+        DCLAW_FLEET_API_TOKEN="provided by the test credential store",
+    )
+    result = subprocess.run(
+        ["bash", "-euc", recipe[1].replace("/path/to/extracted-assets", str(assets))],
+        cwd=assets,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    for relative in ("grafana/dashboards/defenseclaw-fleet.json", "prometheus/scrape.d/fleet.yml"):
+        assert (stack / relative).is_file()
 
 
 def _is_generated_grafana_credential(relative_path: str) -> bool:

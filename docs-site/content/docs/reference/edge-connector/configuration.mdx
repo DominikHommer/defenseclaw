@@ -439,19 +439,24 @@ Fleet is disabled by default. Enable `fleet.enabled: true` on the gateway and se
 
 For a local Docker stack, enable the optional scrape after confirming `host.docker.internal:18970` reaches your gateway **from a container**. Docker Desktop on macOS provides this host name. On Linux, set `gateway.api_bind` to the Docker bridge's host IP only if your firewall restricts access to the Docker network; this changes the bind for the entire gateway REST API. Managed enterprise installs require loopback and cannot use that bind change. For those hosts, run Prometheus on the host or provide a separately secured metrics-only proxy. Keep the gateway API bearer token secret and use TLS for any nonlocal access.
 
+First create the user stack with `defenseclaw setup local-observability up`. The recipe below uses its default directory, `$HOME/.defenseclaw/observability-stack`; use your configured data directory if it differs. Set `FLEET_ASSETS` to the absolute path of the extracted Fleet archive. The archive supplies the optional overlay, scrape example and dashboard; the installed user stack supplies the core Compose file and Grafana provisioning.
+
 ```bash
-cd bundles/local_observability_stack
+FLEET_ASSETS="/path/to/extracted-assets"
+cd "$HOME/.defenseclaw/observability-stack"
 test -n "$DCLAW_FLEET_API_TOKEN" || { echo 'Fleet API token is empty' >&2; exit 1; }
 install -d -m 0700 "$HOME/.defenseclaw/fleet-secrets"
 printf '%s' "$DCLAW_FLEET_API_TOKEN" > "$HOME/.defenseclaw/fleet-secrets/metrics-token"
 chgrp "$(id -g)" "$HOME/.defenseclaw/fleet-secrets/metrics-token"
 chmod 0640 "$HOME/.defenseclaw/fleet-secrets/metrics-token"
-cp /path/to/extracted-assets/bundles/local_observability_stack/prometheus/examples/fleet.yml prometheus/scrape.d/fleet.yml
+mkdir -p prometheus/scrape.d grafana/dashboards
+cp "$FLEET_ASSETS/bundles/local_observability_stack/prometheus/examples/fleet.yml" prometheus/scrape.d/fleet.yml
+cp "$FLEET_ASSETS/bundles/local_observability_stack/grafana/dashboards/defenseclaw-fleet.json" grafana/dashboards/defenseclaw-fleet.json
 chmod 0755 prometheus/scrape.d
 chmod 0644 prometheus/scrape.d/fleet.yml # Prometheus runs as a non-root user
 export FLEET_METRICS_TOKEN_FILE="$HOME/.defenseclaw/fleet-secrets/metrics-token"
 export FLEET_METRICS_TOKEN_GID="$(id -g)"
-docker compose -f docker-compose.yml -f /path/to/extracted-assets/bundles/local_observability_stack/docker-compose.fleet.yml up -d
+docker compose -f docker-compose.yml -f "$FLEET_ASSETS/bundles/local_observability_stack/docker-compose.fleet.yml" up -d
 ```
 
 Keep the private `fleet-secrets` directory outside the bundle so wheel staging and bundle upgrades cannot copy the token. The token file needs group-read permission because the Prometheus container runs as a non-root user; the optional Compose file grants only this file's group to that container. Verify **Status → Targets** in Prometheus at `http://127.0.0.1:9090/targets`: `defenseclaw-fleet` must be **UP**. A `401` means the token is wrong; `connection refused` means the gateway bind/target is unreachable. Remove `prometheus/scrape.d/fleet.yml` and restart Compose to disable the scrape. When using another Prometheus instance, import the JSON and point its `defenseclaw-prometheus` data source at that instance. On an existing managed stack, the normal refresh preserves Grafana and Prometheus operator configuration; use `--refresh-config` only after backing up custom files, or copy the Fleet dashboard and scrape settings into the installed bundle by hand.
