@@ -67,14 +67,14 @@ func TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401107, User: "erin"}}, nil, nil); err == nil {
+	if err := WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401107, User: "erin"}}, nil, nil, nil); err == nil {
 		t.Fatal("the canceled lookup did not fail the pass")
 	}
 	if !exists("94401103") || !exists("94401106") || exists("94401104") {
 		t.Fatalf("after a failed pass: directory %v, local %v, expired %v; want the young records kept and the expired one gone",
 			exists("94401103"), exists("94401106"), exists("94401104"))
 	}
-	if err := WriteIdentitySpool(context.Background(), dir, nil, nil, nil); err != nil {
+	if err := WriteIdentitySpool(context.Background(), dir, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !exists("94401103") {
@@ -96,7 +96,7 @@ func TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList(t *testing.T) {
 	}
 	// The canceled lookup fails and the pass reports it; the record of the
 	// previous owner must be gone either way.
-	_ = WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401105, User: "bob"}}, nil, nil)
+	_ = WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401105, User: "bob"}}, nil, nil, nil)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("reassigned uid kept previous account record: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestIdentitySpoolKeepsAnOmittedAccountOfAnAnsweringDirectoryUntilASecondPas
 		{[]IdentitySpoolAccount{alice}, true},      // a new first omission
 		{[]IdentitySpoolAccount{alice}, false},     // confirmed: bob is gone
 	} {
-		if err := WriteIdentitySpool(context.Background(), dir, step.accounts, nil, nil); err != nil {
+		if err := WriteIdentitySpool(context.Background(), dir, step.accounts, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := os.Stat(filepath.Join(dir, "94401202.json")); (err == nil) != step.wantBob {
@@ -280,7 +280,7 @@ func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForADay(t *testing.T) {
 // retry interval rather than treating partial directory facts as refreshed.
 func TestIdentitySpoolReportsFailedAccount(t *testing.T) {
 	err := WriteIdentitySpool(context.Background(), t.TempDir(),
-		[]IdentitySpoolAccount{{UID: 999999999, User: ""}}, nil, nil)
+		[]IdentitySpoolAccount{{UID: 999999999, User: ""}}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("failed account lookup was reported as a successful spool pass")
 	}
@@ -417,7 +417,7 @@ func TestIdentitySpoolKeepsAnAccountPartialListingsOmitWhileItResolves(t *testin
 	}
 	pass := func(accounts ...IdentitySpoolAccount) {
 		t.Helper()
-		if err := WriteIdentitySpool(context.Background(), dir, accounts, nil, nil); err != nil {
+		if err := WriteIdentitySpool(context.Background(), dir, accounts, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -543,7 +543,7 @@ func TestIdentitySpoolDropsTheRecordOfAUIDReusedBySameNameInAnotherDomain(t *tes
 			dir := t.TempDir()
 			writeTestSpoolRecord(t, dir, testDirectoryRecord(bobUID, "dcad-bob", "dclab.test"))
 			for pass := range 2 {
-				err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: aliceUID, User: "dcad-alice"}}, nil, nil)
+				err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: aliceUID, User: "dcad-alice"}}, nil, nil, nil)
 				if (err != nil) != tc.alicePassFails {
 					t.Fatalf("pass %d: err = %v, want failed %v", pass+1, err, tc.alicePassFails)
 				}
@@ -579,7 +579,7 @@ func TestIdentitySpoolFailedLookupDoesNotKeepAnotherDomainsUPN(t *testing.T) {
 			record.SSSDDomain, record.UPNSource, record.Facts.UPN, record.Facts.Principal = "", "", "", ""
 			return record, errors.New("SSSD InfoPipe lookup: timed out")
 		}
-		err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: bobUID, User: "dcad-bob"}}, nil, nil)
+		err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: bobUID, User: "dcad-bob"}}, nil, nil, nil)
 		identitySpoolCollect = previous
 		if err == nil {
 			t.Fatalf("%s: the failed lookup was not reported", tc.domain)
@@ -632,7 +632,7 @@ func TestIdentitySpoolDepartureChecksEndWithThePass(t *testing.T) {
 		return err == nil
 	}
 	// Pass 1: bob's uid does not resolve; the first omission only marks.
-	if err := WriteIdentitySpool(context.Background(), dir, alice, nil, nil); err != nil || !has() {
+	if err := WriteIdentitySpool(context.Background(), dir, alice, nil, nil, nil); err != nil || !has() {
 		t.Fatalf("pass 1: err %v, bob kept %v; want the record marked and kept", err, has())
 	}
 	// Pass 2: the lookup blocks; the pass ends with its context.
@@ -640,7 +640,7 @@ func TestIdentitySpoolDepartureChecksEndWithThePass(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- WriteIdentitySpool(ctx, dir, alice, nil, nil) }()
+	go func() { done <- WriteIdentitySpool(ctx, dir, alice, nil, nil, nil) }()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -656,14 +656,14 @@ func TestIdentitySpoolDepartureChecksEndWithThePass(t *testing.T) {
 	// stays.
 	blocked.Store(false)
 	before := calls.Load()
-	if err := WriteIdentitySpool(context.Background(), dir, alice, nil, nil); err != nil || !has() || calls.Load() != before {
+	if err := WriteIdentitySpool(context.Background(), dir, alice, nil, nil, nil); err != nil || !has() || calls.Load() != before {
 		t.Fatalf("while bob's lookup runs: err %v, bob kept %v, lookups started %d; want none started and the record kept", err, has(), calls.Load()-before)
 	}
 	releaseLookups()
 	waitIdentityLookupGateIdle(t, &identitySpoolDepartureGate)
 	// The mark survived both: the next pass that finds the uid gone removes
 	// the record.
-	if err := WriteIdentitySpool(context.Background(), dir, alice, nil, nil); err != nil || has() {
+	if err := WriteIdentitySpool(context.Background(), dir, alice, nil, nil, nil); err != nil || has() {
 		t.Fatalf("pass after the cut-short checks: err %v, bob kept %v; want the record removed", err, has())
 	}
 }
@@ -705,7 +705,7 @@ func TestIdentitySpoolDepartureLookupThatNeverReturnsHoldsOnlyItsAccount(t *test
 	}
 	for pass := 1; pass <= 6; pass++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		err := WriteIdentitySpool(ctx, dir, alice, nil, nil)
+		err := WriteIdentitySpool(ctx, dir, alice, nil, nil, nil)
 		cancel()
 		if err != nil {
 			t.Fatalf("pass %d: %v", pass, err)
@@ -845,7 +845,7 @@ func TestIdentitySpoolDropsTheUPNOfAnAccountRecreatedUnderTheSameUID(t *testing.
 				if tc.listed {
 					accounts = append(accounts, IdentitySpoolAccount{UID: bobUID, User: "dcad-bob"})
 				}
-				_ = WriteIdentitySpool(context.Background(), dir, accounts, nil, nil)
+				_ = WriteIdentitySpool(context.Background(), dir, accounts, nil, nil, nil)
 				record, err := ReadIdentitySpoolRecord(dir, strconv.Itoa(bobUID), nil)
 				if hasUPN := err == nil && record.Facts.UPN == "dcad-bob@dclab.test"; hasUPN == recreated {
 					t.Fatalf("bob's record %+v (%v): the old account's UPN kept %v, want %v", record, err, hasUPN, !recreated)
@@ -905,7 +905,7 @@ func TestIdentitySpoolRemovesAnOmittedRecordOnlyAfterTwoNotFoundAnswersInARow(t 
 			writeTestSpoolRecord(t, dir, testDirectoryRecord(bobUID, "dcad-bob", "dclab.test"))
 			for pass, next := range tc.answers {
 				answer = next
-				_ = WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: aliceUID, User: "dcad-alice"}}, nil, nil)
+				_ = WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: aliceUID, User: "dcad-alice"}}, nil, nil, nil)
 				_, err := os.Stat(filepath.Join(dir, strconv.Itoa(bobUID)+".json"))
 				if wantGone := tc.gone != 0 && pass+1 >= tc.gone; (err != nil) != wantGone {
 					t.Fatalf("pass %d (%s): bob's record gone %v, want %v", pass+1, next, err != nil, wantGone)

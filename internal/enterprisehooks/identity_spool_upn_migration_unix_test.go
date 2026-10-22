@@ -73,7 +73,7 @@ func TestIdentitySpoolKeepsAnUpgradedRecordsUPNWhileTheDirectoryBindsIt(t *testi
 					}
 					return binding
 				}
-				if err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: uid, User: "dcad-alice"}}, nil, nil); err != nil {
+				if err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: uid, User: "dcad-alice"}}, nil, nil, nil); err != nil {
 					t.Fatal(err)
 				}
 				record, err := ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), nil)

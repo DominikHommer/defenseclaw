@@ -181,7 +181,7 @@ func enterpriseHookEnrolledAccountRows(ctx context.Context, stderr io.Writer, ru
 	for _, row := range rows {
 		seen[row.UID] = true
 	}
-	leftOut := enterpriseHookEnrollmentLeftOut(ctx)
+	leftOut := enterpriseHookEnrollmentLeftOut(ctx, enterpriseHookIdentitySpoolDirForConfig())
 	for _, account := range accounts {
 		if account.UID <= 0 || seen[account.UID] || leftOut.has(account.UID, account.User) {
 			continue

@@ -1561,7 +1561,7 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 		}, nil
 	}
 	alice := 1001
-	accounts, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", enterpriseHookReconcileRun{
+	accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", enterpriseHookReconcileRun{
 		Manifest: "/etc/defenseclaw/hooks/manifest.json",
 		Targets:  []enterprisehooks.ManifestTarget{{User: "alice", UID: &alice, Connector: "opencode"}, {User: "carol", Connector: "opencode"}},
 		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
@@ -1663,7 +1663,7 @@ func TestIdentitySpoolCanonicalizesManifestAlias(t *testing.T) {
 	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
 		"canonical": {Name: "canonical", UID: 4242, GID: 4242},
 	}})
-	accounts, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", enterpriseHookReconcileRun{
+	accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", enterpriseHookReconcileRun{
 		Rows: []enterpriseHookReconcileRow{{UID: 4242, User: "accepted-alias", Connector: "codex", OK: true}},
 	})
 	if len(accounts) != 1 || accounts[0].User != "canonical" {
@@ -1682,7 +1682,7 @@ func TestIdentitySpoolCanonicalizesManifestAlias(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	_ = enterprisehooks.WriteIdentitySpool(canceled, dir, accounts, nil, nil)
+	_ = enterprisehooks.WriteIdentitySpool(canceled, dir, accounts, nil, nil, nil)
 	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, "4242", nil)
 	if err != nil || record.Facts.UPN != "alice@example.test" {
 		t.Fatalf("failed refresh lost the verified UPN: record=%+v err=%v", record, err)
@@ -1696,7 +1696,7 @@ func TestIdentitySpoolNamesHomeOnlyTarget(t *testing.T) {
 	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
 		"alice": {Name: "alice", UID: 4242, GID: 4242, Home: "/Users/alice"},
 	}})
-	accounts, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", enterpriseHookReconcileRun{
+	accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", enterpriseHookReconcileRun{
 		Rows: []enterpriseHookReconcileRow{{UID: 4242, UserHome: "/Users/alice", Connector: "codex", OK: true}},
 	})
 	if len(accounts) != 1 || accounts[0].UID != 4242 || accounts[0].User != "alice" {
@@ -1705,9 +1705,13 @@ func TestIdentitySpoolNamesHomeOnlyTarget(t *testing.T) {
 }
 
 // W2B-G-enum review loop 1: an account a partial listing already omitted
-// has no key, so adding it to exclude_users (or exempt_users, or leaving the
-// manifest) changed nothing the guardian compares, and its record stayed
-// until the 15-minute refresh. A left account now has a key of its own.
+// has no key, so adding it to exclude_users (or leaving the manifest)
+// changed nothing the guardian compares, and its record stayed until the
+// 15-minute refresh. A left account now has a key of its own, and the
+// exclude_users entries are keys too, since the pass checks every record it
+// does not list against them (review loop 6). exempt_users withdraw
+// nothing, so they change no key: the gateway still accepts and inspects an
+// exempt account's hook calls under its own profile.
 func TestIdentitySpoolKeysChangeWhenAnOmittedAccountLeaves(t *testing.T) {
 	previousCfg := cfg
 	t.Cleanup(func() {
@@ -1729,7 +1733,7 @@ func TestIdentitySpoolKeysChangeWhenAnOmittedAccountLeaves(t *testing.T) {
 		t.Fatal(err)
 	}
 	fingerprint := func() string {
-		_, keys := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, run)
+		_, keys, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, run)
 		slices.Sort(keys)
 		return strings.Join(keys, ";")
 	}
@@ -1738,15 +1742,18 @@ func TestIdentitySpoolKeysChangeWhenAnOmittedAccountLeaves(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		exclude, exempt []string
+		same            bool
 	}{
 		{name: "excluded by name", exclude: []string{"bob"}},
 		{name: "excluded by uid", exclude: []string{"4243"}},
-		{name: "exempt", exempt: []string{"bob"}},
+		{name: "exempt", exempt: []string{"bob"}, same: true},
 	} {
 		cfg = &config.Config{}
 		cfg.Enterprise.Enrollment.ExcludeUsers, cfg.Enterprise.Enrollment.ExemptUsers = tc.exclude, tc.exempt
-		if got := fingerprint(); got == before {
+		if got := fingerprint(); got == before && !tc.same {
 			t.Errorf("%s: the identity pass keys stayed %q, so the left account's record waits for the refresh interval", tc.name, got)
+		} else if got != before && tc.same {
+			t.Errorf("%s: the identity pass keys changed to %q", tc.name, got)
 		}
 	}
 }
@@ -1759,7 +1766,10 @@ func TestIdentitySpoolKeysChangeWhenAnOmittedAccountLeaves(t *testing.T) {
 // identity record was never withdrawn. The current exclude_users and
 // exempt_users now apply before the rows and the eligible accounts, by uid,
 // by name, by another spelling the directory resolves, and by the spelling
-// the stale file carries while the directory does not answer.
+// the stale file carries while the directory does not answer. Both keep the
+// account out of the scans; only exclude_users withdraw its identity record
+// (review loop 6: the gateway still accepts an exempt account's hook calls
+// and inspects them under its own profile).
 func TestStaleEligibleAccountsDoNotOverrideAnExclusion(t *testing.T) {
 	previousCfg := cfg
 	previousEligible, previousIdentity := enterpriseHookLoadEligibleAccounts, enterpriseHookLoadIdentityAccounts
@@ -1811,7 +1821,7 @@ func TestStaleEligibleAccountsDoNotOverrideAnExclusion(t *testing.T) {
 			}
 			check := func(when string, run enterpriseHookReconcileRun) {
 				t.Helper()
-				accounts, keys := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", run)
+				accounts, keys, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", run)
 				var enrolled, left []int
 				for _, account := range accounts {
 					if account.Left {
@@ -1819,6 +1829,12 @@ func TestStaleEligibleAccountsDoNotOverrideAnExclusion(t *testing.T) {
 					} else {
 						enrolled = append(enrolled, account.UID)
 					}
+				}
+				if len(tc.exempt) > 0 {
+					if !slices.Equal(enrolled, []int{aliceUID, bobUID}) || len(left) != 0 {
+						t.Fatalf("%s: identity accounts %+v (keys %v), want alice and the exempt bob enrolled", when, accounts, keys)
+					}
+					return
 				}
 				if !slices.Equal(enrolled, []int{aliceUID}) || !slices.Equal(left, []int{bobUID}) || !slices.Contains(keys, "left:"+strconv.Itoa(bobUID)) {
 					t.Fatalf("%s: identity accounts %+v (keys %v), want alice enrolled and bob's record withdrawn", when, accounts, keys)

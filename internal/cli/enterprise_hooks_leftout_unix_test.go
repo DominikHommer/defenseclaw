@@ -14,6 +14,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -112,7 +113,7 @@ func TestExclusionNameLookupsNeverHoldTheGuardian(t *testing.T) {
 		done := make(chan result, 1)
 		go func() {
 			rows := enterpriseHookEnrolledAccountRows(ctx, io.Discard, run)
-			accounts, _ := enterpriseHookIdentitySpoolAccounts(ctx, io.Discard, "", run)
+			accounts, _, _ := enterpriseHookIdentitySpoolAccounts(ctx, io.Discard, "", run)
 			done <- result{accounts, rows}
 		}()
 		select {
@@ -183,6 +184,18 @@ func TestExclusionNameLookupsNeverHoldTheGuardian(t *testing.T) {
 	releaseOnce.Do(func() { close(release) })
 	delete(resolver.accounts, "carol")
 	deadline := time.Now().Add(5 * time.Second)
+	// The released lookup returns on its own; until it has, a pass's lookup
+	// of carol does not start, and the scans and the identity pass of one
+	// guardian pass could read her name apart.
+	for {
+		if _, err := enterprisehooks.LookupStandaloneUserBounded(context.Background(), "carol"); unixidentity.IsNotFound(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the released lookup of carol did not return")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	for carolLeft("the name no longer resolves") {
 		if time.Now().After(deadline) {
 			t.Fatal("carol stays excluded after her name stopped resolving")
@@ -192,8 +205,8 @@ func TestExclusionNameLookupsNeverHoldTheGuardian(t *testing.T) {
 }
 
 // The record of an account a partial listing omitted is matched against the
-// settings by the name it carries, so excluding that account withdraws the
-// record without a lookup.
+// settings by the name it carries, in the pass, so excluding that account
+// withdraws the record without a name lookup.
 func TestExclusionWithdrawsTheRecordOfAnOmittedAccountByItsName(t *testing.T) {
 	previousCfg := cfg
 	t.Cleanup(func() {
@@ -215,10 +228,15 @@ func TestExclusionWithdrawsTheRecordOfAnOmittedAccountByItsName(t *testing.T) {
 	}
 	cfg = &config.Config{}
 	cfg.Enterprise.Enrollment.ExcludeUsers = []string{"bob@corp.example"}
-	accounts, keys := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{})
-	if !slices.ContainsFunc(accounts, func(a enterprisehooks.IdentitySpoolAccount) bool { return a.UID == 4243 && a.Left }) ||
-		!slices.Contains(keys, "left:"+strconv.Itoa(4243)) {
-		t.Fatalf("accounts %+v (keys %v), want bob's record withdrawn", accounts, keys)
+	accounts, keys, withdraw := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{})
+	if !slices.Contains(keys, "exclude:bob@corp.example") {
+		t.Fatalf("keys %v do not follow exclude_users", keys)
+	}
+	if err := enterprisehooks.WriteIdentitySpool(context.Background(), dir, accounts, nil, nil, withdraw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, strconv.Itoa(4243)+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bob's record was not withdrawn: %v", err)
 	}
 	if got := calls.Load(); got != 0 {
 		t.Fatalf("name lookups = %d, want 0: the record's name already matches", got)

@@ -143,22 +143,31 @@ type enterpriseHookDirectoryFlush struct {
 }
 
 // enterpriseHookIdentitySpoolAccounts lists the accounts a pass resolves
-// identity facts for, and the keys that tell whether they changed.
+// identity facts for, the keys that tell whether they changed, and the check
+// the pass applies to every record of an account it does not list
+// (enterprisehooks.WriteIdentitySpool's withdraw).
 //
-// The accounts the settings leave out are matched against the rows, the
-// eligible accounts and the records already in dir, the identity spool, so
-// the record of an account a partial listing omitted goes at once too.
+// An identity fact that is not proven never withdraws a record: a record
+// goes at once only for an account the settings leave out (exclude_users,
+// or out of the manifest) that holds no target the guardian authorization
+// still accepts, and, for a name entry, only when the account its uid holds
+// now is shown to be the excluded one (enterpriseHookLeftOutAccounts
+// withdraws). A hook call the gateway accepts keeps the profile its UPN
+// selects until the guardian stops accepting it, and a reused uid never
+// loses its new owner's record to an old answer. exempt_users withdraw
+// nothing: the gateway accepts an exempt caller's hook calls and inspects
+// them under its own profile.
 func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, dir string,
-	run enterpriseHookReconcileRun) ([]enterprisehooks.IdentitySpoolAccount, []string) {
+	run enterpriseHookReconcileRun) ([]enterprisehooks.IdentitySpoolAccount, []string, enterprisehooks.IdentitySpoolWithdraw) {
 	accounts := []enterprisehooks.IdentitySpoolAccount{}
 	keys := []string{}
 	seen := map[int]bool{}
 	var leftUIDs []int
-	// The current exclude_users and exempt_users apply before any row or
-	// eligible account: the manifest and eligible-accounts.json the
-	// enumerator wrote can be older than them (a later write failed), and an
-	// account they still list must not keep its record (left).
-	leftOut := enterpriseHookEnrollmentLeftOut(ctx)
+	// The current exclude_users apply before any row or eligible account:
+	// the manifest and eligible-accounts.json the enumerator wrote can be
+	// older than them (a later write failed).
+	leftOut := enterpriseHookEnrollmentLeftOut(ctx, dir)
+	accepted := enterpriseHookAcceptedHookCallers(stderr)
 	left := map[int]bool{}
 	leave := func(uid int) {
 		if !left[uid] {
@@ -177,6 +186,11 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 		}
 		return ""
 	}
+	list := func(uid int, user string) {
+		seen[uid] = true
+		accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: uid, User: user})
+		keys = append(keys, strconv.Itoa(uid)+":"+user)
+	}
 	for _, row := range run.Rows {
 		// A pending row with a resolved uid (its home is not available, or
 		// was recreated) stays enrolled: its record keeps being refreshed,
@@ -188,13 +202,11 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 		// The manifest's spelling is not proof of the UID's current name.
 		// macOS directory collection also needs this canonical name.
 		user := canonicalUser(row.UID)
-		if leftOut.has(row.UID, row.User, user) {
+		if !accepted.has(row.UID, row.User, user) && leftOut.withdraws(row.UID, row.User, user) {
 			leave(row.UID)
 			continue
 		}
-		seen[row.UID] = true
-		accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: row.UID, User: user})
-		keys = append(keys, strconv.Itoa(row.UID)+":"+user)
+		list(row.UID, user)
 	}
 	// Eligible accounts without rows, and accounts whose home is untrusted,
 	// keep their identity record too: a standard user who makes his home
@@ -208,7 +220,8 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 		if enterpriseHookManifestEnrollment() {
 			enrolled := enterprisehooks.ManifestEnrolledAccounts(extra, enterprisehooks.Manifest{Targets: run.Targets})
 			for _, account := range extra {
-				if !slices.ContainsFunc(enrolled, func(e enterprisehooks.UnixEligibleAccount) bool { return e.UID == account.UID }) {
+				if !slices.ContainsFunc(enrolled, func(e enterprisehooks.UnixEligibleAccount) bool { return e.UID == account.UID }) &&
+					!accepted.has(account.UID, account.User) {
 					leftUIDs = append(leftUIDs, account.UID)
 				}
 			}
@@ -219,24 +232,27 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 				continue
 			}
 			user := canonicalUser(account.UID)
-			if leftOut.has(account.UID, account.User, user) {
+			if !accepted.has(account.UID, account.User, user) && leftOut.withdraws(account.UID, account.User, user) {
 				leave(account.UID)
 				continue
 			}
-			seen[account.UID] = true
-			accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: account.UID, User: user})
-			keys = append(keys, strconv.Itoa(account.UID)+":"+user)
+			list(account.UID, user)
 		}
 	}
-	// The accounts the enrollment settings leave out (excluded, exempt, out
-	// of the manifest) lose their record at once. A directory account the
-	// pass merely does not list keeps it until the directory shows that it
-	// left, since a listing can be partial (GAP-1113, GAP-1236).
-	for _, uid := range leftOut.numeric {
-		leave(uid)
+	// An account the guardian authorization still accepts hook calls from
+	// keeps a refreshed record, also when this run's rows do not name it (the
+	// reconcile could not rewrite the authorization).
+	for _, uid := range accepted.listedUIDs() {
+		if !seen[uid] {
+			list(uid, canonicalUser(uid))
+		}
 	}
-	for _, record := range enterprisehooks.ReadIdentitySpoolRecords(dir, nil, enterpriseHookLeftOutRecordsMax) {
-		if uid, err := strconv.Atoi(record.Key); err == nil && uid > 0 && !seen[uid] && !left[uid] && leftOut.has(uid, record.User) {
+	// The accounts the enrollment settings leave out (excluded, out of the
+	// manifest) lose their record at once. A directory account the pass
+	// merely does not list keeps it until the directory shows that it left,
+	// since a listing can be partial (GAP-1113, GAP-1236).
+	for _, uid := range leftOut.excludedNumeric {
+		if !seen[uid] && !accepted.has(uid) {
 			leave(uid)
 		}
 	}
@@ -251,88 +267,317 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 			keys = append(keys, "left:"+strconv.Itoa(uid))
 		}
 	}
-	return accounts, keys
+	// The pass checks every record it does not list against the settings
+	// (a record a partial listing omitted carries its account's name), so a
+	// change of exclude_users starts a pass at the next tick.
+	for _, entry := range leftOut.excludedEntries() {
+		keys = append(keys, "exclude:"+entry)
+	}
+	withdraw := func(uid int, record enterprisehooks.IdentitySpoolRecord) bool {
+		return uid > 0 && !seen[uid] && !accepted.has(uid, record.User) && leftOut.withdraws(uid, record.User)
+	}
+	return accounts, keys, withdraw
+}
+
+// enterpriseHookAcceptedAccounts are the accounts whose hook calls the
+// guardian authorization the gateway reads still accepts: those holding a
+// protected target, by uid or, for a target without one, by name. unknown
+// marks an authorization that could not be read: every account is taken as
+// accepted, so no record is withdrawn until it reads.
+type enterpriseHookAcceptedAccounts struct {
+	unknown bool
+	uids    map[int]bool
+	names   map[string]bool
+}
+
+// enterpriseHookLoadAcceptedTargets reads the protected targets of the
+// guardian authorization; tests replace it.
+var enterpriseHookLoadAcceptedTargets = func() ([]enterpriseHookReconcileRow, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	authorization, _, err := loadEnterpriseHookGuardianAuthorization(cfg.DataDir)
+	return authorization.ProtectedTargets, err
+}
+
+func enterpriseHookAcceptedHookCallers(stderr io.Writer) enterpriseHookAcceptedAccounts {
+	accepted := enterpriseHookAcceptedAccounts{uids: map[int]bool{}, names: map[string]bool{}}
+	targets, err := enterpriseHookLoadAcceptedTargets()
+	if err != nil {
+		fmt.Fprintf(stderr, "[hook-guardian] identity spool: %v; no identity record is withdrawn until it reads\n", err)
+		accepted.unknown = true
+		return accepted
+	}
+	for _, target := range targets {
+		// The gateway accepts only a target whose protection succeeded.
+		if !target.OK {
+			continue
+		}
+		if target.UID > 0 {
+			accepted.uids[target.UID] = true
+		} else if user := strings.TrimSpace(target.User); user != "" {
+			accepted.names[user] = true
+		}
+	}
+	return accepted
+}
+
+// has reports whether the authorization accepts hook calls from the account
+// with uid, or from one of names, the spellings it is known by.
+func (a enterpriseHookAcceptedAccounts) has(uid int, names ...string) bool {
+	if a.unknown || a.uids[uid] {
+		return true
+	}
+	return slices.ContainsFunc(names, func(name string) bool {
+		name = strings.TrimSpace(name)
+		return name != "" && a.names[name]
+	})
+}
+
+// listedUIDs lists the uids the authorization names, in order.
+func (a enterpriseHookAcceptedAccounts) listedUIDs() []int {
+	uids := make([]int, 0, len(a.uids))
+	for uid := range a.uids {
+		if uid > 0 {
+			uids = append(uids, uid)
+		}
+	}
+	slices.Sort(uids)
+	return uids
 }
 
 // enterpriseHookLeftOutAccounts is what enterprise.enrollment.exclude_users
 // and exempt_users name, matched as the enumerator matches them: an account
 // name or its decimal uid. A name is also resolved to its uid, so another
-// spelling of the account matches too, and a name that does not resolve
-// (the directory does not answer) still matches the name a row, an eligible
-// account or an identity record carries.
+// spelling of the account matches too.
 //
-// The names are resolved only when an account the pass would keep is not
-// already left out by its uid or one of its spellings, so a host with no
-// such account asks the directory nothing. The lookups end with the
-// reconcile context and after enterpriseHookLeftOutLookupWait, and a name
-// whose earlier lookup has not returned (an Open Directory call that never
-// answers) starts no new one (enterprisehooks.LookupStandaloneUserBounded):
-// a stalled lookup never holds the guardian's watch loop. A name whose
-// lookup does not answer this pass keeps the uid its last answer gave
-// (enterpriseHookLeftOutProven), so an exclusion keeps applying through an
-// outage; a not-found answer forgets it.
+// has is the strict reading the scans use: a match by uid, by a spelling,
+// by the uid a name resolves to now, or by the uid its last answer gave
+// while it does not answer leaves the account out. withdraws is the reading
+// that removes an identity record: exclude_users only, and a name entry
+// counts only when the account its uid holds now is the excluded one.
+//
+// The names are resolved only when an account is not already decided by its
+// uid or one of its spellings, so a host with no such account asks the
+// directory nothing. The lookups end with the reconcile context and after
+// enterpriseHookLeftOutLookupWait, and a name or uid whose earlier lookup
+// has not returned (an Open Directory call that never answers) starts no
+// new one (enterprisehooks.LookupStandaloneUserBounded): a stalled lookup
+// never holds the guardian's watch loop. A name whose lookup does not answer
+// this pass keeps its last answer (enterpriseHookLeftOutProven); a not-found
+// answer forgets it.
 type enterpriseHookLeftOutAccounts struct {
 	ctx context.Context
-	// numeric holds the entries written as a decimal uid.
-	numeric []int
-	byUID   map[int]bool
-	names   map[string]bool
+	// dir is the identity spool: the record of a uid names the account, and
+	// its SID where SSSD holds one, that the uid held at the last pass.
+	dir string
+	// excluded and exempt hold the entries as written.
+	excluded, exempt map[string]bool
+	// excludedNumeric lists the exclude_users entries written as a uid.
+	excludedNumeric []int
+	// excludedUIDs and exemptUIDs hold the uids the entries name: written
+	// as a uid, or a name that resolved to it in this call.
+	excludedUIDs, exemptUIDs map[int]bool
+	// cached holds, per uid, the last answers of the names that did not
+	// answer in this call.
+	cached map[int][]enterpriseHookLeftOutProof
 	// unresolved lists the name entries resolve has not looked up yet.
 	unresolved []string
 	resolved   bool
+	// holders memoizes accountAt.
+	holders map[int]enterpriseHookLeftOutHolder
 }
 
-// enterpriseHookLeftOutLookupWait bounds the name lookups of one call.
+// enterpriseHookLeftOutProof is the last answer a name entry got: the uid,
+// the account name and, when the identity spool held one for that account,
+// its SID.
+type enterpriseHookLeftOutProof struct {
+	entry string
+	uid   int
+	name  string
+	sid   string
+}
+
+// enterpriseHookLeftOutHolder is the account a uid holds now, as far as one
+// call knows: the account database's answer, or, when it does not answer,
+// the uid's identity record. An empty name means neither says.
+type enterpriseHookLeftOutHolder struct {
+	name     string
+	sid      string
+	answered bool
+}
+
+// enterpriseHookLeftOutLookupWait bounds the lookups of one call.
 var enterpriseHookLeftOutLookupWait = 3 * time.Second
 
-// enterpriseHookLeftOutProven holds the uid each exclude_users or
-// exempt_users name last resolved to.
+// enterpriseHookLeftOutProven holds the last answer of each exclude_users or
+// exempt_users name, by lower-case name.
 var enterpriseHookLeftOutProven = struct {
 	sync.Mutex
-	uids map[string]int
-}{uids: map[string]int{}}
+	proofs map[string]enterpriseHookLeftOutProof
+}{proofs: map[string]enterpriseHookLeftOutProof{}}
 
 // enterpriseHookEnrollmentLeftOut reads the current settings' exclude_users
-// and exempt_users; their names are resolved on demand (has).
-func enterpriseHookEnrollmentLeftOut(ctx context.Context) *enterpriseHookLeftOutAccounts {
-	out := &enterpriseHookLeftOutAccounts{ctx: ctx, byUID: map[int]bool{}, names: map[string]bool{}}
+// and exempt_users; their names are resolved on demand. dir is the identity
+// spool.
+func enterpriseHookEnrollmentLeftOut(ctx context.Context, dir string) *enterpriseHookLeftOutAccounts {
+	out := &enterpriseHookLeftOutAccounts{
+		ctx: ctx, dir: dir,
+		excluded: map[string]bool{}, exempt: map[string]bool{},
+		excludedUIDs: map[int]bool{}, exemptUIDs: map[int]bool{},
+		cached: map[int][]enterpriseHookLeftOutProof{}, holders: map[int]enterpriseHookLeftOutHolder{},
+	}
 	if cfg == nil {
 		return out
 	}
-	for _, entry := range append(slices.Clone(cfg.Enterprise.Enrollment.ExcludeUsers), cfg.Enterprise.Enrollment.ExemptUsers...) {
-		if entry = strings.TrimSpace(entry); entry == "" {
-			continue
-		}
-		out.names[entry] = true
-		if uid, err := strconv.Atoi(entry); err == nil {
-			if uid > 0 && !out.byUID[uid] {
-				out.byUID[uid] = true
-				out.numeric = append(out.numeric, uid)
+	add := func(entries []string, names map[string]bool, uids map[int]bool, numeric *[]int) {
+		for _, entry := range entries {
+			if entry = strings.TrimSpace(entry); entry == "" {
+				continue
 			}
-		} else if !slices.Contains(out.unresolved, entry) {
-			out.unresolved = append(out.unresolved, entry)
+			names[entry] = true
+			if uid, err := strconv.Atoi(entry); err == nil {
+				if uid > 0 && !uids[uid] {
+					uids[uid] = true
+					if numeric != nil {
+						*numeric = append(*numeric, uid)
+					}
+				}
+			} else if !slices.Contains(out.unresolved, entry) {
+				out.unresolved = append(out.unresolved, entry)
+			}
 		}
 	}
+	add(cfg.Enterprise.Enrollment.ExcludeUsers, out.excluded, out.excludedUIDs, &out.excludedNumeric)
+	add(cfg.Enterprise.Enrollment.ExemptUsers, out.exempt, out.exemptUIDs, nil)
 	return out
+}
+
+// excludedEntries lists the exclude_users entries, in order.
+func (l *enterpriseHookLeftOutAccounts) excludedEntries() []string {
+	entries := make([]string, 0, len(l.excluded))
+	for entry := range l.excluded {
+		entries = append(entries, entry)
+	}
+	slices.Sort(entries)
+	return entries
 }
 
 // has reports whether the settings leave out the account with uid, by uid
 // or by one of names (its spelling in a row, an eligible account or an
-// identity record, its name by uid). It resolves the names the first time
-// they are needed.
+// identity record, its name by uid), strictly: an exclusion that is not
+// proven this pass still keeps the account out of the scans. It resolves
+// the names the first time they are needed.
 func (l *enterpriseHookLeftOutAccounts) has(uid int, names ...string) bool {
-	if l.byUID[uid] {
+	if l.excludedUIDs[uid] || l.exemptUIDs[uid] {
 		return true
 	}
 	for _, name := range names {
-		if name = strings.TrimSpace(name); name != "" && l.names[name] {
+		if name = strings.TrimSpace(name); name != "" && (l.excluded[name] || l.exempt[name]) {
 			return true
 		}
 	}
 	if !l.resolved {
 		l.resolve()
 	}
-	return l.byUID[uid]
+	return l.excludedUIDs[uid] || l.exemptUIDs[uid] || len(l.cached[uid]) > 0
+}
+
+// withdraws reports whether exclude_users takes the identity record of the
+// account with uid, known by names. A uid entry and a name that resolves to
+// uid now do. A spelling the account is listed by does unless the account
+// the uid holds now is another one. A name's last answer, while it does not
+// answer, does only when the account the uid holds now is the one that
+// answer named, with the same SID where both are known: a uid the directory
+// gave to another account since then keeps its new owner's record.
+func (l *enterpriseHookLeftOutAccounts) withdraws(uid int, names ...string) bool {
+	if uid <= 0 {
+		return false
+	}
+	if l.excludedUIDs[uid] {
+		return true
+	}
+	if slices.ContainsFunc(names, func(name string) bool {
+		name = strings.TrimSpace(name)
+		return name != "" && l.excluded[name]
+	}) {
+		if holder := l.accountAt(uid); holder.name == "" || l.excluded[holder.name] {
+			return true
+		}
+	}
+	if !l.resolved {
+		l.resolve()
+	}
+	if l.excludedUIDs[uid] {
+		return true
+	}
+	for _, proof := range l.cached[uid] {
+		if !l.excluded[proof.entry] {
+			continue
+		}
+		holder := l.accountAt(uid)
+		if holder.name != "" && (holder.name == proof.name || l.excluded[holder.name]) &&
+			(proof.sid == "" || holder.sid == "" || strings.EqualFold(proof.sid, holder.sid)) {
+			return true
+		}
+		if holder.answered && holder.name != proof.name {
+			// The account database gives the uid to another account: the
+			// last answer no longer holds.
+			l.forget(proof)
+		}
+	}
+	return false
+}
+
+// accountAt reports the account uid holds now (enterpriseHookLeftOutHolder).
+// The uid lookup is bounded as the name lookups are. A not-found answer is
+// not taken as an answer: SSSD gives it for a directory account while its
+// backend is down.
+func (l *enterpriseHookLeftOutAccounts) accountAt(uid int) enterpriseHookLeftOutHolder {
+	if holder, ok := l.holders[uid]; ok {
+		return holder
+	}
+	record, recordErr := enterprisehooks.ReadIdentitySpoolRecord(l.dir, strconv.Itoa(uid), nil)
+	ctx := l.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, enterpriseHookLeftOutLookupWait)
+	account, err := enterprisehooks.LookupStandaloneUIDBounded(waitCtx, uid)
+	cancel()
+	var holder enterpriseHookLeftOutHolder
+	switch {
+	case err == nil && account.UID == uid && account.Name != "":
+		holder = enterpriseHookLeftOutHolder{name: account.Name, answered: true}
+		if recordErr == nil && record.User == account.Name {
+			holder.sid = record.AccountSID
+		}
+	case recordErr == nil && strings.TrimSpace(record.User) != "":
+		holder = enterpriseHookLeftOutHolder{name: record.User, sid: record.AccountSID}
+	}
+	l.holders[uid] = holder
+	return holder
+}
+
+// recordSID is the SID the identity record of uid holds for the account
+// named name, or "".
+func (l *enterpriseHookLeftOutAccounts) recordSID(uid int, name string) string {
+	record, err := enterprisehooks.ReadIdentitySpoolRecord(l.dir, strconv.Itoa(uid), nil)
+	if err != nil || record.User != name {
+		return ""
+	}
+	return record.AccountSID
+}
+
+// forget drops a last answer the account database has since contradicted.
+func (l *enterpriseHookLeftOutAccounts) forget(proof enterpriseHookLeftOutProof) {
+	proven := &enterpriseHookLeftOutProven
+	proven.Lock()
+	defer proven.Unlock()
+	key := strings.ToLower(proof.entry)
+	if got, ok := proven.proofs[key]; ok && got.uid == proof.uid && got.name == proof.name {
+		delete(proven.proofs, key)
+	}
 }
 
 // resolve looks the name entries up at once, each at most until the call's
@@ -350,6 +595,7 @@ func (l *enterpriseHookLeftOutAccounts) resolve() {
 	defer cancel()
 	type answer struct {
 		uid   int
+		name  string
 		found bool
 		known bool
 	}
@@ -362,13 +608,28 @@ func (l *enterpriseHookLeftOutAccounts) resolve() {
 			account, err := enterprisehooks.LookupStandaloneUserBounded(waitCtx, name)
 			switch {
 			case err == nil && account.UID > 0:
-				answers[i] = answer{uid: account.UID, found: true, known: true}
+				answers[i] = answer{uid: account.UID, name: account.Name, found: true, known: true}
 			case unixidentity.IsNotFound(err):
 				answers[i] = answer{known: true}
 			}
 		}()
 	}
 	wg.Wait()
+	mark := func(entry string, uid int) {
+		if l.excluded[entry] {
+			l.excludedUIDs[uid] = true
+		}
+		if l.exempt[entry] {
+			l.exemptUIDs[uid] = true
+		}
+	}
+	proofs := make([]enterpriseHookLeftOutProof, len(l.unresolved))
+	for i, name := range l.unresolved {
+		if got := answers[i]; got.found {
+			mark(name, got.uid)
+			proofs[i] = enterpriseHookLeftOutProof{entry: name, uid: got.uid, name: got.name, sid: l.recordSID(got.uid, got.name)}
+		}
+	}
 	proven := &enterpriseHookLeftOutProven
 	proven.Lock()
 	defer proven.Unlock()
@@ -376,33 +637,44 @@ func (l *enterpriseHookLeftOutAccounts) resolve() {
 		key := strings.ToLower(name)
 		switch got := answers[i]; {
 		case got.found:
-			proven.uids[key] = got.uid
+			proof := proofs[i]
+			if prior, ok := proven.proofs[key]; ok && proof.sid == "" && prior.uid == proof.uid && prior.name == proof.name {
+				proof.sid = prior.sid
+			}
+			proven.proofs[key] = proof
 		case got.known:
-			delete(proven.uids, key)
-		}
-		if uid := proven.uids[key]; uid > 0 {
-			l.byUID[uid] = true
+			delete(proven.proofs, key)
+		default:
+			if proof, ok := proven.proofs[key]; ok && proof.uid > 0 {
+				proof.entry = name
+				l.cached[proof.uid] = append(l.cached[proof.uid], proof)
+			}
 		}
 	}
 	l.unresolved = nil
 }
 
-// enterpriseHookLeftOutRecordsMax bounds the identity records one pass
-// checks against the settings.
-const enterpriseHookLeftOutRecordsMax = 4096
+// enterpriseHookIdentitySpoolDirForConfig is the identity spool of the
+// current settings.
+func enterpriseHookIdentitySpoolDirForConfig() string {
+	if cfg == nil {
+		return ""
+	}
+	return enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
+}
 
 func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return
 	}
-	dir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
+	dir := enterpriseHookIdentitySpoolDirForConfig()
 	if dir == "" {
 		return
 	}
 	// The guardian follows a pushed config's trusted child domains, as the
 	// gateway does on reload (GAP-1255).
 	useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
-	accounts, keys := enterpriseHookIdentitySpoolAccounts(ctx, stderr, dir, run)
+	accounts, keys, withdraw := enterpriseHookIdentitySpoolAccounts(ctx, stderr, dir, run)
 	enrolled := slices.DeleteFunc(slices.Clone(accounts), func(a enterprisehooks.IdentitySpoolAccount) bool { return a.Left })
 	startEnterpriseHookDirectoryReturnWatch(ctx, stderr, dir, enrolled)
 	startEnterpriseHookDirectoryReachWatch(ctx, stderr, dir, enrolled)
@@ -443,7 +715,7 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 			return
 		}
 		logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
-		passErr = enterprisehooks.WriteIdentitySpool(ctx, dir, accounts, enterpriseHookAuthorizationOwnershipSetter, logf)
+		passErr = enterprisehooks.WriteIdentitySpool(ctx, dir, accounts, enterpriseHookAuthorizationOwnershipSetter, logf, withdraw)
 		if passErr != nil {
 			fmt.Fprintf(stderr, "[hook-guardian] identity spool: %v\n", passErr)
 		}
