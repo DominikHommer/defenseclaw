@@ -212,21 +212,23 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 		env     []string
 		hint    string
 		retried bool
-		// notice is the systemMessage text, when it is not the start step.
-		notice string
+		// blocked: the call is denied although the fail mode is open.
+		blocked bool
 	}{
 		// The hook names the way back (SWEEP-16): an explicit stop is never
 		// undone by a hook, so the user has to start the gateway.
 		"stopped with defenseclaw-gateway stop": {prepare: func(dataDir string) {
 			_ = os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600)
 		}, hint: "stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection"},
+		// The install window is not an outage: an open fail mode does not let
+		// the call through unchecked (GAP-0649).
 		"install in progress": {prepare: func(dataDir string) {
 			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
-		}, hint: installing, retried: true, notice: "is being installed or upgraded for this account"},
+		}, hint: installing, retried: true, blocked: true},
 		"stopped by an upgrade in progress": {prepare: func(dataDir string) {
 			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
 			_ = os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600)
-		}, hint: installing, retried: true, notice: "is being installed or upgraded for this account"},
+		}, hint: installing, retried: true, blocked: true},
 		"no configuration": {prepare: func(dataDir string) {
 			_ = os.Remove(filepath.Join(dataDir, "config.yaml"))
 		}, hint: waited, retried: true},
@@ -259,14 +261,14 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 			if tc.hint == "" && strings.Contains(run.stderr, "defenseclaw-gateway start") {
 				t.Errorf("stderr = %q, want no start advice", run.stderr)
 			}
-			// Claude Code hides stderr of a hook that exits 0, so the next
-			// step is also on stdout as a systemMessage (GAP-0037).
-			if tc.notice != "" {
-				if !strings.Contains(run.stdout, tc.notice) || strings.Contains(run.stdout, "stopped with") {
-					t.Errorf("stdout = %q, want the notice %q and no operator-stop text", run.stdout, tc.notice)
+			if tc.blocked {
+				if reason := failClosedDenyReason(t, run); !strings.Contains(reason, "being installed or upgraded") {
+					t.Errorf("deny reason = %q, want the install named", reason)
 				}
 				return
 			}
+			// Claude Code hides stderr of a hook that exits 0, so the next
+			// step is also on stdout as a systemMessage (GAP-0037).
 			assertGatewayDownNotice(t, run.stdout, tc.hint != "")
 		})
 	}

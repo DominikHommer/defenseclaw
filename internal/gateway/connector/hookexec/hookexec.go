@@ -1811,6 +1811,13 @@ func emitFailOpenAllow(opts Options, sp spec, reason string) int {
 
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	failMode = managedNonOutageMode(&opts, failMode)
+	if perUserInstallWindow(opts) {
+		// An install or upgrade stops this account's gateway and starts it
+		// again when it is done. That window is not an outage, so an open
+		// fail mode does not let the call through unchecked (GAP-0649).
+		failMode = "closed"
+		opts.FailMode = "closed"
+	}
 	if failMode == "closed" {
 		// A refusal passed in closed (a peer DefenseClaw cannot verify, an
 		// invalid runtime) stays closed for the connectors whose helpers read
@@ -1848,6 +1855,22 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		return 0
 	}
 	return emitFailOpenAllow(opts, sp, reason)
+}
+
+// installLockName is the folder install.sh and install.ps1 hold in the data
+// directory while they install or upgrade this account's DefenseClaw
+// (internal/cli installLockName).
+const installLockName = ".install.lock"
+
+// perUserInstallWindow reports a per-user hook (not managed, not Secure
+// Client) running while an install or upgrade of this account's DefenseClaw
+// holds installLockName.
+func perUserInstallWindow(opts Options) bool {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || strings.TrimSpace(opts.Home) == "" {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(opts.Home, installLockName))
+	return err == nil
 }
 
 const coldStartFailedReason = "gateway cold start failed"
@@ -1956,6 +1979,11 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	}
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return ""
+	}
+	if perUserInstallWindow(opts) {
+		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
+			"upgraded for this account, and its gateway starts again when that is done. Try again in a moment; " +
+			"if it does not come back, run `defenseclaw-gateway start`."
 	}
 	if reason == perUserGatewayRestartingReason {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": this account's DefenseClaw gateway is " +

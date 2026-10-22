@@ -182,7 +182,10 @@ claude_fail_closed_decision() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
-  if [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ]; then
+  # An install stops the gateway like an operator does; the next step names
+  # the install (GAP-0649).
+  if [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ] &&
+    [ ! -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/.install.lock" ]; then
     reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection."
   elif [ "$1" = "gateway unreachable" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
     reason="DefenseClaw blocked this: ${next//\`/}."

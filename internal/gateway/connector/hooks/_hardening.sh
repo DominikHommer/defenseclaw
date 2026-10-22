@@ -1125,6 +1125,15 @@ defenseclaw_should_fail_closed_on_unreachable() {
   case "${FAIL_MODE:-open}" in
     closed) return 0 ;;
   esac
+  # An install or upgrade of this account's DefenseClaw (.install.lock) stops
+  # its gateway and starts it again when it is done. That window is not an
+  # outage, so a per-user hook does not let the call through unchecked
+  # (GAP-0649). Managed and socket hooks keep the administrator's mode.
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) ;;
+    *) [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ] ||
+      [ ! -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/.install.lock" ] || return 0 ;;
+  esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;
     *) return 1 ;;
@@ -1292,9 +1301,9 @@ defenseclaw_unreachable_notice_json() {
   next="$(defenseclaw_unreachable_next_step)"
   [ -n "$next" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-  if [ -e "${data}/.install.lock" ]; then
-    text='DefenseClaw is not checking this session: DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done. If it does not come back, run `defenseclaw-gateway start`.'
-  elif [ -e "${data}/gateway.stopped" ]; then
+  # During an install (.install.lock) a per-user hook fails closed
+  # (defenseclaw_should_fail_closed_on_unreachable), so no notice names it.
+  if [ -e "${data}/gateway.stopped" ]; then
     text='DefenseClaw is not checking this session: the gateway was stopped with `defenseclaw-gateway stop`. Run `defenseclaw-gateway start` to resume protection.'
   elif [ -n "${_DC_GATEWAY_RESTART_WAITED:-}" ] && ! defenseclaw_own_config_invalid; then
     text='DefenseClaw is not checking this session: this account'"'"'s gateway is restarting or not running (no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection.'

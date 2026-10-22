@@ -15,6 +15,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -90,6 +92,19 @@ func TestPerUserFailOpenHookNamesTheRestart(t *testing.T) {
 	if result.code != 0 || json.Unmarshal([]byte(result.stdout), &notice) != nil ||
 		!strings.Contains(notice["systemMessage"], "restarting or not running") {
 		t.Fatalf("code=%d stdout=%q, want the restart notice", result.code, result.stdout)
+	}
+
+	// GAP-0649: an install or upgrade (.install.lock) is not an outage, so
+	// the open hook blocks the call and names the install.
+	installing := run(t, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
+		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 150*time.Millisecond)
+		if err := os.Mkdir(filepath.Join(opts.Home, ".install.lock"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(installing.stdout, `"permissionDecision":"deny"`) ||
+		!strings.Contains(installing.stdout, "being installed or upgraded") {
+		t.Fatalf("code=%d stdout=%q, want the call blocked with the install named", installing.code, installing.stdout)
 	}
 }
 
