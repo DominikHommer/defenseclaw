@@ -2596,8 +2596,10 @@ func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 	if err == nil {
 		return false, nil
 	}
-	return true, writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script,
-		fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err))
+	if !opts.suppliedConfigUnreadable {
+		err = fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)
+	}
+	return true, writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
 }
 
 // writeWindowsEnterpriseStandaloneRefusal writes the schema-2 result of a

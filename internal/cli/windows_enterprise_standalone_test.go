@@ -803,6 +803,37 @@ func TestWindowsEnterpriseUnparseableConfigRefusalReportsTheRunningDeployment(t 
 	}
 }
 
+// GAP-0537: a --config that does not exist is refused like one that does not
+// parse, after the status probe, so the refusal reports the running
+// deployment instead of health_not_checked and no enrollment. It stays a
+// preflight failure (1603).
+func TestWindowsEnterpriseMissingConfigRefusalReportsTheRunningDeployment(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
+	opts := ensureTestOptions()
+	opts.configPath = filepath.Join(t.TempDir(), "absent.yaml")
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", opts); err != nil || opts.suppliedConfigRefusal == nil {
+		t.Fatalf("missing config: %v, deferred refusal %v", err, opts.suppliedConfigRefusal)
+	}
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status")}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(context.Background(), command, "ensure", opts, `C:\stage\install-enterprise.ps1`)
+	if !refused || commandExitCode(err) != 1603 || len(stub.calls) != 1 || stub.calls[0][1] != "Status" {
+		t.Fatalf("refused=%v exit %d, installer runs %q", refused, commandExitCode(err), stub.calls)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Installed || len(result.Errors) != 1 || result.Errors[0].Code != "preflight_failed" ||
+		!strings.Contains(result.Errors[0].Message, "absent.yaml") ||
+		windowsBundleHasCode(result.Warnings, windowsEnterpriseHealthNotChecked) {
+		t.Fatalf("result %+v", result)
+	}
+}
+
 // GAP-1433: an ensure or upgrade whose config is refused first recovers a
 // pending transaction with a repair that carries no sources, so the refusal
 // reports the restored deployment instead of leaving the services stopped.

@@ -116,6 +116,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// trusted, so the refusal reports the running deployment as a refused
 	// config that parses does (GAP-0103).
 	suppliedConfigRefusal error
+	// suppliedConfigUnreadable marks a suppliedConfigRefusal for a file
+	// that could not be opened or read: a preflight failure (1603), not
+	// invalid arguments.
+	suppliedConfigUnreadable bool
 	// runningDeploymentLabel marks a run that refused its config before it
 	// changed anything: every warning from index
 	// runningDeploymentWarningsFrom on, those the finish adds included, is
