@@ -270,6 +270,60 @@ func TestManagedHookAndGatewayAuditTheAnswerTheAgentGot(t *testing.T) {
 	}
 }
 
+// A 103 the gateway sends after the hook's capability wait (a slow peer
+// lookup at handler start) does not turn an answer given in time into a
+// block: the hook takes it, and the audit records the unconfirmed decision,
+// never a block the agent did not get.
+func TestManagedHookAndGatewayAfterALateEarlyHint(t *testing.T) {
+	f := newManagedHookAuditFixture(t, func(w http.ResponseWriter) http.ResponseWriter {
+		return &lateHintWriter{ResponseWriter: w}
+	})
+	home := t.TempDir()
+	token := "authenticated-generation-token"
+	var stdout, stderr bytes.Buffer
+	code := hookexec.Run(t.Context(), hookexec.Options{
+		Connector:                 "claudecode",
+		Event:                     "PreToolUse",
+		APIAddr:                   f.server.Listener.Addr().String(),
+		FailMode:                  "closed",
+		ManagedEnterprise:         true,
+		AuthenticatedManagedToken: &token,
+		Home:                      home,
+		HookDir:                   filepath.Join(home, "hooks"),
+		Stdin:                     strings.NewReader(managedHookBody("late-hint", "PreToolUse")),
+		Stdout:                    &stdout,
+		Stderr:                    &stderr,
+		HTTPClient:                &http.Client{},
+		StartedAt:                 time.Now(),
+	})
+	if out := stdout.String() + stderr.String(); code != 0 || strings.Contains(out, "deny") {
+		t.Fatalf("answer after a late 103 was not taken: code=%d output=%q", code, out)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		got := f.audited(t, "late-hint")["late-hint"]
+		if got == "unconfirmed/no_answer" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("audited late-hint = %q, want unconfirmed/no_answer", got)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// lateHintWriter sends 103 after the hook's capability wait.
+type lateHintWriter struct{ http.ResponseWriter }
+
+func (w *lateHintWriter) WriteHeader(code int) {
+	if code == http.StatusEarlyHints {
+		time.Sleep(time.Second)
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *lateHintWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // lateAnswerWriter holds the next hook answer, once late is set, until the
 // hook's answer budget (3.5 s) has run out.
 type lateAnswerWriter struct {
@@ -294,7 +348,8 @@ func (w *lateAnswerWriter) Unwrap() http.ResponseWriter { return w.ResponseWrite
 
 // A call that sends no receipt keeps its evaluated decision unless it is a
 // native hook's tool call (an earlier hook binary) or its caller hung up.
-// In-agent plugins and policy bridges never send one.
+// The managed OpenCode plugin runs the native hook; the Amp plugin and the
+// Omnigent bridge never send one.
 func TestUnreceiptedManagedHookDecisions(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
 	api := &APIServer{scannerCfg: cfg}
@@ -306,7 +361,7 @@ func TestUnreceiptedManagedHookDecisions(t *testing.T) {
 		ctx              context.Context
 		want             string
 	}{
-		{"opencode", "tool.execute.before", t.Context(), "allow"},
+		{"opencode", "tool.execute.before", t.Context(), "unconfirmed"},
 		{"amp", "tool.call", t.Context(), "allow"},
 		{"omnigent", "PreToolUse", t.Context(), "allow"},
 		{"claudecode", "UserPromptSubmit", t.Context(), "allow"},

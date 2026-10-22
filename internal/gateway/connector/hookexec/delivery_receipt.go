@@ -17,7 +17,8 @@ import (
 
 // The managed hook and gateway use the same HTTP request for the verdict and
 // its delivery receipt. An old gateway does not send 103 Early Hints, so the
-// body is closed after this compatibility wait and remains its original JSON.
+// body ends with HookDeliveryReleased after this compatibility wait. A 1.0.4
+// gateway whose 103 comes later reads the same marker in place of a receipt.
 const hookDeliveryCapabilityWait = 250 * time.Millisecond
 
 type hookDeliveryRequest struct {
@@ -26,15 +27,19 @@ type hookDeliveryRequest struct {
 	once   sync.Once
 	mu     sync.Mutex
 	closed bool
+	// released: the capability wait passed first and the body ended with
+	// HookDeliveryReleased. The answer is ordinary, with no receipt.
+	released bool
 }
 
 // DeliveryReceiptEvent reports whether a managed native hook sends a delivery
 // receipt for event (1.0.4 and later): a tool call with an answer deadline.
-// OpenCode, Amp and Omnigent call the gateway from their in-agent plugin or
-// policy bridge, which sends none.
+// The managed OpenCode plugin runs the native hook, so its tool calls do.
+// Amp and Omnigent call the gateway from their in-agent plugin or policy
+// bridge, which sends none.
 func DeliveryReceiptEvent(connector, event string) bool {
 	switch connector {
-	case "opencode", "amp", "omnigent":
+	case "amp", "omnigent":
 		return false
 	}
 	return toolGateEvent(connector, event)
@@ -73,9 +78,7 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 		select {
 		case <-delivery.ready:
 		case <-timer.C:
-			if !delivery.capabilityReceived() {
-				delivery.close()
-			}
+			delivery.release()
 		case <-req.Context().Done():
 		}
 	}()
@@ -100,6 +103,31 @@ func (d *hookDeliveryRequest) close() {
 		d.closed = true
 		_ = d.writer.Close()
 	}
+}
+
+// release ends the body with HookDeliveryReleased unless the gateway's 103
+// came first.
+func (d *hookDeliveryRequest) release() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return
+	}
+	select {
+	case <-d.ready:
+		return
+	default:
+	}
+	_, _ = io.WriteString(d.writer, HookDeliveryReleased)
+	d.closed = true
+	d.released = true
+	_ = d.writer.Close()
+}
+
+func (d *hookDeliveryRequest) wasReleased() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.released
 }
 
 func (d *hookDeliveryRequest) acknowledge(localBlock bool) error {

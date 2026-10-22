@@ -91,6 +91,11 @@ const HookDeliveryReceiptAck = "ack\n"
 
 const HookDeliveryReceiptBlock = "block\n"
 
+// HookDeliveryReleased ends the request body of a hook whose capability wait
+// passed without a 103: the hook takes the ordinary answer and sends no
+// receipt. It is JSON whitespace, so an older gateway's decoder ignores it.
+const HookDeliveryReleased = "\n"
+
 const HookDeliveryConfirmed = "received\n"
 
 // HookProgressStatus is the informational status of that report.

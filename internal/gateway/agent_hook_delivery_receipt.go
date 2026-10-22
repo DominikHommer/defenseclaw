@@ -58,6 +58,8 @@ func (d *hookDeliveryReceipt) readPayload() ([]byte, error) {
 // receipt is an exact token, not a caller-supplied verdict: a different
 // verdict cannot be substituted after policy evaluation. No receipt means
 // the hook's answer watchdog won or the connection was lost.
+// HookDeliveryReleased means the 103 came after the hook's capability wait:
+// the hook took the answer as an ordinary one and sends no receipt.
 func (d *hookDeliveryReceipt) offer(w http.ResponseWriter, answer func()) string {
 	controller := http.NewResponseController(w)
 	if err := controller.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -73,6 +75,8 @@ func (d *hookDeliveryReceipt) offer(w http.ResponseWriter, answer func()) string
 		return ""
 	}
 	switch line {
+	case hookexec.HookDeliveryReleased:
+		return line
 	case hookexec.HookDeliveryReceiptAck, hookexec.HookDeliveryReceiptBlock:
 		_, _ = io.WriteString(w, hookexec.HookDeliveryConfirmed)
 		_ = controller.Flush()
@@ -116,6 +120,8 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 //     binary (a package upgrade in flight) or a connection without full
 //     duplex. Its answer watchdog may have blocked after the gateway decided,
 //     so only a block is known.
+//   - A 1.0.4 hook that released its request before the gateway's late 103
+//     took the answer without a receipt, the same as an earlier binary.
 //   - Every other call keeps its evaluated decision. In-agent plugins, policy
 //     bridges and events without an answer deadline send no receipt.
 func (a *APIServer) unreceiptedHookDecision(ctx context.Context, connectorName, event string, resp agentHookResponse) agentHookResponse {

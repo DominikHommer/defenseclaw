@@ -954,10 +954,14 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// the bytes it sent are never taken as its decision.
 	var body []byte
 	var readErr error
-	if delivery != nil {
+	if delivery != nil || resp.Header.Get(HookDeliveryRequiredHeader) == "1" {
+		// A released request's answer is the same one line, ahead of the
+		// gateway's audit write.
 		body, readErr = bufio.NewReader(io.LimitReader(resp.Body, defaultMaxBody+1)).ReadBytes('\n')
 	} else {
 		body, readErr = io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody+1))
+	}
+	if delivery == nil {
 		stopAnswer()
 	}
 	if (readErr != nil || int64(len(body)) > defaultMaxBody) && managedNativeDecision(opts) &&
@@ -1187,7 +1191,9 @@ func sendHookRequest(
 		return nil, err
 	}
 	if delivery != nil {
-		if resp.Header.Get(HookDeliveryRequiredHeader) == "1" {
+		// A 103 after the capability wait still asks for a receipt; the
+		// gateway reads the released marker instead and takes none.
+		if resp.Header.Get(HookDeliveryRequiredHeader) == "1" && !delivery.wasReleased() {
 			resp.Body = &hookDeliveryResponseBody{ReadCloser: resp.Body, delivery: delivery}
 		} else {
 			delivery.close()

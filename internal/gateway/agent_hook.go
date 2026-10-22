@@ -683,9 +683,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		wireResp := resp
 		if delivery != nil {
 			attemptedWrite = true
-			resp = a.deliveredHookDecision(connectorName, resp, delivery.offer(w, func() {
+			receipt := delivery.offer(w, func() {
 				a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, wireResp))
-			}))
+			})
+			if receipt == hookexec.HookDeliveryReleased {
+				resp = a.unreceiptedHookDecision(r.Context(), connectorName, req.HookEventName, resp)
+			} else {
+				resp = a.deliveredHookDecision(connectorName, resp, receipt)
+			}
 		} else {
 			resp = a.unreceiptedHookDecision(r.Context(), connectorName, req.HookEventName, resp)
 		}
