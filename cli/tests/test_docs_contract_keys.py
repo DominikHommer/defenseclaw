@@ -65,10 +65,17 @@ def test_keys_set_gateway_token_page_matches_what_the_cli_sends(tmp_path, monkey
     bullet = _gateway_token_bullet()
     assert "keeps accepting" not in bullet
     assert "audit events still use that token" in bullet
-    assert "HTTP 401 until you run `defenseclaw-gateway restart`" in bullet
+    # Either a gateway restart or doctor --fix (which restarts it on a rejected
+    # token, test_cmd_doctor_gateway_auth_fix.py) clears the 401.
+    assert "HTTP 401 until the gateway restarts" in bullet
+    assert "run `defenseclaw-gateway restart`, or run `defenseclaw doctor --fix`" in bullet
     quoted = re.search(r"`defenseclaw doctor` reports `([^`]+)`", bullet)
-    # A console without UTF-8 shows the em dash as "-", so render the quote the same way.
-    assert quoted and " ".join(ux.console_text(quoted.group(1)).split()) in row, (quoted and quoted.group(1), row)
+    # The quote is the whole row, label and detail, as doctor prints it. A console
+    # without UTF-8 shows the em dash as "-", so render the quote the same way.
+    assert quoted and " ".join(ux.console_text(quoted.group(1)).split()) == row.strip(), (
+        quoted and quoted.group(1),
+        row,
+    )
 
 
 def test_no_page_says_a_running_gateway_keeps_accepting_the_cli_after_a_token_change():
