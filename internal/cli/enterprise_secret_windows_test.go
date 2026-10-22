@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -52,7 +53,16 @@ func windowsSecretTestHarness(t *testing.T) string {
 	dir := filepath.Join(root, "secrets")
 	previousAccount := windowsSecretGatewayAccount
 	t.Cleanup(func() { windowsSecretGatewayAccount = previousAccount })
-	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install")})
+	// The change spool keeps its state in the lifecycle folder and its
+	// events beside the config, as on an installed computer.
+	layout := managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install"),
+		ConfigDir: filepath.Join(root, "config"), DataDir: filepath.Join(root, "data")}
+	for _, folder := range []string{layout.LifecycleDir, layout.ConfigDir, layout.DataDir} {
+		if err := os.MkdirAll(folder, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stubWindowsSecretHost(t, layout)
 	// A virtual service account that always exists stands in for the
 	// gateway service.
 	windowsSecretGatewayAccount = `NT SERVICE\TrustedInstaller`
@@ -441,7 +451,11 @@ func TestWindowsSecretFlagErrorsPrintTheFailureDocument(t *testing.T) {
 // is a no-op.
 func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
 	dir := windowsSecretTestHarness(t)
-	host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := stubWindowsSecretHost(t, layout)
 	written := false
 	windowsSecretRestartGateway = func() (bool, error) {
 		_, statErr := os.Stat(filepath.Join(dir, "ai-defense-api-key"))
@@ -531,7 +545,11 @@ func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
 // locks, writes nothing and restarts nothing.
 func TestWindowsSecretRechecksTheDeploymentUnderTheLocks(t *testing.T) {
 	dir := windowsSecretTestHarness(t)
-	host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := stubWindowsSecretHost(t, layout)
 	for _, action := range []string{"set", "remove"} {
 		t.Run(action, func(t *testing.T) {
 			host.events = nil
@@ -737,7 +755,16 @@ func TestWindowsSecretRemoveStaysInsideTheRealFolder(t *testing.T) {
 		}
 	}
 	windowsSecretTestJunction(t, filepath.Join(dir, "llm-key"), target)
-	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install")})
+	// The change spool keeps its state in the lifecycle folder and its
+	// events beside the config, as on an installed computer.
+	layout := managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install"),
+		ConfigDir: filepath.Join(root, "config"), DataDir: filepath.Join(root, "data")}
+	for _, folder := range []string{layout.LifecycleDir, layout.ConfigDir, layout.DataDir} {
+		if err := os.MkdirAll(folder, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stubWindowsSecretHost(t, layout)
 	for _, name := range []string{"ai-defense-api-key", "llm-key", "never-stored"} {
 		out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true}, "")
 		if err != nil || !strings.Contains(out, `"ok":true`) {
@@ -848,4 +875,55 @@ func TestWindowsSecretOpenCredentialRefusesLinksAndOversizedFiles(t *testing.T) 
 		t.Fatalf("plain credential: %q, %v", data, err)
 	}
 	_ = windows.CloseHandle(entry)
+}
+
+// GAP-0335: Windows `secret set` stores a credential the confirmed bundle
+// references only with the value that bundle signs. Another value is
+// refused secret_ref_mismatch with exit 1603 under the change locks: nothing
+// is written and the gateway is not restarted. The signed value is stored.
+func TestWindowsSecretSetStoresOnlyTheValueTheConfirmedBundleSigns(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	e, store := credentialBundleEnv(t)
+	confirmSignedBundle(t, store, e.signCredentialBundle(t, "5", "key-1", filepath.Join(e.dir, "key.pem")))
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := stubWindowsSecretHost(t, layout)
+	credential := filepath.Join(dir, "ai-defense-api-key")
+
+	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "key-2\r\n")
+	if err == nil || commandExitCode(err) != windowsSecretExitFailure {
+		t.Fatalf("set of a value the bundle does not sign: %v (exit %d), want exit %d", err, commandExitCode(err), windowsSecretExitFailure)
+	}
+	var doc struct {
+		OK     bool `json:"ok"`
+		Errors []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil || doc.OK || len(doc.Errors) != 1 || doc.Errors[0].Code != "secret_ref_mismatch" {
+		t.Fatalf("refusal document %s (%v), want one secret_ref_mismatch error", out, err)
+	}
+	if strings.Contains(out, "key-2") {
+		t.Fatal("the refusal prints the value")
+	}
+	if _, statErr := os.Stat(credential); !os.IsNotExist(statErr) {
+		t.Fatalf("a refused value was written: %v", statErr)
+	}
+	want := []string{"lock bundle", "lock lifecycle", "unlock lifecycle", "unlock bundle"}
+	if strings.Join(host.events, ",") != strings.Join(want, ",") {
+		t.Fatalf("events %v, want the refusal under both locks and no restart: %v", host.events, want)
+	}
+
+	host.events = nil
+	if out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "key-1\r\n"); err != nil {
+		t.Fatalf("set of the signed value: %v\n%s", err, out)
+	}
+	if data, err := os.ReadFile(credential); err != nil || strings.TrimSpace(string(data)) != "key-1" {
+		t.Fatalf("stored credential %q, %v; want the signed value", data, err)
+	}
+	if !slices.Contains(host.events, "restart") {
+		t.Fatalf("events %v, want a gateway restart after the change", host.events)
+	}
 }
