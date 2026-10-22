@@ -602,6 +602,8 @@ def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch
         assert "action" in servers["Kiro"]["args"]
         verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
         assert verified.exit_code == 0, verified.output
+        equivalent_data_dir = str(Path(data_dir) / ".." / Path(data_dir).name)
+        assert not cmd_acp_module._verify_binding(equivalent_data_dir, "zed", "kiro", app.cfg.acp)
         # A copied guarded entry with stale metadata must also be checked.
         servers["Stale"] = dict(servers["Kiro"], args=list(servers["Kiro"]["args"]))
         profile_index = servers["Stale"]["args"].index("--profile") + 1

@@ -506,7 +506,7 @@ def _verify_binding(
             or any(options.get(flag) != expected for flag, expected in {
                 "--client": client, "--agent": agent,
                 "--contract-lock": str(lock_path.resolve()),
-                "--token-file": str(Path(data_dir) / "acp" / (
+                "--token-file": str(Path(data_dir).expanduser().resolve() / "acp" / (
                     f"{client}-{agent}.token" if isinstance(lock_guard, dict) and lock_guard.get("managed_custody")
                     else ".token"
                 )),
