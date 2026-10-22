@@ -658,6 +658,7 @@ func TestWindowsBundleRollbackByTheInstalledCLIPutsTheLastGoodConfigBack(t *test
 	// writer, so /health names the bundle that enforces again.
 	host, opts := newHotConfigHost(t, bundleConfig, "config_version: 9\nguardrail:\n  block_at: HIGH\n  hook_self_heal_debounce_ms: 500\n")
 	host.adopted = true
+	host.bundleID, host.bundleVersion = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T9", 4
 	opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", ""
 	opts.bundleRollback = true
 	opts.bundleRollbackTo = &windowsBundleRollbackTarget{store: enterprisebundle.NewStore(t.TempDir(), t.TempDir()),
@@ -770,7 +771,7 @@ func TestWindowsHotBundleWaitsForGatewayBundleIdentity(t *testing.T) {
 		}
 		return []byte(`{"effective_digest":"sha256:abc","gateway_reported_digest":"sha256:abc","config_generation":3,"config_generation_recorded":true,"gateway_reported_config_generation":3,"gateway_reported_bundle_id":"` + id + `","gateway_reported_bundle_version":2}`), nil
 	}
-	bundle := &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: bundleID, Version: 2}}}
+	bundle := &enterprisebundle.Ref{BundleID: bundleID, Version: 2}
 	if !windowsEnterpriseHotConfigAdopted(context.Background(), time.Second, bundle) || calls < 2 {
 		t.Fatalf("gateway bundle identity was not awaited; calls=%d", calls)
 	}

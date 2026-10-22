@@ -1290,13 +1290,19 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 	rollback.jsonOutput = true
 	out := cmd.OutOrStdout()
 	cmd.SetOut(io.Discard)
-	_ = runWindowsEnterpriseStandaloneEnsure(run.ctx, cmd, &rollback, opts.resolvedInstaller)
+	rollbackErr := runWindowsEnterpriseStandaloneEnsure(run.ctx, cmd, &rollback, opts.resolvedInstaller)
 	cmd.SetOut(out)
 	enforcing := ""
 	if policy := windowsBundlePolicy(run.ctx); policy != nil {
 		enforcing = policy.Digest
 	}
-	return enforcing, windowsBundleInstalledSHA(run.layout.ConfigPath) == sha256HexBytes(last)
+	restored := rollbackErr == nil && windowsBundleInstalledSHA(run.layout.ConfigPath) == sha256HexBytes(last)
+	if restored && ref != nil {
+		// Even byte-identical bundle configs need identity proof. A no-op
+		// ensure may not enter the hot-apply adoption check at all.
+		restored = windowsEnterpriseHotConfigAdopted(run.ctx, windowsEnterpriseHotConfigTimeout, ref)
+	}
+	return enforcing, restored
 }
 
 // attachWindowsBundleSummary sets the result v2 bundle block: the receipt

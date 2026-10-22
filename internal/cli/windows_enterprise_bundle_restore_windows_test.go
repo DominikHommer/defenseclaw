@@ -129,11 +129,14 @@ func newWindowsBundleRestoreHost(t *testing.T) *windowsBundleRestoreHost {
 // gateway enforces the bundle only while config.yaml is the bundle config.
 func (host *windowsBundleRestoreHost) policyDigest(context.Context) ([]byte, error) {
 	reported := windowsBundleEditedDigest
+	bundleID, bundleVersion := "", "0"
 	if installed, err := os.ReadFile(host.layout.ConfigPath); err == nil && bytes.Equal(installed, host.bundleConfig) {
 		reported = host.digest
+		bundleID, bundleVersion = host.bundleID, "5"
 	}
 	return []byte(`{"effective_digest":"` + reported + `","config_generation":7,"config_generation_recorded":true,` +
-		`"gateway_reported_digest":"` + reported + `","gateway_reported_config_generation":7}`), nil
+		`"gateway_reported_digest":"` + reported + `","gateway_reported_config_generation":7,` +
+		`"gateway_reported_bundle_id":"` + bundleID + `","gateway_reported_bundle_version":` + bundleVersion + `}`), nil
 }
 
 // installer stubs the PowerShell lifecycle with replies; it must be called
@@ -452,8 +455,22 @@ func TestWindowsBundleRestoreWaitsForAPendingTransaction(t *testing.T) {
 // gateway digested the restored config outside the bundle's scope and
 // status, verify and ensure failed with bundle_not_applied.
 func TestWindowsBundleRollbackRecordsTheLastGoodBundleAgain(t *testing.T) {
-	for _, pruned := range []bool{false, true} {
-		t.Run(map[bool]string{false: "receipt kept", true: "receipt pruned"}[pruned], func(t *testing.T) {
+	// GAP-0445: equal bytes, policy digest and generation do not prove a
+	// signed bundle. A refused nested ensure must not count as a rollback.
+	for _, tc := range []struct {
+		name              string
+		pruned, identical bool
+		identity          string
+		version           uint64
+		want              bool
+	}{
+		{name: "receipt kept", version: 5, want: true},
+		{name: "receipt pruned", pruned: true, version: 5, want: true},
+		{name: "different bundle with identical config", identical: true, identity: "different-bundle", version: 5},
+		{name: "different version with identical config", identical: true, version: 4},
+		{name: "missing identity", identity: "missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			host := newWindowsBundleRestoreHost(t)
 			ctx := context.Background()
 			host.tamper(t, false)
@@ -466,11 +483,14 @@ func TestWindowsBundleRollbackRecordsTheLastGoodBundleAgain(t *testing.T) {
 			}
 			// The next bundle's config, installed and adopted, then refused.
 			failed := append(append([]byte(nil), host.bundleConfig...), []byte("# next bundle\n")...)
+			if tc.identical {
+				failed = host.bundleConfig
+			}
 			if err := windowsEnterpriseHotConfigWrite(ctx, host.layout.ConfigPath, failed, configwrite.Options{Actor: configwrite.ActorLifecycle,
 				Reason: "next bundle", ExpectSHA256: configwrite.SHA256Hex(host.bundleConfig)}); err != nil {
 				t.Fatal(err)
 			}
-			if pruned {
+			if tc.pruned {
 				receipts, _ := filepath.Glob(filepath.Join(host.layout.LifecycleDir, enterprisebundle.ReceiptsDirName, "*.json"))
 				for _, path := range receipts {
 					if err := os.Remove(path); err != nil {
@@ -479,6 +499,23 @@ func TestWindowsBundleRollbackRecordsTheLastGoodBundleAgain(t *testing.T) {
 				}
 			}
 			host.installer(t, installedStatus("status"), installedStatus("Verify"))
+			windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
+				raw, err := host.policyDigest(ctx)
+				if err != nil {
+					return nil, err
+				}
+				var report policyDigestReport
+				if err := json.Unmarshal(raw, &report); err != nil {
+					return nil, err
+				}
+				if tc.identity == "missing" {
+					report.GatewayReportedBundleID = ""
+				} else if tc.identity != "" {
+					report.GatewayReportedBundleID = tc.identity
+				}
+				report.GatewayReportedBundleVersion = tc.version
+				return json.Marshal(report)
+			}
 			source, validate := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigValidate
 			t.Cleanup(func() { windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigValidate = source, validate })
 			windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "config", nil }
@@ -492,8 +529,11 @@ func TestWindowsBundleRollbackRecordsTheLastGoodBundleAgain(t *testing.T) {
 			cmd, _ := windowsBundleCommand()
 			run := &windowsBundleRun{ctx: ctx, layout: host.layout, driver: newWindowsBundleDriver(host.layout),
 				previous: host.bundleConfig, previousGeneration: before}
-			if _, ok := rollbackWindowsBundle(cmd, opts, run); !ok {
-				t.Fatal("the rollback did not put the last good bundle config back")
+			if _, ok := rollbackWindowsBundle(cmd, opts, run); ok != tc.want {
+				t.Fatalf("rollback applied = %v, want %v", ok, tc.want)
+			}
+			if !tc.want {
+				return
 			}
 			state, err := configwrite.ReadGenerationState(host.layout.ConfigPath)
 			if err != nil || state.ConfigSHA256 != configwrite.SHA256Hex(host.bundleConfig) || state.BundleID != host.bundleID ||

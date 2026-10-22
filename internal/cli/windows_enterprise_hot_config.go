@@ -467,7 +467,7 @@ func windowsEnterpriseHotConfigApply(
 	if gatewayOnNewConfig() {
 		adoptionWait = windowsEnterpriseHotConfigRestartTimeout
 	}
-	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait, opts.bundle) {
+	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait, windowsHotConfigBundleRef(opts)) {
 		undo()
 		failBundle("bundle_policy_not_adopted", "the gateway did not report the bundle policy, generation and identity before the apply deadline")
 		return false, nil
@@ -558,16 +558,16 @@ var windowsEnterpriseHotConfigRefreshTargets = func(ctx context.Context, layout 
 // windowsEnterpriseHotConfigAdopted waits for the gateway to report the
 // effective policy the installed config computes to, with no rejected reload
 // and the config recorded.
-func windowsEnterpriseHotConfigAdopted(ctx context.Context, wait time.Duration, bundle *windowsBundleRun) bool {
+func windowsEnterpriseHotConfigAdopted(ctx context.Context, wait time.Duration, bundle *enterprisebundle.Ref) bool {
 	deadline := time.Now().Add(wait)
 	for {
 		out, _ := windowsEnterprisePolicyDigest(ctx)
 		var report policyDigestReport
 		decoded := json.Unmarshal(out, &report) == nil
 		bundleApplied := true
-		if bundle != nil && bundle.prepared != nil && bundle.prepared.Receipt != nil && bundle.prepared.Receipt.BundleID != "" {
-			bundleApplied = report.GatewayReportedBundleID == bundle.prepared.Receipt.BundleID &&
-				report.GatewayReportedBundleVersion == bundle.prepared.Receipt.Version
+		if bundle != nil {
+			bundleApplied = bundle.BundleID != "" && bundle.Version > 0 &&
+				report.GatewayReportedBundleID == bundle.BundleID && report.GatewayReportedBundleVersion == bundle.Version
 		}
 		if decoded && report.Digest != "" && report.Digest == report.GatewayReportedDigest &&
 			report.GatewayLastReloadError == "" && report.ConfigGeneration > 0 && report.ConfigGenerationRecorded &&
@@ -583,6 +583,25 @@ func windowsEnterpriseHotConfigAdopted(ctx context.Context, wait time.Duration, 
 		case <-time.After(windowsEnterpriseHotConfigPoll):
 		}
 	}
+}
+
+// windowsHotConfigBundleRef requires the same bundle identity for adoption
+// that the config writer records, including a rollback to a confirmed bundle.
+// An incomplete bundle reference cannot become a config-only adoption check.
+func windowsHotConfigBundleRef(opts *windowsEnterpriseLifecycleOptions) *enterprisebundle.Ref {
+	if opts.bundleRollbackTo != nil {
+		if opts.bundleRollbackTo.ref != nil {
+			return opts.bundleRollbackTo.ref
+		}
+		return &enterprisebundle.Ref{}
+	}
+	if opts.bundle != nil {
+		if opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
+			return &enterprisebundle.Ref{BundleID: opts.bundle.prepared.Receipt.BundleID, Version: opts.bundle.prepared.Receipt.Version}
+		}
+		return &enterprisebundle.Ref{}
+	}
+	return nil
 }
 
 // windowsEnterpriseHotConfigEnforcesInstalled waits for the gateway to
