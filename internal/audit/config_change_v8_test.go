@@ -26,6 +26,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 )
 
+// testConfigChangePins is a record pin folder of its own.
+func testConfigChangePins(t *testing.T) *ConfigChangePins {
+	t.Helper()
+	return NewConfigChangePins(filepath.Join(t.TempDir(), "change-record-pins"))
+}
+
 const (
 	testConfigChangeID = "c-01JB8Z4X6T2Q9V3M5N7P1R0S4W"
 	// testChangedAt is the time of every test change.
@@ -72,7 +78,7 @@ func TestLogConfigChangeRecordsEachFamily(t *testing.T) {
 			logger := newTestLogger(t)
 			runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
 			logger.SetRuntimeV8Emitter(runtime)
-			if err := logger.LogConfigChange(tc.change, nil); err != nil {
+			if err := logger.LogConfigChange(tc.change, nil, testConfigChangePins(t)); err != nil {
 				t.Fatalf("LogConfigChange: %v", err)
 			}
 			_, records := runtime.snapshot()
@@ -109,7 +115,7 @@ func TestLogConfigChangeRefusesMalformedChanges(t *testing.T) {
 		"applied, no name": {EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set", Outcome: ConfigChangeApplied},
 		"anchor set":       {EventID: testConfigChangeID, Kind: ConfigChangeTrustAnchors, Action: "set", Outcome: ConfigChangeApplied},
 	} {
-		if err := logger.LogConfigChange(change, nil); err == nil {
+		if err := logger.LogConfigChange(change, nil, testConfigChangePins(t)); err == nil {
 			t.Fatalf("%s: LogConfigChange accepted %+v", name, change)
 		}
 	}
@@ -124,6 +130,7 @@ func TestLogConfigChangeRecordsEachChangeOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	change := ConfigChange{ChangedAt: testChangedAt, EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set",
 		Outcome: ConfigChangeApplied, Actor: "os:uid:0:root", SecretName: "splunk-hec-token"}
+	pins := testConfigChangePins(t)
 	for run, want := range [][]bool{{false, true}, {true, true}} {
 		store, err := NewStore(path)
 		if err != nil {
@@ -137,7 +144,7 @@ func TestLogConfigChangeRecordsEachChangeOnce(t *testing.T) {
 		logger.SetRuntimeV8Emitter(runtime)
 		metrics := -1
 		for offer := 0; offer < 2; offer++ {
-			if err := logger.LogConfigChange(change, nil); err != nil {
+			if err := logger.LogConfigChange(change, nil, pins); err != nil {
 				t.Fatalf("run %d offer %d: %v", run, offer, err)
 			}
 			if metrics >= 0 && len(runtime.metricSnapshot()) != metrics {
@@ -149,10 +156,10 @@ func TestLogConfigChangeRecordsEachChangeOnce(t *testing.T) {
 			t.Fatalf("run %d: a restart recorded the metrics of a stored change again", run)
 		}
 		runtime.mu.Lock()
-		stored := append([]bool(nil), runtime.storedLocally...)
+		stored := append([]bool(nil), runtime.skippedLocalWrite...)
 		runtime.mu.Unlock()
 		if fmt.Sprint(stored) != fmt.Sprint(want) {
-			t.Fatalf("run %d stored-locally offers = %v, want %v", run, stored, want)
+			t.Fatalf("run %d offers that skipped the local write = %v, want %v", run, stored, want)
 		}
 		var rows int
 		if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action = ?`,
@@ -175,7 +182,7 @@ func TestLogConfigChangeFailsWhileTheStoreIsClosed(t *testing.T) {
 	}
 	change := ConfigChange{ChangedAt: testChangedAt, EventID: testConfigChangeID, Kind: ConfigChangeTrustAnchors, Action: "install",
 		Outcome: ConfigChangeRefused, ReasonCode: "lifecycle_busy", Actor: "os:uid:0:root"}
-	if err := logger.LogConfigChange(change, nil); err == nil {
+	if err := logger.LogConfigChange(change, nil, testConfigChangePins(t)); err == nil {
 		t.Fatal("LogConfigChange succeeded with the audit store closed")
 	}
 }
@@ -205,7 +212,7 @@ func TestLogConfigChangeKeepsTheAccountOffTheCounters(t *testing.T) {
 				logger := newTestLogger(t)
 				runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
 				logger.SetRuntimeV8Emitter(runtime)
-				if err := logger.LogConfigChange(change, nil); err != nil {
+				if err := logger.LogConfigChange(change, nil, testConfigChangePins(t)); err != nil {
 					t.Fatalf("LogConfigChange: %v", err)
 				}
 				_, records := runtime.snapshot()
@@ -273,24 +280,24 @@ func TestLogConfigChangeSucceedsOnlyOnceTheRowIsPowerLossDurable(t *testing.T) {
 		BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`); err != nil {
 		t.Fatal(err)
 	}
-	delivery := observability.NewRemoteDelivery()
+	delivery, pins := observability.NewRemoteDelivery(), testConfigChangePins(t)
 	for offer := 0; offer < 2; offer++ {
-		if err := logger.LogConfigChange(change, delivery); err == nil {
+		if err := logger.LogConfigChange(change, delivery, pins); err == nil {
 			t.Fatalf("offer %d succeeded although its row could not be flushed", offer)
 		}
 	}
 	runtime.mu.Lock()
-	stored := append([]bool(nil), runtime.storedLocally...)
+	stored := append([]bool(nil), runtime.skippedLocalWrite...)
 	runtime.mu.Unlock()
 	if fmt.Sprint(stored) != "[false true]" {
-		t.Fatalf("stored-locally offers = %v, want the row written once and found once", stored)
+		t.Fatalf("offers that skipped the local write = %v, want the row written once and found once", stored)
 	}
 	if _, err := logger.store.db.Exec(`DROP TRIGGER audit_flush_fails`); err != nil {
 		t.Fatal(err)
 	}
 	before := generation()
 	for offer := 0; offer < 2; offer++ {
-		if err := logger.LogConfigChange(change, delivery); err != nil {
+		if err := logger.LogConfigChange(change, delivery, pins); err != nil {
 			t.Fatalf("offer %d after the flush recovered: %v", offer, err)
 		}
 		if got := generation(); got != before+int64(offer)+1 {

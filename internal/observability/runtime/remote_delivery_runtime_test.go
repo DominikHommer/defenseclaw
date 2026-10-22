@@ -24,9 +24,17 @@ func offerChange(
 	t *testing.T, runtime *Runtime, tracker *observability.RemoteDelivery, storedLocally bool, builder EmitBuilder,
 ) error {
 	t.Helper()
-	ctx := t.Context()
+	return offerChangeIn(t, t.Context(), runtime, tracker, storedLocally, builder)
+}
+
+// offerChangeIn is offerChange on ctx.
+func offerChangeIn(
+	t *testing.T, ctx context.Context, runtime *Runtime, tracker *observability.RemoteDelivery, storedLocally bool,
+	builder EmitBuilder,
+) error {
+	t.Helper()
 	if storedLocally {
-		ctx = observability.WithStoredLocally(ctx)
+		ctx = observability.WithSkipLocalWrite(ctx)
 	}
 	tracker.BeginAttempt()
 	defer tracker.EndAttempt()
@@ -141,7 +149,7 @@ func TestRuntimeSendsAChangeToEachSinkOnItsOwn(t *testing.T) {
 
 // A change event stays in its spool until every remote destination has it.
 // The runtime tells the change's RemoteDelivery the outcome of each
-// destination; an offer of a change the store holds (WithStoredLocally)
+// destination; an offer of a change the store holds (WithSkipLocalWrite)
 // writes nothing locally and goes only to the destinations that did not
 // acknowledge an earlier offer. After a restart (a new RemoteDelivery) it
 // goes to every destination again. An atomic batch, which writes every
@@ -211,7 +219,7 @@ func TestRuntimeReplaysAStoredChangeOnlyToDestinationsThatLackIt(t *testing.T) {
 	}
 
 	if _, err := runtime.EmitAtomicBatch(t.Context(), []LogBatchItem{{
-		Context: observability.WithStoredLocally(t.Context()), Metadata: diagnosticMetadata(t),
+		Context: observability.WithSkipLocalWrite(t.Context()), Metadata: diagnosticMetadata(t),
 		Builder: runtimeContentRecordBuilder("runtime-change-batch-stored", "change"),
 	}}); err == nil {
 		t.Fatal("an atomic batch took an occurrence the store already holds")
@@ -219,11 +227,15 @@ func TestRuntimeReplaysAStoredChangeOnlyToDestinationsThatLackIt(t *testing.T) {
 	assertNoRuntimeDelivery(t, adapters["acks"])
 }
 
-// A config reload keeps a pending change deliverable: the sender keeps the
-// change and its RemoteDelivery, and its next offer is built on the
-// generation the reload made and goes to that generation's destinations.
-// The store still holds it once. A new record must still name the current
-// generation.
+// A config reload keeps a pending change deliverable, as the same record:
+// the sender keeps the change and its RemoteDelivery, and its next offer
+// goes to the destinations of the generation the reload made, still built
+// on the config its record was pinned on (observability.WithPinnedProvenance).
+// The store still holds it once. Any other record must still name the
+// current generation: a record of the replaced one without the pin, or a
+// pinned offer whose record names another config. Before, the offer after
+// the reload was rebuilt on the new generation, so the destination got
+// another record under the id the first offer had.
 func TestRuntimeSendsAPendingChangeAfterAReload(t *testing.T) {
 	dependencies := newRuntimeTestDependencies(t)
 	makePlan := func(generation string) *config.ObservabilityV8Plan {
@@ -270,12 +282,23 @@ func TestRuntimeSendsAPendingChangeAfterAReload(t *testing.T) {
 		t.Fatal("the reload kept the generation and digest")
 	}
 	adapter.outcome = delivery.OutcomeDelivered
-	if err := offerChange(t, runtime, tracker, true, runtimeContentRecordBuilder(recordID, "change")); err != nil {
+	pinned := observability.WithPinnedProvenance(t.Context(), observability.PinnedProvenance{
+		ConfigGeneration: first.Generation(), ConfigDigest: first.Digest(),
+	})
+	asPinned := func(_ EmitContext, admission router.Admission) (observability.Record, error) {
+		return runtimeContentRecordBuilder(recordID, "change")(first, admission)
+	}
+	if err := offerChangeIn(t, pinned, runtime, tracker, true, runtimeContentRecordBuilder(recordID, "change")); err == nil {
+		t.Fatal("a pinned offer whose record names the current config was accepted")
+	}
+	assertNoRuntimeDelivery(t, adapter)
+	if err := offerChangeIn(t, pinned, runtime, tracker, true, asPinned); err != nil {
 		t.Fatalf("an offer of the pending change after a reload: %v", err)
 	}
 	item := receiveRuntimeDelivery(t, adapter)
-	if item.identity.RecordID != recordID || !strings.Contains(string(item.bytes), active.Digest()) {
-		t.Fatalf("the offer after the reload is not on the new generation: %s", item.bytes)
+	if item.identity.RecordID != recordID || !strings.Contains(string(item.bytes), first.Digest()) ||
+		strings.Contains(string(item.bytes), active.Digest()) {
+		t.Fatalf("the offer after the reload is not the pinned record: %s", item.bytes)
 	}
 	if !settleChange(t, tracker) {
 		t.Fatal("the offer after the reload did not settle as delivered")

@@ -373,7 +373,7 @@ func TestLocalLogPipelineLocalFailureContracts(t *testing.T) {
 	// A trust anchor or credential change event is a spooled occurrence its
 	// sender offers until every sink has it; the local store is one sink.
 	// Its failed write, like any other, hands back the remote work
-	// (GAP-1536). Once the store holds it (observability.WithStoredLocally)
+	// (GAP-1536). Once the store holds it (observability.WithSkipLocalWrite)
 	// it is not written again and only its remote work comes back; an
 	// atomic batch, which writes every item, refuses it. Before, a change's
 	// failed write handed back no remote work, so a destination waited on
@@ -393,7 +393,7 @@ func TestLocalLogPipelineLocalFailureContracts(t *testing.T) {
 		appender.mu.Lock()
 		before := len(appender.calls)
 		appender.mu.Unlock()
-		stored := observability.WithStoredLocally(t.Context())
+		stored := observability.WithSkipLocalWrite(t.Context())
 		outcome, err = pipeline.Process(stored, metadata, build)
 		appender.mu.Lock()
 		after := len(appender.calls)

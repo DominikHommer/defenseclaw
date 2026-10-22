@@ -62,11 +62,15 @@ var (
 const bundleReceiptMarkerName = "bundle-receipt.reported"
 const bundleRefusalMarkerName = "bundle-refusal.reported"
 
+// changeRecordPinsDirName holds the record pin of each change event not
+// reported yet (audit.ConfigChangePin), in the gateway's data directory.
+const changeRecordPinsDirName = "change-record-pins"
+
 // bundleReceiptSink is the audit surface the reporter uses (*audit.Logger).
 type bundleReceiptSink interface {
 	LogPolicyBundleReceipt(principal string, bundle audit.PolicyBundle, receipt audit.PolicyBundleReceipt) error
 	RecordPolicyBundleVersion(ctx context.Context, bundleVersion uint64) error
-	LogConfigChange(change audit.ConfigChange, delivery *observability.RemoteDelivery) error
+	LogConfigChange(change audit.ConfigChange, delivery *observability.RemoteDelivery, pins *audit.ConfigChangePins) error
 }
 
 // changeDelivery is the reporter's state of one change event it offered.
@@ -92,6 +96,8 @@ type bundleReceiptReporter struct {
 	seen            map[string]bool
 	// changes holds the change events offered and not reported yet.
 	changes map[string]*changeDelivery
+	// pins keeps the record of each change the same on every offer.
+	pins *audit.ConfigChangePins
 }
 
 // newBundleReceiptReporter returns the reporter of a standalone enterprise
@@ -108,6 +114,7 @@ func newBundleReceiptReporter(cfg *config.Config, configPath string, logger *aud
 		refusalMarkerPath: filepath.Join(cfg.DataDir, bundleRefusalMarkerName),
 		sink:              logger,
 		enforcedVersion:   liveBundleVersion,
+		pins:              audit.NewConfigChangePins(filepath.Join(cfg.DataDir, changeRecordPinsDirName)),
 	}
 }
 
@@ -121,6 +128,7 @@ func liveBundleVersion() uint64 {
 func (r *bundleReceiptReporter) run(ctx context.Context) {
 	r.reported = r.readMarker()
 	r.reportedRefusal = r.readRefusalMarker()
+	r.pins.Prune(r.reportedOnDisk)
 	ticker := time.NewTicker(bundleReceiptPollInterval)
 	defer ticker.Stop()
 	for {
@@ -308,7 +316,7 @@ func (r *bundleReceiptReporter) reportChanges() {
 
 // reportChange offers ev to its sinks, the audit store and every remote
 // destination, until each confirmed it. The record is built from the event
-// alone (its id, time and content), so every offer sends the same record,
+// and its record pin (r.pins), so every offer sends the same record,
 // and each sink gets it on its own: a destination does not wait for the
 // audit row, nor the row for a destination. The audit logger stores each
 // change event id once and returns nil only once the row survives a power
@@ -344,7 +352,7 @@ func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 		EventID: ev.EventID, Kind: ev.Kind, Action: ev.Action, Outcome: ev.Outcome, ReasonCode: ev.ReasonCode,
 		Actor: ev.Actor, ChangedAt: ev.Time, SHA256: ev.SHA256, PreviousSHA256: ev.PreviousSHA256,
 		KeyIDsAdded: ev.KeyIDsAdded, KeyIDsRemoved: ev.KeyIDsRemoved, SecretName: ev.SecretName,
-	}, state.delivery)
+	}, state.delivery, r.pins)
 	state.retry = err != nil
 	if err != nil {
 		return
@@ -354,9 +362,24 @@ func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 	}
 }
 
+// changeReported marks a change every sink confirmed, and then drops its
+// record pin, once the marker is on disk: until then a restart offers it
+// again, and its pin keeps that offer the same record.
 func (r *bundleReceiptReporter) changeReported(id string) {
 	delete(r.changes, id)
 	r.markSeen(id)
+	if r.reportedOnDisk(id) {
+		_ = r.pins.Remove(id)
+	}
+}
+
+// reportedOnDisk reports whether the reported marker of id is on disk.
+func (r *bundleReceiptReporter) reportedOnDisk(id string) bool {
+	if !reportableID(id) {
+		return false
+	}
+	info, err := os.Lstat(filepath.Join(r.seenDir(), id))
+	return err == nil && info.Mode().IsRegular()
 }
 
 func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt) error {

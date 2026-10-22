@@ -217,6 +217,9 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 			event, family, source, classification, normalized, snapshot, admission, evidence,
 		)
 	}
+	if spooled := spooledChangeFrom(ctx); spooled != nil {
+		build = spooled.builder(build)
+	}
 	result, err := binding.emitter.EmitRuntimeV8(
 		contextWithLegacyEventProjection(ctx, event), metadata, build,
 	)
@@ -227,10 +230,10 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 	if outcomeErr != nil {
 		return auditV8Persisted, fmt.Errorf("audit: v8 control-plane action %q: %w", event.Action, outcomeErr)
 	}
-	// An occurrence the store already held (observability.WithStoredLocally)
-	// only goes to the remote destinations again: its metrics were recorded
-	// with its row.
-	if disposition == auditV8Persisted && !observability.StoredLocally(ctx) {
+	// An offer that skips the local write (observability.WithSkipLocalWrite)
+	// only goes to the remote destinations: its metrics are recorded with
+	// its row.
+	if disposition == auditV8Persisted && !observability.SkipLocalWrite(ctx) {
 		auditMetric, metricErr := newAuditEventRuntimeV8GeneratedMetric(event)
 		if metricErr == nil {
 			metrics := make([]RuntimeV8GeneratedMetric, 0, 1+len(companionMetrics))

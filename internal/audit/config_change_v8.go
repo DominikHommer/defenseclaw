@@ -167,12 +167,17 @@ func configChangeKeyIDs(ids []string) observability.Optional[[]string] {
 // LogConfigChange records one trust anchor or protected credential change:
 // config.trust_anchors.changed, config.secret.changed or
 // config.secret.change_failed. It reports only. The record is built from
-// the change alone (its id, time and content), so every offer of the same
-// change is the same record. It returns nil once the audit row survives a
+// the change (its id, time and content) and its pin in pins (the run,
+// sidecar, binary and config of its first offer, flushed before any sink
+// got it), so every offer of the same change, after a restart or a reload
+// too, is the same record. It returns nil once the audit row survives a
 // power loss; delivery, kept by the caller across offers of the same
 // change, tells when every remote destination has it. The two are separate
-// sinks of the change.
-func (l *Logger) LogConfigChange(change ConfigChange, delivery *observability.RemoteDelivery) error {
+// sinks of the change: a store that cannot answer fails the call but not
+// the remote offer.
+func (l *Logger) LogConfigChange(
+	change ConfigChange, delivery *observability.RemoteDelivery, pins *ConfigChangePins,
+) error {
 	if l == nil {
 		return nil
 	}
@@ -230,6 +235,7 @@ func (l *Logger) LogConfigChange(change ConfigChange, delivery *observability.Re
 		OccurrenceID:   stableOccurrenceID("config.change", change.EventID),
 		OccurredAt:     changedAt,
 		RemoteDelivery: delivery,
+		Pins:           pins, PinKey: change.EventID,
 	})
 }
 

@@ -1161,6 +1161,11 @@ type ActivityInput struct {
 	// offer sends the record to the remote destinations that do not have it.
 	// The call returns nil only once the row survives a power loss.
 	OccurrenceID string
+	// Pins and PinKey, with OccurrenceID, keep the record of every offer
+	// the same: the first offer pins it (ConfigChangePin) under PinKey, the
+	// producer's spool event id, before any sink gets it.
+	Pins   *ConfigChangePins
+	PinKey string
 	// OccurredAt, with OccurrenceID, is the time of the occurrence, which
 	// its record keeps on every offer.
 	OccurredAt time.Time

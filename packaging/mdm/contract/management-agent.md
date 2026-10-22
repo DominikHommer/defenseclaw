@@ -53,9 +53,16 @@ gateway.
   it. A destination that refuses it or cannot be reached gets it again,
   under the same record id, at a later poll, also after a config reload;
   after a gateway restart an unreported event goes to every destination
-  again, so a destination can receive it twice with the same id. Every copy
-  has the change's id, time and content; its run, sidecar, binary and
-  config values name the gateway process that sent it. A command that cannot record
+  again, so a destination can receive it twice with the same id. Every
+  copy, the audit row included, is the same record: before any sink gets
+  an event, the gateway pins the run, sidecar, binary and config values of
+  that first offer (a file in its data directory, flushed), and builds
+  every later offer, after a restart or a config reload too, from the event
+  and its pin. An offer that would be another record (the pin or the row
+  was changed, or collection now admits another form) is not sent. A
+  destination still gets the event while the audit store cannot be read
+  or written; the event then stays in the spool until its row is on disk.
+  A command that cannot record
   its change (the spool cannot be written, or holds 4096 events the gateway
   has not reported) refuses it with `state_invalid` before anything is
   changed. The command holds room for its event from that check until the

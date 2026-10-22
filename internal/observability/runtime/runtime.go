@@ -514,7 +514,8 @@ func (runtime *Runtime) emitWithLeaseControls(
 
 // leaseRecordBuilder builds one occurrence's record on the pinned generation:
 // it stamps the runtime correlation and checks the record names that
-// generation. Emit and EmitAtomicBatch share it.
+// generation, or the config a spooled occurrence's record was pinned on
+// (observability.WithPinnedProvenance). Emit and EmitAtomicBatch share it.
 func leaseRecordBuilder(
 	ctx context.Context,
 	lease *runtimegraph.Lease,
@@ -553,9 +554,16 @@ func leaseRecordBuilder(
 		if err != nil {
 			return observability.Record{}, &emitBuilderError{}
 		}
+		generation, digest := snapshot.Generation(), snapshot.Digest()
+		if pinned, ok := observability.PinnedProvenanceFrom(ctx); ok && !inbound {
+			// A spooled occurrence's record is pinned on its first offer and
+			// keeps that config on every offer (audit.ConfigChangePin), so a
+			// reload never makes another record under its id.
+			generation, digest = pinned.ConfigGeneration, pinned.ConfigDigest
+		}
 		provenance := record.Provenance()
-		if provenance.ConfigDigest != snapshot.Digest() || provenance.ConfigGeneration < 0 ||
-			uint64(provenance.ConfigGeneration) != snapshot.Generation() {
+		if provenance.ConfigDigest != digest || provenance.ConfigGeneration < 0 ||
+			uint64(provenance.ConfigGeneration) != generation {
 			return observability.Record{}, &emitBuilderError{}
 		}
 		return record, nil
@@ -577,10 +585,10 @@ func (runtime *Runtime) EmitAtomicBatch(
 		return nil, &Error{code: ErrorInvalidDependency}
 	}
 	for index := range items {
-		// An occurrence the local store already holds goes through Emit,
+		// An occurrence marked observability.WithSkipLocalWrite goes through Emit,
 		// which skips its local write; a batch always writes every item.
 		if items[index].Context == nil || items[index].Builder == nil ||
-			observability.StoredLocally(items[index].Context) {
+			observability.SkipLocalWrite(items[index].Context) {
 			return nil, &Error{code: ErrorInvalidDependency}
 		}
 	}

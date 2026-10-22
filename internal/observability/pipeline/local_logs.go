@@ -286,8 +286,8 @@ func (*recordBuildFailure) Error() string { return "canonical log record build f
 // required local projection, and only then creates optional destination work.
 // Optional projection failures are isolated and returned as bounded identities.
 // A failed local write still returns the remote projections (GAP-1536). An
-// occurrence marked observability.WithStoredLocally is not written again:
-// only its remote projections are returned.
+// occurrence marked observability.WithSkipLocalWrite is not written: only
+// its remote projections are returned.
 func (pipeline *LocalLogPipeline) Process(
 	ctx context.Context,
 	metadata router.Metadata,
@@ -413,8 +413,8 @@ func (pipeline *LocalLogPipeline) process(
 	originDestination string,
 	exportOnWriteFailure bool,
 ) (LocalLogOutcome, error) {
-	storedLocally := observability.StoredLocally(ctx)
-	if storedLocally && (localOnly || originDestination != "") {
+	skipLocal := observability.SkipLocalWrite(ctx)
+	if skipLocal && (localOnly || originDestination != "") {
 		return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
 	}
 	prepared, outcome, admitted, err := pipeline.prepare(ctx, metadata, builder)
@@ -422,9 +422,9 @@ func (pipeline *LocalLogPipeline) process(
 		return outcome, err
 	}
 	sinkPolicy := legacyredaction.SinkPolicyFromContext(ctx)
-	if storedLocally {
-		// The store already holds this occurrence under its stable id
-		// (observability.WithStoredLocally): hand back its remote work only.
+	if skipLocal {
+		// The store holds this spooled occurrence already, or cannot say
+		// (observability.WithSkipLocalWrite): hand back its remote work only.
 		outcome.localPersisted = true
 		pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, "")
 		return outcome, nil
@@ -561,8 +561,8 @@ func (pipeline *LocalLogPipeline) ProcessAtomicBatch(
 	if pipeline == nil {
 		return nil, &Error{code: ErrorInvalidDependency}
 	}
-	if observability.StoredLocally(ctx) {
-		// A batch writes every item; an occurrence the store already holds
+	if observability.SkipLocalWrite(ctx) {
+		// A batch writes every item; an occurrence marked to skip the local write
 		// goes through Process.
 		return nil, &Error{code: ErrorInvalidInput}
 	}

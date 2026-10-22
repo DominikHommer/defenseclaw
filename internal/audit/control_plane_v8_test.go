@@ -35,12 +35,26 @@ type testRuntimeV8Emitter struct {
 	admission router.Admission
 	profile   observabilityredaction.Profile
 
+	// generation and digest are the config the emitter runs (23 and
+	// testEventHistoryGraphDigest when unset); a record must name them, or
+	// the config its offer pinned (observability.WithPinnedProvenance), as
+	// the runtime requires.
+	generation uint64
+	digest     string
+	// failWrite, when set, fails the local write after the record is built
+	// (the runtime still hands it to the destinations, GAP-1536).
+	failWrite error
+
 	mu       sync.Mutex
 	metadata []router.Metadata
 	records  []observability.Record
 	metrics  []observability.Record
-	// storedLocally is observability.StoredLocally of each emitted record.
-	storedLocally []bool
+	// built is every record the builder returned: what a destination of
+	// the runtime could get, the record of a failed write included.
+	built []observability.Record
+	// skippedLocalWrite is observability.SkipLocalWrite of each emitted
+	// record.
+	skippedLocalWrite []bool
 }
 
 type rejectingRuntimeV8Emitter struct {
@@ -111,21 +125,35 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 		emitter.mu.Unlock()
 		return RuntimeV8EmitOutcome{Admission: router.AdmissionDrop}, nil
 	}
-	record, err := builder(RuntimeV8BuildContext{
-		ConfigGeneration: 23,
-		ConfigDigest:     testEventHistoryGraphDigest,
-	}, emitter.admission)
+	generation, digest := emitter.generation, emitter.digest
+	if digest == "" {
+		generation, digest = 23, testEventHistoryGraphDigest
+	}
+	record, err := builder(RuntimeV8BuildContext{ConfigGeneration: generation, ConfigDigest: digest}, emitter.admission)
 	if err != nil {
 		return RuntimeV8EmitOutcome{}, err
+	}
+	if pinned, ok := observability.PinnedProvenanceFrom(ctx); ok {
+		generation, digest = pinned.ConfigGeneration, pinned.ConfigDigest
+	}
+	if provenance := record.Provenance(); provenance.ConfigDigest != digest ||
+		provenance.ConfigGeneration < 0 || uint64(provenance.ConfigGeneration) != generation {
+		return RuntimeV8EmitOutcome{}, fmt.Errorf("test runtime: the record does not name the config it was built on")
 	}
 	projection, _, err := testEventHistoryProjectionEngine.Project(record, emitter.profile)
 	if err != nil {
 		return RuntimeV8EmitOutcome{}, err
 	}
-	// An occurrence the store already holds is not written again (the
-	// runtime's pipeline skips its local append).
-	storedLocally := observability.StoredLocally(ctx)
-	if !storedLocally {
+	emitter.mu.Lock()
+	emitter.built = append(emitter.built, record.Clone())
+	emitter.mu.Unlock()
+	// An offer that skips the local write is not written (the runtime's
+	// pipeline skips its local append).
+	skipLocal := observability.SkipLocalWrite(ctx)
+	if !skipLocal {
+		if emitter.failWrite != nil {
+			return RuntimeV8EmitOutcome{}, emitter.failWrite
+		}
 		if err := emitter.writer.AppendContext(ctx, record, projection); err != nil {
 			return RuntimeV8EmitOutcome{}, err
 		}
@@ -133,7 +161,7 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 	emitter.mu.Lock()
 	emitter.metadata = append(emitter.metadata, metadata)
 	emitter.records = append(emitter.records, record.Clone())
-	emitter.storedLocally = append(emitter.storedLocally, storedLocally)
+	emitter.skippedLocalWrite = append(emitter.skippedLocalWrite, skipLocal)
 	emitter.mu.Unlock()
 	return RuntimeV8EmitOutcome{Admission: emitter.admission, LocalPersisted: true}, nil
 }

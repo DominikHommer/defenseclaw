@@ -48,31 +48,41 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	auditID := uuid.New().String()
 	timestamp := time.Now().UTC()
 	ctx := context.Background()
-	stored := false
+	var spooled *spooledChange
+	// localErr is the audit store's failure to answer for a spooled
+	// occurrence: the offer still goes to the remote destinations, and the
+	// call fails so the producer keeps it until the row is durable.
+	var localErr error
 	if in.OccurrenceID != "" {
 		// The producer keeps this occurrence in its durable spool under a
 		// stable id (the hash of its content) and its one sender offers it
 		// until every sink has it: the audit store, and each remote
-		// destination (observability.RemoteDelivery). Each sink gets it on
-		// its own, and every offer sends the same record: it is built from
-		// the occurrence alone (its id, time and content). An offer writes
-		// the row unless the store holds it already, and goes only to the
-		// destinations that do not have it yet.
+		// destination (observability.RemoteDelivery), each on its own.
+		// Every offer is the same record: it is built from the occurrence
+		// (its id, time and content) and its pin (the run, sidecar, binary
+		// and config of the first offer, flushed before any sink got it),
+		// and sent only when it is the pinned record. An offer writes the
+		// row unless the store holds it (then the row must be the record),
+		// and goes only to the destinations that do not have it yet.
 		auditID = in.OccurrenceID
 		activityID = uuid.NewSHA1(stableOccurrenceNamespace, []byte("activity\x00"+auditID)).String()
 		if !in.OccurredAt.IsZero() {
 			timestamp = in.OccurredAt.UTC()
 		}
+		var err error
+		if spooled, err = l.spooledChange(ctx, in); err != nil {
+			return err
+		}
+		if spooled.lookupErr != nil {
+			localErr = spooled.lookupErr
+		}
+		if spooled.row != nil || localErr != nil {
+			ctx = observability.WithSkipLocalWrite(ctx)
+		}
+		ctx = withSpooledChange(spooled.context(ctx), spooled)
 		delivery := in.RemoteDelivery
 		if delivery == nil {
 			delivery = observability.NewRemoteDelivery()
-		}
-		var err error
-		if stored, err = l.store.hasOccurrence(ctx, auditID); err != nil {
-			return err
-		}
-		if stored {
-			ctx = observability.WithStoredLocally(ctx)
 		}
 		ctx = observability.WithRemoteDelivery(ctx, delivery)
 		delivery.BeginAttempt()
@@ -115,6 +125,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
 	stampAuditEventEnvelope(&auditEv)
+	spooled.pinEvent(&auditEv)
 	metricActor := actor
 	if in.ConfigChange != nil {
 		// The audit record keeps the OS account of a change; its counters
@@ -144,10 +155,10 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	// metrics are emitted in one generated batch on the same runtime binding as
 	// the canonical occurrence and remain exactly once for dashboard continuity.
 	if disposition != auditV8Unhandled {
-		return l.occurrenceDurable(ctx, in.OccurrenceID)
+		return l.occurrenceDurable(ctx, in.OccurrenceID, localErr)
 	}
-	if stored {
-		return fmt.Errorf("audit: no generated v8 family replays activity action %q", action)
+	if spooled != nil {
+		return fmt.Errorf("audit: no generated v8 family records spooled activity action %q", action)
 	}
 	disposition, emitErr = l.emitCompatibilityAuditV8(
 		ctx, auditEv,
@@ -163,19 +174,53 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		return emitErr
 	}
 	if disposition != auditV8Unhandled {
-		return l.occurrenceDurable(ctx, in.OccurrenceID)
+		return nil
 	}
 	return fmt.Errorf("audit: no generated v8 family handled activity action %q", action)
+}
+
+// spooledChange reads what an offer of a spooled occurrence needs: its pin
+// and the stored row. A pin that does not read is an error (no sink gets
+// the offer); a store that cannot say whether it holds the row is not: the
+// offer skips it (lookupErr) and still goes to the remote destinations. A
+// row whose pin is gone pins the record the row holds.
+func (l *Logger) spooledChange(ctx context.Context, in ActivityInput) (*spooledChange, error) {
+	if in.Pins == nil {
+		return nil, fmt.Errorf("audit: spooled occurrence %s has no record pins", in.OccurrenceID)
+	}
+	change := &spooledChange{pins: in.Pins, key: in.PinKey}
+	var err error
+	if change.pin, change.pinned, err = in.Pins.load(in.PinKey); err != nil {
+		return nil, err
+	}
+	row, stored, lookupErr := l.store.storedChangeRow(ctx, in.OccurrenceID)
+	switch {
+	case lookupErr != nil:
+		change.lookupErr = lookupErr
+	case stored:
+		change.row = &row
+		if !change.pinned {
+			if change.pin, err = row.pin(); err != nil {
+				return nil, err
+			}
+			change.pinned, change.fromRow = true, true
+		}
+	}
+	return change, nil
 }
 
 // occurrenceDurable is the audit store's confirmation of an occurrence with
 // a stable id (occurrenceID; none for any other): its row, just written or
 // found stored by an earlier process, survives a power loss. The pool
 // commits with synchronous=NORMAL, which a power loss can take back, so the
-// store is flushed before its producer may count the row as stored.
-func (l *Logger) occurrenceDurable(ctx context.Context, occurrenceID string) error {
+// store is flushed before its producer may count the row as stored. An
+// offer the store could not answer (localErr) is not confirmed.
+func (l *Logger) occurrenceDurable(ctx context.Context, occurrenceID string, localErr error) error {
 	if occurrenceID == "" {
 		return nil
+	}
+	if localErr != nil {
+		return localErr
 	}
 	return l.store.syncCommittedWrites(ctx)
 }
