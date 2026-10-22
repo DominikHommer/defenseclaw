@@ -41,10 +41,62 @@ command counts the 500 newest audit rows by connector.
 defenseclaw setup codex
 ```
 
-If another connector is already wired, choose **Add** to keep both active. Choose **Replace** only when you want DefenseClaw to tear down the previous connector's agent-side files before wiring the new one.
+Setup asks these questions in this order. The first one is the enforcement mode,
+answered with a number:
 
-For an unattended run, `--yes` takes the add/reconfigure path. Use
-`--replace` only when replacement is intentional:
+```text
+  Enforcement mode for Codex
+  ──────────────────────────
+    [1] observe — scan and report findings, never block (recommended to start)
+    [2] action  — scan and block/confirm when policy requires (PreToolUse deny)
+  Select mode (1, 2) [1]:
+```
+
+Type `1` (observe) or `2` (action), or press Enter for the default. Letters are
+rejected here. Passing `--mode observe` or `--mode action` answers this question,
+so setup does not ask it.
+
+If another connector is already wired (here, `claudecode`), setup prints what it
+will change and then asks how to combine them:
+
+```text
+  DefenseClaw is already configured for: claudecode
+  You are setting up: codex
+    [a] Add     — run it alongside the existing connector(s) (multi-connector)
+    [r] Replace — switch to only this connector
+    [c] Cancel  — make no changes
+  Choose (a, r, c) [a]:
+```
+
+Type `a` to keep both active. Type `r` only when you want DefenseClaw to tear
+down the previous connector's agent-side files before wiring the new one. `c`
+makes no changes.
+
+If you chose action mode, setup then offers the LLM judge:
+
+```text
+  Add LLM judge on top of rule scanning? [y/N]:
+```
+
+Press Enter or type `n` to keep rule scanning only, or `y` to add the judge
+(configure its model with `defenseclaw setup llm`). Observe mode skips this
+question. `--enable-judge` or `--no-enable-judge` answers it.
+
+To replace instead of add, pass `--replace`. Setup then asks a yes/no question
+in place of the Add/Replace/Cancel choice, followed by the judge question in
+action mode:
+
+```bash
+defenseclaw setup claude-code --replace --mode action
+```
+
+```text
+  Replace codex with claudecode? This removes the other connector(s). [y/N]: y
+  Add LLM judge on top of rule scanning? [y/N]: n
+```
+
+For an unattended run, `--yes` asks nothing and takes the add/reconfigure path.
+Use `--replace` only when replacement is intentional:
 
 ```bash
 defenseclaw setup codex --yes
