@@ -21,6 +21,8 @@
 # gone), a recovery takes the finalizer of a run that stopped before it
 # recorded the finalizer's hash, and an uninstall gives back only the vendor
 # directory rights Setup recorded adding.
+# W2B-G-win loop round 2: a self-uninstall that defers a held InstallRoot to
+# the finalizer fails with the retryable uninstall_in_use, never ok.
 # Runs elevated in a disposable directory; no service or machine root is
 # touched.
 
@@ -478,6 +480,100 @@ $stream.Dispose()
             finally {
                 foreach ($name in $stubbed) {
                     Microsoft.PowerShell.Management\Set-Item -Path "function:script:$name" -Value $savedFunctions[$name]
+                }
+            }
+
+            # W2B-G-win review, loop round 2: a committed self-uninstall that
+            # hands a held InstallRoot to the finalizer is not finished when
+            # the CLI exits (InstallRoot, and with purge the purge, are still
+            # there, and nothing confirms the finalizer finishes them), so its
+            # result is a retryable uninstall_in_use failure, never ok, with
+            # or without purge; the finalizer still starts once, and the
+            # status's own errors stay.
+            $strandedInstall = [IO.Path]::Combine($Root, 'stranded-install')
+            [void][IO.Directory]::CreateDirectory($strandedInstall)
+            $strandedLayout = @{
+                InstallRoot = $strandedInstall
+                SelfUninstallReceiptPath = [IO.Path]::Combine($Root, 'stranded-receipt.json')
+                SelfUninstallHelperPath = [IO.Path]::Combine($Root, 'stranded-finalizer.ps1')
+                SelfUninstallEnvironmentRoot = [IO.Path]::Combine($Root, 'stranded-environment')
+            }
+            $strandedStubs = @(
+                'Set-DefenseClawSelfUninstallReceiptHelper',
+                'Start-DefenseClawSelfUninstallHelper',
+                'Get-DefenseClawLifecycleStatus',
+                'Add-DefenseClawUserRegistrationCleanupResult'
+            )
+            $savedStranded = @{}
+            foreach ($name in $strandedStubs) {
+                $savedStranded[$name] = (Microsoft.PowerShell.Management\Get-Item -LiteralPath "function:$name").ScriptBlock
+            }
+            $script:TestStrandedPurge = $false
+            $script:TestStrandedStarts = 0
+            $script:TestStrandedStatusErrors = @()
+            try {
+                function script:Set-DefenseClawSelfUninstallReceiptHelper {
+                    param($Layout, $GatewayServiceName, $GuardianServiceName)
+                    return [pscustomobject]@{
+                        phase = 'prepared_install_retirement'
+                        retired_install_root = [IO.Path]::Combine($Root, 'stranded-install-retired')
+                        purge_requested = $script:TestStrandedPurge
+                    }
+                }
+                function script:Start-DefenseClawSelfUninstallHelper { param($Layout, $Receipt) $script:TestStrandedStarts++ }
+                function script:Get-DefenseClawLifecycleStatus {
+                    param($Action, $Layout, $GatewayServiceName, $GuardianServiceName)
+                    return [pscustomobject]@{
+                        schema_version = 1
+                        ok = $true
+                        action = 'uninstall'
+                        installed = $false
+                        transaction_pending = $false
+                        errors = @($script:TestStrandedStatusErrors)
+                    }
+                }
+                function script:Add-DefenseClawUserRegistrationCleanupResult { param($Result, $Layout, $Finalization) return $Result }
+                foreach ($case in @(
+                        @{ purge = $true; statusErrors = @(); rerun = 'run the uninstall with PURGE=1 again'; finish = 'the uninstall cleanup and the purge' },
+                        @{ purge = $false; statusErrors = @(); rerun = 'run the uninstall again'; finish = 'the uninstall cleanup once' },
+                        @{ purge = $true; statusErrors = @('a status error'); rerun = 'run the uninstall with PURGE=1 again'; finish = 'the uninstall cleanup and the purge' }
+                    )) {
+                    $script:TestStrandedPurge = [bool]$case.purge
+                    $script:TestStrandedStarts = 0
+                    $script:TestStrandedStatusErrors = @($case.statusErrors)
+                    $label = "purge=$($case.purge) status errors=$(@($case.statusErrors).Count)"
+                    try {
+                        $stranded = Start-DefenseClawDeferredSelfUninstallRetirement `
+                            -Layout $strandedLayout `
+                            -GatewayServiceName 'DefenseClawW2BSmokeAbsent' `
+                            -GuardianServiceName 'DefenseClawW2BSmokeGuardianAbsent' `
+                            -Finalization $null `
+                            -Reason 'The process cannot access the file because it is being used by another process.'
+                        $errors = @($stranded.errors)
+                        $inUse = @($errors | Microsoft.PowerShell.Core\Where-Object { ([string]$_).StartsWith('uninstall_in_use: ', [StringComparison]::Ordinal) })
+                        $json = $stranded | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 6 -Compress | Microsoft.PowerShell.Utility\ConvertFrom-Json
+                        if ([bool]$stranded.ok -or [bool]$json.ok -or $inUse.Count -ne 1 -or $errors.Count -ne (@($case.statusErrors).Count + 1) -or
+                            ($errors.Count -gt 1 -and [string]$errors[0] -cne 'a status error') -or
+                            -not ([string]$inUse[0]).Contains($strandedInstall) -or
+                            -not ([string]$inUse[0]).Contains('being used by another process') -or
+                            -not ([string]$inUse[0]).Contains([string]$case.rerun) -or
+                            -not ([string]$inUse[0]).Contains([string]$case.finish) -or
+                            (-not $case.purge -and ([string]$inUse[0]).Contains('PURGE=1')) -or
+                            -not [bool]$stranded.self_uninstall_cleanup_pending -or
+                            [bool]$stranded.canonical_install_root_absent -or
+                            [string]::IsNullOrWhiteSpace([string]$stranded.install_root_retirement_deferred) -or
+                            [bool]$stranded.installed -or $script:TestStrandedStarts -ne 1) {
+                            $failures.Add("a self-uninstall with a held InstallRoot ($label) did not fail with uninstall_in_use: ok=$($stranded.ok) errors=$($errors -join ' | ') starts=$($script:TestStrandedStarts) canonical_absent=$($stranded.canonical_install_root_absent)")
+                        }
+                    }
+                    catch {
+                        $failures.Add("a self-uninstall with a held InstallRoot ($label) threw: $($_.Exception.Message)")
+                    }
+                }
+            }
+            finally {
+                foreach ($name in $strandedStubs) {
+                    Microsoft.PowerShell.Management\Set-Item -Path "function:script:$name" -Value $savedStranded[$name]
                 }
             }
 

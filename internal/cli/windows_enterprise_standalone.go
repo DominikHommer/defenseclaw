@@ -163,6 +163,16 @@ type windowsEnterpriseInstallerReport struct {
 	// LifecycleCollectError why that collect could not run (GAP-0211).
 	LifecycleGenerationsCollected int    `json:"lifecycle_generations_collected"`
 	LifecycleCollectError         string `json:"lifecycle_collect_error"`
+	// A self-uninstall by the installed CLI (Add-DefenseClawSelfUninstallResult)
+	// reports the cleanup a finalizer finishes after the CLI exits.
+	// CanonicalInstallRootAbsent is nil when the installer did not report it;
+	// InstallRootRetirementDeferred is set when a program held a file in
+	// InstallRoot past the rename retry, so the folder and the committed
+	// cleanup (with purge, the purge) are still there.
+	SelfUninstallCleanupPending   bool   `json:"self_uninstall_cleanup_pending"`
+	CanonicalInstallRootAbsent    *bool  `json:"canonical_install_root_absent"`
+	InstallRootRetirementDeferred string `json:"install_root_retirement_deferred"`
+	RetiredInstallRoot            string `json:"retired_install_root"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -1269,6 +1279,7 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		result.AddError(code, message)
 	}
+	addWindowsEnterpriseSelfUninstallCleanup(result, report)
 	if !report.OK && len(result.Errors) == 0 {
 		code := "not_ready"
 		if !report.Installed {
@@ -1328,6 +1339,45 @@ func applyWindowsEnterpriseInstallerReport(
 	// complete.
 	if report.Installed || report.TransactionPending {
 		addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
+	}
+}
+
+// windowsEnterpriseSelfUninstallStrandedMessage is the uninstall_in_use error
+// of a self-uninstall whose installer report says InstallRoot is still there
+// but carries no error of its own.
+const windowsEnterpriseSelfUninstallStrandedMessage = "a program still holds a file in the DefenseClaw install folder, so the uninstall " +
+	"could not remove it. DefenseClaw is already uninstalled (its services and hooks are removed); a cleanup that starts when this " +
+	"command exits removes the folder and finishes the uninstall cleanup once that program closes the file. Close the program, then " +
+	"run the uninstall again to confirm that it finished"
+
+// addWindowsEnterpriseSelfUninstallCleanup carries a self-uninstall's pending
+// cleanup into the result. While InstallRoot is still there (a program held a
+// file in it past the rename retry) the uninstall is not finished and nothing
+// this process can wait for confirms that the finalizer finishes it, so the
+// run fails with the retryable uninstall_in_use, whatever ok the installer
+// reported: an ok result let an exit-code-driven manager stop retrying with
+// InstallRoot and the purge left behind (W2B-G-win review, loop round 2). A
+// self-uninstall that retired InstallRoot only waits for this process to exit
+// before the retired copy goes, which a warning says.
+func addWindowsEnterpriseSelfUninstallCleanup(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if report == nil {
+		return
+	}
+	stranded := strings.TrimSpace(report.InstallRootRetirementDeferred) != "" ||
+		(report.CanonicalInstallRootAbsent != nil && !*report.CanonicalInstallRootAbsent)
+	if stranded {
+		if !windowsEnterpriseResultHasError(result, "uninstall_in_use") {
+			message := windowsEnterpriseSelfUninstallStrandedMessage
+			if deferred := strings.TrimSpace(report.InstallRootRetirementDeferred); deferred != "" {
+				message += " (" + windowsEnterpriseBoundedDiagnostic(deferred) + ")"
+			}
+			result.AddError("uninstall_in_use", message)
+		}
+		return
+	}
+	if report.OK && report.SelfUninstallCleanupPending && strings.TrimSpace(report.RetiredInstallRoot) != "" {
+		result.AddWarning("self_uninstall_cleanup_pending", "the retired install folder "+
+			strings.TrimSpace(report.RetiredInstallRoot)+" is removed by a cleanup that runs once this command exits")
 	}
 }
 
