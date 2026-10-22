@@ -1166,7 +1166,9 @@ def test_hook_fail_modes_are_rendered_before_the_gateway_stops_and_the_hook_swap
     assert install.index("$stagedGateway = Join-Path $Staging") < first
     before = install[first:stop]
     assert "Restore-SetupInstall" in before and "nothing was changed (see above)" in before, before
-    after = install[second : install.index("Stop-Watchdog", second)]
+    # The refusal after the stop throws into the catch that undoes every
+    # step after the hook swap (r104 W4 review, loop round 1).
+    after = install[second : install.index("$saved = Save-Snapshot", second)]
     assert after.index("Clear-StagedRelease") < after.index("Restart-Old") < after.index("$(Get-RestoredNote)"), after
     update = _ps1_function("Update-HookFailModes")
     assert '@("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0' in update, update

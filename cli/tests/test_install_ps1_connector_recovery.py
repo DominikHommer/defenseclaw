@@ -958,7 +958,7 @@ def test_direct_installer_guards_version_changes_before_staging_and_after_quiesc
     assert early < install.index('Assert-InstallRoom $InstallRoom') < install.index('New-InstallDirectory $Staging')
     assert install.index('Wait-VenvFree', early) < install.index('Stop-Watchdog', early) < late
     assert late < install.index('Save-Snapshot')
-    assert 'Restart-Old\n            throw' in install[late:]
+    assert 'Restart-Old\n        Die "$reason. $(Get-RestoredNote)"' in install[late:]
 
 
 @WINDOWS_POWERSHELL
