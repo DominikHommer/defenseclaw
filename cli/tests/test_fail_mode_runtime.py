@@ -1112,7 +1112,7 @@ def test_unix_resolver_reads_the_installed_mode_of_a_real_render(key: str, tmp_p
 
 @pytest.mark.parametrize("mode", ["open", "closed"])
 def test_unix_resolver_still_reads_a_legacy_render(mode: str, tmp_path: Path) -> None:
-    # 1.0.3 and older renders (and Secure Client renders) keep the override.
+    # 1.0.3 and older renders keep the override until upgrade refreshes them.
     script = tmp_path / "hook.sh"
     script.write_text(f'#!/bin/bash\nFAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"\n', encoding="utf-8")
     assert fail_mode_runtime._read_baked_hook_mode(script) == mode

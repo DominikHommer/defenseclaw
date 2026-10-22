@@ -17,7 +17,7 @@ One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows
 | --- | --- | --- |
 | `guardrail.hook_fail_mode` | `open` allows, `closed` blocks supported hook events when delivery or the gateway response fails. | `closed`. Under Secure Client an unset value is `open` ([Secure Client](#secure-client)). Per connector: `guardrail.connectors.<name>.hook_fail_mode`. |
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force a closed connector open. | Unset. Per agent process. |
-| `DEFENSECLAW_FAIL_MODE` | Not read by 1.0.4 hooks: the installed mode is the fail mode. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again; Secure Client shell hooks keep it ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)). | Set the mode with `defenseclaw guardrail fail-mode`. |
+| `DEFENSECLAW_FAIL_MODE` | Not read by 1.0.4 hooks in any profile: the installed mode is the fail mode. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)). | Set the mode with `defenseclaw guardrail fail-mode`. |
 
 An explicit value always wins, on every install: the OSS per-user install, the standalone enterprise profile, MDM-managed standalone hosts and Secure Client. On a managed computer the value comes from the administrator's config, so an `open` there is the administrator's choice and the managed hooks follow it. On a managed standalone host `DEFENSECLAW_STRICT_AVAILABILITY` is tighten-only: a stricter value is honored, a looser one is ignored ([Environment variables](/docs/reference/configuration/env-vars)).
 
@@ -173,7 +173,7 @@ A hook's fail mode is the one installed with it: the mode setup baked into the s
 
 `DEFENSECLAW_STRICT_AVAILABILITY=1` is the one process setting the hooks read. It can only close: it blocks a call while the gateway is down, even on a hook installed open. Status still reports the installed mode.
 
-Hooks rendered by 1.0.3 or earlier read `DEFENSECLAW_FAIL_MODE` until the upgrade's connector refresh renders them again. Under an authenticated Secure Client deployment, the Antigravity, Devin, Hermes and Kiro shell hooks still take it as a full override (Secure Client delivery is unchanged in 1.0.4).
+Hooks rendered by 1.0.3 or earlier read `DEFENSECLAW_FAIL_MODE` until the upgrade's connector refresh renders them again. The 1.0.4 Secure Client Antigravity, Devin, Hermes and Kiro shell hooks use the installed mode as well. Secure Client delivery requires its trusted, root-owned macOS install folder or SYSTEM-owned Windows `secure-client.install` directory beneath the install root; process environment values cannot select it. The Windows installer creates that marker on install or upgrade.
 
 The shared `inspect-*.sh` scripts serve every connector of one data directory, and `DEFENSECLAW_CONNECTOR` only picks the connector they report as. They run open only when every connector recorded there is open: one connector set to `closed` closes them for all, also after an upgrade that kept an older global `open`. A malformed or partial record (for example a `fail_modes` value in `hooks/.hookcfg` that is not a map) also closes them.
 

@@ -270,6 +270,7 @@ func withoutSessionFactsEnv(env []string) []string {
 // A Secure Client shell hook sends no session facts (GAP-0148, issue #1092);
 // a per-user hook in the same SSH session sends them.
 func TestSecureClientShellHookSendsNoSessionFacts(t *testing.T) {
+	useVerifiedSecureClientDeployment(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows hooks report identity from hookexec, not from the shell helper")
 	}

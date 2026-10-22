@@ -91,13 +91,9 @@ readonly FAIL_MODE
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
-{{if and .Managed (not .SecureClientDelivery)}}# Managed hooks outside an authenticated Secure Client deployment use the
-# installer-owned delivery policy; an inherited DEFENSECLAW_FAIL_MODE cannot
-# weaken an explicitly closed managed hook. Secure Client hooks keep the
-# environment override (#1163).
-FAIL_MODE="{{.FailMode}}"{{else if .SecureClientDelivery}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{else}}FAIL_MODE="{{.FailMode}}"
+FAIL_MODE="{{.FailMode}}"
 # The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
-# environment is not read, so status and doctor report what runs (GAP-0315).{{end}}
+# environment is not read, so status and doctor report what runs (GAP-0461).
 {{end}}DEFENSECLAW_HOOK_CONNECTOR="kiro"
 DEFENSECLAW_HOOK_NAME="kiro-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
