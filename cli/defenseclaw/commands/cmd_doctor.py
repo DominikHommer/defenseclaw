@@ -10211,9 +10211,9 @@ def _check_judge_calls(cfg, r: _DoctorResult) -> None:
         with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as db:
             # A v8 judge row keeps its fields only in payload_json (GAP-0614).
             columns = {str(row[1]) for row in db.execute("PRAGMA table_info(audit_events)").fetchall()}
-            structured = (
-                "COALESCE(NULLIF(structured_json, ''), payload_json)" if "payload_json" in columns else "structured_json"
-            )
+            structured = "structured_json"
+            if "payload_json" in columns:
+                structured = "COALESCE(NULLIF(structured_json, ''), payload_json)"
             rows = db.execute(
                 f"SELECT {structured} FROM audit_events WHERE action = ? AND timestamp >= ? "
                 f"ORDER BY {audit_time_order(db)} LIMIT 20",
