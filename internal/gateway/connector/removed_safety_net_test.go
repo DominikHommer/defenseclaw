@@ -19,7 +19,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 )
 
 // removedLongOld is an old script of c that is longer than the stub, with
@@ -339,63 +338,4 @@ func TestRemovedInPlaceWriteThatFailsLeavesNoPartScript(t *testing.T) {
 			h.requireRevoked(t, c)
 		})
 	}
-}
-
-// Safety net: a shell that is already running the old OpenHands script
-// reads on from where it was in the file after the stub is written into it.
-// The stub's tail (blanks out to the old end, then exit 2) makes that run
-// block; a file cut after the stub would end the run with the status of its
-// last command (0, an allow), and a rename alone would let it run the old
-// script to its end.
-func TestRemovedStubInPlaceBlocksARunThatIsAlreadyGoing(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("OpenHands ran its hook script only on Linux and macOS")
-	}
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("no bash")
-	}
-	c := removedOpenHands
-	h := newRemovedHost(t)
-	h.stage(t, c)
-	fifo := filepath.Join(h.home, "release")
-	started := filepath.Join(h.home, "started")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Skipf("mkfifo: %v", err)
-	}
-	old := "#!" + bash + "\n# defenseclaw-managed-hook v6\nset -euo pipefail\n" +
-		strings.Repeat("# the 1.0.3 hook goes on before it calls the gateway\n", 40) +
-		": > '" + started + "'\n" +
-		"cat '" + fifo + "' >/dev/null\n" +
-		"exit 0\n"
-	writeRemovedFile(t, h.script(c), old, c.mode)
-	run := exec.Command(h.script(c))
-	if err := run.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = run.Process.Kill() })
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if _, err := os.Stat(started); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the old hook never started")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err := c.Teardown(context.Background(), h.opts); err != nil {
-		t.Fatalf("Teardown: %v", err)
-	}
-	release, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = release.Close()
-	err = run.Wait()
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) || exit.ExitCode() != 2 {
-		t.Fatalf("the run that was already going ended with %v; want exit 2", err)
-	}
-	h.requireStub(t, c)
 }

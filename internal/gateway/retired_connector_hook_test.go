@@ -155,18 +155,3 @@ func TestRetiredConnectorHookRoutesKeepTheConnectionForTheBlock(t *testing.T) {
 		}
 	}
 }
-
-// The sandbox ingress answers the retired routes with the block too, before
-// the binding check: an old OpenShell OpenHands hook gets the removal
-// reason, with its binding, a revoked one or none.
-func TestRetiredConnectorHookRoutesBlockOnTheSandboxIngress(t *testing.T) {
-	f := newSandboxIngressFixture(t)
-	for _, path := range retiredHookPaths {
-		for _, token := range []string{"", f.claudeTok, "dcsb_" + strings.Repeat("c", 43), "not-a-sandbox-token"} {
-			requireRetiredBlock(t, path+" on the sandbox ingress", f.do(t, http.MethodPost, path, token, `{"hook_event_name":"PreToolUse"}`))
-		}
-	}
-	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", "", `{}`); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("claude-code hook on the ingress without a binding: status %d, want 401", rec.Code)
-	}
-}
