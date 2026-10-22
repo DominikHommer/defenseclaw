@@ -52,7 +52,6 @@ def _helpers() -> str:
         "Remove-FailedInstall",
         "New-FailedInstallDirectory",
         "Get-DataEntries",
-        "Move-RestoreConnectorRecovery",
         "Restore-Slot",
         "Clear-SetupDataDir",
         "Invoke-Quietly",
@@ -1458,13 +1457,16 @@ def test_every_automatic_failed_tree_removal_preserves_receipts_first() -> None:
     assert "Remove-Tree $old.FullName" not in slot
     cleanup = _function("Remove-FailedInstall")
     assert cleanup.index("Save-FailedConnectorRecovery $Failed") < cleanup.index("Remove-Tree $Failed")
-    # Both strict receipt directions precede all live runtime/data exchange.
-    phase = slot.index("Move-RestoreConnectorRecovery $Slot $failed")
-    assert phase < slot.index("Restore-BinDir") < slot.index("foreach ($part")
+    # Both strict receipt directions come first in the write-ahead move plan,
+    # before the environment and ordinary data, and every move is proven
+    # before the binaries change or the marked snapshot is retired.
+    receipts = slot.index("Where-Object { Test-ConnectorRecoveryArtifactName $_.Name }")
+    assert receipts < slot.index("foreach ($part") < slot.index("-not (Test-ConnectorRecoveryArtifactName $_.Name)")
+    assert slot.count("Where-Object { Test-ConnectorRecoveryArtifactName $_.Name }") == 2
     assert slot.count("-not (Test-ConnectorRecoveryArtifactName $_.Name)") == 2
-    receipts = _function("Move-RestoreConnectorRecovery")
-    assert "Remove-Tree" not in receipts
-    assert "Move-Path $entry.To $entry.From" in receipts
+    assert slot.index("foreach ($move in $plan.Moves)") < slot.index("Restore-BinDir")
+    assert slot.index('Remove-Item -LiteralPath (Join-Path $Slot "COMPLETE")') < slot.index("Remove-Tree $Slot")
+    assert "Remove-Tree $entry" not in slot
 
 
 def _restore_stubs(data: Path, slot: Path) -> str:

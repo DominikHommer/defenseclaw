@@ -74,7 +74,7 @@ cmd.exe asks this whenever Ctrl+C reaches a batch file. This happens when you ru
 
 ## An upgrade is interrupted
 
-**Fix.** Close the TUI and other DefenseClaw commands, then run `defenseclaw upgrade` (or the install command) again. A cut-off run (closed window, power loss) first restores the install it was replacing. To go back a version on purpose, run `defenseclaw rollback`.
+**Fix.** Close the TUI and other DefenseClaw commands, then run `defenseclaw upgrade` (or the install command) again. A cut-off run (closed window, power loss) first restores the install it was replacing. If the gateway was running before, the installer starts it again and exits with an error until it answers: start it with the command the error names (for a DefenseClaw Setup install, Setup's `defenseclaw-startup.exe`), then run the installer again. A run of 1.0.3 or earlier that was cut off early may not have recorded whether the gateway was running; the installer then leaves it stopped and says so. To go back a version on purpose, run `defenseclaw rollback`.
 
 **Check.** `defenseclaw version` shows one release for the CLI and the gateway.
 
