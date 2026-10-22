@@ -46,6 +46,83 @@ func legacyBridgeRecord(id, account string) inventory.AgentIdentityRecord {
 	}
 }
 
+func TestBareReplacementCannotInheritUnprovenLegacyAssignmentInEitherOrder(t *testing.T) {
+	stubProfileSources(t)
+	qualified := legacyBridgeInputs("CORP\\alice")
+	bare := legacyBridgeInputs("alice")
+	legacy, current := agentidentity.LegacyAgentID(qualified), agentidentity.AgentID(bare)
+	if legacy == current {
+		t.Fatal("test needs distinct legacy and bare current IDs")
+	}
+	previous := derivedLegacyAgentIDs.ids
+	t.Cleanup(func() { derivedLegacyAgentIDs.ids = previous })
+	derivedLegacyAgentIDs.ids = nil
+	noteDerivedLegacyAgentID(bare)
+	for _, recordedAccount := range []string{"CORP\\alice", "alice"} {
+		records := []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, recordedAccount)}
+		legacyBridgeLedger(t, &records)
+		for _, legacyFirst := range []bool{true, false} {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "observe"
+			cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+				"strict": {Mode: "action"}, "watch": {Mode: "observe"}, "relaxed": {Mode: "observe"},
+			}
+			cfg.Guardrail.DefaultProfile = "strict"
+			legacyAssignment := config.ProfileAssignment{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}}
+			generalAssignment := config.ProfileAssignment{Profile: "watch", Match: config.ProfileMatch{Connectors: []string{"codex"}}}
+			if legacyFirst {
+				cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{legacyAssignment, generalAssignment}
+			} else {
+				cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{generalAssignment, legacyAssignment}
+			}
+			api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+			profileAgentSource = func(context.Context) (string, bool) { return current, true }
+			ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "70001", UserName: "alice"})
+			ctx = api.withGuardrailProfileDecision(ctx, "codex")
+			got := api.resolveProfile(ctx)
+			if got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || api.agentHookMode(ctx, "codex") != "action" {
+				t.Errorf("recorded=%q legacyFirst=%v: profile %+v, want strict action", recordedAccount, legacyFirst, got)
+			}
+			response := api.evaluateAgentHook(ctx, agentHookRequest{ConnectorName: "codex", HookEventName: "PreToolUse"})
+			if response.Action != "block" || response.Mode != "action" {
+				t.Errorf("recorded=%q legacyFirst=%v: hook action=%q mode=%q, want block/action", recordedAccount, legacyFirst, response.Action, response.Mode)
+			}
+		}
+	}
+}
+
+func TestUnprovenLegacyAgentBlocksWithWeakDefault(t *testing.T) {
+	stubProfileSources(t)
+	bare := legacyBridgeInputs("alice")
+	legacy := agentidentity.LegacyAgentID(bare)
+	current := agentidentity.AgentID(bare)
+	records := []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice")}
+	legacyBridgeLedger(t, &records)
+	previous := derivedLegacyAgentIDs.ids
+	t.Cleanup(func() { derivedLegacyAgentIDs.ids = previous })
+	derivedLegacyAgentIDs.ids = nil
+	noteDerivedLegacyAgentID(bare)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"watch": {Mode: "observe"}, "other": {Mode: "action"}}
+	cfg.Guardrail.DefaultProfile = "watch"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "watch", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
+		{Profile: "other", Match: config.ProfileMatch{Agents: []string{legacy}}},
+	}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	profileAgentSource = func(context.Context) (string, bool) { return current, true }
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "70001", UserName: "alice"})
+	ctx = api.withGuardrailProfileDecision(ctx, "codex")
+	if decision := api.resolveProfile(ctx); !decision.UnprovenAgent || decision.Match != profileMatchDefaultLookupFailed {
+		t.Fatalf("unproven legacy profile = %+v", decision)
+	}
+	response := api.evaluateAgentHook(ctx, agentHookRequest{ConnectorName: "codex", HookEventName: "PreToolUse"})
+	if response.Action != "block" || response.Mode != "action" {
+		t.Fatalf("weak default let unproven legacy call through: action=%q mode=%q", response.Action, response.Mode)
+	}
+}
+
 // An assignment written for a 1.0.3 agent identity keeps selecting the
 // account that identity was recorded for, under the identity that account
 // has now, and not a namesake of another domain given the same uid later

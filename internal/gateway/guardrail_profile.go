@@ -162,6 +162,9 @@ type profileDecision struct {
 	// Assignment is the 1-based index of the assignment that matched, 0 for
 	// the default.
 	Assignment int
+	// UnprovenAgent means a legacy agents entry may name this account but
+	// the ledger cannot prove ownership. Tool calls are refused until rebind.
+	UnprovenAgent bool
 }
 
 // guardrailProfileSet is every profile derived from one configuration.

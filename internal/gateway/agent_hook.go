@@ -2370,6 +2370,20 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	if hookEvaluatorPanicHook != nil {
 		hookEvaluatorPanicHook()
 	}
+	if a.resolveProfile(ctx).UnprovenAgent {
+		// Different rule packs have no safe total strictness order. Refuse
+		// blockable events until an operator rebinds the old agents entry to
+		// the verified current ID, regardless of assignment order or the
+		// configured default profile's mode.
+		profile := a.hookProfileForRequest(ctx, req.ConnectorName)
+		action, wouldBlock := mapHookActionForProfile("block", "action", req.HookEventName,
+			profile.Capabilities, profile, req.Payload)
+		if action == "block" {
+			return agentHookResponseForProfile(profile, req, action, "block", "CRITICAL",
+				"Agent identity ownership is unproven. Rebind the legacy agents assignment to the current agent ID in config.yaml, then run `defenseclaw-gateway restart`.",
+				nil, "action", wouldBlock, profile.Capabilities)
+		}
+	}
 	// A hook authenticated through a sandbox binding is always evaluated and
 	// enforced: DefenseClaw launched that harness itself, usually with its
 	// own permission prompts off, and the host's connector selection and
@@ -3071,6 +3085,9 @@ func (a *APIServer) hookEnablementConfig(ctx context.Context) *config.Config {
 func (a *APIServer) agentHookMode(ctx context.Context, name string) string {
 	if a == nil {
 		return "observe"
+	}
+	if a.resolveProfile(ctx).UnprovenAgent {
+		return "action"
 	}
 	return hookModeForConfig(a.decisionConfig(ctx), name)
 }

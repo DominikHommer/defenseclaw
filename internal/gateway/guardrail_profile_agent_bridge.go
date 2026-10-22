@@ -89,16 +89,17 @@ var profileAgentLedger = func(filter inventory.AgentIdentityFilter) ([]inventory
 func (set *guardrailProfileSet) matchAgent(subject *profileSubject, source, connectorName, agent string) profileDecision {
 	matched, unresolved := set.profileAgent(agent)
 	decision := set.match(subject, source, connectorName, matched)
-	if unresolved == nil || subject == nil || source == "" || decision.Match == profileMatchDefaultLookupFailed {
+	if unresolved == nil || subject == nil || source == "" {
 		return decision
 	}
-	earlier := set.assignments
-	if decision.Assignment > 0 && decision.Assignment <= len(earlier) {
-		earlier = earlier[:decision.Assignment-1]
-	}
-	for _, assignment := range earlier {
+	// An unproven legacy owner must not lose to an earlier, weaker match.
+	// Scan the whole list: assignment order applies only after ownership is
+	// proved, and the legacy entry may have belonged to this account.
+	for _, assignment := range set.assignments {
 		if set.unresolvedAgentMatch(assignment.Match, subject, connectorName, unresolved) {
-			return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+			closed := set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+			closed.UnprovenAgent = true
+			return closed
 		}
 	}
 	return decision
@@ -244,6 +245,19 @@ func (b *profileAgentBridge) readLedger() (profileAgentLinks, bool) {
 		if id != legacyID {
 			if id == strings.ToLower(agentidentity.AgentID(in)) {
 				links.derived[id] = legacyID
+			}
+			continue
+		}
+		if agentidentity.AccountDomain(rec.UserName) == "" {
+			// A 1.0.3 bare name does not prove whether this was a local
+			// account or a directory account that later lost its qualifier.
+			// Keep the old assignment unresolved until an operator rebinds it.
+			current := strings.ToLower(agentidentity.AgentID(in))
+			if current != "" {
+				if links.ambiguous[current] == nil {
+					links.ambiguous[current] = map[string]bool{}
+				}
+				links.ambiguous[current][id] = true
 			}
 			continue
 		}
