@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -34,6 +35,20 @@ var enterpriseForeignHookRemovalsLogMu sync.Mutex
 // process's ledger publication; tests shorten it.
 var foreignHookRemovalLedgerLockWait = 5 * time.Second
 
+// foreignHookRemovalTime is when a cleanup returned: the process-time mark
+// (agentprocess.Now) and the wall time, taken together. The ledger orders
+// two cleanups of one file by them, so a cleanup that publishes after a
+// later one of the same file never replaces the later one's mark.
+type foreignHookRemovalTime struct {
+	mark string
+	at   time.Time
+}
+
+// foreignHookRemovalNow dates a cleanup that just returned.
+func foreignHookRemovalNow() foreignHookRemovalTime {
+	return foreignHookRemovalTime{mark: agentprocess.Now(), at: time.Now().UTC()}
+}
+
 // enterpriseForeignHookAccountID names an account the way the gateway names
 // a verified caller: the SID when there is one, else the uid.
 func enterpriseForeignHookAccountID(sid string, uid int) string {
@@ -51,18 +66,19 @@ func enterpriseForeignHookAccountID(sid string, uid int) string {
 // gateway reads (enterprisepolicy.ForeignHookRemovalsFile), so that
 // account's agent processes of that connector, and of any other that loads
 // the same file, that started before the removal stay denied: they may
-// still run a hook they loaded. mark is the process-time mark
-// (agentprocess.Now) the caller took as soon as the cleanup returned, before
-// any lock or wait here: a process that started after it never loaded a
-// removed hook, however long this commit waits for another one. Failures are
-// logged; the per-call check still applies.
-func recordEnterpriseForeignHookRemovals(stderr io.Writer, mark, account, home, connectorName string, paths []string) {
+// still run a hook they loaded. removed is when the cleanup returned
+// (foreignHookRemovalNow), taken by the caller before any lock or wait here:
+// a process that started after it never loaded a removed hook, however long
+// this commit waits for another one, and a later cleanup of the same file
+// that published first keeps its entry. Failures are logged; the per-call
+// check still applies.
+func recordEnterpriseForeignHookRemovals(stderr io.Writer, removed foreignHookRemovalTime, account, home, connectorName string, paths []string) {
 	identity, ok := connector.CanonicalUserScopedIdentity(account)
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	if !ok || connectorName == "" || len(paths) == 0 || cfg == nil || !cfg.StandaloneEnterprise() {
 		return
 	}
-	if err := commitEnterpriseForeignHookRemovals(stderr, mark, identity, home, connectorName, paths); err != nil {
+	if err := commitEnterpriseForeignHookRemovals(stderr, removed, identity, home, connectorName, paths); err != nil {
 		enterpriseForeignHookRemovalsLogMu.Lock()
 		defer enterpriseForeignHookRemovalsLogMu.Unlock()
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s: %v\n",
@@ -82,8 +98,8 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, mark, account, home, 
 // it failed to record would let a process that loaded the removed hook be
 // allowed once they are repaired, and the gateway refuses every exchange
 // while the fence is unusable.
-func commitEnterpriseForeignHookRemovals(stderr io.Writer, mark, identity, home, connectorName string, paths []string) error {
-	guardianDir, published, err := publishEnterpriseForeignHookRemovals(stderr, mark, identity, home, connectorName, paths)
+func commitEnterpriseForeignHookRemovals(stderr io.Writer, removed foreignHookRemovalTime, identity, home, connectorName string, paths []string) error {
+	guardianDir, published, err := publishEnterpriseForeignHookRemovals(stderr, removed, identity, home, connectorName, paths)
 	if !published {
 		return err
 	}
@@ -96,8 +112,8 @@ func commitEnterpriseForeignHookRemovals(stderr io.Writer, mark, identity, home,
 // publishEnterpriseForeignHookRemovals adds the removals to the ledger under
 // the in-process and ledger locks and releases both on return. published
 // reports whether the new ledger is in place.
-func publishEnterpriseForeignHookRemovals(stderr io.Writer, mark, identity, home, connectorName string, paths []string) (guardianDir string, published bool, err error) {
-	if mark == "" {
+func publishEnterpriseForeignHookRemovals(stderr io.Writer, removed foreignHookRemovalTime, identity, home, connectorName string, paths []string) (guardianDir string, published bool, err error) {
+	if removed.mark == "" || removed.at.IsZero() {
 		return "", false, errors.New("the process clock is unavailable")
 	}
 	enterpriseForeignHookRemovalsMu.Lock()
@@ -132,7 +148,7 @@ func publishEnterpriseForeignHookRemovals(stderr io.Writer, mark, identity, home
 		for _, name := range enterprisepolicy.ForeignHookRemovalConnectors(home, path, connectorName, connectors) {
 			added = append(added, enterprisepolicy.ForeignHookRemoval{
 				Identity: identity, Connector: name, Path: foreignGuardLogField(path, 512),
-				At: now.Format(time.RFC3339), Mark: mark,
+				At: removed.at.Format(time.RFC3339Nano), Mark: removed.mark,
 			})
 		}
 	}

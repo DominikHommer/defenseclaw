@@ -26,7 +26,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -342,15 +341,15 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	}
 	// Each account's removals are recorded for the gateway as soon as its
 	// worker ends, so its agent processes that started before them stay
-	// denied (recordEnterpriseForeignHookRemovals). The mark is taken once,
+	// denied (recordEnterpriseForeignHookRemovals). The time is taken once,
 	// when the worker ended, not per connector: a connector's commit may
 	// wait for another. Only the connectors the job asked for count: the
 	// worker runs as the user.
 	recordRemovals := func(outcome enterpriseHookWorkerOutcome) {
-		mark := agentprocess.Now()
+		removed := foreignHookRemovalNow()
 		for _, cleanup := range outcome.Job.Request.ForeignCleanup {
 			if report, ok := outcome.Response.Cleanup[cleanup.Connector]; ok {
-				recordEnterpriseForeignHookRemovals(stderr, mark, strconv.Itoa(outcome.Job.Account.UID), outcome.Job.Account.Home,
+				recordEnterpriseForeignHookRemovals(stderr, removed, strconv.Itoa(outcome.Job.Account.UID), outcome.Job.Account.Home,
 					cleanup.Connector, boundedStrings(report.Removed, 32))
 			}
 		}

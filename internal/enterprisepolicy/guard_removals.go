@@ -51,9 +51,9 @@ type ForeignHookRemoval struct {
 	Identity  string `json:"identity"`
 	Connector string `json:"connector"`
 	Path      string `json:"path"`
-	// At is when the removal was recorded, after the file was cleaned, and
-	// Mark is the same instant as an agent process start time
-	// (agentprocess.Now).
+	// At is when the cleanup that removed the file returned, and Mark is the
+	// same instant as an agent process start time (agentprocess.Now). The
+	// guardian takes both together, before it waits to publish them.
 	At   string `json:"at"`
 	Mark string `json:"mark"`
 }
@@ -97,8 +97,10 @@ func (r ForeignHookRemoval) complete() bool {
 // entry, and to the ledger around them.
 const foreignHookRemovalIndent = 64
 
-// EncodeForeignHookRemovals adds added to existing, keeping the latest entry
-// per account, connector and file, drops incomplete entries and those older
+// EncodeForeignHookRemovals adds added to existing, keeping the entry of the
+// cleanup that ended last per account, connector and file
+// (removalEndedAfter), whatever order the cleanups published in, drops
+// incomplete entries and those older
 // than sessionRecordTTL (a session block lasts as long), keeps the newest
 // that fit foreignHookRemovalsLimit and ForeignHookRemovalsMaxBytes, and
 // encodes the ledger. The gateway denies every account's calls while the
@@ -117,7 +119,7 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 			continue
 		}
 		key := removal.Identity + "\x00" + removal.Connector + "\x00" + removal.Path
-		if previous, ok := latest[key]; !ok || !at.Before(previous.at) {
+		if previous, ok := latest[key]; !ok || removalEndedAfter(removal, at, previous.removal, previous.at) {
 			latest[key] = dated{removal, at, key}
 		}
 	}
@@ -152,6 +154,20 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 		return nil, errors.New("foreign-hook removal ledger exceeds the size limit")
 	}
 	return data, nil
+}
+
+// removalEndedAfter reports whether the cleanup of removal, dated at, ended
+// no earlier than that of previous, dated previousAt. Their process marks
+// order two cleanups of one boot, however the wall clock stepped and
+// whenever each published (a ledger an earlier build wrote dates each entry
+// at its publication); At orders the rest, and two marks of one clock tick
+// (Linux counts 10 ms ticks). Keeping the later mark of one boot denies
+// every agent process the earlier one denies.
+func removalEndedAfter(removal ForeignHookRemoval, at time.Time, previous ForeignHookRemoval, previousAt time.Time) bool {
+	if order, ok := agentprocess.CompareMarks(removal.Mark, previous.Mark); ok && order != 0 {
+		return order > 0
+	}
+	return !at.Before(previousAt)
 }
 
 // ForeignHookRemovalConnectors returns connector and each of candidates
@@ -204,13 +220,21 @@ const sessionRemovedNote = "The agent can keep running a hook it loaded when it 
 // started before the guardian removed one of its connector's hooks.
 const removedSessionReason = "removed after this agent process started"
 
+// removalTimeText shows a ledger time to the second.
+func removalTimeText(at string) string {
+	if parsed, err := time.Parse(time.RFC3339Nano, at); err == nil {
+		return parsed.UTC().Format(time.RFC3339)
+	}
+	return at
+}
+
 // removedHookDecision denies a call of an agent process that started before
 // the guardian removed an unapproved hook of its connector for this account.
 func removedHookDecision(decision GuardDecision, connector string, removal ForeignHookRemoval) GuardDecision {
 	decision.Deny = true
 	decision.Reason = fmt.Sprintf(
 		"enterprise_foreign_hook_blocked: your organization blocks %s hooks it has not approved, because they can change a tool call after DefenseClaw checks it. This agent started before DefenseClaw removed an unapproved hook from %s at %s. %s",
-		connector, removal.Path, removal.At, sessionRemovedNote,
+		connector, removal.Path, removalTimeText(removal.At), sessionRemovedNote,
 	)
 	decision.Findings = append([]Finding{{
 		Connector: connector,

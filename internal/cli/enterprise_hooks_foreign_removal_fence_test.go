@@ -60,7 +60,7 @@ func recordForeignHookRemoval(account, home string) <-chan string {
 	done := make(chan string, 1)
 	go func() {
 		var stderr bytes.Buffer
-		recordEnterpriseForeignHookRemovals(&stderr, agentprocess.Now(), account, home, "claudecode", []string{home + "/.claude/settings.json"})
+		recordEnterpriseForeignHookRemovals(&stderr, foreignHookRemovalNow(), account, home, "claudecode", []string{home + "/.claude/settings.json"})
 		done <- stderr.String()
 	}()
 	return done
@@ -101,7 +101,8 @@ func processStartedAt(t *testing.T, mark string) string {
 // holds the ledger lock, and an agent process starts after the cleanup
 // returned and before the lock is free. Every removal record writes for the
 // identity must deny a process that started before the cleanup, and not
-// the one that started after it: it never loaded the removed hook.
+// the one that started after it: it never loaded the removed hook. Each is
+// dated when the cleanup returned too, not at its publication.
 func checkRemovalMarkedAtCleanup(t *testing.T, guardianDir, identity string, cleaned <-chan struct{}, record func()) {
 	t.Helper()
 	before := processStartedAt(t, agentprocess.Now())
@@ -121,6 +122,7 @@ func checkRemovalMarkedAtCleanup(t *testing.T, guardianDir, identity string, cle
 		t.Fatal("the cleanup did not run")
 	}
 	time.Sleep(50 * time.Millisecond)
+	afterAt := time.Now()
 	after := processStartedAt(t, agentprocess.Now())
 	time.Sleep(50 * time.Millisecond)
 	unlock()
@@ -144,6 +146,9 @@ func checkRemovalMarkedAtCleanup(t *testing.T, guardianDir, identity string, cle
 		}
 		if agentprocess.StartedBefore(after, removal.Mark) {
 			t.Fatalf("an agent process that started after the cleanup, while the commit waited for the ledger lock, is denied as if it loaded the removed hook: %+v", removal)
+		}
+		if at, err := time.Parse(time.RFC3339Nano, removal.At); err != nil || !at.Before(afterAt) {
+			t.Fatalf("the removal must be dated when the cleanup returned, not at its publication: %+v", removal)
 		}
 	}
 	if found == 0 {
@@ -317,6 +322,48 @@ func TestReconcileMarksTheForeignHookRemovalWhenTheCleanupReturns(t *testing.T) 
 			ConnectorName: "claudecode", UserHome: "/home/alice", OwnerUID: 1001, OwnerGID: 1001, DataDir: "/home/alice/.defenseclaw",
 		})
 	})
+}
+
+// An older cleanup that publishes last, as a guardian that stalled after
+// its cleanup returned, never replaces the mark of a later cleanup of the
+// same file: an agent process that started between the two may have loaded
+// the hook the later one removed, so it stays denied.
+func TestGuardianOlderCleanupPublishedLastKeepsTheLaterRemoval(t *testing.T) {
+	guardianDir := setupForeignHookRemovalGuardian(t)
+	home := "/home/alice"
+	paths := []string{home + "/.claude/settings.json"}
+	first := foreignHookRemovalNow()
+	time.Sleep(50 * time.Millisecond)
+	between := processStartedAt(t, agentprocess.Now())
+	time.Sleep(50 * time.Millisecond)
+	second := foreignHookRemovalNow()
+	var stderr bytes.Buffer
+	recordEnterpriseForeignHookRemovals(&stderr, second, "1001", home, "claudecode", paths)
+	time.Sleep(50 * time.Millisecond)
+	recordEnterpriseForeignHookRemovals(&stderr, first, "1001", home, "claudecode", paths)
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected guardian errors: %s", stderr.String())
+	}
+	removals, err := loadEnterpriseForeignHookRemovals(filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, removal := range removals {
+		if removal.Identity != "1001" {
+			continue
+		}
+		found++
+		if removal.Mark != second.mark || !agentprocess.StartedBefore(between, removal.Mark) {
+			t.Fatalf("an agent process that started between the two cleanups is allowed after the older one published last: %+v", removal)
+		}
+		if at, err := time.Parse(time.RFC3339Nano, removal.At); err != nil || !at.Equal(second.at) {
+			t.Fatalf("the removal must be dated when the later cleanup returned, %v: %+v", second.at, removal)
+		}
+	}
+	if found == 0 {
+		t.Fatalf("no removal recorded: %+v", removals)
+	}
 }
 
 // Reconcile creates the fence's lock files that are missing, as on an

@@ -18,7 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -151,12 +150,12 @@ func reconcileEnterpriseForeignHooks(opts enterprisehooks.InstallOptions) {
 		GID:      opts.OwnerGID,
 		SID:      opts.OwnerSID,
 	}, opts.ConnectorName, opts.DataDir)
-	mark := agentprocess.Now()
+	removed := foreignHookRemovalNow()
 	for _, finding := range result.Removed {
 		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise foreign-hook guard: removed %s %s hook from %s (sha256:%s); backup in %s\n",
 			finding.Connector, dashIfEmpty(finding.Event), finding.Path, finding.Digest, result.BackupDir)
 	}
-	recordEnterpriseForeignHookRemovals(os.Stderr, mark, enterpriseForeignHookAccountID(opts.OwnerSID, opts.OwnerUID), opts.UserHome, opts.ConnectorName, removedForeignHookPaths(result))
+	recordEnterpriseForeignHookRemovals(os.Stderr, removed, enterpriseForeignHookAccountID(opts.OwnerSID, opts.OwnerUID), opts.UserHome, opts.ConnectorName, removedForeignHookPaths(result))
 	for _, finding := range result.Reported {
 		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise foreign-hook guard: %s hook in %s left in place (%s)\n", finding.Connector, finding.Path, finding.Reason)
 	}
