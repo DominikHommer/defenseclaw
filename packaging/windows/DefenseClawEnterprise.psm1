@@ -188,7 +188,7 @@ $script:DefenseClawTrustMode = 'Authenticode'
 # Signed standalone modules authenticate the Python source even though a .py
 # file cannot carry embedded Authenticode. Keep this digest aligned with the
 # release checkout's edge-connector/tools/policy_compiler.py.
-$script:DefenseClawPolicyCompilerSHA256 = 'b2c3766d4ba51bb37bd57158d510f251ea2532bf6f8a5e7a44a98a724826ac39'
+$script:DefenseClawPolicyCompilerSHA256 = '67ea70960fe6282fd13769bd13b446c5c8c6abe08eba20d22452e5096dd66ac5'
 # Standalone roots a standard user created and Install moved aside.
 $script:DefenseClawQuarantinedRoots = @()
 # Standalone pending-transaction recovery: the gateway of the running Setup
@@ -3386,6 +3386,7 @@ function Assert-DefenseClawUnsignedCertificationScope {
         'Upgrade',
         'Repair',
         'Reconcile',
+        'Recover',
         'Status',
         'Verify',
         'Uninstall'
@@ -35220,7 +35221,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('Install', 'Upgrade', 'Repair', 'Reconcile', 'Status', 'Verify', 'Uninstall')]
+        [ValidateSet('Install', 'Upgrade', 'Repair', 'Reconcile', 'Recover', 'Status', 'Verify', 'Uninstall')]
         [string]$Action,
         [string]$BrokerBinary,
         [string]$ProviderLibrary,
@@ -35278,6 +35279,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [switch]$CollectRuntimeGenerations
     )
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
+    if ($Action -eq 'Recover' -and -not (Test-DefenseClawStandaloneProfile)) {
+        throw 'Recover is available only to standalone Setup after a timed-out lifecycle'
+    }
     $script:DefenseClawLauncherTemp = [string]$LauncherTemp
     $script:DefenseClawRemoveLifecycleLockOnExit = $false
     $script:DefenseClawUninstallPurgeUserState = (
@@ -35410,7 +35414,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -Path $CertificationCodexHome `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -AllowMissing:($Action -in @('Status', 'Verify'))
+        -AllowMissing:($Action -in @('Status', 'Verify', 'Recover'))
     if ($Purge -and $Action -ne 'Uninstall') {
         throw '-Purge is valid only with Uninstall'
     }
@@ -35428,8 +35432,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         throw '-NoStart is valid only with Install, Upgrade, or Repair'
     }
     if ($CoreHardeningCertification -and
-        $Action -notin @('Install', 'Upgrade', 'Repair')) {
-        throw '-CoreHardeningCertification is valid only with Install, Upgrade, or Repair'
+        $Action -notin @('Install', 'Upgrade', 'Repair', 'Recover')) {
+        throw '-CoreHardeningCertification is valid only with Install, Upgrade, Repair, or Recover'
     }
     if (-not [string]::IsNullOrWhiteSpace($resolvedCertificationCodexHome) -and
         -not $AllowUnsigned) {
@@ -35528,7 +35532,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -Layout $layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -AllowMissingCertificationCodexHome:($Action -in @('Status', 'Verify'))
+        -AllowMissingCertificationCodexHome:($Action -in @('Status', 'Verify', 'Recover'))
     if ((Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $layout.MetadataPath `
             -PathType Leaf) -and
@@ -35714,7 +35718,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         Assert-DefenseClawLayoutVolumeIdentity `
             -Layout $layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName
+            -GuardianServiceName $GuardianServiceName `
+            -AllowMissingCertificationCodexHome:($Action -eq 'Recover')
         Assert-DefenseClawLifecycleSourcesCurrent -Sources $sources
         if ($standaloneFleetStateKnown) {
             $recheckedFleetEnabled = Test-DefenseClawStandaloneFleetSourceEnabled `
@@ -35730,6 +35735,26 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # conflict check that ran before the lock wait. On a host with no
         # footprint of the other profile both checks are no-ops.
         Assert-DefenseClawOtherProfileLifecycleIdle
+        if ($Action -eq 'Recover') {
+            # Setup's original child is gone. Reuse the protected pending
+            # journal under the same lifecycle lock, then stop: starting a
+            # second install here could time out and stop the services again.
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $layout.PendingPath -PathType Leaf) {
+                [void](Recover-DefenseClawPendingTransaction `
+                    -Layout $layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName)
+            }
+            $recoveredStatus = Get-DefenseClawLifecycleStatus `
+                -Action $Action `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName
+            if ([bool]$recoveredStatus.transaction_pending) {
+                throw 'the lifecycle recovery is still pending; the protected journal was kept'
+            }
+            return $recoveredStatus
+        }
         if ($Action -in @('Install', 'Upgrade', 'Repair') -and
             $GatewayServiceName -ceq 'DefenseClawGateway') {
             Assert-DefenseClawNoOtherProfileDeployment

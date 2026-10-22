@@ -15,7 +15,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Upgrade', 'Repair', 'Reconcile', 'Status', 'Verify', 'Uninstall')]
+    [ValidateSet('Install', 'Upgrade', 'Repair', 'Reconcile', 'Recover', 'Status', 'Verify', 'Uninstall')]
     [string]$Action = 'Install',
 
     [string]$BrokerBinary,
@@ -699,6 +699,7 @@ function Assert-DefenseClawBootstrapUnsignedCertificationScope {
         'Upgrade',
         'Repair',
         'Reconcile',
+        'Recover',
         'Status',
         'Verify',
         'Uninstall'
@@ -770,7 +771,8 @@ function Assert-DefenseClawBootstrapUnsignedCertificationScope {
         -PathType Container
     $allowMissingCertificationHome = $LifecycleAction -in @(
         'Status',
-        'Verify'
+        'Verify',
+        'Recover'
     )
     if (-not $certificationHomeExists -and
         -not $allowMissingCertificationHome) {
@@ -3427,8 +3429,8 @@ try {
         throw '-CertificationCodexHome requires -AllowUnsigned for every lifecycle action'
     }
     if ($CoreHardeningCertification -and
-        $Action -notin @('Install', 'Upgrade', 'Repair')) {
-        throw '-CoreHardeningCertification is valid only with Install, Upgrade, or Repair'
+        $Action -notin @('Install', 'Upgrade', 'Repair', 'Recover')) {
+        throw '-CoreHardeningCertification is valid only with Install, Upgrade, Repair, or Recover'
     }
     if ($CoreHardeningCertification -and
         (-not $AllowUnsigned -or

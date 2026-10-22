@@ -298,6 +298,9 @@ func init() {
 	for _, action := range []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall", "ensure"} {
 		enterpriseWindowsCmd.AddCommand(newWindowsEnterpriseLifecycleCommand(action))
 	}
+	recovery := newWindowsEnterpriseLifecycleCommand("recover")
+	recovery.Hidden = true // Setup uses this once after a timed-out lifecycle child.
+	enterpriseWindowsCmd.AddCommand(recovery)
 	enterpriseWindowsCmd.AddCommand(newWindowsServiceConfigValidationCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsStandaloneFleetInspectCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsCodexRequirementsCommand())
@@ -452,7 +455,7 @@ func runWindowsEnterpriseLifecycle(
 	// likewise refuses before loading the installer module (GAP-0640), and
 	// so does reconcile, which ran the module and answered 1603 with
 	// installed:false for a deployment that exists (GAP-0931).
-	if (windowsEnterpriseMutationAction(action) || action == "uninstall" || action == "reconcile") && !windowsEnterpriseIsElevated() &&
+	if (windowsEnterpriseMutationAction(action) || action == "uninstall" || action == "reconcile" || action == "recover") && !windowsEnterpriseIsElevated() &&
 		managed.IsStandaloneProfile(opts.profile) {
 		// A trusted Secure Client record already makes this request invalid.
 		// Preserve its profile refusal before the standalone elevation check.
@@ -997,7 +1000,7 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 	if opts == nil {
 		return errors.New("Windows enterprise lifecycle options are unavailable")
 	}
-	mutationAction := action == "install" || action == "upgrade" || action == "repair"
+	mutationAction := action == "install" || action == "upgrade" || action == "repair" || action == "recover"
 	mutationSecurityOptionUsed := opts.attestAgentApplicationControl ||
 		opts.attestClaudeEffectivePolicy ||
 		opts.coreHardeningCertification

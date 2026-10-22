@@ -180,7 +180,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			if err == nil {
 				result.AddWarning("scanner_runtime_not_scoped", windowsScannerRuntimeNotScoped)
 			}
-		case "status", "verify":
+		case "status", "verify", "recover":
 			if result.Installed {
 				result.AddWarning("scanner_runtime_not_scoped", windowsScannerRuntimeNotScoped)
 			}
@@ -245,10 +245,10 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 		case kept != "":
 			result.AddWarning("scanner_runtime_left", "the scanner runtime folder was kept: "+kept)
 		}
-	case "status", "verify":
+	case "status", "verify", "recover":
 		// A request refused before its health checks ran reports only the
 		// recorded deployment; a standard account cannot read the runtime
-		// folder anyway.
+		// folder anyway. Recovery must also prove this shared executable tree.
 		if result.Installed && !windowsEnterpriseResultHasWarning(result, windowsEnterpriseHealthNotChecked) {
 			result.Scanners = windowsScannerRuntimeReader()
 			// Every scan fails closed without a ready runtime, so verify
@@ -262,7 +262,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 				message = windowsScannerRuntimeServiceProblem()
 			}
 			if message != "" {
-				if result.Action == "verify" {
+				if result.Action == "verify" || result.Action == "recover" {
 					result.AddError("scanner_runtime_unavailable", message)
 				} else {
 					result.AddWarning("scanner_runtime_unavailable", message)
