@@ -488,10 +488,10 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 		profile.DecodeToolArgs = antigravityToolArgsFromRawPayload
 	}
 	if c.name == "copilot" {
-		// Copilot's documented hook body is camelCase and carries the complete
-		// tool request in toolName/toolArgs. Event identity remains bound to the
-		// event-specific Setup registration and is supplied out-of-band by the
-		// authenticated bridge.
+		// Copilot's hook body uses toolName/toolArgs on PreToolUse, while a
+		// native PermissionRequest edit carries toolInput with a single-file
+		// diff. Event identity remains bound to Setup's registration and is
+		// supplied out-of-band by the authenticated bridge.
 		profile.Decode = copilotProfileDecode
 	}
 	if c.name == "cursor" {
@@ -515,6 +515,12 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 	}
 	args, present := payload["toolArgs"]
 	if !present {
+		if hookFirstString(payload, "hookName") == "permissionRequest" {
+			if input, hasInput := payload["toolInput"]; hasInput {
+				req.ToolArgsAuthoritative = true
+				req.ToolArgs = copilotargs.PermissionEditArgs(req.ToolName, input)
+			}
+		}
 		return req
 	}
 	req.ToolArgsAuthoritative = true
