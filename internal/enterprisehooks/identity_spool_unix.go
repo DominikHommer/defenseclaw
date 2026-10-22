@@ -323,6 +323,12 @@ func identitySpoolSameIdentity(record, fresh IdentitySpoolRecord, complete bool)
 		}
 		return identitySpoolDepartureUnknown
 	}
+	if fresh.AccountSID != "" && record.AccountSID == "" {
+		// Older spool records may lack the account's immutable SID. A
+		// matching uid, name and domain cannot bind their UPN to the
+		// account whose SID the current lookup resolved.
+		return identitySpoolDepartureOther
+	}
 	compared := false
 	for _, pair := range [][2]string{
 		{record.AccountSID, fresh.AccountSID},

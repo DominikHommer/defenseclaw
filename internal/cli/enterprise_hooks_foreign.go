@@ -57,7 +57,30 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		Policy:        policy,
 		OwnedCommands: perUserOwnedHookCommandsForBinary(name, target.UserHome, dataDir, opts.HookBinary),
 	}
-	return cleanEnterpriseForeignHooksAsTarget(target, request, time.Now())
+	account := enterpriseForeignHookAccountID(target.SID, target.UID)
+	// Plan first, editing nothing: a cleanup with nothing to remove
+	// publishes no denial. Then publish the denial for the agents that may
+	// load a planned file and clean only those files; an unapproved entry
+	// found in another file after the plan waits for the next pass.
+	plan, _, err := cleanEnterpriseForeignHooksAsTarget(target, request, enterprisepolicy.CleanupScope{Plan: true}, time.Now())
+	if len(plan.Planned) == 0 {
+		return plan, err
+	}
+	pending, err := beginEnterpriseForeignHookCleanup(os.Stderr, account, enterpriseForeignHookDenialConnectors(target.UserHome, map[string][]string{name: plan.Planned}))
+	if err != nil {
+		return enterprisepolicy.CleanupResult{Reported: plan.Reported}, fmt.Errorf("publish the foreign-hook cleanup denial before editing hooks: %w", err)
+	}
+	// The cleanup records what it removed, also after an error, then ends
+	// its transaction: a cleanup that cannot tell all it changed leaves a
+	// removal for every agent that started before now.
+	result, uncertain, err := cleanEnterpriseForeignHooksAsTarget(target, request, enterprisepolicy.CleanupScope{Files: plan.Planned}, time.Now())
+	if recordErr := recordEnterpriseForeignHookRemovals(os.Stderr, account, target.UserHome, name, removedForeignHookPaths(result)); recordErr != nil {
+		uncertain, err = true, errors.Join(err, recordErr)
+	}
+	if finishErr := finishEnterpriseForeignHookCleanup(os.Stderr, pending, uncertain); finishErr != nil {
+		err = errors.Join(err, fmt.Errorf("settle the foreign-hook cleanup denial: %w", finishErr))
+	}
+	return result, err
 }
 
 // enterpriseForeignHookRunAsTarget runs fn as the user. Replaceable in tests
@@ -65,22 +88,26 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 var enterpriseForeignHookRunAsTarget = enterprisehooks.RunAsTarget
 
 // cleanEnterpriseForeignHooksAsTarget cleans request's user config as
-// target: the default locations and every location an environment variable
-// moves it to.
-func cleanEnterpriseForeignHooksAsTarget(target enterprisehooks.TargetCredentials, request enterprisepolicy.GuardRequest, now time.Time) (enterprisepolicy.CleanupResult, error) {
-	var result enterprisepolicy.CleanupResult
-	err := enterpriseForeignHookRunAsTarget(target, func() error {
+// target, within scope: the default locations and every location an
+// environment variable moves it to. uncertain says the cleanup may have
+// changed files its result does not list: an edit failed, or the cleanup
+// did not finish.
+func cleanEnterpriseForeignHooksAsTarget(target enterprisehooks.TargetCredentials, request enterprisepolicy.GuardRequest, scope enterprisepolicy.CleanupScope, now time.Time) (result enterprisepolicy.CleanupResult, uncertain bool, err error) {
+	started, finished := false, false
+	var cleanErr error
+	err = enterpriseForeignHookRunAsTarget(target, func() error {
 		// The guardian has no user environment: the user's hooks recorded
 		// the config locations their agents' environment redirects to, and
 		// on Windows the user's persistent environment names more.
 		redirects, redirectErr := enterprisepolicy.LoadEnvRedirects(target.UserHome, request.Connector)
 		userEnv, userEnvErr := enterpriseForeignHookUserEnvRedirects(target, request)
 		redirects = append(redirects, userEnv...)
-		var cleanErr error
-		result, cleanErr = enterprisepolicy.CleanUserForeignHooksWithRedirects(request, redirects, now)
+		started = true
+		result, cleanErr = enterprisepolicy.CleanUserForeignHooksWithRedirects(request, redirects, scope, now)
+		finished = true
 		return errors.Join(cleanErr, redirectErr, userEnvErr)
 	})
-	return result, err
+	return result, started && (!finished || cleanErr != nil), err
 }
 
 // enterpriseForeignHookCollectBlocks takes the foreign-hook blocks one
@@ -154,7 +181,6 @@ func reconcileEnterpriseForeignHooks(opts enterprisehooks.InstallOptions) {
 		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise foreign-hook guard: removed %s %s hook from %s (sha256:%s); backup in %s\n",
 			finding.Connector, dashIfEmpty(finding.Event), finding.Path, finding.Digest, result.BackupDir)
 	}
-	recordEnterpriseForeignHookRemovals(os.Stderr, enterpriseForeignHookAccountID(opts.OwnerSID, opts.OwnerUID), opts.UserHome, opts.ConnectorName, removedForeignHookPaths(result))
 	for _, finding := range result.Reported {
 		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise foreign-hook guard: %s hook in %s left in place (%s)\n", finding.Connector, finding.Path, finding.Reason)
 	}

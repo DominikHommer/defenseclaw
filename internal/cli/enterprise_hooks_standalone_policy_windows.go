@@ -392,6 +392,7 @@ func enterpriseHookWindowsEligibleProfilesFor(ctx context.Context, current *conf
 // the user and is best effort: the hook-side guard still denies tool calls
 // while an unapproved hook remains.
 func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Writer, rows []enterpriseHookReconcileRow, now time.Time) {
+	reconcileEnterpriseForeignHookCleanups(stderr)
 	_, connectors, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone || err != nil || len(connectors) == 0 {
 		return
@@ -478,7 +479,6 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: removed %s %s hook from %s (sha256:%s); backup in %s\n",
 					finding.Connector, dashIfEmpty(finding.Event), finding.Path, finding.Digest, result.BackupDir)
 			}
-			recordEnterpriseForeignHookRemovals(stderr, current.creds.SID, current.creds.UserHome, name, removedForeignHookPaths(result))
 			if err != nil {
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s %s: %v\n", name, current.creds.UserHome, err)
 			}
