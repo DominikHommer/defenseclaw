@@ -8,8 +8,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -33,6 +37,77 @@ func newHookCorrelationServer(t *testing.T, path string) (*APIServer, *audit.Sto
 		t.Fatal(err)
 	}
 	return &APIServer{store: store}, store
+}
+
+// A hook flood reuses a session but gives every tool call its own provider
+// invocation ID. Every call must receive a decision with its own correlation.
+func TestClaudeHookFloodKeepsPendingOperationsDistinct(t *testing.T) {
+	installCorrelationHMACForTest()
+	installDefaultProfileConnector(t, "claudecode")
+	fixture := newSidecarRuntimeFixture(t, true)
+	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := audit.NewLogger(fixture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints})
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	server := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
+	bindHookLifecycleV8(t, server, fixture.runtime)
+	cwd := t.TempDir()
+	var wg sync.WaitGroup
+	errors := make(chan error, 96)
+	start := time.Now()
+	for i := range 96 {
+		if wait := time.Until(start.Add(time.Duration(i) * time.Second / 10)); wait > 0 {
+			time.Sleep(wait)
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			payload := map[string]interface{}{
+				"hook_event_name": "PreToolUse", "session_id": "flood-session",
+				"transcript_path": filepath.Join(cwd, "transcript.jsonl"), "cwd": cwd,
+				"tool_name":   "Bash",
+				"tool_use_id": fmt.Sprintf("toolu_01%022d", i),
+				"tool_input":  map[string]interface{}{"command": "echo ok"},
+			}
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				errors <- err
+				return
+			}
+			recorder := httptest.NewRecorder()
+			server.handleAgentHook("claudecode").ServeHTTP(recorder,
+				httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(raw)))
+			var answer struct {
+				Action string `json:"action"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil || answer.Action != "allow" {
+				errors <- fmt.Errorf("call %d: status=%d answer=%s err=%v", i, recorder.Code, recorder.Body.String(), err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		t.Error(err)
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close() //nolint:errcheck
+	var operations, distinctIDs int
+	if err := database.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT operation_id)
+		FROM correlation_pending_operations`).Scan(&operations, &distinctIDs); err != nil {
+		t.Fatal(err)
+	}
+	if operations != 96 || distinctIDs != 96 {
+		t.Fatalf("pending operations=%d distinct IDs=%d, want 96 each", operations, distinctIDs)
+	}
 }
 
 func installCorrelationHMACForTest() {

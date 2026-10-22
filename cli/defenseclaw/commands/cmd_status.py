@@ -495,7 +495,7 @@ def status(app: AppContext, as_json: bool) -> None:
             "Sidecar",
             ux._style("not checked while config.yaml is invalid; run defenseclaw config validate", fg="yellow"),
         )
-        _print_agents(cfg, sidecar_down=True)
+        _print_agents(cfg, sidecar_down=True, sidecar_unchecked=True)
     elif health is not None:
         from defenseclaw.commands.cmd_doctor import _gateway_runs_replaced_binary
 
@@ -775,6 +775,7 @@ def _print_agents(
     sidecar_down: bool = False,
     sidecar_hung: bool = False,
     sidecar_unread: bool = False,
+    sidecar_unchecked: bool = False,
 ) -> None:
     """Render the "Agents" roster as one section, for ANY connector count.
 
@@ -874,10 +875,16 @@ def _print_agents(
     if sidecar_unread and enabled_count:
         # The gateway answers hooks; only this command cannot read its state.
         header = ux._style(f"{enabled_count} configured; live hook state not readable by this account", fg="yellow")
+    if sidecar_unchecked and enabled_count:
+        # Invalid local config prevented a runtime check. It says nothing
+        # about whether the gateway currently answers hook requests.
+        header = ux._style(
+            f"{enabled_count} configured; live hook state not checked while config.yaml is invalid", fg="yellow"
+        )
     _status_row("Agents", header)
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
-    if sidecar_down and enabled_count and not sidecar_unread:
+    if sidecar_down and enabled_count and not sidecar_unread and not sidecar_unchecked:
         _echo_wrapped(
             " " * 16
             + ux.dim(
