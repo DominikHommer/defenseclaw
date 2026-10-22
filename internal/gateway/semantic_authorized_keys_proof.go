@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -26,7 +27,11 @@ import (
 // action and its fallback handling unchanged.
 
 var (
-	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`(?s)\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];.*\bp\.write_text\(`)
+	trustedPathlibAuthorizedKeysAssign   = regexp.MustCompile(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];`)
+	trustedPathlibWriteText              = regexp.MustCompile(`\bp\.write_text\s*\(`)
+	trustedPathlibReassign               = regexp.MustCompile(`\bp\s*=([^=])`)
+	trustedPythonOtherPath               = regexp.MustCompile(`^(?:(?:pathlib\.)?Path\s*\(\s*(?:"([^"\\\n]*)"|'([^'\\\n]*)')\s*\)|"([^"\\\n]*)"|'([^'\\\n]*)')$`)
+	trustedPythonSimpleChdir             = regexp.MustCompile(`^os\.chdir\s*\(\s*(?:Path\.home\(\)\s*/\s*['"]\.ssh['"]|['"][^'"\\]*['"])\s*\)$`)
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
@@ -156,32 +161,256 @@ func trustedGitBashAuthorizedKeysWrite(input actionfacts.Input) bool {
 	return parsed.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(parsed)
 }
 
-func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
+// trustedInlineAuthorizedKeysWrite proves the write of one inline
+// interpreter program (python -c, perl/ruby/node -e). pythonDir is the
+// directory python -c imports from first when the gateway can look at it
+// (trustedPythonImportDir), or "".
+func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts, pythonDir string) bool {
 	if len(facts.Commands) != 1 {
 		return false
 	}
 	command := facts.Commands[0]
-	if command.Effect != actionfacts.EffectExecute || !command.ArgvComplete ||
+	if command.Effect != actionfacts.EffectExecute ||
 		command.ParentCommandID != 0 || len(command.Argv) != 3 ||
 		len(command.Redirects) != 0 || len(command.Wrappers) != 0 {
 		return false
 	}
 	switch command.Program {
 	case "python", "python3":
-		return command.Argv[1] == "-c" && facts.ActiveHome != "" &&
-			(trustedPathlibAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedPythonPathAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome))
+		importPathOverride, shellArgvProven := trustedPythonImportPathOverride(input, command.Argv)
+		if command.Argv[1] != "-c" || facts.ActiveHome == "" ||
+			(!command.ArgvComplete && !shellArgvProven) {
+			return false
+		}
+		text, calls := trustedPythonExecutedViews(command.Argv[2], pythonDir, importPathOverride)
+		return trustedPathlibAuthorizedKeysWrite(text, calls, facts.ActiveHome, facts.CWD) ||
+			trustedPythonPathExpandWrite(text, calls) ||
+			trustedInterpreterAuthorizedKeysWrite(text, facts.ActiveHome, "python")
 	case "perl":
-		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
+		return command.ArgvComplete && command.Argv[1] == "-e" && facts.ActiveHome != "" &&
 			(trustedPerlAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome))
+				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, "perl"))
 	case "ruby", "node":
-		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
-			trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome)
+		return command.ArgvComplete && command.Argv[1] == "-e" && facts.ActiveHome != "" &&
+			trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, command.Program)
 	default:
 		return false
 	}
+}
+
+// trustedPythonExecutedViews returns two views of Python -c code, both with
+// the offsets of code. text has its comments and inert triple-quoted strings
+// blanked (a docstring that spells a write executes nothing, GAP-1199): a
+// path operand is read there. calls has the text of every string blanked,
+// f-string fields kept (guardrail.MaskPythonStrings): a write call must start
+// there, since a call spelled in a string or in the literal text of an
+// f-string is data. When the code that runs may turn a string into code or
+// read one (guardrail.PythonStringsMayRun: exec, a child process, a file it
+// writes, its docstrings, an import of a module that may be a file of the
+// working directory, ...), both views are the code whole, so such a string
+// still proves its write. So does every program when its working directory
+// is not known or may hold a module: the interpreter imports on its own.
+func trustedPythonExecutedViews(code, dir string, importPathOverride bool) (text, calls string) {
+	calls = guardrail.MaskPythonStrings(code)
+	if importPathOverride || guardrail.PythonStringsMayRun(calls, dir) {
+		return code, code
+	}
+	return guardrail.MaskPythonCommentsAndDocstrings(code), calls
+}
+
+// trustedPythonImportDir is the directory python -c imports from first, the
+// command's working directory, when the gateway sees the filesystem the
+// command runs in (as literalStdinFilesOf requires): not a sandbox, and an
+// absolute directory. Otherwise it is "" and every import that may load a
+// module from it keeps the program's strings.
+func trustedPythonImportDir(request trustedActionRequest, facts actionfacts.Facts) string {
+	if request.SkipLocalFilesystemResolution || request.SandboxGuestCWD != "" || !filepath.IsAbs(facts.CWD) {
+		return ""
+	}
+	return facts.CWD
+}
+
+// trustedPythonImportPathOverride checks the shell assignment syntax of the
+// one Python invocation. A per-call PYTHONPATH or PYTHONHOME can load a module
+// outside the inspected cwd, so inert-looking string text remains unproven.
+// A sole such assignment makes ActionFacts leave ArgvComplete false; the AST
+// can still prove the exact three arguments used by the Python call.
+func trustedPythonImportPathOverride(input actionfacts.Input, argv []string) (override, argvProven bool) {
+	command, ok := trustedBashCommandInput(input)
+	if !ok || len(command) > 64<<10 {
+		return true, false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
+	if err != nil || len(file.Stmts) != 1 {
+		return true, false
+	}
+	stmt := file.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok {
+		return true, false
+	}
+	for _, assignment := range call.Assigns {
+		if assignment.Name == nil {
+			return true, false
+		}
+		switch assignment.Name.Value {
+		case "PYTHONPATH", "PYTHONHOME":
+			override = true
+		default:
+			return true, false
+		}
+	}
+	if !override || stmt.Negated || stmt.Background || len(stmt.Redirs) != 0 ||
+		len(call.Args) != len(argv) {
+		return override, false
+	}
+	fields, ok := trustedBashStaticFields(call)
+	return override, ok && slices.Equal(fields, argv)
+}
+
+// trustedPythonCodeAt reports whether text[i] is code in calls.
+func trustedPythonCodeAt(text, calls string, i int) bool {
+	return i >= 0 && i < len(text) && len(calls) == len(text) && calls[i] == text[i]
+}
+
+// trustedPathlibAuthorizedKeysWrite proves p = Path.home() / ".ssh" /
+// "authorized_keys"; ... p.write_text(...) unless p is bound to another path
+// before the write (trustedPathlibRebound, GAP-1299). Both start in code
+// (calls).
+func trustedPathlibAuthorizedKeysWrite(text, calls, home, cwd string) bool {
+	if len(calls) != len(text) {
+		return false
+	}
+	for _, assign := range trustedPathlibAuthorizedKeysAssign.FindAllStringIndex(text, -1) {
+		if !trustedPythonCodeAt(text, calls, assign[0]) {
+			continue
+		}
+		write := trustedPathlibWriteText.FindStringIndex(calls[assign[1]:])
+		if write != nil && !trustedPathlibRebound(text, assign[0], assign[1], assign[1]+write[0], home, cwd) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedPathlibRebound reports whether text[from:to] binds p, in code, to a
+// literal path that is not a keys file: p = Path("notes.txt"), p =
+// pathlib.Path('notes.txt') or p = "notes.txt" as an unconditional statement
+// of its own. A binding spelled in a string or f"{p=}", a binding that may
+// not run, or any other value (p = p, p = q, the keys file again, a loop or
+// with target) may leave p the keys file, so the proof stands (fail closed).
+// So does a literal that resolves to the keys file through a link or hard
+// link (trustedOrdinaryPathReassignment, G-hooks-wp), a literal that other
+// code could redirect (anything but the known imports, or a simple chdir for
+// an absolute literal, before the keys assignment, between it and the
+// rebinding, or between the rebinding and the write:
+// trustedPythonPathStablePrefix), and source whose strings the masker
+// cannot follow.
+func trustedPathlibRebound(text string, assignStart, from, to int, home, cwd string) bool {
+	code := guardrail.MaskPythonStrings(text)
+	if len(code) != len(text) || code == text && strings.ContainsAny(text, "'\"#") {
+		return false
+	}
+	for _, hit := range trustedPathlibReassign.FindAllStringSubmatchIndex(code[from:to], -1) {
+		start := from + hit[2]
+		// An unconditional statement of its own: at column 0 or after a ";" of
+		// a simple statement at column 0, not after a backslash continuation.
+		// An attribute (x.p = ...), a chained target, an indented or
+		// compound-statement binding (if x: p = ...) may leave p bound.
+		line := strings.LastIndexByte(code[:from+hit[0]], '\n') + 1
+		prefix := code[line : from+hit[0]]
+		statement := strings.TrimRight(prefix, " \t")
+		if line >= 2 && code[line-2] == '\\' || strings.HasPrefix(prefix, " ") || strings.HasPrefix(prefix, "\t") ||
+			statement != "" && !strings.HasSuffix(statement, ";") || strings.Contains(prefix, ":") {
+			continue
+		}
+		end := to
+		if i := strings.IndexAny(code[start:to], ";\n"); i >= 0 {
+			end = start + i
+		}
+		literal := trustedPythonOtherPath.FindStringSubmatch(strings.TrimSpace(text[start:end]))
+		if literal == nil {
+			continue
+		}
+		// The literal must also name an ordinary file: a link or hard link
+		// to the keys file still writes it (G-hooks-wp).
+		name := strings.Join(literal[1:], "")
+		if strings.Contains(strings.ToLower(name), "authorized_keys") || !trustedOrdinaryPathReassignment(name, home, cwd) {
+			continue
+		}
+		// A relative literal resolves when write_text runs, and any path
+		// can be redirected in process: every other statement up to the
+		// write must be one that changes neither (G-hooks-wp).
+		other := text[:assignStart] + ";" + text[from:from+hit[0]] + ";" + text[end:to]
+		if trustedPythonPathStablePrefix(strings.ReplaceAll(other, "\n", ";"), filepath.IsAbs(name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedPythonPathExpandWrite proves
+// Path("~/.ssh/authorized_keys").expanduser().write_text(...) in code.
+func trustedPythonPathExpandWrite(text, calls string) bool {
+	for _, hit := range trustedPythonPathAuthorizedKeysWrite.FindAllStringIndex(text, -1) {
+		if trustedPythonCodeAt(text, calls, hit[0]) {
+			return true
+		}
+	}
+	return false
+}
+
+// A relative Path is resolved when write_text runs, and any Path can be
+// redirected by an in-process link or rename. Only imports may precede this
+// narrow waiver. A simple chdir is also safe for an absolute reassignment.
+func trustedPythonPathStablePrefix(prefix string, absolute bool) bool {
+	for _, statement := range strings.Split(prefix, ";") {
+		statement = strings.TrimSpace(statement)
+		if statement == "" {
+			continue
+		}
+		switch statement {
+		case "from pathlib import Path", "import pathlib", "import os", "from os import path":
+		default:
+			if !absolute || !trustedPythonSimpleChdir.MatchString(statement) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func trustedOrdinaryPathReassignment(name, home, cwd string) bool {
+	if name == "" || strings.ContainsAny(name, "\x00\r\n$`*?[") {
+		return false
+	}
+	if !filepath.IsAbs(name) {
+		if !filepath.IsAbs(cwd) {
+			return false
+		}
+		name = filepath.Join(cwd, name)
+	}
+	resolved, ok := hookpaths.ResolveWriteTarget(name)
+	if !ok {
+		return false
+	}
+	entry, entryErr := os.Stat(resolved)
+	if entryErr != nil && !os.IsNotExist(entryErr) {
+		return false
+	}
+	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
+		if canonicalSemanticPath(resolved) == canonicalSemanticPath(protected) {
+			return false
+		}
+		guarded, err := os.Stat(protected)
+		if err != nil && !os.IsNotExist(err) {
+			return false
+		}
+		if entryErr == nil && err == nil && os.SameFile(entry, guarded) {
+			return false
+		}
+	}
+	return true
 }
 
 // A static shell redirect writes its target independently of the program's
@@ -385,13 +614,13 @@ func trustedAuthorizedKeysRedirectText(input actionfacts.Input, target string) b
 		homeResolvedTwinProves(inner, parsed, sshAuthorizedKeysCommandPrerequisite)
 }
 
-func trustedInterpreterAuthorizedKeysWrite(code, activeHome string) bool {
+func trustedInterpreterAuthorizedKeysWrite(code, activeHome, language string) bool {
 	if len(code) == 0 || len(code) > 16<<10 ||
 		!trustedAuthorizedKeysPathInText(code, activeHome) {
 		return false
 	}
 	for _, location := range trustedInterpreterOpenCall.FindAllStringIndex(code, -1) {
-		if !interpreterCodePosition(code, location[0]) {
+		if !interpreterCodePosition(code, location[0], language) {
 			continue
 		}
 		call, ok := boundedInterpreterCall(code, location[1]-1)
@@ -409,7 +638,7 @@ func trustedInterpreterAuthorizedKeysWrite(code, activeHome string) bool {
 		}
 	}
 	for _, location := range trustedInterpreterWriteCall.FindAllStringIndex(code, -1) {
-		if !interpreterCodePosition(code, location[0]) {
+		if !interpreterCodePosition(code, location[0], language) {
 			continue
 		}
 		if call, ok := boundedInterpreterCall(code, location[1]-1); ok {
@@ -461,10 +690,18 @@ func interpreterCallArgs(call string) []string {
 	return append(args, strings.TrimSpace(call[start:len(call)-1]))
 }
 
-func interpreterCodePosition(code string, position int) bool {
+func interpreterCodePosition(code string, position int, language string) bool {
 	var quote byte
+	comment := false
+	perlHashDelimiters := 0
 	for i := 0; i < position; i++ {
 		c := code[i]
+		if comment {
+			if c == '\n' {
+				comment = false
+			}
+			continue
+		}
 		if quote != 0 {
 			switch c {
 			case '\\':
@@ -474,9 +711,32 @@ func interpreterCodePosition(code string, position int) bool {
 			}
 		} else if c == '\'' || c == '"' {
 			quote = c
+		} else if c == '#' {
+			if language == "perl" && perlHashDelimiters > 0 {
+				perlHashDelimiters--
+			} else if language == "perl" && interpreterPerlHashRegexpStart(code, i) > 0 {
+				perlHashDelimiters = interpreterPerlHashRegexpStart(code, i)
+			} else if interpreterCommentStart(code, i, language) {
+				comment = true
+			}
 		}
 	}
-	return quote == 0
+	return quote == 0 && !comment
+}
+
+func interpreterPerlHashRegexpStart(code string, i int) int {
+	for _, operator := range []string{"s", "m", "qr", "tr", "y"} {
+		start := i - len(operator)
+		if start < 0 || code[start:i] != operator ||
+			start > 0 && !strings.ContainsRune(" \t\n;=~(", rune(code[start-1])) {
+			continue
+		}
+		if operator == "m" || operator == "qr" {
+			return 1
+		}
+		return 2
+	}
+	return 0
 }
 
 func trustedAuthorizedKeysPathInText(text, activeHome string) bool {
@@ -604,7 +864,39 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	if err != nil {
 		return false
 	}
+	var boundWord *syntax.Word
+	boundValue := ""
+	if len(file.Stmts) == 2 {
+		assignment, assignmentOK := file.Stmts[0].Cmd.(*syntax.CallExpr)
+		second := file.Stmts[1]
+		if binary, ok := second.Cmd.(*syntax.BinaryCmd); ok && binary.Op == syntax.AndStmt {
+			second = binary.X
+		}
+		child, childOK := second.Cmd.(*syntax.CallExpr)
+		if assignmentOK && childOK && len(assignment.Args) == 0 && len(assignment.Assigns) == 1 &&
+			len(file.Stmts[0].Redirs) == 0 && len(child.Args) > 0 {
+			item := assignment.Assigns[0]
+			if item.Name != nil && item.Value != nil {
+				if value, static := hookpaths.StaticWord(item.Value, input.ActiveHome); static && value == "ln" {
+					candidate := child.Args[0]
+					start, end := int(candidate.Pos().Offset()), int(candidate.End().Offset())
+					if start >= 0 && end <= len(input.Command) && end > start {
+						for _, spelling := range []string{"$" + item.Name.Value, "${" + item.Name.Value + "}",
+							`"$` + item.Name.Value + `"`, `"${` + item.Name.Value + `}"`} {
+							if input.Command[start:end] == spelling {
+								boundWord, boundValue = candidate, value
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	word := func(value *syntax.Word) string {
+		if value == boundWord {
+			return boundValue
+		}
 		text, ok := hookpaths.StaticWord(value, input.ActiveHome)
 		if !ok {
 			return ""
@@ -626,6 +918,9 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if found {
+			return false
+		}
+		if _, declaration := node.(*syntax.FuncDecl); declaration {
 			return false
 		}
 		stmt, ok := node.(*syntax.Stmt)
@@ -722,6 +1017,9 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
 	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {
 		return false
+	}
+	if hookpaths.UnprovenWriteTitle(request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]) != "" {
+		return true
 	}
 	// One list for the path, hard-link and missing-final-file checks, the
 	// same files the direct-write rule protects (GAP-1370).
@@ -942,6 +1240,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
+	if hookpaths.UnprovenProtectedWrite(input.Command, input.CWD, facts.ActiveHome) != "" {
+		return true
+	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
 		return true
 	}
@@ -984,6 +1285,18 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
+		boundedOperands, boundedPattern := hookpaths.BoundedShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		if boundedPattern {
+			// Bash expands the bound redirect as a pathname pattern at run
+			// time, which may select a link to the protected file. The opened
+			// file is unknown, so fail closed.
+			return true
+		}
+		for _, operand := range boundedOperands {
+			if writeTarget(operand, false, false) {
+				return true
+			}
+		}
 		for _, operand := range hookpaths.QuotedDynamicCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
 			if writeTarget(operand, false, true) {
 				return true
@@ -1001,42 +1314,58 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 		}
 	}
-	for _, candidate := range facts.Paths {
-		if candidate.Access != actionfacts.PathAccessWrite &&
-			candidate.Access != actionfacts.PathAccessAppend {
-			continue
-		}
-		command, ok := integrityCommandByID(facts, candidate.CommandID)
-		if !ok || !integrityCommandMutatesPath(command, candidate) ||
-			((!(integrityExplicitCommandMutator(command, candidate)) && (command.Program != "dd" || !(command.ArgvComplete))) && !(integrityStructuredFileMutator(facts, command))) {
-			continue
-		}
-		target := candidate.Resolved
-		// A POSIX shell running on Windows can leave a relative path
-		// unresolved because ActionFacts does not reinterpret the Windows CWD
-		// as a POSIX root. The owned, literal redirect still names a local
-		// file relative to that CWD.
-		if target == "" && command.Dialect == actionfacts.DialectPOSIX &&
-			candidate.Flavor == actionfacts.PathFlavorPOSIX &&
-			candidate.Normalized != "" && !isAbsoluteSemanticPath(candidate.Normalized) &&
-			!strings.ContainsAny(candidate.Value, "*?[]$`\\") &&
-			!strings.HasPrefix(candidate.Value, "~") &&
-			integrityCommandOwnsStaticRedirect(command, candidate) {
-			target = filepath.Join(facts.CWD, filepath.FromSlash(candidate.Normalized))
-		}
-		if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
-			target = raw
-		}
-		ownCopy := (command.Program == "cp" || command.Program == "gcp") &&
-			target == hookpaths.CopyDestination(command.Argv, clientCWD)
-		if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
-			continue
-		}
-		if replacedBySed[target] && !isProtected(target) {
-			continue
-		}
-		if writeTarget(target, false, ownCopy) {
-			return true
+	// A native write call with a key outside its reviewed schema stays
+	// partial and names no path; the harness still writes the file its
+	// target key names (actionfacts.UnknownKeyWriteTargetViews), which the
+	// hook's write evidence lists, so each such target is judged as well.
+	views := append([]actionfacts.Facts{facts}, actionfacts.UnknownKeyWriteTargetViews(request.Input, facts)...)
+	for _, view := range views {
+		for _, candidate := range view.Paths {
+			if candidate.Access != actionfacts.PathAccessWrite &&
+				candidate.Access != actionfacts.PathAccessAppend {
+				continue
+			}
+			command, ok := integrityCommandByID(view, candidate.CommandID)
+			if !ok || !integrityCommandMutatesPath(command, candidate) ||
+				((!(integrityExplicitCommandMutator(command, candidate)) && (command.Program != "dd" || !(command.ArgvComplete))) && !(integrityStructuredFileMutator(view, command))) {
+				continue
+			}
+			target := candidate.Resolved
+			// A POSIX shell running on Windows can leave a relative path
+			// unresolved because ActionFacts does not reinterpret the Windows CWD
+			// as a POSIX root. The owned, literal redirect still names a local
+			// file relative to that CWD.
+			if target == "" && command.Dialect == actionfacts.DialectPOSIX &&
+				candidate.Flavor == actionfacts.PathFlavorPOSIX &&
+				candidate.Normalized != "" && !isAbsoluteSemanticPath(candidate.Normalized) &&
+				!strings.ContainsAny(candidate.Value, "*?[]$`\\") &&
+				!strings.HasPrefix(candidate.Value, "~") &&
+				integrityCommandOwnsStaticRedirect(command, candidate) {
+				target = filepath.Join(view.CWD, filepath.FromSlash(candidate.Normalized))
+			}
+			// A structured write names its target from the event cwd. A
+			// gateway that could not validate that cwd (ProtectHome) has no
+			// resolved path for a relative target: place it in the client's
+			// cwd, as the hook keyed it (hookpaths.ResolveConnector), or the
+			// write through a link there was never judged.
+			if target == "" && candidate.Normalized != "" && integrityStructuredFileMutator(view, command) &&
+				!strings.ContainsAny(candidate.Normalized, "*?[]$`") && !strings.HasPrefix(candidate.Normalized, "~") {
+				target = candidate.Normalized
+			}
+			if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
+				target = raw
+			}
+			ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
+				target == hookpaths.CopyDestination(command.Argv, clientCWD)
+			if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
+				continue
+			}
+			if replacedBySed[target] && !isProtected(target) {
+				continue
+			}
+			if writeTarget(target, false, ownCopy) {
+				return true
+			}
 		}
 	}
 	// An apply_patch edit (its own tool or a shell wrapper) names its files
@@ -1475,4 +1804,15 @@ func trustedNestedAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts
 		}
 	}
 	return false
+}
+
+func interpreterCommentStart(code string, i int, language string) bool {
+	switch language {
+	case "python", "ruby":
+		return true
+	case "perl":
+		return i == 0 || code[i-1] != '$'
+	default:
+		return false
+	}
 }

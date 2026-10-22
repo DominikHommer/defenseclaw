@@ -84,6 +84,7 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 		{"case form", "apply_patch", command(envelope(update(strings.ToUpper(keys)))), "", true},
 		{"benign patch", "apply_patch", command(envelope(update("notes.txt"))), "", false},
 		{"benign unquoted heredoc", "Bash", command("apply_patch <<PATCH\n" + envelope(update("notes.txt")) + "\nPATCH"), "", false},
+		{"benign unquoted heredoc literal escape", "Bash", command("apply_patch <<PATCH\n" + envelope(update("notes.txt")+`+printf("a\n");`+"\n") + "\nPATCH"), "", false},
 		{"benign heredoc", "Bash", command("apply_patch <<'PATCH'\n" + envelope(update("notes.txt")) + "\nPATCH"), "", false},
 		{"benign search", "Bash", command(`grep -rn "*** Begin Patch" .`), "", false},
 	} {

@@ -115,9 +115,8 @@ func TestConfigValidateMissingFileIsNotFound(t *testing.T) {
 		out := &strings.Builder{}
 		configValidateCmd.SetOut(out)
 		err := configValidateCmd.RunE(configValidateCmd, []string{missing})
-		if err == nil || !strings.Contains(err.Error(), "cannot read "+missing) ||
-			!strings.Contains(err.Error(), "[config_not_found]") || !strings.Contains(err.Error(), "check the path") ||
-			strings.Contains(err.Error(), "compiled safely") {
+		if err == nil || !strings.Contains(err.Error(), "cannot read "+missing+": no file exists at this path") ||
+			!strings.Contains(err.Error(), "check the path") || strings.Contains(err.Error(), "compiled safely") {
 			t.Fatalf("config validate %s (json %v) = %v, want a not-found error naming the path", missing, asJSON, err)
 		}
 		if asJSON && !strings.Contains(out.String(), "[config_not_found]") {

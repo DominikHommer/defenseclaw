@@ -25,7 +25,8 @@ func OpaqueCMDWrapperArgvReduction(input Input, facts Facts) (Facts, bool) {
 			commandText = extracted.command
 		}
 	}
-	if callOperatorCMD(commandText, facts) && len(input.Argv) == 0 {
+	callOperator := callOperatorCMD(commandText, facts) && len(input.Argv) == 0
+	if callOperator {
 		trimmed := strings.TrimLeftFunc(commandText, unicode.IsSpace)
 		input.Command = strings.TrimLeftFunc(trimmed[1:], unicode.IsSpace)
 		// The tool may have supplied its working directory inside Args.
@@ -37,43 +38,101 @@ func OpaqueCMDWrapperArgvReduction(input Input, facts Facts) (Facts, bool) {
 	}
 	if facts.Parse.Status != StatusPartial || facts.Parse.Dialect != DialectPowerShell ||
 		len(facts.Parse.Issues) != 1 || facts.Parse.Issues[0] != IssueUnsupportedConstruct ||
-		len(facts.Commands) != 1 {
+		len(facts.Commands) == 0 || callOperator && len(facts.Commands) != 1 {
 		return Facts{}, false
 	}
-	command := facts.Commands[0]
-	if command.ParentCommandID != 0 || command.Program != "cmd" ||
-		(command.Executable != "cmd" && command.Executable != "cmd.exe") ||
-		command.Dialect != DialectPowerShell || command.Background || command.ControlFlowUncertain ||
-		!command.ArgvComplete || len(command.Argv) < 3 || len(command.Arguments) != len(command.Argv) {
-		return Facts{}, false
-	}
-	commandSwitch := 1
-	for commandSwitch < len(command.Argv) && staticCMDOption(command.Argv[commandSwitch]) {
-		commandSwitch++
-	}
-	if commandSwitch+1 >= len(command.Argv) || !strings.EqualFold(command.Argv[commandSwitch], "/c") {
-		return Facts{}, false
-	}
-	// A sole quoted /c body already has a complete argument boundary. The
-	// ordinary wrapper analysis handles it, as before this reduction.
-	if commandSwitch+2 == len(command.Argv) && command.Arguments[commandSwitch+1].Quote != QuoteNone {
-		return Facts{}, false
-	}
-	for _, argument := range command.Arguments {
-		if argument.Expands || argument.StaticGlob != "" {
+	// A PowerShell list (cmd.exe /c ... && type out.txt) keeps every command
+	// of the list. Each must have a complete static argv, and each cmd.exe in
+	// it must be a wrapper this reduction accepts.
+	commands := make([]CommandFact, 0, len(facts.Commands))
+	wrapped := false
+	for _, command := range facts.Commands {
+		if command.ParentCommandID != 0 || command.Dialect != DialectPowerShell || command.Background ||
+			command.ControlFlowUncertain || !command.ArgvComplete || len(command.Argv) == 0 ||
+			len(command.Arguments) != len(command.Argv) {
 			return Facts{}, false
 		}
+		for _, argument := range command.Arguments {
+			if argument.Expands || argument.StaticGlob != "" {
+				return Facts{}, false
+			}
+		}
+		if command.Program != "cmd" {
+			commands = append(commands, command)
+			continue
+		}
+		if !opaqueCMDWrapper(command, len(facts.Commands) == 1) {
+			return Facts{}, false
+		}
+		// Only the outer process and its argv are certain. Derived
+		// operations, redirects and paths, and everything cmd.exe or AutoRun
+		// may run, are omitted.
+		command.Operations = nil
+		command.Redirects = nil
+		command.Wrappers = nil
+		commands = append(commands, command)
+		wrapped = true
 	}
-	// Only the outer process and its argv are certain. Derived operations,
-	// redirects and paths, and everything cmd.exe or AutoRun may run, are omitted.
-	command.Operations = nil
-	command.Redirects = nil
-	command.Wrappers = nil
+	if !wrapped {
+		return Facts{}, false
+	}
 	return Facts{
 		Tool: facts.Tool, CWD: facts.CWD, ActiveHome: facts.ActiveHome,
 		Parse:    ParseResult{Status: StatusComplete, Dialect: DialectPowerShell},
-		Commands: []CommandFact{command},
+		Commands: commands,
 	}, true
+}
+
+// opaqueCMDWrapper reports a cmd.exe call whose argv is static options, then
+// /c or /r (its synonym), then an unquoted body: cmd.exe /c echo x > out.txt,
+// cmd.exe /d/c ..., cmd.exe /r .... alone is set for the only command of the
+// action: a sole quoted body there already has a complete argument boundary
+// and the ordinary wrapper analysis handles it.
+func opaqueCMDWrapper(command CommandFact, alone bool) bool {
+	if command.Executable != "cmd" && command.Executable != "cmd.exe" || len(command.Argv) < 3 {
+		return false
+	}
+	commandSwitch := 1
+	for commandSwitch < len(command.Argv) {
+		options, run := cmdSwitches(command.Argv[commandSwitch])
+		if !options {
+			return false
+		}
+		commandSwitch++
+		if run {
+			break
+		}
+		if commandSwitch == len(command.Argv) {
+			return false
+		}
+	}
+	if commandSwitch >= len(command.Argv) {
+		return false
+	}
+	return !alone || commandSwitch+1 != len(command.Argv) || command.Arguments[commandSwitch].Quote == QuoteNone
+}
+
+// cmdSwitches reads one cmd.exe argument of switches, which cmd.exe also
+// takes joined (/d/c): ok when every switch is a static option or a final
+// /c or /r, and run when the argument ends with /c or /r.
+func cmdSwitches(value string) (ok, run bool) {
+	if !strings.HasPrefix(value, "/") || len(value) < 2 {
+		return false, false
+	}
+	parts := strings.Split(value[1:], "/")
+	for index, part := range parts {
+		switch strings.ToLower(part) {
+		case "c", "r":
+			if index != len(parts)-1 {
+				return false, false
+			}
+			return true, true
+		}
+		if !staticCMDOption("/" + part) {
+			return false, false
+		}
+	}
+	return true, false
 }
 
 func staticCMDOption(value string) bool {
@@ -112,7 +171,8 @@ func callOperatorCMD(command string, facts Facts) bool {
 		return false
 	}
 	trimmed := strings.TrimLeftFunc(command, unicode.IsSpace)
-	if !strings.HasPrefix(trimmed, "&") || len(trimmed) < 2 || !unicode.IsSpace(rune(trimmed[1])) {
+	// "& cmd.exe" and "&cmd.exe" are the same call; "&&" is not a call.
+	if !strings.HasPrefix(trimmed, "&") || len(trimmed) < 2 || trimmed[1] == '&' {
 		return false
 	}
 	return true

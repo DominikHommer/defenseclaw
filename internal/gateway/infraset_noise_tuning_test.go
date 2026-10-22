@@ -271,6 +271,13 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 	const connector = "home-spelled-authorized-keys"
 	installToolCallCorpusProfileConnector(t, connector, "default")
 	const rule = "persistence.ssh_authorized_keys_command"
+	t.Setenv("PYTHONPATH", "")
+	t.Setenv("PYTHONHOME", "")
+	pythonCWD := t.TempDir()
+	shadowCWD := t.TempDir()
+	if err := os.WriteFile(filepath.Join(shadowCWD, "subprocess.py"), []byte("# local module\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name, command, cwd, home string
 		write                    bool
@@ -303,6 +310,81 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"python open append", `python3 -c "import os; open(os.path.expanduser('~/.ssh/authorized_keys'), 'a').write('dccert-block-marker\n')"`, "", "", true},
 		{"python Path home", `python3 -c "from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p.write_text(p.read_text() + 'dccert-block-marker\n')"`, "", "", true},
 		{"python Path expanduser", `python3 -c "from pathlib import Path; Path('~/.ssh/authorized_keys').expanduser().write_text('dccert-block-marker\n')"`, "", "", true},
+		// A docstring or comment that spells the write runs nothing (GAP-1199);
+		// exec of such a string still writes.
+		{"python docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", false},
+		{"python exec docstring write", `python3 -c 'from pathlib import Path; exec("""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""")'`, "", "", true},
+		// An f-string runs its fields: the write in one is not a docstring.
+		{"python f-string write", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("dccert-block-marker")}"""'`, "", "", true},
+		{"python f-string same quotes write", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{"""a""" + str(p.write_text("dccert-block-marker"))}"""'`, "", "", true},
+		{"python docstring write beside an f-string", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print(f"{1}")'`, "", "", false},
+		// Literal f-string text runs nothing; only its fields do. An ordinary
+		// standard-library import with no local shadow leaves the text inert.
+		{"python f-string literal text write", `python3 -c "p=Path.home()/'.ssh'/'authorized_keys'; f'''p.write_text('sample')'''"`, "", "", false},
+		{"python f-string literal text write beside a pathlib import", `python3 -c "from pathlib import Path; p=Path.home()/'.ssh'/'authorized_keys'; f'''p.write_text('sample')'''"`, "", "", false},
+		{"python f-string text beside a write field", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""note: {p.write_text("dccert-block-marker")}"""'`, "", "", true},
+		// Dynamic-code words in a comment or a docstring run nothing; in code
+		// (an alias, getattr, a child interpreter) they keep the string whole.
+		{"python exec comment beside a docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")  # no exec here'`, "", "", false},
+		{"python exec word in a docstring write", `python3 -c '"""exec this: p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", false},
+		{"python getattr exec docstring write", `python3 -c 'from pathlib import Path; getattr(__builtins__, "ex" + "ec")("""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""")'`, "", "", true},
+		{"python child interpreter docstring write", `python3 -c 'import subprocess; subprocess.run(["python3", "-c", """from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""])'`, "", "", true},
+		// An unused import runs nothing only for a module the interpreter never
+		// loads from the working directory (os, sys, ...): a subprocess.py or
+		// helper.py there runs on import and can exec __main__.__doc__. A string
+		// reached only through a sink (a docstring, a written module, a child)
+		// still counts. A call spelled in a one-line string or f-string text is
+		// data.
+		{"python unused subprocess import beside a docstring write", `python3 -c 'import subprocess; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", false},
+		{"python shadowed subprocess import beside a docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; import subprocess; print("ok")'`, shadowCWD, "", true},
+		{"python import path override beside a docstring write", `PYTHONPATH=` + shadowCWD + ` python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; import subprocess; print("ok")'`, pythonCWD, "", true},
+		{"python unused aliased imports beside a docstring write", `python3 -c 'import subprocess as sp, ctypes; from os import system as run, popen; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", false},
+		{"python unused preloaded imports beside a docstring write", `python3 -c 'from os import system as run, popen; import sys; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", false},
+		{"python shadowable module import after a docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; import helper'`, "", "", true},
+		{"python fullwidth exec of a string write", `python3 -c 'ｅｘｅｃ("""from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""")'`, "", "", true},
+		{"python used json import beside a docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; import json; print(json.dumps(1))'`, "", "", true},
+		{"python used aliased import beside a docstring write", `python3 -c 'import subprocess as sp; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; sp.run(["true"])'`, "", "", true},
+		{"python star import beside a docstring write", `python3 -c 'from subprocess import *; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", true},
+		{"python module docstring exec", `python3 -c '"""from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; exec(__doc__)'`, "", "", true},
+		{"python docstring written to a module and imported", `python3 -c 'open("m.py", "w").write("""from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""); import m'`, "", "", true},
+		{"python posix_spawn child docstring write", `python3 -c 'import os; os.posix_spawn("/usr/bin/python3", ["python3", "-c", """from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""], {})'`, "", "", true},
+		{"python timeit docstring write", `python3 -c 'import timeit; timeit.timeit("""from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""", number=1)'`, "", "", true},
+		{"python one-line f-string text write", `python3 -c 'p = Path.home() / ".ssh" / "authorized_keys"; print(f"p.write_text(42)")'`, "", "", false},
+		{"python one-line f-string text write beside a pathlib import", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; print(f"p.write_text(42)")'`, "", "", false},
+		{"python string text write", `python3 -c 'p = Path.home() / ".ssh" / "authorized_keys"; print("p.write_text(42)")'`, "", "", false},
+		{"python string text write beside a pathlib import", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; print("p.write_text(42)")'`, "", "", false},
+		{"python string in an f-string field write", `python3 -c "p = Path.home() / '.ssh' / 'authorized_keys'; print(f'{\"p.write_text(42)\"}')"`, "", "", false},
+		{"python string in an f-string field write beside a pathlib import", `python3 -c "from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; print(f'{\"p.write_text(42)\"}')"`, "", "", false},
+		{"python one-line f-string field write", `python3 -c "from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; print(f'{p.write_text(\"k\")}')"`, "", "", true},
+		{"python string text expanduser write", `python3 -c "print('Path(\"~/.ssh/authorized_keys\").expanduser().write_text(\"k\")')"`, "", "", false},
+		// Format spec text is literal; a nested field runs. f"{p=}" does not
+		// bind p again.
+		{"python format spec text write", `python3 -c 'p = Path.home() / ".ssh" / "authorized_keys"; print(f"{1:p.write_text(42)}")'`, "", "", false},
+		{"python format spec text write beside a pathlib import", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; print(f"{1:p.write_text(42)}")'`, "", "", false},
+		{"python format spec field write", `python3 -c "from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; print(f'{1:{p.write_text(\"k\")}}')"`, "", "", true},
+		{"python self-documenting field then write", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; print(f"{p=}"); p.write_text("k")'`, "", "", true},
+		// A variable of the program's own whose name holds a sink word reaches
+		// no sink; a builtin, an imported name or a star import still does.
+		{"python ordinary variable beside a docstring write", `python3 -c 'source = 1; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print(source)'`, "", "", false},
+		{"python ordinary names beside a docstring write", `python3 -c 'doc = copy_count = 1; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print(doc, copy_count)'`, "", "", false},
+		{"python local alias of exec docstring write", `python3 -c 'source = exec; source("""from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""")'`, "", "", true},
+		{"python imported source beside a docstring write", `python3 -c 'from inspect import getsource as source; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print(source)'`, "", "", true},
+		{"python star import and a variable beside a docstring write", `python3 -c 'from os import *; source = 1; """p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print(source)'`, "", "", true},
+		{"python exec string text write", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; exec("p.write_text(42)")'`, "", "", true},
+		// A path bound again before the write is not the keys file (GAP-1299).
+		{"python reassigned path", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p = Path("notes.txt"); p.write_text("example")'`, "", "", false},
+		{"python reassigned pathlib path", `python3 -c "import pathlib; p = pathlib.Path.home() / '.ssh' / 'authorized_keys'; p = pathlib.Path('notes.txt'); p.write_text('example')"`, "", "", false},
+		// Only a binding in code to another literal path counts: string text, a
+		// self-documenting f-string field, p = p, the keys file again or a loop
+		// target may still be the keys file.
+		{"python rebinding spelled in string text", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; print("p = Path(1)"); p.write_text("k")'`, "", "", true},
+		{"python rebinding spelled in a docstring", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """p = Path("notes.txt")"""; p.write_text("k")'`, "", "", true},
+		{"python path bound to itself", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p = p; p.write_text("k")'`, "", "", true},
+		{"python path bound to the keys file again", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p = Path("~/.ssh/authorized_keys").expanduser(); p.write_text("k")'`, "", "", true},
+		{"python path bound to a keys literal", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p = Path("/home/alice/.ssh/authorized_keys"); p.write_text("k")'`, "", "", true},
+		{"python conditional rebinding", "python3 -c 'from pathlib import Path; p = Path.home() / \".ssh\" / \"authorized_keys\";\nif False:\n    p = Path(\"notes.txt\")\np.write_text(\"k\")'", "", "", true},
+		{"python attribute rebinding", `python3 -c 'from pathlib import Path; import types; x = types.SimpleNamespace(); p = Path.home() / ".ssh" / "authorized_keys"; x.p = Path("notes.txt"); p.write_text("k")'`, "", "", true},
+		{"python loop target path", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; [p.write_text("k") for p in [p]]'`, "", "", true},
 		{"python append absolute", `python3 -c 'open("/home/alice/.ssh/authorized_keys", "a").write("dccert-block-marker")'`, "", "", true},
 		{"python home append", `python -c 'open("$HOME/.ssh/authorized_keys", "a").write("dccert-block-marker")'`, "", "", true},
 		{"perl write", `perl -e 'open(F, ">>", "$ENV{HOME}/.ssh/authorized_keys"); print F "dccert-block-marker\n"; close(F)'`, "", "", true},
@@ -383,6 +465,9 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		cwd, home := test.cwd, test.home
 		if cwd == "" {
 			cwd = "/repo"
+			if strings.HasPrefix(test.name, "python ") {
+				cwd = pythonCWD
+			}
 		}
 		if home == "" {
 			home = "/home/alice"

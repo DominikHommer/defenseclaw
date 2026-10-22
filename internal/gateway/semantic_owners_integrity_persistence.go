@@ -1479,7 +1479,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	if request.EnforcementCapable &&
-		(trustedAuthorizedKeysWriteProof(input, facts, symlinkWrite) ||
+		(trustedAuthorizedKeysWriteProof(input, facts, symlinkWrite, trustedPythonImportDir(request, facts)) ||
 			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
@@ -1491,8 +1491,15 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				}
 			}
 			title := rule.Title
+			reason := request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]
+			if reason == "" {
+				reason = hookpaths.UnprovenProtectedWrite(input.Command, input.CWD, input.ActiveHome)
+			}
+			if unproven := hookpaths.UnprovenWriteTitle(reason); unproven != "" {
+				title = unproven + "; use a literal path or split the command"
+			}
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
-				title = "Archive extraction may create a link before a later write; run the extraction and the write as separate commands"
+				title = archiveBeforeWriteTitle
 			}
 			return append(kept, adjustConfidence(input.Tool, RuleFinding{
 				RuleID: rule.ID, Title: title, Severity: rule.Severity,
@@ -1510,8 +1517,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 
 // trustedAuthorizedKeysWriteProof reports a bounded positive proof that the
 // call writes an authorized-keys file. input is the request's input with
-// the command text of a shell tool filled in.
-func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool) bool {
+// the command text of a shell tool filled in. pythonDir is the directory a
+// python -c program imports from first, "" when the gateway cannot look at
+// it (trustedPythonImportDir).
+func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, pythonDir string) bool {
 	enforcementFacts := facts.EnforcementProjection()
 	return enforcementFacts.EnforcementEligible() &&
 		(sshAuthorizedKeysCommandPrerequisite(enforcementFacts) ||
@@ -1532,13 +1541,21 @@ func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.
 		trustedWindowsLocationAuthorizedKeysWrite(input) ||
 		trustedShellWrapperAuthorizedKeysWrite(input, facts) ||
 		trustedBase64ShellAuthorizedKeysWrite(input, facts) ||
-		trustedInlineAuthorizedKeysWrite(facts) ||
+		trustedInlineAuthorizedKeysWrite(input, facts, pythonDir) ||
 		trustedPOSIXPowerShellAuthorizedKeysWrite(input, facts) ||
 		trustedCMDAuthorizedKeysWrite(input) ||
 		trustedNamedOutFileAuthorizedKeysWrite(input) ||
 		trustedGitBashAuthorizedKeysWrite(input) ||
 		trustedNestedAuthorizedKeysWrite(input, facts)
 }
+
+// archiveBeforeWriteTitle is the title of an authorized-keys block whose
+// write follows an archive extraction. It is ship-authored, so it reaches
+// the user as written (trustedBuiltInFindingLabel), and it holds no "; ",
+// which splits a reason into parts that were each redacted, so the
+// guidance never showed (GAP-1555).
+const archiveBeforeWriteTitle = "Archive extraction may create a link before a later write. " +
+	"Run the extraction and the write as separate commands"
 
 // trustedUnknownKeyAuthorizedKeysWrite judges the target of a native
 // file-write tool call (write, edit, multiedit, create) whose arguments
@@ -1577,7 +1594,8 @@ func trustedSandboxGuestAuthorizedKeysWrite(request trustedActionRequest) bool {
 			input.Command = command
 		}
 	}
-	return trustedAuthorizedKeysWriteProof(input, facts, false)
+	// The guest's directory is not the gateway's to look at.
+	return trustedAuthorizedKeysWriteProof(input, facts, false, "")
 }
 
 func appendTrustedSSHPrivateKeyWriteFinding(

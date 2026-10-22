@@ -79,12 +79,25 @@ var configValidateCmd = &cobra.Command{
 					configV8SettingRule(derivationErr.Error()), "", "")
 				failure.ConfigVersion = loaded.runtime.ConfigVersion
 			}
+			refusal := err
+			if derivationErr != nil {
+				refusal = derivationErr
+			}
+			plain, worded := configValidatePlainRefusal(refusal, failure, configValidateShownPath(path), path)
+			var readError *configV8ReadError
+			if errors.As(err, &readError) {
+				// A file that could not be read was not refused for its
+				// content: every host says so in plain words (GAP-0605).
+				plain, worded = readError.sentence(configValidateShownPath(path)), true
+			}
+			if worded {
+				failure.Message = plain
+			}
 			if configValidateJSON {
 				_ = json.NewEncoder(out).Encode(failure)
 			}
-			var readError *configV8ReadError
-			if errors.As(err, &readError) {
-				return fmt.Errorf("cannot read %s: %s", configValidateShownPath(path), failure.Reason)
+			if worded {
+				return errors.New(plain)
 			}
 			return fmt.Errorf("%s is not valid at %s: %s", configValidateShownPath(path), failure.Path, failure.Reason)
 		}

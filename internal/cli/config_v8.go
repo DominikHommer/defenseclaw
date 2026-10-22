@@ -61,6 +61,9 @@ type configV8WireFailure struct {
 	ConfigVersion int    `json:"config_version"`
 	Path          string `json:"path"`
 	Reason        string `json:"reason"`
+	// Message is the refusal in plain words on a standalone managed host,
+	// as `config validate` prints it there.
+	Message string `json:"message,omitempty"`
 }
 
 // config-v8 is a machine-facing bridge for the Python operator CLI. Keeping
@@ -114,7 +117,7 @@ var configV8ValidateCmd = &cobra.Command{
 // references load as the gateway's reload needs, and every jsonl destination
 // is a file the gateway may write (GAP-0890). It changes nothing.
 func checkConfigV8Candidate(path, dataDir string) (*loadedConfigV8File, error) {
-	loaded, err := loadConfigV8File(path, dataDir)
+	loaded, err := loadConfigV8FileWithCredentials(path, dataDir, configValidateCredentialsDir(path))
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +231,9 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 			)
 		}
 	case errors.As(err, &yamlError):
+		if sourceError == nil && yamlError.ConfigVersion >= config.ObservabilityV8ConfigVersion {
+			result.ConfigVersion = yamlError.ConfigVersion
+		}
 		result.Path = configV8DiagnosticPath(yamlError.Path)
 		result.Reason = configV8DiagnosticReason(string(yamlError.Code), yamlError.Summary, "", yamlError.Action)
 	case errors.As(err, &schemaError):
@@ -276,19 +282,28 @@ type configV8ReadError struct {
 func (e *configV8ReadError) Error() string { return fmt.Sprintf("read config %s: %v", e.path, e.err) }
 func (e *configV8ReadError) Unwrap() error { return e.err }
 
-// reason is the bounded diagnostic of the read failure: its code, what
-// happened and the next step.
-func (e *configV8ReadError) reason() string {
+// diagnostic is the read failure's code, what happened and the next step.
+func (e *configV8ReadError) diagnostic() (code, summary, action string) {
 	switch {
 	case errors.Is(e.err, fs.ErrNotExist):
-		return configV8DiagnosticReason("config_not_found", "no file exists at this path", "",
-			"check the path, or pass the config.yaml to check")
+		return "config_not_found", "no file exists at this path", "check the path, or pass the config.yaml to check"
 	case errors.Is(e.err, fs.ErrPermission):
-		return configV8DiagnosticReason("config_unreadable", "this account may not read the file", "",
-			"run the command as an account that can read it, such as an administrator")
+		return "config_unreadable", "this account may not read the file",
+			"run the command as an account that can read it, such as an administrator"
 	}
-	return configV8DiagnosticReason("config_unreadable", "the file could not be read", "",
-		"check that the path names a readable file")
+	return "config_unreadable", "the file could not be read", "check that the path names a readable file"
+}
+
+// reason is the bounded diagnostic of the read failure.
+func (e *configV8ReadError) reason() string {
+	code, summary, action := e.diagnostic()
+	return configV8DiagnosticReason(code, summary, "", action)
+}
+
+// sentence is the read failure in plain words, naming the file as shown.
+func (e *configV8ReadError) sentence(shown string) string {
+	_, summary, action := e.diagnostic()
+	return "cannot read " + shown + ": " + summary + "; " + action
 }
 
 // configV8SourceVersion is the config_version a parsed document declares, or
@@ -662,6 +677,13 @@ func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate
 	}
 	names := make([]string, 0, len(configured))
 	for name := range configured {
+		// until 1.1: the runtime loader drops a connector 1.0.4 removed
+		// (OpenHands, OmniGent) so the gateway can start and tear it down;
+		// expecting it to survive refused every published config that set it
+		// up before cleanup could run (GAP-0290).
+		if config.IsRetiredConnector(name) {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
