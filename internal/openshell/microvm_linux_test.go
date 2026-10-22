@@ -117,6 +117,11 @@ func TestDoctorOnLinuxRunningMicroVMs(t *testing.T) {
 	}
 }
 
+// f13 is the problem of a 0.1.3 driver under a gateway of release gw.
+func f13(gw string) string {
+	return "is OpenShell 0.1.3's, older than the gateway's " + gw + ", and the gateway starts every MicroVM with it"
+}
+
 // TestDoctorChecksWhatLinuxMicroVMsNeed: each need of the MicroVM driver on
 // Linux fails with the way on.
 func TestDoctorChecksWhatLinuxMicroVMsNeed(t *testing.T) {
@@ -185,6 +190,17 @@ func TestDoctorChecksWhatLinuxMicroVMsNeed(t *testing.T) {
 			f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
 		}, want: checkWant{"vm-driver", fail, "openshell-driver-vm is not installed (NVIDIA's openshell package does not ship it)"},
 			fix: &fixWant{text: "openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz", manual: true}},
+		// An in-place upgrade of NVIDIA's package leaves the driver it
+		// does not ship (GAP-0652): one older than the gateway fails.
+		{name: "driver older than the gateway", setup: func(f *doctorFixture) {
+			f.atRelease(openshell.InstallerVersion)
+			f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm 0.1.3\n", nil)
+		}, want: checkWant{"vm-driver", fail, f13(openshell.InstallerVersion)},
+			fix: &fixWant{text: "into ~/.local/libexec/openshell", manual: true}},
+		{name: "driver of the gateway's release", setup: func(f *doctorFixture) {
+			f.atRelease(openshell.InstallerVersion)
+			f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)
+		}, want: checkWant{"vm-driver", pass, "openshell-driver-vm"}},
 		// A driver the gateway runs from a directory DefenseClaw does not
 		// search is found by its process.
 		{name: "driver found by its process", setup: func(f *doctorFixture) {

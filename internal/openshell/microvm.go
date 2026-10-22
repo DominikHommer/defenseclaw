@@ -90,6 +90,12 @@ type MicroVMHost struct {
 	// DriverBinary is the openshell-driver-vm the gateway starts; empty
 	// when none was found.
 	DriverBinary string `json:"driver_binary,omitempty"`
+	// DriverVersion is the release DriverBinary reports (Linux), and
+	// DriverOlderThan the gateway's release when that is newer: an in-place
+	// upgrade of NVIDIA's package leaves the driver, which it does not ship,
+	// as it was (GAP-0652).
+	DriverVersion   string `json:"driver_version,omitempty"`
+	DriverOlderThan string `json:"driver_older_than,omitempty"`
 	// DriverFromFormula reports that DriverBinary is the one in the
 	// nvidia/openshell/openshell formula's keg, the only one the
 	// formula's post-install step (ResignVMDriverCommand) signs.

@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // What OpenShell's MicroVM (vm) driver needs on a Linux host, which runs a
@@ -249,6 +250,14 @@ func (r *doctorRun) linuxMicroVMHost(ctx context.Context) *MicroVMHost {
 	m.E2fsprogs = e2fsprogsIn(r.E2fsprogsDirs)
 	m.DriverRunning = r.running.Name == DriverVM
 	m.DriverBinary = r.findVMDriver(ctx)
+	if m.DriverBinary != "" && r.gateway.Version != (Version{}) {
+		if v, err := r.vmDriverVersion(ctx, m.DriverBinary); err == nil {
+			m.DriverVersion = v.String()
+			if v.Release().Compare(r.gateway.Version.Release()) < 0 {
+				m.DriverOlderThan = r.gateway.Version.Release().String()
+			}
+		}
+	}
 	m.StateDir = r.vmStateDir()
 	m.StaleCache = staleVMCache(m.StateDir)
 	if r.service != nil {
@@ -256,6 +265,31 @@ func (r *doctorRun) linuxMicroVMHost(ctx context.Context) *MicroVMHost {
 		m.UMaskTooStrict = UMaskTooStrict(r.service.UMask)
 	}
 	return m
+}
+
+// vmDriverVersion is the release the driver at path reports
+// ("openshell-driver-vm 0.1.5").
+func (r *doctorRun) vmDriverVersion(ctx context.Context, path string) (Version, error) {
+	out, err := r.Runner.Output(ctx, Command{Name: path, Args: []string{"--version"}, Timeout: 15 * time.Second})
+	if err != nil {
+		return Version{}, err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return Version{}, fmt.Errorf("%s --version printed nothing", path)
+	}
+	return ParseVersion(fields[len(fields)-1])
+}
+
+// vmDriverFix is the way on from a Linux host's MicroVM driver problem:
+// the driver of InstallerTag, into the administrator's folder when the
+// stale driver is there (the user's own driver folder is searched first,
+// so a copy there would do only for this account).
+func (m *MicroVMHost) vmDriverFix(goarch string) *Fix {
+	if m.DriverOlderThan != "" && slices.Contains(AdminVMDriverDirs("linux"), filepath.Dir(m.DriverBinary)) {
+		return AdminVMDriverFix("linux", goarch)
+	}
+	return InstallVMDriverFix(goarch)
 }
 
 // linuxMicroVMChecks makes, once, the machine checks of a Linux host
@@ -321,8 +355,8 @@ func (r *doctorRun) linuxVMDriverCheck() Check {
 	switch {
 	case m.E2fsprogs == "":
 		c.Fix = InstallE2fsprogsFix()
-	case m.DriverBinary == "" && !m.DriverRunning:
-		c.Fix = InstallVMDriverFix(r.GOARCH)
+	case m.DriverBinary == "" && !m.DriverRunning, m.DriverOlderThan != "":
+		c.Fix = m.vmDriverFix(r.GOARCH)
 	case len(stale) > 0:
 		c.Fix = m.StaleCacheFix()
 	}
@@ -353,8 +387,8 @@ func (m *MicroVMHost) Fixes(goarch string) []*Fix {
 	if m.E2fsprogs == "" {
 		out = append(out, InstallE2fsprogsFix())
 	}
-	if m.DriverBinary == "" && !m.DriverRunning {
-		out = append(out, InstallVMDriverFix(goarch))
+	if m.DriverBinary == "" && !m.DriverRunning || m.DriverOlderThan != "" {
+		out = append(out, m.vmDriverFix(goarch))
 	}
 	return out
 }
@@ -401,6 +435,10 @@ func (m *MicroVMHost) toolProblems() []string {
 	}
 	if m.DriverBinary == "" && !m.DriverRunning {
 		out = append(out, vmDriverBinary+" is not installed (NVIDIA's openshell package does not ship it)")
+	}
+	if m.DriverOlderThan != "" {
+		out = append(out, fmt.Sprintf("%s is OpenShell %s's, older than the gateway's %s, and the gateway starts every MicroVM with it "+
+			"(an upgrade of NVIDIA's openshell package leaves the driver, which the package does not ship, as it was)", m.DriverBinary, m.DriverVersion, m.DriverOlderThan))
 	}
 	return out
 }
