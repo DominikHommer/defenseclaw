@@ -1112,6 +1112,7 @@ function Confirm-Step {{ return $true }}
 function Start-Transcript {{}}
 function Wait-UninstallCleanup {{}}
 function Resume-InterruptedRun {{}}
+function Save-BinarySnapshot {{}}
 function Protect-UvDirectory {{}}
 function Get-Cosign {{ return '' }}
 function Assert-InstallRoom([long]$Bytes, [string]$Purpose) {{
@@ -1252,6 +1253,7 @@ def test_snapshot_receipt_copy_would_block_rollback_after_live_recovery(tmp_path
         tmp_path,
         f"""
 {_function('New-InstallDirectory')}
+{_function('Save-BinarySnapshot')}
 {_function('Save-Snapshot')}
 $Previous = Join-Path $DataDir 'previous'
 $Snap = $Previous

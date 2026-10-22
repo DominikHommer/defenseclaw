@@ -1129,10 +1129,11 @@ def test_the_new_hook_goes_in_before_the_data_copy() -> None:
     # GAP-0196: the 1.0.2 hook answered the whole data copy and environment
     # build with the operator-stop notice and cold starts. The new hook goes
     # in once the rollback copy holds the old one, before the slow copies.
+    binary = _ps1_function("Save-BinarySnapshot")
+    assert binary.index('Copy-BinDir (Join-Path $Snap "bin")') < binary.index("Install-HookFirst $Snap")
     save = _ps1_function("Save-Snapshot")
     order = [
-        'Copy-BinDir (Join-Path $Snap "bin")',
-        "Install-HookFirst $Snap",
+        'Save-BinarySnapshot',
         "foreach ($entry in $entries) { Copy-Kept",
         'Move-Path $Venv (Join-Path $Snap "venv")',
         'Join-Path $Snap "COMPLETE"',
@@ -1144,6 +1145,8 @@ def test_the_new_hook_goes_in_before_the_data_copy() -> None:
     # An unfinished snapshot puts the old hook back before anything else.
     undo = _ps1_function("Undo-Snapshot")
     assert undo.index("Undo-HookFirst $Slot") < undo.index("Move-Path")
+    install = _ps1_function("Invoke-Install")
+    assert install.index("Save-BinarySnapshot") < install.index("if (-not (Stop-Gateway))")
     # A finished one is restored with the rest of the bin folder.
     assert 'Restore-BinDir (Join-Path $Slot "bin")' in _ps1_function("Restore-Slot")
 

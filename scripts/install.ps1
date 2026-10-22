@@ -1479,8 +1479,19 @@ function Invoke-UvPipInstall([string[]]$UvArgs) {
     return $false
 }
 
-function Save-Snapshot {
+function Save-BinarySnapshot {
+    # Only immutable binaries are copied while the gateway runs. The new
+    # hook understands .install.lock, including when upgrading from 1.0.2.
+    # HOOK_FIRST lets interrupted-run recovery restore it before any data
+    # snapshot or process shutdown has started.
     New-InstallDirectory $Snap
+    Copy-BinDir (Join-Path $Snap "bin")
+    Install-HookFirst $Snap
+    Set-Content -LiteralPath (Join-Path $Snap "BIN_SAVED") -Value "" -Encoding Ascii
+}
+
+function Save-Snapshot {
+    if (-not (Test-Path -LiteralPath (Join-Path $Snap "BIN_SAVED"))) { Save-BinarySnapshot }
     New-Item -ItemType Directory -Path (Join-Path $Snap "data") | Out-Null
     $entries = Get-DataEntries
     $need = [long]0
@@ -1497,8 +1508,6 @@ function Save-Snapshot {
         Write-Err "Not enough free disk space next to $DataDir for a rollback copy"
         return $false
     }
-    Copy-BinDir (Join-Path $Snap "bin")
-    Install-HookFirst $Snap
     foreach ($entry in $entries) { Copy-Kept $entry.FullName (Join-Path $Snap "data") }
     Save-ExternalConfig $Snap
     if (Test-Path -LiteralPath $Venv) { Move-Path $Venv (Join-Path $Snap "venv") 60 }
@@ -1660,6 +1669,8 @@ function Install-New {
 }
 
 function Restart-Old {
+    $earlySlot = Get-Variable -Name Snap -ValueOnly -ErrorAction SilentlyContinue
+    if ($earlySlot -and (Test-Path -LiteralPath (Join-Path $earlySlot "HOOK_FIRST"))) { Undo-HookFirst $earlySlot }
     if ($Setup) { Restore-SetupInstall } elseif ($WasRunning) { [void](Start-Gateway) }
     # Say plainly when the gateway that ran before is down now (GAP-1349).
     $Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)
@@ -2736,9 +2747,15 @@ function Invoke-Install {
         if ($Setup) { Restore-SetupInstall }
         Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
     }
+    $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
+    try { Save-BinarySnapshot } catch {
+        Invoke-Quietly { Undo-Snapshot $Snap }
+        throw
+    }
     if ($WasRunning) {
         Write-Info "Stopping the gateway [$(Get-UtcClock)]"
         if (-not (Stop-Gateway)) {
+            Invoke-Quietly { Undo-Snapshot $Snap }
             if ($Setup) { Restore-SetupInstall }
             Die "The running gateway did not stop; nothing was changed"
         }
@@ -2761,7 +2778,6 @@ function Invoke-Install {
     }
     if ($Setup) { Stop-ProcessesUnder $Setup.Root }
 
-    $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
     # Ctrl+C now would leave a half-swapped install; it is ignored until the swap is done.
     try { [Console]::TreatControlCAsInput = $true } catch { }
     try { $saved = Save-Snapshot } catch { Write-Err $_.Exception.Message; [void](Test-DiskFull); $saved = $false }
