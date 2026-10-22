@@ -4,7 +4,9 @@
 package guardrail
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,15 +29,17 @@ var pythonName = regexp.MustCompile(`[A-Za-z_][A-Za-z_0-9]*`)
 // code (MaskPythonStrings), since a call spelled in a string or in the
 // literal text of an f-string runs nothing, unless the code may run a string
 // (PythonStringsMayRun), when the masked text counts whole as before.
-func pythonPathWriteMatch(rule *regexp.Regexp, source string, sourceDir ...string) []int {
+// script is the absolute path of the file, "" when it is not known: Python
+// imports from the script's directory first.
+func pythonPathWriteMatch(rule *regexp.Regexp, source, script string) []int {
 	code := MaskPythonCommentsAndDocstrings(source)
 	calls := MaskPythonStrings(source)
-	if len(sourceDir) != 0 && !filepath.IsAbs(sourceDir[0]) {
-		if absolute, err := filepath.Abs(sourceDir[0]); err == nil {
-			sourceDir = []string{absolute}
-		}
+	dir, self := "", ""
+	if script != "" {
+		dir, self = filepath.Split(script)
+		dir = filepath.Clean(dir)
 	}
-	if PythonStringsMayRun(calls, sourceDir...) {
+	if pythonStringsMayRun(calls, dir, self) {
 		calls = code
 	}
 	lines := strings.Split(code, "\n")
@@ -267,8 +271,10 @@ func maskPythonStrings(out []byte, from, to, depth int) bool {
 // identifier) through which code can turn string text into code that runs,
 // or reach a string that does not run: dynamic evaluation and name lookup,
 // child processes, serializers that call, introspection of code, frames and
-// docstrings, the program's own command line, and a file the code writes
-// (and may import or run later).
+// docstrings, the program's own command line, and a file the code writes,
+// renames, links, moves, unpacks or fetches into place (and may import or
+// run later: os.symlink(staged, "json.py") puts a module before the
+// standard library).
 var pythonStringRunFragments = []string{
 	"exec", "eval", "compile", "getattr", "attrgetter", "methodcaller",
 	"globals", "locals", "vars", "__dict__", "__import__", "importlib",
@@ -279,7 +285,8 @@ var pythonStringRunFragments = []string{
 	"co_consts", "co_code", "frame", "inspect", "modules", "subclasses",
 	"__base", "argv", "cmdline", "commandline", "procargs", "psutil",
 	"sysctl", "linecache", "source", "write", "open", "dump", "copy",
-	"logging", "handler",
+	"logging", "handler", "rename", "replace", "link", "move", "extract",
+	"unpack", "retrieve", "mkfifo", "mknod",
 }
 
 // pythonStringRunNames are short names matched whole.
@@ -288,22 +295,38 @@ var pythonStringRunNames = map[string]bool{
 }
 
 // PythonStringsMayRun reports whether code, Python source masked with
-// MaskPythonStrings, may run or read one of its strings or docstrings. A
-// dynamic sink in executed code, an unrecognized import, or a module that
-// may load local code keeps the strings. With no execution directory it also
-// keeps them for every non-preloaded import. When a directory is supplied,
-// a small set of standard-library imports can leave inert strings masked if
-// that directory has no loadable Python code and the import path is ordinary.
-// A shadow module can read __main__.__doc__ or sys.orig_argv. Non-ASCII code
-// stays whole because Python normalizes identifiers before interpreting them.
-// In an import of preloaded modules, a name does not count when no name that
-// statement binds is used elsewhere. Nor does a variable of the program's own (source
-// = 1, def doc(x), f(write=True)): a plain name, not an attribute, that is
-// not a builtin or a module dunder (exec, open, __doc__) and that no import
-// may bind (named in an import, or any "from m import *") holds only a value
-// that code this scan reads computed, so the name reaches no sink that code
-// does not name.
-func PythonStringsMayRun(code string, sourceDir ...string) bool {
+// MaskPythonStrings, may run or read the text of one of its strings or
+// docstrings. dir is the directory Python puts first on sys.path when it
+// runs the code (the working directory for python -c, the script's own
+// directory for a script), or "" when it is not known.
+//
+// A module an import loads may run any string of the program: a file such as
+// subprocess.py, json.py or helper.py on sys.path reads the program's
+// docstring through sys.modules["__main__"] and its command line through
+// sys.orig_argv. Every program may import, with or without an import
+// statement: the interpreter imports on its own ("a".encode("idna") imports
+// stringprep and re, help() imports pydoc), first from dir. So the strings
+// count unless every import loads only standard-library code
+// (pythonImportPathOrdinary): every module an import statement names is in
+// the standard library, dir is known and holds nothing an import can load,
+// and nothing moves the import path. An "import" the scan cannot read as a
+// statement counts, and so does any non-ASCII byte in code: Python reads
+// identifiers in NFKC form, so a fullwidth ｅｘｅｃ is exec and import ｊｓｏｎ imports
+// json, names this scan cannot match. A name of pythonStringRunFragments or
+// pythonStringRunNames in code counts too. A name an import binds does not
+// count when the program uses no name that statement binds. Nor does a
+// variable of the program's own (source = 1, def doc(x), f(write=True)): a
+// plain name, not an attribute, that is not a builtin or a module dunder
+// (exec, open, __doc__) and that no import may bind (named in an import, or
+// any "from m import *") holds only a value that code this scan reads
+// computed, so the name reaches no sink that code does not name.
+func PythonStringsMayRun(code, dir string) bool {
+	return pythonStringsMayRun(code, dir, "")
+}
+
+// pythonStringsMayRun is PythonStringsMayRun for a script named self in dir:
+// its own file is the code the scan reads, not a module beside it.
+func pythonStringsMayRun(code, dir, self string) bool {
 	for i := 0; i < len(code); i++ {
 		if code[i] >= utf8.RuneSelf {
 			return true
@@ -311,24 +334,11 @@ func PythonStringsMayRun(code string, sourceDir ...string) bool {
 	}
 	names := pythonName.FindAllStringIndex(code, -1)
 	var statements, unused [][2]int
-	var directoryChecked, directorySafe bool
 	imported, star := map[string]bool{}, false
 	for _, statement := range pythonImports(code) {
-		importText := code[statement.span[0]:statement.span[1]]
-		if !pythonImportsPreloaded(importText) {
-			if !pythonImportKnownStdlib(importText) {
-				return true
-			}
-			if !directoryChecked {
-				directoryChecked = true
-				directorySafe = len(sourceDir) != 0 && filepath.IsAbs(sourceDir[0]) &&
-					os.Getenv("PYTHONPATH") == "" && os.Getenv("PYTHONHOME") == "" &&
-					!pythonImportPathAccess.MatchString(code) &&
-					!pythonDirectoryMayLoadCode(sourceDir[0])
-			}
-			if !directorySafe {
-				return true
-			}
+		text := code[statement.span[0]:statement.span[1]]
+		if !pythonImportsStandardLibrary(text) {
+			return true
 		}
 		statements = append(statements, statement.span)
 		if statement.bound == nil {
@@ -336,7 +346,7 @@ func PythonStringsMayRun(code string, sourceDir ...string) bool {
 		} else if !pythonNamesUsed(code, names, statement.bound, statement.span[0], statement.span[1]) {
 			unused = append(unused, statement.span)
 		}
-		for _, name := range pythonName.FindAllString(code[statement.span[0]:statement.span[1]], -1) {
+		for _, name := range pythonName.FindAllString(text, -1) {
 			imported[name] = true
 		}
 	}
@@ -358,34 +368,52 @@ func PythonStringsMayRun(code string, sourceDir ...string) bool {
 		}
 		return true
 	}
-	return false
+	// Read last: it reads dir.
+	return !pythonImportPathOrdinary(code, dir, self)
 }
 
-// pythonPreloadedModules are the modules an import never loads from the
-// working directory or the script's directory: built into every interpreter
-// (sys, builtins), or frozen and already imported at startup (os, its path
-// module, io, abc, codecs, stat). Any other module, standard library or not,
-// is looked up on sys.path, whose first entry is that directory.
-var pythonPreloadedModules = map[string]bool{
-	"sys": true, "builtins": true, "os": true, "os.path": true,
-	"io": true, "abc": true, "codecs": true, "stat": true,
-}
+// pythonStandardModules are the top-level public modules of the standard
+// library (sys.stdlib_module_names of Python 3.12, less the modules Python
+// 3.13 removed and tomllib, which Python 3.10 lacks, plus __future__), less
+// site and zipimport, which load code from any directory or archive they are
+// given (site.addsitedir runs the import lines of a .pth file there). A
+// missing one would be looked up past the standard library, in
+// site-packages; so would a module only one platform ships (winreg on
+// Linux), the same residual as any installed module.
+var pythonStandardModules = func() map[string]bool {
+	set := map[string]bool{"__future__": true}
+	for _, name := range strings.Fields(`abc antigravity argparse array ast
+		asyncio atexit base64 bdb binascii bisect builtins bz2 cProfile calendar
+		cmath cmd code codecs codeop collections colorsys compileall concurrent
+		configparser contextlib contextvars copy copyreg csv ctypes curses
+		dataclasses datetime dbm decimal difflib dis doctest email encodings
+		ensurepip enum errno faulthandler fcntl filecmp fileinput fnmatch
+		fractions ftplib functools gc genericpath getopt getpass gettext glob
+		graphlib grp gzip hashlib heapq hmac html http idlelib imaplib
+		importlib inspect io ipaddress itertools json keyword linecache locale
+		logging lzma mailbox marshal math mimetypes mmap modulefinder msvcrt
+		multiprocessing netrc nt ntpath nturl2path numbers opcode operator
+		optparse os pathlib pdb pickle pickletools pkgutil platform plistlib
+		poplib posix posixpath pprint profile pstats pty pwd py_compile pyclbr
+		pydoc pydoc_data pyexpat queue quopri random re readline reprlib
+		resource rlcompleter runpy sched secrets select selectors shelve shlex
+		shutil signal smtplib socket socketserver sqlite3 sre_compile
+		sre_constants sre_parse ssl stat statistics string stringprep struct
+		subprocess symtable sys sysconfig syslog tabnanny tarfile tempfile
+		termios textwrap this threading time timeit tkinter token tokenize trace
+		traceback tracemalloc tty turtle turtledemo types typing unicodedata
+		unittest urllib uuid venv warnings wave weakref webbrowser winreg
+		winsound wsgiref xml xmlrpc zipapp zipfile zlib zoneinfo`) {
+		set[name] = true
+	}
+	return set
+}()
 
-// These standard-library modules are safe to treat as ordinary imports only
-// when the scanned program's directory cannot supply a module of that name.
-// Every other import remains unproven. Keep this set small: a name is added
-// only when the benign-text rules have a regression for it.
-var pythonKnownStdlibModules = map[string]bool{
-	"pathlib": true, "subprocess": true, "json": true,
-	"ctypes": true, "inspect": true, "timeit": true, "types": true,
-}
-
-var pythonImportPathAccess = regexp.MustCompile(`\bsys\s*\.\s*(?:path|meta_path)\b`)
-
-// pythonImportKnownStdlib recognizes only unambiguous imports of the small
-// standard-library set above. Directory and import-path checks are separate
-// and run at most once per program in PythonStringsMayRun.
-func pythonImportKnownStdlib(statement string) bool {
+// pythonImportsStandardLibrary reports whether statement, an import
+// statement, is an absolute import of standard-library modules only
+// (import json, import os.path as p, from pathlib import Path). A relative
+// import, "from m import *" or a shape the scan cannot read is not.
+func pythonImportsStandardLibrary(statement string) bool {
 	if _, ok := pythonImportBindings(statement); !ok {
 		return false
 	}
@@ -393,21 +421,17 @@ func pythonImportKnownStdlib(statement string) bool {
 	var modules []string
 	switch {
 	case len(words) >= 4 && words[0] == "from" && slices.Contains(words[2:], "import"):
-		if words[1] == "." || strings.HasPrefix(words[1], ".") || slices.Contains(words, "*") {
+		if strings.HasPrefix(words[1], ".") || slices.Contains(words, "*") {
 			return false
 		}
-		modules = append(modules, strings.SplitN(words[1], ".", 2)[0])
+		modules = append(modules, words[1])
 	case len(words) >= 2 && words[0] == "import":
 		for items := words[1:]; len(items) > 0; {
 			end := slices.Index(items, ",")
 			if end < 0 {
 				end = len(items)
 			}
-			item := items[:end]
-			if len(item) != 1 && (len(item) != 3 || item[1] != "as") {
-				return false
-			}
-			modules = append(modules, strings.SplitN(item[0], ".", 2)[0])
+			modules = append(modules, items[0])
 			if end == len(items) {
 				break
 			}
@@ -416,77 +440,196 @@ func pythonImportKnownStdlib(statement string) bool {
 	default:
 		return false
 	}
-	if len(modules) == 0 || len(modules) > 8 {
+	for _, module := range modules {
+		if !pythonStandardModules[strings.SplitN(module, ".", 2)[0]] {
+			return false
+		}
+	}
+	return len(modules) > 0
+}
+
+// pythonImportPathOrdinary reports whether an import of code, by a
+// statement or by the interpreter itself, loads only standard-library code.
+// A standard-library module imports others in turn, so any module of dir can
+// shadow one of them: dir must be known, absolute and hold nothing an import
+// can load (pythonDirectoryMayLoadCode). PYTHONPATH or PYTHONHOME in the
+// environment puts other directories first, and code that may change
+// sys.path, a package's search path or the import hooks, or the working
+// directory an -c program imports from (os.chdir), loads from anywhere
+// (pythonImportPathMoves).
+func pythonImportPathOrdinary(code, dir, self string) bool {
+	return dir != "" && filepath.IsAbs(dir) &&
+		os.Getenv("PYTHONPATH") == "" && os.Getenv("PYTHONHOME") == "" &&
+		!pythonImportPathMoves(code) &&
+		!pythonDirectoryMayLoadCode(dir, self)
+}
+
+// pythonImportPathMoves reports whether code may change where an import
+// looks or what it finds there: pythonImportPathChange matches, or code
+// reaches the sys module other than through one of pythonSysAttributes
+// (pythonSysEscapes).
+func pythonImportPathMoves(code string) bool {
+	return pythonImportPathChange.MatchString(code) || pythonSysEscapes(code)
+}
+
+// pythonImportPathChange matches code that may move the import path under a
+// name other than sys: a package's search path (__path__, the
+// submodule_search_locations of its spec), the __self__ of a module's
+// function (sys.exit.__self__ is sys), and a change of the directory an -c
+// program imports from (chdir, fchdir, chroot).
+var pythonImportPathChange = regexp.MustCompile(
+	`\b(?:f?chdir|chroot|__path__|submodule_search_locations|__self__)\b`)
+
+// pythonSysAttributes are the attributes of sys that neither hold nor change
+// the import system: the program's streams, exit and exception state, and
+// facts about the interpreter. Any other attribute may (path, meta_path,
+// path_hooks, path_importer_cache, modules, pycache_prefix, implementation,
+// a frame, a hook, remote_exec, or one a later Python adds).
+var pythonSysAttributes = func() map[string]bool {
+	set := map[string]bool{}
+	for _, name := range strings.Fields(`abiflags api_version argv
+		base_exec_prefix base_prefix builtin_module_names byteorder copyright
+		dont_write_bytecode exc_info exception exec_prefix executable exit flags
+		float_info float_repr_style getallocatedblocks getdefaultencoding
+		getfilesystemencodeerrors getfilesystemencoding getrecursionlimit
+		getrefcount getsizeof getswitchinterval getwindowsversion hash_info
+		hexversion int_info intern is_finalizing last_exc maxsize maxunicode
+		orig_argv platform platlibdir prefix ps1 ps2 setrecursionlimit
+		setswitchinterval stderr stdin stdlib_module_names stdout thread_info
+		version version_info warnoptions winver`) {
+		set[name] = true
+	}
+	return set
+}()
+
+// pythonSysEscapes reports whether code reaches the sys module other than to
+// read or set one of pythonSysAttributes (sys.exit, os.sys.version): through
+// any other attribute (sys.path, os.sys.meta_path), or as a value (s = sys,
+// f(sys), [sys][0], (sys).path, import sys as s, from sys import path),
+// through which code may move the import path under a name no pattern of the
+// path's own finds. An import statement that binds sys as sys (import sys,
+// from os import sys) is not a use.
+func pythonSysEscapes(code string) bool {
+	imports := pythonImports(code)
+	for _, name := range pythonName.FindAllStringIndex(code, -1) {
+		if code[name[0]:name[1]] != "sys" {
+			continue
+		}
+		next := pythonSkipBlank(code, name[1])
+		if i := slices.IndexFunc(imports, func(statement pythonImport) bool {
+			return name[0] >= statement.span[0] && name[1] <= statement.span[1]
+		}); i >= 0 {
+			if !slices.Contains(imports[i].bound, "sys") || pythonName.FindString(code[next:]) == "as" {
+				return true
+			}
+			continue
+		}
+		if next >= len(code) || code[next] != '.' {
+			return true
+		}
+		from := pythonSkipBlank(code, next+1)
+		attr := pythonName.FindStringIndex(code[from:])
+		if attr == nil || attr[0] != 0 || !pythonSysAttributes[code[from:from+attr[1]]] {
+			return true
+		}
+	}
+	return false
+}
+
+// pythonSkipBlank returns the offset of the first byte of code from i on
+// that is not white space or a line continuation.
+func pythonSkipBlank(code string, i int) int {
+	for i < len(code) && strings.IndexByte(" \t\r\n\f\\", code[i]) >= 0 {
+		i++
+	}
+	return i
+}
+
+// Bounds of pythonDirectoryMayLoadCode, which runs on the hook path.
+const (
+	pythonDirMaxEntries     = 256
+	pythonPackageMaxEntries = 1024
+)
+
+// pythonDirectoryMayLoadCode reports whether dir may hold code an import
+// loads: a source, bytecode or extension module (.py, .pyw, .pyc, .pyo,
+// .pyd, .so in any case; a .zip or .egg too), a regular package (a
+// directory with a module's name that holds an __init__ file of any kind),
+// or a link, which may name any of these. A directory that cannot be read,
+// or that holds more entries than the scan reads (pythonDirMaxEntries in
+// dir, pythonPackageMaxEntries across its package-named directories), may
+// hold one. self, when not "", is the scanned script's own file name.
+func pythonDirectoryMayLoadCode(dir, self string) bool {
+	entries, ok := pythonReadDir(dir, pythonDirMaxEntries)
+	if !ok {
+		return true
+	}
+	budget := pythonPackageMaxEntries
+	for _, entry := range entries {
+		name := entry.Name()
+		switch {
+		case self != "" && name == self && entry.Type().IsRegular():
+		case entry.Type()&fs.ModeSymlink != 0, pythonLoadableFile(name):
+			return true
+		case entry.IsDir() && pythonModuleName(name):
+			inner, ok := pythonReadDir(filepath.Join(dir, name), budget)
+			if !ok {
+				return true
+			}
+			budget -= len(inner)
+			for _, file := range inner {
+				if strings.HasPrefix(strings.ToLower(file.Name()), "__init__.") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// pythonReadDir reads at most limit entries of dir; it reports false when
+// dir cannot be read or holds more.
+func pythonReadDir(dir string, limit int) ([]fs.DirEntry, bool) {
+	if limit <= 0 {
+		return nil, false
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	entries, err := f.ReadDir(limit + 1)
+	return entries, len(entries) <= limit && (err == nil || errors.Is(err, io.EOF))
+}
+
+// pythonLoadableFile reports a file name an import may load as a module.
+func pythonLoadableFile(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".py", ".pyw", ".pyc", ".pyo", ".pyd", ".so", ".zip", ".egg":
+		return true
+	}
+	return false
+}
+
+// pythonModuleName reports a directory name an import may name: an ASCII
+// identifier, or any name with a non-ASCII byte (Python reads identifiers
+// in NFKC form).
+func pythonModuleName(name string) bool {
+	if name == "" {
 		return false
 	}
-	for _, module := range modules {
-		if !pythonKnownStdlibModules[module] {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= utf8.RuneSelf:
+			return true
+		case c == '_' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z':
+		case '0' <= c && c <= '9' && i > 0:
+		default:
 			return false
 		}
 	}
 	return true
-}
-
-// A standard-library import may itself import other modules. Any loadable
-// source, package or extension beside the program can shadow one of those
-// dependencies, so checking only the module named in the import is unsafe.
-// Reading at most 257 entries keeps the hook cost bounded. An unreadable or
-// larger directory leaves the import unproven.
-func pythonDirectoryMayLoadCode(dir string) bool {
-	f, err := os.Open(dir)
-	if err != nil {
-		return true
-	}
-	defer f.Close()
-	entries, err := f.ReadDir(257)
-	if len(entries) > 256 || (err != nil && err != io.EOF) {
-		return true
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.Type()&os.ModeSymlink != 0 {
-			return true
-		}
-		if strings.HasSuffix(name, ".py") || strings.HasSuffix(name, ".pyc") ||
-			strings.HasSuffix(name, ".so") || strings.HasSuffix(name, ".pyd") ||
-			strings.HasSuffix(name, ".zip") || strings.HasSuffix(name, ".egg") {
-			return true
-		}
-		if entry.IsDir() {
-			_, err := os.Lstat(filepath.Join(dir, name, "__init__.py"))
-			if err == nil || !os.IsNotExist(err) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// pythonImportsPreloaded reports whether statement, an import statement,
-// loads only modules of pythonPreloadedModules. A relative import, a
-// trailing comma or a shape the scan cannot read loads an unknown module.
-func pythonImportsPreloaded(statement string) bool {
-	words := strings.Fields(strings.NewReplacer("(", " ", ")", " ", ",", " , ", "\\", " ").Replace(statement))
-	switch {
-	case len(words) >= 4 && words[0] == "from" && slices.Contains(words[2:], "import"):
-		return pythonPreloadedModules[words[1]]
-	case len(words) >= 2 && words[0] == "import":
-		for items := words[1:]; ; {
-			end := slices.Index(items, ",")
-			if end < 0 {
-				end = len(items)
-			}
-			item := items[:end]
-			if len(item) != 1 && (len(item) != 3 || item[1] != "as") || !pythonPreloadedModules[item[0]] {
-				return false
-			}
-			if end == len(items) {
-				return true
-			}
-			items = items[end+1:]
-		}
-	}
-	return false
 }
 
 // pythonProgramVariable reports whether the name word at code[at] is a plain

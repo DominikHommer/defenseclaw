@@ -2132,6 +2132,13 @@ class TestSkillList(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         [item] = json.loads(result.output)
         self.assertEqual(item["verdict"], "quarantine failed")
+        self.assertEqual(item["reason"], "quarantine failed: permission denied")
+        with patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=mock_list.return_value["skills"][0]):
+            info = self.invoke(["info", "aws-deploy", "--json"])
+            self.assertEqual(info.exit_code, 0, info.output)
+            self.assertEqual(json.loads(info.output)["reason"], item["reason"])
+            card = self.invoke(["info", "aws-deploy"])
+            self.assertIn("permission denied", card.output)
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_shows_a_skill_the_watcher_has_not_scanned_as_pending(self, mock_list):
@@ -3112,6 +3119,19 @@ class TestSkillScanURL(SkillCommandTestBase):
         name, version = _parse_clawhub_uri("clawhub://my-skill")
         self.assertEqual(name, "my-skill")
         self.assertIsNone(version)
+
+    @patch("defenseclaw.registries.adapters._base.http_get")
+    def test_versioned_clawhub_scan_refuses_before_fetch(self, mock_http_get):
+        result = self.invoke(["scan", "clawhub://weather@1.0.0"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("version", result.output.lower())
+        mock_http_get.assert_not_called()
+
+        mock_http_get.return_value = b'{"dist":{"tarball":"https://other.example/openclaw.tgz"}}'
+        result = self.invoke(["scan", "clawhub://weather"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("untrusted", result.output.lower())
+        self.assertEqual(mock_http_get.call_count, 1)
 
     @patch("defenseclaw.registries.adapters._base.http_get")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")

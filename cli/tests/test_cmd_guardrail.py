@@ -156,6 +156,9 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("Codex", result.output)
         self.assertIn("codex", result.output)
         self.assertIn("Enable with", result.output)
+        as_json = runner.invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
+        self.assertEqual(as_json.exit_code, 0, as_json.output)
+        self.assertIsNone(json.loads(as_json.output)["connectors"][0]["fail_mode"])
 
     def test_status_surfaces_hook_fail_mode(self):
         runner = CliRunner()

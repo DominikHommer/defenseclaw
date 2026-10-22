@@ -143,6 +143,10 @@ restarts the gateway. Then set `enterprise.inspection.ai_defense.enabled: true` 
 
 ### Change the config
 
+On a device in bundle mode (bundle trust anchors installed), deliver a new signed
+bundle instead: Setup refuses a config change with `bundle_required`.
+Otherwise:
+
 Build new content with the new `config_version: 9` `config.yaml` and create it as a
 new application with the same Setup. Replace the registry rule with a **Script**
 detection method that also checks the installed config. Take the minimum version and
@@ -197,3 +201,6 @@ Exit codes: `0` success, `1603` failed and rolled back (read `errors[].code`;
 [lifecycle error codes](/docs/troubleshooting/enterprise#lifecycle-error-codes)),
 `1618` Fast Retry, `1639` invalid arguments (fix the content), `3010` reserved
 ([Exit codes](/docs/enterprise/mdm#exit-codes)).
+
+A malformed, non-UTF-8 or invalid candidate config returns `invalid_arguments`
+and exit `1639`. Fix the content before retrying; the installed config stays in force.

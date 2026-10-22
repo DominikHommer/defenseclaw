@@ -44,7 +44,9 @@ Every recipe does the same five idempotent steps, in this order:
 5. **Verify.** `enterprise linux verify --json` is read-only and exits `1` when a
    file, permission, service or readiness check fails.
 
-After the first install, change the config only through `ensure --config`: the
+In bundle mode (bundle trust anchors installed), the config comes only from signed
+bundles and `ensure --config` refuses a different one with `bundle_required`.
+Otherwise, after the first install, change the config only through `ensure --config`: the
 lifecycle validates the candidate before it replaces `/etc/defenseclaw/config.yaml`
 and rolls back if applying fails. The recipes set only that file's owner and mode,
 never its group, so the tool and the lifecycle do not change it back and forth.
@@ -100,25 +102,31 @@ guardrail:
 
 ## Plain apt and dnf
 
-Run as root, in the folder with `config.yaml` and the verified package:
+Run this script as root, in the folder with `config.yaml` and the verified package.
+Use the install command for your distribution:
 
 ```bash
+set -e
 install -d -m 0700 -o root -g root /etc/mdm/defenseclaw
 install -m 0600 -o root -g root config.yaml /etc/mdm/defenseclaw/config.yaml
 install -d -m 0755 -o root -g root /etc/defenseclaw
 [ -e /etc/defenseclaw/config.yaml ] || install -m 0640 -o root -g root config.yaml /etc/defenseclaw/config.yaml
 
-apt-get install -y ./defenseclaw-enterprise-<version>-linux-amd64.deb   # Debian, Ubuntu
-dnf install -y ./defenseclaw-enterprise-<version>-linux-amd64.rpm       # RHEL family
+if command -v apt-get >/dev/null; then
+  apt-get install -y ./defenseclaw-enterprise-X.Y.Z-linux-amd64.deb
+else
+  dnf install -y ./defenseclaw-enterprise-X.Y.Z-linux-amd64.rpm
+fi
 
 rc=75
 for attempt in 1 2 3 4 5; do
   /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package \
     --config /etc/mdm/defenseclaw/config.yaml --json && { rc=0; break; } || rc=$?
   [ "$rc" -eq 75 ] || break
-  sleep 30
+  [ "$attempt" -eq 5 ] || sleep 30
 done
 echo "ensure exited $rc"
+exit "$rc"
 ```
 
 Store the key from an administrator session, on standard input:

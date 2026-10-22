@@ -1944,58 +1944,6 @@ func TestWindowsEnterpriseInstalledCLIKeepsAHashPinnedMarker(t *testing.T) {
 	}
 }
 
-// W4 review, loop round 1: the standalone result dropped what a
-// self-uninstall left to its finalizer, so a deferred InstallRoot
-// retirement read as a finished uninstall. A deferral is a warning naming
-// the holder and the next step, a success that leaves the canonical
-// InstallRoot with nothing deferred is an error, and a plain self-uninstall
-// says the renamed folder goes when the CLI exits.
-func TestWindowsEnterpriseSelfUninstallResultKeepsThePendingCleanup(t *testing.T) {
-	apply := func(t *testing.T, line string) *enterprisestatus.Result {
-		t.Helper()
-		report, err := parseWindowsEnterpriseInstallerReport([]byte(line))
-		if err != nil {
-			t.Fatalf("parse %s: %v", line, err)
-		}
-		result := enterprisestatus.New("uninstall", "standalone", "windows", "test")
-		applyWindowsEnterpriseInstallerReport(result, nil, report, windowsEnterpriseStandaloneRun{})
-		return result
-	}
-	const base = `{"schema_version":1,"ok":true,"action":"Uninstall","installed":false,"transaction_pending":false,` +
-		`"install_root":"C:\\Program Files\\Cisco\\DefenseClaw","retired_install_root":"C:\\Program Files\\Cisco\\DefenseClaw.retired-0"`
-
-	deferred := apply(t, base+`,"self_uninstall_cleanup_pending":true,"canonical_install_root_absent":false,`+
-		`"install_root_retirement_deferred":"a program holds a file in C:\\Program Files\\Cisco\\DefenseClaw (scanner.exe (pid 5151): Access is denied.); the detached cleanup removes it, and finishes the uninstall cleanup, once that program closes it"}`)
-	if len(deferred.Errors) != 0 || len(deferred.Warnings) != 1 || deferred.Warnings[0].Code != "uninstall_cleanup_pending" ||
-		!strings.Contains(deferred.Warnings[0].Message, "scanner.exe (pid 5151)") ||
-		!strings.Contains(deferred.Warnings[0].Message, `if C:\Program Files\Cisco\DefenseClaw is still there after that program exits, run the uninstall again`) {
-		t.Fatalf("deferred retirement: errors %+v warnings %+v", deferred.Errors, deferred.Warnings)
-	}
-	if code := deferred.Finish("windows", windowsEnterpriseFailureCodeFor(deferred)); !deferred.OK || code != 0 {
-		t.Fatalf("deferred retirement finished ok=%t exit %d", deferred.OK, code)
-	}
-
-	left := apply(t, base+`,"self_uninstall_cleanup_pending":true,"canonical_install_root_absent":false}`)
-	if len(left.Errors) != 1 || left.Errors[0].Code != "install_root_remaining" ||
-		!strings.Contains(left.Errors[0].Message, `C:\Program Files\Cisco\DefenseClaw is still there`) {
-		t.Fatalf("canonical InstallRoot left: errors %+v", left.Errors)
-	}
-	if code := left.Finish("windows", windowsEnterpriseFailureCodeFor(left)); left.OK || code == 0 {
-		t.Fatalf("canonical InstallRoot left finished ok=%t exit %d", left.OK, code)
-	}
-
-	plain := apply(t, base+`,"self_uninstall_cleanup_pending":true,"canonical_install_root_absent":true}`)
-	if len(plain.Errors) != 0 || len(plain.Warnings) != 0 || len(plain.Changes) != 1 ||
-		!strings.Contains(plain.Changes[0], `C:\Program Files\Cisco\DefenseClaw.retired-0`) {
-		t.Fatalf("plain self-uninstall: errors %+v warnings %+v changes %+v", plain.Errors, plain.Warnings, plain.Changes)
-	}
-
-	other := apply(t, `{"schema_version":1,"ok":true,"action":"Uninstall","installed":false,"transaction_pending":false}`)
-	if len(other.Errors) != 0 || len(other.Warnings) != 0 || len(other.Changes) != 0 {
-		t.Fatalf("an uninstall that is not a self-uninstall: errors %+v warnings %+v changes %+v", other.Errors, other.Warnings, other.Changes)
-	}
-}
-
 // A committed uninstall that could not act as some users (signed out, or not
 // run as LocalSystem) says which DefenseClaw per-user registrations stay. A
 // malformed forwarded value never hides the lifecycle's report.

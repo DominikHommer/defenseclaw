@@ -877,7 +877,7 @@ type GatewayPlan struct {
 // plan): the restart stops its sandboxes, which DefenseClaw's own restarts
 // refuse to do unless OpenShell reports them stopped (CheckStopped), and
 // `sandbox stop` flushes.
-const manualRestartFlushFirst = "first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME`, which flushes their disks, " +
+const manualRestartFlushFirst = "first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes, which flushes their disks, " +
 	"or what they wrote since their last sync is lost"
 
 // switchesDriver reports whether the plan moves the gateway to another
@@ -1531,17 +1531,27 @@ func envFlag(v string) bool {
 // rollbackAfter restores what Apply wrote after cause, restarting the
 // gateway again when it was already restarted with the new files. That
 // second restart makes the same check as the first (CheckStopped), still
-// under Apply's lifecycle lock: a sandbox that another OpenShell client
-// started on the restarted gateway, and that OpenShell does not report
-// stopped, leaves the gateway on the new files with the restart pending,
-// rather than stop it.
+// under Apply's lifecycle lock. If another OpenShell client started a
+// sandbox, keep the active gateway files and refuse the second restart.
 func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApplyResult, cause error, restart bool) error {
+	var activeFiles []gatewayFileState
+	if restart {
+		var err error
+		activeFiles, err = g.snapshotGatewayFiles(res)
+		if err != nil {
+			return fmt.Errorf("%w; the active gateway files could not be saved before rollback: %v", cause, err)
+		}
+	}
 	if err := g.restore(ctx, res); err != nil {
 		return fmt.Errorf("%w; restoring the previous configuration also failed: %v", cause, err)
 	}
 	if restart {
 		if err := g.CheckStopped(ctx); err != nil {
-			return fmt.Errorf("%w; the previous files were restored, but the gateway still runs on the new ones, since it was not restarted again: %w", cause, err)
+			if restoreErr := g.restoreGatewayFiles(ctx, activeFiles, res); restoreErr != nil {
+				return fmt.Errorf("%w; the rollback was refused (%v) and restoring the active gateway files failed: %v", cause, err, restoreErr)
+			}
+			g.clearRestartPending()
+			return fmt.Errorf("%w; the rollback was refused and the active gateway files were kept without another restart: %w", cause, err)
 		}
 		if err := g.restart(ctx); err != nil {
 			// The service manager refused both restarts (brew services
@@ -1571,6 +1581,13 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	if res == nil || len(res.Files) == 0 {
 		return nil
 	}
+	// Hold the account's rollback lock for every rollback path, including a
+	// stopped or externally managed gateway, until its files are settled.
+	unlock, err := g.LockLifecycle(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if g.NoService(ctx) {
 		if err := g.restore(ctx, res); err != nil {
 			return err
@@ -1604,12 +1621,11 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	}
 	// Before anything changes: a sandbox that OpenShell does not report
 	// stopped refuses the restart.
-	unlock, err := g.LockLifecycle(ctx)
-	if err != nil {
+	if err := g.CheckStopped(ctx); err != nil {
 		return err
 	}
-	defer unlock()
-	if err := g.CheckStopped(ctx); err != nil {
+	activeFiles, err := g.snapshotGatewayFiles(res)
+	if err != nil {
 		return err
 	}
 	if err := g.markRestartPending(); err != nil {
@@ -1617,6 +1633,15 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	}
 	if err := g.restore(ctx, res); err != nil {
 		return err
+	}
+	// Raw openshell clients do not hold DefenseClaw's lifecycle lock. Check
+	// again after file and unit work, immediately before the restart.
+	if err := g.CheckStopped(ctx); err != nil {
+		if restoreErr := g.restoreGatewayFiles(ctx, activeFiles, res); restoreErr != nil {
+			return fmt.Errorf("%w; restoring the active gateway files after the refused rollback failed: %v", err, restoreErr)
+		}
+		g.clearRestartPending()
+		return fmt.Errorf("%w (the active gateway files were kept and the gateway was not restarted)", err)
 	}
 	return g.restart(ctx)
 }
@@ -1694,6 +1719,44 @@ func (g *GatewayConfigurator) restore(ctx context.Context, res *GatewayApplyResu
 			errs = append(errs, err)
 		}
 	}
+	return errors.Join(errs...)
+}
+
+// gatewayFileState is the active configuration before an older one is
+// restored. A raw OpenShell start during rollback leaves the gateway
+// running, so a refused restart must leave these files active too.
+type gatewayFileState struct {
+	path   string
+	data   []byte
+	exists bool
+}
+
+func (g *GatewayConfigurator) snapshotGatewayFiles(res *GatewayApplyResult) ([]gatewayFileState, error) {
+	states := make([]gatewayFileState, 0, len(res.Files))
+	for _, file := range res.Files {
+		data, err := safefile.ReadRegularFileBounded(file.Path, maxGatewayFileBytes)
+		if errors.Is(err, fs.ErrNotExist) {
+			states = append(states, gatewayFileState{path: file.Path})
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("openshell: read the active gateway file %s before rollback: %w", file.Path, err)
+		}
+		states = append(states, gatewayFileState{path: file.Path, data: data, exists: true})
+	}
+	return states, nil
+}
+
+func (g *GatewayConfigurator) restoreGatewayFiles(ctx context.Context, states []gatewayFileState, res *GatewayApplyResult) error {
+	var errs []error
+	for _, state := range states {
+		if state.exists {
+			errs = append(errs, safefile.Write(state.path, state.data))
+		} else if err := os.Remove(state.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	errs = append(errs, g.reloadUnits(ctx, res.Files))
 	return errors.Join(errs...)
 }
 

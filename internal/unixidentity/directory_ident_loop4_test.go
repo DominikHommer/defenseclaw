@@ -35,6 +35,11 @@ func sssdConfiguredHost(t *testing.T) {
 // fail. A gid getent names no group for stays a number only once every
 // directory service of the group line shows it has none; nslcd's completed
 // search for the gid names it.
+//
+// r104 identity: a gid whose lack of a name is not proved is reported in
+// UnconfirmedGroups (never a name another provider gives on its own), and
+// the gateway treats every group entry it may be as possibly matching.
+// Either that, or a failed lookup, is fail closed; a proven number is not.
 func TestAnUnnamedGroupNeedsADefinitiveMiss(t *testing.T) {
 	localLine := []byte("alice:x:1001:5100::/home/alice:/bin/sh\n")
 	results := map[string]commandResult{
@@ -52,8 +57,8 @@ func TestAnUnnamedGroupNeedsADefinitiveMiss(t *testing.T) {
 		ok         bool
 		wantGroups []string
 	}{
-		{"nslcd names the group", "group: files ldap\n",
-			&fakeNSLCD{members: members, groups: map[int]string{5200: "strict-devs"}}, "", true, []string{"5100", "local-team", "strict-devs"}},
+		{"nslcd names the group, glibc did not", "group: files ldap\n",
+			&fakeNSLCD{members: members, groups: map[int]string{5200: "strict-devs"}}, "", false, nil},
 		{"nslcd's search for the gid fails", "group: files ldap\n",
 			&fakeNSLCD{members: members, groups: map[int]string{5200: "strict-devs"}, incomplete: map[string]bool{"gid:5200": true}}, "", false, nil},
 		{"nslcd is down for the gid", "group: files ldap\n", nil, "", false, nil},
@@ -76,8 +81,12 @@ func TestAnUnnamedGroupNeedsADefinitiveMiss(t *testing.T) {
 				startFakeSSSD(t, nil)
 			}
 			facts, err := newFakeNSS(&fakeRun{results: results}).DirectoryFactsForUID(1001, time.Now())
-			if tc.ok != (err == nil) {
-				t.Fatalf("facts = %+v, %v; want ok %v", facts, err, tc.ok)
+			// ok: every gid is proven. Otherwise the lookup fails or
+			// reports 5200 unconfirmed, and no provider's own name for it
+			// is taken.
+			proven := err == nil && !slices.Contains(facts.UnconfirmedGroups, "5200")
+			if tc.ok != proven || slices.Contains(facts.Groups, "strict-devs") {
+				t.Fatalf("facts = %+v, %v; want proven %v", facts, err, tc.ok)
 			}
 			if got := slices.Sorted(slices.Values(facts.Groups)); tc.ok && !slices.Equal(got, tc.wantGroups) {
 				t.Fatalf("groups = %v, want %v", got, tc.wantGroups)
@@ -95,8 +104,8 @@ func TestAnUnnamedGroupNeedsADefinitiveMiss(t *testing.T) {
 			"passwd 41301": {stdout: line}, "-s ldap passwd 41301": {stdout: line},
 			"initgroups bob": {stdout: []byte("bob 41301 5300\n")}, "group 41301 5300": {stdout: []byte("bob:*:41301:\n"), exitCode: getentExitNotFound},
 		}})
-		if facts, err := r.DirectoryFactsForUID(41301, time.Now()); err == nil {
-			t.Fatalf("facts = %+v; want the lookup to fail while LDAP cannot name gid 5300", facts)
+		if facts, err := r.DirectoryFactsForUID(41301, time.Now()); err == nil && !slices.Contains(facts.UnconfirmedGroups, "5300") {
+			t.Fatalf("facts = %+v; want gid 5300 unconfirmed while LDAP cannot name it", facts)
 		}
 	})
 }

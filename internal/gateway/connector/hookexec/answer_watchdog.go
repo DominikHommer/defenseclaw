@@ -131,10 +131,8 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 // renderNoAnswer renders the answer of a call whose gateway did not answer
 // in time, and the failure log line it writes when it is given.
 func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []byte, code int, logFailure func()) {
-	if opts.answerSpentLocally {
-		// The answer is closed (failNoAnswer), and so is its log line.
-		failMode = "closed"
-	}
+	// The row and the rendered decision must use the same effective mode.
+	failMode = noAnswerFailMode(opts, failMode)
 	var out, errb bytes.Buffer
 	rendered := opts
 	rendered.Stdout, rendered.Stderr = &out, &errb
@@ -175,6 +173,24 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 	if w.fired || (w.closedKnown && !closed) {
 		return
 	}
+	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
+}
+
+// closeForBusyGateway makes the watchdog's answer the closed one of a call
+// the gateway answered 429 (opts.gatewayBusy): a deadline that passes while
+// the call waits to resend, or on a resend, is no outage. Safe on a nil
+// watchdog.
+func (w *answerWatchdog) closeForBusyGateway(opts Options, sp spec) {
+	if w == nil {
+		return
+	}
+	stdout, stderr, code, logFailure := renderNoAnswer(opts, sp, "closed")
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired {
+		return
+	}
+	w.closedKnown = true
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
 }
 

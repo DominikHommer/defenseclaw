@@ -298,6 +298,9 @@ def test_public_bundle_receipt_acl_does_not_expose_private_paths() -> None:
     # Change events are readable by the gateway service, not by standard users.
     assert "$top -ceq 'change-events'" in classifier
     assert "^change-events\\\\c-[0-7][0-9A-HJKMNP-TV-Z]{25}\\.json$" in classifier
+    # So are the reservations of changes in progress (change-events\reserved).
+    assert "$RelativePath -ceq 'change-events\\reserved' -and $IsDirectory" in classifier
+    assert "^change-events\\\\reserved\\\\c-[0-7][0-9A-HJKMNP-TV-Z]{25}\\.json$" in classifier
     assert classifier.index("$top -ceq 'change-events'") < classifier.index("if ($IsDirectory) { return 'AdminDirectory' }")
     assert classifier.index("$top -ceq 'receipt-events'") < classifier.index("if ($IsDirectory) { return 'AdminDirectory' }")
     assert "if ($IsDirectory) { return 'AdminDirectory' }" in classifier
@@ -413,7 +416,10 @@ def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
     assert "store.EnsureStageDirectory = windowsBundleEnsureStageDirectory" in go
     assert "store.PublishStageFile = windowsBundlePublishStageFile" in go
     assert "windowsBundleEnsurePrivateDirectory(filepath.Dir(dst))" in go
-    assert "writeWindowsBundleAdminFile(dst, raw)" in go
+    # The anchors are replaced, then sealed admin-only (w3-g3-obs splits the
+    # two steps so a failed seal is recorded as a changed file).
+    assert "writeWindowsBundleFile(dst, raw)" in go
+    assert "windowsBundlePublishPrivateFile(dst)" in go
     assert "'trust'" in module.split("function Invoke-DefenseClawBundleAclContract {", 1)[1].split("function Set-DefenseClawManagedAcls {", 1)[0]
     assert "s.EnsureStageDirectory(dir, parent)" in store
     assert "if !dirs[parent]" in store

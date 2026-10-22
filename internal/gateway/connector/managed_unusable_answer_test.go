@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -161,6 +162,79 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// r104 W4b2 review P1: a standalone managed shell hook (Linux, macOS) whose
+// administrator chose hook_fail_mode open lets a call through only on a
+// gateway outage (here the stopped service: no hook socket). A rate limit
+// (HTTP 429 after the resends, or a resend that fails after a 429), a 5xx,
+// an unusable answer and input too large to inspect are no outage and block,
+// as in the native hook runner.
+func TestManagedStandaloneShellHooksOpenOnlyForAnOutage(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is required to run the shell hooks")
+	}
+	answer := func(status int, body string) func(int, http.ResponseWriter) bool {
+		return func(_ int, w http.ResponseWriter) bool {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+			return true
+		}
+	}
+	rateLimited := `{"error":"rate_limited","reason":"enterprise_managed_rate_limited","retry_after_seconds":1}`
+	for _, conn := range []Connector{
+		NewHermesConnector(), NewKiroConnector(), NewCursorConnector(),
+		NewDevinConnector(), NewAntigravityConnector(),
+	} {
+		hook := hookArgvConnectorCase(t, conn.Name())
+		for _, tc := range []struct {
+			name    string
+			serve   func(int, http.ResponseWriter) bool
+			stdin   string
+			stopped bool
+			blocks  bool
+		}{
+			{name: "rate limited until the resends end", serve: answer(http.StatusTooManyRequests, rateLimited), blocks: true},
+			{name: "rate limited, then the resend fails", serve: func(n int, w http.ResponseWriter) bool {
+				if n == 1 {
+					return answer(http.StatusTooManyRequests, rateLimited)(n, w)
+				}
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err == nil {
+					_ = conn.Close()
+				}
+				return true
+			}, blocks: true},
+			{name: "gateway 5xx", serve: answer(http.StatusServiceUnavailable, `{"error":"unavailable"}`), blocks: true},
+			{name: "gateway 4xx", serve: answer(http.StatusBadRequest, `{"error":"bad request"}`), blocks: true},
+			{name: "unusable answer", serve: answer(http.StatusOK, `{"action":"proceed"}`), blocks: true},
+			{name: "input too large to inspect", stdin: `{"pad":"` + strings.Repeat("x", 1100<<10) + `"}`, blocks: true},
+			{name: "gateway stopped", stopped: true, blocks: false},
+			{name: "allow verdict", serve: answer(http.StatusOK, `{"action":"allow"}`), blocks: false},
+		} {
+			t.Run(fmt.Sprintf("%s %s", conn.Name(), tc.name), func(t *testing.T) {
+				t.Parallel()
+				f := newHookSocketFixture(t, "dcoo", nil)
+				f.gateway.serve = tc.serve
+				if tc.stopped {
+					if err := os.Remove(f.socket); err != nil {
+						t.Fatal(err)
+					}
+				}
+				stdin := hook.stdin
+				if tc.stdin != "" {
+					stdin = tc.stdin
+				}
+				code, stdout, stderr := runStandaloneShellHookInMode(t, f, conn, hook.script, hook.args, stdin, "open")
+				blocked := code == 2 || strings.Contains(stdout, `"deny"`) ||
+					strings.Contains(stdout, `"block"`) || strings.Contains(stdout, `"continue":false`)
+				if blocked != tc.blocks {
+					t.Fatalf("admin open: exit %d stdout=%q stderr=%q: blocked = %v, want %v", code, stdout, stderr, blocked, tc.blocks)
+				}
+			})
 		}
 	}
 }

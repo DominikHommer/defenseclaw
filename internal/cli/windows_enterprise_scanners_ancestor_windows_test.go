@@ -34,7 +34,7 @@ func TestWindowsScannerRuntimeRefusesReplaceRightsAboveItsFolder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := managed.WriteScannerRuntimeAdmission(root, digest); err != nil {
+	if err := managed.WriteScannerRuntimeAdmission(root, digest, managed.ScannerRuntimeTrustAuthenticode); err != nil {
 		t.Fatal(err)
 	}
 	source := filepath.Join(cisco, "Staging", managed.StandaloneWindowsScannerRuntimeName)
@@ -64,7 +64,7 @@ func TestWindowsScannerRuntimeRefusesReplaceRightsAboveItsFolder(t *testing.T) {
 	if got := readWindowsScannerRuntime(); got.State != "not_prepared" {
 		t.Fatalf("stock tree: scanners = %+v, want not_prepared", got)
 	}
-	if err := admitWindowsScannerRuntimePayload(source, staged, pinned); err != nil {
+	if _, err := admitWindowsScannerRuntimePayload(source, staged, pinned); err != nil {
 		t.Fatalf("stock tree: the staged payload was refused: %v", err)
 	}
 
@@ -79,7 +79,7 @@ func TestWindowsScannerRuntimeRefusesReplaceRightsAboveItsFolder(t *testing.T) {
 	if err := windowsScannerRuntimeServiceCheck(); err == nil || !strings.Contains(err.Error(), cisco) || !strings.Contains(err.Error(), "write-like") {
 		t.Fatalf("service check = %v, want the replace right on %s", err, cisco)
 	}
-	if err := admitWindowsScannerRuntimePayload(source, staged, pinned); err == nil || !strings.Contains(err.Error(), cisco) {
+	if _, err := admitWindowsScannerRuntimePayload(source, staged, pinned); err == nil || !strings.Contains(err.Error(), cisco) {
 		t.Fatalf("the staged payload under %s was admitted: %v", cisco, err)
 	}
 	// The copy is never run: the install fails on the replace right, the

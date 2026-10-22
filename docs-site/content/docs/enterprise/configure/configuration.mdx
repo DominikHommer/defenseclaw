@@ -19,6 +19,7 @@ A standalone deployment reads one administrator-owned `config.yaml` per host. Th
 | macOS | `/opt/cisco/defenseclaw/etc/config.yaml` (`0640`, root, group `_defenseclaw`) | The `com.cisco.defenseclaw.apply` LaunchDaemon watches the file and runs `ensure --reason path`. |
 | Windows | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` (Administrators only) | Nothing watches it. Run ensure again with the new file, as in [Change the config](/docs/enterprise/operate/lifecycle#change-the-config). |
 
+- In bundle mode (bundle trust anchors installed), the config comes only from signed bundles: a plain config is refused with `bundle_required` and an edit of the file on Linux and macOS is reverted.
 - The package ships no config. Write it as root and keep it unwritable by other users. The MDM wrapper refuses a config file a non-administrator can write (`mdm_untrusted_input`); see [Deliver the config](/docs/enterprise/mdm#deliver-the-config).
 - Linux and macOS take the config from `--config`, else the file already at the path, else a built-in default that observes and protects nothing.
 - On Windows, supply the file to ensure (`--config`, Setup's `CONFIG=` or the wrapper's `-ConfigPath`). Do not edit the installed copy: ensure only compares the file you supply.
@@ -67,7 +68,7 @@ guardrail:
 `openclaw` and `zeptoclaw` need the guardrail proxy, which a managed host does not run, so they are not managed. Per-user enrollment also depends on the [enrollment settings](/docs/enterprise/configure/enrollment) and on a supported agent version. The full route table is in [Machine policy](/docs/enterprise/configure/machine-policy#routes-by-connector).
 
 <Callout type="warn" title="Leave an agent out to leave it unprotected">
-`guardrail.connectors.<name>.enabled: false` disables the connector and removes its machine policy and hooks. An empty entry (`{}`) enables it. To leave an agent unprotected, omit it from `guardrail.connectors` and `enterprise.machine_policy.connectors`, or set that connector's `ownership: "off"`. Then run `enterprise policy show` and `enterprise verify` to see which agents still have coverage.
+`guardrail.connectors.<name>.enabled: false` disables the connector and removes its machine policy and hooks. An empty entry (`{}`) enables it. To leave an agent unprotected, omit it from `guardrail.connectors` and `enterprise.machine_policy.connectors`, or set that connector's `ownership: "off"`. Then run `defenseclaw-gateway enterprise policy show --json` and the OS-specific coverage check: `enterprise linux verify --json`, `enterprise macos verify --json` or `enterprise windows verify --json`, using the installed gateway as administrator.
 </Callout>
 
 ## Apply and check

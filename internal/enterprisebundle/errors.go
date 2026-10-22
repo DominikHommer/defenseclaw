@@ -28,6 +28,7 @@ type Code string
 
 const (
 	CodeArchiveInvalid   Code = "archive_invalid"
+	CodeDiskFull         Code = "disk_full"
 	CodeManifestInvalid  Code = "manifest_invalid"
 	CodeFileMissing      Code = "file_missing"
 	CodeFileExtra        Code = "file_extra"
@@ -130,6 +131,16 @@ func CodeOf(err error) Code {
 
 func refuse(code Code, path, format string, args ...any) *Error {
 	return &Error{Code: code, Path: path, Detail: fmt.Sprintf(format, args...)}
+}
+
+// StageError preserves a storage exhaustion reason when a valid bundle could
+// not be copied into the private stage. The receipt and CLI use the same code.
+func StageError(err error) *Error {
+	code := CodeArchiveInvalid
+	if stageDiskFull(err) {
+		code = CodeDiskFull
+	}
+	return &Error{Code: code, Detail: "cannot stage the bundle: " + err.Error(), cause: err}
 }
 
 // safePath quotes a path taken from untrusted input when it holds anything

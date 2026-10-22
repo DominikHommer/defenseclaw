@@ -1455,6 +1455,10 @@ func (e *sessionDeleteError) Unwrap() error { return e.err }
 func (s *session) finish(ctx context.Context, stopped bool) error {
 	a := s.app
 	name := s.sb.Name
+	// A copy review can wait for an answer while another terminal connects.
+	// The count taken when the harness ended is stale by the time the review
+	// completes; use the current leases before deciding to stop or delete.
+	s.others = a.attachedSessions(name)
 	switch {
 	case s.rm && s.liveRun:
 		s.notDeleted("its detached run is still going", "the run ends")

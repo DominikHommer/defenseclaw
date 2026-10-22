@@ -153,8 +153,15 @@ func windowsEnterpriseStandardUserMutationAnswer(action string, flags ...string)
 // command (GAP-2039). The code stays out of the sentence: it is the
 // managedViewRefusal's, for --json errors[].code (GAP-2262).
 func windowsManagedStandardUserViewAnswer(what, adminArgs string) string {
+	executable := managedWindowsAdminCLI()
+	if strings.HasPrefix(adminArgs, "enterprise windows sandbox ") {
+		// Sandbox administration is a gateway command (r103 GAP-0215).
+		// Both binaries are shipped beside each other by standalone Setup.
+		dir := executable[:strings.LastIndexAny(executable, `/\`)+1]
+		executable = dir + "defenseclaw-gateway.exe"
+	}
 	return what + " of a managed computer can be read only from an elevated Administrator prompt or by the MDM agent. " +
-		"Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" + managedWindowsAdminCLI() + "' " + adminArgs + "`. Nothing was changed."
+		"Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" + executable + "' " + adminArgs + "`. Nothing was changed."
 }
 
 // managedViewRefusal is a standard account's refusal of a managed view. It

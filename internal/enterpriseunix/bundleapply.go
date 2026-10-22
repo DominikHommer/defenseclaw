@@ -85,6 +85,10 @@ const (
 type bundleRun struct {
 	store   *enterprisebundle.Store
 	receipt *enterprisebundle.Receipt
+	// verifiedProductFloor came from this run's verified signed manifest. A
+	// replacement bundle can recover a damaged confirmed bundle without
+	// relying on the damaged bundle's unreadable minimum.
+	verifiedProductFloor string
 	// configSHA is the SHA-256 of the rendered config.yaml.
 	configSHA string
 	// confirmPending is set when the deployment committed the bundle config
@@ -468,7 +472,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	}
 	staging, err := store.Stage(receipt, b)
 	if err != nil {
-		return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeArchiveInvalid, Detail: "cannot stage the bundle: " + err.Error()})
+		return refuse(enterprisebundle.StageError(err))
 	}
 	// Everything below reads the staged copy only.
 	staged, err := enterprisebundle.ReadDir(staging)
@@ -528,10 +532,29 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		if r.Noop {
 			r.NoopReason = "already_applied"
 		}
+		// The old receipt proves only that the bundle was enforced when it
+		// was first confirmed. A repeated delivery may repair config.yaml
+		// and restart the gateway without its policy ever converging. Do not
+		// report that cached confirmation as this delivery's outcome.
+		if code == 0 && len(r.Errors) == 0 {
+			current, err := store.CurrentSummary()
+			if err != nil || current == nil || r.Policy == nil || !r.Policy.Applied ||
+				r.Policy.EffectiveDigest != current.EffectivePolicyDigest ||
+				r.Policy.GatewayReportedDigest != current.EffectivePolicyDigest {
+				r.Noop, r.NoopReason = false, ""
+				// ensureInstalled describes the historical confirmed receipt.
+				// This repeated delivery has not earned that result block.
+				r.Bundle = nil
+				r.AddError(codeBundleNotConfirmed, fmt.Sprintf(
+					"the repeated policy bundle is installed, but the gateway has not confirmed its effective policy; check `defenseclaw-gateway enterprise bundle status`, then resubmit the same signed bundle with `%s`", bundleApplyCommand))
+				return code
+			}
+		}
 		l.describeCurrentBundle()
 		return code
 	}
 	m := res.Manifest
+	run.verifiedProductFloor = m.MinProductVersion
 	if err := store.Advance(receipt, enterprisebundle.StateVerified, func(rc *enterprisebundle.Receipt) {
 		rc.TenantID, rc.DeviceGroup, rc.Principal = m.TenantID, m.Target.DeviceGroup, m.CreatedBy
 		rc.ChangeSummary, rc.RollbackOf = m.ChangeSummary, m.RollbackOf

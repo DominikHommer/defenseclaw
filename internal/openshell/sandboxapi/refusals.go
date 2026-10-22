@@ -130,6 +130,12 @@ func adminSentence() string {
 // fallback ("your IT help desk") when the organization configured none.
 func contact(requestAccess string) string {
 	if v := refusalValue(requestAccess); v != "" {
+		if len(v) >= len("contact ") && strings.EqualFold(v[:len("contact ")], "contact ") {
+			v = strings.TrimSpace(v[len("contact "):])
+		}
+		if v == "" {
+			return strings.TrimPrefix(config.OpenShellRequestAccessFallback, "contact ")
+		}
 		return v
 	}
 	return strings.TrimPrefix(config.OpenShellRequestAccessFallback, "contact ")

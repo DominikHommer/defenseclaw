@@ -54,7 +54,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
      * contractors  Contractors are enforced from day one (mode=action, block_at=MEDIUM, alert_at=LOW)
      * ml-team  The ML team stays in observe mode (mode=observe)
 
-     * assignments (first match wins):
+     * assignments (strictest match wins):
          1. contractors <- groups=contractors@corp.example.com
          2. ml-team <- groups=ml-team@corp.example.com
      * default: ml-team

@@ -1154,8 +1154,14 @@ type ActivityInput struct {
 	ConfigChange *ConfigChange
 	// OccurrenceID, when set, is the audit event id. A record already
 	// stored under it is not written again, so a producer that re-offers
-	// the same event after a restart records it once.
+	// the same event after a restart records it once; the offer sends the
+	// stored record again to the remote destinations that do not have it.
+	// The call returns nil only once the record survives a power loss.
 	OccurrenceID string
+	// RemoteDelivery, with OccurrenceID, follows the record's remote
+	// destinations across offers (observability.RemoteDelivery). Nil
+	// follows this offer only.
+	RemoteDelivery *observability.RemoteDelivery
 }
 
 // ActivityDiffEntry records one canonical control-plane mutation delta.

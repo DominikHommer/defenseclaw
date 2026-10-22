@@ -699,9 +699,13 @@ Process names match a catalog name exactly or as a distinct part separated by a 
   <Tab value="Components">
 ```bash
 defenseclaw agent components --ecosystem npm --min-identity 0.8
-defenseclaw agent components show ai-sdk
-defenseclaw agent components history ai-sdk
+defenseclaw agent components show ai
+defenseclaw agent components history ai
 ```
+
+Use the component ID from `agent components`; package IDs such as `ai` and
+`openai` resolve only after discovery finds those packages. A display label or
+connector name is not a component ID.
 
 Package-dependency view: every AI-related npm, PyPI, Go, Cargo, or other package dependency across your workspaces. `--ecosystem` takes the ecosystem name (`npm`, `pypi`, `go`, …). `show` and `history` drill into a single component's identity score and detection trail.
   </Tab>
@@ -720,7 +724,7 @@ The macOS app decodes the same wire shape and uses the same recommended scope. I
 Discovery isn't binary — every signal has a confidence score. To inspect what evidence backed a particular decision:
 
 ```bash
-defenseclaw agent confidence explain claudecode
+defenseclaw agent confidence explain openai
 defenseclaw agent confidence policy show
 defenseclaw agent confidence policy default
 defenseclaw agent confidence policy validate ./my-policy.yaml

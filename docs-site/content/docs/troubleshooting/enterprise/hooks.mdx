@@ -112,7 +112,7 @@ The registry marks it `ignore` on a managed standalone host, so the value is rea
 
 **Fix.** Set the equivalent key in the admin config. See [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
 
-**Check.** `defenseclaw doctor` lists the name in the row `Ignored environment overrides` only while it is set.
+**Check.** On managed Linux and macOS, `doctor` is unavailable: the packaged launcher runs only sandbox commands. As root, run the installed gateway's `enterprise linux status --json` or `enterprise macos status --json` and check that `policy.applied` is `true`. The `Ignored environment overrides` row belongs to the per-user Python CLI.
 
 ## AI Defense is not used
 
@@ -122,13 +122,13 @@ The credential is missing or unreadable, the `credential` name under `enterprise
 
 **Check.** `/health` shows `ai_defense_available`; when it is `false`, `ai_defense_error` says why.
 
-## `policy.applied` is `false`, or doctor shows `Policy` as FAIL
+## `policy.applied` is `false`
 
 Two messages are possible. "The gateway applies `sha256:...` but config.yaml and its policy assets compute to `sha256:...`" means a reload is pending or was rejected, or the file changed under the gateway. "The last change was rejected" (`/health` has `policy.last_reload_error`) means the gateway built the new policy generation and rejected it, for example a rule pack or Rego module that no longer loads, or a pinned digest that does not match. It keeps enforcing the previous generation, so nothing is unprotected, but the change is not live.
 
 **Fix.** Wait one reload, then run `status --json` again. If it persists, restart the managed gateway or run `repair` ([Restart the managed gateway](/docs/enterprise/operate/lifecycle#restart-the-managed-gateway)). For a rejection, read the error, fix the config or the asset it names, and apply the config. A custom rule pack edited in place no longer matches its pinned digest: pin the new digest, or restore the pack. `policy digest` prints the components.
 
-**Check.** `policy.applied` is `true`. Where the `defenseclaw` CLI is present, doctor shows:
+**Check.** `policy.applied` is `true` in the native lifecycle's `status --json`. On a per-user install, the equivalent `defenseclaw doctor` rows are:
 
 ```text
 [PASS] Policy  —  generation 1, digest sha256:77ef51dce35b (applied by the gateway)

@@ -413,6 +413,36 @@ func TestPolicyValidateRejectsDeletedConfiguredDirectory(t *testing.T) {
 	}
 }
 
+func TestPolicyTestWithoutRegoDistinguishesAnExistingRootFromAMissingRoot(t *testing.T) {
+	for _, layout := range []string{"no rego directory", "empty rego directory", "missing policy root"} {
+		t.Run(layout, func(t *testing.T) {
+			root := t.TempDir()
+			if layout == "empty rego directory" {
+				if err := os.Mkdir(filepath.Join(root, "rego"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if layout == "missing policy root" {
+				root = filepath.Join(root, "missing")
+			}
+			setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
+			setPolicyPathTestFlags(t)
+			var output strings.Builder
+			previous := policyTestCmd.OutOrStdout()
+			policyTestCmd.SetOut(&output)
+			t.Cleanup(func() { policyTestCmd.SetOut(previous) })
+			err := policyTestCmd.RunE(policyTestCmd, nil)
+			if layout == "missing policy root" {
+				if err == nil {
+					t.Fatal("missing policy root accepted")
+				}
+			} else if err != nil || !strings.Contains(output.String(), "nothing to run") {
+				t.Fatalf("output=%q, error=%v", output.String(), err)
+			}
+		})
+	}
+}
+
 func TestPolicyReloadRemainsPathIndependent(t *testing.T) {
 	ownGatewayListener(t)
 	const token = "reload-fixture-value"

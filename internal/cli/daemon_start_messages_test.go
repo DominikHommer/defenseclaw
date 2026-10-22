@@ -79,6 +79,35 @@ func writeGatewayMessageConfig(t *testing.T, body string) string {
 	return configPath
 }
 
+// Check the same loader start uses, including a released v8 source. Log-tail
+// parsing alone does not guarantee that start names an unsafe destination.
+func TestGatewayStartPreflightNamesUnsafeJSONLDestination(t *testing.T) {
+	for _, schema := range []string{"8", "9"} {
+		t.Run(schema, func(t *testing.T) {
+			path := t.TempDir()
+			configPath := writeGatewayMessageConfig(t, fmt.Sprintf("observability:\n  destinations:\n    - name: unsafe-copy\n      kind: jsonl\n      path: %q\n", path))
+			raw, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = []byte(strings.Replace(string(raw), "config_version: 8", "config_version: "+schema, 1))
+			if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, loadErr := loadDaemonConfig(startCmd)
+			if loadErr == nil {
+				t.Fatal("start accepted an unsafe JSONL destination")
+			}
+			message := daemonConfigLoadError("start", loadErr).Error()
+			for _, want := range []string{`destination "unsafe-copy"`, path, "is a directory", "point it at a file"} {
+				if !strings.Contains(message, want) {
+					t.Errorf("start refusal omits %q: %s", want, message)
+				}
+			}
+		})
+	}
+}
+
 // GAP-1900: gateway status names a missing destination key with one remedy.
 func TestGatewayStatusMissingDestinationKeyGivesOneRemedy(t *testing.T) {
 	const secretEnv = "DC_TEST_STATUS_ONE_REMEDY_KEY"

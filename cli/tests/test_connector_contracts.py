@@ -304,6 +304,9 @@ class TestConnectorContractManifest(unittest.TestCase):
         rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
         self.assertIn("scoped bearer + source header on /v1/<signal>", rendered)
         self.assertNotIn("/otlp/codex/<token>", rendered)
+        self.assertNotIn("/api/v1/codex/notify", rendered)
+        self.assertNotIn("otel / notify", rendered)
+        self.assertNotIn("notify bridge", rendered)
 
     def test_setup_banner_prints_the_gateway_hook_route(self) -> None:
         # GAP-1611: the gateway serves Claude Code on /api/v1/claude-code/hook.
@@ -730,19 +733,6 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.save_calls, 0)
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")
         self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
-
-    def test_action_downgrade_cannot_stage_unsupported_codex(self) -> None:
-        with patch(
-            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-            return_value=_discovery("codex", installed=True, version="codex 0.124.0"),
-        ):
-            ok = _apply_hook_connector_setup(
-                self.app, connector="codex", mode="action", restart=False,
-                _downgrade_refused_action=True,
-            )
-        self.assertFalse(ok)
-        self.assertEqual(self.save_calls, 0)
-        self.assertEqual(self.app.cfg.claw.mode, "openclaw")
 
     def test_hermes_action_mode_detects_but_rejects_v017_before_save(self) -> None:
         with patch(

@@ -1458,6 +1458,19 @@ func TestManagedPolicyAllowAndBlockUseTheGatewayDecisionStore(t *testing.T) {
 	if len(got) != 2 || got[1].Kind != sandboxrelay.DecisionEgressAllow {
 		t.Fatalf("stored decisions = %+v", got)
 	}
+	checked, err := e.m.PolicyTest(t.Context(), sandboxapi.PolicyTestRequest{Sandbox: "onebox", Checks: []sandboxapi.PolicyCheck{
+		{Host: "example.org", Port: 443}, {Host: "api.example.org", Port: 443},
+	}})
+	if err != nil || len(checked.Decisions) != 2 {
+		t.Fatalf("saved decision policy test: %+v, %v", checked, err)
+	}
+	for i, kind := range []string{"block", "allow"} {
+		d := checked.Decisions[i]
+		if d.Allowed != (kind == "allow") || !strings.Contains(d.Source, "your saved "+kind+" decision") ||
+			!strings.Contains(d.Source, "managed gateway") || !strings.Contains(d.Reason, "You ") {
+			t.Fatalf("saved %s provenance: %+v", kind, d)
+		}
+	}
 	off := false
 	auth.gatewayOnly.Store(&config.OpenShellAdminConfig{AllowUnblock: &off})
 	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "another.example.org", Kind: "allow"}); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || len(auth.decisions()) != 2 {

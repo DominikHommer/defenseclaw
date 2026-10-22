@@ -76,9 +76,9 @@ func AgentID(in Inputs) string {
 }
 
 // LegacyAgentID is the ID 1.0.0 to 1.0.3 gave in, whose account key left
-// out the domain, or "" when it is AgentID's: in names a uid's qualified
-// account. A guardrail profile assignment written for the legacy ID keeps
-// selecting the account it was recorded for (the gateway's agent ledger).
+// out the domain and did not distinguish bare accounts, or "" when it is
+// AgentID's. A guardrail profile assignment written for the legacy ID may
+// select an account only when the gateway's agent ledger proves ownership.
 // Remove once upgrades from 1.0.3 are no longer supported.
 func LegacyAgentID(in Inputs) string {
 	if legacy := agentID(in, false); legacy != agentID(in, true) {
@@ -97,8 +97,16 @@ func agentID(in Inputs, withDomain bool) string {
 	parts := []string{machine, user, connector, NormalizeInstallFP(in.InstallFP)}
 	if !IsSID(user) {
 		parts = append(parts, AccountKey(in.Account))
-		if domain := AccountDomain(in.Account); withDomain && domain != "" {
-			parts = append(parts, domain)
+		if withDomain && AccountKey(in.Account) != "" {
+			if domain := AccountDomain(in.Account); domain != "" {
+				parts = append(parts, domain)
+			} else {
+				// A bare account must never share a current ID with the
+				// domain-free ID a qualified account used before 1.0.4.
+				// Two parts keep this namespace distinct even if a real
+				// directory's domain equals the first marker.
+				parts = append(parts, "account-kind:bare", "account-namespace:1.0.4")
+			}
 		}
 		if incarnation := clean(in.Incarnation); incarnation != "" {
 			parts = append(parts, "incarnation:"+incarnation)

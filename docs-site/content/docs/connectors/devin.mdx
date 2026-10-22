@@ -62,11 +62,15 @@ Other hooks and JSONC content in those files are kept.
 
 ## Turn it off
 
+For a per-user, single-connector install:
+
 ```bash
-defenseclaw guardrail disable --connector devin --yes
+defenseclaw guardrail disable --yes
 ```
 
-This keeps Devin's settings. Turn it back on with `defenseclaw guardrail enable --connector devin`. To remove the connector, run `defenseclaw setup remove devin --yes` (add `--force` if it is the last one).
+This keeps Devin's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove devin --yes` (add `--force` if it is the last one).
+
+On a multi-connector install, add `--connector devin` to `guardrail disable` and `guardrail enable` to change only this agent.
 
 ## Details
 

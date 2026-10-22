@@ -98,7 +98,8 @@ var (
 
 // ErrChangeSpoolFull refuses a change event while the spool holds
 // maxPendingChangeEvents events the gateway has not reported.
-var ErrChangeSpoolFull = errors.New("the change spool is full of events the gateway has not reported yet; start the gateway so it reports them")
+var ErrChangeSpoolFull = errors.New("the change spool is full of events the gateway has not reported yet " +
+	"(it is stopped, or a remote destination has not acknowledged them); start the gateway, or fix the destination, so it reports them")
 
 // ChangeReported reports whether the gateway with the data directory
 // dataDir has marked change event id reported.
@@ -254,12 +255,12 @@ func ChangedKeyIDs(previous, next []string) (added, removed []string) {
 
 // ChangeSpool writes change events. Reported tells which events the
 // gateway has reported (ChangeReported); nil counts none as reported.
-// Prepare creates (or repairs) the spool directory with its owner and
-// access, and Publish sets the owner and access of one written file; both
-// are platform hooks. A nil hook does nothing. StateDir is the existing
-// root-only (Windows: SYSTEM and Administrators) lifecycle directory that
-// holds the spool lock and the reservations of changes in progress
-// (Reserve).
+// Prepare creates (or repairs) the spool directory and its reserved
+// folder with their owner and access, and Publish sets the owner and
+// access of one written file (an event's temp file before its rename, an
+// event kept as an outcome, or a reservation); both are platform hooks. A nil Prepare creates the folder 0750, a nil Publish
+// does nothing. StateDir is the existing root-only (Windows: SYSTEM and
+// Administrators) lifecycle directory that holds the spool lock (Reserve).
 type ChangeSpool struct {
 	Dir      string
 	StateDir string
@@ -299,42 +300,86 @@ func marshalChangeEvent(ev ChangeEvent) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// writeEvent writes one validated event durably and publishes it.
+// writeEvent writes one validated event durably with the gateway's access:
+// Publish runs on the temp file before the rename, so <event_id>.json never
+// exists with an access the gateway cannot read. A command that stops in
+// between leaves only the temp file (removeWriteLeftovers) and keeps its
+// reservation, which the gateway and the next writer then report.
 func (s ChangeSpool) writeEvent(id string, data []byte) error {
-	path := filepath.Join(s.Dir, id+".json")
-	if err := configwrite.WriteFileDurable(path, data, 0o640); err != nil {
+	return configwrite.WriteFileDurablePublished(filepath.Join(s.Dir, id+".json"), data, 0o640, s.Publish)
+}
+
+// removeWriteLeftovers removes the temp file (.<event_id>.json.*.tmp) of
+// an event write that stopped before its rename. Every event write holds
+// the spool lock, which the caller holds, so none is in progress.
+func (s ChangeSpool) removeWriteLeftovers() {
+	entries, err := os.ReadDir(s.Dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		rest, hidden := strings.CutPrefix(name, ".")
+		id, _, named := strings.Cut(rest, ".json.")
+		if hidden && named && strings.HasSuffix(name, ".tmp") && ValidChangeEventID(id) && entry.Type().IsRegular() {
+			_ = os.Remove(filepath.Join(s.Dir, name))
+		}
+	}
+}
+
+// ready prepares the spool directory, removes the temp files of stopped
+// event writes, moves the event of every reservation whose command ended
+// into the spool, removes the oldest reported events beyond
+// maxReportedChangeEvents and checks that one more event fits beside the
+// reservations still held. The caller holds the spool lock.
+func (s ChangeSpool) ready() error {
+	if err := s.prepareDir(s.Dir); err != nil {
 		return err
 	}
-	if s.Publish != nil {
-		if err := s.Publish(path); err != nil {
-			_ = os.Remove(path)
+	s.removeWriteLeftovers()
+	held, err := s.settleReservations()
+	if err != nil {
+		return err
+	}
+	return s.prune(held)
+}
+
+// prepareDir creates (or repairs) dir, the spool or its reserved folder,
+// with the spool's owner and access. The parent of every folder it creates
+// is flushed, so the new folder survives a power loss.
+func (s ChangeSpool) prepareDir(dir string) error {
+	created := missingDirs(dir)
+	if s.Prepare != nil {
+		if err := s.Prepare(dir); err != nil {
+			return err
+		}
+	} else if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	if err := requireDirectory(dir); err != nil {
+		return err
+	}
+	for _, d := range created {
+		if err := syncChangeDir(filepath.Dir(d)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// ready prepares the spool directory, moves the event of every reservation
-// whose command ended into the spool, removes the oldest reported events
-// beyond maxReportedChangeEvents and checks that one more event fits beside
-// the reservations still held. The caller holds the spool lock.
-func (s ChangeSpool) ready() error {
-	if s.Prepare != nil {
-		if err := s.Prepare(s.Dir); err != nil {
-			return err
+// missingDirs lists dir and its missing parents, outermost first.
+func missingDirs(dir string) []string {
+	var missing []string
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Lstat(d); !errors.Is(err, os.ErrNotExist) {
+			break
 		}
-	} else if err := os.MkdirAll(s.Dir, 0o750); err != nil {
-		return err
+		missing = append([]string{d}, missing...)
+		if filepath.Dir(d) == d {
+			break
+		}
 	}
-	info, err := os.Lstat(s.Dir)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("change events directory is not a regular directory: %s", s.Dir)
-	}
-	held, err := s.settleReservations()
-	if err != nil {
-		return err
-	}
-	return s.prune(held)
+	return missing
 }
 
 // prune makes room for one more event: it removes the oldest reported

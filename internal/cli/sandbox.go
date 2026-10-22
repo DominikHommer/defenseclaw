@@ -269,7 +269,13 @@ func sandboxHostRefusal(goos, goarch string, cleanup bool) error {
 func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, args []string) error) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		app := newSandboxApp(cmd)
-		err := fn(cmd.Context(), app, cmd, args)
+		var err error
+		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+			err = openshell.WaitGatewayLifecycle(cmd.Context(), "")
+		}
+		if err == nil {
+			err = fn(cmd.Context(), app, cmd, args)
+		}
 		if err == nil {
 			return nil
 		}

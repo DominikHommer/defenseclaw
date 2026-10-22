@@ -2203,6 +2203,10 @@ func TestWindowsUnenrolledRefusalLeadsWithTheNextStep(t *testing.T) {
 			Stderr:                   &errb,
 			HTTPClient:               &http.Client{Transport: rt},
 		})
+		if !strings.Contains(errb.String(), "once you have signed in and the agent is installed") ||
+			!strings.Contains(errb.String(), "first start if that is later") {
+			t.Fatalf("enrollment wait must name its prerequisites and later starting point: %q", errb.String())
+		}
 		first, _, _ := strings.Cut(errb.String(), "\n")
 		if code == 0 || rt.requests != 0 || !strings.HasPrefix(first, lead) || len(lead) > 80 {
 			t.Fatalf("%s: code %d requests %d first stderr line %q, want a block that starts %q", reason, code, rt.requests, first, lead)
@@ -2252,6 +2256,39 @@ func TestUnknownConnector(t *testing.T) {
 	})
 	if code != 2 {
 		t.Fatalf("code = %d, want 2 for unknown connector", code)
+	}
+}
+
+// until 1.1: a hook an older release registered for a removed connector (on
+// Windows, the native launcher) blocks every call, in every fail mode, and
+// says that support was removed in 1.0.4; it never reaches the gateway.
+func TestRemovedConnectorHookBlocksWithTheRemovalReason(t *testing.T) {
+	for _, connector := range []string{"openhands", "OpenHands", "omnigent"} {
+		for _, failMode := range []string{"open", "closed"} {
+			t.Run(connector+"/"+failMode, func(t *testing.T) {
+				var out, errb bytes.Buffer
+				home := t.TempDir()
+				code := Run(context.Background(), Options{
+					Connector: connector, Event: "PreToolUse", FailMode: failMode, Home: home, HookDir: home, Token: "t",
+					Stdin: strings.NewReader(`{"tool_name":"bash"}`), Stdout: &out, Stderr: &errb,
+				})
+				if code != 2 {
+					t.Fatalf("code = %d, want 2 (block)", code)
+				}
+				if !strings.Contains(errb.String(), "support was removed in DefenseClaw 1.0.4") {
+					t.Fatalf("stderr = %q, want the removal reason", errb.String())
+				}
+				if strings.EqualFold(connector, "openhands") {
+					var decision map[string]string
+					if err := json.Unmarshal(out.Bytes(), &decision); err != nil || decision["decision"] != "deny" ||
+						!strings.Contains(decision["reason"], "OpenHands support was removed") {
+						t.Fatalf("stdout = %q, want the OpenHands deny decision", out.String())
+					}
+				} else if out.Len() != 0 {
+					t.Fatalf("stdout = %q, want none", out.String())
+				}
+			})
+		}
 	}
 }
 

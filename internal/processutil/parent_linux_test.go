@@ -125,6 +125,93 @@ func TestRunTreeHelperGateway(t *testing.T) {
 	_ = RunTree(CommandContext(context.Background(), "/bin/sh", "-c", `sleep "$1" & wait`, "sh", marker))
 }
 
+// The MCP launcher creates its own session and leaves a server child in it.
+// Killing the gateway must still end both generations of that process tree.
+func TestRunTreeIsolatedKillsDetachedMCPServerAfterGatewaySIGKILL(t *testing.T) {
+	if os.Getenv("PROCESSUTIL_TEST_ISOLATED_GATEWAY") != "" {
+		return
+	}
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("setsid is unavailable")
+	}
+	marker := strconv.Itoa(7000+os.Getpid()%1000) + "." + strconv.FormatInt(time.Now().UnixNano()%1000000, 10)
+	gateway := exec.Command(os.Args[0], "-test.run=^TestRunTreeIsolatedHelperGateway$")
+	gateway.Env = append(os.Environ(), "PROCESSUTIL_TEST_ISOLATED_GATEWAY="+marker)
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = gateway.Process.Kill(); _ = gateway.Wait() })
+	deadline := time.Now().Add(10 * time.Second)
+	server := 0
+	for server == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("detached MCP server did not start")
+		}
+		time.Sleep(20 * time.Millisecond)
+		server = sleepWithArg(marker)
+	}
+	contained := processesWithArg(marker)
+	if len(contained) < 3 {
+		t.Fatalf("scanner fixture has %d processes, want scanner, detached launcher and child", len(contained))
+	}
+	if err := gateway.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	_ = gateway.Wait()
+	deadline = time.Now().Add(5 * time.Second)
+	for anyProcessRunning(contained) {
+		if time.Now().After(deadline) {
+			for _, pid := range contained {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+			t.Fatalf("MCP launcher, server or child survived gateway SIGKILL: %v", contained)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func anyProcessRunning(pids []int) bool {
+	for _, pid := range pids {
+		if helperRunning(pid) {
+			return true
+		}
+	}
+	return false
+}
+
+func processesWithArg(arg string) []int {
+	entries, _ := os.ReadDir("/proc")
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err == nil && strings.Contains(string(raw), "\x00"+arg+"\x00") {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+func TestRunTreeIsolatedHelperGateway(t *testing.T) {
+	marker := os.Getenv("PROCESSUTIL_TEST_ISOLATED_GATEWAY")
+	if marker == "" {
+		t.Skip("helper process")
+	}
+	cmd := CommandContext(context.Background(), "/bin/sh", "-c", `setsid /bin/sh -c 'sleep "$1" & wait' sh "$1" & wait`, "sh", marker)
+	_ = RunTreeIsolated(context.Background(), cmd)
+}
+
+func TestRunTreeIsolatedKeepsNormalScannerExitStatus(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		if err := RunTreeIsolated(context.Background(), CommandContext(context.Background(), "/bin/true")); err != nil {
+			t.Fatalf("normal scanner exit %d: %v", i, err)
+		}
+	}
+}
+
 // sleepWithArg is the pid of a running "sleep arg", or 0.
 func sleepWithArg(arg string) int {
 	entries, _ := os.ReadDir("/proc")

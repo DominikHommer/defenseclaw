@@ -49,7 +49,7 @@ iot_extensions:
       action: block
 ```
 
-The policy compiler converts these into deterministic finite automata (DFA) tables evaluated in constant time per input symbol. Sequences are tracked per `session_id`.
+The policy compiler converts these into deterministic finite automata (DFA) tables evaluated in constant time per input symbol. Sequences are tracked per `session_id`. Each sequence must list one to four known capabilities; actions must be `allow`, `block`, `warn`, or `escalate`. Unknown capabilities, actions, severity names and malformed values are rejected before either artifact is written. Invalid policy data returns exit 65; an unreadable input returns a concise error and exit 1.
 
 ## Destination rules
 

@@ -71,7 +71,7 @@ func TestProfileExplainRefusesAnAccountItsLookupRefused(t *testing.T) {
 		setIdentityLookupBlocking(prevBlocking)
 		liveGuardrailProfiles.Store(nil)
 	})
-	profileExplainCachedSubject = func(string, time.Time) (profileSubject, bool) { return profileSubject{}, false }
+	profileExplainCachedSubject = func(string, time.Time) (profileSubject, error) { return profileSubject{}, errNoCachedHolder }
 	setIdentityLookupBlocking(true)
 
 	cfg := &config.Config{}

@@ -44,7 +44,7 @@ Hermes registers shell callbacks in each running process, and DefenseClaw has no
 | Reload state | `~/.defenseclaw/` managed connector data, `hermes-direct-native-state.json` |
 | Hook runtime, Windows | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
-Disable removes only DefenseClaw's entries, keeping every byte outside the `hooks` mapping (comments included) and removing its approvals. On Linux and macOS `hermes-hook.sh` stays as an inert stub, because a running Hermes keeps calling it until it restarts.
+Disable removes only DefenseClaw's entries and approvals. Settings and comments outside the `hooks` mapping are kept; whitespace can change. On Linux and macOS `hermes-hook.sh` stays as an inert stub, because a running Hermes keeps calling it until it restarts.
 
 ### Inventory
 
@@ -78,6 +78,14 @@ DefenseClaw builds a Hermes overlay image. Nothing on your host changes. `defens
 | Ctrl-Z and Ctrl-C | The sandbox refuses Hermes's process-group signal, so the image answers with `defenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox …` and Hermes keeps running (Hermes prints its own "has been suspended" line first). One Ctrl-C at an empty prompt ends Hermes (`Shutting down… (finalizing session)`) and DefenseClaw goes on to the end of the session. The sandbox is kept, and `defenseclaw sandbox connect <name>` restarts Hermes. |
 | Other traffic | Apart from the model, Hermes reaches `models.dev` at start and hourly (model metadata, no off switch). `sandbox destinations` lists it as Hermes' own, and a pack that refuses it does so quietly. The image marks the install `docker` so Hermes does not check `pypi.org` or print the pip notice. `model_catalog.enabled: false` stops the curated model-list fetch, and the Tirith download and runtime installs are off. The rest goes through the egress proxy. |
 | Status | Verified end to end through the daemon on a mock model: hooks reached the ingress with OpenShell substituting the key, a rule-blocked command was refused with the rule's reason, and egress went through the proxy, including a blocklisted host that a sandbox-scoped unblock let through. The hook-fire probe passed, including a hostile user `config.yaml`, a planted `sitecustomize`, and a launcher refusal for a planted `.env`, provider plugin or `secrets` section. The curated provider profiles have not carried a real model inside a sandbox. |
+
+## Managed verification
+
+`enterprise <os> status --json` and `verify --json` report `connectors.hermes.hooks_installed` and `targets`. On Linux and macOS these come from the guardian's last reconcile: they can still say `all` after hooks are removed, until the guardian checks again. They do not prove what a running Hermes host has loaded.
+
+To check the current hook files on Linux, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks verify --json`. On macOS use `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise hooks verify --json`. Missing or changed owned commands fail this check. Reload every Hermes host after repair.
+
+`enterprise policy verify` checks machine-policy connectors; Hermes uses per-user hooks, so that command can succeed while its hooks are missing.
 
 ## Hook events
 

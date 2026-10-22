@@ -15,7 +15,7 @@ Every environment variable DefenseClaw reads, with defaults, accepted values and
 Ambient `DEFENSECLAW_OTEL_*`, standard `OTEL_EXPORTER_OTLP_*` and `DEFENSECLAW_DISABLE_REDACTION` values are not live collection, routing or redaction policy. Destinations name credential variables explicitly through fields such as `token_env`, `bearer_env` or `{env: NAME}`. Rows described as legacy observability inputs are read only by the automatic upgrade converter and are retired after their value is materialized.
 </Callout>
 
-`defenseclaw doctor` reports active security override flags visible to the CLI process. Inspect the gateway and Edge Connector service environments separately when they run under systemd or another supervisor.
+On per-user installs, `defenseclaw doctor` reports active security override flags visible to the CLI process. Inspect the gateway and Edge Connector service environments separately when they run under systemd or another supervisor.
 
 ## Managed hosts and the environment
 
@@ -38,9 +38,9 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
   `DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, every
   `DEFENSECLAW_ALLOW_*` switch, and `DEFENSECLAW_ENTERPRISE_PROFILE`, among
   others.
-- **Doctor names what it ignored.** When a managed standalone host sees an
-  ignored variable set, `defenseclaw doctor` lists it by name, never by value,
-  in the Security overrides section, and leaves it out of the active overrides:
+- **Python doctor names what it ignored.** If the Python CLI reads a managed
+  config, its Security overrides section lists ignored names, never values.
+  Managed packages do not ship this doctor; use [Check what is active](#check-what-is-active) below.
 
   ```text
   [PASS] Ignored environment overrides  —  this device is managed, so these have no effect: DEFENSECLAW_ALLOW_CGNAT, DEFENSECLAW_JUDGE_TRACE
@@ -529,11 +529,25 @@ in an elevated PowerShell first. See
 
 ## Check what is active
 
-Run `defenseclaw doctor` to inspect the CLI process environment and core managed-host overrides. For Fleet and Edge services, also inspect the supervisor's environment file and resolved `config.yaml`.
+On a per-user install, run `defenseclaw doctor` to inspect the CLI process environment and `defenseclaw keys list` to check credential sources.
 
 ```bash
 defenseclaw doctor
 defenseclaw keys list
 ```
+
+On managed Linux and macOS, the user's `defenseclaw` launcher offers only sandbox commands;
+it refuses `doctor` and `keys list`. An administrator runs the packaged binary as root:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
+```
+
+These status commands report deployment health. To check ignored overrides, compare
+the administrator-owned service environment's variable names with this catalog's
+`ignore` and `tighten_only` rows. On managed Windows, use `enterprise windows status --json`
+from an elevated prompt; its `doctor` command only prints administrator guidance.
+For Fleet and Edge services, inspect their supervisor's environment and resolved `config.yaml`.
 
 See also [Keys](/docs/reference/configuration/keys), [Redaction](/docs/reference/observability/redaction), and [Fail modes](/docs/reference/configuration/fail-modes) for `DEFENSECLAW_FAIL_MODE` and `DEFENSECLAW_STRICT_AVAILABILITY`.

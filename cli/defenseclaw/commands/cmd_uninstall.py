@@ -110,18 +110,19 @@ _CREATED_DIRS_RECORD_MAX_BYTES = 1 << 20
 _WIN_SYNCHRONIZE = 0x00100000
 _WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 # until 1.1: removed connectors whose older-release state uninstall still
-# tears down (connector_backups markers, the manual cleanup record their
-# teardown left, and active_connector.json names).
+# tears down (connector_backups markers, the hook script their stub replaces,
+# and active_connector.json names). The teardown only writes the stub and
+# revokes the tokens; uninstall lists what is left.
 _REMOVED_CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     "omnigent": (
         os.path.join("connector_backups", "omnigent", "config.json"),
         os.path.join("connector_backups", "omnigent", "module.json"),
         os.path.join("connector_backups", "omnigent", "pth.json"),
-        os.path.join("removed_connector_cleanup", "omnigent.json"),
+        os.path.join("hooks", "defenseclaw_omnigent_policy.py"),
     ),
     "openhands": (
         os.path.join("connector_backups", "openhands", "config.json"),
-        os.path.join("removed_connector_cleanup", "openhands.json"),
+        os.path.join("hooks", "openhands-hook.sh"),
     ),
 }
 _ACTIVE_CONNECTOR_STATE = "active_connector.json"
@@ -534,6 +535,7 @@ def _dispatch_native_windows_uninstall(
         raise click.ClickException(str(exc)) from exc
     if outcome.returncode == 0:
         ux.ok("Native Windows uninstall completed.")
+        _print_removed_connector_leftovers(str(config_module.default_data_path()), data_removed=wipe_data)
         if binaries:
             _remove_script_install_after_native_setup(request.platform_name)
         return True
@@ -1810,33 +1812,29 @@ def _teardown_connectors(
     return tuple(out)
 
 
-def _require_removed_connector_cleanup_done(data_dir: str) -> None:
-    """Refuse to remove data or binaries while a removed connector's manual cleanup is pending.
+def _print_removed_connector_leftovers(data_dir: str, *, data_removed: bool) -> None:
+    """until 1.1: list what the removed OpenHands/OmniGent teardown left, with the steps.
 
-    until 1.1: when the OpenHands or OmniGent teardown cannot prove a file is
-    DefenseClaw's, it changes nothing and records the steps to finish by hand
-    (``defenseclaw.removed_connectors``). The agent then still runs the hook
-    script or imports the policy module in *data_dir*, and the record and the
-    gateway that finishes the cleanup are the user's way out, so none of them
-    may go first. An unreadable record counts as pending.
+    The teardown only replaces DefenseClaw's hook script with a stub that
+    blocks every call and revokes the tokens; the agent's own config still
+    names it. Every uninstall form prints this. What a data folder removal
+    takes away (*data_removed*) is not listed.
     """
-    from defenseclaw.removed_connectors import pending_cleanup
-
-    pending = pending_cleanup(data_dir)
-    if not pending:
+    if not data_dir:
         return
-    steps: list[str] = []
-    for cleanup in pending:
-        if cleanup.error:
-            steps.append(f"  - {cleanup.label}: {cleanup.error}")
-        steps.extend(f"  - {item.path} ({item.reason}): {item.step}" for item in cleanup.items)
-    labels = " and ".join(cleanup.label for cleanup in pending)
-    raise click.ClickException(
-        f"aborting uninstall: the removed {labels} connector cleanup left files for you to finish, "
-        "and the agent still uses DefenseClaw's files in "
-        f"{data_dir}. No data or binaries were removed. Do these steps, then run the same "
-        "uninstall command again; it finishes the cleanup before it removes anything:\n" + "\n".join(steps)
-    )
+    from defenseclaw.removed_connectors import leftovers
+
+    lines: list[str] = []
+    for left in leftovers(data_dir):
+        lines.extend(left.lines(without_under=data_dir if data_removed else ""))
+    if not lines:
+        return
+    if data_removed:
+        lines.append(
+            "  DefenseClaw's data folder is removed by this uninstall, so a hook or policy listed above "
+            "names a file that no longer exists, and the agent fails on it: remove it from the agent's config."
+        )
+    click.echo("\n".join(lines))
 
 
 def _removed_connectors_in_active_state(data_dir: str) -> tuple[str, ...]:
@@ -2059,31 +2057,16 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         phases.append(ExecutionPhaseResult(name, "succeeded"))
 
     run_phase("plan validation", lambda: _validate_plan(plan))
-    # until 1.1: data or binary removal waits for a removed connector's
-    # manual cleanup. Its teardown runs first and the check right after, both
-    # before anything else changes, so a blocked uninstall leaves the gateway
-    # running, the surviving connectors set up and the guardrail on.
-    removal_gated = bool((plan.remove_data_dir or plan.remove_binaries) and plan.data_dir)
-    retired = ()
-    if removal_gated:
-        retired = tuple(name for name in plan.connectors if name in _REMOVED_CONNECTOR_BACKUP_MARKERS)
-    if retired:
-        run_phase("removed connector teardown", lambda: _connector_teardown(plan, retired))
-    if removal_gated:
-        run_phase(
-            "removed connector cleanup check",
-            lambda: _require_removed_connector_cleanup_done(plan.data_dir),
-        )
     if plan.sandbox_teardown:
         # Before the sidecar stops: the daemon deletes its own sandboxes.
         run_phase("sandbox teardown", lambda: _sandbox_teardown(plan))
     if plan.stop_gateway:
         run_phase("gateway stop", lambda: _stop_gateway(plan))
-    surviving = tuple(name for name in plan.connectors if name not in retired)
-    if surviving:
-        run_phase("connector teardown", lambda: _connector_teardown(plan, surviving))
-    if plan.connectors and not plan.remove_data_dir:
-        _turn_guardrail_off(plan.data_dir)
+    if plan.connectors:
+        run_phase("connector teardown", lambda: _connector_teardown(plan))
+        if not plan.remove_data_dir:
+            _turn_guardrail_off(plan.data_dir)
+    _print_removed_connector_leftovers(plan.data_dir, data_removed=plan.remove_data_dir)
     if plan.stop_gateway and plan.data_dir:
         _remove_probe_created_state(plan.data_dir)
         # The gateway is stopped, so its watcher no longer uses them.
@@ -3235,20 +3218,17 @@ def _gateway_supports_connector_teardown(gateway_path: str | None = None) -> boo
     return "teardown" in combined and "list-backups" in combined
 
 
-def _connector_teardown(plan: UninstallPlan, connectors: tuple[str, ...] | None = None) -> None:
+def _connector_teardown(plan: UninstallPlan) -> None:
     """Run connector teardown via the canonical sentinel, falling back
     to the OpenClaw-specific Python helpers when the gateway binary
     is too old (pre-S7.2) or the connector isn't OpenClaw.
-
-    *connectors* (default: all of ``plan.connectors``) are torn down in order.
 
     For non-OpenClaw connectors the Python fallback path is **not**
     safe — calling ``restore_openclaw_config`` against a Codex install
     would corrupt it — so we hard-fail in that case with a clear
     remediation pointing at the gateway upgrade path.
     """
-    if connectors is None:
-        connectors = plan.connectors
+    connectors = plan.connectors
     gateway_supported = _gateway_supports_connector_teardown(plan.gateway_path or None)
     for name in connectors:
         if gateway_supported:
@@ -3387,7 +3367,7 @@ def _run_gateway_connector_teardown(
             if _ANSI_ESCAPE.sub("", line).strip().endswith(f"{connector} teardown complete"):
                 continue
             ux.echo(f"  {ux.dim('·')} {line.strip()}")
-    if proc.stderr and proc.returncode != 0:
+    if proc.stderr:
         for line in proc.stderr.splitlines():
             ux.echo(f"  {ux._style('⚠', fg='yellow', bold=True)} {line}")
     if proc.returncode == 0:

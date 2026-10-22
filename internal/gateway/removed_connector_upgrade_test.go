@@ -23,7 +23,7 @@ import (
 
 // until 1.1: what an OpenHands setup of 1.0.x left in a data directory.
 type retiredOpenHandsHost struct {
-	home, dataDir, script, hooksPath string
+	home, dataDir, script, hooksPath, patchedHooks string
 }
 
 const (
@@ -48,12 +48,10 @@ func stageRetiredOpenHands(t *testing.T) retiredOpenHandsHost {
 	h.script = filepath.Join(h.dataDir, "hooks", "openhands-hook.sh")
 	h.hooksPath = filepath.Join(h.home, ".openhands", "hooks.json")
 	writeRetiredFile(t, h.script, retiredOpenHandsScript)
-	writeRetiredSetupRecord(t, h.dataDir, "openhands", "config", h.hooksPath, []byte(retiredOpenHandsOperatorHooks),
-		`{"pre_tool_use":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/local/bin/audit-hook"}]},`+
-			`{"matcher":"*","hooks":[{"type":"command","command":"`+h.script+`","timeout":60}]}]}`)
-	// The hook contract lock as 1.0.3 wrote it: its OpenHands entry holds
-	// the digest of the script setup rendered, the proof teardown needs
-	// before it turns the script into the tombstone.
+	h.patchedHooks = `{"pre_tool_use":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/local/bin/audit-hook"}]},` +
+		`{"matcher":"*","hooks":[{"type":"command","command":"` + h.script + `","timeout":60}]}]}`
+	writeRetiredSetupRecord(t, h.dataDir, "openhands", "config", h.hooksPath, []byte(retiredOpenHandsOperatorHooks), h.patchedHooks)
+	// The hook contract lock as 1.0.3 wrote it.
 	digest := sha256.Sum256([]byte(retiredOpenHandsScript))
 	writeRetiredFile(t, filepath.Join(h.dataDir, "hook_contract_lock.json"), `{"version":2,"updated_at":"2026-10-01T00:00:00Z","connectors":{"openhands":{`+
 		`"connector":"openhands","contract_id":"openhands-hooks-v1","compatibility_status":"supported","hook_script_version":"v6",`+
@@ -71,28 +69,32 @@ func stageRetiredOpenHands(t *testing.T) retiredOpenHandsHost {
 func (h retiredOpenHandsHost) requireTornDown(t *testing.T) {
 	t.Helper()
 	data, err := os.ReadFile(h.hooksPath)
-	if err != nil || string(data) != retiredOpenHandsOperatorHooks {
-		t.Fatalf("OpenHands hooks after the upgrade = %s, %v; want %s", data, err, retiredOpenHandsOperatorHooks)
+	if err != nil || string(data) != h.patchedHooks {
+		t.Fatalf("OpenHands hooks after the upgrade = %s, %v; want them as setup left them: %s", data, err, h.patchedHooks)
 	}
-	if body, err := os.ReadFile(h.script); err != nil || !strings.Contains(string(body), "disabled tombstone") {
-		t.Fatalf("hook script after the upgrade = %q, %v; want the disabled tombstone", body, err)
+	if body, err := os.ReadFile(h.script); err != nil || !strings.Contains(string(body), "disabled tombstone") ||
+		!strings.Contains(string(body), "exit 2") || !strings.Contains(string(body), "OpenHands support was removed in DefenseClaw 1.0.4") {
+		t.Fatalf("hook script after the upgrade = %q, %v; want the stub that blocks every call", body, err)
 	}
-	if got := connector.LoadHookContractLockEntry(h.dataDir, "openhands"); got.Connector != "" {
-		t.Fatalf("openhands lock entry survived its cleanup: %+v", got)
+	if got := connector.LoadHookContractLockEntry(h.dataDir, "openhands"); got.Connector != "openhands" {
+		t.Fatalf("the openhands lock entry was cleared: %+v", got)
 	}
 	if token, err := connector.LoadHookAPIToken(h.dataDir, "openhands"); err != nil || token != "" {
 		t.Fatalf("openhands token = %q, %v; want revoked", token, err)
 	}
-	if _, err := os.Lstat(filepath.Join(h.dataDir, "removed_connector_cleanup", "openhands.json")); !os.IsNotExist(err) {
-		t.Fatalf("manual cleanup recorded for an unchanged setup: %v", err)
+	if _, err := os.Lstat(filepath.Join(h.dataDir, "connector_backups", "openhands", "config.json")); err != nil {
+		t.Fatalf("the hooks.json backup record was removed: %v", err)
+	}
+	if leftovers, _ := connector.RemovedConnectorLeftovers("openhands", connector.SetupOpts{DataDir: h.dataDir}); len(leftovers) == 0 ||
+		leftovers[0].Path != h.hooksPath {
+		t.Fatalf("leftovers = %+v, want hooks.json first", leftovers)
 	}
 }
 
 // until 1.1: the first gateway start after an upgrade from a release that
-// set up OpenHands puts its hooks.json back the way that setup found it and
-// turns the hook script into the tombstone, instead of only forgetting the
-// connector, so OpenHands does not keep calling a hook route that no longer
-// exists.
+// set up OpenHands turns the hook script into the stub that blocks every call
+// and revokes the token; hooks.json, the backups and the lock stay, and are
+// listed for the user to remove by hand.
 func TestUpgradeTearsDownTheRemovedOpenHandsConnector(t *testing.T) {
 	h := stageRetiredOpenHands(t)
 	if err := connector.SaveActiveConnector(h.dataDir, "openhands"); err != nil {

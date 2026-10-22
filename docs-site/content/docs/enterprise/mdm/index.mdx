@@ -26,7 +26,7 @@ enterprise deployment? Start with [Deploy to a fleet](/docs/enterprise/get-start
 | [Ansible, Puppet, Chef, Salt, apt, dnf](/docs/enterprise/mdm/linux-config-management) | Linux | The `.deb` or `.rpm` and your config |
 | Anything else: start at [What you deliver](#what-you-deliver) | Windows, Linux, macOS | The release file and the kit wrapper, run as SYSTEM or root |
 
-**Validation status.** The three Intune recipes ran end to end on a test tenant (PR #1304). The other recipes are templates checked with [Simulate your MDM](/docs/enterprise/mdm/reference#simulate-your-mdm). Pilot each on a small device group first.
+**Validation status.** The Intune Windows, macOS script and Linux recipes ran on a test tenant with test builds packaged as `9.9.9` (PR #1304; macOS live script build `f9ed814b1`). This does not certify later releases. The other recipes, including the macOS PKG app route, are templates checked with [Simulate your MDM](/docs/enterprise/mdm/reference#simulate-your-mdm). Pilot each on a small device group first.
 
 ## The contract every recipe follows
 
@@ -119,6 +119,9 @@ one gets a default that protects **no** agents.
   `cisco_ai_defense.api_key`.
 - A `config_version: 8` file is migrated to 9 when applied. The Intune Win32
   packager requires 9.
+- **Bundle mode.** Once your MDM installs bundle trust anchors, the device takes
+  its config only from signed bundles and refuses a plain config with
+  `bundle_required`.
 
 ## Deliver the AI Defense key
 
@@ -222,7 +225,8 @@ Windows: `%WINDIR%\Logs\DefenseClaw` and the `DefenseClaw` event log. Linux:
 ## Upgrades, rollback and config changes
 
 Upgrade by delivering the new artifact and pin and running `ensure`; change the
-config by running the wrapper again with the new file. Every lifecycle refuses an
+config by running the wrapper again with the new file. On a device in bundle mode,
+deliver a new signed bundle instead; a plain config is refused with `bundle_required`. Every lifecycle refuses an
 older release unless you ask for the rollback
 ([Roll back](/docs/enterprise/operate/lifecycle#roll-back),
 [details](/docs/enterprise/mdm/reference#upgrades-rollback-and-config-changes)).

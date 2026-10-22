@@ -31,7 +31,9 @@ func TestQualifiedNameMatchNeedsTheResolvedAccount(t *testing.T) {
 		{"the account's own row, another spelling", `CORP\alice`, true, uid, `corp\Alice`, newToken, true},
 		{"no token, uid handed on", `CORP\alice`, true, uid, `CORP\alice`, "", false},
 		{"no token, one holder known", `CORP\alice`, false, uid, `CORP\alice`, "", true},
-		{"no token, a deleted account's other uid", `CORP\alice`, true, otherUID, `CORP\alice`, "", true},
+		// GAP-0325: a filter resolved to a live account never takes a
+		// tokenless row of another uid by its recorded name.
+		{"no token, a deleted account's other uid", `CORP\alice`, true, otherUID, `CORP\alice`, "", false},
 		{"bare filter names every alice", "alice", true, uid, `CORP\alice`, oldToken, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

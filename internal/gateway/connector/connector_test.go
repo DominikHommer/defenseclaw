@@ -2796,7 +2796,8 @@ func TestClaudeCode_Teardown_RestoresSettings(t *testing.T) {
 	settingsDir := filepath.Join(dir, "claude-settings")
 	os.MkdirAll(settingsDir, 0o755)
 	settingsPath := filepath.Join(settingsDir, "settings.json")
-	os.WriteFile(settingsPath, []byte(`{"existingKey": true}`), 0o644)
+	original := []byte("{\"env\":{\"FIXTURE\":\"preserve\"}}\n")
+	os.WriteFile(settingsPath, original, 0o644)
 
 	ClaudeCodeSettingsPathOverride = settingsPath
 	defer func() { ClaudeCodeSettingsPathOverride = "" }()
@@ -2814,6 +2815,16 @@ func TestClaudeCode_Teardown_RestoresSettings(t *testing.T) {
 	}
 
 	data, _ := os.ReadFile(settingsPath)
+	if !bytes.Equal(data, original) {
+		t.Fatalf("teardown changed pristine settings bytes: %q, want %q", data, original)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("repeated Teardown: %v", err)
+	}
+	data, _ = os.ReadFile(settingsPath)
+	if !bytes.Equal(data, original) {
+		t.Fatalf("repeated teardown changed pristine bytes: %q", data)
+	}
 	var settings map[string]interface{}
 	json.Unmarshal(data, &settings)
 

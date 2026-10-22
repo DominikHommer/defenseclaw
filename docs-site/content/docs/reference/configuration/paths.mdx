@@ -12,6 +12,8 @@ DefenseClaw keeps programs, data and each agent's own configuration in separate 
 
 ## What the install creates
 
+The trees below describe the per-user shell installers, including native Windows `install.ps1`, which manages a private `.venv` and generated hook scripts. The Windows Setup package uses an embedded runtime and `defenseclaw-hook.exe` instead; it creates no `.venv`. See [Windows installation](/docs/get-started/windows) for the package layout.
+
 <Files>
   <Folder name="~/.defenseclaw" defaultOpen>
     <Folder name=".venv">

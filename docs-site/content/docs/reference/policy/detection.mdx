@@ -292,7 +292,7 @@ separate benign or mixed data; an attack-only corpus cannot establish FPR.
 
 ## YARA MCP-description scanning
 
-The MCP scanner adds ten YARA signatures from
+The MCP scanner adds eleven YARA signatures from
 `policies/yara/mcp-tools/description_injection.yara`:
 
 | Signature | Requires |
@@ -307,6 +307,7 @@ The MCP scanner adds ten YARA signatures from
 | Traffic-control override | A bounded emergency-priority or individual signal override |
 | Physical-access change | A concrete smart-lock guest grant or owned-door unlock request |
 | Network-security policy change | A concrete allowlist or business-service denylist change |
+| Hidden credential exfiltration | A home credential-file path with an instruction to read and send it, or to override earlier instructions and send or hide the access |
 
 These signatures are high-precision description-injection signals, not proof of
 authorization or tool execution. They remain alert-only. The scanner loads the
@@ -654,11 +655,12 @@ Guardrail events keep matching rule IDs, evaluation IDs, reasons and severity in
 | High-assurance packs | `policies/guardrail-use-cases/` |
 | Reproducible public scores | `benchmarks/` |
 
-Run the repository checks after changing a detector:
+Run the repository checks after changing a detector, using Go 1.26.4 (the CI toolchain). Run the gateway suite through the shard runner:
 
 ```bash
 make check-guardrail-catalog
-go test -timeout 30m ./internal/actionfacts ./internal/guardrail ./internal/gateway
+go test -timeout 30m ./internal/actionfacts ./internal/guardrail
+python3 scripts/go_test_shards.py --package-dir internal/gateway --shard-count 16 -- go test -timeout 30m ./internal/gateway
 go test ./benchmarks/...
 ```
 

@@ -76,7 +76,7 @@ func TestWindowsScannerRuntimeMatchingBytesAreAdmittedAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An earlier run admitted these bytes under a looser policy.
-	if err := managed.WriteScannerRuntimeAdmission(root, digest); err != nil {
+	if err := managed.WriteScannerRuntimeAdmission(root, digest, managed.ScannerRuntimeTrustAuthenticode); err != nil {
 		t.Fatal(err)
 	}
 	opts := &windowsEnterpriseLifecycleOptions{resolvedInstaller: installer, trustMode: windowsEnterpriseTrustAuthenticode, productVersion: "1.0.4"}

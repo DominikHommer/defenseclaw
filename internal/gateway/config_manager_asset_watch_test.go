@@ -98,7 +98,12 @@ func TestConfigManagerWatchesTheRejectedCandidateAssets(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("repairing the rejected candidate's asset did not rebuild the generation")
 	}
-	if mgr.rejectedAssets.Load() != nil {
+	// The callback sends applied before reload commits its final state.
+	// Wait for that reload to return before checking its rejected assets.
+	mgr.mu.Lock()
+	stillRejected := mgr.rejectedAssets.Load() != nil
+	mgr.mu.Unlock()
+	if stillRejected {
 		t.Fatal("a reload that built still watches the rejected candidate's assets")
 	}
 	cancel()

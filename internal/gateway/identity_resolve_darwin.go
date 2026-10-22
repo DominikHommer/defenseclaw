@@ -50,6 +50,8 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 		Groups:     groups,
 		Assurance:  useridentity.AssuranceVerified,
 		ResolvedAt: now,
+		// Read before the record (forgetOnSpoolChange).
+		SpoolSeenAt: identitySpoolSeenAt(key, now),
 	}
 	// Open Directory answers a bound Mac's directory accounts too, so only an
 	// account of the local node is local. Calling every account local let no
@@ -58,7 +60,7 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if darwinLocalNodeAccount(account.Username, account.Uid) {
 		own.Directory = useridentity.DirectoryLocal
 	}
-	record, ok := readIdentitySpoolFactsForAccount(key, account.Username, "", now)
+	record, ok, _ := readIdentitySpoolFactsForAccount(key, account.Username, "", now)
 	var spool *enterprisehooks.IdentitySpoolRecord
 	if ok {
 		spool = &record

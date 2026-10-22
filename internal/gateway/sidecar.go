@@ -4741,10 +4741,6 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if err := verifyEffectiveHookRegistration(setupOpts, conn); err != nil {
 			return failSetup("registration verification", err)
 		}
-		if err := s.saveSingleConnectorReadyState(ctx, setupOpts, conn, singleRollback); err != nil {
-			return err
-		}
-
 		// Plan A4 / S0.12: refuse to start when the connector advertises
 		// no usable upstream provider for a proxy-bound data path.
 		// Without this, the gateway would accept agent traffic and fail
@@ -4760,14 +4756,15 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if probe, ok := conn.(connector.ProviderProbe); ok && shouldRunProviderProbeForConnector(conn, &s.currentConfig().Guardrail) {
 			count, err := probe.HasUsableProviders()
 			if err != nil {
-				s.health.SetGuardrail(StateError, err.Error(), nil)
-				return fmt.Errorf("connector %s reports no usable providers: %w (set guardrail.allow_empty_providers=true to override)", conn.Name(), err)
+				return failSetup("provider verification", fmt.Errorf("connector %s reports no usable providers: %w (set guardrail.allow_empty_providers=true to override)", conn.Name(), err))
 			}
 			if count == 0 {
-				s.health.SetGuardrail(StateError, "no usable providers", nil)
-				return fmt.Errorf("connector %s reports zero usable providers; refusing to start (set guardrail.allow_empty_providers=true to override)", conn.Name())
+				return failSetup("provider verification", fmt.Errorf("connector %s reports zero usable providers; refusing to start (set guardrail.allow_empty_providers=true to override)", conn.Name()))
 			}
 			fmt.Fprintf(os.Stderr, "[guardrail] provider probe ok: %s reports %d usable upstream(s)\n", conn.Name(), count)
+		}
+		if err := s.saveSingleConnectorReadyState(ctx, setupOpts, conn, singleRollback); err != nil {
+			return err
 		}
 	}
 	if s.currentConfig().Guardrail.Enabled {
@@ -7244,11 +7241,13 @@ func connectorDroppable(registry *connector.Registry, name string) bool {
 
 // retireOrDropUnregisteredConnector handles a name the registry cannot
 // resolve. A retired connector ID has a teardown-only owner
-// (connector.RetiredConnector) that removes exactly what an older release
-// wrote. A cleanup it cannot finish or verify is returned with the lock entry
-// kept, the way a registered connector's failed teardown is: the caller keeps
-// the name (active roster or lock) so a later boot retries it. Any other name
-// only loses DefenseClaw's lock state (dropUnregisteredConnectorState).
+// (connector.RetiredConnector). A cleanup it cannot finish or verify is
+// returned with the lock entry kept, the way a registered connector's failed
+// teardown is: the caller keeps the name (active roster or lock) so a later
+// boot retries it. A removed connector (OpenHands, OmniGent; until 1.1) keeps
+// its lock entry even then: its teardown changes only its hook script and
+// tokens, and clearing its entry is a no-op. Any other name only loses
+// DefenseClaw's lock state (dropUnregisteredConnectorState).
 func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.Registry, dataDir, name, surface string, clearLock func(dataDir, connectorName string) error) error {
 	retired, ok := connector.RetiredConnector(name)
 	if !ok {
@@ -7269,6 +7268,16 @@ func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.
 	}
 	RemoveConnectorRulePackOverrides(retired.Name())
 	return nil
+}
+
+// removedConnectorAlreadyTornDown reports whether name is a removed connector
+// (until 1.1) whose teardown has nothing left to do.
+func removedConnectorAlreadyTornDown(dataDir, name string) bool {
+	if !connector.IsRemovedConnector(name) {
+		return false
+	}
+	retired, ok := connector.RetiredConnector(name)
+	return ok && retired.VerifyClean(connector.SetupOpts{DataDir: dataDir}) == nil
 }
 
 // auditDroppedConnectorState records that boot dropped the state of a
@@ -7361,6 +7370,11 @@ func reconcileOrphanedConnectorRegistrations(
 		if !ok {
 			if !connectorDroppable(registry, name) {
 				return fmt.Errorf("protected lock-only connector %q is not registered and a plugin may still provide it (check plugin discovery); %s", name, removedConnectorDocHint)
+			}
+			if removedConnectorAlreadyTornDown(dataDir, name) {
+				// until 1.1: a removed connector's lock entry stays after
+				// its teardown, so only a teardown still due runs.
+				continue
 			}
 			if err := retireOrDropUnregisteredConnector(ctx, registry, dataDir, name, "lock-only", ops.clearLock); err != nil {
 				return err

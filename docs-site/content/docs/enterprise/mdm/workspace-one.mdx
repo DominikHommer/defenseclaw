@@ -110,6 +110,8 @@ or newer, and `1` otherwise.
   ([AI Defense key](/docs/enterprise/configure/ai-defense-key)).
 - **Upgrade or change the config.** Build new content and add it as a new app version;
   raise `-MinimumVersion`. `/ensure` upgrades in place and applies the new config.
+  In bundle mode, leave the config out and deliver a new signed bundle for a config
+  change; a plain config is refused with `bundle_required`.
   `ensure` refuses a downgrade ([Roll back](/docs/enterprise/operate/lifecycle#roll-back)).
 - **Uninstall.** `uninstall.ps1` finds the installed CLI and runs `enterprise windows
   uninstall`; `-Purge` also removes enrolled accounts' data
@@ -120,6 +122,10 @@ Exit codes: `0` success, `1603` failed (retried up to **Retry Count**; read
 `1639` invalid arguments (fix the content; a retry gives the same result)
 ([Exit codes](/docs/enterprise/mdm#exit-codes)). Logs: the app's **Details View**,
 `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` and the `DefenseClaw` event log.
+
+A malformed, non-UTF-8 or invalid Windows candidate config returns
+`invalid_arguments` and exit `1639`. Fix the content before retrying; the
+installed config stays in force.
 
 ## macOS
 
@@ -197,7 +203,8 @@ lifecycle fails the install after rolling back; the result is in
   `guardrail.custom_packs.<name>` to that path and its `sha256:<digest>` pin. Stage
   the pack again before reinstalling after a purge.
 - **Upgrade, change the config.** Upload the new package as a new app version and
-  raise `DC_MIN_VERSION`; edit the inline config for a config change
+  raise `DC_MIN_VERSION`; edit the inline config for a config change (in bundle
+  mode, deliver a new signed bundle instead)
   ([Roll back](/docs/enterprise/operate/lifecycle#roll-back)).
 
 Exit codes: `0` **Executed**; `1` failed and rolled back; `2` invalid settings

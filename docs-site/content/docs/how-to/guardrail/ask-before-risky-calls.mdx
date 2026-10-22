@@ -35,9 +35,9 @@ Human approval (HITL) pauses a risky call and asks you instead of silently allow
      ✓ The running gateway applies it now.
    ```
 
-   The list names every agent you have set up, so yours will differ. Without a terminal (a pipe or a script) the command refuses to run until you add `--yes`.
+   The list names every agent you have set up, so yours will differ. Scripts can supply confirmation on standard input: a newline accepts the default yes, and `y` confirms explicitly. If standard input ends without an answer, the command aborts. Use `--yes` to skip the prompt. If input is still a terminal but both output streams are piped, the command refuses because the prompt would be hidden; remove the pipe or add `--yes`.
 
-   `--min-severity` takes `low`, `medium`, `high` or `critical`. Add `--connector claudecode` to change one agent only. Add `--yes` to skip the prompt in a script. The running gateway applies the change without a restart.
+   `--min-severity` takes `low`, `medium`, `high` or `critical`. On a multi-connector install, add `--connector claudecode` to change one agent only. With a single connector, omit `--connector`. Add `--yes` to skip the prompt in a script. The running gateway applies the change without a restart.
 
 2. Ask Claude Code to run a command that matches a HIGH rule and sends no data:
 
@@ -48,6 +48,8 @@ Human approval (HITL) pauses a risky call and asks you instead of silently allow
    ```text
    DefenseClaw policy needs your confirmation for this action (rule C2-WEBHOOK-SITE: webhook.site (known exfil)).
    ```
+
+   DefenseClaw asks only in Claude Code's Manual mode, its default. In any other permission mode (accept edits, plan, auto, bypass permissions, don't ask) Claude Code may run or deny the call without showing the prompt, so DefenseClaw blocks it and the reason ends with the next step: switch Claude Code to Manual mode (Shift+Tab) and ask again.
 
    Not every HIGH finding asks. Only a finding that can block can pause. Alert-only HIGH rules (such as `PATH-AWS-CONFIG`) never ask: the agent shows a notice and the audit log records `alert`.
 
@@ -68,7 +70,7 @@ Alert #1
   …
 ```
 
-`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved.
+`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved. Outside Manual mode, the decision is `block`. Copilot CLI and Antigravity deny a confirm without asking in a non-interactive run (`-p`); their audit still shows `confirm`.
 
 ## When the agent cannot ask
 

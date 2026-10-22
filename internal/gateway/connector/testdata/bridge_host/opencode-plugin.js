@@ -576,7 +576,6 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     // unless the managed deployment itself was uninstalled.
     if (await defenseclawDeploymentRemoved()) return null;
     if (actionable) return { reason: "DefenseClaw hook credential is unavailable." };
-    await defenseclawLogFailOpen("hook credential unavailable", "transport");
     return null;
   }
   const controller = new AbortController();
@@ -616,13 +615,13 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       if ((res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE) === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
-      await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
+      if (actionable) await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
       return null;
     }
     const data = await res.json();
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
       if (DC_FAIL_MODE === "open") {
-        await defenseclawLogFailOpen("invalid gateway verdict", "response");
+        if (actionable) await defenseclawLogFailOpen("invalid gateway verdict", "response");
         return null;
       }
 
@@ -644,7 +643,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }
-    await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
+    if (actionable) await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
     return null;
   } finally {
     clearTimeout(timer);

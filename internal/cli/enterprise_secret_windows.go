@@ -141,7 +141,7 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return nil
 	}
 	change, err := changeWindowsSecret(cmd, action, opts)
-	defer change.reservation.Release()
+	defer func() { _ = change.reservation.Release() }()
 	if ev, ok := secretChangeEvent(action, opts.name, change.changed, secretFailureCode(err, windowsSecretExitInvalid), err, false); ok {
 		// The success document (secret-result.schema.json) has no warnings.
 		layout, layoutErr := windowsSecretLayout()
@@ -150,6 +150,9 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 		warnChangeUnrecorded(cmd.ErrOrStderr(), layoutErr)
 	}
+	// A run that recorded nothing (the stored value, an absent credential)
+	// gives its reservation back here, durably.
+	warnChangeReleaseUnflushed(cmd.ErrOrStderr(), change.reservation.Release())
 	if err != nil {
 		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json)
 	}

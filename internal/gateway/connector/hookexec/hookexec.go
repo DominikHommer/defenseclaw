@@ -245,6 +245,12 @@ type Options struct {
 	// gateway request with less than hookGatewayAnswerFloor of the answer
 	// budget left: a missing answer then fails closed (failNoAnswer).
 	answerSpentLocally bool
+	// gatewayBusy is set on a standalone hook outside Secure Client once the
+	// gateway answered the call with 429 (a rate limit or a full gateway):
+	// the gateway is up, so no failure after it is an outage
+	// (ManagedOutageFailsOpen). The call gets a verdict from a resend or is
+	// closed in every fail mode.
+	gatewayBusy bool
 	// managedOutageOpen is set on a standalone hook outside Secure Client
 	// for a failure that ManagedOutageFailsOpen lets through (the gateway is
 	// not running, was still restarting, or gave no answer). Only such a
@@ -431,6 +437,17 @@ func runHook(ctx context.Context, opts Options) int {
 		sp = copilotVSCodeLocalSpec
 	}
 	if !ok {
+		if reason, removed := removedConnectorReason(opts.Connector); removed {
+			// until 1.1: a Windows hook an older release registered for a
+			// removed connector runs this launcher, not a script; it
+			// blocks the way the script's stub does.
+			if strings.EqualFold(strings.TrimSpace(opts.Connector), "openhands") {
+				body, _ := json.Marshal(map[string]string{"decision": "deny", "reason": reason})
+				fmt.Fprintln(opts.Stdout, string(body))
+			}
+			fmt.Fprintln(opts.Stderr, reason)
+			return blockExit
+		}
 		// Unknown connector is a wiring bug, not a policy decision. Fail loud
 		// so it surfaces in tests / setup rather than silently disabling the
 		// guardrail. The CLI validates --connector against the registry, so
@@ -889,6 +906,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// deadline instead of failing the tool call for a burst the gateway
 	// clears in seconds (GAP-0205).
 	for retry := 0; !opts.SecureClient && err == nil && resp.StatusCode == http.StatusTooManyRequests && retry < hookBusyRetries; retry++ {
+		if managedNativeDecision(opts) && !opts.gatewayBusy {
+			// A rate limit is no outage: the administrator's open does
+			// not apply to it, also when the resends run out of time or
+			// the watchdog answers first (r104 W4b2 review P1).
+			opts.gatewayBusy = true
+			opts.answerWatch.closeForBusyGateway(opts, sp)
+		}
 		delay := retryAfterDelay(resp.Header.Get("Retry-After"))
 		_ = resp.Body.Close()
 		if !retryFitsAnswer(opts.answerBy, delay) {
@@ -1672,7 +1696,12 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 		}
 		return rawStringOr(fields, "permissionDecision", "") == want
 	case "antigravity":
-		// Antigravity reads only its documented decision values.
+		// Antigravity reads only its documented decision values. A
+		// confirmation must be force_ask: its plain ask honors a cached
+		// Always Allow grant and can run the call unasked (GAP-0405).
+		if action == "confirm" {
+			want = "force_ask"
+		}
 		return rawStringOr(fields, "decision", "") == want
 	case "devin", "kiro", "opencode":
 		decision := rawStringOr(fields, "decision", "")
@@ -2123,8 +2152,9 @@ const unixUnenrolledAccountExplanation = "this account is not enrolled in Defens
 // Claude Code, its first start, which records the build the enumerator
 // verifies; the next cycle (within five minutes) then enrolls the account.
 const unenrolledAccountExplanation = "this account is not enrolled yet; restart the agent in 5 minutes. " +
-	"DefenseClaw enrolls an account within 5 minutes of its desktop sign-in (console or Remote Desktop; " +
-	"not SSH, a scheduled task or runas) and, for Claude Code, of its first start. " +
+	"DefenseClaw enrolls an account within 5 minutes once you have signed in and the agent is installed " +
+	"(console or Remote Desktop; not SSH, a scheduled task or runas). " +
+	"For Claude Code, the wait starts at its first start if that is later. " +
 	"If this continues, the policy may exclude this account: ask your administrator"
 
 // failUnenrolled blocks, like failUnreachable in closed mode, a tool call of
@@ -2693,9 +2723,11 @@ func managedPeerFailMode(opts Options, failMode string, err error) string {
 // meets the same outage and gives the open result, with its notice and its
 // failure log line, as for every other connector. Every other error (a peer
 // DefenseClaw cannot verify, another program on the gateway port, an
-// unusable answer) and every closed or unset mode keep the refusal.
+// unusable answer), any failure of a call the gateway answered 429
+// (Options.gatewayBusy: the gateway is up and rate-limited it) and every
+// closed or unset mode keep the refusal.
 func ManagedOutageFailsOpen(opts Options, err error) bool {
-	if err == nil || !managedNativeDecision(opts) || opts.StrictAvailability ||
+	if err == nil || !managedNativeDecision(opts) || opts.StrictAvailability || opts.gatewayBusy ||
 		strings.TrimSpace(opts.ManagedRuntimeFailure) != "" || normalizeFailMode(opts.FailMode) != "open" {
 		return false
 	}
@@ -3503,6 +3535,20 @@ func compactField(m map[string]json.RawMessage, field string) string {
 		return trimmed
 	}
 	return buf.String()
+}
+
+// removedConnectorReason is the block reason of a hook for a connector 1.0.4
+// removed (until 1.1), or false.
+func removedConnectorReason(connector string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(connector)) {
+	case "openhands":
+		return "DefenseClaw blocked this call: OpenHands support was removed in DefenseClaw 1.0.4. " +
+			"To use OpenHands without DefenseClaw, remove every DefenseClaw hook from your OpenHands hooks.json, then restart OpenHands.", true
+	case "omnigent":
+		return "DefenseClaw blocked this call: OmniGent support was removed in DefenseClaw 1.0.4. " +
+			"To use OmniGent without DefenseClaw, remove DefenseClaw's policy from your OmniGent config.yaml, then restart OmniGent.", true
+	}
+	return "", false
 }
 
 // decodeDecision pulls the `decision` string from an already-compact JSON

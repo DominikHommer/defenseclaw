@@ -9,6 +9,10 @@ keywords:
   - CEL regex fallback
 ---
 
+<Callout title="Shell examples">
+The shell examples require Bash. On native Windows, use Git Bash or WSL; PowerShell uses different continuation and environment-variable syntax.
+</Callout>
+
 DefenseClaw embeds CEL as a bounded semantic matcher, not as a general-purpose
 policy runtime. The server establishes a trusted tool-action boundary,
 normalizes the action into typed `ActionFacts`, and evaluates one immutable

@@ -323,7 +323,7 @@ func (m *Manifest) Validate() error {
 	if err := checkDisplayText(m.ChangeSummary, MaxChangeSummary); err != nil {
 		return bad("change_summary", "%s", err)
 	}
-	if m.MinProductVersion != "" && !productVersionRegex.MatchString(m.MinProductVersion) {
+	if m.MinProductVersion != "" && !IsReleaseVersion(m.MinProductVersion) {
 		return bad("min_product_version", "want a version such as 1.2.3")
 	}
 	if err := m.validateFiles(); err != nil {
@@ -332,7 +332,7 @@ func (m *Manifest) Validate() error {
 	if err := m.validateSecretRefs(); err != nil {
 		return err
 	}
-	if !productVersionRegex.MatchString(m.EffectivePolicy.ProductVersion) {
+	if !IsReleaseVersion(m.EffectivePolicy.ProductVersion) {
 		return bad("effective_policy.product_version", "want a version such as 1.2.3")
 	}
 	if !knownPlatform(m.EffectivePolicy.ComputedOn) {

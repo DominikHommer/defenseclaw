@@ -39,6 +39,12 @@ type testRuntimeV8Emitter struct {
 	metadata []router.Metadata
 	records  []observability.Record
 	metrics  []observability.Record
+	// exportAfterWrite is observability.ExportAfterLocalWrite of each emit.
+	exportAfterWrite []bool
+	// replays is observability.StoredReplay of each emitted record.
+	replays []bool
+	// build is the config of this process (nil: generation 23).
+	build *RuntimeV8BuildContext
 }
 
 type rejectingRuntimeV8Emitter struct {
@@ -103,16 +109,20 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 	if emitter == nil || emitter.writer == nil || builder == nil {
 		return RuntimeV8EmitOutcome{}, fmt.Errorf("test runtime emitter is unavailable")
 	}
+	emitter.mu.Lock()
+	emitter.exportAfterWrite = append(emitter.exportAfterWrite, observability.ExportAfterLocalWrite(ctx))
+	emitter.mu.Unlock()
 	if emitter.admission == router.AdmissionDrop {
 		emitter.mu.Lock()
 		emitter.metadata = append(emitter.metadata, metadata)
 		emitter.mu.Unlock()
 		return RuntimeV8EmitOutcome{Admission: router.AdmissionDrop}, nil
 	}
-	record, err := builder(RuntimeV8BuildContext{
-		ConfigGeneration: 23,
-		ConfigDigest:     testEventHistoryGraphDigest,
-	}, emitter.admission)
+	build := RuntimeV8BuildContext{ConfigGeneration: 23, ConfigDigest: testEventHistoryGraphDigest}
+	if emitter.build != nil {
+		build = *emitter.build
+	}
+	record, err := builder(build, emitter.admission)
 	if err != nil {
 		return RuntimeV8EmitOutcome{}, err
 	}
@@ -120,12 +130,17 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 	if err != nil {
 		return RuntimeV8EmitOutcome{}, err
 	}
-	if err := emitter.writer.AppendContext(ctx, record, projection); err != nil {
-		return RuntimeV8EmitOutcome{}, err
+	// A stored replay is not written again (the runtime's pipeline skips
+	// its local append).
+	if !observability.StoredReplay(ctx) {
+		if err := emitter.writer.AppendContext(ctx, record, projection); err != nil {
+			return RuntimeV8EmitOutcome{}, err
+		}
 	}
 	emitter.mu.Lock()
 	emitter.metadata = append(emitter.metadata, metadata)
 	emitter.records = append(emitter.records, record.Clone())
+	emitter.replays = append(emitter.replays, observability.StoredReplay(ctx))
 	emitter.mu.Unlock()
 	return RuntimeV8EmitOutcome{Admission: emitter.admission, LocalPersisted: true}, nil
 }

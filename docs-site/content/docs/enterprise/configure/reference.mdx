@@ -56,7 +56,7 @@ asset_policy:
 
 A threshold comes from the most specific place that sets it: profile connector, profile, `guardrail.connectors`, application protection, global, then the rule pack's default. The file is checked against the closed config schema: a key that does not exist, or that a version 9 file no longer accepts (for example `skill_actions`, `mcp_actions`, `plugin_actions` or `guardrail.rule_pack_dir`), fails validation and the host keeps its current config.
 
-On managed standalone hosts, `guardrail.hook_fail_mode: open` does not override fail-closed gateway peer verification when the gateway is down.
+On managed standalone hosts the default is `closed`. An administrator can select `guardrail.hook_fail_mode: open` to let supported hooks allow calls during a gateway outage, with an inspection-bypassed warning. Runtime integrity, peer identity and credential refusals stay fail-closed. An unusable gateway answer also blocks on standalone hosts. See [Fail modes](/docs/reference/configuration/fail-modes#refusals-that-ignore-the-fail-mode) for the exact boundary.
 
 ### Custom rule packs
 
@@ -832,7 +832,7 @@ A digest covers the hook entry and the content of every file its command may run
 
 The machine-policy registrations run the administrator-owned hook binary. On Linux and macOS the command is `'<bin>/defenseclaw-hook' hook --connector <name> --enterprise-managed`, where `<bin>` is `/opt/defenseclaw/bin` (Linux) or `/opt/cisco/defenseclaw/bin` (macOS). On Windows the binary is `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, and Cursor runs it through a protected PowerShell adapter next to its `hooks.json`.
 
-Per-user registrations differ by OS. On Windows every one runs the same hook binary, or an in-agent plugin that calls the gateway (Amp). On Linux and macOS, Devin's entry in `~/.config/devin/config.json` runs the same administrator-owned command, so its hooks run the foreign-hook guard and always fail closed whatever `hook_fail_mode` says. Antigravity, Hermes and Kiro run a hook script the guardian writes into the user's `~/.defenseclaw/hooks` (for example `hermes-hook.sh`), which sends the event to the gateway over the hook socket; the guardian verifies and repairs it. Amp and the per-user OpenCode plugin call the gateway from inside the agent and run `defenseclaw-hook` for the foreign-hook check.
+Per-user registrations differ by OS. On Windows every one runs the same hook binary, or an in-agent plugin that calls the gateway (Amp). On Linux and macOS, Devin's entry in `~/.config/devin/config.json` runs the same administrator-owned command and the foreign-hook guard. Its hooks default to closed. With `foreign_hooks: remove` (the default) the guard checks each call's session with the gateway, so a gateway outage blocks the call even under the administrator's `hook_fail_mode: open` ([Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#gateway-outages)). Foreign-hook and integrity refusals always block ([Fail modes](/docs/reference/configuration/fail-modes)). Antigravity, Hermes and Kiro run a hook script the guardian writes into the user's `~/.defenseclaw/hooks` (for example `hermes-hook.sh`), which sends the event to the gateway over the hook socket; the guardian verifies and repairs it. Amp and the per-user OpenCode plugin call the gateway from inside the agent and run `defenseclaw-hook` for the foreign-hook check.
 
 ## AI Defense key detail
 
@@ -859,14 +859,12 @@ trailing whitespace.
 
 ### Remove the key
 
-Remove the reference first. The removal refuses a credential the installed config
-still names (`enterprise.inspection.ai_defense.credential`), so the key stays
-stored until you do this:
+Removal refuses a key that enabled AI Defense inspection still references
+(`enterprise.inspection.ai_defense.credential`). A reference under disabled inspection does not prevent removal.
+Disable inspection and remove its reference before deleting the stored key:
 
 1. In the config you deploy, set `enabled: false` under
-   `enterprise.inspection.ai_defense` and delete its `credential` line. Otherwise
-   the gateway keeps logging that the credential is missing, while the local
-   engine decides alone.
+   `enterprise.inspection.ai_defense` and delete its `credential` line.
 2. Apply the config with `ensure`.
 3. Remove the key:
 
@@ -879,7 +877,7 @@ On macOS use `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise sec
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret remove --name ai-defense-api-key
 ```
 
-If the config still names the key, the command exits `1` (`1603` on Windows)
+If enabled AI Defense inspection still names the key, the command exits `1` (`1603` on Windows)
 with `the installed config still references credential ai-defense-api-key`, and
 nothing is removed. On Linux and macOS a successful removal prints
 `- removed credential ai-defense-api-key`, or

@@ -119,8 +119,8 @@ func TestStopWayOn(t *testing.T) {
 		runs  bool
 		want  string
 	}{
-		{openshell.PhaseReady, "", true, stop},
-		{openshell.PhaseReady, "", false, stop},
+		{openshell.PhaseReady, "", true, stop + " (DefenseClaw sandbox), or `openshell sandbox stop dc-x` (raw OpenShell sandbox)"},
+		{openshell.PhaseReady, "", false, stop + " (DefenseClaw sandbox), or `openshell sandbox stop dc-x` (raw OpenShell sandbox)"},
 		{openshell.PhaseStarting, "", true, "wait until `defenseclaw sandbox list` shows it ready or stopped, then " + stop + " if it is ready"},
 		{openshell.PhaseUnknown, "", false, "wait until `defenseclaw sandbox list` shows it ready or stopped, then " + stop + " if it is ready"},
 		{openshell.PhaseCompleted, "", true, ended},
@@ -142,6 +142,13 @@ func TestStopWayOn(t *testing.T) {
 		if strings.Contains(got, "start dc-x") && strings.Contains(got, "work is kept") || strings.Contains(got, "keeps its work") {
 			t.Errorf("StopWayOn(%q, %q) says the work is kept: %s", tc.phase, tc.said, got)
 		}
+	}
+}
+
+func TestRawMicroVMRestartAdviceNamesItsControlSurface(t *testing.T) {
+	got := openshell.StopWayOn("raw-box", openshell.PhaseReady, "", true)
+	if !strings.Contains(got, "`openshell sandbox stop raw-box`") {
+		t.Fatalf("raw MicroVM cannot follow the printed stop advice: %s", got)
 	}
 }
 
@@ -396,6 +403,30 @@ func TestLifecycleLock(t *testing.T) {
 		t.Fatalf("a restart once the starts ended: %v", err)
 	}
 	restart()
+}
+
+func TestSandboxCommandWaitsForGatewayRollbackLock(t *testing.T) {
+	dir := t.TempDir()
+	unlock, err := openshell.LockGatewayLifecycle(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- openshell.WaitGatewayLifecycle(context.Background(), dir) }()
+	select {
+	case err := <-done:
+		t.Fatalf("sandbox command crossed the rollback lock: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("sandbox command did not resume after rollback")
+	}
 }
 
 // TestAGatewayThatCannotBeReadHoldsItsMicroVMs: a gateway whose

@@ -67,8 +67,9 @@ A change to `enterprise.tetragon` is rendered into a drop-in for the helper
 (`defenseclaw-sensor-helper.service.d/30-defenseclaw-tetragon.conf`) and the
 helper restarts into it. The helper never reads `config.yaml` itself: it acts
 only on what `ensure` accepted. An absent block and `mode: consume` with the
-default `burn_in` and `customer_events` produce the same policy digest and no
-drop-in.
+default `burn_in` and `customer_events` produce the same policy digest.
+With Plane C on, these defaults need no drop-in. With Plane C off, `ensure` writes an `off` drop-in
+so the helper runs the effective mode that `status` reports.
 
 Every semantic condition is a cap, never a rejection, because a rejected
 config blocks unrelated changes on a managed computer:
@@ -313,7 +314,7 @@ Tetragon is not ready while Tetragon is down.
 
 | Item | Path | Owner and mode |
 | --- | --- | --- |
-| Helper drop-in, written only when the settings are not the defaults | `/etc/systemd/system/defenseclaw-sensor-helper.service.d/30-defenseclaw-tetragon.conf` | `root`, `0644` |
+| Helper drop-in, written for non-default settings or the Plane C off cap | `/etc/systemd/system/defenseclaw-sensor-helper.service.d/30-defenseclaw-tetragon.conf` | `root`, `0644` |
 | Helper state | `/var/lib/defenseclaw-sensor/`: `tetragon-loaded` (the policy names DefenseClaw loaded), `tetragon-state.json`, `burnin.json`, `tetragon-pause` | `root`, `0700` |
 | Until-reboot pause and rendered policy copies | `/run/defenseclaw-sensor-tetragon/`: `tetragon-pause`, `tetragon/` | `root` |
 | Helper unit | `defenseclaw-sensor-helper.service`, started after `tetragon.service` | `root` |

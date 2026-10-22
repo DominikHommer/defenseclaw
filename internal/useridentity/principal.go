@@ -230,6 +230,13 @@ func (f AccountFilter) Matches(id, name string) bool {
 // loop 3). Its recorded name does not select a row recorded for another
 // account than the one the filter resolves to (recordedForAnother).
 func (f AccountFilter) MatchesIn(id, name, domains, incarnation string) bool {
+	if f.domain != "" && f.incarnation == "" && f.holderChanged && slices.ContainsFunc(f.ids, func(resolved string) bool {
+		return KindForID(resolved) == KindPOSIXUID
+	}) {
+		// The resolved uid's current holder is unproven. Even a row with
+		// another uid and the same qualified name has no ownership proof.
+		return false
+	}
 	return f.matches(id, name, domains, func() bool { return f.ownRow(id, domains, incarnation) },
 		func() bool { return f.recordedForAnother(id, incarnation) })
 }
@@ -245,6 +252,11 @@ func (f AccountFilter) matches(id, name, domains string, own, another func() boo
 		return strings.EqualFold(resolved, id)
 	}) && own():
 		return true
+	case f.domain != "" && len(f.ids) > 0:
+		// A resolved qualified name belongs to its live UID/SID. A prior
+		// holder's row can retain the exact spelling without an account
+		// token, but that spelling cannot overrule the resolved identity.
+		return false
 	case name == "":
 		return false
 	case another != nil && another():
@@ -275,7 +287,7 @@ func (f AccountFilter) ownRow(id, domains, incarnation string) bool {
 	switch {
 	case incarnation != "" && f.incarnation != "":
 		return incarnation == f.incarnation
-	case incarnation == "" && f.holderChanged:
+	case f.holderChanged:
 		return false
 	}
 	return f.recordedIn(domains)
@@ -298,7 +310,7 @@ func (f AccountFilter) recordedForAnother(id, incarnation string) bool {
 	switch {
 	case incarnation != "" && f.incarnation != "":
 		return incarnation != f.incarnation
-	case incarnation == "" && f.holderChanged:
+	case f.holderChanged:
 		return slices.ContainsFunc(f.ids, func(resolved string) bool { return strings.EqualFold(resolved, strings.TrimSpace(id)) })
 	}
 	return false

@@ -23,7 +23,11 @@ defenseclaw setup amp --mode action                    # enforce calls and resul
 defenseclaw setup amp --workspace /path/to/repo        # also inventory the repository
 ```
 
-On Windows, run the same commands in PowerShell with a Windows path. The plugin is per user in every case. `--workspace` only adds that repository's `.amp` settings, plugins, skills and agents to inventory.
+On Windows, use a Windows path. The plugin is per user in every case.
+`--workspace` sets the workspace for the whole DefenseClaw install, including
+Amp's project inventory. Use it on a single-Amp install: if it would move peer connectors
+from their current scope, setup refuses and changes nothing. On a multi-connector
+install, run `defenseclaw setup amp` without `--workspace` for global protection.
 
 For headless runs, give Amp time to load plugins:
 
@@ -68,11 +72,15 @@ It holds a connector-scoped token and is limited to your account. Setup keeps an
 
 ## Turn it off
 
+For a per-user, single-connector install:
+
 ```bash
-defenseclaw guardrail disable --connector amp --yes
+defenseclaw guardrail disable --yes
 ```
 
-This keeps Amp's settings. Turn it back on with `defenseclaw guardrail enable --connector amp`. To remove the connector, run `defenseclaw setup remove amp --yes` (add `--force` if it is the last one). `defenseclaw plugin remove defenseclaw --connector amp` is refused, because Amp would run unguarded. Relaunch Amp afterwards.
+This keeps Amp's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove amp --yes` (add `--force` if it is the last one). `defenseclaw plugin remove defenseclaw --connector amp` is refused, because Amp would run unguarded. A modified bridge makes `defenseclaw setup remove amp` refuse before saving configuration. Preserve your edits, run `defenseclaw setup amp --yes --restart`, then retry removal. Relaunch Amp afterwards.
+
+On a multi-connector install, add `--connector amp` to `guardrail disable` and `guardrail enable` to change only this agent.
 
 ## Details
 

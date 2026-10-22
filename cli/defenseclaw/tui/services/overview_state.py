@@ -840,7 +840,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        'Gateway is not running - press : and run "start" (or run defenseclaw-gateway start)',
+                        "Gateway is not running. Run: defenseclaw-gateway start",
                     )
                 )
         elif gateway_state in {"starting", "reconnecting"}:
@@ -912,7 +912,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        f"Doctor found {effective_failed} failure(s) - see the DOCTOR panel or run: defenseclaw doctor",
+                        f"Doctor found {effective_failed} failure(s) · run: defenseclaw doctor",
                     )
                 )
             elif contradicted and len(removed) == len(contradicted):

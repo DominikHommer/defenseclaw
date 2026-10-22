@@ -352,7 +352,7 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. Run bare it prints the global value **plus a per-connector breakdown**. The running gateway applies a change without a restart; on a Secure Client computer the command restarts it (`--no-restart` to skip). |
 | `defenseclaw guardrail block-message ["<text>"] [--clear] [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. `--clear --connector X` removes that connector's override so it inherits the global message, or the built-in default when the global value is empty. Unscoped `--clear` also clears active connector overrides, returning the active roster to the built-in default. Do not pass text and `--clear` together. |
 | `defenseclaw guardrail list-packs [--json]` | Read-only. Lists the built-in rule-pack presets, custom packs found under `~/.defenseclaw/policies/guardrail/` or configured anywhere, and the pack each active connector enforces (per-connector override > global pack > built-in default). `--json` prints `{"version": 1, "global": {...}, "connectors": [...], "packs": [...]}`. |
-| `defenseclaw guardrail use-pack PACK [--connector X] [--no-validate] [--json]` | Switch rule packs. `PACK` is a preset (`default`, `strict`, `permissive`), a `guardrail.custom_packs` key, a pack name under `~/.defenseclaw/policies/guardrail/`, or a directory. It is written as `guardrail.rule_pack`; a custom directory is also pinned as `guardrail.custom_packs.NAME` with its validated digest, so an edited pack is refused until pinned again. An invalid pack changes nothing; `--no-validate` skips validating a built-in pack. Without `--connector`, every connector uses `PACK` and per-connector packs are removed. `--json` prints `{"version": 1, "ok", "scope", "connector", "pack", "path", "cleared_overrides", "validation", "gateway", "message"}`. |
+| `defenseclaw guardrail use-pack PACK [--connector X] [--no-validate] [--repin [--yes]] [--json]` | Switch rule packs. `PACK` is a preset (`default`, `strict`, `permissive`), a `guardrail.custom_packs` key, a pack name under `~/.defenseclaw/policies/guardrail/`, or a directory. It is written as `guardrail.rule_pack`; a custom directory is also pinned as `guardrail.custom_packs.NAME` with its validated digest, so an edited pack is refused until `--repin` pins it again (it shows the pinned and the new digest, names the other scopes that share the pin, lists every `config.yaml` edit, and asks; if `config.yaml` changed meanwhile it saves nothing and says to run it again; `--yes` for scripts, which `--json` needs). An invalid pack changes nothing; `--no-validate` skips validating a built-in pack. Without `--connector`, every connector uses `PACK` and per-connector packs are removed. `--json` prints `{"version": 1, "ok", "scope", "connector", "pack", "path", "cleared_overrides", "validation", "gateway", "message"}`. |
 | `defenseclaw guardrail use-pack --clear --connector X` | Remove X's rule-pack override so it uses the global pack again. |
 | `defenseclaw guardrail protection list [--json]` | Read-only. Lists the opt-in protection packs (five selectable, one staged) and which scope (the global pack or an active connector) has which on. See [Opt-in protection packs](#opt-in-protection-packs). |
 | `defenseclaw guardrail protection enable NAME [--connector X] [--profile P] [--json]` | Turn an opt-in protection pack on for a scope: adds `NAME` to `guardrail[.profiles.P][.connectors.C].rules.protections`, which the gateway layers onto the scope's rule pack on its next reload. Staged and unknown packs are refused (exit `1`). The gateway composes the pack in memory on its next reload; nothing is restarted. |
@@ -581,7 +581,8 @@ These list/inventory verbs read across the full active roster:
 | `defenseclaw skill list [--connector X]` | All active connectors by default; one connector when scoped. |
 | `defenseclaw mcp list [--connector X]` | All configured connector MCP sources by default; one connector when scoped. |
 | `defenseclaw plugin list [--connector X]` | All configured connector plugin sources by default; one connector when scoped. |
-| `defenseclaw tool list/status [--connector X]` | Effective tool policy for all active connectors by default; one connector when scoped. |
+| `defenseclaw tool list [--connector X]` | List tool policy across active connectors; one connector when scoped. |
+| `defenseclaw tool status <name> [--connector X]` | Effective policy for the named tool; one connector when scoped. |
 | `defenseclaw codeguard status [--connector X]` | CodeGuard install state across active connectors by default; one connector when scoped. |
 
 ## Audit & alerts
@@ -989,7 +990,7 @@ error: This device is managed: change config.yaml in the admin config (MDM or ma
 `skill`, `mcp`, `plugin` and `tool` `block`, `allow` and `unblock` are refused
 the same way, with a message that the `asset_policy` block and allow lists are
 set in the admin config (MDM or management plane), and exit `3`.
-A standard user with no per-user config on a managed device is not sent to
+When the Python CLI is used against a managed config, a standard user with no per-user config is not sent to
 `defenseclaw init`: `init`, `quickstart` and every command that needs a config print `This
 device is managed: DefenseClaw is configured by your administrator (MDM or
 management plane), so there is no per-user config to create and 'defenseclaw
@@ -1021,6 +1022,16 @@ and has no `guardrail` group. A standard account's
 `enterprise windows status` or `verify` only says that it needs an elevated
 prompt. The administrator runs `defenseclaw.exe enterprise ...` from an
 elevated PowerShell.
+
+The Windows package's `init` and `quickstart` are not shipped: they return an
+unknown-command error and exit `2`. Its `doctor` prints administrator guidance and exits `1`,
+including with `--passive` or `--json`; it does not run the Python doctor's checks.
+Its `config` group has only `validate` and `migrate`: there is no `config get` or
+`config show`. From an elevated prompt, an administrator checks the managed config with
+`config validate 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'`, reads the
+compiled admission policy with `policy show`, and checks an account's agents with
+`enterprise policy show --user NAME`. These package commands do not share the
+Python CLI's no-config exit `3` contract.
 
 ## Registries
 
@@ -1258,7 +1269,12 @@ Setup. See [Install with an MDM](/docs/enterprise/mdm).
 
 Property names are case-insensitive, and dashes in them are ignored. Paths
 must be absolute: Setup refuses relative paths and paths that contain `%`.
-The unsigned (hash-pinned) Setup writes its payload trust file itself from its embedded manifest; a signed Setup uses Authenticode trust, optionally pinned with `ALLOWEDSIGNERS=`. Setup's own argument errors, such as an unknown property, a missing, relative or environment-expanded `CONFIG=` or `MANIFEST=` path, `/install` without `CONFIG=` and `MANIFEST=`, or a `TIMEOUTSECONDS` out of range, exit `1639`. A token that is not elevated, or a `CONFIG=` or `MANIFEST=` file a non-administrator can change, exits `1603`. The Secure Client Setup returns only `0` and `1603`.
+The unsigned (hash-pinned) Setup writes its payload trust file itself from its embedded manifest; a signed Setup uses Authenticode trust, optionally pinned with `ALLOWEDSIGNERS=`. Setup's own argument errors, such as an unknown property, a missing, relative or environment-expanded `CONFIG=` or `MANIFEST=` path, `/install` without `CONFIG=` and `MANIFEST=`, or a `TIMEOUTSECONDS` out of range, exit `1639`. Setup also exits `1639` for a `CONFIG=` or `MANIFEST=` file that a non-administrator owns or can change, and names the account and the `icacls` fix. A token that is not elevated exits `1603`. The Secure Client Setup returns only `0` and `1603`.
+
+On managed Linux and macOS, an administrator's in-process `scan code --json`
+redacts its local output with a process-local key and leaves the gateway's audit
+store and correlation key alone. `policy test` reports nothing to run when the
+installed policy has no Rego tests.
 
 ### Machine policy (`enterprise policy`)
 
@@ -1272,13 +1288,18 @@ never write machine policy; the lifecycle does. See
 | `defenseclaw-gateway enterprise policy export --connector X` | Print DefenseClaw's entries for your own policy tool. `--format`: `codex` takes `toml` or `plist`; `claudecode` takes `json`, `claude-hklm-json`, `reg`, `plist`, `intune-settings-catalog`, or `version-floor` (the [version floor](/docs/enterprise/configure/machine-policy#claude-code-version-floor) drop-in); `cursor`, `copilot`, and `opencode` take `json`. The default is the connector's native file |
 | `defenseclaw-gateway enterprise policy verify` | Verify coverage. Exits `1` when it is incomplete. Takes the same `--connector` and `--user` flags. `--live` also runs the real client as the user; it needs `--user`, one `--connector` (`codex` or `claudecode`), and `--agent-binary` with an absolute path. `--audit-db` (the gateway audit database searched for the Claude Code check's tool call; default: the configured `audit_db`) and `--timeout` (default `90s`) tune the live check |
 
-All three take `--json`. On this release, set `DEFENSECLAW_CONFIG` to the
-managed config path when you run them. Otherwise they read the calling user's
-`~/.defenseclaw/config.yaml` and refuse.
+`show` and `verify` take `--json`. `export` prints the selected vendor format;
+it has no `--json` flag. On a standalone managed host, run the installed binary
+as root or from an elevated Windows prompt. The commands read the installed managed config and runtime automatically.
 
 ```bash
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector claudecode --format plist
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector claudecode --format plist
+```
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --json
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy export --connector codex --format toml
 ```
 
 ### Protected credentials (`enterprise secret`)

@@ -127,7 +127,10 @@ gateway. `enterprise secret status` never shows the value.
 
 ## 6. Change the config, upgrade and roll back
 
-**Change the config.** Setup applies a new config when `/ensure` runs with a config
+**Change the config.** On a device in bundle mode (bundle trust anchors installed),
+deliver a new signed bundle instead: Setup refuses a config package with
+`bundle_required`. Otherwise,
+Setup applies a new config when `/ensure` runs with a config
 that differs from the installed one. The registry rule detects by version only, so
 Intune does not re-run an app for a config-only change. To roll out a new config,
 re-author `config.yaml` as `config_version: 9` (see
@@ -148,7 +151,10 @@ launcher and `ensure` re-applies the deployment. Do not edit the installed file 
 hand; changes made outside Setup are not validated.
 
 **Upgrade.** Build content for the new release and assign it as a new Win32 app. `/ensure`
-upgrades in place and keeps the config and state.
+upgrades in place and keeps the config and state. In bundle mode, keep the base and bundle apps
+assigned and add a separate Setup-only app built without `-ConfigPath` and without
+supersedence: superseding a base app that a bundle app depends on failed with
+Intune error `0x87D300DB`.
 After each upgrade with Claude Code enabled, an administrator must repeat the
 [attestation](/docs/enterprise/install/windows#verify-the-install); until then
 `status` can report `ok=true` with `security_complete=false`.

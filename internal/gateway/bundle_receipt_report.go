@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 // The gateway reports the signed policy bundle receipts of a standalone
@@ -50,6 +51,10 @@ var (
 	// audit logger that refuses it before the reporter waits for the next
 	// receipt.
 	bundleReceiptRetries = 12
+	// bundleChangeDeliveryWait bounds how long the reporter waits for the
+	// remote destinations of one change offer to answer before it offers
+	// the change again.
+	bundleChangeDeliveryWait = 10 * time.Minute
 )
 
 // These legacy single-slot markers also let a new reporter recognize events
@@ -61,7 +66,15 @@ const bundleRefusalMarkerName = "bundle-refusal.reported"
 type bundleReceiptSink interface {
 	LogPolicyBundleReceipt(principal string, bundle audit.PolicyBundle, receipt audit.PolicyBundleReceipt) error
 	RecordPolicyBundleVersion(ctx context.Context, bundleVersion uint64) error
-	LogConfigChange(change audit.ConfigChange) error
+	LogConfigChange(change audit.ConfigChange, delivery *observability.RemoteDelivery) error
+}
+
+// changeDelivery is the reporter's state of one change event it offered.
+type changeDelivery struct {
+	delivery *observability.RemoteDelivery
+	offered  time.Time
+	// retry is set when the audit logger refused the last offer.
+	retry bool
 }
 
 type bundleReceiptReporter struct {
@@ -77,6 +90,8 @@ type bundleReceiptReporter struct {
 	attempts        int
 	gaugeVersion    uint64
 	seen            map[string]bool
+	// changes holds the change events offered and not reported yet.
+	changes map[string]*changeDelivery
 }
 
 // newBundleReceiptReporter returns the reporter of a standalone enterprise
@@ -268,10 +283,15 @@ func (r *bundleReceiptReporter) reportSpool() {
 }
 
 // reportChanges emits one audit event per change event not reported yet,
-// oldest first. A file that does not validate is skipped. An event is
-// marked reported only once the audit logger recorded it: one it refuses
-// is offered again at every poll, and the logger stores each change event
-// id once, so a marker lost after the audit write cannot report it twice.
+// oldest first, then one per reservation whose command ended before it
+// wrote its event (failed, interrupted): a change interrupted after it was
+// made is reported at the next poll, a gateway restart included, even when
+// no later command writes the spool. A file that does not validate is
+// skipped. A reservation the next command moves into the spool keeps its
+// id, so it is not reported again. The spool event is the change's durable
+// outbox: reportChange marks it reported, which lets the change commands
+// remove it, only once its audit row survives a power loss and every
+// remote destination acknowledged it.
 func (r *bundleReceiptReporter) reportChanges() {
 	dir := r.changeDir()
 	for _, id := range enterprisestatus.ListChangeEventIDs(dir) {
@@ -282,16 +302,62 @@ func (r *bundleReceiptReporter) reportChanges() {
 		if err != nil || ev.EventID != id {
 			continue
 		}
-		err = r.sink.LogConfigChange(audit.ConfigChange{
-			EventID: ev.EventID, Kind: ev.Kind, Action: ev.Action, Outcome: ev.Outcome, ReasonCode: ev.ReasonCode,
-			Actor: ev.Actor, ChangedAt: ev.Time, SHA256: ev.SHA256, PreviousSHA256: ev.PreviousSHA256,
-			KeyIDsAdded: ev.KeyIDsAdded, KeyIDsRemoved: ev.KeyIDsRemoved, SecretName: ev.SecretName,
-		})
-		if err != nil {
-			continue
-		}
-		r.markSeen(id)
+		r.reportChange(ev)
 	}
+	for _, ev := range enterprisestatus.EndedChangeReservations(dir) {
+		if !r.hasSeen(ev.EventID) {
+			r.reportChange(ev)
+		}
+	}
+}
+
+// reportChange offers ev to the audit logger until it is reported. The
+// logger stores each change event id once and returns nil only once the
+// row survives a power loss; an offer it refuses is made again at the next
+// poll, and one whose store write failed exported nothing. The change's
+// RemoteDelivery, kept across offers, says when every remote destination
+// acknowledged it. While its deliveries are in flight the change is not
+// offered again; once one failed (refused, dropped, abandoned at shutdown)
+// the next poll offers it again, and the logger sends the stored record to
+// the destinations that do not have it. After a restart the delivery state
+// is gone and an unreported change goes to every destination again, under
+// the same record id.
+func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
+	state := r.changes[ev.EventID]
+	if state == nil {
+		state = &changeDelivery{delivery: observability.NewRemoteDelivery()}
+		if r.changes == nil {
+			r.changes = make(map[string]*changeDelivery)
+		}
+		r.changes[ev.EventID] = state
+	} else if !state.retry {
+		settled, delivered := state.delivery.Settled()
+		if settled && delivered {
+			r.changeReported(ev.EventID)
+			return
+		}
+		if !settled && time.Since(state.offered) < bundleChangeDeliveryWait {
+			return
+		}
+	}
+	state.offered = time.Now()
+	err := r.sink.LogConfigChange(audit.ConfigChange{
+		EventID: ev.EventID, Kind: ev.Kind, Action: ev.Action, Outcome: ev.Outcome, ReasonCode: ev.ReasonCode,
+		Actor: ev.Actor, ChangedAt: ev.Time, SHA256: ev.SHA256, PreviousSHA256: ev.PreviousSHA256,
+		KeyIDsAdded: ev.KeyIDsAdded, KeyIDsRemoved: ev.KeyIDsRemoved, SecretName: ev.SecretName,
+	}, state.delivery)
+	state.retry = err != nil
+	if err != nil {
+		return
+	}
+	if settled, delivered := state.delivery.Settled(); settled && delivered {
+		r.changeReported(ev.EventID)
+	}
+}
+
+func (r *bundleReceiptReporter) changeReported(id string) {
+	delete(r.changes, id)
+	r.markSeen(id)
 }
 
 func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt) error {

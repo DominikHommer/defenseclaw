@@ -1986,6 +1986,9 @@ class TestCheckHookHealth(unittest.TestCase):
         self.assertEqual(results[True]["label"], _HERMES_HOOKS_LABEL)
         self.assertIn(hook, results[True]["detail"])
         self.assertIn("live=false", results[True]["detail"])
+        self.assertIn("cannot verify", results[True]["detail"])
+        self.assertIn("close", results[True]["remediation"].lower())
+        self.assertIn("defenseclaw doctor", results[True]["remediation"])
         # With no Hermes host running there is nothing to reload.
         self.assertEqual(results[False]["status"], "pass", results[False])
 
@@ -2180,6 +2183,30 @@ class TestCheckHookHealth(unittest.TestCase):
         self.assertIn("no load heartbeat yet", r.checks[-1]["detail"])
         for internal in ("--pure", "DACL", "tamper-proof", "authenticated"):
             self.assertNotIn(internal, r.checks[-1]["detail"])
+
+    def test_opencode_runtime_health_retries_ambiguous_ownership_without_trusting_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp, "opencode", [])
+            status = self._opencode_status(tmp, {"name": "opencode", "state": "stopped"})
+            ambiguous = MagicMock(trusted=False, code="ambiguous_listener", detail="multiple listener owners")
+            trusted = MagicMock(trusted=True, pid=4242, detail="")
+            with (
+                patch("defenseclaw.commands.cmd_doctor._trusted_gateway_listener", side_effect=[ambiguous, trusted]),
+                patch("defenseclaw.commands.cmd_doctor.time.sleep"),
+                patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, status)) as probe,
+            ):
+                outcome, detail = _opencode_load_heartbeat_status(cfg)
+            self.assertIn("reports stopped", detail)
+            probe.assert_called_once()
+            with (
+                patch("defenseclaw.commands.cmd_doctor._trusted_gateway_listener", return_value=ambiguous),
+                patch("defenseclaw.commands.cmd_doctor.time.sleep"),
+                patch("defenseclaw.commands.cmd_doctor._http_probe") as probe,
+            ):
+                outcome, detail = _opencode_load_heartbeat_status(cfg)
+            self.assertEqual(outcome, "warn")
+            self.assertIn("multiple listener owners", detail)
+            probe.assert_not_called()
 
     def test_opencode_runtime_status_rejects_stale_and_malformed_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

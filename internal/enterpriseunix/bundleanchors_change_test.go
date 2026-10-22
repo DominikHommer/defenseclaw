@@ -175,6 +175,32 @@ func TestInstallBundleAnchorsRefusedWhenTheChangeCannotBeRecorded(t *testing.T) 
 	}
 }
 
+// A reservation has the access of the spool, root with the service group,
+// so the gateway reads the reservation of a command that ended after its
+// change. Before, reservations were root-only in the lifecycle folder, and
+// the gateway never saw them.
+func TestChangeReservationsAreReadableByTheGateway(t *testing.T) {
+	b, _ := newAnchorsHost(t)
+	b.accounts.accounts[b.env.Layout.ServiceUser] = Account{Name: b.env.Layout.ServiceUser, UID: 991, GID: 988}
+	reservation, err := b.env.ReserveChange(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet, "splunk-hec-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reservation.Release()
+	reserved := filepath.Join(b.env.P(enterprisestatus.ChangeEventsDir(b.env.Layout.ConfigDir)), enterprisestatus.ChangeReservedDirName)
+	entries, err := os.ReadDir(reserved)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("reservations = %v, %v", entries, err)
+	}
+	file := filepath.Join(reserved, entries[0].Name())
+	for path, mode := range map[string]os.FileMode{reserved: 0o750, file: 0o640} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != mode || b.owners[path] != [2]int{0, 988} {
+			t.Fatalf("%s: mode %v owner %v (%v), want %v root with the service group", path, info.Mode().Perm(), b.owners[path], err, mode)
+		}
+	}
+}
+
 // Before the service account exists, an existing spool keeps its group.
 func TestChangeSpoolKeepsItsGroupBeforeTheServiceAccountExists(t *testing.T) {
 	b, _ := newAnchorsHost(t)

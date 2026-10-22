@@ -1923,7 +1923,7 @@
           "items": {
             "$ref": "#/$defs/guardrailProfileAssignment"
           },
-          "description": "Ordered profile assignments; the first match wins."
+          "description": "Profile assignments; when several match, the strictest profile wins."
         },
         "default_profile": {
           "type": "string",

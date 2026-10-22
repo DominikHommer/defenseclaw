@@ -93,7 +93,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	if !on {
 		for _, entry := range state.sortedPending() {
 			if entry.Kind == "stop" {
-				l.describePending(entry)
+				l.describePending(ctx, entry)
 			}
 		}
 		l.noteOpenShellCapability(ctx, settings, false, nil, nil)
@@ -161,7 +161,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 		}
 	}
 	for _, entry := range state.sortedPending() {
-		l.describePending(entry)
+		l.describePending(ctx, entry)
 	}
 	l.describeMacOSAgents(ctx)
 	// The gateway reads this to say, in its own words, why a host run of a
@@ -219,7 +219,7 @@ func versionNote(version string) string {
 }
 
 // describePending reports a change that waits for an account's sandboxes.
-func (l *lifecycle) describePending(entry pending) {
+func (l *lifecycle) describePending(ctx context.Context, entry pending) {
 	waiting := fmt.Sprintf("%d sandboxes run (or are starting, stopping, or a MicroVM that OpenShell does not report stopped)", entry.Sandboxes)
 	switch {
 	case entry.Sandboxes < 0:
@@ -242,6 +242,14 @@ func (l *lifecycle) describePending(entry pending) {
 		}
 		if entry.Sandboxes > 0 {
 			waiting += "; a change the user's own sandbox command applied since stays listed until the next ensure"
+		}
+	}
+	// A macOS LaunchAgent reload needs the user's GUI console session; with
+	// none active the reload waits for the next login or sandbox command,
+	// whatever the last ensure counted (g-unix-console).
+	if l.env.GOOS == "darwin" && entry.Kind == "launchd" {
+		if active, err := l.env.activeMacOSConsoleSession(ctx, entry.UID); err == nil && !active {
+			waiting = "no active GUI console session; the reload is deferred until this user's next login or sandbox command"
 		}
 	}
 	l.result.Services = append(l.result.Services, enterprisestatus.Service{

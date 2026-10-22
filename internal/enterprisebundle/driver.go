@@ -157,7 +157,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	}
 	staging, err := d.Store.Stage(receipt, b)
 	if err != nil {
-		return refuse(&Error{Code: CodeArchiveInvalid, Detail: "cannot stage the bundle: " + err.Error()})
+		return refuse(StageError(err))
 	}
 	staged, err := ReadDir(staging)
 	if err != nil {

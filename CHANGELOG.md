@@ -10,6 +10,12 @@ for current behavior.
 
 ## [Unreleased] — 1.0.4
 
+- **Managed local scans and policy tests no longer need service-owned state.** JSON code scans use a process-local redaction key without opening the gateway audit database or correlation key; policy tests report no tests when an installed config-only policy has no Rego directory.
+- **Invalid enterprise profiles keep the source version and field in diagnostics.** Non-string values are refused at `enterprise.profile` before profile resolution, and version-9 error JSON keeps `config_version: 9`.
+- **Fleet policy versions always returns an array.** The empty SQLite-backed response now sends `versions: []`, matching the API contract and the in-memory backend.
+- **The complete config example names its required credential inputs.** Supply the Galileo and Splunk variables before native validation, or omit those destinations.
+- **The reference separates managed package commands from the per-user CLI.** It corrects policy export flags, workspace scope, discovery IDs and connector outage limits, and names the builds used for Intune delivery checks.
+
 ### Known limits
 
 - Amp fail-open outages do not produce failure-file alerts. The fail-mode reference now distinguishes this reporting limit and the stricter managed standalone failure outcomes (GAP-0448, GAP-0451).
@@ -17,6 +23,12 @@ for current behavior.
 - On a managed standalone host with `foreign_hooks: remove`, guarded connectors (GitHub Copilot CLI, Cursor, Devin, OpenCode, Amp, Hermes) still block every tool call during a gateway outage, also under `hook_fail_mode: open`, as in 1.0.3 (GAP-0352).
 
 ### Changed
+
+- `defenseclaw guardrail use-pack` re-pins a custom pack edited since it was pinned only with `--repin`, by name or by directory: it shows the pinned and the new digest, names every other connector, profile, the global pack or automatic-protection (`application_protection`) pack that shares the pin and so gets the edited pack too, lists every `config.yaml` edit it will make, and asks (`--yes` for scripts; `--json` without `--yes` refuses). It reads `config.yaml` once and saves only onto those bytes: if the file changed or was removed since, it saves nothing and says `config changed, run again`. If the file is missing or empty, it refuses. It never creates `config.yaml`. A plain `use-pack` refuses the stale pin, as in 1.0.3.
+- The TUI's human-approval confirmation names the connectors in observe mode, which do not wait, and those with no native approval prompt, whose confirm verdicts raise alerts instead (Codex, for one). It asks "Set human approval to ..." instead of "Ask a human for ..." when not every connector it reaches asks a person.
+- **Bare policy updates include connectors stored under an alias.** HILT, hook fail-mode and block-message commands resolve active names to their configured keys, so saved overrides and Protection center readback agree.
+- **Refused action setup exits with an error before staging another mode.** Single, batch and guardrail setup keep the prior roster and hooks when action preflight fails; choose observe explicitly to stage observation.
+- **The Overview gateway-down notice keeps its full recovery command at 80×24.** The approval guide also documents piped confirmation input and EOF accurately.
 
 - **OpenShell 0.1.5.** `defenseclaw sandbox setup` and the managed `install: setup` mode now install NVIDIA OpenShell 0.1.5 (installer script and release tarballs pinned by SHA-256). What 0.1.5 also brings: a MicroVM flushes its disk before a stop, and a sandbox in OpenShell's error state (after a Docker restart, for one) can be stopped and started again, so the feed, the stop and start errors, `sandbox doctor` and the session messages now say `defenseclaw sandbox stop NAME` and `start NAME` instead of a delete. A sandbox whose provisioning timed out (`ProvisioningTimedOut`, `ImagePreparationTimedOut`), whose stop OpenShell refuses, is told to wait for OpenShell's cleanup and start again with no stop. The supervisor's OCSF log files are named `openshell-ocsf.*.jsonl` from 0.1.5; DefenseClaw does not read them. The first MicroVM start of each image after the upgrade prepares its disk again (about a minute and 5 GB); `sandbox image prune` removes the older release's disks.
 
@@ -30,6 +42,18 @@ for current behavior.
 
 - An interrupted Windows upgrade refuses to continue when gateway recovery fails, including on another retry. Restoring a snapshot now checkpoints and verifies required data and environment moves, retains recovery state on failure, and verifies an external config before reporting recovery (GAP-0444, GAP-0450).
 
+- **A refused proxy-provider setup restores the vendor configuration.** Provider verification now runs before setup is published as ready and rolls back a failed prerequisite. Correcting a ZeptoClaw provider key and retrying no longer reuses a stale blank-key snapshot or leaves an orphaned localhost redirect.
+- **Webhook tests and scoped setup report the right result.** Generic synthetic events include the sending host in the signed body. Connector-scoped adds no longer inherit global names or overwrite warnings, and a PagerDuty test with an unset routing key exits with a short error, including in a dry run.
+- **Managed provenance no longer prints an empty CLI snapshot.** The Unix administrator command reads the running gateway over its protected socket and verifies the listener's kernel identity on that connection. Missing or incomplete state refuses with the deployment status command. Linux profile-validation errors explain reinstall recovery; personal gateway startup names unsafe JSONL destinations before spawning a daemon; Windows sandbox hints name the gateway executable; profile explain omits an unproven directory source for an unnamed numeric gid.
+- **Hidden credential reads in MCP descriptions produce findings.** The bundled YARA pack detects instructions to read home credential files and exfiltrate their contents or conceal the access, including the managed as-user scan's previously missed description. Ordinary tool documentation has negative controls, and the scanner SDK reports the new finding as HIGH.
+- **Personal Claude Code hooks decode successful responses with one parser process when jq is available.** The response must be one JSON object with a known action and structured native output. The existing jq-free path remains supported.
+- **Windows standalone teardown returns kept agent config files to their owner's control.** Only verified removal releases the guardian's owner-rights restriction; failed teardown retains protection. File inspection and the DACL update use the same no-follow handle, rejecting unproven owners, reparse paths and hard links without relaxing DefenseClaw's retained state.
+- **The administrator's open covers gateway outages only, for rate limits and shell hooks too.** On a managed standalone host a call the gateway answered with HTTP 429 now blocks when no verdict follows its resends, also under `hook_fail_mode: open`; before, running out of answer time after a 429 counted as an outage and let the call run. On Linux and macOS the Antigravity, Cursor, Devin, Hermes and Kiro shell hooks also block an error status, an unusable answer and input too large to inspect under `open`, as the native hook already did.
+- **The fail-mode command describes its apply step accurately.** Help and the reference now explain that the default refreshes and verifies hook registrations directly where supported, and restarts a running gateway only when full connector setup is needed.
+- **Sandbox hook outages leave a persistent failure log.** Shell hooks now write to the workload data home instead of the read-only runtime, including neutral Stop answers and closed prompt or tool-call failures.
+
+- **Local Splunk setup reports a failed prerequisite.** Missing Docker, a stopped daemon or a busy port now exits nonzero in both command and wizard setup, before local Splunk configuration is written.
+
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
 
 ### Removed
@@ -38,6 +62,10 @@ for current behavior.
 - The managed `install: setup` mode no longer re-signs the macOS MicroVM driver ad hoc with Apple's hypervisor entitlement: every release it can install (0.1.5) ships the driver signed with it, so the shim never ran.
 
 ## [Unreleased] — 1.0.3
+
+### Documentation website
+
+- **Avoid loading a large search index on every page visit.** Search now initializes when opened, uses a smaller word-prefix index with compact record IDs, and has a 32 MiB decoded build limit to guard against mobile tab reloads. Page text and heading links remain searchable.
 
 ### Upgrade note for 1.0.3
 

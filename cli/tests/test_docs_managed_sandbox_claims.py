@@ -66,3 +66,20 @@ def test_windows_rule_pack_folder_is_not_left_readable_by_users() -> None:
 def test_lifecycle_explains_a_hand_edit_is_applied_not_drift() -> None:
     lifecycle = _read("enterprise/operate/reference.mdx")
     assert "A hand edit of the config is applied, not reported as drift" in lifecycle  # GAP-0398
+
+
+def test_coverage_and_cli_keep_managed_sandbox_platform_support() -> None:
+    coverage = _read("appendix/coverage-by-layer.mdx")
+    rows = [line.split("|") for line in coverage.splitlines() if line.startswith("| **")]
+    linux = next(row[3] for row in rows if "Linux, managed" in row[1])
+    mac = next(row[3] for row in rows if "macOS, managed" in row[1])
+    assert linux.strip().startswith("Yes"), linux
+    assert all(term in linux for term in ("Docker", "MicroVM", "KVM", "copy")), linux
+    assert mac.strip().startswith("Yes"), mac
+    assert all(term in mac for term in ("MicroVM", "Apple silicon", "copy")), mac
+    assert next(row[3] for row in rows if "Windows" in row[1]).strip().startswith("No")
+
+    reference = " ".join(_read("reference/sandboxes/cli.mdx").split())
+    install = reference.split("### `sandbox kernel-feed install`", 1)[1].split("```", 1)[0]
+    assert "where sandboxes are not supported" not in install
+    assert "per-user" in install and "managed" in install

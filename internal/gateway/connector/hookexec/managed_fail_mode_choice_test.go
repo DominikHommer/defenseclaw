@@ -310,14 +310,15 @@ func TestStandaloneManagedNoAnswerAfterASlowLocalStepStaysClosed(t *testing.T) {
 			}
 		})
 		t.Run("hook request: "+tc.name, func(t *testing.T) {
-			started := time.Now().Add(-tc.spent)
 			result := run(t, "codex", nil, func(o *Options) {
 				managedCodex(o)
 				o.ExplainUnenrolledAccount = true
 				o.FailMode = "open"
 				o.APIAddr = addr
 				o.HTTPClient = &http.Client{}
-				o.StartedAt = started
+				// run prepares the on-disk test home before this callback.
+				// Only the simulated hook work belongs to this budget.
+				o.StartedAt = time.Now().Add(-tc.spent)
 			})
 			if blocked(result) == tc.open {
 				t.Fatalf("blocked = %v, want %v: code=%d stdout=%q stderr=%q", blocked(result), !tc.open, result.code, result.stdout, result.stderr)
@@ -433,5 +434,78 @@ func TestStandaloneManagedOpenCodeExplicitAllowOnlyOnAnOutage(t *testing.T) {
 			t.Fatalf("%s: explicit allow = %v, blocked = %v, want allowed %v: code=%d stdout=%q stderr=%q",
 				tc.name, explicit, blocked(result), tc.allowed, result.code, result.stdout, result.stderr)
 		}
+	}
+}
+
+// r104 W4b2 review P1: a standalone managed hook the gateway answered 429 (a
+// rate limit or a full gateway) is not in an outage, so the administrator's
+// open does not let the call through when no verdict follows: not when the
+// resends do not fit the answer budget, not when a resend gets no answer (the
+// answer deadline or the watchdog ends it), and not when a resend meets a
+// dropped connection or a stopped service. A per-user hook in fail mode open
+// keeps its open result.
+func TestStandaloneManagedRateLimitBlocksUnderOpen(t *testing.T) {
+	shortAnswerBudget(t, 1500*time.Millisecond)
+	busy := func() (*http.Response, error) {
+		header := make(http.Header)
+		header.Set("Retry-After", "1")
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Header: header,
+			Body: io.NopCloser(strings.NewReader(`{"error":"rate_limited","reason":"enterprise_managed_rate_limited"}`))}, nil
+	}
+	busyThen := func(then func(*http.Request) (*http.Response, error)) func() *stubRT {
+		return func() *stubRT {
+			return &stubRT{onRequest: func(s *stubRT, r *http.Request) (*http.Response, error) {
+				if s.requests == 1 {
+					return busy()
+				}
+				return then(r)
+			}}
+		}
+	}
+	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+	cases := []struct {
+		name string
+		rt   func() *stubRT
+	}{
+		{"429 until the answer budget ends", busyThen(func(*http.Request) (*http.Response, error) { return busy() })},
+		{"429, then no answer", busyThen(func(r *http.Request) (*http.Response, error) {
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		})},
+		{"429, then a dropped connection", busyThen(func(*http.Request) (*http.Response, error) { return nil, io.EOF })},
+		{"429, then the service is not running", busyThen(func(*http.Request) (*http.Response, error) { return nil, notRunning })},
+	}
+	events := map[string]string{
+		"claudecode": "PreToolUse",
+		"codex":      "PreToolUse",
+		"copilot":    "preToolUse",
+		"devin":      "PreToolUse",
+		"hermes":     "pre_tool_call",
+		"opencode":   "tool.execute.before",
+	}
+	for connector, event := range events {
+		for _, tc := range cases {
+			t.Run(connector+" "+tc.name, func(t *testing.T) {
+				t.Parallel()
+				rt := tc.rt()
+				result := run(t, connector, rt, func(o *Options) {
+					managedCodex(o)
+					o.ExplainUnenrolledAccount = true
+					o.FailMode = "open"
+					o.Event = event
+					o.Stdin = strings.NewReader(`{"hook_event_name":"` + event + `","tool_name":"Bash","tool_input":{"command":"echo ok"},` +
+						`"tool":"bash","args":{"command":"echo ok"},"toolName":"bash","toolArgs":"{}"}`)
+				})
+				if !blocked(result) || strings.Contains(result.stderr, "fail-open") || strings.Contains(result.stdout, `"fail_open":true`) {
+					t.Fatalf("a rate-limited call under admin open was allowed: requests=%d code=%d stdout=%q stderr=%q",
+						rt.requests, result.code, result.stdout, result.stderr)
+				}
+			})
+		}
+	}
+	// A per-user hook in fail mode open keeps its open result.
+	perUser := run(t, "codex", &stubRT{onRequest: func(*stubRT, *http.Request) (*http.Response, error) { return busy() }}, nil)
+	if blocked(perUser) {
+		t.Fatalf("per-user open: a rate limit must keep the open result: code=%d stdout=%q", perUser.code, perUser.stdout)
 	}
 }

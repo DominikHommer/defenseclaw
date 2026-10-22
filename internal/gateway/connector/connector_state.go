@@ -1073,6 +1073,14 @@ func ClearHookContractLockEntryForMode(
 	if strings.TrimSpace(dataDir) == "" {
 		return nil
 	}
+	if IsRemovedConnector(connectorName) {
+		// until 1.1: a removed connector's teardown changes only its hook
+		// script and tokens (removed.go). Its lock entry and .hookcfg
+		// state stay, in every mode: the shared files hold the surviving
+		// connectors' entries too, and only their own writer may change
+		// them.
+		return nil
+	}
 	connectorName = normalizeConnectorName(connectorName)
 	path := filepath.Join(dataDir, hookContractLockFile)
 	return withFileLockMode(path, managedEnterprise, func() error {

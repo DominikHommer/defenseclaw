@@ -174,6 +174,8 @@ Delete the source file afterwards. Storing the key re-runs `ensure`, which appli
 - **Change the config:** edit it in the script and save. The next run validates and
   applies it. An invalid config fails the run with `config_invalid` and leaves the
   installed config unchanged.
+  In bundle mode (bundle trust anchors installed), a changed config is refused with
+  `bundle_required` and the installed one stays; deliver a new signed bundle instead.
 - **Upgrade:** host the new artifact, then update `DC_SOURCE_URL`, `DC_SOURCE_SHA256`
   and `DC_PRODUCT_VERSION`. Keep each host on one channel: a host installed from the
   deb or rpm refuses a payload-archive upgrade.

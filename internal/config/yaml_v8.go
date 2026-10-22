@@ -83,6 +83,9 @@ type V8YAMLError struct {
 	// FirstLine is the line of the first definition of a duplicate key, so
 	// the CLI can say "the first one is at line 3" (GAP-2188).
 	FirstLine int
+	// ConfigVersion is the integer declared by a version/profile refusal.
+	// It keeps structured diagnostics from stamping a source-9 file as v8.
+	ConfigVersion int
 }
 
 func (e *V8YAMLError) Error() string {
@@ -388,7 +391,7 @@ func (w *v8YAMLWalker) validate(node *yaml.Node, path string, depth int) error {
 	return nil
 }
 
-func validateV8YAMLVersion(source string, root *yaml.Node) error {
+func validateV8YAMLVersion(source string, root *yaml.Node) (err error) {
 	value := v8YAMLMapValue(root, "config_version")
 	if value == nil {
 		return v8Error(source, V8YAMLErrorVersionRequired, "$.config_version", root,
@@ -405,6 +408,11 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
 			"config_version must be an integer", "run `defenseclaw migrate` to create a current source")
 	}
+	defer func() {
+		if refusal, ok := err.(*V8YAMLError); ok {
+			refusal.ConfigVersion = int(version)
+		}
+	}()
 	if version >= ConfigVersionV9 && version <= MaxSupportedConfigVersion {
 		// Secure Client stays on config_version 8, with its own diagnostics.
 		if err := validateV8YAMLEnterpriseProfile(source, root); err != nil {
@@ -444,7 +452,19 @@ func validateV8YAMLEnterpriseProfile(source string, root *yaml.Node) error {
 	}
 	enterprise := v8YAMLMapValue(root, "enterprise")
 	node := v8YAMLMapValue(enterprise, "profile")
+	allowed := "standalone or secure_client"
+	if runtime.GOOS == "linux" {
+		allowed = "standalone"
+	}
+	if node != nil && (node.Kind != yaml.ScalarNode || node.ShortTag() != "!!str") {
+		return v8Error(source, V8YAMLErrorProfileInvalid, "$.enterprise.profile", node,
+			"enterprise.profile must be a string", "set it to "+allowed)
+	}
 	declared := managed.NormalizeEnterpriseProfile(yamlScalarValue(node))
+	if node != nil && declared == "" {
+		return v8Error(source, V8YAMLErrorProfileInvalid, "$.enterprise.profile", node,
+			"enterprise.profile is not a supported profile", "set it to "+allowed)
+	}
 	pinned := managed.NormalizeEnterpriseProfile(os.Getenv(managed.EnterpriseProfileEnv))
 	if _, err := managed.ResolveEnterpriseProfile(runtime.GOOS, v9DocumentDeploymentMode(root), pinned, declared); err == nil {
 		return nil
@@ -462,10 +482,6 @@ func validateV8YAMLEnterpriseProfile(source string, root *yaml.Node) error {
 	const path = "$.enterprise.profile"
 	switch {
 	case declared != "" && !known(declared):
-		allowed := "standalone or secure_client"
-		if runtime.GOOS == "linux" {
-			allowed = "standalone"
-		}
 		return v8Error(source, V8YAMLErrorProfileInvalid, path, at,
 			"enterprise.profile is not a supported profile", "set it to "+allowed)
 	case pinned != "" && !known(pinned):
@@ -479,7 +495,7 @@ func validateV8YAMLEnterpriseProfile(source string, root *yaml.Node) error {
 	default:
 		return v8Error(source, V8YAMLErrorProfileInvalid, path, at,
 			"enterprise.profile is fixed to standalone on Linux (secure_client is not available here)",
-			"set it to standalone or remove it")
+			"set it to standalone or remove it; changing the profile needs a reinstall of the deployment on a supported platform")
 	}
 }
 

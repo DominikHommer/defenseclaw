@@ -116,7 +116,11 @@ def read_config_text(path: str | os.PathLike[str]) -> str:
     with the locale encoding, as before.
     """
     with open(path, "rb") as handle:
-        data = handle.read()
+        return decode_config_bytes(handle.read())
+
+
+def decode_config_bytes(data: bytes) -> str:
+    """config.yaml bytes as text, the way :func:`read_config_text` reads them."""
     data = data.removeprefix(codecs.BOM_UTF8)
     try:
         return data.decode("utf-8")
@@ -2428,7 +2432,7 @@ class GuardrailProfileMatch:
 
 @dataclass
 class GuardrailProfileAssignment:
-    """One ordered ``guardrail.profile_assignments`` entry (first match wins).
+    """One ``guardrail.profile_assignments`` entry (the strictest match wins).
 
     Mirrors ``config.ProfileAssignment``.
     """
@@ -7722,6 +7726,10 @@ def _merge_application_protection_guardrail(raw: Any) -> PerConnectorGuardrailCo
         hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
         hook_fail_mode=str(raw.get("hook_fail_mode", "") or ""),
         block_message=str(raw.get("block_message", "") or ""),
+        # The pack the gateway loads for connectors it protects automatically
+        # (EffectiveRulePackRefForConnector); the CLI needs it to know which
+        # scopes select a custom_packs pin.
+        rule_pack=str(raw.get("rule_pack", "") or ""),
         enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),

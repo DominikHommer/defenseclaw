@@ -5183,9 +5183,9 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     ),
     "codex": (
         "~/.codex/config.toml hooks / features.hooks / hook trust state",
-        "~/.codex/config.toml otel / notify",
+        "~/.codex/config.toml otel",
         "Optional CodeGuard native skill only when explicitly installed",
-        "~/.defenseclaw/hooks/ (including owner-only scoped OTLP credential) and notify bridge files",
+        "~/.defenseclaw/hooks/ (including owner-only scoped OTLP credential)",
     ),
     "hermes": (
         (
@@ -6068,9 +6068,6 @@ def _check_guardrail_setup_connector_versions(
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
-            if (mode or "").strip().lower() == "action":
-                _downgrade_guardrail_setup_action_connector(gc, connector)
-                continue
             _restore_setup_config_snapshot(app, setup_snapshot)
             return False
     if exact_windows_opencode:
@@ -6101,34 +6098,9 @@ def _check_guardrail_setup_connector_versions(
             tuple(targets),
             _prior_snapshot=setup_snapshot,
         )
-    # Version validation can refuse a requested action mode and persist an
-    # observe fallback. Reconcile the hook-lane judge gate after every target
-    # has reached its final mode so a refused connector cannot remain judged
-    # when execute_guardrail_setup() saves the configuration below.
+    # Reconcile the judge gate only after every requested mode is admitted.
     _prune_judge_gate_to_action_scope(gc, targets)
     return True
-
-
-def _downgrade_guardrail_setup_action_connector(gc, connector: str) -> None:
-    """Persist an observe fallback when guardrail setup refuses action mode."""
-    label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
-    ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
-
-    connectors = getattr(gc, "connectors", None)
-    if connectors:
-        key = connector
-        if key not in connectors:
-            wanted = normalize_connector(connector)
-            for existing_key in connectors:
-                if normalize_connector(str(existing_key)) == wanted:
-                    key = existing_key
-                    break
-        if key not in connectors:
-            connectors[key] = PerConnectorGuardrailConfig()
-        connectors[key].mode = "observe"
-        return
-
-    gc.mode = "observe"
 
 
 def _hilt_support_note(connector: str) -> str:
@@ -7212,7 +7184,10 @@ def setup_guardrail(
         rollback_status = restore_guardrail_secret_publication()
         if not rollback_status.complete:
             raise _GuardrailSecretFailure("validation-refused-rollback-incomplete") from None
-        return
+        raise click.ClickException(
+            "guardrail setup did not pass connector preflight; prior settings were restored. "
+            "Resolve the error above, then rerun: defenseclaw setup guardrail"
+        )
     if non_interactive and judge_on_before_versions and not gc.judge.enabled and not judge_gate_was_all:
         # GAP-2175: the judge was requested, but every connector in scope is
         # in observe mode, so the gate prune turned it back off. Say so.
@@ -9851,7 +9826,6 @@ def _apply_hook_connector_setup(
     judge_hook_connectors: str | None = None,
     allow_trusted_path_prompt: bool = True,
     trusted_prompt_cache: dict[str, bool] | None = None,
-    _downgrade_refused_action: bool = False,
     _version_preflighted: bool = False,
     _protected_selection: _VerifiedSetupAgentSelections | None = None,
     _selection_transaction_snapshot: _SetupConfigSnapshot | None = None,
@@ -9926,18 +9900,7 @@ def _apply_hook_connector_setup(
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
-            # Every non-OpenCode hook contract deliberately permits observe
-            # when action admission is refused (missing, unversioned, or
-            # outside the validated range).  Reusing that decision avoids a
-            # second discovery/probe whose answer can drift within the same
-            # setup transaction.  OpenCode is the strict exception: unknown
-            # versions are refused in both modes and never reach this fallback.
-            if desired_mode == "action" and _downgrade_refused_action and connector not in {"opencode", "codex"}:
-                label = _CONNECTOR_META.get(connector, {}).get("label", connector)
-                ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
-                desired_mode = "observe"
-            else:
-                return False
+            return False
 
     cfg = app.cfg
     gc = cfg.guardrail
@@ -10384,8 +10347,6 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
             ux.echo("    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>")
         else:
             ux.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
-    if connector == "codex":
-        ux.echo("    • Notify     — agent-turn-complete events → /api/v1/codex/notify")
     if connector == "amp":
         ux.echo("    • Headless   — use `amp -x ... --plugin-ready-timeout 30` for complete lifecycle telemetry")
     click.echo()
@@ -10574,8 +10535,8 @@ def _print_observability_summary(
         click.echo("  Or keep it configured but stop enforcing it:")
         click.echo(f"    defenseclaw guardrail disable --connector {connector}")
     else:
-        click.echo("  To revert and restore direct LLM access:")
-        click.echo("    defenseclaw setup guardrail --disable")
+        click.echo("  To disable the DefenseClaw integration:")
+        click.echo("    defenseclaw guardrail disable --yes")
     click.echo()
 
 
@@ -10918,10 +10879,12 @@ def _setup_observability_alias(
         judge_hook_connectors=judge_hook_connectors,
         allow_trusted_path_prompt=interactive,
         trusted_prompt_cache=trusted_prompt_cache,
-        _downgrade_refused_action=True,
     )
     if not ok:
-        raise click.ClickException(f"failed to configure {connector} (mode={normalized_mode}) — see errors above")
+        raise click.ClickException(
+            f"failed to configure {connector} (mode={normalized_mode}); resolve the error above, then rerun: "
+            f"defenseclaw setup {connector} --yes --mode {normalized_mode}"
+        )
     normalized_mode = app.cfg.guardrail.effective_mode(connector)
 
     if interactive:
@@ -11486,14 +11449,11 @@ def _apply_setup_batch(
         if trusted_prompt_cache is not None:
             preflight_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector_name, **preflight_kwargs):
-            if (connector_mode or "").strip().lower() == "action" and connector_name not in {"opencode", "codex"}:
-                label = _CONNECTOR_META.get(connector_name, {}).get("label", connector_name)
-                ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
-                resolved_connector_modes[connector_name] = "observe"
-                continue
             _restore_setup_config_snapshot(app, setup_snapshot)
             raise click.ClickException(
-                f"connector {connector_name!r} did not pass setup preflight; prior roster was not changed"
+                f"connector {connector_name!r} did not pass setup preflight; prior roster was not changed. "
+                "Resolve the error above, then rerun: "
+                f"defenseclaw setup {connector_name} --yes --mode {connector_mode}"
             )
 
     if batch_discovery is not None and not agent_discovery._write_cache(
@@ -11580,7 +11540,6 @@ def _apply_setup_batch(
                 judge_hook_connectors=None,
                 allow_trusted_path_prompt=allow_trusted_path_prompt,
                 trusted_prompt_cache=trusted_prompt_cache,
-                _downgrade_refused_action=True,
                 _version_preflighted=True,
                 _protected_selection=protected_selection,
                 _selection_transaction_snapshot=setup_snapshot,
@@ -11860,8 +11819,8 @@ def _hook_guardrail_options(fn):
             default=None,
             help=(
                 "Per-connector hook fail mode: how the hook behaves when the "
-                "gateway answers with an error. 'open' allows + logs "
-                "(recommended); 'closed' blocks."
+                "gateway is unavailable or gives an unusable answer. "
+                "'closed' blocks (default and recommended); 'open' allows uninspected calls."
             ),
         ),
     ]
@@ -12320,6 +12279,47 @@ def _remove_connector(
     elif not yes and not click.confirm(f"Remove connector {match!r}?", default=True):
         click.echo("  Aborted; no changes made.")
         return True
+
+    if match in {"opencode", "amp"}:
+        from defenseclaw.commands.cmd_doctor import _managed_plugin_drift, managed_backup_target_after_home_move
+        from defenseclaw.connector_paths import managed_plugin_path
+
+        try:
+            # The receipt binds only the DefenseClaw plugin. The agent's own
+            # settings (Amp's settings.json and friends) are not DefenseClaw
+            # artifacts and never prove or disprove the teardown.
+            candidates = [managed_plugin_path(match)]
+            receipt = os.path.join(cfg.data_dir, "connector_backups", match, "config.json")
+            existed, body, _generation = _capture_protected_setup_file(
+                receipt, _SETUP_CONFIG_MAX_BYTES, "plugin backup", trust_windows_administrators=True,
+            )
+            if existed:
+                record = _json.loads(body)
+                if (
+                    not isinstance(record, dict) or type(record.get("version")) is not int or record["version"] != 1
+                    or record.get("connector") != match or record.get("logical_name") != "config"
+                    or type(record.get("existed")) is not bool
+                    or not isinstance(record.get("path"), str) or not os.path.isabs(record["path"])
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("post_sha256") or ""))
+                ):
+                    raise ValueError("invalid plugin backup identity")
+                # After a supported home move the receipt still names the
+                # old home; it then proves this home's copy, digest included.
+                candidates.append(managed_backup_target_after_home_move(receipt, record["path"]) or record["path"])
+            for path in set(candidates):
+                try:
+                    os.lstat(path)
+                except FileNotFoundError:
+                    continue
+                if problem := _managed_plugin_drift(cfg, path, match):
+                    raise ValueError(problem)
+        except (OSError, ValueError) as exc:
+            ux.echo(
+                f"  ✗ Cannot remove {match}: its plugin teardown is unverified ({exc}). "
+                f"Preserve your edits, then run `defenseclaw setup {match} --yes --restart` "
+                "and retry removal. No configuration was saved.", err=True,
+            )
+            return False
 
     setup_snapshot: _SetupConfigSnapshot | None = None
     runtime_rollback = _windows_runtime_rollback(restart)
@@ -17319,9 +17319,7 @@ def _interactive_logs(app: AppContext) -> bool:
         return False
 
     if not _native_windows_local_splunk():
-        ok, _reason = _preflight_docker()
-        if not ok:
-            return False
+        _require_local_splunk_docker()
 
     index = click.prompt("  Index name", default="defenseclaw_local")
     source = click.prompt("  Source", default="defenseclaw")
@@ -17419,27 +17417,8 @@ def _setup_logs(
     ):
         return False
 
-    ok, reason = (True, "") if _native_windows_local_splunk() else _preflight_docker()
-    if not ok:
-        if non_interactive:
-            # Map the pre-flight reason code to a one-line, accurate
-            # error so the operator does not have to re-read the
-            # checklist above. Historically this branch always said
-            # "Docker is required for --logs", which was misleading
-            # when the actual failure was a busy port.
-            detail = {
-                "docker_not_installed": "Docker is not installed",
-                "docker_daemon_not_running": "Docker daemon is not running",
-            }.get(reason)
-            if detail is None and reason.startswith("port_") and reason.endswith("_in_use"):
-                # reason looks like "port_8000_in_use"
-                port = reason.split("_", 2)[1]
-                detail = f"port {port} is already in use — free it (or stop the existing Splunk instance) and re-run"
-            if detail is None:
-                detail = "pre-flight checks failed (see messages above)"
-            click.echo(f"  error: {detail}", err=True)
-            raise SystemExit(1)
-        return False
+    if not _native_windows_local_splunk():
+        _require_local_splunk_docker()
 
     if s3_export and not (s3_bucket or os.environ.get("S3_BUCKET")):
         click.echo("  error: --s3-bucket is required with --s3-export (or set S3_BUCKET)", err=True)
@@ -18374,6 +18353,23 @@ def _preflight_docker() -> tuple[bool, str]:
         click.echo(f"    Port {port} ({label})... available")
 
     return True, ""
+
+
+def _require_local_splunk_docker() -> None:
+    """Refuse setup on a failed prerequisite in both CLI and wizard flows."""
+    ok, reason = _preflight_docker()
+    if ok:
+        return
+    detail = {
+        "docker_not_installed": "Docker is not installed",
+        "docker_daemon_not_running": "Docker daemon is not running",
+    }.get(reason)
+    if detail is None and reason.startswith("port_") and reason.endswith("_in_use"):
+        port = reason.split("_", 2)[1]
+        detail = f"port {port} is already in use — free it (or stop the existing Splunk instance) and re-run"
+    if detail is None:
+        detail = "pre-flight checks failed (see messages above)"
+    raise click.ClickException(f"Local Splunk preflight failed: {detail}")
 
 
 def _port_in_use(port: int) -> bool:

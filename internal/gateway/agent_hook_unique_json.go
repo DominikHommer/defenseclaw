@@ -15,9 +15,11 @@ import (
 )
 
 // hookToolCallJSONUnambiguous checks the raw hook body before a map decoder
-// selects one value of a duplicate key. JSON-string arguments are checked
-// too: Copilot accepts an object encoded in toolArgs as a string. Malformed
-// or over-deep input cannot prove an unambiguous tool call.
+// selects one value of a duplicate key: every object of the body, and of a
+// Copilot toolArgs string that holds a JSON object or array (the Copilot
+// projection reads such a string as the arguments), has unique keys, and
+// the body is one JSON value. Malformed input, trailing data or a value
+// nested deeper than the gateway's decoder reads cannot prove one tool call.
 func hookToolCallJSONUnambiguous(connector string, body []byte) bool {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
@@ -28,8 +30,10 @@ func hookToolCallJSONUnambiguous(connector string, body []byte) bool {
 	return err == io.EOF
 }
 
-const hookMaxJSONDepth = 32
-const hookMaxJSONMembers = 4096
+// hookMaxJSONDepth is encoding/json's own nesting limit, so no body the
+// gateway decoded is refused for its depth alone. The body size bounds the
+// work (apiRequestBodyMaxBytes).
+const hookMaxJSONDepth = 10000
 
 func hookUniqueJSONValue(decoder *json.Decoder, depth int, parentKey string, copilot bool) bool {
 	token, err := decoder.Token()
@@ -69,7 +73,7 @@ func hookUniqueJSONValue(decoder *json.Decoder, depth int, parentKey string, cop
 				return false
 			}
 			key, ok := keyToken.(string)
-			if !ok || len(seen) >= hookMaxJSONMembers {
+			if !ok {
 				return false
 			}
 			if _, duplicate := seen[key]; duplicate {
@@ -102,9 +106,6 @@ func hookUniqueJSONValue(decoder *json.Decoder, depth int, parentKey string, cop
 // never a read-only tool by default.
 func copilotWriteCallUnproven(name string, args json.RawMessage, cwd, home string) bool {
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return true
-	}
 	if copilotWriteAlias(name) && !copilotKnownWriteSpelling(name) {
 		return true
 	}
@@ -117,24 +118,19 @@ func copilotWriteCallUnproven(name string, args json.RawMessage, cwd, home strin
 		return !known || len(targets) == 0
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
+	// Copilot CLI includes a display-only description on edit and a file
+	// mode on create. The gateway judges the call without them
+	// (agentHookTrustedActionArgs), so that is the call proven here; any
+	// other extra field stays unproven.
+	if clean, ok := copilotargs.WriteArgsWithoutMetadata(tool, args); ok {
+		input.Args = clean
+	}
 	facts := actionfacts.Analyze(input)
 	if reduced, _, ok := actionfacts.OverLimitWriteTargetReduction(input, facts); ok {
 		facts = reduced
 	}
 	if !facts.Authoritative() {
-		// Copilot CLI includes display-only description on edit and a file
-		// mode on create. Neither can name a second target. Drop only these
-		// established metadata fields and require the reviewed schema to
-		// become complete; any other extra field stays unproven.
-		clean, ok := copilotWriteArgsWithoutMetadata(tool, args)
-		if !ok {
-			return true
-		}
-		input.Args = clean
-		facts = actionfacts.Analyze(input)
-		if !facts.Authoritative() {
-			return true
-		}
+		return true
 	}
 	for _, target := range facts.Paths {
 		switch target.Access {
@@ -143,38 +139,6 @@ func copilotWriteCallUnproven(name string, args json.RawMessage, cwd, home strin
 		}
 	}
 	return true
-}
-
-func copilotWriteArgsWithoutMetadata(tool string, args json.RawMessage) (json.RawMessage, bool) {
-	var metadata, reviewed map[string]bool
-	switch tool {
-	case "edit":
-		metadata = map[string]bool{"description": true}
-		reviewed = map[string]bool{"path": true, "old_str": true, "new_str": true}
-	case "create":
-		metadata = map[string]bool{"mode": true}
-		reviewed = map[string]bool{"path": true, "file_text": true}
-	default:
-		return nil, false
-	}
-	var object map[string]json.RawMessage
-	if json.Unmarshal(args, &object) != nil || len(object) == 0 {
-		return nil, false
-	}
-	removed := false
-	for key := range object {
-		if metadata[key] {
-			delete(object, key)
-			removed = true
-		} else if !reviewed[key] {
-			return nil, false
-		}
-	}
-	if !removed {
-		return nil, false
-	}
-	clean, err := json.Marshal(object)
-	return clean, err == nil
 }
 
 func copilotKnownWriteSpelling(name string) bool {

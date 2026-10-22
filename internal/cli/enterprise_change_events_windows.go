@@ -29,9 +29,10 @@ import (
 // windowsChangeSpool is the change spool <ConfigDir>\bundles\change-events
 // of layout (the layout the command changes) with the bundle version
 // descriptors: SYSTEM and Administrators full control, the gateway service
-// read, no standard user. Its lock and reservations live in the
-// Administrators-only lifecycle directory. An event the gateway marked
-// reported under <DataDir> may be removed. A test replaces it.
+// read, no standard user; its reservations (reserved\) have the same
+// access. Its lock lives in the Administrators-only lifecycle directory.
+// An event the gateway marked reported under <DataDir> may be removed. A
+// test replaces it.
 var windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
 	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)
 	if err != nil {

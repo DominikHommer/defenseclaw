@@ -40,7 +40,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 
 <HookEventsList connector="antigravity" />
 
-- In action mode `PreToolUse` can deny a tool call or ask you first, using Antigravity's own `decision` field.
+- In action mode `PreToolUse` can deny a tool call or ask you first, using Antigravity's own `decision` field. The ask always prompts, even when you chose "Always Allow" before.
 - `PreInvocation` and `PostInvocation` can only add context. `PostToolUse` only observes. `Stop` is always allowed.
 - Observe mode never blocks.
 
@@ -64,11 +64,15 @@ Setup backs up `hooks.json` and keeps unrelated hooks. It writes only the global
 
 ## Turn it off
 
+For a per-user, single-connector install:
+
 ```bash
-defenseclaw guardrail disable --connector antigravity --yes
+defenseclaw guardrail disable --yes
 ```
 
-This keeps Antigravity's settings. Turn it back on with `defenseclaw guardrail enable --connector antigravity`. To remove the connector, run `defenseclaw setup remove antigravity --yes` (add `--force` if it is the last one).
+This keeps Antigravity's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove antigravity --yes` (add `--force` if it is the last one).
+
+On a multi-connector install, add `--connector antigravity` to `guardrail disable` and `guardrail enable` to change only this agent.
 
 ## Details
 

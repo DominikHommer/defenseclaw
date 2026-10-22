@@ -1060,6 +1060,10 @@ def test_status_names_a_connector_whose_setup_failed_at_gateway_start():
     # GAP-1937: the Agents count matches `defenseclaw-gateway status`.
     agents_row = next(line for line in out.splitlines() if "Agents" in line)
     assert "1 active, 1 not running" in agents_row
+    roster = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+    assert roster["hermes"]["state"] == "not running"
+    assert "not enforced" in roster["hermes"]["runtime_detail"]
+    assert roster["codex"]["state"] == "running"
 
 
 def test_status_keeps_live_claude_code_health_without_claude_on_path(monkeypatch):

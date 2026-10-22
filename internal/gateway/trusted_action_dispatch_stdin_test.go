@@ -188,6 +188,14 @@ func TestLiteralStdinUnreadNeedsAFileThatIsNotStdin(t *testing.T) {
 		{"grep --file=alias notes.txt", seen, false},
 		{"grep acme notes.txt alias", seen, false},
 		{"grep acme notes.txt -e x", seen, false},
+		// A trailing option: GNU grep reads it as an option, a
+		// non-permuting getopt (POSIXLY_CORRECT, BSD cat) as a file named
+		// "-n". Both readings must prove the heredoc unread; a "-n" that
+		// does not exist yet may still become a link to stdin, as
+		// missing.txt may.
+		{"grep -e - /dev/null -n", seen, false},
+		{"grep -e - notes.txt -n", seen, false},
+		{"cat notes.txt -n", seen, false},
 		// Without a view of the command's filesystem, or its directory,
 		// only the null device is known.
 		{"cat notes.txt", literalStdinFiles{cwd: dir}, false},
@@ -199,6 +207,21 @@ func TestLiteralStdinUnreadNeedsAFileThatIsNotStdin(t *testing.T) {
 		command := actionfacts.CommandFact{Program: argv[0], Argv: argv, ArgvComplete: true}
 		if got := literalStdinUnread(command, tc.files); got != tc.unread {
 			t.Errorf("literalStdinUnread(%q, %+v) = %t, want %t", tc.command, tc.files, got, tc.unread)
+		}
+	}
+	// With a regular file named "-n", both readings of the trailing word
+	// name a file that is not stdin.
+	dashed := literalStdinFiles{cwd: t.TempDir(), inspect: true}
+	for _, name := range []string{"notes.txt", "-n"} {
+		if err := os.WriteFile(filepath.Join(dashed.cwd, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, line := range []string{"grep -e - /dev/null -n", "grep -e - notes.txt -n", "cat notes.txt -n"} {
+		argv := strings.Fields(line)
+		command := actionfacts.CommandFact{Program: argv[0], Argv: argv, ArgvComplete: true}
+		if !literalStdinUnread(command, dashed) {
+			t.Errorf("literalStdinUnread(%q) beside a regular file -n = false, want true", line)
 		}
 	}
 }

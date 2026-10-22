@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -139,6 +140,29 @@ func TestDriverInterruptedIdenticalConfigKeepsConfirmedBundle(t *testing.T) {
 	state, err = d.Store.LoadState()
 	if err != nil || state.Current == nil || state.Current.BundleID != retry.Receipt.BundleID || state.Floor != retry.Receipt.Version {
 		t.Fatalf("proven retry was not confirmed: %+v, %v", state, err)
+	}
+}
+
+func TestDriverStageDiskFullKeepsAClassifiedReceipt(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	d.Store.EnsureStageDirectory = func(_, path string) error {
+		return &os.PathError{Op: "mkdir", Path: path, Err: syscall.ENOSPC}
+	}
+	p, err := d.Prepare(t.Context(), f.bundle, nil)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.Code("disk_full") || p == nil || p.Receipt == nil {
+		t.Fatalf("stage error = %+v, %v; want disk_full receipt", p, err)
+	}
+	receipts, err := d.Store.Receipts()
+	if err != nil || len(receipts) != 1 || receipts[0].State != enterprisebundle.StateFailed ||
+		receipts[0].ErrorCode != enterprisebundle.Code("disk_full") {
+		t.Fatalf("persisted receipts = %+v, %v; want failed disk_full", receipts, err)
+	}
+	if runtime.GOOS == "windows" {
+		// Native Windows writes report ERROR_DISK_FULL (112), not ENOSPC.
+		if got := enterprisebundle.CodeOf(enterprisebundle.StageError(syscall.Errno(112))); got != enterprisebundle.Code("disk_full") {
+			t.Fatalf("Windows disk-full code = %s", got)
+		}
 	}
 }
 

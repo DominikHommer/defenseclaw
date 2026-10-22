@@ -24,6 +24,13 @@ func TestParseV8YAMLRefusesABadProfileAtTheProfile(t *testing.T) {
 		name, pin, profile, want string
 	}{
 		{"unknown name", "", "w0-invalid-profile", "is not a supported profile"},
+		{"empty string", "", `""`, "is not a supported profile"},
+		{"whitespace string", "", `"  "`, "is not a supported profile"},
+		{"list", "", "[standalone]", "must be a string"},
+		{"mapping", "", "{name: standalone}", "must be a string"},
+		{"integer", "", "123", "must be a string"},
+		{"boolean", "", "true", "must be a string"},
+		{"null", "", "null", "must be a string"},
 		{"unknown name with pin", managed.ProfileStandalone, "nope", "is not a supported profile"},
 		{"other than the pin", managed.ProfileStandalone, managed.ProfileSecureClient, "fixed to standalone on this host"},
 	} {
@@ -49,6 +56,9 @@ func TestParseV8YAMLRefusesABadProfileAtTheProfile(t *testing.T) {
 		var yamlErr *V8YAMLError
 		if !errors.As(err, &yamlErr) || yamlErr.Code != V8YAMLErrorProfileInvalid || !strings.Contains(yamlErr.Summary, "fixed to standalone on Linux") {
 			t.Fatalf("ParseV8YAML = %v", err)
+		}
+		if !strings.Contains(yamlErr.Action, "changing the profile needs a reinstall of the deployment") {
+			t.Fatalf("profile refusal omits the deployment recovery: %v", err)
 		}
 	})
 	t.Run("matching pin", func(t *testing.T) {

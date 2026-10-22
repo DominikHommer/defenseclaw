@@ -906,15 +906,22 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector %s teardown: %w", name, err)
 	}
 
+	// until 1.1: a removed connector's teardown changes only its hook script
+	// and tokens; the rest is listed with the steps to remove it by hand.
+	leftovers, removed := connector.RemovedConnectorLeftovers(name, opts)
 	if connectorFlagJSON {
 		payload := map[string]any{
 			"connector": name,
 			"action":    "teardown",
 			"ok":        true,
 		}
+		if removed {
+			payload["leftovers"] = append([]connector.RemovedLeftover{}, leftovers...)
+		}
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s teardown complete\n", Style(glyph("✓", "OK"), "fg=green", "bold"), name)
+	fmt.Fprint(cmd.OutOrStdout(), connector.FormatRemovedLeftovers(name, leftovers))
 	return nil
 }
 

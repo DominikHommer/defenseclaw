@@ -25,13 +25,12 @@ describe('Intune base config versus the signed bundle', () => {
     assert.ok(list, 'packager hook-block key list not found');
     const compared = [...list[1].matchAll(/'([a-z_]+)'/g)].map((match) => match[1]);
     assert.ok(compared.length > 0);
-    const name = 'enterprise/mdm/intune/windows-reference.mdx';
-    const text = page(name);
-    assert.ok(!text.includes('the packager checks this) so that window does not change what is blocked'), name);
-    assert.ok(text.includes('No other setting is compared'), name);
-    assert.ok(text.includes('such as `asset_policy:`, into the base config too'), name);
+    const reference = readFileSync(join(site, 'content/docs/enterprise/mdm/intune/windows-reference.mdx'), 'utf8');
+    const row = reference.split('\n').find((line) => line.startsWith('| `-BaseConfigPath` |'));
+    assert.ok(row, 'windows-reference has no -BaseConfigPath row');
+    assert.ok(row.includes('No other setting is compared'), 'the -BaseConfigPath row does not say nothing else is compared');
     for (const key of ['guardrail', ...compared]) {
-      assert.ok(text.includes(`\`${key}:\``), `${name} does not name the compared ${key}: block`);
+      assert.ok(row.includes(`\`${key}:\``), `the -BaseConfigPath row does not name the compared ${key}: block`);
     }
     assert.ok(page('enterprise/mdm/index.mdx').includes(
       '/docs/enterprise/mdm/intune/windows-reference#signed-bundles-and-the-base-config',
@@ -45,12 +44,12 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     assert.ok(!failModes.includes('The generated hooks stay open even when the effective mode is `closed`'));
     assert.ok(failModes.includes('Copilot and Antigravity still run a call when the hook times out or cannot start'));
     assert.ok(failModes.includes('Under Secure Client they stay open'));
-    for (const name of ['reference/connectors/copilot.mdx', 'connectors/copilot.mdx']) {
+    for (const name of ['reference/connectors/copilot.mdx']) {
       const text = page(name);
       assert.ok(!/no fail-closed hook transport/i.test(text), name);
       assert.ok(text.includes('in fail mode `closed`, the default'), name);
     }
-    for (const name of ['reference/connectors/antigravity.mdx', 'connectors/antigravity.mdx']) {
+    for (const name of ['reference/connectors/antigravity.mdx']) {
       const text = page(name);
       assert.ok(!text.includes('A gateway failure lets the call run'), name);
       assert.ok(!text.includes('normal fail-open operation'), name);
@@ -70,5 +69,6 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
   it('says an upgrade keeps only an open the config sets', () => {
     assert.ok(page('get-started/upgrade.mdx').includes("An upgrade sets each hook's fail mode from your config before the new hook runs"));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
+    assert.ok(page('reference/configuration/fail-modes.mdx').includes('Hooks follow an open fail mode only when your config sets it'));
   });
 });

@@ -1333,6 +1333,7 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		result.AddError(code, message)
 	}
+	addWindowsEnterpriseSelfUninstallCleanup(result, report)
 	if !report.OK && len(result.Errors) == 0 {
 		code := "not_ready"
 		if !report.Installed {
@@ -1385,7 +1386,6 @@ func applyWindowsEnterpriseInstallerReport(
 		addWindowsEnterpriseUserStateWarning(result, report)
 	}
 	addWindowsEnterpriseMachineStateWarning(result, report)
-	addWindowsEnterpriseSelfUninstallCleanup(result, report)
 	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
 	// Only when nothing above explains it. A completed uninstall leaves
 	// nothing to secure; only a deployment that is still installed (or a
@@ -1393,6 +1393,45 @@ func applyWindowsEnterpriseInstallerReport(
 	// complete.
 	if report.Installed || report.TransactionPending {
 		addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
+	}
+}
+
+// windowsEnterpriseSelfUninstallStrandedMessage is the uninstall_in_use error
+// of a self-uninstall whose installer report says InstallRoot is still there
+// but carries no error of its own.
+const windowsEnterpriseSelfUninstallStrandedMessage = "a program still holds a file in the DefenseClaw install folder, so the uninstall " +
+	"could not remove it. DefenseClaw is already uninstalled (its services and hooks are removed); a cleanup that starts when this " +
+	"command exits removes the folder and finishes the uninstall cleanup once that program closes the file. Close the program, then " +
+	"run the uninstall again to confirm that it finished"
+
+// addWindowsEnterpriseSelfUninstallCleanup carries a self-uninstall's pending
+// cleanup into the result. While InstallRoot is still there (a program held a
+// file in it past the rename retry) the uninstall is not finished and nothing
+// this process can wait for confirms that the finalizer finishes it, so the
+// run fails with the retryable uninstall_in_use, whatever ok the installer
+// reported: an ok result let an exit-code-driven manager stop retrying with
+// InstallRoot and the purge left behind (W2B-G-win review, loop round 2). A
+// self-uninstall that retired InstallRoot only waits for this process to exit
+// before the retired copy goes, which a warning says.
+func addWindowsEnterpriseSelfUninstallCleanup(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if report == nil {
+		return
+	}
+	stranded := strings.TrimSpace(report.InstallRootRetirementDeferred) != "" ||
+		(report.CanonicalInstallRootAbsent != nil && !*report.CanonicalInstallRootAbsent)
+	if stranded {
+		if !windowsEnterpriseResultHasError(result, "uninstall_in_use") {
+			message := windowsEnterpriseSelfUninstallStrandedMessage
+			if deferred := strings.TrimSpace(report.InstallRootRetirementDeferred); deferred != "" {
+				message += " (" + windowsEnterpriseBoundedDiagnostic(deferred) + ")"
+			}
+			result.AddError("uninstall_in_use", message)
+		}
+		return
+	}
+	if report.OK && report.SelfUninstallCleanupPending && strings.TrimSpace(report.RetiredInstallRoot) != "" {
+		result.AddWarning("self_uninstall_cleanup_pending", "the retired install folder "+
+			strings.TrimSpace(report.RetiredInstallRoot)+" is removed by a cleanup that runs once this command exits")
 	}
 }
 
@@ -1466,38 +1505,6 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 	}
 	if len(remaining) > 0 {
 		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(len(remaining), windowsEnterpriseBoundedLabels(remaining)))
-	}
-}
-
-// addWindowsEnterpriseSelfUninstallCleanup keeps what a self-uninstall left
-// to its finalizer in the result: a retirement deferred to a program that
-// holds InstallRoot is a warning naming it, and a success that reports the
-// canonical InstallRoot still in place with nothing deferred is an error.
-// A plain self-uninstall says that the retired folder goes when the CLI
-// exits.
-func addWindowsEnterpriseSelfUninstallCleanup(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
-	installRoot := strings.TrimSpace(report.InstallRoot)
-	if installRoot == "" {
-		installRoot = "the install folder"
-	}
-	if deferred := strings.TrimSpace(report.InstallRootRetirementDeferred); deferred != "" {
-		result.AddWarning("uninstall_cleanup_pending", windowsEnterpriseBoundedDiagnostic(deferred)+
-			". The uninstall is committed; if "+installRoot+" is still there after that program exits, run the uninstall again to finish")
-		return
-	}
-	if report.CanonicalInstallRootAbsent != nil && !*report.CanonicalInstallRootAbsent {
-		if report.OK {
-			result.AddError("install_root_remaining", "the uninstall finished, but "+installRoot+
-				" is still there and no cleanup is pending for it; run the uninstall again")
-		}
-		return
-	}
-	if report.SelfUninstallCleanupPending {
-		retired := strings.TrimSpace(report.RetiredInstallRoot)
-		if retired == "" {
-			retired = "the renamed install folder"
-		}
-		result.Changes = append(result.Changes, "the installed CLI's own files ("+retired+") are removed once this command exits")
 	}
 }
 

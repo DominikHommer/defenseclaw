@@ -1030,6 +1030,19 @@ func (m *ConfigManager) noteAppliedGeneration(raw []byte) {
 	}
 }
 
+// savedWriteNotApplied reports whether raw holds a saved write the gateway
+// has not applied: bytes other than the applied ones, or a recorded
+// generation newer than the applied one. Without applied bytes only a newer
+// generation counts, so unchanged bytes never repeat the last writer's
+// config.change.applied. Callers hold mu.
+func (m *ConfigManager) savedWriteNotApplied(raw []byte) bool {
+	if m.appliedRaw != nil && !bytes.Equal(m.appliedRaw, raw) {
+		return true
+	}
+	generation, ok := appliedGenerationOf(m.path, raw)
+	return ok && m.appliedGenerationKnown && generation > m.appliedGeneration
+}
+
 // pendingBundleGeneration is true only for a new lifecycle-recorded bundle
 // whose generation has not passed through the config manager's apply path.
 func (m *ConfigManager) pendingBundleGeneration(raw []byte) bool {
@@ -1278,6 +1291,16 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		exportCandidateKey()
 		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
+		// Saved intent can change without changing the running settings:
+		// holding a listener until restart, cancelling that pending change,
+		// or removing an explicit default. Attribute each saved write before
+		// advancing the source/generation watermark.
+		if m.logger != nil && !next.SecureClientIntegration() && m.savedWriteNotApplied(source.raw) {
+			if activity, _, recorded := configChangeActivity(m.path, m.appliedRaw, source.raw,
+				pendingRestart, pendingRestart, m.appliedGeneration, m.appliedGenerationKnown); recorded {
+				_ = m.logger.LogActivity(activity)
+			}
+		}
 		// A bundle can advance its persistent generation while keeping
 		// config.yaml identical. An asset reload must still be able to
 		// attribute the later policy swap to that bundle.
@@ -1330,6 +1353,12 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		clearGenerationBuildError()
 		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
+		// The startup reconcile of the boot bytes applies nothing new: they
+		// become the applied bytes, so a later event for the same bytes
+		// does not attribute their writer again.
+		if m.appliedRaw == nil && m.startupKnown && sha256.Sum256(source.raw) == m.startupSource {
+			m.appliedRaw = source.raw
+		}
 		version.SetContentHash(source.raw)
 		if m.health != nil {
 			state, msg := StateRunning, ""
@@ -1456,11 +1485,22 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 			// Client reads .env only at start (issue #1092).
 			config.LoadDotEnv(filepath.Join(defaultDataDir, ".env"))
 		}
-		compiled, compileErr := config.ParseCompileObservabilityV8(
-			m.path,
-			before.raw,
-			config.ObservabilityV8CompileOptions{DefaultDataDir: defaultDataDir},
-		)
+		compileRaw := before.raw
+		var compileErr error
+		if !secureClient && config.NeedsMigrationV9(compileRaw) {
+			// The runtime loader migrates v8 read-only as well. Validate the
+			// same candidate here, rather than rejecting its legacy keys before
+			// that loader can run. Do not export candidate secrets before apply.
+			compileRaw, _, compileErr = config.MigrateV8InMemoryCandidate(m.path, compileRaw, guardrail.RulePackDigest)
+			if compileErr != nil {
+				compileErr = config.InMemoryMigrationError(m.path, compileErr)
+			}
+		}
+		var compiled *config.ObservabilityV8CompiledConfig
+		if compileErr == nil {
+			compiled, compileErr = config.ParseCompileObservabilityV8(m.path, compileRaw,
+				config.ObservabilityV8CompileOptions{DefaultDataDir: defaultDataDir})
+		}
 		var next *config.Config
 		var loadErr error
 		if compileErr == nil {

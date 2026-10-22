@@ -135,6 +135,8 @@ The managed config is administrator-owned. For what it contains, see
 | macOS | `/opt/cisco/defenseclaw/etc/config.yaml` | The `com.cisco.defenseclaw.apply` daemon runs `ensure --reason path` when the file changes, or when an entry directly inside `etc/secrets` or `etc/policies` is added, removed or replaced, at most once every 30 seconds |
 | Windows | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` | The lifecycle does not watch it. Run Setup `/ensure` again with the new file |
 
+**Bundle mode.** On a device whose MDM installed bundle trust anchors, the config comes only from signed bundles. `ensure --config`, Setup `CONFIG=` or a wrapper run with a config that is not the current bundle's is refused with `bundle_required`, and on Linux and macOS an edit of the installed file is reverted to the bundle's config. Deliver a new bundle instead. The rest of this section is for devices without bundle trust anchors.
+
 A change is applied by the apply trigger on Linux and macOS. While it runs, `status` and `verify` report `lifecycle_busy` and exit `75`; that is not a failure, so run them again. A hand edit of the config as root is applied, not reported as drift. Details: [Lifecycle detail](/docs/enterprise/operate/reference#applying-a-config-change).
 
 On Linux and macOS you can also hand the new file to `ensure`. It validates the file,
@@ -228,7 +230,7 @@ managed gateway through the service manager instead.
 | macOS | `sudo launchctl kickstart -k system/com.cisco.defenseclaw.gateway` | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --json` |
 | Windows | Run the installed release's Setup with `/repair JSON=1` | The same |
 
-A managed hook that meets a restarting gateway retries for about 3 seconds, so a quick restart is not visible to the agent; a longer one blocks each call, and a hook never allows a call because the gateway was restarting. Tool-call hooks wait at most about 3.5 seconds for the gateway, then block with `enterprise_managed_gateway_no_answer`. `ensure` applies most config changes in the running gateway without a restart; a change to a process-level key (`gateway.*`, `enterprise.network`, the other `enterprise` keys) restarts it and takes two to six minutes. The rules are in [Lifecycle detail](/docs/enterprise/operate/reference#gateway-restarts-and-hook-timing).
+A managed hook that meets a restarting gateway retries for about 3 seconds, so a quick restart is not visible to the agent. With the default closed fail mode, a longer restart blocks each call. Tool-call hooks wait at most about 3.5 seconds for the gateway, then block with `enterprise_managed_gateway_no_answer`. The administrator's `hook_fail_mode: open` allows only classified gateway outages (service stopped, restarting or no answer in time); integrity, peer-verification, credential and rate-limit refusals still block. Connectors whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`, the default) block outages too. `DEFENSECLAW_STRICT_AVAILABILITY=1` closes outages too. `ensure` applies most config changes in the running gateway without a restart; a change to a process-level key (`gateway.*`, `enterprise.network`, the other `enterprise` keys) restarts it and takes two to six minutes. The rules are in [Lifecycle detail](/docs/enterprise/operate/reference#gateway-restarts-and-hook-timing).
 
 ## Uninstall
 

@@ -32,6 +32,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import click
 
@@ -1019,7 +1020,9 @@ def _print_skill_info_card(
         style = _POLICY_VERDICT_STYLES.get(verdict, "white")
         click.echo()
         click.echo(f"{ux.bold('Policy:')}      {ux._style(verdict, fg=style, bold=True)}")
-        if info_map.get("reason") and verdict in ("blocked", "rejected", "quarantined", "disabled"):
+        if info_map.get("reason") and verdict in (
+            "blocked", "rejected", "quarantined", "quarantine failed", "disabled",
+        ):
             click.echo(f"  {ux.bold('Reason:')} {info_map['reason']}")
         note = _skill_policy_note(
             info_map.get("name", skill_name), verdict, held=held,
@@ -1542,6 +1545,8 @@ def _skill_list_json_items(
             ae = actions_map[name]
             if not ae.actions.is_empty():
                 item["actions"] = ae.actions.to_dict()
+            if ae.reason:
+                item["reason"] = ae.reason
         if global_decisions and name in global_decisions:
             # A global (unscoped) block, e.g. from the watcher: a --connector
             # unblock cannot clear it, so the TUI runs the bare unblock for
@@ -1652,6 +1657,11 @@ def _print_skill_list_table(
         )
 
     console.print(table)
+    for skill in skills:
+        name = skill.get("name", "")
+        entry = actions_map.get(name)
+        if entry is not None and str(entry.reason or "").startswith("quarantine failed: "):
+            click.echo(f"  {name}: {entry.reason}")
     if removed_count:
         console.print(
             f"[dim]{removed_count} removed skill(s) are no longer on disk; they are listed "
@@ -1881,7 +1891,7 @@ def scan(
       defenseclaw skill scan
       defenseclaw skill scan ./my-skill
       defenseclaw skill scan https://example.com/skills/my-skill.tar.gz
-      defenseclaw skill scan clawhub://my-skill@1.2.3
+      defenseclaw skill scan clawhub://my-skill
     """
     if action and remote:
         click.echo(
@@ -3431,7 +3441,7 @@ def _scan_from_url(app: AppContext, url: str, as_json: bool) -> None:
     """Fetch a skill and scan locally, then clean up.
 
     Supports two schemes:
-      clawhub://name[@version]  — uses `npx clawhub install` into a temp dir
+      clawhub://name            — scans the latest openclaw npm package
       https://...               — downloads a .tar.gz or .zip archive
     """
     if url.startswith("clawhub://"):
@@ -3455,9 +3465,16 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
         http_get,
     )
 
-    name, _version = _parse_clawhub_uri(uri)
+    name, version = _parse_clawhub_uri(uri)
     if not name:
         click.echo(f"error: invalid clawhub URI: {uri}", err=True)
+        raise SystemExit(1)
+    if version is not None:
+        click.echo(
+            "error: clawhub skill scan cannot select a version; scan a reviewed "
+            "copy with --path or use an https:// archive from the intended source",
+            err=True,
+        )
         raise SystemExit(1)
 
     if not as_json:
@@ -3470,13 +3487,28 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
             accept="application/json",
             timeout=30,
         ))
-        tarball_url = meta.get("dist", {}).get("tarball")
+        dist = meta.get("dist") if isinstance(meta, dict) else None
+        tarball_url = dist.get("tarball") if isinstance(dist, dict) else None
     except (IngestError, json.JSONDecodeError) as exc:
         click.echo(f"error: npm registry lookup failed: {exc}", err=True)
         raise SystemExit(1)
 
     if not tarball_url:
         click.echo("error: could not resolve openclaw tarball URL from npm", err=True)
+        raise SystemExit(1)
+    if not isinstance(tarball_url, str):
+        click.echo("error: npm registry returned an invalid openclaw tarball URL", err=True)
+        raise SystemExit(1)
+    source = urlsplit(tarball_url)
+    if (
+        source.scheme != "https"
+        or source.netloc != "registry.npmjs.org"
+        or not source.path.startswith("/openclaw/-/openclaw-")
+        or not source.path.endswith(".tgz")
+        or source.query
+        or source.fragment
+    ):
+        click.echo("error: npm registry returned an untrusted openclaw tarball URL", err=True)
         raise SystemExit(1)
 
     if not as_json:
@@ -3708,6 +3740,10 @@ def _parse_clawhub_uri(uri: str) -> tuple[str, str | None]:
 MAX_SKILL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024  # 512 MiB
 MAX_SKILL_MEMBER_COUNT = 10_000
 MAX_SKILL_PER_FILE_BYTES = 64 * 1024 * 1024  # 64 MiB
+# The npm package carries many other skills. Bound inspection of its whole
+# tar stream while keeping the usual extraction limits for the selected one.
+MAX_CLAWHUB_INSPECTED_MEMBERS = 50_000
+MAX_CLAWHUB_INSPECTED_BYTES = 4 * 1024 * 1024 * 1024
 
 
 class _SkillExtractTooLargeError(Exception):
@@ -3843,26 +3879,27 @@ def _safe_tar_extract(
 
     Each member name is validated after stripping *strip* leading path
     components to prevent path traversal (``..`` segments, absolute paths,
-    or symlinks escaping *dest_dir*). ("Untrusted skill archives can decompress without an output cap"):
-    enforces the same global member-count, per-file, and total-bytes
-    caps that the HTTP scan path applies via
-    :func:`_safe_tar_extractall_capped`.
+    or symlinks escaping *dest_dir*). The whole archive is read as a bounded
+    stream; only members under *prefix* count toward the extraction limits.
     """
     import tarfile
 
     real_dest = os.path.realpath(dest_dir)
-    with tarfile.open(archive_path, "r:gz") as tf:
-        members = tf.getmembers()
-        if len(members) > MAX_SKILL_MEMBER_COUNT:
-            raise _SkillExtractTooLargeError(
-                f"tar archive lists {len(members)} members "
-                f"(> {MAX_SKILL_MEMBER_COUNT})"
-            )
+    with tarfile.open(archive_path, "r|gz") as tf:
         total = 0
         seen = 0
-        for member in members:
+        inspected_bytes = 0
+        for inspected, member in enumerate(tf, start=1):
+            inspected_bytes += max(member.size, 0)
+            if inspected > MAX_CLAWHUB_INSPECTED_MEMBERS or inspected_bytes > MAX_CLAWHUB_INSPECTED_BYTES:
+                raise _SkillExtractTooLargeError("clawhub package exceeds the archive inspection limit")
             if not member.name.startswith(prefix):
                 continue
+            seen += 1
+            size = max(member.size, 0) if member.isfile() else 0
+            if member.isfile():
+                total += size
+            _check_extract_caps(seen, total, size, member.name)
             if member.issym() or member.islnk():
                 continue
 
@@ -3879,14 +3916,11 @@ def _safe_tar_extract(
             if member.isdir():
                 os.makedirs(target, exist_ok=True)
             elif member.isfile():
-                seen += 1
-                size = max(member.size, 0)
-                total += size
-                _check_extract_caps(seen, total, size, member.name)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
-                with tf.extractfile(member) as src:
-                    if src is None:
-                        continue
+                src = tf.extractfile(member)
+                if src is None:
+                    continue
+                with src:
                     written = 0
                     with open(target, "wb") as dst:
                         while True:
@@ -5885,4 +5919,3 @@ def _run_clawhub_install(skill_name: str, force: bool, cwd: str | None = None) -
             err=True,
         )
         raise SystemExit(1)
-

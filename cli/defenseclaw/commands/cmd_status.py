@@ -650,14 +650,13 @@ def _status_refused_detail(cfg, client, public) -> str:
 
 
 def _print_removed_connector_cleanup(cfg) -> None:
-    """until 1.1: name a removed connector whose files wait for manual cleanup."""
-    from defenseclaw.removed_connectors import pending_cleanup
+    """until 1.1: name a removed connector that left things to remove by hand."""
+    from defenseclaw.removed_connectors import leftovers
 
-    for pending in pending_cleanup(str(getattr(cfg, "data_dir", "") or "")):
-        what = pending.error or f"{len(pending.items)} file(s) to clean up by hand"
+    for left in leftovers(str(getattr(cfg, "data_dir", "") or "")):
         _status_row(
             "Cleanup",
-            ux._style(f"{pending.label} was removed in 1.0.4; {what}", fg="yellow")
+            ux._style(f"{left.label} was removed in 1.0.4; {len(left.items)} item(s) to remove by hand", fg="yellow")
             + ux.dim(" (steps: defenseclaw doctor)"),
         )
 
@@ -1840,6 +1839,7 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             },
         )
     health_map = _fetch_health_connectors(health=health)
+    not_started = _connectors_not_started(health)
     for name, row in rows.items():
         # The text roster already uses this authenticated runtime state. Keep
         # the JSON projection in agreement, including manual hook connectors.
@@ -1851,6 +1851,12 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             # As the text output: not running while doctor fails it (GAP-0513).
             row["state"] = "off"
             row["runtime_detail"] = _agent_missing_detail(name)
+        if row.get("enabled") and name in not_started:
+            row["state"] = "not running"
+            row["runtime_detail"] = (
+                "setup failed when the gateway started, so it is not enforced; "
+                f"run defenseclaw setup {'claude-code' if name == 'claudecode' else name}"
+            )
     if "opencode" in rows and rows["opencode"].get("enabled") and "runtime_detail" not in rows["opencode"]:
         runtime_state, runtime_detail = _opencode_runtime_truth(
             health_map.get("opencode"),
@@ -1910,11 +1916,11 @@ def _status_payload(app) -> dict:
             "scanners": _scanner_status_map(cfg),
         }
     )
-    from defenseclaw.removed_connectors import pending_cleanup
+    from defenseclaw.removed_connectors import leftovers
 
-    if pending := [item.as_json() for item in pending_cleanup(str(cfg.data_dir or ""))]:
-        # until 1.1: files the removed OpenHands/OmniGent teardown left.
-        payload["removed_connector_cleanup"] = pending
+    if left := [item.as_json() for item in leftovers(str(cfg.data_dir or ""))]:
+        # until 1.1: what the removed OpenHands/OmniGent teardown left.
+        payload["removed_connector_cleanup"] = left
 
     if app.store:
         try:

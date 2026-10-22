@@ -39,7 +39,17 @@ gateway.
   `config.secret.changed` and `config.secret.change_failed` (actor,
   credential name, action, outcome, reason code). A change made while the
   gateway is stopped is reported when it starts. An event stays in the
-  spool until the gateway has reported it. A command that cannot record
+  spool until the gateway has reported it: its audit row is flushed to disk
+  (it survives a power loss) and every OTel destination acknowledged it. A
+  destination that refuses it or cannot be reached gets it again, under the
+  same record id, at a later poll; after a gateway restart an unreported
+  event goes to every destination again, so a destination can receive it
+  twice with the same id. Every copy is the stored record: the same time,
+  run, sidecar, binary and config values, whichever gateway process sends
+  it. A gateway that cannot rebuild the stored record exactly (it was
+  upgraded to a build with another record schema, or collection now keeps
+  only the mandatory floor for it) does not send it, and the event stays in
+  the spool. A command that cannot record
   its change (the spool cannot be written, or holds 4096 events the gateway
   has not reported) refuses it with `state_invalid` before anything is
   changed. The command holds room for its event from that check until the
@@ -47,11 +57,14 @@ gateway.
   between. A record that fails after the change is the warning
   `change_unrecorded`; a command that ends after that check and before
   its event (killed, or the device restarted) is reported as failed with
-  reason `interrupted` when the next change event is written, whether or
-  not it had changed anything. A `BUNDLE=` `TRUSTANCHORS=` run whose bundle is not
+  reason `interrupted` by the gateway's next poll (a restart is enough),
+  whether or not it had changed anything. A `BUNDLE=` `TRUSTANCHORS=` run whose bundle is not
   confirmed records one refused anchor install. No event carries a credential value or a hash of
   one. Byte-identical anchors, a `set` of the
-  stored value and a `remove` of an absent credential record nothing. The
+  stored value and a `remove` of an absent credential record nothing; the
+  room such a command held is removed durably before it exits, and when
+  that cannot be flushed it prints the warning `change_release_unflushed`
+  (a power loss could then report it as `interrupted`). The
   results still carry what the agent needs for its own report: `sha256`,
   `previous_sha256` and `key_ids` from anchors install, `sha256_prefix` from
   `secret status --json`.
@@ -1330,8 +1343,9 @@ the read-only commands answer (section 4).
   records the delivery channel (MDM, agent, administrator): the apply cannot
   tell them apart without trusting the caller (2.6).
 - Trust anchor and credential change events reach the audit log only
-  when the gateway runs; while it is stopped, 4096 unreported events fill
-  the spool and further changes are refused (`state_invalid`). Builds
+  when the gateway runs; while it is stopped, or while an OTel destination
+  keeps refusing them, 4096 unreported events fill the spool and further
+  changes are refused (`state_invalid`). Builds
   before 1.0.4 record none (section 0). A refusal before the command knows
   it runs as root (or elevated), or that the device is managed, records
   nothing.

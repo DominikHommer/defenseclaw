@@ -6,6 +6,9 @@ package hookexec
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -68,17 +71,39 @@ func blocked(result runResult) bool {
 // blocked then, whatever the hook's fail mode: never allowed.
 func TestManagedToolCallFailsClosedWhenTheGatewayDoesNotAnswerInTime(t *testing.T) {
 	shortAnswerBudget(t, 300*time.Millisecond)
-	result, elapsed := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) {
-		managedCodex(opts)
-	})
-	if elapsed > time.Second {
-		t.Fatalf("the call waited %s for a gateway that does not answer, want about the 300ms budget", elapsed)
-	}
-	if !blocked(result) {
-		t.Fatalf("an unanswered managed call was not blocked: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
-	}
-	if !strings.Contains(result.stdout+result.stderr, managedGatewayNoAnswerReason) {
-		t.Fatalf("stdout=%q stderr=%q, want the reason %s", result.stdout, result.stderr, managedGatewayNoAnswerReason)
+	shortAnswerFloor(t)
+	for _, event := range []string{"PreToolUse", "PermissionRequest", "PostToolUse", "UserPromptSubmit"} {
+		for _, open := range []bool{false, true} {
+			if open && toolGateEvent("codex", event) {
+				continue // Existing tool-gate outage policy is tested separately.
+			}
+			t.Run(event+"/open="+strconv.FormatBool(open), func(t *testing.T) {
+				home := t.TempDir()
+				result, elapsed := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) {
+					managedWindowsStandalone(opts)
+					opts.FailureLogHome = userLogHome(home)
+					opts.Event = event
+					if open {
+						opts.FailMode = "open"
+					}
+					opts.Stdin = strings.NewReader(`{"hook_event_name":"` + event + `","tool_name":"shell","prompt":"echo ok"}`)
+					// Keep the regression fast even when the answer budget is missing.
+					opts.HTTPClient.Timeout = 1200 * time.Millisecond
+				})
+				if elapsed > time.Second || !blocked(result) {
+					t.Errorf("after %s code=%d stdout=%q stderr=%q, want a bounded block", elapsed, result.code, result.stdout, result.stderr)
+				}
+				entry := lastHookFailure(t, home)
+				if entry["reason"] != managedGatewayNoAnswerReason || entry["hook"] != "codex-hook" ||
+					entry["category"] != "transport" || entry["fail_mode"] != "closed" || entry["outcome"] != "fail_closed" {
+					t.Errorf("failure = %v, want the event's managed no-answer refusal", entry)
+				}
+				data, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+				if err != nil || strings.Count(string(data), "\n") != 1 {
+					t.Fatalf("failure log = %q, err=%v, want exactly one row", data, err)
+				}
+			})
+		}
 	}
 }
 

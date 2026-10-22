@@ -352,12 +352,18 @@ defenseclaw_shared_hook_token_file() {
 # only with its config source (FAIL_MODE_SOURCE=config, fail_mode_sources,
 # legacy_fail_mode_source): an earlier release's open may be an unset mode it
 # resolved open, and an open lowered for a vendor that cannot fail closed is
-# not an operator's choice.
+# not an operator's choice. A managed hook's guardian-written records carry no
+# source (the managed readers decode them canonically); their open is the
+# administrator's explicit choice, so it counts when the hook is managed and
+# hooks/.hookcfg says managed_enterprise (defenseclaw_managed_runtime_sidecar).
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
   local config="${hook_dir}/.hookcfg"
-  local candidate suffix recorded mode source selected="" summary=""
+  local candidate suffix recorded mode source selected="" summary="" managed_open=0
+  if defenseclaw_managed_runtime_sidecar "$config"; then
+    managed_open=1
+  fi
   for candidate in "${hook_dir}"/.hookcfg.*; do
     [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
     suffix="${candidate##*.hookcfg.}"
@@ -370,7 +376,7 @@ defenseclaw_shared_runtime_fail_mode() {
     [ "$recorded" = "$suffix" ] || continue
     mode="$(defenseclaw_flat_hookcfg_value "$candidate" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
     source="$(defenseclaw_flat_hookcfg_value "$candidate" FAIL_MODE_SOURCE 2>/dev/null || true)"
-    if [ "$mode" != "open" ] || [ "$source" != "config" ]; then
+    if [ "$mode" != "open" ] || { [ "$source" != "config" ] && [ "$managed_open" != 1 ]; }; then
       printf closed
       return 0
     fi
@@ -384,15 +390,15 @@ defenseclaw_shared_runtime_fail_mode() {
   # parser leaves only the flat records.
   if [ -f "$config" ]; then
     if command -v jq >/dev/null 2>&1; then
-      summary="$(jq -r --arg connector "$connector" '
-        def word($source): if . == null or . == "" then "none" elif . == "open" and $source == "config" then "open" else "closed" end;
+      summary="$(jq -r --arg connector "$connector" --arg managed "$managed_open" '
+        def word($source): if . == null or . == "" then "none" elif . == "open" and ($source == "config" or $managed == "1") then "open" else "closed" end;
         if type == "object" and (.version | type) == "number" and .version >= 2
           and ((has("fail_modes") | not) or (.fail_modes | type) == "object")
           and ((has("fail_mode_sources") | not) or (.fail_mode_sources | type) == "object") then
           (if has("fail_modes") then .fail_modes else {} end) as $modes
           | (if has("fail_mode_sources") then .fail_mode_sources else {} end) as $sources
           | .legacy_fail_mode_source as $legacy_source
-          | "\($modes | length) \(if [$modes | to_entries[] | .value == "open" and $sources[.key] == "config"] | all then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word($sources[$connector])) end) \(.legacy_fail_mode | word($legacy_source))"
+          | "\($modes | length) \(if [$modes | to_entries[] | .value == "open" and ($sources[.key] == "config" or $managed == "1")] | all then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word($sources[$connector])) end) \(.legacy_fail_mode | word($legacy_source))"
         else "invalid" end' "$config" 2>/dev/null)" || summary="invalid"
     elif _dc_python3_usable; then
       summary="$(python3 -c 'import json,sys
@@ -401,9 +407,10 @@ assert isinstance(d,dict) and type(d.get("version")) is int and d["version"]>=2
 m=d.get("fail_modes",{})
 s=d.get("fail_mode_sources",{})
 assert isinstance(m,dict) and isinstance(s,dict)
-w=lambda v,src:"none" if v in (None,"") else ("open" if v=="open" and src=="config" else "closed")
+g=sys.argv[3]=="1"
+w=lambda v,src:"none" if v in (None,"") else ("open" if v=="open" and (src=="config" or g) else "closed")
 c=sys.argv[2]
-print(len(m),"open" if all(v=="open" and s.get(k)=="config" for k,v in m.items()) else "closed",w(m.get(c),s.get(c)) if c else "none",w(d.get("legacy_fail_mode"),d.get("legacy_fail_mode_source")))' "$config" "$connector" 2>/dev/null)" || summary="invalid"
+print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.items()) else "closed",w(m.get(c),s.get(c)) if c else "none",w(d.get("legacy_fail_mode"),d.get("legacy_fail_mode_source")))' "$config" "$connector" "$managed_open" 2>/dev/null)" || summary="invalid"
     fi
   fi
   local json_count=0 json_all=open json_selected=none json_legacy=none
@@ -441,7 +448,7 @@ print(len(m),"open" if all(v=="open" and s.get(k)=="config" for k,v in m.items()
   if ! legacy_connector="$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_CONNECTOR 2>/dev/null)" \
     || [ -n "$legacy_connector" ] \
     || [ "$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)" != "open" ] \
-    || [ "$(defenseclaw_flat_hookcfg_value "$legacy" FAIL_MODE_SOURCE 2>/dev/null || true)" != "config" ]; then
+    || { [ "$(defenseclaw_flat_hookcfg_value "$legacy" FAIL_MODE_SOURCE 2>/dev/null || true)" != "config" ] && [ "$managed_open" != 1 ]; }; then
     printf closed
     return 0
   fi
@@ -450,6 +457,20 @@ print(len(m),"open" if all(v=="open" and s.get(k)=="config" for k,v in m.items()
     return 0
   fi
   printf open
+}
+
+# defenseclaw_managed_runtime_sidecar returns 0 when this hook is managed (its
+# script sets DEFENSECLAW_MANAGED_HOOK) and config, hooks/.hookcfg, records
+# managed_enterprise true, which only the guardian's managed writer sets. A
+# per-user hook that inherits DEFENSECLAW_MANAGED_HOOK=1 reads a per-user
+# sidecar without it, so its unsourced open stays closed. Builtins only: jq
+# and python3 are not on every hardened PATH.
+defenseclaw_managed_runtime_sidecar() {
+  local config="$1" body=""
+  [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ] || return 1
+  [ -f "$config" ] && [ ! -L "$config" ] || return 1
+  IFS= read -r -d '' -n 65536 body < "$config" 2>/dev/null || [ -n "$body" ] || return 1
+  [[ "$body" =~ \"managed_enterprise\"[[:space:]]*:[[:space:]]*true([^A-Za-z0-9_]|$) ]]
 }
 
 # _defenseclaw_sweep_stale_hook_dirs removes orphaned hook-tmp.*

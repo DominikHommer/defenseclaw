@@ -95,7 +95,10 @@ func CheckProductVersion(min, running string) error {
 	if min == "" {
 		return nil
 	}
-	if !productVersionRegex.MatchString(running) {
+	if !IsReleaseVersion(min) {
+		return refuse(CodeProductTooOld, "min_product_version", "the signed minimum is not a valid release version; run defenseclaw-gateway enterprise bundle sign --help and redeliver a corrected signed bundle")
+	}
+	if !IsReleaseVersion(running) {
 		return refuse(CodeProductTooOld, "min_product_version", "this build (%s) is not a release version; the bundle needs %s or later", boundedText(running, 64), min)
 	}
 	if semver.Compare("v"+running, "v"+min) < 0 {
@@ -107,7 +110,9 @@ func CheckProductVersion(min, running string) error {
 // IsReleaseVersion reports whether v is a release version
 // (MAJOR.MINOR.PATCH, an optional prerelease and build), the only kind
 // CheckProductVersion places against a min_product_version.
-func IsReleaseVersion(v string) bool { return productVersionRegex.MatchString(v) }
+func IsReleaseVersion(v string) bool {
+	return productVersionRegex.MatchString(v) && semver.IsValid("v"+v)
+}
 
 // VerifyInput is what Verify checks a bundle against.
 type VerifyInput struct {

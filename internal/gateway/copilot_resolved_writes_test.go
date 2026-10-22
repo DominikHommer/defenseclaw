@@ -30,7 +30,14 @@ import (
 // that call in the dialect the gateway reads: a VS Code Local body (the
 // vscode-local hook surface, or a CLI hook file the Local harness runs) with
 // CLI-shaped decoys beside it hid the target from the resolver, and the
-// reduction then dropped the marker that said so.
+// reduction then dropped the marker that said so. A Copilot CLI edit or
+// create carries a display-only description or file mode: the gateway
+// judged the call as partial, with no target, and the evidence listed none,
+// so a write through the link (or a hard link) to authorized_keys was
+// allowed. Both now read the call without its metadata, at any size. A
+// relative target had no resolved path on a gateway that cannot validate
+// the event cwd, so the link was never judged; it is placed in the hook's
+// cwd, as the evidence keys it.
 func TestManagedCopilotWriteThroughHomeSymlinkUsesTheJudgedCall(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway walk")
@@ -55,6 +62,10 @@ func TestManagedCopilotWriteThroughHomeSymlinkUsesTheJudgedCall(t *testing.T) {
 	if err := os.Symlink(keys, link); err != nil {
 		t.Fatal(err)
 	}
+	hard := filepath.Join(project, "hard.cfg")
+	if err := os.Link(keys, hard); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
 	patch := func(path string) string {
@@ -71,6 +82,18 @@ func TestManagedCopilotWriteThroughHomeSymlinkUsesTheJudgedCall(t *testing.T) {
 		return body
 	}
 	cliDecoys := map[string]any{"toolName": "view", "toolArgs": jsonText(map[string]any{"path": notes})}
+	// edit and create in the Copilot CLI's own shape, with their metadata.
+	edit := func(path, text string, args func(map[string]any) any) map[string]any {
+		call := map[string]any{"path": path, "old_str": "# base", "new_str": text, "description": "add a key"}
+		return map[string]any{"toolName": "edit", "toolArgs": args(call)}
+	}
+	create := func(path, text string, args func(map[string]any) any) map[string]any {
+		call := map[string]any{"path": path, "file_text": text, "mode": "0600"}
+		return map[string]any{"toolName": "create", "toolArgs": args(call)}
+	}
+	asString := func(call map[string]any) any { return jsonText(call) }
+	asObject := func(call map[string]any) any { return call }
+	key := "ssh-ed25519 AAAA marker\n"
 	for _, row := range []struct {
 		name           string
 		surface, event string
@@ -102,6 +125,23 @@ func TestManagedCopilotWriteThroughHomeSymlinkUsesTheJudgedCall(t *testing.T) {
 		{"CLI over-limit create with decoy snake fields", "", "preToolUse", map[string]any{"toolName": "create",
 			"toolArgs":  jsonText(map[string]any{"path": link, "file_text": big}),
 			"tool_name": "view", "tool_input": map[string]any{"path": notes}}, true},
+		{"CLI edit with a description", "", "preToolUse", edit(link, key, asString), true},
+		{"CLI edit object with a description, relative path", "", "preToolUse", edit("deploy.cfg", key, asObject), true},
+		{"CLI edit with a description through a hard link", "", "preToolUse", edit(hard, key, asString), true},
+		{"CLI over-limit edit with a description", "", "preToolUse", edit(link, big, asString), true},
+		{"CLI edit, relative path", "", "preToolUse", map[string]any{"toolName": "edit",
+			"toolArgs": jsonText(map[string]any{"path": "deploy.cfg", "old_str": "# base", "new_str": key})}, true},
+		{"VS Code Local create_file, relative path", connector.CopilotHookSurfaceVSCodeLocal, "PreToolUse",
+			map[string]any{"hook_event_name": "PreToolUse", "tool_name": "create_file",
+				"tool_input": map[string]any{"filePath": "deploy.cfg", "content": key}}, true},
+		{"CLI edit with a description of an ordinary file, relative path", "", "preToolUse", edit("notes.txt", key, asString), false},
+		{"CLI edit with a description of an ordinary file", "", "preToolUse", edit(notes, key, asString), false},
+		{"CLI over-limit edit with a description of an ordinary file", "", "preToolUse", edit(notes, big, asString), false},
+		{"CLI create with a mode", "", "preToolUse", create(link, key, asString), true},
+		{"CLI create object with a mode, relative path", "", "preToolUse", create("deploy.cfg", key, asObject), true},
+		{"CLI create with a mode through a hard link", "", "preToolUse", create(hard, key, asString), true},
+		{"CLI over-limit create with a mode", "", "preToolUse", create(link, big, asString), true},
+		{"CLI create with a mode of a new file", "", "preToolUse", create(filepath.Join(project, "new.txt"), key, asString), false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if err := os.Chmod(homes, 0o700); err != nil {
