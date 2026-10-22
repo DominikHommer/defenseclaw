@@ -623,6 +623,31 @@ func TestIdentitySpoolFailedLookupDoesNotKeepAnotherDomainsUPN(t *testing.T) {
 	}
 }
 
+// A pre-1.0.4 spool record has no SID. The directory can recreate an account
+// with the same uid, name and domain; a partial lookup of the new SID must not
+// let the old record's UPN select the new account's profile.
+func TestIdentitySpoolFailedLookupDropsSIDLessRecordWhenFreshSIDIsKnown(t *testing.T) {
+	const uid = 94401413
+	dir := t.TempDir()
+	old := testDirectoryRecord(uid, "dcad-bob", "dclab.test")
+	writeTestSpoolRecord(t, dir, old)
+	previous := identitySpoolCollect
+	t.Cleanup(func() { identitySpoolCollect = previous })
+	identitySpoolCollect = func(_ context.Context, account IdentitySpoolAccount, _ time.Time) (IdentitySpoolRecord, error) {
+		fresh := testDirectoryRecord(account.UID, account.User, "dclab.test")
+		fresh.AccountSID = "S-1-5-21-1111-2222-3333-1106"
+		fresh.UPNSource, fresh.Facts.UPN, fresh.Facts.Principal = "", "", ""
+		return fresh, errors.New("SSSD InfoPipe UPN lookup: timed out")
+	}
+	if err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: uid, User: old.User}}, nil, nil); err == nil {
+		t.Fatal("the failed lookup was not reported")
+	}
+	got, err := ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), nil)
+	if err != nil || got.AccountSID != "S-1-5-21-1111-2222-3333-1106" || got.Facts.UPN != "" {
+		t.Fatalf("old UPN survived an unproven account binding: %+v (%v)", got, err)
+	}
+}
+
 // W2B-G-enum review loop 1: the departure lookups of omitted records ran
 // without the pass context, so a slow NSS or Open Directory lookup held the
 // pass, and the spool refreshes after it, past its deadline. They now end
