@@ -55,6 +55,7 @@ def test_manual_downgrade_regenerates_connectors_before_start():
     regenerate = text.index('Regenerate every connector')
     start = text.index('Start the 0.8.x gateway')
     assert regenerate < start
+    assert "matching pre-upgrade `.env`" in text
     assert 'defenseclaw quickstart --connector claudecode --mode action' in text
     assert 'contract' in text[regenerate:start]
     assert 'fail mode' in text[regenerate:start]
