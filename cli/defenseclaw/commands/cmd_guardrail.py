@@ -2164,28 +2164,21 @@ _HERMES_UPSTREAM_TIMEOUT_NOTE = (
 )
 
 
-def _profile_connector_policies(gc, connector: str) -> list[tuple[str, str, bool]]:
-    """``(profile, mode, own_hilt)`` for each guardrail profile, for *connector*.
+def _profile_connector_policies(gc, connector: str) -> list[tuple[str, str]]:
+    """``(profile, mode)`` for each guardrail profile, for *connector*.
 
     *mode* is the mode the profile itself sets for the connector, "" when it
     inherits. A profile's own per-connector value wins over its profile-wide
-    one, as the gateway resolves it (applyGuardrailProfile). *own_hilt* is
-    True when the profile sets a HILT block (profile-wide or for this
-    connector), which replaces the saved connector HILT for its accounts.
+    one, as the gateway resolves it (applyGuardrailProfile).
     """
-    rows: list[tuple[str, str, bool]] = []
+    rows: list[tuple[str, str]] = []
     target = normalize_connector(connector)
     for pname, profile in sorted((getattr(gc, "profiles", None) or {}).items()):
         mode = str(getattr(profile, "mode", "") or "").strip().lower()
-        own_hilt = getattr(profile, "hilt", None) is not None
         for cname, override in (getattr(profile, "connectors", None) or {}).items():
-            if normalize_connector(cname) != target:
-                continue
-            if str(getattr(override, "mode", "") or "").strip():
+            if normalize_connector(cname) == target and str(getattr(override, "mode", "") or "").strip():
                 mode = str(override.mode).strip().lower()
-            if getattr(override, "hilt", None) is not None:
-                own_hilt = True
-        rows.append((str(pname), mode, own_hilt))
+        rows.append((str(pname), mode))
     return rows
 
 
@@ -2194,33 +2187,77 @@ def _action_profiles_for(gc, connector: str) -> list[str]:
 
     An unset mode inherits and is not counted.
     """
-    return [name for name, mode, _ in _profile_connector_policies(gc, connector) if mode == "action"]
+    return [name for name, mode in _profile_connector_policies(gc, connector) if mode == "action"]
 
 
-def _hilt_profile_notes(gc, connector: str, label: str, enabled: bool, min_severity: str) -> list[str]:
-    """What a saved *connector* HILT change does for accounts on guardrail profiles.
+def _hilt_preview_lines(app: AppContext, key: str, label: str, enabled: bool, min_severity: str) -> list[str]:
+    """What saving this connector HILT block does, line by line.
 
-    A profile that sets its own HILT block is not reached by the change. One
-    that inherits it but sets a different mode than the connector's base mode
-    pauses (action) or does not (observe) where the base preview says the
+    The hook mode and HILT come from the gateway's own resolvers
+    (``defenseclaw-gateway connector hilt-preview``), never from a Python
+    copy: a legacy ``claude_code.mode``, ``codex.mode`` or
+    ``connector_hooks.<c>.mode`` wins over the guardrail mode there, and a
+    guardrail profile that sets a mode or its own HILT block changes what its
+    accounts get. When the gateway cannot answer, the preview says so and
+    promises nothing.
+    """
+    from defenseclaw import config_inspect
+
+    try:
+        preview = config_inspect.connector_hilt_preview(
+            normalize_connector(key),
+            enabled=enabled,
+            min_severity=min_severity,
+            config_path=str(config_path_for_data_dir(app.cfg.data_dir)),
+        )
+    except config_inspect.ConfigInspectError as exc:
+        return [
+            f"Could not resolve {label}'s hook mode with the gateway ({exc}). The saved HILT policy pauses "
+            f"actions only where {label} runs in action mode; check an account with: "
+            f"defenseclaw guardrail profile explain --user <name> --connector {normalize_connector(key)}"
+        ]
+    base = preview.base
+    if base.mode != "action":
+        lines = [
+            f"{label} is in {base.mode} mode, which does not pause actions for approval. "
+            "The saved HILT policy applies when the connector uses action mode."
+        ]
+    elif base.enabled:
+        lines = [
+            f"{label} will prompt for approval on confirmable actions at/above "
+            f"{base.min_severity} (CRITICAL findings still block outright)."
+        ]
+    else:
+        lines = [f"{label} will NOT prompt — actions resolve straight to allow/alert/block."]
+    return lines + _hilt_profile_notes(preview, label)
+
+
+def _hilt_profile_notes(preview, label: str) -> list[str]:
+    """What a saved connector HILT change does for accounts on guardrail profiles.
+
+    *preview* is the gateway's answer (``connector_hilt_preview``). A profile
+    with its own HILT block is not reached by the change. One that follows it
+    but runs the connector in another hook mode than the accounts on no
+    profile pauses (action) or does not (observe) where the base line says the
     opposite, so its accounts get their own line.
     """
-    base_mode = (gc.effective_mode(connector) or "observe").strip().lower()
+    base = preview.base
     action: list[str] = []
     passive: list[str] = []
     own: list[str] = []
-    for name, mode, own_hilt in _profile_connector_policies(gc, connector):
-        if own_hilt:
-            own.append(name)
-        elif mode and mode != base_mode:
-            (action if mode == "action" else passive).append(name)
+    for scope in preview.profiles:
+        if not scope.follows_connector_hilt:
+            own.append(scope.profile)
+        elif scope.mode != base.mode:
+            (action if scope.mode == "action" else passive).append(scope.profile)
     notes: list[str] = []
     if action:
         names = ", ".join(action)
-        if enabled:
+        if base.enabled:
             notes.append(
                 f"Guardrail profile(s) {names} put {label} in action mode: their accounts will be prompted "
-                f"for approval on confirmable actions at/above {min_severity} (CRITICAL findings still block outright)."
+                f"for approval on confirmable actions at/above {base.min_severity} (CRITICAL findings still block "
+                "outright)."
             )
         else:
             notes.append(
@@ -2343,25 +2380,8 @@ def _set_connector_hilt(
         f"enabled={ux.accent(str(new_enabled).lower())} "
         f"min_severity={ux.accent(new_min)}"
     )
-    if gc.effective_mode(key) != "action":
-        ux.subhead(
-            f"{label} is in {gc.effective_mode(key)} mode, which does not pause actions for approval. "
-            "The saved HILT policy applies when the connector uses action mode.",
-            indent="  ",
-        )
-    elif new_enabled:
-        ux.subhead(
-            f"{label} will prompt for approval on confirmable actions at/above "
-            f"{new_min} (CRITICAL findings still block outright).",
-            indent="  ",
-        )
-    else:
-        ux.subhead(
-            f"{label} will NOT prompt — actions resolve straight to allow/alert/block.",
-            indent="  ",
-        )
-    for note in _hilt_profile_notes(gc, key, label, new_enabled, new_min):
-        ux.subhead(note, indent="  ")
+    for line in _hilt_preview_lines(app, key, label, new_enabled, new_min):
+        ux.subhead(line, indent="  ")
     click.echo()
 
     if not yes and not _confirm_proceed():

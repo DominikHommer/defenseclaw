@@ -429,7 +429,7 @@ func (a *APIServer) claudeCodeEnabled() bool {
 func (a *APIServer) claudeCodeMode(ctx context.Context) string {
 	// The request's guardrail profile, when one applies, replaces the live
 	// configuration (see guardrail_profile.go).
-	return hookModeForConfig(a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()), "claudecode")
+	return a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()).HookModeForConnector("claudecode")
 }
 
 func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) claudeCodeHookResponse {

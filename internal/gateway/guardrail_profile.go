@@ -1806,7 +1806,7 @@ func profileEffectiveView(cfg *config.Config, connectorName string) map[string]a
 	}
 	hilt := cfg.EffectiveHILTForConnector(connectorName)
 	view := map[string]any{
-		"mode":          hookModeForConfig(cfg, connectorName),
+		"mode":          cfg.HookModeForConnector(connectorName),
 		"block_at":      cfg.Guardrail.EffectiveBlockAt(connectorName),
 		"alert_at":      cfg.Guardrail.EffectiveAlertAt(connectorName),
 		"rule_pack_dir": cfg.EffectiveRulePackDirForConnector(connectorName),
