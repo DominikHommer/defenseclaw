@@ -240,6 +240,110 @@ func TestRunGuardrailMultiDisablingARefusedConnectorKeepsOtherConnectors(t *test
 	}
 }
 
+// The single-connector start removes every other connector of the saved
+// active set. When the operator drops a connector whose agent settings no
+// longer parse, its teardown fails on that file and Setup refuses to restore
+// it, so the start stopped with "prior-registration rollback incomplete" on
+// every boot and the remaining connector was not enforced. It now keeps the
+// refused connector for a teardown retry, as the multi-connector start does,
+// and the retry removes it once the file parses again.
+func TestRunGuardrailRemovingARefusedConnectorStartsTheRemainingOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("per-user Codex setup on Windows needs protected executable evidence")
+	}
+	cases := []struct {
+		name   string
+		victim string
+		peer   string
+		off    func(t *testing.T, f *agentSettingsRefusalFixture)
+		on     func(t *testing.T, f *agentSettingsRefusalFixture)
+	}{
+		{
+			name: "claude code settings do not parse", victim: "claudecode", peer: "codex",
+			off: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				data := readAgentFile(t, f.claudeSettings)
+				if err := os.WriteFile(f.claudeSettings, append(data, '{'), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			on: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				data := readAgentFile(t, f.claudeSettings)
+				if err := os.WriteFile(f.claudeSettings, bytes.TrimSuffix(data, []byte("{")), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "codex config does not parse", victim: "codex", peer: "claudecode",
+			off: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				appendAgentFile(t, f.codexConfig, "\nbroken = [\n")
+			},
+			on: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				replaceAgentFile(t, f.codexConfig, "\nbroken = [\n", "\n")
+			},
+		},
+		{
+			name: "codex features hooks false", victim: "codex", peer: "claudecode",
+			off: func(t *testing.T, f *agentSettingsRefusalFixture) {
+				appendAgentFile(t, f.codexConfig, "\n[features]\nhooks = false\n")
+			},
+			on: func(t *testing.T, f *agentSettingsRefusalFixture) {},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAgentSettingsRefusalFixture(t)
+			s, err := f.boot(t)
+			if err != nil || !reflect.DeepEqual(f.running(s), []string{"claudecode", "codex"}) {
+				t.Fatalf("first start: err=%v running=%v", err, f.running(s))
+			}
+			tc.off(t, f)
+			s, err = f.boot(t)
+			if err != nil || !reflect.DeepEqual(f.running(s), []string{tc.peer}) {
+				t.Fatalf("start with %s refused: err=%v running=%v", tc.victim, err, f.running(s))
+			}
+
+			delete(f.cfg.Guardrail.Connectors, tc.victim)
+			for boot := 1; boot <= 2; boot++ {
+				s, err = f.boot(t)
+				if err != nil {
+					t.Fatalf("start %d after removing the refused %s stopped the guardrail: %v", boot, tc.victim, err)
+				}
+				if snap := s.health.Snapshot(); snap.Guardrail.State != StateRunning || !reflect.DeepEqual(f.running(s), []string{tc.peer}) {
+					t.Fatalf("start %d after removing %s: state=%s running=%v (%s), want %s running",
+						boot, tc.victim, snap.Guardrail.State, f.running(s), snap.Guardrail.LastError, tc.peer)
+				}
+			}
+			kept := connector.LoadActiveConnectors(f.dataDir)
+			if tc.name != "codex features hooks false" {
+				if !reflect.DeepEqual(kept, []string{"claudecode", "codex"}) {
+					t.Errorf("active set with the removed %s still registered = %v, want it kept for a teardown retry", tc.victim, kept)
+				}
+				if refused := fmt.Sprint(s.health.Snapshot().Guardrail.Details[GuardrailAgentSettingsRefused]); !strings.Contains(refused, tc.victim+":") {
+					t.Errorf("health does not name the removed %s kept for a retry: %s", tc.victim, refused)
+				}
+			}
+
+			// Repair converges: once the file parses again the removed
+			// connector is torn down and forgotten.
+			tc.on(t, f)
+			s, err = f.boot(t)
+			if err != nil || !reflect.DeepEqual(f.running(s), []string{tc.peer}) {
+				t.Fatalf("start after the fix with %s removed: err=%v running=%v", tc.victim, err, f.running(s))
+			}
+			if strings.Contains(string(readAgentFile(t, f.settingsFile(tc.victim))), filepath.Join(f.dataDir, "hooks")) {
+				t.Errorf("the removed %s still has DefenseClaw hooks after its file was fixed", tc.victim)
+			}
+			if entry := jsonConnectorEntry(t, readAgentFile(t, filepath.Join(f.dataDir, "hook_contract_lock.json")), tc.victim); entry != nil {
+				t.Errorf("the removed %s kept its hook contract lock entry: %s", tc.victim, entry)
+			}
+			if active := connector.LoadActiveConnectors(f.dataDir); !reflect.DeepEqual(active, []string{tc.peer}) {
+				t.Errorf("active set after the removed %s was torn down = %v, want [%s]", tc.victim, active, tc.peer)
+			}
+		})
+	}
+}
+
 type agentSettingsRefusalFixture struct {
 	cfg            *config.Config
 	dataDir        string
@@ -293,14 +397,19 @@ func newAgentSettingsRefusalFixture(t *testing.T) *agentSettingsRefusalFixture {
 	return f
 }
 
-// boot runs one gateway start until the guardrail runs or the start fails.
+// boot runs one gateway start, single- or multi-connector as the gateway
+// picks, until the guardrail runs or the start fails.
 func (f *agentSettingsRefusalFixture) boot(t *testing.T) (*Sidecar, error) {
 	t.Helper()
 	s := &Sidecar{cfg: f.cfg, health: NewSidecarHealth(), router: routerWithDefaultRulePack(t)}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- s.runGuardrailMulti(ctx) }()
+	run := s.runGuardrailMulti
+	if len(f.cfg.ActiveConnectors()) < 2 {
+		run = s.runGuardrail
+	}
+	go func() { done <- run(ctx) }()
 	deadline := time.Now().Add(time.Minute)
 	for s.health.Snapshot().Guardrail.State != StateRunning {
 		select {
@@ -319,7 +428,11 @@ func (f *agentSettingsRefusalFixture) boot(t *testing.T) (*Sidecar, error) {
 }
 
 func (f *agentSettingsRefusalFixture) running(s *Sidecar) []string {
-	names, _ := s.health.Snapshot().Guardrail.Details["connectors"].([]string)
+	details := s.health.Snapshot().Guardrail.Details
+	if name, ok := details["connector"].(string); ok {
+		return []string{name}
+	}
+	names, _ := details["connectors"].([]string)
 	return names
 }
 
