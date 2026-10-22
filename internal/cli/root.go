@@ -380,6 +380,15 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 	if err != nil {
 		return nil, nil, err
 	}
+	// Start uses this loader before launching a child. Refuse an unsafe
+	// personal JSONL destination here, with its name and path, rather than
+	// depending on a later, content-free runtime bootstrap error (GAP-0097).
+	// Managed service accounts have their own ACL-aware lifecycle preflight.
+	if !managed.IsManagedEnterprise(candidate.DeploymentMode) {
+		if err := checkJSONLDestinationPaths(loaded.compiled, ""); err != nil {
+			return nil, nil, err
+		}
+	}
 	return candidate, startup, nil
 }
 
