@@ -613,8 +613,9 @@ def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:
     failed = install[install.index("if (-not $saved) {") :][:500]
     assert failed.index("Clear-StagedRelease") < failed.index("Restart-Old")
     assert "it was not changed, but its gateway is not running" in failed
-    final = _text()[_text().index("if ($Run.Lock) {") :][:200]
-    assert "Invoke-Quietly { Clear-StagedRelease }" in final
+    assert "if ($Run.Lock) { Close-InstallLock }" in _text()
+    close = _ps1_function("Close-InstallLock")
+    assert close.index("Invoke-Quietly { Clear-StagedRelease }") < close.index("Remove-Tree $LockDir")
 
 
 def test_a_first_install_on_a_full_disk_says_so_and_keeps_no_failed_copy() -> None:
