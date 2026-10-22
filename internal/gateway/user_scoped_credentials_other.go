@@ -51,6 +51,8 @@ var agentIdentityIncarnation = func(string) string { return "" }
 // token here: a SID is never handed to another account.
 var agentIdentityAccountToken = func(string) string { return "" }
 
+var agentIdentityVerifiedAccountToken = func(string) string { return "" }
+
 var agentIdentityHolderHistory = func(string) (string, bool) { return "", false }
 
 // managedHookPeerLastName keeps no last name off Linux and macOS, where no

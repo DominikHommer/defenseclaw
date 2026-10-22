@@ -275,7 +275,7 @@ func (f AccountFilter) ownRow(id, domains, incarnation string) bool {
 	switch {
 	case incarnation != "" && f.incarnation != "":
 		return incarnation == f.incarnation
-	case incarnation == "" && f.holderChanged:
+	case f.holderChanged:
 		return false
 	}
 	return f.recordedIn(domains)
@@ -298,7 +298,7 @@ func (f AccountFilter) recordedForAnother(id, incarnation string) bool {
 	switch {
 	case incarnation != "" && f.incarnation != "":
 		return incarnation != f.incarnation
-	case incarnation == "" && f.holderChanged:
+	case f.holderChanged:
 		return slices.ContainsFunc(f.ids, func(resolved string) bool { return strings.EqualFold(resolved, strings.TrimSpace(id)) })
 	}
 	return false

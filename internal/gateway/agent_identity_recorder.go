@@ -803,8 +803,19 @@ func adminViewAccountProvenance(ids []string) (string, bool) {
 	if len(ids) != 1 {
 		return "", false
 	}
+	// The first inventory request after a uid handoff may precede any new
+	// agent hook. Refresh the holder before reading its history; rowToken
+	// alone resolves the new token without recording the handoff.
+	_ = agentIdentityIncarnation(ids[0])
+	current := agentIdentityVerifiedAccountToken(ids[0])
 	last, changed := agentIdentityHolderHistory(ids[0])
-	return firstNonEmpty(agentIdentityAccountToken(ids[0]), last), changed
+	if useridentity.KindForID(ids[0]) == useridentity.KindPOSIXUID && (current == "" || last != current) {
+		// A qualified filter cannot prove ownership of any row of an
+		// unresolved uid, or of a holder change that did not persist in
+		// history (for example, when its bounded cache is full).
+		return "", true
+	}
+	return current, changed
 }
 
 // adminViewAccountDomains is the useridentity.AccountDomains of the
