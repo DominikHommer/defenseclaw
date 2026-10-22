@@ -21,7 +21,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -105,17 +104,11 @@ func recordWindowsChangeRefusal(cmd *cobra.Command, ev enterprisestatus.ChangeEv
 
 // Cobra stops parsing at the first error. A later --trust-anchors, or one
 // missing its value, still requests an anchor change; never inspect its path.
+// A --trust-anchors that is another flag's value (--config --trust-anchors)
+// or follows "--" requests nothing.
 func windowsAnchorsArgumentRefusal(cmd *cobra.Command, err error) error {
-	requested := cmd.Flags().Changed("trust-anchors")
-	for _, arg := range secretRawArgs() {
-		if arg == "--" {
-			break
-		}
-		if arg == "--trust-anchors" || strings.HasPrefix(arg, "--trust-anchors=") {
-			requested = true
-			break
-		}
-	}
+	requested := cmd.Flags().Changed("trust-anchors") ||
+		argsSetLongFlag(cmd.Flags(), secretRawArgs(), "trust-anchors")
 	if requested {
 		if ev, ok := anchorsFailureEvent("invalid_arguments", false, nil); ok {
 			recordWindowsChangeRefusal(cmd, ev)
