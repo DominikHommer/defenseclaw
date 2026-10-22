@@ -89,7 +89,9 @@ jobs:
       - name: Unit tests (policy creator)
         # Gate the deploy on the share/highlighter/cmdk-filter tests so
         # silent regressions in the policy creator can't ship to Pages.
-        run: npm run test:policy-creator
+        run: |
+          npm run test:policy-creator
+          npm run test:docs-w4
 
       - name: Unit tests (feature demos)
         run: npm run test:feature-demos

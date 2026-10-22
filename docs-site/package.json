@@ -21,6 +21,7 @@
     "test:diagram-zones": "tsx --test ./scripts/test-diagram-zones.tsx",
     "test:support-matrix": "tsx --test ./scripts/test-support-matrix.ts",
     "test:docs-claims": "tsx --test ./scripts/test-docs-claims.ts",
+    "test:docs-w4": "tsx --test ./scripts/test-docs-w4.ts",
     "postinstall": "fumadocs-mdx && tsx ./scripts/build-policy-assets.ts && tsx ./scripts/sync-connector-icons.ts"
   },
   "dependencies": {
