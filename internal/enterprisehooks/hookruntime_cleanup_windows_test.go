@@ -143,11 +143,7 @@ func TestRemoveWindowsStandaloneMachinePolicySelectorLocks(t *testing.T) {
 // its lock with it.
 func TestRemoveWindowsStandaloneDeletedAccountSelectorTargets(t *testing.T) {
 	stubWindowsHookRuntimeRoot(t)
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		t.Fatalf("resolve test SID: %v", err)
-	}
-	owner := user.User.Sid
+	owner := currentWindowsTestSID(t)
 	const deleted = "S-1-5-21-1111111111-2222222222-3333333333-1021"
 	base := t.TempDir()
 	previousPath, previousOwner := windowsManagedRuntimeSelectorPathResolver, windowsManagedPolicyOwnerSID

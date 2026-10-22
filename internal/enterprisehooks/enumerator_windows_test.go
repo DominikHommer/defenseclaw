@@ -1326,7 +1326,6 @@ func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenASessionIsUnidentifie
 	})
 	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
 	windowsLocalAccountDisabled = func(string) (bool, error) { return true, nil }
-	windowsSignedInSessionUsers = readWindowsSignedInSessionUsers
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o700); err != nil {
 		t.Fatal(err)
@@ -1336,6 +1335,9 @@ func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenASessionIsUnidentifie
 	}
 	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
 	stubActiveSessions(t, map[string][]string{})
+	// After stubActiveSessions, which stubs the signed-in reader too: the
+	// sessions are read from the stubbed session API (GAP-0606).
+	windowsSignedInSessionUsers = readWindowsSignedInSessionUsers
 	for _, tc := range []struct {
 		name     string
 		tokenErr error

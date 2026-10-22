@@ -2733,15 +2733,27 @@ func TestRemoveWindowsClaudeManagedPolicyKeepsPolicyForOtherTargets(t *testing.T
 
 func currentWindowsTestSID(t *testing.T) *windows.SID {
 	t.Helper()
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		t.Fatalf("current Windows token user: %v", err)
-	}
 	// These fixtures target the account running the test, and production
 	// refuses LocalSystem as a target (the refusal has its own tests). Run
 	// as LocalSystem there is no interactive account to target.
-	if user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+	if windowsTestRunsAsLocalSystem(t) {
 		t.Skip("skipped as LocalSystem: the fixture targets the running account, and enterprise hooks refuse LocalSystem as a target; run the package as an interactive administrator")
+	}
+	return windowsTestTokenUser(t)
+}
+
+// windowsTestRunsAsLocalSystem reports whether the test runs as LocalSystem,
+// as the managed lifecycle does.
+func windowsTestRunsAsLocalSystem(t *testing.T) bool {
+	t.Helper()
+	return windowsTestTokenUser(t).IsWellKnown(windows.WinLocalSystemSid)
+}
+
+func windowsTestTokenUser(t *testing.T) *windows.SID {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current Windows token user: %v", err)
 	}
 	return user.User.Sid
 }

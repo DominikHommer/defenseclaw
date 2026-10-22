@@ -28,11 +28,7 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		t.Fatalf("resolve test SID: %v", err)
-	}
-	target := user.User.Sid
+	target := currentWindowsTestSID(t)
 	for _, path := range []string{dataDir, hookDir} {
 		if err := setWindowsUserPathProtection(path, target, true); err != nil {
 			t.Fatalf("protect target directory %s: %v", path, err)
@@ -464,11 +460,7 @@ func newWindowsManagedRuntimeGenerationMissingHooksGCFixture(
 	t *testing.T,
 ) windowsManagedRuntimeGenerationMissingHooksGCFixture {
 	t.Helper()
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		t.Fatalf("resolve test SID: %v", err)
-	}
-	target := user.User.Sid
+	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
 	descriptor, err := windowsTargetOwnedDirectorySecurityDescriptor(target)
@@ -746,6 +738,8 @@ func TestWindowsManagedRuntimeGenerationEqualityUsesConnectorScopedContractIdent
 }
 
 func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContractDrift(t *testing.T) {
+	// The Secure Client profile of a verified install (GAP-0606).
+	setStandaloneProfileForTest(t, false)
 	desired := WindowsManagedRuntimeGenerationDesired{
 		Connector:                  "codex",
 		TargetSID:                  "S-1-5-21-1000-1000-1000-1001",
