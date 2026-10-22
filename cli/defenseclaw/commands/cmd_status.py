@@ -730,6 +730,7 @@ def _print_agents(
         manual_actives = []
     health_map = _fetch_health_connectors(health=health)
     not_started = _connectors_not_started(health)
+    refused_by_agent_settings = _connectors_refused_by_agent_settings(health)
     state = _application_protection_status(cfg, health=health)
 
     roster: dict[str, dict] = {}
@@ -893,6 +894,12 @@ def _print_agents(
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn == "claudecode" and not shutil.which("claude"):
                 suffix = _connector_state_verb("off") + ux.dim(" (Claude Code is not detected on PATH)")
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
+            elif conn.strip().lower() in refused_by_agent_settings:
+                # Rerunning setup cannot help: the agent's own settings refuse
+                # the hooks, and the reason names their fix (GAP-0578).
+                reason = refused_by_agent_settings[conn.strip().lower()]
+                suffix = _connector_state_verb("not running") + ux.dim(f" (not enforced: {reason})")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn.strip().lower() in not_started:
                 # Setup failed when the gateway started (GAP-1714).
@@ -1089,6 +1096,22 @@ def _connectors_not_started(health: dict | None) -> set[str]:
     if not isinstance(names, list):
         return set()
     return {name.strip().lower() for name in names if isinstance(name, str) and name.strip()}
+
+
+def _connectors_refused_by_agent_settings(health: dict | None) -> dict[str, str]:
+    """Connectors the gateway left unguarded because their agent's own settings
+    turn its hooks off or do not parse, each with the gateway's reason, which
+    names the fix (GAP-0578)."""
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    refused = details.get("connectors_refused_by_agent_settings") if isinstance(details, dict) else None
+    if not isinstance(refused, dict):
+        return {}
+    return {
+        name.strip().lower(): reason.strip()
+        for name, reason in refused.items()
+        if isinstance(name, str) and name.strip() and isinstance(reason, str) and reason.strip()
+    }
 
 
 def _agent_missing(cfg, connector: str) -> bool:

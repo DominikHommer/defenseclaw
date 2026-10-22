@@ -1179,6 +1179,15 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 }
 
 func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	if c.name == "copilot" {
+		// disableAllHooks is the operator's choice and Setup never overrides
+		// it. Refusing here, before the hook scripts are written, keeps the
+		// earlier registration; the patch refused after them, and the
+		// rollback removed it (GAP-0578).
+		if err := validateCopilotHookPolicy(opts, c.configPath(opts)); err != nil {
+			return refuseForAgentConfig(fmt.Errorf("%w; fix that setting, then run: defenseclaw-gateway restart", err))
+		}
+	}
 	if c.name == "opencode" {
 		if err := validateOpenCodeWindowsSetupAdmission(opts); err != nil {
 			return executableAdmissionRefused(err)

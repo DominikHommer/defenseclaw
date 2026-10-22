@@ -332,6 +332,9 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return errors.New("managed Windows Codex hooks require the administrator-owned machine requirements installer")
 	}
 	return withCodexLifecycleTransaction(opts, func() error {
+		if err := refuseCodexUserConfig(opts); err != nil {
+			return err
+		}
 		if previous, err := codexPreviousSetupRoot(opts.DataDir); err != nil {
 			return err
 		} else if previous != "" {
@@ -359,6 +362,42 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		}
 		return c.setupLocked(ctx, opts)
 	})
+}
+
+// refuseCodexUserConfig refuses, before Setup changes anything, a per-user
+// config.toml that Setup must not rewrite: one that turns Codex hooks off
+// (the user's choice, GAP-1094) or that does not parse. The earlier hooks and
+// the user's setting stay as they are, and a gateway start keeps the other
+// connectors (GAP-0578). Managed installs keep their hooks in protected
+// requirements, so their patch decides.
+func refuseCodexUserConfig(opts SetupOpts) error {
+	if opts.ManagedEnterprise {
+		return nil
+	}
+	path := codexConfigPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil // a missing file is created by the patch; an unreadable one is reported there
+	}
+	cfg := map[string]interface{}{}
+	if err := parseCodexTOML(data, &cfg); err != nil {
+		return refuseForAgentConfig(fmt.Errorf("Codex config %s does not parse (%v); fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+	}
+	if raw, exists := cfg["hooks"]; exists {
+		if _, ok := raw.(map[string]interface{}); !ok {
+			return refuseForAgentConfig(fmt.Errorf("Codex hooks configuration in %s has unsupported type %T; refusing to replace it; fix the file, then run: defenseclaw-gateway restart", path, raw)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+		}
+	}
+	features, _ := cfg["features"].(map[string]interface{})
+	for _, key := range []string{"hooks", "codex_hooks"} {
+		if enabled, ok := features[key].(bool); ok && !enabled {
+			return refuseForAgentConfig(fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+				"Codex hooks are turned off in %s ([features] %s = false), so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks, then run: defenseclaw-gateway restart",
+				path, key,
+			))
+		}
+	}
+	return nil
 }
 
 func codexPreviousSetupRoot(dataDir string) (string, error) {

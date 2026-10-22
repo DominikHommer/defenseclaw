@@ -4611,7 +4611,7 @@ hooks = false
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
 	err := c.Setup(context.Background(), opts)
-	if err == nil || !strings.Contains(err.Error(), "hooks are disabled") {
+	if err == nil || !strings.Contains(err.Error(), "hooks are turned off") {
 		t.Fatalf("Setup error = %v, want explicit disabled-hooks error", err)
 	}
 }

@@ -5358,6 +5358,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		if len(notStarted) > 0 {
 			guardrailDetails["connectors_not_started"] = notStarted
 		}
+		if len(setupTransaction.agentSettingsRefused) > 0 {
+			guardrailDetails[GuardrailAgentSettingsRefused] = setupTransaction.agentSettingsRefused
+		}
 		s.health.SetGuardrail(StateRunning, "", guardrailDetails)
 	}
 	publishHealth()
@@ -5906,6 +5909,9 @@ type multiConnectorSetupTransaction struct {
 	// releaseRefused is set when a refusal came from this release's contract
 	// table for an agent an earlier release admitted.
 	releaseRefused bool
+	// agentSettingsRefused maps each connector whose agent's own settings
+	// refused DefenseClaw hooks to the reason, which names the fix.
+	agentSettingsRefused map[string]string
 	// publishSetupProgress reports each connector's setup step in guardrail
 	// health. Only the boot path sets it: a running guardrail stays running.
 	publishSetupProgress bool
@@ -6082,6 +6088,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		transaction.applied = nil
 		transaction.admissionRefused = nil
 		transaction.releaseRefused = false
+		transaction.agentSettingsRefused = nil
 	}
 	registrations := make([]connectorRegistration, 0, len(conns))
 	for _, conn := range conns {
@@ -6161,6 +6168,19 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				})
 			}
 			err = s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
+		}
+		if errors.Is(err, connector.ErrAgentConfigRefusal) {
+			// The agent's own settings refuse the hooks, for example after
+			// `codex features disable hooks`. Setup changed nothing, so the
+			// earlier registration and the user's setting stay, and only this
+			// connector is unguarded until they are fixed. Failing the start
+			// stopped every other connector too (GAP-0578).
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s not started (other connectors unaffected): %v\n", registration.conn.Name(), err)
+			if transaction.agentSettingsRefused == nil {
+				transaction.agentSettingsRefused = map[string]string{}
+			}
+			transaction.agentSettingsRefused[registration.conn.Name()] = err.Error()
+			continue
 		}
 		if err != nil {
 			// Admission failures happen before Setup writes hook files. Tearing
@@ -7649,6 +7669,11 @@ func (s *Sidecar) saveSingleConnectorReadyState(
 // installed hook surface for this error — the existing registration is still
 // the last verified contract.
 var ErrHookContractAdmission = errors.New("hook contract admission failed")
+
+// GuardrailAgentSettingsRefused is the guardrail health detail that maps each
+// connector the agent's own settings refused (connector.ErrAgentConfigRefusal)
+// to the reason, so status can name that agent's fix (GAP-0578).
+const GuardrailAgentSettingsRefused = "connectors_refused_by_agent_settings"
 
 // GuardrailHookContractAdmissionRefused is the guardrail health detail that
 // lists the connectors refused by the hook-contract admission gate when that

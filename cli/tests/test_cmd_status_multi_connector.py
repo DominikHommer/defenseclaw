@@ -1170,3 +1170,26 @@ def test_status_marks_missing_claude_binary_as_not_detected(monkeypatch):
     claude_row = next(line for line in out.splitlines() if "Claude Code (claudecode)" in line)
     assert "not detected" in claude_row.lower()
     assert "RUNNING" not in claude_row
+
+
+def test_status_names_the_agent_settings_fix_for_a_connector_the_gateway_refused():
+    # GAP-0578: `codex features disable hooks`, then a restart. Rerunning
+    # setup cannot help, so status names the fix the gateway gave.
+    cfg = _cfg(["codex", "hermes"], modes={"codex": "action"})
+    reason = (
+        "Codex hooks are turned off in /home/u/.codex/config.toml ([features] hooks = false), "
+        "so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks"
+    )
+    health = {
+        "connectors": [{"name": "hermes", "state": "running"}],
+        "guardrail": {"state": "running", "details": {
+            "connectors_not_started": ["codex"],
+            "connectors_refused_by_agent_settings": {"codex": reason},
+        }},
+    }
+    out = " ".join(_render_live(cfg, health).split())
+    codex_block = out[out.index("Codex (codex)"):out.index("Hermes (hermes)")]
+    assert "NOT RUNNING" in codex_block
+    assert "codex features enable hooks" in codex_block
+    assert "defenseclaw setup codex" not in codex_block
+    assert "1 active, 1 not running" in out

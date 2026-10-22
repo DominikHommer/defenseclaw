@@ -68,17 +68,17 @@ func (c *ClaudeCodeConnector) ToolInspectionMode() ToolInspectionMode { return T
 func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	if !opts.ManagedEnterprise {
+		// Managed installs, Secure Client included, keep their setup path.
+		if err := refuseClaudeCodeUserSettings(opts); err != nil {
+			return err
+		}
+	}
 	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeClaude, opts.OTLPPathToken)
 	if err != nil {
 		return fmt.Errorf("claudecode scoped OTLP token: %w", err)
 	}
 	opts.OTLPPathToken = otlpToken
-	if !opts.ManagedEnterprise {
-		// Managed installs, Secure Client included, keep their setup path.
-		if err := claudeCodeSettingsParseable(claudeCodeSettingsPath()); err != nil {
-			return setupRefusedUnchanged{err: err}
-		}
-	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	// Plan C2: hand the connector itself so HookScriptOwner is the
@@ -118,6 +118,31 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		}
 	}
 
+	return nil
+}
+
+// refuseClaudeCodeUserSettings refuses, before Setup changes anything, user
+// settings Setup must not rewrite: a settings file that does not parse, or a
+// disableAllHooks=true that switches every hook off (the user's choice,
+// GAP-1066). The registration verifier rejects the second after Setup, and
+// rolling back then removed the hooks an earlier setup installed. A gateway
+// start keeps the other connectors (GAP-0578).
+func refuseClaudeCodeUserSettings(opts SetupOpts) error {
+	if err := claudeCodeSettingsParseable(claudeCodeSettingsPath()); err != nil {
+		return refuseForAgentConfig(err)
+	}
+	// Settings this read cannot inspect are left to the registration
+	// verifier, as before.
+	sources, err := inspectClaudeCodeUserSources(opts)
+	if err != nil {
+		return nil
+	}
+	if disabled, source, err := effectiveClaudeCodeUserHooksDisabled(sources); err == nil && disabled {
+		return refuseForAgentConfig(fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+			"Claude Code %s sets disableAllHooks=true, so Claude Code runs none of its hooks and DefenseClaw is not guarding its tool calls; remove disableAllHooks (or set it to false), then run: defenseclaw-gateway restart",
+			source.label(),
+		))
+	}
 	return nil
 }
 

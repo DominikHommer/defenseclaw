@@ -14652,6 +14652,8 @@ def _restart_services(
             unverified_peers = _unverified_setup_peers() - must_converge
             if unverified_peers:
                 readiness_kwargs["unverified"] = unverified_peers
+        if title == _ROLLBACK_RESTART_TITLE:
+            readiness_kwargs["accept_agent_settings_refusals"] = True
         readiness = _wait_for_connector_runtime(
             data_dir,
             wait_targets,
@@ -15406,7 +15408,17 @@ def _wait_for_connector_runtime(
     require_gateway_health: bool = False,
     required: set[str] | None = None,
     unverified: frozenset[str] = frozenset(),
+    accept_agent_settings_refusals: bool = False,
 ) -> _ConnectorRuntimeReadiness:
+    """Wait until the restarted gateway runs *connectors* with fresh hooks.
+
+    A connector the gateway refused because its agent's own settings turn its
+    hooks off or do not parse kept its earlier hooks, and waiting cannot change
+    that (GAP-0578). When it is in ``required`` the wait fails at once with the
+    gateway's reason, which names the fix; with
+    ``accept_agent_settings_refusals`` (the rollback restart, which restores
+    exactly that registration) it is skipped like a refused peer.
+    """
     ordered = tuple(dict.fromkeys(normalize_connector(name) for name in connectors if name))
     expected = set(ordered)
     if not expected:
@@ -15443,9 +15455,11 @@ def _wait_for_connector_runtime(
     observed_fresh_publications: set[str] = set()
     skipped_peers: set[str] = set()
     last_failure = _ConnectorRuntimeReadiness(False, invariant="snapshot", detail="runtime files are not ready")
+    agent_settings_refused: dict[str, str] = {}
+    from defenseclaw.commands.cmd_status import _connectors_refused_by_agent_settings
 
     def gateway_ready(deadline: float) -> tuple[bool, str | None, _ConnectorRuntimeReadiness]:
-        nonlocal gateway_generation
+        nonlocal gateway_generation, agent_settings_refused
         if not require_gateway_health and gateway_generation is None:
             return True, gateway_generation, _ConnectorRuntimeReadiness(True)
         remaining = deadline - time.monotonic()
@@ -15485,6 +15499,7 @@ def _wait_for_connector_runtime(
                 ),
             )
         guardrail = health.get("guardrail")
+        agent_settings_refused = _connectors_refused_by_agent_settings(health)
         state = guardrail.get("state") if isinstance(guardrail, dict) else None
         if isinstance(state, str) and state.strip().lower() in {"error", "stopped"}:
             return (
@@ -15620,6 +15635,22 @@ def _wait_for_connector_runtime(
                 last_failure = health_failure
                 if health_failure.invariant == "gateway-state":
                     return health_failure
+        settings_refused = {name: reason for name, reason in agent_settings_refused.items() if name in expected}
+        blocking = sorted(
+            name for name in settings_refused if name in must_converge and not accept_agent_settings_refusals
+        )
+        if blocking:
+            return _ConnectorRuntimeReadiness(False, blocking[0], "agent-settings", settings_refused[blocking[0]])
+        if settings_refused:
+            for name in sorted(settings_refused):
+                ux.warn(f"skipping {name}: {settings_refused[name]}")
+            expected = expected - set(settings_refused)
+            skipped_peers.update(settings_refused)
+            _remember_runtime_skipped_peers(settings_refused)
+            tolerated = frozenset(tolerated | set(settings_refused))
+            ordered = tuple(name for name in ordered if name in expected)
+            if not expected:
+                return _ConnectorRuntimeReadiness(True, skipped=frozenset(skipped_peers))
         try:
             state, state_marker = _read_stable_regular_json(state_path)
             lock, lock_marker = _read_stable_regular_json(lock_path)
