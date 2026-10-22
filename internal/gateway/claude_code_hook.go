@@ -86,6 +86,9 @@ type claudeCodeHookRequest struct {
 	// guestCWD is a sandbox request's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); CWD is its host mount.
 	guestCWD string
+	// callerHome is set only from verified managed caller context. Empty
+	// keeps the per-user connector's configured Claude home resolution.
+	callerHome string
 }
 
 type claudeCodeHookResponse struct {

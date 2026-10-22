@@ -894,9 +894,19 @@ func ClaudeCodeProjectAgentDirs(cwd string) []string {
 // The canonical FileChanged matcher below therefore matches every dynamic path;
 // this helper supplies the actual user/project files DefenseClaw needs.
 func ClaudeCodeWatchPaths(cwd string) []string {
+	return claudeCodeWatchPaths(cwd, claudeCodeConfigDir(), claudeCodeMCPStatePath())
+}
+
+// ClaudeCodeWatchPathsForHome resolves managed caller paths without using
+// the service account's home or its Claude configuration overrides.
+func ClaudeCodeWatchPathsForHome(cwd, home string) []string {
+	return claudeCodeWatchPaths(cwd, filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json"))
+}
+
+func claudeCodeWatchPaths(cwd, configDir, mcpStatePath string) []string {
 	root := claudeCodeAbsoluteWatchPath(cwd)
-	userDir := claudeCodeAbsoluteWatchPath(claudeCodeConfigDir())
-	userMCP := claudeCodeAbsoluteWatchPath(claudeCodeMCPStatePath())
+	userDir := claudeCodeAbsoluteWatchPath(configDir)
+	userMCP := claudeCodeAbsoluteWatchPath(mcpStatePath)
 
 	candidates := make([]string, 0, 12)
 	rulesDirs := make([]string, 0, 2)

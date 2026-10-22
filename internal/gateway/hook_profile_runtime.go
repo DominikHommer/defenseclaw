@@ -123,6 +123,9 @@ func decodeClaudeCodeRequestForContext(ctx context.Context, rawBody []byte, payl
 	req.NewCWD = hookCWDForContext(ctx, req.NewCWD)
 	req.OldCWD = hookCWDForContext(ctx, req.OldCWD)
 	req.sandboxView, _ = sandboxHookView(ctx)
+	if _, peer := managedHookPeerFromContext(ctx); peer || serviceAccountGatewayFromContext(ctx) {
+		req.callerHome = trustedActiveHome(ctx)
+	}
 	return req
 }
 
