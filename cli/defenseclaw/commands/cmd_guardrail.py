@@ -4098,28 +4098,27 @@ def use_pack_cmd(
     if kind == "preset" and repin:
         raise click.UsageError(f"--repin re-pins a custom pack; '{pack_name}' is a built-in preset.")
 
+    # A directory can have several registered names, or another spelling on
+    # a case-insensitive filesystem. None of its pins may be bypassed by
+    # selecting that same directory through a different name.
+    try:
+        matching_pins = {
+            name: pin for name, pin in sorted((getattr(gc, "custom_packs", None) or {}).items())
+            if policy_catalog.same_pack_path(path, policy_catalog.normalize_pack_path(pin.path))
+        }
+    except OSError as exc:
+        _fail(1, f"Can't establish rule-pack directory identity ({exc}). Nothing was changed; run defenseclaw doctor.")
+    if kind == "custom" and matching_pins:
+        pack_name = next(iter(matching_pins))
+        kind = "registered"
+
     validation: dict | None = None
     warning = ""
     digest = ""
     # (pinned, new) when --repin replaces a stale pin; never without --repin.
     repinned: tuple[str, str] | None = None
+    stale_pins: dict[str, str] = {}
 
-    def _refuse_stale_pin(pinned: str) -> None:
-        _finish(
-            ok=False,
-            exit_code=1,
-            pack_name=pack_name,
-            path=path,
-            validation=validation,
-            message=(
-                f"Rule pack {pack_name!r} no longer matches the digest pinned for it ({pinned or 'none'}; "
-                f"the pack is now sha256:{digest}). Review the pack, then re-pin it: defenseclaw guardrail "
-                f"use-pack {raw} --repin (or defenseclaw config set guardrail.custom_packs.{name_for_pin}.digest "
-                f"sha256:{digest}). Nothing was changed."
-            ),
-        )
-
-    name_for_pin = pack_name
     if kind != "preset" or not no_validate:
         try:
             result = rulepack_validation.validate_rule_pack(path)
@@ -4150,12 +4149,22 @@ def use_pack_cmd(
                 )
             # The pin covers the pack's own files, not the embedded defaults.
             digest = str((result.summary or {}).get("files_digest", "") or "")
-            pinned = str(getattr(registered, "digest", "") or "").strip().lower().removeprefix("sha256:")
-            if kind == "registered" and digest.lower() != pinned:
-                old_pin = f"sha256:{pinned}" if pinned else ""
-                if not repin:
-                    _refuse_stale_pin(old_pin)
-                repinned = (old_pin, f"sha256:{digest}")
+            for alias, pin in matching_pins.items():
+                pinned = str(pin.digest or "").strip().lower().removeprefix("sha256:")
+                if digest.lower() != pinned:
+                    old_pin = f"sha256:{pinned}" if pinned else ""
+                    if not repin:
+                        _fail(
+                            1,
+                            f"Rule pack {alias!r} at {path} no longer matches its pinned digest ({old_pin or 'none'}; "
+                            f"the pack is now sha256:{digest}). Review the pack, then run: defenseclaw guardrail "
+                            f"use-pack {raw if alias == pack_name else alias} --repin "
+                            f"(or defenseclaw config set guardrail.custom_packs.{alias}.digest sha256:{digest}). "
+                            "Nothing was changed.",
+                        )
+                    stale_pins[alias] = old_pin
+            if stale_pins:
+                repinned = (next(iter(stale_pins.values())), f"sha256:{digest}")
 
     _preflight_config_write(app)
     changes: list = []
@@ -4167,29 +4176,21 @@ def use_pack_cmd(
         existing = (getattr(gc, "custom_packs", None) or {}).get(name)
         if existing is not None:
             existing_path = policy_catalog.normalize_pack_path(str(getattr(existing, "path", "") or ""))
-            existing_digest = str(getattr(existing, "digest", "") or "").lower()
-            if existing_path != path:
-                _fail(
-                    1,
-                    f"Custom pack name {name!r} is already registered at {existing_path}. "
-                    "Choose a different pack name or update the registered pack explicitly. Nothing was changed.",
-                )
-            if existing_digest != f"sha256:{digest.lower()}":
-                # Same directory, edited since it was pinned: only --repin replaces the pin.
-                name_for_pin = name
-                if not repin:
-                    _refuse_stale_pin(existing_digest)
-                repinned = (existing_digest, f"sha256:{digest}")
-        if existing is None or repinned is not None:
-            changes.append(
-                config_writer.Change(f"guardrail.custom_packs.{name}", {"path": path, "digest": f"sha256:{digest}"})
+            _fail(
+                1,
+                f"Custom pack name {name!r} is already registered at {existing_path}. "
+                "Choose a different pack name or update the registered pack explicitly. Nothing was changed.",
             )
-    elif repinned is not None:
         changes.append(
+            config_writer.Change(f"guardrail.custom_packs.{name}", {"path": path, "digest": f"sha256:{digest}"})
+        )
+    elif repinned is not None:
+        changes.extend(
             config_writer.Change(
-                f"guardrail.custom_packs.{name}",
-                {"path": str(getattr(registered, "path", "") or ""), "digest": repinned[1]},
+                f"guardrail.custom_packs.{alias}",
+                {"path": matching_pins[alias].path, "digest": repinned[1]},
             )
+            for alias in stale_pins
         )
     shared: list[str] = []
     if repinned is not None:
@@ -4198,10 +4199,11 @@ def use_pack_cmd(
         written = {_scope_key(connector_key, None)}
         if connector_key is None:
             written |= {_scope_key(other, None) for other in (getattr(gc, "connectors", None) or {})}
-        shared = _repin_shared_scopes(app.cfg, name, written)
+        shared = sorted({scope for alias in stale_pins for scope in _repin_shared_scopes(app.cfg, alias, written)})
     shared_note = (
         f" The pin is shared, so the edited pack also applies to {', '.join(shared)}." if shared else ""
     )
+    repin_names = ", ".join(repr(alias) for alias in stale_pins)
     key = _scope_key(connector_key, None)
     changes.append(config_writer.Change(f"{key}.rule_pack", name))
     cleared: list[str] = []
@@ -4224,13 +4226,13 @@ def use_pack_cmd(
         if json_out and not yes:
             _fail(
                 2,
-                f"Re-pinning {name!r} from {repinned[0] or 'none'} to {repinned[1]} needs your confirmation; "
+                f"Re-pinning {repin_names} from {repinned[0] or 'none'} to {repinned[1]} needs your confirmation; "
                 f"pass --yes with --json.{shared_note} It would change config.yaml: {'; '.join(planned)}. "
                 "Nothing was changed.",
             )
         if not json_out:
             ux.warn(
-                f"Re-pin {name!r} at {path}: pinned {repinned[0] or 'none'}, the pack is now {repinned[1]}. "
+                f"Re-pin {repin_names} at {path}: pinned {repinned[0] or 'none'}, the pack is now {repinned[1]}. "
                 f"The gateway then enforces the edited pack.{shared_note}",
                 indent="  ",
             )
@@ -4265,7 +4267,7 @@ def use_pack_cmd(
     if dropped:
         message += f" Dropped rule references the pack does not have: {'; '.join(dropped)}."
     if repinned is not None:
-        message += f" Re-pinned {name!r} from {repinned[0] or 'none'} to {repinned[1]}.{shared_note}"
+        message += f" Re-pinned {repin_names} from {repinned[0] or 'none'} to {repinned[1]}.{shared_note}"
     _log_guardrail_change(
         app,
         "guardrail-use-pack",

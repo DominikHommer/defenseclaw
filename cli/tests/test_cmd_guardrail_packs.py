@@ -189,6 +189,29 @@ def test_registered_custom_pack_key_is_selected_by_name(env):
     assert unknown.exit_code == 1 and "guardrail.custom_packs name (team)" in unknown.output
 
 
+def test_directory_identity_cannot_bypass_any_registered_pin(env, monkeypatch):
+    app, _root, custom, writes = env
+    alias_path = str(custom.with_name("Team"))
+    app.cfg.guardrail.custom_packs = {
+        "fresh": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64),
+        "stale": CustomRulePack(path=alias_path, digest="sha256:" + "b" * 64),
+    }
+    original_samefile = cmd_guardrail.os.path.samefile
+
+    def samefile(left, right):
+        if {str(left), str(right)} <= {str(custom), alias_path}:
+            return True  # The filesystem resolves Team and team to one directory.
+        return original_samefile(left, right)
+
+    monkeypatch.setattr(cmd_guardrail.os.path, "samefile", samefile)
+    for target in (str(custom), "fresh"):
+        result = _run(app, ["use-pack", target, "--json"])
+        assert result.exit_code == 1, result.output
+        assert "stale" in result.output and "--repin" in result.output
+        assert writes == []
+
+
+
 @pytest.mark.parametrize("by_name", [False, True], ids=["path", "name"])
 def test_stale_pin_is_replaced_only_by_a_confirmed_repin(env, monkeypatch, by_name):
     """W4 review: plain use-pack never replaces a stale pin; --repin shows both digests and asks."""
