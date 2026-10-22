@@ -2742,7 +2742,9 @@ func TestWindowsEnterpriseRefusedPowerShellReportsRecordedDeployment(t *testing.
 	}
 	notChecked := false
 	for _, warning := range result.Warnings {
-		notChecked = notChecked || warning.Code == windowsEnterpriseHealthNotChecked
+		notChecked = notChecked || (warning.Code == windowsEnterpriseHealthNotChecked &&
+			strings.Contains(warning.Message, "enrollment") && strings.Contains(warning.Message, "PowerShell 7") &&
+			strings.Contains(warning.Message, "restore") && strings.Contains(warning.Message, "then"))
 	}
 	if !result.Installed || len(result.Services) != 4 || len(result.Errors) != 1 ||
 		result.Errors[0].Code != "powershell7_untrusted" || !notChecked {

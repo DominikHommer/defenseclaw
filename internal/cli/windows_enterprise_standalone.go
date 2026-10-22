@@ -2345,6 +2345,13 @@ func finishWindowsEnterpriseStandalone(
 	result *enterprisestatus.Result,
 	failureCode int,
 ) error {
+	if windowsBundleHasCode(result.Errors, "powershell7_untrusted") {
+		for i := range result.Warnings {
+			if result.Warnings[i].Code == windowsEnterpriseHealthNotChecked {
+				result.Warnings[i].Message = windowsEnterpriseUncheckedHealthMessage(result.Profile, true)
+			}
+		}
+	}
 	addWindowsEnterprisePipeWaitWarning(result, opts)
 	deliveredBundle := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
 	finishWindowsEnterpriseBundle(cmd, opts, result)
@@ -2664,9 +2671,7 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 				result.Readiness.SensorHelper = state == "running"
 			}
 		}
-		result.AddWarning(windowsEnterpriseHealthNotChecked, "this request was refused before any health check ran, so readiness.gateway, readiness.guardian, "+
-			"coverage_complete and security_complete were not checked (they read false); only the recorded deployment and the service states are reported. "+
-			"For the deployment's health, run `& '"+managedWindowsAdminCLI()+"' enterprise windows verify --profile "+profile+" --json` from an elevated PowerShell prompt")
+		result.AddWarning(windowsEnterpriseHealthNotChecked, windowsEnterpriseUncheckedHealthMessage(profile, false))
 		return
 	}
 }

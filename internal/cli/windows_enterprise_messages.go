@@ -189,3 +189,14 @@ func windowsEnterpriseStandardUserInspectionAnswer(action string) string {
 		managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`, and your account's agents with `& '" +
 		managedWindowsAdminCLI() + "' enterprise policy show --user " + managedHostCurrentAccountName() + "`. Nothing was changed."
 }
+
+// A host refusal has no enrollment or readiness result. An untrusted engine
+// must be repaired before repeating the health command that refused it.
+func windowsEnterpriseUncheckedHealthMessage(profile string, untrustedPowerShell bool) string {
+	next := "For the deployment's health, run "
+	if untrustedPowerShell {
+		next = "First restore administrator-only write access and trusted ownership on the PowerShell 7 installation and its parent folders, then run "
+	}
+	return "this request was refused before any health check ran, so readiness.gateway, readiness.guardian, coverage_complete, security_complete and enrollment were not checked (booleans read false and enrollment counts read zero); only the recorded deployment and the service states are reported. " + next +
+		"`& '" + managedWindowsAdminCLI() + "' enterprise windows verify --profile " + profile + " --json` from an elevated PowerShell prompt"
+}
