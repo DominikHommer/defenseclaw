@@ -47,6 +47,8 @@ These are not an outage, so they block in every fail mode on a managed computer:
 
 On a managed standalone host `open` applies only to an outage: the gateway service is not running, is restarting, or gives no answer in time. Every other failure blocks in `open` too: input over the hook's 1 MiB limit, a gateway 5xx, an unusable answer and any other transport error. Per-user and Secure Client hooks are unchanged.
 
+Managed Codex prompt and tool-result hooks also bound a stalled gateway's answer to 3.5 seconds (up to 4 seconds when it reports scanner progress). They keep their fail-closed outcome even in outage mode `open`, and record one `enterprise_managed_gateway_no_answer` transport failure per unanswered call.
+
 ### Secure Client
 
 Under the Secure Client integration only, hooks fail open: an unset `guardrail.hook_fail_mode` resolves to `open` for every connector (Codex and Claude Code included), independent of the guardrail mode, and an explicit `closed` (global or per connector) is kept. With `open`, a Secure Client hook allows the call when the gateway is unreachable, its service is stopped or its answer cannot be used, and records the failure. Only an authenticated Secure Client deployment gets this: the profile the protected config resolves and, for the native Windows hook, a host whose Secure Client installation, deployment record and gateway service check out. Every other install keeps the closed default.

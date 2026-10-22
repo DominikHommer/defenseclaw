@@ -108,14 +108,18 @@ func ManagedGatewayNoAnswer(err error) bool {
 // whose gateway gave no decision within hookAnswerBudget.
 const perUserGatewayNoAnswerReason = "gateway did not answer in time"
 
-// answerDeadline is when the hook of a tool call that started at startedAt
-// stops waiting for its gateway; zero (the hook's whole budget, as before)
-// for a Secure Client hook and for every event that does not gate a tool
-// call. Prompts, session events and stop events keep their budgets: their
-// local work (component scans at a stop, for example) can take longer, and
-// they do not hold a tool call.
+// answerDeadline bounds hooks that hold an agent call waiting for a verdict.
+// Managed Codex also gates prompt submission and delivery of tool results;
+// both need the same bounded answer and canonical no-answer reason as a
+// pre-tool hook. Secure Client, per-user non-tool events, session and stop
+// events keep their whole budget (including longer local component scans).
 func answerDeadline(opts Options, startedAt time.Time) time.Time {
-	if opts.SecureClient || startedAt.IsZero() || !toolGateEvent(opts.Connector, opts.Event) {
+	bounded := toolGateEvent(opts.Connector, opts.Event)
+	if managedNativeDecision(opts) && strings.EqualFold(strings.TrimSpace(opts.Connector), "codex") {
+		event := strings.TrimSpace(opts.Event)
+		bounded = bounded || event == "UserPromptSubmit" || event == "PostToolUse"
+	}
+	if opts.SecureClient || startedAt.IsZero() || !bounded {
 		return time.Time{}
 	}
 	return startedAt.Add(hookAnswerBudget)
@@ -221,19 +225,26 @@ func gatewayNoAnswer(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), errGatewayNoAnswer)
 }
 
-// failNoAnswer fails a tool call whose gateway gave no decision in time:
-// closed for a Secure Client hook, the fail mode for a standalone hook (the
-// administrator's, owner decision 2026-10-20) and for a per-user hook. A
-// standalone hook whose own work left its gateway less than
-// hookGatewayAnswerFloor (Options.answerSpentLocally) is closed.
+// noAnswerFailMode keeps managed non-tool events and locally spent budgets
+// closed. Only a proven tool-gate outage uses the administrator's fail mode.
+func noAnswerFailMode(opts Options, failMode string) string {
+	if opts.answerSpentLocally || (opts.ManagedEnterprise &&
+		(!managedNativeDecision(opts) || !toolGateEvent(opts.Connector, opts.Event))) {
+		return "closed"
+	}
+	return failMode
+}
+
 func failNoAnswer(opts Options, sp spec, failMode string) int {
+	failMode = noAnswerFailMode(opts, failMode)
 	if opts.ManagedEnterprise {
-		mode := "closed"
-		if managedNativeDecision(opts) && !opts.answerSpentLocally {
-			mode = failMode
+		// The existing administrator-selected outage exception applies only
+		// to tool gates. Newly bounded prompt/result events retain their
+		// previous fail-closed outcome, including when outage mode is open.
+		if managedNativeDecision(opts) && toolGateEvent(opts.Connector, opts.Event) && !opts.answerSpentLocally {
 			opts = withManagedOutage(opts, errGatewayNoAnswer)
 		}
-		return failUnreachable(opts, sp, mode, managedGatewayNoAnswerReason)
+		return failUnreachable(opts, sp, failMode, managedGatewayNoAnswerReason)
 	}
 	return failUnreachable(opts, sp, failMode, perUserGatewayNoAnswerReason)
 }
