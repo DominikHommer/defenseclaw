@@ -78,6 +78,10 @@ type runResult struct {
 }
 
 // run executes a hook against a stub gateway with a temp Home + .token file.
+// userLogHome is the failure-log resolver of a managed test call whose
+// invoking user's diagnostic directory is home.
+func userLogHome(home string) func() string { return func() string { return home } }
+
 func run(t *testing.T, connector string, rt *stubRT, mutate func(*Options)) runResult {
 	return runWithContext(t, context.Background(), connector, rt, mutate)
 }
@@ -185,6 +189,7 @@ func TestClaudeAndCodexNativeOutputAgreesWithGatewayAction(t *testing.T) {
 						o.FailMode = "closed"
 						o.ManagedEnterprise = managed
 						home = o.Home
+						o.FailureLogHome = userLogHome(o.Home)
 					})
 					if tc.blocked {
 						denied := claudeBlocked(r)
@@ -2787,7 +2792,7 @@ func TestSecureClientCopilotHookFollowsItsDeliveryMode(t *testing.T) {
 		home := t.TempDir()
 		var stdout, stderr bytes.Buffer
 		opts := Options{Connector: "copilot", Event: "preToolUse", ManagedEnterprise: true, SecureClient: true,
-			Home: home, Stdout: &stdout, Stderr: &stderr, Now: time.Now}
+			Home: home, FailureLogHome: userLogHome(home), Stdout: &stdout, Stderr: &stderr, Now: time.Now}
 		mutate(&opts)
 		code := fail(opts)
 		failures, _ := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))

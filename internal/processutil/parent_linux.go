@@ -20,13 +20,20 @@ package processutil
 
 import (
 	"os/exec"
+	"runtime"
 	"syscall"
 )
 
-// exitWithParent has the kernel kill cmd when this process dies.
-func exitWithParent(cmd *exec.Cmd) {
+// runWithParent runs cmd so that the kernel kills it when this process
+// dies. Linux sends the parent-death signal when the thread that started the
+// child ends, not the process, so cmd runs on a thread locked to this
+// goroutine: the runtime cannot end that thread while the child still runs.
+func runWithParent(cmd *exec.Cmd) error {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	return cmd.Run()
 }

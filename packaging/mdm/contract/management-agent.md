@@ -248,17 +248,21 @@ that ends without `\n` (`printf '%s'`) makes `secret set` wait up to 1 s to
 tell an agent that exited while it sent the value from one that is done. At most 16 KiB. Names match
 `^[a-z0-9][a-z0-9-]{0,62}$`.
 
-Send a credential **only when it changed**. Every Windows `set` restarts the
-gateway (managed hooks fail closed while it restarts), and there is no
-identical-value no-op. Compare first with `enterprise secret status --json`
-(no lock, read-only): `sha256_prefix` is the first 12 hex characters of the
-SHA-256 of the stored value. Hash the value the way the device stores it: on
-Windows with surrounding whitespace trimmed, on Linux and macOS without the
-one trailing newline. Equal prefix: skip the call, unless the agent's last
-call for that name did not end with exit 0. After a Windows `restart_failed`
-(2.2), or an unknown outcome (a killed child, a `secret set` still waiting
-when the agent stopped, 2.4), the value can be stored while the gateway runs
-with the old one: resubmit even when the prefix matches.
+Send a credential **only when it changed**. A Windows `set` of the exact
+stored bytes is not rewritten, but it still restarts a running gateway
+(managed hooks apply their fail mode while it restarts: closed by default,
+open only where the administrator set open): nothing proves which value the
+running gateway loaded. With no running gateway nothing restarts
+(`gateway_restarted: false`). The result keeps the contract v1 shape, with no
+`noop` member. Compare first with `enterprise secret status --json` (no lock,
+read-only): `sha256_prefix` is the first 12 hex characters of the SHA-256 of
+the stored value. Hash the value the way the device stores it: on Windows with
+surrounding whitespace trimmed, on Linux and macOS without the one trailing
+newline. Equal prefix: skip the call, unless the agent's last call for that
+name did not end with exit 0. After a Windows `restart_failed` (2.2), or an
+unknown outcome (a killed child, a `secret set` still waiting when the agent
+stopped, 2.4), the value can be stored while the gateway runs with the old
+one: resubmit even when the prefix matches, which restarts the gateway.
 
 ### 2.6 `--reason` and `--delivery-id`
 
@@ -415,8 +419,9 @@ Exit 0.
   on a device, for `verified` and `already_applied`, whether the apply
   restarts the gateway, from the installed config.yaml and the bundle
   config, with the classifier the apply uses on that OS:
-  - `required`: the apply restarts the gateway and managed hooks fail closed
-    while it restarts. `reason_codes` `restart_settings` (`settings` names the
+  - `required`: the apply restarts the gateway, and managed hooks apply
+    their fail mode while it restarts (closed unless the administrator set
+    open). `reason_codes` `restart_settings` (`settings` names the
     restart-required settings as patterns such as `guardrail.hook_self_heal`
     or `guardrail.connectors.*.enabled`, never a profile, group or connector
     name) or, on Windows, `codex_machine_policy` (Codex protection turns on or
@@ -507,7 +512,8 @@ Exit 0.
   on or off runs the full lifecycle transaction instead (a repair with the
   bundle config), because only that transaction installs and removes
   Codex's machine policy: every DefenseClaw service restarts, managed hooks
-  fail closed meanwhile (usually one to three minutes), and the receipt
+  apply their fail mode meanwhile (closed unless the administrator set open;
+  usually one to three minutes), and the receipt
   records `restart: true`.
 - Idempotency: the same bytes as the confirmed bundle are a success no-op;
   the repeated delivery's receipt is discarded and no new public receipt is
@@ -836,13 +842,16 @@ off the device. The agent does not read `/health` itself (section 7); the
   guardian repair. Either lock not free in time: `lifecycle_busy`, 1618,
   nothing written; retry.
 - Idempotency: on Linux and macOS an identical value is not rewritten and
-  ensure runs anyway (usually a no-op). On Windows every set writes and
-  restarts the running gateway (managed hooks fail closed while it restarts);
-  there is no identical-value no-op, so send a credential only when `status`
-  shows a different `sha256_prefix` (section 2.5). A Windows set or remove
-  that changed the store and then failed to restart is `restart_failed`,
-  exit 1603: resubmit it, which writes and restarts again, even though
-  `sha256_prefix` already shows the new value (2.2).
+  ensure runs anyway (usually a no-op). On Windows an identical value is not
+  rewritten, but every set restarts a running gateway (managed hooks apply
+  their fail mode while it restarts: closed unless the administrator set
+  open), so send a credential only when `status` shows a
+  different `sha256_prefix` (section 2.5); with no running gateway it reports
+  `gateway_restarted: false`. A gateway that is still starting counts as
+  running and is restarted once it runs. A Windows set or remove that changed the
+  store and then failed to restart is `restart_failed`, exit 1603: resubmit
+  it, which restarts again, even though `sha256_prefix` already shows the new
+  value (2.2).
 - stdout: `secret-result.schema.json`, exactly one document with `--json`.
   Linux and macOS print lifecycle result v2 (`action: "ensure"`) once the
   lifecycle ran, and `{schema_version: 1, ok: false, action, name,

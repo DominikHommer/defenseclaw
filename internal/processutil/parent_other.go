@@ -20,5 +20,6 @@ package processutil
 
 import "os/exec"
 
-// exitWithParent has no kernel support here (macOS); cmd runs as is.
-func exitWithParent(_ *exec.Cmd) {}
+// runWithParent runs cmd as is: there is no parent-death signal here
+// (macOS).
+func runWithParent(cmd *exec.Cmd) error { return cmd.Run() }
