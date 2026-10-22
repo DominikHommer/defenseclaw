@@ -479,7 +479,7 @@ func validateV8YAMLEnterpriseProfile(source string, root *yaml.Node) error {
 	default:
 		return v8Error(source, V8YAMLErrorProfileInvalid, path, at,
 			"enterprise.profile is fixed to standalone on Linux (secure_client is not available here)",
-			"set it to standalone or remove it")
+			"set it to standalone or remove it; changing the profile needs a reinstall of the deployment on a supported platform")
 	}
 }
 
