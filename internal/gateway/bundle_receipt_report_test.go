@@ -19,9 +19,11 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,15 +38,23 @@ import (
 const testBundleID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T7"
 
 type fakeBundleReceiptSink struct {
+	mu         sync.Mutex
 	receipts   []audit.PolicyBundleReceipt
 	bundles    []audit.PolicyBundle
 	principals []string
 	versions   []uint64
 	changes    []audit.ConfigChange
 	changeErr  error
+	confirmed  []string
+	// confirmGate holds every delivery until it is closed or the delivery's
+	// deadline passes; confirmFail refuses the deliveries of these ids.
+	confirmGate chan struct{}
+	confirmFail map[string]bool
 }
 
 func (f *fakeBundleReceiptSink) LogConfigChange(change audit.ConfigChange) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.changeErr != nil {
 		return f.changeErr
 	}
@@ -53,9 +63,46 @@ func (f *fakeBundleReceiptSink) LogConfigChange(change audit.ConfigChange) error
 }
 
 func (f *fakeBundleReceiptSink) LogPolicyBundleReceipt(principal string, b audit.PolicyBundle, r audit.PolicyBundleReceipt) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.bundles, f.receipts = append(f.bundles, b), append(f.receipts, r)
 	f.principals = append(f.principals, principal)
 	return nil
+}
+
+func (f *fakeBundleReceiptSink) ConfirmPolicyBundleReceipt(ctx context.Context, _ string, _ audit.PolicyBundle, r audit.PolicyBundleReceipt) error {
+	return f.confirm(ctx, r.ReceiptID)
+}
+
+func (f *fakeBundleReceiptSink) ConfirmConfigChange(ctx context.Context, change audit.ConfigChange) error {
+	return f.confirm(ctx, change.EventID)
+}
+
+func (f *fakeBundleReceiptSink) confirm(ctx context.Context, id string) error {
+	f.mu.Lock()
+	gate, refuse := f.confirmGate, f.confirmFail[id]
+	f.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if refuse {
+		return errors.New("destination refused the delivery")
+	}
+	f.mu.Lock()
+	f.confirmed = append(f.confirmed, id)
+	f.mu.Unlock()
+	return nil
+}
+
+// persistedCounts is the number of receipt and change rows written.
+func (f *fakeBundleReceiptSink) persistedCounts() (receipts, changes int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.receipts), len(f.changes)
 }
 
 func (f *fakeBundleReceiptSink) RecordPolicyBundleVersion(_ context.Context, v uint64) error {
@@ -88,14 +135,14 @@ func TestBundleReceiptReporterReportsEachTerminalReceiptOnce(t *testing.T) {
 		return r
 	}
 	reporter := newReporter()
-	reporter.poll(context.Background()) // no receipt yet: only the gauge
+	pollSettled(reporter) // no receipt yet: only the gauge
 	writeTestPublicReceipt(t, path, enterprisestatus.PublicReceipt{SchemaVersion: 1, ReceiptID: testBundleID,
 		BundleID: testBundleID, Version: 4, Actor: "os:uid:0:root", Principal: "operator:manual-r4", DeliveryID: "agent-7:d.4",
 		State: enterprisestatus.BundleConfirmed, FinishedAt: "2026-10-12T10:00:00.000Z",
 		CurrentBundleID: testBundleID, CurrentVersion: 4, ChangeSummary: "first", Restart: true, RestartRequired: true})
-	reporter.poll(context.Background())
-	reporter.poll(context.Background())
-	newReporter().poll(context.Background()) // a restarted gateway does not report it again
+	pollSettled(reporter)
+	pollSettled(reporter)
+	pollSettled(newReporter()) // a restarted gateway does not report it again
 	if len(sink.receipts) != 1 || sink.receipts[0].State != "confirmed" || sink.bundles[0].ChangeSummary != "first" ||
 		sink.receipts[0].Actor != "os:uid:0:root" || sink.principals[0] != "operator:manual-r4" ||
 		sink.receipts[0].EnforcingVersion != 4 || !sink.receipts[0].Restart || !sink.receipts[0].RestartRequired ||
@@ -106,7 +153,7 @@ func TestBundleReceiptReporterReportsEachTerminalReceiptOnce(t *testing.T) {
 		Version: 5, State: enterprisestatus.BundleFailed, ErrorCode: "signature_invalid",
 		FinishedAt: "2026-10-12T10:05:00.000Z", CurrentBundleID: testBundleID, CurrentVersion: 4})
 	reporter.lastModTime = time.Time{} // same second as the first write
-	reporter.poll(context.Background())
+	pollSettled(reporter)
 	if len(sink.receipts) != 2 || sink.receipts[1].ErrorCode != "signature_invalid" || sink.receipts[1].EnforcingVersion != 4 {
 		t.Fatalf("receipts = %+v", sink.receipts)
 	}
@@ -126,15 +173,15 @@ func TestBundleReceiptReporterEmitsRefusalWithoutReplacingConfirmation(t *testin
 		BundleID: testBundleID, Version: 2, State: enterprisestatus.BundleConfirmed,
 		FinishedAt: "2026-10-13T06:13:33Z", CurrentBundleID: testBundleID, CurrentVersion: 2}
 	writeTestPublicReceipt(t, path, base)
-	r.poll(context.Background())
+	pollSettled(r)
 	base.LastRefusal = &enterprisestatus.BundleRefusal{ReceiptID: "r-01JAZ3Y8Q2K7V4N6M5P0R9S8T8",
 		BundleID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T9", Version: 1,
 		ErrorCode: "capability_loss", Time: "2026-10-13T06:16:41Z", DeliveryID: "agent-7:d.1",
 		WarningCodes: []string{"capability_disabled"}, DisabledByBundle: []string{"sandbox"}}
 	writeTestPublicReceipt(t, path, base)
 	r.lastModTime = time.Time{}
-	r.poll(context.Background())
-	r.poll(context.Background())
+	pollSettled(r)
+	pollSettled(r)
 	if len(sink.receipts) != 2 || sink.receipts[0].State != "confirmed" ||
 		sink.receipts[1].State != "failed" || sink.receipts[1].ErrorCode != "capability_loss" ||
 		len(sink.receipts[1].WarningCodes) != 1 || sink.receipts[1].WarningCodes[0] != "capability_disabled" ||
@@ -156,12 +203,12 @@ func TestBundleReceiptReporterDoesNotRepeatInitialRefusal(t *testing.T) {
 	writeTestPublicReceipt(t, path, enterprisestatus.PublicReceipt{SchemaVersion: 1,
 		ReceiptID: testBundleID, BundleID: testBundleID, Version: 1, State: "failed",
 		ErrorCode: refusal.ErrorCode, FinishedAt: refusal.Time, LastRefusal: refusal})
-	r.poll(context.Background())
+	pollSettled(r)
 	writeTestPublicReceipt(t, path, enterprisestatus.PublicReceipt{SchemaVersion: 1,
 		ReceiptID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", BundleID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8",
 		Version: 2, State: "confirmed", FinishedAt: "2026-10-13T06:05:00Z", LastRefusal: refusal})
 	r.lastModTime = time.Time{}
-	r.poll(context.Background())
+	pollSettled(r)
 	if len(sink.receipts) != 2 {
 		t.Fatalf("receipts = %+v", sink.receipts)
 	}
@@ -200,15 +247,15 @@ func TestBundleReceiptReporterDrainsConsecutiveRefusalsBeforePoll(t *testing.T) 
 	newReporter := func() *bundleReceiptReporter {
 		r := &bundleReceiptReporter{receiptPath: store.PublicReceiptPath(),
 			markerPath:        filepath.Join(dir, bundleReceiptMarkerName),
-			refusalMarkerPath: filepath.Join(dir, bundleRefusalMarkerName), sink: logger,
+			refusalMarkerPath: filepath.Join(dir, bundleRefusalMarkerName), sink: acknowledgedCaptureSink{logger},
 			enforcedVersion: func() uint64 { return 0 }}
 		r.reported, r.reportedRefusal = r.readMarker(), r.readRefusalMarker()
 		return r
 	}
 	reporter := newReporter()
-	reporter.poll(context.Background())
-	reporter.poll(context.Background())
-	newReporter().poll(context.Background())
+	pollSettled(reporter)
+	pollSettled(reporter)
+	pollSettled(newReporter())
 	records := capture.snapshot()
 	if len(records) != 2 {
 		t.Fatalf("audit records = %d, want both refusals once", len(records))
@@ -225,6 +272,18 @@ func TestBundleReceiptReporterDrainsConsecutiveRefusalsBeforePoll(t *testing.T) 
 		}
 	}
 }
+
+// acknowledgedCaptureSink persists through the real logger. The capture
+// emitter keeps records in memory rather than SQLite, so the confirm phase,
+// which requires the stored row, is modeled as acknowledged here; the audit
+// package tests the real confirm phase.
+type acknowledgedCaptureSink struct{ *audit.Logger }
+
+func (acknowledgedCaptureSink) ConfirmPolicyBundleReceipt(context.Context, string, audit.PolicyBundle, audit.PolicyBundleReceipt) error {
+	return nil
+}
+
+func (acknowledgedCaptureSink) ConfirmConfigChange(context.Context, audit.ConfigChange) error { return nil }
 
 func TestBundleReceiptReporterOnlyOnStandaloneEnterprise(t *testing.T) {
 	if r := newBundleReceiptReporter(&config.Config{DataDir: t.TempDir()}, filepath.Join(t.TempDir(), "config.yaml"), &audit.Logger{}); r != nil {

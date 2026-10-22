@@ -17,6 +17,7 @@
 package audit
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"sort"
@@ -158,19 +159,42 @@ func configChangeKeyIDs(ids []string) observability.Optional[[]string] {
 	return observability.Present(out)
 }
 
-// LogConfigChange records one trust anchor or protected credential change:
+// LogConfigChange persists one trust anchor or protected credential change:
 // config.trust_anchors.changed, config.secret.changed or
-// config.secret.change_failed. It reports only.
+// config.secret.change_failed. It writes and syncs the local row without
+// waiting on any destination; ConfirmConfigChange delivers it. It reports
+// only.
 func (l *Logger) LogConfigChange(change ConfigChange) error {
 	if l == nil {
 		return nil
 	}
-	action, err := configChangeAction(change)
+	in, err := configChangeActivity(change)
 	if err != nil {
 		return err
 	}
-	if _, err := configChangeV8FieldsFor(&change); err != nil {
+	return l.persistSpooledActivity(in)
+}
+
+// ConfirmConfigChange delivers a change LogConfigChange persisted to every
+// destination its row owes and returns once each acknowledged it.
+func (l *Logger) ConfirmConfigChange(ctx context.Context, change ConfigChange) error {
+	if l == nil {
+		return nil
+	}
+	in, err := configChangeActivity(change)
+	if err != nil {
 		return err
+	}
+	return l.confirmSpooledActivity(ctx, in)
+}
+
+func configChangeActivity(change ConfigChange) (ActivityInput, error) {
+	action, err := configChangeAction(change)
+	if err != nil {
+		return ActivityInput{}, err
+	}
+	if _, err := configChangeV8FieldsFor(&change); err != nil {
+		return ActivityInput{}, err
 	}
 	after := map[string]any{"event_id": change.EventID, "kind": change.Kind, "action": change.Action, "outcome": change.Outcome}
 	if change.ChangedAt != "" {
@@ -210,12 +234,11 @@ func (l *Logger) LogConfigChange(change ConfigChange) error {
 	if change.Outcome != ConfigChangeApplied {
 		severity = "MEDIUM"
 	}
-	actor := strings.TrimSpace(change.Actor)
-	return l.logDurableActivity(ActivityInput{
-		Actor: actor, Action: action, TargetType: targetType, TargetID: targetID, Reason: reason,
+	return ActivityInput{
+		Actor: strings.TrimSpace(change.Actor), Action: action, TargetType: targetType, TargetID: targetID, Reason: reason,
 		After: after, Severity: severity, ConfigChange: &change,
 		OccurrenceID: stableOccurrenceID("config.change", change.EventID),
-	})
+	}, nil
 }
 
 // stableOccurrenceID is the audit event id of a producer event with its own

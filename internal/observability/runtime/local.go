@@ -243,6 +243,23 @@ func (component *localLogComponent) Process(
 	return outcome, err
 }
 
+// ProcessSpooled is the persist phase of a replayable receipt
+// (pipeline.ProcessSpooled).
+func (component *localLogComponent) ProcessSpooled(
+	ctx context.Context,
+	metadata router.Metadata,
+	builder router.RecordBuilder,
+	intent func([]string) error,
+) (pipeline.LocalLogOutcome, error) {
+	if component == nil || component.pipeline == nil || component.store == nil ||
+		!component.active.Load() || component.closed.Load() {
+		return pipeline.LocalLogOutcome{}, &localFactoryError{}
+	}
+	outcome, err := component.pipeline.ProcessSpooled(ctx, metadata, builder, intent)
+	component.countWrite(outcome, err)
+	return outcome, err
+}
+
 func (component *localLogComponent) ProcessAtomicBatch(
 	ctx context.Context,
 	items []pipeline.AtomicBatchItem,

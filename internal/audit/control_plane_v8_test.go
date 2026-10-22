@@ -34,6 +34,8 @@ type testRuntimeV8Emitter struct {
 	writer    *EventHistoryWriter
 	admission router.Admission
 	profile   observabilityredaction.Profile
+	// spoolDestinations are the destinations a persisted spool item owes.
+	spoolDestinations []string
 
 	mu       sync.Mutex
 	metadata []router.Metadata
@@ -130,9 +132,12 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 	return RuntimeV8EmitOutcome{Admission: emitter.admission, LocalPersisted: true}, nil
 }
 
-func (emitter *testRuntimeV8Emitter) EmitRuntimeV8Confirmed(ctx context.Context, metadata router.Metadata, builder RuntimeV8Builder, replay bool) (RuntimeV8EmitOutcome, error) {
-	if replay {
+func (emitter *testRuntimeV8Emitter) EmitRuntimeV8Spooled(ctx context.Context, metadata router.Metadata, builder RuntimeV8Builder, spool RuntimeV8Spool) (RuntimeV8EmitOutcome, error) {
+	if spool.Confirm {
 		return RuntimeV8EmitOutcome{Admission: router.AdmissionOrdinary, LocalPersisted: true}, nil
+	}
+	if err := spool.Intent(emitter.spoolDestinations); err != nil {
+		return RuntimeV8EmitOutcome{}, err
 	}
 	return emitter.EmitRuntimeV8(ctx, metadata, builder)
 }

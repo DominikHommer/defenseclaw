@@ -545,7 +545,9 @@ func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8(
 	}, err
 }
 
-func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8Confirmed(ctx context.Context, metadata router.Metadata, builder audit.RuntimeV8Builder, replay bool) (audit.RuntimeV8EmitOutcome, error) {
+// EmitRuntimeV8Spooled adapts one phase of a replayable spool item
+// (audit.RuntimeV8Spool) to the runtime's SpooledEmission.
+func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8Spooled(ctx context.Context, metadata router.Metadata, builder audit.RuntimeV8Builder, spool audit.RuntimeV8Spool) (audit.RuntimeV8EmitOutcome, error) {
 	if owner == nil || owner.runtime == nil || builder == nil {
 		return audit.RuntimeV8EmitOutcome{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
@@ -554,9 +556,11 @@ func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8Confirmed(ctx cont
 	if owner.closed {
 		return audit.RuntimeV8EmitOutcome{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
 	}
-	outcome, err := owner.runtime.EmitConfirmed(ctx, metadata, func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
+	outcome, err := owner.runtime.EmitSpooled(ctx, metadata, func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
 		return builder(audit.RuntimeV8BuildContext{ConfigGeneration: snapshot.Generation(), ConfigDigest: snapshot.Digest()}, admission)
-	}, replay)
+	}, observabilityruntime.SpooledEmission{
+		Confirm: spool.Confirm, Intent: spool.Intent, Obligations: spool.Obligations, Known: spool.Known,
+	})
 	return audit.RuntimeV8EmitOutcome{Admission: outcome.Admission(), LocalPersisted: outcome.LocalPersisted()}, err
 }
 

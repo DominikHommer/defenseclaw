@@ -17,7 +17,6 @@
 package gateway
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -60,9 +59,9 @@ func TestBundleReceiptReporterReportsEachChangeEventOnce(t *testing.T) {
 	secret := writeTestChangeEvent(t, spool, enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet,
 		enterprisestatus.ChangeApplied, "", func(ev *enterprisestatus.ChangeEvent) { ev.SecretName = "splunk-hec-token" })
 	reporter := newReporter()
-	reporter.poll(context.Background())
-	reporter.poll(context.Background())
-	newReporter().poll(context.Background())
+	pollSettled(reporter)
+	pollSettled(reporter)
+	pollSettled(newReporter())
 	if len(sink.changes) != 2 || sink.changes[0].EventID != anchors.EventID || sink.changes[1].EventID != secret.EventID ||
 		sink.changes[0].SHA256 != anchors.SHA256 || sink.changes[0].KeyIDsAdded[0] != "fleet-2026-11" ||
 		sink.changes[1].SecretName != "splunk-hec-token" || sink.changes[1].Actor == "" {
@@ -70,7 +69,7 @@ func TestBundleReceiptReporterReportsEachChangeEventOnce(t *testing.T) {
 	}
 	failed := writeTestChangeEvent(t, spool, enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet,
 		enterprisestatus.ChangeRefused, "invalid_arguments", nil)
-	newReporter().poll(context.Background())
+	pollSettled(newReporter())
 	if len(sink.changes) != 3 || sink.changes[2].EventID != failed.EventID || sink.changes[2].ReasonCode != "invalid_arguments" ||
 		sink.changes[2].SecretName != "" {
 		t.Fatalf("changes = %+v", sink.changes)
@@ -96,14 +95,14 @@ func TestBundleReceiptReporterKeepsRefusedChangeEventsUntilRecorded(t *testing.T
 	ev := writeTestChangeEvent(t, spool, enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionRemove,
 		enterprisestatus.ChangeApplied, "", func(ev *enterprisestatus.ChangeEvent) { ev.SecretName = "otlp-token" })
 	for range 36 { // More than the retired receipt retry cap.
-		reporter.poll(context.Background())
+		pollSettled(reporter)
 	}
 	if reporter.hasSeen(ev.EventID) || enterprisestatus.ChangeReported(dir, ev.EventID) {
 		t.Fatal("a change event the audit logger refused was marked reported")
 	}
 	sink.changeErr = nil
-	reporter.poll(context.Background())
-	reporter.poll(context.Background())
+	pollSettled(reporter)
+	pollSettled(reporter)
 	if len(sink.changes) != 1 || sink.changes[0].EventID != ev.EventID {
 		t.Fatalf("changes = %+v, want the refused event once", sink.changes)
 	}

@@ -84,13 +84,25 @@ type RuntimeV8Emitter interface {
 	) (RuntimeV8EmitOutcome, error)
 }
 
-// RuntimeV8ConfirmedEmitter confirms every selected remote spool delivery.
-// replay is true only after the producer proved its stable local row exists.
-type RuntimeV8ConfirmedEmitter interface {
-	EmitRuntimeV8Confirmed(context.Context, router.Metadata, RuntimeV8Builder, bool) (RuntimeV8EmitOutcome, error)
+// RuntimeV8Spool is one phase of a replayable producer's spool item (a policy
+// bundle receipt, a trust anchor or credential change). Confirm false
+// persists the local row; Intent records the destinations it selects before
+// the commit. Confirm true delivers a row the producer proved exists to the
+// recorded Obligations (Known), or to the current routing when none were
+// recorded, and returns once every destination acknowledged it.
+type RuntimeV8Spool struct {
+	Confirm     bool
+	Intent      func(destinations []string) error
+	Obligations []string
+	Known       bool
 }
 
-type spoolReplayContextKey struct{}
+// RuntimeV8SpoolEmitter runs both phases of a replayable spool item.
+type RuntimeV8SpoolEmitter interface {
+	EmitRuntimeV8Spooled(context.Context, router.Metadata, RuntimeV8Builder, RuntimeV8Spool) (RuntimeV8EmitOutcome, error)
+}
+
+type spoolContextKey struct{}
 
 // RuntimeV8FindingContentFingerprinter is the optional key-custody capability
 // used at the forensic persistence boundary. Implementations retain the
@@ -227,24 +239,30 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 	}
 	emitCtx := contextWithLegacyEventProjection(ctx, event)
 	var result RuntimeV8EmitOutcome
-	replay, replayable := ctx.Value(spoolReplayContextKey{}).(bool)
-	if replayable {
-		confirmed, ok := binding.emitter.(RuntimeV8ConfirmedEmitter)
+	if spool, spooled := ctx.Value(spoolContextKey{}).(RuntimeV8Spool); spooled {
+		emitter, ok := binding.emitter.(RuntimeV8SpoolEmitter)
 		if !ok {
 			return auditV8Persisted, fmt.Errorf("audit: spool delivery confirmation is unavailable")
 		}
-		result, err = confirmed.EmitRuntimeV8Confirmed(emitCtx, metadata, build, replay)
+		result, err = emitter.EmitRuntimeV8Spooled(emitCtx, metadata, build, spool)
+		if spool.Confirm {
+			// The local row and its metrics belong to the persist phase.
+			if err != nil {
+				return auditV8Persisted, fmt.Errorf("audit: confirm v8 control-plane action %q: %w", event.Action, err)
+			}
+			return auditV8Persisted, nil
+		}
 	} else {
 		result, err = binding.emitter.EmitRuntimeV8(emitCtx, metadata, build)
 	}
-	if err != nil && (!replayable || !result.LocalPersisted) {
+	if err != nil {
 		return auditV8Persisted, fmt.Errorf("audit: emit v8 control-plane action %q: %w", event.Action, err)
 	}
 	disposition, outcomeErr := runtimeV8Disposition(result, true)
 	if outcomeErr != nil {
 		return auditV8Persisted, fmt.Errorf("audit: v8 control-plane action %q: %w", event.Action, outcomeErr)
 	}
-	if disposition == auditV8Persisted && !replay {
+	if disposition == auditV8Persisted {
 		auditMetric, metricErr := newAuditEventRuntimeV8GeneratedMetric(event)
 		if metricErr == nil {
 			metrics := make([]RuntimeV8GeneratedMetric, 0, 1+len(companionMetrics))
@@ -253,20 +271,8 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 			// Metrics are an independent best-effort signal. Once the canonical
 			// log is durably persisted, a metric-path failure must not report the
 			// operator mutation as failed or invite a retry that duplicates it.
-			metricCtx := ctx
-			cancel := func() {}
-			if replayable {
-				// Remote acknowledgement may have exhausted the event's
-				// deadline after local persistence. Count that first local
-				// occurrence independently; replay suppresses a second count.
-				metricCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), time.Second)
-			}
-			_ = l.recordRuntimeV8GeneratedMetricBatch(metricCtx, binding, metrics)
-			cancel()
+			_ = l.recordRuntimeV8GeneratedMetricBatch(ctx, binding, metrics)
 		}
-	}
-	if err != nil {
-		return auditV8Persisted, fmt.Errorf("audit: emit v8 control-plane action %q: %w", event.Action, err)
 	}
 	return disposition, nil
 }

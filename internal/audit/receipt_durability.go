@@ -9,15 +9,34 @@ import (
 	"time"
 )
 
-// logDurableActivity retires a producer's spool record only after confirmed
-// delivery and a power-loss barrier for its canonical local row.
-func (l *Logger) logDurableActivity(in ActivityInput) error {
-	if err := l.logActivityImpl(in); err != nil {
+// A replayable producer (the gateway's bundle receipt and change reporter)
+// retires a spool item only after two phases. persistSpooledActivity writes
+// the canonical local row, records the destinations the row owes before the
+// commit, and establishes a power-loss barrier; it never waits on a
+// destination, so a stalled destination cannot delay local audit history.
+// confirmSpooledActivity then delivers that row and returns once every
+// destination it owes acknowledged it.
+
+const spoolPersistTimeout = 10 * time.Second
+
+func (l *Logger) persistSpooledActivity(in ActivityInput) error {
+	ctx, cancel := context.WithTimeout(context.Background(), spoolPersistTimeout)
+	defer cancel()
+	if err := l.logActivity(ctx, in, &spoolPhase{}); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	return l.store.SyncEventHistory(ctx)
+}
+
+func (l *Logger) confirmSpooledActivity(ctx context.Context, in ActivityInput) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := l.logActivity(ctx, in, &spoolPhase{confirm: true}); err != nil {
+		return err
+	}
+	l.forgetSpoolObligations(in.OccurrenceID)
+	return nil
 }
 
 // SyncEventHistory establishes a power-loss barrier before a producer retires

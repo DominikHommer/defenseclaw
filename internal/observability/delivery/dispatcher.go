@@ -245,26 +245,33 @@ func (dispatcher *Dispatcher) Enqueue(payload Payload) EnqueueResult {
 	return EnqueueResult{Disposition: EnqueueAccepted, Reason: ReasonNone}
 }
 
-// EnqueueConfirmed uses the same bounded queue, retries and adapter worker as
-// ordinary delivery. Completion means the adapter acknowledged this payload;
-// a flush alone also completes dropped and rejected work and is not proof.
-func (dispatcher *Dispatcher) EnqueueConfirmed(ctx context.Context, payload Payload) error {
-	if ctx == nil {
-		return newError(ErrorInvalidContext)
-	}
-	payload.acknowledged = make(chan error, 1)
+// EnqueueAcknowledged admits payload to the same bounded queue, retries and
+// adapter worker as ordinary delivery and returns a wait for its
+// acknowledgement. It does not wait itself: a producer admits one record to
+// every destination before it waits on any of them, so a stalled destination
+// cannot hold the record back from the others. The wait succeeds only once
+// the adapter acknowledged this payload; a flush alone also completes dropped
+// and rejected work and is not proof.
+func (dispatcher *Dispatcher) EnqueueAcknowledged(payload Payload) (func(context.Context) error, error) {
+	acknowledged := make(chan error, 1)
+	payload.acknowledged = acknowledged
 	if !dispatcher.Enqueue(payload).Accepted() {
-		return errors.New("destination did not accept the receipt")
+		return nil, errors.New("destination did not accept the receipt")
 	}
-	if err := dispatcher.Flush(ctx); err != nil {
-		return err
-	}
-	select {
-	case err := <-payload.acknowledged:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return func(ctx context.Context) error {
+		if ctx == nil {
+			return newError(ErrorInvalidContext)
+		}
+		if err := dispatcher.Flush(ctx); err != nil {
+			return err
+		}
+		select {
+		case err := <-acknowledged:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}, nil
 }
 
 func acknowledgePayloads(payloads []Payload, err error) {

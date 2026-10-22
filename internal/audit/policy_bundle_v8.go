@@ -174,19 +174,43 @@ func policyBundleReceiptV8FieldsFor(r *PolicyBundleReceipt) (policyBundleReceipt
 	return out, nil
 }
 
-// LogPolicyBundleReceipt records the terminal receipt of a signed policy
+// LogPolicyBundleReceipt persists the terminal receipt of a signed policy
 // bundle: one config.bundle.receipt record, the
 // defenseclaw.policy.bundle.applies counter and, when the device enforces a
 // bundle, the defenseclaw.policy.bundle.version gauge. principal is the
 // bundle principal the receipt names (control-plane:<tenant>/<admin> or
-// operator:<os-admin>), "" when the manifest could not be read. It reports
-// only; nothing here changes what is enforced.
+// operator:<os-admin>), "" when the manifest could not be read. It writes and
+// syncs the local row without waiting on any destination;
+// ConfirmPolicyBundleReceipt delivers it. It reports only; nothing here
+// changes what is enforced.
 func (l *Logger) LogPolicyBundleReceipt(principal string, bundle PolicyBundle, receipt PolicyBundleReceipt) error {
 	if l == nil {
 		return nil
 	}
-	if _, err := policyBundleReceiptV8FieldsFor(&receipt); err != nil {
+	in, err := policyBundleReceiptActivity(principal, bundle, receipt)
+	if err != nil {
 		return err
+	}
+	return l.persistSpooledActivity(in)
+}
+
+// ConfirmPolicyBundleReceipt delivers a receipt LogPolicyBundleReceipt
+// persisted to every destination its row owes and returns once each
+// acknowledged it. The reporter retires the receipt only after both.
+func (l *Logger) ConfirmPolicyBundleReceipt(ctx context.Context, principal string, bundle PolicyBundle, receipt PolicyBundleReceipt) error {
+	if l == nil {
+		return nil
+	}
+	in, err := policyBundleReceiptActivity(principal, bundle, receipt)
+	if err != nil {
+		return err
+	}
+	return l.confirmSpooledActivity(ctx, in)
+}
+
+func policyBundleReceiptActivity(principal string, bundle PolicyBundle, receipt PolicyBundleReceipt) (ActivityInput, error) {
+	if _, err := policyBundleReceiptV8FieldsFor(&receipt); err != nil {
+		return ActivityInput{}, err
 	}
 	severity := "INFO"
 	reason := "policy bundle confirmed"
@@ -226,13 +250,13 @@ func (l *Logger) LogPolicyBundleReceipt(principal string, bundle PolicyBundle, r
 	if actor == "" {
 		actor = strings.TrimSpace(principal)
 	}
-	return l.logDurableActivity(ActivityInput{
+	return ActivityInput{
 		Actor: actor, Principal: strings.TrimSpace(principal), Action: ActionConfigBundleReceipt,
 		TargetType: "policy_bundle", TargetID: receipt.ReceiptID, Reason: reason,
 		After: after, Severity: severity, Bundle: &bundle, BundleReceipt: &receipt,
 		OccurrenceID: uuid.NewHash(sha256.New(), stableOccurrenceNamespace,
 			[]byte("policy.bundle.receipt\x00"+receipt.ReceiptID+"|"+receipt.State+"|"+receipt.FinishedAt+"|"+receipt.DeliveryID), 8).String(),
-	})
+	}, nil
 }
 
 // RecordPolicyBundleVersion records the defenseclaw.policy.bundle.version

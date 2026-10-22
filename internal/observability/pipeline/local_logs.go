@@ -72,6 +72,12 @@ const (
 	ErrorLocalProjection   ErrorCode = "local_projection_failed"
 	ErrorLocalWrite        ErrorCode = "local_write_failed"
 	ErrorFailureRecord     ErrorCode = "failure_record_failed"
+	// ErrorDeliveryIntent: a replayable producer could not record the
+	// destinations its occurrence owes before the local commit.
+	ErrorDeliveryIntent ErrorCode = "delivery_intent_failed"
+	// ErrorDeliveryObligation: a destination a committed replayable row
+	// owes is not selected by the current routing.
+	ErrorDeliveryObligation ErrorCode = "delivery_obligation_unroutable"
 )
 
 // Error never retains or unwraps producer content, persistence diagnostics, or
@@ -622,6 +628,92 @@ func (pipeline *LocalLogPipeline) ProjectCommitted(
 	outcome := LocalLogOutcome{admission: admission, localPersisted: true}
 	pipeline.projectOptional(&outcome, record, optional, legacyredaction.SinkPolicyFromContext(ctx), "")
 	return outcome
+}
+
+// ProcessSpooled persists one occurrence of a replayable producer (a policy
+// bundle receipt, a trust anchor or credential change) without building
+// destination work. intent receives the names of the optional destinations
+// the occurrence selects before the local append, so the producer keeps that
+// remote obligation across a restart and a later route change; nothing is
+// appended when intent fails. ProjectSpooled builds the delivery later.
+func (pipeline *LocalLogPipeline) ProcessSpooled(
+	ctx context.Context,
+	metadata router.Metadata,
+	builder router.RecordBuilder,
+	intent func(destinations []string) error,
+) (LocalLogOutcome, error) {
+	if intent == nil {
+		return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
+	}
+	prepared, outcome, admitted, err := pipeline.prepare(ctx, metadata, builder)
+	if err != nil || !admitted {
+		return outcome, err
+	}
+	destinations := make([]string, 0, len(prepared.optional))
+	for _, delivery := range prepared.optional {
+		destinations = append(destinations, delivery.DestinationName)
+	}
+	if err := intent(destinations); err != nil {
+		return LocalLogOutcome{}, boundedPipelineError(ErrorDeliveryIntent, err)
+	}
+	if err := pipeline.appender.AppendContext(ctx, prepared.record.Clone(), prepared.projection); err != nil {
+		return LocalLogOutcome{}, boundedPipelineError(ErrorLocalWrite, err)
+	}
+	outcome.localPersisted = true
+	return outcome, nil
+}
+
+// ProjectSpooled builds the destination work of a replayable occurrence whose
+// stable local row its producer proved exists. The row is not appended again,
+// and current collection does not decide whether it was persisted: a row with
+// no remote obligation stays complete after logs are turned off. known
+// obligations are the destinations ProcessSpooled recorded before the commit.
+// Each must still be selected by the current routing, and only they receive
+// the record, so a route change neither drops an earlier obligation nor adds
+// a destination the occurrence never owed. Without a record the current
+// ordinary routing decides, and floor-only routing owes nothing remote.
+func (pipeline *LocalLogPipeline) ProjectSpooled(
+	ctx context.Context,
+	record observability.Record,
+	obligations []string,
+	known bool,
+) (LocalLogOutcome, error) {
+	if pipeline == nil || pipeline.evaluator == nil || pipeline.projector == nil || ctx == nil {
+		return LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
+	}
+	if known && len(obligations) == 0 {
+		return LocalLogOutcome{admission: router.AdmissionFloor, localPersisted: true}, nil
+	}
+	admission, deliveries, err := pipeline.evaluator.RouteCommitted(record)
+	if err != nil {
+		return LocalLogOutcome{}, &Error{code: ErrorEvaluation}
+	}
+	outcome := LocalLogOutcome{admission: router.AdmissionFloor, localPersisted: true}
+	var optional []router.Delivery
+	if admission == router.AdmissionOrdinary {
+		var ok bool
+		if _, optional, ok = splitLocalDelivery(deliveries, admission); !ok {
+			return LocalLogOutcome{}, &Error{code: ErrorLocalDelivery}
+		}
+		outcome.admission = admission
+	}
+	if known {
+		selected := make(map[string]router.Delivery, len(optional))
+		for _, delivery := range optional {
+			selected[delivery.DestinationName] = delivery
+		}
+		owed := make([]router.Delivery, 0, len(obligations))
+		for _, name := range obligations {
+			delivery, ok := selected[name]
+			if !ok {
+				return LocalLogOutcome{}, &Error{code: ErrorDeliveryObligation}
+			}
+			owed = append(owed, delivery)
+		}
+		optional = owed
+	}
+	pipeline.projectOptional(&outcome, record, optional, legacyredaction.SinkPolicyFromContext(ctx), "")
+	return outcome, nil
 }
 
 // projectOptional projects record for each optional destination, collecting

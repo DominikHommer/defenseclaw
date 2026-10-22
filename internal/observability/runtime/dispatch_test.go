@@ -275,7 +275,10 @@ func TestConfirmedReceiptDeliveryReplaysWithoutRepeatingLocalPersistence(t *test
 	const id = "confirmed-receipt"
 	done := make(chan error, 1)
 	go func() {
-		_, err := runtime.EmitConfirmed(ctx, diagnosticMetadata(t), runtimeContentRecordBuilder(id, "receipt"), false)
+		_, err := runtime.EmitSpooled(ctx, diagnosticMetadata(t), runtimeContentRecordBuilder(id, "receipt"), SpooledEmission{Intent: func([]string) error { return nil }})
+		if err == nil {
+			_, err = runtime.EmitSpooled(ctx, diagnosticMetadata(t), runtimeContentRecordBuilder(id, "receipt"), SpooledEmission{Confirm: true})
+		}
 		done <- err
 	}()
 	<-adapter.started
@@ -297,7 +300,7 @@ func TestConfirmedReceiptDeliveryReplaysWithoutRepeatingLocalPersistence(t *test
 	if _, err := runtime.Reload(ctx, runtimegraph.ConfigFromPlan(repaired, false)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runtime.EmitConfirmed(ctx, diagnosticMetadata(t), runtimeContentRecordBuilder(id, "receipt"), true); err != nil {
+	if _, err := runtime.EmitSpooled(ctx, diagnosticMetadata(t), runtimeContentRecordBuilder(id, "receipt"), SpooledEmission{Confirm: true}); err != nil {
 		t.Fatal(err)
 	}
 	for seen := 0; seen < 2; {

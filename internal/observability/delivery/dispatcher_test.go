@@ -476,7 +476,12 @@ func TestConfirmedDeliveryRequiresAnAcknowledgementRatherThanQueueCompletion(t *
 			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
 			done := make(chan error, 1)
-			go func() { done <- dispatcher.EnqueueConfirmed(ctx, payload(t, "receipt-id", "receipt")) }()
+			// Admission returns while the adapter still holds the batch.
+			wait, err := dispatcher.EnqueueAcknowledged(payload(t, "receipt-id", "receipt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			go func() { done <- wait(ctx) }()
 			<-adapter.started
 			select {
 			case err := <-done:

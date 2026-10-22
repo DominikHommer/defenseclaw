@@ -15,6 +15,14 @@ import (
 
 // logActivityImpl contains the Track 5 LogActivity body.
 func (l *Logger) logActivityImpl(in ActivityInput) error {
+	return l.logActivity(context.Background(), in, nil)
+}
+
+// spoolPhase selects one phase of a replayable producer's spool item
+// (persistSpooledActivity, confirmSpooledActivity); nil is ordinary activity.
+type spoolPhase struct{ confirm bool }
+
+func (l *Logger) logActivity(ctx context.Context, in ActivityInput, phase *spoolPhase) error {
 	actor := in.Actor
 	if actor == "" {
 		actor = "system"
@@ -67,25 +75,29 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	summaryBlob, _ := json.Marshal(summary)
 
 	auditID := observability.NewTimeOrderedID()
-	stored := false
-	replayable := in.BundleReceipt != nil || in.ConfigChange != nil
+	if phase != nil && in.OccurrenceID == "" {
+		return fmt.Errorf("audit: a spooled activity needs a stable occurrence id")
+	}
 	if in.OccurrenceID != "" {
 		auditID = in.OccurrenceID
-		var err error
-		stored, err = l.store.hasAuditEvent(context.Background(), auditID)
+		stored, err := l.store.hasAuditEvent(ctx, auditID)
 		if err != nil {
 			return err
 		}
-		if stored && !replayable {
+		confirm := phase != nil && phase.confirm
+		if confirm && !stored {
+			return fmt.Errorf("audit: spooled activity %s has no local row to confirm", auditID)
+		}
+		if stored && !confirm {
 			return nil
 		}
 	}
-	ctx := context.Background()
-	if replayable {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		ctx = context.WithValue(ctx, spoolReplayContextKey{}, stored)
+	if phase != nil {
+		spool, err := l.spoolDelivery(auditID, phase.confirm)
+		if err != nil {
+			return err
+		}
+		ctx = context.WithValue(ctx, spoolContextKey{}, spool)
 	}
 	// v7 clean break: AgentInstanceID is per-session (unset for
 	// activity/mutation events that have no session anchor);

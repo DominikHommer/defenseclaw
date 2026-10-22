@@ -366,18 +366,21 @@ func (component *destinationDispatchComponent) Enqueue(work pipeline.ProjectedDe
 	}
 }
 
-func (component *destinationDispatchComponent) EnqueueConfirmed(ctx context.Context, work pipeline.ProjectedDelivery) error {
+// EnqueueAcknowledged admits one confirmed delivery to its destination and
+// returns the wait for that destination's acknowledgement (see
+// delivery.Dispatcher.EnqueueAcknowledged).
+func (component *destinationDispatchComponent) EnqueueAcknowledged(work pipeline.ProjectedDelivery) (func(context.Context) error, error) {
 	if component == nil {
-		return errors.New("receipt dispatcher is unavailable")
+		return nil, errors.New("receipt dispatcher is unavailable")
 	}
 	route := work.Delivery()
 	entry := component.byName[route.DestinationName]
 	if entry == nil || entry.dispatcher == nil || entry.kind != route.DestinationKind {
-		return errors.New("receipt destination is unavailable")
+		return nil, errors.New("receipt destination is unavailable")
 	}
 	encoded, err := work.Projection().Bytes()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	identity := work.Identity()
 	payload, err := delivery.NewPayload(encoded, delivery.RoutingIdentity{
@@ -385,9 +388,9 @@ func (component *destinationDispatchComponent) EnqueueConfirmed(ctx context.Cont
 		EventName: string(identity.EventName()), OriginDestination: identity.OriginDestination(),
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return entry.dispatcher.EnqueueConfirmed(ctx, payload)
+	return entry.dispatcher.EnqueueAcknowledged(payload)
 }
 
 func (component *destinationDispatchComponent) ObserveProjectionFailure(failure pipeline.OptionalFailure) {

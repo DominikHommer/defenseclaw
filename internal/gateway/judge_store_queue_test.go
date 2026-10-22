@@ -86,8 +86,14 @@ func (e *captureJudgeRuntimeV8Emitter) snapshot() []observability.Record {
 	return append([]observability.Record(nil), e.records...)
 }
 
-func (e *captureJudgeRuntimeV8Emitter) EmitRuntimeV8Confirmed(ctx context.Context, metadata router.Metadata, build audit.RuntimeV8Builder, _ bool) (audit.RuntimeV8EmitOutcome, error) {
+func (e *captureJudgeRuntimeV8Emitter) EmitRuntimeV8Spooled(ctx context.Context, metadata router.Metadata, build audit.RuntimeV8Builder, spool audit.RuntimeV8Spool) (audit.RuntimeV8EmitOutcome, error) {
 	// This capture has no remote destinations; it models successful delivery.
+	if spool.Confirm {
+		return audit.RuntimeV8EmitOutcome{Admission: router.AdmissionOrdinary, LocalPersisted: true}, nil
+	}
+	if err := spool.Intent(nil); err != nil {
+		return audit.RuntimeV8EmitOutcome{}, err
+	}
 	return e.EmitRuntimeV8(ctx, metadata, build)
 }
 
