@@ -225,6 +225,66 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
+			// GAP-0616: a runtime-expanded word in another statement leaves
+			// the sequence partial; each statement is still judged alone.
+			name:    "subshell with an expanding word in another statement",
+			command: "(echo " + redirectReductionMarker + "); echo $USER",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "if body with an expanding word in another statement",
+			command: "if true; then echo " + redirectReductionMarker + "; fi; echo $HOME",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "loop body with an expanding word in another statement",
+			command: "for i in 1; do echo " + redirectReductionMarker + "; done; echo $HOME",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "expanding word in the subshell",
+			command: "(echo $USER " + redirectReductionMarker + ")",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			// A redirect of a compound command is one of each command in it.
+			name:    "redirected subshell",
+			command: "(echo " + redirectReductionMarker + ") 2>/dev/null",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "redirected group",
+			command: "{ echo " + redirectReductionMarker + "; } > /dev/null",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "loop reading a file",
+			command: "while read l; do echo " + redirectReductionMarker + "; done < /etc/hosts",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "subshell with a runtime-expanded redirect target",
+			command: "(echo " + redirectReductionMarker + ") > $HOME/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			// A descriptor duplication only adds a data flow.
+			name:    "descriptor duplication",
+			command: "echo " + redirectReductionMarker + " 2>&1",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "subshell with a descriptor duplication",
+			command: "(echo " + redirectReductionMarker + ") 2>&1",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			// An exit in a subshell ends only the subshell.
+			name:    "exit in a subshell",
+			command: "(exit 0); echo " + redirectReductionMarker,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
 			// The view would drop what a command substitution in a loop
 			// word runs, so the loop is not reduced.
 			name:    "command substitution in a loop word",
@@ -300,9 +360,10 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},
 		},
 		{
+			// GAP-0616: as alone, `echo marker $USER` blocks.
 			name:    "expanding argument under if",
 			command: "if test -n \"$X\"; then echo " + redirectReductionMarker + " $USER; fi",
-			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": detectionOnly, "TEST-MARKER-NOT-N": detectionOnly},
 		},
 	}
 	for _, test := range tests {
@@ -358,6 +419,51 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 		})
 	}
 
+}
+
+// GAP-0616: a built-in rule with a code-owned prerequisite (CMD-RM-RF)
+// blocks a command in a compound command, next to a runtime-expanded word or
+// under a redirect, as it blocks the command alone.
+func TestTrustedActionBlocksBuiltInRuleInEachStatementOfCompoundCommand(t *testing.T) {
+	const connector = "statements-alone-default-test"
+	installDefaultProfileConnector(t, connector)
+	for _, test := range []struct {
+		command string
+		blocks  bool
+	}{
+		{"rm -rf /", true},
+		{"rm -rf /; echo $HOME", true},
+		{"(rm -rf /); echo $HOME", true},
+		{"if true; then rm -rf /; fi; echo $HOME", true},
+		{"for i in 1 2; do rm -rf /; done; echo $HOME", true},
+		{"(rm -rf /) 2>&1", true},
+		{"{ rm -rf /; } 2>/dev/null", true},
+		{"(cd /tmp && rm -rf /) > /tmp/log 2>&1", true},
+		{"rm -rf / 2>&1", true},
+		{"rm -rf / > /tmp/log 2>&1", true},
+		{"rm -rf /tmp/dc-x; echo $HOME", false},
+		{"(rm -rf /tmp/dc-x) 2>&1", false},
+	} {
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: actionfacts.Input{
+				Tool:        "shell",
+				Command:     test.command,
+				CWD:         "/home/alice/project",
+				ActiveHome:  "/home/alice",
+				DialectHint: actionfacts.DialectPOSIX,
+			},
+			LegacyText:         test.command,
+			Connector:          connector,
+			EnforcementCapable: true,
+		})
+		finding := findingWithID(findings, "CMD-RM-RF")
+		if got := finding != nil && finding.contributesToEnforcement(); got != test.blocks {
+			t.Errorf("%q: CMD-RM-RF blocks = %t, want %t; findings=%v", test.command, got, test.blocks, FindingStrings(findings))
+		}
+		if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != test.blocks {
+			t.Errorf("%q: verdict block = %t, want %t; findings=%v", test.command, got, test.blocks, FindingStrings(findings))
+		}
+	}
 }
 
 // A rule that negates over commands or operations must decide on the facts

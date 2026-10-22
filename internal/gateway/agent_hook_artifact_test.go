@@ -51,6 +51,15 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 			body: "#!/bin/sh\n(rm -rf /)\n", wantRule: "CMD-RM-RF", enforceable: true,
 		},
 		{
+			name: "redirected group is enforced",
+			body: "#!/bin/sh\n{ rm -rf /; } 2>/dev/null\n", wantRule: "CMD-RM-RF", enforceable: true,
+		},
+		{
+			// An exit in a subshell ends only the subshell.
+			name: "exit in a subshell leaves later command reachable",
+			body: "#!/bin/sh\n(exit 0)\nrm -rf /\n", wantRule: "CMD-RM-RF", enforceable: true,
+		},
+		{
 			name: "exit makes later command unreachable",
 			body: "#!/bin/sh\nexit 0\nrm -rf /\n", wantRule: "CMD-RM-RF",
 		},
@@ -748,6 +757,15 @@ func TestPromotedArtifactInCompoundCommandIsEnforced(t *testing.T) {
 		{"bash heredoc.sh || echo failed", true},
 		{"bash heredoc.sh | cat", true},
 		{"(bash heredoc.sh)", true},
+		{"{ bash heredoc.sh; }", true},
+		{"{ bash heredoc.sh; } > /dev/null", true},
+		{"(bash heredoc.sh) 2>&1", true},
+		{"if true; then bash heredoc.sh; fi", true},
+		{"case x in x) bash heredoc.sh;; esac", true},
+		{"while true; do bash heredoc.sh; done", true},
+		{"for i in 1; do bash heredoc.sh; done", true},
+		{"! bash heredoc.sh", true},
+		{"bash heredoc.sh; echo $HOME", true},
 		{"bash heredoc.sh &", true},
 		{"echo start; bash heredoc.sh", true},
 		{fmt.Sprintf("false && bash %q", path), true},

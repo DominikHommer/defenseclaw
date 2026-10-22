@@ -338,8 +338,11 @@ func promotedArtifactCandidateAlone(
 	if index < 0 {
 		return actionfacts.Facts{}, false
 	}
+	// A { } group adds no command and leaves the control flow certain, but
+	// sets the command's control flow operator.
 	command := facts.Commands[index]
 	compound := len(facts.Commands) > 1 || command.ControlFlowUncertain ||
+		command.ControlFlowOperator != actionfacts.ControlFlowOperatorNone ||
 		command.PipelineID != 0 || command.Background
 	if !compound || command.ParentCommandID != 0 || !command.ArgvComplete || len(command.Argv) == 0 ||
 		len(command.Redirects) != 0 ||
@@ -352,7 +355,7 @@ func promotedArtifactCandidateAlone(
 		return path.CommandID == command.ID && !path.Absolute
 	})
 	if relative && slices.ContainsFunc(facts.Commands, func(earlier actionfacts.CommandFact) bool {
-		return earlier.ID < command.ID && promotedArtifactMayChangeDirectory(earlier)
+		return earlier.ID < command.ID && actionfacts.ChangesShellDirectory(earlier)
 	}) {
 		return actionfacts.Facts{}, false
 	}
@@ -389,26 +392,6 @@ var promotedArtifactCompoundIssues = map[actionfacts.IssueCode]bool{
 	actionfacts.IssueUnsupportedConstruct:  true,
 	actionfacts.IssueDynamicWord:           true,
 	actionfacts.IssueUnknownOperandGrammar: true,
-}
-
-// promotedArtifactPOSIXDirectoryCommands are the POSIX commands that change
-// the directory of the shell that runs them or run text that may (a function
-// body that does shows up as its own command).
-var promotedArtifactPOSIXDirectoryCommands = map[string]bool{
-	"cd": true, "pushd": true, "popd": true, "source": true, ".": true,
-	"eval": true, "exec": true, "builtin": true, "command": true,
-	"alias": true, "trap": true,
-}
-
-// promotedArtifactMayChangeDirectory reports whether command may change the
-// directory later commands of the action run in. A PowerShell or cmd.exe
-// script shares its caller's location, so there any command may.
-func promotedArtifactMayChangeDirectory(command actionfacts.CommandFact) bool {
-	if command.Dialect != actionfacts.DialectPOSIX {
-		return true
-	}
-	program := strings.ToLower(strings.TrimSpace(command.Program))
-	return program == "" || promotedArtifactPOSIXDirectoryCommands[program]
 }
 
 func promotedArtifactActionEnforcementEligible(

@@ -211,7 +211,17 @@ func dispatchTrustedAction(
 	// keep their meaning: it is an extra pass where only a monotone argv
 	// rule's match counts.
 	var powerShellView *actionfacts.Facts
+	// statementsAlone are the statements of a partial compound command, each
+	// analysed as if it ran alone (GAP-0616). A block stops the whole call
+	// before any of it runs, so a rule that blocks a statement alone blocks
+	// the action: `(rm -rf /); echo $HOME` as `rm -rf /`. Like the PowerShell
+	// body view, they are an extra pass where only a match counts.
+	var statementsAlone []actionfacts.StatementAlone
+	// wholeView is unset when no view of the whole action exists and only
+	// statementsAlone are judged.
+	wholeView := true
 	if !facts.Authoritative() {
+		statementsAlone = actionfacts.StatementsAlone(request.Input, facts)
 		if view, ok := actionfacts.PowerShellCommandSubsetReduction(request.Input, facts); ok {
 			powerShellView = &view
 		}
@@ -260,6 +270,10 @@ func dispatchTrustedAction(
 		} else if powerShellView != nil {
 			semanticFacts, viewCandidate, subsetView = *powerShellView, argvSubsetReductionCandidate, true
 			powerShellView = nil
+		} else if len(statementsAlone) != 0 {
+			// Only the statements alone are judged, where only a match
+			// counts.
+			wholeView, subsetView = false, true
 		} else {
 			var fallbackTelemetry trustedActionTelemetry
 			findings, fallbackTelemetry = dispatchTrustedFallback(
@@ -274,7 +288,11 @@ func dispatchTrustedAction(
 	}
 	// matchOnly is set when only a match on the view counts.
 	matchOnly := staticTargetTwin != nil || subsetView
-	fullProjection, projectionCode := semantic.Project(semanticFacts)
+	var fullProjection *semanticpb.Facts
+	projectionCode := semantic.ProjectionOK
+	if wholeView {
+		fullProjection, projectionCode = semantic.Project(semanticFacts)
+	}
 	if projectionCode != semantic.ProjectionOK {
 		var fallbackTelemetry trustedActionTelemetry
 		findings, fallbackTelemetry = dispatchTrustedFallback(
@@ -410,7 +428,7 @@ func dispatchTrustedAction(
 		return false
 	}
 
-	if evaluateSemanticRules(
+	if wholeView && evaluateSemanticRules(
 		semanticFacts,
 		fullProjection,
 		viewCandidate,
@@ -431,6 +449,20 @@ func dispatchTrustedAction(
 				true,
 				nil,
 			)
+		}
+	}
+	// A statement alone, like a subset view, adds matches only, and only of
+	// an expression that more commands cannot turn off.
+	for _, statement := range statementsAlone {
+		candidateOK := statementAloneCandidate
+		if statement.Subset {
+			candidateOK = subsetReductionCandidate
+			if statement.PartialArgv {
+				candidateOK = argvSubsetReductionCandidate
+			}
+		}
+		if projection, code := semantic.Project(statement.View); code == semantic.ProjectionOK {
+			evaluateSemanticRules(statement.View, projection, candidateOK, true, nil)
 		}
 	}
 	restoreTrustedUnresolvedReadFallbacks(
@@ -696,6 +728,18 @@ func subsetReductionCandidate(candidate compiledSemanticRule) bool {
 func argvSubsetReductionCandidate(candidate compiledSemanticRule) bool {
 	return candidate.owner.prerequisite == nil &&
 		candidate.program.StaticArgvSubsetSafe()
+}
+
+// statementAloneCandidate reports whether a match of candidate on the
+// complete analysis of a statement alone (actionfacts.StatementsAlone)
+// may stand for the whole action: the expression must be one that more
+// commands and facts cannot turn off (semantic.Program.StaticCommandSubsetSafe),
+// and a code-owned prerequisite, which is checked on that analysis, must be
+// one that holds for the action when it holds for one statement of it
+// (semanticOwner.statementLocal).
+func statementAloneCandidate(candidate compiledSemanticRule) bool {
+	return (candidate.owner.prerequisite == nil || candidate.owner.statementLocal) &&
+		candidate.program.StaticCommandSubsetSafe()
 }
 
 // listReductionCandidate reports whether a result of candidate on the view

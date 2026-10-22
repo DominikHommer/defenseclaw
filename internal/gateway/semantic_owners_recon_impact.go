@@ -248,6 +248,8 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		},
 		prerequisite:     recursiveDeletePrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		// Any one rm -rf of a critical path in the action.
+		statementLocal: true,
 	},
 	"CMD-SUDO": {
 		prerequisite:     sudoOrRootPrivilegeDiscoveryPrerequisite,

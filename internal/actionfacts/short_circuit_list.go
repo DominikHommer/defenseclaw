@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -53,18 +54,169 @@ func ShortCircuitListReduction(input Input, facts Facts) (view Facts, ok bool) {
 // `if true; then rm -rf /; fi`. facts must be Analyze(input).
 //
 // The view is the analysis of a twin of the command in which each simple
-// command is a statement of its own. A subshell or group no longer scopes the
-// directory or variables of its commands there, and a loop runs its body
-// once, so callers may count only a match on the view, for an expression that
-// more commands cannot turn off.
+// command is a statement of its own, with the redirects of the compound
+// commands around it, and without an exit that only ends a subshell. A
+// subshell or group no longer scopes the directory or variables of its
+// commands there, and a loop runs its body once, so callers may count only a
+// match on the view, for an expression that more commands cannot turn off.
 //
-// The view is unavailable when a compound command carries a redirect, a for
-// or case word runs a command, a statement is a coprocess, the command
-// defines a function or has a here-document, the twin analysis is not
-// complete, or a command in it is not a plain POSIX process with a static
-// argv.
+// The view is unavailable when a for or case word runs a command, a
+// statement is a coprocess, the command defines a function or has a
+// here-document, the twin analysis is not complete, or a command in it is not
+// a plain POSIX process with a static argv.
 func CompoundCommandReduction(input Input, facts Facts) (view Facts, ok bool) {
 	return sequenceReduction(input, facts, true)
+}
+
+// maxStatementsAlone bounds the statements StatementsAlone analyses.
+const maxStatementsAlone = 128
+
+// StatementAlone is one statement of an action analysed as if it were the
+// whole tool call. View is a complete view of it: its analysis, or for a
+// statement that is partial alone, its StaticCommandSubsetReduction view
+// (Subset set, and PartialArgv as that reduction reports it).
+type StatementAlone struct {
+	View        Facts
+	Subset      bool
+	PartialArgv bool
+}
+
+// StatementsAlone returns each statement of a partial POSIX action analysed
+// as if it ran alone: the statements of CompoundCommandReduction's twin (the
+// commands of && and || lists, subshells, groups, if, loop and case bodies,
+// and negated and background statements, with the redirects of the compound
+// commands around them), each with the context of input. A statement that is
+// partial alone because of a descriptor duplication (2>&1) is analysed
+// without it, as is an action of one such statement. facts must be
+// Analyze(input).
+//
+// A block stops the whole tool call before any of it runs, so a rule that
+// blocks a statement alone also blocks the action (GAP-0616): `(rm -rf /);
+// echo $HOME` as `rm -rf /`. A statement alone lacks the other statements,
+// how they change the shell, and the duplications left out, so a caller may
+// count only a match on a view, for an expression that more commands,
+// redirects and data flows cannot turn off. A statement with a relative path
+// is left out when a command of the action may change the directory
+// (ChangesShellDirectory), and one that is partial alone is left out unless
+// it has a StaticCommandSubsetReduction view. Nothing is returned when the
+// action defines a function, has a here-document, a coprocess, or a for or
+// case word that runs a command, or when a command whose program expands or
+// a shell builtin with a runtime-expanded word may change what the others
+// run. At most maxStatementsAlone statements are analysed.
+func StatementsAlone(input Input, facts Facts) (statements []StatementAlone) {
+	defer func() {
+		if recover() != nil {
+			statements = nil
+		}
+	}()
+	if facts.Parse.Status != StatusPartial || facts.Parse.Dialect != DialectPOSIX ||
+		len(facts.Commands) == 0 {
+		return nil
+	}
+	_, capture := analyzeWithRedirectTargets(input, "")
+	// A bash function, or a zsh anonymous one (`function\n{ ...; }`), is
+	// not a POSIX one.
+	if definesFunction(capture.source) {
+		return nil
+	}
+	texts, reduced, ok := sequenceStatements(capture.source, true)
+	if !ok {
+		return nil
+	}
+	// One statement alone is the action, which only its duplications may
+	// leave partial.
+	single := !reduced && len(texts) == 1
+	// As for StaticCommandSubsetReduction, a shell builtin with a
+	// runtime-expanded word (cd $DIR, export PATH=$DIR, eval "$X") or a
+	// command whose program expands may change what the others run.
+	if slices.ContainsFunc(facts.Commands, func(command CommandFact) bool {
+		return strings.TrimSpace(command.Program) == "" ||
+			(shellStateBuiltins[strings.ToLower(command.Program)] &&
+				slices.ContainsFunc(command.Arguments, func(argument ArgumentFact) bool {
+					return argument.Expands || argument.StaticGlob != ""
+				}))
+	}) {
+		return nil
+	}
+	directoryMayChange := slices.ContainsFunc(facts.Commands, ChangesShellDirectory)
+	alone := input
+	alone.Args, alone.Argv = nil, nil
+	for _, text := range texts[:min(len(texts), maxStatementsAlone)] {
+		alone.Command = text
+		view := Analyze(alone)
+		if !view.Authoritative() || single {
+			stripped, ok := withoutDescriptorDuplications(text)
+			if !ok && single {
+				return nil
+			}
+			if ok {
+				alone.Command = stripped
+				view = Analyze(alone)
+			}
+		}
+		if view.Parse.Dialect != DialectPOSIX || (directoryMayChange &&
+			slices.ContainsFunc(view.Paths, func(path PathFact) bool { return !path.Absolute })) {
+			continue
+		}
+		if view.Authoritative() {
+			statements = append(statements, StatementAlone{View: view})
+			continue
+		}
+		if subset, partialArgv, ok := StaticCommandSubsetReduction(alone, view); ok {
+			statements = append(statements, StatementAlone{View: subset, Subset: true, PartialArgv: partialArgv})
+		}
+	}
+	return statements
+}
+
+// withoutDescriptorDuplications returns statement without its descriptor
+// duplications (2>&1, <&3, >&-), and reports whether it had any.
+func withoutDescriptorDuplications(statement string) (string, bool) {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
+		Parse(strings.NewReader(statement), "")
+	if err != nil {
+		return "", false
+	}
+	var cuts [][2]int
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if redirect, ok := node.(*syntax.Redirect); ok &&
+			(redirect.Op == syntax.DplIn || redirect.Op == syntax.DplOut) {
+			cuts = append(cuts, [2]int{int(redirect.Pos().Offset()), int(redirect.End().Offset())})
+		}
+		return true
+	})
+	if len(cuts) == 0 {
+		return "", false
+	}
+	// Walk visits redirects in source order; cut from the last.
+	for index := len(cuts) - 1; index >= 0; index-- {
+		start, end := cuts[index][0], cuts[index][1]
+		if start < 0 || end <= start || end > len(statement) {
+			return "", false
+		}
+		statement = statement[:start] + statement[end:]
+	}
+	return statement, true
+}
+
+// shellDirectoryCommands are the POSIX commands that change the directory of
+// the shell that runs them or run text that may.
+var shellDirectoryCommands = map[string]bool{
+	"cd": true, "pushd": true, "popd": true, "source": true, ".": true,
+	"eval": true, "exec": true, "builtin": true, "command": true,
+	"alias": true, "trap": true,
+}
+
+// ChangesShellDirectory reports whether command may change the directory
+// later commands of its action run in: a POSIX command that changes it or
+// runs text that may, or one whose program is not static. A PowerShell or
+// cmd.exe script shares its caller's location, so there any command may.
+func ChangesShellDirectory(command CommandFact) bool {
+	if command.Dialect != DialectPOSIX {
+		return true
+	}
+	program := strings.ToLower(strings.TrimSpace(command.Program))
+	return program == "" || shellDirectoryCommands[program]
 }
 
 func sequenceReduction(input Input, facts Facts, compound bool) (view Facts, ok bool) {
@@ -112,21 +264,36 @@ func sequenceReduction(input Input, facts Facts, compound bool) (view Facts, ok 
 // shortCircuitListSequence returns source with each top-level && or || list
 // replaced by its commands, one statement per line; with compound, also each
 // subshell, group, if, while, until, for and case, and each negated or
-// background statement. It declines a source with nothing to replace, one
-// with a negated, background (unless compound) or coprocess statement in a
-// list, one where a dropped word could run a command (a for or case word with
-// a command substitution) or a redirect of a replaced compound command would
-// be lost, and one where a statement could change what another runs (a
-// function definition) or where cutting the text could lose input (a
-// here-document).
+// background statement (sequenceStatements). It declines a source with
+// nothing to replace.
 func shortCircuitListSequence(source string, compound bool) (string, bool) {
-	if source == "" {
+	statements, reduced, ok := sequenceStatements(source, compound)
+	if !ok || !reduced {
 		return "", false
+	}
+	return strings.Join(statements, "\n"), true
+}
+
+// sequenceStatements returns the statements of source with each top-level &&
+// or || list replaced by its commands, and reports whether it replaced
+// anything. With compound, it also replaces each subshell, group, if, while,
+// until, for and case by the statements in it, and a negated or background
+// statement by its command. A redirect of a replaced compound command is
+// moved onto each statement in it, which then writes or reads what the
+// compound command did, and an exit in a subshell, which ends only that
+// subshell, is left out. It declines a source with a negated, background
+// (unless compound) or coprocess statement in a list, one where a dropped
+// word could run a command (a for or case word with a command substitution),
+// and one where a statement could change what another runs (a function
+// definition) or where cutting the text could lose input (a here-document).
+func sequenceStatements(source string, compound bool) (statements []string, reduced, ok bool) {
+	if source == "" {
+		return nil, false, false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
 		Parse(strings.NewReader(source), "")
 	if err != nil {
-		return "", false
+		return nil, false, false
 	}
 	declined := false
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -139,18 +306,41 @@ func shortCircuitListSequence(source string, compound bool) (string, bool) {
 		return !declined
 	})
 	if declined {
-		return "", false
+		return nil, false, false
 	}
-	kept := make([]string, 0, len(file.Stmts))
-	reduced := false
-	keep := func(node syntax.Node) bool {
-		start, end := int(node.Pos().Offset()), int(node.End().Offset())
+	statements = make([]string, 0, len(file.Stmts))
+	text := func(from, to syntax.Pos) (string, bool) {
+		start, end := int(from.Offset()), int(to.Offset())
 		if start < 0 || end <= start || end > len(source) {
+			return "", false
+		}
+		return source[start:end], true
+	}
+	// redirects are those of the compound commands being replaced, outermost
+	// first, as text to append to each statement.
+	var redirects []string
+	// keep adds the text of node, or of a command and its redirects.
+	keep := func(node syntax.Node, redirs ...*syntax.Redirect) bool {
+		from, to := node.Pos(), node.End()
+		for _, redirect := range redirs {
+			if redirect.Pos().Offset() < from.Offset() {
+				from = redirect.Pos()
+			}
+			if redirect.End().Offset() > to.Offset() {
+				to = redirect.End()
+			}
+		}
+		statement, ok := text(from, to)
+		if !ok {
 			return false
 		}
-		kept = append(kept, source[start:end])
+		for index := len(redirects) - 1; index >= 0; index-- {
+			statement += " " + redirects[index]
+		}
+		statements = append(statements, statement)
 		return true
 	}
+	subshells := 0
 	var flatten func(stmt *syntax.Stmt) bool
 	flattenAll := func(stmts []*syntax.Stmt) bool {
 		for _, stmt := range stmts {
@@ -175,6 +365,8 @@ func shortCircuitListSequence(source string, compound bool) (string, bool) {
 		}
 		switch typed := command.(type) {
 		case *syntax.Subshell:
+			subshells++
+			defer func() { subshells-- }()
 			return true, flattenAll(typed.Stmts)
 		case *syntax.Block:
 			return true, flattenAll(typed.Stmts)
@@ -206,32 +398,66 @@ func shortCircuitListSequence(source string, compound bool) (string, bool) {
 		}
 		return false, false
 	}
+	// flattenRedirected replaces the compound command of stmt with its
+	// redirects moved onto the statements in it.
+	flattenRedirected := func(stmt *syntax.Stmt) (replaced, ok bool) {
+		if len(stmt.Redirs) == 0 {
+			return flattenCompound(stmt.Cmd)
+		}
+		if !compound {
+			return false, false
+		}
+		moved, ok := text(stmt.Redirs[0].Pos(), stmt.Redirs[len(stmt.Redirs)-1].End())
+		if !ok {
+			return false, false
+		}
+		saved := redirects
+		redirects = append(redirects[:len(redirects):len(redirects)], moved)
+		defer func() { redirects = saved }()
+		return flattenCompound(stmt.Cmd)
+	}
 	flatten = func(stmt *syntax.Stmt) bool {
 		if stmt == nil || stmt.Coprocess || stmt.Disown {
 			return false
 		}
+		if compound && subshells > 0 && !stmt.Negated && !stmt.Background &&
+			len(stmt.Redirs) == 0 && subshellExit(stmt.Cmd) {
+			reduced = true
+			return true
+		}
 		if stmt.Negated || stmt.Background {
-			if !compound || len(stmt.Redirs) != 0 {
+			if !compound {
 				return false
 			}
 			reduced = true
-			if replaced, ok := flattenCompound(stmt.Cmd); replaced {
+			if replaced, ok := flattenRedirected(stmt); replaced {
 				return ok
 			}
-			return stmt.Cmd != nil && keep(stmt.Cmd)
+			return stmt.Cmd != nil && keep(stmt.Cmd, stmt.Redirs...)
 		}
-		if len(stmt.Redirs) == 0 {
-			if replaced, ok := flattenCompound(stmt.Cmd); replaced {
-				reduced = true
-				return ok
-			}
+		if replaced, ok := flattenRedirected(stmt); replaced {
+			reduced = true
+			return ok
 		}
-		return keep(stmt)
+		if stmt.Cmd == nil {
+			return len(stmt.Redirs) != 0 && keep(stmt.Redirs[0], stmt.Redirs...)
+		}
+		// Not stmt itself, whose text may end in a ; that a moved redirect
+		// cannot follow.
+		return keep(stmt.Cmd, stmt.Redirs...)
 	}
-	if !flattenAll(file.Stmts) || !reduced {
-		return "", false
+	if !flattenAll(file.Stmts) {
+		return nil, false, false
 	}
-	return strings.Join(kept, "\n"), true
+	return statements, reduced, true
+}
+
+// subshellExit reports whether command is a plain exit, which in a subshell
+// ends only the subshell.
+func subshellExit(command syntax.Command) bool {
+	call, ok := command.(*syntax.CallExpr)
+	return ok && len(call.Assigns) == 0 && len(call.Args) != 0 &&
+		call.Args[0].Lit() == "exit" && inertPOSIXWords(call.Args...)
 }
 
 // inertPOSIXWords reports whether words run no command when the shell

@@ -36,8 +36,13 @@ type semanticOwner struct {
 	unmatchedClaims        []string
 	prerequisite           semanticOwnerPrerequisite
 	suppressFallback       semanticOwnerPrerequisite
-	detectionOnly          bool
-	alertOnly              bool
+	// statementLocal is set when prerequisite holds on an action whenever
+	// it holds on the complete analysis of one statement of it alone
+	// (actionfacts.StatementsAlone). Most prerequisites also read the shape
+	// of the whole action and are left unset.
+	statementLocal bool
+	detectionOnly  bool
+	alertOnly      bool
 }
 
 func (o semanticOwner) eligible(facts actionfacts.Facts) bool {
