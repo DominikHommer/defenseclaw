@@ -1365,6 +1365,9 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	m.rejected = false
 	m.rejectedAssets.Store(nil)
 	gen := m.gen.Add(1)
+	if !next.SecureClientIntegration() {
+		version.BumpGeneration()
+	}
 	m.current.Store(cloneConfig(next))
 	exportCandidateKey()
 	recordHandEdit(ctx, next, m.path, source.raw)
