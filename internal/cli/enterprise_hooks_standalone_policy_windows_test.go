@@ -8,6 +8,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -62,9 +63,9 @@ func TestWindowsForeignCleanupCoversEligibleUsersWithoutRows(t *testing.T) {
 		windowsManagedClaudeSettingsRemover, windowsManagedClaudeRegistrationProbe = previousRemover, previousProbe
 	})
 	var probed, migrated []string
-	windowsManagedClaudeRegistrationProbe = func(home, sid string) (bool, error) {
+	windowsManagedClaudeRegistrationProbe = func(home, sid string) (bool, []string, error) {
 		probed = append(probed, sid+"|"+home)
-		return sid == alice, nil
+		return sid == alice, nil, nil
 	}
 	windowsManagedClaudeSettingsRemover = func(home, sid, _ string) (int, []string, error) {
 		migrated = append(migrated, sid+"|"+home)
@@ -92,6 +93,59 @@ func TestWindowsForeignCleanupCoversEligibleUsersWithoutRows(t *testing.T) {
 		if !strings.Contains(log.String(), want) {
 			t.Fatalf("migration log lacks %q:\n%s", want, log.String())
 		}
+	}
+}
+
+// A settings file holding only DefenseClaw hooks the remover keeps (here
+// an edited launcher guard and a defenseclaw-gateway command) is never
+// rewritten, but each is still reported: the real probe finds them, so
+// Copilot's block on them comes with guidance.
+func TestWindowsClaudeMigrationReportsLeftoversWhenNothingIsRemovable(t *testing.T) {
+	t.Setenv("SystemRoot", `C:\Windows`)
+	const home, sid = `C:\Users\alice`, "S-1-5-21-1-2-3-1001"
+	edited := windowsClaudeGuardFixture(filepath.Join(home, ".local", "bin", "defenseclaw-hook.exe"), "claudecode", "0")
+	gateway := map[string]any{"type": "command", "command": `C:\tools\defenseclaw-gateway.exe`, "args": []any{"hook"}}
+	raw, err := json.Marshal(map[string]any{"hooks": map[string]any{
+		"PreToolUse": []any{map[string]any{"hooks": []any{edited}}},
+		"Stop":       []any{map[string]any{"hooks": []any{gateway}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousReader, previousRemover := windowsManagedClaudeUserSettingsReader, windowsManagedClaudeSettingsRemover
+	t.Cleanup(func() {
+		windowsManagedClaudeUserSettingsReader, windowsManagedClaudeSettingsRemover = previousReader, previousRemover
+	})
+	windowsManagedClaudeUserSettingsReader = func(gotHome, gotSID string) ([]byte, error) {
+		if gotHome != home || gotSID != sid {
+			t.Fatalf("read %s %s", gotHome, gotSID)
+		}
+		return raw, nil
+	}
+	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, []string, error) {
+		t.Fatal("settings without a removable hook were rewritten")
+		return 0, nil, nil
+	}
+	var log bytes.Buffer
+	migrateWindowsClaudeUserHooks(&log, enterprisehooks.TargetCredentials{UserHome: home, UID: -1, GID: -1, SID: sid})
+	settings := filepath.Join(home, ".claude", "settings.json")
+	for _, want := range []string{
+		settings + " still holds PreToolUse: a hook command naming defenseclaw-hook (arguments not shown)",
+		settings + " still holds Stop: a hook command naming defenseclaw-gateway (arguments not shown)",
+	} {
+		if !strings.Contains(log.String(), want) {
+			t.Fatalf("migration log lacks %q:\n%s", want, log.String())
+		}
+	}
+	if strings.Contains(log.String(), "removed") {
+		t.Fatalf("nothing was removed:\n%s", log.String())
+	}
+	// A file without a DefenseClaw hook stays silent.
+	raw = []byte(`{"hooks":{"Stop":[{"hooks":[{"command":"notify.exe"}]}]}}`)
+	log.Reset()
+	migrateWindowsClaudeUserHooks(&log, enterprisehooks.TargetCredentials{UserHome: home, UID: -1, GID: -1, SID: sid})
+	if log.Len() != 0 {
+		t.Fatalf("clean settings were reported:\n%s", log.String())
 	}
 }
 

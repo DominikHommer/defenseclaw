@@ -392,16 +392,14 @@ func enterpriseHookWindowsEligibleProfilesFor(ctx context.Context, current *conf
 // agent that reads the file (Copilot CLI in a project under the home) block
 // as on a foreign hook (GAP-0587). A read-only probe runs first, so a file
 // without such a hook is never rewritten or re-protected; the hooks that
-// still name DefenseClaw after the removal are reported.
+// still name DefenseClaw are reported, after the removal or, when nothing
+// was removable, from the probe. Passes run once per cleanup interval, so
+// the report repeats at most that often.
 func migrateWindowsClaudeUserHooks(stderr io.Writer, target enterprisehooks.TargetCredentials) {
 	settings := filepath.Join(target.UserHome, ".claude", "settings.json")
-	present, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
-	if err == nil && !present {
-		return
-	}
+	present, left, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
 	removed := 0
-	var left []string
-	if err == nil {
+	if err == nil && present {
 		removed, left, err = windowsManagedClaudeSettingsRemover(target.UserHome, target.SID, "")
 	}
 	if err != nil {
