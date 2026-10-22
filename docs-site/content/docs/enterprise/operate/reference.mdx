@@ -86,8 +86,6 @@ running (usually under a minute), they report `lifecycle_busy`, exit `75` and sa
 configuration change is being applied. That is not a failure and needs no repair: run them
 again when it finishes.
 
-On a device in bundle mode, an edit of the managed config is reverted to the current bundle's config instead.
-
 **A hand edit of the config is applied, not reported as drift.** When you edit the managed
 `config.yaml` in place as root (keeping its mode and owner), the apply trigger picks the
 change up and runs `ensure`, so after the trigger finishes (about 20 seconds on a Mac,
@@ -97,6 +95,12 @@ report. An immediate `verify` while the trigger runs answers `lifecycle_busy`, n
 and for a rejected edit (`config_rejected`), not for a valid edit of the config itself.
 `ensure --config` with the reviewed file puts the reviewed version back and records it as
 the applied config.
+
+In bundle mode (bundle trust anchors installed), the managed config is the current
+bundle's config. On Linux and macOS the apply trigger reverts an edit to that config.
+Windows does not watch the file: the edit stays until a later Setup `/ensure` or
+`/repair` without `CONFIG=` puts the bundle's config back and keeps the edit as
+`rejected-config.yaml`.
 
 ### Invalid and rejected configs
 

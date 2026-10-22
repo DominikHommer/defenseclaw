@@ -226,3 +226,68 @@ def test_no_page_promises_a_bundle_required_refusal_changes_nothing():
             if 'bundle_required' in block and NO_CHANGE_CLAIM.search(block):
                 offenders.append(f'{page.relative_to(DOCS)}: {" ".join(block.split())[:160]}')
     assert not offenders, '\n'.join(offenders)
+
+
+# An edit of the installed config in bundle mode: Linux and macOS revert it
+# (the apply trigger runs ensure with the current bundle's config); Windows
+# does not watch config.yaml, so the edit stays until a later Setup /ensure or
+# /repair without CONFIG= puts the bundle's config back.
+BUNDLE_MODE_CONTEXT = re.compile(r'bundle mode|bundle trust anchors|trust anchors installed', re.IGNORECASE)
+EDIT_PUT_BACK = re.compile(
+    r'\bedit(?:s|ed)?\b[^.|]*?\b(?:revert\w*|put back|restor\w*|undone|discarded|overwritten)'
+    r'|\b(?:revert\w*|put back|restor\w*|undoes|discards|overwrites)\b[^.|]*?\bedit(?:s|ed)?\b',
+    re.IGNORECASE,
+)
+UNIX_SCOPE = re.compile(r'Linux and macOS|Linux, macOS\b(?! and Windows)|Linux or macOS')
+WINDOWS_NOT_WATCHED = re.compile(r'Windows (?:does not|doesn\'t) watch|[Nn]othing watches|not watched', re.IGNORECASE)
+# Pages that are about Linux or macOS only; their sentences need no OS scope.
+UNIX_ONLY_PAGE = re.compile(r'(?:^|/)(?:linux|macos|jamf|kandji)(?:-[a-z]+)?\.mdx$')
+SENTENCE_END = re.compile(r'(?<=[.!?])\s+(?=[A-Z*`])')
+WINDOWS_RESTORE = DOCS.parents[2] / 'internal/cli/windows_enterprise_bundle_restore.go'
+
+
+def _bundle_edit_blocks():
+    for page in sorted(DOCS.rglob('*.mdx')):
+        rel = page.relative_to(DOCS).as_posix()
+        for block in _doc_blocks(page.read_text()):
+            flat_block = ' '.join(block.split())
+            if BUNDLE_MODE_CONTEXT.search(flat_block) and EDIT_PUT_BACK.search(flat_block):
+                yield rel, flat_block
+
+
+def test_bundle_mode_edit_reversion_is_found():
+    found = {rel for rel, _ in _bundle_edit_blocks()}
+    for name in ('enterprise/operate/reference.mdx', 'enterprise/operate/lifecycle.mdx',
+                 'enterprise/configure/configuration.mdx', 'enterprise/mdm/reference.mdx'):
+        assert name in found, name
+
+
+def test_no_page_promises_windows_reverts_a_bundle_mode_edit():
+    # The scope must sit in the sentence that promises the reversion, not
+    # elsewhere in the paragraph.
+    offenders = []
+    for rel, block in _bundle_edit_blocks():
+        if UNIX_ONLY_PAGE.search(rel):
+            continue
+        for sentence in SENTENCE_END.split(block):
+            if not EDIT_PUT_BACK.search(sentence):
+                continue
+            if not UNIX_SCOPE.search(sentence):
+                offenders.append(f'{rel}: not scoped to Linux and macOS: {sentence[:200]}')
+            elif re.search(r'\bWindows\b', sentence) and not WINDOWS_NOT_WATCHED.search(sentence):
+                offenders.append(f'{rel}: names Windows without saying nothing watches the file: {sentence[:200]}')
+    assert not offenders, '\n'.join(offenders)
+
+
+def test_windows_bundle_mode_edit_is_restored_by_a_later_ensure_or_repair():
+    # The code: Setup /ensure or /repair without CONFIG= (or BUNDLE=,
+    # TRUSTANCHORS=, MODE=) on an installed device restores the confirmed
+    # bundle config over an edited config.yaml.
+    src = WINDOWS_RESTORE.read_text()
+    body = src.split('func windowsBundleRestoreRequested(', 1)[1].split('\n}\n', 1)[0]
+    assert '(action == "ensure" || action == "repair")' in body
+    assert 'strings.TrimSpace(opts.configPath) == ""' in body
+    assert 'opts.installedBeforeRun' in body
+    blocks = [b for rel, b in _bundle_edit_blocks() if rel == 'enterprise/operate/reference.mdx']
+    assert any(WINDOWS_NOT_WATCHED.search(b) and 'Setup `/ensure` or `/repair` without `CONFIG=`' in b
+               for b in blocks), blocks
