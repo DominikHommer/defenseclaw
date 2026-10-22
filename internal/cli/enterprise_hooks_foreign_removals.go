@@ -641,6 +641,77 @@ func enterpriseForeignHookClearRemovalPending(identity string) error {
 	return enterprisepolicy.ClearForeignHookRemovalPending(cfg.DataDir, identity)
 }
 
+// commitEnterpriseForeignHookRemovals publishes the ledger first and then
+// waits for the exchanges that may have read the previous one. Online
+// exchanges never wait on the commit: one that starts after the publication
+// reads the removal, so a pending removal denies only the removed account's
+// new calls, and nothing slow (staging, sync, ownership, trust checks)
+// happens while the guardian holds the fence. The ledger does not depend on
+// the lock files either: a removal it failed to record would let a process
+// that loaded the removed hook be allowed once they are repaired, and the
+// gateway refuses every exchange while the fence is unusable.
+func commitEnterpriseForeignHookRemovals(stderr io.Writer, identity, home, connectorName string, paths []string) error {
+	dataDir := cfg.DataDir
+	guardianDir := managed.HookGuardianAuthorizationDir(dataDir)
+	if !filepath.IsAbs(guardianDir) {
+		return errors.New("the data directory is not an absolute path")
+	}
+	if _, err := hardenEnterpriseHookAuthorizationDir(dataDir); err != nil {
+		return err
+	}
+	var problems []error
+	if err := ensureEnterpriseForeignHookRemovalFence(guardianDir); err != nil {
+		problems = append(problems, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), foreignHookRemovalLedgerLockWait)
+	unlockLedger, err := enterprisepolicy.LockForeignHookRemovalsLedger(ctx, guardianDir)
+	cancel()
+	if err != nil {
+		// Without the lock, a commit of another guardian process at the
+		// same moment could drop one of the two; without the commit, this
+		// removal is lost for sure.
+		problems = append(problems, fmt.Errorf("committed without the ledger lock: %w", err))
+	} else {
+		defer unlockLedger()
+	}
+	mark := agentprocess.Now()
+	if mark == "" {
+		return errors.Join(append(problems, errors.New("the process clock is unavailable"))...)
+	}
+	now := time.Now().UTC()
+	connectors := enterprisepolicy.StandaloneConnectors(cfg)
+	added := make([]enterprisepolicy.ForeignHookRemoval, 0, len(paths))
+	for _, path := range paths {
+		for _, name := range enterprisepolicy.ForeignHookRemovalConnectors(home, path, connectorName, connectors) {
+			added = append(added, enterprisepolicy.ForeignHookRemoval{
+				Identity: identity, Connector: name, Path: foreignGuardLogField(path, 512),
+				At: now.Format(time.RFC3339), Mark: mark,
+			})
+		}
+	}
+	path := filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile)
+	existing, loadErr := loadEnterpriseForeignHookRemovals(path)
+	if loadErr != nil {
+		// The gateway cannot use this ledger either; replacing it keeps
+		// the new removals.
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: replacing the removal ledger: %v\n", loadErr)
+	}
+	data, err := enterprisepolicy.EncodeForeignHookRemovals(existing, added, now)
+	if err != nil {
+		return errors.Join(append(problems, err)...)
+	}
+	if err := publishEnterpriseHookProtectedFile(path, data); err != nil {
+		return errors.Join(append(problems, err)...)
+	}
+	if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
+		problems = append(problems, err)
+	}
+	if _, err := enterprisepolicy.AwaitForeignHookRemovalExchanges(guardianDir); err != nil {
+		problems = append(problems, err)
+	}
+	return errors.Join(problems...)
+}
+
 func loadEnterpriseForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestHookCallerLimiterBoundsEachCallerSeparately(t *testing.T) {
@@ -315,6 +316,12 @@ func TestForeignHookSessionExchangesDoNotWaitOnOtherIdentities(t *testing.T) {
 	if !filepath.IsAbs(dataDir) {
 		t.Fatalf("test data dir %q is not absolute", dataDir)
 	}
+	guardianDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
+	writeForeignHookRemovalFenceFiles(t, guardianDir)
+	previous := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
 	exchange := func(identity string) <-chan int {
 		done := make(chan int, 1)
 		go func() {
@@ -326,7 +333,7 @@ func TestForeignHookSessionExchangesDoNotWaitOnOtherIdentities(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(body))
 			ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")
 			ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
-			response := httptest.NewRecorder()
+			response := newDeadlineRecorder()
 			api.handleForeignHookSession(response, req.WithContext(ctx))
 			done <- response.Code
 		}()

@@ -81,6 +81,22 @@ type SandboxStatus struct {
 	PendingRestart bool
 	// StartedAt is when the daemon started (zero when it does not say).
 	StartedAt time.Time
+	// Legacy is a daemon whose status has no live count: one before
+	// DefenseClaw 1.0.4, which a package upgrade left running. Its exit
+	// stops the account's OpenShell gateway once no sandbox runs, with no
+	// check for a MicroVM that completed or is in OpenShell's error state,
+	// which that stop ends with no flush; a stop of it ends it first
+	// (StopKill).
+	Legacy bool
+}
+
+// daemonStop is scope for a stop of the sandbox daemon that st describes:
+// with StopKill for a daemon before 1.0.4 (SandboxStatus.Legacy).
+func daemonStop(st SandboxStatus, scope StopScope) StopScope {
+	if st.Legacy {
+		return scope | StopKill
+	}
+	return scope
 }
 
 // busy is how many of the account's sandboxes a stop of its gateway or
@@ -142,6 +158,13 @@ const (
 	StopGateway
 	// StopSocket stops the daemon's socket (Linux).
 	StopSocket
+	// StopKill, with StopDaemon or StopSocket, first ends the daemon's
+	// main process with SIGKILL: the exit of a daemon before DefenseClaw
+	// 1.0.4 (SandboxStatus.Legacy), which a stop's SIGTERM runs, stops the
+	// account's OpenShell gateway under a MicroVM that completed, with no
+	// flush. A killed daemon runs nothing on its way out, and the unit's
+	// ExecStop, which then runs with no main process, stops nothing.
+	StopKill
 )
 
 func (e *Env) sandboxOps() SandboxUserOps {
@@ -461,6 +484,7 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 	// A daemon before 1.0.4 does not say which sandboxes may hold compute:
 	// every one it counts does (sandboxapi.Status.Busy).
 	st.Live = max(reply.Sandboxes, reply.Running)
+	st.Legacy = reply.Live == nil
 	if reply.Live != nil {
 		st.Live = *reply.Live
 	}
@@ -482,6 +506,11 @@ func (o *commandUserOps) unitRunning(ctx context.Context, a SandboxAccount, unit
 
 func (o *commandUserOps) Stop(ctx context.Context, a SandboxAccount, scope StopScope) error {
 	e := o.env
+	if scope&StopKill != 0 && scope&(StopDaemon|StopSocket) != 0 {
+		if err := o.killDaemon(ctx, a); err != nil {
+			return err
+		}
+	}
 	if e.GOOS == "darwin" {
 		domain := o.domain(ctx, a)
 		var errs []error
@@ -520,6 +549,78 @@ func (o *commandUserOps) Stop(ctx context.Context, a SandboxAccount, scope StopS
 		return err
 	}
 	return nil
+}
+
+// daemonKillWait bounds how long a stop with StopKill waits for systemd to
+// see the killed daemon go; daemonKillPoll paces the look. Variables for
+// tests.
+var (
+	daemonKillWait = 15 * time.Second
+	daemonKillPoll = 100 * time.Millisecond
+)
+
+// killDaemon ends the main process of the account's sandbox daemon with
+// SIGKILL (StopKill). On Linux it waits until systemd saw that process go:
+// the stop that follows then runs the unit's ExecStop with no main
+// process, which stops nothing, where an ExecStop that still saw the
+// killed process asked a socket no daemon answers. A daemon that does not
+// run has nothing to end; one that cannot be ended is an error, and then
+// nothing is stopped.
+func (o *commandUserOps) killDaemon(ctx context.Context, a SandboxAccount) error {
+	e := o.env
+	if e.GOOS == "darwin" {
+		res, err := e.Runner.Run(ctx, "launchctl", "kill", "SIGKILL", o.domain(ctx, a)+"/"+labelSandbox)
+		if err != nil && !bootoutNotLoaded(res, err) && o.unitRunning(ctx, a, userUnitSandboxService, labelSandbox) {
+			return fmt.Errorf("end the sandbox daemon of %s, which an earlier DefenseClaw started, before its stop: %w", a.Name, err)
+		}
+		return nil
+	}
+	pid, err := o.daemonMainPID(ctx, a)
+	if err != nil || pid == 0 {
+		return err
+	}
+	if _, err := o.runAs(ctx, a, userCommandTimeout, "/usr/bin/systemctl", "--user", "kill", "--kill-who=main", "--signal=SIGKILL", userUnitSandboxService); err != nil {
+		if now, perr := o.daemonMainPID(ctx, a); perr != nil || now == pid {
+			return fmt.Errorf("end the sandbox daemon of %s, which an earlier DefenseClaw started, before its stop: %w", a.Name, err)
+		}
+		return nil // it went by itself
+	}
+	deadline := time.Now().Add(daemonKillWait)
+	for {
+		now, err := o.daemonMainPID(ctx, a)
+		if err != nil {
+			return err
+		}
+		if now != pid {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the sandbox daemon of %s was sent SIGKILL, but systemd still names process %d after %s", a.Name, pid, daemonKillWait)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(daemonKillPoll):
+		}
+	}
+}
+
+// daemonMainPID is the main process systemd names for the account's sandbox
+// daemon: 0 when none runs, also when the account's user manager does not
+// run.
+func (o *commandUserOps) daemonMainPID(ctx context.Context, a SandboxAccount) (int, error) {
+	res, err := o.runAs(ctx, a, userCommandTimeout, "/usr/bin/systemctl", "--user", "show", "--property=MainPID", "--value", userUnitSandboxService)
+	if err != nil {
+		if !o.unitRunning(ctx, a, userUnitSandboxService, labelSandbox) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read the main process of the sandbox daemon of %s: %w", a.Name, err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(res.Stdout)))
+	if err != nil || pid < 0 {
+		return 0, fmt.Errorf("read the main process of the sandbox daemon of %s: systemd said %q", a.Name, strings.TrimSpace(string(res.Stdout)))
+	}
+	return pid, nil
 }
 
 // bootoutNotLoaded reports a launchctl bootout that failed because the agent
@@ -806,7 +907,7 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 			state.Pending[key] = entry
 			continue
 		}
-		if err := l.performAccountChange(ctx, ops, account, entry, status.Active, cur); err != nil {
+		if err := l.performAccountChange(ctx, ops, account, entry, status, cur); err != nil {
 			entry.Reason = entry.reasonBase() + " (" + err.Error() + ")"
 			state.Pending[key] = entry
 			var held *drainHeld
@@ -853,10 +954,12 @@ func (e *drainHeld) Unwrap() error { return e.err }
 // socket or the launcher starts it on the next command) runs the
 // installed DefenseClaw, which the drain's lock holds back, and the drain
 // checks after the daemon is down, so it sees what the old daemon started
-// before. The returned release lets the drain go, warning when it ended
-// badly.
-func (l *lifecycle) drainAccount(ctx context.Context, ops SandboxUserOps, a SandboxAccount) (release func(), err error) {
-	if err := ops.Stop(ctx, a, StopDaemon|StopSocket); err != nil {
+// before. That old daemon, which st (the status the change went on)
+// describes, is killed, not stopped: its exit stops the gateway, under a
+// MicroVM it started and that completed since the status (StopKill). The
+// returned release lets the drain go, warning when it ended badly.
+func (l *lifecycle) drainAccount(ctx context.Context, ops SandboxUserOps, a SandboxAccount, st SandboxStatus) (release func(), err error) {
+	if err := ops.Stop(ctx, a, daemonStop(st, StopDaemon|StopSocket)); err != nil {
 		return nil, fmt.Errorf("stop the sandbox daemon of %s before its gateway: %w", a.Name, err)
 	}
 	done, err := ops.Drain(ctx, a)
@@ -875,8 +978,10 @@ func (l *lifecycle) drainAccount(ctx context.Context, ops SandboxUserOps, a Sand
 // reload, a stop, a switch) does so only under the account's drain
 // (drainAccount), once its sandbox daemon is down. The stops under it name
 // the daemon again: one the socket or the launcher started since runs the
-// installed DefenseClaw, which the drain held back.
-func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps, a SandboxAccount, entry pending, active bool, cur *openshellApplied) error {
+// installed DefenseClaw, which the drain held back. st is the account's
+// status the change went on.
+func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps, a SandboxAccount, entry pending, st SandboxStatus, cur *openshellApplied) error {
+	active := st.Active
 	switch entry.Kind {
 	case "launchd":
 		jobs, err := l.env.loadedMacOSAgents(ctx, a)
@@ -884,7 +989,7 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 			return err
 		}
 		if len(jobs) > 0 {
-			release, err := l.drainAccount(ctx, ops, a)
+			release, err := l.drainAccount(ctx, ops, a, st)
 			if err != nil {
 				return err
 			}
@@ -900,12 +1005,14 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 		if !active {
 			return nil // it starts on the new inputs
 		}
-		if err := ops.Stop(ctx, a, StopDaemon); err != nil {
+		// A daemon before 1.0.4 is killed: its exit would stop the
+		// gateway, which this change keeps, under a MicroVM that completed.
+		if err := ops.Stop(ctx, a, daemonStop(st, StopDaemon)); err != nil {
 			return err
 		}
 		l.openshellChange("restarted the sandbox daemon of %s (no sandbox of this account was running); %s", a.Name, entry.reasonBase())
 	case "stop":
-		release, err := l.drainAccount(ctx, ops, a)
+		release, err := l.drainAccount(ctx, ops, a, st)
 		if err != nil {
 			return err
 		}
@@ -922,7 +1029,7 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 		}
 		// Held until the previous setup is gone: a daemon the socket or the
 		// launcher starts in between would run on it.
-		release, err := l.drainAccount(ctx, ops, a)
+		release, err := l.drainAccount(ctx, ops, a, st)
 		if err != nil {
 			return err
 		}

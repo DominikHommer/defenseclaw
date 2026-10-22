@@ -262,7 +262,8 @@ var sandboxPrerequisitesPath = func(goos string) string {
 type sandboxPrerequisiteItems struct {
 	Ready   bool `json:"ready"`
 	Missing []struct {
-		Item string `json:"item"`
+		Item   string `json:"item"`
+		Detail string `json:"detail"`
 	} `json:"missing"`
 }
 
@@ -356,12 +357,30 @@ func sandboxPrerequisiteWhy(cfg *config.Config, goos, driver string, record sand
 	for _, missing := range items.Missing {
 		switch strings.ToLower(strings.TrimSpace(missing.Item)) {
 		case "openshell cli", "openshell gateway", "microvm driver", "openshell pin", "openshell platform":
+			// The trusted lifecycle record distinguishes a missing binary from
+			// one it found but refused for its release. Keep that distinction
+			// in the user's doctor/run refusal without changing availability.
+			if detail := installedOpenShellPrerequisite(missing.Detail); detail != "" {
+				return detail
+			}
 			return sandboxUnavailableNoOpenShell
 		case "docker":
 			why = sandboxUnavailableDockerMissing
 		}
 	}
 	return why
+}
+
+func installedOpenShellPrerequisite(detail string) string {
+	detail = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(detail), "openshell: "))
+	switch {
+	case strings.HasPrefix(detail, "OpenShell ") &&
+		(strings.Contains(detail, " runs no DefenseClaw sandbox") || strings.Contains(detail, " is not supported")):
+		return detail + "; ask your administrator to upgrade OpenShell"
+	case strings.Contains(detail, " is installed, enterprise.openshell.version pins "):
+		return "OpenShell " + detail + "; ask your administrator to install the pinned release"
+	}
+	return ""
 }
 
 // sandboxDriverFor is the compute driver managed sandboxes want on goos:

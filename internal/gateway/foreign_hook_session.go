@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -111,10 +112,76 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	decision = a.recheckForeignHookSessionAllow(places, identity, exchange.Key, decision, recordKey)
 	unlock()
 	if decision.Deny {
+		// A denial cannot become an allow when the guardian commits a
+		// removal, so do not hold the fence through audit export or the
+		// response write.
+		fenceUnlock()
+		unlock()
 		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(decision)
+		return
+	}
+	if refusal := writeFencedForeignHookAllow(w, decision, answerBy); refusal != "" {
+		fenceUnlock()
+		unlock()
+		writeManagedHookRefusal(w, http.StatusServiceUnavailable, refusal)
+	}
+}
+
+// foreignHookFenceWait bounds how long an exchange waits for the removal
+// fence before it is refused; only a guardian's brief exclusive check holds
+// the fence against it. foreignHookFencedWriteTimeout bounds an allow's
+// response write, so a client that stops reading its response does not
+// hold the fence for long. A response that fits the socket buffer is
+// written without the client reading; one the client does not take in time
+// is cut, and the client's hook fails closed on the incomplete response.
+const (
+	foreignHookFenceWait          = 500 * time.Millisecond
+	foreignHookFencedWriteTimeout = 250 * time.Millisecond
+)
+
+// foreignHookExchangeHold bounds an allow from the moment the exchange took
+// the fence (enterprisepolicy.ForeignHookRemovalExchangeHold); tests
+// shorten it.
+var foreignHookExchangeHold = enterprisepolicy.ForeignHookRemovalExchangeHold
+
+// writeFencedForeignHookAllow writes an allow and flushes it to the
+// connection within foreignHookFencedWriteTimeout, and never past answerBy.
+// It returns a refusal reason, having written nothing, when the connection
+// cannot bound the write or answerBy has passed: the caller then refuses the
+// call instead of answering an allow that a guardian no longer waits for.
+// A write cut at the deadline leaves the expired deadline in place, so the
+// server's own finishing writes fail at once too.
+func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolicy.GuardDecision, answerBy time.Time) string {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(decision); err != nil {
+		return "foreign_hook_response_unbounded"
+	}
+	deadline := time.Now().Add(foreignHookFencedWriteTimeout)
+	if answerBy.Before(deadline) {
+		deadline = answerBy
+	}
+	if !time.Now().Before(deadline) {
+		return "foreign_hook_removal_fence_expired"
+	}
+	controller := http.NewResponseController(w)
+	if err := controller.SetWriteDeadline(deadline); err != nil {
+		return "foreign_hook_response_unbounded"
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(decision)
+	w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(body.Bytes()); err != nil {
+		return ""
+	}
+	if err := controller.Flush(); err != nil {
+		return ""
+	}
+	// A keep-alive connection serves the caller's next request: clear the
+	// deadline only after the whole allow has reached it.
+	_ = controller.SetWriteDeadline(time.Time{})
+	return ""
 }
 
 // recheckForeignHookSessionAllow reads the record key and the guardian's
@@ -603,7 +670,26 @@ func (foreignHookRemovalSource) forIdentity(dir, identity string) ([]enterprisep
 	return out, nil
 }
 
+// The guardian replaces the ledger while exchanges run. A read that meets
+// the replacement on Windows is tried again foreignHookRemovalsBusyRetries
+// times, foreignHookRemovalsBusyDelay apart, well within an exchange's
+// hold, instead of denying the call.
+const (
+	foreignHookRemovalsBusyRetries = 20
+	foreignHookRemovalsBusyDelay   = 5 * time.Millisecond
+)
+
 func readForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {
+	for attempt := 0; ; attempt++ {
+		removals, err := readForeignHookRemovalsOnce(path)
+		if err == nil || attempt == foreignHookRemovalsBusyRetries || !foreignHookRemovalsReadBusy(err) {
+			return removals, err
+		}
+		time.Sleep(foreignHookRemovalsBusyDelay)
+	}
+}
+
+func readForeignHookRemovalsOnce(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {
 	if err := validateManagedGuardianAuthorization(path, "hook guardian foreign-hook removals"); err != nil {
 		return nil, err
 	}

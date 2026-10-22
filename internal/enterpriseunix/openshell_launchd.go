@@ -274,7 +274,7 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 		// A reload of a job that runs stops it, the gateway's with its
 		// MicroVMs: under the account's drain only, which checks again what
 		// the status above read.
-		release, derr := l.drainAccount(ctx, e.sandboxOps(), a)
+		release, derr := l.drainAccount(ctx, e.sandboxOps(), a, status)
 		if derr != nil {
 			state.Pending[key] = pending{User: a.Name, UID: a.UID, Home: a.Home, Kind: "launchd", Reason: "the signed gateway binary or a loaded LaunchAgent changed (" + derr.Error() + ")",
 				Since: e.Now().UTC().Format(time.RFC3339), Sandboxes: -1}

@@ -259,6 +259,23 @@ func TestSandboxStubHelpIsTheGoHelp(t *testing.T) {
 	}
 }
 
+// GAP-0270: both JSON spellings keep the failing doctor's exit status 1.
+// Help is part of that CLI contract in both standalone and managed modes.
+func TestSandboxDoctorHelpNamesJSONFailureExit(t *testing.T) {
+	for name, help := range map[string]string{
+		"standalone": newSandboxDoctorCmd().Long,
+		"managed":    managedSandboxDoctorLong,
+	} {
+		help = strings.Join(strings.Fields(help), " ")
+		if !strings.Contains(help, "Exits 1 when a check fails") ||
+			!strings.Contains(help, "--output json") ||
+			!strings.Contains(help, "--json") ||
+			strings.Contains(help, "exit status is 0") {
+			t.Errorf("%s doctor help gives the wrong JSON exit status: %s", name, help)
+		}
+	}
+}
+
 // sandboxPreRun refuses, before any command runs, a machine sandboxes do
 // not run on: Windows, and a Mac without Apple silicon, where OpenShell's
 // MicroVM driver does not run. Teardown still runs on such a Mac: it

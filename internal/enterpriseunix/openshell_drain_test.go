@@ -109,7 +109,11 @@ func TestAWaitingSwitchChecksAgainUnderTheAccountsDrain(t *testing.T) {
 
 // oldDaemon models what runs as an account around a managed change: its
 // sandbox daemon, started by DefenseClaw 1.0.3 before the package upgrade
-// and still running it, which takes no lifecycle lock; the socket, which
+// and still running it, which takes no lifecycle lock and, stopped
+// (SIGTERM), runs its exit: that stops the account's OpenShell gateway when
+// no sandbox runs, a MicroVM that completed counting for none
+// (stopOpenShellIfIdle of 1.0.3); killed (StopKill), it runs nothing. The
+// socket, which
 // starts a daemon of the installed DefenseClaw (one that takes it); the
 // drain's lock; and the MicroVMs on the gateway that a stop-sandboxes
 // leaves running (one that started and completed: it holds the gateway).
@@ -125,6 +129,7 @@ type oldDaemon struct {
 	lost, refused  int
 	startedByOld   bool
 	stoppedGateway bool
+	oldExitRan     bool
 }
 
 func (d *oldDaemon) tick(op string) {
@@ -146,7 +151,13 @@ func (d *oldDaemon) tick(op string) {
 	if op == "release" {
 		d.held = false
 	}
-	if strings.Contains(op, "daemon") {
+	if strings.Contains(op, "daemon") || strings.Contains(op, "socket") {
+		if d.legacyUp && !strings.Contains(op, "kill") {
+			d.oldExitRan = true
+			d.lost += d.lingering
+			d.lingering = 0
+			d.stoppedGateway = true
+		}
 		d.legacyUp = false
 	}
 	if strings.Contains(op, "gateway") {
@@ -167,7 +178,9 @@ func (d *oldDaemon) tick(op string) {
 // starts back. For every step at which something starts a sandbox, for
 // the pin switch and for sandboxes turned off, no MicroVM is lost: a
 // sandbox started before the check makes the change wait, and none can
-// start after it.
+// start after it. The old daemon is killed, not stopped: stopped, its exit
+// ended the MicroVM it started and that completed right before (at the
+// first step) with the gateway, before the drain could see it.
 func TestAManagedChangeStopsTheGatewayOnlyOnceNoOldDaemonCanStartAnything(t *testing.T) {
 	for _, kind := range []string{"switch", "stop"} {
 		for race := 0; race <= 6; race++ {
@@ -190,7 +203,7 @@ func TestAManagedChangeStopsTheGatewayOnlyOnceNoOldDaemonCanStartAnything(t *tes
 					requireOK(t, h.ensure(sandboxConfig(t, "linux", true, on)))
 					cfg = sandboxConfig(t, "linux", false, on)
 				}
-				h.ops.status[h.alice.UID] = SandboxStatus{Active: true}
+				h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Legacy: true}
 				d := &oldDaemon{race: race, legacyUp: true}
 				h.ops.order = nil
 				h.ops.onOp = func(_ SandboxAccount, op string) { d.tick(op) }
@@ -203,18 +216,56 @@ func TestAManagedChangeStopsTheGatewayOnlyOnceNoOldDaemonCanStartAnything(t *tes
 				}
 				r := h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.4"), ConfigFile: writeTempConfig(t, cfg)})
 				requireOK(t, r)
-				if d.lost != 0 {
-					t.Fatalf("the gateway's stop ended %d MicroVM(s) with no flush (an old daemon started one: %v); order %v", d.lost, d.startedByOld, h.ops.order)
+				if d.lost != 0 || d.oldExitRan {
+					t.Fatalf("the gateway's stop ended %d MicroVM(s) with no flush (an old daemon started one: %v, its exit ran: %v); order %v",
+						d.lost, d.startedByOld, d.oldExitRan, h.ops.order)
 				}
 				_, waiting := h.env.loadOpenShellState().Pending[fmt.Sprint(h.alice.UID)]
 				if waiting == d.stoppedGateway {
 					t.Fatalf("waiting %v, gateway stopped %v; order %v", waiting, d.stoppedGateway, h.ops.order)
 				}
-				if !waiting && !slices.Equal(h.ops.order[:2], []string{"stop alice:daemon+socket", "drain alice"}) {
+				if !waiting && !slices.Equal(h.ops.order[:2], []string{"stop alice:kill+daemon+socket", "drain alice"}) {
 					t.Fatalf("order = %v", h.ops.order)
 				}
 			})
 		}
+	}
+}
+
+// TestARestartOfAnOldDaemonKeepsTheGatewayOfACompletedMicroVM: a waiting
+// restart (the daemon's inputs changed) stops only the daemon, and keeps
+// the account's OpenShell gateway. Stopped, a daemon before 1.0.4 ran its
+// exit, which stopped that gateway under a MicroVM it started after the
+// status and that completed, with no flush; it is killed now. A daemon of
+// 1.0.4, whose exit checks for MicroVMs, is stopped as before.
+func TestARestartOfAnOldDaemonKeepsTheGatewayOfACompletedMicroVM(t *testing.T) {
+	for _, legacy := range []bool{true, false} {
+		t.Run(fmt.Sprintf("legacy=%v", legacy), func(t *testing.T) {
+			h := newOSHost(t, "linux")
+			cfg := sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "docker"})
+			requireOK(t, h.ensure(cfg))
+			h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Running: 1, Legacy: legacy}
+			requireOK(t, h.ensure(sandboxConfigWithTelemetry(t, "linux")))
+			if entry := h.env.loadOpenShellState().Pending[fmt.Sprint(h.alice.UID)]; entry.Kind != "restart" {
+				t.Fatalf("pending = %+v", entry)
+			}
+			h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Legacy: legacy}
+			d := &oldDaemon{race: 1, legacyUp: legacy}
+			h.ops.order = nil
+			h.ops.onOp = func(_ SandboxAccount, op string) { d.tick(op) }
+			r := h.ensure(sandboxConfigWithTelemetry(t, "linux"))
+			requireOK(t, r)
+			want := "stop alice:daemon"
+			if legacy {
+				want = "stop alice:kill+daemon"
+			}
+			if !slices.Equal(h.ops.order, []string{want}) || d.lost != 0 || d.oldExitRan || d.stoppedGateway {
+				t.Fatalf("order %v, lost %d, old exit ran %v, gateway stopped %v", h.ops.order, d.lost, d.oldExitRan, d.stoppedGateway)
+			}
+			if !containsLine(r.Changes, "restarted the sandbox daemon of alice") {
+				t.Fatalf("changes = %v", r.Changes)
+			}
+		})
 	}
 }
 

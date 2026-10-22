@@ -213,6 +213,7 @@ func startTestHookSocketServer(t *testing.T, opts hookSocketTestServer) (string,
 		if err := os.WriteFile(managed.HookGuardianAuthorizationPath(dataDir), []byte(opts.ledger), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		writeForeignHookRemovalFenceFiles(t, managed.HookGuardianAuthorizationDir(dataDir))
 		restoreValidate := validateManagedGuardianAuthorization
 		validateManagedGuardianAuthorization = func(string, string) error { return nil }
 		t.Cleanup(func() { validateManagedGuardianAuthorization = restoreValidate })

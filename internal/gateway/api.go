@@ -3832,6 +3832,10 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
+// Unwrap lets http.ResponseController reach the connection, so a handler
+// behind the metrics middleware can bound its write (handleForeignHookSession).
+func (sw *statusWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
+
 type authenticatedInspectConnectorKey struct{}
 
 func withAuthenticatedInspectConnector(ctx context.Context, connectorName string) context.Context {
