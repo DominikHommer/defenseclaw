@@ -109,10 +109,6 @@ type RuntimeContractLock struct {
 		ID           string `json:"id"`
 		ConfigPath   string `json:"config_path"`
 		ConfigSHA256 string `json:"config_sha256"`
-		// AdoptedEntries names the operator's own editor entries that setup
-		// routed through the guard, so verify can report one pointed back at
-		// the agent. Python setup writes it; the guard does not use it.
-		AdoptedEntries []string `json:"adopted_entries,omitempty"`
 	} `json:"client"`
 	Agent struct {
 		ID      string `json:"id"`

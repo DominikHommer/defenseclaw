@@ -105,6 +105,8 @@ A request that names a profile the configuration does not assign to that pair is
 
 Each binding pins its own lock at `<data-dir>/acp/<client>-<agent>.contract-lock.json`. The lock records the guard and agent executable paths and SHA-256 digests, the client configuration path and digest, and the ACP schema version. Agents share one scoped token, a private file named on the guard's command line. Setup uses only the catalog that ships with DefenseClaw and never downloads from the online ACP registry.
 
+Setup and adopt also record a SHA-256 digest of each editor entry they write, in `<data-dir>/acp/owned-entries.json` (private to your account). Setup, adopt and remove change only the reserved `DefenseClaw · <Agent>` entry and entries that still match that record. They leave any other entry exactly as it is, for example one you edited or pointed back at the agent, and print the step to take: `defenseclaw acp adopt` to guard it again, or delete it in the editor settings. `acp verify` reports an adopted entry that changed and an entry whose `--gateway` is not this gateway.
+
 ## Telemetry
 
 Every guarded decision is a `guardrail.evaluation.completed` event with these attributes.

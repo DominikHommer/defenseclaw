@@ -15068,7 +15068,7 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
     for client, agent in sorted(pairs):
         label = f"ACP binding [{client}/{agent}]"
         try:
-            problems = cmd_acp._verify_binding(data_dir, client, agent, acp)
+            problems = cmd_acp._verify_binding(data_dir, client, agent, acp, cmd_acp._expected_gateway(cfg))
             profile = acp.profile_for_pair(client, agent)
             resolved = acp.profiles.get(profile)
             mode = (resolved.mode if resolved else "") or acp.mode
