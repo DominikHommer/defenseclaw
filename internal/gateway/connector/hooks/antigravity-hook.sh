@@ -342,13 +342,14 @@ ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
 case "$ACTION" in
   allow|alert) ;;
   confirm)
-    # A confirmation is Antigravity's ask; without it the call would run.
+    # A confirmation is Antigravity's force_ask; without it the call would
+    # run (plain ask honors a cached Always Allow grant: GAP-0405).
     if [ "$HOOK_EVENT" = "PreToolUse" ]; then
       OUTPUT_DECISION=""
       if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
         OUTPUT_DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || OUTPUT_DECISION=""
       fi
-      [ "$OUTPUT_DECISION" = "ask" ] || fail_response "missing native confirmation in gateway response"
+      [ "$OUTPUT_DECISION" = "force_ask" ] || fail_response "missing native confirmation in gateway response"
     fi
     ;;
   block)

@@ -109,11 +109,11 @@ Claude Code fields such as `systemMessage`, `additionalContext` and `permissionD
 
 ## Verdict mapping
 
-`observe` records findings and always permits tool execution. `action` may deny or ask only at `PreToolUse`. The [official hooks documentation](https://antigravity.google/docs/hooks) defines `PreToolUse` as a synchronous pre-execution hook whose stdout carries one of `allow`, `deny`, `ask` or `force_ask` in `decision`. DefenseClaw sends `{ "decision": "deny", "reason": "policy denied" }` for a hard block and `{ "decision": "ask", "reason": "operator confirmation required" }` for native confirmation. This synchronous `PreToolUse` decision is the only hard-blocking claim for the connector.
+`observe` records findings and always permits tool execution. `action` may deny or ask only at `PreToolUse`. The [official hooks documentation](https://antigravity.google/docs/hooks) defines `PreToolUse` as a synchronous pre-execution hook whose stdout carries one of `allow`, `deny`, `ask` or `force_ask` in `decision`. DefenseClaw sends `{ "decision": "deny", "reason": "policy denied" }` for a hard block and `{ "decision": "force_ask", "reason": "operator confirmation required" }` for native confirmation. This synchronous `PreToolUse` decision is the only hard-blocking claim for the connector.
 
 ## Native ask
 
-Only `PreToolUse` supports native ask. DefenseClaw sends `{ "decision": "ask", "reason": "operator confirmation required" }` for native confirmation. It does not claim the response overrides Antigravity's permission-bypass flags, and keeps `force_ask` only as internal `raw_action` telemetry.
+Only `PreToolUse` supports native ask. DefenseClaw sends `force_ask`, which always prompts. It never sends `ask`, because `ask` honors a cached "Always Allow" grant and the call could run without a prompt. A headless `agy -p` run cannot prompt and denies the call; the audit log still records `confirm`. DefenseClaw does not claim the response overrides Antigravity's permission-bypass flags.
 
 ## Fail mode
 

@@ -4627,7 +4627,7 @@ threading.Event().wait()
         $interactiveEvidence -match 'lacks an authentic record identity' -and
         $interactiveEvidence -match 'CMD-SOCAT-EXEC' -and
         $interactiveEvidence -match 'CMD-ENV-DUMP' -and
-        $interactiveEvidence -match "native_decision = 'ask'" -and
+        $interactiveEvidence -match "native_decision = 'force_ask'" -and
         $interactiveEvidence -match "native_interaction = 'approved'" -and
         $interactiveEvidence -match "native_interaction = 'declined'" -and
         $interactiveEvidence -notmatch '(?s)PostToolUse.*?step_idx\s+-ceq' -and

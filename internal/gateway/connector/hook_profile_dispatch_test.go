@@ -679,6 +679,19 @@ func TestAntigravityProfileRespond_Parity(t *testing.T) {
 			},
 		},
 		{
+			// GAP-0405: a plain ask honors a cached Always Allow grant;
+			// force_ask always prompts.
+			name:   "PreToolUse_action_mode_confirm_forces_a_fresh_prompt",
+			event:  "PreToolUse",
+			action: "confirm",
+			raw:    "confirm",
+			reason: "matched policy: C2-WEBHOOK-SITE",
+			expected: map[string]interface{}{
+				"decision": "force_ask",
+				"reason":   "matched policy: C2-WEBHOOK-SITE",
+			},
+		},
+		{
 			name:       "PreToolUse_action_mode_alert_allows",
 			event:      "PreToolUse",
 			action:     "alert",

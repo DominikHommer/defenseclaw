@@ -226,6 +226,11 @@ func cursorPermissionOutput(action, reason string, supportsAsk, supportsUserMess
 // https://antigravity.google/docs/hooks. PreToolUse is the sole hard policy
 // boundary: synchronous stdout {"decision":"deny"} blocks the tool. No
 // enforcement claim relies on the hook process exit code.
+//
+// A confirmation is "force_ask", never "ask": Antigravity's "ask" honors a
+// cached "Always Allow" grant, so a call the user once allowed always would
+// run with no fresh prompt, while "force_ask" always prompts and ignores
+// cached permissions (rel-1-0-4 GAP-0405).
 func antigravityHookOutputForProfile(event, action, _ string, reason, additional string) map[string]interface{} {
 	switch canonicalHookEvent(event) {
 	case "pretooluse":
@@ -233,7 +238,7 @@ func antigravityHookOutputForProfile(event, action, _ string, reason, additional
 		case "block":
 			return map[string]interface{}{"decision": "deny", "reason": reason}
 		case "confirm":
-			return map[string]interface{}{"decision": "ask", "reason": reason}
+			return map[string]interface{}{"decision": "force_ask", "reason": reason}
 		default:
 			return map[string]interface{}{"decision": "allow"}
 		}

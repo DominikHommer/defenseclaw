@@ -151,20 +151,21 @@ func claudeCodeProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 	}
 }
 
-// ClaudeCodeModeCanAsk reports whether Claude Code shows its approval dialog
-// for a PreToolUse permissionDecision "ask" in the session's permission_mode.
-// Only "default" (labeled Manual) shows it. In acceptEdits, bypassPermissions
-// and dontAsk Claude Code treats "ask" as "defer", so allow rules or the mode
-// decide and the call can run with no prompt; in auto and plan it treats
-// "ask" as "deny" (code.claude.com/docs/en/hooks, PreToolUse decision
-// control). A missing or unknown mode cannot ask either, so a confirmation
-// fails closed to a block (GAP-0371).
+// ClaudeCodeModeCanAsk reports whether DefenseClaw sends a PreToolUse
+// permissionDecision "ask" in the session's permission_mode. Only "default"
+// (labeled Manual) is a mode where the ask reliably reaches the user. In
+// acceptEdits, bypassPermissions and dontAsk Claude Code can treat "ask" as
+// "defer", so allow rules or the mode decide and the call can run with no
+// prompt; in auto the classifier can still deny it unshown, and plan does
+// not run tools (code.claude.com/docs/en/hooks, PreToolUse decision
+// control). Manual-only is DefenseClaw's policy: any other, missing or
+// unknown mode fails closed to a block (GAP-0371).
 func ClaudeCodeModeCanAsk(permissionMode string) bool {
 	return strings.TrimSpace(permissionMode) == "default"
 }
 
 // ClaudeCodeNoAskReason adds the next step to the reason of a confirmation
-// that was blocked because the session's permission mode cannot ask. It is
+// that was blocked because the session is not in Manual mode. It is
 // idempotent, so each wire shaper may apply it.
 func ClaudeCodeNoAskReason(reason, permissionMode string) string {
 	mode := strings.TrimSpace(permissionMode)
@@ -172,8 +173,8 @@ func ClaudeCodeNoAskReason(reason, permissionMode string) string {
 	if mode != "" {
 		where = mode + " mode"
 	}
-	hint := "Claude Code cannot ask for approval in " + where +
-		", so DefenseClaw blocked the call. To approve it, switch Claude Code to Manual mode (Shift+Tab) and ask again."
+	hint := "DefenseClaw asks for approval only in Claude Code's Manual mode, so it blocked the call in " + where +
+		". To approve it, switch Claude Code to Manual mode (Shift+Tab) and ask again."
 	reason = strings.TrimSpace(reason)
 	if strings.Contains(reason, hint) {
 		return reason

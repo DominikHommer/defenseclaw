@@ -1640,7 +1640,12 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 		}
 		return rawStringOr(fields, "permissionDecision", "") == want
 	case "antigravity":
-		// Antigravity reads only its documented decision values.
+		// Antigravity reads only its documented decision values. A
+		// confirmation must be force_ask: its plain ask honors a cached
+		// Always Allow grant and can run the call unasked (GAP-0405).
+		if action == "confirm" {
+			want = "force_ask"
+		}
 		return rawStringOr(fields, "decision", "") == want
 	case "devin", "kiro", "opencode":
 		decision := rawStringOr(fields, "decision", "")
