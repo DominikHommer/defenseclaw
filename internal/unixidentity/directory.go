@@ -1126,10 +1126,41 @@ func (r *NSSResolver) confirmUnnamedGroups(ids []int, names map[int]string) erro
 				}
 			}
 		case service == "sss" || service == "winbind":
-			// passwdAbsent checks these services as a whole: the key is not
-			// asked.
-			if err := r.passwdAbsent(service, strconv.Itoa(unnamed[0]), true); err != nil {
-				return fmt.Errorf("unixidentity: no group answers for gid %d, and %s cannot show that it answers: %w", unnamed[0], service, err)
+			for _, gid := range unnamed {
+				if names[gid] != "" {
+					continue
+				}
+				group, lookupErr := r.lookupGroupIDInService(service, gid)
+				if lookupErr == nil {
+					names[gid] = group.Name
+					continue
+				}
+				if !IsNotFound(lookupErr) {
+					return fmt.Errorf("unixidentity: %s group %d: %w", service, gid, lookupErr)
+				}
+				// A live NSS socket can return not-found for an uncached GID
+				// while its domain is offline. Require both this GID's miss
+				// and every served domain to be online.
+				var onlineErr error
+				if service == "sss" && sssdConfigured() {
+					sssd, dialErr := dialSSSDNSS(r.context())
+					if dialErr == nil {
+						sssd.Close()
+						onlineErr = sssdDomainsOnline(r.context())
+					} else {
+						onlineErr = dialErr
+					}
+				} else if service == "winbind" {
+					if _, statErr := os.Stat(sambaConfPath); !errors.Is(statErr, os.ErrNotExist) {
+						onlineErr = winbindAnswers(r.context())
+						if onlineErr == nil {
+							onlineErr = winbindDomainsOnline(r.context())
+						}
+					}
+				}
+				if onlineErr != nil {
+					return fmt.Errorf("unixidentity: %s cannot confirm absence of group %d: %w: %w", service, gid, onlineErr, errDirectoryUnconfirmed)
+				}
 			}
 		case memberListServices[service]:
 			return fmt.Errorf("unixidentity: no group answers for gid %d, and getent answers %s so also when %s did not answer: %w",
@@ -1970,12 +2001,21 @@ func (r *NSSResolver) passwdAbsent(service, key string, byUID bool) error {
 			return fmt.Errorf("%w: %w", err, errDirectoryUnconfirmed)
 		}
 		sssd.Close()
+		if err := sssdDomainsOnline(r.context()); err != nil {
+			return fmt.Errorf("SSSD cannot confirm absence of account %s: %w: %w", key, err, errDirectoryUnconfirmed)
+		}
 		return nil
 	case service == "winbind":
 		if _, err := os.Stat(sambaConfPath); errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return winbindAnswers(r.context())
+		if err := winbindAnswers(r.context()); err != nil {
+			return err
+		}
+		if err := winbindDomainsOnline(r.context()); err != nil {
+			return fmt.Errorf("winbind cannot confirm absence of account %s: %w: %w", key, err, errDirectoryUnconfirmed)
+		}
+		return nil
 	case service == "ldap":
 		holder, found, err := nslcdPasswd(r.context(), key, byUID)
 		if err != nil {
@@ -2213,10 +2253,16 @@ func (r *NSSResolver) otherHoldersInService(service string, uid int, first Accou
 		accounts = found
 	}
 	var others []string
+	skippedOwner := false
 	for _, account := range accounts {
-		if account.Name != first.Name {
-			others = append(others, account.Name+" ("+service+")")
+		if !skippedOwner && account.Name == first.Name && account.UID == first.UID {
+			skippedOwner = true
+			continue
 		}
+		others = append(others, account.Name+" ("+service+")")
+	}
+	if len(accounts) > 0 && !skippedOwner {
+		return nil, fmt.Errorf("unixidentity: %s did not list the account NSS named for uid %d: %w", service, uid, errDirectoryUnconfirmed)
 	}
 	return others, nil
 }

@@ -298,6 +298,36 @@ func (r *NSSResolver) LookupGroupID(gid int) (Group, error) {
 	return group, nil
 }
 
+// lookupGroupIDInService asks one NSS provider for a specific GID. A
+// successful responder connection says nothing about this lookup's result.
+func (r *NSSResolver) lookupGroupIDInService(service string, gid int) (Group, error) {
+	if !validServiceName(service) || gid < 0 {
+		return Group{}, fmt.Errorf("unixidentity: invalid group service lookup %q %d", service, gid)
+	}
+	result, err := r.runner(r.context(), r.path, []string{"-s", service, "group", strconv.Itoa(gid)}, withoutGroupMembers)
+	if err != nil {
+		return Group{}, err
+	}
+	if result.exitCode == getentExitNotFound && len(nonEmptyLines(string(result.stdout))) == 0 {
+		return Group{}, ErrNotFound
+	}
+	if result.exitCode != getentExitOK {
+		return Group{}, fmt.Errorf("unixidentity: getent -s %s group %d exited %d", service, gid, result.exitCode)
+	}
+	lines := nonEmptyLines(string(result.stdout))
+	if len(lines) != 1 {
+		return Group{}, fmt.Errorf("unixidentity: getent -s %s group %d returned %d entries", service, gid, len(lines))
+	}
+	group, err := ParseGroupLine(lines[0])
+	if err != nil {
+		return Group{}, err
+	}
+	if group.GID != gid {
+		return Group{}, fmt.Errorf("unixidentity: getent -s %s group %d answered for gid %d", service, gid, group.GID)
+	}
+	return group, nil
+}
+
 // GroupIDs resolves groups for the account identified by its uid.
 func (r *NSSResolver) GroupIDs(account Account) ([]int, error) {
 	if err := validName(account.Name); err != nil {
