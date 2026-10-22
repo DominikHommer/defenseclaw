@@ -32,6 +32,7 @@ from defenseclaw.file_permissions import (
     atomic_write_text_secure,
     make_private_directory,
     protect_private_file,
+    windows_guard_private_file_error,
 )
 
 _SCHEMA_VERSION = "schema-v1.21.0"
@@ -183,6 +184,46 @@ def _contract_lock_path(data_dir: str, client: str, agent: str) -> Path:
     return Path(data_dir) / "acp" / f"{client}-{agent}.contract-lock.json"
 
 
+def _acp_dir_is_redirected(data_dir: str) -> bool:
+    """Whether <data_dir>/acp exists but is a link, a reparse point or not a directory.
+
+    Setup creates that directory itself, private to this account. A symlink
+    or a Windows junction there sends every lock and token to another
+    runtime's directory: its locks prove nothing about this runtime's
+    entries, and its files are not this runtime's to change or remove.
+    """
+    path = Path(data_dir).expanduser() / "acp"
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    reparse = getattr(info, "st_file_attributes", 0) & 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
+    return stat.S_ISLNK(info.st_mode) or bool(reparse) or not stat.S_ISDIR(info.st_mode)
+
+
+def _acp_runtime_dir(data_dir: str) -> Path | None:
+    """This runtime's own ACP directory (canonical), or None when there is none to trust.
+
+    The data directory is resolved (it holds this runtime's config, so where
+    it points is this runtime), but the acp directory under it must be a
+    real directory, not a link to someone else's.
+    """
+    if not data_dir or _acp_dir_is_redirected(data_dir):
+        return None
+    path = Path(data_dir).expanduser().resolve() / "acp"
+    return path if path.is_dir() else None
+
+
+def _refuse_redirected_acp_dir(data_dir: str) -> None:
+    if _acp_dir_is_redirected(data_dir):
+        raise click.ClickException(
+            f"ACP runtime directory {Path(data_dir) / 'acp'} is a link or not a directory; "
+            "DefenseClaw will not write or remove ACP state through it. Move it aside and run the command again"
+        )
+
+
 def _write_contract_lock(
     *,
     data_dir: str,
@@ -243,9 +284,32 @@ def _lock_document(path: Path, client: str, agent: str) -> dict[str, Any] | None
     return document
 
 
-def _adopted_entries(document: dict[str, Any] | None) -> list[str]:
-    names = document["client"].get("adopted_entries") if document else None
-    return [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
+def _lock_binds_editor(lock: dict[str, Any], client: str) -> bool:
+    """Whether a lock was written for the editor settings file this client uses now.
+
+    The editor file moves with XDG_CONFIG_HOME, APPDATA or HOME. A lock
+    written for the old file names entries in that file, not in this one.
+    """
+    try:
+        return Path(lock["client"]["config_path"]).resolve() == _client_path(client).resolve()
+    except (KeyError, TypeError, OSError, ValueError, click.ClickException):
+        return False
+
+
+def _retained_adopted_entries(data_dir: str, client: str, agent: str) -> list[str]:
+    """Entries this runtime's proven lock says the pair adopted in the current editor file.
+
+    Setup routes such an entry back through the guard without an adopt
+    request, so only a lock that proves ownership (this runtime's own
+    directory, complete, private to this account) and that binds this very
+    editor file may name one. Any other entry with that name is the
+    operator's, and taking it over needs an explicit acp adopt.
+    """
+    runtime = _acp_runtime_dir(data_dir)
+    lock = _proven_lock(runtime / f"{client}-{agent}.contract-lock.json", client, agent) if runtime else None
+    if lock is None or not _lock_binds_editor(lock, client):
+        return []
+    return list(lock["client"].get("adopted_entries", []))
 
 
 def _client_contract_snapshots(data_dir: str, client: str, agent: str) -> list[tuple[Path, tuple[bool, bytes]]]:
@@ -308,11 +372,13 @@ def _lock_is_private(path: Path) -> bool:
     Setup writes locks owner-only. On POSIX a lock another account owns, or
     one others can read or rewrite, proves nothing about who wrote the entry,
     and the guard refuses a lock with any group or other permission bit.
-    (Root may own one: enterprise re-pinning rewrites managed locks.) Windows
-    locks sit in the account's own profile with an owner-only ACL.
+    (Root may own one: enterprise re-pinning rewrites managed locks.) On
+    Windows the check is the guard's own: no reparse point on the path,
+    owned by this account, and a DACL that grants only this account, OWNER
+    RIGHTS and SYSTEM.
     """
     if os.name == "nt":
-        return True
+        return windows_guard_private_file_error(path) is None
     try:
         info = path.lstat()
     except OSError:
@@ -442,15 +508,15 @@ def _lock_names_entry(
     and mode.
     A guard-like filename proves nothing on its own: an operator's wrapper
     may also be called defenseclaw-acp. With no runtime (data_dir None) no
-    alias is proven.
+    alias is proven, and neither is one when the runtime's acp directory is
+    a link (to another runtime's directory) rather than its own.
     """
-    if not data_dir:
-        return False
     lock_value, token_value = options.get("--contract-lock", ""), options.get("--token-file", "")
     try:
-        runtime_lock = _contract_lock_path(str(Path(data_dir).expanduser()), client, agent)
-        runtime = runtime_lock.parent.resolve()
-        expected_lock = runtime / runtime_lock.name
+        runtime = _acp_runtime_dir(data_dir or "")
+        if runtime is None:
+            return False
+        expected_lock = runtime / f"{client}-{agent}.contract-lock.json"
         if not _is_exact_path(lock_value, expected_lock):
             return False
         lock = _proven_lock(expected_lock, client, agent)
@@ -463,7 +529,7 @@ def _lock_names_entry(
         token_name = f"{client}-{agent}.token" if lock["guard"].get("managed_custody") else ".token"
         if not _is_exact_path(token_value, runtime / token_name):
             return False
-        return Path(lock["client"]["config_path"]).resolve() == _client_path(client).resolve()
+        return _lock_binds_editor(lock, client)
     except (OSError, ValueError, click.ClickException):
         return False
 
@@ -593,6 +659,15 @@ def _unproven_pair_entries(client: str, agent: str, data_dir: str) -> list[str]:
     )
 
 
+def _warn_redirected_acp_dir(redirected: bool, data_dir: str) -> None:
+    if redirected:
+        ux.warn(
+            f"Left {Path(data_dir) / 'acp'}: it is a link or not a directory, so the contract locks "
+            "and tokens it reaches are not this runtime's to remove.",
+            indent="",
+        )
+
+
 def _warn_unproven_entries(names: list[str], path: Path, client: str, agent: str) -> None:
     for name in names:
         ux.warn(
@@ -656,7 +731,8 @@ def _binding_pairs(cfg: Any, data_dir: str) -> set[tuple[str, str]]:
     user, so only this user's locks count there.
     """
     pairs = _managed_pairs(data_dir)
-    for client in _CLIENTS:
+    # Locks reached through a linked acp directory are another runtime's.
+    for client in _CLIENTS if not _acp_dir_is_redirected(data_dir) else ():
         for agent in _AGENTS:
             lock = _contract_lock_path(data_dir, client, agent)
             if lock.is_symlink() or lock.exists():
@@ -740,7 +816,7 @@ def _verify_binding(
     if not names:
         problems.append("managed editor entry is missing")
     lock_path = _contract_lock_path(data_dir, client, agent)
-    if lock_path.is_symlink() or not lock_path.is_file():
+    if lock_path.is_symlink() or not lock_path.is_file() or _acp_runtime_dir(data_dir) is None:
         problems.append("contract lock is missing or unsafe")
         return problems
     try:
@@ -761,19 +837,21 @@ def _verify_binding(
         or lock_agent.get("id") != agent
     ):
         problems.append("contract lock identity does not match")
+    same_editor = isinstance(lock_client, dict) and _lock_binds_editor(lock, client)
     adopted = lock_client.get("adopted_entries", []) if isinstance(lock_client, dict) else []
     if not isinstance(adopted, list) or not all(isinstance(name, str) for name in adopted):
         problems.append("contract lock adopted entries are malformed")
-    else:
+    elif same_editor:
+        # Adopted names refer to the file the lock was written for; in
+        # another editor file the same name is someone else's entry.
         problems.extend(
             f"adopted editor entry {name!r} no longer launches the DefenseClaw guard"
             for name in adopted
             if name not in names
         )
     if isinstance(lock_client, dict):
-        locked_client_path = lock_client.get("config_path")
         client_digest = lock_client.get("config_sha256")
-        if not isinstance(locked_client_path, str) or Path(locked_client_path).resolve() != client_path.resolve():
+        if not same_editor:
             problems.append("client configuration path does not match")
         elif settings_usable and (not isinstance(client_digest, str) or client_digest != _client_digest(client_path)):
             problems.append("client configuration digest has drifted")
@@ -975,12 +1053,13 @@ def setup_cmd(
                 f"central enterprise ACP policy does not authorize {client}/{agent} in {profile} {mode} mode"
             )
     client_path = _client_path(client)
+    _refuse_redirected_acp_dir(data_dir)
     _check_reserved_entry(client, agent, data_dir, entry_name)
     token_candidate = (
         Path(data_dir) / "acp" / f"{client}-{agent}.token" if managed else Path(data_dir) / "acp" / ".token"
     )
     lock_candidate = _contract_lock_path(data_dir, client, agent)
-    retained = _adopted_entries(_proven_lock(lock_candidate, client, agent))
+    retained = _retained_adopted_entries(data_dir, client, agent)
     client_snapshot = _snapshot(client_path)
     token_snapshot = _snapshot(token_candidate)
     lock_snapshots = _client_contract_snapshots(data_dir, client, agent)
@@ -1187,12 +1266,17 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
     if not managed and runtime_data_dir:
         raise click.ClickException("--runtime-data-dir is a managed-enrollment option")
     lock_path = _contract_lock_path(data_dir, client, agent)
-    lock_snapshots = _client_contract_snapshots(data_dir, client, agent)
+    # A linked acp directory holds another runtime's locks: remove neither
+    # reads, rewrites nor deletes them, and says so.
+    redirected = _acp_dir_is_redirected(data_dir)
+    lock_snapshots = [] if redirected else _client_contract_snapshots(data_dir, client, agent)
+    had_lock = not redirected and lock_path.exists()
     had_entry = _has_client_entry(client, agent, data_dir)
     had_policy = not managed and app.cfg.acp.binding_key(client, agent) in app.cfg.acp.bindings
-    if not (had_entry or had_policy or lock_path.exists()):
+    if not (had_entry or had_policy or had_lock):
         click.echo(f"Nothing to remove: no DefenseClaw {agent} entry is configured for {client} ({path})")
         _warn_unproven_entries(unproven, path, client, agent)
+        _warn_redirected_acp_dir(redirected, data_dir)
         return
     acp_snapshot = copy.deepcopy(app.cfg.acp)
     try:
@@ -1207,9 +1291,10 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
                 app.cfg.acp.clients.pop(client, None)
             if not any(pair_agent == agent for _, pair_agent in remaining):
                 app.cfg.acp.agents.pop(agent, None)
-        if lock_path.exists():
+        if had_lock and lock_path.exists():
             lock_path.unlink()
-        _refresh_client_contract_digests(data_dir, client, path)
+        if not redirected:
+            _refresh_client_contract_digests(data_dir, client, path)
         if not managed:
             active_clients = set(app.cfg.acp.clients)
             active_agents = set(app.cfg.acp.agents)
@@ -1236,6 +1321,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
     _progress(True, "Recording the change with the gateway...")
     _log_acp_change(app, "acp-remove", f"scope={client}/{agent} entry=removed previous=configured")
     _warn_unproven_entries(unproven, path, client, agent)
+    _warn_redirected_acp_dir(redirected, data_dir)
     if had_entry:
         click.echo(f"Removed the DefenseClaw {agent} entry from {path}")
     else:
@@ -1417,6 +1503,9 @@ def refresh_guard_pins(
     locks whose guard is that file. With ``apply=False`` nothing is written.
     Returns the ``client/agent`` pairs re-pinned (or that would be).
     """
+    if _acp_dir_is_redirected(data_dir):
+        # Locks behind a linked acp directory are another runtime's.
+        return []
     protocol = {"schema_version": _SCHEMA_VERSION, "schema_sha256": _SCHEMA_SHA256}
     only_path = os.path.normcase(str(Path(guard_path).expanduser().resolve())) if guard_path else ""
     repinned: list[str] = []
