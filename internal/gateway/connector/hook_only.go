@@ -3694,6 +3694,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	if err := validateHermesWindowsConfigPath(configPath); err != nil {
 		return err
 	}
+	retireManagedConsent := managedStandaloneRender(opts)
 	logicalName := hermesAllowlistLogicalName
 	path := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
 	backup, backupErr := loadManagedFileBackupForTransform(opts.DataDir, "hermes", logicalName, path)
@@ -3703,7 +3704,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	// Approvals that carry DefenseClaw's ownership marker are DefenseClaw's
 	// even in the copy Setup captured (a file put back from an earlier
 	// enrollment holds them), so that copy is restored only without them.
-	if backup == nil || !hermesAllowlistHoldsOwnedApprovals(backup.PristineBytes) {
+	if !retireManagedConsent && (backup == nil || !hermesAllowlistHoldsOwnedApprovals(backup.PristineBytes)) {
 		restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, "hermes", logicalName, path)
 		if err != nil {
 			return err
@@ -3761,6 +3762,13 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 		owned, _ := entry[hermesAllowlistOwnerField].(bool)
 		_, requiredEvent := events[event]
 		pair := event + "\x00" + entryCommand
+		if retireManagedConsent && requiredEvent && entryCommand == command &&
+			(owned || hermesConsentForCommand(entry, command)) {
+			// A standalone uninstall removes the product, including consent for
+			// its exact hook retained by a supported upgrade. Restoring that
+			// consent would leave a registration pointing into removed state.
+			continue
+		}
 		if owned && requiredEvent && !pristinePairs[pair] {
 			if entryCommand != command {
 				return fmt.Errorf("Hermes allowlist entry %s has a tampered DefenseClaw command; refusing non-exact cleanup", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
