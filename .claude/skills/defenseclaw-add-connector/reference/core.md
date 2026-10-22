@@ -300,6 +300,21 @@ Also:
 
 Setup must be idempotent. Use a lock file wherever setup can run concurrently (Hermes uses `.hermes-lifecycle.lock`).
 
+**ACP editor entries.** `internal/inventory/acp_registry.json` is the canonical
+client capability table; the packaged Python copy and Go `builtinCatalog`
+must match it (`scripts/check_schemas.py`,
+`TestBuiltinCatalogMatchesCanonicalACPRegistry`). The table supplies the
+entry container, managed type, launch keys and editor-owned preferences to
+ACP setup, entry pinning and verification. `acp verify` enumerates every
+configured editor entry; only another entry proven to use the same pinned
+guard with its own private lock is exempt. A catalog command can resolve to
+an opaque wrapper on `PATH`, so a direct or unknown launch fails verification.
+A direct entry that was previously adopted is operator-owned
+again until an explicit `acp adopt`, so plain setup must leave it intact and
+verify must keep reporting it. Before setup or removal refreshes another
+binding's legacy whole-file pin, validate its old digest; leave drifted pins
+unchanged for that binding's explicit repair.
+
 **Teardown.**
 - Remove entries by exact owned command strings (`removeJSONHookReferences`). Include **every** legacy rendered command, for example `legacyAntigravityWindowsHookCommand` and the legacy Devin, Copilot and Kiro call-operator forms.
 - Restore the pristine file when it is unchanged.

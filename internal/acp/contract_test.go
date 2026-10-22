@@ -16,6 +16,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
+func TestClientEntrySHA256RejectsUnknownClient(t *testing.T) {
+	path := filepath.Join(testenv.PrivateTempDir(t), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"agent_servers":{"DefenseClaw · Kiro":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClientEntrySHA256(path, "unknown", "kiro"); err == nil {
+		t.Fatal("unknown editor capabilities produced an entry pin")
+	}
+}
+
 func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) {
 	dir := testenv.PrivateTempDir(t)
 	agent := filepath.Join(dir, "agent")

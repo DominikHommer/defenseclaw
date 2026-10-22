@@ -112,11 +112,18 @@ environment or another launch field requires setup again. Setting up a
 different binding in the same editor keeps existing entry pins; it cannot
 approve changes to another binding's launch fields.
 
-`defenseclaw acp verify` and `defenseclaw acp status` also fail while any
-other entry in the editor file can start the agent without the guard: its
-command, a wrapper or script that names it, a link or copy of the pinned
-binary, or a registry or built-in entry for it. Delete that entry, or route it
-through the guard with `defenseclaw acp adopt`.
+`defenseclaw acp verify` and `defenseclaw acp status` check every configured
+agent-server entry in the editor file. Another entry is verified only when it
+uses the same pinned guard with a private lock and a distinct agent executable.
+A direct agent entry, an opaque wrapper, a registry entry or an unfamiliar
+launch field leaves verification unhealthy because it could start the agent
+without the guard. A catalog command alone is insufficient: the program on
+`PATH` could be a wrapper. Delete the entry, or explicitly route a supported
+direct entry through
+the guard with `defenseclaw acp adopt`. Re-running `acp setup` never takes
+ownership of a direct entry that was adopted earlier. Setup also refuses to
+pin an unfamiliar launch field on a managed entry; remove that field before
+re-running setup.
 
 A lock written by an older release pins the whole settings file, so after an
 upgrade any edit to that file, a theme change included, still fails
@@ -124,9 +131,10 @@ upgrade any edit to that file, a theme change included, still fails
 `defenseclaw acp refresh` do not change that pin: they re-pin only the guard.
 To pin only the entries, run `defenseclaw acp setup` again for each such
 binding, with its `--profile` (and `--activate` for an action profile). After a
-drift, `defenseclaw acp verify` prints that exact command. Until then, setting
-up another binding in the same editor re-pins the older lock to the current
-settings file.
+drift, `defenseclaw acp verify` prints that exact command. Setup or removal of
+a different binding updates an older whole-file pin only when its previous
+digest still matches. A drifted binding keeps its old pin until its own
+explicit setup.
 
 ## Telemetry
 

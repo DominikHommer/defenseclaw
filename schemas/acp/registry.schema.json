@@ -42,8 +42,18 @@
     "support": {"enum": ["cataloged", "tested", "certified"]},
     "client": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "name", "support", "config_kind"],
-      "properties": {"id": {"$ref": "#/$defs/id"}, "name": {"type": "string"}, "support": {"$ref": "#/$defs/support"}, "config_kind": {"$ref": "#/$defs/id"}, "source_url": {"type": "string", "format": "uri", "pattern": "^https://"}}
+      "required": ["id", "name", "support", "config_kind", "entry_capabilities"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "name": {"type": "string"}, "support": {"$ref": "#/$defs/support"}, "config_kind": {"$ref": "#/$defs/id"}, "entry_capabilities": {"$ref": "#/$defs/entry_capabilities"}, "source_url": {"type": "string", "format": "uri", "pattern": "^https://"}}
+    },
+    "entry_capabilities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["entries_key", "managed_type", "launch_keys", "preference_keys"],
+      "properties": {
+        "entries_key": {"const": "agent_servers"},
+        "managed_type": {"enum": ["", "custom"]},
+        "launch_keys": {"type": "array", "uniqueItems": true, "items": {"enum": ["command", "args", "env", "type"]}},
+        "preference_keys": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
     },
     "agent": {
       "type": "object", "additionalProperties": false,

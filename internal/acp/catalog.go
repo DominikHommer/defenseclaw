@@ -50,13 +50,23 @@ type Agent struct {
 	Notes       string   `json:"notes,omitempty" yaml:"notes,omitempty"`
 }
 
+// ClientEntryCapabilities defines the editor fields setup writes and the
+// fields its own UI may change without changing the agent launch.
+type ClientEntryCapabilities struct {
+	EntriesKey     string   `json:"entries_key" yaml:"entries_key"`
+	ManagedType    string   `json:"managed_type" yaml:"managed_type"`
+	LaunchKeys     []string `json:"launch_keys" yaml:"launch_keys"`
+	PreferenceKeys []string `json:"preference_keys" yaml:"preference_keys"`
+}
+
 // Client describes an editor that can spawn an ACP agent.
 type Client struct {
-	ID         string  `json:"id" yaml:"id"`
-	Name       string  `json:"name" yaml:"name"`
-	Support    Support `json:"support" yaml:"support"`
-	ConfigKind string  `json:"config_kind" yaml:"config_kind"`
-	SourceURL  string  `json:"source_url,omitempty" yaml:"source_url,omitempty"`
+	ID                string                  `json:"id" yaml:"id"`
+	Name              string                  `json:"name" yaml:"name"`
+	Support           Support                 `json:"support" yaml:"support"`
+	ConfigKind        string                  `json:"config_kind" yaml:"config_kind"`
+	EntryCapabilities ClientEntryCapabilities `json:"entry_capabilities" yaml:"entry_capabilities"`
+	SourceURL         string                  `json:"source_url,omitempty" yaml:"source_url,omitempty"`
 }
 
 type Catalog struct {
@@ -70,8 +80,13 @@ var builtinCatalog = Catalog{
 	SchemaVersion: SchemaVersion,
 	SchemaSHA256:  SchemaSHA256,
 	Clients: []Client{
-		{ID: "zed", Name: "Zed", Support: SupportTested, ConfigKind: "zed-settings", SourceURL: "https://zed.dev/docs/ai/external-agents"},
-		{ID: "jetbrains", Name: "JetBrains AI Assistant", Support: SupportCataloged, ConfigKind: "jetbrains-acp", SourceURL: "https://www.jetbrains.com/help/ai-assistant/acp.html"},
+		{ID: "zed", Name: "Zed", Support: SupportTested, ConfigKind: "zed-settings", SourceURL: "https://zed.dev/docs/ai/external-agents",
+			EntryCapabilities: ClientEntryCapabilities{EntriesKey: "agent_servers", ManagedType: "custom",
+				LaunchKeys:     []string{"command", "args", "env", "type"},
+				PreferenceKeys: []string{"default_mode", "default_model", "favorite_models", "default_config_options", "favorite_config_option_values"}}},
+		{ID: "jetbrains", Name: "JetBrains AI Assistant", Support: SupportCataloged, ConfigKind: "jetbrains-acp", SourceURL: "https://www.jetbrains.com/help/ai-assistant/acp.html",
+			EntryCapabilities: ClientEntryCapabilities{EntriesKey: "agent_servers", ManagedType: "",
+				LaunchKeys: []string{"command", "args", "env"}, PreferenceKeys: []string{}}},
 	},
 	Agents: []Agent{
 		{ID: "kiro", Name: "Kiro", Command: "kiro-cli", Args: []string{"acp"}, Support: SupportTested, ConnectorID: "kiro", Kind: "native", SourceURL: "https://kiro.dev/docs/cli/acp/"},
@@ -92,7 +107,24 @@ func BuiltinCatalog() Catalog {
 		}
 	}
 	c.Clients = append([]Client(nil), builtinCatalog.Clients...)
+	for index := range c.Clients {
+		caps := &c.Clients[index].EntryCapabilities
+		caps.LaunchKeys = append([]string(nil), caps.LaunchKeys...)
+		caps.PreferenceKeys = append([]string(nil), caps.PreferenceKeys...)
+		if caps.PreferenceKeys == nil {
+			caps.PreferenceKeys = []string{}
+		}
+	}
 	return c
+}
+
+func clientEntryCapabilities(id string) (ClientEntryCapabilities, error) {
+	for _, client := range builtinCatalog.Clients {
+		if client.ID == id && client.EntryCapabilities.EntriesKey != "" {
+			return client.EntryCapabilities, nil
+		}
+	}
+	return ClientEntryCapabilities{}, errors.New("unknown ACP client: " + id)
 }
 
 func LookupAgent(id string) (Agent, error) {

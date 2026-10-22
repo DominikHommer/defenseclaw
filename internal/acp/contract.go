@@ -42,21 +42,6 @@ func ManagedEntryName(agent string) string {
 	return "DefenseClaw · " + strings.ToUpper(agent[:1]) + strings.ToLower(agent[1:])
 }
 
-// editorOwnedEntryKeys are the keys an editor stores in an agent entry for
-// choices made in its own UI. Zed keeps the session mode, model and config
-// options picked in the agent panel there and sends them to the agent over
-// ACP (session/set_mode, session/set_model, session/set_config_option), where
-// the guard checks them like any other request; they cannot change what the
-// editor launches. Choosing "Accept Edits" stored default_mode in the guarded
-// entry, and the next start refused the entry as changed (GAP-0900). The
-// command, args, env and type, and every key not named here, stay pinned.
-var editorOwnedEntryKeys = map[string]map[string]bool{
-	"zed": {
-		"default_mode": true, "default_model": true, "favorite_models": true,
-		"default_config_options": true, "favorite_config_option_values": true,
-	},
-}
-
 // ClientEntrySHA256 is the digest of agent's guarded entry in the editor
 // settings file at path: its JSON with sorted keys, so that the editor
 // rewriting the file around it, or reformatting it, leaves it unchanged. The
@@ -68,6 +53,14 @@ func ClientEntrySHA256(path, clientID, agentID string) (string, error) {
 // ClientEntriesSHA256 also pins the names and contents of adopted or
 // numbered entries sharing one binding. No alias may escape the lock.
 func ClientEntriesSHA256(path, clientID, agentID string, adopted []string) (string, error) {
+	capabilities, err := clientEntryCapabilities(clientID)
+	if err != nil {
+		return "", err
+	}
+	preferences := make(map[string]bool, len(capabilities.PreferenceKeys))
+	for _, key := range capabilities.PreferenceKeys {
+		preferences[key] = true
+	}
 	body, err := safefile.ReadRegularFileBounded(path, maxClientConfigBytes)
 	if err != nil {
 		return "", err
@@ -81,7 +74,7 @@ func ClientEntriesSHA256(path, clientID, agentID string, adopted []string) (stri
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return "", errors.New("editor settings have trailing content")
 	}
-	servers, _ := document["agent_servers"].(map[string]any)
+	servers, _ := document[capabilities.EntriesKey].(map[string]any)
 	names := adopted
 	if len(names) == 0 {
 		names = []string{ManagedEntryName(agentID)}
@@ -94,7 +87,7 @@ func ClientEntriesSHA256(path, clientID, agentID string, adopted []string) (stri
 		}
 		pinned := make(map[string]any, len(fields))
 		for key, value := range fields {
-			if !editorOwnedEntryKeys[clientID][key] {
+			if !preferences[key] {
 				pinned[key] = value
 			}
 		}

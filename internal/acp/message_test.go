@@ -119,8 +119,12 @@ func TestBuiltinCatalogReturnsAnIndependentCopy(t *testing.T) {
 	first := BuiltinCatalog()
 	first.Agents[0].Args[0] = "tampered"
 	first.Agents[0].Command = "tampered"
+	first.Clients[0].EntryCapabilities.LaunchKeys[0] = "tampered"
+	first.Clients[0].EntryCapabilities.PreferenceKeys[0] = "tampered"
 	second := BuiltinCatalog()
-	if second.Agents[0].Command == "tampered" || second.Agents[0].Args[0] == "tampered" {
+	if second.Agents[0].Command == "tampered" || second.Agents[0].Args[0] == "tampered" ||
+		second.Clients[0].EntryCapabilities.LaunchKeys[0] == "tampered" ||
+		second.Clients[0].EntryCapabilities.PreferenceKeys[0] == "tampered" {
 		t.Fatal("caller mutation changed the built-in ACP catalog")
 	}
 }

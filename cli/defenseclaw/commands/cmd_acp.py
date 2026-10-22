@@ -11,7 +11,6 @@ import hashlib
 import io
 import json
 import os
-import re
 import secrets
 import shlex
 import shutil
@@ -24,7 +23,12 @@ from typing import Any
 import click
 
 from defenseclaw import ux
-from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS, ACP_CLIENT_IDS, ACP_REGISTRY
+from defenseclaw.acp_catalog import (
+    ACP_AGENT_ENTRY_POINTS,
+    ACP_CLIENT_ENTRY_CAPABILITIES,
+    ACP_CLIENT_IDS,
+    ACP_REGISTRY,
+)
 from defenseclaw.config import ACPBinding, ACPProfile
 from defenseclaw.connector_paths import _normalize_jsonc
 from defenseclaw.context import AppContext, pass_ctx
@@ -42,12 +46,7 @@ _REGISTRY = ACP_REGISTRY
 _CLIENTS = set(ACP_CLIENT_IDS)
 _AGENTS = {agent_id: (command, list(args)) for agent_id, (command, args) in ACP_AGENT_ENTRY_POINTS.items()}
 _ENTRY_DIGEST_PREFIX = "entry-sha256:"
-# Keep aligned with editorOwnedEntryKeys in internal/acp/contract.go.
-_EDITOR_OWNED_ENTRY_KEYS = {
-    "zed": {
-        "default_mode", "default_model", "favorite_models", "default_config_options", "favorite_config_option_values",
-    },
-}
+_CLIENT_CAPABILITIES = ACP_CLIENT_ENTRY_CAPABILITIES
 
 
 def _client_path(client: str) -> Path:
@@ -182,7 +181,7 @@ def _client_digest(path: Path, client: str, agent: str, lock_client: dict[str, A
 def _client_entry_digest(path: Path, client: str, agent: str, adopted_entries: list[str] | None = None) -> str:
     """Mirror ClientEntriesSHA256: pin every guarded entry and its picker name."""
     document = _read_json_object(path)
-    servers = document.get("agent_servers")
+    servers = document.get(_CLIENT_CAPABILITIES[client].entries_key)
     names = adopted_entries or [_managed_name(agent)]
     if not isinstance(servers, dict) or not names:
         raise click.ClickException(f"guarded editor entries are missing: {path}")
@@ -192,7 +191,7 @@ def _client_entry_digest(path: Path, client: str, agent: str, adopted_entries: l
         if not isinstance(entry, dict):
             raise click.ClickException(f"guarded editor entry {name!r} is missing or invalid: {path}")
         entries[name] = {
-            key: value for key, value in entry.items() if key not in _EDITOR_OWNED_ENTRY_KEYS.get(client, ())
+            key: value for key, value in entry.items() if key not in _CLIENT_CAPABILITIES[client].preference_keys
         }
     # A reserved entry keeps the existing Go entry digest format. Adopted
     # entries hash the name-to-entry map, so a rename or missing alias drifts.
@@ -292,11 +291,6 @@ def _lock_document(path: Path, client: str, agent: str) -> dict[str, Any] | None
     return document
 
 
-def _adopted_entries(document: dict[str, Any] | None) -> list[str]:
-    names = document["client"].get("adopted_entries") if document else None
-    return [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
-
-
 def _client_contract_snapshots(data_dir: str, client: str, agent: str) -> list[tuple[Path, tuple[bool, bytes]]]:
     paths = {_contract_lock_path(data_dir, client, agent)}
     paths.update(
@@ -307,14 +301,44 @@ def _client_contract_snapshots(data_dir: str, client: str, agent: str) -> list[t
     return [(path, _snapshot(path)) for path in sorted(paths)]
 
 
+def _preflight_other_client_pins(
+    data_dir: str, client: str, client_path: Path, changing_agent: str, *, pin_entries: bool
+) -> dict[str, str]:
+    """Prove other pins before an editor write can change a whole-file digest."""
+    if not client_path.is_file():
+        return {}
+    current_digest = _sha256_file(str(client_path))
+    validated: dict[str, str] = {}
+    for pair_client, pair_agent in sorted(_managed_pairs(data_dir)):
+        if pair_client != client or pair_agent == changing_agent:
+            continue
+        path = _contract_lock_path(data_dir, pair_client, pair_agent)
+        lock = _proven_lock(path, pair_client, pair_agent)
+        if lock is None:
+            raise click.ClickException(f"{client}/{pair_agent} contract lock is unsafe; run defenseclaw acp verify")
+        pinned = lock["client"]["config_sha256"]
+        if pinned.startswith(_ENTRY_DIGEST_PREFIX):
+            if (
+                not pin_entries
+                and lock["client"]["config_path"] == str(client_path.resolve())
+                and _client_digest(client_path, client, pair_agent, lock["client"]) == pinned
+            ):
+                validated[pair_agent] = pinned
+            continue
+        if lock["client"]["config_path"] == str(client_path.resolve()) and pinned == current_digest:
+            validated[pair_agent] = pinned
+    return validated
+
+
 def _refresh_client_contract_digests(
-    data_dir: str, client: str, client_path: Path, *, pin_entries: bool = True
+    data_dir: str, client: str, client_path: Path, *, pin_entries: bool = True,
+    changing_agent: str = "", validated_pins: dict[str, str] | None = None,
 ) -> None:
-    """Refresh legacy file pins without re-sealing another binding's entry."""
+    """Refresh only legacy file pins proven sound before the editor write."""
     if not client_path.is_file():
         return
     for pair_client, pair_agent in sorted(_managed_pairs(data_dir)):
-        if pair_client != client:
+        if pair_client != client or pair_agent == changing_agent:
             continue
         path = _contract_lock_path(data_dir, pair_client, pair_agent)
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 << 10:
@@ -337,6 +361,10 @@ def _refresh_client_contract_digests(
                 raise click.ClickException("entry-pinned client path changed; run: defenseclaw acp verify")
             # This setup did not authorize another binding's changed launch
             # fields. Only its own setup can repair entry drift.
+            continue
+        if validated_pins is None or validated_pins.get(pair_agent) != lock_client.get("config_sha256"):
+            # The file had already drifted before this operation. Preserve
+            # that lock so verify keeps requiring its own explicit setup.
             continue
         lock_client["config_path"] = str(client_path.resolve())
         lock_client["config_sha256"] = _sha256_file(str(client_path))
@@ -554,7 +582,7 @@ def _pair_entry_names(servers: dict[str, Any], client: str, agent: str, data_dir
 
 def _check_reserved_entry(client: str, agent: str, data_dir: str, adopting: str | None = None) -> None:
     path = _client_path(client)
-    servers = _read_json_object(path).get("agent_servers")
+    servers = _read_json_object(path).get(_CLIENT_CAPABILITIES[client].entries_key)
     name = _managed_name(agent)
     if not isinstance(servers, dict) or name not in servers or name == adopting:
         return
@@ -575,12 +603,12 @@ def _set_client_entry(
     command: str,
     args: list[str],
     entry_name: str | None = None,
-    retained: list[str] | None = None,
 ) -> tuple[Path, list[str]]:
     """Write the pair's guard entries; return the file and the entry names written."""
     path = _client_path(client)
     document = _read_json_object(path)
-    servers = document.setdefault("agent_servers", {})
+    capabilities = _CLIENT_CAPABILITIES[client]
+    servers = document.setdefault(capabilities.entries_key, {})
     if not isinstance(servers, dict):
         raise click.ClickException(f"agent_servers must be an object in {path}")
     names = _pair_entry_names(servers, client, agent, data_dir)
@@ -590,12 +618,6 @@ def _set_client_entry(
         if not isinstance(adopted, dict) or _agent_for_entry(adopted) != agent:
             raise click.ClickException(f"ACP entry {entry_name!r} changed before adoption; run the same command again")
         taken_over.add(entry_name)
-    # An entry this binding adopted earlier (its lock names it) that now
-    # launches the agent directly is a bypass; route it back through the guard.
-    for name in retained or []:
-        candidate = servers.get(name)
-        if name not in names and isinstance(candidate, dict) and _agent_for_entry(candidate) == agent:
-            taken_over.add(name)
     names.extend(sorted(taken_over - set(names)))
     for name in names:
         if name in taken_over:
@@ -619,15 +641,19 @@ def _set_client_entry(
         entry = dict(servers.get(name) or {})
         entry.update(command=command, args=args)
         entry.setdefault("env", {})
-        if client == "zed":
-            entry["type"] = "custom"
+        if capabilities.managed_type:
+            entry["type"] = capabilities.managed_type
+        if not _entry_launch_shape_known(entry, client):
+            raise click.ClickException(
+                f"ACP entry {name!r} has unknown launch fields; remove them before setup or adoption"
+            )
         servers[name] = entry
     _write_json(path, document)
     return path, written
 
 
 def _has_client_entry(client: str, agent: str, data_dir: str) -> bool:
-    servers = _read_json_object(_client_path(client)).get("agent_servers")
+    servers = _read_json_object(_client_path(client)).get(_CLIENT_CAPABILITIES[client].entries_key)
     return isinstance(servers, dict) and bool(_pair_entry_names(servers, client, agent, data_dir))
 
 
@@ -636,7 +662,7 @@ def _unproven_pair_entries(client: str, agent: str, data_dir: str) -> list[str]:
 
     Removal leaves them (the operator's, or another runtime's) and warns.
     """
-    servers = _read_json_object(_client_path(client)).get("agent_servers")
+    servers = _read_json_object(_client_path(client)).get(_CLIENT_CAPABILITIES[client].entries_key)
     if not isinstance(servers, dict):
         return []
     proven = set(_pair_entry_names(servers, client, agent, data_dir))
@@ -661,7 +687,7 @@ def _warn_unproven_entries(names: list[str], path: Path, client: str, agent: str
 def _remove_client_entry(client: str, agent: str, data_dir: str) -> Path:
     path = _client_path(client)
     document = _read_json_object(path)
-    servers = document.get("agent_servers")
+    servers = document.get(_CLIENT_CAPABILITIES[client].entries_key)
     if not isinstance(servers, dict):
         return path
     names = _pair_entry_names(servers, client, agent, data_dir)
@@ -680,7 +706,7 @@ def _remove_client_entry(client: str, agent: str, data_dir: str) -> Path:
     if not servers:
         # Don't leave an empty agent_servers object (or a file that setup
         # created only for DefenseClaw) behind once the last entry is gone.
-        document.pop("agent_servers")
+        document.pop(_CLIENT_CAPABILITIES[client].entries_key)
     if document:
         _write_json(path, document)
     elif path.is_file() and not path.is_symlink():
@@ -693,7 +719,7 @@ def _managed_pairs(data_dir: str | None) -> set[tuple[str, str]]:
     pairs: set[tuple[str, str]] = set()
     for client in sorted(_CLIENTS):
         document = _read_json_object(_client_path(client))
-        servers = document.get("agent_servers")
+        servers = document.get(_CLIENT_CAPABILITIES[client].entries_key)
         if not isinstance(servers, dict):
             continue
         for agent in _AGENTS:
@@ -765,211 +791,77 @@ def _managed_guard_custody_is_trusted(path_value: str) -> bool:
         return False
 
 
-# Program suffixes Windows runs a bare command name with (PATHEXT). A direct
-# entry may name the agent with any of them, in any case.
-_LAUNCH_SUFFIXES = (".exe", ".cmd", ".bat", ".com", ".ps1")
-# What ends a word in an argument, an environment value or a script, so a
-# wrapper (env, sh -c, cmd /c, npx, a script file) that names the agent is
-# read word by word.
-_LAUNCH_WORD_SPLIT = re.compile(r"[\s\"'`;|&()<>=,]+")
-_LAUNCH_SCRIPT_BYTES = 1 << 20
-
-
-def _launch_stem(word: str) -> str:
-    """The case-folded program name a launch word runs, split on either OS's separators."""
-    name = re.split(r"[\\/]", word.strip())[-1].casefold()
-    for suffix in _LAUNCH_SUFFIXES:
-        if name.endswith(suffix):
-            return name[: -len(suffix)]
-    return name
-
-
-def _path_key(path: Path) -> str:
-    """A canonical real path, case-folded on a case-insensitive volume."""
-    text = str(path)
-    if os.name == "nt":
-        return text.casefold()
-    swapped = path.with_name(path.name.swapcase())
-    try:
-        insensitive = swapped.name != path.name and os.path.samefile(path, swapped)
-    except OSError:
-        insensitive = False
-    return text.casefold() if insensitive else text
-
-
-def _launch_file(word: str, *, search_path: bool) -> Path | None:
-    """The regular file a launch word runs: a path, or a bare name on PATH."""
-    value = word.strip()
-    if not value or "\0" in value:
-        return None
-    try:
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            if not search_path:
-                return None
-            found = shutil.which(value)
-            if not found:
-                return None
-            candidate = Path(found)
-        return candidate.resolve() if candidate.is_file() else None
-    except (OSError, ValueError, RuntimeError):
-        return None
-
-
-def _is_pinned_file(path: Path | None, pinned: dict[str, Any], *, by_digest: bool) -> bool:
-    """Whether a file is the pinned executable: the same file by any path,
-    link or letter case, or (by_digest) a copy with the pinned digest."""
-    pinned_path, pinned_sha = pinned.get("path"), pinned.get("sha256")
-    if path is None or not isinstance(pinned_path, str) or not pinned_path:
+def _entry_launch_shape_known(entry: Any, client: str) -> bool:
+    """Only launch fields in the client capability table may affect a picker entry."""
+    if not isinstance(entry, dict):
         return False
-    try:
-        expected = Path(pinned_path).resolve()
-        if _path_key(path) == _path_key(expected):
-            return True
-        if expected.is_file() and os.path.samefile(path, expected):
-            return True
-        return (
-            by_digest
-            and isinstance(pinned_sha, str)
-            and expected.is_file()
-            and path.stat().st_size == expected.stat().st_size
-            and _sha256_file(str(path)).casefold() == pinned_sha.casefold()
-        )
-    except (OSError, ValueError, RuntimeError):
+    capabilities = _CLIENT_CAPABILITIES[client]
+    if set(entry) - capabilities.launch_keys - capabilities.preference_keys:
         return False
+    entry_type = entry.get("type", "")
+    if not isinstance(entry_type, str) or entry_type not in {"", capabilities.managed_type}:
+        return False
+    args = entry.get("args", [])
+    return (
+        isinstance(args, list)
+        and all(isinstance(value, str) for value in args)
+        and isinstance(entry.get("env", {}), dict)
+        and all(isinstance(key, str) and isinstance(value, str)
+                for key, value in entry.get("env", {}).items())
+    )
 
 
-def _launch_words(text: str) -> list[str]:
-    return [word for word in _LAUNCH_WORD_SPLIT.split(text) if word]
-
-
-def _is_path_word(word: str) -> bool:
-    return "/" in word or "\\" in word or word.startswith("~")
-
-
-def _words_launch_agent(
-    words: list[str], whole: list[str], agent: str, lock_agent: dict[str, Any], *, scripts: bool
+def _guard_mediates_entry(
+    entry: dict[str, Any], client: str, target_agent: str,
+    target_lock_agent: dict[str, Any], target_lock_guard: dict[str, Any], data_dir: str,
 ) -> bool:
-    """Whether these words can start the agent.
-
-    A word names the agent (its id, or a program name containing it, in any
-    letter case and with any Windows suffix), is followed by the agent's ACP
-    arguments, or is a path to the pinned agent or a copy of it. With
-    scripts, a path to a small text script is read for the same words (one
-    level). whole holds the unsplit strings, so a path with spaces is checked.
-    """
-    catalog_command, catalog_args = _AGENTS[agent]
-    pinned_path = lock_agent.get("path") if isinstance(lock_agent.get("path"), str) else ""
-    distinct = {agent.casefold()} | {
-        stem for stem in (_launch_stem(catalog_command), _launch_stem(pinned_path)) if agent.casefold() in stem
-    }
-    launch_stems = {_launch_stem(catalog_command), _launch_stem(pinned_path)} - {""}
-    acp_args = [value.casefold() for value in catalog_args]
-    folded = [word.casefold() for word in words]
-    for index, word in enumerate(words):
-        stem = _launch_stem(word)
-        if stem in distinct:
-            return True
-        if acp_args and folded[index + 1:index + 1 + len(acp_args)] == acp_args and (
-            stem in launch_stems
-            or _is_pinned_file(_launch_file(word, search_path=True), lock_agent, by_digest=True)
-        ):
-            return True
-    for word in [*whole, *words]:
-        if not _is_path_word(word) and not Path(word.strip() or ".").is_absolute():
-            continue
-        target = _launch_file(word, search_path=False)
-        if _is_pinned_file(target, lock_agent, by_digest=True):
-            return True
-        if scripts and _script_launches_agent(target, agent, lock_agent):
-            return True
-    return False
-
-
-def _script_launches_agent(target: Path | None, agent: str, lock_agent: dict[str, Any]) -> bool:
-    """Whether a small text script (a wrapper the entry runs) names the agent."""
-    try:
-        if target is None or target.stat().st_size > _LAUNCH_SCRIPT_BYTES:
-            return False
-        body = target.read_bytes()
-    except OSError:
+    """A different picker entry must use our pinned guard for a different executable."""
+    if not _entry_launch_shape_known(entry, client) or entry.get("env", {}):
         return False
-    if b"\0" in body[:8192]:
+    if entry.get("command") != target_lock_guard.get("path"):
         return False
-    text = body.decode("utf-8", "replace")
-    return _words_launch_agent(_launch_words(text), text.splitlines(), agent, lock_agent, scripts=False)
+    options = _guard_options(entry)
+    if set(options) != _GUARD_ENTRY_OPTIONS or options.get("--client") != client:
+        return False
+    agent = options.get("--agent", "")
+    if agent not in _AGENTS or agent == target_agent:
+        return False
+    path_value = options.get("--contract-lock", "")
+    lock_path = Path(data_dir).expanduser().resolve() / "acp" / f"{client}-{agent}.contract-lock.json"
+    if not _is_exact_path(path_value, lock_path):
+        return False
+    lock = _proven_lock(lock_path, client, agent)
+    if lock is None or entry.get("command") != lock["guard"]["path"]:
+        return False
+    if lock["agent"]["sha256"] == target_lock_agent.get("sha256"):
+        return False
+    token_name = f"{client}-{agent}.token" if lock["guard"].get("managed_custody") else ".token"
+    return (
+        options["--token-file"] == str(lock_path.parent / token_name)
+        and lock["client"]["config_path"] == str(_client_path(client).resolve())
+        and _launches_locked_agent(entry, options, lock, agent)
+    )
 
 
-def _entry_strings(value: Any, skip: frozenset[str] | set[str]) -> list[str]:
-    """Every string value in an entry, leaving out the editor's own preference keys."""
-    found: list[str] = []
-
-    def walk(item: Any, top: bool) -> None:
-        if isinstance(item, str):
-            found.append(item)
-        elif isinstance(item, dict):
-            for key, child in item.items():
-                if not (top and key in skip):
-                    walk(child, False)
-        elif isinstance(item, list):
-            for child in item:
-                walk(child, False)
-
-    walk(value, True)
-    return found
-
-
-def _unguarded_agent_entries(
-    servers: dict[str, Any],
-    guarded: list[str],
-    client: str,
-    agent: str,
-    lock_agent: dict[str, Any],
-    lock_guard: Any,
+def _unverified_editor_entries(
+    servers: dict[str, Any], guarded: list[str], client: str, agent: str,
+    locked_agent: dict[str, Any], locked_guard: dict[str, Any], data_dir: str,
 ) -> list[str]:
-    """Other editor entries that can start the agent without the guard.
+    """Enumerate every runnable picker entry; an unknown launch cannot verify green.
 
-    Entry pins cover only the guarded entries, so a direct alias added
-    beside them (the agent's command, a wrapper or script that names it, a
-    link or copy of the pinned binary, or a registry or built-in entry for
-    it) left the binding verified while the editor could start the agent
-    unmediated. Any doubt counts as a bypass. An entry that starts the
-    pinned guard itself is mediated by that guard's own lock and is left out.
+    An opaque wrapper can compute the target binary name at runtime, so
+    scanning its text or filename does not establish that it is unrelated.
+    The capability table defines the only fields we can interpret. All
+    other shapes and launch commands require explicit removal or adoption.
     """
-    catalog_command, _catalog_args = _AGENTS[agent]
-    skip = _EDITOR_OWNED_ENTRY_KEYS.get(client, set())
-    pinned_guard = lock_guard if isinstance(lock_guard, dict) else {}
-    found: list[str] = []
-    for name, entry in servers.items():
-        if name in guarded:
-            continue
-        command = entry.get("command") if isinstance(entry, dict) else None
-        command = command if isinstance(command, str) and command.strip() else ""
-        strings = _entry_strings(entry, skip)
-        if command:
-            target = _launch_file(command, search_path=True)
-            if _is_pinned_file(target, pinned_guard, by_digest=False):
-                continue
-            if _is_pinned_file(target, lock_agent, by_digest=True) or _launch_stem(command) in {
-                agent.casefold(), _launch_stem(catalog_command), _launch_stem(str(lock_agent.get("path") or ""))
-            } - {""}:
-                found.append(name)
-                continue
-            if _script_launches_agent(target, agent, lock_agent):
-                found.append(name)
-                continue
-        else:
-            # No argv: the editor starts it itself, from its registry, an
-            # extension or a built-in, by the entry's name.
-            label = str(name).casefold()
-            name_words = {label, label.removesuffix("-acp"), *re.split(r"[\W_]+", label)}
-            if name_words & {agent.casefold(), _launch_stem(catalog_command)}:
-                found.append(name)
-                continue
-        words = [word for text in strings for word in _launch_words(text)]
-        if _words_launch_agent(words, strings, agent, lock_agent, scripts=True):
-            found.append(name)
-    return sorted(found)
+    return sorted(
+        name for name, entry in servers.items()
+        if name not in guarded
+        and (
+            not isinstance(entry, dict)
+            or not _guard_mediates_entry(entry, client, agent, locked_agent, locked_guard, data_dir)
+        )
+    )
 
 
 def _verify_binding(
@@ -998,7 +890,7 @@ def _verify_binding(
             settings_usable = True
         except click.ClickException as exc:
             problems.append(f"editor settings file cannot be used: {exc.message}")
-    servers = document.get("agent_servers")
+    servers = document.get(_CLIENT_CAPABILITIES[client].entries_key)
     names = _pair_entry_names(servers, client, agent, data_dir) if isinstance(servers, dict) else []
     if not names:
         problems.append("managed editor entry is missing")
@@ -1087,6 +979,9 @@ def _verify_binding(
         if not isinstance(entry, dict):
             problems.append(f"editor entry {name!r} is not an object")
             continue
+        if not _entry_launch_shape_known(entry, client):
+            problems.append(f"editor entry {name!r} has unknown launch fields")
+            continue
         args = entry.get("args")
         options = _guard_options(entry)
         if (
@@ -1107,9 +1002,13 @@ def _verify_binding(
             problems.append(f"editor launch command does not match the lock: {name}")
     if isinstance(servers, dict) and isinstance(lock_agent, dict):
         problems.extend(
-            f"editor entry {name!r} can start {agent} without the DefenseClaw guard; delete it from "
-            f"{client_path}, or route it through the guard with: defenseclaw acp adopt --client {client}"
-            for name in _unguarded_agent_entries(servers, names, client, agent, lock_agent, lock_guard)
+            f"editor entry {name!r} can start {agent} without the DefenseClaw guard (launch unverified); "
+            f"delete it from {client_path}, or explicitly adopt a supported direct entry with: "
+            f"defenseclaw acp adopt --client {client}"
+            for name in _unverified_editor_entries(
+                servers, names, client, agent, lock_agent,
+                lock_guard if isinstance(lock_guard, dict) else {}, data_dir,
+            )
         )
     return problems
 
@@ -1252,7 +1151,10 @@ def setup_cmd(
         Path(data_dir) / "acp" / f"{client}-{agent}.token" if managed else Path(data_dir) / "acp" / ".token"
     )
     lock_candidate = _contract_lock_path(data_dir, client, agent)
-    retained = _adopted_entries(_proven_lock(lock_candidate, client, agent))
+    pin_entries = not is_secure_client(app.cfg)
+    validated_pins = _preflight_other_client_pins(
+        data_dir, client, client_path, agent, pin_entries=pin_entries
+    )
     client_snapshot = _snapshot(client_path)
     token_snapshot = _snapshot(token_candidate)
     lock_snapshots = _client_contract_snapshots(data_dir, client, agent)
@@ -1279,7 +1181,7 @@ def setup_cmd(
     ]
     try:
         _progress(show, f"Writing the DefenseClaw {agent} entry to {client_path}...")
-        path, written = _set_client_entry(client, agent, data_dir, guard, args, entry_name, retained)
+        path, written = _set_client_entry(client, agent, data_dir, guard, args, entry_name)
         _progress(show, "Pinning the guard and agent executable digests...")
         lock_path = _write_contract_lock(
             data_dir=data_dir,
@@ -1292,9 +1194,12 @@ def setup_cmd(
             client_path=path,
             managed=managed,
             adopted_entries=[name for name in written if name != _managed_name(agent)],
-            pin_entries=not is_secure_client(app.cfg),
+            pin_entries=pin_entries,
         )
-        _refresh_client_contract_digests(data_dir, client, path, pin_entries=not is_secure_client(app.cfg))
+        _refresh_client_contract_digests(
+            data_dir, client, path, pin_entries=pin_entries,
+            changing_agent=agent, validated_pins=validated_pins,
+        )
         if not managed:
             app.cfg.acp.enabled = True
             # These two are global fallbacks, not this pair's policy. Writing
@@ -1467,6 +1372,8 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
         click.echo(f"Nothing to remove: no DefenseClaw {agent} entry is configured for {client} ({path})")
         _warn_unproven_entries(unproven, path, client, agent)
         return
+    pin_entries = not is_secure_client(app.cfg)
+    validated_pins = _preflight_other_client_pins(data_dir, client, path, agent, pin_entries=pin_entries)
     acp_snapshot = copy.deepcopy(app.cfg.acp)
     try:
         _progress(True, f"Removing the DefenseClaw {agent} entry from {path}...")
@@ -1482,7 +1389,10 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
                 app.cfg.acp.agents.pop(agent, None)
         if lock_path.exists():
             lock_path.unlink()
-        _refresh_client_contract_digests(data_dir, client, path, pin_entries=not is_secure_client(app.cfg))
+        _refresh_client_contract_digests(
+            data_dir, client, path, pin_entries=pin_entries,
+            changing_agent=agent, validated_pins=validated_pins,
+        )
         if not managed:
             active_clients = set(app.cfg.acp.clients)
             active_agents = set(app.cfg.acp.agents)
@@ -1845,7 +1755,7 @@ def _detect_acp_clients(data_dir: str | None = None) -> list[dict[str, Any]]:
                 record["error"] = str(exc)
                 findings.append(record)
                 continue
-            servers = document.get("agent_servers")
+            servers = document.get(_CLIENT_CAPABILITIES[client].entries_key)
             if isinstance(servers, dict):
                 for name, entry in sorted(servers.items()):
                     if not isinstance(entry, dict):
