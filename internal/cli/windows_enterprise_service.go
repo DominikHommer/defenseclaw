@@ -475,6 +475,7 @@ func runWindowsEnterpriseLifecycle(
 		windowsLifecycleYieldToHooks()
 	}
 	if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
+		recordWindowsAnchorsProfileRefusal(cmd, opts, err)
 		if windowsEnterpriseStandaloneRequested(opts) || windowsEnterpriseUnknownProfileRequested(opts) {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 		}

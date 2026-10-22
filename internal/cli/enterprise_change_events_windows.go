@@ -19,12 +19,45 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"strings"
+
+	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
+
+// Profile validation runs before installedBeforeRun is populated and before
+// the bundle path can record its own refusal. Audit a requested anchor change
+// there only for an elevated caller on a verified installed standalone host.
+func recordWindowsAnchorsProfileRefusal(cmd *cobra.Command, opts *windowsEnterpriseLifecycleOptions, cause error) {
+	if opts == nil || strings.TrimSpace(opts.trustAnchors) == "" || !windowsEnterpriseIsElevated() {
+		return
+	}
+	installed, err := windowsEnterpriseDeploymentInspector(managed.ProfileStandalone)
+	if err != nil || installed.State != winpath.EnterpriseDeploymentInstalled {
+		return
+	}
+	secureClient, err := windowsEnterpriseDeploymentInspector(managed.ProfileSecureClient)
+	if err != nil || secureClient.State == winpath.EnterpriseDeploymentInstalled || secureClient.State == winpath.EnterpriseDeploymentUnknown {
+		return
+	}
+	layout, err := windowsBundleLayout()
+	if err == nil {
+		current, _ := safefile.ReadRegularFileBounded(newWindowsBundleDriver(layout).AnchorsPath, windowsBundleMaxAnchors)
+		code := "profile_preflight_refused"
+		if errors.Is(cause, errWindowsEnterpriseInvalidArguments) {
+			code = "invalid_arguments"
+		}
+		err = recordWindowsAnchorsFailure(layout, code, false, current)
+	}
+	warnChangeUnrecorded(cmd.ErrOrStderr(), err)
+}
 
 // windowsChangeSpool is the change spool <ConfigDir>\bundles\change-events
 // of layout (the layout the command changes) with the bundle version
