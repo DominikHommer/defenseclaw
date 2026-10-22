@@ -368,7 +368,7 @@ func (l *lifecycle) recordSupersededInbox(store *enterprisebundle.Store) {
 				fmt.Sprintf("the bundle inbox also held version %d; a run takes only the highest inbox version", l.inboxTopVersion))
 		}
 		if err != nil {
-			l.result.AddWarning(codeBundleStateUnreadable, "cannot write the receipt of a superseded inbox bundle: "+err.Error())
+			l.result.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), "cannot write the receipt of a superseded inbox bundle: "+err.Error()+stateWriteAction(err))
 		}
 	}
 	l.inboxSuperseded = nil
@@ -1117,7 +1117,7 @@ func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterpri
 			rc.EnforcingDigest, _ = l.gatewayPolicyNow(ctx, record.ServiceUID)
 		}
 		if err := store.Fail(rc, enterprisebundle.CodeInterrupted, "the run that applied this bundle ended before its transaction committed; the transaction was rolled back and the last good policy kept enforcing"); err != nil {
-			r.AddWarning(codeBundleStateUnreadable, "could not settle the policy bundle store: "+err.Error())
+			r.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), "could not settle the policy bundle store: "+err.Error()+stateWriteAction(err))
 			return
 		}
 		r.AddWarning(codeBundleInterrupted, fmt.Sprintf("policy bundle %s version %d was rolled back after an interrupted apply; the last good policy enforces", rc.BundleID, rc.Version))
@@ -1149,7 +1149,7 @@ func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterpri
 	rc.RolledBack = st.Current != nil
 	rc.EnforcingDigest, _ = l.gatewayPolicyNow(ctx, record.ServiceUID)
 	if err := store.Fail(rc, bundleConfirmationCode(err), "after an interrupted apply the gateway did not report the policy of this bundle"); err != nil {
-		r.AddWarning(codeBundleStateUnreadable, "could not settle the policy bundle store: "+err.Error())
+		r.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), "could not settle the policy bundle store: "+err.Error()+stateWriteAction(err))
 		return
 	}
 	next := "there is no last good bundle to return to, and the gateway keeps enforcing the policy it last built"

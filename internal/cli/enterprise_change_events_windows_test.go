@@ -9,8 +9,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // stubWindowsChangeSpool records change events into a plain folder of the
@@ -280,6 +284,67 @@ func TestWindowsAnchorsArgumentRefusalsRecordOneChangeEvent(t *testing.T) {
 	})
 }
 
+// Setup forwards BUNDLE=, TRUSTANCHORS= and REFUSECAPABILITYLOSS=1 to every
+// change action, so install, upgrade and repair take those flags and refuse
+// them themselves: invalid_arguments, exit 1639, and a TRUSTANCHORS= run on
+// an installed computer records one refused anchor install. Before, cobra
+// failed on the unknown flag before the run started: exit 1 (1603 from
+// Setup), no JSON result and no audit row (GAP-0608).
+func TestWindowsLifecycleRefusesBundleFlagsOnOtherChangeActions(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{managed.ProfileStandalone: winpath.EnterpriseDeploymentInstalled})
+	savedElevated, savedHost, savedMetadata := windowsEnterpriseIsElevated, windowsEnterpriseStandaloneHostValidator, windowsEnterpriseActivationMetadata
+	savedConnectors, savedTargets := windowsEnterpriseEnrolledConnectors, windowsEnterpriseEnrolledTargets
+	t.Cleanup(func() {
+		windowsEnterpriseIsElevated, windowsEnterpriseStandaloneHostValidator, windowsEnterpriseActivationMetadata = savedElevated, savedHost, savedMetadata
+		windowsEnterpriseEnrolledConnectors, windowsEnterpriseEnrolledTargets = savedConnectors, savedTargets
+	})
+	windowsEnterpriseIsElevated = func() bool { return true }
+	windowsEnterpriseStandaloneHostValidator = func() error { return nil }
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return "", true }
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return nil, nil }
+	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) { return map[string]bool{}, nil }
+	for _, action := range []string{"install", "upgrade", "repair"} {
+		for _, tc := range []struct {
+			name      string
+			flags     []string
+			anchorRow bool
+		}{
+			{"TRUSTANCHORS=", []string{"--trust-anchors", e.anchors}, true},
+			{"BUNDLE=", []string{"--bundle", filepath.Join(e.dir, "policy.dcbundle")}, false},
+			{"REFUSECAPABILITYLOSS=1", []string{"--refuse-capability-loss"}, false},
+		} {
+			t.Run(action+" "+tc.name, func(t *testing.T) {
+				layout := stubWindowsBundleHost(t)
+				spool := stubWindowsChangeSpool(t)
+				command := newWindowsEnterpriseLifecycleCommand(action)
+				var stdout bytes.Buffer
+				command.SetOut(&stdout)
+				command.SetErr(io.Discard)
+				command.SetArgs(append([]string{"--profile", "standalone", "--json"}, tc.flags...))
+				err := command.ExecuteContext(context.Background())
+				if got := commandExitCode(err); got != enterprisestatus.WindowsExitInvalidArgs {
+					t.Fatalf("exit %d, want %d (%v)\n%s", got, enterprisestatus.WindowsExitInvalidArgs, err, stdout.String())
+				}
+				var result enterprisestatus.Result
+				if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+					t.Fatalf("no JSON result: %v\n%s", decodeErr, stdout.String())
+				}
+				if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
+					t.Fatalf("errors = %+v, want one invalid_arguments", result.Errors)
+				}
+				assertWindowsBundleInstalledAnchors(t, layout, nil, "after the refusal")
+				if tc.anchorRow {
+					assertOneRefusedAnchorInstall(t, spool, "invalid_arguments")
+				} else if events := windowsChangeEvents(t, spool); len(events) != 0 {
+					t.Fatalf("a run without TRUSTANCHORS= recorded %+v", events)
+				}
+			})
+		}
+	}
+}
+
 // An anchor-only ensure whose new anchor file fails its check once it
 // replaced the installed one (anchor_insecure here) puts the previous file
 // back (none when there was none) and records one failed anchor install
@@ -340,6 +405,56 @@ func TestWindowsAnchorsThatFailTheirCheckAfterTheReplaceRecordAFailedChange(t *t
 			if ev.Kind != enterprisestatus.ChangeKindTrustAnchors || ev.Outcome != enterprisestatus.ChangeFailed ||
 				ev.ReasonCode != string(enterprisebundle.CodeAnchorInsecure) || ev.SHA256 != wantSHA {
 				t.Fatalf("change event = %+v, want a failed anchor install (anchor_insecure) with sha256 %q", ev, wantSHA)
+			}
+			assertNoWindowsChangeReservations(t, spool)
+		})
+	}
+}
+
+// GAP-0609: an anchor-only ensure whose state write runs out of space is
+// disk_full with the next step, not state_invalid, and the change event
+// carries that code: refused when the bundle directory could not be
+// prepared, failed once the anchor install started.
+func TestWindowsAnchorsWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	full := &os.PathError{Op: "mkdir", Path: `C:\ProgramData\DefenseClaw`, Err: windows.ERROR_DISK_FULL}
+	for _, tc := range []struct {
+		name    string
+		outcome string
+		stub    func(layout managed.StandaloneLayout)
+	}{
+		{"bundle directory", enterprisestatus.ChangeRefused, func(managed.StandaloneLayout) {
+			windowsBundleEnsureDirectory = func(managed.StandaloneLayout) error { return full }
+		}},
+		{"trust anchor folder", enterprisestatus.ChangeFailed, func(layout managed.StandaloneLayout) {
+			folder := filepath.Dir(newWindowsBundleDriver(layout).AnchorsPath)
+			windowsBundleEnsurePrivateDirectory = func(path string) error {
+				if filepath.Clean(path) == filepath.Clean(folder) {
+					return full
+				}
+				return os.MkdirAll(path, 0o700)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			layout := stubWindowsBundleHost(t) // restores both seams
+			spool := stubWindowsChangeSpool(t)
+			tc.stub(layout)
+			cmd, out := windowsBundleCommand()
+			opts := &windowsEnterpriseLifecycleOptions{trustAnchors: e.anchors, profile: managed.ProfileStandalone,
+				jsonOutput: true, installedBeforeRun: true}
+			done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
+			cleanupPreparedWindowsBundle(t, opts)
+			if !done || err == nil || !strings.Contains(out.String(), string(enterprisebundle.CodeDiskFull)) ||
+				strings.Contains(out.String(), string(enterprisebundle.CodeStateInvalid)) || !strings.Contains(out.String(), "free space on that volume") {
+				t.Fatalf("anchor install on a full volume: done=%v err=%v; want disk_full with the next step\n%s", done, err, out)
+			}
+			assertWindowsBundleInstalledAnchors(t, layout, nil, "after the full volume")
+			events := windowsChangeEvents(t, spool)
+			if len(events) != 1 || events[0].Kind != enterprisestatus.ChangeKindTrustAnchors ||
+				events[0].Outcome != tc.outcome || events[0].ReasonCode != string(enterprisebundle.CodeDiskFull) {
+				t.Fatalf("change events = %+v, want one %s anchor install (disk_full)", events, tc.outcome)
 			}
 			assertNoWindowsChangeReservations(t, spool)
 		})

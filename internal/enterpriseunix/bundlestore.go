@@ -71,7 +71,7 @@ func (l *lifecycle) settleBundles(ctx context.Context, record *Deployment) {
 	store := l.env.bundleStore()
 	report, err := store.Settle(l.env.installedBundleDirs()...)
 	if err != nil {
-		l.result.AddWarning(codeBundleStateUnreadable, "could not settle the policy bundle store: "+err.Error())
+		l.result.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), "could not settle the policy bundle store: "+err.Error()+stateWriteAction(err))
 		return
 	}
 	if n := len(report.Interrupted); n > 0 {

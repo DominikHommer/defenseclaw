@@ -724,7 +724,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		return refuseArguments("invalid_arguments", "--refuse-capability-loss requires --bundle")
 	}
 	if requested && action != "ensure" {
-		return refuseArguments("invalid_arguments", "--bundle and --trust-anchors are valid only with ensure")
+		return refuseArguments("invalid_arguments", "BUNDLE= (--bundle) and TRUSTANCHORS= (--trust-anchors) are valid only with ensure; nothing was changed: deliver them with Setup /ensure (defenseclaw enterprise windows ensure)")
 	}
 	// --mode/--connector is the QA shorthand the installer renders a
 	// config from: a config all the same (Setup refused it with these too).
@@ -808,7 +808,8 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		}
 	}()
 	if err := windowsBundleEnsureDirectory(layout); err != nil {
-		return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot protect the policy bundle directory: "+err.Error())
+		failure := enterprisebundle.StateWriteError("cannot protect the policy bundle directory", err)
+		return refuseAnchors(string(failure.Code), failure.Detail)
 	}
 	if opts.trustAnchors != "" {
 		// An install this computer could not audit is not made: the spool
@@ -816,7 +817,8 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		// until the event is written.
 		reservation, err := reserveWindowsChange(layout, enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, "")
 		if err != nil {
-			return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot record the trust anchor change: "+err.Error())
+			failure := enterprisebundle.StateWriteError("cannot record the trust anchor change", err)
+			return refuseAnchors(string(failure.Code), failure.Detail)
 		}
 		run.anchorReservation = reservation
 		if opts.bundlePath != "" {
@@ -839,7 +841,8 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		installed, replaced, err := installWindowsBundleAnchors(opts.trustAnchors, driver.AnchorsPath)
 		if err != nil {
 			code := string(windowsBundleCode(err, enterprisebundle.CodeAnchorInsecure))
-			failed := code == string(enterprisebundle.CodeStateInvalid)
+			// A write that failed (on a full volume too) is a failed change.
+			failed := code == string(enterprisebundle.CodeStateInvalid) || code == string(enterprisebundle.CodeDiskFull)
 			message := "the trust anchors were not installed: " + err.Error()
 			if replaced && run.anchorOnly != nil {
 				// The installed file was replaced and then failed its
@@ -1239,8 +1242,11 @@ func (run *windowsBundleRun) commitAnchors(result *enterprisestatus.Result) {
 	run.anchorStaged = false // The commit records its own outcome.
 	installed, _, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath)
 	if err != nil {
-		result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
 		code := "anchor_install_failed"
+		if enterprisebundle.CodeOf(err) == enterprisebundle.CodeDiskFull {
+			code = string(enterprisebundle.CodeDiskFull)
+		}
+		result.AddError(code, "could not commit the verified trust anchors: "+err.Error())
 		if restoreErr := restoreWindowsBundleAnchors(run.anchorPath, run.anchorExisted, run.anchorPrevious); restoreErr != nil {
 			result.AddError("anchor_restore_failed", "could not restore the previous trust anchors: "+restoreErr.Error())
 			code = "anchor_restore_failed"
@@ -1651,14 +1657,14 @@ func installWindowsBundleAnchors(src, dst string) (installed []byte, replaced bo
 		return nil, false, err
 	}
 	if err := windowsBundleEnsurePrivateDirectory(filepath.Dir(dst)); err != nil {
-		return nil, false, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+		return nil, false, enterprisebundle.StateWriteError("prepare the trust anchor folder", err)
 	}
 	// writeWindowsBundleFile replaces dst by a rename, its last step.
 	if err := writeWindowsBundleFile(dst, raw); err != nil {
-		return nil, false, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+		return nil, false, enterprisebundle.StateWriteError("write the trust anchor file", err)
 	}
 	if err := windowsBundlePublishPrivateFile(dst); err != nil {
-		return nil, true, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+		return nil, true, enterprisebundle.StateWriteError("protect the trust anchor file", err)
 	}
 	if _, err := enterprisebundle.LoadAnchors(dst, bundleAnchorTrust); err != nil {
 		return nil, true, err
