@@ -37,38 +37,70 @@ func damageCurrentVersion(t *testing.T, b *bundleHost) {
 	}
 }
 
-// With the current bundle damaged, a changing run cannot prove the release
-// floor. It refuses without applying an unsigned edit of config.yaml; with
-// no copy that matches the deployment record it also applies nothing.
-func TestBundleDamagedCurrentVersionRefusesAnUnsignedConfigEdit(t *testing.T) {
-	b := newBundleHost(t)
-	v1, _, _ := bundleConfigs(b.testHost)
-	requireOK(t, b.apply(b.dir(1, v1)))
-	installed := b.read(b.env.Layout.ConfigPath)
-	damageCurrentVersion(t, b)
-	edited := installed + "\n# an unsigned edit\n"
-	writeRooted(t, b.env.P(b.env.Layout.ConfigPath), edited)
+// The confirmed manifest still proves the release floor when a bundle file
+// is damaged. Ensure restores only config bytes matching the deployment
+// record; an unsigned --config and a run without that copy are refused.
+func TestBundleDamagedCurrentVersionRecoversOnlyCommittedConfig(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			v1, v2, _ := bundleConfigs(b.testHost)
+			initial := b.dir(1, v1)
+			raw, err := os.ReadFile(filepath.Join(initial, enterprisebundle.ManifestName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := enterprisebundle.DecodeManifest(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest.MinProductVersion = "1.0.0"
+			raw, err = manifest.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			sig, err := enterprisebundle.Sign(raw, b.key, "k1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			signed, err := sig.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeRooted(t, filepath.Join(initial, enterprisebundle.ManifestName), string(raw))
+			writeRooted(t, filepath.Join(initial, enterprisebundle.SignatureName), string(signed))
+			requireOK(t, b.apply(initial))
+			installed := b.read(b.env.Layout.ConfigPath)
+			damageCurrentVersion(t, b)
+			if err := b.env.BundleProductFloorRefusal("0.8.10"); errorCode(err, "") != codeProductFloor {
+				t.Fatalf("damaged config lowered the signed release floor: %v", err)
+			}
+			edited := installed + "\n# an unsigned edit\n"
+			writeRooted(t, b.env.P(b.env.Layout.ConfigPath), edited)
 
-	from := len(b.services.calls)
-	r := b.run(Options{Action: ActionEnsure})
-	requireError(t, r, codeProductFloor)
-	if !hasWarning(r, codeBundleStateUnreadable) {
-		t.Fatalf("warnings = %+v", r.Warnings)
-	}
-	if got := b.read(b.env.Layout.ConfigPath); got != edited {
-		t.Fatalf("the refused run wrote config.yaml:\n%s", got)
-	}
-	if gatewayTouched(b.testHost, from) {
-		t.Fatal("a run with an unknown floor touched the gateway")
-	}
+			r := b.run(Options{Action: ActionEnsure})
+			requireOK(t, r)
+			if !hasWarning(r, codeBundleStateUnreadable) {
+				t.Fatalf("warnings = %+v", r.Warnings)
+			}
+			if got := b.read(b.env.Layout.ConfigPath); got != installed {
+				t.Fatalf("ensure did not restore the committed config:\n%s", got)
+			}
+			other := filepath.Join(t.TempDir(), "config.yaml")
+			writeRooted(t, other, v2)
+			requireError(t, b.run(Options{Action: ActionEnsure, ConfigFile: other}), codeBundleStateUnreadable)
 
-	if err := os.Remove(b.env.committedConfigPath()); err != nil {
-		t.Fatal(err)
-	}
-	from = len(b.services.calls)
-	requireError(t, b.run(Options{Action: ActionEnsure}), codeBundleStateUnreadable)
-	if gatewayTouched(b.testHost, from) {
-		t.Fatal("a run with no verified config touched the gateway")
+			if err := os.Remove(b.env.committedConfigPath()); err != nil {
+				t.Fatal(err)
+			}
+			writeRooted(t, b.env.P(b.env.Layout.ConfigPath), edited)
+			from := len(b.services.calls)
+			requireError(t, b.run(Options{Action: ActionEnsure}), codeBundleStateUnreadable)
+			if gatewayTouched(b.testHost, from) {
+				t.Fatal("a run with no verified config touched the gateway")
+			}
+			requireOK(t, b.apply(b.dir(2, v2)))
+		})
 	}
 }
 

@@ -93,51 +93,6 @@ func TestBundleInboxProcessesAtMostMaxInboxFilesARun(t *testing.T) {
 	}
 }
 
-// A damaged current version has an unproven release floor, so an ensure
-// refuses without changing the last committed config. A newly verified
-// signed bundle supplies a proven replacement floor and can recover it.
-func TestBundleDamagedCurrentVersionKeepsTheInstalledConfig(t *testing.T) {
-	b := newBundleHost(t)
-	v1, v2, _ := bundleConfigs(b.testHost)
-	requireOK(t, b.apply(b.dir(1, v1)))
-	installed := b.read(b.env.Layout.ConfigPath)
-	dir := b.env.bundleStore().VersionDir(b.state().Current.Dir)
-	if err := os.Chmod(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	config := filepath.Join(dir, enterprisebundle.ConfigName)
-	if err := os.Chmod(config, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config, []byte("damaged: true\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	from := len(b.services.calls)
-	r := b.run(Options{Action: ActionEnsure})
-	requireError(t, r, codeProductFloor)
-	if !hasWarning(r, codeBundleStateUnreadable) {
-		t.Fatalf("warnings = %+v", r.Warnings)
-	}
-	if !strings.Contains(fmt.Sprint(r.Errors), bundleApplyCommand+" --json") {
-		t.Fatalf("refusal does not name the recovery command: %+v", r.Errors)
-	}
-	if b.read(b.env.Layout.ConfigPath) != installed {
-		t.Fatal("the run changed the installed config")
-	}
-	if gatewayTouched(b.testHost, from) {
-		t.Fatal("a run with an unknown floor touched the gateway")
-	}
-	other := filepath.Join(t.TempDir(), "config.yaml")
-	writeRooted(t, other, v2)
-	requireError(t, b.run(Options{Action: ActionEnsure, ConfigFile: other}), codeBundleStateUnreadable)
-
-	requireOK(t, b.apply(b.dir(2, v2)))
-	if st := b.state(); st.Current == nil || st.Current.BundleID != bundleID(2) {
-		t.Fatalf("state after a new bundle = %+v", st)
-	}
-}
-
 // bundle_required says signed-bundle mode is on because a trust anchor file
 // exists, without claiming who installed it.
 func TestBundleRequiredNamesTheAnchorFileNotWhoInstalledIt(t *testing.T) {
