@@ -109,7 +109,7 @@ The machine-wide drop-in carries one hook contract for every account, not the ve
 | Response field | `claude_code_output` |
 | Native OTLP | yes |
 | W3C traceparent | yes |
-| Fail closed | yes |
+| Fail closed | See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) |
 
 ## Verdict mapping
 
@@ -145,7 +145,7 @@ Only `PreToolUse` supports native ask. In action mode a confirm verdict returns 
 
 ## Fail mode
 
-Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for this connector, including managed routes and hook timeouts. To change the installed setting, use [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

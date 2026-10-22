@@ -56,7 +56,7 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 	}{
 		{filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "configuration", "fail-modes.mdx"), []string{
 			"`DEFENSECLAW_FAIL_MODE` is not read",
-			"`closed` blocks `preToolUse` and `permissionRequest`",
+			"/docs/reference/apis/capability-matrix#gateway-outage",
 		}},
 		{filepath.Join("..", "..", "envvars", "registry.json"), []string{
 			"Not read by 1.0.4 hooks",

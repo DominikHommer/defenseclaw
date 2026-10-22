@@ -60,18 +60,22 @@ Claude Code (`PreToolUse`, in Manual mode only; other permission modes block), C
 
 ### Which connectors fail closed?
 
-Every listed connector can block a gateway outage. Copilot CLI, Antigravity and
-Hermes hooks block delivery failures when the effective mode is `closed`, the default.
-Those agents can still allow a call when the hook times out or cannot start; the
-table marks that limit separately from the hook's deny response.
+Use the [gateway outage table](#gateway-outage). The first table's Fail-closed column also marks agents that can run a call when a hook cannot start or times out.
 
-- Fail-closed means the hook blocks when it cannot reach the gateway. A hook process that dies or times out is non-blocking in Claude Code, Codex and Devin (see the [enterprise threat model](/docs/enterprise/plan/threat-model#residual-risks)).
-- On a managed standalone host, hooks use the administrator's resolved fail mode,
-  also in observe mode. The default is `closed`. If the administrator explicitly selects `open`,
-  a gateway outage can allow the call. Oversized input, a gateway 5xx, an unusable
-  answer and other transport errors still block. See [Fail modes](/docs/reference/configuration/fail-modes).
-- On a per-user install a fail-open call is recorded as a `guardrail-degraded` alert when the gateway starts again ([Fail modes](/docs/reference/configuration/fail-modes#reporting-and-diagnosis)).
-- Cursor is mode-matched: action writes `failClosed: true` and observe writes `failClosed: false`.
+## Gateway outage
+
+The default is `closed` everywhere except Secure Client. On a managed standalone host, only an administrator can choose `open`, and it covers a stopped gateway, a restart or no answer in time. Rate limits, failed identity or credential checks, oversized input and unusable answers still block. The environment never selects the installed mode. [Fail modes](/docs/reference/configuration/fail-modes) explains how to set and inspect it.
+
+<OutageMatrix />
+
+- **Managed tool calls default to closed.** The managed column shows the administrator's explicit `open`. On Linux and macOS the Amp plugin still blocks. The per-user Copilot and OpenCode routes also block there; their machine-policy routes use the native hook and follow the administrator's outage mode. Windows follows the administrator's outage mode. `status --json` and `verify --json` report the mode of the installed route.
+- **The foreign-hook guard can still block.** With `foreign_hooks: remove` (the default), guarded tool calls from Copilot CLI, Cursor, Devin, OpenCode, Amp and Hermes need the gateway's session record. A stopped or restarting gateway leaves that check unproven, so the call blocks even under administrator `open`. Start the gateway, then restart the agent if its session still fails the check. See [Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#gateway-outages).
+- **A hook must run to deny.** Claude Code, Codex, Devin, Kiro, Copilot CLI, Antigravity and Hermes can run a call when a hook cannot start or times out. Cursor writes `failClosed: true` in action mode and `false` in per-user observe mode. A loaded Amp or OpenCode plugin denies a tool call it cannot check in mode `closed`.
+- **Vendor limits still apply.** Antigravity does not document non-zero hook exit status as enforcement; DefenseClaw sends its native deny on `PreToolUse`. Hermes accepts a valid block answer and, from 0.21, exit 2; other exits, a killed hook or a timeout can let a call run. Kiro CLI 2.24.1 ran a tool after a 12-second `preToolUse` hook exceeded its default timeout. DefenseClaw registers a 30-second timeout.
+- **Cursor CLI has an outage display limit.** Builds without `beforeSubmitPrompt` can send the prompt without a hook check. In action mode a refused prompt can disappear without a displayed reason, although tool refusals show their reason. Run `defenseclaw-gateway status`; on a per-user install, `defenseclaw-gateway start` restores a stopped gateway.
+- **Strict availability only tightens.** Where the table says Read, `DEFENSECLAW_STRICT_AVAILABILITY=1` closes an outage without changing the installed or reported mode. Amp does not read it.
+- **Secure Client keeps its existing delivery.** Its unset mode is `open`; an explicit `closed` is kept where the connector supports it, as shown in the table. Only its Antigravity, Devin, Hermes and Kiro shell hooks retain the legacy `DEFENSECLAW_FAIL_MODE` override. Hooks rendered by 1.0.3 or earlier keep their legacy input until upgrade renders them again.
+- **Stop events let a turn end.** Once a stop or session-end event is identified, an outage gets a neutral response. Codex prompt and tool-result hooks remain closed on managed hosts even under administrator outage `open`. Per-user fail-open calls are recorded and later reported as `guardrail-degraded` alerts; see [diagnosis](/docs/reference/configuration/fail-modes#reporting-and-diagnosis).
 
 ### I want to run the agent in an OpenShell sandbox
 

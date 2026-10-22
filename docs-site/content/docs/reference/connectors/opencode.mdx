@@ -20,7 +20,7 @@ Reference for the [OpenCode connector](/docs/connectors/opencode). OpenCode has 
 
 ### The bridge plugin
 
-The bridge resolves the gateway verdict before throwing, so a fail-open transport error never becomes an accidental block.
+The bridge resolves the gateway verdict before throwing. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for transport failures.
 
 ```js
 "tool.execute.before": async (input, output) => {
@@ -92,7 +92,7 @@ DefenseClaw installs its plugin through OpenCode's managed config (`/etc/opencod
 | Response field | `hook_output` |
 | Native OTLP | no |
 | W3C traceparent | no |
-| Fail closed | yes |
+| Fail closed | See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) |
 
 The contract is `opencode-hooks-v1` with bridge `v7`, source-reviewed for `>=1.18.10, <1.19.0` and pinned at the official [`v1.18.33` release](https://github.com/anomalyco/opencode/releases/tag/v1.18.33). The plugin hooks it uses (`config`, `event`, `tool.execute.before`, `tool.execute.after`) match the 1.18.19 types.
 
@@ -119,9 +119,7 @@ OpenCode 1.18.10 to 1.18.33 also expose `permission.ask`, `chat.params`, `chat.h
 
 ## Fail mode
 
-Fail closed: yes, for the awaited `tool.execute.before` only. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
-
-When the gateway is unreachable the bridge honors the fail mode: `FAIL_MODE=closed` throws and blocks, `FAIL_MODE=open` allows. This applies only to the awaited `tool.execute.before`. The bridge also awaits `tool.execute.after` so the result is attributed before the next call, but ignores that delivery's verdict and transport result. Generic lifecycle delivery is not awaited.
+See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for this connector, including managed routes and hook timeouts. To change the installed setting, use [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

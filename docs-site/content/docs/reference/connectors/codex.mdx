@@ -105,7 +105,7 @@ Codex activates project `.codex/` layers only for trusted projects. Inventory re
 | Response field | `codex_output` |
 | Native OTLP | yes |
 | W3C traceparent | yes |
-| Fail closed | yes |
+| Fail closed | See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) |
 
 Each hook request must match the registered event and its stdin `hook_event_name`. The gateway also compares the event and contract ID with the protected contract lock and rejects mismatches or tampering. Controls marked v3/v4 need Codex `0.133` or later: v3 covers `0.133` to `0.144`, v4 covers `0.145` and later. They do not apply to v1 and v2.
 
@@ -131,9 +131,7 @@ Codex has no native ask surface (Can ask is 0 on every contract). A confirm verd
 
 ## Fail mode
 
-Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
-
-When a hook fails closed because DefenseClaw cannot decide, `Stop`, `SubagentStop` and `SessionEnd` are not blocked. A blocked stop would only make Codex try again. Codex ends the turn, and the next prompt or tool call is blocked until the gateway is back ([Stop and session-end events](/docs/reference/configuration/fail-modes#stop-and-session-end-events)).
+See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for this connector, including managed routes and hook timeouts. To change the installed setting, use [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

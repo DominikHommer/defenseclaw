@@ -59,7 +59,7 @@ def test_managed_hook_docs_distinguish_outages_from_refusals() -> None:
     )
     for text in guidance:
         assert not re.search(r"always fails?[ -]closed|never allows a call because", text, re.IGNORECASE)
-        assert "hook_fail_mode: open" in text and "outage" in text
+        assert ("hook_fail_mode: open" in text and "outage" in text) or "/docs/reference/apis/capability-matrix#gateway-outage" in text
 
     troubleshooting = (DOCS / "troubleshooting/enterprise/index.mdx").read_text(encoding="utf-8")
     for reason in ("enterprise_managed_rate_limited", "enterprise_managed_overloaded"):
@@ -92,12 +92,13 @@ def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check()
         _flat("enterprise/plan/threat-model.mdx").split("### Disable hooks", 1)[1].split("### ", 1)[0],
     )
     for text in guarded:
-        assert "foreign_hooks: remove" in text
+        assert "foreign_hooks: remove" in text or "/docs/reference/apis/capability-matrix#gateway-outage" in text
 
     per_layer = coverage.split("## Fail-open and fail-closed, per layer", 1)[1].split("## ", 1)[0]
     assert "in observe mode | Open" not in per_layer
     assert "Managed Claude Code and Codex hooks | Always closed" not in per_layer
-    assert "observe and action mode alike" in per_layer and "outage only" in per_layer
+    assert "observe and action mode alike" in per_layer
+    assert "/docs/reference/apis/capability-matrix#gateway-outage" in per_layer
     assert "observe mode fails open" not in coverage
 
     troubleshooting = (DOCS / "troubleshooting/enterprise/index.mdx").read_text(encoding="utf-8")
@@ -107,7 +108,9 @@ def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check()
     no_answer = next(
         line for line in troubleshooting.splitlines() if line.startswith("| `enterprise_managed_gateway_no_answer` |")
     )
-    assert "HTTP 429" in no_answer and "foreign_hooks: remove" in no_answer
+    assert "/docs/reference/apis/capability-matrix#gateway-outage" in no_answer
+    matrix = _flat("reference/apis/capability-matrix.mdx")
+    assert "Rate limits" in matrix and "foreign_hooks: remove" in matrix
 
 
 # (fact, [(pages that may hold the phrase, phrase), ...])

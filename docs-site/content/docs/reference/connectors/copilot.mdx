@@ -153,7 +153,7 @@ Not covered yet:
 | Response field | `hook_output` |
 | Native OTLP | no |
 | W3C traceparent | yes |
-| Fail closed | no |
+| Fail closed | See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) |
 
 ## Verdict mapping
 
@@ -170,7 +170,7 @@ Only `preToolUse` supports native ask. In action mode a confirm verdict that is 
 
 ## Fail mode
 
-Copilot runs a call when its hook times out or cannot start. Every other failure DefenseClaw sees (gateway down, unusable answer, missing token, oversized input) is denied with Copilot's own `deny` in fail mode `closed`, the default, and the reason names the next step. With `--fail-mode open` such a call runs, is recorded in `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports a `guardrail-degraded` alert when it starts again. On a managed standalone host the administrator-owned hook denies `preToolUse` and `permissionRequest` while the gateway service is not running. Under Secure Client the hook stays open. The gateway requires the exact trusted event-specific registration header and never infers the event from stdin fields.
+See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for this connector, including managed routes and hook timeouts. To change the installed setting, use [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

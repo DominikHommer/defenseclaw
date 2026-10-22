@@ -9,6 +9,8 @@ keywords:
   - allowManagedHooksOnly
 ---
 
+For connector outages, see the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
+
 Some agents read a machine-wide policy file that standard users cannot change. For those agents, the standalone profile publishes DefenseClaw's hooks in that file instead of in each user's own config, so there is no user-owned file to delete and no repair window. The other agents are protected per user: the guardian writes DefenseClaw's hook into each enrolled user's agent config and repairs it. Terms are in [Concepts](/docs/enterprise/plan/concepts).
 
 Only agents you select in the config are protected; see [Choose the agents to protect](/docs/enterprise/configure/configuration#choose-the-agents-to-protect). DefenseClaw's entries are derived from the config (`guardrail.connectors` and `enterprise.machine_policy`) and never read back as policy. The next `ensure`, `repair` or `reconcile` rewrites a changed entry, and `verify` reports the drift until then. Change the config, not the vendor file.

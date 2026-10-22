@@ -93,7 +93,7 @@ Amp cannot run in a sandbox yet. The image is **unverified**, so `defenseclaw sa
 | Response field | `` |
 | Native OTLP | no |
 | W3C traceparent | no |
-| Fail closed | yes |
+| Fail closed | See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) |
 
 The contract is `amp-plugin-v1`, plugin script `v2`. DefenseClaw pins the normalized Amp build `0.0.1785334225` as its contract snapshot and certification floor. Amp does not declare that build as the upstream minimum.
 
@@ -107,7 +107,7 @@ The contract is `amp-plugin-v1`, plugin script `v2`. DefenseClaw pins the normal
 | `tool.result` | Inspect status and output after execution, before model delivery | Preserve, withhold or replace, or native confirm |
 | `agent.end` | Close the turn and record its status | Observe only |
 
-Amp documents no `session.end` and no separate subagent events. Oracle, Task launchers, MCP tools and plugin-defined tools are governed at their parent `tool.call`. If Amp emits events from a child thread, DefenseClaw enforces that child's calls under its thread ID and invents no parent-child edge. For a `confirm` decision, the plugin calls Amp's confirmation UI only when the thread is active in the foreground. Denial, a background thread or unavailable UI rejects a pending call or withholds a pending result. Gateway errors honor the configured open or closed hook failure mode. Fail-closed applies once the plugin has loaded, and a killed or stopped check blocks the call.
+Amp documents no `session.end` and no separate subagent events. Oracle, Task launchers, MCP tools and plugin-defined tools are governed at their parent `tool.call`. If Amp emits events from a child thread, DefenseClaw enforces that child's calls under its thread ID and invents no parent-child edge. For a `confirm` decision, the plugin calls Amp's confirmation UI only when the thread is active in the foreground. Denial, a background thread or unavailable UI rejects a pending call or withholds a pending result. Gateway failure handling is in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
 
 ## Native ask
 
@@ -115,7 +115,7 @@ Amp can ask in the active foreground thread during `tool.call` and before a `too
 
 ## Fail mode
 
-Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. Gateway errors honor the configured open or closed mode. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for this connector, including managed routes and hook timeouts. To change the installed setting, use [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

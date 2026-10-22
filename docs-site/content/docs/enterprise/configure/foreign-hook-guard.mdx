@@ -48,15 +48,7 @@ The last sentence appears only when the hook was present at session start. With 
 
 ## Gateway outages
 
-While the gateway cannot answer (it is stopped or restarting), guarded tool calls are blocked whatever the fail mode, `open` included:
-
-```text
-enterprise_foreign_hook_blocked: DefenseClaw could not check this agent
-session's hook record with its gateway, so the call is blocked. Retry when
-the DefenseClaw gateway is running; if the block continues, restart the agent.
-```
-
-This is a known limit in 1.0.4: the guard keeps each session's hook record in the gateway, so it cannot prove during an outage that a session is clean. Calls of unguarded connectors follow the fail mode as usual. Stop and session-end events get the agent's normal allow, so a blocked agent can still end its turn and exit.
+The guard needs the gateway's session record to prove that a session is clean. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for the affected connectors and recovery steps.
 
 ## Approve a hook
 

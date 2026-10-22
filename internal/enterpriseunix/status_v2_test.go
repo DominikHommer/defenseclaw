@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/contracttest"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -66,6 +68,52 @@ func installedConfig(t *testing.T, h *testHost) *config.Config {
 		t.Fatal(err)
 	}
 	return cfg
+}
+
+// GAP-0465: the Unix per-user plugins can be rendered closed even when the
+// administrator selected open. Status and verify must describe the installed
+// route, including a machine-policy route that uses the native hook instead.
+func TestStatusV2FailModeMatchesTheInstalledRoute(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := statusV2Host(t, goos)
+			var input map[string]any
+			if err := yaml.Unmarshal([]byte(h.read(h.env.Layout.ConfigPath)), &input); err != nil {
+				t.Fatal(err)
+			}
+			for _, mode := range []string{"", "closed", "open"} {
+				input["guardrail"] = map[string]any{
+					"enabled": true, "mode": "observe", "hook_fail_mode": mode,
+					"connectors": map[string]any{"amp": map[string]any{}, "opencode": map[string]any{},
+						"copilot": map[string]any{}, "codex": map[string]any{}},
+				}
+				raw, err := yaml.Marshal(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeHostFile(t, h, h.env.Layout.ConfigPath, string(raw))
+				for _, machine := range []bool{false, true} {
+					record := &Deployment{}
+					if machine {
+						record.MachinePolicyConnectors = []string{"opencode", "copilot", "codex"}
+					}
+					for _, action := range []string{ActionStatus, ActionVerify} {
+						l := &lifecycle{env: h.env, opts: Options{Action: action}, result: enterprisestatus.New(action, "standalone", goos, "1.0.4")}
+						l.describeConnectors(record)
+						for _, name := range []string{"amp", "opencode", "copilot", "codex"} {
+							want := "closed"
+							if mode == "open" && (name == "codex" || machine && (name == "opencode" || name == "copilot")) {
+								want = "open"
+							}
+							if got := l.result.Connectors[name].EffectiveHookFailMode; got != want {
+								t.Errorf("%s %s machine=%v config=%q: effective_hook_fail_mode=%q, want %q", action, name, machine, mode, got, want)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
 }
 
 func TestStatusV2BlocksLinuxAndMacOS(t *testing.T) {

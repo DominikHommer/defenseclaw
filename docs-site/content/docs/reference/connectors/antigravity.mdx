@@ -48,7 +48,7 @@ DefenseClaw builds an Antigravity overlay image. Nothing on your host changes.
 | --- | --- |
 | Tier | User. agy reads global hooks from `~/.gemini/config/hooks.json`, and the reviewed 1.2.x build has no managed hook location. The image seeds the file and keeps a root-owned copy under `/usr/local/lib/defenseclaw/antigravity/`. The launcher restores it before every start, and refuses to start when the path is not a regular file. |
 | Workspace hooks | agy also loads `<workspace>/.agents/hooks.json`. The launcher refuses to start when that file reuses a `defenseclaw-antigravity-*` key. Other workspace hooks load beside DefenseClaw's. |
-| Fail closed | agy enforces only a synchronous `PreToolUse` `{"decision":"deny"}`. The sandbox hook prints it on every failure and names the reason: policy service unreachable or server error, refused request (HTTP 400), reply without a verdict, or missing binding token. |
+| Fail closed | See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) |
 | Known gaps | The agent can edit `hooks.json`, or start a second agy with another `HOME`, from a tool call. DefenseClaw sees that call first, and hook-silence detection is the backstop. Command rules judge `run_command` (in the directory its `Cwd` names) and `send_command_input` (as shell input). A script the agent writes and runs is judged by the command that starts it. |
 | Install pin | agy 1.2.12 from the tarball Google's manifest names, checked against the manifest SHA-512, which DefenseClaw pins per architecture (arm64, x86_64). The build refuses a version without a pinned download or below `>=1.1.8`. |
 | Model access | The `defenseclaw-gemini` provider profile sends `GEMINI_API_KEY` as `x-goog-api-key` to `generativelanguage.googleapis.com`. The launcher selects agy's `gemini` provider in `~/.gemini/antigravity-cli/settings.json`, and the key skips Google sign-in. Signing in with a Google account inside a sandbox is untested. |
@@ -74,7 +74,7 @@ DefenseClaw builds an Antigravity overlay image. Nothing on your host changes.
 | Response field | `hook_output` |
 | Native OTLP | no |
 | W3C traceparent | yes |
-| Fail closed | no |
+| Fail closed | See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) |
 
 DefenseClaw's hook contract covers `agy` `>=1.1.8`. Google's [changelog](https://antigravity.google/changelog) records the changes that matter: v1.0.8 corrected the shared `~/.gemini/config/hooks.json` path, v1.0.10 made PowerShell the Windows default shell, v1.0.15 fixed Windows output, v1.1.1 fixed workspace hook loading, v1.1.7 stopped disabled plugins from running hooks, and v1.1.8 is the floor for the five-event contract. Later versions run as untested newer versions until a release changes the hook schema ([version policy](/docs/reference/apis/hook-contracts#version-policy)).
 
@@ -117,7 +117,7 @@ Only `PreToolUse` supports native ask. DefenseClaw sends `force_ask`, which alwa
 
 ## Fail mode
 
-Antigravity does not document non-zero hook exit status as enforcement, so DefenseClaw does not advertise connector-wide fail-closed support. In fail mode `closed`, the default, a gateway, authentication or decoding failure denies `PreToolUse` with `decision: "deny"`; with `open` it gets the event's no-op answer. Antigravity itself still runs a call when the hook times out or cannot start. Under Secure Client the hook stays open. Other events keep their documented non-blocking shapes. DefenseClaw does not claim it can override Antigravity's own permission bypass.
+See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for this connector, including managed routes and hook timeouts. To change the installed setting, use [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

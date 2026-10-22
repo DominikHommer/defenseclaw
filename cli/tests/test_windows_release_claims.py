@@ -426,7 +426,9 @@ def test_antigravity_windows_claims_match_official_hook_boundary() -> None:
     assert "Google documents no configuration-home environment override" in config_reference
     assert "<workspace>/.agents/hooks.json" in config_reference
     assert "only hard-blocking claim for the connector" in connector_page_text
-    assert "does not document non-zero hook exit status as enforcement" in connector_page_text
+    outage_reference = (ROOT / "docs-site/content/docs/reference/apis/capability-matrix.mdx").read_text(encoding="utf-8")
+    assert "does not document non-zero hook exit status as enforcement" in " ".join(outage_reference.split())
+    assert "/docs/reference/apis/capability-matrix#gateway-outage" in connector_page_text
     assert "`>=1.1.8`" in compatibility
     # The sandbox image pin follows the harness DefaultVersion.
     assert "installs agy `1.2.12`" in " ".join(compatibility.split())

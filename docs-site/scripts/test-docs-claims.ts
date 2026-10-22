@@ -34,6 +34,35 @@ describe('managed ACP support', () => {
   });
 });
 
+describe('managed outage documentation', () => {
+  it('links every outage refusal to the capability matrix', () => {
+    const text = readFileSync(join(site, 'content/docs/troubleshooting/enterprise/index.mdx'), 'utf8');
+    for (const code of ['not_running', 'restarting', 'no_answer']) {
+      const row = text.split('\n').find((line) => line.startsWith(`| \`enterprise_managed_gateway_${code}\` |`));
+      assert.ok(row, code);
+      assert.ok(row.includes('/docs/reference/apis/capability-matrix#gateway-outage'), code);
+      assert.doesNotMatch(row, /it allows|allows this|never an allow|hook_fail_mode: open/, code);
+    }
+    assert.ok(page('appendix/coverage-by-layer.mdx').includes('/docs/reference/apis/capability-matrix#gateway-outage'));
+  });
+});
+
+describe('installed fail mode environment contract', () => {
+  it('does not classify the retired fail-mode input as tighten-only', () => {
+    const text = page('troubleshooting/enterprise/hooks.mdx');
+    const section = text.split('## A `DEFENSECLAW_*` variable or `.env` entry has no effect')[1]?.split('## ')[0];
+    assert.ok(section, 'environment troubleshooting section');
+    assert.match(section, /`DEFENSECLAW_FAIL_MODE` is not read by 1\.0\.4 hooks/);
+    assert.match(section, /`DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_HOOK_MAX_BODY`.*`tighten_only`/);
+    assert.doesNotMatch(section, /`DEFENSECLAW_FAIL_MODE`, .*`tighten_only`/);
+    assert.ok(section.includes('/docs/reference/apis/capability-matrix#gateway-outage'));
+    const truth = page('reference/configuration/source-of-truth.mdx');
+    assert.doesNotMatch(truth, /\| `tighten_only` \|[^|]*\|[^|]*DEFENSECLAW_FAIL_MODE/);
+    const threat = page('enterprise/plan/threat-model.mdx');
+    assert.doesNotMatch(threat, /`DEFENSECLAW_FAIL_MODE`, .*count only when stricter/);
+  });
+});
+
 describe('Intune base config versus the signed bundle', () => {
   it('names exactly the blocks the packager compares', () => {
     const packager = readFileSync(
@@ -57,20 +86,14 @@ describe('Intune base config versus the signed bundle', () => {
 
 describe('fail mode of Copilot CLI and Antigravity hooks', () => {
   it('says the hooks follow a closed fail mode', () => {
-    const failModes = page('reference/configuration/fail-modes.mdx');
-    assert.ok(!failModes.includes('The generated hooks stay open even when the effective mode is `closed`'));
-    assert.ok(failModes.includes('Copilot and Antigravity still run a call when the hook times out or cannot start'));
-    assert.ok(failModes.includes('Under Secure Client they stay open'));
-    for (const name of ['reference/connectors/copilot.mdx']) {
-      const text = page(name);
-      assert.ok(!/no fail-closed hook transport/i.test(text), name);
-      assert.ok(text.includes('in fail mode `closed`, the default'), name);
-    }
-    for (const name of ['reference/connectors/antigravity.mdx']) {
-      const text = page(name);
-      assert.ok(!text.includes('A gateway failure lets the call run'), name);
-      assert.ok(!text.includes('normal fail-open operation'), name);
-      assert.ok(text.includes('In fail mode `closed`, the default'), name);
+    const matrix = JSON.parse(readFileSync(join(site, 'data/capability-matrix.json'), 'utf8'));
+    for (const id of ['copilot', 'antigravity']) {
+      const row = matrix.connectors.find((connector: { id: string }) => connector.id === id);
+      assert.equal(row?.outage.perUserClosed, 'blocks', id);
+      assert.equal(row?.hooks.blocksDeliveryFailures, true, id);
+      const text = page(`reference/connectors/${id}.mdx`);
+      assert.ok(text.includes('/docs/reference/apis/capability-matrix#gateway-outage'), id);
+      assert.doesNotMatch(text, /no fail-closed hook transport|A gateway failure lets the call run|normal fail-open operation/i, id);
     }
   });
 

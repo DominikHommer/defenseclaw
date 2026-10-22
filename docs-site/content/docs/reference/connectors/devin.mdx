@@ -99,7 +99,7 @@ Devin CLI cannot run in a sandbox yet. The image is **unverified**, so `defensec
 | Response field | `hook_output` |
 | Native OTLP | no |
 | W3C traceparent | yes |
-| Fail closed | yes |
+| Fail closed | See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) |
 
 The contract was reviewed against Devin CLI `3000.4.25` on Windows, macOS and Linux. On Linux it is also pinned to `3000.11.3`, which a live check showed delivers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` under these names and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse` (`PermissionRequest` and `PostCompaction` are not verified). Any other CLI from `3000.4.25` on, on every OS, runs as an untested newer version unless known broken ([version policy](/docs/reference/apis/hook-contracts#version-policy)). On Windows a CLI older than `3000.4.25` has no contract, so setup keeps it in observe mode and refuses action mode.
 
@@ -124,7 +124,7 @@ Devin has no native resumable ask. A `confirm` finding stays in audit and cannot
 
 ## Fail mode
 
-Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. In a standalone enterprise deployment each hook follows the administrator's fail mode: `closed` unless `hook_fail_mode` (global or for Devin) is `open`. Devin itself blocks only on exit `2`; every other hook error fails open on its side. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for this connector, including managed routes and hook timeouts. To change the installed setting, use [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

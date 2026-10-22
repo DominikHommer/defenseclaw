@@ -56,8 +56,7 @@ Teardown restores the earlier file, or removes only DefenseClaw's entries, then 
 ## Limits
 
 - Cursor runs Enterprise, Team, Project and User hooks and merges them by that priority. DefenseClaw owns only the user hook and cannot detect a higher-priority conflict.
-- Cursor Agent CLI builds that do not emit `beforeSubmitPrompt` let prompts reach the model, even when the gateway is down. Tool hooks still block. Check `hook_decision` audit rows before you claim prompt coverage.
-- When the gateway is down in action mode, Cursor Agent CLI drops a refused prompt without showing why. Run `defenseclaw-gateway status`.
+- See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for Cursor CLI prompt coverage and outage messages.
 - On managed Windows, the first start in a new folder can stall at "Trusting workspace...". Close the tab and start again, or start with `cursor-agent --trust`.
 - Cursor Agent cannot run in an OpenShell sandbox yet.
 

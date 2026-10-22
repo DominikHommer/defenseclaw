@@ -7,6 +7,8 @@ keywords:
   - tool.execute.before
 ---
 
+For delivery failures, see the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
+
 import { ConnectorSupport } from '@/components/support-matrix';
 
 DefenseClaw installs one plugin file in OpenCode's plugin directory. The plugin sends each tool call to the gateway before it runs and throws if the verdict is a block. OpenCode talks to its model provider directly and no proxy is involved.

@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -104,7 +105,19 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 		in.MachinePolicy = record.MachinePolicyConnectors
 		in.MachinePolicyCoverage = machinePolicyCoverage(record.MachinePolicyConnectors, r.MachinePolicy)
 	}
-	failMode := func(name string) string { return enterprisehooks.ManagedHookFailMode(cfg, name) }
+	failMode := func(name string) string {
+		mode := enterprisehooks.ManagedHookFailMode(cfg, name)
+		if cfg == nil || cfg.SecureClientIntegration() || slices.Contains(in.MachinePolicy, name) {
+			return mode
+		}
+		// Unix per-user plugins and bridges can be rendered closed even when
+		// the config says open. Machine-policy routes use the native hook.
+		conn, ok := registry.Get(name)
+		if !ok || connector.ConnectorHookOutage(conn).ManagedOpenUnixPerUserRoute == connector.OutageBlocks {
+			return "closed"
+		}
+		return mode
+	}
 	block, hidden := enterprisestatus.BuildConnectors(in, failMode)
 	r.Connectors = block
 	if hidden > 0 {

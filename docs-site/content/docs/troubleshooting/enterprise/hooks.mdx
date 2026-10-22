@@ -108,7 +108,7 @@ This is a per-user CLI left from an earlier install. It covers `config set`, `co
 
 ## A `DEFENSECLAW_*` variable or `.env` entry has no effect
 
-The registry marks it `ignore` on a managed standalone host, so the value is read as unset. `DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_HOOK_MAX_BODY` are `tighten_only`: honored only when stricter.
+The registry marks ignored inputs `ignore` on a managed standalone host, so they are read as unset. `DEFENSECLAW_FAIL_MODE` is not read by 1.0.4 hooks on these hosts: the installed mode comes from the administrator's config. `DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_HOOK_MAX_BODY` are `tighten_only`: honored only when stricter. Connector limits and Secure Client's existing delivery are in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
 
 **Fix.** Set the equivalent key in the admin config. See [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
 

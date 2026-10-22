@@ -7,6 +7,8 @@ keywords:
   - pre_tool_call
 ---
 
+For delivery failures, see the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
+
 import { ConnectorSupport } from '@/components/support-matrix';
 
 DefenseClaw adds hooks to the default profile's `config.yaml` and approves exactly those hook commands. This is a hook connector: Hermes talks to its model provider directly and no proxy is involved.
@@ -56,7 +58,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 ## Limits
 
 - The connector covers the default profile only. Named-profile homes and multiplex gateways are rejected.
-- Hermes runs the call when a hook times out or cannot start. In the supported releases it blocks only on a valid block answer and, from Hermes 0.21, on exit code 2.
+- See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for hook errors and timeouts.
 - Hermes runs every hook registered for an event, in order. A hook added after DefenseClaw's can change a command DefenseClaw already checked.
 - `hermes --safe-mode`, or a `HERMES_HOME` without the `hooks` block, runs with no DefenseClaw hook.
 - A host that is not reloaded keeps its old state, also after you turn the connector off.

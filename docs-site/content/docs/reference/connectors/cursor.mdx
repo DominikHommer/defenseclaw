@@ -91,7 +91,7 @@ Cursor Agent cannot run in a sandbox yet. DefenseClaw builds the image, but it i
 | Response field | `hook_output` |
 | Native OTLP | no |
 | W3C traceparent | yes |
-| Fail closed | yes |
+| Fail closed | See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) |
 
 The contract covers Cursor Desktop application versions `>=2.4.0, <4.0.0`, and for the Agent CLI only the reviewed exact build `2026.07.23-e383d2b`. The hook payload's `cursor_version` is the Desktop application version. A later Agent build runs as an untested newer version ([version policy](/docs/reference/apis/hook-contracts#version-policy)).
 
@@ -114,7 +114,7 @@ DefenseClaw does not enable Cursor native approval. Confirm verdicts stay attrib
 
 ## Fail mode
 
-Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. Action mode registers `failClosed: true` and observe mode registers `failClosed: false`; a conflicting `--fail-mode` is ignored with a warning. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for this connector, including managed routes and hook timeouts. To change the installed setting, use [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 
@@ -127,7 +127,7 @@ Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks 
 | Build | Behavior | Check |
 | --- | --- | --- |
 | Agent CLI 2026.10.01-14929f9 | Did not emit `beforeSubmitPrompt` in a managed standalone run although `hooks.json` registered it. Prompts reached the model with the gateway stopped. Tool hooks still ran and blocked. | Look for `beforeSubmitPrompt` rows with `hook_decision` in the audit log. DefenseClaw status and enterprise verify warn about this. |
-| Same build, gateway down, action mode | A refused prompt is dropped without a message: the input clears and the start screen returns. The hook answers `continue: false` with a reason, but the CLI does not display `user_message` for that event. Tool calls show their reason. | Run `defenseclaw-gateway status` (or `defenseclaw-gateway start` on a per-user install). Refusals are the `"connector":"cursor"` lines with `"fail_mode":"closed"` in `~/.defenseclaw/logs/hook-failures.jsonl`. |
+| Same build, gateway down, action mode | See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for prompt and tool-call display limits. | Run `defenseclaw-gateway status`. |
 | 2026.10.01-e373342 and -14929f9, managed Windows | After you answer `[a] Trust this workspace` on the first start in a folder, the CLI can stay on "Trusting workspace..." and ignore typing and Ctrl+C. The folder is already trusted. | Close the tab and start `cursor-agent` again, or start new folders with `cursor-agent --trust`. |
 
 Cursor spawns command-hook processes and reloads `hooks.json` automatically. If a change is not loaded, restart Cursor.
