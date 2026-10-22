@@ -51,6 +51,7 @@ param(
     [string]$QuickstartMode = "",
     [switch]$NoPersistPath,
     [string]$CosignPath = "",
+    [switch]$AcceptCurrentInstall,
     [switch]$Help,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$UnknownArguments = @()
@@ -1775,23 +1776,50 @@ function Get-LifecycleNextStep {
     return $retry
 }
 
-function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped) {
+function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outlived) {
     # Step 5: the restored install is the one the manifest recorded, and its
     # gateway runs again when it ran (unless the restore keeps it stopped on
     # purpose, GAP-0407). The manifest goes only once that is proven; on a
     # failure it stays, the install stays locked and its hooks closed
     # (Close-InstallLock, Close-UnfinishedInstallHooks), and the error names
     # the next step.
+    # -Outlived: the record outlived its restore (no snapshot is left), so
+    # the live config and connectors may have changed on purpose since. Those
+    # differences alone are accepted once the gateway proves it enforces the
+    # live config, or when -AcceptCurrentInstall asks for it; every trust
+    # check (the recorded binaries, the bin folder, the gateway's health and
+    # its acceptance of the live config) still applies.
     if (-not $Manifest) { return }
     $running = [bool](Get-Field $Manifest "GatewayWasRunning") -and -not $KeepStopped
-    $problems = @(Wait-LifecycleProof (Get-Field $Manifest "Bins") $running @(Get-Field $Manifest "Connectors") `
-        -RequireProtected ([bool](Get-Field $Manifest "BinDirProtected")) -SetupRoot ([string](Get-Field $Manifest "SetupRoot")))
+    $bins = Get-Field $Manifest "Bins"
+    $protected = [bool](Get-Field $Manifest "BinDirProtected")
+    $setupRoot = [string](Get-Field $Manifest "SetupRoot")
+    $problems = @(Wait-LifecycleProof $bins $running @(Get-Field $Manifest "Connectors") -RequireProtected $protected -SetupRoot $setupRoot)
+    $drift = @()
+    $configChanged = $false
     $config = [string](Get-Field $Manifest "Config")
     $liveConfig = Get-OptionalSha256 (Join-Path $DataDir "config.yaml")
-    if ($config -and $liveConfig -ne $config) { $problems += "$(Join-Path $DataDir 'config.yaml') is not the config the previous install ran with" }
+    if ($config -and $liveConfig -ne $config) { $drift += "$(Join-Path $DataDir 'config.yaml') is not the config the previous install ran with"; $configChanged = $true }
     $external = [string](Get-Field $Manifest "ExternalConfig")
     if ($external -and (Get-OptionalSha256 $external) -ne [string](Get-Field $Manifest "ExternalConfigSha256")) {
-        $problems += "$external is not the config the previous install ran with"
+        $drift += "$external is not the config the previous install ran with"; $configChanged = $true
+    }
+    if ($Outlived -and $problems.Count -and
+        -not @(Test-LifecycleProof $bins $running @() -RequireProtected $protected -SetupRoot $setupRoot).Count) {
+        # Only connectors the record names are not guarded.
+        $drift += $problems
+        $problems = @()
+    }
+    if ($drift.Count) {
+        $override = [bool](Get-Variable -Name AcceptCurrentInstall -ValueOnly -ErrorAction SilentlyContinue)
+        $enforced = $configChanged -and $running -and -not $setupRoot -and
+            (Get-GatewayDigestProblem (Join-Path $BinDir "defenseclaw-gateway.exe")) -eq ""
+        if ($Outlived -and -not $problems.Count -and ($enforced -or $override)) {
+            $why = if ($enforced) { "its gateway enforces the live config" } else { "-AcceptCurrentInstall" }
+            Write-Warn "The install an earlier run recorded is back with changes made since ($($drift -join '; ')); accepted as it is now ($why)"
+        } else {
+            $problems += $drift
+        }
     }
     if ([string](Get-Field $Manifest "HookFailModes") -and -not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) {
         $problems += "the hooks' outage modes ($(Join-Path $DataDir 'hooks\.hookcfg')) are missing"
@@ -1810,8 +1838,13 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped) {
     }
     if ($problems.Count) {
         Set-RecoveryPending
+        $accept = ""
+        if ($Outlived -and $drift.Count -and -not @($problems | Where-Object { $drift -notcontains $_ }).Count) {
+            # Only the changes made since stand in the way.
+            $accept = " If you changed the config or removed a connector on purpose, run it with -AcceptCurrentInstall to keep the install as it is now."
+        }
         throw ("The previous install is not proven back: $($problems -join '; '). The record of it stays in $LifecycleManifest and the install stays locked; " +
-            "fix the cause, then run: $(Get-LifecycleNextStep)")
+            "fix the cause, then run: $(Get-LifecycleNextStep)$accept")
     }
     Remove-LifecycleManifest
 }
@@ -2767,7 +2800,7 @@ function Resume-InterruptedRun {
     if ($manifest) { $restart = $restart -or [bool](Get-Field $manifest "GatewayWasRunning") }
     if ($restart -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "recovered" }
     Set-RecoverySetupRoot $manifest
-    Assert-LifecycleRestored $manifest
+    Assert-LifecycleRestored $manifest -Outlived
 }
 
 function Set-RecoverySetupRoot($Manifest) {
@@ -2968,6 +3001,9 @@ Options:
   -QuickstartMode MODE  observe or action (implies -Quickstart)
   -NoPersistPath        Do not change the user PATH in the registry
   -CosignPath FILE      cosign to check the release signature with (default: cosign on PATH)
+  -AcceptCurrentInstall Keep the config and connectors changed since an earlier
+                        run that is not proven back (its binaries and gateway
+                        are still checked)
   -Help                 Show this help
 
 Exit codes (run as a file):

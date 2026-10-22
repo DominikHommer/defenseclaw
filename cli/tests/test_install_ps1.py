@@ -1097,6 +1097,110 @@ Write-Output "STARTS=$script:starts"
     assert "FAILED_LAUNCH=0 " not in out and "SUCCESSFUL_LAUNCH=0" in out, out
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    "case, accepted, override_accepted, hint",
+    [
+        # The gateway proves it enforces the edited config: kept as it is now.
+        ("config-edited", True, True, False),
+        ("config-edited-connector-removed", True, True, False),
+        # An older restored gateway cannot report the digest: only the override keeps it.
+        ("config-edited-old-gateway", False, True, True),
+        # A guarded connector is gone while the config still names it.
+        ("connector-removed", False, True, True),
+        # Trust and health checks are never waived.
+        ("config-edited-binary-changed", False, False, False),
+        ("config-edited-gateway-rejects-config", False, False, False),
+        ("config-edited-gateway-down", False, False, False),
+        ("config-edited-bin-dir-open", False, False, False),
+    ],
+)
+def test_a_lifecycle_record_that_outlived_its_restore_accepts_later_changes_only_once_proven(
+    tmp_path: Path, case: str, accepted: bool, override_accepted: bool, hint: bool
+) -> None:
+    # A restore whose gateway did not start (a port clash) left its record
+    # with no snapshot. The user then fixed the cause by editing config.yaml,
+    # or removed a connector: the record still demanded the recorded config
+    # bytes and every recorded connector, so every later install, upgrade,
+    # repair and rollback refused, until the record was deleted by hand.
+    data = tmp_path / "data"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    data.mkdir()
+    gateway = bin_dir / "defenseclaw-gateway.exe"
+    gateway.write_bytes(b"gateway 1.0.3")
+    gateway_sha = hashlib.sha256(gateway.read_bytes()).hexdigest()
+    config = data / "config.yaml"
+    config.write_text("gateway:\n  port: 18970\n", encoding="utf-8")
+    config_sha = hashlib.sha256(config.read_bytes()).hexdigest()
+    record = {
+        "Schema": 1, "Operation": "upgrade", "From": "1.0.3", "To": "1.0.4", "Slot": "", "SetupRoot": "",
+        "Bins": {"defenseclaw-gateway.exe": gateway_sha}, "GatewayWasRunning": True,
+        "Connectors": ["claudecode", "codex"], "Config": config_sha, "ExternalConfig": "",
+        "ExternalConfigSha256": "", "HookFailModes": "", "BinDirProtected": True, "Committed": False,
+    }
+    if "config-edited" in case:
+        config.write_text("gateway:\n  port: 18971\n", encoding="utf-8")
+    if "binary-changed" in case:
+        gateway.write_bytes(b"another gateway")
+    connectors = ["claudecode"] if "connector-removed" in case else ["claudecode", "codex"]
+    digest = {"old-gateway": "unsupported", "rejects-config": "the gateway rejected the live config"}
+    digest_result = next((v for k, v in digest.items() if k in case), "")
+    results = []
+    for override in (False, True):
+        manifest = data / ".lifecycle-txn.json"
+        manifest.write_text(json.dumps(record), encoding="utf-8")
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+$BinDir = '{bin_dir}'
+$Staging = Join-Path $DataDir '.staging'
+$Previous = Join-Path $DataDir 'previous'
+$SetupHookState = Join-Path $DataDir 'hook-runtime-state.json'
+$AcceptCurrentInstall = ${str(override).lower()}
+function Write-Warn([string]$Message) {{ Write-Host "WARN: $Message" }}
+function Write-Info([string]$Message) {{ Write-Host $Message }}
+function Find-SetupInstall {{ return $null }}
+function Die([string]$Message) {{ throw $Message }}
+function Move-Path([string]$From, [string]$To) {{ Move-Item -LiteralPath $From -Destination $To }}
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
+function Start-RecoveredGateway {{ }}
+{_resume_functions("Read-Text", "Resume-InterruptedRun")}
+{_txn_real_functions()}
+{_TXN_PRELUDE}
+function Get-GatewayProcess {{
+    if ('{case}' -like '*gateway-down') {{ return $null }}
+    return [pscustomobject]@{{ Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }}
+}}
+function Get-GatewayHealthReport {{
+    $entries = @({", ".join(f"[pscustomobject]@{{ name = '{c}'; state = 'running' }}" for c in connectors)})
+    return [pscustomobject]@{{ running = $true; health = [pscustomobject]@{{ connectors = $entries }} }}
+}}
+function Get-GatewayDigestProblem {{ return '{digest_result}' }}
+function Test-BinDirProtected {{ return -not ('{case}' -like '*bin-dir-open') }}
+try {{ Resume-InterruptedRun; Write-Output 'ACCEPTED' }} catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
+Write-Output "RECORD=$(Test-Path -LiteralPath $LifecycleManifest)"
+"""
+        completed = _run_powershell(script)
+        out = completed.stdout + completed.stderr
+        assert completed.returncode == 0, out
+        results.append(out)
+    plain, overridden = results
+    for out, want in ((plain, accepted), (overridden, override_accepted)):
+        if want:
+            assert "ACCEPTED" in out and "REFUSED" not in out and "RECORD=False" in out, out
+            assert "accepted as it is now" in out, out
+        else:
+            assert "REFUSED: The previous install is not proven back" in out and "RECORD=True" in out, out
+    assert ("-AcceptCurrentInstall" in plain) == hint, plain
+    if accepted:
+        assert "its gateway enforces the live config" in plain, plain
+    elif override_accepted:
+        assert "(-AcceptCurrentInstall)" in overridden, overridden
+
+
 def _resume_functions(*names: str) -> str:
     # The listed install.ps1 functions this file has, in file order.
     return "\n".join(
