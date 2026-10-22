@@ -2854,6 +2854,47 @@ def test_a_refresh_that_cannot_find_an_unprobed_agent_keeps_it_installed(monkeyp
     binary.unlink()
     gone = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["amp"]
     assert (gone.installed, gone.binary_path) == (False, "")
+def test_a_scan_restricted_to_one_connector_still_probes_every_enrolled_one(monkeypatch, tmp_path):
+    """GAP-0547: `setup codex` probed only Codex. Claude Code, enrolled in
+    action mode, had updated itself since the last scan, so its version was
+    not kept and the cache the restarted gateway reads had none: the gateway
+    refused claudecode ("agent version not probed") and could not start."""
+    data_dir = tmp_path / ".defenseclaw"
+    data_dir.mkdir()
+    (data_dir / "config.yaml").write_text(
+        "guardrail:\n  connectors:\n    claudecode: {mode: action}\n    codex: {mode: action}\n"
+        "    amp:\n      enabled: false\n",
+        encoding="utf-8",
+    )
+    claude = tmp_path / "claude"
+    claude.write_text("#!/bin/sh\n", encoding="utf-8")
+    versions = {"claudecode": "2.1.304 (Claude Code)"}
+    probed: list[str] = []
+
+    def probe(name, _path, _args, **_kwargs):
+        probed.append(name)
+        return versions.get(name, f"{name} 1.0"), ""
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(
+        ad, "_binary_candidates_for_agent",
+        lambda name, _spec: (str(claude),) if name == "claudecode" else (f"/opt/bin/{name}",),
+    )
+    monkeypatch.setattr(ad, "_version_for_agent_binary", probe)
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
+
+    # The agent updates itself after that scan.
+    versions["claudecode"] = "2.1.308 (Claude Code)"
+    os.utime(claude, None)
+    probed.clear()
+    disc = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=data_dir)
+
+    assert sorted(probed) == ["claudecode", "codex"]
+    assert disc.agents["claudecode"].version == "2.1.308 (Claude Code)"
+    assert ad._read_cache(data_dir=data_dir).agents["claudecode"].version == "2.1.308 (Claude Code)"
+    # Not enrolled (or disabled): still not started (GAP-0901).
+    assert disc.agents["copilot"].error == ad.VERSION_NOT_PROBED
+    assert disc.agents["amp"].error == ad.VERSION_NOT_PROBED
 
 
 def test_cached_discovery_rechecks_config_files(monkeypatch, tmp_path):
