@@ -1355,6 +1355,7 @@ func applyWindowsEnterpriseInstallerReport(
 			result.Action,
 			configPath,
 			purge,
+			windowsBundleHasCode(result.Errors[firstError:], "lifecycle_busy"),
 			report.TransactionPending,
 			decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
 			decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
