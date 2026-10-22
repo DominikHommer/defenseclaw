@@ -35,6 +35,10 @@ def _flat(page: str) -> str:
 
 # (fact, [(pages that may hold the phrase, phrase), ...])
 FACTS = [
+    ('scanner_tree_names_the_linux_custodian_escape_limit', [
+        (('reference/scanning/scanners.mdx',),
+         'On Linux, if a scanner SIGKILLs its child-subreaper custodian, a detached child can keep running even though the scan fails closed.'),
+    ]),
     ('scanner_tree_names_the_macos_escape_limit', [
         (('reference/scanning/scanners.mdx',),
          "macOS has one known limit: a child that forks, starts a new session and exits between two reads of the process table (about 100 ms apart) can hand its own child to launchd before the gateway sees it. If that child keeps a descriptor it inherited, the scan fails closed; if it closes every descriptor, it is not found and keeps running."),
@@ -497,6 +501,15 @@ FACTS = [
          "Windows Home, per-user Docker Desktop, WSL2 engines and Windows containers are not supported"),
     ]),
 ]
+
+
+def test_runtracked_comment_names_the_linux_custodian_escape_limit():
+    source = (ROOT / "internal/processutil/command.go").read_text(encoding="utf-8")
+    match = re.search(r"// RunTracked runs.*?\nfunc RunTracked\(", source, re.DOTALL)
+    assert match is not None
+    comment = " ".join(line.removeprefix("//").strip() for line in match.group().splitlines())
+    assert "scanner SIGKILLs the custodian" in comment
+    assert "a detached child can keep running" in comment
 
 
 @pytest.mark.parametrize("fact", [f[0] for f in FACTS])

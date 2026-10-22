@@ -91,19 +91,21 @@ func RunContained(cmd *exec.Cmd) error {
 	return runContained(cmd)
 }
 
-// RunTracked runs a command whose whole process tree must end with it,
-// without limiting what it may start: the skill-scanner starts helpers on
-// every scan, and the no-fork launcher of RunContained failed every macOS
-// gateway skill scan (r104 W5b). Every process the command starts is
-// killed when the command exits, when cmd is canceled and when this process
-// dies, however it dies.
+// RunTracked runs a command under a process-tree supervisor without limiting
+// what it may start: the skill-scanner starts helpers on every scan, and the
+// no-fork launcher of RunContained failed every macOS gateway skill scan
+// (r104 W5b). The supervisor ends descendants when the command exits, cmd is
+// canceled, or this process dies, subject to the OS limits below.
 //
 // On Linux the kernel reparents every orphan of the tree to a
 // child-subreaper custodian, also one that left the group or session, and the
-// custodian kills and reaps them all; when it cannot, RunTracked returns
-// ErrNotContained. A user namespace like RunContained's would show
-// root-owned files as owned by the overflow user to the scanner. On macOS a supervisor, a short-lived copy of this binary in a
-// process group of its own, runs the command in a session of its own. It
+// custodian kills and reaps them while it remains alive. If a scanner SIGKILLs
+// the custodian, a detached child can keep running even though RunTracked
+// fails. If the custodian cannot complete its sweep, RunTracked returns
+// ErrNotContained. A user namespace like RunContained's would show root-owned
+// files as owned by the overflow user to the scanner. On macOS a supervisor,
+// a short-lived copy of this binary in a process group of its own, runs the
+// command in a session of its own. It
 // follows every descendant with kqueue NOTE_FORK and NOTE_EXIT and the
 // process table, by parent, group and session, also once it starts a
 // session of its own; it watches this process with NOTE_EXIT. To end the
