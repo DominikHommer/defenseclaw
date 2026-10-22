@@ -387,7 +387,9 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	}
 	key := strconv.Itoa(uid)
 	c.noteHolder(uid, key)
-	return c.directoryCache().get(key, block)
+	cache := c.directoryCache()
+	forgetOnSpoolAccountChange(cache, key, time.Now())
+	return cache.get(key, block)
 }
 
 // explainDirectory is directory for `guardrail profile explain`: the facts a
@@ -402,7 +404,9 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 func (c *managedHookPeerHomeCache) explainDirectory(uid int) (useridentity.DirectoryFacts, error) {
 	key := strconv.Itoa(uid)
 	c.noteHolder(uid, key)
-	return explainDirectoryFacts(c.directoryCache(), key)
+	cache := c.directoryCache()
+	forgetOnSpoolAccountChange(cache, key, time.Now())
+	return explainDirectoryFacts(cache, key)
 }
 
 // noteHolder records the account (name and home) that uid's cached

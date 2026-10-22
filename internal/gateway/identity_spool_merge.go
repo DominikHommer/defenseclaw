@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -228,24 +227,26 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 	return merged
 }
 
-// spoolGroupsCheckInterval is how often a request re-reads an account's
-// guardian identity record to see whether its group set changed.
-const spoolGroupsCheckInterval = 5 * time.Second
-
-var spoolGroupChecks struct {
-	sync.Mutex
-	at map[string]time.Time
-}
-
 // forgetOnSpoolGroupChange drops key's cached facts when the guardian's
 // identity record lists another group set than the one they were built
 // from. On Windows the groups come from the account's sign-in token: after a
 // user signed out and in again the enumerator recorded the new groups at
 // once and `profile-explain` showed them, while hooks kept the cached old
 // ones for up to 15 more minutes (GAP-1027). A new sign-in now applies at the
-// next request, and explain and the hooks agree. The record is read at most
-// every spoolGroupsCheckInterval per account.
+// next request, and explain and the hooks agree. A removed record also drops
+// cached token groups before the next request makes a policy decision.
 func forgetOnSpoolGroupChange(cache *identityDirectoryCache, key string, now time.Time) {
+	forgetOnSpoolChange(cache, key, now, true)
+}
+
+// forgetOnSpoolAccountChange also checks a managed Unix UID's spool identity.
+// The account database cache may still name the preceding owner of the same
+// UID, name and home, while the guardian has already published a new SID.
+func forgetOnSpoolAccountChange(cache *identityDirectoryCache, key string, now time.Time) {
+	forgetOnSpoolChange(cache, key, now, false)
+}
+
+func forgetOnSpoolChange(cache *identityDirectoryCache, key string, now time.Time, checkGroups bool) {
 	if cache == nil || key == "" || currentIdentitySpoolDir() == "" {
 		return
 	}
@@ -253,21 +254,18 @@ func forgetOnSpoolGroupChange(cache *identityDirectoryCache, key string, now tim
 	if !ok {
 		return
 	}
-	spoolGroupChecks.Lock()
-	if last, seen := spoolGroupChecks.at[key]; seen && now.Sub(last) >= 0 && now.Sub(last) < spoolGroupsCheckInterval {
-		spoolGroupChecks.Unlock()
-		return
-	}
-	if spoolGroupChecks.at == nil || len(spoolGroupChecks.at) >= identityDirectoryMax {
-		spoolGroupChecks.at = map[string]time.Time{}
-	}
-	spoolGroupChecks.at[key] = now
-	spoolGroupChecks.Unlock()
 	record, ok := readIdentitySpoolFacts(key, now)
 	if !ok {
+		// A failed or withdrawn publication cannot leave old token groups
+		// (Windows) or a guardian-only UPN (Unix) in the gateway cache.
+		if checkGroups && len(cached.Groups) > 0 || !checkGroups && (cached.UPN != "" || cached.AccountSID != "") {
+			cache.forget(key)
+		}
 		return
 	}
-	if cached.GroupsPartial != record.Facts.GroupsPartial || !sameGroupSet(cached.Groups, record.Facts.Groups) {
+	if checkGroups && (cached.GroupsPartial != record.Facts.GroupsPartial || !sameGroupSet(cached.Groups, record.Facts.Groups)) ||
+		!checkGroups && (!strings.EqualFold(cached.AccountSID, record.AccountSID) ||
+			record.Facts.UPN != "" && !strings.EqualFold(cached.UPN, record.Facts.UPN)) {
 		cache.forget(key)
 	}
 }
