@@ -277,11 +277,15 @@ func (set *guardrailProfileSet) unresolvedAgentMatch(m config.ProfileMatch, subj
 	return ok
 }
 
-// profileAgent is the agents entry the request's agent identity agent is
-// matched as: agent, or, when no assignment names agent, the legacy
-// identity an assignment names for the same account. unresolved, when not
-// nil, reports the entries that may be agent's legacy identity without the
-// ledger proving it.
+// profileAgent is what the request's agent identity agent is matched as
+// (match's agent argument): agent, and the legacy identity an assignment
+// names that the ledger links to agent's account (profileAgentIDs), so an
+// assignment naming either applies in assignment order. An assignment
+// naming agent does not skip the link: it may come after one written for
+// the agent's 1.0.3 identity. unresolved, when not nil, reports the entries
+// that may be agent's legacy identity without the ledger proving it;
+// matchAgent then lets no later assignment, one naming agent included,
+// apply in place of an earlier one with such an entry.
 func (set *guardrailProfileSet) profileAgent(agent string, legacy profileAgentLegacy) (matched string, unresolved func(entry string) bool) {
 	agent = strings.TrimSpace(agent)
 	if set == nil || agent == "" {
@@ -298,7 +302,7 @@ func (set *guardrailProfileSet) profileAgent(agent string, legacy profileAgentLe
 			}
 		}
 	})
-	if len(bridge.entries) == 0 || bridge.entries[strings.ToLower(agent)] {
+	if len(bridge.entries) == 0 {
 		return agent, nil
 	}
 	own, known := "", false
@@ -312,7 +316,7 @@ func (set *guardrailProfileSet) profileAgent(agent string, legacy profileAgentLe
 	}
 	linked, unresolved := bridge.legacyOf(strings.ToLower(agent), own, known)
 	if linked != "" {
-		return linked, nil
+		return profileAgentIDs(agent, linked), nil
 	}
 	return agent, unresolved
 }

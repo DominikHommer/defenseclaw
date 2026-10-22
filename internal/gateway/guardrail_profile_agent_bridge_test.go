@@ -77,8 +77,8 @@ func TestLegacyAgentAssignmentSelectsOnlyItsRecordedAccount(t *testing.T) {
 	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
 	}}
-	if got, _ := set.profileAgent(corp, nil); got != legacy {
-		t.Errorf("corp's agent matches as %q, want its legacy identity %q", got, legacy)
+	if got, _ := set.profileAgent(corp, nil); got != profileAgentIDs(corp, legacy) {
+		t.Errorf("corp's agent matches as %q, want its identity and its legacy identity %q", got, legacy)
 	}
 	if got, _ := set.profileAgent(lab, nil); got != lab {
 		t.Errorf("the lab namesake's agent matches as %q, want its own identity %q", got, lab)
@@ -90,8 +90,10 @@ func TestLegacyAgentAssignmentSelectsOnlyItsRecordedAccount(t *testing.T) {
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
 		{Profile: "strict", Match: config.ProfileMatch{Agents: []string{corp}}},
 	}}
-	if got, _ := named.profileAgent(corp, nil); got != corp {
-		t.Errorf("an assignment naming the current identity lost to the legacy one: %q", got)
+	// An assignment naming the current identity does not skip the link:
+	// both are matched in assignment order.
+	if got, _ := named.profileAgent(corp, nil); got != profileAgentIDs(corp, legacy) {
+		t.Errorf("with an assignment naming the current identity, corp's agent matches as %q, want both identities", got)
 	}
 }
 
@@ -108,12 +110,12 @@ func TestLegacyAgentAssignmentWithAnOverwrittenRecordSelectsNeitherAccount(t *te
 	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
 	}}
-	if got, _ := set.profileAgent(lab, nil); got != legacy {
-		t.Fatalf("with one account recorded, lab's agent matches as %q, want %q", got, legacy)
+	if got, _ := set.profileAgent(lab, nil); got != profileAgentIDs(lab, legacy) {
+		t.Fatalf("with one account recorded, lab's agent matches as %q, want %q too", got, legacy)
 	}
 	// corp's agent is seen after the upgrade.
 	records = append(records, legacyBridgeRecord(corp, "alice@corp.example"))
-	if got, _ := set.profileAgent(lab, nil); got != legacy {
+	if got, _ := set.profileAgent(lab, nil); got != profileAgentIDs(lab, legacy) {
 		t.Fatalf("the link was read again before its refresh: %q", got)
 	}
 	set.agentBridge.readAt = time.Time{}
@@ -128,7 +130,7 @@ func TestLegacyAgentAssignmentWithAnOverwrittenRecordSelectsNeitherAccount(t *te
 	other.MachineHash = agentidentity.MachineHash("fedcba9876543210fedcba9876543210")
 	records = []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice@lab.example"), other}
 	fresh := &guardrailProfileSet{assignments: set.assignments}
-	if got, _ := fresh.profileAgent(lab, nil); got != legacy {
+	if got, _ := fresh.profileAgent(lab, nil); got != profileAgentIDs(lab, legacy) {
 		t.Errorf("a namesake on another machine took the link: %q", got)
 	}
 }

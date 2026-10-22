@@ -1014,9 +1014,7 @@ func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, s
 		}) {
 			continue
 		}
-		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool {
-			return strings.EqualFold(strings.TrimSpace(v), agent) && agent != ""
-		}) {
+		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool { return agentEntryMatches(v, agent) }) {
 			continue
 		}
 		uidMatches := anyMatches(m.Users, func(v string) bool {
@@ -1091,12 +1089,36 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 		reason, group = profileMatchUser, ""
 	}
 	if len(m.Agents) > 0 {
-		if agent == "" || !anyMatches(m.Agents, func(v string) bool { return strings.EqualFold(strings.TrimSpace(v), agent) }) {
+		if !anyMatches(m.Agents, func(v string) bool { return agentEntryMatches(v, agent) }) {
 			return "", "", false
 		}
 		reason, group = profileMatchAgent, ""
 	}
 	return reason, group, true
+}
+
+// profileAgentIDSep separates the identities of match's agent argument
+// (profileAgentIDs).
+const profileAgentIDSep = "\x00"
+
+// profileAgentIDs is match's agent argument for an agent matched as each
+// of ids: its identity and the 1.0.3 identity the agent ledger links to its
+// account (profileAgent). An assignment naming any of them matches, so the
+// first such assignment applies, whichever identity it names.
+func profileAgentIDs(ids ...string) string {
+	return strings.Join(ids, profileAgentIDSep)
+}
+
+// agentEntryMatches reports whether an agents entry names agent, match's
+// agent argument: one identity, or several (profileAgentIDs).
+func agentEntryMatches(entry, agent string) bool {
+	entry = strings.TrimSpace(entry)
+	for id := range strings.SplitSeq(agent, profileAgentIDSep) {
+		if id != "" && strings.EqualFold(entry, id) {
+			return true
+		}
+	}
+	return false
 }
 
 // profileUserName is the name users entries match: the bare account, or,
@@ -1666,6 +1688,11 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	user := strings.TrimSpace(query.Get("user"))
 	connectorName := config.NormalizeConnectorName(query.Get("connector"))
 	agent := strings.TrimSpace(query.Get("agent"))
+	if strings.Contains(agent, profileAgentIDSep) {
+		// It would be matched as two identities (profileAgentIDs).
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent: an agent identity has no NUL character"})
+		return
+	}
 
 	set := a.guardrailProfileSet()
 	if connectorName != "" && !connector.IsKnownBuiltinConnector(connectorName) &&
