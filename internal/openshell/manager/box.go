@@ -782,6 +782,20 @@ func (m *Manager) scheduleOldSupervisorStop(b *box) {
 	}()
 }
 
+// retryOldSupervisorStop schedules the stop of b again while its session is
+// still ready on an old supervisor: a stop that failed (stopOldSupervisor)
+// returned it to ready, which lifecycle sees as no transition, so each
+// reconcile tries again, and the reconcile interval is the backoff
+// (GAP-0415).
+func (m *Manager) retryOldSupervisorStop(b *box) {
+	m.mu.Lock()
+	old := b.phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(b.rec.SessionRelease)
+	m.mu.Unlock()
+	if old {
+		m.scheduleOldSupervisorStop(b)
+	}
+}
+
 // stopOldSupervisor stops the sandbox name while the session bindingID
 // still runs an old supervisor (scheduleOldSupervisorStop). A stop that
 // fails leaves it running on it: the feed says so, and its view tells the

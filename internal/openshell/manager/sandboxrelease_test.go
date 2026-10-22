@@ -129,7 +129,8 @@ func TestOldSupervisorWordsForARecordWithoutARelease(t *testing.T) {
 // runs, whatever the gateway runs now. DefenseClaw stops it as soon as it
 // sees it, also on an upgraded gateway and for a restarted daemon, and the
 // next start runs the gateway's own supervisor. A stop that fails keeps the
-// session's release, says so, and names it in the view for the CLI.
+// session's release, says so, names it in the view for the CLI, and is tried again on each
+// reconcile until the session stops.
 func TestAnOldSupervisorIsStoppedBeforeAnySandboxRunsOnIt(t *testing.T) {
 	e := newEnv(t, nil)
 	e.m.opts.Connect = func(ctx context.Context) (*Gateway, error) {
@@ -190,10 +191,12 @@ func TestAnOldSupervisorIsStoppedBeforeAnySandboxRunsOnIt(t *testing.T) {
 	if finding("DefenseClaw could not stop kept, whose session still runs the supervisor of OpenShell 0.1.3") != 1 {
 		t.Fatalf("findings = %+v", e.events("kept", sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor))
 	}
-	// The next sight of it stops it.
-	sight("0.1.3")
+	// The daemon's next periodic reconcile, which forces no transition on a
+	// sandbox still ready, tries the stop again, and it stops it.
+	must(t, e.m.Reconcile(t.Context()))
+	e.m.tamperStops.Wait()
 	if got := e.get("kept"); got.Phase != "stopped" || got.OldSupervisor {
-		t.Fatalf("the next sight: phase %s, old supervisor %v", got.Phase, got.OldSupervisor)
+		t.Fatalf("the next reconcile: phase %s, old supervisor %v", got.Phase, got.OldSupervisor)
 	}
 
 	// A session on the gateway's own supervisor is left running.

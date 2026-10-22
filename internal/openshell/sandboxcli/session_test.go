@@ -1803,9 +1803,6 @@ func TestStartTakesAFreshSnapshotWhenNothingIsOnTop(t *testing.T) {
 	}
 }
 
-// A headless session in an existing sandbox runs without a terminal:
-// `connect NAME --prompt TEXT` or the harness's own print flag (manual
-// test M6).
 // TestAnOldSupervisorRunsNothing (GAP-0415): a ready sandbox the daemon
 // names as running the supervisor of an OpenShell older than SupportedMin
 // gets no exec, and a connect stops it and starts it again (on the
@@ -1846,6 +1843,9 @@ func TestAnOldSupervisorRunsNothing(t *testing.T) {
 	has(t, ta.output(), "m1-b still runs the supervisor of an OpenShell release older than "+openshell.SupportedMin)
 }
 
+// A headless session in an existing sandbox runs without a terminal:
+// `connect NAME --prompt TEXT` or the harness's own print flag (manual
+// test M6).
 func TestConnectRunsOnePromptHeadless(t *testing.T) {
 	for _, c := range []struct {
 		name string
