@@ -146,16 +146,27 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 		// (review loop round 3).
 		switch action {
 		case "install", "upgrade", "repair", "ensure", "uninstall":
+			if len(result.Errors) != 0 {
+				// A failed run changes nothing shared: the production
+				// deployment's admission record stays as it is, whatever it
+				// names, as a failed run left the runtime before 1.0.4. Only the
+				// production Setup's /repair or upgrade, or a certification run
+				// that succeeds, settles a legacy record; a failed one quarantined
+				// the record of a healthy signed 1.0.3 production scanner it could
+				// not prove, and the 1.0.3 gateway stopped scanning (W2B-G-win
+				// fifth review loop, round 1).
+				return
+			}
 			// Such a run can only take trust away: an admission record that
 			// does not prove a production admission (the record a 1.0.3
 			// --allow-unsigned certification install wrote for its unsigned
 			// scanner) is removed unless the production deployment's own trust
 			// settings prove the executable it names, so no gateway runs that
 			// scanner (W2B-G-win review loop round 1). A record those settings
-			// prove is the production deployment's and stays, whether this run
-			// failed or not: a 1.0.3 gateway keeps scanning with it (loop
-			// round 2). One they cannot prove is removed too: a 1.0.3 gateway
-			// runs whatever a schema 1 record names (loop round 3).
+			// prove is the production deployment's and stays: a 1.0.3 gateway
+			// keeps scanning with it (loop round 2). One they cannot prove is
+			// removed too: a 1.0.3 gateway runs whatever a schema 1 record
+			// names (loop round 3).
 			quarantined, err := quarantineUnprovenWindowsScannerRuntimeAdmission()
 			switch {
 			case err != nil:
@@ -166,7 +177,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			case quarantined != "":
 				result.AddWarning("scanner_runtime_admission_quarantined", windowsScannerRuntimeAdmissionQuarantined+" (not proven: "+quarantined+")")
 			}
-			if len(result.Errors) == 0 {
+			if err == nil {
 				result.AddWarning("scanner_runtime_not_scoped", windowsScannerRuntimeNotScoped)
 			}
 		case "status", "verify":

@@ -65,18 +65,20 @@ func legacyWindowsScannerRuntimeAdmits(t *testing.T, root, path string) bool {
 // admission record into the shared production runtime. Since round 3 a
 // certification run leaves that folder alone, so its uninstall no longer
 // removed the scanner and the production gateway kept running it. Every
-// mutating certification run, of every scope, failed or not, checks such a
+// mutating certification run that succeeds, of every scope, checks such a
 // record against the production deployment's own trust settings, never this
 // run's. One they prove, the record of a signed production scanner, stays
-// byte-identical, so a failed certification run no longer disables a healthy
-// 1.0.3 production runtime (round 2). Every other one is quarantined, and a
-// 1.0.3 gateway refuses the scanner then too: one they refuse, and one they
+// byte-identical (round 2). Every other one is quarantined, and a 1.0.3
+// gateway refuses the scanner then too: one they refuse, and one they
 // cannot prove, which round 2 left for the 1.0.3 gateway to run (an unsigned
 // scanner under a hash-pinned production deployment, which may be the
 // certification install's own, and trust settings or files that cannot be
-// read; round 3). It never touches a record that proves a production
-// admission, makes no lock file unless it quarantines, and status and verify
-// stay read-only.
+// read; round 3). A failed run, whatever made it fail, changes no shared
+// record at all, as a failed run left the runtime before 1.0.4: it
+// quarantined the record of a healthy signed 1.0.3 production scanner whose
+// signer the config does not pin (fifth review loop, round 1). It never
+// touches a record that proves a production admission, makes no lock file
+// unless it quarantines, and status and verify stay read-only.
 func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *testing.T) {
 	root, runtimeFile := newWindowsScannerRuntimeRemovalTest(t)
 	aclSeam, authenticodeSeam, signersSeam := windowsScannerRuntimeACLCheck, windowsScannerRuntimeAuthenticode, windowsScannerRuntimeProductionSigners
@@ -124,14 +126,23 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 		"allow unsigned":       func(o *windowsEnterpriseLifecycleOptions) { o.allowUnsigned = true },
 		"codex home":           func(o *windowsEnterpriseLifecycleOptions) { o.certificationCodexHome = `C:\dc-cert\codex-home` },
 	}
-	run := func(name, action string, failed bool) *enterprisestatus.Result {
+	// The ways a certification lifecycle run fails before its scanner step:
+	// before it changes its own deployment (a refusal, a busy lock, an
+	// installer that cannot start) and after it changed some of it.
+	failures := []struct{ code, message string }{
+		{"installer_launch_failed", "the installer could not be started"},
+		{"elevation_required", "run this from an elevated prompt"},
+		{"lifecycle_busy", "another DefenseClaw lifecycle run holds the lock"},
+		{"invalid_arguments", "the certification scope is not exact"},
+		{"installer_failed", "the installer stopped after it replaced the gateway service"},
+	}
+	run := func(name, action string, failure int) *enterprisestatus.Result {
 		opts := &windowsEnterpriseLifecycleOptions{productVersion: "1.0.4"}
 		scopes[name](opts)
 		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
 		result.Installed = action != "uninstall"
-		if failed {
-			// An installer launch failure, unrelated to the scanner.
-			result.AddError("installer_launch_failed", "the installer could not be started")
+		if failure >= 0 {
+			result.AddError(failures[failure].code, failures[failure].message)
 		}
 		applyWindowsStandaloneScannerRuntime(result, opts)
 		return result
@@ -213,9 +224,10 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 			setup: func() { signed, deployment = true, installed("authenticode") }},
 	} {
 		for name := range scopes {
-			for _, action := range []string{"install", "upgrade", "repair", "ensure", "uninstall"} {
-				for _, failed := range []bool{false, true} {
-					label := fmt.Sprintf("%s: %s %s (failed=%v)", tc.name, name, action, failed)
+			for i, action := range []string{"install", "upgrade", "repair", "ensure", "uninstall"} {
+				for _, failure := range []int{-1, i % len(failures), (i + 2) % len(failures)} {
+					failed := failure >= 0
+					label := fmt.Sprintf("%s: %s %s (failure=%d)", tc.name, name, action, failure)
 					aclErr, signersErr, deploymentErr, signed, signers, deployment = nil, nil, nil, false, nil, winpath.EnterpriseDeployment{}
 					tc.setup()
 					if err := os.Remove(lock); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -239,7 +251,7 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 					if err != nil {
 						t.Fatal(err)
 					}
-					result := run(name, action, failed)
+					result := run(name, action, failure)
 					if windowsEnterpriseResultHasError(result, "scanner_runtime_admission_unproven") {
 						t.Fatalf("%s: errors %+v", label, result.Errors)
 					}
@@ -247,8 +259,23 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 						t.Fatalf("%s removed the production runtime: %v", label, err)
 					}
 					after, readErr := os.ReadFile(record)
-					switch tc.want {
-					case quarantined:
+					switch {
+					case failed:
+						// A failed run leaves the shared record as it found it,
+						// whatever production trust says of it.
+						if readErr != nil || string(after) != string(before) {
+							t.Fatalf("%s: a failed certification run changed the production admission record (%v): %q", label, readErr, after)
+						}
+						if !tc.missing && !tc.changed && !legacyWindowsScannerRuntimeAdmits(t, root, runtimeFile) {
+							t.Fatalf("%s: after a failed certification run a 1.0.3 gateway no longer runs the production scanner", label)
+						}
+						if len(result.Warnings) != 0 || len(result.Errors) != 1 || result.Errors[0].Code != failures[failure].code {
+							t.Fatalf("%s: a failed run reported the scanner step: errors %+v warnings %+v", label, result.Errors, result.Warnings)
+						}
+						if _, err := os.Lstat(lock); !errors.Is(err, os.ErrNotExist) {
+							t.Fatalf("%s: a failed certification run made a lock file in the production runtime (%v)", label, err)
+						}
+					case tc.want == quarantined:
 						if !errors.Is(readErr, os.ErrNotExist) {
 							t.Fatalf("%s kept the record production trust refuses (%v): the production gateway still runs the scanner it names", label, readErr)
 						}
@@ -287,7 +314,7 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 	for name := range scopes {
 		for _, action := range []string{"status", "verify"} {
 			record, _ := writeLegacyWindowsScannerRuntimeAdmission(t, root, runtimeFile)
-			result := run(name, action, false)
+			result := run(name, action, -1)
 			if _, err := os.Lstat(record); err != nil || windowsEnterpriseResultHasWarning(result, "scanner_runtime_admission_quarantined") {
 				t.Fatalf("%s %s is read-only but quarantined the record (%v)", name, action, err)
 			}
@@ -312,7 +339,7 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 	}
 	for name := range scopes {
 		for _, action := range []string{"install", "uninstall"} {
-			result := run(name, action, false)
+			result := run(name, action, -1)
 			got, err := os.ReadFile(record)
 			if err != nil || string(got) != string(want) || len(result.Errors) != 0 ||
 				windowsEnterpriseResultHasWarning(result, "scanner_runtime_admission_quarantined") {
