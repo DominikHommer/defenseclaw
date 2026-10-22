@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -437,10 +438,16 @@ func TestProvenanceShowSendsNoCredentialOnALegacyPIDRecord(t *testing.T) {
 		}
 		return string(data)
 	}
+	startIdentity := provenanceTestStartIdentity(t, home)
 	for _, tc := range []struct{ name, record string }{
 		{"bare PID", strconv.Itoa(pid)},
 		{"JSON without the executable", jsonRecord(map[string]any{"pid": pid})},
 		{"JSON without the start identity", jsonRecord(map[string]any{"pid": pid, "executable": executable, "data_dir": home})},
+		// The record of a release before 1.0 proves the process, not the
+		// home: copied here from another home, it names that home's live
+		// gateway, which holds the listener.
+		{"strong record without the data directory", jsonRecord(map[string]any{
+			"pid": pid, "executable": executable, "start_identity": startIdentity, "start_time": time.Now().Unix()})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(home, daemon.PIDFileName), []byte(tc.record), 0o600); err != nil {
@@ -461,11 +468,48 @@ func TestProvenanceShowSendsNoCredentialOnALegacyPIDRecord(t *testing.T) {
 			}
 		})
 	}
+	// The current record of this home proves the process and its home.
+	current := jsonRecord(map[string]any{
+		"pid": pid, "executable": executable, "data_dir": home, "start_identity": startIdentity, "start_time": time.Now().Unix()})
+	if err := os.WriteFile(filepath.Join(home, daemon.PIDFileName), []byte(current), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !provenanceGatewayProven(pid) {
+		t.Fatal("this home's current PID record does not prove its gateway")
+	}
 	provenanceGatewayProven = func(got int) bool { return got == pid }
 	cmd, buf, _ := provenanceTestCommand()
 	if err := runProvenanceShow(cmd, nil); err != nil || !strings.Contains(buf.String(), "generation: 7\n") {
 		t.Fatalf("a proven gateway: output=%q error=%v", buf, err)
 	}
+}
+
+// provenanceTestStartIdentity is the kernel start identity of this test
+// process, read from the record a daemon child writes of itself.
+func provenanceTestStartIdentity(t *testing.T, home string) string {
+	t.Helper()
+	t.Setenv(daemon.EnvDaemon, "1")
+	t.Setenv(daemon.EnvDataDir, home)
+	if err := daemon.RecordAppliedAuth(daemon.AppliedAuth{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(daemon.EnvDaemon, "")
+	t.Setenv(daemon.EnvDataDir, "")
+	path := filepath.Join(home, daemon.AppliedAuthFileName)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		StartIdentity string `json:"start_identity"`
+	}
+	if err := json.Unmarshal(raw, &record); err != nil || record.StartIdentity == "" {
+		t.Fatalf("start identity of the test process: %q, %v", record.StartIdentity, err)
+	}
+	return record.StartIdentity
 }
 
 // A per-user gateway authenticates with the token it started with and

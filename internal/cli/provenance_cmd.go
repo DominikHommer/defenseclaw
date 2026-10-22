@@ -54,19 +54,20 @@ var provenanceGatewayIdentity = func(ctx context.Context) (provenanceGateway, er
 	return provenanceGateway{PID: pid}, nil
 }
 
-// provenanceGatewayProven reports whether this home's PID record proves pid
-// is the gateway it started: a current record (executable, kernel start
-// identity, data directory), the strong record of the release before it
-// (executable and start identity), or a current record of a gateway whose
-// file was replaced while it ran. The read then sends the credential only
-// to a listener that process holds, and accepts only an answer that names
-// it. A bare PID or an older record without both identities names only a
-// PID, which the OS may since have given to another account's process
-// (start and status still use it to detect a running gateway). A seam for
-// tests.
+// provenanceGatewayProven reports whether this home's PID record, bound to
+// this home, proves pid is the gateway it started: a current record
+// (executable, kernel start identity, this data directory), or that record
+// of a gateway whose file was replaced while it ran. The read then sends the
+// credential only to a listener that process holds, and accepts only an
+// answer that names it. A bare PID or an older record without both
+// identities names only a PID, which the OS may since have given to another
+// account's process. The strong record of a release before 1.0 (executable
+// and start identity, no data directory) names the process but not its
+// home: copied into another home it names that home's gateway, which would
+// receive this home's credential. Start and status still use such records to
+// detect a running gateway, and a restart replaces them. A seam for tests.
 var provenanceGatewayProven = func(pid int) bool {
-	d := daemon.New(config.DefaultDataPath())
-	return d.HasManagedProcessIdentity(pid) || d.HasAuthenticatedMigrationProcessIdentity(pid)
+	return daemon.New(config.DefaultDataPath()).HasHomeBoundProcessIdentity(pid)
 }
 
 // provenanceLookupIP resolves a configured API host name. A seam for tests.

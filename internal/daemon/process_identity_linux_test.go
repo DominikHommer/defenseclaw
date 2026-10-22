@@ -136,6 +136,9 @@ func TestDeletedExecutableStopsOnlyThroughAuthenticatedShutdown(t *testing.T) {
 	if !d.HasAuthenticatedMigrationProcessIdentity(cmd.Process.Pid) {
 		t.Fatal("exact deleted executable did not qualify for authenticated migration")
 	}
+	if d.HasHomeBoundProcessIdentity(cmd.Process.Pid) {
+		t.Fatal("an unbound record of a replaced executable proved the gateway of this home")
+	}
 	forged := originMain
 	forged.Executable += "-other"
 	if d.verifyProcessForAuthenticatedMigration(forged) {
@@ -168,6 +171,9 @@ func TestDeletedExecutableStopsOnlyThroughAuthenticatedShutdown(t *testing.T) {
 	}
 	if !d.RunsReplacedExecutable() {
 		t.Fatal("status does not report that this home's gateway runs a replaced binary")
+	}
+	if !d.HasHomeBoundProcessIdentity(cmd.Process.Pid) {
+		t.Fatal("this home's record of a replaced executable does not prove its gateway")
 	}
 	if err := d.Stop(50 * time.Millisecond); !errors.Is(err, ErrUnsafeProcessIdentity) {
 		t.Fatalf("direct stop of a replaced executable = %v, want ErrUnsafeProcessIdentity", err)
@@ -244,6 +250,9 @@ func TestCustodyRetiredExecutableStaysRecognized(t *testing.T) {
 	}
 	if !d.HasAuthenticatedMigrationProcessIdentity(cmd.Process.Pid) || d.HasManagedProcessIdentity(cmd.Process.Pid) {
 		t.Fatal("retired executable must be recognized for authenticated control only")
+	}
+	if !d.HasHomeBoundProcessIdentity(cmd.Process.Pid) {
+		t.Fatal("this home's record of a retired executable does not prove its gateway")
 	}
 	if err := d.Stop(50 * time.Millisecond); !errors.Is(err, ErrUnsafeProcessIdentity) {
 		t.Fatalf("direct stop of a retired executable = %v, want ErrUnsafeProcessIdentity", err)
