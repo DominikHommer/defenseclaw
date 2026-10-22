@@ -1172,9 +1172,9 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 // control flow. The hook cannot see the CDPATH of the agent's shell, which
 // startup files may set without exporting it, so only an absolute or ./
 // operand without dot-dot names a proven directory. After any other cd the
-// link may sit in another directory, where its relative target may name the
-// protected file: the chain is accepted only when the write cannot open the
-// new link.
+// shell may stand in a directory the hook cannot name, where the new link or a
+// link already there may lead the write to a protected file, so the chain is
+// not accepted and the link scope stays opaque.
 func staticChangedDirectoryLink(file *syntax.File, cwd, home string) (*syntax.CallExpr, string) {
 	if len(file.Stmts) != 1 {
 		return nil, ""
@@ -1207,22 +1207,13 @@ func staticChangedDirectoryLink(file *syntax.File, cwd, home string) (*syntax.Ca
 	link, linkOK := StaticWord(second.Args[0], home)
 	option, optionOK := StaticWord(second.Args[1], home)
 	writer, writerOK := StaticWord(third.Args[0], home)
-	if !cdOK || cd != "cd" || !pathOK || path == "" || strings.HasPrefix(path, "-") ||
+	if !cdOK || cd != "cd" || !pathOK || path == "" || strings.HasPrefix(path, "-") || !cdBypassesSearchPath(path) ||
 		!linkOK || !slices.Contains(linkPrograms, programBase(link)) || !optionOK || option != "-s" ||
 		!writerOK || writer != "echo" || len(statements[2].Redirs) != 1 {
 		return nil, ""
 	}
 	for _, word := range second.Args[2:] {
 		if _, static := StaticWord(word, home); !static {
-			return nil, ""
-		}
-	}
-	if !cdBypassesSearchPath(path) {
-		target, _ := StaticWord(second.Args[2], home)
-		name, _ := StaticWord(second.Args[3], home)
-		written, static := StaticWord(statements[2].Redirs[0].Word, home)
-		if !static || written == "" || strings.ContainsAny(written, `/\`) || shellAuthorizedKeysBase(written) ||
-			written == filepath.Clean(name) || written == filepath.Base(target) {
 			return nil, ""
 		}
 	}

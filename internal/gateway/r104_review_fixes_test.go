@@ -98,7 +98,7 @@ func TestR104ReviewFixDecisions(t *testing.T) {
 		{"bound pattern loop", `for f in 'ali*'; do echo marker >> $f; done`, true},
 		{"quoted bound pattern", `printf -v f %s 'ali*'; echo marker >> "$f"`, false},
 		{"search-path cd writes the link", `cd sub && ln -s ../authorized_keys b && echo marker > b`, true},
-		{"search-path cd writes another file", `cd sub && ln -s ../a b && echo marker > out.txt`, false},
+		{"search-path cd writes another file", `cd sub && ln -s ../a b && echo marker > out.txt`, true},
 		{"explicit cd writes the link", `cd ./sub && ln -s ../authorized_keys b && echo marker > b`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
