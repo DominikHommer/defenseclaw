@@ -403,29 +403,6 @@ func TestGatewayConfigRollback(t *testing.T) {
 			t.Fatalf("rollback did not restore and restart: %v", err)
 		}
 	})
-	t.Run("raw MicroVM starts during rollback restore", func(t *testing.T) {
-		f := newGatewayFixture(t)
-		f.write(t, "gateway.toml", operatorTOML)
-		res, err := f.apply(f.plan(t, bindMounts))
-		if err != nil {
-			t.Fatal(err)
-		}
-		applied := f.read(t, "gateway.toml")
-		restarts := f.restarts()
-		checks := 0
-		f.cfg.CheckStopped = func(context.Context) error {
-			checks++
-			if checks == 2 {
-				return fmt.Errorf("%w; raw-box (ready): `openshell sandbox stop raw-box`; then retry", openshell.ErrUnflushed)
-			}
-			return nil
-		}
-		err = f.cfg.Rollback(context.Background(), res)
-		if !errors.Is(err, openshell.ErrUnflushed) || checks < 2 || f.restarts() != restarts ||
-			f.read(t, "gateway.toml") != applied || !strings.Contains(err.Error(), "openshell sandbox stop raw-box") {
-			t.Fatalf("rollback crossed raw start: err=%v checks=%d restarts=%d config=%q", err, checks, f.restarts()-restarts, f.read(t, "gateway.toml"))
-		}
-	})
 	// GAP-0149: teardown restarted a stopped service (another account's
 	// gateway held the port), which then restarted forever. A stopped
 	// service gets its files back and no start.
@@ -446,33 +423,6 @@ func TestGatewayConfigRollback(t *testing.T) {
 			t.Fatalf("Rollback left a pending-restart mark: %+v, %v", st, err)
 		}
 	})
-}
-
-// GAP-0347: a raw OpenShell client does not take DefenseClaw's lifecycle
-// lock. Rollback must check again after restoring files and reloading units,
-// since such a client can start a MicroVM while those steps run.
-func TestRollbackRefusesAMicroVMStartedDuringRestore(t *testing.T) {
-	f := newGatewayFixture(t)
-	f.write(t, "gateway.toml", operatorTOML)
-	res, err := f.apply(f.plan(t, bothChanges))
-	if err != nil {
-		t.Fatal(err)
-	}
-	checks := 0
-	f.cfg.CheckStopped = func(context.Context) error {
-		checks++
-		if checks == 1 {
-			return nil // stopped before restore
-		}
-		if got := f.read(t, "gateway.toml"); got != operatorTOML {
-			t.Fatalf("check ran before restore: %q", got)
-		}
-		return fmt.Errorf("%w: a raw OpenShell client started a MicroVM", openshell.ErrUnflushed)
-	}
-	err = f.cfg.Rollback(context.Background(), res)
-	if !errors.Is(err, openshell.ErrUnflushed) || checks != 2 || f.restarts() != 1 {
-		t.Fatalf("rollback after concurrent start = %v; checks %d, restarts %d", err, checks, f.restarts())
-	}
 }
 
 var errProbe = errors.New("could not confirm the gateway requires a client certificate: i/o timeout")

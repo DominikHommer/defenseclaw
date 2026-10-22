@@ -34,9 +34,35 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
+
+// A nested run (inside a sandbox) launches the harness natively: no
+// sandbox command takes a host lock at entry, so a configuration directory
+// it cannot write does not refuse it.
+func TestNestedSandboxRunDoesNotNeedHostLifecycleLock(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("nested OpenShell runs use Linux or macOS")
+	}
+	blockedConfig := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedConfig, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", blockedConfig)
+	t.Setenv(openshell.EnvSandboxID, "existing-sandbox")
+	called := false
+	run := sandboxRunE(func(context.Context, *sandboxcli.App, *cobra.Command, []string) error {
+		called = true
+		return nil
+	})
+	cmd := &cobra.Command{Use: "run"}
+	cmd.SetContext(t.Context())
+	if err := run(cmd, nil); err != nil || !called {
+		t.Fatalf("nested run tried to use the host lifecycle lock: callback=%t err=%v", called, err)
+	}
+}
 
 // sandboxManifestCommand describes one sandbox subcommand for the Python
 // stub parity check (track G2) and for this golden test. Long and Example
