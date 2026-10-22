@@ -1030,6 +1030,9 @@ if [[ "${WAS_RUNNING}" == true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "
     warn "The gateway was running without a configuration; run 'defenseclaw init' to set it up"
 fi
 if [[ "${WAS_RUNNING}" == true ]]; then
+    # An older setup can remove working hooks after the same refresh error.
+    # Interrupted recovery must preserve this refusal too.
+    : > "${SNAP}/GATEWAY_RESTART_UNPROVEN"
     set +e
     start_gateway
     START_RC=$?
@@ -1041,6 +1044,7 @@ if [[ "${WAS_RUNNING}" == true ]]; then
         drop_staging
         die "DefenseClaw ${VERSION} was not installed. ${RESTORED_NOTE} Log: ${LOG}"
     fi
+    rm -f "${SNAP}/GATEWAY_RESTART_UNPROVEN"
 fi
 finish_swap
 trap - HUP PIPE
@@ -1616,7 +1620,8 @@ swap_app() {
 }
 
 restore_snapshot() {
-    local failed="" binary link name dest kept=true restored=true moved free_mb
+    local failed="" binary link name dest kept=true restored=true moved free_mb keep_stopped=false
+    [[ ! -e "${SNAP}/GATEWAY_RESTART_UNPROVEN" ]] || keep_stopped=true
     # A restore that stops part-way (a full disk) keeps the snapshot, and the
     # next run finishes it from what this one recorded there: FAILED_DIR names
     # the folder that keeps the failed install, VENV_BACK and DATA_ASIDE mark
@@ -1722,7 +1727,7 @@ restore_snapshot() {
         return 0
     fi
     rm -rf "${SNAP}" || true
-    restart_old
+    restart_old "${keep_stopped}"
     if [[ "${kept}" == true ]]; then
         warn "The failed ${VERSION} install was kept in ${failed} ($(du -sh "${failed}" 2>/dev/null | awk '{print $1}')) for troubleshooting"
         info "Your previous install and its data are back; it is safe to remove the copy with: rm -rf '${failed}'"
@@ -1733,6 +1738,14 @@ restore_snapshot() {
 }
 
 restart_old() {
+    if [[ "${1:-false}" == true ]]; then
+        local gateway_command
+        printf -v gateway_command '%q' "${BIN_DIR}/defenseclaw-gateway"
+        RESTORED_NOTE="Your previous install is back, with its gateway kept stopped to preserve its hook registration."
+        warn "${RESTORED_NOTE}"
+        info "Resolve the startup error (close the agent if its settings are in use), then run: ${gateway_command} start"
+        return 0
+    fi
     if [[ "${WAS_RUNNING}" == true ]]; then
         start_gateway >/dev/null 2>&1 && return 0
         # Say plainly that the gateway that ran before is down now (GAP-1349).

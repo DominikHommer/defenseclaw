@@ -5887,9 +5887,9 @@ func (s *Sidecar) notifyHookHealed(connectorName string, paths []string) {
 // setupConnectorsIsolated runs setupOneConnector for each connector in turn
 // and returns the names that came up cleanly. It is the heart of the DN1
 // failure-isolation guarantee: scoped tokens are preflighted for every
-// connector before setup mutates state; after that, a connector whose setup
-// fails is logged and skipped while remaining connectors continue. The order
-// of the returned slice matches the input order (sorted by the caller).
+// connector before setup mutates state. New connector failures are isolated;
+// a failed active connector refresh restores the transaction and refuses
+// startup. The returned names follow the input order (sorted by the caller).
 type multiConnectorSetupRollbackPoint struct {
 	conn             connector.Connector
 	opts             connector.SetupOpts
@@ -6605,7 +6605,7 @@ func connectorSetupTokensFor(dataDir string, conn connector.Connector, gatewayTo
 // setupOneConnector performs the full setup-and-verify sequence for a single
 // connector in the multi-connector boot loop. It returns an error (rather
 // than aborting boot) so the caller can isolate the failure (DN1) and keep
-// the other connectors running. On a post-Setup verification failure it rolls
+// the other connectors running. On a post-Setup verification failure it
 // returns the error to its caller, which owns rollback to the pre-setup
 // registration. Teardown here would erase a previously active guard.
 func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connector, opts connector.SetupOpts, masterKey string, cache *guardrail.RulePackCache) error {
