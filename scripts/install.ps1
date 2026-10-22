@@ -3608,7 +3608,9 @@ function Invoke-Install {
     # protected. A start that reported a connector needing attention (exit
     # 3) already said which one. Anything else restores the previous install.
     $provenGateway = $startNew -and -not $sealOnly
-    $guardedBefore = if ($startRc -eq 0) { @(Get-Field $Manifest "Connectors") } else { @() }
+    # Only connectors this release supports on Windows are required again: a
+    # retired one (or the default openclaw entry) has no hooks to put back.
+    $guardedBefore = if ($startRc -eq 0) { @(@(Get-Field $Manifest "Connectors") | Where-Object { $ConnectorChoices -contains $_ -and $_ -ne "none" }) } else { @() }
     $problems = @(Wait-LifecycleProof $stagedBinaries $provenGateway $guardedBefore -RequireDigest:$provenGateway)
     if ($problems.Count) {
         foreach ($problem in $problems) { Write-Err $problem }
