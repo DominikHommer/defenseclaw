@@ -162,7 +162,7 @@ class DoctorPolicyStateTests(unittest.TestCase):
         from defenseclaw.commands import cmd_doctor
 
         cases = [
-            (2, 4, "it has not applied the change saved as config generation 4 (it enforces generation 2)"),
+            (2, 4, "it has not applied the change saved as config generation 4 (it enforces config generation 2)"),
             (None, 4, "it has not applied the change saved as config generation 4"),
             (2, 2, "it has not applied the current config.yaml and policy assets"),
         ]
@@ -176,6 +176,27 @@ class DoctorPolicyStateTests(unittest.TestCase):
                 cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
             self.assertIn(want, result.checks[0]["detail"], config_generation)
             self.assertIn("defenseclaw-gateway restart", result.checks[0]["detail"])
+
+
+    def test_policy_row_names_the_config_generation_that_survives_a_restart(self):
+        # GAP-0642: the row named policy.generation, which counts the rebuilds of
+        # the running gateway and starts again at 1 after a restart, while
+        # config.generation.json kept counting.
+        from defenseclaw.commands import cmd_doctor
+
+        applied = "sha256:" + "a" * 64
+        for policy, want in (
+            ({"effective_digest": applied, "generation": 1, "config_generation": 18,
+              "config_generation_recorded": True}, "config generation 18, digest sha256:aaaaaaaaaaaa"),
+            ({"effective_digest": applied, "generation": 4}, "digest sha256:aaaaaaaaaaaa (applied"),
+        ):
+            result = _DoctorResult()
+            with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": applied}):
+                cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
+            detail = result.checks[0]["detail"]
+            self.assertEqual(result.checks[0]["status"], "pass", result.checks)
+            self.assertTrue(detail.startswith(want), detail)
+            self.assertNotIn(f"generation {policy['generation']},", detail)
 
 
 class DoctorRetiredPolicyDataTests(unittest.TestCase):

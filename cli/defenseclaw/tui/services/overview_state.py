@@ -133,8 +133,9 @@ class HealthSnapshot:
     # to the config-derived roster.
     connector: ConnectorHealth | None = None
     connectors: tuple[ConnectorHealth, ...] = ()
-    # The effective policy the gateway applied (/status ``policy``): its
-    # applied generation and effective_policy_digest ("" when not reported).
+    # The effective policy the gateway applied (/status ``policy``): the
+    # config generation it was built from (0 when not reported) and its
+    # effective_policy_digest ("" when not reported).
     policy_generation: int = 0
     policy_digest: str = ""
 
@@ -143,6 +144,8 @@ class HealthSnapshot:
         digest = self.policy_digest.removeprefix("sha256:")
         if not digest:
             return ""
+        if not self.policy_generation:
+            return digest[:digest_chars]
         return f"gen {self.policy_generation} · {digest[:digest_chars]}"
 
 
