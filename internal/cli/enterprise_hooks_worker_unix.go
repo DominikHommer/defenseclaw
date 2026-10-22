@@ -217,6 +217,9 @@ type enterpriseHookWorkerCleanupReport struct {
 	Reported  []string `json:"reported,omitempty"`
 	BackupDir string   `json:"backup_dir,omitempty"`
 	Error     string   `json:"error,omitempty"`
+	// Uncertain says the cleanup may have changed files Removed does not
+	// list: an edit failed.
+	Uncertain bool `json:"uncertain,omitempty"`
 }
 
 type enterpriseHookWorkerTargetResult struct {
@@ -1320,6 +1323,9 @@ func forwardEnterpriseHookWorkerStderr(account enterpriseHookWorkerAccount, stde
 type enterpriseHookWorkerJob struct {
 	Account enterpriseHookWorkerAccount
 	Request enterpriseHookWorkerRequest
+	// foreignCleanupToken is the job's foreign-hook cleanup transaction
+	// (beginEnterpriseForeignHookCleanup), if it has one.
+	foreignCleanupToken string
 }
 
 type enterpriseHookWorkerOutcome struct {
@@ -1334,13 +1340,14 @@ var enterpriseHookWorkerRunner = runEnterpriseHookWorker
 // runEnterpriseHookWorkerPool runs one worker per job with bounded
 // parallelism and returns outcomes in job order.
 func runEnterpriseHookWorkerPool(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int) []enterpriseHookWorkerOutcome {
-	return runEnterpriseHookWorkerPoolReporting(ctx, jobs, parallelism, nil)
+	return runEnterpriseHookWorkerPoolReporting(ctx, jobs, parallelism, nil, nil)
 }
 
 // runEnterpriseHookWorkerPoolReporting is runEnterpriseHookWorkerPool that
-// also hands each outcome to done, when set, as soon as its worker ends
+// also hands each job to start, when set, just before its worker starts,
+// and each outcome to done, when set, as soon as its worker ends
 // (concurrently with the other workers).
-func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int, done func(enterpriseHookWorkerOutcome)) []enterpriseHookWorkerOutcome {
+func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int, start func(*enterpriseHookWorkerJob), done func(enterpriseHookWorkerOutcome)) []enterpriseHookWorkerOutcome {
 	if parallelism <= 0 {
 		parallelism = enterpriseHookWorkerParallelism
 	}
@@ -1353,6 +1360,9 @@ func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterprise
 			defer wg.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
+			if start != nil {
+				start(&jobs[i])
+			}
 			response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
 			outcomes[i] = enterpriseHookWorkerOutcome{Job: jobs[i], Response: response, Err: err}
 			if done != nil {

@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,8 +24,39 @@ import (
 )
 
 // enterpriseForeignHookRemovalsMu serializes ledger updates: the Unix
-// per-user workers report their removals concurrently.
+// per-user workers report their removals concurrently. It also guards
+// enterpriseForeignHookCleanupTxs.
 var enterpriseForeignHookRemovalsMu sync.Mutex
+
+// enterpriseForeignHookCleanupTx is one cleanup transaction this process
+// opened (beginEnterpriseForeignHookCleanup): its pending denials, whether
+// its cleanup still runs, and, once it ended, whether it cannot tell exactly
+// which files it changed.
+type enterpriseForeignHookCleanupTx struct {
+	entries   []enterprisepolicy.ForeignHookRemoval
+	running   bool
+	uncertain bool
+}
+
+// enterpriseForeignHookCleanupTxs are this process's cleanup transactions
+// whose pending denials are, or may be, in the ledger, by token.
+var enterpriseForeignHookCleanupTxs = map[string]*enterpriseForeignHookCleanupTx{}
+
+// enterpriseForeignHookAbandonedAfter is how long the pending denial of a
+// cleanup whose guardian process ended (a crash) stays before a ledger
+// update settles it. Until then a worker of that cleanup may still edit
+// files: a cleanup's denial is published just before its worker starts, and
+// a foreign-cleanup worker exits within enterpriseHookWorkerTimeout plus
+// five seconds, even on macOS, which has no parent-death signal.
+var enterpriseForeignHookAbandonedAfter = 10 * time.Minute
+
+// enterpriseForeignHookCleanupOwner names this process in its pending
+// denials, and enterpriseForeignHookOwnerEnded tells whether the process a
+// pending denial names has ended. Replaceable in tests.
+var (
+	enterpriseForeignHookCleanupOwner = agentprocess.Self
+	enterpriseForeignHookOwnerEnded   = agentprocess.Ended
+)
 
 // enterpriseForeignHookAccountID names an account the way the gateway names
 // a verified caller: the SID when there is one, else the uid.
@@ -55,19 +87,10 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 	if !ok || connectorName == "" {
 		return errors.New("cannot bind the hook removal to an account and connector")
 	}
+	connectors := enterprisepolicy.StandaloneConnectors(cfg)
 	enterpriseForeignHookRemovalsMu.Lock()
 	defer enterpriseForeignHookRemovalsMu.Unlock()
-	err := func() error {
-		dataDir := cfg.DataDir
-		if !filepath.IsAbs(managed.HookGuardianAuthorizationDir(dataDir)) {
-			return errors.New("the data directory is not an absolute path")
-		}
-		mark := agentprocess.Now()
-		if mark == "" {
-			return errors.New("the process clock is unavailable")
-		}
-		now := time.Now().UTC()
-		connectors := enterprisepolicy.StandaloneConnectors(cfg)
+	err := updateEnterpriseForeignHookLedger(stderr, func(now time.Time, mark string) []enterprisepolicy.ForeignHookRemoval {
 		added := make([]enterprisepolicy.ForeignHookRemoval, 0, len(paths))
 		for _, path := range paths {
 			for _, name := range enterprisepolicy.ForeignHookRemovalConnectors(home, path, connectorName, connectors) {
@@ -77,47 +100,8 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 				})
 			}
 		}
-		path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile)
-		existing, loadErr := loadEnterpriseForeignHookRemovals(path)
-		if loadErr != nil {
-			// The gateway cannot use this ledger either; replacing it keeps
-			// the new removals.
-			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: replacing the removal ledger: %v\n", loadErr)
-		}
-		data, err := enterprisepolicy.EncodeForeignHookRemovals(existing, added, now)
-		if err != nil {
-			return err
-		}
-		kept, err := enterprisepolicy.ParseForeignHookRemovals(data)
-		if err != nil {
-			return err
-		}
-		for _, want := range added {
-			found := false
-			for _, got := range kept {
-				if got == want {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return errors.New("the removal ledger cannot retain the new denial")
-			}
-		}
-		if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
-			return err
-		}
-		if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
-			return err
-		}
-		if err := os.Chmod(path, 0o640); err != nil {
-			return err
-		}
-		if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
-			return err
-		}
-		return enterpriseHookAuthorizationFileTrustCheck(path)
-	}()
+		return added
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s: %v\n",
 			connectorName, foreignGuardLogField(account, 256), err)
@@ -125,60 +109,145 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 	return err
 }
 
-// beginEnterpriseForeignHookCleanup publishes a denial before any user hook
-// file can be removed. All governed connectors are covered because several
-// can load the same file. A failed publication refuses cleanup.
-func beginEnterpriseForeignHookCleanup(stderr io.Writer, account, home, connectorName string) (string, error) {
+// beginEnterpriseForeignHookCleanup opens a cleanup transaction for account
+// before any of its user hook files can be removed: one ledger write
+// publishes a pending denial for every governed connector and for
+// connectors, because several can load the same file. On an error nothing
+// may be edited. finishEnterpriseForeignHookCleanup ends the transaction.
+func beginEnterpriseForeignHookCleanup(stderr io.Writer, account string, connectors []string) (string, error) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return "", nil
+	}
+	identity, ok := connector.CanonicalUserScopedIdentity(account)
+	if !ok {
+		return "", errors.New("cannot bind the cleanup denial to an account")
 	}
 	var id [8]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return "", err
 	}
-	token := enterprisepolicy.ForeignHookCleanupPendingPrefix + hex.EncodeToString(id[:]) + ">"
-	connectors := append(enterprisepolicy.StandaloneConnectors(cfg), connectorName)
-	seen := map[string]bool{}
-	for _, name := range connectors {
-		if seen[name] {
-			continue
+	token := enterprisepolicy.ForeignHookCleanupPendingPath(hex.EncodeToString(id[:]), enterpriseForeignHookCleanupOwner())
+	names := []string{}
+	for _, name := range append(enterprisepolicy.StandaloneConnectors(cfg), connectors...) {
+		if name = strings.ToLower(strings.TrimSpace(name)); name != "" && !slices.Contains(names, name) {
+			names = append(names, name)
 		}
-		seen[name] = true
-		if err := recordEnterpriseForeignHookRemovals(stderr, account, home, name, []string{token}); err != nil {
-			return "", err
+	}
+	enterpriseForeignHookRemovalsMu.Lock()
+	defer enterpriseForeignHookRemovalsMu.Unlock()
+	tx := &enterpriseForeignHookCleanupTx{running: true}
+	enterpriseForeignHookCleanupTxs[token] = tx
+	err := updateEnterpriseForeignHookLedger(stderr, func(now time.Time, mark string) []enterprisepolicy.ForeignHookRemoval {
+		tx.entries = tx.entries[:0]
+		for _, name := range names {
+			tx.entries = append(tx.entries, enterprisepolicy.ForeignHookRemoval{
+				Identity: identity, Connector: name, Path: token, At: now.Format(time.RFC3339Nano), Mark: mark,
+			})
 		}
+		return tx.entries
+	})
+	if err != nil {
+		// Nothing was edited: take back whatever was published, now or
+		// on a later update.
+		tx.running = false
+		_ = updateEnterpriseForeignHookLedger(stderr, nil)
+		return "", err
 	}
 	return token, nil
 }
 
-// finishEnterpriseForeignHookCleanup removes only this cleanup's pending
-// denial, after all of its actual removals were committed. On failure the
-// pending denial stays, so an uncertain write cannot permit an old hook.
-func finishEnterpriseForeignHookCleanup(account, token string) error {
+// finishEnterpriseForeignHookCleanup ends cleanup transaction token once
+// the caller recorded every removal it knows of. uncertain says it cannot
+// tell that it knows all of them: its worker failed, an edit failed, or a
+// removal could not be recorded. A certain cleanup's pending denial is
+// cleared. An uncertain one's becomes, for each of its connectors, a
+// removal at this instant (ForeignHookCleanupIncompletePath), after every
+// edit the cleanup made: agents that started earlier stay denied until they
+// restart, later ones loaded the files as they are now. If the ledger
+// cannot be written the pending denial stays, and the next ledger update
+// settles it.
+func finishEnterpriseForeignHookCleanup(stderr io.Writer, token string, uncertain bool) error {
 	if token == "" || cfg == nil || !cfg.StandaloneEnterprise() {
 		return nil
 	}
-	identity, ok := connector.CanonicalUserScopedIdentity(account)
-	if !ok {
-		return errors.New("cannot bind the cleanup to an account")
+	enterpriseForeignHookRemovalsMu.Lock()
+	defer enterpriseForeignHookRemovalsMu.Unlock()
+	tx := enterpriseForeignHookCleanupTxs[token]
+	if tx == nil {
+		return nil
+	}
+	tx.running, tx.uncertain = false, uncertain
+	return updateEnterpriseForeignHookLedger(stderr, nil)
+}
+
+// reconcileEnterpriseForeignHookCleanups settles the pending denials of
+// cleanups that ended: this process's that a failed ledger write left, and
+// those of a guardian process that ended without settling them
+// (enterpriseForeignHookAbandonedAfter). Each cleanup pass runs it first,
+// also one that cleans nothing, so an abandoned denial never outlives the
+// next pass: it would deny every agent of its account, and of an account
+// that later reuses the uid, forever.
+func reconcileEnterpriseForeignHookCleanups(stderr io.Writer) {
+	if cfg == nil || !cfg.StandaloneEnterprise() || !filepath.IsAbs(managed.HookGuardianAuthorizationDir(cfg.DataDir)) {
+		return
 	}
 	enterpriseForeignHookRemovalsMu.Lock()
 	defer enterpriseForeignHookRemovalsMu.Unlock()
-	dataDir := cfg.DataDir
-	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile)
-	existing, err := loadEnterpriseForeignHookRemovals(path)
-	if err != nil {
-		return err
+	if err := updateEnterpriseForeignHookLedger(stderr, nil); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: settle ended cleanups' pending denials: %v\n", err)
 	}
-	kept := existing[:0:0]
-	for _, removal := range existing {
-		if removal.Identity != identity || removal.Path != token {
-			kept = append(kept, removal)
+}
+
+// updateEnterpriseForeignHookLedger rewrites the removal ledger with the
+// entries add returns (nil adds none), each of which must survive
+// encoding, and settles the pending denials of ended cleanups
+// (settleEnterpriseForeignHookPending). It writes only when something
+// changed. A ledger that cannot be read is replaced, keeping this process's
+// pending denials: the gateway denies every call while it is unreadable.
+// The caller holds enterpriseForeignHookRemovalsMu.
+func updateEnterpriseForeignHookLedger(stderr io.Writer, add func(now time.Time, mark string) []enterprisepolicy.ForeignHookRemoval) error {
+	dataDir := cfg.DataDir
+	dir := managed.HookGuardianAuthorizationDir(dataDir)
+	if !filepath.IsAbs(dir) {
+		return errors.New("the data directory is not an absolute path")
+	}
+	mark := agentprocess.Now()
+	if mark == "" {
+		return errors.New("the process clock is unavailable")
+	}
+	now := time.Now().UTC()
+	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
+	existing, loadErr := loadEnterpriseForeignHookRemovals(path)
+	if loadErr != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: replacing the removal ledger: %v\n", loadErr)
+		existing = nil
+		for _, tx := range enterpriseForeignHookCleanupTxs {
+			existing = append(existing, tx.entries...)
 		}
 	}
-	data, err := enterprisepolicy.EncodeForeignHookRemovals(kept, nil, time.Now().UTC())
+	kept, added, settled := settleEnterpriseForeignHookPending(existing, now, mark)
+	if add != nil {
+		added = append(added, add(now, mark)...)
+	}
+	if loadErr == nil && len(added) == 0 && len(kept) == len(existing) {
+		// Nothing changes; settled transactions have no denial left.
+		for _, token := range settled {
+			delete(enterpriseForeignHookCleanupTxs, token)
+		}
+		return nil
+	}
+	data, err := enterprisepolicy.EncodeForeignHookRemovals(kept, added, now)
 	if err != nil {
 		return err
+	}
+	retained, err := enterprisepolicy.ParseForeignHookRemovals(data)
+	if err != nil {
+		return err
+	}
+	for _, want := range added {
+		if !slices.Contains(retained, want) {
+			return errors.New("the removal ledger cannot retain the new denial")
+		}
 	}
 	if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
 		return err
@@ -192,7 +261,66 @@ func finishEnterpriseForeignHookCleanup(account, token string) error {
 	if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
 		return err
 	}
-	return enterpriseHookAuthorizationFileTrustCheck(path)
+	if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
+		return err
+	}
+	for _, token := range settled {
+		delete(enterpriseForeignHookCleanupTxs, token)
+	}
+	return nil
+}
+
+// settleEnterpriseForeignHookPending returns the ledger entries to keep,
+// the removals that replace settled pending denials, and the settled
+// transactions of this process. A pending denial stays while its cleanup
+// may still edit files: this process's running cleanup, or another
+// process's until that process ended over
+// enterpriseForeignHookAbandonedAfter after it published the denial. A
+// denial that cannot be tied to a process that ended stays. An ended cleanup
+// that cannot tell what it changed (uncertain, or abandoned) leaves a
+// removal at now for each connector its denial named.
+func settleEnterpriseForeignHookPending(existing []enterprisepolicy.ForeignHookRemoval, now time.Time, mark string) (kept, added []enterprisepolicy.ForeignHookRemoval, settled []string) {
+	incomplete := func(pending enterprisepolicy.ForeignHookRemoval) enterprisepolicy.ForeignHookRemoval {
+		return enterprisepolicy.ForeignHookRemoval{
+			Identity: pending.Identity, Connector: pending.Connector, Path: enterprisepolicy.ForeignHookCleanupIncompletePath,
+			At: now.Format(time.RFC3339Nano), Mark: mark,
+		}
+	}
+	for token, tx := range enterpriseForeignHookCleanupTxs {
+		if tx.running {
+			continue
+		}
+		settled = append(settled, token)
+		if tx.uncertain {
+			for _, entry := range tx.entries {
+				added = append(added, incomplete(entry))
+			}
+		}
+	}
+	self := ""
+	for _, entry := range existing {
+		if !enterprisepolicy.ForeignHookCleanupPending(entry.Path) {
+			kept = append(kept, entry)
+			continue
+		}
+		if tx, ok := enterpriseForeignHookCleanupTxs[entry.Path]; ok {
+			if tx.running {
+				kept = append(kept, entry)
+			}
+			continue
+		}
+		if self == "" {
+			self = enterpriseForeignHookCleanupOwner()
+		}
+		owner := enterprisepolicy.ForeignHookCleanupPendingOwner(entry.Path)
+		at, err := time.Parse(time.RFC3339Nano, entry.At)
+		if owner == "" || owner == self || err != nil || now.Sub(at) < enterpriseForeignHookAbandonedAfter || !enterpriseForeignHookOwnerEnded(owner) {
+			kept = append(kept, entry)
+			continue
+		}
+		added = append(added, incomplete(entry))
+	}
+	return kept, added, settled
 }
 
 func loadEnterpriseForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {

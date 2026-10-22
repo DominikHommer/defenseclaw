@@ -47,7 +47,7 @@ func TestForeignHookRemovalIsDeniedBeforeItsLedgerCommit(t *testing.T) {
 	if err := os.WriteFile(hook, []byte("foreign hook"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	token, err := beginEnterpriseForeignHookCleanup(io.Discard, "1000", home, "cursor")
+	token, err := beginEnterpriseForeignHookCleanup(io.Discard, "1000", []string{"cursor"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestForeignHookRemovalIsDeniedBeforeItsLedgerCommit(t *testing.T) {
 	if err := recordEnterpriseForeignHookRemovals(io.Discard, "1000", home, "cursor", []string{hook}); err != nil {
 		t.Fatal(err)
 	}
-	if err := finishEnterpriseForeignHookCleanup("1000", token); err != nil {
+	if err := finishEnterpriseForeignHookCleanup(io.Discard, token, false); err != nil {
 		t.Fatal(err)
 	}
 	committed, err := loadEnterpriseForeignHookRemovals(ledger)
@@ -77,7 +77,7 @@ func TestForeignHookCleanupRefusesUnboundAccount(t *testing.T) {
 	previous := cfg
 	t.Cleanup(func() { cfg = previous })
 	cfg = standaloneTestConfig(dataDir)
-	if _, err := beginEnterpriseForeignHookCleanup(io.Discard, "unverified-account", t.TempDir(), "cursor"); err == nil {
+	if _, err := beginEnterpriseForeignHookCleanup(io.Discard, "unverified-account", []string{"cursor"}); err == nil {
 		t.Fatal("cleanup can remove hooks without a denial bound to a verified account")
 	}
 }

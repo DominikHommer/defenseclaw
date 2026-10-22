@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -142,6 +143,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return 0
 	}
+	reconcileEnterpriseForeignHookCleanups(stderr)
 	cleanups, vscode, err := enterpriseHookForeignCleanupConnectors()
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: %v\n", err)
@@ -339,50 +341,62 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	for _, account := range stale {
 		staleUIDs[account.UID] = true
 	}
-	// Publish a denial before any worker can remove a file. A worker whose
-	// denial cannot be published must not touch that connector's hooks.
-	pending := map[int]map[string]string{}
-	for i := range jobs {
-		account := &jobs[i].Account
-		kept := jobs[i].Request.ForeignCleanup[:0:0]
-		for _, cleanup := range jobs[i].Request.ForeignCleanup {
-			token, err := beginEnterpriseForeignHookCleanup(stderr, strconv.Itoa(account.UID), account.Home, cleanup.Connector)
-			if err != nil {
-				clean = false
-				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s %s refused before file removal: %v\n", account.User, cleanup.Connector, err)
-				continue
-			}
-			if pending[account.UID] == nil {
-				pending[account.UID] = map[string]string{}
-			}
-			pending[account.UID][cleanup.Connector] = token
-			kept = append(kept, cleanup)
+	// Each account's foreign-hook cleanup is one transaction. Its denial is
+	// published just before its worker starts, so no worker removes a file
+	// without one; a job whose denial cannot be published cleans nothing.
+	var refused atomic.Bool
+	beginCleanup := func(job *enterpriseHookWorkerJob) {
+		if len(job.Request.ForeignCleanup) == 0 {
+			return
 		}
-		jobs[i].Request.ForeignCleanup = kept
+		names := make([]string, 0, len(job.Request.ForeignCleanup))
+		for _, cleanup := range job.Request.ForeignCleanup {
+			names = append(names, cleanup.Connector)
+		}
+		token, err := beginEnterpriseForeignHookCleanup(stderr, strconv.Itoa(job.Account.UID), names)
+		if err != nil {
+			refused.Store(true)
+			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s refused before file removal: %v\n", job.Account.User, err)
+			job.Request.ForeignCleanup = nil
+			return
+		}
+		job.foreignCleanupToken = token
 	}
-	// Each account's removals are recorded for the gateway as soon as its
-	// worker ends, so its agent processes that started before them stay
-	// denied (recordEnterpriseForeignHookRemovals). Only the connectors the
-	// job asked for count: the worker runs as the user.
-	recordRemovals := func(outcome enterpriseHookWorkerOutcome) {
+	// As soon as its worker ends, the account's removals are recorded for
+	// the gateway, so its agent processes that started before them stay
+	// denied (recordEnterpriseForeignHookRemovals), and the transaction
+	// ends. Only the connectors the job asked for count: the worker runs as
+	// the user. A worker that failed, did not answer for a connector or
+	// failed an edit may have changed files it did not report, so its
+	// cleanup ends uncertain.
+	endCleanup := func(outcome enterpriseHookWorkerOutcome) {
+		if outcome.Job.foreignCleanupToken == "" {
+			return
+		}
+		account := strconv.Itoa(outcome.Job.Account.UID)
+		uncertain := outcome.Err != nil
 		for _, cleanup := range outcome.Job.Request.ForeignCleanup {
-			if report, ok := outcome.Response.Cleanup[cleanup.Connector]; ok {
-				account := strconv.Itoa(outcome.Job.Account.UID)
-				err := recordEnterpriseForeignHookRemovals(stderr, account, outcome.Job.Account.Home,
-					cleanup.Connector, report.Removed)
-				if err == nil && report.Error == "" && outcome.Err == nil {
-					if err := finishEnterpriseForeignHookCleanup(account, pending[outcome.Job.Account.UID][cleanup.Connector]); err != nil {
-						fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: keep the pending denial for %s %s: %v\n", account, cleanup.Connector, err)
-					}
-				}
+			report, ok := outcome.Response.Cleanup[cleanup.Connector]
+			if !ok || report.Uncertain {
+				uncertain = true
 			}
+			if ok && recordEnterpriseForeignHookRemovals(stderr, account, outcome.Job.Account.Home, cleanup.Connector, report.Removed) != nil {
+				uncertain = true
+			}
+		}
+		if err := finishEnterpriseForeignHookCleanup(stderr, outcome.Job.foreignCleanupToken, uncertain); err != nil {
+			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: keep the pending denial for %s until it can be settled: %v\n", account, err)
 		}
 	}
 	removed := 0
 	createdDirs := map[int][]string{}
 	var auditRepairs []enterpriseHookGuardianAuditReport
 	reportedUIDs := map[int]bool{}
-	for _, outcome := range runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, recordRemovals) {
+	outcomes := runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, beginCleanup, endCleanup)
+	if refused.Load() {
+		clean = false
+	}
+	for _, outcome := range outcomes {
 		user := outcome.Job.Account.User
 		if outcome.Err != nil {
 			clean = false
@@ -655,8 +669,8 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 			Getenv:        os.Getenv,
 			OwnedCommands: cleanup.OwnedCommands,
 		}, redirects, now)
+		report := enterpriseHookWorkerCleanupReport{BackupDir: result.BackupDir, Uncertain: err != nil}
 		err = errors.Join(err, redirectErr)
-		report := enterpriseHookWorkerCleanupReport{BackupDir: result.BackupDir}
 		for _, finding := range result.Removed {
 			report.Removed = append(report.Removed, finding.Path)
 		}

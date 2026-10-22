@@ -122,6 +122,65 @@ func StartedBefore(identity, mark string) bool {
 	return startErr == nil && clockErr == nil && start <= clock
 }
 
+// Self returns the identity of this process, or "" when it cannot be read.
+func Self() string {
+	lookup, done := newLookup()
+	defer done()
+	return selfFrom(lookup, os.Getpid())
+}
+
+func selfFrom(lookup func(int) (Process, error), self int) string {
+	process, err := lookup(self)
+	if err != nil {
+		return ""
+	}
+	return process.identity()
+}
+
+// Ended reports whether the process an identity names has provably ended:
+// it is of another boot or operating system, no process has its ID, the
+// process with its ID started at another time, or it has exited. An
+// identity that does not parse, or a lookup that fails otherwise, is not
+// known to have ended.
+func Ended(identity string) bool {
+	lookup, done := newLookup()
+	defer done()
+	return endedFrom(lookup, currentBoot(), identity)
+}
+
+func endedFrom(lookup func(int) (Process, error), boot, identity string) bool {
+	parts := strings.Split(identity, ":")
+	if len(parts) != 4 {
+		return false
+	}
+	pid, pidErr := strconv.Atoi(parts[2])
+	if _, startErr := strconv.ParseInt(parts[3], 10, 64); pidErr != nil || startErr != nil || pid <= 0 {
+		return false
+	}
+	if parts[0] != runtime.GOOS {
+		return true
+	}
+	if parts[1] != boot {
+		// Only two known boot IDs prove another boot.
+		return parts[1] != "" && boot != ""
+	}
+	process, err := lookup(pid)
+	if errors.Is(err, errNotFound) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	return process.Exited || process.identity() != identity
+}
+
+// currentBoot is the boot an identity of this boot names ("" when unknown,
+// and always outside Linux).
+func currentBoot() string {
+	boot, _, _ := currentClock()
+	return boot
+}
+
 // Identity returns the identity of the agent process that runs this
 // process, or "" when no agent ancestor can be named.
 func Identity() string {
