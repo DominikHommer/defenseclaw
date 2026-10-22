@@ -49,12 +49,18 @@ func (e *Env) BundleProductFloorRefusal(version string) error {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
-		return &codedError{code: codeProductFloor, err: fmt.Errorf("cannot check the bundle trust anchors, so the release floor of the confirmed policy bundle is unknown: %w", err)}
+		return &codedError{code: codeProductFloor, err: fmt.Errorf("cannot check the bundle trust anchors, so the release floor of the confirmed policy bundle is unknown: %w; run `defenseclaw-gateway enterprise bundle anchors install --file <approved-bundle-anchors.json> --json` before retrying", err)}
 	}
 	floor, err := confirmedBundleProductFloor(e.bundleStore())
 	if err != nil {
-		return &codedError{code: codeProductFloor, err: fmt.Errorf("cannot read the release floor of the confirmed policy bundle: %w", err)}
+		return &codedError{code: codeProductFloor, err: fmt.Errorf("cannot read the release floor of the confirmed policy bundle: %w; run `%s --json` with a new signed bundle to replace it before retrying", err, bundleApplyCommand)}
 	}
+	return bundleProductFloorRefusal(version, floor)
+}
+
+// bundleProductFloorRefusal compares a candidate with a proven floor: either
+// the readable confirmed bundle or a new bundle verified by this apply run.
+func bundleProductFloorRefusal(version, floor string) error {
 	if floor == "" {
 		return nil
 	}
@@ -63,10 +69,10 @@ func (e *Env) BundleProductFloorRefusal(version string) error {
 		if len(candidate) > 64 {
 			candidate = candidate[:64] + "..."
 		}
-		return &codedError{code: codeProductFloor, err: fmt.Errorf("the confirmed signed policy bundle needs DefenseClaw %s or later, and %q is not a release version, so it cannot meet that floor; install a release at or above %s, or deliver a bundle signed without --min-product-version first", floor, candidate, floor)}
+		return &codedError{code: codeProductFloor, err: fmt.Errorf("the signed policy bundle needs DefenseClaw %s or later, and %q is not a release version, so it cannot meet that floor; install a release at or above %s, or deliver a bundle signed without --min-product-version first", floor, candidate, floor)}
 	}
 	if enterprisebundle.CheckProductVersion(floor, candidate) != nil {
-		return &codedError{code: codeProductFloor, err: fmt.Errorf("the confirmed signed policy bundle needs DefenseClaw %s or later, and this is %s; to go back, deliver a bundle signed with a lower --min-product-version first", floor, candidate)}
+		return &codedError{code: codeProductFloor, err: fmt.Errorf("the signed policy bundle needs DefenseClaw %s or later, and this is %s; to go back, deliver a bundle signed with a lower --min-product-version first", floor, candidate)}
 	}
 	return nil
 }

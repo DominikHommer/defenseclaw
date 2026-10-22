@@ -93,9 +93,9 @@ func TestBundleInboxProcessesAtMostMaxInboxFilesARun(t *testing.T) {
 	}
 }
 
-// A damaged current version directory does not stop a changing run that
-// gives no config: the installed config is kept, the run reports it, and a
-// new bundle still applies. A --config is still refused.
+// A damaged current version has an unproven release floor, so an ensure
+// refuses without changing the last committed config. A newly verified
+// signed bundle supplies a proven replacement floor and can recover it.
 func TestBundleDamagedCurrentVersionKeepsTheInstalledConfig(t *testing.T) {
 	b := newBundleHost(t)
 	v1, v2, _ := bundleConfigs(b.testHost)
@@ -113,13 +113,20 @@ func TestBundleDamagedCurrentVersionKeepsTheInstalledConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	from := len(b.services.calls)
 	r := b.run(Options{Action: ActionEnsure})
-	requireOK(t, r)
+	requireError(t, r, codeProductFloor)
 	if !hasWarning(r, codeBundleStateUnreadable) {
 		t.Fatalf("warnings = %+v", r.Warnings)
 	}
+	if !strings.Contains(fmt.Sprint(r.Errors), bundleApplyCommand+" --json") {
+		t.Fatalf("refusal does not name the recovery command: %+v", r.Errors)
+	}
 	if b.read(b.env.Layout.ConfigPath) != installed {
 		t.Fatal("the run changed the installed config")
+	}
+	if gatewayTouched(b.testHost, from) {
+		t.Fatal("a run with an unknown floor touched the gateway")
 	}
 	other := filepath.Join(t.TempDir(), "config.yaml")
 	writeRooted(t, other, v2)

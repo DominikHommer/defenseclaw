@@ -1221,9 +1221,14 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if record != nil && !l.opts.AllowDowngrade && compareProductVersions(p.version, record.ProductVersion) < 0 {
 		return nil, &codedError{code: codeDowngrade, err: fmt.Errorf("payload version %s is older than the installed %s; downgrades are refused (rerun with --allow-downgrade to roll back deliberately)", p.version, record.ProductVersion)}
 	}
-	// The confirmed bundle's release floor applies to every candidate,
-	// including a repair or ensure of the recorded version.
-	if err := env.BundleProductFloorRefusal(p.version); err != nil {
+	// Every candidate must meet an authenticated floor. A newly verified
+	// signed replacement supplies its own floor even when the previously
+	// confirmed bundle is damaged; other runs use the confirmed bundle.
+	if l.bundle != nil {
+		if err := bundleProductFloorRefusal(p.version, l.bundle.verifiedProductFloor); err != nil {
+			return nil, err
+		}
+	} else if err := env.BundleProductFloorRefusal(p.version); err != nil {
 		return nil, err
 	}
 	if l.opts.ProductVersion != "" && strings.TrimPrefix(l.opts.ProductVersion, "v") != p.version {

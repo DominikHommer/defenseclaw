@@ -85,6 +85,10 @@ const (
 type bundleRun struct {
 	store   *enterprisebundle.Store
 	receipt *enterprisebundle.Receipt
+	// verifiedProductFloor came from this run's verified signed manifest. A
+	// replacement bundle can recover a damaged confirmed bundle without
+	// relying on the damaged bundle's unreadable minimum.
+	verifiedProductFloor string
 	// configSHA is the SHA-256 of the rendered config.yaml.
 	configSHA string
 	// confirmPending is set when the deployment committed the bundle config
@@ -532,6 +536,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		return code
 	}
 	m := res.Manifest
+	run.verifiedProductFloor = m.MinProductVersion
 	if err := store.Advance(receipt, enterprisebundle.StateVerified, func(rc *enterprisebundle.Receipt) {
 		rc.TenantID, rc.DeviceGroup, rc.Principal = m.TenantID, m.Target.DeviceGroup, m.CreatedBy
 		rc.ChangeSummary, rc.RollbackOf = m.ChangeSummary, m.RollbackOf
