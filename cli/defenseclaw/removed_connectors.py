@@ -302,6 +302,28 @@ def _script_state(path: str, c: _Removed) -> str:
     return "stub" if STUB_PHRASE.encode() in data else "owned"
 
 
+def _links(path: str) -> int:
+    try:
+        return os.stat(path).st_nlink
+    except OSError:
+        return 1
+
+
+def _hard_link_step(c: _Removed, script: str) -> str:
+    lister = f"fsutil hardlink list {script}" if os.name == "nt" else f"find / -xdev -samefile {script}"
+    return (
+        f"delete every other name of this file ({lister} lists them), then run "
+        f"defenseclaw-gateway connector teardown --connector {c.name}, which writes the stub and revokes the tokens"
+    )
+
+
+def _foreign_step(c: _Removed) -> str:
+    return (
+        "if it is not yours, delete it; if it is, move it out of DefenseClaw's hooks folder; then run "
+        f"defenseclaw-gateway connector teardown --connector {c.name}, which revokes the tokens"
+    )
+
+
 def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
     items: list[Leftover] = []
     teardown = f"run defenseclaw-gateway connector teardown --connector {c.name}"
@@ -335,20 +357,31 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
             items.append(left)
     script = os.path.join(hooks, c.script)
     state = _script_state(script, c)
+    # The teardown keeps the tokens while an old hook may still run at the
+    # script path (removed.go hookLeft): they go once its step is done.
+    token_step = teardown
+    links = _links(script) if state == "owned" else 1
     if state == "stub":
         items.append(
             Leftover(script, f"the stub that blocks every {c.label} call", "delete it once nothing above runs it")
         )
+    elif state == "owned" and links > 1:
+        what = (
+            f"still the hook script an older DefenseClaw wrote, with {links} names (hard links); teardown leaves it "
+            "and its tokens, so every name still reaches the gateway, which blocks every call"
+        )
+        items.append(Leftover(script, what, _hard_link_step(c, script)))
+        token_step = f"follow the step for {script} first"
     elif state == "owned":
         items.append(Leftover(script, "still the hook script an older DefenseClaw wrote", teardown))
     elif state == "foreign":
-        items.append(
-            Leftover(
-                script,
-                "not changed: it is not a file DefenseClaw wrote (no DefenseClaw marker, or a link)",
-                "remove what runs it, then delete it if it is not yours",
-            )
+        what = (
+            "not changed: DefenseClaw cannot prove it wrote it (a link, no DefenseClaw marker in its first lines, "
+            "or not a regular file); teardown keeps its tokens, so an old hook here still reaches the gateway, "
+            "which blocks every call"
         )
+        items.append(Leftover(script, what, _foreign_step(c)))
+        token_step = f"follow the step for {script} first"
     elif state != "absent":
         items.append(Leftover(script, state, "delete it once nothing above runs it"))
     if c.name == "openhands":
@@ -367,7 +400,7 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
         )
     for token in (os.path.join(hooks, f".hook-{c.name}.token"), os.path.join(hooks, f".otlp-{c.name}.token")):
         if os.path.lexists(token):
-            items.append(Leftover(token, "a DefenseClaw token for the removed connector", teardown))
+            items.append(Leftover(token, "a DefenseClaw token for the removed connector", token_step))
     return items
 
 

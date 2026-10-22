@@ -23,12 +23,18 @@ package connector
 //
 //  1. It replaces the hook script an older release wrote for the connector
 //     (OpenHands' openhands-hook.sh, OmniGent's policy module), proven by its
-//     DefenseClaw marker, with a static deny stub, in one atomic rename (a
-//     file with a second name, a hard link, gets the stub written into it,
-//     so every name blocks). A stub an older teardown left that allowed
-//     every call is replaced the same way. The stub blocks every call and says that support was
-//     removed in 1.0.4 and how to remove the hook.
-//  2. It revokes the DefenseClaw tokens issued for the connector.
+//     DefenseClaw marker, with a static deny stub, in one atomic rename. A
+//     stub an older teardown left that allowed every call is replaced the
+//     same way. The stub blocks every call and says that support was removed
+//     in 1.0.4 and how to remove the hook.
+//  2. It revokes the DefenseClaw tokens issued for the connector, but only
+//     once nothing but the stub is left at the script path. An old hook that
+//     still runs (a file with more than one name, a hard link; a link, or a
+//     file DefenseClaw cannot prove it wrote) keeps its tokens: without them
+//     the old hook allows every call in fail mode open, with them it reaches
+//     the retired gateway route, which blocks every call. The teardown then
+//     fails with the step that resolves it by hand (removedOnlyConnector.
+//     hookLeft), and the next start tries again.
 //
 // Nothing else is touched: agent config files (hooks.json, config.yaml),
 // import paths (.pth), runtime records (.hookcfg), backups, the hook
@@ -49,6 +55,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -240,11 +247,6 @@ const (
 	removedScriptForeign
 )
 
-func (c removedOnlyConnector) scriptState(path string) (removedScriptState, error) {
-	state, _, err := c.scriptStateAndLinks(path)
-	return state, err
-}
-
 // scriptStateAndLinks is scriptState and, for a regular file, how many names
 // (hard links) the file has.
 func (c removedOnlyConnector) scriptStateAndLinks(path string) (removedScriptState, uint32, error) {
@@ -311,32 +313,24 @@ func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error 
 	if err := c.replaceScript(opts.DataDir); err != nil {
 		return fmt.Errorf("%w; nothing was changed, and the next start tries again", err)
 	}
+	if err := c.hookLeft(opts.DataDir); err != nil {
+		return fmt.Errorf("%s teardown: %w; its tokens were kept, so the old hook still reaches the gateway, which blocks every call", c.name, err)
+	}
 	return c.revokeTokens(opts.DataDir)
 }
 
 // replaceScript writes the deny stub over a script an older release wrote, in
-// one atomic rename that replaces the file itself, never a link's target.
-//
-// A file with more than one name (a hard link elsewhere) is written in
-// place instead: a rename gives only this name the stub, and the old hook
-// under its other name would go on running with its tokens revoked, which
-// in fail mode open lets every call run. That is done only for a file owned
-// by the owner of its hooks folder (removedMayWriteInPlace): a link to
-// someone else's file, made to have a privileged teardown write it, gets the
-// rename.
+// one atomic rename that replaces the file itself, never a link's target. A
+// file with more than one name is left as it is: the rename would give only
+// this name the stub, and a later run would then revoke the tokens of the old
+// hook under its other names (hookLeft keeps them).
 func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	path := c.scriptPath(dataDir)
 	state, links, err := c.scriptStateAndLinks(path)
 	if err != nil {
 		return fmt.Errorf("%s teardown: read %s: %w", c.name, path, err)
 	}
-	if state != removedScriptOwned {
-		return nil
-	}
-	if links > 1 {
-		if err := c.writeStubIntoFile(path); err != nil {
-			return fmt.Errorf("%s teardown: write the stub that blocks every call into %s (%d names): %w", c.name, path, links, err)
-		}
+	if state != removedScriptOwned || links > 1 {
 		return nil
 	}
 	if err := atomicWriteFileNoFollow(path, []byte(c.tombstone), c.mode); err != nil {
@@ -345,50 +339,46 @@ func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	return nil
 }
 
-// writeStubIntoFile writes the stub into the file at path, which every one
-// of its names shares. The whole stub goes in first and the old tail is cut
-// after it, so a reader that sees the new first bytes runs the stub to its
-// end; a failed cut leaves a file that still has the marker, which the next
-// start writes again. The file is checked again through the open handle: one
-// that is no longer an older release's script is left alone.
-func (c removedOnlyConnector) writeStubIntoFile(path string) error {
-	file, err := os.OpenFile(path, os.O_RDWR|otlpOpenNoFollow(), 0)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() || info.Size() > removedScriptReadLimit {
+// hookLeft returns why an old hook may still run at the script path, with
+// the step that resolves it by hand; nil when the path holds the stub (under
+// every name) or nothing. While it fails, the tokens stay and VerifyClean
+// fails.
+func (c removedOnlyConnector) hookLeft(dataDir string) error {
+	path := c.scriptPath(dataDir)
+	state, links, err := c.scriptStateAndLinks(path)
+	switch {
+	case err != nil:
+		return fmt.Errorf("read %s: %w", path, err)
+	case state == removedScriptAbsent || state == removedScriptStub:
 		return nil
+	case state == removedScriptOwned && links > 1:
+		return fmt.Errorf("%s is the hook script an older DefenseClaw wrote and has %d names (hard links), so it was not changed. To finish: %s",
+			path, links, c.hardLinkStep(path))
+	case state == removedScriptOwned:
+		return fmt.Errorf("%s is still the hook script an older DefenseClaw wrote", path)
 	}
-	folder, err := os.Lstat(filepath.Dir(path))
-	if err != nil {
-		return err
+	return fmt.Errorf("%s was not changed: DefenseClaw cannot prove it wrote it (a link, no DefenseClaw marker in its first %d lines, or not a regular file), and it may still run the old hook. To finish: %s",
+		path, removedMarkerLines, c.foreignStep())
+}
+
+// hardLinkStep is the manual step for a script with more than one name.
+func (c removedOnlyConnector) hardLinkStep(path string) string {
+	list := "find / -xdev -samefile " + path + " lists them"
+	if runtime.GOOS == "windows" {
+		list = "fsutil hardlink list " + path + " lists them"
 	}
-	if !removedMayWriteInPlace(info, folder) {
-		_ = file.Close()
-		return atomicWriteFileNoFollow(path, []byte(c.tombstone), c.mode)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, removedScriptReadLimit+1))
-	if err != nil {
-		return err
-	}
-	if c.classifyScript(data) != removedScriptOwned {
-		return nil
-	}
-	if _, err := file.WriteAt([]byte(c.tombstone), 0); err != nil {
-		return err
-	}
-	if err := file.Truncate(int64(len(c.tombstone))); err != nil {
-		return err
-	}
-	if err := file.Chmod(c.mode); err != nil {
-		return err
-	}
-	return file.Sync()
+	return "delete every other name of this file (" + list + "), then run " + c.teardownCommand() + ", which writes the stub and revokes the tokens"
+}
+
+// foreignStep is the manual step for a script path DefenseClaw cannot prove
+// it wrote.
+func (c removedOnlyConnector) foreignStep() string {
+	return "if it is not yours, delete it; if it is, move it out of DefenseClaw's hooks folder; then run " +
+		c.teardownCommand() + ", which revokes the tokens"
+}
+
+func (c removedOnlyConnector) teardownCommand() string {
+	return "defenseclaw-gateway connector teardown --connector " + c.name
 }
 
 func (c removedOnlyConnector) otlpTokenPath(dataDir string) string {
@@ -436,17 +426,12 @@ func (c removedOnlyConnector) tokenPaths(dataDir string) []string {
 	return append(paths, c.otlpTokenPath(dataDir))
 }
 
-// VerifyClean fails while the script is still one an older release wrote or
-// a token is still there: what Teardown changes. What it leaves is listed by
-// RemovedConnectorLeftovers, not reported here.
+// VerifyClean fails while an old hook may still run at the script path
+// (hookLeft) or a token is still there: what Teardown changes. What it
+// leaves is listed by RemovedConnectorLeftovers, not reported here.
 func (c removedOnlyConnector) VerifyClean(opts SetupOpts) error {
-	path := c.scriptPath(opts.DataDir)
-	state, err := c.scriptState(path)
-	if err != nil {
-		return fmt.Errorf("%s cleanup: read %s: %w", c.name, path, err)
-	}
-	if state == removedScriptOwned {
-		return fmt.Errorf("%s cleanup incomplete: %s is still the hook script an older DefenseClaw wrote", c.name, path)
+	if err := c.hookLeft(opts.DataDir); err != nil {
+		return fmt.Errorf("%s cleanup incomplete: %w", c.name, err)
 	}
 	for _, token := range c.tokenPaths(opts.DataDir) {
 		if _, err := os.Lstat(token); err == nil {
@@ -508,17 +493,23 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 		}
 	}
 	script := c.scriptPath(opts.DataDir)
-	state, err := c.scriptState(script)
+	state, links, err := c.scriptStateAndLinks(script)
+	tokenStep := c.teardownCommand()
 	switch {
 	case err != nil:
 		add(script, fmt.Sprintf("could not be read (%v)", err), "delete it once nothing above runs it")
 	case state == removedScriptStub:
 		add(script, "the stub that blocks every "+c.label+" call", "delete it once nothing above runs it")
+	case state == removedScriptOwned && links > 1:
+		add(script, fmt.Sprintf("still the hook script an older DefenseClaw wrote, with %d names (hard links); teardown leaves it and its tokens, so every name still reaches the gateway, which blocks every call", links),
+			c.hardLinkStep(script))
+		tokenStep = "follow the step for " + script + " first"
 	case state == removedScriptOwned:
-		add(script, "still the hook script an older DefenseClaw wrote", "run defenseclaw-gateway connector teardown --connector "+c.name)
+		add(script, "still the hook script an older DefenseClaw wrote", c.teardownCommand())
 	case state == removedScriptForeign:
-		add(script, "not changed: it is not a file DefenseClaw wrote (no DefenseClaw marker, or a link)",
-			"remove what runs it, then delete it if it is not yours")
+		add(script, "not changed: DefenseClaw cannot prove it wrote it (a link, no DefenseClaw marker in its first lines, or not a regular file); teardown keeps its tokens, so an old hook here still reaches the gateway, which blocks every call",
+			c.foreignStep())
+		tokenStep = "follow the step for " + script + " first"
 	}
 	if c.name == removedOpenHandsID {
 		record := filepath.Join(opts.DataDir, "hooks", hookConfigSidecarName+"."+c.name)
@@ -533,7 +524,7 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 	}
 	for _, token := range c.tokenPaths(opts.DataDir) {
 		if _, err := os.Lstat(token); err == nil {
-			add(token, "a DefenseClaw token for the removed connector", "run defenseclaw-gateway connector teardown --connector "+c.name)
+			add(token, "a DefenseClaw token for the removed connector", tokenStep)
 		}
 	}
 	return out

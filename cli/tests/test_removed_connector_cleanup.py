@@ -123,6 +123,46 @@ class LeftoversTests(_Host):
         self.openhands("#!/bin/sh\necho mine\n")
         self.assertIn("not changed", self.items("openhands")[os.path.join(self.hooks, "openhands-hook.sh")].what)
 
+    # Review fixes (G-deadcode loop round 3): the teardown keeps the tokens
+    # while an old hook may still run at the script path; the leftovers say
+    # what to do by hand first, and the tokens point at that step.
+    def test_a_script_defenseclaw_cannot_prove_it_wrote_keeps_the_tokens_behind_its_step(self):
+        script = os.path.join(self.hooks, "openhands-hook.sh")
+        token = _write(os.path.join(self.hooks, ".hook-openhands.token"), "t")
+        target = _write(os.path.join(self.hooks, "old-hook.sh"), _OPENHANDS_103)
+        for plant in ("#!/bin/sh\n#\n#\n" + _OPENHANDS_103.split("\n", 1)[1], None):
+            with self.subTest(symlink=plant is None):
+                self.openhands(plant or "x")
+                if plant is None:
+                    os.remove(script)
+                    try:
+                        os.symlink(target, script)
+                    except OSError as exc:
+                        self.skipTest(f"symlink: {exc}")
+                items = self.items("openhands")
+                self.assertIn("teardown keeps its tokens", items[script].what)
+                self.assertEqual(
+                    items[script].step, removed_connectors._foreign_step(removed_connectors._CONNECTORS[0])
+                )
+                self.assertIn("move it out of DefenseClaw's hooks folder", items[script].step)
+                self.assertEqual(items[token].step, f"follow the step for {script} first")
+
+    def test_a_hard_linked_script_keeps_the_tokens_behind_its_step(self):
+        self.openhands(_OPENHANDS_103)
+        script = os.path.join(self.hooks, "openhands-hook.sh")
+        token = _write(os.path.join(self.hooks, ".hook-openhands.token"), "t")
+        try:
+            os.link(script, os.path.join(self.home, "elsewhere-hook.sh"))
+        except OSError as exc:
+            self.skipTest(f"hard link: {exc}")
+        items = self.items("openhands")
+        self.assertIn("with 2 names (hard links)", items[script].what)
+        self.assertIn(
+            "-samefile " + script if os.name != "nt" else "fsutil hardlink list " + script, items[script].step
+        )
+        self.assertIn("delete every other name of this file", items[script].step)
+        self.assertEqual(items[token].step, f"follow the step for {script} first")
+
     def test_a_config_that_no_longer_names_defenseclaw_is_not_listed(self):
         config = self.openhands()
         _write(config, '{"pre_tool_use": []}')
@@ -298,6 +338,11 @@ class GoParityTests(unittest.TestCase):
             "; it holds other import paths too",
             "; it holds nothing else",
             "), so it may still name DefenseClaw's hook",
+            " names (hard links); teardown leaves it and its tokens, so every name still reaches the gateway, which blocks every call",
+            "not changed: DefenseClaw cannot prove it wrote it (a link, no DefenseClaw marker in its first lines, or not a regular file)",
+            "if it is not yours, delete it; if it is, move it out of DefenseClaw's hooks folder; then run ",
+            "delete every other name of this file (",
+            "follow the step for ",
         ):
             self.assertIn(phrase, source)
 

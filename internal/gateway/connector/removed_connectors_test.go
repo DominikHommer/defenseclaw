@@ -501,16 +501,24 @@ func TestRemovedTeardownReplacesOnlyScriptsDefenseClawWrote(t *testing.T) {
 					before = h.snapshot(t)
 				}
 				conn, _ := RetiredConnector(c.name)
-				if err := conn.Teardown(context.Background(), h.opts); err != nil {
-					t.Fatalf("Teardown: %v", err)
-				}
 				if !v.replace {
+					// Left as it is, and the teardown says so with the step
+					// that finishes it (see removed_r3_test.go).
+					if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "To finish: ") {
+						t.Fatalf("Teardown = %v, want the manual step", err)
+					}
 					requireRemovedSame(t, "teardown of a script DefenseClaw did not write", h.snapshot(t), before)
 					leftovers, _ := RemovedConnectorLeftovers(c.name, h.opts)
 					if !removedListsPath(leftovers, h.script(c)) {
 						t.Fatalf("leftovers %+v do not name %s", leftovers, h.script(c))
 					}
+					if err := conn.VerifyClean(h.opts); err == nil {
+						t.Fatal("VerifyClean passed with a script DefenseClaw did not write at the path")
+					}
 					return
+				}
+				if err := conn.Teardown(context.Background(), h.opts); err != nil {
+					t.Fatalf("Teardown: %v", err)
 				}
 				requireRemovedSame(t, "teardown", h.snapshot(t, h.script(c)), before)
 				h.requireStub(t, c)
