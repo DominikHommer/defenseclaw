@@ -916,3 +916,88 @@ func TestWindowsSecretSetThatFailsTheTrustCheckKeepsThePreviousCredential(t *tes
 	}
 	assertNoWindowsChangeReservations(t, state)
 }
+
+// A set whose new credential fails the gateway's trust check and cannot be
+// undone changed the credential and is audited applied, never failed: the
+// new credential could not be removed (another handle denies its deletion),
+// or the previous one could not be put back. A previous credential that
+// could not be put back stays kept, never deleted.
+func TestWindowsSecretSetThatCannotUndoAFailedTrustCheckIsAuditedApplied(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	spool, state := stubWindowsChangeSpool(t)
+	verify, remove, rename := windowsSecretVerifyStored, windowsSecretRemoveFile, windowsSecretRenameFile
+	restore := func() {
+		windowsSecretVerifyStored, windowsSecretRemoveFile, windowsSecretRenameFile = verify, remove, rename
+	}
+	t.Cleanup(restore)
+	untrusted := func(string, string) error { return errors.New("the credential owner is not trusted") }
+	removeDenied := func(string) error { return windows.ERROR_SHARING_VIOLATION }
+	renameDenied := func(string, string) error { return windows.ERROR_SHARING_VIOLATION }
+	set := func(name, value string) (string, error) {
+		return runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true, json: true}, value)
+	}
+	read := func(path string) string {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "<" + err.Error() + ">"
+		}
+		return string(data)
+	}
+	kept := func(name string) []string {
+		paths, err := filepath.Glob(filepath.Join(dir, "."+name+".kept-*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return paths
+	}
+
+	// A first set whose new credential could not be removed.
+	windowsSecretVerifyStored, windowsSecretRemoveFile = untrusted, removeDenied
+	out, err := set("judge-api-key", "first-value")
+	windowsSecretFailureDoc(t, out, err, "set", "change_failed")
+	if got := read(filepath.Join(dir, "judge-api-key")); got != "first-value" || !strings.Contains(err.Error(), "still stored") {
+		t.Fatalf("first set: credential %q, error %v", got, err)
+	}
+
+	const name = "ai-defense-api-key"
+	final := filepath.Join(dir, name)
+	for _, tc := range []struct {
+		label, want, left string
+		remove            func(string) error
+	}{
+		// Neither undone: the new credential is stored.
+		{"new credential not removed", "rotated-value", "is still stored", removeDenied},
+		// The new credential removed, the previous one not put back.
+		{"previous credential not put back", "", "was removed", remove},
+	} {
+		restore()
+		if _, err := set(name, "previous-value"); err != nil {
+			t.Fatalf("%s: store the previous credential: %v", tc.label, err)
+		}
+		windowsSecretVerifyStored, windowsSecretRemoveFile, windowsSecretRenameFile = untrusted, tc.remove, renameDenied
+		out, err := set(name, "rotated-value")
+		windowsSecretFailureDoc(t, out, err, "set", "change_failed")
+		if !strings.Contains(err.Error(), tc.left) || !strings.Contains(err.Error(), "kept at") {
+			t.Fatalf("%s: error %v", tc.label, err)
+		}
+		if got := read(final); (tc.want == "" && !strings.HasPrefix(got, "<")) || (tc.want != "" && got != tc.want) {
+			t.Fatalf("%s: the credential holds %q, want %q", tc.label, got, tc.want)
+		}
+		if paths := kept(name); len(paths) != 1 || read(paths[0]) != "previous-value" {
+			t.Fatalf("%s: the previous credential was not kept: %v", tc.label, paths)
+		}
+	}
+
+	var outcomes []string
+	for _, ev := range windowsChangeEvents(t, spool) {
+		outcomes = append(outcomes, ev.SecretName+":"+ev.Outcome+":"+ev.ReasonCode)
+	}
+	applied := name + ":" + enterprisestatus.ChangeApplied + ":"
+	want := []string{"judge-api-key:" + enterprisestatus.ChangeApplied + ":", applied, applied, applied, applied}
+	slices.Sort(outcomes)
+	slices.Sort(want)
+	if !slices.Equal(outcomes, want) {
+		t.Fatalf("change events = %v, want %v", outcomes, want)
+	}
+	assertNoWindowsChangeReservations(t, state)
+}

@@ -307,8 +307,11 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	// in the reservation: a command that ends after the change is recorded
 	// applied, not failed (interrupted). A change it cannot mark is not made.
 	target := filepath.Join(layout.SecretsDir, opts.name)
-	// A write whose credential failed the gateway's trust check stored
-	// nothing usable, whatever is at the path now: it is not the change.
+	// A set whose new credential failed the gateway's trust check and was
+	// taken out again left the file the reservation marked: the target
+	// shows no change. One whose new credential could not be taken out, or
+	// whose previous one could not be put back, changed the credential
+	// (errWindowsSecretLeftChanged), whatever the target inspection says.
 	markedChange := func(apply func() error) error {
 		if reservation != nil {
 			if err := reservation.MarkTarget(target); err != nil {
@@ -317,7 +320,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 			}
 		}
 		err := apply()
-		change.changed = err == nil || (!errors.Is(err, errWindowsSecretNotStored) && reservation.TargetChanged())
+		change.changed = err == nil || errors.Is(err, errWindowsSecretLeftChanged) || reservation.TargetChanged()
 		return err
 	}
 	unchanged := false
@@ -733,10 +736,18 @@ func ensureWindowsSecretsDir(store *windowsSecretStore, reader *windows.SID) err
 	return applyWindowsSDDL(store.dir, windowsSecretDirectorySDDL(reader))
 }
 
-// errWindowsSecretNotStored marks a set whose new credential failed the
-// gateway's trust check: it was taken out again, so the change was not
-// made.
-var errWindowsSecretNotStored = errors.New("the new credential was not stored")
+// errWindowsSecretLeftChanged marks a set whose new credential failed the
+// gateway's trust check and could not be undone: the new credential is
+// still stored, or the previous one could not be put back. The credential
+// changed, so the run is audited applied.
+var errWindowsSecretLeftChanged = errors.New("the credential was changed")
+
+// windowsSecretRemoveFile and windowsSecretRenameFile undo a set whose new
+// credential failed the gateway's trust check. Seams for tests.
+var (
+	windowsSecretRemoveFile = os.Remove
+	windowsSecretRenameFile = os.Rename
+)
 
 // windowsSecretVerifyStored proves the gateway's reader accepts credential
 // name in dir. It runs with the administrator's token, so it checks the
@@ -779,18 +790,35 @@ func writeWindowsSecret(store *windowsSecretStore, name string, value []byte) er
 		discardKeptWindowsSecret(kept)
 		return nil
 	}
+	return undoWindowsSecretWrite(final, kept, verifyErr)
+}
+
+// undoWindowsSecretWrite takes out the new credential at final, which failed
+// the gateway's trust check (verifyErr), and puts back the previous one kept
+// at kept ("" when there was none). Every step is checked: unless final again
+// holds what it held before the set (nothing, or the kept file), the error
+// wraps errWindowsSecretLeftChanged, and a kept copy that could not be put
+// back stays where it is, named in the error.
+func undoWindowsSecretWrite(final, kept string, verifyErr error) error {
 	if kept == "" {
-		_ = os.Remove(final)
-		return fmt.Errorf("%w: it failed the gateway's trust check and was removed: %w", errWindowsSecretNotStored, verifyErr)
+		if err := windowsSecretRemoveFile(final); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: the new credential failed the gateway's trust check (%w) and could not be removed, so it is still stored: %w",
+				errWindowsSecretLeftChanged, verifyErr, err)
+		}
+		return fmt.Errorf("the new credential was not stored: it failed the gateway's trust check and was removed: %w", verifyErr)
 	}
-	if err := os.Rename(kept, final); err != nil {
-		_ = os.Remove(final)
-		if err := os.Rename(kept, final); err != nil {
-			discardKeptWindowsSecret(kept)
-			return fmt.Errorf("%w: it failed the gateway's trust check (%w) and was removed, and the previous credential could not be put back: %w", errWindowsSecretNotStored, verifyErr, err)
+	if err := windowsSecretRenameFile(kept, final); err != nil {
+		removeErr := windowsSecretRemoveFile(final)
+		if err := windowsSecretRenameFile(kept, final); err != nil {
+			left := "was removed"
+			if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				left = "is still stored"
+			}
+			return fmt.Errorf("%w: the new credential failed the gateway's trust check (%w) and %s, and the previous credential could not be put back; it is kept at %s: %w",
+				errWindowsSecretLeftChanged, verifyErr, left, kept, err)
 		}
 	}
-	return fmt.Errorf("%w: it failed the gateway's trust check, and the previous credential was kept: %w", errWindowsSecretNotStored, verifyErr)
+	return fmt.Errorf("the new credential was not stored: it failed the gateway's trust check, and the previous credential was kept: %w", verifyErr)
 }
 
 // keepWindowsSecret links the regular file credential name of dir under a

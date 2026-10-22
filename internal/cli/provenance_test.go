@@ -467,3 +467,86 @@ func TestProvenanceShowSendsNoCredentialOnALegacyPIDRecord(t *testing.T) {
 		t.Fatalf("a proven gateway: output=%q error=%v", buf, err)
 	}
 }
+
+// A per-user gateway authenticates with the token it started with and
+// records the token_env and inline token of that start (daemon.AppliedAuth).
+// With no default gateway token set, provenance still sends that token, and
+// only it, after config.yaml was edited into a state the gateway rejected,
+// or a valid edit of the token that the gateway holds until a restart: an
+// inline token, or one read from a custom token_env. The token and token_env
+// of the edited file are never used. A record of another process is none.
+func TestProvenanceShowAuthenticatesWithTheCredentialTheGatewayStartedWith(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	for _, key := range []string{managed.ConfigPathEnv, managed.DeploymentModeEnv, managed.EnterpriseProfileEnv,
+		"OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN"} {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	t.Setenv("R104_EDITED_TOKEN", "token of the edited token_env")
+	t.Setenv("R104_APPLIED_TOKEN", provenanceTestToken)
+	gateway := newProvenanceTestGateway()
+	gateway.live.Generation = 43
+	server := httptest.NewServer(gateway)
+	defer server.Close()
+	gateway.healthAddr = server.Listener.Addr().String()
+	stubProvenanceGateway(t, provenanceGateway{PID: os.Getpid()}, ownProcessHolds)
+	addr := server.Listener.Addr().(*net.TCPAddr)
+	oldListeners := provenanceGatewayListeners
+	t.Cleanup(func() { provenanceGatewayListeners = oldListeners })
+	provenanceGatewayListeners = func(int) ([]daemon.TCPListenAddr, error) {
+		return []daemon.TCPListenAddr{{IP: addr.IP, Port: addr.Port}}, nil
+	}
+	// This test process is the gateway the record names.
+	t.Setenv(daemon.EnvDaemon, "1")
+	t.Setenv(daemon.EnvDataDir, home)
+	path := filepath.Join(home, "config.yaml")
+	edited := "gateway:\n  token: token-of-the-edit\n  token_env: R104_EDITED_TOKEN\n"
+	for _, tc := range []struct {
+		name    string
+		applied daemon.AppliedAuth
+		body    string // a rejected config.yaml; "" is a valid edit the gateway holds
+	}{
+		{"inline token, rejected file", daemon.AppliedAuth{Token: provenanceTestToken}, "config_version: 9\n" + edited + "r104_rejected_key: true\n"},
+		{"custom token_env, rejected file", daemon.AppliedAuth{TokenEnv: "R104_APPLIED_TOKEN"}, "guardrail: {mode: [\n" + edited},
+		{"inline token, held edit", daemon.AppliedAuth{Token: provenanceTestToken}, ""},
+		{"custom token_env, held edit", daemon.AppliedAuth{TokenEnv: "R104_APPLIED_TOKEN", Token: "inline token the variable overrides"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := daemon.RecordAppliedAuth(tc.applied); err != nil {
+				t.Fatal(err)
+			}
+			cmd, out, _ := provenanceTestCommand()
+			if tc.body != "" {
+				if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := prepareProvenanceShow(cmd, nil); err != nil {
+					t.Fatalf("a rejected config.yaml stopped the read: %v", err)
+				}
+			} else {
+				cfg = provenanceTestConfig(t, server)
+				cfg.Gateway.Token, cfg.Gateway.TokenEnv = "token-of-the-edit", "R104_EDITED_TOKEN"
+			}
+			if err := runProvenanceShow(cmd, nil); err != nil || !strings.Contains(out.String(), "generation: 43\n") {
+				t.Fatalf("output=%q error=%v", out, err)
+			}
+		})
+	}
+	// The record a gateway that ran before under another PID left behind:
+	// nothing in it is sent.
+	stale, err := json.Marshal(map[string]any{"pid": os.Getpid() + 1, "start_identity": "1", "token": provenanceTestToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, daemon.AppliedAuthFileName), stale, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := gateway.credentialed.Load()
+	cfg = provenanceTestConfig(t, server)
+	cfg.Gateway.Token, cfg.Gateway.TokenEnv = "", ""
+	cmd, out, _ := provenanceTestCommand()
+	if err := runProvenanceShow(cmd, nil); err == nil || out.Len() != 0 || gateway.credentialed.Load() != before {
+		t.Fatalf("a stale record: output=%q error=%v credentialed=%d", out, err, gateway.credentialed.Load()-before)
+	}
+}

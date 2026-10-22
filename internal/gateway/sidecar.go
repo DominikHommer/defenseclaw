@@ -1147,11 +1147,13 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	//
 	// If token synthesis fails here we cannot proceed — the API server
 	// authenticates inbound hook calls with this token. Fail loudly.
+	loadedGateway := s.currentConfig().Gateway
 	apiToken, tokErr := s.ensureGatewayTokenSynthesis()
 	if tokErr != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] FATAL: failed to synthesize gateway token: %v\n", tokErr)
 		return fmt.Errorf("sidecar: gateway token synthesis: %w", tokErr)
 	}
+	s.recordAppliedGatewayAuth(loadedGateway)
 	inventory.SetPathHashKey(deriveAIInventoryHashKey(apiToken))
 
 	s.attachApplicationProtectionObserver(runCtx, apiToken)
@@ -8240,6 +8242,24 @@ func (s *Sidecar) ensureGatewayTokenSynthesis() (string, error) {
 	// same value through their normal os.Getenv lookup path.
 	_ = os.Setenv("DEFENSECLAW_GATEWAY_TOKEN", tok)
 	return tok, nil
+}
+
+// recordAppliedGatewayAuth records the credential configuration a per-user
+// gateway started with (daemon.AppliedAuth): the token_env and the inline
+// token of the config it loaded, never a token from the environment or one
+// synthesized into .env, which the CLI reads from there itself. The gateway
+// reads its token once, so `provenance show` sends the token this resolves
+// to, and only to this proven process, also after config.yaml was edited
+// into a state the gateway rejected or holds. A standalone deployment's
+// lifecycle keeps its own copy of the config it applied. A failure leaves
+// that read only the default gateway token.
+func (s *Sidecar) recordAppliedGatewayAuth(loaded config.GatewayConfig) {
+	if s.currentConfig().StandaloneEnterprise() {
+		return
+	}
+	if err := daemon.RecordAppliedAuth(daemon.AppliedAuth{TokenEnv: loaded.TokenEnv, Token: loaded.Token}); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] warning: cannot record the applied gateway credential configuration: %v\n", err)
+	}
 }
 
 // deriveAIInventoryHashKey returns the per-installation HMAC key that

@@ -171,13 +171,13 @@ var provenanceGatewayListeners = daemon.ProcessTCPListeners
 // standalone deployment's API address is the one its administrator-owned
 // runtime descriptor publishes, and its credential fields come from the
 // root-only copy of the config its lifecycle last applied (Linux, macOS). A
-// per-user gateway keeps no copy of what it applied: its endpoint is the API
-// listener the proven gateway process holds (provenancePerUserEndpoint),
-// and its credential the default gateway token of the environment and its
-// .env (loaded before the strict load). Either way the credential goes only
-// to a listener proven to belong to the gateway process, and that process
-// must answer as itself. A missing or unreadable config is not a rejected
-// one: there is nothing to fall back on.
+// per-user gateway's endpoint is the API listener the proven gateway
+// process holds (provenancePerUserEndpoint), and its credential fields come
+// from the record that process wrote of the ones it started with
+// (provenanceGatewayToken). Either way the credential goes only to a
+// listener proven to belong to the gateway process, and that process must
+// answer as itself. A missing or unreadable config is not a rejected one:
+// there is nothing to fall back on.
 func provenanceAppliedConfig(ctx context.Context, loadErr error) (*config.Config, error) {
 	if errors.Is(loadErr, fs.ErrNotExist) || errors.Is(loadErr, fs.ErrPermission) {
 		return nil, loadErr
@@ -408,6 +408,25 @@ func dialProvenanceGateway(ctx context.Context, addresses []net.IP, port int, ga
 	return nil, errors.New("gateway listener identity is unproven; the gateway token was not sent")
 }
 
+// provenanceGatewayToken is the credential the proven gateway applied. A
+// per-user gateway reads its token once, when it starts, and records the
+// token_env and inline token it started with (daemon.AppliedAuth); they
+// resolve here as the gateway resolved them, through the environment and
+// .env. A config.yaml edited since, whether the gateway rejected the edit or
+// holds it until a restart, is not what it authenticates with. Without that
+// record (a gateway of an earlier release) the loaded config's fields are
+// used, which for a rejected file leave only the default gateway token; a
+// standalone deployment's are those its lifecycle last applied.
+func provenanceGatewayToken(c *config.Config, gateway provenanceGateway) string {
+	fields := c.Gateway
+	if !c.StandaloneEnterprise() {
+		if applied, ok := daemon.New(config.DefaultDataPath()).AppliedAuth(gateway.PID); ok {
+			fields.TokenEnv, fields.Token = applied.TokenEnv, applied.Token
+		}
+	}
+	return strings.TrimSpace(fields.ResolvedToken())
+}
+
 // runningGatewayProvenance reads the authenticated gateway snapshot. The
 // short-lived CLI process has never applied a configuration and cannot
 // report the daemon's generation from its own version.Current().
@@ -438,7 +457,7 @@ func runningGatewayProvenance(cmd *cobra.Command) (version.Provenance, error) {
 	if err != nil {
 		return version.Provenance{}, err
 	}
-	if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
+	if token := provenanceGatewayToken(cfg, gateway); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	client := provenanceHTTPClient(addresses, cfg.Gateway.APIPort, gateway)
