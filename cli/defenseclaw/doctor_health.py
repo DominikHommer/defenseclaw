@@ -36,12 +36,15 @@ from typing import Any
 
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACTS,
+    KIRO_CLI_HOOK_FLOOR,
     PROXY_CONNECTORS,
     REGISTERED_CONNECTORS,
     STATUS_KNOWN,
     STATUS_NOT_GATED,
     STATUS_UNVERSIONED,
     ConnectorContract,
+    kiro_cli_below_hook_floor,
+    kiro_cli_below_hook_floor_reason,
     normalize_agent_version,
     normalize_connector,
     resolve_connector_contract,
@@ -536,7 +539,32 @@ def assess_connector_health(
             continue
 
         normalized = _safe_semver_from_agent(raw_version)
-        if normalized:
+        kiro_below_floor = kiro_cli_below_hook_floor(raw_version) if connector == "kiro" else ""
+        if kiro_below_floor:
+            # Kiro has no contract range to install: say why this kiro-cli
+            # is refused and which version to update to (GAP-0227).
+            findings.append(
+                ConnectorHealthFinding(
+                    connector=public_name,
+                    status=HealthStatus.UNSUPPORTED,
+                    reason_code="connector-version-outside-contract",
+                    summary=kiro_cli_below_hook_floor_reason(kiro_below_floor),
+                    installed_version=normalized,
+                    supported_agent_ranges=ranges,
+                    remediations=(
+                        RemediationChoice(
+                            choice_id="install-supported-connector-version",
+                            summary=f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then rerun setup",
+                            kind=RemediationKind.MANUAL,
+                            changes_state=True,
+                            requires_confirmation=True,
+                            unattended_allowed=False,
+                        ),
+                        _refresh_discovery_choice(),
+                    ),
+                )
+            )
+        elif normalized:
             findings.append(
                 ConnectorHealthFinding(
                     connector=public_name,
