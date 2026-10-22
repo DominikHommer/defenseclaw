@@ -29,9 +29,10 @@ const darwinTreeWaitDelay = 5 * time.Second
 
 // Test seams.
 var (
-	startDarwinWatchdog    = startDarwinGroupWatchdog
+	startDarwinWatchdog    = startGroupWatchdog
 	releaseDarwinStartGate = func(w *os.File) error { _, err := w.Write([]byte("go\n")); return err }
 	signalDarwinGroup      = func(pgid int) error { return syscall.Kill(-pgid, syscall.SIGKILL) }
+	afterDarwinLeaderExit  = func() {}
 )
 
 // macOS has no Linux parent-death signal. Start the command as a process
@@ -39,9 +40,11 @@ var (
 // be running before that gate opens: even a SIGKILL in the narrow interval
 // after Start cannot leave a scanner executing without a supervisor.
 //
-// Every signal to the group, the watchdog's included, is sent while the
-// leader is still unreaped: its PID, and with it the group ID, cannot be
-// reused until Wait reaps it.
+// This process signals the group only while the leader is still unreaped:
+// its PID, and with it the group ID, cannot be reused until Wait reaps it.
+// The watchdog is itself a member of the group, so the group ID stays its
+// own also when the gateway died and launchd reaped the leader before the
+// watchdog's kill.
 func runTree(cmd *exec.Cmd, _ bool) error {
 	if cmd == nil {
 		return errors.New("processutil: nil command")
@@ -137,25 +140,8 @@ func runTree(cmd *exec.Cmd, _ bool) error {
 		break
 	}
 	// NOTE_EXIT arrives while the direct child is still a zombie.
+	afterDarwinLeaderExit()
 	return finish(nil)
-}
-
-func startDarwinGroupWatchdog(pgid int) (func(), error) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		return nil, err
-	}
-	watchdog := exec.Command("/bin/sh", "-c", `read -r _; kill -9 "-$1" 2>/dev/null; exit 0`,
-		"defenseclaw-group-watchdog", strconv.Itoa(pgid))
-	watchdog.Stdin = r
-	watchdog.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	err = watchdog.Start()
-	_ = r.Close()
-	if err != nil {
-		_ = w.Close()
-		return nil, err
-	}
-	return func() { _ = w.Close(); _ = watchdog.Wait() }, nil
 }
 
 func killDarwinGroup(pid int) error {

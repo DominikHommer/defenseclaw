@@ -105,3 +105,59 @@ func TestDarwinTreeCancellationEndsDescendants(t *testing.T) {
 	}
 	requireDarwinChildGone(t, pid)
 }
+
+const darwinLeaderExited = "DC_PROCESSUTIL_DARWIN_LEADER_EXITED"
+
+// TestDarwinTreeLeaderExitedHelper is the gateway of
+// TestDarwinTreeGatewayDiesAfterTheScannerExits: its scanner starts a helper
+// and exits; the gateway then stops before its own cleanup and waits to be
+// killed.
+func TestDarwinTreeLeaderExitedHelper(t *testing.T) {
+	dir := os.Getenv(darwinLeaderExited)
+	if dir == "" {
+		t.Skip("gateway of TestDarwinTreeGatewayDiesAfterTheScannerExits")
+	}
+	afterDarwinLeaderExit = func() {
+		_ = os.WriteFile(filepath.Join(dir, "exited"), nil, 0o600)
+		time.Sleep(time.Minute)
+	}
+	_ = RunTree(exec.Command("/bin/sh", "-c", `sleep 60 & echo $! > "$1.tmp" && mv "$1.tmp" "$1"; exit 0`,
+		"sh", filepath.Join(dir, "helper.pid")))
+}
+
+// The gateway dies after the scanner leader exited and before its cleanup
+// killed the group: the watchdog, a member of that group, still ends what
+// the scanner left behind (W4b2 scanner, loop round 1).
+func TestDarwinTreeGatewayDiesAfterTheScannerExits(t *testing.T) {
+	if os.Getenv(darwinLeaderExited) != "" {
+		t.Skip("running as the gateway")
+	}
+	dir := t.TempDir()
+	gateway := exec.Command(os.Args[0], "-test.run=^TestDarwinTreeLeaderExitedHelper$", "-test.count=1")
+	gateway.Env = append(os.Environ(), darwinLeaderExited+"="+dir)
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = gateway.Process.Kill(); _ = gateway.Wait() })
+	pid, err := waitDarwinChildPID(filepath.Join(dir, "helper.pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(dir, "exited")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatal("the gateway never saw its scanner exit")
+		}
+	}
+	if darwinChildGone(pid) {
+		t.Fatalf("helper %d ended before the gateway died; the test proves nothing", pid)
+	}
+	if err := gateway.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = gateway.Wait()
+	requireDarwinChildGone(t, pid)
+}

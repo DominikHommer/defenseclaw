@@ -21,7 +21,7 @@ package processutil
 import "os/exec"
 
 // exitWithParent has no kernel support on these platforms; cmd runs as is.
-func exitWithParent(_ *exec.Cmd) {}
+func exitWithParent(_ *exec.Cmd) (beginReap func()) { return func() {} }
 
 // killDescendantsAtExit is Linux only (parent_linux.go).
 func killDescendantsAtExit(_ *exec.Cmd) {}

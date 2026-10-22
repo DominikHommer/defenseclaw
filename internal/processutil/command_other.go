@@ -32,14 +32,16 @@ func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) {
 // runTree runs cmd on a thread locked to this goroutine until it is reaped:
 // Linux sends the parent-death signal when the thread that started the child
 // ends, not the process, so the runtime must not end that thread while the
-// child still runs (G-small).
+// child still runs (G-small). No group signal follows the reap: the group
+// ID may then name an unrelated group.
 func runTree(cmd *exec.Cmd, _ bool) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	exitWithParent(cmd)
+	beginReap := exitWithParent(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	killDescendantsAtExit(cmd)
+	beginReap()
 	return cmd.Wait()
 }
