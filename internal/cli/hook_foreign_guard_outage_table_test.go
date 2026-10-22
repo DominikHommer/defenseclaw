@@ -60,7 +60,8 @@ func outageCellBlocks(t *testing.T, id, value, goos string, hooksOnlyPreserve bo
 	switch value {
 	case "blocks":
 		return true
-	case "runs", "per-user-route-blocks-linux-macos":
+	case "runs", "per-user-route-blocks-linux-macos", "per-user-route-blocks":
+		// The machine-policy route (the default) follows the mode.
 		return false
 	case "blocks-linux-macos":
 		return goos != "windows"
