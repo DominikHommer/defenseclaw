@@ -22,8 +22,8 @@ defenseclaw setup claude-code                # first setup defaults to observe: 
 defenseclaw setup claude-code --mode action  # block on policy hits
 ```
 
-On re-runs, pressing Enter keeps the current mode. Use `--mode observe` or
-`--mode action` to choose a mode explicitly.
+A re-run without `--mode` keeps the current mode, including with `--yes`.
+Use `--mode observe` or `--mode action` to choose a mode explicitly.
 
 On Windows, run the same commands in PowerShell. Quit and reopen Claude Code afterwards so it loads the hooks.
 
@@ -80,7 +80,9 @@ defenseclaw guardrail disable --yes
 With the default restart, disabling removes DefenseClaw hooks and OpenTelemetry
 settings from Claude Code's settings file. It preserves your other Claude Code
 settings. `defenseclaw guardrail enable` restores DefenseClaw hooks and telemetry
-settings. With `--no-restart`, the removal takes effect when you restart the gateway.
+settings. For a whole-guardrail disable with `--no-restart`, removal takes effect
+when you restart the gateway. With `--connector claudecode` and `--no-restart`,
+a running gateway removes the connector's entries at once.
 To remove the connector from DefenseClaw's configuration, run
 `defenseclaw setup remove claudecode --yes` (add `--force` if it is the last one).
 

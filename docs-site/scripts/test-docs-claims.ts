@@ -9,6 +9,18 @@ import { fileURLToPath } from 'node:url';
 
 const site = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repo = join(site, '..');
+const hookConnectors = [
+  { id: 'claudecode', command: 'claude-code', name: 'Claude Code' },
+  { id: 'codex', command: 'codex', name: 'Codex' },
+  { id: 'cursor', command: 'cursor', name: 'Cursor' },
+  { id: 'devin', command: 'devin', name: 'Devin' },
+  { id: 'copilot', command: 'copilot', name: 'Copilot' },
+  { id: 'hermes', command: 'hermes', name: 'Hermes' },
+  { id: 'antigravity', command: 'antigravity', name: 'Antigravity' },
+  { id: 'opencode', command: 'opencode', name: 'OpenCode' },
+  { id: 'kiro', command: 'kiro', name: 'Kiro' },
+  { id: 'amp', command: 'amp', name: 'Amp' },
+] as const;
 
 function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
@@ -70,23 +82,48 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
   });
 });
 
-describe('Claude Code setup and teardown', () => {
-  it('says disabling removes DefenseClaw entries but preserves other settings', () => {
-    const turnOff = page('connectors/claudecode.mdx').split('## Turn it off')[1]?.split('## Details')[0];
-    assert.ok(turnOff, 'Claude Code turn-off section is missing');
-    assert.match(turnOff, /removes? DefenseClaw(?:'s)? hooks and OpenTelemetry settings/i);
-    assert.match(turnOff, /preserves? (?:your|the) other Claude Code settings/i);
-    assert.match(turnOff, /guardrail enable.*(?:restores?|reinstalls?) DefenseClaw(?:'s)? (?:entries|hooks)/i);
+describe('Hook connector setup and teardown', () => {
+  it('limits the observe default to first setup in every CLI row and connector page', () => {
+    const reference = readFileSync(join(site, 'content/docs/reference/commands/cli.mdx'), 'utf8');
+    for (const { id, command } of hookConnectors) {
+      const row = reference.split('\n').find((line) => line.startsWith(`| \`defenseclaw setup ${command}\` |`));
+      assert.ok(row, `${id} CLI reference row is missing`);
+      assert.match(row, /first setup.*observe|observe.*first setup/i, `${id} CLI row must qualify the default`);
+      assert.match(row, /re-run.*keeps the current mode/i, `${id} CLI row must explain reruns`);
+
+      const setup = page(`connectors/${id}.mdx`).split('## Set up')[1]?.split('## Check it')[0];
+      assert.ok(setup, `${id} setup section is missing`);
+      assert.match(setup, /first setup.*observe|observe.*first setup/i, `${id} page must qualify the default`);
+      assert.match(setup, /re-run without `--mode` keeps the current mode/i, `${id} page must explain scripted reruns`);
+    }
   });
 
-  it('limits the observe default to first setup and explains reruns', () => {
-    const setup = readFileSync(join(site, 'content/docs/connectors/claudecode.mdx'), 'utf8')
-      .split('## Set up')[1]?.split('## Check it')[0];
-    assert.ok(setup, 'Claude Code setup section is missing');
-    const bareCommand = setup.split('\n').find((line) => /^defenseclaw setup claude-code\s+#/.test(line));
-    assert.ok(bareCommand, 'bare Claude Code setup command is missing');
-    assert.match(bareCommand, /first setup.*observe|observe.*first setup/i);
-    assert.match(setup, /re-?runs?[^\n]*keeps? (?:the )?current mode/i);
-    assert.match(setup, /defenseclaw setup claude-code --mode action/);
+  it('says what teardown removes and what it preserves on every connector page', () => {
+    for (const { id, name } of hookConnectors) {
+      const turnOff = page(`connectors/${id}.mdx`).split('## Turn it off')[1]?.split('## Details')[0];
+      assert.ok(turnOff, `${id} turn-off section is missing`);
+      assert.ok(!new RegExp(`This keeps ${name}'s settings`, 'i').test(turnOff), `${id} must not imply hooks stay installed`);
+      if (id === 'opencode' || id === 'amp') {
+        assert.match(turnOff, /removes? DefenseClaw's plugin/i, `${id} must name plugin removal`);
+        assert.match(turnOff, /edited plugin.*(?:is left|is kept)/i, `${id} must explain edited plugins`);
+        assert.match(turnOff, /guardrail enable.*(?:restores?|reinstalls?) DefenseClaw's plugin/i, `${id} must explain re-enable`);
+      } else {
+        assert.match(turnOff, /removes? DefenseClaw(?:'s)? hook/i, `${id} must name hook removal`);
+        assert.match(turnOff, /guardrail enable.*(?:restores?|reinstalls?) DefenseClaw(?:'s)? hook/i, `${id} must explain re-enable`);
+      }
+      assert.match(turnOff, new RegExp(`preserves? (?:your|the) other ${name} settings`, 'i'), `${id} must preserve unrelated settings`);
+    }
+    const claude = page('connectors/claudecode.mdx').split('## Turn it off')[1]?.split('## Details')[0];
+    assert.match(claude ?? '', /removes? DefenseClaw(?:'s)? hooks and OpenTelemetry settings/i);
+    const kiro = page('connectors/kiro.mdx').split('## Turn it off')[1]?.split('## Details')[0];
+    assert.match(kiro ?? '', /inert stub/i);
+  });
+
+  it('distinguishes whole-guardrail --no-restart from connector hot reload', () => {
+    const setup = page('connectors/claudecode.mdx').split('## Set up')[1]?.split('## Check it')[0];
+    assert.match(setup ?? '', /re-run without `--mode` keeps the current mode/i);
+    const turnOff = page('connectors/claudecode.mdx').split('## Turn it off')[1]?.split('## Details')[0];
+    assert.match(turnOff ?? '', /whole-guardrail disable.*`--no-restart`.*restart the gateway/i);
+    assert.match(turnOff ?? '', /`--connector claudecode`.*`--no-restart`.*running gateway.*(?:at once|without a restart)/i);
   });
 });
