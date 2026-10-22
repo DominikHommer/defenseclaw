@@ -6102,7 +6102,9 @@ def main():
     libc = ctypes.CDLL(None, use_errno=True)
     # PR_SET_CHILD_SUBREAPER, then PR_SET_PDEATHSIG: the supervisor reaps the
     # namespace's init however the process between them ends.
-    if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 or libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+    if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        return 125
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
         return 125
     if parent == 1 or os.getppid() != parent:
         return 124
