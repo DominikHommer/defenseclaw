@@ -416,7 +416,10 @@ def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
     assert "store.EnsureStageDirectory = windowsBundleEnsureStageDirectory" in go
     assert "store.PublishStageFile = windowsBundlePublishStageFile" in go
     assert "windowsBundleEnsurePrivateDirectory(filepath.Dir(dst))" in go
-    assert "writeWindowsBundleAdminFile(dst, raw)" in go
+    # The anchors are replaced, then sealed admin-only (w3-g3-obs splits the
+    # two steps so a failed seal is recorded as a changed file).
+    assert "writeWindowsBundleFile(dst, raw)" in go
+    assert "windowsBundlePublishPrivateFile(dst)" in go
     assert "'trust'" in module.split("function Invoke-DefenseClawBundleAclContract {", 1)[1].split("function Set-DefenseClawManagedAcls {", 1)[0]
     assert "s.EnsureStageDirectory(dir, parent)" in store
     assert "if !dirs[parent]" in store

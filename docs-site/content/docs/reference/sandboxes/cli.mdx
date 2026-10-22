@@ -554,10 +554,10 @@ again after `defenseclaw upgrade`, which says so when the feed is older than
 the new release. An install or update restarts the feed: a sandbox that was
 already running then shows DefenseClaw's own hook calls in full until you stop
 and start it (`sandbox ps` counts them and prints the two commands). Run as
-yourself, it prints the exact `sudo` command for this install. This feed is
-per-user only and is refused on a managed host. Managed Linux and macOS
-support sandboxes under the administrator's
-[sandbox policy](/docs/enterprise/runtime/sandboxes).
+yourself, it prints the exact `sudo` command for this install. This per-user feed installer
+is refused on managed hosts. The standalone managed Linux and macOS packages support
+sandboxes under the administrator's [sandbox policy](/docs/enterprise/runtime/sandboxes);
+the administrator configures their sensor services through the managed lifecycle.
 
 ```bash
 defenseclaw sandbox kernel-feed install
