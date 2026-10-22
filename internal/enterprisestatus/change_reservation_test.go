@@ -143,7 +143,11 @@ func TestChangeReservationKeepsItsPlace(t *testing.T) {
 	}
 	r.Release()
 	events := readSpool(t, spool)
-	if len(events) != 3 || events[2].EventID != r.id || events[2].Outcome != ChangeApplied {
+	byID := make(map[string]ChangeEvent, len(events))
+	for _, event := range events {
+		byID[event.EventID] = event
+	}
+	if saved := byID[r.id]; len(events) != 3 || saved.EventID != r.id || saved.Outcome != ChangeApplied {
 		t.Fatalf("spool = %+v, want the applied install under the reservation id", events)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(spool.StateDir, changeReservationsDirName)); len(entries) != 0 {
@@ -208,13 +212,17 @@ func TestChangeSpoolRecordsTheReservationOfACommandThatEnded(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("spool = %+v, want the interrupted set and the applied install", events)
 	}
-	interrupted := events[0]
+	byID := make(map[string]ChangeEvent, len(events))
+	for _, event := range events {
+		byID[event.EventID] = event
+	}
+	interrupted := byID[ended.id]
 	if interrupted.EventID != ended.id || interrupted.Kind != ChangeKindSecret || interrupted.Outcome != ChangeFailed ||
 		interrupted.ReasonCode != ChangeInterrupted || interrupted.SecretName != "splunk-hec-token" {
 		t.Fatalf("interrupted change = %+v", interrupted)
 	}
-	if events[1].EventID != written.id || events[1].Outcome != ChangeApplied {
-		t.Fatalf("applied install = %+v", events[1])
+	if applied := byID[written.id]; applied.EventID != written.id || applied.Outcome != ChangeApplied {
+		t.Fatalf("applied install = %+v", applied)
 	}
 	entries, err := os.ReadDir(filepath.Join(spool.StateDir, changeReservationsDirName))
 	if err != nil || len(entries) != 1 || entries[0].Name() != held.id+".json" {

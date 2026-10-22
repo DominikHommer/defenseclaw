@@ -20,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 )
 
@@ -70,6 +71,9 @@ func TestChangeSpoolRemovesOnlyReportedEvents(t *testing.T) {
 	next := writeSpoolEvents(t, spool, 1)
 	got := ListChangeEventIDs(spool.Dir)
 	want := append(append([]string{}, ids[3:]...), next...)
+	// ULIDs in the same millisecond have random suffixes; the spool lists
+	// by ID, not by the order these writes happened to finish.
+	sort.Strings(want)
 	if len(got) != len(want) {
 		t.Fatalf("spool = %v, want %v (the three reported events removed)", got, want)
 	}
