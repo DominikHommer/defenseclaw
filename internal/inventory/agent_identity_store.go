@@ -19,7 +19,7 @@ import (
 // whichever runs first wins and the other is a no-op. The last_seen index
 // serves the listing's order and its pages.
 var agentIdentitiesDDL = []string{
-	`CREATE TABLE IF NOT EXISTS agent_identities (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0, user_domain TEXT, user_incarnation TEXT)`,
+	`CREATE TABLE IF NOT EXISTS agent_identities (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0, user_domain TEXT, user_incarnation TEXT, user_upn TEXT, subagents_seen INTEGER NOT NULL DEFAULT 0, last_subagent_id TEXT)`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_identities_last_seen ON agent_identities(last_seen DESC, agent_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_identities_connector ON agent_identities(connector)`,
 	// The sessions an agent identity has counted: the count is of distinct
@@ -28,6 +28,10 @@ var agentIdentitiesDDL = []string{
 	`CREATE TABLE IF NOT EXISTS agent_identity_sessions (agent_id TEXT NOT NULL, session_id TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY (agent_id, session_id)) WITHOUT ROWID`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_identity_sessions_first_seen ON agent_identity_sessions(first_seen)`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_identity_sessions_last_seen ON agent_identity_sessions(last_seen)`,
+	// The sub-agent instances (ais-) an agent identity has counted, so one
+	// that hooks again after a gateway restart is not counted twice.
+	`CREATE TABLE IF NOT EXISTS agent_identity_subagents (agent_id TEXT NOT NULL, instance_id TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY (agent_id, instance_id)) WITHOUT ROWID`,
+	`CREATE INDEX IF NOT EXISTS idx_agent_identity_subagents_last_seen ON agent_identity_subagents(last_seen)`,
 	// The records a prune keeps aside for the gateway's 1.0.3 assignment
 	// bridge (retireLegacyAgentIdentities); never listed.
 	`CREATE TABLE IF NOT EXISTS agent_identities_retired (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0)`,
@@ -55,13 +59,18 @@ type AgentIdentityRecord struct {
 	// incarnation or listed record, inventory.db v8): where both sides name
 	// one, it tells two accounts of one uid apart where their domains may
 	// overlap. "" for a row written before, or while none was known.
-	UserIncarnation string    `json:"-"`
-	Connector       string    `json:"connector"`
-	InstallFP       string    `json:"install_fp,omitempty"`
-	MachineHash     string    `json:"machine_hash"`
-	FirstSeen       time.Time `json:"first_seen"`
-	LastSeen        time.Time `json:"last_seen"`
-	LastSessionID   string    `json:"last_session_id,omitempty"`
+	UserIncarnation string `json:"-"`
+	// UPN is the userPrincipalName of the account when the agent was last
+	// seen, from the directory facts the gateway holds for its uid or SID
+	// (inventory.db v9). "" for an account the directory gives none, a
+	// local account among them.
+	UPN           string    `json:"upn,omitempty"`
+	Connector     string    `json:"connector"`
+	InstallFP     string    `json:"install_fp,omitempty"`
+	MachineHash   string    `json:"machine_hash"`
+	FirstSeen     time.Time `json:"first_seen"`
+	LastSeen      time.Time `json:"last_seen"`
+	LastSessionID string    `json:"last_session_id,omitempty"`
 	// SessionsSeen is the session count. In an UpsertAgentIdentities batch
 	// it is the number of sessions this process first saw since the previous
 	// flush.
@@ -71,6 +80,19 @@ type AgentIdentityRecord struct {
 	// so a session resumed after a gateway restart is new to it; the upsert
 	// counts only ids the store has not retained for this agent.
 	SessionIDs []string `json:"-"`
+	// SubagentsSeen counts the sub-agent instances (ais-) the agent ran, in
+	// its own sessions or in child sessions, and LastSubagentID is the
+	// newest of them (inventory.db v9). They are not counted as sessions.
+	SubagentsSeen  int64  `json:"subagents_seen"`
+	LastSubagentID string `json:"last_subagent_id,omitempty"`
+}
+
+// AgentIdentitySubagent is one sighting of a sub-agent instance of an
+// agent identity.
+type AgentIdentitySubagent struct {
+	AgentID    string
+	InstanceID string
+	Seen       time.Time
 }
 
 // agentIdentityBatchSessionCap bounds the session ids a batch names. A
@@ -198,8 +220,10 @@ func restartAnotherAccountsAgentIdentity(ctx context.Context, tx *sql.Tx, rec Ag
 		slices.ContainsFunc(previous, func(domain string) bool { return slices.Contains(domains, domain) }):
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_identity_sessions WHERE agent_id = ?`, rec.AgentID); err != nil {
-		return err
+	for _, table := range []string{"agent_identity_sessions", "agent_identity_subagents"} {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE agent_id = ?`, rec.AgentID); err != nil {
+			return err
+		}
 	}
 	_, err = tx.ExecContext(ctx, `DELETE FROM agent_identities WHERE agent_id = ?`, rec.AgentID)
 	return err
@@ -214,19 +238,20 @@ type AgentIdentitySession struct {
 
 // UpsertAgentIdentities writes one batch in a single transaction.
 func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []AgentIdentityRecord) error {
-	return s.UpsertAgentIdentitiesAndExclude(ctx, batch, nil)
+	return s.UpsertAgentIdentityBatch(ctx, batch, nil, nil)
 }
 
-// UpsertAgentIdentitiesAndExclude writes sightings and late child-session
-// exclusions atomically. A known agent keeps its first_seen, moves last_seen
-// forward, and counts each named session only once.
-func (s *InventoryStore) UpsertAgentIdentitiesAndExclude(
-	ctx context.Context, batch []AgentIdentityRecord, excluded []AgentIdentitySession,
+// UpsertAgentIdentityBatch writes sightings, late child-session exclusions
+// and sub-agent sightings atomically. A known agent keeps its first_seen,
+// moves last_seen forward, and counts each named session and each sub-agent
+// instance only once.
+func (s *InventoryStore) UpsertAgentIdentityBatch(
+	ctx context.Context, batch []AgentIdentityRecord, excluded []AgentIdentitySession, subagents []AgentIdentitySubagent,
 ) error {
 	if s == nil || s.db == nil {
 		return errors.New("inventory store: not open")
 	}
-	if len(batch) == 0 && len(excluded) == 0 || s.legacySchema {
+	if len(batch) == 0 && len(excluded) == 0 && len(subagents) == 0 || s.legacySchema {
 		return nil
 	}
 	return s.runInTx(ctx, "agent_identities.upsert", func(tx *sql.Tx) error {
@@ -234,10 +259,11 @@ func (s *InventoryStore) UpsertAgentIdentitiesAndExclude(
 			return err
 		}
 		stmt, err := tx.PrepareContext(ctx, `INSERT INTO agent_identities
-			(agent_id, user_id, user_name, connector, install_fp, machine_hash, first_seen, last_seen, last_session_id, sessions_seen, user_domain, user_incarnation)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(agent_id, user_id, user_name, connector, install_fp, machine_hash, first_seen, last_seen, last_session_id, sessions_seen, user_domain, user_incarnation, user_upn)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(agent_id) DO UPDATE SET
 				user_name = COALESCE(NULLIF(excluded.user_name, ''), agent_identities.user_name),
+				user_upn = COALESCE(NULLIF(excluded.user_upn, ''), agent_identities.user_upn),
 				user_domain = COALESCE(NULLIF(excluded.user_domain, ''), agent_identities.user_domain),
 				user_incarnation = COALESCE(NULLIF(excluded.user_incarnation, ''), agent_identities.user_incarnation),
 				first_seen = min(agent_identities.first_seen, excluded.first_seen),
@@ -308,7 +334,8 @@ func (s *InventoryStore) UpsertAgentIdentitiesAndExclude(
 			}
 			if _, err := stmt.ExecContext(ctx, rec.AgentID, rec.UserID, rec.UserName, rec.Connector,
 				rec.InstallFP, rec.MachineHash, formatAgentIdentityTime(first), formatAgentIdentityTime(last),
-				lastSessionID, sessions, strings.TrimSpace(rec.UserDomain), strings.TrimSpace(rec.UserIncarnation)); err != nil {
+				lastSessionID, sessions, strings.TrimSpace(rec.UserDomain), strings.TrimSpace(rec.UserIncarnation),
+				strings.TrimSpace(rec.UPN)); err != nil {
 				return err
 			}
 		}
@@ -341,14 +368,56 @@ func (s *InventoryStore) UpsertAgentIdentitiesAndExclude(
 				return err
 			}
 		}
-		return nil
+		return upsertAgentIdentitySubagents(ctx, tx, subagents)
 	})
 }
 
+// upsertAgentIdentitySubagents counts each sub-agent instance of a stored
+// agent identity once, oldest sighting first, so the last one counted is the
+// newest. A sub-agent of an identity the store has no row for is dropped:
+// the hooks that report it record the identity in the same batch.
+func upsertAgentIdentitySubagents(ctx context.Context, tx *sql.Tx, subagents []AgentIdentitySubagent) error {
+	subagents = slices.Clone(subagents)
+	slices.SortStableFunc(subagents, func(a, b AgentIdentitySubagent) int { return a.Seen.Compare(b.Seen) })
+	for _, sub := range subagents {
+		if sub.AgentID == "" || sub.InstanceID == "" {
+			continue
+		}
+		seen := sub.Seen
+		if seen.IsZero() {
+			seen = time.Now()
+		}
+		at := formatAgentIdentityTime(seen)
+		inserted, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO agent_identity_subagents (agent_id, instance_id, first_seen, last_seen)
+			SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM agent_identities WHERE agent_id = ?)`,
+			sub.AgentID, sub.InstanceID, at, at, sub.AgentID)
+		if err != nil {
+			return err
+		}
+		added, err := inserted.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if added == 0 {
+			if _, err := tx.ExecContext(ctx, `UPDATE agent_identity_subagents SET last_seen = max(last_seen, ?)
+				WHERE agent_id = ? AND instance_id = ?`, at, sub.AgentID, sub.InstanceID); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE agent_identities SET subagents_seen = subagents_seen + 1, last_subagent_id = ?
+			WHERE agent_id = ?`, sub.InstanceID, sub.AgentID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // PruneAgentIdentitySessions deletes orphaned and expired deduplication
-// rows. A resumed chat refreshes last_seen, so it stays deduplicated while
-// active; sessions_seen remains a cumulative count after rows expire. A zero
-// cutoff deletes only orphaned rows.
+// rows of sessions and sub-agents. A resumed chat refreshes last_seen, so it
+// stays deduplicated while active; sessions_seen and subagents_seen remain
+// cumulative counts after rows expire. A zero cutoff deletes only orphaned
+// rows.
 func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context, cutoff time.Time) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, errors.New("inventory store: not open")
@@ -361,14 +430,17 @@ func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context, cutoff 
 		if err := ensureAgentIdentitiesTable(ctx, tx); err != nil {
 			return err
 		}
-		result, err := tx.ExecContext(ctx, `DELETE FROM agent_identity_sessions
-			WHERE last_seen < ? OR NOT EXISTS (SELECT 1 FROM agent_identities
-				WHERE agent_identities.agent_id = agent_identity_sessions.agent_id)`,
-			formatAgentIdentityTime(cutoff))
-		if err != nil {
-			return err
+		for _, table := range []string{"agent_identity_sessions", "agent_identity_subagents"} {
+			result, err := tx.ExecContext(ctx, `DELETE FROM `+table+`
+				WHERE last_seen < ? OR NOT EXISTS (SELECT 1 FROM agent_identities
+					WHERE agent_identities.agent_id = `+table+`.agent_id)`,
+				formatAgentIdentityTime(cutoff))
+			if err != nil {
+				return err
+			}
+			n, _ := result.RowsAffected()
+			removed += n
 		}
-		removed, _ = result.RowsAffected()
 		return nil
 	})
 	return removed, err
@@ -403,11 +475,12 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 		// Retired rows are records 1.0.0 to 1.0.3 wrote, which keep no
 		// account domains (v7) and no account incarnations: they are
 		// selected by their uid.
-		from = ` FROM (SELECT ` + agentIdentityColumns + `, user_domain, user_incarnation FROM agent_identities UNION ALL SELECT ` +
-			agentIdentityColumns + `, NULL AS user_domain, NULL AS user_incarnation FROM agent_identities_retired)`
+		from = ` FROM (SELECT ` + agentIdentityColumns + `, user_domain, user_incarnation, user_upn, subagents_seen, last_subagent_id FROM agent_identities UNION ALL SELECT ` +
+			agentIdentityColumns + `, NULL AS user_domain, NULL AS user_incarnation, NULL AS user_upn, 0 AS subagents_seen, NULL AS last_subagent_id FROM agent_identities_retired)`
 	}
 	query := `SELECT agent_id, user_id, COALESCE(user_name, ''), connector, COALESCE(install_fp, ''), machine_hash,
-		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen, COALESCE(user_domain, ''), COALESCE(user_incarnation, '')` + from + where +
+		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen, COALESCE(user_domain, ''), COALESCE(user_incarnation, ''),
+		COALESCE(user_upn, ''), subagents_seen, COALESCE(last_subagent_id, '')` + from + where +
 		` ORDER BY last_seen DESC, agent_id`
 	// The user filter runs in Go (useridentity.AccountFilter), so a
 	// bare name selects a row stored as user@realm or DOMAIN\user, and the
@@ -453,7 +526,8 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 		var rec AgentIdentityRecord
 		var first, last string
 		if err := rows.Scan(&rec.AgentID, &rec.UserID, &rec.UserName, &rec.Connector, &rec.InstallFP,
-			&rec.MachineHash, &first, &last, &rec.LastSessionID, &rec.SessionsSeen, &rec.UserDomain, &rec.UserIncarnation); err != nil {
+			&rec.MachineHash, &first, &last, &rec.LastSessionID, &rec.SessionsSeen, &rec.UserDomain, &rec.UserIncarnation,
+			&rec.UPN, &rec.SubagentsSeen, &rec.LastSubagentID); err != nil {
 			return nil, 0, err
 		}
 		if user != "" && !account.MatchesIn(rec.UserID, rec.UserName, rec.UserDomain, rec.UserIncarnation) {

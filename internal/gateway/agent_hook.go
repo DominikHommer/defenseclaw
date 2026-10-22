@@ -1883,7 +1883,7 @@ func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) Agen
 	// who send the same session id get different instances.
 	facts := resolveHookAgentIdentity(ctx, req)
 	identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
-	newSession := false
+	newSession, subagentInstance := false, ""
 	if reg := SharedAgentRegistry(); reg != nil {
 		resolved, minted := reg.ResolveForAgentIdentity(ctx, facts.ID, req.SessionID, identity.AgentID)
 		if identity.AgentID == "" {
@@ -1898,6 +1898,7 @@ func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) Agen
 		if facts.ID != "" && identity.AgentInstanceID != "" {
 			if subagent := hookSubagentID(req); subagent != "" {
 				identity.AgentInstanceID = agentidentity.SubagentInstanceID(identity.AgentInstanceID, subagent)
+				subagentInstance = identity.AgentInstanceID
 			}
 		}
 	}
@@ -1907,6 +1908,7 @@ func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) Agen
 		sharedAgentIdentities.observe(facts, "", false)
 	default:
 		sharedAgentIdentities.observe(facts, req.SessionID, newSession)
+		sharedAgentIdentities.observeSubagent(facts.ID, req.SessionID, subagentInstance, identity.AgentInstanceID)
 	}
 	return identity
 }

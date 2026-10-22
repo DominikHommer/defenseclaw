@@ -53,8 +53,11 @@ type agentIdentityFacts struct {
 	// (agentIdentityAccountToken).
 	UserDomain      string
 	UserIncarnation string
-	Connector       string
-	InstallFP       string
+	// UserUPN is the account's UPN in the directory facts the gateway
+	// cached for the uid or SID (agentIdentityAccountUPN).
+	UserUPN   string
+	Connector string
+	InstallFP string
 	// InstallHint is a config root the agent claimed (a CLAUDE_CONFIG_DIR or
 	// CODEX_HOME style override seen in the payload) that differs from
 	// InstallFP. It is recorded for operators and never moves the ID.
@@ -115,6 +118,7 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		UserName:        firstNonEmpty(account, user.Name),
 		UserDomain:      agentIdentityAccountDomains(user.ID),
 		UserIncarnation: agentIdentityAccountToken(agentidentity.NormalizeUserID(user.ID)),
+		UserUPN:         agentIdentityAccountUPN(user.ID),
 		Connector:       connectorName,
 		InstallFP:       agentIdentityInstallFP(connectorName, user),
 	}
@@ -152,6 +156,22 @@ func agentIdentityAccountDomains(userID string) string {
 		return ""
 	}
 	return useridentity.AccountDomains(facts)
+}
+
+// agentIdentityAccountUPN is the UPN of the account a uid or SID's hooks ran
+// as, from the directory facts the gateway cached for it, or "" while none
+// are cached or the directory gives the account none (a local account). It
+// never looks the account up, so the hook path does not wait for it.
+func agentIdentityAccountUPN(userID string) string {
+	userID = agentidentity.NormalizeUserID(userID)
+	if userID == "" {
+		return ""
+	}
+	facts, _, ok := peerDirectoryCache().peek(userID)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(facts.UPN)
 }
 
 // hookAgentIdentityUser picks the user an agent identity belongs to, most
