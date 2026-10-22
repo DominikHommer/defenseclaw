@@ -252,7 +252,10 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	}
 	// While the harness runs, other sessions' ends leave the sandbox alone,
 	// and what its copy held as it last stopped is no longer known.
-	release := s.app.holdSession(s.sb.Name)
+	release, err := s.app.holdSession(s.sb.Name)
+	if err != nil {
+		return -1, err
+	}
 	defer release()
 	s.app.forgetStoppedCopy(s.sb.Name)
 	stop := s.beginSession(ctx)
@@ -361,7 +364,10 @@ var loginShell = []string{"sh", "-c", "if command -v bash >/dev/null 2>&1; then 
 func (s *session) attachShell(ctx context.Context) (int, error) {
 	// While the shell runs, other sessions' ends leave the sandbox alone,
 	// and what its copy held as it last stopped is no longer known.
-	release := s.app.holdSession(s.sb.Name)
+	release, err := s.app.holdSession(s.sb.Name)
+	if err != nil {
+		return -1, err
+	}
 	defer release()
 	s.app.forgetStoppedCopy(s.sb.Name)
 	stop := s.beginSession(ctx)
@@ -1455,6 +1461,18 @@ func (e *sessionDeleteError) Unwrap() error { return e.err }
 func (s *session) finish(ctx context.Context, stopped bool) error {
 	a := s.app
 	name := s.sb.Name
+	unlock, err := a.sessionGate(name)
+	if err != nil {
+		return fmt.Errorf("cannot confirm whether another session uses %s: %w; run `%s status %s` before retrying", name, err, CommandName, name)
+	}
+	defer unlock()
+	// A reconnect may have acquired its lease while the copy's final
+	// apply/branch/patch question was open. The gate closes the race between
+	// this count and Stop or Delete.
+	s.others, err = a.attachedSessionsChecked(name)
+	if err != nil {
+		return fmt.Errorf("cannot confirm whether another session uses %s: %w; run `%s status %s` before retrying", name, err, CommandName, name)
+	}
 	switch {
 	case s.rm && s.liveRun:
 		s.notDeleted("its detached run is still going", "the run ends")
