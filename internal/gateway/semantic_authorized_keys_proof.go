@@ -176,32 +176,78 @@ func trustedGitBashAuthorizedKeysWrite(input actionfacts.Input) bool {
 	return parsed.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(parsed)
 }
 
-func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
+// trustedInlineAuthorizedKeysWrite proves the write of one inline
+// interpreter program (python -c, perl/ruby/node -e).
+//
+// A python -c program is read whole, its comments, docstrings and string
+// text included. Whether a string runs depends on the modules the program
+// loads, and the interpreter imports on its own at start-up (site and
+// sitecustomize, a codec): a module that the import path of the shell running
+// the command supplies (its PYTHONPATH, PYTHONHOME or user site, a module of
+// its working directory) can run __main__.__doc__ or any string of
+// sys.orig_argv. The gateway does not see that shell's environment (an
+// export of an earlier call in a persistent shell, a profile, a function
+// standing in for python3), and its own environment is not the shell's, so
+// no string of the program is proven inert.
+func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
 	if len(facts.Commands) != 1 {
 		return false
 	}
 	command := facts.Commands[0]
-	if command.Effect != actionfacts.EffectExecute || !command.ArgvComplete ||
+	if command.Effect != actionfacts.EffectExecute ||
 		command.ParentCommandID != 0 || len(command.Argv) != 3 ||
 		len(command.Redirects) != 0 || len(command.Wrappers) != 0 {
 		return false
 	}
 	switch command.Program {
 	case "python", "python3":
-		return command.Argv[1] == "-c" && facts.ActiveHome != "" &&
-			(trustedPathlibAuthorizedKeysWriteProof(command.Argv[2], facts.ActiveHome, facts.CWD) ||
-				trustedPythonPathAuthorizedKeysWriteProof(command.Argv[2]) ||
-				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, "python"))
+		if command.Argv[1] != "-c" || facts.ActiveHome == "" ||
+			(!command.ArgvComplete && !trustedPythonAssignedArgv(input, command.Argv)) {
+			return false
+		}
+		return trustedPathlibAuthorizedKeysWriteProof(command.Argv[2], facts.ActiveHome, facts.CWD) ||
+			trustedPythonPathAuthorizedKeysWriteProof(command.Argv[2]) ||
+			trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, "python")
 	case "perl":
-		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
+		return command.ArgvComplete && command.Argv[1] == "-e" && facts.ActiveHome != "" &&
 			(trustedPerlAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
 				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, "perl"))
 	case "ruby", "node":
-		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
+		return command.ArgvComplete && command.Argv[1] == "-e" && facts.ActiveHome != "" &&
 			trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, command.Program)
 	default:
 		return false
 	}
+}
+
+// trustedPythonAssignedArgv reports whether the shell syntax of the one
+// Python invocation proves its argv when PYTHONPATH or PYTHONHOME
+// assignments prefix it (PYTHONPATH=/x python3 -c '...'). A sole such
+// assignment makes ActionFacts leave ArgvComplete false; the AST can still
+// prove the exact three arguments of the call.
+func trustedPythonAssignedArgv(input actionfacts.Input, argv []string) bool {
+	command, ok := trustedBashCommandInput(input)
+	if !ok || len(command) > 64<<10 {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
+	if err != nil || len(file.Stmts) != 1 {
+		return false
+	}
+	stmt := file.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) == 0 || stmt.Negated || stmt.Background ||
+		len(stmt.Redirs) != 0 || len(call.Args) != len(argv) {
+		return false
+	}
+	for _, assignment := range call.Assigns {
+		if assignment.Name == nil ||
+			assignment.Name.Value != "PYTHONPATH" && assignment.Name.Value != "PYTHONHOME" {
+			return false
+		}
+	}
+	fields, ok := trustedBashStaticFields(call)
+	return ok && slices.Equal(fields, argv)
 }
 
 func trustedPathlibAuthorizedKeysWriteProof(code, home, cwd string) bool {
@@ -1193,42 +1239,58 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 		}
 	}
-	for _, candidate := range facts.Paths {
-		if candidate.Access != actionfacts.PathAccessWrite &&
-			candidate.Access != actionfacts.PathAccessAppend {
-			continue
-		}
-		command, ok := integrityCommandByID(facts, candidate.CommandID)
-		if !ok || !integrityCommandMutatesPath(command, candidate) ||
-			((!(integrityExplicitCommandMutator(command, candidate)) && (command.Program != "dd" || !(command.ArgvComplete))) && !(integrityStructuredFileMutator(facts, command))) {
-			continue
-		}
-		target := candidate.Resolved
-		// A POSIX shell running on Windows can leave a relative path
-		// unresolved because ActionFacts does not reinterpret the Windows CWD
-		// as a POSIX root. The owned, literal redirect still names a local
-		// file relative to that CWD.
-		if target == "" && command.Dialect == actionfacts.DialectPOSIX &&
-			candidate.Flavor == actionfacts.PathFlavorPOSIX &&
-			candidate.Normalized != "" && !isAbsoluteSemanticPath(candidate.Normalized) &&
-			!strings.ContainsAny(candidate.Value, "*?[]$`\\") &&
-			!strings.HasPrefix(candidate.Value, "~") &&
-			integrityCommandOwnsStaticRedirect(command, candidate) {
-			target = filepath.Join(facts.CWD, filepath.FromSlash(candidate.Normalized))
-		}
-		if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
-			target = raw
-		}
-		ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
-			target == hookpaths.CopyDestination(command.Argv, clientCWD)
-		if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
-			continue
-		}
-		if replacedBySed[target] && !isProtected(target) {
-			continue
-		}
-		if writeTarget(target, false, ownCopy) {
-			return true
+	// A native write call with a key outside its reviewed schema stays
+	// partial and names no path; the harness still writes the file its
+	// target key names (actionfacts.UnknownKeyWriteTargetViews), which the
+	// hook's write evidence lists, so each such target is judged as well.
+	views := append([]actionfacts.Facts{facts}, actionfacts.UnknownKeyWriteTargetViews(request.Input, facts)...)
+	for _, view := range views {
+		for _, candidate := range view.Paths {
+			if candidate.Access != actionfacts.PathAccessWrite &&
+				candidate.Access != actionfacts.PathAccessAppend {
+				continue
+			}
+			command, ok := integrityCommandByID(view, candidate.CommandID)
+			if !ok || !integrityCommandMutatesPath(command, candidate) ||
+				((!(integrityExplicitCommandMutator(command, candidate)) && (command.Program != "dd" || !(command.ArgvComplete))) && !(integrityStructuredFileMutator(view, command))) {
+				continue
+			}
+			target := candidate.Resolved
+			// A POSIX shell running on Windows can leave a relative path
+			// unresolved because ActionFacts does not reinterpret the Windows CWD
+			// as a POSIX root. The owned, literal redirect still names a local
+			// file relative to that CWD.
+			if target == "" && command.Dialect == actionfacts.DialectPOSIX &&
+				candidate.Flavor == actionfacts.PathFlavorPOSIX &&
+				candidate.Normalized != "" && !isAbsoluteSemanticPath(candidate.Normalized) &&
+				!strings.ContainsAny(candidate.Value, "*?[]$`\\") &&
+				!strings.HasPrefix(candidate.Value, "~") &&
+				integrityCommandOwnsStaticRedirect(command, candidate) {
+				target = filepath.Join(view.CWD, filepath.FromSlash(candidate.Normalized))
+			}
+			// A structured write names its target from the event cwd. A
+			// gateway that could not validate that cwd (ProtectHome) has no
+			// resolved path for a relative target: place it in the client's
+			// cwd, as the hook keyed it (hookpaths.ResolveConnector), or the
+			// write through a link there was never judged.
+			if target == "" && candidate.Normalized != "" && integrityStructuredFileMutator(view, command) &&
+				!strings.ContainsAny(candidate.Normalized, "*?[]$`") && !strings.HasPrefix(candidate.Normalized, "~") {
+				target = candidate.Normalized
+			}
+			if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
+				target = raw
+			}
+			ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
+				target == hookpaths.CopyDestination(command.Argv, clientCWD)
+			if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
+				continue
+			}
+			if replacedBySed[target] && !isProtected(target) {
+				continue
+			}
+			if writeTarget(target, false, ownCopy) {
+				return true
+			}
 		}
 	}
 	// An apply_patch edit (its own tool or a shell wrapper) names its files

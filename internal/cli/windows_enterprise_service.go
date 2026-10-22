@@ -1287,7 +1287,7 @@ func runWindowsEnterprisePowerShellEngineWithRunner(
 					))
 				} else {
 					failures = append(failures, fmt.Errorf(
-						"Windows enterprise installer exited with code %d",
+						"windows enterprise installer exited with code %d",
 						exit.ExitCode(),
 					))
 				}

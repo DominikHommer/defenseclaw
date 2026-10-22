@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
@@ -121,8 +122,11 @@ type agentHookRequest struct {
 	ToolName                    string
 	ToolArgs                    json.RawMessage
 	ToolArgsProjectionUncertain bool
-	Content                     string
-	Direction                   string
+	// ToolCallUnparsed: the connector's decoder found no tool call it can
+	// read (connector.HookProfileRequest.ToolCallUnparsed).
+	ToolCallUnparsed bool
+	Content          string
+	Direction        string
 	// HookSurface names the connector-owned hook config that invoked this
 	// request, for connectors that install more than one with differing veto
 	// contracts. Setup marks each config's command and the bridge forwards
@@ -321,20 +325,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required"})
 				return
 			}
-			vscodeLocal := copilotHookDialectFromHeaders(r.Header) == connector.CopilotHookSurfaceVSCodeLocal
-			if local, ok := connector.CopilotVSCodeLocalEventForCLIHook(event); !vscodeLocal && ok &&
-				payloadString(payload, "hook_event_name") == local &&
-				payload["toolName"] == nil && payload["toolArgs"] == nil {
-				// GAP-1903: the VS Code Local harness also runs the per-user
-				// Copilot CLI hook file, under the Local event the bound CLI
-				// event maps to, and sends it the Local payload (snake_case
-				// tool_name/tool_input). Decoded as a CLI body, the call had
-				// no authoritative arguments and its command rules stayed
-				// detection-only. The Copilot CLI's own camelCase bodies carry
-				// no hook_event_name, and the body may only name the event
-				// the hook command is bound to.
-				event, vscodeLocal = local, true
-			}
+			// The registered hook surface and event own the dialect. Body
+			// fields cannot select a different parser.
+			var vscodeLocal bool
+			event, vscodeLocal = copilotargs.LocalDialect(copilotHookDialectFromHeaders(r.Header), event)
 			if vscodeLocal {
 				// The VS Code Local harness names the event in its body.
 				// It must be the event the hook command is bound to, so a
@@ -410,6 +404,27 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// request mints.
 		agentIdentityID := resolveHookAgentIdentity(r.Context(), agentHookRequest{ConnectorName: connectorName, Payload: payload}).ID
 		req := normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawBody, profile, registeredEvent, agentIdentityID)
+		toolRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
+		if toolRoute == connector.ToolEventRouteStructuredAction ||
+			profile.ToolCallLifecycle.Version == 0 && isGenericToolInspectionEvent(req.HookEventName) {
+			if !hookToolCallJSONUnambiguous(connectorName, rawBody) {
+				req.ToolCallUnparsed = true
+			}
+			// A mapped Local event owns snake_case tool fields. A CLI-shaped
+			// decoy cannot switch the registered route or hide its target.
+			if connectorName == "copilot" && copilotVSCodeLocalFromContext(r.Context()) &&
+				(payload["toolName"] != nil || payload["toolArgs"] != nil) {
+				req.ToolCallUnparsed = true
+			}
+			if connectorName == "copilot" && !copilotVSCodeLocalFromContext(r.Context()) &&
+				(payload["hook_event_name"] != nil || payload["tool_name"] != nil ||
+					payload["tool_input"] != nil) {
+				req.ToolCallUnparsed = true
+			}
+			if connectorName == "copilot" && copilotWriteCallUnproven(req.ToolName, req.ToolArgs, req.CWD, hookActiveHome(r.Context())) {
+				req.ToolCallUnparsed = true
+			}
+		}
 		a.hermesTasks.fill(&req)
 		if req.HookEventName == "" {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
@@ -2106,6 +2121,7 @@ func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload 
 	if decoded.ToolName != "" {
 		req.ToolName = decoded.ToolName
 	}
+	req.ToolCallUnparsed = decoded.ToolCallUnparsed
 	if decoded.ToolArgsAuthoritative {
 		req.ToolArgs = append(json.RawMessage(nil), decoded.ToolArgs...)
 		req.ToolArgsProjectionUncertain = len(req.ToolArgs) == 0
@@ -2121,6 +2137,10 @@ func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload 
 		toolArgs := profile.DecodeToolArgs(rawPayload)
 		req.ToolArgsProjectionUncertain = len(toolArgs) == 0
 		if len(toolArgs) == 0 {
+			// A body the raw decoder rejects (a duplicate key, an alias
+			// collision) is an unread tool call even when the map decode
+			// found one: refuse it, never judge it as an empty call.
+			req.ToolCallUnparsed = true
 			toolArgs = json.RawMessage(`{}`)
 		}
 		req.ToolArgs = append(json.RawMessage(nil), toolArgs...)
@@ -2290,6 +2310,16 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// handles the "non-enforceable event" case by downgrading to
 		// would-block automatically.
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
+	case structuredToolEvent && req.ToolCallUnparsed:
+		// A tool call the connector's decoder cannot read is refused, not
+		// judged as an empty call (fail closed, GAP-0337).
+		a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
+		verdict = &ToolInspectVerdict{
+			Action: "block", Severity: "HIGH", Confidence: 1.0,
+			Reason: fmt.Sprintf("DefenseClaw could not read the tool call in this %s hook payload, "+
+				"so it cannot show the call is safe and blocks it. Update DefenseClaw and the agent if this repeats.", req.ConnectorName),
+			Findings: []string{"HOOK-TOOL-CALL-UNPARSED"},
+		}
 	case structuredToolEvent:
 		if req.ToolArgsProjectionUncertain {
 			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
@@ -2298,8 +2328,8 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			req.ConnectorName, req.ToolName, runtime.GOOS,
 		)
 		if req.ConnectorName == "copilot" && (req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal ||
-			connector.CopilotVSCodeLocalTool(req.ToolName)) {
-			fallbackTool = connector.CopilotVSCodeLocalActionTool(req.ToolName)
+			copilotargs.LocalTool(req.ToolName)) {
+			fallbackTool = copilotargs.LocalActionTool(req.ToolName)
 		}
 		actionTool, resourceIdentity := trustedToolActionFromContext(
 			ctx, req.ConnectorName, req.ToolName, fallbackTool,
@@ -2614,6 +2644,14 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 	case "amp":
 		if out, dir, ok := connector.AmpBashTrustedShellArgs(toolName, args); ok {
 			return out, dir
+		}
+	case "copilot":
+		// The Copilot CLI edit and create tools carry a display-only
+		// description or file mode beside their reviewed fields; judged
+		// with it, the call stayed partial and named no target for the
+		// path rules and the hook's write evidence.
+		if out, ok := copilotargs.WriteArgsWithoutMetadata(copilotargs.LocalActionTool(toolName), args); ok {
+			return out, ""
 		}
 	}
 	if out, dir, ok := connector.TrustedShellArgs(connectorName, toolName, args); ok {

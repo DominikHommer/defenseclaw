@@ -5,6 +5,7 @@
 package hookpaths
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"io/fs"
@@ -18,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
@@ -562,8 +564,30 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 // could not be trusted. A regular file maps to itself, unless it is a hard
 // link to one of the user's authorized-keys files. An operand
 // is never dropped silently: when one cannot be listed (over a bound, or the command exceeds
-// the shell analysis limits) the map carries TruncatedKey.
+// the shell analysis limits) the map carries TruncatedKey. The body is read
+// as the Claude Code and Codex command hooks send it.
 func Resolve(payload []byte) string {
+	return ResolveConnector("", "", "", payload)
+}
+
+// ResolveConnector is Resolve for a hook body of connector, read as the
+// gateway's profile for that connector reads it. surface and event are the
+// hook command's --hook-surface value and bound event, the values the hook
+// sends the gateway; only Copilot reads them. A Copilot body is read in the
+// dialect the gateway selects from them (copilotargs.LocalDialect): the
+// CLI's toolName and toolArgs, or the VS Code Local harness's tool_name and
+// tool_input, through the copilotargs projection the gateway's Copilot
+// profiles use, so a freeform apply_patch, a toolArgs JSON string and a VS
+// Code Local tool name the gateway judges are the call resolved here. A body
+// that spells the tool name, or the tool arguments, twice with different
+// values is marked incomplete: no client sends one, and an operand this map
+// does not list fails closed where the gateway cannot place it.
+//
+// A structured write call over the ActionFacts analysis limits is judged by
+// the gateway on its reduced call (actionfacts.OverLimitWriteTargetReduction),
+// so the map lists that call's targets and the limit alone does not make it
+// incomplete. Any other reason still does.
+func ResolveConnector(connector, surface, event string, payload []byte) string {
 	if len(payload) > MaxPayloadBytes {
 		return incompleteEvidence("")
 	}
@@ -571,24 +595,29 @@ func Resolve(payload []byte) string {
 	if json.Unmarshal(payload, &envelope) != nil {
 		return ""
 	}
-	field := func(names ...string) json.RawMessage {
-		for _, name := range names {
-			if value := envelope[name]; len(value) != 0 {
-				return value
-			}
-		}
-		return nil
+	copilot := strings.EqualFold(strings.TrimSpace(connector), "copilot")
+	var toolRaw, args json.RawMessage
+	var toolConflict, argsConflict bool
+	if copilot {
+		toolRaw, args, toolConflict, argsConflict = copilotCall(envelope, surface, event)
+	} else {
+		toolRaw, _, toolConflict = firstAlias(envelope, []string{"tool_name", "toolName"})
+		args, _, argsConflict = firstAlias(envelope,
+			[]string{"tool_input", "toolInput", "tool_args", "toolArgs", "args", "arguments"})
 	}
 	var tool string
-	_ = json.Unmarshal(field("tool_name", "toolName"), &tool)
-	args := field("tool_input", "toolInput", "tool_args", "toolArgs", "args", "arguments")
-	if len(args) == 0 {
+	_ = json.Unmarshal(toolRaw, &tool)
+	tool = strings.TrimSpace(tool)
+	if copilot {
+		tool = copilotargs.LocalActionTool(tool)
+	}
+	if len(args) == 0 && !toolConflict && !argsConflict {
 		return ""
 	}
 	// The gateway names relative operands from the event cwd; use the same
 	// directory so both sides build the same keys.
 	var cwd string
-	_ = json.Unmarshal(field("cwd"), &cwd)
+	_ = json.Unmarshal(envelope["cwd"], &cwd)
 	if !filepath.IsAbs(cwd) {
 		var err error
 		if cwd, err = os.Getwd(); err != nil {
@@ -619,11 +648,32 @@ func Resolve(payload []byte) string {
 	if err != nil {
 		return incompleteEvidence(cwd)
 	}
+	if len(args) == 0 {
+		return incompleteEvidence(cwd)
+	}
+	if copilot {
+		// The gateway judges a Copilot edit or create without its metadata
+		// field (copilotargs.WriteArgsWithoutMetadata): describe that call.
+		if clean, ok := copilotargs.WriteArgsWithoutMetadata(tool, args); ok {
+			args = clean
+		}
+	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
 	facts := actionfacts.Analyze(input)
+	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(input, facts); ok {
+		// The gateway judges the reduced call: list its targets.
+		facts = view
+	}
+	// A native write call with a key outside its reviewed schema stays
+	// partial, but the harness writes the file its target key names, and
+	// the gateway judges that target (actionfacts.UnknownKeyWriteTargetViews):
+	// list it.
+	for _, view := range actionfacts.UnknownKeyWriteTargetViews(input, facts) {
+		facts.Paths = append(facts.Paths, view.Paths...)
+	}
 	// A connector can name the shell text "cmd" while ActionFacts requires
 	// its canonical command field. Resolve that exact string as a shell too.
-	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded
+	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded || toolConflict || argsConflict
 	var operands, literalOperands []string
 	var directoryOperands []RedirectOccurrence
 	var directoryUnknown bool
@@ -797,6 +847,103 @@ func Resolve(payload []byte) string {
 		return incompleteEvidence(cwd)
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+// copilotCall returns the tool name and the projected arguments of a Copilot
+// hook body as the gateway's profile for its dialect reads them
+// (copilotargs.LocalDialect), and whether another spelling of the tool name
+// or of the arguments carries a different value. The profile reads only its
+// dialect's two fields; the other dialect's fields and the generic aliases
+// are spellings it ignores.
+func copilotCall(envelope map[string]json.RawMessage, surface, event string) (json.RawMessage, json.RawMessage, bool, bool) {
+	var hookEvent string
+	_ = json.Unmarshal(envelope["hook_event_name"], &hookEvent)
+	_, local := copilotargs.LocalDialect(surface, event)
+	toolNames := []string{"toolName", "tool_name"}
+	argNames := []string{"toolArgs", "tool_input", "toolInput", "tool_args", "args", "arguments"}
+	if local {
+		toolNames[0], toolNames[1] = toolNames[1], toolNames[0]
+		argNames[0], argNames[1] = argNames[1], argNames[0]
+	}
+	toolRaw, toolConflict := dialectAlias(envelope, toolNames)
+	rawArgs, argsConflict := dialectAlias(envelope, argNames)
+	if !local && (hookEvent != "" || aliasSet(envelope["tool_name"]) || aliasSet(envelope["tool_input"])) {
+		toolConflict = true
+	}
+	if local && (aliasSet(envelope["toolName"]) || aliasSet(envelope["toolArgs"])) {
+		toolConflict = true
+	}
+	var tool string
+	_ = json.Unmarshal(toolRaw, &tool)
+	tool = strings.TrimSpace(tool)
+	// Both profiles project an arguments field that is present, null
+	// included, and read none when it is absent.
+	if _, present := envelope[argNames[0]]; !present {
+		return toolRaw, nil, toolConflict, argsConflict
+	}
+	var value any
+	if json.Unmarshal(rawArgs, &value) != nil {
+		value = nil
+	}
+	if local {
+		return toolRaw, copilotargs.LocalToolArgs(tool, value), toolConflict, argsConflict
+	}
+	return toolRaw, copilotargs.CLIToolArgs(tool, value), toolConflict, argsConflict
+}
+
+// dialectAlias returns the value of names[0], the one spelling a Copilot
+// profile reads, and whether another of names carries a value other than
+// null that differs from it (or is set while names[0] is not).
+func dialectAlias(envelope map[string]json.RawMessage, names []string) (json.RawMessage, bool) {
+	value := bytes.TrimSpace(envelope[names[0]])
+	conflict := false
+	for _, name := range names[1:] {
+		other := envelope[name]
+		if aliasSet(other) {
+			conflict = conflict || !aliasSet(value) || !sameAliasValue(value, bytes.TrimSpace(other))
+		}
+	}
+	return value, conflict
+}
+
+// aliasSet reports a field present with a value other than null.
+func aliasSet(value json.RawMessage) bool {
+	value = bytes.TrimSpace(value)
+	return len(value) != 0 && !bytes.Equal(value, []byte("null"))
+}
+
+// firstAlias returns the first of names that envelope carries with a value
+// other than null, its name, and whether another of names carries a different
+// value: a string, compared with surrounding space trimmed as the gateway
+// reads a tool name, or any other JSON value, compared compacted.
+func firstAlias(envelope map[string]json.RawMessage, names []string) (json.RawMessage, string, bool) {
+	var first json.RawMessage
+	var firstName string
+	conflict := false
+	for _, name := range names {
+		value := bytes.TrimSpace(envelope[name])
+		if !aliasSet(value) {
+			continue
+		}
+		if first == nil {
+			first, firstName = value, name
+			continue
+		}
+		conflict = conflict || !sameAliasValue(first, value)
+	}
+	return first, firstName, conflict
+}
+
+func sameAliasValue(a, b json.RawMessage) bool {
+	var textA, textB string
+	if json.Unmarshal(a, &textA) == nil && json.Unmarshal(b, &textB) == nil {
+		return strings.TrimSpace(textA) == strings.TrimSpace(textB)
+	}
+	var compactA, compactB bytes.Buffer
+	if json.Compact(&compactA, a) != nil || json.Compact(&compactB, b) != nil {
+		return false
+	}
+	return bytes.Equal(compactA.Bytes(), compactB.Bytes())
 }
 
 // incompleteEvidence is the header for a tool call whose write operands

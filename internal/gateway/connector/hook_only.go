@@ -35,6 +35,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"gopkg.in/yaml.v3"
@@ -553,29 +554,10 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 		return req
 	}
 	req.ToolArgsAuthoritative = true
-	switch value := args.(type) {
-	case map[string]interface{}:
-		raw, err := json.Marshal(value)
-		if err == nil {
-			req.ToolArgs = raw
-		}
-	case string:
-		// Copilot's hook reference types toolArgs as unknown, while the
-		// official CLI hook tutorial documents and emits it as a JSON string.
-		// Preserve that inner object for the strict ActionFacts parser instead
-		// of treating a valid native command as an empty argument projection.
-		raw := bytes.TrimSpace([]byte(value))
-		if len(raw) >= 2 && raw[0] == '{' && raw[len(raw)-1] == '}' && json.Valid(raw) {
-			req.ToolArgs = append(json.RawMessage(nil), raw...)
-		}
-	}
-	if CopilotVSCodeLocalTool(req.ToolName) && len(req.ToolArgs) != 0 {
-		// The VS Code Local harness running the CLI hook file (GAP-1903).
-		var input interface{}
-		if json.Unmarshal(req.ToolArgs, &input) == nil {
-			req.ToolArgs = copilotVSCodeLocalToolArgs(req.ToolName, input)
-		}
-	}
+	// Copilot's hook reference types toolArgs as unknown, while the official
+	// CLI hook tutorial documents and emits it as a JSON string. The hook-side
+	// write-target resolver reads the same projection (hookpaths).
+	req.ToolArgs = copilotargs.CLIToolArgs(req.ToolName, args)
 	return req
 }
 

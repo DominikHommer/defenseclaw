@@ -54,6 +54,11 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// ArtifactBody is set when LegacyText and Input.Command are the whole
+	// body of a script the call runs (the artifact lane): its comments and
+	// data are not tool-call text, so a migrated literal rule must match a
+	// word the parse took from an executed command (GAP-1513).
+	ArtifactBody bool
 	// conflictSource is the tool call's argument object before a connector
 	// projection took arguments out of Input.Args, for the conflicting-keys
 	// check (conflictingToolArgumentKeys); nil when Input.Args is the object
@@ -583,11 +588,24 @@ func withMigratedLiteralRuleFindings(
 // the parse of its commands took from it, with its path values and network
 // hosts.
 func trustedActionTexts(request trustedActionRequest, facts actionfacts.Facts) []string {
-	texts := []string{request.LegacyText, request.Input.Command, string(request.Input.Args)}
-	texts = append(texts, request.Input.Argv...)
-	texts = appendJSONStrings(texts, request.Input.Args)
+	var texts []string
+	if !request.ArtifactBody {
+		texts = append(texts, request.LegacyText, request.Input.Command, string(request.Input.Args))
+		texts = append(texts, request.Input.Argv...)
+		texts = appendJSONStrings(texts, request.Input.Args)
+	}
 	for _, command := range facts.Commands {
 		texts = append(texts, command.Argv...)
+		// The quoted heredoc fed to a command (cat > file <<'EOF') is data
+		// the command may act on, so a migrated literal in it counts in a
+		// script body too, whatever the command's name. No name proves that
+		// stdin goes unread: the shell that runs the script may bind any
+		// name, true, cat or /bin/cat alike, to a function that reads it
+		// (exported to the shell, or defined by BASH_ENV or a profile), and
+		// the gateway sees none of that shell's state.
+		if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous {
+			texts = append(texts, command.LiteralStdin)
+		}
 		for _, argument := range command.Arguments {
 			texts = append(texts, argument.Value)
 		}
