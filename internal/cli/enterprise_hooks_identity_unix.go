@@ -263,6 +263,24 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 			list(uid, canonicalUser(uid))
 		}
 	}
+	// A caller the gateway accepts by name only (an exempt_users entry, or
+	// a protected target without a uid) keeps a refreshed record too, by the
+	// uid its name holds now, or, while its lookup does not answer, by the
+	// uid of the record that names it: a record a pass does not list ages
+	// out after an hour, and the gateway then lost the profile its UPN
+	// selects while it still accepted the caller (GAP-0399, GAP-0442). An
+	// exclusion still wins.
+	for _, uid := range enterpriseHookNameCallerUIDs(ctx, dir, leftOut, accepted) {
+		if seen[uid] || left[uid] {
+			continue
+		}
+		user := canonicalUser(uid)
+		if leftOut.withdraws(uid, user) {
+			leave(uid)
+			continue
+		}
+		list(uid, user)
+	}
 	// The accounts the enrollment settings leave out (excluded, out of the
 	// manifest) lose their record at once. A directory account the pass
 	// merely does not list keeps it until the directory shows that it left,
@@ -374,6 +392,61 @@ func (a enterpriseHookAcceptedAccounts) has(uid int, names ...string) bool {
 		return name != "" && a.names[name]
 	})
 }
+
+// enterpriseHookNameCallerUIDs lists, in order, the uids of the callers the
+// gateway accepts by name only: exempt_users entries (a uid entry as
+// written) and protected targets without a uid. A name resolves through a
+// bounded lookup (enterprisehooks.LookupStandaloneUserBounded); a name whose
+// lookup does not answer keeps the uid of the identity record that names
+// it, so its last proven record keeps being refreshed.
+func enterpriseHookNameCallerUIDs(ctx context.Context, dir string, leftOut *enterpriseHookLeftOutAccounts,
+	accepted enterpriseHookAcceptedAccounts) []int {
+	var names []string
+	var uids []int
+	for uid := range leftOut.exemptUIDs {
+		uids = append(uids, uid)
+	}
+	for entry := range leftOut.exempt {
+		if _, err := strconv.Atoi(entry); err != nil {
+			names = append(names, entry)
+		}
+	}
+	for name := range accepted.names {
+		names = append(names, name)
+	}
+	if len(names) > 0 {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, enterpriseHookLeftOutLookupWait)
+		defer cancel()
+		var records []enterprisehooks.IdentitySpoolRecord
+		for _, name := range names {
+			account, err := enterprisehooks.LookupStandaloneUserBounded(waitCtx, name)
+			if err == nil && account.UID > 0 {
+				uids = append(uids, account.UID)
+				continue
+			}
+			if unixidentity.IsNotFound(err) {
+				continue
+			}
+			if records == nil {
+				records = enterprisehooks.ReadIdentitySpoolRecords(dir, nil, enterpriseHookNameCallerRecordLimit)
+			}
+			for _, record := range records {
+				if uid, convErr := strconv.Atoi(record.Key); convErr == nil && uid > 0 && strings.EqualFold(strings.TrimSpace(record.User), name) {
+					uids = append(uids, uid)
+				}
+			}
+		}
+	}
+	slices.Sort(uids)
+	return slices.Compact(uids)
+}
+
+// enterpriseHookNameCallerRecordLimit bounds the records
+// enterpriseHookNameCallerUIDs reads.
+const enterpriseHookNameCallerRecordLimit = 4096
 
 // listedUIDs lists the uids the authorization names, in order.
 func (a enterpriseHookAcceptedAccounts) listedUIDs() []int {
