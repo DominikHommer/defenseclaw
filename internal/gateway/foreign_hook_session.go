@@ -89,18 +89,17 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	unlock := sync.OnceFunc(a.foreignHookSessionLocks.lock(stateDir))
 	defer unlock()
 	places := a.foreignHookSessionPlaces(dataDir)
+	// Only a standalone gateway gets here (userScopedCredentialsRequired),
+	// so every exchange takes its account's removal lock.
 	var lockErr error
 	release := func() {}
-	if places.standalone {
-		ctx, cancel := context.WithTimeout(r.Context(), foreignHookExchangeWait)
-		held, err := foreignHookAccountExchangeLock(ctx, dataDir, identity)
-		cancel()
-		if err != nil {
-			lockErr = err
-		} else {
-			release = held
-		}
+	ctx, cancel := context.WithTimeout(r.Context(), foreignHookExchangeWait)
+	if held, err := foreignHookAccountExchangeLock(ctx, dataDir, identity); err != nil {
+		lockErr = err
+	} else {
+		release = held
 	}
+	cancel()
 	defer release()
 	answerBy := time.Now().Add(foreignHookExchangeHold)
 	// The record key first, then the guardian's removals, both under the
@@ -135,7 +134,7 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		// Every denial is published only after the key is gone.
 		a.killForeignHookSessionKey(places, identity, exchange.Key)
 	}
-	if places.standalone && !decision.Deny && !time.Now().Before(answerBy) {
+	if !decision.Deny && !time.Now().Before(answerBy) {
 		// Too late to answer allow: a removal of the account may already
 		// have stopped waiting for this exchange. Nothing is published.
 		decision = enterprisepolicy.ApplyForeignHookRemovals(decision, exchange.Key, nil, errForeignHookExchangeExpired, time.Now())
@@ -151,12 +150,6 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		release()
 		unlock()
 		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(decision)
-		return
-	}
-	if !places.standalone {
-		unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(decision)
 		return
@@ -248,23 +241,19 @@ var (
 // foreignHookSessionPlaces are where one exchange reads the guardian's
 // removals and writes its protected session record: the guardian's ledger
 // folder (managed.HookGuardianAuthorizationDir) and the protected session
-// record root ("" where this gateway publishes none). standalone is a
-// standalone gateway (not Secure Client, not per-user): it takes the
-// account's removal lock. rootErr is a record root a standalone gateway
+// record root ("" where this gateway publishes none). rootErr is a record
+// root a standalone gateway
 // could not locate at all (foreignHookSessionRecordRoot): the exchange is
 // denied, because the gateway can then neither remove the key nor publish
 // its answer.
 type foreignHookSessionPlaces struct {
 	removalsDir string
 	recordRoot  string
-	standalone  bool
 	rootErr     error
 }
 
 func (a *APIServer) foreignHookSessionPlaces(dataDir string) foreignHookSessionPlaces {
 	places := foreignHookSessionPlaces{removalsDir: managed.HookGuardianAuthorizationDir(dataDir)}
-	cfg := a.scannerCfg
-	places.standalone = cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration()
 	root, err := a.foreignHookSessionRecordRoot(dataDir)
 	if err != nil {
 		places.rootErr = fmt.Errorf("the protected foreign-hook session record folder cannot be located: %w", err)
