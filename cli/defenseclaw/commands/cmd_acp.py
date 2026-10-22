@@ -70,6 +70,10 @@ def _resolve_executable(value: str, label: str) -> str:
     raise click.ClickException(f"{label} executable was not found: {value}")
 
 
+def _reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
 def _read_json_object(path: Path) -> dict[str, Any]:
     # A broken symlink reports exists() == False; reject it before that check.
     if path.is_symlink():
@@ -82,8 +86,8 @@ def _read_json_object(path: Path) -> dict[str, Any]:
         raise click.ClickException(f"client configuration is too large: {path}")
     try:
         raw = path.read_text(encoding="utf-8-sig")
-        value = json.loads(_normalize_jsonc(raw))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        value = json.loads(_normalize_jsonc(raw), parse_constant=_reject_nonfinite_json)
+    except (OSError, ValueError) as exc:
         raise click.ClickException(f"cannot read {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise click.ClickException(f"client configuration must contain a JSON object: {path}")

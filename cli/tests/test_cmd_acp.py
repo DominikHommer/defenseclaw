@@ -198,6 +198,12 @@ def test_editor_preferences_do_not_drift_guarded_entry_pins(tmp_path, monkeypatc
         settings.write_text(json.dumps(document))
         verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
         assert verified.exit_code == 0, verified.output
+        # The Go guard parses the entire settings file as JSON before
+        # hashing entries; Python must not accept non-JSON numbers elsewhere.
+        malformed = dict(document, unrelated=float("nan"))
+        settings.write_text(json.dumps(malformed))
+        refused = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert refused.exit_code != 0, refused.output
         for name in names:
             changed = json.loads(json.dumps(document))
             changed["agent_servers"][name]["env"]["CHANGED_LAUNCH"] = "yes"
