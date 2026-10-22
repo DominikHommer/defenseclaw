@@ -1260,5 +1260,9 @@ def reconcile_connector_registration(cfg: Any, connector: str) -> ConnectorFailM
         raise OSError(detail[:240])
     state = resolve_connector_fail_mode(cfg, name)
     if not state.current:
-        raise OSError(f"connector runtime verification failed for {state.connector}: " + ", ".join(state.drift))
+        raise OSError(
+            f"connector runtime verification failed for {state.connector}: "
+            + ", ".join(state.drift)
+            + ". Run `defenseclaw doctor`, then retry the fail-mode command."
+        )
     return state

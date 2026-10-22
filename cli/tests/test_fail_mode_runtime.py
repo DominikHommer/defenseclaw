@@ -574,6 +574,17 @@ def test_windows_registration_freshness_retries_access_denied_without_accepting_
     assert _WINDOWS_REGISTRATION_FRESHNESS(SimpleNamespace(data_dir=str(tmp_path)), "claudecode") == expected
     assert validate.call_count == attempts
     assert len(waits) == attempts - 1 and sum(waits) <= 2
+    if expected:
+        monkeypatch.setattr("defenseclaw.fail_mode.shutil.which", lambda _name: str(tmp_path / "gateway.exe"))
+        monkeypatch.setattr(
+            "defenseclaw.fail_mode.subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0)
+        )
+        monkeypatch.setattr(
+            "defenseclaw.fail_mode.resolve_connector_fail_mode",
+            lambda *_args: SimpleNamespace(current=False, connector="claudecode", drift=(expected,)),
+        )
+        with pytest.raises(OSError, match="defenseclaw doctor"):
+            fail_mode_runtime.reconcile_connector_registration(SimpleNamespace(data_dir=str(tmp_path)), "claudecode")
 
 
 def test_windows_codex_presence_uses_native_registration_validator(
