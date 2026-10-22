@@ -80,7 +80,7 @@ A hook does not start the gateway:
 - for 60 seconds after a hook start failed (see `~/.defenseclaw/gateway.log`);
 - when `DEFENSECLAW_GATEWAY_AUTOSTART=0` is set.
 
-While the gateway is down, fail-closed hooks block agent calls, in observe mode too. Only hooks set to `hook_fail_mode: open` let them through, with a `gateway unreachable` line on stderr ([Fail modes](/docs/reference/configuration/fail-modes#which-value-applies)). When `gateway.watchdog.enabled` is set and the gateway process stops on its own, the watchdog starts it again after `gateway.watchdog.debounce` failed health checks. A gateway that runs but does not answer is not restarted by a hook or the watchdog: check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`.
+While the gateway is down, hooks with an effective fail mode of `closed` block supported agent calls, including in observe mode. Hooks with an effective mode of `open` let the call through and print `gateway unreachable` on stderr. Per-user Cursor in observe mode fails open during an outage even if `hook_fail_mode` is `closed`; its user hooks register `failClosed: false`. See [Fail modes](/docs/reference/configuration/fail-modes#which-value-applies) for the managed-host and Secure Client limits. When `gateway.watchdog.enabled` is set and the gateway process stops on its own, the watchdog starts it again after `gateway.watchdog.debounce` failed health checks. A gateway that runs but does not answer is not restarted by a hook or the watchdog: check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`.
 
 ## Verify a download
 

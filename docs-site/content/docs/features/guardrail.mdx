@@ -63,7 +63,7 @@ Human approval is off by default. Its default minimum severity is HIGH. Change t
 
 ## Fail mode
 
-The hook fail mode decides what happens when the gateway cannot answer (unreachable, bad response, authentication failure). The default is `closed`: the agent blocks the call where the event can carry a block response. `open` allows the call and logs the failure.
+The installed hook's effective fail mode decides what happens when the gateway cannot answer (unreachable, bad response, authentication failure). The configured default is `closed` outside Secure Client: the agent blocks the call where the event can carry a block response. On a per-user install, an effective `open` lets the call run and logs the failure. On a managed standalone host, the administrator's `open` covers eligible gateway outages only. Per-user Cursor in observe mode fails open when the gateway is unreachable even if `hook_fail_mode` is `closed`; its hooks use `failClosed: false`. See [Fail modes](/docs/reference/configuration/fail-modes) for the managed-host and Secure Client limits.
 
 ## Which agents can ask
 

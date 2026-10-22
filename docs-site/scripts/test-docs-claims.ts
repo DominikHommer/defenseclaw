@@ -26,6 +26,63 @@ function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
 
+function assertCursorObserveOutageException(text: string, name: string): void {
+  assert.match(
+    text,
+    /per-user Cursor in observe mode.{0,130}(?:fails open|allows the call).{0,130}`(?:guardrail\.)?hook_fail_mode`.{0,30}`closed`/i,
+    `${name} must explain that Cursor observe ignores a closed fail-mode setting during an outage`,
+  );
+}
+
+describe('per-user Cursor observe outage claims', () => {
+  it('qualifies the coverage overview and failure table', () => {
+    const coverage = page('appendix/coverage-by-layer.mdx');
+    const overview = coverage.split('## Where each layer exists')[1]?.split('## Who sees and who enforces')[0] ?? '';
+    const failureTable = coverage.split('## Fail-open and fail-closed, per layer')[1]?.split('## What Tetragon adds')[0] ?? '';
+    assertCursorObserveOutageException(overview, 'coverage overview');
+    const hookRow = /\| A hook cannot reach the gateway \|([^|]+)\|/.exec(failureTable)?.[1] ?? '';
+    assertCursorObserveOutageException(hookRow, 'coverage hook outage row');
+    assert.match(hookRow, /eligible managed outages/i);
+  });
+
+  it('qualifies the Cursor reference fail-mode contract', () => {
+    const reference = page('reference/connectors/cursor.mdx');
+    const failMode = reference.split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
+    assertCursorObserveOutageException(failMode, 'Cursor reference');
+    assert.match(failMode, /managed.{0,120}(?:resolved|administrator).{0,80}fail mode/i);
+    const managed = reference.split('### Enterprise standalone profile')[1]?.split('### OpenShell sandbox')[0] ?? '';
+    assert.match(managed, /failClosed.{0,100}administrator.{0,50}resolved fail mode/i);
+    assert.match(managed, /`true`.{0,50}`closed`.{0,100}`false`.{0,50}`open`/i);
+  });
+
+  it('qualifies installer outage guidance', () => {
+    const startup = page('reference/commands/installer.mdx').split('## Startup behavior')[1]?.split('## Verify a download')[0] ?? '';
+    assertCursorObserveOutageException(startup, 'installer guidance');
+  });
+
+  it('states the exception in the fail-mode reference', () => {
+    const failModes = page('reference/configuration/fail-modes.mdx');
+    assertCursorObserveOutageException(failModes.split('## Controls')[0] ?? '', 'fail-mode introduction');
+    const controls = failModes.split('## Controls')[1]?.split('### Which value applies')[0] ?? '';
+    assert.match(controls, /An explicit value selects the fail mode.{0,120}except for per-user Cursor/i);
+    assertCursorObserveOutageException(
+      failModes.split('### Which value applies')[1]?.split('### Refusals')[0] ?? '',
+      'fail-mode precedence',
+    );
+    const secureClient = failModes.split('### Secure Client')[1]?.split('### Connectors without a fail-closed hook')[0] ?? '';
+    assert.match(secureClient, /configured default.{0,60}`closed`.{0,100}per-user Cursor in observe mode.{0,60}`open`/i);
+    const persisted = failModes.split('## Persisted fail mode')[1]?.split('## Connector response shapes')[0] ?? '';
+    assert.match(persisted, /per-user Cursor.{0,90}observe mode.{0,90}installed.{0,70}`open`/i);
+    assert.match(persisted, /Hooks follow an open fail mode only when your config sets it, except per-user Cursor in observe mode/i);
+  });
+
+  it('qualifies the guardrail feature summary', () => {
+    const failMode = page('features/guardrail.mdx').split('## Fail mode')[1]?.split('## Which agents can ask')[0] ?? '';
+    assertCursorObserveOutageException(failMode, 'guardrail summary');
+    assert.match(failMode, /managed standalone host.{0,100}eligible gateway outages only/i);
+  });
+});
+
 describe('Intune base config versus the signed bundle', () => {
   it('names exactly the blocks the packager compares', () => {
     const packager = readFileSync(
