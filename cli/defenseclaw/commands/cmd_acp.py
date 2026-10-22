@@ -335,7 +335,7 @@ def _refresh_client_contract_digests(
             if lock_client.get("config_path") != str(client_path.resolve()):
                 raise click.ClickException("entry-pinned client path changed; run: defenseclaw acp verify")
             # This setup did not authorize another binding's changed launch
-            # fields. Its own setup/refresh must repair any entry drift.
+            # fields. Only its own setup can repair entry drift.
             continue
         lock_client["config_path"] = str(client_path.resolve())
         lock_client["config_sha256"] = _sha256_file(str(client_path))
@@ -1471,7 +1471,8 @@ def refresh_guard_pins(
 
     Touches only the editor entries DefenseClaw wrote (``_managed_pairs``),
     never a managed-custody lock, and only the guard digest and protocol
-    schema: a changed agent binary still needs ``acp setup``. ``from_sha256``
+    schema: a changed agent binary, and an older lock that pins the whole
+    editor settings file, still need ``acp setup``. ``from_sha256``
     limits it to locks that pinned that guard digest; ``guard_path`` to
     locks whose guard is that file. With ``apply=False`` nothing is written.
     Returns the ``client/agent`` pairs re-pinned (or that would be).
@@ -1531,7 +1532,8 @@ def refresh_cmd(app: AppContext, from_sha256: str, guard_path: str) -> None:
     An upgrade replaces defenseclaw-acp, so each contract lock still names the
     old guard digest and the editor entry fails closed. This re-pins only
     DefenseClaw's own guard and the protocol schema; a changed agent binary or
-    editor entry still needs 'defenseclaw acp setup'. The installers and
+    editor entry, or an older lock that pins the whole editor settings file,
+    still needs 'defenseclaw acp setup'. The installers and
     'make all' run it, and 'defenseclaw doctor --fix' does too.
     """
     if not app.cfg:

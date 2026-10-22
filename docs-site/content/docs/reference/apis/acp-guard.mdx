@@ -20,7 +20,7 @@ Reference for the [ACP guard](/docs/features/acp-guard). Tasks are in [Guard an 
 | `defenseclaw acp verify` | Checks the contract lock against what is configured. |
 | `defenseclaw acp detect` | Lists guarded, unguarded and foreign agent entries in each editor. |
 | `defenseclaw acp adopt` (also `defenseclaw setup acp`) | Points existing unguarded entries at the guard. Flags: `--client`, `--activate`. |
-| `defenseclaw acp refresh --from-sha256 DIGEST` | Re-pins a new guard in locks that pinned the old one. The installer runs it on upgrade. |
+| `defenseclaw acp refresh --from-sha256 DIGEST` | Re-pins a new guard in locks that pinned the old one. The installer runs it on upgrade. It changes only the guard and protocol pins. |
 | `defenseclaw acp remove --client C --agent A` | Removes the entry and reclaims the contract lock. |
 
 ## What is guarded
@@ -108,10 +108,19 @@ Each binding pins its own lock at `<data-dir>/acp/<client>-<agent>.contract-lock
 Per-user and standalone setup pin the guarded editor entries, including adopted
 and numbered entries. Changing unrelated settings, or Zed's mode and model
 preferences, keeps those pins valid. Changing a guarded command, arguments,
-environment or another launch field requires setup again. Locks from older
-releases still pin the whole settings file until you run `defenseclaw acp refresh`.
-Setting up a different binding in the same editor keeps existing entry pins;
-it cannot approve changes to another binding's launch fields.
+environment or another launch field requires setup again. Setting up a
+different binding in the same editor keeps existing entry pins; it cannot
+approve changes to another binding's launch fields.
+
+A lock written by an older release pins the whole settings file, so after an
+upgrade any edit to that file, a theme change included, still fails
+`defenseclaw acp verify` and the guard refuses the binding. The installer and
+`defenseclaw acp refresh` do not change that pin: they re-pin only the guard.
+To pin only the entries, run `defenseclaw acp setup` again for each such
+binding, with its `--profile` (and `--activate` for an action profile). After a
+drift, `defenseclaw acp verify` prints that exact command. Until then, setting
+up another binding in the same editor re-pins the older lock to the current
+settings file.
 
 ## Telemetry
 

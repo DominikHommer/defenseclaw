@@ -1744,3 +1744,118 @@ def test_bypassed_adopted_entry_stays_in_status_and_verify(tmp_path, monkeypatch
         assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code != 0
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+@pytest.mark.parametrize("entry_names", [[], ["My Kiro", "Kiro (2)"]], ids=["reserved", "adopted-and-numbered"])
+def test_only_setup_moves_a_legacy_whole_file_pin_to_entry_pins(tmp_path, monkeypatch, entry_names):
+    # W7 loop 1: a lock from 1.0.3 or older pins the whole settings file. The
+    # upgrade's acp refresh re-pins only the guard, so the binding stays strict
+    # until the setup command verify prints runs for it, once per binding.
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard_path = tmp_path / "bin" / "defenseclaw-acp"
+    guard_path.parent.mkdir()
+    guard = _binary(guard_path)
+    kiro = _binary(tmp_path / "kiro-cli")
+    cursor = _binary(tmp_path / "cursor-agent")
+    settings = _zed_settings(tmp_path)
+    locks = {agent: Path(data_dir) / "acp" / f"zed-{agent}.contract-lock.json" for agent in ("kiro", "cursor")}
+    runner = CliRunner()
+
+    def verify(agent):
+        return runner.invoke(acp_cmd, ["verify", "--client", "zed", "--agent", agent], obj=app)
+
+    def client_pin(agent):
+        return json.loads(locks[agent].read_text())["client"]
+
+    def theme(value):
+        document = json.loads(settings.read_text())
+        document["theme"] = value
+        settings.write_text(json.dumps(document))
+
+    try:
+        if entry_names:
+            settings.parent.mkdir(parents=True)
+            settings.write_text(json.dumps({"agent_servers": {
+                name: {"command": kiro, "args": ["acp"]} for name in entry_names
+            }}))
+            args = ["adopt", "--client", "zed", "--guard-binary", guard, "--yes", "--json-output"]
+        else:
+            args = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", kiro]
+        result = runner.invoke(acp_cmd, args, obj=app)
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "cursor", "--guard-binary", guard, "--agent-binary", cursor],
+            obj=app,
+        )
+        assert result.exit_code == 0, result.output
+        # What an older release wrote: the whole-file digest.
+        for lock in locks.values():
+            document = json.loads(lock.read_text())
+            document["client"]["config_sha256"] = cmd_acp_module._sha256_file(str(settings))
+            lock.write_text(json.dumps(document))
+        assert verify("kiro").exit_code == 0 and verify("cursor").exit_code == 0
+
+        # The upgrade replaces the guard and the installer runs acp refresh.
+        guard_path.write_bytes(b"upgraded-guard")
+        legacy = {agent: client_pin(agent) for agent in locks}
+        result = runner.invoke(acp_cmd, ["refresh"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert "zed/kiro" in result.output and "zed/cursor" in result.output
+        assert {agent: client_pin(agent) for agent in locks} == legacy
+        assert verify("kiro").exit_code == 0 and verify("cursor").exit_code == 0
+
+        # The pin is still the whole file: a theme change fails verification.
+        theme("Ayu")
+        for agent in locks:
+            drifted = verify(agent)
+            assert drifted.exit_code != 0 and "client configuration digest has drifted" in drifted.output
+        assert runner.invoke(acp_cmd, ["refresh"], obj=app).output == ""
+        assert {agent: client_pin(agent) for agent in locks} == legacy
+        assert verify("kiro").exit_code != 0
+
+        # The remedy the docs name: the setup command verify prints.
+        result = runner.invoke(acp_cmd, _repair_args(verify("kiro").output), obj=app)
+        assert result.exit_code == 0, result.output
+        pin = client_pin("kiro")
+        assert pin["config_sha256"].startswith(cmd_acp_module._ENTRY_DIGEST_PREFIX)
+        assert sorted(pin.get("adopted_entries", [])) == sorted(entry_names)
+        theme("One Dark")
+        assert verify("kiro").exit_code == 0, verify("kiro").output
+
+        # Each binding needs its own setup: the other lock is still a file pin.
+        assert not client_pin("cursor")["config_sha256"].startswith(cmd_acp_module._ENTRY_DIGEST_PREFIX)
+        theme("Ayu")
+        drifted = verify("cursor")
+        assert drifted.exit_code != 0 and "client configuration digest has drifted" in drifted.output
+        result = runner.invoke(acp_cmd, _repair_args(drifted.output), obj=app)
+        assert result.exit_code == 0, result.output
+        assert client_pin("cursor")["config_sha256"].startswith(cmd_acp_module._ENTRY_DIGEST_PREFIX)
+        theme("Solarized")
+        assert verify("kiro").exit_code == 0 and verify("cursor").exit_code == 0
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_docs_name_setup_not_refresh_for_legacy_whole_file_pins():
+    # W7 loop 1: the reference and changelog said acp refresh moved a legacy
+    # whole-file pin to entry pins; refresh re-pins only the guard.
+    root = Path(__file__).resolve().parents[2]
+    for relative in (
+        "docs-site/content/docs/reference/apis/acp-guard.mdx",
+        "docs-site/content/docs/reference/commands/cli.mdx",
+        "CHANGELOG.md",
+    ):
+        text = (root / relative).read_text(encoding="utf-8")
+        units = [" ".join(unit.split()) for unit in re.split(r"\n\s*\n|\n(?=[-|] )", text)]
+        legacy = [unit for unit in units if "whole settings file" in unit or "whole-file pin" in unit]
+        assert legacy, relative
+        for unit in legacy:
+            assert "acp setup" in unit, (relative, unit)
+            for sentence in re.split(r"(?<=[.;])\s+", unit):
+                if "refresh" in sentence and not re.search(r"only the guard|do not change|does not change", sentence):
+                    assert not re.search(r"until|entry pins|pin only|migrat|convert|preference", sentence), (
+                        relative, sentence,
+                    )
+        assert not re.search(r"until (you run `defenseclaw acp refresh`|refreshed)", text), relative
