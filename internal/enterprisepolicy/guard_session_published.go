@@ -596,7 +596,10 @@ func EnsurePublishedSessionKeys(root string, trust PublishedSessionTrust) error 
 // record folder root (root or SYSTEM): the lifecycle runs it before install,
 // upgrade, repair, ensure and uninstall change anything, so nothing another
 // account did to the record folders while they were loosened brings an
-// allow back. Keys come back per account (EnsurePublishedSessionKeys).
+// allow back. Keys come back per account (EnsurePublishedSessionKeys). A
+// key file whose owner cannot be read is removed too. An account whose key
+// cannot be removed gets a second key next to it, which the hook refuses,
+// and the error names it.
 func KillAllPublishedSessionKeys(root string) error {
 	dir, rootPrefix, ok := publishedSessionKeyRoot(root)
 	if !ok {
@@ -609,21 +612,24 @@ func KillAllPublishedSessionKeys(root string) error {
 	if err != nil {
 		return err
 	}
-	var keys []SessionRecordKey
+	var errs []error
 	for _, name := range names {
 		if !hasPrefixFold(name, rootPrefix) || !IsPublishedSessionKeyName(name) {
 			continue
 		}
 		path := filepath.Join(dir, name)
-		owned, err := publishedSessionKeyOwned(path)
-		if err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+		if owned, err := publishedSessionKeyOwned(path); err == nil && !owned {
+			continue
 		}
-		if owned {
-			keys = append(keys, SessionRecordKey{path: path})
+		if err := removePublishedSessionKeyFiles(dir, []SessionRecordKey{{path: path}}); err != nil {
+			prefix := name[:strings.LastIndex(name, PublishedSessionKeyInfix)+len(PublishedSessionKeyInfix)]
+			if _, decoyErr := createPublishedSessionKey(dir, prefix, PublishedSessionTrust{}); decoyErr != nil {
+				err = fmt.Errorf("%w: %v; no second key could be added either: %v", ErrPublishedSessionKeyAlive, err, decoyErr)
+			}
+			errs = append(errs, err)
 		}
 	}
-	return removePublishedSessionKeyFiles(dir, keys)
+	return errors.Join(errs...)
 }
 
 // RemovePublishedSessionKeys removes every key file of the record folder

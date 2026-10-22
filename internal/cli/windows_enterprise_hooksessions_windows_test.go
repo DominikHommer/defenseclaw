@@ -80,20 +80,26 @@ func windowsHookSessionTestProves(root, identity string, key enterprisepolicy.Se
 	return err == nil
 }
 
-// Kill switch (round 3 scenario 4): install, upgrade, repair, ensure and
-// uninstall remove the key before they change anything, and status and
+// Item 7, the Windows lifecycle step (round 3 scenario 4): install, upgrade,
+// repair, ensure and uninstall remove every account's key of the records
+// before they change anything (KillAllPublishedSessionKeys), and status and
 // verify do not; a lifecycle that is not elevated touches nothing. Only an
-// action that finished without an error makes a new key, after it put the
-// folder's owner and DACL back; one with an error leaves none.
-func TestWindowsLifecycleKillsTheKeyFirstAndMakesANewOneLast(t *testing.T) {
-	root, _ := windowsHookSessionTestHost(t)
-	var kills []string
-	previousRetire := windowsHookSessionRetireKey
-	windowsHookSessionRetireKey = func(path string, trust enterprisepolicy.PublishedSessionTrust) error {
+// install, upgrade, repair or ensure that finished without an error makes
+// keys again (EnsurePublishedSessionKeys), after it put the folder's owner
+// and DACL back; one with an error, uninstall, status and verify make none.
+func TestWindowsLifecycleKillsTheKeysFirstAndMakesThemLast(t *testing.T) {
+	root, identity := windowsHookSessionTestHost(t)
+	var kills, ensures []string
+	previousKill, previousEnsure := windowsHookSessionKillKeys, windowsHookSessionEnsureKeys
+	windowsHookSessionKillKeys = func(path string) error {
 		kills = append(kills, path)
-		return previousRetire(path, trust)
+		return previousKill(path)
 	}
-	t.Cleanup(func() { windowsHookSessionRetireKey = previousRetire })
+	windowsHookSessionEnsureKeys = func(path string, trust enterprisepolicy.PublishedSessionTrust) error {
+		ensures = append(ensures, path)
+		return previousEnsure(path, trust)
+	}
+	t.Cleanup(func() { windowsHookSessionKillKeys, windowsHookSessionEnsureKeys = previousKill, previousEnsure })
 	for _, action := range []string{"install", "upgrade", "repair", "ensure", "uninstall", "status", "verify"} {
 		kills = nil
 		killWindowsHookSessionKey(action)
@@ -111,31 +117,53 @@ func TestWindowsLifecycleKillsTheKeyFirstAndMakesANewOneLast(t *testing.T) {
 	windowsEnterpriseIsElevated = func() bool { return true }
 
 	opts := &windowsEnterpriseLifecycleOptions{}
-	failed := &enterprisestatus.Result{Action: "repair"}
-	failed.AddError("apply_failed", "the action failed")
-	applyWindowsStandaloneHookSessionRecords(failed, opts)
-	if _, err := enterprisepolicy.ReadPublishedSessionKey(root); err == nil {
-		t.Fatal("an action that failed must make no key")
+	for _, action := range []string{"install", "upgrade", "repair", "ensure", "uninstall", "status", "verify"} {
+		ensures = nil
+		failed := &enterprisestatus.Result{Action: action}
+		failed.AddError("apply_failed", "the action failed")
+		applyWindowsStandaloneHookSessionRecords(failed, opts)
+		if len(ensures) != 0 {
+			t.Fatalf("%s that failed must make no key: %v", action, ensures)
+		}
 	}
-	result := &enterprisestatus.Result{Action: "repair"}
-	applyWindowsStandaloneHookSessionRecords(result, opts)
-	if len(result.Warnings) != 0 {
-		t.Skipf("the record folder cannot get its owner here (an elevated test): %+v", result.Warnings)
+	// An account folder the gateway made, without a key.
+	key := enterprisepolicy.SessionKey{Connector: "copilot", Session: "s-1", Process: "windows:b:1:100"}
+	if err := enterprisepolicy.WritePublishedSessionRecordsForTest(root, identity, key, enterprisepolicy.GuardDecision{}, time.Now()); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := enterprisepolicy.ReadPublishedSessionKey(root); err != nil {
-		t.Fatalf("an action that finished must make a key: %v", err)
+	for _, action := range []string{"status", "verify"} {
+		ensures = nil
+		applyWindowsStandaloneHookSessionRecords(&enterprisestatus.Result{Action: action}, opts)
+		if len(ensures) != 0 {
+			t.Fatalf("%s must make no key: %v", action, ensures)
+		}
+	}
+	for _, action := range []string{"install", "upgrade", "repair", "ensure"} {
+		ensures = nil
+		result := &enterprisestatus.Result{Action: action}
+		applyWindowsStandaloneHookSessionRecords(result, opts)
+		if len(result.Warnings) != 0 {
+			t.Skipf("the record folder cannot get its owner here (an elevated test): %+v", result.Warnings)
+		}
+		if len(ensures) != 1 || ensures[0] != root {
+			t.Fatalf("%s that finished must make the keys once, last: %v", action, ensures)
+		}
+		if _, err := enterprisepolicy.ReadPublishedSessionKey(root, identity); err != nil {
+			t.Fatalf("%s that finished must give the account a key: %v", action, err)
+		}
 	}
 	keyDir, _ := enterprisepolicy.PublishedSessionKeyDir(root)
 	if !strings.EqualFold(keyDir, filepath.Dir(root)) {
 		t.Fatalf("the key must be next to the record folder: %s", keyDir)
 	}
+	ensures = nil
 	uninstall := &enterprisestatus.Result{Action: "uninstall"}
 	applyWindowsStandaloneHookSessionRecords(uninstall, opts)
-	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) || len(uninstall.Warnings) != 0 {
-		t.Fatalf("uninstall must remove the folder: %v %+v", err, uninstall.Warnings)
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) || len(uninstall.Warnings) != 0 || len(ensures) != 0 {
+		t.Fatalf("uninstall must remove the folder and make no key: %v %+v %v", err, uninstall.Warnings, ensures)
 	}
-	if keys, _ := filepath.Glob(root + enterprisepolicy.PublishedSessionKeyInfix + "*"); len(keys) != 0 {
-		t.Fatalf("uninstall must remove the key: %v", keys)
+	if keys, _ := filepath.Glob(filepath.Join(filepath.Dir(root), filepath.Base(root)+".*"+enterprisepolicy.PublishedSessionKeyInfix+"*")); len(keys) != 0 {
+		t.Fatalf("uninstall must remove the keys: %v", keys)
 	}
 }
 
@@ -156,8 +184,17 @@ func TestWindowsHookSessionRepairWithARetainedHandleKeepsNoOldAllow(t *testing.T
 		t.Skipf("the record folder cannot get its owner here (an elevated test): %+v", result.Warnings)
 	}
 	key := enterprisepolicy.SessionKey{Connector: "copilot", Session: "s-1", Process: "windows:b:1:100"}
-	if err := enterprisepolicy.WritePublishedSessionRecordsForTest(root, identity, key, enterprisepolicy.GuardDecision{}, time.Now()); err != nil {
-		t.Fatal(err)
+	// The gateway makes the account's folder; the guardian's next pass gives
+	// it a key; the next allow is published under it.
+	for i := 0; i < 2; i++ {
+		if err := enterprisepolicy.WritePublishedSessionRecordsForTest(root, identity, key, enterprisepolicy.GuardDecision{}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			if err := enterprisepolicy.EnsurePublishedSessionKeys(root, windowsHookSessionTrust()); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	if !windowsHookSessionTestProves(root, identity, key) {
 		t.Fatal("the published allow must prove the process")
@@ -167,8 +204,8 @@ func TestWindowsHookSessionRepairWithARetainedHandleKeepsNoOldAllow(t *testing.T
 	if err := os.CopyFS(saved, os.DirFS(account)); err != nil {
 		t.Fatal(err)
 	}
-	// The repair, as SYSTEM without the restore privilege: the key goes
-	// first, the folder gets its DACL back, and a new key comes last.
+	// The repair, as SYSTEM without the restore privilege: the keys go
+	// first, the folder gets its DACL back, and new keys come last.
 	killWindowsHookSessionKey("repair")
 	result = &enterprisestatus.Result{Action: "repair"}
 	applyWindowsStandaloneHookSessionRecords(result, opts)
@@ -198,36 +235,5 @@ func TestWindowsHookSessionRepairWithARetainedHandleKeepsNoOldAllow(t *testing.T
 	}
 	if !windowsHookSessionTestProves(root, identity, key) {
 		t.Fatal("the next allow after the repair proves the process")
-	}
-}
-
-// Status and verify report a record folder without exactly one key the
-// hook trusts: the gateway removes it before every block and the hook
-// guardian makes a new one at its next pass, so a report that stays needs a
-// repair.
-func TestWindowsHookSessionStatusReportsAMissingKey(t *testing.T) {
-	root, _ := windowsHookSessionTestHost(t)
-	result := &enterprisestatus.Result{Action: "install"}
-	applyWindowsStandaloneHookSessionRecords(result, &windowsEnterpriseLifecycleOptions{})
-	if len(result.Warnings) != 0 {
-		t.Skipf("the record folder cannot get its owner here (an elevated test): %+v", result.Warnings)
-	}
-	previousTrust, previousKey := windowsHookSessionRootTrustProblem, windowsHookSessionKeyProblem
-	windowsHookSessionRootTrustProblem = func(string) error { return nil }
-	// The temporary folder is not one the hook trusts: only the key count
-	// is checked here.
-	windowsHookSessionKeyProblem = func(root string) error {
-		_, err := enterprisepolicy.ReadPublishedSessionKey(root)
-		return err
-	}
-	t.Cleanup(func() { windowsHookSessionRootTrustProblem, windowsHookSessionKeyProblem = previousTrust, previousKey })
-	if problem := windowsHookSessionRootProblem(); problem != "" {
-		t.Fatalf("a folder with one key is no problem: %s", problem)
-	}
-	if err := enterprisepolicy.KillPublishedSessionKey(root); err != nil {
-		t.Fatal(err)
-	}
-	if problem := windowsHookSessionRootProblem(); !strings.Contains(problem, "the key of the protected foreign-hook session records") {
-		t.Fatalf("a folder without a key must be reported: %q", problem)
 	}
 }

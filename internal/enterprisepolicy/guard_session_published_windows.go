@@ -183,6 +183,11 @@ func publishedSessionKeySDDL(gateway *windows.SID) string {
 // trust names, and flushes it. This process (SYSTEM or an administrator)
 // owns it.
 func createPublishedSessionKeyFile(path string, trust PublishedSessionTrust) error {
+	if trust.ServiceAccount == "" {
+		// A second key the lifecycle adds only shadows one it could not
+		// remove; it names the standalone gateway service.
+		trust.ServiceAccount = `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc
+	}
 	gateway, err := managed.WindowsServiceAccountSID(trust.ServiceAccount)
 	if err == nil && gateway == nil {
 		err = errors.New("no gateway service account is named")

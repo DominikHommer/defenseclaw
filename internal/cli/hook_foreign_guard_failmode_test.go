@@ -161,7 +161,7 @@ func newProtectedRecordFixture(t *testing.T) *protectedRecordFixture {
 // earlier allow proves nothing.
 func (r *protectedRecordFixture) newKey(t *testing.T) {
 	t.Helper()
-	if err := enterprisepolicy.CreatePublishedSessionKey(r.root, enterpriseForeignHookSessionKeyTrust()); err != nil {
+	if err := enterprisepolicy.RotatePublishedSessionKey(r.root, protectedRecordIdentity, enterpriseForeignHookSessionKeyTrust()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -169,7 +169,7 @@ func (r *protectedRecordFixture) newKey(t *testing.T) {
 // key is the path of the current record key.
 func (r *protectedRecordFixture) key(t *testing.T) string {
 	t.Helper()
-	key, err := enterprisepolicy.ReadPublishedSessionKey(r.root)
+	key, err := enterprisepolicy.ReadPublishedSessionKey(r.root, protectedRecordIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +314,7 @@ func TestForeignHookGuardOpenOutageFollowsTheProtectedSessionRecord(t *testing.T
 		records.untrusted[key] = true
 		blocked("a key file the user can change")
 		delete(records.untrusted, key)
-		if err := enterprisepolicy.KillPublishedSessionKey(records.root); err != nil {
+		if err := enterprisepolicy.KillPublishedSessionKey(records.root, protectedRecordIdentity); err != nil {
 			t.Fatal(err)
 		}
 		blocked("no key")

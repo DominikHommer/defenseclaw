@@ -218,11 +218,11 @@ func TestWindowsCopilotVSCodeUserOwnsTheLocalHookFile(t *testing.T) {
 	}
 }
 
-// The machine-policy pass holds no fence of its own while it cleans a
-// user's hooks: a slow scan that removes nothing never keeps another
+// The machine-policy pass holds no removal lock of its own while it cleans
+// a user's hooks: a slow scan that removes nothing never keeps the
 // account's gateway exchanges waiting.
-func TestWindowsForeignCleanupHoldsNoFenceWhileItCleans(t *testing.T) {
-	guardianDir := useInProcessCleanupFence(t)
+func TestWindowsForeignCleanupHoldsNoLockWhileItCleans(t *testing.T) {
+	useForeignHookGuardian(t, nil)
 	previousOptions, previousProfiles := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles
 	previousCleanup, previousBlocks := enterpriseForeignHookCleanup, enterpriseForeignHookCollectBlocks
 	t.Cleanup(func() {
@@ -244,8 +244,8 @@ func TestWindowsForeignCleanupHoldsNoFenceWhileItCleans(t *testing.T) {
 	calls := 0
 	enterpriseForeignHookCleanup = func(enterprisehooks.TargetCredentials, string, string) (enterprisepolicy.CleanupResult, error) {
 		calls++
-		if !cleanupFenceFree(guardianDir, 200*time.Millisecond) {
-			t.Error("the machine-policy pass holds the cleanup fence while it scans")
+		if !accountRemovalLockFree(t, alice, 200*time.Millisecond) {
+			t.Error("the machine-policy pass holds the account's removal lock while it scans")
 		}
 		return enterprisepolicy.CleanupResult{}, nil
 	}

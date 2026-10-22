@@ -75,7 +75,7 @@ func TestPublishedSessionKeyFileGivesOnlyTheGatewayItsRemoval(t *testing.T) {
 		t.Fatalf("the key file's DACL must give standard users no access a sharing mode applies to: %s", sddl)
 	}
 	if _, err := createAccountTestKey(filepath.Join(t.TempDir(), "x"), publishedSessionTestIdentity(t), PublishedSessionTrust{}); err == nil {
-		t.Fatal("a key file without the gateway service account must not be made")
+		t.Fatal("a key file in a folder that does not exist must not be made")
 	}
 	if err := KillPublishedSessionKey(root, publishedSessionTestIdentity(t)); err != nil {
 		t.Fatal(err)

@@ -748,3 +748,59 @@ func TestPublishedForeignHookSessionPruneKeepsTheNewest(t *testing.T) {
 		t.Fatal("a record past its age must be pruned")
 	}
 }
+
+// The lifecycle's removal of every key fails closed: a key file whose
+// removal fails gets a second key next to it, so the account's earlier
+// allows still prove nothing; a key whose owner cannot be read is removed
+// anyway (review of the consolidation: an early return left every key).
+func TestKillAllPublishedSessionKeysFailsClosed(t *testing.T) {
+	root := publishedSessionTestRoot(t)
+	identity := publishedSessionTestIdentity(t)
+	other := publishedSessionOtherIdentity(identity)
+	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
+	for _, account := range []string{identity, other} {
+		if err := publishCurrent(root, account, key, GuardDecision{}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stuck := publishedSessionTestKey(t, root, identity).ID()
+	previousRemove := publishedSessionRemoveKey
+	publishedSessionRemoveKey = func(name string) error {
+		if name == stuck {
+			return &os.PathError{Op: "remove", Path: name, Err: errors.New("input/output error")}
+		}
+		return previousRemove(name)
+	}
+	t.Cleanup(func() { publishedSessionRemoveKey = previousRemove })
+	restore := OverridePublishedSessionKeyOwnerForTest(func(path string) (bool, error) {
+		if path != stuck {
+			return false, errors.New("access denied")
+		}
+		return true, nil
+	})
+	err := KillAllPublishedSessionKeys(root)
+	restore()
+	withPublishedSessionKeysOfTheTestAccount(t)
+	if err == nil {
+		t.Fatal("a key that could not be removed must be reported")
+	}
+	if errors.Is(err, ErrPublishedSessionKeyAlive) {
+		t.Fatalf("the second key was added, so the key is not alive: %v", err)
+	}
+	if publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("an account with a key that could not be removed must prove nothing (second key)")
+	}
+	if publishedSessionTestAllows(root, other, key) {
+		t.Fatal("a key whose owner could not be read must be removed anyway")
+	}
+	publishedSessionRemoveKey = previousRemove
+	if err := EnsurePublishedSessionKeys(root, publishedSessionTestTrust); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadPublishedSessionKey(root, identity); err != nil {
+		t.Fatalf("the next pass gives the account one key again: %v", err)
+	}
+	if publishedSessionTestAllows(root, identity, key) {
+		t.Fatal("the new key must not bring the earlier allow back")
+	}
+}
