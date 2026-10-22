@@ -24,6 +24,10 @@ for current behavior.
 
 ### Fixed
 
+- **Managed macOS policy repair removes writable directory modes.** Repair strips group and other write permission even when the directory already has enough read and search permission, including after ACL repair.
+- **Administrator code scans use the verified deployment's existing redaction key.** Root scans accept the proven service account's key without changing its bytes, owner or permissions. Path aliases cannot select a different key; missing or untrusted custody still refuses with the installed repair command.
+- **RPM storage failures preserve the last complete package result.** The scriptlet reports a storage problem and the ensure retry command, and does not infer that no deployment is active from a missing result.
+- **Windows trust-anchor refusals are audited during profile preflight.** Elevated callers on verified installed standalone hosts get the refused change event even when incompatible arguments stop the command before bundle preparation.
 - **Ordinary Claude Code settings edits keep exporter custody verified.** Doctor compares the managed exporter environment and credential helper with Setup's exact snapshot; changed endpoints, headers, helpers or intentional absences still report drift.
 - **Disabling an unused Local Splunk integration needs no Docker installation.** On Windows, the bundle seeded during installation does not count as a configured stack. Existing runtime credentials and configured destinations still require ownership verification before stopping anything.
 - **Rejected reloads appear in local audit history.** Schema and policy generation refusals emit the mandatory `config.reload.rejected` event through the active configuration, without recording rejected values.
