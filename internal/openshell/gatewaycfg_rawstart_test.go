@@ -30,9 +30,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 )
 
-// rawBoxRefusal is CheckStopped's refusal of a sandbox a raw `openshell`
+// errRawBox is CheckStopped's refusal of a sandbox a raw `openshell`
 // client started (StopWayOn's words for a ready one).
-var rawBoxRefusal = fmt.Errorf("%w; OpenShell has not reported these stopped: raw-box (ready): `defenseclaw sandbox stop raw-box` (DefenseClaw sandbox), "+
+var errRawBox = fmt.Errorf("%w; OpenShell has not reported these stopped: raw-box (ready): `defenseclaw sandbox stop raw-box` (DefenseClaw sandbox), "+
 	"or `openshell sandbox stop raw-box` (raw OpenShell sandbox); then try again", openshell.ErrUnflushed)
 
 // GAP-0380, GAP-0454, GAP-0458, GAP-0347 (decision A): a raw `openshell`
@@ -90,7 +90,7 @@ func TestGatewayRollbackRawOpenShellStart(t *testing.T) {
 					callsAtFinal = len(f.runner.Calls())
 				}
 				if checks == tc.refuseAt {
-					return rawBoxRefusal
+					return errRawBox
 				}
 				return nil
 			}
