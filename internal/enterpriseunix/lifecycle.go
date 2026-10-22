@@ -3046,8 +3046,8 @@ func (l *lifecycle) policyAssetsChanged(ctx context.Context, record *Deployment,
 	if reported == "" || reloadError != "" {
 		return false
 	}
-	digest, generation, ok := l.computePolicy(ctx)
-	if !ok {
+	digest, generation, err := l.computePolicy(ctx)
+	if err != nil {
 		// A policy that does not build is no change ensure applies: the
 		// running gateway keeps the policy it loaded, and the run fails
 		// with the reason instead of restarting into a policy that does not

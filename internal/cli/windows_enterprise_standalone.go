@@ -722,7 +722,7 @@ func windowsEnterprisePolicyDigestCommand(ctx context.Context) (*exec.Cmd, error
 // policy-state.json beside deployment.json when it does. A gateway that
 // rejected a reload and a config.yaml edited outside the lifecycle are
 // reported for every action. Nothing is reported while the gateway is not
-// ready or when the installed CLI cannot compute it.
+// ready; when the installed CLI cannot compute it, policy_unverified names why.
 func applyWindowsEnterprisePolicy(ctx context.Context, result *enterprisestatus.Result) {
 	applyWindowsEnterprisePolicyAs(ctx, result, result.Action != "status" && result.Action != "verify")
 }
@@ -735,8 +735,19 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 	if !result.Installed || !result.Readiness.Gateway {
 		return
 	}
-	out, _ := windowsEnterprisePolicyDigest(ctx)
+	out, err := windowsEnterprisePolicyDigest(ctx)
+	warnings := len(result.Warnings)
 	state := applyEnterprisePolicyReport(result, out, change)
+	if state == nil && len(result.Warnings) == warnings {
+		// Name the check that did not run, such as an installed CLI the
+		// custody check refuses (rel-1-0-4 GAP-0594), instead of omitting the
+		// policy block silently.
+		cause := "the installed CLI reported no effective policy digest"
+		if err != nil {
+			cause = err.Error()
+		}
+		result.AddWarning("policy_unverified", "the effective policy the gateway enforces could not be checked: "+cause)
+	}
 	if state == nil || !state.Applied || !change || len(result.Errors) != 0 {
 		return
 	}
