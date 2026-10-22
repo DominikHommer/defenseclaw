@@ -58,6 +58,13 @@ type HookOutage struct {
 	// deployment the hook still takes DEFENSECLAW_FAIL_MODE from the agent's
 	// environment as a full override. No other hook reads it.
 	SecureClientEnvFailMode bool
+	// GuardCheckedAtLoad: the in-agent plugin asks the foreign-hook guard
+	// once when the agent loads it and keeps a block it gets then for the
+	// life of the agent process (the agent loads plugins once). Where the
+	// guard blocks an outage (enterprisepolicy.GuardBlocksOutage), an agent
+	// started during the outage keeps blocking its tool calls after the
+	// gateway is back, until it restarts.
+	GuardCheckedAtLoad bool
 }
 
 // managedUnixOutageClosed names the connectors whose per-user-route hooks a
@@ -83,6 +90,12 @@ var strictAvailabilityExceptions = map[string]string{
 // delivery render (templateData.SecureClientDelivery) keeps the
 // DEFENSECLAW_FAIL_MODE override (#1163).
 var secureClientEnvFailModeHooks = map[string]bool{"antigravity": true, "devin": true, "hermes": true, "kiro": true, "openhands": true}
+
+// guardCheckedAtLoadPlugins are the plugins that run the foreign-hook check
+// at load and hold its block for the process: amp-plugin.ts (startupGuard),
+// opencode-plugin.js and the machine-policy OpenCode plugin
+// (defenseclawStartupGuard).
+var guardCheckedAtLoadPlugins = map[string]bool{"amp": true, "opencode": true}
 
 // managedOutageProbeSocket marks a managed standalone Linux or macOS render
 // (managedStandaloneRender) for ConnectorHookOutage; nothing is written.
@@ -114,6 +127,7 @@ func ConnectorHookOutage(conn Connector) HookOutage {
 		SecureClientClosed:          hookOutage(conn, SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true, HookFailMode: "closed"}),
 		StrictAvailability:          strict,
 		SecureClientEnvFailMode:     secureClientEnvFailModeHooks[name],
+		GuardCheckedAtLoad:          guardCheckedAtLoadPlugins[name],
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -22,24 +23,41 @@ import (
 // here against the code: connector.ConnectorHookOutage, whose fields the
 // connector and hookexec tests check against the hooks, and the machine
 // policy targets of this package, whose managed hooks (defenseclaw-hook
-// --enterprise-managed) follow the administrator's fail mode on every OS.
+// --enterprise-managed) follow the administrator's fail mode on every OS,
+// and the foreign-hook guard (GuardBlocksOutage), which with the default
+// foreign_hooks: remove blocks a guarded connector's call in every fail mode
+// while the gateway cannot answer for the agent session (internal/cli
+// TestOutageTableManagedOpenMatchesAFullManagedCall runs that call).
 // Every other page links to the table instead of restating it
 // (TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix).
 
 const outageTableLink = "/docs/connectors/capability-matrix#gateway-outage"
 
-// Values of the table's managed open column.
+// Values of the table's managed open columns.
 const (
 	managedOpenRuns                 = "runs"
 	managedOpenBlocks               = "blocks"
 	managedOpenBlocksLinuxMacOS     = "blocks-linux-macos"
 	managedOpenPerUserRouteBlocksLM = "per-user-route-blocks-linux-macos"
+	// The default managed_hooks_only: enforce turns on the vendor lock and
+	// leaves the guard off; preserve turns the guard on.
+	managedOpenRunsBlocksWithHooksOnlyPreserve = "runs-blocks-with-hooks-only-preserve"
 )
 
+var outageTableOSes = []string{"linux", "darwin", "windows"}
+
 type documentedOutage struct {
-	PerUserClosed      string `json:"perUserClosed"`
-	PerUserOpen        string `json:"perUserOpen"`
+	PerUserClosed string `json:"perUserClosed"`
+	PerUserOpen   string `json:"perUserOpen"`
+	// ManagedOpen is the administrator's open with the default machine
+	// policy (foreign_hooks: remove, so the foreign-hook guard runs where it
+	// covers the connector); ManagedOpenNoGuard with foreign_hooks report or
+	// allow, where only the hook decides.
 	ManagedOpen        string `json:"managedOpen"`
+	ManagedOpenNoGuard string `json:"managedOpenNoGuard"`
+	// HeldUntilRestart: where the guard blocks the outage, an agent that
+	// started during it keeps blocking until it restarts.
+	HeldUntilRestart   bool   `json:"heldUntilRestart"`
 	SecureClientClosed string `json:"secureClientClosed"`
 	StrictAvailability string `json:"strictAvailability"`
 	EnvFailMode        string `json:"envFailMode"`
@@ -71,19 +89,20 @@ func documentedConnectorRows(t *testing.T) []struct {
 }
 
 // codeOutage is the table row the code gives for conn.
-func codeOutage(conn connector.Connector) documentedOutage {
+func codeOutage(t *testing.T, conn connector.Connector) documentedOutage {
 	outage := connector.ConnectorHookOutage(conn)
-	managedOpen := outage.ManagedOpenUnixPerUserRoute
+	noGuard := outage.ManagedOpenUnixPerUserRoute
 	if outage.ManagedOpenUnixPerUserRoute == connector.OutageBlocks && !connector.IsProxyConnector(conn.Name()) {
 		// Linux and macOS only: the Windows standalone hooks follow the
 		// administrator's mode. With machine policy (the default where the
 		// connector has it) the hook is defenseclaw-hook --enterprise-managed,
 		// which follows it too; only the per-user route blocks.
-		managedOpen = managedOpenBlocksLinuxMacOS
+		noGuard = managedOpenBlocksLinuxMacOS
 		if _, machinePolicy := targets[conn.Name()]; machinePolicy {
-			managedOpen = managedOpenPerUserRouteBlocksLM
+			noGuard = managedOpenPerUserRouteBlocksLM
 		}
 	}
+	managedOpen, guardBlocksSomewhere := managedOpenWithDefaultGuard(t, conn.Name(), noGuard)
 	env := "no"
 	if outage.SecureClientEnvFailMode {
 		env = "secure-client"
@@ -92,10 +111,50 @@ func codeOutage(conn connector.Connector) documentedOutage {
 		PerUserClosed:      outage.PerUserClosed,
 		PerUserOpen:        outage.PerUserOpen,
 		ManagedOpen:        managedOpen,
+		ManagedOpenNoGuard: noGuard,
+		HeldUntilRestart:   outage.GuardCheckedAtLoad && guardBlocksSomewhere,
 		SecureClientClosed: outage.SecureClientClosed,
 		StrictAvailability: outage.StrictAvailability,
 		EnvFailMode:        env,
 	}
+}
+
+// managedOpenWithDefaultGuard is the managed open cell under the default
+// machine policy: on each OS the call blocks where the foreign-hook guard
+// blocks the outage (GuardBlocksOutage) and otherwise does what the hook
+// does (noGuard, the cell for foreign_hooks report or allow). It also
+// reports whether the guard blocks the outage on any OS.
+func managedOpenWithDefaultGuard(t *testing.T, name, noGuard string) (string, bool) {
+	t.Helper()
+	policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(name)
+	preserve := policy
+	preserve.ManagedHooksOnly = config.ManagedHooksOnlyPreserve
+	guard, guardPreserve := map[string]bool{}, map[string]bool{}
+	somewhere := false
+	for _, goos := range outageTableOSes {
+		guard[goos] = GuardBlocksOutage(name, goos, policy)
+		guardPreserve[goos] = GuardBlocksOutage(name, goos, preserve)
+		somewhere = somewhere || guard[goos]
+	}
+	all := func(m map[string]bool) bool { return m["linux"] && m["darwin"] && m["windows"] }
+	none := func(m map[string]bool) bool { return !m["linux"] && !m["darwin"] && !m["windows"] }
+	switch {
+	case all(guard):
+		return managedOpenBlocks, somewhere
+	case guard["linux"] && guard["darwin"] && !guard["windows"]:
+		// Windows does what the hook does: every no-guard value but blocks
+		// lets a Windows outage call run.
+		if noGuard == managedOpenBlocks {
+			return managedOpenBlocks, somewhere
+		}
+		return managedOpenBlocksLinuxMacOS, somewhere
+	case none(guard) && all(guardPreserve) && noGuard == managedOpenRuns:
+		return managedOpenRunsBlocksWithHooksOnlyPreserve, somewhere
+	case none(guard) && none(guardPreserve):
+		return noGuard, somewhere
+	}
+	t.Errorf("%s: no table value for a guard that blocks an outage on %v (%v with managed_hooks_only preserve) over %q; add one", name, guard, guardPreserve, noGuard)
+	return "", somewhere
 }
 
 func TestDocsCapabilityMatrixOutageMatchesTheHooks(t *testing.T) {
@@ -114,7 +173,7 @@ func TestDocsCapabilityMatrixOutageMatchesTheHooks(t *testing.T) {
 			t.Errorf("%s: capability matrix row has no outage entry", row.ID)
 			continue
 		}
-		if want := codeOutage(conn); *row.Outage != want {
+		if want := codeOutage(t, conn); *row.Outage != want {
 			t.Errorf("%s: docs outage row %+v, the code says %+v", row.ID, *row.Outage, want)
 		}
 	}

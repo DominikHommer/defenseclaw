@@ -186,11 +186,22 @@ export function SandboxHarnessTable() {
 // gateway is down, still restarting or gives no answer in time. This table
 // is the one place the docs state it per connector; every other page links
 // here (#gateway-outage). The values are checked against the code by
-// TestDocsCapabilityMatrixOutageMatchesTheHooks (internal/enterprisepolicy).
+// TestDocsCapabilityMatrixOutageMatchesTheHooks (internal/enterprisepolicy)
+// and the managed columns against a full managed call by
+// TestOutageTableManagedOpenMatchesAFullManagedCall (internal/cli).
+type ManagedOpen = 'blocks' | 'runs' | 'blocks-linux-macos' | 'per-user-route-blocks-linux-macos';
+
 interface OutageRow {
   perUserClosed: 'blocks' | 'runs' | 'guardrail-mode';
   perUserOpen: 'blocks' | 'runs' | 'guardrail-mode';
-  managedOpen: 'blocks' | 'runs' | 'blocks-linux-macos' | 'per-user-route-blocks-linux-macos';
+  // The administrator's open with the default machine policy
+  // (foreign_hooks: remove: the foreign-hook guard runs where it covers the
+  // connector), and with foreign_hooks report or allow.
+  managedOpen: ManagedOpen | 'runs-blocks-with-hooks-only-preserve';
+  managedOpenNoGuard: ManagedOpen;
+  // Where the guard blocks the outage, an agent started during it stays
+  // blocked until it restarts.
+  heldUntilRestart: boolean;
   secureClientClosed: 'blocks' | 'runs';
   strictAvailability: 'yes' | 'no' | 'managed-only' | 'n/a';
   envFailMode: 'secure-client' | 'no';
@@ -203,6 +214,8 @@ const outageText: Record<string, string> = {
   'blocks-linux-macos': 'Blocks on Linux and macOS; runs on Windows',
   'per-user-route-blocks-linux-macos':
     'Runs through machine policy (the default); blocks on Linux and macOS on the per-user route',
+  'runs-blocks-with-hooks-only-preserve':
+    'Runs; blocks with managed_hooks_only: preserve, which turns the foreign-hook guard on',
 };
 
 const strictText: Record<OutageRow['strictAvailability'], string> = {
@@ -212,18 +225,25 @@ const strictText: Record<OutageRow['strictAvailability'], string> = {
   'n/a': 'No hooks',
 };
 
-function Outcome({ value }: { value: string }) {
+function Outcome({ value, heldUntilRestart = false }: { value: string; heldUntilRestart?: boolean }) {
   const blocks = value === 'blocks';
   return (
-    <span
-      className={
-        blocks
-          ? 'inline-flex rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-800 dark:text-emerald-300'
-          : 'text-xs leading-relaxed'
-      }
-    >
-      {outageText[value] ?? value}
-    </span>
+    <>
+      <span
+        className={
+          blocks
+            ? 'inline-flex rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-800 dark:text-emerald-300'
+            : 'text-xs leading-relaxed'
+        }
+      >
+        {outageText[value] ?? value}
+      </span>
+      {heldUntilRestart && (
+        <div className="mt-1 text-xs leading-relaxed text-fd-muted-foreground">
+          Where it blocks, an agent started during the outage stays blocked until it restarts.
+        </div>
+      )}
+    </>
   );
 }
 
@@ -234,13 +254,14 @@ export function OutageMatrix() {
       className="capability-matrix not-prose my-6 overflow-x-auto border border-fd-border"
       ariaLabel="Gateway outage by fail mode"
     >
-      <table className="w-full min-w-[900px] border-collapse text-sm">
+      <table className="w-full min-w-[1040px] border-collapse text-sm">
         <thead>
           <tr className="bg-fd-card text-left">
             <Th>Connector</Th>
             <Th>Per-user, fail mode closed</Th>
             <Th>Per-user, fail mode open</Th>
-            <Th>Managed standalone, administrator chose open</Th>
+            <Th>Managed standalone, open, default foreign-hook guard</Th>
+            <Th>Managed standalone, open, foreign_hooks report or allow</Th>
             <Th>Secure Client, fail mode closed</Th>
             <Th>DEFENSECLAW_STRICT_AVAILABILITY</Th>
             <Th>DEFENSECLAW_FAIL_MODE</Th>
@@ -257,7 +278,10 @@ export function OutageMatrix() {
               </Td>
               <Td><Outcome value={c.outage.perUserClosed} /></Td>
               <Td><Outcome value={c.outage.perUserOpen} /></Td>
-              <Td className="max-w-[240px]"><Outcome value={c.outage.managedOpen} /></Td>
+              <Td className="max-w-[240px]">
+                <Outcome value={c.outage.managedOpen} heldUntilRestart={c.outage.heldUntilRestart} />
+              </Td>
+              <Td className="max-w-[240px]"><Outcome value={c.outage.managedOpenNoGuard} /></Td>
               <Td><Outcome value={c.outage.secureClientClosed} /></Td>
               <Td className="text-xs">{strictText[c.outage.strictAvailability]}</Td>
               <Td className="text-xs">{c.outage.envFailMode === 'secure-client' ? 'Secure Client only' : 'Not read'}</Td>
