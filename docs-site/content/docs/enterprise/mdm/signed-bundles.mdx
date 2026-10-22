@@ -1,0 +1,165 @@
+---
+title: Signed policy bundles
+description: Deliver the managed config as a signed policy bundle on Windows, Linux and macOS. Install the trust anchors, make the first deployment, roll out a new bundle and check that the device enforces it.
+keywords:
+  - DefenseClaw signed policy bundle
+  - dcbundle
+  - bundle trust anchors
+  - bundle_required
+  - enterprise bundle status
+---
+
+A signed policy bundle (`.dcbundle`) carries `config.yaml`, the policy files it
+names, a manifest with their hashes and a detached signature. A standalone
+enterprise device applies a bundle only when it verifies against the trust anchors
+your MDM installed (`<etc>/trust/bundle-anchors.json`). Secure Client computers do
+not take bundles.
+
+## Bundle mode
+
+Installing the trust anchors puts the device in bundle mode. From then on it takes
+its config only from signed bundles:
+
+- A config delivered without a bundle (Setup `CONFIG=`, `-ConfigPath`, `--config`,
+  `--config-file`, `DC_CONFIG_FILE` or `dc_inline_config`) that is not the current
+  bundle's config is refused with `bundle_required`. Nothing changes.
+- Windows Setup also refuses `TRUSTANCHORS=` together with `CONFIG=`
+  (`bundle_required`, exit `1639`).
+- On Linux and macOS, an edit of the installed `config.yaml` is reverted to the
+  current bundle's config.
+
+To change the config of a device in bundle mode, sign and deliver a new bundle.
+
+## Sign and check a bundle
+
+On an administrator workstation, with the release your devices run:
+
+```bash
+defenseclaw-gateway enterprise bundle sign --in ./policy --out v12.dcbundle \
+  --key signing.pem --key-id acme-2026a --tenant acme --device-group eng-laptops \
+  --version 12 --created-by operator:alice --summary "Block HIGH for eng"
+defenseclaw-gateway enterprise bundle verify --bundle v12.dcbundle \
+  --anchors bundle-anchors.json --platform windows --json
+```
+
+`--in` is a folder with `config.yaml` and the policy files it names. The version
+must be above the anchors' `min_version` and the device's last confirmed bundle
+version. `sign` and `verify` run offline and change nothing. Run `verify` for each
+platform you target (`linux`, `darwin`, `windows`): a device refuses a bundle whose
+signed digest for its platform it computes differently (`digest_mismatch`). To sign
+with an HSM or KMS, use `--emit-digest` and `--attach-sig`
+(`enterprise bundle sign --help`).
+
+## First deployment
+
+The first policy should be the bundle's. Each route below gets there in one MDM
+run or one app chain.
+
+### Windows
+
+Setup takes `CONFIG=` on the first install and `BUNDLE=` only after it. With
+Intune, deliver these Win32 apps in this order:
+
+1. **Rule-pack app**, if the config names a custom rule pack
+   ([Custom rule pack app](/docs/enterprise/mdm/intune/windows-reference#custom-rule-pack-app)).
+2. **Base app**, built with `-ConfigPath` from the
+   [Intune on Windows](/docs/enterprise/mdm/intune/windows) recipe. Its config is
+   the **base config** (see the rules below). Until the bundle applies, the device
+   enforces it.
+3. **Bundle app**, built from the same Setup with the bundle, the anchors and the
+   base config, with the base app as its dependency (**Automatically install:
+   Yes**):
+
+```powershell
+./New-DefenseClawIntunePackage.ps1 `
+  -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
+  -Sha256 '<SHA-256 of the Setup>' -BundlePath .\v12.dcbundle `
+  -TrustAnchorPath .\bundle-anchors.json -RequireBundle 12 `
+  -BaseConfigPath .\config.yaml -OutputDirectory .\intune-bundle-12
+```
+
+Upload the generated `detect-bundle.ps1` as the bundle app's custom detection rule.
+It detects the app only when the device enforces bundle `12`. Other Windows tools
+run the same Setup on an installed computer: `/ensure BUNDLE=<file>
+TRUSTANCHORS=<file> JSON=1`, or `Invoke-DefenseClawEnterprise.ps1` with
+`-BundlePath` and `-TrustAnchorPath`.
+
+### Linux and macOS
+
+Put the package source, the bundle and the anchors in the **same** wrapper script.
+Paste the base64 of the bundle into `dc_inline_bundle` (or set `DC_BUNDLE_FILE`) and
+the anchor file into `dc_inline_trust_anchors` (or set `DC_TRUST_ANCHOR_FILE`). The
+run installs the package, then the anchors, then applies the bundle. See
+[Intune on Linux](/docs/enterprise/mdm/intune/linux) and
+[Intune on macOS](/docs/enterprise/mdm/intune/macos) for the rest of the script.
+
+Without a base config the package applies its built-in default, which protects no
+agents, until the first bundle applies. If that bundle does not apply (for example,
+an expired anchor), the device stays unprotected. To avoid that, also fill in
+`dc_inline_config` (or `DC_CONFIG_FILE`) with a base config. The wrapper applies it
+before the anchors and the bundle. Once the anchors are installed, the base config is
+not used.
+
+### Base config rules
+
+- Its `guardrail:` block is the bundle's, apart from `custom_packs.<pack>.path`,
+  which names the pack folder installed before this run.
+- Its `claude_code:`, `codex:`, `connector_hooks:` and `application_protection:`
+  blocks are the bundle's, or absent from both. Their modes override the guardrail
+  mode.
+- It is plain ASCII with LF or CRLF line endings, writes every top-level key plainly
+  in lowercase and ends each quoted value and each `{...}` or `[...]` on its line.
+  The check compares text.
+
+The Windows packager refuses a base config that breaks these rules. The Linux and
+macOS wrappers install nothing and fail with `mdm_base_config_mismatch` (exit `2`).
+The wrapper reads the bundle with `tar`; without it, a run with a base config
+installs nothing (`mdm_tar_missing`, exit `1`).
+
+## Roll out a new bundle
+
+Sign the next version and check it as above. Then:
+
+- **Windows (Intune):** build a new bundle app with the new bundle, the same base
+  config and the Setup of the release the devices run (an older Setup is refused with
+  `downgrade_refused`). Let it supersede the previous bundle app without uninstalling
+  it.
+- **Linux and macOS:** replace the bundle in the wrapper script, keep the anchors, and
+  let the MDM run it again.
+- **By hand:** as root or an elevated administrator,
+  `defenseclaw-gateway enterprise bundle apply --bundle <file> --json`.
+
+The policy in force keeps enforcing until the gateway reports the new one. A failed
+apply keeps the last good bundle. Applying the current bundle again changes nothing
+(`already_applied`).
+
+### Upgrade the product in bundle mode
+
+Leave the config out of upgrade packages and scripts.
+
+- **Windows (Intune):** keep the base and bundle apps assigned. Add a separate
+  Setup-only Win32 app built without `-ConfigPath` and without supersedence:
+  superseding a base app that a bundle app depends on failed with Intune error
+  `0x87D300DB`. Build the next bundle app with the new Setup.
+- **Linux and macOS:** update the package source, its pin and `DC_PRODUCT_VERSION` in
+  the script.
+
+## Check it worked
+
+As root or an elevated administrator on the device:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise bundle status --json
+```
+
+On macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. On Windows,
+run `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise bundle status --json`
+from an elevated PowerShell.
+
+The device enforces the bundle when `bundle_mode` is `true`, `current` names the
+version you delivered and `applied` is `true`. A refused bundle appears under
+`last_refusal` with its code, such as `signature_invalid` or `digest_mismatch`. On
+Windows, `enterprise windows verify` fails with `bundle_not_applied` when a confirmed
+bundle does not enforce. All codes:
+[Troubleshooting](/docs/troubleshooting/enterprise#lifecycle-error-codes) and
+[MDM wrapper error codes](/docs/troubleshooting/enterprise#mdm-wrapper-error-codes).

@@ -9,7 +9,7 @@ keywords:
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-DefenseClaw writes hooks and an OpenTelemetry exporter into Codex's `config.toml`. Per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. This is a hook connector: Codex talks to OpenAI directly and no proxy is involved.
+DefenseClaw writes hooks and an OpenTelemetry exporter into Codex's `config.toml`. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. Codex in an OpenShell sandbox (`defenseclaw sandbox run codex`) is the exception: the sandbox image installs `codex-notify.sh` and sets `notify` in its managed config. This is a hook connector: Codex talks to OpenAI directly and no proxy is involved.
 
 ## Platform support
 

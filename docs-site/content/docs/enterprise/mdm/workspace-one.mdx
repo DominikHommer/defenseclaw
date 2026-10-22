@@ -110,6 +110,8 @@ or newer, and `1` otherwise.
   ([AI Defense key](/docs/enterprise/configure/ai-defense-key)).
 - **Upgrade or change the config.** Build new content and add it as a new app version;
   raise `-MinimumVersion`. `/ensure` upgrades in place and applies the new config.
+  In bundle mode, leave the config out and deliver a new signed bundle for a config
+  change; a plain config is refused with `bundle_required` ([Signed policy bundles](/docs/enterprise/mdm/signed-bundles)).
   `ensure` refuses a downgrade ([Roll back](/docs/enterprise/operate/lifecycle#roll-back)).
 - **Uninstall.** `uninstall.ps1` finds the installed CLI and runs `enterprise windows
   uninstall`; `-Purge` also removes enrolled accounts' data
@@ -197,7 +199,8 @@ lifecycle fails the install after rolling back; the result is in
   `guardrail.custom_packs.<name>` to that path and its `sha256:<digest>` pin. Stage
   the pack again before reinstalling after a purge.
 - **Upgrade, change the config.** Upload the new package as a new app version and
-  raise `DC_MIN_VERSION`; edit the inline config for a config change
+  raise `DC_MIN_VERSION`; edit the inline config for a config change (in bundle
+  mode, deliver a new signed bundle instead: [Signed policy bundles](/docs/enterprise/mdm/signed-bundles))
   ([Roll back](/docs/enterprise/operate/lifecycle#roll-back)).
 
 Exit codes: `0` **Executed**; `1` failed and rolled back; `2` invalid settings

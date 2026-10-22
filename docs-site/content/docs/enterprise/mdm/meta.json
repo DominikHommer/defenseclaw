@@ -8,6 +8,7 @@
     "configmgr",
     "linux-config-management",
     "linux-config-recipes",
+    "signed-bundles",
     "reference"
   ]
 }

@@ -18,7 +18,11 @@ Reference for [Intune on Windows](/docs/enterprise/mdm/intune/windows).
 | `-Sha256` | The Setup's pin. Required with hash-pinned trust; the script refuses a Setup that does not match. |
 | `-TrustMode` | `HashPinned` (default) or `Authenticode`. |
 | `-AllowedSigners` | With `Authenticode`: SHA-256 thumbprints of accepted signer certificates, comma-separated or repeated. |
-| `-ConfigPath` | The config. Without one the first install fails with `1639`. |
+| `-ConfigPath` | The config. Without one the first install fails with `1639`. Leave it out of a bundle package and of an upgrade for a device in bundle mode, which refuses it with `bundle_required`. |
+| `-BundlePath` | A signed policy bundle (`.dcbundle`) for a bundle app. Not with `-ConfigPath`; needs `-BaseConfigPath` and `-RequireBundle`. See [Signed policy bundles](/docs/enterprise/mdm/signed-bundles). |
+| `-BaseConfigPath` | With `-BundlePath`: the config of the base app. Its guardrail policy and hook mode blocks must be the bundle's. |
+| `-TrustAnchorPath` | With `-BundlePath`: the bundle trust anchor file to install. |
+| `-RequireBundle` | With `-BundlePath`: the bundle version or id the generated `detect-bundle.ps1` requires. |
 | `-OutputDirectory` | Where to write. Required. Its `content` folder must not exist yet. |
 | `-IntuneWinAppUtil` | Path to `IntuneWinAppUtil.exe`. When set, the script also builds the `.intunewin`. |
 | `-ProductVersion` | The release version. The script prints it in the detection rule and records it. |
@@ -153,7 +157,7 @@ It reads the 64-bit registry view, so the **Run script as 32-bit process on
 
 ## Config-aware detection script
 
-Use this instead of the registry rule when you roll out a config-only change. Replace the two values at the top with the minimum version and the `config_sha256` value from the new package's `intune-package.json`:
+Use this instead of the registry rule when you roll out a config-only change. Not for a device in bundle mode: it refuses a config package with `bundle_required`, so deliver a new bundle app with its `detect-bundle.ps1` ([Signed policy bundles](/docs/enterprise/mdm/signed-bundles)). Replace the two values at the top with the minimum version and the `config_sha256` value from the new package's `intune-package.json`:
 
 ```powershell
 $minimum = [version]'X.Y.Z'

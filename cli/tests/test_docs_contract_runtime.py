@@ -41,12 +41,6 @@ def test_codex_notify_is_scoped_to_secure_client(name):
         assert "Secure Client only" in row
 
 
-def test_codex_notify_residual_has_the_same_scope():
-    text = (DOCS / "enterprise/plan/threat-model.mdx").read_text()
-    row = next(line for line in text.splitlines() if line.startswith("| **Codex passes each turn"))
-    assert "Secure Client only" in row
-
-
 def test_hermes_verification_discloses_snapshot_and_checks_current_files():
     text = flat("reference/connectors/hermes.mdx")
     assert "last reconcile" in text
@@ -74,3 +68,35 @@ def test_site_description_qualifies_runtime_coverage():
     text = (ROOT / "docs-site/lib/site.ts").read_text()
     assert "Inspect the runtime events each connector sends." in text
     assert "Inspect prompts, completions, and tool calls at runtime." not in text
+
+
+CODEX_SANDBOX_NOTIFY_PAGES = [
+    "connectors/codex.mdx",
+    "reference/connectors/codex.mdx",
+    "how-to/guardrail/catch-prompt-injection.mdx",
+]
+
+
+@pytest.mark.parametrize("name", CODEX_SANDBOX_NOTIFY_PAGES)
+def test_codex_no_notify_claim_names_the_openshell_exception(name):
+    text = flat(name)
+    assert "OpenShell sandbox" in text
+    if name != "reference/connectors/codex.mdx":
+        assert "On an ordinary host install" in text
+    else:
+        assert "installs on the host do not register" in text
+
+
+def test_codex_sandbox_reference_describes_its_notify_bridge():
+    text = (DOCS / "reference/connectors/codex.mdx").read_text()
+    section = text.split("### OpenShell sandbox", 1)[1].split("\n## ", 1)[0]
+    row = next(line for line in section.splitlines() if line.startswith("| Notify bridge"))
+    assert "codex-notify.sh" in row and "managed_config.toml" in row
+    assert "/api/v1/codex/notify" in row
+    assert "never blocks" in row and "process list" in row
+
+
+def test_codex_notify_privacy_residual_includes_the_sandbox():
+    text = (DOCS / "enterprise/plan/threat-model.mdx").read_text()
+    row = next(line for line in text.splitlines() if line.startswith("| **Codex passes each turn"))
+    assert "Secure Client" in row and "OpenShell sandbox" in row and "codex-notify.sh" in row

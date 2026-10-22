@@ -143,6 +143,10 @@ restarts the gateway. Then set `enterprise.inspection.ai_defense.enabled: true` 
 
 ### Change the config
 
+On a device in bundle mode (bundle trust anchors installed), deliver a new signed
+bundle instead: Setup refuses a config change with `bundle_required` ([Signed policy bundles](/docs/enterprise/mdm/signed-bundles)).
+Otherwise:
+
 Build new content with the new `config_version: 9` `config.yaml` and create it as a
 new application with the same Setup. Replace the registry rule with a **Script**
 detection method that also checks the installed config. Take the minimum version and

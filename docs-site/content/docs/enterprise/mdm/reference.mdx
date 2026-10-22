@@ -406,6 +406,11 @@ deliver the older pkg; the package consumes it. See
 | Linux, macOS | Run the wrapper again with the new config and no artifact. The lifecycle validates the new file before it replaces the installed one, then applies it. With a script-only MDM, edit the config in the script and let the MDM run it again. Replacing the installed file directly also works: the apply job (`defenseclaw-enterprise-apply.path` on Linux, `com.cisco.defenseclaw.apply` on macOS) runs `ensure` when the file changes. |
 | Windows | Run Setup again with the new file: `/ensure JSON=1 CONFIG=<new file>`, or the wrapper with `-SetupPath` and `-ConfigPath`. Use a Setup of the installed version or newer. The installed CLI cannot apply a new config on its own: its `enterprise windows ensure --config` (and the wrapper without `-SetupPath`) exits `1639`, because it has no payload to re-apply. |
 
+On a device in bundle mode (bundle trust anchors installed), both routes refuse a
+config that is not the current bundle's with `bundle_required`, and on Linux and
+macOS an edit of the installed file is reverted. Deliver a new signed bundle
+instead ([Signed policy bundles](/docs/enterprise/mdm/signed-bundles)).
+
 An MDM that detects the Windows deployment by version does not re-run it for a
 config-only change.
 [Intune on Windows](/docs/enterprise/mdm/intune/windows#6-change-the-config-upgrade-and-roll-back)

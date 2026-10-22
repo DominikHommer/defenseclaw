@@ -198,7 +198,7 @@ submits inventory ([Detection](/docs/enterprise/mdm#detection)).
 | --- | --- |
 | Upgrade | Upload the new package and set `DC_MIN_VERSION` in the extension attribute to the new version. Create a new install policy with the new package, or flush the old policy's logs: a **Once per computer** policy does not run again on a computer with a log entry |
 | Roll back | Run a script that creates the root-owned marker (`touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`), then deploy the earlier package ([Roll back](/docs/enterprise/operate/lifecycle#roll-back)) |
-| Change the config | Edit the YAML in `DefenseClaw stage config`. The ensure policy applies it at its next run, validated first |
+| Change the config | Edit the YAML in `DefenseClaw stage config`. The ensure policy applies it at its next run, validated first. In bundle mode, deliver a new signed bundle instead; a plain config is refused with `bundle_required` ([Signed policy bundles](/docs/enterprise/mdm/signed-bundles)) |
 
 ## Deliver a custom macOS rule pack
 

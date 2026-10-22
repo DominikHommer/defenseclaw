@@ -366,6 +366,7 @@ On a tarball host, `uninstall --purge` removes everything, including `/opt/defen
 - **Change the config.** Replace `/etc/defenseclaw/config.yaml`. The apply path
   unit runs `ensure`, which validates and applies it or rolls back
   ([Change the config](/docs/enterprise/operate/lifecycle#change-the-config)).
+  In bundle mode the edit is reverted; deliver a new signed bundle ([Signed policy bundles](/docs/enterprise/mdm/signed-bundles)).
 - **Tetragon.** Read [Remove the policies, or downgrade](/docs/enterprise/runtime/tetragon/)
   before you downgrade below the first release that supports Tetragon, and
   [Upgrades](/docs/enterprise/runtime/tetragon#upgrades) when a release changes a kernel
