@@ -4741,10 +4741,6 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if err := verifyEffectiveHookRegistration(setupOpts, conn); err != nil {
 			return failSetup("registration verification", err)
 		}
-		if err := s.saveSingleConnectorReadyState(ctx, setupOpts, conn, singleRollback); err != nil {
-			return err
-		}
-
 		// Plan A4 / S0.12: refuse to start when the connector advertises
 		// no usable upstream provider for a proxy-bound data path.
 		// Without this, the gateway would accept agent traffic and fail
@@ -4760,14 +4756,15 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if probe, ok := conn.(connector.ProviderProbe); ok && shouldRunProviderProbeForConnector(conn, &s.currentConfig().Guardrail) {
 			count, err := probe.HasUsableProviders()
 			if err != nil {
-				s.health.SetGuardrail(StateError, err.Error(), nil)
-				return fmt.Errorf("connector %s reports no usable providers: %w (set guardrail.allow_empty_providers=true to override)", conn.Name(), err)
+				return failSetup("provider verification", fmt.Errorf("connector %s reports no usable providers: %w (set guardrail.allow_empty_providers=true to override)", conn.Name(), err))
 			}
 			if count == 0 {
-				s.health.SetGuardrail(StateError, "no usable providers", nil)
-				return fmt.Errorf("connector %s reports zero usable providers; refusing to start (set guardrail.allow_empty_providers=true to override)", conn.Name())
+				return failSetup("provider verification", fmt.Errorf("connector %s reports zero usable providers; refusing to start (set guardrail.allow_empty_providers=true to override)", conn.Name()))
 			}
 			fmt.Fprintf(os.Stderr, "[guardrail] provider probe ok: %s reports %d usable upstream(s)\n", conn.Name(), count)
+		}
+		if err := s.saveSingleConnectorReadyState(ctx, setupOpts, conn, singleRollback); err != nil {
+			return err
 		}
 	}
 	if s.currentConfig().Guardrail.Enabled {
