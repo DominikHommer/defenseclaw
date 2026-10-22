@@ -51,10 +51,12 @@ def test_hermes_verification_discloses_snapshot_and_checks_current_files():
 
 
 def test_windows_hermes_gateway_failure_is_distinct_from_vendor_timeout():
-    text = flat("appendix/windows-security-model.mdx")
-    assert "Hermes never fails closed" not in text
-    assert "Hermes blocks on DefenseClaw's valid block answer" in text
-    assert "times out or cannot start" in text
+    appendix = flat("appendix/windows-security-model.mdx")
+    assert "Hermes never fails closed" not in appendix
+    assert "/docs/reference/apis/capability-matrix#gateway-outage" in appendix
+    matrix = flat("reference/apis/capability-matrix.mdx")
+    assert "Hermes accepts a valid block answer" in matrix
+    assert "a killed hook or a timeout can let a call run" in matrix
 
 
 def test_prompt_findings_follow_the_configured_threshold():

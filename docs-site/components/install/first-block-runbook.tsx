@@ -37,7 +37,7 @@ export function FirstBlockRunbook({ className }: { className?: string }) {
     },
     {
       title: 'Set up',
-      body: 'Finds the agents you have and starts them in observe mode, so nothing is blocked yet.',
+      body: 'Finds the agents you have and starts them in observe mode, so policy findings do not block yet.',
       command: INIT_COMMAND,
       copyLabel: 'Copy defenseclaw init',
     },

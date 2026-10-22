@@ -39,13 +39,13 @@ Any value other than `open` (in any case) is `closed`. Per-connector behavior is
 These are not an outage, so they block in every fail mode on a managed computer:
 
 - The administrator-owned runtime is missing or fails its checks (the runtime descriptor on Linux and macOS, the runtime generation on Windows).
-- On native Windows, another program answers in place of the gateway service.
+- Another program answers in place of the gateway service.
 - The hook token is missing, or the gateway refuses the credential (HTTP 401 or 403, also when the answer is cut off or too large).
 - The call does not match the event or hook contract the hook was registered for.
 - The account is not enrolled.
 - A foreign hook the guard finds, or a session record it cannot verify. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#gateway-outages).
 
-On a managed standalone host `open` is for an outage: the gateway service is not running, is restarting, or gives no answer in time. Input over the hook's 1 MiB limit, a gateway 5xx and an unusable answer block in `open` too. Unix shell hooks in this build have a socket trust exception described below. Per-user and Secure Client hooks are unchanged.
+On a managed standalone host `open` applies only to an outage: the gateway service is not running, is restarting, or gives no answer in time. Every other failure blocks in `open` too: input over the hook's 1 MiB limit, a gateway 5xx, an unusable answer and any other transport error. Per-user and Secure Client hooks are unchanged.
 
 Event-specific outage limits are in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
 
@@ -128,7 +128,7 @@ Use the [capability matrix](/docs/reference/apis/capability-matrix#gateway-outag
 
 `DEFENSECLAW_STRICT_AVAILABILITY=1` is an unconditional closed override for transport and missing-token failures, for managed or compatibility deployments that must never open during a gateway outage. It does not add a missing hook, turn native OTLP into enforcement, or make an unsupported connector block-capable. A strict outage can make the agent unavailable, so use status, gateway monitoring and a tested restart path before applying it broadly. On native Windows, set normal posture with `guardrail fail-mode` so setup, doctor and status can reconcile and report it.
 
-On a managed standalone computer, hooks reject an invalid runtime and missing or refused credentials in every fail mode. A native Windows hook also blocks an unverified gateway peer. Unix shell hooks whose socket ownership check fails use the installed fail mode before sending a request; with administrator `open`, a tool call may run. Keep these hooks `closed` until the socket trust fix is installed. `DEFENSECLAW_STRICT_AVAILABILITY=1` closes classified outages too.
+On a managed standalone computer, hooks reject an invalid runtime, an unverified gateway peer or missing or refused credentials in every fail mode. The administrator's `open` covers only classified outages; `DEFENSECLAW_STRICT_AVAILABILITY=1` closes those too.
 
 ## The environment does not set the fail mode
 

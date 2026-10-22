@@ -469,12 +469,12 @@ export function buildCommand(
     // server-side. Warn here so the operator notices.
     if (s.humanApproval) {
       warnings.push(
-        'Human approval (HITL) only fires in action mode. Observe mode logs without blocking, so there is nothing to pause on. The --human-approval flag was omitted.',
+        'Human approval (HITL) only fires in action mode. Observe mode does not block on findings, so there is nothing to pause on. The --human-approval flag was omitted.',
       );
     }
     if (s.blockMessage.trim()) {
       warnings.push(
-        'Custom block message only applies in action mode. Observe never blocks. The --block-message flag was omitted.',
+        'Custom block message only applies in action mode. Observe mode does not block on findings. The --block-message flag was omitted.',
       );
     }
   }
@@ -654,7 +654,7 @@ export function CommandGenerator() {
 
         <Section
           title="Mode"
-          subtitle="observe logs without blocking. action enforces on configured severities."
+          subtitle="observe logs findings without blocking on them. action enforces on configured severities."
         >
           <SegmentedControl<Mode>
             name="mode"

@@ -41,7 +41,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 
 - In action mode these events deny with Cursor's own response: `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead` and `beforeSubmitPrompt`.
 - DefenseClaw does not turn on Cursor's native ask. A confirm verdict stays an alert.
-- Observe mode allows everything and records what action mode would have blocked.
+- Observe mode does not block on policy findings; it records what action mode would have blocked. A per-user observe hook also allows a call when the gateway cannot answer. On a managed computer the administrator's outage mode applies; see the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
 - `sessionStart`, `sessionEnd`, `stop` and `subagentStop` never gate.
 
 ## Files it changes

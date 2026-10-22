@@ -333,7 +333,7 @@ makes it `false`. See [Health fields](/docs/enterprise/operate/operations#health
 
 ### Observe and action modes
 
-`guardrail.mode`. In `observe` mode policy verdicts never block and DefenseClaw
+`guardrail.mode`. In `observe` mode policy verdicts do not block and DefenseClaw
 records what it would have blocked. In `action` mode it enforces. The
 deployment's own checks apply in both modes. You can also set the mode per agent
 under `guardrail.connectors`.

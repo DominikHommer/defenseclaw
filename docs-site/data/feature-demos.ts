@@ -203,12 +203,12 @@ connector:
     ],
     evidence: [
       { id: 'mode-event', label: 'Finding', value: 'system.path-change · HIGH', detail: 'The same pending action is used for every mode.', tone: 'warning' },
-      { id: 'mode-observe', label: 'Observe', value: 'Allow + log', detail: 'Observe mode records evidence but cannot block.', tone: 'info' },
+      { id: 'mode-observe', label: 'Observe', value: 'Allow + log', detail: 'Observe mode records evidence and does not block on the finding.', tone: 'info' },
       { id: 'mode-action', label: 'Action', value: 'Block', detail: 'Blocks because the demo sets block_at to HIGH. The shipped default blocks CRITICAL and alerts on HIGH.', tone: 'danger' },
       { id: 'mode-hitl', label: 'Action + HITL', value: 'Native pause', detail: 'Claude Code supports ask on PreToolUse.', tone: 'warning' },
     ],
     outcomes: [
-      { id: 'observe-result', kind: 'observe', label: 'Allow and observe', reason: 'Observe mode never blocks', action: 'Emit evidence' },
+      { id: 'observe-result', kind: 'observe', label: 'Allow and observe', reason: 'Observe mode does not block on findings', action: 'Emit evidence' },
       { id: 'action-result', kind: 'block', label: 'Block action', reason: 'HIGH meets block_at: HIGH', action: 'Return denial' },
       { id: 'hitl-result', kind: 'pause', label: 'Pause for approval', reason: 'Action mode + HITL + native ask support', action: 'Wait for operator' },
     ],
@@ -222,7 +222,7 @@ connector:
         id: 'observe', label: 'Observe', description: 'Allow execution and record evidence.',
         steps: [
           step('observe-input', 'Inspect action', 'The HIGH-risk action reaches the guardrail.', 'pretool', ['mode-event'], [{ tabId: 'pretool', start: 2, end: 7, tone: 'warning' }]),
-          step('observe-decision', 'Observe only', 'Observe mode records the finding without blocking.', 'observe-decision', ['mode-event', 'mode-observe'], [{ tabId: 'observe-decision', start: 2, end: 7, tone: 'info' }], 'observe-result'),
+          step('observe-decision', 'Observe only', 'Observe mode records the finding without blocking on it.', 'observe-decision', ['mode-event', 'mode-observe'], [{ tabId: 'observe-decision', start: 2, end: 7, tone: 'info' }], 'observe-result'),
         ],
       },
       {
@@ -270,7 +270,7 @@ rules:
     tags: [credential, file-sensitive]` },
       { id: 'policy-config', label: 'config.yaml', language: 'yaml', source: `# ~/.defenseclaw/config.yaml (excerpt)
 guardrail:
-  mode: action           # observe mode never blocks
+  mode: action           # observe mode does not block on findings
   judge:
     enabled: false       # the optional LLM judge is off by default
   # No block_at is set, so the default pack decides:

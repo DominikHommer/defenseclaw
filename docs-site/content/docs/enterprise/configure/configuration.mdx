@@ -58,7 +58,7 @@ guardrail:
       mode: action       # this agent blocks; the others only observe
 ```
 
-`observe` logs the verdict without blocking; `action` blocks what policy denies. A connector's own `mode` overrides the global value. `block_message` may contain at most 4096 characters.
+`observe` logs the verdict without blocking on it, and a check that cannot complete still follows the hook fail mode; `action` blocks what policy denies. A connector's own `mode` overrides the global value. `block_message` may contain at most 4096 characters.
 
 | Route | Connectors | What DefenseClaw changes |
 | --- | --- | --- |

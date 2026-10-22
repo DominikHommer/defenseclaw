@@ -17,7 +17,7 @@ DOCS = ROOT / "docs-site/content/docs"
     [
         (
             "reference/apis/capability-matrix.mdx",
-            ("administrator explicitly selects `open`", "Hermes hooks block delivery failures"),
+            ("only an administrator can choose `open`", "Hermes accepts a valid block answer"),
             ("every connector's hook fails closed, also in observe mode",),
         ),
         (

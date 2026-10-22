@@ -175,7 +175,7 @@ A managed config also accepts the `openshell.admin` block (organization-wide lim
 
 ### Sample configs
 
-Each sample is an observe-mode starter: it inspects Codex, Claude Code, Cursor, Copilot and OpenCode, logs every verdict and does not block. Change `guardrail.mode` to `action` when you are ready to block. Each sample also turns on AI Discovery (`ai_discovery.enabled: true`), which is off when the key is not set.
+Each sample is an observe-mode starter: it inspects Codex, Claude Code, Cursor, Copilot and OpenCode, logs every verdict and does not block on policy findings. Change `guardrail.mode` to `action` when you are ready to block. Each sample also turns on AI Discovery (`ai_discovery.enabled: true`), which is off when the key is not set.
 
 <Tabs items={['Linux', 'macOS', 'Windows']}>
   <Tab value="Linux">

@@ -14,10 +14,10 @@ function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
 
-function docPages(dir = join(site, 'content/docs')): string[] {
+function docPages(dir = join(site, 'content/docs'), ext = /\.mdx$/): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name);
-    return entry.isDirectory() ? docPages(path) : entry.name.endsWith('.mdx') ? [path] : [];
+    return entry.isDirectory() ? docPages(path, ext) : ext.test(entry.name) ? [path] : [];
   });
 }
 
@@ -74,13 +74,16 @@ describe('managed outage documentation', () => {
     assert.match(guard, /Windows.*Hermes.*administrator.*outage mode/i);
   });
 
-  it('does not promise a closed Unix socket trust failure before its fix', () => {
-    const source = readFileSync(join(repo, 'internal/gateway/connector/hook_socket_transport.go'), 'utf8');
-    assert.match(source, /if ! defenseclaw_hook_socket_trusted; then\s+fail_unreachable/);
+  it('keeps an unverified gateway socket or peer closed in every fail mode', () => {
+    for (const path of docPages()) {
+      const text = readFileSync(path, 'utf8').split(/\s+/).join(' ');
+      assert.doesNotMatch(text, /socket trust (has a known limit|exception)|until the socket trust fix/i, path);
+      assert.doesNotMatch(text, /socket ownership check fails[^.]*installed fail mode/i, path);
+      assert.doesNotMatch(text, /keep the hook mode closed and run `repair`/, path);
+    }
     const modes = page('reference/configuration/fail-modes.mdx');
-    assert.doesNotMatch(modes, /unverified gateway peer or missing or refused credentials in every fail mode/);
-    assert.match(modes, /Unix shell hooks.*socket.*installed fail mode/i);
-    assert.match(page('reference/apis/capability-matrix.mdx'), /socket ownership.*installed fail mode/i);
+    assert.match(modes, /hooks reject an invalid runtime, an unverified gateway peer or missing or refused credentials in every fail mode/);
+    assert.match(modes, /- Another program answers in place of the gateway service\./);
   });
 });
 
@@ -106,15 +109,62 @@ describe('installed fail mode environment contract', () => {
 });
 
 describe('guardrail setup prompt mapping', () => {
-  it('maps the action-mode judge picker and its initial empty selection', () => {
-    const source = readFileSync(join(repo, 'cli/defenseclaw/commands/cmd_setup.py'), 'utf8');
+  const source = readFileSync(join(repo, 'cli/defenseclaw/commands/cmd_setup.py'), 'utf8');
+  const reference = readFileSync(join(site, 'content/docs/reference/commands/guardrail-setup.mdx'), 'utf8');
+  const table = reference.split('## Prompt-flag mapping')[1]?.split('\n## ')[0] ?? '';
+  const rows = table.split('\n').filter((line) => line.startsWith('| **'));
+
+  it('names only prompts the wizard asks', () => {
+    assert.ok(rows.length > 10, 'prompt-flag rows');
+    for (const row of rows) {
+      const cell = row.match(/^\| \*\*(.+?)\*\*/)?.[1] ?? '';
+      for (const prompt of cell.split(' / ')) {
+        assert.ok(source.includes(prompt), `cmd_setup.py has no prompt "${prompt}"`);
+      }
+    }
+  });
+
+  it('maps the action-mode judge picker and the proxy-only judge question', () => {
     assert.ok(source.includes('title="Select action connector(s) for LLM judge."'));
     assert.ok(source.includes('default_selected=_default_batch_judge_labels(judge_targets, gc, display_by_connector)'));
-    const reference = page('reference/commands/guardrail-setup.mdx');
-    assert.match(reference, /Select action connector\(s\) for LLM judge\./);
-    assert.match(reference, /none selected on first setup/i);
-    assert.match(reference, /--judge-hook-connectors/);
-    assert.doesNotMatch(reference, /\| \*\*Add LLM judge on top of rule scanning\?\*\*/);
+    assert.ok(source.includes('"  Add LLM judge on top of rule scanning?",\n        default=bool(gc.judge.enabled),'));
+    const picker = rows.find((row) => row.startsWith('| **Select action connector(s) for LLM judge.**'));
+    assert.match(picker ?? '', /none selected on first setup/i);
+    assert.match(picker ?? '', /--judge-hook-connectors/);
+    const question = rows.find((row) => row.startsWith('| **Add LLM judge on top of rule scanning?**'));
+    assert.match(question ?? '', /proxy connectors only/);
+  });
+});
+
+describe('observe mode scope', () => {
+  // Observe mode turns policy verdicts into alerts. A check that cannot
+  // complete still follows the hook fail mode (agent_hook.go
+  // hookFailedCheckResponse), and the ACP guard can refuse an unchecked frame.
+  const unscoped = /\b(never blocks?|blocks? nothing|allows? everything|(?<!\()cannot block|nothing is (stopped|blocked)|only logs|logs only|does not block(?! on)|without blocking(?! on))\b/i;
+
+  it('scopes every observe-mode no-block claim to policy findings', () => {
+    const files = [
+      ...docPages(),
+      ...docPages(join(site, 'components'), /\.tsx?$/),
+      ...docPages(join(site, 'data'), /\.(ts|json)$/),
+    ];
+    const claims: string[] = [];
+    for (const path of files) {
+      const text = readFileSync(path, 'utf8');
+      for (const clause of text.split(/[.;|\n]\s*/)) {
+        if (/\bobserv/i.test(clause) && unscoped.test(clause)) claims.push(`${path.slice(site.length + 1)}: ${clause.trim()}`);
+      }
+    }
+    assert.deepEqual(claims, []);
+  });
+
+  it('states that hook failures still follow the fail mode', () => {
+    for (const name of ['connectors/claudecode.mdx', 'connectors/antigravity.mdx', 'reference/policy/thresholds.mdx', 'how-to/guardrail/turn-on-blocking.mdx']) {
+      assert.match(page(name), /does not block on (policy )?(findings|them)/i, name);
+      assert.match(page(name), /closed hook|fail mode/i, name);
+    }
+    assert.match(page('connectors/cursor.mdx'), /managed computer.*administrator's outage mode/i);
+    assert.match(page('features/acp-guard.mdx'), /observe mode.*`fail_mode`/i);
   });
 });
 
