@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from defenseclaw.tui.services.overview_state import OVERVIEW_NOTICE_WIDTH, runtime_degraded_notice
+from defenseclaw.tui.services.overview_state import OVERVIEW_NOTICE_WIDTH, OverviewConfig, runtime_degraded_notice
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -65,3 +65,20 @@ async def test_degraded_notice_shows_the_n_key_on_the_80x24_overview(tmp_path) -
         await pilot.pause()
         screen = fixtures.screen_text(app)
     assert "N for details: shadow egress partially covered" in screen, screen
+
+
+async def test_stopped_gateway_recovery_is_whole_on_the_80x24_overview(tmp_path) -> None:
+    app = fixtures.snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.overview_model.cfg = OverviewConfig(
+            guardrail_enabled=True,
+            connector_modes=(("claudecode", "action"), ("codex", "action")),
+        )
+        app.overview_model.set_gateway_probe("stopped")
+        app.action_switch_panel("overview")
+        await pilot.pause()
+        screen = fixtures.screen_text(app)
+        notices = app.overview_model.build_notices()
+    recovery = next(notice.message for notice in notices if "Gateway is not running" in notice.message)
+    assert any(recovery in line for line in screen.splitlines()), screen
