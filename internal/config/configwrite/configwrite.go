@@ -121,6 +121,11 @@ type Change struct {
 
 // Options describe who writes and why.
 type Options struct {
+	// GenerationFloor is a proven prior counter recovered by the lifecycle.
+	GenerationFloor uint64
+	// RecordSHA256 binds a metadata-only generation repair to approved
+	// bytes after install returns. Empty retains the ordinary writer path.
+	RecordSHA256 string
 	// Actor is ActorMigration, ActorLifecycle or a prefixed actor such as
 	// "cli:alice".
 	Actor string
@@ -155,7 +160,7 @@ type BundleRef struct {
 }
 
 func (o Options) writer() cfgtxn.Writer {
-	return cfgtxn.Writer{Actor: o.Actor, LocalActor: o.LocalActor, Reason: o.Reason,
+	return cfgtxn.Writer{GenerationFloor: o.GenerationFloor, Actor: o.Actor, LocalActor: o.LocalActor, Reason: o.Reason,
 		BundleID: o.Bundle.ID, BundleVersion: o.Bundle.Version, SignerKeyID: o.Bundle.SignerKeyID,
 		TransactionActor: o.TransactionActor, TransactionBundleID: o.TransactionBundle.ID,
 		TransactionBundleVersion: o.TransactionBundle.Version,
@@ -222,6 +227,9 @@ func Locked(ctx context.Context, path string, opt Options, install func() (bool,
 		return Result{}, err
 	}
 	sum := cfgtxn.SHA256Hex(raw)
+	if opt.RecordSHA256 != "" && !strings.EqualFold(strings.TrimPrefix(opt.RecordSHA256, "sha256:"), sum) {
+		return Result{}, ErrConflict
+	}
 	if !changed {
 		state, _ := cfgtxn.ReadGenerationState(txn.Path())
 		return Result{Generation: state.Generation, SHA256: sum}, nil

@@ -237,29 +237,7 @@ func windowsStagedBundleGeneration(path string, raw []byte) (configwrite.Options
 	if err != nil || !strings.EqualFold(filepath.Clean(path), filepath.Clean(layout.ConfigPath)) {
 		return configwrite.Options{}, false, nil
 	}
-	receipts, err := newWindowsBundleDriver(layout).Store.Receipts()
-	if err != nil {
-		return configwrite.Options{}, false, fmt.Errorf("read staged policy bundles: %w", err)
-	}
-	sum := configwrite.SHA256Hex(raw)
-	var matched *enterprisebundle.Receipt
-	for _, receipt := range receipts {
-		if receipt.State != enterprisebundle.StateStaged || !strings.EqualFold(receipt.ConfigSHA256, sum) {
-			continue
-		}
-		if matched != nil {
-			return configwrite.Options{}, false, fmt.Errorf("multiple staged policy bundles match installed config %s", path)
-		}
-		matched = receipt
-	}
-	if matched == nil {
-		return configwrite.Options{}, false, nil
-	}
-	opt, ok := enterprisebundle.GenerationOptions(matched)
-	if !ok {
-		return configwrite.Options{}, false, fmt.Errorf("staged policy bundle %s has no principal", matched.ReceiptID)
-	}
-	return opt, true, nil
+	return newWindowsBundleDriver(layout).ConfigGenerationOptions(raw)
 }
 
 // windowsBundleCurrent reports a current (confirmed) policy bundle in the
@@ -1255,8 +1233,30 @@ type windowsBundleRollbackTarget struct {
 // writeOptions records the rollback write as the confirmed bundle: its
 // principal and bundle fields, so the gateway digests the restored config in
 // the bundle's scope and status, verify and ensure find the bundle enforcing.
-func (t *windowsBundleRollbackTarget) writeOptions(expectSHA string) configwrite.Options {
-	return configwrite.RestoreOptions(t.before, t.restored, windowsBundleRestoreWriteOptions(t.store, t.ref, expectSHA))
+func (t *windowsBundleRollbackTarget) writeOptions(expectSHA string) (configwrite.Options, error) {
+	driver := &enterprisebundle.Driver{Store: t.store}
+	raw, ref, err := driver.CurrentConfig()
+	if err != nil {
+		return configwrite.Options{}, err
+	}
+	if ref == nil || t.ref == nil || ref.BundleID != t.ref.BundleID || ref.Version != t.ref.Version ||
+		ref.ManifestSHA256 != t.ref.ManifestSHA256 || ref.SignerKeyID != t.ref.SignerKeyID ||
+		ref.EffectivePolicyDigest != t.ref.EffectivePolicyDigest || configwrite.SHA256Hex(raw) != t.restored {
+		return configwrite.Options{}, errors.New("confirmed bundle changed before rollback; run defenseclaw.exe enterprise windows ensure --profile standalone")
+	}
+	opt, ok, err := driver.ConfigGenerationOptions(raw)
+	if err != nil {
+		return opt, err
+	}
+	if !ok {
+		return opt, errors.New("cannot prove the confirmed rollback principal; run defenseclaw.exe enterprise windows ensure --profile standalone")
+	}
+	opt.ExpectSHA256 = expectSHA
+	if t.before.BundleID == ref.BundleID && t.before.BundleVersion == ref.Version &&
+		t.before.SignerKeyID == opt.Bundle.SignerKeyID && t.before.Actor == opt.Actor {
+		opt = configwrite.RestoreOptions(t.before, t.restored, opt)
+	}
+	return opt, nil
 }
 
 // rollbackWindowsBundle installs the last good config again (the current

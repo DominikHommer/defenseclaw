@@ -958,7 +958,7 @@ def test_direct_installer_guards_version_changes_before_staging_and_after_quiesc
     assert early < install.index('Assert-InstallRoom $InstallRoom') < install.index('New-InstallDirectory $Staging')
     assert install.index('Wait-VenvFree', early) < install.index('Stop-Watchdog', early) < late
     assert late < install.index('Save-Snapshot')
-    assert 'Restart-Old\n            throw' in install[late:]
+    assert 'Restart-Old\n        Die "$reason. $(Get-RestoredNote)"' in install[late:]
 
 
 @WINDOWS_POWERSHELL
@@ -1112,6 +1112,7 @@ function Confirm-Step {{ return $true }}
 function Start-Transcript {{}}
 function Wait-UninstallCleanup {{}}
 function Resume-InterruptedRun {{}}
+function Save-BinarySnapshot {{}}
 function Protect-UvDirectory {{}}
 function Get-Cosign {{ return '' }}
 function Assert-InstallRoom([long]$Bytes, [string]$Purpose) {{
@@ -1252,6 +1253,7 @@ def test_snapshot_receipt_copy_would_block_rollback_after_live_recovery(tmp_path
         tmp_path,
         f"""
 {_function('New-InstallDirectory')}
+{_function('Save-BinarySnapshot')}
 {_function('Save-Snapshot')}
 $Previous = Join-Path $DataDir 'previous'
 $Snap = $Previous

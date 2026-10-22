@@ -163,6 +163,16 @@ type windowsEnterpriseInstallerReport struct {
 	// LifecycleCollectError why that collect could not run (GAP-0211).
 	LifecycleGenerationsCollected int    `json:"lifecycle_generations_collected"`
 	LifecycleCollectError         string `json:"lifecycle_collect_error"`
+	// A self-uninstall (the installed CLI removing its own deployment)
+	// leaves cleanup to a detached finalizer that runs once the CLI exits:
+	// SelfUninstallCleanupPending says so, CanonicalInstallRootAbsent (nil
+	// when not reported) whether InstallRoot is already renamed aside to
+	// RetiredInstallRoot, and InstallRootRetirementDeferred names the program
+	// that still held InstallRoot when the rename was deferred.
+	SelfUninstallCleanupPending   bool   `json:"self_uninstall_cleanup_pending"`
+	CanonicalInstallRootAbsent    *bool  `json:"canonical_install_root_absent"`
+	InstallRootRetirementDeferred string `json:"install_root_retirement_deferred"`
+	RetiredInstallRoot            string `json:"retired_install_root"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -729,6 +739,10 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 	}
 	out, _ := windowsEnterprisePolicyDigest(ctx)
 	state := applyEnterprisePolicyReport(result, out, change)
+	if state != nil && state.ConfigUnrecorded {
+		result.SecurityComplete, result.Noop, result.NoopReason = false, false, ""
+		result.AddError("lifecycle_error", "config generation is unproven or records a hand edit; run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1 from an elevated prompt")
+	}
 	if state == nil || !state.Applied || !change || len(result.Errors) != 0 {
 		return
 	}
@@ -1371,6 +1385,7 @@ func applyWindowsEnterpriseInstallerReport(
 		addWindowsEnterpriseUserStateWarning(result, report)
 	}
 	addWindowsEnterpriseMachineStateWarning(result, report)
+	addWindowsEnterpriseSelfUninstallCleanup(result, report)
 	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
 	// Only when nothing above explains it. A completed uninstall leaves
 	// nothing to secure; only a deployment that is still installed (or a
@@ -1451,6 +1466,38 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 	}
 	if len(remaining) > 0 {
 		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(len(remaining), windowsEnterpriseBoundedLabels(remaining)))
+	}
+}
+
+// addWindowsEnterpriseSelfUninstallCleanup keeps what a self-uninstall left
+// to its finalizer in the result: a retirement deferred to a program that
+// holds InstallRoot is a warning naming it, and a success that reports the
+// canonical InstallRoot still in place with nothing deferred is an error.
+// A plain self-uninstall says that the retired folder goes when the CLI
+// exits.
+func addWindowsEnterpriseSelfUninstallCleanup(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	installRoot := strings.TrimSpace(report.InstallRoot)
+	if installRoot == "" {
+		installRoot = "the install folder"
+	}
+	if deferred := strings.TrimSpace(report.InstallRootRetirementDeferred); deferred != "" {
+		result.AddWarning("uninstall_cleanup_pending", windowsEnterpriseBoundedDiagnostic(deferred)+
+			". The uninstall is committed; if "+installRoot+" is still there after that program exits, run the uninstall again to finish")
+		return
+	}
+	if report.CanonicalInstallRootAbsent != nil && !*report.CanonicalInstallRootAbsent {
+		if report.OK {
+			result.AddError("install_root_remaining", "the uninstall finished, but "+installRoot+
+				" is still there and no cleanup is pending for it; run the uninstall again")
+		}
+		return
+	}
+	if report.SelfUninstallCleanupPending {
+		retired := strings.TrimSpace(report.RetiredInstallRoot)
+		if retired == "" {
+			retired = "the renamed install folder"
+		}
+		result.Changes = append(result.Changes, "the installed CLI's own files ("+retired+") are removed once this command exits")
 	}
 }
 
@@ -2345,6 +2392,13 @@ func finishWindowsEnterpriseStandalone(
 	result *enterprisestatus.Result,
 	failureCode int,
 ) error {
+	if windowsBundleHasCode(result.Errors, "powershell7_untrusted") {
+		for i := range result.Warnings {
+			if result.Warnings[i].Code == windowsEnterpriseHealthNotChecked {
+				result.Warnings[i].Message = windowsEnterpriseUncheckedHealthMessage(result.Profile, true)
+			}
+		}
+	}
 	addWindowsEnterprisePipeWaitWarning(result, opts)
 	deliveredBundle := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
 	finishWindowsEnterpriseBundle(cmd, opts, result)
@@ -2609,6 +2663,7 @@ func writeWindowsEnterpriseStandaloneRefusal(
 		// deployment as installed=false with no services (GAP-0036).
 		describeHost(result)
 	}
+
 	result.AddError(code, message)
 	failure := windowsEnterpriseFailureCodeFor(result)
 	if invalid {
@@ -2664,9 +2719,7 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 				result.Readiness.SensorHelper = state == "running"
 			}
 		}
-		result.AddWarning(windowsEnterpriseHealthNotChecked, "this request was refused before any health check ran, so readiness.gateway, readiness.guardian, "+
-			"coverage_complete and security_complete were not checked (they read false); only the recorded deployment and the service states are reported. "+
-			"For the deployment's health, run `& '"+managedWindowsAdminCLI()+"' enterprise windows verify --profile "+profile+" --json` from an elevated PowerShell prompt")
+		result.AddWarning(windowsEnterpriseHealthNotChecked, windowsEnterpriseUncheckedHealthMessage(profile, false))
 		return
 	}
 }
@@ -2911,13 +2964,6 @@ func readWindowsEnterpriseBoundedFile(path string, limit int64) ([]byte, error) 
 }
 
 // ensure ------------------------------------------------------------------
-
-// windowsEnterpriseEnsurePlan is the action ensure selected and why.
-type windowsEnterpriseEnsurePlan struct {
-	Action string // "", install, upgrade, repair
-	Reason string
-	Detail string // the failed read-only check behind a verify_failed repair
-}
 
 var windowsEnterpriseEnsureTimeout = 12 * time.Minute
 
@@ -3166,9 +3212,18 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, code)
 	}
+	configStateRepaired, stateErr := windowsEnterpriseConfigGenerationRepair(ctx, opts, statusReport)
+	if stateErr != nil {
+		applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+		result.AddError("lifecycle_error", stateErr.Error())
+		return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+	}
+	if configStateRepaired {
+		result.Changes = append(result.Changes, "recovered config generation from the approved config and proven previous counter")
+	}
 	alreadyAppliedNeedsRepair := false
 	verifyFailure := ""
-	if run := opts.bundle; run != nil && run.prepared != nil && run.prepared.AlreadyApplied &&
+	if run := opts.bundle; !configStateRepaired && run != nil && run.prepared != nil && run.prepared.AlreadyApplied &&
 		statusReport.Installed && !statusReport.TransactionPending &&
 		compareWindowsEnterpriseVersions(opts.productVersion, statusReport.InstalledVersion) == 0 &&
 		windowsBundleInstalledSHA(run.layout.ConfigPath) == run.prepared.ConfigSHA256 {
@@ -3239,7 +3294,12 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	}
 	plan := windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed", Detail: verifyFailure}
 	var planErr error
-	if !alreadyAppliedNeedsRepair {
+	switch {
+	case configStateRepaired:
+		plan, planErr = planWindowsEnterpriseEnsureAfterGenerationRecovery(func() (windowsEnterpriseEnsurePlan, error) {
+			return planWindowsEnterpriseEnsure(statusReport, opts, script)
+		})
+	case !alreadyAppliedNeedsRepair:
 		plan, planErr = planWindowsEnterpriseEnsure(statusReport, opts, script)
 	}
 	if planErr != nil {
@@ -3418,7 +3478,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		defer cleanupManifest()
 	}
 	beforeGatewayPID := uint32(0)
-	if opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
+	if opts.bundle != nil && windowsBundleConfigChange(opts.bundle.prepared) {
 		beforeGatewayPID = windowsStandaloneGatewayPID()
 	}
 	serviceMutationAttempted = true
@@ -3819,7 +3879,7 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 		// A config_version 8 source is installed as its v9 migration, so the
 		// same source is not drift while the installed file is that result.
 		if err != nil || (got != want && !config.MigratedFrom(layout.ConfigPath, want, got)) {
-			if opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
+			if opts.bundle != nil && windowsBundleConfigChange(opts.bundle.prepared) {
 				return "bundle", nil
 			}
 			return "config", nil

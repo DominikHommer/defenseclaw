@@ -138,7 +138,7 @@ if ($RunAsFile -and $PSVersionTable.PSEdition -ne "Core" -and $env:PSModulePath)
     $env:PSModulePath = $modulePath -join ";"
 }
 $RunByUpgrade = $RunAsFile -and (Split-Path -Leaf (Split-Path -Parent $PSCommandPath)) -match '^defenseclaw-(upgrade|rollback)-'
-$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false; UsageError = $false }
+$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false; UsageError = $false; UndoPending = $false; RestorePending = $false }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
@@ -1513,8 +1513,20 @@ function Invoke-UvPipInstall([string[]]$UvArgs) {
     return $false
 }
 
-function Save-Snapshot {
+function Save-BinarySnapshot {
+    # Only immutable binaries are copied while the gateway runs. The new
+    # hook understands .install.lock, including when upgrading from 1.0.2.
+    # HOOK_FIRST lets interrupted-run recovery restore it before any data
+    # snapshot or process shutdown has started.
     New-InstallDirectory $Snap
+    Copy-BinDir (Join-Path $Snap "bin")
+    Install-HookFirst $Snap
+    Set-Content -LiteralPath (Join-Path $Snap "GATEWAY_WAS_RUNNING") -Value ([string]$WasRunning).ToLowerInvariant() -Encoding Ascii
+    Set-Content -LiteralPath (Join-Path $Snap "BIN_SAVED") -Value "" -Encoding Ascii
+}
+
+function Save-Snapshot {
+    if (-not (Test-Path -LiteralPath (Join-Path $Snap "BIN_SAVED"))) { Save-BinarySnapshot }
     New-Item -ItemType Directory -Path (Join-Path $Snap "data") | Out-Null
     $entries = Get-DataEntries
     $need = [long]0
@@ -1531,8 +1543,6 @@ function Save-Snapshot {
         Write-Err "Not enough free disk space next to $DataDir for a rollback copy"
         return $false
     }
-    Copy-BinDir (Join-Path $Snap "bin")
-    Install-HookFirst $Snap
     foreach ($entry in $entries) { Copy-Kept $entry.FullName (Join-Path $Snap "data") }
     Save-ExternalConfig $Snap
     if (Test-Path -LiteralPath $Venv) { Move-Path $Venv (Join-Path $Snap "venv") 60 }
@@ -1662,12 +1672,42 @@ function Install-HookFirst([string]$Slot) {
     }
     Set-Content -LiteralPath (Join-Path $Slot "HOOK_FIRST") -Value "" -Encoding Ascii
     Install-File $staged $live
+    Wait-PreviousHookExit ([DateTime]::UtcNow)
+}
+
+function Wait-PreviousHookExit([DateTime]$PublishedAt) {
+    # A hook already running the previous image can still cold-start its
+    # gateway after the swap. Drain only calls born before publication while
+    # the old gateway remains available; new hook traffic keeps running.
+    $image = Join-Path $BinDir 'defenseclaw-hook.exe'
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $pending = $false
+        foreach ($row in @(Get-ProcessesUnder @($image))) {
+            $process = Get-Process -Id $row.ProcessId -ErrorAction SilentlyContinue
+            if (-not $process) { $pending = $true; continue }
+            try { $started = $process.StartTime.ToUniversalTime() } catch {
+                throw "Cannot prove that previous hook calls finished before stopping the gateway. Close the agents, then run: & '<checked install.ps1>' -Local '<checked release assets directory>' -Yes"
+            }
+            if ($started -le $PublishedAt) { $pending = $true }
+        }
+        if (-not $pending) { return }
+        if ($clock.Elapsed.TotalSeconds -ge 30) {
+            throw "Previous hook calls did not finish within 30 seconds before stopping the gateway. Close the agents, then run: & '<checked install.ps1>' -Local '<checked release assets directory>' -Yes"
+        }
+        Start-Sleep -Milliseconds 25
+    }
 }
 
 function Undo-HookFirst([string]$Slot) {
     $saved = Join-Path $Slot "bin\defenseclaw-hook.exe"
     if ((Test-Path -LiteralPath (Join-Path $Slot "HOOK_FIRST")) -and (Test-Path -LiteralPath $saved -PathType Leaf)) {
-        Install-File $saved (Join-Path $BinDir "defenseclaw-hook.exe")
+        $live = Join-Path $BinDir "defenseclaw-hook.exe"
+        Install-File $saved $live
+        # Only the old hook's bytes in place are a restore.
+        if (-not (Test-Path -LiteralPath $live -PathType Leaf) -or (Get-Sha256 $live) -ne (Get-Sha256 $saved)) {
+            throw "The previous defenseclaw-hook.exe is not back in $BinDir"
+        }
     }
 }
 
@@ -1679,6 +1719,16 @@ function Undo-Snapshot([string]$Slot) {
         Move-Path (Join-Path $Slot "installer") $InstallerDir
     }
     Remove-Tree $Slot
+}
+
+function Undo-EarlySnapshot([string]$Slot) {
+    # Undo-Snapshot removes the slot last, so a slot still here is an undo
+    # that did not finish: a hook reader or a scanner held the old hook or
+    # the environment, and the new hook may still be live. The install then
+    # stays locked (Close-InstallLock) and the next run of the installer
+    # finishes the undo (Resume-InterruptedRun).
+    try { Undo-Snapshot $Slot } catch { Write-Err "Could not put the previous install back: $($_.Exception.Message)" }
+    $Run.UndoPending = [bool](Test-Path -LiteralPath $Slot)
 }
 
 function Protect-BinDir {
@@ -1775,16 +1825,57 @@ function Install-New {
 }
 
 function Restart-Old {
-    if ($Setup) { Restore-SetupInstall } elseif ($WasRunning) { [void](Start-Gateway) }
-    # Say plainly when the gateway that ran before is down now (GAP-1349).
-    $Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)
+    # An unfinished snapshot left by a failed undo is undone once more. The
+    # old gateway starts either way: with the new hook still live (the pair an
+    # upgrade runs until it stops the gateway) the agents stay guarded.
+    $earlySlot = Get-Variable -Name Snap -ValueOnly -ErrorAction SilentlyContinue
+    if ($earlySlot -and (Test-Path -LiteralPath $earlySlot) -and -not (Test-Path -LiteralPath (Join-Path $earlySlot "COMPLETE"))) {
+        Undo-EarlySnapshot $earlySlot
+    } elseif ($earlySlot -and (Test-Path -LiteralPath (Join-Path $earlySlot "HOOK_FIRST"))) {
+        try { Undo-HookFirst $earlySlot } catch {
+            Write-Err "Could not put the previous hook back: $($_.Exception.Message)"
+            $Run.RestorePending = $true
+        }
+    }
+    # A failure here (a gateway.pid that cannot be read, DefenseClaw Setup's
+    # hook state that cannot be moved back) must not end the restore it is
+    # part of: it is reported like a gateway that did not start.
+    try {
+        if ($Setup) { Restore-SetupInstall } elseif ($WasRunning) { [void](Start-Gateway) }
+        # Say plainly when the gateway that ran before is down now (GAP-1349).
+        $Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)
+    } catch {
+        Write-Err "Could not start the previous gateway again: $($_.Exception.Message)"
+        $Run.OldGatewayDown = [bool]$WasRunning
+        if ($Setup) { $Run.RestorePending = $true }
+    }
     if ($Run.OldGatewayDown) {
         Write-Warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
         Write-Info "Start it with: defenseclaw-gateway start (log: $(Join-Path $DataDir 'gateway.log')). On a large audit database its first start can take several minutes"
     }
 }
 
+function Test-RecoveryPending { return [bool]($Run.UndoPending -or $Run.RestorePending) }
+
+function Get-UnchangedNote {
+    if (Test-RecoveryPending) { return "the previous install is not fully back (see above); run the installer again to finish restoring it" }
+    return "nothing was changed"
+}
+
+function Close-InstallLock {
+    # An undo or a restore that did not finish keeps .install.lock, so hooks
+    # wait for the install instead of starting a gateway for a mixed install.
+    # The next run takes the lock over and finishes the restore.
+    Invoke-Quietly { Clear-StagedRelease }
+    if (Test-RecoveryPending) {
+        Write-Warn "The install stays locked ($LockDir) until the installer runs again and finishes restoring the previous install; until then hooks do not start the gateway"
+        return
+    }
+    Invoke-Quietly { Remove-Tree $LockDir }
+}
+
 function Get-RestoredNote {
+    if (Test-RecoveryPending) { return "Your previous install is not fully back (see above); run the installer again to finish restoring it." }
     if (-not $PrevVersion) { return "Nothing was left installed." }
     if ($Run.OldGatewayDown) { return "Your previous install is back, but its gateway is not running (see above)." }
     return "Your previous install is back."
@@ -1964,6 +2055,7 @@ function Restore-Snapshot {
     Clear-StagedRelease
     try { $failed = Restore-Slot $Snap } catch {
         # The snapshot stays marked complete, so the next run restores it.
+        $Run.RestorePending = $true
         Write-Err $_.Exception.Message
         Die "Could not restore $previousLabel; run the installer again to finish restoring it. Log: $($Run.Log)"
     }
@@ -2087,7 +2179,11 @@ function Resume-InterruptedRun {
             }
         } else {
             # The snapshot never finished, so live data was only copied, not changed.
+            $restart = (Read-Text (Join-Path $slot "GATEWAY_WAS_RUNNING")) -eq "true"
             Undo-Snapshot $slot
+            if ($restart -and -not (Get-GatewayProcess) -and (Test-Path -LiteralPath (Join-Path $BinDir 'defenseclaw-gateway.exe') -PathType Leaf)) {
+                [void](Start-Gateway)
+            }
         }
     }
     $hold = Join-Path $DataDir ".rollback-hold"
@@ -2713,7 +2809,7 @@ function Invoke-Install {
     if (Test-Path -LiteralPath "$Venv.busy") {
         if (Test-Path -LiteralPath $Venv) { Remove-Tree "$Venv.busy" } else { Move-Path "$Venv.busy" $Venv }
     }
-    Resume-InterruptedRun
+    try { Resume-InterruptedRun } catch { $Run.RestorePending = $true; throw }
 
     if ($Rollback) { return Invoke-Rollback }
 
@@ -2853,44 +2949,71 @@ function Invoke-Install {
             if ($Setup) { Restore-SetupInstall }
             Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
         }
-        Write-Info "Stopping the gateway [$(Get-UtcClock)]"
-        if (-not (Stop-Gateway)) {
-            Stop-HookFailModeHold
-            if ($Setup) { Restore-SetupInstall }
-            Die "The running gateway did not stop; nothing was changed"
-        }
-        # The hold refreshes again once the gateway has exited.
-        if (-not (Complete-HookFailModeHold)) {
-            Clear-StagedRelease
-            Restart-Old
-            Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down. $(Get-RestoredNote)"
-        }
     } elseif (-not (Update-HookFailModes $stagedGateway)) {
         if ($Setup) { Restore-SetupInstall }
         Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
     }
-    Stop-Watchdog
-    if ($versionChange) {
-        try {
+    $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
+    try { Save-BinarySnapshot } catch {
+        Stop-HookFailModeHold
+        Undo-EarlySnapshot $Snap
+        throw
+    }
+    # From here to the rollback copy the new hook is live while the old
+    # gateway stops. Any failure, a refusal or a thrown error (a gateway.pid
+    # read that fails after the old gateway exited), puts the old hook back
+    # and starts the old gateway again; an undo that does not finish keeps
+    # .install.lock (Close-InstallLock) for the next run to finish.
+    $stopRefused = $false
+    try {
+        if ($WasRunning) {
+            Write-Info "Stopping the gateway [$(Get-UtcClock)]"
+            if (-not (Stop-Gateway)) {
+                $stopRefused = $true
+                Die "The running gateway did not stop"
+            }
+            # The hold refreshes again once the gateway has exited: it may
+            # have rendered them while it ran or shut down.
+            if (-not (Complete-HookFailModeHold)) {
+                Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down"
+            }
+        }
+        Stop-Watchdog
+        if ($versionChange) {
             Assert-GatewayQuiescent "Version change to $Ver"
             Assert-NoActiveConnectorRecovery "Version change to $Ver"
-        } catch {
-            Restart-Old
-            throw
         }
+        if ($Setup) { Stop-ProcessesUnder $Setup.Root }
+    } catch {
+        $reason = ([string]$_.Exception.Message).TrimEnd('.', ' ')
+        # A stop that was refused or threw leaves the hold waiting for a
+        # gateway that still runs.
+        Stop-HookFailModeHold
+        Undo-EarlySnapshot $Snap
+        Clear-StagedRelease
+        if ($stopRefused) {
+            # The old gateway still runs; only DefenseClaw Setup's hook state goes back.
+            if ($Setup) {
+                try { Restore-SetupInstall } catch {
+                    Write-Err "Could not put DefenseClaw Setup's hook state back: $($_.Exception.Message)"
+                    $Run.RestorePending = $true
+                }
+            }
+            Die "${reason}; $(Get-UnchangedNote)"
+        }
+        Restart-Old
+        Die "$reason. $(Get-RestoredNote)"
     }
-    if ($Setup) { Stop-ProcessesUnder $Setup.Root }
 
-    $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
     # Ctrl+C now would leave a half-swapped install; it is ignored until the swap is done.
     try { [Console]::TreatControlCAsInput = $true } catch { }
     try { $saved = Save-Snapshot } catch { Write-Err $_.Exception.Message; [void](Test-DiskFull); $saved = $false }
     if (-not $saved) {
-        Invoke-Quietly { Undo-Snapshot $Snap }
+        Undo-EarlySnapshot $Snap
         Clear-StagedRelease
         Restart-Old
-        if ($Run.OldGatewayDown) { Die "Could not save the current install; it was not changed, but its gateway is not running (see above)" }
-        Die "Could not save the current install; nothing was changed"
+        if ($Run.OldGatewayDown -and -not (Test-RecoveryPending)) { Die "Could not save the current install; it was not changed, but its gateway is not running (see above)" }
+        Die "Could not save the current install; $(Get-UnchangedNote)"
     }
     $previousLabel = if ($PrevVersion) { $PrevVersion } else { "the previous state" }
     try { $installed = Install-New } catch { Write-Err $_.Exception.Message; [void](Test-DiskFull); $installed = $false }
@@ -2915,16 +3038,17 @@ function Invoke-Install {
     }
     if ($startNew) {
         $startedAt = Get-Date
-        $startRc = Start-Gateway
+        # A start that throws is a start that failed: the install is restored.
+        try { $startRc = Start-Gateway } catch { Write-Err $_.Exception.Message; $startRc = 1 }
         if ($sealOnly) {
-            [void](Stop-Gateway)
+            try { [void](Stop-Gateway) } catch { Write-Warn "Could not stop the $Ver gateway after its first start: $($_.Exception.Message)" }
             if ($startRc -ne 0 -and $startRc -ne 3) {
                 Write-Warn "The $Ver gateway did not start (see above); fix what it reports, then run 'defenseclaw-gateway start'"
                 $startRc = 0
             }
         } elseif ($startRc -ne 0 -and $startRc -ne 3) {
             Write-Err ("The $Ver gateway did not become healthy within {0:N0} s [{1}]; restoring $previousLabel" -f ((Get-Date) - $startedAt).TotalSeconds, (Get-UtcClock))
-            [void](Stop-Gateway)
+            try { [void](Stop-Gateway) } catch { Write-Err "Could not stop the $Ver gateway: $($_.Exception.Message)" }
             Restore-Snapshot
             Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"
         }
@@ -3022,11 +3146,8 @@ try {
     $code = if ($Run.UsageError) { 2 } else { 1 }
 } finally {
     try { [Console]::TreatControlCAsInput = $false } catch { }
+    if ($Run.Lock) { Close-InstallLock }
     if ($Run.Transcript) { try { Stop-Transcript | Out-Null } catch { } }
-    if ($Run.Lock) {
-        Invoke-Quietly { Clear-StagedRelease }
-        Invoke-Quietly { Remove-Tree $LockDir }
-    }
     if ($Run.Owner -ne [IntPtr]::Zero) { [void][DefenseClawInstall.Native]::SwapDefaultOwner($Run.Owner) }
     # A variable that was unset stays unset. PowerShell 7 passes $null to
     # SetEnvironmentVariable as "", which leaves an empty variable behind

@@ -345,6 +345,21 @@ func TestDriverConfirmsOnlyAnInstalledAndEnforcedBundle(t *testing.T) {
 	if !again.AlreadyApplied || again.Receipt != nil || again.ConfigSHA256 != good.ConfigSHA256 {
 		t.Fatalf("repeat delivery = %+v", again)
 	}
+	// Setup CONFIG= restoring these same signed bytes must retain the
+	// confirmed principal even after the delivery receipts are pruned.
+	if err := os.Remove(filepath.Join(d.Store.LifecycleDir, enterprisebundle.ReceiptsDirName, good.Receipt.ReceiptID+".json")); err != nil {
+		t.Fatal(err)
+	}
+	d.RefuseRestart = func(_, _ []byte) string { return "the confirmed config restores a restart setting" }
+	deferred, deferErr := d.Prepare(ctx, f.bundle, nil)
+	if enterprisebundle.CodeOf(deferErr) != enterprisebundle.CodeRestartDeferred || deferred.Receipt.State != enterprisebundle.StateFailed {
+		t.Fatalf("repeated restart delivery was not deferred: %+v, %v", deferred, deferErr)
+	}
+	d.RefuseRestart = nil
+	opt, recorded, generationErr := d.ConfigGenerationOptions(good.Config)
+	if generationErr != nil || !recorded || opt.Actor != good.Receipt.Principal || opt.Bundle.ID != good.Receipt.BundleID {
+		t.Fatalf("confirmed config attribution = %+v, %v, %v", opt, recorded, generationErr)
+	}
 
 	tampered := *f.bundle
 	tampered.Signature = flip(f.bundle.Signature, len(f.bundle.Signature)/2)

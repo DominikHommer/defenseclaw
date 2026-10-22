@@ -3775,6 +3775,15 @@ else {
             '  Installed CLI cleanup: pending until this CLI process exits'
         )
     }
+    $deferredRetirement = $result.PSObject.Properties[
+        'install_root_retirement_deferred'
+    ]
+    if ($null -ne $deferredRetirement -and
+        -not [string]::IsNullOrWhiteSpace([string]$deferredRetirement.Value)) {
+        Microsoft.PowerShell.Utility\Write-Warning -Message (
+            'Install folder cleanup is pending: ' + [string]$deferredRetirement.Value
+        )
+    }
     $clientReloadProperty = $result.PSObject.Properties[
         'cached_enterprise_clients_require_reload'
     ]

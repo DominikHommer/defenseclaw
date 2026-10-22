@@ -58,7 +58,7 @@ func TestShellHookSessionFactsSkipAStalledCredentialCache(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(cache), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	record, err := json.Marshal(map[string]string{"key": "k", "env_key": "FILE:" + ccache + "||" + connection + "|", "header": "v1;k=ssh;ca=192.0.2.10;krb=alice@EXAMPLE.TEST"})
+	record, err := json.Marshal(map[string]any{"expires_at": time.Now().Add(4 * time.Minute).Unix(), "key": "k", "env_key": "FILE:" + ccache + "||" + connection + "|", "header": "v1;k=ssh;ca=192.0.2.10;krb=alice@EXAMPLE.TEST"})
 	if err != nil {
 		t.Fatal(err)
 	}

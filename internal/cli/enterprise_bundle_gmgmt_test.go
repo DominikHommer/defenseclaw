@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -100,5 +101,11 @@ func TestBundleRestartDeferralFollowsThePrediction(t *testing.T) {
 	cmd := newEnterpriseBundleApplyCommand()
 	if cmd.Flags().Lookup("defer-restart") == nil {
 		t.Fatal("bundle apply has no --defer-restart")
+	}
+}
+
+func TestWindowsConfirmedBundleReplayIsAConfigChange(t *testing.T) {
+	if !windowsBundleConfigChange(&enterprisebundle.Prepared{AlreadyApplied: true}) {
+		t.Fatal("a confirmed signed bundle with config drift lost its config apply path")
 	}
 }

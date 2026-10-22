@@ -1993,11 +1993,27 @@ defenseclaw_session_facts_full() {
     DIR:/*) ccache="${KRB5CCNAME#DIR:}" ;;
     /*) ccache="$KRB5CCNAME" ;;
   esac
-  if [ -f "$cache" ] && [ ! -L "$cache" ] && [ -n "$(find "$cache" -mmin -5 2>/dev/null)" ] &&
+  local fresh=0 expires="" now=""
+  if [ -f "$cache" ] && [ ! -L "$cache" ]; then
+    IFS= read -r -d '' -n 4096 record < "$cache" 2>/dev/null || true
+    if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ]; then
+      # Bash 5's epoch clock is a builtin. Unproven, expired and implausibly
+      # future records refresh through the native identity collector.
+      re='"expires_at":([0-9]{1,11})[,}]'
+      now="$EPOCHSECONDS"
+      if [[ "$record" =~ $re ]]; then
+        expires="${BASH_REMATCH[1]}"
+        if [ "$expires" -gt "$now" ] && [ "$expires" -le "$((now + 300))" ]; then fresh=1; fi
+      fi
+    elif [ -n "$(find "$cache" -mmin -5 2>/dev/null)" ]; then
+      # macOS's system Bash 3.2 has no epoch clock.
+      fresh=1
+    fi
+  fi
+  if [ "$fresh" = 1 ] &&
     { [ -z "$ccache" ] || _dc_ccache_changed "$ccache" "$cache"; } && [ "${_DC_CCACHE_CHANGED:-same}" != newer ]; then
     # The binary would wait on a stalled cache too.
     [ "${_DC_CCACHE_CHANGED:-same}" != stalled ] || return 0
-    IFS= read -r -d '' -n 4096 record < "$cache" 2>/dev/null || true
     re='"env_key":"([^"]*)"'
     if [[ "$record" =~ $re ]] && [ "${BASH_REMATCH[1]}" = "$env_key" ]; then
       re='"header":"([^"]*)"'

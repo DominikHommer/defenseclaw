@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -277,6 +278,9 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
+	if state, err := configwrite.ReadGenerationState(path); err != nil && !errors.Is(err, fs.ErrNotExist) && state.Generation == 0 {
+		return fmt.Errorf("cannot prove the previous config generation from %s; restore that file from the last verified administrator backup, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", configwrite.GenerationPath(path))
+	}
 	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure"}
 	if bundleOpt, ok, err := managedStandaloneBundleGeneration(path, raw); err != nil {
 		return err
@@ -328,8 +332,7 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 	}
 	if state, err := configwrite.ReadGenerationState(path); err == nil &&
 		state.ConfigSHA256 == configwrite.SHA256Hex(raw) &&
-		(opt.Bundle.ID == "" || state.Actor == opt.Actor && state.BundleID == opt.Bundle.ID &&
-			state.BundleVersion == opt.Bundle.Version && state.SignerKeyID == opt.Bundle.SignerKeyID) {
+		(opt.Bundle.ID == "" || managedStandaloneGenerationMatches(state, raw, opt)) {
 		// Already recorded, but the record still takes the DACL of the
 		// config: an uninstall that keeps state leaves it administrator-only,
 		// and the gateway service reads it for its generation (GAP-0293).
@@ -504,4 +507,49 @@ func printConfigMigrateResult(cmd *cobra.Command, result *config.MigrateV9Result
 		fmt.Fprintf(out, "Wrote %s.\n", strings.Join(result.Written, ", "))
 	}
 	return nil
+}
+
+// repairManagedStandaloneConfigGeneration changes metadata only after exact
+// approved bytes and a proven previous counter have been established.
+func repairManagedStandaloneConfigGeneration(ctx context.Context, path string, approved []byte, floor uint64) (bool, error) {
+
+	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure (recovered config generation)", GenerationFloor: floor}
+	if bundleOpt, ok, err := managedStandaloneBundleGeneration(path, approved); err != nil {
+		return false, err
+	} else if ok {
+		opt = bundleOpt
+		opt.GenerationFloor = max(bundleOpt.GenerationFloor, floor)
+	}
+	opt.RecordSHA256 = configwrite.SHA256Hex(approved)
+	if opt.GenerationFloor == 0 {
+		return false, fmt.Errorf("cannot prove the previous config generation; restore %s from the last verified administrator backup, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", configwrite.GenerationPath(path))
+	}
+	restoreACL, err := keepConfigDACL(path)
+	if err != nil {
+		return false, err
+	}
+	changed := false
+	_, err = configwrite.Locked(ctx, path, opt, func() (bool, error) {
+		installed, err := os.ReadFile(path)
+		if err != nil {
+			return false, err
+		}
+		if !bytes.Equal(installed, approved) {
+			return false, configwrite.ErrConflict
+		}
+		state, readErr := configwrite.ReadGenerationState(path)
+		changed = readErr != nil || !managedStandaloneGenerationMatches(state, installed, opt)
+		return changed, nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return changed, restoreACL(configwrite.GenerationPath(path))
+}
+
+func managedStandaloneGenerationMatches(state configwrite.GenerationState, raw []byte, opt configwrite.Options) bool {
+	return state.Generation > 0 && state.Generation >= opt.GenerationFloor &&
+		state.ConfigSHA256 == configwrite.SHA256Hex(raw) && !configwrite.IsHandEditActor(state.Actor) &&
+		(opt.Bundle.ID == "" || state.Actor == opt.Actor && state.BundleID == opt.Bundle.ID &&
+			state.BundleVersion == opt.Bundle.Version && state.SignerKeyID == opt.Bundle.SignerKeyID)
 }
