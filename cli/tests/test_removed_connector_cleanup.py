@@ -40,7 +40,7 @@ from tests.helpers import cleanup_app, make_app_context
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _OPENHANDS_STUB = (
     "#!/bin/sh -p\n# defenseclaw-managed-hook v0 (disabled tombstone)\n"
-    "echo '{\"decision\":\"deny\",\"reason\":\"OpenHands support was removed in DefenseClaw 1.0.4.\"}'\nexit 2\n"
+    'echo \'{"decision":"deny","reason":"OpenHands support was removed in DefenseClaw 1.0.4."}\'\nexit 2\n'
 )
 _OPENHANDS_103 = "#!/bin/bash\n# defenseclaw-managed-hook v6\nexec defenseclaw-hook hook --connector openhands\n"
 _OMNIGENT_STUB = "# defenseclaw-managed-policy v0 (disabled tombstone)\n_REASON = 'OmniGent support was removed in DefenseClaw 1.0.4.'\n"
@@ -99,7 +99,12 @@ class LeftoversTests(_Host):
         script = os.path.join(self.hooks, "openhands-hook.sh")
         self.assertEqual(
             list(items),
-            [config, script, os.path.join(self.hooks, ".hookcfg.openhands"), os.path.join(self.data, "connector_backups", "openhands")],
+            [
+                config,
+                script,
+                os.path.join(self.hooks, ".hookcfg.openhands"),
+                os.path.join(self.data, "connector_backups", "openhands"),
+            ],
         )
         self.assertIn("remove every hook whose command runs openhands-hook.sh", items[config].step)
         self.assertIn("blocks every call", items[config].what)
@@ -126,12 +131,20 @@ class LeftoversTests(_Host):
     def test_windows_launcher_hooks_are_listed(self):
         config = _write(
             os.path.join(self.home, ".openhands", "hooks.json"),
-            json.dumps({"pre_tool_use": [{"hooks": [{"command": "C:\\\\dc\\\\defenseclaw-hook.exe hook --connector openhands"}]}]}),
+            json.dumps(
+                {
+                    "pre_tool_use": [
+                        {"hooks": [{"command": "C:\\\\dc\\\\defenseclaw-hook.exe hook --connector openhands"}]}
+                    ]
+                }
+            ),
         )
         self.assertIn(config, self.items("openhands"))
 
     def test_lists_everything_the_omnigent_teardown_left(self):
-        config = _write(os.path.join(self.home, ".omnigent", "config.yaml"), "policy_modules: [defenseclaw_omnigent_policy]\n")
+        config = _write(
+            os.path.join(self.home, ".omnigent", "config.yaml"), "policy_modules: [defenseclaw_omnigent_policy]\n"
+        )
         explicit = _write(os.path.join(self.home, "explicit.yaml"), "policy_modules: [defenseclaw_omnigent_policy]\n")
         pth = _write(os.path.join(self.home, "venv", "defenseclaw_omnigent.pth"), self.hooks + "\n")
         _backup(self.data, "omnigent", "pth", pth)
@@ -152,7 +165,9 @@ class LeftoversTests(_Host):
         config = self.openhands()
         [left] = removed_connectors.leftovers(self.data, home=self.home)
         lines = left.lines(without_under=self.data)
-        self.assertEqual(lines[0], "OpenHands support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:")
+        self.assertEqual(
+            lines[0], "OpenHands support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:"
+        )
         self.assertEqual(len(lines), 2)
         self.assertTrue(lines[1].startswith(f"  - {config}: "))
         self.assertEqual(left.as_json()["items"][0]["path"], config)
@@ -170,9 +185,13 @@ class GoParityTests(unittest.TestCase):
         self.assertGreaterEqual(source.count(removed_connectors.STUB_PHRASE), 2)
         self.assertRegex(source, re.escape('"# defenseclaw-managed-hook v0 (disabled tombstone)\\n"'))
         self.assertRegex(source, re.escape('"# defenseclaw-managed-policy v0 (disabled tombstone)\\n"'))
-        for phrase in ("from this file, then restart OpenHands", "from this file, then restart OmniGent",
-                       "the stub that blocks every ", "delete it once nothing above runs it",
-                       "copy back what you need, then delete this folder"):
+        for phrase in (
+            "from this file, then restart OpenHands",
+            "from this file, then restart OmniGent",
+            "the stub that blocks every ",
+            "delete it once nothing above runs it",
+            "copy back what you need, then delete this folder",
+        ):
             self.assertIn(phrase, source)
 
 

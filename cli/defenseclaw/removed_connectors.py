@@ -235,7 +235,9 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
     script = os.path.join(hooks, c.script)
     state = _script_state(script, c)
     if state == "stub":
-        items.append(Leftover(script, f"the stub that blocks every {c.label} call", "delete it once nothing above runs it"))
+        items.append(
+            Leftover(script, f"the stub that blocks every {c.label} call", "delete it once nothing above runs it")
+        )
     elif state == "owned":
         items.append(Leftover(script, "still the hook script an older DefenseClaw wrote", teardown))
     elif state == "foreign":
@@ -251,7 +253,8 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
     if c.name == "openhands":
         record = os.path.join(hooks, ".hookcfg.openhands")
         if os.path.lexists(record):
-            items.append(Leftover(record, "the runtime settings of the removed hook; DefenseClaw no longer reads it", "delete it"))
+            what = "the runtime settings of the removed hook; DefenseClaw no longer reads it"
+            items.append(Leftover(record, what, "delete it"))
     backups = os.path.join(data_dir, "connector_backups", c.name)
     if os.path.lexists(backups):
         items.append(
