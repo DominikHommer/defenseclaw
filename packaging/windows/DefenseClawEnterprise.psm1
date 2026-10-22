@@ -29258,7 +29258,8 @@ function Invoke-DefenseClawCommittedInstallRootRetirement {
             throw (
                 "Windows refused to rename $Source aside ($($failure.Exception.Message)) and no program holds a file in it, " +
                 'so the refusal does not end when a program exits. Check that administrators can rename that folder and ' +
-                'create folders in its parent (no deny entry, no read-only file system), then run the uninstall again'
+                'create folders in its parent (no deny entry, no read-only file system) and that no window or prompt has ' +
+                'it as its current folder, then run the uninstall again'
             )
         }
         return ('{0}: {1}' -f ($holders -join '; '), $failure.Exception.Message)
