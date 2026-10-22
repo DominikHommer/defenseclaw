@@ -935,9 +935,6 @@ def hook_command_problems(cfg: Any, connector: str) -> list[str]:
 
     if os.name == "nt":
         return []
-    edited = edited_hook_problems(cfg, connector)
-    if edited:
-        return edited
     hooks_dir = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "hooks")
     for path in _hook_config_paths(cfg, connector):
         try:
@@ -960,7 +957,7 @@ def hook_command_problems(cfg: Any, connector: str) -> list[str]:
                 f"hook command in {path} cannot run: the shell runs {program!r}, not the hook script "
                 f"under {hooks_dir} (a path with a space must be quoted)"
             ]
-    return []
+    return edited_hook_problems(cfg, connector)
 
 
 # The Unix hook script Setup registers for each hook connector. Windows
@@ -1219,7 +1216,7 @@ def _foreign_owned_file_command(cfg: Any, connector: str, path: Path, document: 
         hooks = document.get("hooks")
         for entry in hooks if isinstance(hooks, list) else []:
             if isinstance(entry, dict) and entry.get("trigger") in _KIRO_V3_TRIGGERS:
-                for command in _hook_command_strings(entry) or [""]:
+                for command in _hook_command_strings(entry):
                     if command != render:
                         return command
     return None
