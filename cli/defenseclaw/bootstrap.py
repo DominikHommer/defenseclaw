@@ -1754,6 +1754,7 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
         hook_registration_problems,
         hook_runtime_problems,
         repair_command,
+        unguarded_tool_call_hooks,
     )
 
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
@@ -1772,9 +1773,14 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
     if not problems:
         return None
     # A hook command the shell cannot run guards nothing (GAP-0382), and an
-    # agent setting that turns its hooks off is not repaired by a gateway
-    # restart (rel-1-0-4 GAP-0580).
-    blocking = problems[0].startswith("hook command ") or problems[0] in agent_hook_switch_problems(cfg, connector)
+    # agent setting that turns its hooks off (rel-1-0-4 GAP-0580) or a hook
+    # entry edited so tool calls run unchecked is not repaired by a gateway
+    # restart.
+    blocking = (
+        problems[0].startswith("hook command ")
+        or problems[0] in agent_hook_switch_problems(cfg, connector)
+        or problems[0] in unguarded_tool_call_hooks(cfg, connector)
+    )
     return StepResult(
         "Connector runtime",
         "fail" if blocking else "warn",

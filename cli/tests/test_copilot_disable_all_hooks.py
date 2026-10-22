@@ -162,3 +162,70 @@ def test_every_agent_hook_switch_fails_the_setup_read_back(tmp_path, monkeypatch
     assert hook_integrity.agent_hook_switch_problems(cfg, connector)
     step = _readiness(cfg, connector)
     assert step is not None and step.status == "fail", step
+
+
+@pytest.mark.parametrize("value", [True, "yes"], ids=["true", "not-boolean"])
+@pytest.mark.parametrize("platform", ["posix", "windows"])
+@pytest.mark.parametrize("recorded", [True, False], ids=["recorded", "lock-without-paths"])
+@pytest.mark.parametrize("case", _COPILOT, ids=_case_id)
+def test_disable_all_hooks_in_the_hook_registration_file(tmp_path, monkeypatch, case, recorded, platform, value):
+    """Copilot also reads disableAllHooks from the DefenseClaw hook file itself, as setup and the Windows doctor do."""
+
+    cfg, paths = _copilot(tmp_path, monkeypatch, case, platform)
+    registration = Path(paths[0])
+    document = json.loads(registration.read_text(encoding="utf-8"))
+    registration.write_text(json.dumps({"disableAllHooks": value, **document}), encoding="utf-8")
+    if not recorded:
+        # A lock from before the hook files were recorded (an upgrade).
+        lock = Path(cfg.data_dir, "hook_contract_lock.json")
+        lock.write_text(json.dumps({"version": 2, "connectors": {"copilot": {"locations": {}}}}), encoding="utf-8")
+
+    problems = hook_integrity.agent_hook_switch_problems(cfg, "copilot")
+    assert len(problems) == 1 and str(registration) in problems[0], problems
+    assert f"remove disableAllHooks from {registration}" in hook_integrity.repair_command("copilot", problems[0])
+    assert hook_integrity.unrunnable_hook_problem(cfg, "copilot") == problems[0]
+    assert problems[0] in cmd_status._hook_runtime_degraded_suffix(cfg, "copilot")
+    if recorded:
+        step = _readiness(cfg, "copilot")
+        assert step is not None and step.status == "fail" and problems[0] in step.detail, step
+    if platform == "posix":
+        rows = _doctor_rows(cfg, monkeypatch)
+        assert rows and all(row["status"] == "fail" for row in rows), rows
+        assert any(str(registration) in row["detail"] for row in rows), rows
+
+
+@pytest.mark.parametrize("case", _COPILOT, ids=_case_id)
+def test_disable_all_hooks_false_in_the_hook_registration_file_is_guarded(tmp_path, monkeypatch, case):
+    cfg, paths = _copilot(tmp_path, monkeypatch, case)
+    registration = Path(paths[0])
+    document = json.loads(registration.read_text(encoding="utf-8"))
+    registration.write_text(json.dumps({"disableAllHooks": False, **document}), encoding="utf-8")
+    assert hook_integrity.agent_hook_switch_problems(cfg, "copilot") == []
+    assert _readiness(cfg, "copilot") is None
+
+
+@pytest.mark.parametrize(
+    "field, value, why",
+    [("timeout", 1, "timeout is 1"), ("matcher", "NoSuchTool", "")],
+    ids=["timeout", "matcher"],
+)
+def test_a_hook_entry_that_lets_tool_calls_run_unchecked_fails_the_setup_read_back(
+    tmp_path, monkeypatch, field, value, why
+):
+    case = next(c for c in _CASES if c["connector"] == "claudecode" and c["os"] == "posix" and c["scope"] == "user")
+    cfg, paths = _install(tmp_path, monkeypatch, case)
+    settings = Path(tmp_path / "home" / ".claude" / "settings.json")
+    assert str(settings) in paths
+    document = json.loads(settings.read_text(encoding="utf-8"))
+    for entry in document["hooks"]["PreToolUse"]:
+        if field == "matcher":
+            entry["matcher"] = value
+        else:
+            for handler in entry["hooks"]:
+                handler[field] = value
+    settings.write_text(json.dumps(document), encoding="utf-8")
+
+    problems = hook_integrity.unguarded_tool_call_hooks(cfg, "claudecode")
+    assert problems and "tool calls can run unchecked" in problems[0] and why in problems[0], problems
+    step = _readiness(cfg, "claudecode")
+    assert step is not None and step.status == "fail" and problems[0] in step.detail, step
