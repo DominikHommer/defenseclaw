@@ -665,8 +665,16 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 			Getenv:        os.Getenv,
 			OwnedCommands: cleanup.OwnedCommands,
 		}
-		if fence != nil {
+		switch {
+		case fence != nil:
 			guard.GuardRemoval = enterpriseForeignHookRemovalGuard(name, fence)
+		case request.Standalone:
+			// A standalone removal is recorded, under the account's removal
+			// lock and after the key rotation, before the file changes; a
+			// worker the guardian gave no commit channel removes nothing.
+			guard.GuardRemoval = func([]string, func() error) error {
+				return errors.New("foreign-hook removal refused: the guardian passed no removal commit channel")
+			}
 		}
 		result, err := enterprisepolicy.CleanUserForeignHooksWithRedirects(guard, redirects, now)
 		err = errors.Join(err, redirectErr)
