@@ -24,6 +24,10 @@ for current behavior.
 
 ### Fixed
 
+- **Managed provenance no longer prints an empty CLI snapshot.** The Unix administrator command reads the running gateway over its protected socket and verifies the listener's kernel identity on that connection. Missing or incomplete state refuses with the deployment status command. Linux profile-validation errors explain reinstall recovery; personal gateway startup names unsafe JSONL destinations before spawning a daemon; Windows sandbox hints name the gateway executable; profile explain omits an unproven directory source for an unnamed numeric gid.
+- **Hidden credential reads in MCP descriptions produce findings.** The bundled YARA pack detects instructions to read home credential files and exfiltrate their contents or conceal the access, including the managed as-user scan's previously missed description. Ordinary tool documentation has negative controls, and the scanner SDK reports the new finding as HIGH.
+- **Personal Claude Code hooks decode successful responses with one parser process when jq is available.** The response must be one JSON object with a known action and structured native output. The existing jq-free path remains supported.
+- **Windows standalone teardown returns kept agent config files to their owner's control.** Only verified removal releases the guardian's owner-rights restriction; failed teardown retains protection. File inspection and the DACL update use the same no-follow handle, rejecting unproven owners, reparse paths and hard links without relaxing DefenseClaw's retained state.
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
 
 ### Removed
