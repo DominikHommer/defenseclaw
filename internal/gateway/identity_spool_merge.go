@@ -4,7 +4,9 @@
 package gateway
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -102,15 +104,43 @@ var spoolRecordSignInHint = func() string {
 // readIdentitySpoolFacts returns the guardian's record for key (a uid or
 // SID), when one exists, is trusted and is current.
 func readIdentitySpoolFacts(key string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool) {
+	record, state := readIdentitySpoolState(key, now)
+	return record, state == identitySpoolCurrent
+}
+
+// identitySpoolState is what the gateway finds for an account's guardian
+// identity record.
+type identitySpoolState int
+
+const (
+	// identitySpoolCurrent is a trusted record inside its trust window.
+	identitySpoolCurrent identitySpoolState = iota
+	// identitySpoolWithdrawn is no record at all: the guardian removed it
+	// (a uid handed to another account on Linux and macOS, a publication
+	// that failed on Windows) or never wrote one.
+	identitySpoolWithdrawn
+	// identitySpoolUnreadable is a record the gateway cannot use now: a
+	// read, parse or trust failure (a sharing violation while the
+	// enumerator replaces the file), or a timestamp outside its trust
+	// window. It withdraws nothing the record proved before.
+	identitySpoolUnreadable
+)
+
+// readIdentitySpoolState reads the guardian's record for key and says
+// whether it is current, withdrawn or unreadable.
+func readIdentitySpoolState(key string, now time.Time) (enterprisehooks.IdentitySpoolRecord, identitySpoolState) {
 	dir := currentIdentitySpoolDir()
 	if dir == "" {
-		return enterprisehooks.IdentitySpoolRecord{}, false
+		return enterprisehooks.IdentitySpoolRecord{}, identitySpoolWithdrawn
 	}
 	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, key, validateManagedGuardianAuthorization)
-	if err != nil || record.UpdatedAt.After(now) || now.Sub(record.UpdatedAt) > identitySpoolMaxAge {
-		return enterprisehooks.IdentitySpoolRecord{}, false
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return enterprisehooks.IdentitySpoolRecord{}, identitySpoolWithdrawn
+	case err != nil || record.UpdatedAt.After(now) || now.Sub(record.UpdatedAt) > identitySpoolMaxAge:
+		return enterprisehooks.IdentitySpoolRecord{}, identitySpoolUnreadable
 	}
-	return record, true
+	return record, identitySpoolCurrent
 }
 
 // identitySpoolConnectorEmail is the connector address the enumerator
@@ -239,6 +269,18 @@ func forgetOnSpoolGroupChange(cache *identityDirectoryCache, key string, now tim
 	forgetOnSpoolChange(cache, key, now, true)
 }
 
+// forgetOnSpoolChange drops key's cached facts when the guardian's record
+// contradicts them or was withdrawn. A record that is there but cannot be
+// read now withdraws nothing: the facts it proved stay, bounded by their
+// lifetime and the record's trust window (identitySpoolTrustedUntil), as
+// cached facts stay through a directory outage. Dropping them on such a
+// miss let the next request resolve without the record and select the
+// outage default, which can be weaker than the assignment the facts select.
+// A withdrawn record does end them: on Windows the enumerator withdraws it
+// when it cannot publish the account's current token groups, so the next
+// lookup has no groups and takes the outage path (default_lookup_failed);
+// on Linux and macOS the guardian withdraws it when the uid belongs to
+// another account, whose facts are not these.
 func forgetOnSpoolChange(cache *identityDirectoryCache, key string, now time.Time, checkGroups bool) {
 	if cache == nil || key == "" || currentIdentitySpoolDir() == "" {
 		return
@@ -247,10 +289,13 @@ func forgetOnSpoolChange(cache *identityDirectoryCache, key string, now time.Tim
 	if !ok {
 		return
 	}
-	record, ok := readIdentitySpoolFacts(key, now)
-	if !ok {
-		// A failed or withdrawn publication cannot leave old token groups
-		// (Windows) or a guardian-only UPN (Unix) in the gateway cache.
+	record, state := readIdentitySpoolState(key, now)
+	switch state {
+	case identitySpoolUnreadable:
+		return
+	case identitySpoolWithdrawn:
+		// A withdrawn publication cannot leave old token groups (Windows)
+		// or a guardian-only UPN (Unix) in the gateway cache.
 		if checkGroups && len(cached.Groups) > 0 || !checkGroups && (cached.UPN != "" || cached.AccountSID != "") {
 			cache.forget(key)
 		}
