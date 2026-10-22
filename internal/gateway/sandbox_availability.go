@@ -263,6 +263,8 @@ type sandboxPrerequisiteItems struct {
 	Ready   bool `json:"ready"`
 	Missing []struct {
 		Item string `json:"item"`
+		// Version is the refused release of an installed OpenShell part.
+		Version string `json:"version"`
 	} `json:"missing"`
 }
 
@@ -355,13 +357,36 @@ func sandboxPrerequisiteWhy(cfg *config.Config, goos, driver string, record sand
 	why := sandboxUnavailablePrerequisiteOther
 	for _, missing := range items.Missing {
 		switch strings.ToLower(strings.TrimSpace(missing.Item)) {
-		case "openshell cli", "openshell gateway", "microvm driver", "openshell pin", "openshell platform":
+		case "openshell cli", "openshell gateway", "microvm driver":
+			if why := sandboxOpenShellRefused(missing.Version); why != "" {
+				return why
+			}
+			return sandboxUnavailableNoOpenShell
+		case "openshell pin", "openshell platform":
 			return sandboxUnavailableNoOpenShell
 		case "docker":
 			why = sandboxUnavailableDockerMissing
 		}
 	}
 	return why
+}
+
+// sandboxOpenShellRefused is the reason for an OpenShell part the
+// administrator installed in a release the host runs no sandbox on (the
+// record's version): an installed release is never "not installed"
+// (GAP-0266). One outside the supported window is unsupported; a
+// supported one the pin does not allow is not the organization's release.
+// "" when version cannot be read.
+func sandboxOpenShellRefused(version string) string {
+	v, err := openshell.ParseVersion(version)
+	if err != nil {
+		return ""
+	}
+	if openshell.CheckSupported(v) != nil {
+		return "OpenShell " + v.String() + " is installed, but that release is unsupported: sandboxes need OpenShell " +
+			openshell.SupportedMin + " or later, below " + openshell.SupportedBelow
+	}
+	return "OpenShell " + v.String() + " is installed, but it is not the release your organization requires"
 }
 
 // sandboxDriverFor is the compute driver managed sandboxes want on goos:

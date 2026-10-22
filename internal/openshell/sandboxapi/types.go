@@ -395,6 +395,14 @@ type Sandbox struct {
 	// Orphaned marks an OpenShell sandbox with DefenseClaw labels but no
 	// DefenseClaw binding; its hooks cannot authenticate.
 	Orphaned bool `json:"orphaned,omitempty"`
+	// OldSupervisor marks a ready sandbox whose session runs the supervisor
+	// of an OpenShell release older than openshell.SupportedMin (or of one
+	// its record does not name), whose network broker can let the sandbox's
+	// connections bypass its policy (NVIDIA/OpenShell#4494). The daemon
+	// stops it; until it has, `sandbox exec` refuses it and `sandbox
+	// connect` stops it before it starts it again (GAP-0415). A daemon
+	// older than 1.0.4 never sets it.
+	OldSupervisor bool `json:"old_supervisor,omitempty"`
 	// NestedRepos are the git repositories the nested-repository guard
 	// found in a mounted project during the current session.
 	NestedRepos []NestedRepo `json:"nested_repos,omitempty"`

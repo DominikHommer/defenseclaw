@@ -2001,11 +2001,17 @@ A MicroVM that completed or is in OpenShell's error state still runs its VM,
 with whatever its workload left running. OpenShell 0.1.3 neither stops nor
 starts it, so the upgrade is refused until you delete it
 (`defenseclaw sandbox delete <name>`). Setup names each such sandbox and the
-command to run. After the
-upgrade, stop and start each sandbox that kept running through it: until it
-stops, it runs the old release's supervisor, and DefenseClaw says so
-(``⚠ <name>'s session started on OpenShell 0.1.3``) in the activity feed and
-in `defenseclaw sandbox status <name>`.
+command to run. A sandbox that keeps running through the upgrade still runs
+the old release's supervisor, with its network broker, until it stops. So
+DefenseClaw stops it as soon as it sees it, as `defenseclaw sandbox stop
+<name>` does, and says so in the activity feed
+(``⚠ <name>'s session started on OpenShell 0.1.3``). The same goes for a
+sandbox DefenseClaw 1.0.3 or older started, whose record names no release.
+`defenseclaw sandbox start <name>` or `connect <name>` then starts it on the
+gateway's own supervisor, with its work. If that stop fails, the sandbox
+keeps running and `defenseclaw sandbox status <name>` names it.
+`defenseclaw sandbox exec` runs nothing in it, and `connect` stops it and
+starts it again before it attaches.
 
 What the upgrade does:
 
