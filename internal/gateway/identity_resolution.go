@@ -141,6 +141,12 @@ func resolveIdentity(subject *profileSubject, agentUnresolved func(string) bool)
 		if subject.upnUnproven {
 			res.UPN = proofUnknown
 		}
+		if subject.holderUnproven {
+			// The groups are the account's own (its process credentials);
+			// which account holds the uid, its names and UPN, are not
+			// known (GAP-0653).
+			res.Account, res.UPN = proofUnknown, proofUnknown
+		}
 		if subject.GroupsUnknown {
 			res.Groups = proofUnknown
 		} else if len(subject.unconfirmedGroups) > 0 {

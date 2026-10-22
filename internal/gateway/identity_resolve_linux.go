@@ -7,6 +7,8 @@ package gateway
 
 import (
 	"context"
+	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -69,6 +71,49 @@ func holderSpoolRecord(key string, account unixidentity.Account, accountSID stri
 	return record, true, nil
 }
 
+// processCredentialFacts are the facts of the per-user gateway's own
+// account, uid, from its kernel credentials: the groups its process holds
+// (its primary group first), named through NSS as an account's groups are,
+// and no fact of which account holds the uid (HolderUnproven): the uid may
+// be another account's as well. false for any other uid and on a gateway
+// that runs as a service account. Tests replace processGroupIDs.
+func processCredentialFacts(resolver *unixidentity.NSSResolver, uid int, now time.Time) (useridentity.DirectoryFacts, bool) {
+	if gatewayRunsAsServiceAccount() || uid != os.Getuid() {
+		return useridentity.DirectoryFacts{}, false
+	}
+	ids, err := processGroupIDs()
+	if err != nil {
+		return useridentity.DirectoryFacts{}, false
+	}
+	names, unconfirmed, err := resolver.GroupNames(ids)
+	if err != nil {
+		return useridentity.DirectoryFacts{}, false
+	}
+	return useridentity.DirectoryFacts{
+		Source:            useridentity.SourceProcessCredentials,
+		Groups:            names,
+		UnconfirmedGroups: unconfirmed,
+		HolderUnproven:    true,
+		Assurance:         useridentity.AssuranceVerified,
+		ResolvedAt:        now,
+	}, true
+}
+
+// processGroupIDs are the gateway process's primary and supplementary gids.
+var processGroupIDs = func() ([]int, error) {
+	groups, err := os.Getgroups()
+	if err != nil {
+		return nil, err
+	}
+	ids := []int{os.Getgid()}
+	for _, id := range groups {
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
 // peerNSSFacts resolves a verified uid's facts (resolveNSSPeerFacts);
 // tests replace it.
 var peerNSSFacts = resolveNSSPeerFacts
@@ -100,6 +145,18 @@ func resolveNSSPeerFacts(key string) (useridentity.DirectoryFacts, error) {
 		return useridentity.DirectoryFacts{}, err
 	}
 	facts, err := resolver.DirectoryFactsForUID(uid, now)
+	if unixidentity.UnsharedUIDNeedsRoot(err) {
+		// The gateway is not root, so it cannot show that SSSD holds no
+		// other account of the uid (GAP-0653). The hook guardian, which
+		// runs as root, records that proof for the account in its current
+		// identity record; a per-user gateway's own account has the groups
+		// its own kernel credentials list, which no other account's are.
+		if _, recorded, _ := holderSpoolRecord(key, account, "", now); recorded {
+			facts, err = resolver.DirectoryFactsForRecordedUnsharedUID(uid, now)
+		} else if own, ok := processCredentialFacts(resolver, uid, now); ok {
+			return own, nil
+		}
+	}
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
