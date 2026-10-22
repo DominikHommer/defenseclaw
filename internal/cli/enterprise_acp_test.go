@@ -289,6 +289,7 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	}
 	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
 	if row, _ := listed[0].(map[string]any); row["token_copy"] != "present" || row["setup"] != "not run" ||
+		row["user_data_dir"] != filepath.Join(renamedHome, ".defenseclaw") ||
 		!strings.Contains(fmt.Sprint(row["note"]), "outside the home") {
 		t.Fatalf("list row after a rename = %v, want the copy found in the new home and a note", row)
 	}

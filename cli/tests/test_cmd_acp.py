@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -217,6 +218,19 @@ def test_verify_detects_agent_digest_drift(tmp_path, monkeypatch):
         result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
         assert result.exit_code != 0
         assert "agent executable digest has drifted" in result.output
+
+        agent_path.write_bytes(b"test-binary")
+        lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+        lock = json.loads(lock_path.read_text())
+        for invalid_agent in (None, [], "unproven", 42):
+            lock_path.write_text(json.dumps(dict(lock, agent=invalid_agent)))
+            before = lock_path.read_bytes()
+            result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert result.exit_code != 0
+            assert "contract lock identity does not match" in result.output
+            assert "run defenseclaw" in result.output
+            assert "--profile" in result.output
+            assert lock_path.read_bytes() == before
     finally:
         cleanup_app(app, db_path, data_dir)
 
@@ -253,7 +267,8 @@ def test_doctor_reports_acp_bindings_and_fails_on_drift(tmp_path, monkeypatch):
         [row] = drifted.checks
         assert row["status"] == "fail"
         assert "agent executable digest has drifted" in row["detail"]
-        assert row["remediation"] == "defenseclaw acp setup --client zed --agent kiro"
+        assert row["remediation"].startswith("defenseclaw acp setup --client zed --agent kiro --profile default")
+        assert "--activate" not in row["remediation"]
     finally:
         cleanup_app(app, db_path, data_dir)
 
@@ -580,7 +595,7 @@ def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch
         # its env, and carries the same argv the managed entry got.
         assert servers["Kiro"]["command"] == guard
         assert servers["Kiro"]["env"] == {"KEEP": "me"}
-        assert servers["Kiro"]["args"] == servers["DefenseClaw · Kiro"]["args"]
+        assert "DefenseClaw · Kiro" not in servers
         # The wrapped agent is the one that was already configured (compare
         # basenames: macOS resolves the temp path through /private).
         assert any(str(value).endswith("kiro-cli") for value in servers["Kiro"]["args"])
@@ -589,10 +604,60 @@ def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch
         assert servers["Foreign"] == {"command": "other", "args": []}
         assert app.cfg.acp.mode == "observe"
 
+        changed = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard,
+             "--agent-binary", agent, "--profile", "locked", "--activate", "--json-output"],
+            obj=app,
+        )
+        assert changed.exit_code == 0, changed.output
+        servers = json.loads(settings.read_text())["agent_servers"]
+        assert set(servers) == {"Kiro", "Foreign"}
+        assert "locked" in servers["Kiro"]["args"]
+        assert "action" in servers["Kiro"]["args"]
+        verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert verified.exit_code == 0, verified.output
+        equivalent_data_dir = str(Path(data_dir) / ".." / Path(data_dir).name)
+        assert not cmd_acp_module._verify_binding(equivalent_data_dir, "zed", "kiro", app.cfg.acp)
+        # A copied guarded entry with stale metadata must also be checked.
+        # Under the reserved name it is DefenseClaw's, and verify reports its
+        # launch. Under another name it no longer matches the lock, so it is
+        # not this runtime's alias: verify ignores it and removal would leave
+        # it with a warning.
+        stale = dict(servers["Kiro"], args=list(servers["Kiro"]["args"]))
+        stale["args"][stale["args"].index("--profile") + 1] = "default"
+        for name in ("DefenseClaw · Kiro", "Stale"):
+            settings.write_text(json.dumps({"agent_servers": {**servers, name: stale}}))
+            cmd_acp_module._refresh_client_contract_digests(str(data_dir), "zed", settings)
+            verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+            problems = cmd_acp_module._verify_binding(str(data_dir), "zed", "kiro", app.cfg.acp)
+            if name == "Stale":
+                assert verified.exit_code == 0, verified.output
+                assert cmd_acp_module._unproven_pair_entries("zed", "kiro", str(data_dir)) == ["Stale"]
+            else:
+                assert verified.exit_code != 0, verified.output
+                assert f"editor launch command does not match the lock: {name}" in problems, problems
+        settings.write_text(json.dumps({"agent_servers": servers}))
+        cmd_acp_module._refresh_client_contract_digests(str(data_dir), "zed", settings)
+
         # Re-running finds nothing to adopt rather than double-wrapping.
         again = CliRunner().invoke(acp_cmd, ["adopt", "--client", "zed", "--yes", "--json-output"], obj=app)
         assert again.exit_code == 0, again.output
         assert json.loads(again.output)["adopted"] == []
+        removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert removed.exit_code == 0, removed.output
+        assert json.loads(settings.read_text())["agent_servers"] == {"Foreign": {"command": "other", "args": []}}
+        collision = {"agent_servers": {"DefenseClaw · Kiro": {"command": "other", "args": []}}}
+        settings.write_text(json.dumps(collision))
+        before = settings.read_bytes()
+        for command in (
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            ["remove", "--client", "zed", "--agent", "kiro"],
+        ):
+            refused = CliRunner().invoke(acp_cmd, command, obj=app)
+            assert refused.exit_code != 0, refused.output
+            assert "rename that entry" in refused.output
+            assert settings.read_bytes() == before
     finally:
         cleanup_app(app, db_path, data_dir)
 
@@ -946,5 +1011,678 @@ def test_setup_returns_once_the_gateway_has_loaded_the_guard(tmp_path, monkeypat
         assert result.exit_code == 0, result.output
         assert "the gateway has not loaded it yet" in result.stderr
         assert result.stdout.startswith("Configured kiro through DefenseClaw in zed (action)")
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def _repair_args(output: str) -> list[str]:
+    """The `acp setup` argv a failed verify told the operator to run."""
+    import re
+    import shlex
+
+    command = output.split("; run ", 1)[1].strip().splitlines()[0]
+    if os.name == "nt":
+        words = [value.replace("''", "'") for value in re.findall(r"'((?:[^']|'')*)'", command)]
+    else:
+        words = shlex.split(command)[1:]
+    assert words[:2] == ["acp", "setup"], command
+    return words[1:]
+
+
+def test_verify_repair_command_keeps_action_mode(tmp_path, monkeypatch):
+    """Following verify's repair hint must not demote an action binding to observe/open."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    # With an unreadable lock the hint names no executables, so setup finds
+    # the guard and the agent on PATH, as it does for the operator.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    suffix = ".exe" if os.name == "nt" else ""
+    guard = _binary(bin_dir / f"defenseclaw-acp{suffix}")
+    agent = _binary(bin_dir / f"kiro-cli{suffix}")
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+    lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+    try:
+        result = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--profile", "locked", "--activate",
+             "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert result.exit_code == 0, result.output
+        intact = lock_path.read_text()
+        for broken in ("{", json.dumps({"version": 1}), None):
+            if broken is None:
+                # A readable lock: the hint also names the pinned executables.
+                lock_path.write_text(intact)
+                agent_path = Path(agent)
+                agent_path.write_bytes(b"updated-binary")
+            else:
+                lock_path.write_text(broken)
+            verified = CliRunner().invoke(acp_cmd, ["verify"], obj=app)
+            assert verified.exit_code != 0, verified.output
+            args = _repair_args(verified.output)
+            assert "--activate" in args and args[args.index("--profile") + 1] == "locked"
+            if broken is None:
+                assert args[args.index("--agent-binary") + 1] == agent
+                assert args[args.index("--guard-binary") + 1] == guard
+            repaired = CliRunner().invoke(acp_cmd, args, obj=app)
+            assert repaired.exit_code == 0, repaired.output
+            locked = app.cfg.acp.profiles["locked"]
+            assert (locked.mode, locked.fail_mode) == ("action", "closed")
+            assert json.loads(lock_path.read_text())["mode"] == "action"
+            assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
+
+        # The mode a binding inherits counts too, and an unknown mode enforces.
+        for profile_mode, fallback in (("", "action"), ("enforce", "observe")):
+            app.cfg.acp.profiles["locked"].mode = profile_mode
+            app.cfg.acp.mode = fallback
+            assert "--activate" in cmd_acp_module.setup_repair_command(app.cfg, "zed", "kiro", str(data_dir))
+        app.cfg.acp.profiles["locked"].mode = "observe"
+        assert "--activate" not in cmd_acp_module.setup_repair_command(app.cfg, "zed", "kiro", str(data_dir))
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_doctor_repair_command_keeps_action_mode(tmp_path, monkeypatch):
+    from defenseclaw.commands.cmd_doctor import _check_acp_bindings, _DoctorResult, _fix_acp_guard_pins
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent_path = tmp_path / "kiro-cli"
+    agent = _binary(agent_path)
+    try:
+        result = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--profile", "locked", "--activate",
+             "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert result.exit_code == 0, result.output
+        agent_path.write_bytes(b"drifted-binary")
+        drifted = _DoctorResult()
+        _check_acp_bindings(app.cfg, drifted)
+        [row] = drifted.checks
+        assert "--activate" in row["remediation"] and "locked" in row["remediation"]
+        _tag, detail = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
+        assert "--activate" in detail
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_remove_and_setup_leave_unproven_guard_named_entries(tmp_path, monkeypatch):
+    """A guard-like filename is not ownership: only a matching contract lock is."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    own = tmp_path / "operator" / "defenseclaw-acp"
+    own.parent.mkdir()
+    operator_guard = _binary(own)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    real_lock = str((Path(data_dir) / "acp" / "zed-kiro.contract-lock.json").resolve())
+    other_lock = str(tmp_path / "elsewhere" / "zed-kiro.contract-lock.json")
+    argv = ["--client", "zed", "--agent", "kiro"]
+    variants = {
+        "no lock": argv + ["--", "kiro-cli", "acp"],
+        "missing lock": argv + ["--contract-lock", other_lock, "--", "kiro-cli", "acp"],
+        # The pair's real lock exists but pins DefenseClaw's guard, not this file.
+        "foreign command": argv + ["--contract-lock", real_lock, "--", "kiro-cli", "acp"],
+    }
+    try:
+        for label, args in variants.items():
+            alias = {"command": operator_guard, "args": args}
+            settings.write_text(json.dumps({"agent_servers": {"My Kiro": alias}}))
+            before = settings.read_bytes()
+            removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert removed.exit_code == 0, (label, removed.output)
+            assert settings.read_bytes() == before, label
+            status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)
+            assert status["bindings"] == {}, label
+
+            setup = CliRunner().invoke(
+                acp_cmd,
+                ["setup", "--client", "zed", "--agent", "kiro", "--activate",
+                 "--guard-binary", guard, "--agent-binary", agent],
+                obj=app,
+            )
+            assert setup.exit_code == 0, (label, setup.output)
+            servers = json.loads(settings.read_text())["agent_servers"]
+            assert servers["My Kiro"] == alias, label
+            assert servers["DefenseClaw · Kiro"]["command"] == guard
+            removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert removed.exit_code == 0, (label, removed.output)
+            assert json.loads(settings.read_text())["agent_servers"] == {"My Kiro": alias}, label
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_alias_with_another_runtimes_lock_is_not_this_runtimes(tmp_path, monkeypatch):
+    """An alias proven only by another runtime's lock or credential is left alone.
+
+    Setup in a second runtime directory writes a valid lock that binds this
+    editor file and pins the same guard. Removal and setup under the current
+    runtime must neither delete nor rewrite that alias (nor the settings
+    file), and status must not count it as this runtime's binding.
+    """
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    other = str((tmp_path / "other-runtime").resolve())
+    current_lock = cmd_acp_module._contract_lock_path(data_dir, "zed", "kiro")
+
+    def lock_in(runtime: str) -> str:
+        settings.write_text("{}")
+        return str(cmd_acp_module._write_contract_lock(
+            data_dir=runtime, client="zed", agent="kiro", profile="default", mode="observe",
+            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False,
+        ))
+
+    def alias(lock: str, token: str) -> dict:
+        return {"command": guard, "args": [
+            "--agent", "kiro", "--client", "zed", "--profile", "default", "--mode", "observe",
+            "--token-file", token, "--gateway", "http://127.0.0.1:1/api/v1/acp/evaluate",
+            "--contract-lock", lock, "--", agent, "acp",
+        ]}
+
+    other_token = str(Path(other) / "acp" / ".token")
+    current_token = str((Path(data_dir) / "acp" / ".token").resolve())
+    variants = {
+        # The other runtime's own lock and token: valid, but not this runtime's.
+        "other runtime lock": lambda: alias(lock_in(other), other_token),
+        # This runtime's lock, but the entry carries another runtime's credential.
+        "other runtime token": lambda: (lock_in(other), alias(lock_in(data_dir), other_token))[1],
+    }
+    if os.name != "nt":
+        def writable_lock() -> dict:
+            entry = alias(lock_in(data_dir), current_token)
+            current_lock.chmod(0o666)
+            return entry
+
+        # This runtime's lock path and token, but a lock others can rewrite.
+        variants["lock out of custody"] = writable_lock
+    try:
+        for label, make in variants.items():
+            entry = make()
+            settings.write_text(json.dumps({"agent_servers": {"Other Kiro": entry}}))
+            before = settings.read_bytes()
+            removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert removed.exit_code == 0, (label, removed.output)
+            assert settings.read_bytes() == before, label
+
+            setup = CliRunner().invoke(
+                acp_cmd,
+                ["setup", "--client", "zed", "--agent", "kiro", "--activate",
+                 "--guard-binary", guard, "--agent-binary", agent],
+                obj=app,
+            )
+            assert setup.exit_code == 0, (label, setup.output)
+            servers = json.loads(settings.read_text())["agent_servers"]
+            assert servers["Other Kiro"] == entry, label
+            assert servers["DefenseClaw · Kiro"]["command"] == guard, label
+            if label == "lock out of custody":
+                # Setup rewrote the lock owner-only, so the copy now names a
+                # lock in this runtime's custody; nothing more to prove here.
+                settings.unlink()
+                continue
+            status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)
+            assert status["bindings"]["zed/kiro"]["healthy"], (label, status)
+            removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert removed.exit_code == 0, (label, removed.output)
+            assert json.loads(settings.read_text())["agent_servers"] == {"Other Kiro": entry}, label
+
+        # Control: this runtime's own adopted alias is still this runtime's.
+        settings.write_text(json.dumps({"agent_servers": {"My Kiro": {"command": agent, "args": ["acp"]}}}))
+        adopted = CliRunner().invoke(
+            acp_cmd, ["adopt", "--client", "zed", "--guard-binary", guard, "--yes", "--json-output"], obj=app
+        )
+        assert adopted.exit_code == 0, adopted.output
+        assert list(json.loads(settings.read_text())["agent_servers"]) == ["My Kiro"]
+        removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert removed.exit_code == 0, removed.output
+        assert not settings.exists()
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_alias_backed_by_an_unusable_lock_is_not_owned(tmp_path, monkeypatch):
+    """Only the canonical, complete, private lock setup writes proves an alias.
+
+    Each variant names this runtime's lock and token and pins the same guard
+    and editor file, but the guard could not start from that lock (or the
+    entry reaches it by another path). Removal must leave the alias and the
+    settings file byte for byte, warn about it, and status must still answer.
+    """
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    runtime = (Path(data_dir) / "acp").resolve()
+    lock = runtime / "zed-kiro.contract-lock.json"
+    token = str(runtime / ".token")
+
+    def write_lock(mutate=None) -> None:
+        settings.write_text("{}")
+        cmd_acp_module._write_contract_lock(
+            data_dir=data_dir, client="zed", agent="kiro", profile="default", mode="observe",
+            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False,
+        )
+        if mutate:
+            document = json.loads(lock.read_text())
+            mutate(document)
+            cmd_acp_module.atomic_write_private_bytes(lock, json.dumps(document).encode())
+
+    def alias(lock_value: str, token_value: str = token) -> dict:
+        return {"command": guard, "args": [
+            "--agent", "kiro", "--client", "zed", "--profile", "default", "--mode", "observe",
+            "--token-file", token_value, "--gateway", "http://127.0.0.1:1/api/v1/acp/evaluate",
+            "--contract-lock", lock_value, "--", agent, "acp",
+        ]}
+
+    def drop(*keys):
+        def mutate(document):
+            item = document
+            for key in keys[:-1]:
+                item = item[key]
+            del item[keys[-1]]
+        return mutate
+
+    def setter(value, *keys):
+        def mutate(document):
+            item = document
+            for key in keys[:-1]:
+                item = item[key]
+            item[keys[-1]] = value
+        return mutate
+
+    variants: dict[str, tuple] = {
+        # The path resolves to this lock but is not the path setup writes.
+        "dot-dot path": (None, str(runtime / ".." / "acp" / lock.name)),
+        "dot-dot token": (None, str(lock), str(runtime / ".." / "acp" / ".token")),
+        # Structurally incomplete or wrong-typed locks the guard refuses.
+        "no protocol": (drop("protocol"), str(lock)),
+        "empty schema pin": (setter("", "protocol", "schema_sha256"), str(lock)),
+        "no editor digest": (drop("client", "config_sha256"), str(lock)),
+        "no guard digest": (drop("guard", "sha256"), str(lock)),
+        "no agent path": (drop("agent", "path"), str(lock)),
+        "no mode": (drop("mode"), str(lock)),
+        "version 2": (setter(2, "version"), str(lock)),
+        "boolean version": (setter(True, "version"), str(lock)),
+        "custody not a flag": (setter(0, "guard", "managed_custody"), str(lock)),
+        "adopted not a list": (setter("Other Kiro", "client", "adopted_entries"), str(lock)),
+    }
+    other = tmp_path / "other-runtime" / "acp"
+    other.mkdir(parents=True)
+    try:
+        (other / lock.name).symlink_to(lock)
+        # Another runtime's lock path is a symlink to this runtime's lock.
+        variants["symlink from another runtime"] = (None, str(other / lock.name))
+    except OSError:  # pragma: no cover - Windows without symlink privilege
+        pass
+    if os.name != "nt":
+        # Readable by others: the guard refuses any group or other bit.
+        variants["group-readable lock"] = (lambda document: None, str(lock))
+    try:
+        for label, (mutate, lock_value, *token_value) in variants.items():
+            write_lock(mutate)
+            if label == "group-readable lock":
+                lock.chmod(0o640)
+            entry = alias(lock_value, *token_value)
+            settings.write_text(json.dumps({"agent_servers": {"Other Kiro": entry}}))
+            before = settings.read_bytes()
+            status = CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app)
+            assert status.exit_code == 0, (label, status.output)
+            json.loads(status.output)
+            removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert removed.exit_code == 0, (label, removed.output)
+            assert settings.read_bytes() == before, label
+            assert "Left editor entry 'Other Kiro'" in removed.output, (label, removed.output)
+
+        # Control: the same alias with the canonical, complete, private lock
+        # is this runtime's, and removal deletes it (and the file it alone used).
+        write_lock()
+        settings.write_text(json.dumps({"agent_servers": {"Other Kiro": alias(str(lock))}}))
+        removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert removed.exit_code == 0, removed.output
+        assert "Left editor entry" not in removed.output
+        assert not settings.exists()
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_setup_reroutes_only_entries_a_proven_lock_names(tmp_path, monkeypatch):
+    """An incomplete lock's adopted_entries must not let setup take over an operator entry."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    lock = (Path(data_dir) / "acp").resolve() / "zed-kiro.contract-lock.json"
+    direct = {"command": agent, "args": ["acp"]}
+    try:
+        settings.write_text("{}")
+        cmd_acp_module._write_contract_lock(
+            data_dir=data_dir, client="zed", agent="kiro", profile="default", mode="observe",
+            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False,
+            adopted_entries=["My Kiro"],
+        )
+        document = json.loads(lock.read_text())
+        del document["protocol"]
+        cmd_acp_module.atomic_write_private_bytes(lock, json.dumps(document).encode())
+        settings.write_text(json.dumps({"agent_servers": {"My Kiro": direct}}))
+        setup = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert setup.exit_code == 0, setup.output
+        servers = json.loads(settings.read_text())["agent_servers"]
+        assert servers["My Kiro"] == direct
+        assert servers["DefenseClaw · Kiro"]["command"] == guard
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+
+def _go_lock_fields() -> dict[str, frozenset[str]]:
+    """The JSON fields of the guard's RuntimeContractLock, per object."""
+    source = (Path(__file__).parents[2] / "internal" / "acp" / "contract.go").read_text(encoding="utf-8")
+    body = source.split("type RuntimeContractLock struct {", 1)[1].split("\n}\n", 1)[0]
+    fields: dict[str, frozenset[str]] = {}
+    stack: list[set[str]] = [set()]
+    for line in body.splitlines():
+        stripped = line.strip()
+        tag = re.search(r'`json:"([^",]+)', stripped)
+        if stripped.endswith("struct {"):
+            stack.append(set())
+        elif stripped.startswith("}") and tag:
+            fields[tag.group(1)] = frozenset(stack.pop())
+            stack[-1].add(tag.group(1))
+        elif tag:
+            stack[-1].add(tag.group(1))
+    fields[""] = frozenset(stack[0])
+    return fields
+
+
+def test_ownership_proof_knows_exactly_the_guard_lock_fields():
+    """Python's lock proof and the guard's strict decoder must agree on every field."""
+    assert cmd_acp_module._LOCK_FIELDS == _go_lock_fields()
+
+
+def test_lock_with_a_field_the_guard_refuses_proves_nothing(tmp_path, monkeypatch):
+    """A lock the guard rejects for an unknown field, at any level, owns no entry.
+
+    Setup must not take over the operator's direct entry such a lock names in
+    adopted_entries, and removal must leave a guard alias that names it and
+    warn. A lock with an older protocol pin is still this runtime's lock.
+    """
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    runtime = (Path(data_dir) / "acp").resolve()
+    lock = runtime / "zed-kiro.contract-lock.json"
+    direct = {"command": agent, "args": ["acp"]}
+    alias = {"command": guard, "args": [
+        "--agent", "kiro", "--client", "zed", "--profile", "default", "--mode", "observe",
+        "--token-file", str(runtime / ".token"), "--gateway", "http://127.0.0.1:1/api/v1/acp/evaluate",
+        "--contract-lock", str(lock), "--", agent, "acp",
+    ]}
+
+    def write_lock(*keys: str, value: object = "x") -> None:
+        settings.write_text("{}")
+        cmd_acp_module._write_contract_lock(
+            data_dir=data_dir, client="zed", agent="kiro", profile="default", mode="observe",
+            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False,
+            adopted_entries=["My Kiro", "Other Kiro"],
+        )
+        if keys:
+            document = json.loads(lock.read_text())
+            item = document
+            for key in keys[:-1]:
+                item = item[key]
+            item[keys[-1]] = value
+            cmd_acp_module.atomic_write_private_bytes(lock, json.dumps(document).encode())
+
+    setup_args = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
+    remove_args = ["remove", "--client", "zed", "--agent", "kiro"]
+    try:
+        for keys in (("extra",), ("protocol", "extra"), ("client", "extra"), ("agent", "extra"), ("guard", "extra")):
+            write_lock(*keys)
+            settings.write_text(json.dumps({"agent_servers": {"My Kiro": direct}}))
+            setup = CliRunner().invoke(acp_cmd, setup_args, obj=app)
+            assert setup.exit_code == 0, (keys, setup.output)
+            servers = json.loads(settings.read_text())["agent_servers"]
+            assert servers["My Kiro"] == direct, keys
+            assert servers["DefenseClaw · Kiro"]["command"] == guard, keys
+
+            write_lock(*keys)
+            settings.write_text(json.dumps({"agent_servers": {"Other Kiro": alias}}))
+            before = settings.read_bytes()
+            removed = CliRunner().invoke(acp_cmd, remove_args, obj=app)
+            assert removed.exit_code == 0, (keys, removed.output)
+            assert settings.read_bytes() == before, keys
+            assert "Left editor entry 'Other Kiro'" in removed.output, (keys, removed.output)
+
+        # Control: an older protocol pin (a lock from before an upgrade, until
+        # acp refresh) still proves the alias, and removal deletes it.
+        write_lock("protocol", "schema_version", value="schema-v1.0.0")
+        settings.write_text(json.dumps({"agent_servers": {"Other Kiro": alias}}))
+        removed = CliRunner().invoke(acp_cmd, remove_args, obj=app)
+        assert removed.exit_code == 0, removed.output
+        assert "Left editor entry" not in removed.output
+        assert not settings.exists()
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_alias_launching_other_than_the_locked_agent_is_not_owned(tmp_path, monkeypatch):
+    """This runtime's valid lock, token and guard do not prove an alias that launches something else.
+
+    Setup writes exactly its guard options, then -- and the locked agent
+    executable with the catalog arguments. An alias that differs (another
+    executable or path after --, other or no arguments, another profile or
+    mode, an unknown or missing option) is not what setup wrote: removal
+    leaves it and its settings file byte for byte and warns, and setup does
+    not rewrite it.
+    """
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    other_agent = _binary(tmp_path / "other-agent")
+    (tmp_path / "sub").mkdir()
+    runtime = (Path(data_dir) / "acp").resolve()
+    lock = runtime / "zed-kiro.contract-lock.json"
+    base = {
+        "--agent": "kiro", "--client": "zed", "--profile": "default", "--mode": "observe",
+        "--token-file": str(runtime / ".token"), "--gateway": "http://127.0.0.1:1/api/v1/acp/evaluate",
+        "--contract-lock": str(lock),
+    }
+
+    def alias(tail=(agent, "acp"), drop=(), **changes) -> dict:
+        options = {**base, **{f"--{key.replace('_', '-')}": value for key, value in changes.items()}}
+        for key in drop:
+            del options[key]
+        return {"command": guard, "args": [*(item for pair in options.items() for item in pair), "--", *tail]}
+
+    variants = {
+        "another executable": alias(tail=(other_agent, "acp")),
+        "same file by another path": alias(tail=(str(tmp_path / "sub" / ".." / "kiro-cli"), "acp")),
+        "extra argument": alias(tail=(agent, "acp", "--trust-all-tools")),
+        "no catalog arguments": alias(tail=(agent,)),
+        "no command": alias(tail=()),
+        "another profile": alias(profile="other"),
+        "another mode": alias(mode="action"),
+        "unknown option": alias(extra="x"),
+        "no gateway": alias(drop=("--gateway",)),
+    }
+    setup_args = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
+    remove_args = ["remove", "--client", "zed", "--agent", "kiro"]
+
+    def write_lock() -> None:
+        settings.write_text("{}")
+        cmd_acp_module._write_contract_lock(
+            data_dir=data_dir, client="zed", agent="kiro", profile="default", mode="observe",
+            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False,
+        )
+
+    try:
+        for label, entry in variants.items():
+            write_lock()
+            settings.write_text(json.dumps({"agent_servers": {"Other Kiro": entry}}))
+            before = settings.read_bytes()
+            removed = CliRunner().invoke(acp_cmd, remove_args, obj=app)
+            assert removed.exit_code == 0, (label, removed.output)
+            assert settings.read_bytes() == before, label
+            assert "Left editor entry 'Other Kiro'" in removed.output, (label, removed.output)
+
+            write_lock()
+            settings.write_text(json.dumps({"agent_servers": {"Other Kiro": entry}}))
+            setup = CliRunner().invoke(acp_cmd, setup_args, obj=app)
+            assert setup.exit_code == 0, (label, setup.output)
+            servers = json.loads(settings.read_text())["agent_servers"]
+            assert servers["Other Kiro"] == entry, label
+            assert servers["DefenseClaw · Kiro"]["command"] == guard, label
+            removed = CliRunner().invoke(acp_cmd, remove_args, obj=app)
+            assert removed.exit_code == 0, (label, removed.output)
+            assert json.loads(settings.read_text())["agent_servers"] == {"Other Kiro": entry}, label
+
+        # Control: the exact launch setup writes is this runtime's alias.
+        write_lock()
+        settings.write_text(json.dumps({"agent_servers": {"Other Kiro": alias()}}))
+        removed = CliRunner().invoke(acp_cmd, remove_args, obj=app)
+        assert removed.exit_code == 0, removed.output
+        assert "Left editor entry" not in removed.output
+        assert not settings.exists()
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_missing_editor_settings_is_a_binding_problem(tmp_path, monkeypatch):
+    """A binding whose editor file is gone is unhealthy, with a repair, not a crash."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    setup = ["setup", "--client", "zed", "--agent", "kiro", "--profile", "locked", "--activate",
+             "--guard-binary", guard, "--agent-binary", agent]
+    try:
+        for verify in (["verify"], ["verify", "--client", "zed", "--agent", "kiro"]):
+            result = CliRunner().invoke(acp_cmd, setup, obj=app)
+            assert result.exit_code == 0, result.output
+            settings.unlink()
+
+            status = CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app)
+            assert status.exit_code == 0, status.output
+            binding = json.loads(status.output)["bindings"]["zed/kiro"]
+            assert not binding["healthy"]
+            assert f"editor settings file is missing: {settings}" in binding["problems"]
+            assert (binding["profile"], binding["mode"]) == ("locked", "action")
+            text = CliRunner().invoke(acp_cmd, ["status"], obj=app)
+            assert text.exit_code == 0 and "NEEDS ATTENTION" in text.output, text.output
+
+            failed = CliRunner().invoke(acp_cmd, verify, obj=app)
+            assert failed.exit_code != 0
+            assert not isinstance(failed.exception, FileNotFoundError), failed.exception
+            assert "editor settings file is missing" in failed.output, failed.output
+            repair = _repair_args(failed.output)
+            assert "--activate" in repair and "locked" in repair, repair
+            repaired = CliRunner().invoke(acp_cmd, repair, obj=app)
+            assert repaired.exit_code == 0, repaired.output
+            assert CliRunner().invoke(acp_cmd, verify, obj=app).exit_code == 0
+
+        # An explicit pair whose editor path is not a file is reported, not raised.
+        settings.unlink()
+        settings.mkdir()
+        failed = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert failed.exit_code != 0
+        assert "editor settings file cannot be used" in failed.output, failed.output
+        assert "; run " in failed.output, failed.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_bypassed_adopted_entry_stays_in_status_and_verify(tmp_path, monkeypatch):
+    """Pointing an adopted entry back at the agent must not make the binding vanish."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    opencode = _binary(tmp_path / "opencode")
+    direct = {"command": agent, "args": ["acp"], "env": {"KEEP": "me"}}
+    lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+    try:
+        for bypass in ("direct", "deleted"):
+            settings.write_text(json.dumps({"agent_servers": {"My Kiro": direct, "Foreign": {"command": "other"}}}))
+            adopted = CliRunner().invoke(
+                acp_cmd,
+                ["adopt", "--client", "zed", "--guard-binary", guard, "--activate", "--yes", "--json-output"],
+                obj=app,
+            )
+            assert adopted.exit_code == 0, adopted.output
+            assert json.loads(lock_path.read_text())["client"]["adopted_entries"] == ["My Kiro"]
+            assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
+
+            document = json.loads(settings.read_text())
+            if bypass == "direct":
+                document["agent_servers"]["My Kiro"] = direct
+            else:
+                del document["agent_servers"]["My Kiro"]
+            settings.write_text(json.dumps(document))
+
+            status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)
+            binding = status["bindings"]["zed/kiro"]
+            assert binding["healthy"] is False and binding["mode"] == "action", bypass
+            assert any("'My Kiro' no longer launches the DefenseClaw guard" in p for p in binding["problems"])
+            verified = CliRunner().invoke(acp_cmd, ["verify"], obj=app)
+            assert verified.exit_code != 0 and "zed/kiro" in verified.output, verified.output
+            assert "--activate" in _repair_args(verified.output)
+
+            # A bypassed pair still counts as using its profile.
+            shared = CliRunner().invoke(
+                acp_cmd,
+                ["setup", "--client", "zed", "--agent", "opencode", "--guard-binary", guard,
+                 "--agent-binary", opencode],
+                obj=app,
+            )
+            assert shared.exit_code != 0 and "zed/kiro" in shared.output, shared.output
+            assert app.cfg.acp.profiles["default"].mode == "action"
+
+            repaired = CliRunner().invoke(acp_cmd, _repair_args(verified.output), obj=app)
+            assert repaired.exit_code == 0, repaired.output
+            servers = json.loads(settings.read_text())["agent_servers"]
+            if bypass == "direct":
+                # The repair routes the adopted entry back through the guard.
+                assert servers["My Kiro"]["command"] == guard and servers["My Kiro"]["env"] == {"KEEP": "me"}
+                assert "DefenseClaw · Kiro" not in servers
+            else:
+                assert servers["DefenseClaw · Kiro"]["command"] == guard
+            assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
+
+            removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert removed.exit_code == 0, removed.output
+            assert json.loads(settings.read_text())["agent_servers"] == {"Foreign": {"command": "other"}}
+
+        # A configured binding whose editor entry and lock are both gone is still listed.
+        app.cfg.acp.bindings["zed/kiro"] = ACPBinding(enabled=True, profile="default")
+        status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)
+        assert status["bindings"]["zed/kiro"]["healthy"] is False
+        assert CliRunner().invoke(acp_cmd, ["verify"], obj=app).exit_code != 0
     finally:
         cleanup_app(app, db_path, data_dir)

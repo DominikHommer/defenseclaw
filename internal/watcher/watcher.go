@@ -3232,6 +3232,15 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 	}
 	if w != nil && w.logger != nil {
 		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_in", "error")
+		if !w.secureClientActive() {
+			envelope := audit.EnvelopeFromContext(ctx)
+			envelope.Connector = w.eventConnector(evt)
+			alertCtx := audit.ContextWithEnvelope(ctx, envelope)
+			_ = w.logger.LogAlertCtx(alertCtx, "watcher", "HIGH", "Quarantine failed; the asset remains blocked", map[string]any{
+				"asset_type": evt.Type.String(), "asset_name": evt.Name,
+				"path": evt.Path, "error": err.Error(), "connector": w.eventConnector(evt),
+			})
+		}
 		_ = w.logger.LogEventCtx(ctx, audit.Event{
 			Action:   string(audit.ActionWatcherBlock),
 			Target:   evt.Path,

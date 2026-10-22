@@ -1020,7 +1020,9 @@ def _print_skill_info_card(
         style = _POLICY_VERDICT_STYLES.get(verdict, "white")
         click.echo()
         click.echo(f"{ux.bold('Policy:')}      {ux._style(verdict, fg=style, bold=True)}")
-        if info_map.get("reason") and verdict in ("blocked", "rejected", "quarantined", "disabled"):
+        if info_map.get("reason") and verdict in (
+            "blocked", "rejected", "quarantined", "quarantine failed", "disabled",
+        ):
             click.echo(f"  {ux.bold('Reason:')} {info_map['reason']}")
         note = _skill_policy_note(
             info_map.get("name", skill_name), verdict, held=held,
@@ -1543,6 +1545,8 @@ def _skill_list_json_items(
             ae = actions_map[name]
             if not ae.actions.is_empty():
                 item["actions"] = ae.actions.to_dict()
+            if ae.reason:
+                item["reason"] = ae.reason
         if global_decisions and name in global_decisions:
             # A global (unscoped) block, e.g. from the watcher: a --connector
             # unblock cannot clear it, so the TUI runs the bare unblock for
@@ -1653,6 +1657,11 @@ def _print_skill_list_table(
         )
 
     console.print(table)
+    for skill in skills:
+        name = skill.get("name", "")
+        entry = actions_map.get(name)
+        if entry is not None and str(entry.reason or "").startswith("quarantine failed: "):
+            click.echo(f"  {name}: {entry.reason}")
     if removed_count:
         console.print(
             f"[dim]{removed_count} removed skill(s) are no longer on disk; they are listed "

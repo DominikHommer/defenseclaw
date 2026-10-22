@@ -2623,7 +2623,8 @@ def test_render_discovery_table_includes_connectors_and_cache_state():
     assert "yes" in rendered
 
 
-def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path):
+@pytest.mark.parametrize("windows", [False, True])
+def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path, windows):
     """RHEL-U3-13: one slow --version on a busy host erased a peer's version,
     so the gateway refused that peer in action mode and setup of another
     connector did not converge."""
@@ -2642,7 +2643,7 @@ def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path
             )
         return fake
 
-    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: windows)
     monkeypatch.setattr(ad, "_scan_agent", scan("amp 0.0.1", ""))
     ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
 

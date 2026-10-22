@@ -81,6 +81,7 @@ from defenseclaw.connector_paths import (
     devin_user_config_path,
     hermes_config_path,
     hermes_profile_unsupported_reason,
+    managed_plugin_path,
     normalize,
     opencode_writable_plugin_folder,
     rule_paths,
@@ -7051,19 +7052,87 @@ def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
     return any(m and m in data for m in markers)
 
 
-def _opencode_managed_plugin_drift(cfg, path: str) -> str:
-    """Return an integrity failure for OpenCode's user-scoped bridge, if any."""
+def _managed_path_within(path: str, root: str) -> bool:
+    try:
+        rel = os.path.relpath(path, root)
+    except ValueError:  # another Windows drive
+        return False
+    if os.name == "nt":
+        rel = rel.lower()
+    return rel == "." or (rel != ".." and not rel.startswith(".." + os.sep))
+
+
+def _managed_backup_target_under(home: str, old_root: str, captured: str) -> str:
+    if _managed_path_within(home, old_root) or _managed_path_within(old_root, home):
+        return ""
+    rel = os.path.relpath(captured, old_root)
+    if rel == "." or rel.startswith(".."):
+        return ""
+    candidate = os.path.join(home, rel)
+    return candidate if os.path.lexists(candidate) else ""
+
+
+def _shallowest_missing_ancestor(path: str) -> str:
+    chain = [path]
+    while os.path.dirname(chain[-1]) != chain[-1]:
+        chain.append(os.path.dirname(chain[-1]))
+    for ancestor in reversed(chain[1:]):
+        try:
+            os.lstat(ancestor)
+        except FileNotFoundError:
+            return ancestor
+        except OSError:
+            return ""
+    return ""
+
+
+def managed_backup_target_after_home_move(record_path: str, captured: str) -> str:
+    """The current-home file a receipt captured before the account home moved, or "".
+
+    The same proof as the gateway's managedBackupTargetAfterHomeMove
+    (GAP-0543, GAP-0633): the receipt lives under the current home, the
+    captured target is outside it, the old root of that target no longer
+    exists (or is the empty folder an rsync-then-empty move leaves), and the
+    same relative file exists under the current home. It only re-targets the
+    receipt; the caller still compares the current file with the recorded
+    digest, so an edited plugin is never accepted.
+    """
+    home = os.path.expanduser("~")
+    if not home or home == "~" or not captured.strip() or not os.path.isabs(captured):
+        return ""
+    home, captured = os.path.normpath(home), os.path.normpath(captured)
+    if not _managed_path_within(os.path.abspath(record_path), home) or _managed_path_within(captured, home):
+        return ""
+    missing = _shallowest_missing_ancestor(captured)
+    if not missing:
+        return ""
+    if candidate := _managed_backup_target_under(home, missing, captured):
+        return candidate
+    parent = os.path.dirname(missing)
+    if parent != os.path.dirname(parent) and os.path.isdir(parent) and not os.path.islink(parent):
+        try:
+            if not os.listdir(parent):
+                return _managed_backup_target_under(home, parent, captured)
+        except OSError:
+            return ""
+    return ""
+
+
+def _managed_plugin_drift(cfg, path: str, connector: str = "opencode") -> str:
+    """Return an integrity failure for a user-scoped plugin bridge, if any."""
 
     data_dir = str(getattr(cfg, "data_dir", "") or "")
-    backup_path = os.path.join(data_dir, "connector_backups", "opencode", "config.json")
+    backup_path = os.path.join(data_dir, "connector_backups", connector, "config.json")
     try:
         with open(backup_path, encoding="utf-8") as fh:
             record = json.load(fh)
     except (OSError, UnicodeError, json.JSONDecodeError):
         return f"managed backup evidence is missing or unreadable: {backup_path}"
-    if record.get("connector") != "opencode" or record.get("logical_name") != "config":
+    if not isinstance(record, dict) or record.get("connector") != connector or record.get("logical_name") != "config":
         return f"managed backup identity is invalid: {backup_path}"
     recorded_path = str(record.get("path") or "")
+    # A supported home move leaves the receipt naming the old home.
+    recorded_path = managed_backup_target_after_home_move(backup_path, recorded_path) or recorded_path
     if not recorded_path or os.path.normcase(os.path.abspath(recorded_path)) != os.path.normcase(os.path.abspath(path)):
         return f"managed backup target does not match the active plugin: {backup_path}"
     expected = str(record.get("post_sha256") or "")
@@ -7081,7 +7150,7 @@ def _opencode_managed_plugin_drift(cfg, path: str) -> str:
     if hashlib.sha256(body).hexdigest() != expected:
         return (
             "managed plugin drift detected; run "
-            "`defenseclaw setup opencode --yes --restart` to reconcile"
+            f"`defenseclaw setup {connector} --yes --restart` to reconcile"
         )
     return ""
 
@@ -7201,6 +7270,14 @@ def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
     if not token:
         return None, "authenticated gateway token is unavailable", True
     trust = _trusted_gateway_listener(cfg)
+    # A fork can briefly expose a second holder of the listening descriptor.
+    # Re-prove the entire identity/endpoint binding; ambiguity itself never
+    # authorizes the authenticated request. Persistent ambiguity stays closed.
+    for delay in (0.05, 0.1, 0.2, 0.4):
+        if trust.code != "ambiguous_listener":
+            break
+        time.sleep(delay)
+        trust = _trusted_gateway_listener(cfg)
     if not trust.trusted and trust.code == "missing":
         return None, "the gateway is not running", False
     if not trust.trusted:
@@ -8346,7 +8423,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     probe_runtime=not r.passive,
                 )
             elif connector == "opencode":
-                if drift := _opencode_managed_plugin_drift(cfg, path):
+                if drift := _managed_plugin_drift(cfg, path):
                     _emit("fail", label, drift, r=r)
                 else:
                     status, runtime_detail = _opencode_load_heartbeat_status(cfg)
@@ -14977,7 +15054,8 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
     try:
         from defenseclaw.commands import cmd_acp
 
-        pairs = set(cmd_acp._managed_pairs())
+        data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
+        pairs = set(cmd_acp._managed_pairs(data_dir))
         for key in list(getattr(acp, "bindings", {}) or {}):
             client, _, agent = str(key).partition("/")
             if client in cmd_acp._CLIENTS and agent in cmd_acp._AGENTS:
@@ -14994,7 +15072,6 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
     if not pairs:
         return
     managed = str(getattr(cfg, "deployment_mode", "") or "") == "managed_enterprise"
-    data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
     for client, agent in sorted(pairs):
         label = f"ACP binding [{client}/{agent}]"
         try:
@@ -15012,7 +15089,7 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
         else:
             # Setup re-pins the agent and the guard; refresh never re-pins
             # a changed agent binary.
-            fix = f"defenseclaw acp setup --client {client} --agent {agent}"
+            fix = cmd_acp.setup_repair_command(cfg, client, agent, data_dir)
         if managed:
             # A managed enrollment keeps its locks in a per-user runtime dir
             # that doctor does not know, so only acp verify can be sure.
@@ -15236,10 +15313,7 @@ def _check_orphaned_hook_entries(cfg, active: str, r: _DoctorResult) -> None:
                 r=r,
                 remediation=f"defenseclaw setup remove {name}",
             )
-    plugins = {
-        "amp": os.path.join(amp_config_home(), "plugins", "defenseclaw.ts"),
-        "opencode": os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js"),
-    }
+    plugins = {name: managed_plugin_path(name) for name in ("amp", "opencode")}
     for name, path in sorted(plugins.items()):
         token = "" if name in active_set else _managed_plugin_credential(path, hooks_dir)
         if not token:
@@ -17196,7 +17270,7 @@ def _fix_acp_guard_pins(
 
     data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
     try:
-        pairs = sorted(cmd_acp._managed_pairs())
+        pairs = sorted(cmd_acp._managed_pairs(data_dir))
         if not pairs:
             return ("skip", "no ACP binding is configured")
         pending = cmd_acp.refresh_guard_pins(data_dir, apply=False)
@@ -17210,7 +17284,7 @@ def _fix_acp_guard_pins(
     agent_note = ""
     if agent_drift:
         commands = ", ".join(
-            "'defenseclaw acp setup --client {} --agent {}'".format(*pair.split("/")) for pair in agent_drift
+            f"`{cmd_acp.setup_repair_command(cfg, *pair.split('/'), data_dir)}`" for pair in agent_drift
         )
         agent_note = (
             f"{', '.join(agent_drift)}: the agent executable changed since setup (for example, it updated); "

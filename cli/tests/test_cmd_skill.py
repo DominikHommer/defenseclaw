@@ -2132,6 +2132,13 @@ class TestSkillList(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         [item] = json.loads(result.output)
         self.assertEqual(item["verdict"], "quarantine failed")
+        self.assertEqual(item["reason"], "quarantine failed: permission denied")
+        with patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=mock_list.return_value["skills"][0]):
+            info = self.invoke(["info", "aws-deploy", "--json"])
+            self.assertEqual(info.exit_code, 0, info.output)
+            self.assertEqual(json.loads(info.output)["reason"], item["reason"])
+            card = self.invoke(["info", "aws-deploy"])
+            self.assertIn("permission denied", card.output)
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_shows_a_skill_the_watcher_has_not_scanned_as_pending(self, mock_list):
