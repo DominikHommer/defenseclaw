@@ -578,3 +578,46 @@ func symlinkOrSkip(t *testing.T, target, link string) {
 		t.Fatal(err)
 	}
 }
+
+func TestMigrateManagedStandaloneConfigRefusesAnUnrecoverableGeneration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("config_version: 9\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := []byte("broken record")
+	if err := os.WriteFile(configwrite.GenerationPath(path), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := migrateManagedStandaloneConfig(context.Background(), path)
+	after, _ := os.ReadFile(configwrite.GenerationPath(path))
+	if err == nil || !strings.Contains(err.Error(), "restore") || string(after) != string(record) {
+		t.Fatalf("unrecoverable record: error=%v, bytes=%q", err, after)
+	}
+}
+
+func TestManagedStandaloneConfigGenerationRecoveryRequiresProof(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("config_version: 9\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := []byte("broken record")
+	if err := os.WriteFile(configwrite.GenerationPath(path), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := repairManagedStandaloneConfigGeneration(context.Background(), path, raw, 0); err == nil || changed {
+		t.Fatalf("unproven counter accepted: %v, %v", changed, err)
+	}
+	after, _ := os.ReadFile(configwrite.GenerationPath(path))
+	if string(after) != string(record) {
+		t.Fatal("refused repair changed the record")
+	}
+	if changed, err := repairManagedStandaloneConfigGeneration(context.Background(), path, raw, 10); err != nil || !changed {
+		t.Fatalf("proven counter refused: %v, %v", changed, err)
+	}
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || state.Generation != 11 || state.Actor != configwrite.ActorLifecycle {
+		t.Fatalf("recovered record = %+v, %v", state, err)
+	}
+}

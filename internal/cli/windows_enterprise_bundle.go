@@ -237,29 +237,7 @@ func windowsStagedBundleGeneration(path string, raw []byte) (configwrite.Options
 	if err != nil || !strings.EqualFold(filepath.Clean(path), filepath.Clean(layout.ConfigPath)) {
 		return configwrite.Options{}, false, nil
 	}
-	receipts, err := newWindowsBundleDriver(layout).Store.Receipts()
-	if err != nil {
-		return configwrite.Options{}, false, fmt.Errorf("read staged policy bundles: %w", err)
-	}
-	sum := configwrite.SHA256Hex(raw)
-	var matched *enterprisebundle.Receipt
-	for _, receipt := range receipts {
-		if receipt.State != enterprisebundle.StateStaged || !strings.EqualFold(receipt.ConfigSHA256, sum) {
-			continue
-		}
-		if matched != nil {
-			return configwrite.Options{}, false, fmt.Errorf("multiple staged policy bundles match installed config %s", path)
-		}
-		matched = receipt
-	}
-	if matched == nil {
-		return configwrite.Options{}, false, nil
-	}
-	opt, ok := enterprisebundle.GenerationOptions(matched)
-	if !ok {
-		return configwrite.Options{}, false, fmt.Errorf("staged policy bundle %s has no principal", matched.ReceiptID)
-	}
-	return opt, true, nil
+	return newWindowsBundleDriver(layout).ConfigGenerationOptions(raw)
 }
 
 // windowsBundleCurrent reports a current (confirmed) policy bundle in the

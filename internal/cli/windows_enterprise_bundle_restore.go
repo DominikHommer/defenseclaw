@@ -18,7 +18,6 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -211,8 +210,16 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 	}
 	restoreEnvironment := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
 	defer restoreEnvironment()
-	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, e.CurrentConfig,
-		windowsBundleRestoreWriteOptions(driver.Store, e.Current, plan.ExpectSHA256)); err != nil {
+	writeOptions, ok, err := driver.ConfigGenerationOptions(e.CurrentConfig)
+	if err != nil || !ok {
+		detail := "the confirmed bundle config changed while waiting for the lifecycle lock"
+		if err != nil {
+			detail = windowsEnterpriseBoundedDiagnostic(err.Error())
+		}
+		return fail("bundle_restore_failed", "cannot prove the confirmed bundle principal ("+detail+"); run defenseclaw.exe enterprise windows ensure --profile standalone from an elevated prompt")
+	}
+	writeOptions.ExpectSHA256 = plan.ExpectSHA256
+	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, e.CurrentConfig, writeOptions); err != nil {
 		return fail("bundle_restore_failed", "config.yaml is "+was+" and re-applying "+label+" from the bundle store failed: "+
 			windowsEnterpriseBoundedDiagnostic(err.Error()))
 	}
@@ -259,24 +266,4 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 	out.changes = append(out.changes, "restarted the gateway on the re-applied "+label)
 	_ = windowsEnterpriseHotConfigAdopted(ctx, windowsEnterpriseHotConfigRestartTimeout, nil)
 	return out
-}
-
-// windowsBundleRestoreWriteOptions records the re-applied config as the
-// confirmed bundle's principal with its bundle fields, as its first apply
-// did; without its receipt (pruned), as the lifecycle.
-func windowsBundleRestoreWriteOptions(store *enterprisebundle.Store, current *enterprisebundle.Ref, expectSHA string) configwrite.Options {
-	if receipts, err := store.Receipts(); err == nil {
-		for _, rc := range receipts {
-			if rc.State != enterprisebundle.StateConfirmed || rc.BundleID != current.BundleID || rc.Version != current.Version {
-				continue
-			}
-			if opt, ok := enterprisebundle.GenerationOptions(rc); ok {
-				opt.ExpectSHA256 = expectSHA
-				return opt
-			}
-		}
-	}
-	return configwrite.Options{Actor: configwrite.ActorLifecycle, LocalActor: configwrite.CurrentOSActor(),
-		Reason:       fmt.Sprintf("enterprise windows ensure (re-applied policy bundle %s version %d)", current.BundleID, current.Version),
-		ExpectSHA256: expectSHA}
 }

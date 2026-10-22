@@ -198,7 +198,7 @@ func windowsEnterpriseHotConfigApply(
 	// A signed bundle has no transaction fallback: the caller fails it with
 	// bundle_apply_failed. Each refusal of a bundle says why, so a failed
 	// first apply names its cause and a held lock is retried (GAP-0104).
-	bundleChange := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
+	bundleChange := opts.bundle != nil && windowsBundleConfigChange(opts.bundle.prepared)
 	payloadlessRollback := windowsBundleRollbackWithoutPayload(opts)
 	opts.codexTargetTransaction = false
 	opts.hotConfigRestoreFailed = false
@@ -276,7 +276,7 @@ func windowsEnterpriseHotConfigApply(
 		// restarting the gateway cannot perform that lifecycle transaction.
 		// Setup falls through to its full Upgrade; a bundle fails before any
 		// config write so the administrator can apply it through Setup.
-		if opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
+		if bundleChange {
 			result.AddError("fleet_setup_required", "Fleet enablement changes require signed standalone Setup to install or remove the compiler; installed config and services were not changed")
 		}
 		return false, nil
@@ -322,7 +322,12 @@ func windowsEnterpriseHotConfigApply(
 	state, stateErr := configwrite.ReadGenerationState(layout.ConfigPath)
 	recordedBefore := stateErr == nil && strings.EqualFold(state.ConfigSHA256, configwrite.SHA256Hex(previous))
 	connectorChangeStartedAt := time.Now().UTC()
-	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, windowsHotConfigWriteOptions(opts, configwrite.SHA256Hex(previous))); err != nil {
+	writeOptions, err := windowsHotConfigWriteOptions(opts, configwrite.SHA256Hex(previous))
+	if err != nil {
+		failBundle("bundle_state_invalid", "cannot prove the signed config principal: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
+		return false, nil
+	}
+	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, writeOptions); err != nil {
 		failBundle("bundle_config_write_failed", "the bundle config could not be installed: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 		return false, nil
 	}
@@ -793,17 +798,32 @@ func acquireWindowsEnterpriseLifecycleLock(path string) (func(), error) {
 // lifecycle, or, when the run applies a signed policy bundle, as the bundle
 // principal with the bundle fields, so config.generation.json and the
 // gateway's config.change.applied event name the bundle.
-func windowsHotConfigWriteOptions(opts *windowsEnterpriseLifecycleOptions, expectSHA string) configwrite.Options {
+func windowsHotConfigWriteOptions(opts *windowsEnterpriseLifecycleOptions, expectSHA string) (configwrite.Options, error) {
 	if opts != nil && opts.bundleRollbackTo != nil {
 		// A rollback to the confirmed bundle records it as that bundle again,
 		// so /health and the digest scope name the bundle that enforces.
-		return opts.bundleRollbackTo.writeOptions(expectSHA)
+		return opts.bundleRollbackTo.writeOptions(expectSHA), nil
 	}
 	if opts != nil && opts.bundle != nil && opts.bundle.prepared != nil && !opts.bundle.prepared.AlreadyApplied {
 		if opt, ok := enterprisebundle.GenerationOptions(opts.bundle.prepared.Receipt); ok {
 			opt.ExpectSHA256 = expectSHA
-			return opt
+			return opt, nil
 		}
+		return configwrite.Options{}, errors.New("staged bundle has no principal")
 	}
-	return configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure", ExpectSHA256: expectSHA}
+	if opts != nil && opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.AlreadyApplied {
+		if opts.bundle.driver == nil {
+			return configwrite.Options{}, errors.New("confirmed bundle store is unavailable")
+		}
+		opt, ok, err := opts.bundle.driver.ConfigGenerationOptions(opts.bundle.prepared.Config)
+		if err != nil {
+			return opt, err
+		}
+		if !ok {
+			return opt, errors.New("confirmed bundle principal is unavailable")
+		}
+		opt.ExpectSHA256 = expectSHA
+		return opt, nil
+	}
+	return configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure", ExpectSHA256: expectSHA}, nil
 }

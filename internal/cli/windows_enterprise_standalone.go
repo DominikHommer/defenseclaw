@@ -729,6 +729,10 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 	}
 	out, _ := windowsEnterprisePolicyDigest(ctx)
 	state := applyEnterprisePolicyReport(result, out, change)
+	if state != nil && state.ConfigUnrecorded {
+		result.SecurityComplete, result.Noop, result.NoopReason = false, false, ""
+		result.AddError("lifecycle_error", "config generation is unproven or records a hand edit; run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1 from an elevated prompt")
+	}
 	if state == nil || !state.Applied || !change || len(result.Errors) != 0 {
 		return
 	}
@@ -2616,6 +2620,7 @@ func writeWindowsEnterpriseStandaloneRefusal(
 		// deployment as installed=false with no services (GAP-0036).
 		describeHost(result)
 	}
+
 	result.AddError(code, message)
 	failure := windowsEnterpriseFailureCodeFor(result)
 	if invalid {
@@ -3171,9 +3176,21 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, code)
 	}
-	alreadyAppliedNeedsRepair := false
+	configStateRepaired, stateErr := repairWindowsEnterpriseConfigGeneration(ctx, opts, statusReport)
+	if stateErr != nil {
+		applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+		result.AddError("lifecycle_error", stateErr.Error())
+		return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+	}
+	if configStateRepaired {
+		result.Changes = append(result.Changes, "recovered config generation from the approved config and proven previous counter")
+	}
+	alreadyAppliedNeedsRepair := configStateRepaired
 	verifyFailure := ""
-	if run := opts.bundle; run != nil && run.prepared != nil && run.prepared.AlreadyApplied &&
+	if configStateRepaired {
+		verifyFailure = "config generation record required recovery"
+	}
+	if run := opts.bundle; !configStateRepaired && run != nil && run.prepared != nil && run.prepared.AlreadyApplied &&
 		statusReport.Installed && !statusReport.TransactionPending &&
 		compareWindowsEnterpriseVersions(opts.productVersion, statusReport.InstalledVersion) == 0 &&
 		windowsBundleInstalledSHA(run.layout.ConfigPath) == run.prepared.ConfigSHA256 {
@@ -3396,7 +3413,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				actionOpts.configPath = opts.configPath
 			}
 		}
-		if alreadyAppliedNeedsRepair {
+		if alreadyAppliedNeedsRepair && !configStateRepaired {
 			actionOpts.configPath = ""
 		}
 		actionOpts = *windowsEnterpriseRepairRecordingOptions("repair", &actionOpts)
@@ -3423,7 +3440,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		defer cleanupManifest()
 	}
 	beforeGatewayPID := uint32(0)
-	if opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
+	if opts.bundle != nil && windowsBundleConfigChange(opts.bundle.prepared) {
 		beforeGatewayPID = windowsStandaloneGatewayPID()
 	}
 	serviceMutationAttempted = true
@@ -3824,7 +3841,7 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 		// A config_version 8 source is installed as its v9 migration, so the
 		// same source is not drift while the installed file is that result.
 		if err != nil || (got != want && !config.MigratedFrom(layout.ConfigPath, want, got)) {
-			if opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
+			if opts.bundle != nil && windowsBundleConfigChange(opts.bundle.prepared) {
 				return "bundle", nil
 			}
 			return "config", nil
