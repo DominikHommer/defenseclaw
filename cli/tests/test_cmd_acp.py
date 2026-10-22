@@ -2428,18 +2428,23 @@ def test_unpinned_copy_of_a_guarded_entry_verifies_only_without_its_own_launch_f
             "gateway": copy_with(gateway="http://127.0.0.1:1/evil"),
             "env and gateway": copy_with(env={"LD_PRELOAD": evil}, gateway="http://127.0.0.1:1/evil"),
         }
-        for label, entry in variants.items():
-            tampered = json.loads(json.dumps(document))
-            tampered["agent_servers"]["Kiro 2"] = entry
-            settings.write_text(json.dumps(tampered))
-            result = verify()
-            assert result.exit_code != 0 and "Kiro 2" in result.output, (label, result.output)
-            assert not healthy(), label
+        # Beside an adopted entry the reserved name is outside the pin too:
+        # the name alone makes it DefenseClaw's, not its launch fields.
+        copy_names = ["Kiro 2"] + (["DefenseClaw · Kiro"] if entry_names else [])
+        for copy_name in copy_names:
+            for label, entry in variants.items():
+                tampered = json.loads(json.dumps(document))
+                tampered["agent_servers"][copy_name] = entry
+                settings.write_text(json.dumps(tampered))
+                result = verify()
+                assert result.exit_code != 0 and copy_name in result.output, (copy_name, label, result.output)
+                assert not healthy(), (copy_name, label)
 
         # Control: an exact copy has no launch field of its own; it launches
         # what the pinned entry launches and still verifies.
         same = json.loads(json.dumps(document))
-        same["agent_servers"]["Kiro 2"] = copy_with()
+        for copy_name in copy_names:
+            same["agent_servers"][copy_name] = copy_with()
         settings.write_text(json.dumps(same))
         assert verify().exit_code == 0, verify().output
 

@@ -965,7 +965,7 @@ def _verify_binding(
         # The guard refuses a lock that is incomplete, carries a field its
         # decoder does not know, or that others can read or rewrite.
         problems.append("contract lock is incomplete, has fields the guard refuses, or is not private")
-    adopted =lock_client.get("adopted_entries", []) if isinstance(lock_client, dict) else []
+    adopted = lock_client.get("adopted_entries", []) if isinstance(lock_client, dict) else []
     if not isinstance(adopted, list) or not all(isinstance(name, str) for name in adopted):
         problems.append("contract lock adopted entries are malformed")
     else:
@@ -1049,6 +1049,15 @@ def _verify_binding(
             }.items())
         ):
             problems.append(f"editor launch command does not match the lock: {name}")
+        elif (
+            isinstance(lock_client, dict)
+            and isinstance(lock_client.get("config_sha256"), str)
+            and isinstance(adopted, list) and all(isinstance(item, str) for item in adopted)
+            and not _pin_covers_launch(entry, name, options, lock_client, client, agent)
+        ):
+            # The reserved name makes an entry DefenseClaw's, not its launch
+            # fields: beside an adopted entry the pin does not cover it.
+            problems.append(f"editor entry {name!r} has env or a --gateway its client pin does not cover")
     if isinstance(servers, dict) and isinstance(lock_agent, dict):
         problems.extend(
             f"editor entry {name!r} can start {agent} without the DefenseClaw guard (launch unverified); "
