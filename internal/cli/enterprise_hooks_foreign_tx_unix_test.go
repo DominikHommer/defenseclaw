@@ -505,8 +505,7 @@ func TestForeignHookUnreadableLedgerIsKept(t *testing.T) {
 		t.Run(damage, func(t *testing.T) {
 			goos, boot, start := foreignTxClock(t)
 			oldAgent := fmt.Sprintf("%s:%s:4343:%d", goos, boot, start)
-			var dataDir string
-			dataDir = useForeignTxPass(t, func(request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+			dataDir := useForeignTxPass(t, func(enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
 				return foreignTxPlan(nil), nil
 			})
 			ledger := foreignTxLedger(dataDir)
@@ -517,7 +516,7 @@ func TestForeignHookUnreadableLedgerIsKept(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			restore := func() {}
+			var restore func()
 			if damage == "does not parse" {
 				if err := os.WriteFile(ledger, []byte(`{"version": 1, "removals": [`), 0o640); err != nil {
 					t.Fatal(err)
