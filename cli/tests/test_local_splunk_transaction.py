@@ -734,7 +734,9 @@ _NO_BRIDGE = "no-bridge"
         ("splunk-hec-127-0-0-1", _DEFAULT_HEC, None, True),
         ("splunk-hec-127-0-0-1", _DEFAULT_HEC, _DEFAULT_HEC, True),
         ("splunk-hec-localhost", _BRIDGE_ELSEWHERE, _BRIDGE_ELSEWHERE, True),
-        ("local-splunk", _DEFAULT_HEC, None, True),
+        # Native Windows setup always used the local reference, so its name on
+        # the remote reference was never written by local setup.
+        ("local-splunk", _DEFAULT_HEC, None, False),
         # Credential equality alone does not make a destination the local sink.
         ("old-remote", _DEFAULT_HEC, None, False),
         ("splunk-hec-localhost", _BRIDGE_ELSEWHERE, None, False),
@@ -747,10 +749,10 @@ _NO_BRIDGE = "no-bridge"
         ("splunk-hec-127-0-0-1", _DEFAULT_HEC, _NO_BRIDGE, False),
     ],
 )
-def test_only_the_owned_local_sink_blocks_the_shared_reference(
+def test_only_an_unrepaired_legacy_sink_blocks_the_shared_reference(
     tmp_path: Path, monkeypatch, name: str, endpoint: str, bridge_url: str | None, refused: bool
 ) -> None:
-    from defenseclaw.observability.v8_presets import local_splunk_sink_shares_reference
+    from defenseclaw.observability.v8_presets import local_splunk_sinks_on_reference
 
     monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", raising=False)
     monkeypatch.setenv(LOCAL_TOKEN_ENV, "local fixture credential")
@@ -761,26 +763,193 @@ def test_only_the_owned_local_sink_blocks_the_shared_reference(
         {"name": name, "kind": "splunk_hec", "endpoint": endpoint, "token_env": "DEFENSECLAW_SPLUNK_HEC_TOKEN"},
         {"name": "other-ref", "kind": "splunk_hec", "endpoint": _DEFAULT_HEC, "token_env": LOCAL_TOKEN_ENV},
     ]
-    assert (
-        local_splunk_sink_shares_reference(str(tmp_path), "DEFENSECLAW_SPLUNK_HEC_TOKEN", destinations) is refused
-    )
+    found = local_splunk_sinks_on_reference(str(tmp_path), "DEFENSECLAW_SPLUNK_HEC_TOKEN", destinations)
+    assert found == ([name] if refused else [])
 
 
-def test_repaired_owned_sink_releases_the_shared_reference(tmp_path: Path, monkeypatch) -> None:
-    # Once the sink local setup owns uses the isolated reference, another
-    # destination that only looks owned does not keep the shared one locked.
-    from defenseclaw.observability.v8_presets import local_splunk_sink_shares_reference
+@pytest.mark.parametrize(
+    ("saved_local", "refused"),
+    [
+        # Local setup since 1.0.4 saves the bridge credential under the local
+        # reference: that record releases the remote reference.
+        ("local fixture credential", False),
+        # Only an exported value, or a credential of another bridge, is no record.
+        (None, True),
+        ("credential of an earlier bridge", True),
+    ],
+    ids=["record", "exported-only", "other-bridge"],
+)
+def test_local_setup_record_releases_the_shared_reference(
+    tmp_path: Path, monkeypatch, saved_local: str | None, refused: bool
+) -> None:
+    from defenseclaw.observability.v8_presets import local_splunk_sinks_on_reference
 
     monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", raising=False)
+    monkeypatch.setenv(LOCAL_TOKEN_ENV, "local fixture credential")
     _write_bridge_contract(tmp_path, "local fixture credential", None)
-    atomic_write_private_bytes(tmp_path / ".env", b"DEFENSECLAW_SPLUNK_HEC_TOKEN='local fixture credential'\n")
-    shared = "DEFENSECLAW_SPLUNK_HEC_TOKEN"
-    repaired = {
-        "name": "splunk-hec-127-0-0-1", "kind": "splunk_hec", "endpoint": _DEFAULT_HEC, "token_env": LOCAL_TOKEN_ENV,
+    dotenv = "DEFENSECLAW_SPLUNK_HEC_TOKEN='local fixture credential'\n"
+    if saved_local is not None:
+        dotenv += f"{LOCAL_TOKEN_ENV}='{saved_local}'\n"
+    atomic_write_private_bytes(tmp_path / ".env", dotenv.encode())
+    look_alike = {
+        "name": "splunk-hec-127-0-0-1", "kind": "splunk_hec", "endpoint": _DEFAULT_HEC,
+        "token_env": "DEFENSECLAW_SPLUNK_HEC_TOKEN",
     }
-    look_alike = {"name": "local-splunk", "kind": "splunk_hec", "endpoint": _DEFAULT_HEC, "token_env": shared}
-    assert local_splunk_sink_shares_reference(str(tmp_path), shared, [look_alike]) is True
-    assert local_splunk_sink_shares_reference(str(tmp_path), shared, [repaired, look_alike]) is False
+    found = local_splunk_sinks_on_reference(str(tmp_path), "DEFENSECLAW_SPLUNK_HEC_TOKEN", [look_alike])
+    assert found == (["splunk-hec-127-0-0-1"] if refused else [])
+
+
+def _legacy_unix_local_setup(
+    app: AppContext, tmp_path: Path, monkeypatch, *, local_token: str, hec_url: str, record: bool
+) -> str:
+    """Run local setup, then return it to an older shape; return the sink name.
+
+    The older shape keeps the sink on the remote reference with the local
+    token saved there. With *record* the private .env still holds the record
+    1.0.4 local setup writes (the bridge credential under the local reference).
+    """
+
+    logs = {"index": "defenseclaw_local", "source": "defenseclaw", "sourcetype": "defenseclaw:json"}
+    cmd_setup._apply_logs_config(app, bootstrap_bridge=True, **logs)
+    monkeypatch.delenv(LOCAL_TOKEN_ENV, raising=False)
+    raw = yaml.safe_load((tmp_path / "config.yaml").read_bytes())
+    sink = raw["observability"]["destinations"][0]
+    sink["token_env"] = "DEFENSECLAW_SPLUNK_HEC_TOKEN"
+    assert sink["endpoint"] == hec_url
+    atomic_write_private_bytes(tmp_path / "config.yaml", yaml.safe_dump(raw).encode())
+    dotenv = f"DEFENSECLAW_SPLUNK_HEC_TOKEN='{local_token}'\n"
+    if record:
+        dotenv += f"{LOCAL_TOKEN_ENV}='{local_token}'\n"
+    atomic_write_private_bytes(tmp_path / ".env", dotenv.encode())
+    return str(sink["name"])
+
+
+@pytest.mark.parametrize(
+    ("bridge_url", "where"),
+    [(None, "dotenv"), (None, "environment"), (_BRIDGE_ELSEWHERE, "dotenv")],
+    ids=["dotenv", "environment", "other-listener"],
+)
+def test_removed_local_sink_releases_the_remote_reference(
+    tmp_path: Path, monkeypatch, bridge_url: str | None, where: str
+) -> None:
+    # Local setup isolated its sink, then the sink was removed. The bridge
+    # contract and the old local token on the remote reference remain, and an
+    # older tunnel to a remote Splunk has the removed sink's name and listener.
+    # The record local setup wrote releases the remote reference.
+    from defenseclaw.commands.cmd_setup_observability import _remove_v8_destination
+
+    app = _app(tmp_path)
+    monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", raising=False)
+    local_token = "local fixture credential"
+    remote_token = "independent remote fixture credential"
+    hec_url = bridge_url or _DEFAULT_HEC
+    _write_bridge_contract(tmp_path, local_token, bridge_url)
+    status, validate = _v8_writer_patches()
+    with (
+        status, validate,
+        patch.object(cmd_setup, "_native_windows_local_splunk", return_value=False),
+        patch.object(cmd_setup, "_bootstrap_bridge", return_value={"hec_url": hec_url, "hec_token": local_token}),
+        patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
+    ):
+        logs = {"index": "defenseclaw_local", "source": "defenseclaw", "sourcetype": "defenseclaw:json"}
+        cmd_setup._apply_logs_config(app, bootstrap_bridge=True, **logs)
+        monkeypatch.delenv(LOCAL_TOKEN_ENV, raising=False)
+        local_name = yaml.safe_load((tmp_path / "config.yaml").read_bytes())["observability"]["destinations"][0][
+            "name"
+        ]
+        _remove_v8_destination(str(tmp_path), local_name)
+        raw = yaml.safe_load((tmp_path / "config.yaml").read_bytes())
+        assert raw["observability"]["destinations"] == []
+        raw["observability"]["destinations"].append({
+            "name": local_name, "kind": "splunk_hec", "enabled": True, "endpoint": hec_url,
+            "token_env": "DEFENSECLAW_SPLUNK_HEC_TOKEN", "network_safety": {"allow_private_networks": True},
+        })
+        atomic_write_private_bytes(tmp_path / "config.yaml", yaml.safe_dump(raw).encode())
+        dotenv = (tmp_path / ".env").read_text(encoding="utf-8")
+        assert f"{LOCAL_TOKEN_ENV}='{local_token}'" in dotenv or f"{LOCAL_TOKEN_ENV}={local_token}" in dotenv
+        if where == "dotenv":
+            dotenv += f"DEFENSECLAW_SPLUNK_HEC_TOKEN='{local_token}'\n"
+        else:
+            monkeypatch.setenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", local_token)
+        atomic_write_private_bytes(tmp_path / ".env", dotenv.encode())
+        cmd_setup._apply_v8_observability_preset(
+            app, "splunk-enterprise",
+            {"endpoint": "https://splunk-new.example.test:8088/services/collector/event"},
+            name="new-remote", secret_value=remote_token,
+        )
+    raw = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    sinks = {item["name"]: (item["token_env"], item["endpoint"]) for item in raw["observability"]["destinations"]}
+    assert sinks == {
+        local_name: ("DEFENSECLAW_SPLUNK_HEC_TOKEN", hec_url),
+        "new-remote": (
+            "DEFENSECLAW_SPLUNK_HEC_TOKEN", "https://splunk-new.example.test:8088/services/collector/event"
+        ),
+    }
+    assert remote_token in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("resolution", ["local-repair", "remote-token", "remove"])
+def test_ambiguous_legacy_sink_offers_both_resolutions(tmp_path: Path, monkeypatch, resolution: str) -> None:
+    # Without the 1.0.4 record a destination with the older local sink's name,
+    # listener and credential on the remote reference may be that sink or a
+    # remote Splunk through a tunnel. Remote setup names it and offers both
+    # ways out; each one then lets remote setup proceed.
+    from defenseclaw.commands.cmd_setup_observability import _remove_v8_destination
+
+    app = _app(tmp_path)
+    monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", raising=False)
+    local_token = "local fixture credential"
+    tunnel_token = "remote tunnel fixture credential"
+    remote_token = "independent remote fixture credential"
+    _write_bridge_contract(tmp_path, local_token, None)
+    status, validate = _v8_writer_patches()
+    new_remote = {"endpoint": "https://splunk-new.example.test:8088/services/collector/event"}
+    with (
+        status, validate,
+        patch.object(cmd_setup, "_native_windows_local_splunk", return_value=False),
+        patch.object(cmd_setup, "_bootstrap_bridge", return_value={"hec_url": _DEFAULT_HEC, "hec_token": local_token}),
+        patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
+    ):
+        name = _legacy_unix_local_setup(
+            app, tmp_path, monkeypatch, local_token=local_token, hec_url=_DEFAULT_HEC, record=False
+        )
+        config_before = (tmp_path / "config.yaml").read_bytes()
+        dotenv_before = (tmp_path / ".env").read_bytes()
+        with pytest.raises(ValueError) as refused:
+            cmd_setup._apply_v8_observability_preset(
+                app, "splunk-enterprise", new_remote, name="new-remote", secret_value=remote_token
+            )
+        message = str(refused.value)
+        assert repr(name) in message
+        assert "Nothing was changed" in message
+        assert "defenseclaw setup splunk --logs --accept-splunk-license" in message
+        assert f"defenseclaw setup observability add splunk-enterprise --name {name} " in message
+        assert "DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN" in message
+        assert f"defenseclaw setup observability remove {name}" in message
+        assert local_token not in message
+        assert (tmp_path / "config.yaml").read_bytes() == config_before
+        assert (tmp_path / ".env").read_bytes() == dotenv_before
+        expected = {"new-remote": "DEFENSECLAW_SPLUNK_HEC_TOKEN"}
+        if resolution == "local-repair":
+            cmd_setup._apply_logs_config(
+                app, bootstrap_bridge=True,
+                index="defenseclaw_local", source="defenseclaw", sourcetype="defenseclaw:json",
+            )
+            expected[name] = LOCAL_TOKEN_ENV
+        elif resolution == "remote-token":
+            cmd_setup._apply_v8_observability_preset(
+                app, "splunk-enterprise", {"endpoint": _DEFAULT_HEC},
+                name=name, secret_value=tunnel_token, allow_private_networks=True,
+            )
+            expected[name] = "DEFENSECLAW_SPLUNK_HEC_TOKEN"
+        else:
+            _remove_v8_destination(str(tmp_path), name)
+        cmd_setup._apply_v8_observability_preset(
+            app, "splunk-enterprise", new_remote, name="new-remote", secret_value=remote_token
+        )
+    raw = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert {item["name"]: item["token_env"] for item in raw["observability"]["destinations"]} == expected
+    assert remote_token in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
 def test_native_disable_selects_only_owned_local_sink(tmp_path: Path) -> None:

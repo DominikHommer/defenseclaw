@@ -28,7 +28,7 @@ for current behavior.
 
 - **Local Splunk starts under a private umask.** Both packagers make the nonsecret app archive readable by the container. Setup reports ready only after the installed app, Web UI and HEC are available, and refuses incomplete startup with a repair command.
 
-- **Local and remote Splunk credentials stay separate.** Unix local setup uses its own token reference, and remote setup refuses a generated local credential, including one saved by an older setup. An older local destination that still shares the remote reference must be repaired before remote setup can replace that credential.
+- **Local and remote Splunk credentials stay separate.** Unix local setup uses its own token reference, and remote setup refuses a generated local credential, including one saved by an older setup. Local setup records its sink by that reference, so the remote reference is released once the local sink is repaired, also after the sink is removed. A destination from an older setup that may still be the local sink is named, with both ways out: repair it as local, or give a remote one (for example through an SSH tunnel) its own token or remove it.
 
 - **Copilot on Windows denies an invalid hook event binding.** Missing, empty, unknown or wrongly cased bindings receive both native denial shapes with the setup command before input or runtime checks. Secure Client delivery is unchanged.
 

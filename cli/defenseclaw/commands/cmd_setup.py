@@ -17693,8 +17693,9 @@ def _apply_logs_config(
     hec_url = (contract or {}).get("hec_url", _SPLUNK_LOCAL_HEC_DEFAULTS["hec_endpoint"])
     hec_token = (contract or {}).get("hec_token", "")
     # Pull host/port from the contract URL so the endpoint matches exactly.
-    # The name ("splunk-hec-127-0-0-1") and this endpoint mark the sink local
-    # setup owns; the remote credential check finds it with the same function.
+    # The isolated local reference and its saved credential record that local
+    # setup owns this sink; the remote credential check reads that record. The
+    # name comes from the same function the check uses for older sinks.
     parsed = urlparse(hec_url)
     host = parsed.hostname or "127.0.0.1"
     port = str(parsed.port or 8088)

@@ -165,8 +165,10 @@ def test_bridge_restart_diagnostics_share_the_readiness_deadline(tmp_path: Path,
     elapsed = time.monotonic() - started
     assert result.returncode != 0, result.stdout + result.stderr
     assert "keeps restarting" in result.stderr, result.stderr
-    # Three seconds of deadline, plus one second for a probe that ignores TERM.
-    assert elapsed < 5.5, f"restart diagnostics took {elapsed:.1f}s past a 3s deadline"
+    # Three seconds of deadline (bash SECONDS counts whole seconds), plus one
+    # second for a probe that ignores TERM, plus start-up on a loaded runner.
+    # The stalled log command alone would run for 60 seconds.
+    assert elapsed < 8, f"restart diagnostics took {elapsed:.1f}s past a 3s deadline"
     if logs == "no-time-left":
         assert not called.exists(), "logs were collected after the deadline"
         assert "last log lines" not in result.stderr, result.stderr

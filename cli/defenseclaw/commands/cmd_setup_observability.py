@@ -562,18 +562,22 @@ def _add_v8_destination(
         authored, expected_sha256 = _v8_authored_destination_snapshot(data_dir)
         if preset.adapter_kind == "splunk_hec":
             from defenseclaw.observability.local_splunk import LOCAL_TOKEN_ENV
-            from defenseclaw.observability.v8_presets import local_splunk_sink_shares_reference
+            from defenseclaw.observability.v8_presets import (
+                legacy_local_splunk_resolution,
+                local_splunk_sinks_on_reference,
+            )
 
-            if preset.token_env != LOCAL_TOKEN_ENV and local_splunk_sink_shares_reference(
-                data_dir,
-                preset.token_env,
-                [existing for existing in authored if existing.get("name") != destination_name],
-            ):
-                raise ValueError(
-                    "A local Splunk destination still shares the remote credential reference. "
-                    "Run defenseclaw setup splunk --logs --accept-splunk-license to isolate it, "
-                    "then repeat remote setup with the remote collector's token. Nothing was changed."
+            candidates = (
+                local_splunk_sinks_on_reference(
+                    data_dir,
+                    preset.token_env,
+                    [existing for existing in authored if existing.get("name") != destination_name],
                 )
+                if preset.token_env != LOCAL_TOKEN_ENV
+                else []
+            )
+            if candidates:
+                raise ValueError(legacy_local_splunk_resolution(candidates[0], preset.token_env))
         matches = [
             (index, existing)
             for index, existing in enumerate(authored)

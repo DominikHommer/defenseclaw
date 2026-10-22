@@ -11,7 +11,7 @@ keywords:
 
 Local Splunk keeps its generated HEC credential separate from your remote collector's token. Remote setup refuses a local credential, including one saved by an older local setup; supply the remote collector's token as shown below.
 
-If an older local destination still shares the remote credential reference, remote setup stops before changing either credential. Run `defenseclaw setup splunk --logs --accept-splunk-license` to separate the local reference, then repeat remote setup with the remote collector's token.
+If a destination from an older local setup may still share the remote credential reference, remote setup names it and stops before changing either credential. If it is your local Splunk sink, run `defenseclaw setup splunk --logs --accept-splunk-license` to separate the local reference. If it is a remote Splunk, for example through an SSH tunnel, give it its own token with `defenseclaw setup observability add splunk-enterprise --name <name> --endpoint <its HEC URL> --allow-private-networks` (token in `DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN`), or remove it with `defenseclaw setup observability remove <name>`. Then repeat remote setup with the remote collector's token. Once local setup has separated the local reference, removing the local sink later does not block remote setup.
 
 | Mode | Use it for | What it sends |
 | --- | --- | --- |
