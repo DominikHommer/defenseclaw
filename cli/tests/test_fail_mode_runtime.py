@@ -1030,15 +1030,16 @@ def test_unix_resolver_reads_the_installed_mode_of_a_real_render(key: str, tmp_p
     # environment; reading it as missing made a refresh fail verification.
     script = tmp_path / "hook.sh"
     script.write_text("#!/bin/bash\n" + "\n".join(_HOOK_FAIL_MODE_LINES[key]) + "\n", encoding="utf-8")
-    assert fail_mode_runtime._read_baked_hook_mode(script) == key.rsplit("/", 1)[1]
+    assert fail_mode_runtime._read_baked_hook_state(script) == (key.rsplit("/", 1)[1], False)
 
 
 @pytest.mark.parametrize("mode", ["open", "closed"])
 def test_unix_resolver_still_reads_a_legacy_render(mode: str, tmp_path: Path) -> None:
-    # 1.0.3 and older renders (and Secure Client renders) keep the override.
+    # 1.0.3 and older renders (and Secure Client renders) keep the override,
+    # so the mode read is only their default.
     script = tmp_path / "hook.sh"
     script.write_text(f'#!/bin/bash\nFAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"\n', encoding="utf-8")
-    assert fail_mode_runtime._read_baked_hook_mode(script) == mode
+    assert fail_mode_runtime._read_baked_hook_state(script) == (mode, True)
 
 
 @pytest.mark.parametrize("windows", [False, True])
@@ -1356,3 +1357,172 @@ def test_opencode_fail_mode_ignores_the_environment(
     report = connector_fail_mode_report(cfg, "opencode")
     assert report["effective"] == installed and report["provenance"] == "opencode-plugin"
     assert report["note"] == "" and "caller_env" not in report
+
+
+# ── 1.0.4 review loop round 1 (G-hooks-upg): renders that read the agent env ─
+#
+# A 0.8.x or 1.0.3 render the upgrade's connector refresh has not replaced
+# yet, and a Secure Client render (#1163), take DEFENSECLAW_FAIL_MODE from the
+# agent's environment. Its default is not the mode it runs, so status and
+# doctor never report it closed and current, whatever the status shell says.
+
+_ENV_READING_RENDERS = {
+    # 0.8.10 and 1.0.3 per-user renders, and Secure Client renders.
+    "default": 'FAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"',
+    "export": 'export FAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"',
+    # A baked line the environment then overrides.
+    "baked-then-env": 'FAIL_MODE="{mode}"\n  FAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"',
+}
+
+
+def _install_render(cfg: SimpleNamespace, name: str, body: str) -> None:
+    """Write *name*'s hook render and keep the contract lock's digest of it current."""
+
+    script_name = "claude-code-hook.sh" if name == "claudecode" else f"{name}-hook.sh"
+    script_path = Path(cfg.data_dir) / "hooks" / script_name
+    script_path.write_text("#!/bin/bash\n" + body + "\n", encoding="utf-8")
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    entry = lock["connectors"][name]
+    entry["contract_id"] = f"{name}-hooks-v1"
+    entry["hook_script_digests"][script_name] = "sha256:" + hashlib.sha256(script_path.read_bytes()).hexdigest()
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+
+def _set_claude_settings_env(home: Path, value: str | None) -> None:
+    settings = home / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    if value is None:
+        payload.pop("env", None)
+    else:
+        payload["env"] = {"DEFENSECLAW_FAIL_MODE": value}
+    settings.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _unix_report(monkeypatch: pytest.MonkeyPatch, cfg: SimpleNamespace, home: Path, name: str) -> tuple:
+    monkeypatch.setattr(fail_mode_runtime, "_codex_registration_current", lambda *_args: True)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=False),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        return resolve_connector_fail_mode(cfg, name), connector_fail_mode_report(cfg, name)
+
+
+@pytest.mark.parametrize("render", sorted(_ENV_READING_RENDERS))
+@pytest.mark.parametrize("shell_env", [None, "open", "closed"])
+@pytest.mark.parametrize(
+    ("name", "mode"),
+    # Claude Code with its settings env open is verified open (below).
+    [("claudecode", "closed"), ("codex", "open"), ("codex", "closed"), ("devin", "open"), ("devin", "closed")],
+)
+def test_a_render_that_reads_the_agent_env_is_never_reported_current(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, mode: str, shell_env: str | None, render: str
+) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {name: mode})
+    _write_current_runtime(cfg, home, {name: mode})
+    if shell_env is None:
+        monkeypatch.delenv("DEFENSECLAW_FAIL_MODE", raising=False)
+    else:
+        monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", shell_env)
+
+    # The same install with the 1.0.4 render is current: only the render differs.
+    _install_render(cfg, name, "\n".join(_HOOK_FAIL_MODE_LINES[f"{_unix_script(name)}/{mode}"]))
+    baked, _ = _unix_report(monkeypatch, cfg, home, name)
+    assert baked.current and baked.runtime_verified, baked.drift
+
+    _install_render(cfg, name, _ENV_READING_RENDERS[render].format(mode=mode))
+    state, report = _unix_report(monkeypatch, cfg, home, name)
+    assert not state.runtime_verified and not state.current
+    assert "agent-env-unverified" in state.drift
+    assert ("hook-script-reads-agent-env" in state.drift) is (name != "devin")
+    assert state.provenance == "agent-env-unverified"
+    assert "DEFENSECLAW_FAIL_MODE" in state.note
+    assert report["current"] is False and report["runtime_verified"] is False
+    assert report["provenance"] == "agent-env-unverified"
+    # The status shell is not the agent: its value is never the runtime mode,
+    # which stays the render's default (none read from an exported line).
+    assert state.runtime == (None if render == "export" else mode)
+    assert all(source != "process-env" for source, _mode in state.sources)
+
+
+def _unix_script(name: str) -> str:
+    return "claude-code-hook.sh" if name == "claudecode" else f"{name}-hook.sh"
+
+
+@pytest.mark.parametrize("default", ["open", "closed"])
+def test_claude_settings_env_open_is_the_mode_of_a_render_that_reads_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, default: str
+) -> None:
+    # Claude Code applies its settings env over the environment it started
+    # in, so open there is what a 1.0.3 render runs: reported open, verified,
+    # and stale until the refresh re-renders it.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    _set_claude_settings_env(home, "open")
+    _install_render(cfg, "claudecode", _ENV_READING_RENDERS["default"].format(mode=default))
+    state, report = _unix_report(monkeypatch, cfg, home, "claudecode")
+    assert state.runtime_verified and state.runtime == "open" and state.effective == "open"
+    assert state.provenance == "agent-env"
+    assert not state.current and "hook-script-reads-agent-env" in state.drift
+    assert report["effective"] == "open" and report["desired"] == "closed"
+
+
+def test_claude_settings_env_closed_does_not_verify_a_render_that_reads_the_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A project's or managed settings env can still set open over the user
+    # settings env, so closed there is no closed claim.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    _set_claude_settings_env(home, "closed")
+    _install_render(cfg, "claudecode", _ENV_READING_RENDERS["default"].format(mode="closed"))
+    state, report = _unix_report(monkeypatch, cfg, home, "claudecode")
+    assert not state.runtime_verified and not state.current
+    assert report["provenance"] == "agent-env-unverified"
+
+
+@pytest.mark.parametrize(
+    ("name", "desired", "secure_client", "want"),
+    [
+        ("codex", "closed", False, "fail"),
+        ("codex", "open", False, "warn"),
+        ("devin", "closed", False, "fail"),
+        ("devin", "closed", True, "warn"),
+        ("devin", "open", True, "warn"),
+    ],
+)
+def test_doctor_never_passes_a_render_that_reads_the_agent_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, desired: str, secure_client: bool, want: str
+) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {name: desired})
+    _write_current_runtime(cfg, home, {name: desired})
+    cfg.guardrail.mode = "action"
+    cfg.guardrail._secure_client = secure_client
+    cfg.skill_dirs = lambda connector=None: []
+    cfg.plugin_dirs = lambda connector=None: []
+    cfg.mcp_servers = lambda connector=None, **_: []
+
+    def mode_rows() -> list[tuple[str, str, str]]:
+        _state, report = _unix_report(monkeypatch, cfg, home, name)
+        emitted: list[tuple[str, str, str]] = []
+        with (
+            patch("defenseclaw.fail_mode.connector_fail_mode_report", return_value=report),
+            patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+            patch.object(
+                cmd_doctor,
+                "_emit",
+                side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail)),
+            ),
+        ):
+            cmd_doctor._check_connector_inventory(cfg, name, cmd_doctor._DoctorResult())
+        return [row for row in emitted if row[1] == "Mode"]
+
+    _install_render(cfg, name, "\n".join(_HOOK_FAIL_MODE_LINES[f"{_unix_script(name)}/{desired}"]))
+    assert [row[0] for row in mode_rows()] == ["pass"]
+    _install_render(cfg, name, _ENV_READING_RENDERS["default"].format(mode=desired))
+    rows = mode_rows()
+    assert [row[0] for row in rows] == [want], rows
+    assert "unverified" in rows[0][2]

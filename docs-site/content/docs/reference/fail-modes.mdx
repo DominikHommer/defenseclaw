@@ -406,6 +406,13 @@ Hooks rendered by 1.0.3 or earlier read `DEFENSECLAW_FAIL_MODE` until the
 upgrade's connector refresh renders them again. Under an authenticated Secure
 Client deployment, the Antigravity, Devin, Hermes and Kiro shell hooks still
 take it as a full override (Secure Client delivery is unchanged in 1.0.4).
+Status and doctor cannot see the agent's environment, so they never report
+such a hook as current: the provenance and the drift are
+`agent-env-unverified`, and doctor's Mode row fails when the config asks for
+`closed` (a warning under Secure Client). The one environment they can read is
+Claude Code's settings `env`: `open` there is reported as the mode the hook
+runs. Run `defenseclaw-gateway restart` to render the Claude Code and Codex
+hooks again.
 
 ## GitHub Copilot CLI fails open upstream
 

@@ -40,6 +40,11 @@ _MAX_DIGEST_FILE = 1024 * 1024 * 1024
 _FAIL_MODE_PATTERN = re.compile(
     r"^FAIL_MODE=\"(?:(open|closed)|\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\})\"", re.MULTILINE
 )
+# A render whose fail mode takes DEFENSECLAW_FAIL_MODE from the agent's
+# environment: every 0.8.x and 1.0.3 per-user render, and a Secure Client
+# render (#1163). Such a hook runs open when the agent's environment says
+# open, whatever its default, so its default is not the mode it runs.
+_ENV_FAIL_MODE_PATTERN = re.compile(r"^[ \t]*(?:export[ \t]+)?FAIL_MODE=[^\n]*DEFENSECLAW_FAIL_MODE", re.MULTILINE)
 _OPENCODE_FAIL_MODE_PATTERN = re.compile(r'const\s+DC_FAIL_MODE\s*=\s*"(open|closed)"\s*;')
 _AMP_FAIL_MODE_PATTERN = re.compile(r'\bconst\s+DC_FAIL_MODE:\s*string\s*=\s*"(open|closed)"')
 _EXPECTED_CONTRACTS = {
@@ -122,10 +127,14 @@ class ConnectorFailModeState:
     runtime: str | None
     sources: tuple[tuple[str, str | None], ...]
     drift: tuple[str, ...]
+    # False when the installed hook takes its mode from the agent's
+    # environment and no verified copy of that environment names one: the
+    # hook can run open whatever ``runtime`` (its default) says.
+    runtime_verified: bool = True
 
     @property
     def current(self) -> bool:
-        return not self.drift and self.runtime == self.desired
+        return self.runtime_verified and not self.drift and self.runtime == self.desired
 
     @property
     def effective(self) -> str:
@@ -145,6 +154,8 @@ class ConnectorFailModeState:
         explicitly.
         """
 
+        if not self.runtime_verified:
+            return "agent-env-unverified"
         if self.runtime is None:
             return "config"
         source = "config"
@@ -177,6 +188,12 @@ class ConnectorFailModeState:
                 f"observe mode keeps hooks fail-{self.desired}; "
                 f"guardrail.hook_fail_mode={self.configured} applies in action mode"
             )
+        if not self.runtime_verified:
+            default = f" (default {self.runtime})" if self.runtime else ""
+            notes.append(
+                "the installed hook reads DEFENSECLAW_FAIL_MODE from the agent's environment, which this "
+                f"command cannot see: it runs open when the agent sets open{default}"
+            )
         return "; ".join(notes)
 
     def to_report(self) -> dict[str, Any]:
@@ -190,6 +207,7 @@ class ConnectorFailModeState:
             "desired": self.desired,
             "runtime": self.runtime,
             "current": self.current,
+            "runtime_verified": self.runtime_verified,
             "drift": list(self.drift),
             "sources": [{"name": source, "mode": mode} for source, mode in self.sources],
         }
@@ -228,18 +246,21 @@ def resolve_connector_fail_mode(
         # fails closed when the file is missing or unreadable or names no mode
         # for the connector (readHookSidecar), so status reports that.
         runtime = "closed"
-    # The hooks read no fail mode from any environment (GAP-0315): not this
-    # shell's, which is not the agent's, and not the agent's either, so
-    # neither is an input here.
-
+    # A 1.0.4 render reads no fail mode from any environment (GAP-0315), so
+    # this shell's (which is not the agent's) is never an input here.
     workspace = _connector_workspace(cfg)
+    # The part of a hook's environment this process can read: only Claude
+    # Code's user settings env, which Claude Code applies over the
+    # environment it was started in.
+    agent_env: str | None = None
     if name == "claudecode":
         claude_env, registered = _claude_registration_state(workspace)
         # Setup still writes the mode into Claude Code's settings env, which
         # hook renders from 1.0.3 and older read until the upgrade's connector
         # refresh re-renders them: a stale value there is registration drift,
-        # never the runtime mode.
+        # and the runtime mode only of a render that reads it.
         sources.append(("claude-env", claude_env))
+        agent_env = claude_env
         if not registered:
             drift.append("registration-missing")
     # Windows Codex registration is a structured event matrix whose native
@@ -247,6 +268,28 @@ def resolve_connector_fail_mode(
     # trust, and file identities, so the text probe is not used there.
     elif name == "codex" and not _is_windows() and not _codex_registration_current(workspace):
         drift.append("registration-missing")
+
+    runtime_verified = True
+    if runtime_source[0] == "hook-script-env":
+        # The render takes its mode from the agent's environment (a 0.8.x or
+        # 1.0.3 render the upgrade's refresh has not replaced yet, or a Secure
+        # Client render): what it runs is the agent's value when it sets one.
+        if agent_env == "open":
+            # Open in Claude Code's settings env is open in the hook.
+            sources.append(("agent-env", "open"))
+            runtime = "open"
+        else:
+            # Nothing else here shows the agent's environment: the status
+            # shell's is not the agent's, and closed in Claude Code's user
+            # settings env can still be set open by a project's or managed
+            # settings env. So no closed or current claim.
+            runtime_verified = False
+            drift.append("agent-env-unverified")
+        if name in _SHARED_RUNTIME_CONNECTORS:
+            # 1.0.4 renders the Claude Code and Codex hooks with the mode
+            # baked in on every deployment, so this one is stale: a refresh
+            # replaces it.
+            drift.append("hook-script-reads-agent-env")
 
     lock_mode, lock_drift = _registration_lock_state(cfg, name)
     sources.append(("registration-lock", lock_mode))
@@ -294,6 +337,7 @@ def resolve_connector_fail_mode(
         runtime=runtime,
         sources=tuple(sources),
         drift=tuple(dict.fromkeys(drift)),
+        runtime_verified=runtime_verified,
     )
 
 
@@ -318,6 +362,7 @@ def connector_fail_mode_report(
             "desired": "open",
             "runtime": "open",
             "current": True,
+            "runtime_verified": True,
             "drift": [],
             "sources": [
                 {"name": "config", "mode": configured},
@@ -338,6 +383,7 @@ def connector_fail_mode_report(
         "desired": configured,
         "runtime": None,
         "current": None,
+        "runtime_verified": None,
         "drift": [],
         "sources": [{"name": "config", "mode": configured}],
     }
@@ -361,7 +407,8 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
             return "windows-sidecar-legacy", mode
         return "windows-sidecar", mode
     script_name = "claude-code-hook.sh" if connector == "claudecode" else f"{connector}-hook.sh"
-    return "hook-script", _read_baked_hook_mode(Path(cfg.data_dir) / "hooks" / script_name)
+    mode, reads_env = _read_baked_hook_state(Path(cfg.data_dir) / "hooks" / script_name)
+    return ("hook-script-env" if reads_env else "hook-script"), mode
 
 
 # The white space Go's strings.TrimSpace strips (unicode.IsSpace), which the
@@ -539,12 +586,18 @@ def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, boo
     return (_go_fail_mode(value) if value else None), True
 
 
-def _read_baked_hook_mode(path: Path) -> str | None:
+def _read_baked_hook_state(path: Path) -> tuple[str | None, bool]:
+    """Return a Unix hook render's installed mode and whether it reads the environment.
+
+    The mode of a render that reads DEFENSECLAW_FAIL_MODE is only its default.
+    """
+
     data = _read_small_file(path)
     if data is None:
-        return None
+        return None, False
     match = _FAIL_MODE_PATTERN.search(data)
-    return (match.group(1) or match.group(2)) if match else None
+    mode = (match.group(1) or match.group(2)) if match else None
+    return mode, _ENV_FAIL_MODE_PATTERN.search(data) is not None
 
 
 def _read_opencode_plugin_mode(cfg: Any) -> str | None:

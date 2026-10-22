@@ -14837,7 +14837,29 @@ def _check_connector_inventory(
                     f"provenance={fail_mode['provenance']}"
                 )
                 desired = fail_mode.get("desired")
-                if fail_mode.get("runtime") is not None and desired in {"open", "closed"} and (
+                if fail_mode.get("runtime_verified") is False:
+                    # The installed hook takes its mode from the agent's
+                    # environment, which doctor cannot see, so it can run
+                    # open whatever its default says: never a pass. Outside
+                    # Secure Client (#1163) that render is a stale one a
+                    # closed policy must not keep.
+                    from defenseclaw.hook_integrity import setup_command
+
+                    secure_client_check = getattr(gc, "secure_client_hook_fail_modes", None)
+                    secure_client = callable(secure_client_check) and bool(secure_client_check())
+                    _emit(
+                        "fail" if desired == "closed" and not secure_client else "warn",
+                        "Mode",
+                        f"{detail}; runtime fail mode unverified",
+                        r=r,
+                        remediation=(
+                            "check DEFENSECLAW_FAIL_MODE in the environment the agent starts in"
+                            if secure_client
+                            else "re-render the hooks: defenseclaw-gateway start (or restart), or "
+                            f"`{setup_command(connector)}`"
+                        ),
+                    )
+                elif fail_mode.get("runtime") is not None and desired in {"open", "closed"} and (
                     fail_mode.get("effective") != desired
                 ):
                     # The hooks run another fail mode than config.yaml asks
