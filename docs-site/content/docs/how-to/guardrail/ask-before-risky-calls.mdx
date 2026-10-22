@@ -55,13 +55,23 @@ Human approval (HITL) pauses a risky call and asks you instead of silently allow
 
 ## Check it worked
 
+List Claude Code's latest alerts, newest first:
+
 ```bash
-defenseclaw alerts --show 1
+defenseclaw alerts --connector claudecode --limit 3
+```
+
+Each time Claude Code asked, the list has a `claudecode:PreToolUse` row with `decision=confirm`. When Claude Code's reply after you approve quotes the URL, that reply is a newer `claudecode:MessageDisplay` row with `decision=alert`, so the confirm row is not always #1. Show the newest `decision=confirm` row by its number, #2 after one deny and one approve:
+
+```bash
+defenseclaw alerts --show 2
 ```
 
 ```text
-Alert #1
+Alert #2
+  ID:        01a16527-4f2e-7a7d-9c1b-5d0e8c2f6a31
   Severity:  HIGH
+  Timestamp: 2026-10-22 19:47:02
   Action:    scan-finding
   Target:    claudecode:PreToolUse
   Decision:  confirm
