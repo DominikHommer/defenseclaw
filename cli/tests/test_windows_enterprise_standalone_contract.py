@@ -1084,3 +1084,47 @@ try {
 """, encoding="utf-8")
     result = subprocess.run([shell, "-NoProfile", "-File", str(script)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_snapshot_directory_left_after_the_commit_never_rolls_the_deployment_back(tmp_path) -> None:
+    # fix/r104-windows: Complete-DefenseClawTransaction removed pending.json
+    # (the commit) and then the snapshot directory; a removal that failed
+    # part-way (a scanner holding one copy) threw into the lifecycle's catch,
+    # which restored the proven deployment from the half-deleted snapshot
+    # with no pending record left to recover it. Now the commit stands and
+    # the directory left behind is named in a warning.
+    state = tmp_path / "state"
+    _run_lifecycle_functions(
+        tmp_path,
+        ["Complete-DefenseClawTransaction"],
+        r"""
+$state = '""" + str(state) + r"""'
+$transaction = Join-Path (Join-Path $state 'transactions') 'abc'
+[void][IO.Directory]::CreateDirectory($transaction)
+$snapshot = Join-Path $transaction 'transaction.json'
+[IO.File]::WriteAllText($snapshot, '{"gateway_service":"g","guardian_service":"h"}')
+[IO.File]::WriteAllText((Join-Path $transaction 'copy.bin'), 'held')
+$pending = Join-Path $state 'pending.json'
+$Layout = @{ PendingPath = $pending; StateRoot = $state }
+function Assert-DefenseClawNoReparsePath([string]$Path) {}
+function Assert-DefenseClawDescendant { param($Path, $Root, $Label) return $Path }
+function Set-DefenseClawInstallRollbackIntentCommitted { return $null }
+function Publish-DefenseClawInstallRollbackIntent { return $null }
+function Remove-Item {
+    param([string]$LiteralPath, [switch]$Recurse, [switch]$Force, $ErrorAction)
+    if ($Recurse) { throw 'The process cannot access the file copy.bin because it is being used by another process.' }
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Force
+}
+foreach ($rollback in @($false, $true)) {
+    [IO.File]::WriteAllText($pending, '{}')
+    $warnings = @()
+    Complete-DefenseClawTransaction -SnapshotPath $snapshot -Layout $Layout -Rollback:$rollback -WarningVariable warnings -WarningAction SilentlyContinue
+    if (Test-Path -LiteralPath $pending) { throw "rollback=${rollback}: the commit did not remove pending.json" }
+    if (-not (Test-Path -LiteralPath $transaction)) { throw "rollback=${rollback}: the stub did not hold the directory" }
+    if (-not ($warnings -join ' ').Contains($transaction)) { throw "rollback=${rollback}: the warning does not name the directory: $warnings" }
+}
+""",
+        replacements=[
+            ("Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $directory", "Remove-Item -LiteralPath $directory"),
+        ],
+    )
