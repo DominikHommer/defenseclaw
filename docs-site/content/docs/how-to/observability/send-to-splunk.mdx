@@ -13,7 +13,7 @@ Each Splunk destination keeps its HEC token under its own reference in `~/.defen
 
 A destination is local Splunk only if local setup created it: setup records the container it started in that destination. Every other Splunk destination is remote, whatever its address, including a remote Splunk reached through an SSH tunnel on `127.0.0.1`. `setup splunk --disable --logs` disables only the recorded local destination, and `--disable --enterprise` disables the others.
 
-A local destination from DefenseClaw 1.0.3 or earlier has no record, so it counts as remote and keeps working unchanged. If local setup finds a destination it did not record under the name it uses, it stops before changing anything and names it. If an older local setup created it, remove it with `defenseclaw setup observability remove <name> --yes` and run local setup again.
+A local destination from DefenseClaw 1.0.3 or earlier has no record, so it counts as remote and keeps working unchanged. If local setup finds a destination it did not record under the name it uses, it stops before changing anything and names it. If an older local setup created it, remove it with `defenseclaw setup observability remove <name> --yes` and run local setup again. Until local setup has recorded a destination, `setup splunk --disable --logs` leaves the local container running while any other Splunk destination is enabled, and names each one with the `setup observability disable <name>` command to run first.
 
 | Mode | Use it for | What it sends |
 | --- | --- | --- |
@@ -104,7 +104,7 @@ defenseclaw setup splunk --disable --enterprise
 defenseclaw setup splunk --disable --o11y
 ```
 
-Each command disables its own destination and leaves the others alone. `--logs` also stops the local container.
+Each command disables its own destination and leaves the others alone. `--logs` also stops the local container, unless a destination that local setup did not record is still enabled (see above).
 
 ## If it fails
 

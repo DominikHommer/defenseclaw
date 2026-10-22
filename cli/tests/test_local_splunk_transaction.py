@@ -694,6 +694,75 @@ def test_local_setup_does_not_start_the_stack_when_it_would_refuse(tmp_path: Pat
     start.assert_not_called()
 
 
+def _write_bridge_url(data_dir: Path, hec_url: str, *, where: str) -> None:
+    # The private bridge env file of an earlier setup, or for a first setup the
+    # seeded template the bridge env file is created from.
+    env_dir = data_dir / "splunk-bridge" / "env"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    target = env_dir / (".env" if where == "bridge-env" else ".env.example")
+    atomic_write_private_bytes(target, f"SPLUNK_IMAGE=splunk/splunk:fixture\nDEFENSECLAW_HEC_URL={hec_url}\n".encode())
+
+
+@pytest.mark.parametrize(
+    ("bridge_url", "where"),
+    [
+        # The finding: an upgraded older sink named after a custom bridge address.
+        ("https://localhost:28088/services/collector/event", "bridge-env"),
+        ("https://[::1]:8088/services/collector/event", "bridge-env"),
+        ("http://localhost:8088/services/collector/event", "bridge-env"),
+        # First setup: the bridge env file will be created from the template.
+        ("https://localhost:8088/services/collector/event", "template"),
+    ],
+)
+def test_local_setup_checks_the_name_of_the_bridge_address_before_the_stack_starts(
+    tmp_path: Path, bridge_url: str, where: str
+) -> None:
+    from defenseclaw.observability.v8_presets import local_splunk_destination_name
+
+    app = _app(tmp_path)
+    name = local_splunk_destination_name(bridge_url)
+    assert name != "splunk-hec-127-0-0-1"
+    _write_bridge_url(tmp_path, bridge_url, where=where)
+    _write_state(tmp_path, [_hec(name, bridge_url, _SHARED)], {"KEEP_ME": "unchanged", _SHARED: "older credential"})
+    config_before = (tmp_path / "config.yaml").read_bytes()
+    dotenv_before = (tmp_path / ".env").read_bytes()
+    status, validate = _v8_writer_patches()
+    with (
+        status, validate,
+        patch.object(cmd_setup, "_native_windows_local_splunk", return_value=False),
+        patch.object(cmd_setup, "_bootstrap_bridge", return_value={"hec_url": bridge_url, "hec_token": "t"}) as bridge,
+        patch.object(cmd_setup, "_local_splunk_container_id", return_value=_FULL_ID) as container,
+        patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
+        pytest.raises(ClickException) as refused,
+    ):
+        cmd_setup._apply_logs_config(app, **_LOGS)
+    # Refused before the stack is refreshed, restarted or started.
+    bridge.assert_not_called()
+    container.assert_not_called()
+    assert f"defenseclaw setup observability remove {name} --yes" in refused.value.message
+    assert "Nothing was changed" in refused.value.message
+    assert (tmp_path / "config.yaml").read_bytes() == config_before
+    assert (tmp_path / ".env").read_bytes() == dotenv_before
+    assert (tmp_path / "splunk-bridge" / "env" / ".env").exists() == (where == "bridge-env")
+
+    _remove(tmp_path, name)
+    _unix_local_setup(app, hec_url=bridge_url)
+    assert _destinations(tmp_path)[name]["local_stack"] == _RECORD
+
+
+def test_local_setup_next_to_an_unrecorded_destination_the_bridge_does_not_name(tmp_path: Path) -> None:
+    # Control: the bridge reports 127.0.0.1, so an unrecorded destination
+    # named for localhost is someone else's and setup goes ahead beside it.
+    app = _app(tmp_path)
+    _write_bridge_url(tmp_path, _DEFAULT_HEC, where="bridge-env")
+    other = _hec("splunk-hec-localhost", "https://localhost:28088/services/collector/event", _SHARED)
+    _write_state(tmp_path, [other], {"KEEP_ME": "unchanged"})
+    _unix_local_setup(app)
+    sinks = _destinations(tmp_path)
+    assert sinks["splunk-hec-localhost"] == other
+    assert sinks["splunk-hec-127-0-0-1"]["local_stack"] == _RECORD
+
+
 def test_remote_setup_never_changes_the_recorded_local_sink(tmp_path: Path) -> None:
     app = _app(tmp_path)
     _unix_local_setup(app)
@@ -821,6 +890,79 @@ def test_disable_acts_only_on_the_recorded_local_sink(tmp_path: Path, host: str,
     ):
         cmd_setup._disable_splunk(app, False, mode == "logs", mode == "enterprise", True)
     assert disabled == expected
+
+
+def _logs_disable(app: AppContext, host: str, status: list[SimpleNamespace]):
+    disabled: list[str] = []
+    with (
+        patch.object(cmd_setup.platform_support, "host_os", return_value=host),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=SimpleNamespace(destinations=tuple(status)),
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._set_v8_destination_enabled",
+            side_effect=lambda _data_dir, name, *_: disabled.append(name),
+        ),
+        patch(
+            "defenseclaw.observability.local_splunk.prepare_native_local_splunk_stop", return_value=(None, False)
+        ) as native_stop,
+        patch.object(cmd_setup, "_stop_bridge") as stop_bridge,
+        patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
+    ):
+        cmd_setup._disable_splunk(app, False, True, False, True)
+    stopped = native_stop.called if host == "windows" else stop_bridge.called
+    return disabled, stopped
+
+
+@pytest.mark.parametrize("host", ["linux", "windows"])
+@pytest.mark.parametrize(
+    "older",
+    [
+        _hec("splunk-hec-localhost", "https://localhost:28088/services/collector/event", _SHARED),
+        _hec("splunk-hec-127-0-0-1", _DEFAULT_HEC, _SHARED),
+        _hec("local-splunk", _DEFAULT_HEC, LOCAL_TOKEN_ENV),
+    ],
+    ids=["custom-bridge", "unix-default", "native"],
+)
+def test_logs_disable_keeps_local_splunk_while_an_unrecorded_destination_is_enabled(
+    tmp_path: Path, capsys, host: str, older: dict
+) -> None:
+    # An upgraded older local sink has no record. --disable --logs does not
+    # disable it, so it must not stop the stack that sink may still send to.
+    app = _app(tmp_path)
+    (tmp_path / "splunk-bridge").mkdir()
+    authored = [older, _hec("remote", _REMOTE_HEC, f"{_SHARED}_REMOTE")]
+    _write_state(tmp_path, authored, {"KEEP_ME": "unchanged"})
+    status = [
+        SimpleNamespace(name=item["name"], kind="splunk_hec", enabled=True, endpoint=item["endpoint"])
+        for item in authored
+    ]
+    disabled, stopped = _logs_disable(app, host, status)
+    assert disabled == []
+    assert not stopped
+    out = " ".join(capsys.readouterr().out.split())
+    assert "Local Splunk was not stopped" in out
+    for name in (older["name"], "remote"):
+        assert f"defenseclaw setup observability disable {name}" in out
+    assert "defenseclaw setup splunk --disable --logs again" in out
+
+    # The named resolution: once those destinations are disabled, --logs stops local Splunk.
+    for item in status:
+        item.enabled = False
+    disabled, stopped = _logs_disable(app, host, status)
+    assert disabled == []
+    assert stopped
+
+
+@pytest.mark.parametrize("host", ["linux", "windows"])
+def test_logs_disable_stops_the_recorded_stack_next_to_remote_destinations(tmp_path: Path, host: str) -> None:
+    # With a record the stack is the recorded one: every other destination is
+    # remote and keeps sending, and the local stack stops.
+    app, status = _disable_state(tmp_path)
+    disabled, stopped = _logs_disable(app, host, status)
+    assert disabled == ["local-splunk"]
+    assert stopped
 
 
 def test_splunk_status_labels_only_the_recorded_sink_local(tmp_path: Path, capsys) -> None:
