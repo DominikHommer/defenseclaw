@@ -104,8 +104,9 @@ var configV8ValidateCmd = &cobra.Command{
 			PlanDigest:        loaded.compiled.Plan.Digest(),
 			NetworkValidation: "offline_syntax_and_literal_policy_only",
 			Valid:             &valid,
-			Warnings:          append(gateway.ConfigHILTWarnings(loaded.runtime), configV8InstalledAdvisories(loaded)...),
 		}
+		result.Warnings = append(gateway.ConfigHILTWarnings(loaded.runtime), configV8InstalledAdvisories(loaded)...)
+		result.Warnings = append(result.Warnings, configValidateManagedStandaloneWarnings(loaded)...)
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetEscapeHTML(false)
 		return encoder.Encode(result)

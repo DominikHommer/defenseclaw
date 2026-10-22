@@ -103,6 +103,7 @@ var configValidateCmd = &cobra.Command{
 		}
 		warnings := append(gateway.ConfigHILTWarnings(loaded.runtime), loaded.runtime.SandboxDefaultProfileWarnings()...)
 		warnings = append(warnings, configV8InstalledAdvisories(loaded)...)
+		warnings = append(warnings, configValidateManagedStandaloneWarnings(loaded)...)
 		if configValidateJSON {
 			valid := true
 			encoder := json.NewEncoder(out)
@@ -143,23 +144,25 @@ func configValidateManagedHostLayout() (managed.StandaloneLayout, bool) {
 
 // configValidateManagedStandaloneLayout applies the rules ensure, Setup and
 // bundle apply refuse a managed standalone config on, so validate does not
-// call a file valid that the lifecycle then refuses (GAP-0601). The listener
-// rule (gateway.api_bind loopback only, gateway.api_port) is the same on
-// every OS and applies everywhere. The layout rules (data_dir, rule pack
-// folders, jsonl paths) differ by OS, so they apply on a standalone managed
-// computer, to the file decoded as its installed config, as ensure decodes
-// a candidate. Other configs, Secure Client's included, keep their own rules.
+// call a file valid that the lifecycle then refuses (GAP-0601). On a
+// standalone managed computer the file is decoded as its installed config and
+// gets that OS's rules: the listener, data_dir, rule pack folders and jsonl
+// paths. Elsewhere it gets the listener rule of the OS it can be for (see
+// configValidateOffHostGOOS). Other configs, Secure Client's included, keep
+// their own rules.
 func configValidateManagedStandaloneLayout(loaded *loadedConfigV8File) error {
 	cfg := loaded.runtime
 	if !managed.IsManagedEnterprise(cfg.DeploymentMode) || !cfg.StandaloneEnterprise() {
 		return nil
 	}
-	err := config.ValidateManagedStandaloneListener(cfg)
-	if layout, ok := configValidateManagedHostLayout(); ok && err == nil {
+	var err error
+	if layout, ok := configValidateManagedHostLayout(); ok {
 		var installed *config.Config
 		if installed, err = config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, loaded.raw); err == nil {
 			err = config.ValidateManagedStandaloneConfig(loaded.raw, installed, loaded.compiled.Plan, layout)
 		}
+	} else {
+		err = config.ValidateManagedStandaloneListener(cfg, configValidateOffHostGOOS(loaded))
 	}
 	if err != nil {
 		return &config.V8SemanticError{
@@ -167,6 +170,38 @@ func configValidateManagedStandaloneLayout(loaded *loadedConfigV8File) error {
 			Summary: "the managed standalone lifecycle refuses this file: " + err.Error(),
 			Action:  "set the value the managed layout requires, or leave the key out",
 		}
+	}
+	return nil
+}
+
+// configValidateOffHostGOOS is the OS a managed standalone file checked off a
+// managed computer can be for: "linux" when its explicit data_dir is a POSIX
+// path, which Windows refuses (Linux and macOS share the listener rule), and
+// "" when it could be for any OS.
+func configValidateOffHostGOOS(loaded *loadedConfigV8File) string {
+	if loaded.document == nil {
+		return ""
+	}
+	if dataDir, ok := loaded.document.Plain["data_dir"].(string); ok && strings.HasPrefix(strings.TrimSpace(dataDir), "/") {
+		return "linux"
+	}
+	return ""
+}
+
+// configValidateManagedStandaloneWarnings names the gateway.api_port of a
+// managed standalone file checked off a managed computer that Linux and
+// macOS refuse and Windows accepts, when the file could be for any OS.
+func configValidateManagedStandaloneWarnings(loaded *loadedConfigV8File) []string {
+	cfg := loaded.runtime
+	if !managed.IsManagedEnterprise(cfg.DeploymentMode) || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	if _, ok := configValidateManagedHostLayout(); ok || configValidateOffHostGOOS(loaded) != "" {
+		return nil
+	}
+	if port := cfg.Gateway.APIPort; port != 0 && port != config.DefaultGatewayAPIPort {
+		return []string{fmt.Sprintf("managed_api_port: gateway.api_port %d is refused by Linux and macOS ensure, which require %d; Windows accepts it when chosen before the first install",
+			port, config.DefaultGatewayAPIPort)}
 	}
 	return nil
 }
