@@ -353,7 +353,8 @@ func (a enterpriseHookAcceptedAccounts) listedUIDs() []int {
 //
 // has is the strict reading the scans use: a match by uid, by a spelling,
 // by the uid a name resolves to now, or by the uid its last answer gave
-// while it does not answer leaves the account out. withdraws is the reading
+// while it does not answer and the uid is not shown to hold another account
+// since, leaves the account out. withdraws is the reading
 // that removes an identity record: exclude_users only, and a name entry
 // counts only when the account its uid holds now is the excluded one.
 //
@@ -465,9 +466,16 @@ func (l *enterpriseHookLeftOutAccounts) excludedEntries() []string {
 
 // has reports whether the settings leave out the account with uid, by uid
 // or by one of names (its spelling in a row, an eligible account or an
-// identity record, its name by uid), strictly: an exclusion that is not
-// proven this pass still keeps the account out of the scans. It resolves
-// the names the first time they are needed.
+// identity record, its name by uid), strictly: an entry the account matches
+// keeps it out of the scans, proven or not. It resolves the names the first
+// time they are needed.
+//
+// A name's last answer, while its lookup does not answer, is not a match
+// but a past fact about the uid: it keeps the account out until the account
+// the uid holds now (the account database's answer, or else the uid's
+// identity record) is shown to be another one, which neither entry names.
+// A uid the directory gave to another account since then is that account's
+// to scan.
 func (l *enterpriseHookLeftOutAccounts) has(uid int, names ...string) bool {
 	if l.excludedUIDs[uid] || l.exemptUIDs[uid] {
 		return true
@@ -480,7 +488,29 @@ func (l *enterpriseHookLeftOutAccounts) has(uid int, names ...string) bool {
 	if !l.resolved {
 		l.resolve()
 	}
-	return l.excludedUIDs[uid] || l.exemptUIDs[uid] || len(l.cached[uid]) > 0
+	if l.excludedUIDs[uid] || l.exemptUIDs[uid] {
+		return true
+	}
+	for _, proof := range l.cached[uid] {
+		holder := l.accountAt(uid)
+		if !l.otherHolder(holder, proof) || l.excluded[holder.name] || l.exempt[holder.name] {
+			return true
+		}
+		if holder.answered && holder.name != proof.name {
+			l.forget(proof)
+		}
+	}
+	return false
+}
+
+// otherHolder reports whether holder, the account a uid holds now, is shown
+// to be another account than the one proof named: another name, or the same
+// name with another SID where both are known. An unknown holder is not.
+func (l *enterpriseHookLeftOutAccounts) otherHolder(holder enterpriseHookLeftOutHolder, proof enterpriseHookLeftOutProof) bool {
+	if holder.name == "" {
+		return false
+	}
+	return holder.name != proof.name || (proof.sid != "" && holder.sid != "" && !strings.EqualFold(proof.sid, holder.sid))
 }
 
 // withdraws reports whether exclude_users takes the identity record of the

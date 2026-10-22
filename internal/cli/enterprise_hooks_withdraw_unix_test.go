@@ -358,3 +358,151 @@ func TestExclusionWithdrawsAnOmittedRecordWhateverTheSpoolSize(t *testing.T) {
 		t.Fatal("the record of xia, exempt, was withdrawn: the gateway still accepts and inspects her hook calls")
 	}
 }
+
+// W2B-G-enum review loop round 3 (P2): the uid an exclude_users or
+// exempt_users name last resolved to kept an account out of the scans while
+// the name's lookup did not answer, whoever held that uid now. After alice
+// left and charlie got her uid, an alias lookup timeout dropped charlie's
+// scan row, and the pass removed his last scan record. A last answer now
+// keeps a uid out of the scans only until the account the uid holds now
+// (the account database's answer, or else the uid's identity record) is
+// shown to be another account neither entry names; with nothing proven it
+// still does.
+func TestALastExclusionAnswerNeverDropsTheScanOfTheUIDsNewHolder(t *testing.T) {
+	settings := withdrawTestSettings(t)
+	const uid = 4242
+	const sidA, sidB, sidC = "S-1-5-21-1-2-3-1101", "S-1-5-21-1-2-3-1201", "S-1-5-21-1-2-3-1301"
+	alice := unixidentity.Account{Name: "alice", UID: uid, GID: uid}
+	charlie := unixidentity.Account{Name: "charlie", UID: uid, GID: uid}
+	authDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authDir)
+	dir := enterprisehooks.IdentitySpoolDir(authDir) // enterpriseHookIdentitySpoolDirForConfig under any settings
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	record := func(user, sid string) {
+		if user == "" {
+			if err := os.Remove(filepath.Join(dir, strconv.Itoa(uid)+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			return
+		}
+		writeWithdrawTestRecord(t, dir, enterprisehooks.IdentitySpoolRecord{Key: strconv.Itoa(uid), User: user, AccountSID: sid})
+	}
+	enterpriseHookLoadAcceptedTargets = func() ([]enterpriseHookReconcileRow, error) { return nil, nil }
+
+	// The directory answers: the alias is alice's, and her record holds her
+	// SID. Both entries keep the answer.
+	answers := map[string]map[string]enterpriseHookLeftOutProof{}
+	for _, kind := range []string{"exclude", "exempt"} {
+		if kind == "exclude" {
+			settings([]string{"alice-alias"}, nil)
+		} else {
+			settings(nil, []string{"alice-alias"})
+		}
+		record("alice", sidA)
+		enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{"alice-alias": alice, "alice": alice}})
+		if !enterpriseHookEnrollmentLeftOut(context.Background(), dir).has(uid, "alice") {
+			t.Fatalf("%s: alice, left out by an alias the directory resolves, is scanned", kind)
+		}
+		enterpriseHookLeftOutProven.Lock()
+		answers[kind] = maps.Clone(enterpriseHookLeftOutProven.proofs)
+		enterpriseHookLeftOutProven.Unlock()
+		if got := answers[kind]["alice-alias"]; got.uid != uid || got.name != "alice" || got.sid != sidA {
+			t.Fatalf("%s: kept answer %+v, want uid %d, alice, %s", kind, got, uid, sidA)
+		}
+	}
+
+	for _, tc := range []struct {
+		name            string
+		kind            string
+		exclude         []string
+		accounts        map[string]unixidentity.Account
+		transient       []string
+		recordUser, sid string
+		listed          string
+		scanned         bool
+		forgets         bool
+	}{
+		// The alias does not answer; its last answer named alice.
+		{name: "the uid lookup names charlie", kind: "exclude",
+			accounts: map[string]unixidentity.Account{"charlie": charlie}, transient: []string{"alice-alias"},
+			recordUser: "charlie", sid: sidC, listed: "charlie", scanned: true, forgets: true},
+		{name: "the uid lookup names charlie, who has no record yet", kind: "exclude",
+			accounts: map[string]unixidentity.Account{"charlie": charlie}, transient: []string{"alice-alias"},
+			listed: "charlie", scanned: true, forgets: true},
+		{name: "only charlie's record says so", kind: "exclude",
+			accounts: map[string]unixidentity.Account{"charlie": charlie}, transient: []string{"alice-alias", "charlie"},
+			recordUser: "charlie", sid: sidC, listed: "charlie", scanned: true},
+		{name: "an account recreated as alice, with another SID", kind: "exclude",
+			accounts: map[string]unixidentity.Account{"alice": alice}, transient: []string{"alice-alias", "alice"},
+			recordUser: "alice", sid: sidB, listed: "alice-new", scanned: true},
+		{name: "the exemption: the uid lookup names charlie", kind: "exempt",
+			accounts: map[string]unixidentity.Account{"charlie": charlie}, transient: []string{"alice-alias"},
+			recordUser: "charlie", sid: sidC, listed: "charlie", scanned: true, forgets: true},
+		{name: "the exemption: only charlie's record says so", kind: "exempt",
+			accounts: map[string]unixidentity.Account{"charlie": charlie}, transient: []string{"alice-alias", "charlie"},
+			recordUser: "charlie", sid: sidC, listed: "charlie", scanned: true},
+		// Nothing shows another holder: the last answer still applies.
+		{name: "charlie holds the uid, has no record, and nothing answers", kind: "exclude",
+			accounts: map[string]unixidentity.Account{"charlie": charlie}, transient: []string{"alice-alias", "charlie"},
+			listed: "charlie"},
+		{name: "still alice, the uid lookup answers", kind: "exclude",
+			accounts: map[string]unixidentity.Account{"alice": alice}, transient: []string{"alice-alias"},
+			recordUser: "alice", sid: sidA, listed: "alice"},
+		{name: "still alice, nothing answers", kind: "exclude",
+			accounts: map[string]unixidentity.Account{"alice": alice}, transient: []string{"alice-alias", "alice"},
+			recordUser: "alice", sid: sidA, listed: "alice"},
+		{name: "still alice, her record has no SID", kind: "exclude",
+			accounts: map[string]unixidentity.Account{"alice": alice}, transient: []string{"alice-alias", "alice"},
+			recordUser: "alice", listed: "alice"},
+		{name: "the exemption: still alice, nothing answers", kind: "exempt",
+			accounts: map[string]unixidentity.Account{"alice": alice}, transient: []string{"alice-alias", "alice"},
+			recordUser: "alice", sid: sidA, listed: "alice"},
+		{name: "the exemption: nothing answers and there is no record", kind: "exempt",
+			transient: []string{"alice-alias"}, listed: "alice"},
+		// The new holder is left out by an entry of its own.
+		{name: "charlie holds the uid and is excluded too", kind: "exclude", exclude: []string{"alice-alias", "charlie"},
+			accounts: map[string]unixidentity.Account{"charlie": charlie}, transient: []string{"alice-alias", "charlie"},
+			recordUser: "charlie", sid: sidC, listed: "charlie.other"},
+		// An explicit match by spelling wins whoever the uid holds.
+		{name: "a spelling the exclusion names", kind: "exclude", exclude: []string{"alice-alias", "charlie.old"},
+			accounts: map[string]unixidentity.Account{"charlie": charlie}, transient: []string{"alice-alias"},
+			recordUser: "charlie", sid: sidC, listed: "charlie.old"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exclude := tc.exclude
+			if exclude == nil {
+				exclude = []string{"alice-alias"}
+			}
+			if tc.kind == "exclude" {
+				settings(exclude, nil)
+			} else {
+				settings(nil, exclude)
+			}
+			enterpriseHookLeftOutProven.Lock()
+			enterpriseHookLeftOutProven.proofs = maps.Clone(answers[tc.kind])
+			enterpriseHookLeftOutProven.Unlock()
+			r := standaloneTestResolver{accounts: tc.accounts, transient: map[string]bool{}}
+			for _, name := range tc.transient {
+				r.transient[name] = true
+			}
+			enterprisehooks.SetStandaloneResolver(r)
+			record(tc.recordUser, tc.sid)
+			eligible := []enterprisehooks.UnixEligibleAccount{{User: tc.listed, UID: uid, Home: "/home/" + tc.listed}}
+			enterpriseHookLoadEligibleAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) { return eligible, nil }
+			rows := enterpriseHookEnrolledAccountRows(context.Background(), io.Discard,
+				enterpriseHookReconcileRun{Manifest: "/etc/defenseclaw/hooks/manifest.json"})
+			scanned := slices.ContainsFunc(rows, func(row enterpriseHookReconcileRow) bool { return row.UID == uid })
+			if scanned != tc.scanned {
+				t.Fatalf("scan rows %+v: uid %d scanned %t, want %t", rows, uid, scanned, tc.scanned)
+			}
+			enterpriseHookLeftOutProven.Lock()
+			_, kept := enterpriseHookLeftOutProven.proofs["alice-alias"]
+			enterpriseHookLeftOutProven.Unlock()
+			if kept == tc.forgets {
+				t.Fatalf("the alias's last answer kept %t, want %t", kept, !tc.forgets)
+			}
+		})
+	}
+}
