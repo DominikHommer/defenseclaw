@@ -55,12 +55,20 @@ func TestWindowsForeignCleanupCoversEligibleUsersWithoutRows(t *testing.T) {
 	}
 	// GAP-0587: DefenseClaw's own older per-user Claude hooks are migrated
 	// for every user, so Copilot does not block on them as foreign hooks.
-	previousRemover := windowsManagedClaudeSettingsRemover
-	t.Cleanup(func() { windowsManagedClaudeSettingsRemover = previousRemover })
-	var migrated []string
+	// Only a file the read-only probe finds one in is rewritten, and what
+	// still names DefenseClaw afterwards is reported.
+	previousRemover, previousProbe := windowsManagedClaudeSettingsRemover, windowsManagedClaudeRegistrationProbe
+	t.Cleanup(func() {
+		windowsManagedClaudeSettingsRemover, windowsManagedClaudeRegistrationProbe = previousRemover, previousProbe
+	})
+	var probed, migrated []string
+	windowsManagedClaudeRegistrationProbe = func(home, sid string) (bool, error) {
+		probed = append(probed, sid+"|"+home)
+		return sid == alice, nil
+	}
 	windowsManagedClaudeSettingsRemover = func(home, sid, _ string) (int, []string, error) {
 		migrated = append(migrated, sid+"|"+home)
-		return 0, nil, nil
+		return 2, []string{"Stop: a hook command naming defenseclaw-hook (arguments not shown)"}, nil
 	}
 	rows := []enterpriseHookReconcileRow{{OK: true, SID: bob, UserHome: `C:\Users\bob`, Connector: "cursor"}}
 	var log bytes.Buffer
@@ -71,8 +79,19 @@ func TestWindowsForeignCleanupCoversEligibleUsersWithoutRows(t *testing.T) {
 	if strings.Join(collected, ",") != bob+","+alice {
 		t.Fatalf("block records must be collected for every user: %v", collected)
 	}
-	if strings.Join(migrated, ",") != bob+`|C:\Users\bob,`+alice+`|C:\Users\alice` {
-		t.Fatalf("older DefenseClaw Claude hooks must be migrated for every user: %v", migrated)
+	if strings.Join(probed, ",") != bob+`|C:\Users\bob,`+alice+`|C:\Users\alice` {
+		t.Fatalf("older DefenseClaw Claude hooks must be looked for for every user: %v", probed)
+	}
+	if strings.Join(migrated, ",") != alice+`|C:\Users\alice` {
+		t.Fatalf("only settings holding older DefenseClaw Claude hooks may be rewritten: %v", migrated)
+	}
+	for _, want := range []string{
+		`removed 2 older DefenseClaw hook command(s) from C:\Users\alice\.claude\settings.json`,
+		`C:\Users\alice\.claude\settings.json still holds Stop: a hook command naming defenseclaw-hook (arguments not shown)`,
+	} {
+		if !strings.Contains(log.String(), want) {
+			t.Fatalf("migration log lacks %q:\n%s", want, log.String())
+		}
 	}
 }
 

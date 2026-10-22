@@ -385,18 +385,35 @@ func enterpriseHookWindowsEligibleProfilesFor(ctx context.Context, current *conf
 }
 
 // migrateWindowsClaudeUserHooks removes DefenseClaw's own older per-user
-// Claude Code hooks (those naming the per-user launcher in ~/.local/bin)
-// from the user's Claude settings, as the Unix guardian removes its leftover
-// registrations each pass. Claude Code is enrolled by machine policy; left in
-// place, the old hooks make every agent that reads the file (Copilot CLI in a
-// project under the home) block as on a foreign hook (GAP-0587).
+// Claude Code hooks (those running the per-user launcher in ~/.local/bin,
+// directly or through the launcher guard) from the user's Claude settings,
+// as the Unix guardian removes its leftover registrations each pass. Claude
+// Code is enrolled by machine policy; left in place, the old hooks make every
+// agent that reads the file (Copilot CLI in a project under the home) block
+// as on a foreign hook (GAP-0587). A read-only probe runs first, so a file
+// without such a hook is never rewritten or re-protected; the hooks that
+// still name DefenseClaw after the removal are reported.
 func migrateWindowsClaudeUserHooks(stderr io.Writer, target enterprisehooks.TargetCredentials) {
 	settings := filepath.Join(target.UserHome, ".claude", "settings.json")
-	removed, _, err := windowsManagedClaudeSettingsRemover(target.UserHome, target.SID, "")
+	present, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
+	if err == nil && !present {
+		return
+	}
+	removed := 0
+	var left []string
+	if err == nil {
+		removed, left, err = windowsManagedClaudeSettingsRemover(target.UserHome, target.SID, "")
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: older DefenseClaw hooks in %s: %v\n", settings, err)
-	} else if removed > 0 {
+		return
+	}
+	if removed > 0 {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: removed %d older DefenseClaw hook command(s) from %s\n", removed, settings)
+	}
+	for _, hook := range left {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: %s still holds %s; remove it so other agents do not block on it\n",
+			settings, boundedEnterpriseHookUserCleanupText(hook))
 	}
 }
 
