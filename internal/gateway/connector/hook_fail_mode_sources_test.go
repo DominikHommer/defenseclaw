@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 func readHookConfigSidecarForTest(t *testing.T, hookDir string) hookConfigSidecar {
@@ -813,12 +815,13 @@ func readerToolSets(t *testing.T) []struct {
 func TestRefreshHookFailModesLeavesRetiredConnectorsUntouched(t *testing.T) {
 	hookDir := t.TempDir()
 	shared := `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open","openhands":"open","omnigent":"open"}}` + "\n"
+	desktop := legacyconnector.RetiredDesktopID
 	files := map[string]string{
-		hookConfigSidecarName:                shared,
-		hookConfigSidecarName + ".openhands": "DEFENSECLAW_CONNECTOR=openhands\nDEFENSECLAW_FAIL_MODE=open\n",
-		hookConfigSidecarName + ".omnigent":  "DEFENSECLAW_CONNECTOR=omnigent\nDEFENSECLAW_FAIL_MODE=open\n",
-		hookConfigSidecarName + ".windsurf":  "DEFENSECLAW_CONNECTOR=windsurf\nDEFENSECLAW_FAIL_MODE=open\n",
-		hookConfigSidecarName + ".codex":     "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n",
+		hookConfigSidecarName:                 shared,
+		hookConfigSidecarName + ".openhands":  "DEFENSECLAW_CONNECTOR=openhands\nDEFENSECLAW_FAIL_MODE=open\n",
+		hookConfigSidecarName + ".omnigent":   "DEFENSECLAW_CONNECTOR=omnigent\nDEFENSECLAW_FAIL_MODE=open\n",
+		hookConfigSidecarName + "." + desktop: "DEFENSECLAW_CONNECTOR=" + desktop + "\nDEFENSECLAW_FAIL_MODE=open\n",
+		hookConfigSidecarName + ".codex":      "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(hookDir, name), []byte(body), 0o600); err != nil {
@@ -832,7 +835,7 @@ func TestRefreshHookFailModesLeavesRetiredConnectorsUntouched(t *testing.T) {
 	if !reflect.DeepEqual(refreshed.Sidecar, []string{"codex"}) {
 		t.Fatalf("refreshed %+v, want codex only", refreshed)
 	}
-	for _, retired := range []string{"openhands", "omnigent", "windsurf"} {
+	for _, retired := range []string{"openhands", "omnigent", desktop} {
 		name := hookConfigSidecarName + "." + retired
 		if body, _ := os.ReadFile(filepath.Join(hookDir, name)); string(body) != files[name] {
 			t.Fatalf("%s rewritten: %q", name, body)
