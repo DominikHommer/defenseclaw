@@ -93,6 +93,13 @@ func (a *APIServer) sandboxRematchIfDue(ctx context.Context, auth *sandboxAuthor
 	cfg := a.liveBaseConfig(ctx)
 	key := a.sandboxPolicyKey(ctx, cfg)
 	match := a.sandboxMatchPeer(ctx, peer, reg.Connector, 0)
+	if match.decision.Refused != "" {
+		// A refused decision names no profile of the caller's (its Name may
+		// be another account's): the registration keeps the profile it was
+		// last matched under, as while the facts do not resolve, and its
+		// relayed hooks are refused (sandboxRelayAdmit).
+		match.resolved = false
+	}
 	factsDigest := sandboxFactsDigest(auth.key, match.facts, match.resolved)
 	if hasRun && key != "" && key == run.PolicyKey && (!match.resolved || factsDigest == reg.FactsDigest) {
 		return reg

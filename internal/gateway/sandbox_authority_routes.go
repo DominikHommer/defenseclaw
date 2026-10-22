@@ -294,6 +294,10 @@ func (a *APIServer) handleSandboxSettings(w http.ResponseWriter, r *http.Request
 	}
 	cfg := a.liveBaseConfig(r.Context())
 	match := a.sandboxMatchPeer(r.Context(), peer, connectorName, 0)
+	if match.decision.Refused != "" {
+		sandboxRefuseView(w, match.decision)
+		return
+	}
 	floor, floorDigest, err := sandboxFloorFor(cfg, match.decision.Name)
 	if err != nil {
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
@@ -943,7 +947,22 @@ func (a *APIServer) sandboxScope(w http.ResponseWriter, r *http.Request, auth *s
 	if !a.sandboxDecide(w, r, peer, connectorName) {
 		return sandboxOwnScope{}, false
 	}
-	return sandboxOwnScope{connector: connectorName, match: a.sandboxMatchPeer(r.Context(), peer, connectorName, sandboxExplainLookupIn)}, true
+	match := a.sandboxMatchPeer(r.Context(), peer, connectorName, sandboxExplainLookupIn)
+	if match.decision.Refused != "" {
+		sandboxRefuseView(w, match.decision)
+		return sandboxOwnScope{}, false
+	}
+	return sandboxOwnScope{connector: connectorName, match: match}, true
+}
+
+// sandboxRefuseView answers a policy view (settings, explain, test, packs)
+// of a caller whose profile decision is refused: no profile is the
+// caller's, and its Name is only the strictest candidate, which may be
+// another account's (an assignment that may name this account while its
+// facts are unproven). The answer is the refusal alone, which names no
+// profile; policy/resolve refuses the run the same way.
+func sandboxRefuseView(w http.ResponseWriter, decision profileDecision) {
+	writeSandboxReason(w, sandboxrelay.ReasonUnavailable, decision.Refused)
 }
 
 // sandboxScopeFloor is the floor of scope: its sandbox's registration floor

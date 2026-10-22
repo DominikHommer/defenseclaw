@@ -125,10 +125,15 @@ enforce different rules, the request is refused until the provider answers.
 After upgrading from 1.0.0–1.0.3, rebind any `agents` assignment to the
 current ID shown by `defenseclaw agent identities`. The older ID did not
 include the account domain, and its inventory row could have been overwritten
-by another account with the same UID. Until rebind, an agent that may own the
-entry gets the strictest profile that may apply (`default_lookup_failed`):
-the entry's own, the default, or the one it matches otherwise. When those
-profiles enforce different rules, its requests are refused.
+by another account with the same UID. An entry for an account without a
+domain (a local account, or a directory account the host names without its
+domain) keeps applying to that account on its own when the inventory shows
+the entry is its own: the 1.0.3 row names that account, and no account of
+another domain with the same name held the UID on that computer. Until
+rebind, any other agent that may own the entry gets the strictest profile
+that may apply (`default_lookup_failed`): the entry's own, the default, or the
+one it matches otherwise. When those profiles enforce different rules, its
+requests are refused.
 
 How the keys combine:
 
@@ -138,8 +143,10 @@ How the keys combine:
 - **The strictest wins.** When several assignments match (a user and a
   group, a legacy and a current agent ID), the strictest of their profiles
   applies, whatever their order: the one that enforces at least what each of
-  the others does, or else the one that blocks (`action`) from the lowest
-  `block_at`. Order still sets which assignment `explain` reports when two
+  the others does. Profiles that enforce different rules (another rule pack,
+  sandbox section or HILT) have no strictest one; then the first one listed
+  applies, as in earlier releases, and a profile another matching one covers
+  never does. Order also sets which assignment `explain` reports when two
   give the same profile.
 - **Unproven facts never select a weaker profile.** When a fact an
   assignment needs is not proven in this pass (the directory lookup failed or
@@ -152,8 +159,10 @@ How the keys combine:
   surface that can block (hook, inspect, ACP, sandbox relay, LLM proxy), and
   the refusal names the `profile explain` command for this host.
 - **Rebind 1.0.3 agent IDs.** After an upgrade from 1.0.0–1.0.3, a bare
-  account gets a distinct agent ID. An older `agents` entry that could belong
-  to that account or to a previous holder of its uid stays unproven. Read the
+  account gets a distinct agent ID. Its older `agents` entry keeps applying
+  when the inventory's 1.0.3 row names that bare account and no account of
+  another domain with that name held the uid on the computer; an entry that
+  could belong to a previous holder of the uid stays unproven. Read the
   current ID with `defenseclaw agent identities`, replace the old `agents`
   entry in `config.yaml`, and run `defenseclaw-gateway restart`.
 - **Case and accents' encoding do not matter.** Groups, account names,
@@ -429,7 +438,8 @@ defenseclaw agent identities --user alice --connector codex
 Copy the `agt-` ID into an `agents` assignment. The ID names one connector
 install for one user on one machine and stays the same across sessions and
 restarts. On upgrade from 1.0.0–1.0.3 to 1.0.4, a bare account gets a new ID
-to separate it from a qualified account's legacy ID; rebind its assignment.
+to separate it from a qualified account's legacy ID. Its old assignment keeps
+applying while the inventory shows the old ID was that account's; rebind it.
 See [Agent identity](/docs/enterprise/identity/authentication#agent-identity).
 
 The pin applies to every decision the gateway makes for that install: its

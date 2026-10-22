@@ -89,10 +89,10 @@ func TestLegacyAgentAssignmentNeedsACurrentIDRebind(t *testing.T) {
 	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
 	}}
-	if got, unresolved := set.profileAgent(corp, nil); got != corp || unresolved == nil || !unresolved(legacy) {
+	if got, unresolved, _ := set.profileAgent(corp, nil); got != corp || unresolved == nil || !unresolved(legacy) {
 		t.Errorf("corp's agent matched as %q without an unresolved legacy entry", got)
 	}
-	if got, _ := set.profileAgent(lab, nil); got != lab {
+	if got, _, _ := set.profileAgent(lab, nil); got != lab {
 		t.Errorf("the lab namesake's agent matches as %q, want its own identity %q", got, lab)
 	}
 	if *asked != 1 {
@@ -102,7 +102,7 @@ func TestLegacyAgentAssignmentNeedsACurrentIDRebind(t *testing.T) {
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
 		{Profile: "strict", Match: config.ProfileMatch{Agents: []string{corp}}},
 	}}
-	if got, _ := named.profileAgent(corp, nil); got != corp {
+	if got, _, _ := named.profileAgent(corp, nil); got != corp {
 		t.Errorf("an assignment naming the current identity lost to the legacy one: %q", got)
 	}
 }
@@ -119,19 +119,19 @@ func TestLegacyAgentAssignmentWithAnOverwrittenRecordSelectsNeitherAccount(t *te
 	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
 	}}
-	if got, unresolved := set.profileAgent(lab, nil); got != lab || unresolved == nil || !unresolved(legacy) {
+	if got, unresolved, _ := set.profileAgent(lab, nil); got != lab || unresolved == nil || !unresolved(legacy) {
 		t.Fatalf("one overwritten row selected %q without unresolved legacy ownership", got)
 	}
 	// corp's agent is seen after the upgrade.
 	records = append(records, legacyBridgeRecord(corp, "alice@corp.example"))
-	if got, _ := set.profileAgent(lab, nil); got != lab {
+	if got, _, _ := set.profileAgent(lab, nil); got != lab {
 		t.Fatalf("the legacy row selected an account before refresh: %q", got)
 	}
 	set.agentBridge.readAt = time.Time{}
-	if got, _ := set.profileAgent(lab, nil); got != lab {
+	if got, _, _ := set.profileAgent(lab, nil); got != lab {
 		t.Errorf("lab's agent matches as %q after corp was recorded, want its own identity %q", got, lab)
 	}
-	if got, _ := set.profileAgent(corp, nil); got != corp {
+	if got, _, _ := set.profileAgent(corp, nil); got != corp {
 		t.Errorf("corp's agent matches as %q, want its own identity %q", got, corp)
 	}
 	// Another machine's, or another uid's, namesake proves nothing here.
@@ -139,7 +139,7 @@ func TestLegacyAgentAssignmentWithAnOverwrittenRecordSelectsNeitherAccount(t *te
 	other.MachineHash = agentidentity.MachineHash("fedcba9876543210fedcba9876543210")
 	records = []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice@lab.example"), other}
 	fresh := &guardrailProfileSet{assignments: set.assignments}
-	if got, _ := fresh.profileAgent(lab, nil); got != lab {
+	if got, _, _ := fresh.profileAgent(lab, nil); got != lab {
 		t.Errorf("a namesake on another machine selected the legacy policy: %q", got)
 	}
 }

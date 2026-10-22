@@ -28,12 +28,13 @@ import (
 //     maybe when a fact it needs is not proven in this pass.
 //   - When every fact is proven, the profiles of the assignments that match
 //     are the candidates, or default_profile when none does, and the
-//     strictest of them applies, whatever their order.
+//     strictest of them applies, whatever their order; of profiles that
+//     enforce different rules, the first listed (provenProfileOf).
 //   - When any fact is not proven (absent, incomplete, timed out, a provider
 //     error anywhere in the NSS, SSSD, LDAP, winbind or Windows token chain,
 //     an ambiguous name or uid, an unproven 1.0.3 agents entry), the
-//     candidates are every profile that could match the account (yes and
-//     maybe, or default_profile when nothing matches for sure) and the last
+//     candidates are the profile the proven matches decide, every profile
+//     that could match the account (maybe), default_profile and the last
 //     profile proven for this exact incarnation. A profile that enforces at
 //     least what each of them enforces applies (profileCovers); when none
 //     does, the request is refused wherever its surface can block it, and
@@ -104,6 +105,10 @@ type identityResolution struct {
 	// agentUnresolved reports the agents entries (lower case) that may be
 	// the request agent's 1.0.3 identity; nil when none may.
 	agentUnresolved func(entry string) bool
+	// agentOwned reports the agents entries (lower case) the agent ledger
+	// proves are the request agent's own 1.0.3 identity
+	// (profileAgentLinks.owned): they match as the agent's identity does.
+	agentOwned func(entry string) bool
 }
 
 // proven reports whether every fact is proven.
@@ -256,7 +261,9 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 	}
 	if len(m.Agents) > 0 {
 		agentState := matchNo
-		if anyMatches(m.Agents, func(v string) bool { return agentEntryMatches(v, agent) }) {
+		if anyMatches(m.Agents, func(v string) bool {
+			return agentEntryMatches(v, agent) || (res.agentOwned != nil && res.agentOwned(strings.ToLower(strings.TrimSpace(v))))
+		}) {
 			agentState = matchYes
 		} else if res.agentUnresolved != nil &&
 			anyMatches(m.Agents, func(v string) bool { return res.agentUnresolved(strings.ToLower(strings.TrimSpace(v))) }) {
@@ -350,18 +357,20 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		}
 		return profileDecision{}, false
 	}
-	var candidates []string
+	var matched []string
 	for _, h := range yes {
-		candidates = append(candidates, h.profile)
+		matched = append(matched, h.profile)
 	}
-	if len(yes) == 0 {
-		candidates = append(candidates, set.defaultProfile)
+	// The proven matches decide one profile: the strictest of them, or of
+	// profiles that enforce different rules the first one listed.
+	candidates := []string{set.defaultProfile}
+	if len(matched) > 0 {
+		candidates = []string{set.provenProfileOf(matched, connectorName)}
 	}
 	if !verified || len(maybe) == 0 {
 		// No assignment depends on a fact that is not proven: the facts
-		// decide, and the strictest profile of the assignments that match
-		// applies, whatever their order.
-		name, _ := set.strictestOf(candidates, connectorName)
+		// decide (provenProfileOf).
+		name := candidates[0]
 		decision, ok := definite(name)
 		if !ok {
 			reason := profileMatchDefault
@@ -405,6 +414,29 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	return decision
 }
 
+// provenProfileOf is the profile of the assignments that match on proven
+// facts (matched, in assignment order): the strictest, whatever their order,
+// when one enforces at least what each of the others does (strictestOf).
+// Profiles that enforce different rules (a rule pack, a sandbox section, a
+// HILT) have no strictest one, and a choice by hook mode and block_at would
+// drop what the other enforces: the first listed of those no other one
+// covers applies, as every release before 1.0.4 chose (first match). A
+// profile another one covers never applies in its place.
+func (set *guardrailProfileSet) provenProfileOf(matched []string, connectorName string) string {
+	if name, covers := set.strictestOf(matched, connectorName); covers {
+		return name
+	}
+	connectors := profileCoverConnectors(connectorName)
+	for _, candidate := range matched {
+		if !slices.ContainsFunc(matched, func(other string) bool {
+			return set.profileCovers(other, candidate, connectors) && !set.profileCovers(candidate, other, connectors)
+		}) {
+			return candidate
+		}
+	}
+	return matched[0]
+}
+
 // compactProfiles drops repeated names, keeping the first.
 func compactProfiles(names []string) []string {
 	out := make([]string, 0, len(names))
@@ -444,25 +476,50 @@ func (set *guardrailProfileSet) strictestOf(candidates []string, connectorName s
 // user: which fact is not proven, and the command that explains the
 // decision on this host.
 func (set *guardrailProfileSet) unprovenRefusalReason(subject *profileSubject, res identityResolution, connectorName string) string {
-	var why []string
+	var why, then []string
+	step := func(text string) {
+		if !slices.Contains(then, text) {
+			then = append(then, text)
+		}
+	}
 	switch res.Account {
 	case proofFailed:
 		why = append(why, "more than one account holds this account's uid")
+		step("ask your administrator to give each account its own uid")
 	case proofUnknown:
 		why = append(why, "the directory has not confirmed which account this is")
+		step("try again after the directory recovers")
 	case proofStale:
 		why = append(why, "the directory cannot confirm this account now")
+		step("try again after the directory recovers")
 	}
-	if res.Groups != proofProven && res.Account == proofProven {
-		why = append(why, "directory group membership is unconfirmed")
+	if res.Account == proofProven {
+		// The account's own facts this pass did not prove; an unproven
+		// account leaves them unproven too, and its reason covers them.
+		if res.Groups != proofProven {
+			why = append(why, "directory group membership is unconfirmed")
+			step("try again after the directory recovers")
+		}
+		if res.UPN != proofProven {
+			why = append(why, "the DefenseClaw guardian has not recorded this account's UPN yet")
+			step("try again after the guardian writes this account's identity record")
+		}
 	}
 	if res.Agent != proofProven {
-		why = append(why, "a guardrail profile assignment names an agent identity from before the upgrade that cannot be matched to this account "+
-			"(ask your administrator to replace the entry with the agent identity `defenseclaw agent identities` shows now)")
+		why = append(why, "a guardrail profile assignment names an agent identity from before the upgrade that cannot be matched to this account")
+		step("ask your administrator to replace the entry with the agent identity `defenseclaw agent identities` shows now")
 	}
-	return "DefenseClaw refused this request: " + strings.Join(why, "; ") +
-		", and the guardrail profiles that may apply enforce different rules; run `" + set.profileExplainCommand(subject, connectorName) +
-		"` after the directory recovers"
+	if len(why) == 0 {
+		// Not reached: a refusal needs an unproven fact. Never an empty
+		// reason.
+		why = append(why, "an identity fact the guardrail profile depends on is not confirmed")
+	}
+	text := "DefenseClaw refused this request: " + strings.Join(why, "; ") +
+		", and the guardrail profiles that may apply enforce different rules"
+	if len(then) > 0 {
+		text += "; " + strings.Join(then, "; ")
+	}
+	return text + "; run `" + set.profileExplainCommand(subject, connectorName) + "` to see the decision"
 }
 
 // profileExplainCommand is the installed command that explains the profile
