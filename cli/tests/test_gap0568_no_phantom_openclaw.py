@@ -113,6 +113,29 @@ class OlderConfigWithoutClawBlockTests(_FreshHome):
             f"config_version: {CURRENT_CONFIG_VERSION}\nobservability: {{}}\n", encoding="utf-8"
         )
 
+    def test_load_without_openclaw_selects_no_connector(self):
+        from defenseclaw.config import load
+
+        cfg = load()
+
+        self.assertFalse(cfg.has_connector_configured())
+        self.assertEqual(cfg.active_connectors(), [])
+
+    def test_load_with_openclaw_installed_keeps_openclaw(self):
+        from defenseclaw.config import load
+
+        self._plant_openclaw()
+
+        self.assertEqual(load().active_connectors(), ["openclaw"])
+
+    def test_a_connector_set_after_load_is_configured(self):
+        from defenseclaw.config import load
+
+        cfg = load()
+        cfg.claw.mode = "codex"
+
+        self.assertEqual(cfg.active_connectors(), ["codex"])
+
     def test_uninstall_plans_no_openclaw_teardown_without_openclaw(self):
         plan = self._plan()
 
@@ -136,8 +159,18 @@ class OlderConfigWithoutClawBlockTests(_FreshHome):
         self.assertIn("openclaw", self._plan().connectors)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class OlderInitClawModeTests(OlderConfigWithoutClawBlockTests):
+    """The claw.mode openclaw default an init before 1.0.4 saved (upgrade path)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from defenseclaw.config import CURRENT_CONFIG_VERSION
+
+        (self.data_dir / "config.yaml").write_text(
+            f"config_version: {CURRENT_CONFIG_VERSION}\nclaw:\n  mode: openclaw\n"
+            "  home_dir: ~/.openclaw\n  config_file: ~/.openclaw/openclaw.json\n",
+            encoding="utf-8",
+        )
 
 
 class FirstRunDefaultConnectorTests(unittest.TestCase):
@@ -172,3 +205,39 @@ class FirstRunDefaultConnectorTests(unittest.TestCase):
         from defenseclaw.commands.cmd_init import _normalize_connector_arg
 
         self.assertEqual(_normalize_connector_arg("codex"), "codex")
+
+class SetupMenuDefaultTests(unittest.TestCase):
+    """The setup connector menu defaults only to an installed agent."""
+
+    def _menu_default(self, current: str, installed: list[str], picked: str | None):
+        from defenseclaw.commands import cmd_setup
+
+        with (
+            patch.object(cmd_setup, "_detect_installed_connectors", return_value=installed),
+            patch.object(cmd_setup, "_read_picked_connector", return_value=picked),
+            patch.object(cmd_setup.click, "prompt", return_value=1) as prompt,
+        ):
+            cmd_setup._select_connector_interactive(current, data_dir="/unused")
+        default = prompt.call_args.kwargs["default"]
+        return None if default is None else cmd_setup._CONNECTOR_NAMES[default - 1]
+
+    def test_no_installed_agent_has_no_default(self):
+        self.assertIsNone(self._menu_default("openclaw", [], None))
+        self.assertIsNone(self._menu_default("", [], None))
+
+    def test_a_picked_agent_that_is_not_installed_is_not_the_default(self):
+        # An older installer recorded codex when it had no terminal to ask on.
+        self.assertIsNone(self._menu_default("openclaw", [], "codex"))
+        self.assertEqual(self._menu_default("openclaw", ["claudecode"], "codex"), "claudecode")
+
+    def test_an_installed_agent_is_the_default(self):
+        self.assertEqual(self._menu_default("openclaw", ["claudecode", "codex"], "codex"), "codex")
+        self.assertEqual(self._menu_default("openclaw", ["claudecode"], None), "claudecode")
+        self.assertEqual(self._menu_default("openclaw", ["openclaw"], None), "openclaw")
+
+    def test_a_configured_connector_stays_the_default(self):
+        self.assertEqual(self._menu_default("cursor", [], None), "cursor")
+
+
+if __name__ == "__main__":
+    unittest.main()

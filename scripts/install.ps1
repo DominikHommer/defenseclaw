@@ -1955,10 +1955,12 @@ function Select-Connector {
     # An answer that is neither a number on the list nor a name is asked
     # again, never replaced with another agent (GAP-0333).
     for ($try = 1; $try -le 3; $try++) {
-        # No console to answer on: the default, as before.
-        try { $choice = Read-Host "  Choice (number or name) [default 1=codex]" } catch { $choice = "" }
+        # Enter, or no console to answer on: no agent. A default never picks
+        # one the machine may not have; 'defenseclaw init' finds the installed
+        # agents (GAP-0568).
+        try { $choice = Read-Host "  Choice (number or name) [default none]" } catch { $choice = "" }
         $answer = "$choice".Trim().ToLowerInvariant()
-        if (-not $answer) { $answer = "1" }
+        if (-not $answer) { $answer = "none" }
         $number = 0
         $picked = ""
         if ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $ConnectorChoices.Count) {

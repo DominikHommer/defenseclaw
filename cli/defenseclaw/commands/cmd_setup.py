@@ -5401,17 +5401,18 @@ def _detect_connector(data_dir: str | None = None) -> str | None:
     Resolution order:
       1. ``<data_dir>/picked_connector`` (written by ``scripts/install.sh
          --connector ...``) — the operator's explicit choice at install
-         time.
+         time — when that agent is installed.
       2. Shared verified application discovery — the highest-priority
          installed agent (see ``_detect_installed_connectors``).
 
-    Returns ``None`` when neither source is conclusive so the caller
-    can fall back to ``"openclaw"``.
+    Returns ``None`` when no installed agent is found: a default never
+    selects an agent the machine does not have (GAP-0568), including the
+    codex an older installer recorded when it had no terminal to ask on.
     """
-    picked = _read_picked_connector(data_dir)
-    if picked:
-        return picked
     installed = _detect_installed_connectors()
+    picked = _read_picked_connector(data_dir)
+    if picked and picked in installed:
+        return picked
     return installed[0] if installed else None
 
 
@@ -5423,12 +5424,12 @@ def _select_connector_interactive(current: str, data_dir: str | None = None) -> 
     override ``current`` when it is empty or still the historical
     fallback ("openclaw") — operators who already configured a non-
     default connector should not see their choice silently flipped by
-    a leftover hint file.
+    a leftover hint file. With no installed agent the menu has no
+    default and the operator picks one.
     """
-    detected = _detect_connector(data_dir)
     default = current
     if not default or default == "openclaw":
-        default = detected or "openclaw"
+        default = _detect_connector(data_dir)
     click.echo()
     click.echo("  Which agent framework are you using?")
     click.echo()

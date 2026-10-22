@@ -19,8 +19,10 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -194,6 +196,10 @@ func (c *Config) activeConnectors() []string {
 // activeConnector() deliberately keeps flooring to "openclaw" for legacy path
 // dispatchers; callers using that API to touch connector state must check this
 // helper first when zero-config behavior matters.
+//
+// A claw.mode that only implies OpenClaw, loaded where no OpenClaw is
+// installed (openClawNotInstalled), counts as unconfigured, as
+// init --connector none does.
 func (c *Config) HasConnectorConfigured() bool {
 	if c == nil {
 		return false
@@ -208,10 +214,10 @@ func (c *Config) HasConnectorConfigured() bool {
 	if strings.TrimSpace(c.Guardrail.Connector) != "" {
 		return true
 	}
-	if strings.TrimSpace(string(c.Claw.Mode)) != "" {
-		return true
-	}
-	return false
+	// A claw.mode that only implies an OpenClaw the machine does not have
+	// configures nothing (GAP-0568): watching its folders would create
+	// ~/.openclaw, and status would name an agent that is not there.
+	return strings.TrimSpace(string(c.Claw.Mode)) != "" && (!c.openClawNotInstalled || !c.OpenClawOnlyImplied())
 }
 
 // ActiveConnectors returns the full resolved set of connector names
@@ -990,6 +996,64 @@ func (c *Config) OpenClawConfigCandidates() []string {
 		out = append(out, candidate)
 	}
 	return out
+}
+
+// OpenClawOnlyImplied reports whether only claw.mode names OpenClaw:
+// guardrail.connector is empty and guardrail.connectors has no openclaw
+// entry, so "openclaw" comes from the claw.mode default (the loader default
+// when config.yaml has no claw block, and what init wrote before 1.0.4) or a
+// leftover of it. setup openclaw pins guardrail.connector. Mirrors
+// openclaw_presence.openclaw_only_implied in the Python CLI.
+func (c *Config) OpenClawOnlyImplied() bool {
+	if c == nil || strings.TrimSpace(c.Guardrail.Connector) != "" {
+		return false
+	}
+	for name := range c.Guardrail.Connectors {
+		if strings.EqualFold(strings.TrimSpace(name), "openclaw") {
+			return false
+		}
+	}
+	return strings.EqualFold(strings.TrimSpace(string(c.Claw.Mode)), "openclaw")
+}
+
+// OpenClawInstalled reports whether an openclaw.json candidate exists or an
+// openclaw binary is found. A stat error other than "does not exist" (for
+// example a permission error) counts as present. Mirrors
+// openclaw_presence.openclaw_installed in the Python CLI.
+func (c *Config) OpenClawInstalled() bool {
+	for _, path := range c.OpenClawConfigCandidates() {
+		if _, err := os.Stat(path); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+	}
+	return OpenClawBinaryInstalled()
+}
+
+// OpenClawBinaryInstalled reports whether an openclaw executable is on PATH or
+// in one of the npm/Homebrew locations a daemon started without the login
+// shell's PATH would miss. Mirrors openclaw_presence.openclaw_binary_installed
+// in the Python CLI. A variable so tests do not depend on the host's PATH.
+var OpenClawBinaryInstalled = func() bool {
+	if _, err := exec.LookPath("openclaw"); err == nil {
+		return true
+	}
+	for _, path := range openClawBinaryFallbacks() {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+func openClawBinaryFallbacks() []string {
+	paths := []string{"/usr/local/bin/openclaw", "/opt/homebrew/bin/openclaw"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths,
+			filepath.Join(home, ".npm-global", "bin", "openclaw"),
+			filepath.Join(home, ".local", "bin", "openclaw"),
+		)
+	}
+	return paths
 }
 
 func connectorEnvHome(variable, defaultDir string) string {

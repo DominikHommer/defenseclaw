@@ -288,6 +288,11 @@ type Config struct {
 	legacyOpenShellPackDir   string
 	// offlineInspection never probes a signer's filesystem for a device default.
 	offlineInspection bool
+	// openClawNotInstalled records that no OpenClaw was installed when a
+	// config whose claw.mode only implies OpenClaw loaded, so
+	// HasConnectorConfigured reports no connector (GAP-0568). Set only by the
+	// loader, on a device load outside a managed enterprise service.
+	openClawNotInstalled bool
 	// offlineVendorPolicyDir and offlineVendorPolicyRoot redirect rule packs
 	// under the target layout's shipped policy folder to a private copy of
 	// the policies this binary embeds (UseOfflineVendorPolicies).
@@ -3113,6 +3118,10 @@ func loadConfigSourceCheckedWithLayout(
 
 	if home, err := os.UserHomeDir(); err == nil {
 		cfg.Gateway.ClawHome = home
+	}
+
+	if !inspection && !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		cfg.openClawNotInstalled = cfg.OpenClawOnlyImplied() && !cfg.OpenClawInstalled()
 	}
 
 	warnPlaintextSecrets(&cfg)

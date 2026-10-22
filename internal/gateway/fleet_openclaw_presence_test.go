@@ -36,9 +36,9 @@ import (
 // Callers must not run in parallel: the probe is a package variable.
 func stubOpenClawBinary(t *testing.T, installed bool) {
 	t.Helper()
-	previous := openClawBinaryInstalled
-	openClawBinaryInstalled = func() bool { return installed }
-	t.Cleanup(func() { openClawBinaryInstalled = previous })
+	previous := config.OpenClawBinaryInstalled
+	config.OpenClawBinaryInstalled = func() bool { return installed }
+	t.Cleanup(func() { config.OpenClawBinaryInstalled = previous })
 }
 
 // withoutOpenClaw points the OpenClaw paths at an empty temp home and stubs

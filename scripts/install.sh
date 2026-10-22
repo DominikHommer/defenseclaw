@@ -2285,10 +2285,12 @@ pick_connector() {
     # An answer that is neither a number on the list nor a name is asked
     # again, never replaced with another agent (GAP-0333).
     while :; do
-        printf "  Choice (number or name) [default 1=codex]: " >&2
-        # No terminal to answer on: the default, as before.
+        printf "  Choice (number or name) [default none]: " >&2
+        # Enter, or no terminal to answer on: no agent. A default never picks
+        # one the machine may not have; 'defenseclaw init' finds the installed
+        # agents (GAP-0568).
         choice=$(read_tty_line) || choice=""
-        CONNECTOR="$(connector_choice "${choice:-1}")" && break
+        CONNECTOR="$(connector_choice "${choice:-none}")" && break
         tries=$((tries + 1))
         if [[ ${tries} -ge 3 ]]; then
             rm -rf "${STAGING}"

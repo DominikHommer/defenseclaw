@@ -385,6 +385,38 @@ def test_test_guardrail_off_reads_the_kept_config(tmp_path: Path, name: str) -> 
     assert completed.stdout.strip() == ("off" if expected else "on")
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_the_agent_prompt_with_no_console_picks_no_agent() -> None:
+    # GAP-0568: with no console to answer on, Select-Connector picked codex and
+    # recorded it in picked_connector.
+    choices = _text()[_text().index("$ConnectorChoices = @(") :]
+    choices = choices[: choices.index(")\n") + 2]
+    script = (
+        "function Write-Step { }\nfunction Write-Ok { param($m) Write-Output $m }\n"
+        "function Write-Warn { param($m) Write-Output $m }\nfunction Stop-Usage { param($m) throw $m }\n"
+        f"{choices}{_ps1_function('Select-Connector')}Select-Connector\n"
+    )
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip().splitlines()[-1] == "none"
+    assert "Connector: codex" not in completed.stdout
+
+
+def test_the_agent_prompt_default_is_no_agent() -> None:
+    # GAP-0568: Enter at the prompt, or no console, picks no agent, as install.sh.
+    body = _ps1_function("Select-Connector")
+    assert "[default none]" in body
+    assert 'if (-not $answer) { $answer = "none" }' in body
+    assert "1=codex" not in body
+
+
 def test_a_slow_first_start_is_waited_for_before_restoring() -> None:
     # GAP-1348: a 1.x gateway over a large audit database outlasted start's
     # 60-second readiness wait, and the upgrade rolled back while it was
