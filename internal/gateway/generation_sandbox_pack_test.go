@@ -157,3 +157,30 @@ func TestSandboxPackDigestMatchesTheBundleScope(t *testing.T) {
 		t.Fatalf("bundle pack digest differs after installation: signed %+v installed %+v", signed.Components, installed.Components)
 	}
 }
+
+// Signing reads authenticated bundle contents as data before the managed
+// installer promotes them to administrator ownership. Runtime must retain
+// its stricter ownership check for exactly the same files.
+func TestOfflineSandboxPackDigestReadsSignerOwnedFiles(t *testing.T) {
+	if os.Geteuid() <= 0 {
+		t.Skip("requires an unprivileged POSIX signer")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "sandboxes")
+	if err := os.MkdirAll(filepath.Join(dir, "corp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "corp", "pack.yaml"), []byte("version: 1\nname: corp\nextends: strict\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	cfg.OpenShell.Enabled, cfg.OpenShell.PackDir, cfg.OpenShell.Admin.RequiredPack = true, dir, "corp"
+	signed, err := buildGeneration(t.Context(), generationInputs{cfg: cfg, bundleRoot: root, offline: true})
+	if err != nil || signed.Components["sandbox_pack:corp"] == "" {
+		t.Fatalf("signer-owned bundle pack could not be digested: %v", err)
+	}
+	if _, err := buildGeneration(t.Context(), generationInputs{cfg: cfg, bundleRoot: root}); err == nil ||
+		!strings.Contains(err.Error(), "administrator-owned") {
+		t.Fatalf("runtime accepted a signer-owned pack before promotion: %v", err)
+	}
+}

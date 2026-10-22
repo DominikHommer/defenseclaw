@@ -351,7 +351,14 @@ func loadSandboxRequiredPacks(cfg *config.Config, scope digestScope, offline boo
 		pack, done := loaded[ref]
 		if !done {
 			var packErr *packs.Error
-			pack, err = loadSandboxGenerationPack(subject, ref, cfg.OpenShell.PackDir)
+			if offline {
+				// A signer hashes staged bundle data before the installer
+				// promotes it to administrator ownership. This generation is
+				// never published; runtime still uses the trusted loader.
+				pack, err = packs.LoadRequired(subject, ref, cfg.OpenShell.PackDir, false)
+			} else {
+				pack, err = loadSandboxGenerationPack(subject, ref, cfg.OpenShell.PackDir)
+			}
 			switch {
 			case err == nil:
 				loaded[ref] = pack
