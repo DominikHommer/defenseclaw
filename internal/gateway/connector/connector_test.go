@@ -9982,10 +9982,6 @@ func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
 	}
 }
 
-// TestHookScript_EnvFailModeOnlyTightens covers GAP-0315: an inherited
-// DEFENSECLAW_FAIL_MODE=open cannot reopen a per-user hook installed closed,
-// and DEFENSECLAW_FAIL_MODE=closed still closes one installed open. Only the
-// persisted mode (guardrail fail-mode) opens a hook.
 // TestHookScript_EnvFailModeIsNotRead: the installed mode is the hook's fail
 // mode. DEFENSECLAW_FAIL_MODE in the agent's environment neither reopens a
 // closed hook nor closes an open one (1.0.4 lead directive), so status, which

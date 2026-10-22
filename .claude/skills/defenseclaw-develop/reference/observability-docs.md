@@ -31,7 +31,7 @@ IDs live only in `reference/checklist.md`. These rows add detail and carry no ID
 
 ## Checklist: new telemetry field
 
-1. Edit the registry YAML. 2. State privacy class and redaction behavior. 3. `make telemetry-generate`. 4. Commit generated outputs. 5. `make telemetry-check`. 6. Update the docs page under `docs-site/content/docs/observability/`.
+1. Edit the registry YAML. 2. State privacy class and redaction behavior. 3. `make telemetry-generate`. 4. Commit generated outputs. 5. `make telemetry-check`. 6. Update the docs page under `docs-site/content/docs/reference/observability/`.
 
 ## Where it lives
 
