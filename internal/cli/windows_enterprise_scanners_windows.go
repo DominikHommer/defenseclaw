@@ -390,7 +390,7 @@ var windowsScannerRuntimeProductionSigners = func() ([]string, error) {
 	if err := yaml.Unmarshal(trimWindowsJSONBOM(body), &document); err != nil {
 		return nil, fmt.Errorf("%s does not parse %s", path, windowsEnterpriseYAMLProblem(err))
 	}
-	configured, err := document.configured(path)
+	configured, err := windowsEnterpriseTrustFromDocument(path, document)
 	if err != nil {
 		return nil, err
 	}

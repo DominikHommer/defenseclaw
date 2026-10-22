@@ -426,11 +426,14 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 		}
 		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("the config %s does not parse %s; fix it and run again", path, windowsEnterpriseYAMLProblem(err))
 	}
-	return document.configured(path)
+	return windowsEnterpriseTrustFromDocument(path, document)
 }
 
 // windowsEnterpriseTrustDocument is the enterprise.trust part of a config.
-type windowsEnterpriseTrustDocument struct {
+// It stays an unnamed struct type (an alias), so a YAML type error names the
+// destination "struct" and windowsEnterpriseYAMLProblem says "a mapping of
+// keys is expected".
+type windowsEnterpriseTrustDocument = struct {
 	Enterprise struct {
 		Trust struct {
 			Mode           string   `yaml:"mode"`
@@ -439,8 +442,9 @@ type windowsEnterpriseTrustDocument struct {
 	} `yaml:"enterprise"`
 }
 
-// configured validates the enterprise.trust the config at path carries.
-func (document windowsEnterpriseTrustDocument) configured(path string) (windowsEnterpriseConfiguredTrust, error) {
+// windowsEnterpriseTrustFromDocument validates the enterprise.trust the
+// config at path carries.
+func windowsEnterpriseTrustFromDocument(path string, document windowsEnterpriseTrustDocument) (windowsEnterpriseConfiguredTrust, error) {
 	configured := windowsEnterpriseConfiguredTrust{path: path}
 	switch mode := strings.ToLower(strings.TrimSpace(document.Enterprise.Trust.Mode)); mode {
 	case "", windowsEnterpriseTrustAuthenticode, windowsEnterpriseTrustHashPinned:
