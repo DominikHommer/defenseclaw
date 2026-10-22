@@ -57,6 +57,9 @@ func TestParseV8YAMLRefusesABadProfileAtTheProfile(t *testing.T) {
 		if !errors.As(err, &yamlErr) || yamlErr.Code != V8YAMLErrorProfileInvalid || !strings.Contains(yamlErr.Summary, "fixed to standalone on Linux") {
 			t.Fatalf("ParseV8YAML = %v", err)
 		}
+		if !strings.Contains(yamlErr.Action, "changing the profile needs a reinstall of the deployment") {
+			t.Fatalf("profile refusal omits the deployment recovery: %v", err)
+		}
 	})
 	t.Run("matching pin", func(t *testing.T) {
 		t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)

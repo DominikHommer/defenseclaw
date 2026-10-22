@@ -350,7 +350,29 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
-OUTPUT=$(echo "$RESULT" | _dc_jq -c '.claude_code_output // empty' 2>/dev/null) || {
+{{if and (not .Managed) (not .Sandbox)}}# Decode the action and its structured output together. Successful personal
+# hooks need one parser process rather than two (#1130). The fallback keeps
+# working on supported hosts without jq; managed/Secure Client renders retain
+# their delivery contract.
+if command -v jq >/dev/null 2>&1; then
+  unset RESPONSE_FIELDS
+  RESPONSE_FIELDS=$(printf '%s' "$RESULT" | jq -ers '
+    if length != 1 or (.[0] | type) != "object" then error("invalid response") else .[0] end
+    | if (.action == "allow" or .action == "alert" or .action == "block" or .action == "confirm")
+         and (.claude_code_output == null or (.claude_code_output | type) == "object")
+      then .action, (.claude_code_output // empty | tojson)
+      else error("invalid response fields") end' 2>/dev/null) || fail_response "invalid JSON response"
+  ACTION="${RESPONSE_FIELDS%%$'\n'*}"
+  OUTPUT=""
+  if [ "$ACTION" != "$RESPONSE_FIELDS" ]; then
+    OUTPUT="${RESPONSE_FIELDS#*$'\n'}"
+  fi
+  unset RESPONSE_FIELDS
+  if [ -n "$OUTPUT" ]; then
+    printf '%s\n' "$OUTPUT"
+  fi
+else
+{{end}}OUTPUT=$(echo "$RESULT" | _dc_jq -c '.claude_code_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
@@ -360,7 +382,8 @@ fi
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
-# alert is advisory (would_block=false): the notice printed above is all
+{{if and (not .Managed) (not .Sandbox)}}fi
+{{end}}# alert is advisory (would_block=false): the notice printed above is all
 # Claude Code gets, and the tool runs, as with allow.
 case "$ACTION" in
   allow|alert|block|confirm) ;;
