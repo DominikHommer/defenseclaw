@@ -14,7 +14,7 @@ import (
 // GAP-0359: equal config bytes can move from the base policy to a signed
 // bundle, or between bundles. The gateway must observe each new identity.
 func TestEqualConfigBytesRecordANewBundleIdentity(t *testing.T) {
-	path := writeTestConfig(t, "enterprise:\n  profile: standalone\nguardrail:\n  mode: observe\nobservability: {}\n")
+	path := writeTestConfig(t, "deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nguardrail:\n  mode: observe\nobservability: {}\n")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
