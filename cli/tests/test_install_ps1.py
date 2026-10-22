@@ -3130,6 +3130,7 @@ def test_native_a_busy_hook_during_interrupted_resume_closes_the_hooks(tmp_path:
     assert hook.read_text(encoding="ascii") == "old defenseclaw-hook.exe"
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_previous_hook_calls_drain_while_new_hook_traffic_continues() -> None:
     script = _ps1_function("Wait-PreviousHookExit") + r"""
 $ErrorActionPreference = 'Stop'
@@ -3152,6 +3153,7 @@ if ($script:passes -ne 3) { throw 'did not drain only the old calls' }
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_unproven_previous_hook_refuses_with_the_checked_local_retry() -> None:
     script = _ps1_function("Wait-PreviousHookExit") + r"""
 $ErrorActionPreference = 'Stop'
