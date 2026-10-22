@@ -164,6 +164,20 @@ type GuardRequest struct {
 	// StopAtFirstBlocking ends a remove-mode evaluation at the first
 	// unapproved finding; the hook needs only the decision.
 	StopAtFirstBlocking bool
+	// BeforeRemove, when set, runs before cleanup changes a user file: before
+	// it moves a plugin aside or rewrites a config without a foreign hook. An
+	// error leaves that hook in place and reported. The guardian takes the
+	// machine's foreign-hook cleanup fence here, so the fence covers only the
+	// interval from the first removal through the ledger commit.
+	BeforeRemove func() error
+}
+
+// beforeRemove runs r.BeforeRemove, if any.
+func (r GuardRequest) beforeRemove() error {
+	if r.BeforeRemove == nil {
+		return nil
+	}
+	return r.BeforeRemove()
 }
 
 // Scan budgets. Real hook trees are a few small files.

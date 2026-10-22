@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -54,33 +55,76 @@ func ensureEnterpriseForeignHookFenceFile(path string) error {
 	return enterpriseHookAuthorizationFileTrustCheck(path)
 }
 
-// withEnterpriseForeignHookCleanupFence closes the read-to-remove interval.
-// The gateway holds this lock until an allow has been sent, while the guardian
-// holds it across cleanup and the removal-ledger commit. If it cannot be
-// acquired, cleanup does not start and the existing foreign-hook guard stays.
-// The fence belongs to the machine guardian, even when the cleanup target
-// keeps its hook scripts in a different per-user data directory.
-func withEnterpriseForeignHookCleanupFence(fn func() error) error {
+// enterpriseForeignHookCleanupQueue admits this guardian's cleanups to the
+// machine's foreign-hook cleanup fence one at a time, in arrival order. A
+// cleanup waiting for another one of this process waits here, within its
+// own bound, and never against enterpriseForeignHookCleanupFenceWait: that
+// budget is only for the gateway's exchanges, each of which holds the fence
+// file for one bounded allow (gateway foreignHookFenceWait).
+var enterpriseForeignHookCleanupQueue = make(chan struct{}, 1)
+
+// enterpriseForeignHookCleanupFenceWait bounds the wait for the fence file
+// once this guardian's turn has come. Replaceable in tests.
+var enterpriseForeignHookCleanupFenceWait = 5 * time.Second
+
+// enterpriseForeignHookCleanupQueueWait bounds an in-process cleanup's wait
+// for its turn (withEnterpriseForeignHookCleanupFence). Every holder is
+// bounded: a per-user worker by its timeout, an in-process cleanup by one
+// connector's cleanup of one account.
+const enterpriseForeignHookCleanupQueueWait = 2 * time.Minute
+
+// acquireEnterpriseForeignHookCleanupFence takes the machine's foreign-hook
+// cleanup fence: this guardian's turn within ctx, then the fence file within
+// enterpriseForeignHookCleanupFenceWait. The gateway holds the same file
+// until an allow has been sent; the guardian holds it from a cleanup's first
+// removal through the removal-ledger commit. On error nothing is held and
+// the caller removes nothing: the existing foreign-hook guard stays. The
+// fence belongs to the machine guardian, even when the cleanup target keeps
+// its hook scripts in a different per-user data directory. The returned
+// function releases the fence and may be called more than once.
+func acquireEnterpriseForeignHookCleanupFence(ctx context.Context) (func(), error) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return fn()
+		return func() {}, nil
 	}
 	dataDir := cfg.DataDir
 	if !filepath.IsAbs(dataDir) {
-		return errors.New("foreign-hook cleanup data directory is unverified")
+		return nil, errors.New("foreign-hook cleanup data directory is unverified")
 	}
 	dir, err := prepareEnterpriseHookAuthorizationDir(dataDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	path := filepath.Join(dir, enterprisepolicy.ForeignHookCleanupFenceFile)
 	if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
-		return err
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	select {
+	case enterpriseForeignHookCleanupQueue <- struct{}{}:
+	case <-ctx.Done():
+		return nil, fmt.Errorf("foreign-hook cleanup fence unavailable: another cleanup holds it: %w", ctx.Err())
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, enterpriseForeignHookCleanupFenceWait)
 	defer cancel()
-	unlock, err := enterprisepolicy.LockForeignHookRemovals(ctx, path)
+	unlock, err := enterprisepolicy.LockForeignHookRemovals(lockCtx, path)
 	if err != nil {
-		return fmt.Errorf("foreign-hook cleanup fence unavailable: %w", err)
+		<-enterpriseForeignHookCleanupQueue
+		return nil, fmt.Errorf("foreign-hook cleanup fence unavailable: %w", err)
+	}
+	return sync.OnceFunc(func() {
+		unlock()
+		<-enterpriseForeignHookCleanupQueue
+	}), nil
+}
+
+// withEnterpriseForeignHookCleanupFence runs one in-process cleanup (a
+// single connector of a single account, with its ledger commit) under the
+// cleanup fence. If the fence cannot be taken, fn does not run.
+func withEnterpriseForeignHookCleanupFence(fn func() error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), enterpriseForeignHookCleanupQueueWait)
+	defer cancel()
+	unlock, err := acquireEnterpriseForeignHookCleanupFence(ctx)
+	if err != nil {
+		return err
 	}
 	defer unlock()
 	return fn()

@@ -146,6 +146,11 @@ func cleanUserSources(req GuardRequest, backupDir string, first func(hookSource)
 					}
 					continue
 				}
+				if err := req.beforeRemove(); err != nil {
+					errs = append(errs, err)
+					result.Reported = append(result.Reported, finding)
+					continue
+				}
 				if err := movePluginAside(finding.Path, backupDir); err != nil {
 					errs = append(errs, err)
 					result.Reported = append(result.Reported, finding)
@@ -283,6 +288,10 @@ func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, resul
 	}
 	rendered, err := encodeOrdered(doc)
 	if err != nil {
+		return err
+	}
+	if err := req.beforeRemove(); err != nil {
+		result.Reported = append(result.Reported, removed...)
 		return err
 	}
 	if err := backupUserFile(source.path, data, backupDir); err != nil {

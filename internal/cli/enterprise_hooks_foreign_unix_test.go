@@ -66,7 +66,7 @@ func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
 			HookBinary: "/opt/defenseclaw/bin/defenseclaw-hook",
 			Policy:     enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RouteMachinePolicy, ForeignHooks: config.ForeignHooksRemove, Guard: true},
 		}},
-	}, time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC))
+	}, time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC), nil)
 	report := reports["cursor"]
 	if report.Error != "" || len(report.Removed) != 1 || report.BackupDir == "" {
 		t.Fatalf("cleanup report %+v", report)

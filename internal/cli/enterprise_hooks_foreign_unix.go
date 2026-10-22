@@ -279,6 +279,15 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			cleanup.OwnedCommands = perUserOwnedHookCommands(cleanup.Connector, account.Home, filepath.Join(account.Home, ".defenseclaw"))
 			request.ForeignCleanup = append(request.ForeignCleanup, cleanup)
 		}
+		if len(request.ForeignCleanup) > 0 && cfg != nil && cfg.StandaloneEnterprise() {
+			// The worker takes the cleanup fence only for each connector's
+			// removals, and this session commits them to the ledger before
+			// the worker goes on.
+			uid, home := strconv.Itoa(account.UID), account.Home
+			request.cleanupFence = newEnterpriseForeignHookFenceSession(request.ForeignCleanup, func(connector string, removed []string) {
+				recordEnterpriseForeignHookRemovals(stderr, uid, home, connector, removed)
+			})
+		}
 		names := leftovers(account.User)
 		if len(cleanups) == 0 && len(names) == 0 && vscode == nil {
 			continue
@@ -339,30 +348,33 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	for _, account := range stale {
 		staleUIDs[account.UID] = true
 	}
-	// Each account's removals are recorded for the gateway as soon as its
-	// worker ends, so its agent processes that started before them stay
-	// denied (recordEnterpriseForeignHookRemovals). Only the connectors the
-	// job asked for count: the worker runs as the user.
+	// Each account's removals are recorded for the gateway so its agent
+	// processes that started before them stay denied
+	// (recordEnterpriseForeignHookRemovals): through the worker's fence
+	// commit, or here, as soon as its worker ends, for what no commit
+	// recorded. A fence the worker took and never committed is released
+	// only after that. Only the connectors the job asked for count: the
+	// worker runs as the user.
 	recordRemovals := func(outcome enterpriseHookWorkerOutcome) {
+		session := outcome.Job.Request.cleanupFence
 		for _, cleanup := range outcome.Job.Request.ForeignCleanup {
+			if session != nil && session.isCommitted(cleanup.Connector) {
+				continue
+			}
 			if report, ok := outcome.Response.Cleanup[cleanup.Connector]; ok {
 				recordEnterpriseForeignHookRemovals(stderr, strconv.Itoa(outcome.Job.Account.UID), outcome.Job.Account.Home,
 					cleanup.Connector, boundedStrings(report.Removed, 32))
 			}
+		}
+		if session != nil {
+			session.release()
 		}
 	}
 	removed := 0
 	createdDirs := map[int][]string{}
 	var auditRepairs []enterpriseHookGuardianAuditReport
 	reportedUIDs := map[int]bool{}
-	guardCleanup := func(job enterpriseHookWorkerJob, run func()) error {
-		if len(job.Request.ForeignCleanup) == 0 {
-			run()
-			return nil
-		}
-		return withEnterpriseForeignHookCleanupFence(func() error { run(); return nil })
-	}
-	outcomes := runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, recordRemovals, guardCleanup)
+	outcomes := runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, recordRemovals)
 	for _, outcome := range outcomes {
 		user := outcome.Job.Account.User
 		if outcome.Err != nil {
@@ -614,7 +626,10 @@ func enterpriseForeignHookUserEnvRedirects(enterprisehooks.TargetCredentials, en
 }
 
 // runEnterpriseHookWorkerForeignCleanup runs inside the worker as the user.
-func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, now time.Time) map[string]enterpriseHookWorkerCleanupReport {
+// With a fence, each connector asks for it right before its first removal
+// and commits its removals once its cleanup ends, so the fence never covers
+// a scan that removes nothing or another task of the worker.
+func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, now time.Time, fence enterpriseHookWorkerCleanupFence) map[string]enterpriseHookWorkerCleanupReport {
 	out := map[string]enterpriseHookWorkerCleanupReport{}
 	home := filepath.Clean(request.Home)
 	for _, cleanup := range request.ForeignCleanup {
@@ -626,7 +641,7 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 		// hooks recorded the config locations their agents' environment
 		// redirects to (XDG_CONFIG_HOME, COPILOT_HOME, CODEX_HOME, ...).
 		redirects, redirectErr := enterprisepolicy.LoadEnvRedirects(home, name)
-		result, err := enterprisepolicy.CleanUserForeignHooksWithRedirects(enterprisepolicy.GuardRequest{
+		guard := enterprisepolicy.GuardRequest{
 			Connector:     name,
 			GOOS:          runtime.GOOS,
 			Home:          home,
@@ -635,11 +650,28 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 			Policy:        cleanup.Policy,
 			Getenv:        os.Getenv,
 			OwnedCommands: cleanup.OwnedCommands,
-		}, redirects, now)
+		}
+		held := false
+		var fenceErr error
+		if fence != nil {
+			// A refusal stands for the rest of this connector's cleanup:
+			// its other removals do not wait for the fence again.
+			guard.BeforeRemove = func() error {
+				if !held && fenceErr == nil {
+					fenceErr = fence.lock(name)
+					held = fenceErr == nil
+				}
+				return fenceErr
+			}
+		}
+		result, err := enterprisepolicy.CleanUserForeignHooksWithRedirects(guard, redirects, now)
 		err = errors.Join(err, redirectErr)
 		report := enterpriseHookWorkerCleanupReport{BackupDir: result.BackupDir}
 		for _, finding := range result.Removed {
 			report.Removed = append(report.Removed, finding.Path)
+		}
+		if held {
+			err = errors.Join(err, fence.commit(name, boundedStrings(report.Removed, 32)))
 		}
 		for _, finding := range result.Reported {
 			report.Reported = append(report.Reported, finding.Path+" ("+finding.Reason+")")

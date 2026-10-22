@@ -286,6 +286,10 @@ func cleanHermesYAMLSource(scan *guardScan, source hookSource, backupDir string,
 	if err != nil {
 		return err
 	}
+	if err := req.beforeRemove(); err != nil {
+		result.Reported = append(result.Reported, removed...)
+		return err
+	}
 	if err := backupUserFile(source.path, data, backupDir); err != nil {
 		return err
 	}
