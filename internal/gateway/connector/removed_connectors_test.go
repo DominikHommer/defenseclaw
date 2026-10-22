@@ -133,7 +133,14 @@ type removedHarness struct {
 
 func newRemovedHarness(t *testing.T) *removedHarness {
 	t.Helper()
-	home := t.TempDir()
+	// The home is not named after the test, as t.TempDir is: a comma or a
+	// # in a test's name made every path under it one the OpenHands check
+	// cannot rule out, so a case passed for its name alone.
+	home, err := os.MkdirTemp("", "removed-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
 	restoreHome, err := BindUserHomeDir(home)
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +148,9 @@ func newRemovedHarness(t *testing.T) *removedHarness {
 	t.Cleanup(restoreHome)
 	t.Setenv("OMNIGENT_CONFIG_HOME", "")
 	t.Setenv("OMNIGENT_CONFIG", "")
+	// The startup file a shell reads when these are set is checked too.
+	t.Setenv("BASH_ENV", "")
+	t.Setenv("ENV", "")
 	notices := &bytes.Buffer{}
 	previous := removedConnectorNotices
 	removedConnectorNotices = notices
@@ -1570,6 +1580,32 @@ func TestRemovedOpenHandsTeardownChecksTheHooksItPutsBack(t *testing.T) {
 		writeRemovedFixture(t, path, "#!/bin/sh\n"+body, 0o700)
 		return path
 	}
+	// startup makes a startup file (name, under home) that runs a link to
+	// the script, and a wrapper (text) the hook runs; it returns the files
+	// it made, the wrapper first.
+	startup := func(t *testing.T, h *openHandsHarness, name, text string) []string {
+		t.Helper()
+		link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "relay"))
+		file := filepath.Join(h.home, name)
+		writeRemovedFixture(t, file, link+"\n", 0o600)
+		path := filepath.Join(h.home, "tools", "audit")
+		writeRemovedFixture(t, path, text, 0o700)
+		return []string{path, file, link}
+	}
+	// startupRun is startup with a plain wrapper the command runs.
+	startupRun := func(name, command string) func(t *testing.T, h *openHandsHarness) (string, []string) {
+		return func(t *testing.T, h *openHandsHarness) (string, []string) {
+			made := startup(t, h, name, "#!/bin/sh\nexit 0\n")
+			return command + " " + made[0], made
+		}
+	}
+	// startupWrapper is startup with a wrapper (text) the hook runs.
+	startupWrapper := func(name, text string) func(t *testing.T, h *openHandsHarness) (string, []string) {
+		return func(t *testing.T, h *openHandsHarness) (string, []string) {
+			made := startup(t, h, name, text)
+			return made[0], made
+		}
+	}
 	for _, tc := range []struct {
 		name string
 		// command returns the saved hook command and the files it made.
@@ -1842,6 +1878,65 @@ func TestRemovedOpenHandsTeardownChecksTheHooksItPutsBack(t *testing.T) {
 			writeRemovedFixture(t, path, string(removedTestImage(t, "windows"))+"\nexec "+link+"\n", 0o700)
 			return path, []string{path, link}
 		}},
+		// Review fixes (G-deadcode loop round 4): a shell reads startup
+		// files the command does not show with no option too (zsh, csh,
+		// fish, the file BASH_ENV or ENV names), sudo -i starts a login
+		// shell, and a wrapper starts one through its #! line (#!/bin/sh -l,
+		// env -S bash -l, zsh, a variable env sets) or a command in it
+		// (exec /bin/sh -l, bash -l, $SHELL, sudo -i, or a shell given the
+		// hook's own -l).
+		{"zsh, which reads .zshenv", startupRun(".zshenv", "/bin/zsh")},
+		{"zsh that env runs", startupRun(".zshenv", "/usr/bin/env /bin/zsh")},
+		{"csh, which reads .cshrc", startupRun(".cshrc", "/bin/csh")},
+		{"fish, which reads config.fish", startupRun(".config/fish/config.fish", "/usr/bin/fish")},
+		{"sudo -i, which starts a login shell", startupRun(".profile", "/usr/bin/sudo -i")},
+		{"script, which runs $SHELL", startupRun(".zshenv", "/usr/bin/script")},
+		{"a shell under another name", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			// The system's bash (a program in a shell directory) and a hard
+			// link to it under another name.
+			command, made := startupRun(".profile", "")(t, h)
+			system := filepath.Join(h.home, "system-bin")
+			bash := filepath.Join(system, "bash")
+			writeRemovedFixture(t, bash, string(removedTestImage(t, runtime.GOOS)), 0o700)
+			previous := removedShellDirs
+			removedShellDirs = append([]string{system}, previous...)
+			t.Cleanup(func() { removedShellDirs = previous })
+			shell := filepath.Join(h.home, "bin", "audit-runner")
+			if err := os.MkdirAll(filepath.Dir(shell), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(bash, shell); err != nil {
+				t.Fatal(err)
+			}
+			return shell + " -l" + command, append(made, bash, shell)
+		}},
+		{"bash with BASH_ENV set", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			command, made := startupRun(".bashenv", "/bin/bash")(t, h)
+			t.Setenv("BASH_ENV", made[1])
+			return command, made
+		}},
+		{"bash with a BASH_ENV the shell expands", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			command, made := startupRun(".bashenv", "/bin/bash")(t, h)
+			t.Setenv("BASH_ENV", "$HOME/.bashenv")
+			return command, made
+		}},
+		{"a Korn shell with ENV set", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			command, made := startupRun(".kshrc", "/bin/ksh")(t, h)
+			t.Setenv("ENV", made[1])
+			return command, made
+		}},
+		{"a #! line that passes the shell -l", startupWrapper(".profile", "#!/bin/sh -l\nexit 0\n")},
+		{"a #! line that runs bash -l through env -S", startupWrapper(".bash_profile", "#!/usr/bin/env -S bash -l\nexit 0\n")},
+		{"a #! line that runs zsh", startupWrapper(".zshenv", "#!/bin/zsh\nexit 0\n")},
+		{"a #! line that sets BASH_ENV through env", startupWrapper(".bashenv", "#!/usr/bin/env BASH_ENV=.bashenv bash\nexit 0\n")},
+		{"a wrapper that runs a login shell", startupWrapper(".profile", "#!/bin/sh\nexec /bin/sh -l -c true\n")},
+		{"a wrapper that runs bash -l found on PATH", startupWrapper(".bash_profile", "#!/bin/sh\nexec bash -l -c true\n")},
+		{"a wrapper that runs $SHELL", startupWrapper(".zshenv", "#!/bin/sh\nexec \"$SHELL\" -c true\n")},
+		{"a wrapper that runs sudo -i", startupWrapper(".profile", "#!/bin/sh\nexec sudo -i true\n")},
+		{"a wrapper that gives a shell the hook's -l", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			made := startup(t, h, ".profile", "#!/bin/sh\nexec /bin/sh \"$@\"\n")
+			return made[0] + " -l", made
+		}},
 	} {
 		for _, back := range []bool{false, true} {
 			mode := "put back by the cleanup"
@@ -1916,12 +2011,17 @@ func TestRemovedOpenHandsTeardownTombstonesWhenEverySavedHookIsRuledOut(t *testi
 			writeRemovedFixture(t, compiled, string(removedTestImage(t, runtime.GOOS))+"/usr/lib/x\x00", 0o700)
 			// A wrapper that runs a quoted path with a blank (checked whole,
 			// and the rest of the string is part of it), a URL and /dev/null.
+			// BASH_ENV names a plain file: bash reads it, and it runs nothing.
+			bashEnv := filepath.Join(h.home, ".bashenv")
+			writeRemovedFixture(t, bashEnv, "umask 077\n", 0o600)
+			t.Setenv("BASH_ENV", bashEnv)
 			quoted := filepath.Join(h.home, "tools", "run-quoted.sh")
 			writeRemovedFixture(t, quoted, "#!/bin/sh\n# runs my audit hook\ncurl -fsS http://127.0.0.1:9/audit || true\nexec \""+spaced+"\" --audit \"$@\" 2>/dev/null\n", 0o700)
 			saved := openHandsHooksRunning(t,
 				"/usr/local/bin/audit-hook",
 				plain,
 				"/bin/sh "+plain+" --audit -x --log="+filepath.Join(h.home, "tools", "audit.log"),
+				"/bin/bash "+plain,
 				"'"+spaced+"'",
 				compiled+" --config="+filepath.Join(h.home, "tools", "missing.toml"),
 				compiled+" -v --paths=/dev/null,"+filepath.Join(h.home, "tools", "missing.d")+" /dev/null",
@@ -2423,6 +2523,63 @@ func TestRemovedResolvedPaths(t *testing.T) {
 		got := removedResolvedPaths(tc.value)
 		if strings.Join(got, "|") != strings.Join(tc.want, "|") {
 			t.Errorf("removedResolvedPaths(%q) = %q, want %q", tc.value, got, tc.want)
+		}
+	}
+}
+
+// Review loop round 4 (G-deadcode): the one saved hook runs a login shell
+// (/bin/sh -l) over a plain script and ~/.profile runs a link to the hook
+// script. The shell's -l is its own option, so the hook may run the script:
+// nothing is put back and the script is not made the tombstone.
+func TestRemovedOpenHandsTeardownKeepsALoginShellHookAlone(t *testing.T) {
+	for _, back := range []bool{false, true} {
+		t.Run(map[bool]string{false: "put back by the cleanup", true: "already back to the saved copy"}[back], func(t *testing.T) {
+			h := newOpenHandsHarness(t, false)
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "relay"))
+			profile := filepath.Join(h.home, ".profile")
+			writeRemovedFixture(t, profile, link+"\n", 0o600)
+			plain := filepath.Join(h.home, "tools", "plain.sh")
+			writeRemovedFixture(t, plain, "exit 0\n", 0o700)
+			saved := openHandsHooksRunning(t, "/bin/sh -l "+plain)
+			h.setUpOver(t, saved, back)
+			before := h.state(t)
+			for path, body := range removedSnapshot(t, link, profile, plain) {
+				before[path] = body
+			}
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown = %v, want the state left for manual cleanup", err)
+			}
+			requireRemovedSnapshot(t, "a teardown that cannot rule out a login shell hook", before)
+			if notice := h.notices.String(); strings.Count(notice, "WARNING") != 1 || !strings.Contains(notice, h.script) {
+				t.Fatalf("notice = %q, want one warning naming %s", notice, h.script)
+			}
+		})
+	}
+}
+
+// removedShellText reads a #! script only when its shell is one the check
+// reads and the line gives it no option and sets no variable.
+func TestRemovedShellTextReadsOnlyAPlainShellLine(t *testing.T) {
+	for _, tc := range []struct {
+		text, interpreter string
+		ok                bool
+	}{
+		{"#!/bin/sh\n", "/bin/sh", true},
+		{"#!/usr/bin/env sh\n", "sh", true},
+		{"#!/usr/bin/env -i bash\n", "bash", true},
+		{"#!/bin/sh -l\n", "", false},
+		{"#!/bin/bash -e\n", "", false},
+		{"#!/usr/bin/env -S bash -l\n", "", false},
+		{"#!/usr/bin/env BASH_ENV=/tmp/x bash\n", "", false},
+		{"#!/usr/bin/env ENV=/tmp/x sh\n", "", false},
+		{"#!/bin/zsh\n", "/bin/zsh", false},
+		{"#!/usr/bin/env\n", "", false},
+		{"#!/usr/bin/python3\n", "/usr/bin/python3", false},
+		{"exit 0\n", "", true},
+	} {
+		interpreter, ok := removedShellText("/tmp/audit", []byte(tc.text))
+		if interpreter != tc.interpreter || ok != tc.ok {
+			t.Errorf("removedShellText(%q) = %q, %v; want %q, %v", tc.text, interpreter, ok, tc.interpreter, tc.ok)
 		}
 	}
 }

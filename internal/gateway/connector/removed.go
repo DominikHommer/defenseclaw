@@ -646,8 +646,12 @@ func (c removedOpenHandsConnector) hooksThatMayRunScript(p *removedCleanupPlan, 
 // value) given to a program other than a shell. A program may run what an
 // argument names: a command found on PATH (env -S relay, env 30), a module
 // (python3 -mrelay), a command line split at its blanks (env -S '/bin/env
-// relay') or a list (--require=/a,relay), and a shell's own options may run
-// its startup files (sh -l). So an option with a value is ruled out only
+// relay') or a list (--require=/a,relay), and a shell (by its name, what it
+// links to, or the shell it is a hard link of) may run its startup files:
+// with its own options (sh -l, sudo -i), always (zsh, csh, tcsh, fish, and
+// su, login, script, screen and tmux, which start one), and the file
+// BASH_ENV or ENV names (ruled out only as a plain absolute path that is
+// ruled out). So an option with a value is ruled out only
 // when the value is an absolute path, an absolute path is ruled out only
 // when it and every part of it (split at blanks, :, , and =) is an absolute
 // path that is ruled out, and a number, any other word, a cluster of flags
@@ -668,7 +672,11 @@ func (c removedOpenHandsConnector) hooksThatMayRunScript(p *removedCleanupPlan, 
 // substitution in a path, a path that goes on past the plain characters the
 // check reads (an escape, a quote that joins more text, any other character)
 // or that ends a longer word, a script in a language other than the shell,
-// or a command found on PATH while a PATH directory holds the script.
+// or a command found on PATH while a PATH directory holds the script. A
+// wrapper may also start a shell that reads its startup files: a #! line
+// that passes its shell an option (#!/bin/sh -l) or sets a variable through
+// env (BASH_ENV), or a word outside a comment that names a shell or a
+// program that starts one (bash -l, su -, sudo -i), or $SHELL.
 type removedScriptCheck struct {
 	script  os.FileInfo
 	needles [][]byte // lower case
@@ -676,6 +684,8 @@ type removedScriptCheck struct {
 	seen    map[string]bool
 	files   int
 	onPath  *bool
+	// shellFiles are the shells in removedShellDirs, by path.
+	shellFiles map[string]os.FileInfo
 }
 
 const (
@@ -778,8 +788,9 @@ func (c *removedScriptCheck) commandMayRun(command string) bool {
 	if !ok || len(words) == 0 {
 		return true
 	}
-	// shellOptions: the last program named is a shell and no operand came
-	// after it, so an option is the shell's own (-l reads its profile).
+	// shellOptions: the last program named is a shell (or starts one) and
+	// no operand came after it, so an option is the shell's own (-l reads
+	// its profile, sudo -i starts a login shell).
 	shellOptions := false
 	for i, word := range words {
 		if c.names([]byte(word)) {
@@ -806,7 +817,11 @@ func (c *removedScriptCheck) commandMayRun(command string) bool {
 		case c.argumentMayRun(word):
 			return true
 		}
-		shellOptions = removedRunsShell(word)
+		shell, mayRun := c.shellMayRun(word)
+		if mayRun {
+			return true
+		}
+		shellOptions = shell
 	}
 	return false
 }
@@ -838,16 +853,132 @@ var removedCommandShells = map[string]bool{
 	"oksh": true, "ash": true, "csh": true, "tcsh": true, "fish": true, "yash": true, "posh": true, "busybox": true,
 }
 
-// removedRunsShell reports whether path is a shell, by its name or the name
-// of what it links to (a version suffix such as bash5.2 dropped).
-func removedRunsShell(path string) bool {
-	names := []string{filepath.Base(path)}
+// removedStartupShells are the shells that read startup files the command
+// does not show even when they run a script with no option: zsh (.zshenv),
+// csh and tcsh (.cshrc, .tcshrc) and fish (config.fish).
+var removedStartupShells = map[string]bool{"zsh": true, "csh": true, "tcsh": true, "fish": true}
+
+// removedLoginPrograms start a shell of their own. Those set true always do
+// (su, login, and script, screen and tmux, which run $SHELL; the shell reads
+// the user's startup files); the others do with an option (sudo -i, sudo
+// -s), so their options are taken as a shell's.
+var removedLoginPrograms = map[string]bool{
+	"su": true, "runuser": true, "login": true, "script": true, "screen": true, "tmux": true,
+	"sudo": false, "doas": false, "pkexec": false,
+}
+
+// removedShellDirs are where a system keeps its shells. A program that is
+// one of them under another name (a hard link) is that shell.
+var removedShellDirs = []string{"/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", "/sbin", "/usr/sbin"}
+
+// removedShellEnvFiles name the startup file a shell reads when they are
+// set: bash reads BASH_ENV when it runs a script, a Korn shell ENV.
+var removedShellEnvFiles = []string{"BASH_ENV", "ENV"}
+
+// removedProgramName is the name a program goes by: lower case, with a
+// version suffix such as bash5.2 dropped.
+func removedProgramName(path string) string {
+	return strings.TrimRight(strings.ToLower(filepath.Base(path)), "0123456789.-")
+}
+
+// removedStartsShell reports whether a program name (removedProgramName) is
+// a shell or a program that starts one.
+func removedStartsShell(name string) bool {
+	_, login := removedLoginPrograms[name]
+	return removedCommandShells[name] || login
+}
+
+// shellMayRun reports whether path is a shell or a program that starts one,
+// by its name, the name of what it links to or the shell in
+// removedShellDirs it is a hard link of (shell: its options are its own),
+// and whether it may run the script with no option given: through
+// the startup files it always reads, or the file BASH_ENV or ENV names when
+// that is not a plain absolute path that is ruled out.
+func (c *removedScriptCheck) shellMayRun(path string) (shell, mayRun bool) {
+	names := []string{removedProgramName(path)}
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		names = append(names, filepath.Base(resolved))
+		names = append(names, removedProgramName(resolved))
+	}
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		names = append(names, c.shellNamesOf(info)...)
 	}
 	for _, name := range names {
-		if removedCommandShells[strings.TrimRight(strings.ToLower(name), "0123456789.-")] {
+		if !removedStartsShell(name) {
+			continue
+		}
+		shell = true
+		if removedStartupShells[name] || removedLoginPrograms[name] {
+			return true, true
+		}
+	}
+	if !shell {
+		return false, false
+	}
+	for _, variable := range removedShellEnvFiles {
+		value := os.Getenv(variable)
+		if value == "" {
+			continue
+		}
+		// The shell expands the value (parameters, command substitution)
+		// before it reads the file.
+		if !removedArgument.MatchString(value) || c.pathMayRun(value, 0) {
+			return true, true
+		}
+	}
+	return true, false
+}
+
+// shellNamesOf returns the names of the shells (and the programs that start
+// one) in removedShellDirs that are the same file as info.
+func (c *removedScriptCheck) shellNamesOf(info os.FileInfo) []string {
+	if c.shellFiles == nil {
+		c.shellFiles = map[string]os.FileInfo{}
+		for _, dir := range removedShellDirs {
+			for _, programs := range []map[string]bool{removedCommandShells, removedLoginPrograms} {
+				for name := range programs {
+					if shell, err := os.Stat(filepath.Join(dir, name)); err == nil {
+						c.shellFiles[filepath.Join(dir, name)] = shell
+					}
+				}
+			}
+		}
+	}
+	var names []string
+	for path, shell := range c.shellFiles {
+		if os.SameFile(info, shell) {
+			names = append(names, filepath.Base(path))
+		}
+	}
+	return names
+}
+
+// removedTextWord is a word of a wrapper's text, its quotes included.
+var removedTextWord = regexp.MustCompile("[^\\s;&|()<>`]+")
+
+// removedTextShellVariable finds $SHELL, the user's shell.
+var removedTextShellVariable = regexp.MustCompile(`\$\{?SHELL\b`)
+
+// removedTextStartsShell reports whether a wrapper's text may start a shell
+// outside a comment: a word (or a part of one split at = : and ,) that
+// names a shell or a program that starts one, as a path or a bare name, or
+// $SHELL. The shell may read startup files, and its options may come from
+// the hook ("$@"), so the wrapper may run the script.
+func removedTextStartsShell(text []byte, quoting removedTextQuoting) bool {
+	for _, match := range removedTextShellVariable.FindAllIndex(text, -1) {
+		if !quoting.comment(match[0]) {
 			return true
+		}
+	}
+	unquote := strings.NewReplacer("'", "", "\"", "", "\\", "")
+	for _, match := range removedTextWord.FindAllIndex(text, -1) {
+		if quoting.comment(match[0]) {
+			continue
+		}
+		word := unquote.Replace(string(text[match[0]:match[1]]))
+		for _, part := range strings.FieldsFunc(word, func(r rune) bool { return r == '=' || r == ':' || r == ',' }) {
+			if removedStartsShell(removedProgramName(part)) {
+				return true
+			}
 		}
 	}
 	return false
@@ -1001,8 +1132,14 @@ func (c *removedScriptCheck) fileMayRun(path string, info os.FileInfo, depth int
 		// system) is run by the shell as a script (the ENOEXEC fallback).
 		return !removedLoadableImage(file, runtime.GOOS)
 	}
-	if !removedShellText(path, text) {
+	interpreter, readable := removedShellText(path, text)
+	if !readable {
 		return true
+	}
+	if interpreter != "" {
+		if _, mayRun := c.shellMayRun(interpreter); mayRun {
+			return true
+		}
 	}
 	if len(text) > removedScriptCheckTextLimit || removedTextRelative.Match(text) || c.scriptOnPath() {
 		return true
@@ -1013,6 +1150,9 @@ func (c *removedScriptCheck) fileMayRun(path string, info os.FileInfo, depth int
 		}
 	}
 	quoting := newRemovedTextQuoting(text)
+	if removedTextStartsShell(text, quoting) {
+		return true
+	}
 	covered := 0
 	for _, match := range removedTextPath.FindAllSubmatchIndex(text, -1) {
 		if match[0] < covered {
@@ -1079,8 +1219,9 @@ func removedMachOLoadable(image *macho.File) bool {
 	return false
 }
 
-// removedShells are the interpreters whose scripts the check reads.
-var removedShells = map[string]bool{"sh": true, "bash": true, "dash": true, "zsh": true, "ksh": true, "mksh": true, "ash": true}
+// removedShells are the interpreters whose scripts the check reads. zsh is
+// not one: it reads .zshenv first, whatever the script holds.
+var removedShells = map[string]bool{"sh": true, "bash": true, "dash": true, "ksh": true, "mksh": true, "ash": true}
 
 // removedScriptExtensions name scripts in a language other than the shell.
 var removedScriptExtensions = map[string]bool{
@@ -1089,32 +1230,40 @@ var removedScriptExtensions = map[string]bool{
 	".psm1": true, ".groovy": true, ".kts": true, ".swift": true, ".exs": true, ".jl": true, ".awk": true,
 }
 
-// removedShellText reports whether a text file is one the check can read: a
-// shell script (its #! line runs sh, bash, dash, zsh, ksh, mksh or ash,
-// directly or through env), or a file with no #! line whose name has no
-// extension of another language (a config file, say). A script in another
-// language may build the path it runs at run time (os.path.join, say), so
-// it may run the script.
-func removedShellText(path string, text []byte) bool {
+// removedShellText reports whether a text file is one the check can read,
+// and the interpreter its #! line runs ("" with none): a shell script (its
+// #! line runs sh, bash, dash, ksh, mksh or ash, directly or through env,
+// with no option and no variable set: a shell's option such as -l may run
+// its startup files, and env may set BASH_ENV), or a file with no #! line
+// whose name has no extension of another language (a config file, say). A
+// script in another language may build the path it runs at run time
+// (os.path.join, say), so it may run the script.
+func removedShellText(path string, text []byte) (interpreter string, ok bool) {
 	if !bytes.HasPrefix(text, []byte("#!")) {
-		return !removedScriptExtensions[strings.ToLower(filepath.Ext(path))]
+		return "", !removedScriptExtensions[strings.ToLower(filepath.Ext(path))]
 	}
 	line, _, _ := bytes.Cut(text[2:], []byte("\n"))
 	fields := strings.Fields(string(line))
 	if len(fields) == 0 {
-		return false
+		return "", false
 	}
-	interpreter := filepath.Base(fields[0])
-	if interpreter == "env" {
+	interpreter, rest := fields[0], fields[1:]
+	if filepath.Base(interpreter) == "env" {
 		interpreter = ""
-		for _, field := range fields[1:] {
-			if !strings.HasPrefix(field, "-") && !strings.Contains(field, "=") {
-				interpreter = filepath.Base(field)
+		for i, field := range rest {
+			if strings.Contains(field, "=") {
+				return "", false
+			}
+			if !strings.HasPrefix(field, "-") {
+				interpreter, rest = field, rest[i+1:]
 				break
 			}
 		}
 	}
-	return removedShells[interpreter]
+	if interpreter == "" || len(rest) > 0 {
+		return "", false
+	}
+	return interpreter, removedShells[filepath.Base(interpreter)]
 }
 
 // textPathMayRun reports whether a path a wrapper names (match, a
