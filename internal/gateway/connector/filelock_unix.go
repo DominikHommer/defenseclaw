@@ -22,45 +22,50 @@ import (
 	"fmt"
 	"os"
 	"syscall"
-	"time"
 )
 
 // withFileLock acquires an exclusive advisory lock on path+".lock" before
-// running fn, and releases it when fn returns. The lock file is cleaned up
-// on success. Stale lock files older than staleLockAge are removed before
-// attempting acquisition.
+// running fn, and releases it when fn returns. The sentinel stays at the
+// same pathname so a waiting writer never locks an unlinked inode.
 func withFileLock(path string, fn func() error) error {
 	return withFileLockMode(path, false, fn)
 }
 
 func withFileLockMode(path string, _ bool, fn func() error) error {
 	lockPath := path + ".lock"
-	const staleLockAge = 60 * time.Second
-
-	// Clean up stale lock files from crashed processes.
-	if info, err := os.Stat(lockPath); err == nil {
-		if time.Since(info.ModTime()) > staleLockAge {
-			_ = os.Remove(lockPath)
+	// Earlier releases unlinked the sentinel after unlocking. A contender
+	// can open that old inode before it is unlinked and acquire its flock
+	// afterward. Confirm the pathname still names our locked inode before
+	// entering the critical section; otherwise reopen and retry.
+	for attempt := 0; attempt < 8; attempt++ {
+		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return fmt.Errorf("open lock file %s: %w", lockPath, err)
+		}
+		if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+			_ = lockFile.Close()
+			return fmt.Errorf("acquire lock %s: %w", lockPath, err)
+		}
+		lockedInfo, fdErr := lockFile.Stat()
+		pathInfo, pathErr := os.Stat(lockPath)
+		if fdErr == nil && pathErr == nil && os.SameFile(lockedInfo, pathInfo) {
+			defer func() {
+				_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+				_ = lockFile.Close()
+			}()
+			return fn()
+		}
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		if fdErr != nil {
+			return fmt.Errorf("inspect lock file %s: %w", lockPath, fdErr)
+		}
+		if pathErr != nil && !os.IsNotExist(pathErr) {
+			return fmt.Errorf("inspect lock path %s: %w", lockPath, pathErr)
 		}
 	}
-
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return fmt.Errorf("open lock file %s: %w", lockPath, err)
-	}
-	defer lockFile.Close()
-
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("acquire lock %s: %w", lockPath, err)
-	}
-	defer func() {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-		_ = os.Remove(lockPath)
-	}()
-
-	return fn()
+	return fmt.Errorf("lock path %s changed while acquiring; retry the operation", lockPath)
 }
 
-// RemoveIdleFileLockSentinels does nothing here: withFileLockMode removes
-// its lock file when it releases the lock.
+// Unix sentinels remain stable across calls; flock releases on process exit.
 func RemoveIdleFileLockSentinels() {}
