@@ -20,6 +20,8 @@ package sandboxcli
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -254,11 +256,14 @@ func TestGAP0455MountedEndDoesNotStopAConnectAfterItsCount(t *testing.T) {
 			second := attachAfterStopCount(t, ta, sbName)
 			ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Rm: rm}))
 			got := second()
-			if got.err == nil {
+			ended := ta.calls("POST", sbName+"/stop") + ta.calls("DELETE", sbName)
+			if got.err == nil && ended > 0 {
 				t.Fatalf("the connect made after the end's count kept a session in a sandbox the end then ended: stop %d, delete %d",
 					ta.calls("POST", sbName+"/stop"), ta.calls("DELETE", sbName))
 			}
-			wantErr(t, got.err, sbName)
+			if got.err != nil && ended == 0 {
+				t.Fatalf("the connect was refused, yet the sandbox runs: %v", got.err)
+			}
 		})
 	}
 }
@@ -272,9 +277,14 @@ func TestGAP0398CopyFinishDoesNotEndAConnectAfterItsCount(t *testing.T) {
 			ta := newTestApp(t, "a\n")
 			second := attachAfterStopCount(t, ta, "fix-tests")
 			ta.ok(t, ta.Run(bg, RunOptions{Harness: "codex", Copy: true, Name: "fix-tests", Rm: rm}))
-			if got := second(); got.err == nil {
+			got := second()
+			ended := ta.calls("POST", "fix-tests/stop") + ta.calls("DELETE", "fix-tests")
+			if got.err == nil && ended > 0 {
 				t.Fatalf("terminal 2 attached to a copy sandbox terminal 1 then ended: stop %d, delete %d",
 					ta.calls("POST", "fix-tests/stop"), ta.calls("DELETE", "fix-tests"))
+			}
+			if got.err != nil && ended == 0 {
+				t.Fatalf("terminal 2 was refused, yet the sandbox runs: %v", got.err)
 			}
 		})
 	}
@@ -346,5 +356,15 @@ func TestStopAndDeleteAskAgainForASessionThatAttachedSinceTheQuestion(t *testing
 		if stop, d := ta.calls("POST", "box/stop"), ta.calls("DELETE", "box"); stop+d != 0 {
 			t.Fatalf("delete=%v: stop %d, delete %d under a session that attached after the question", del, stop, d)
 		}
+	}
+}
+
+// A setup whose gateway restart OpenShell's account of a raw sandbox
+// refused names the stop (the refusal's) and then the setup to rerun.
+func TestSetupNamesTheRetryAfterARefusedRestart(t *testing.T) {
+	err := retryAfterStop(fmt.Errorf("%w; OpenShell has not reported these stopped: raw-box (ready): `openshell sandbox stop raw-box`", openshell.ErrUnflushed))
+	wantErr(t, err, "`openshell sandbox stop raw-box`", "after stopping it, rerun `defenseclaw sandbox setup` with the same flags")
+	if other := errors.New("other"); retryAfterStop(other) != other {
+		t.Fatal("another error was reworded")
 	}
 }

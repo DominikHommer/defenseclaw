@@ -45,9 +45,11 @@ import (
 // DefenseClaw rollback is unsupported.
 const lifecycleLockFile = ".defenseclaw-lifecycle.lock"
 
-// ErrGatewayBusy refuses a create or a start while DefenseClaw restarts or
-// upgrades the OpenShell gateway, and a restart or an upgrade while
-// another is under way or a create or a start does not end in time.
+// ErrGatewayBusy refuses a create or a start while DefenseClaw restarts,
+// upgrades or rolls back the OpenShell gateway, an attach, a stop or a
+// delete that waited for one past lifecycleLockWait, and a restart, an
+// upgrade or a rollback while another is under way or a create, a start,
+// an attach, a stop or a delete does not end in time.
 var ErrGatewayBusy = errors.New("openshell: DefenseClaw is restarting or upgrading the OpenShell gateway")
 
 // lifecycleLockWait bounds how long a restart or an upgrade waits for the
@@ -101,7 +103,7 @@ func LockGatewayLifecycle(ctx context.Context, dir string) (unlock func(), err e
 			return u, lerr
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("%w: another restart or upgrade, or a sandbox create or start, held it for %s; try again once it is done", ErrGatewayBusy, lifecycleLockWait)
+			return nil, fmt.Errorf("%w: another restart, upgrade or rollback, or a sandbox create, start, attach, stop or delete, held it for %s; try again once it is done", ErrGatewayBusy, lifecycleLockWait)
 		}
 		t := time.NewTimer(lifecycleLockPoll)
 		select {
