@@ -132,17 +132,6 @@ func environmentKeyIs(key, name string) bool {
 	return key == name
 }
 
-// splitNULStrings splits NUL-terminated strings, dropping empty ones.
-func splitNULStrings(data []byte) []string {
-	var out []string
-	for _, entry := range bytes.Split(data, []byte{0}) {
-		if len(entry) > 0 {
-			out = append(out, string(entry))
-		}
-	}
-	return out
-}
-
 // procArgs2Environment is the environment in a macOS kern.procargs2 record:
 // a 4-byte argument count, the executable path, NUL padding, the arguments
 // and then the environment, each string ending in NUL. An empty string ends

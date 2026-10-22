@@ -6,6 +6,7 @@
 package daemon
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -28,4 +29,15 @@ func processEnvironment(pid int) ([]string, error) {
 		return nil, fmt.Errorf("the environment of PID %d exceeds %d bytes", pid, maxProcessEnvironmentBytes)
 	}
 	return splitNULStrings(data), nil
+}
+
+// splitNULStrings splits NUL-terminated strings, dropping empty ones.
+func splitNULStrings(data []byte) []string {
+	var out []string
+	for _, entry := range bytes.Split(data, []byte{0}) {
+		if len(entry) > 0 {
+			out = append(out, string(entry))
+		}
+	}
+	return out
 }
