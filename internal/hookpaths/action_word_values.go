@@ -16,6 +16,11 @@ import (
 // redirect after an unset, append, read or command substitution changed it.
 type actionValues map[string]string
 
+// A generated basename is bounded by its literal parent directory, but its
+// exact spelling is not known until execution. Never replace it with a fake
+// filename: that would miss an existing protected symlink with another name.
+const actionGeneratedMarker = "\x1f"
+
 // Assignments in a conditional, loop, function or pipeline may never execute
 // or may execute more than once. They invalidate a prior straight-line value;
 // their branch-local value cannot certify a later write target.
@@ -75,11 +80,14 @@ func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (
 		for _, item := range items {
 			switch part := item.(type) {
 			case *syntax.Lit:
-				if strings.ContainsAny(part.Value, "*?[\x00") {
+				if strings.ContainsAny(part.Value, "*?[\x00\x1f") {
 					return false
 				}
 				out.WriteString(part.Value)
 			case *syntax.SglQuoted:
+				if strings.Contains(part.Value, actionGeneratedMarker) {
+					return false
+				}
 				out.WriteString(part.Value)
 			case *syntax.DblQuoted:
 				if !parts(part.Parts) {
@@ -184,7 +192,7 @@ func actionSubstitutionValue(sub *syntax.CmdSubst, values actionValues, cwd, hom
 		}
 	case "date":
 		if len(words) == 2 && (words[1] == "+%s" || words[1] == "+%Y%m%d") {
-			return "0", true
+			return actionGeneratedMarker, true
 		}
 	case "mktemp":
 		if len(words) <= 2 && (len(words) == 1 || words[1] == "-d") {

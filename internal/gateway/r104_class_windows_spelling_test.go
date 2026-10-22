@@ -4,8 +4,10 @@
 package gateway
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
@@ -14,6 +16,14 @@ func TestR104ActionClassWindowsProtectedSpellings(t *testing.T) {
 	const connector = "r104-class-windows"
 	installToolCallCorpusProfileConnector(t, connector, "default")
 	home := `C:\Users\Alice`
+	encodePowerShell := func(body string) string {
+		units := utf16.Encode([]rune(body))
+		bytes := make([]byte, len(units)*2)
+		for i, unit := range units {
+			bytes[2*i], bytes[2*i+1] = byte(unit), byte(unit>>8)
+		}
+		return base64.StdEncoding.EncodeToString(bytes)
+	}
 	for _, tc := range []struct {
 		name, command string
 		dialect       actionfacts.Dialect
@@ -27,6 +37,7 @@ func TestR104ActionClassWindowsProtectedSpellings(t *testing.T) {
 		{"GAP-0545 extended drive", `echo marker >> //?/C:/Users/Alice/.ssh/authorized_keys`, actionfacts.DialectPOSIX, true},
 		{"drive relative", `echo marker >> C:Users\Alice\.ssh\authorized_keys`, actionfacts.DialectCMD, true},
 		{"PowerShell nested command", `pwsh -Command 'Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker'`, actionfacts.DialectPowerShell, true},
+		{"PowerShell encoded command", `pwsh -EncodedCommand ` + encodePowerShell(`Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker`), actionfacts.DialectPowerShell, true},
 		{"CMD nested command", `cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, actionfacts.DialectCMD, true},
 		{"Windows env split wrapper", `env -S "cmd /c echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, actionfacts.DialectCMD, true},
 		{"Windows nice wrapper", `nice -n 5 cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, actionfacts.DialectCMD, true},

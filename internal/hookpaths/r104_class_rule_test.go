@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
@@ -67,6 +68,9 @@ func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(cwd, "out"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for name, body := range map[string]string{"report.txt": "report.txt\n", "target-name.txt": "alias\n"} {
@@ -165,6 +169,33 @@ func TestR104LeadGapCorpusPOSIX(t *testing.T) {
 		t.Run(row.gap, func(t *testing.T) {
 			if reason := ActionCommandDecision(row.command, cwd, home); reason == "" {
 				t.Fatalf("allowed %q", row.command)
+			}
+		})
+	}
+}
+
+func TestR104ActionClassGeneratedTargetAlias(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(cwd, "out"), filepath.Join(cwd, "build")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	protected := filepath.Join(home, ".ssh", "authorized_keys")
+	for _, name := range []string{filepath.Join(cwd, "out", "run-123.log"),
+		filepath.Join(cwd, "build", time.Now().Format("20060102")+".log")} {
+		if err := os.Symlink(protected, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, command := range []string{
+		`echo marker > "out/run-$RANDOM.log"`,
+		`x=$(date +%Y%m%d); echo marker > "build/$x.log"`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if reason := ActionCommandDecision(command, cwd, home); reason == "" {
+				t.Fatal("a generated name can select an existing protected alias")
 			}
 		})
 	}

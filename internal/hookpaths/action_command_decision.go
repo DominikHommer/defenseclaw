@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,7 +47,7 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 		straightLine[stmt] = true
 	}
 	bounded, boundedUnknown := BoundedShellWriteOperands(command, cwd, home)
-	values := actionValues{"HOME": home, "PWD": cwd, "RANDOM": "0", "$": "1"}
+	values := actionValues{"HOME": home, "PWD": cwd, "RANDOM": actionGeneratedMarker, "$": "1"}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
 	reason := ""
@@ -72,11 +73,18 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 			}
 			switch redirect.Op {
 			case syntax.RdrIn, syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
-				if value, fixed := actionWordValue(redirect.Word, values, cwd, home); fixed &&
-					(redirect.Op == syntax.RdrIn && actionPrivateReadPath(value, cwd, home) ||
-						redirect.Op != syntax.RdrIn && protectedReachPath(OperandPath(value, cwd), protected, ssh)) {
-					reason = "dynamic-argument"
-					return false
+				if value, fixed := actionWordValue(redirect.Word, values, cwd, home); fixed {
+					if strings.Contains(value, actionGeneratedMarker) {
+						if (redirect.Op != syntax.RdrIn || actionStmtMayWrite(stmt, home)) &&
+							!actionGeneratedPathSafe(value, cwd, home) {
+							reason = "dynamic-argument"
+							return false
+						}
+					} else if redirect.Op == syntax.RdrIn && actionPrivateReadPath(value, cwd, home) ||
+						redirect.Op != syntax.RdrIn && protectedReachPath(OperandPath(value, cwd), protected, ssh) {
+						reason = "dynamic-argument"
+						return false
+					}
 				}
 				if _, fixed := StaticWord(redirect.Word, home); !fixed {
 					if _, known := actionWordValue(redirect.Word, values, cwd, home); !known &&
@@ -206,6 +214,55 @@ func actionPrivateReadPath(value, cwd, home string) bool {
 	return false
 }
 
+// A generated basename is safe only when its parent is an ordinary resolved
+// directory and no existing name it might select aliases a protected file.
+// This retains ordinary log/date/temp names without claiming an invented
+// numeric value for RANDOM or date(1).
+func actionGeneratedPathSafe(value, cwd, home string) bool {
+	if !strings.Contains(value, actionGeneratedMarker) {
+		return false
+	}
+	target := OperandPath(value, cwd)
+	parent := filepath.Dir(target)
+	if strings.Contains(parent, actionGeneratedMarker) {
+		return false
+	}
+	physical, ok := ResolveWriteTarget(parent)
+	if !ok {
+		return false
+	}
+	ssh, ok := ResolveWriteTarget(filepath.Join(home, ".ssh"))
+	if !ok || samePathName(physical, ssh) || strings.HasPrefix(physical, ssh+string(filepath.Separator)) {
+		return false
+	}
+	pattern := strings.ReplaceAll(filepath.Base(target), actionGeneratedMarker, "*")
+	directory, err := os.Open(parent)
+	if err != nil {
+		return false
+	}
+	names, err := directory.Readdirnames(4097)
+	_ = directory.Close()
+	if err != nil && err != io.EOF || len(names) > 4096 {
+		return false
+	}
+	protected := newProtectedFiles(home)
+	for _, name := range names {
+		matched, err := filepath.Match(pattern, name)
+		if err != nil {
+			return false
+		}
+		if !matched {
+			continue
+		}
+		candidate := filepath.Join(parent, name)
+		if _, ok := ResolveWriteTarget(candidate); !ok ||
+			protectedReachPath(candidate, protected, filepath.Join(home, ".ssh")) {
+			return false
+		}
+	}
+	return true
+}
+
 func actionPathArgument(program string, index, count int) bool {
 	switch program {
 	case "cp", "gcp", "mv", "gmv", "install", "ln", "rsync":
@@ -225,6 +282,13 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 	program := programBase(words[0])
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
+	for i, word := range words[1:] {
+		if strings.Contains(word, actionGeneratedMarker) &&
+			(actionPathArgument(program, i+1, len(words)) || actionProgramMayWrite(program)) &&
+			!actionGeneratedPathSafe(word, cwd, home) {
+			return "dynamic-argument"
+		}
+	}
 	for _, target := range directLiteralProgramOperands(words, stmt, cwd, home) {
 		if protectedReachPath(target, protected, ssh) {
 			return "dynamic-argument"
