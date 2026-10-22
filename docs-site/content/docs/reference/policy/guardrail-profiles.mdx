@@ -154,8 +154,10 @@ How the keys combine:
   account never gets the AD principal, whatever its name. While SSSD does not
   answer (stopped,
   restarting, or no answer within 2 seconds) the lookup fails and the account
-  keeps its last facts for up to an hour; with none, it gets the default
-  profile with `default_lookup_failed`. Add the uid to the assignment when the
+  keeps its last facts for up to an hour; with none, it reports the default
+  profile with `default_lookup_failed`. An applicable group assignment with
+  unconfirmed membership refuses guarded requests until lookup succeeds.
+  Add the uid to the assignment when the
   account must match regardless. Groups follow the same rule: an account keeps
   only the groups inside the domain of its SID (an LDAP `carol` next to an AD
   `carol` does not get the AD `carol`'s groups), and an account whose
@@ -225,7 +227,7 @@ than one key, the reason names the most specific key, in the order
 | `connector` | Only a `connectors` entry matched. |
 | `default` | The user is verified, but no assignment matched, so `default_profile` applied. |
 | `default_unverified` | No verified user reached the gateway, so only assignments that match on `connectors` alone could apply. |
-| `default_lookup_failed` | The directory lookup for a verified user failed or was too slow, so the default profile applied. |
+| `default_lookup_failed` | The directory lookup for a verified user failed or was too slow. The default profile is reported; guarded requests are refused when an applicable group assignment may match. |
 
 ## Only verified facts select a profile
 
@@ -257,8 +259,11 @@ What follows when the identity is missing:
   groups. One that matches on the verified uid, SID or agent alone applies.
   One that names groups, lists users by name but not this uid or SID, or
   matches on `connectors` alone could depend on the missing facts, so the
-  default profile applies (`default_lookup_failed`) and later assignments are
-  not read. One that lists only other uids or SIDs, or another agent or
+  default profile is reported (`default_lookup_failed`) and later assignments
+  are not read. If an applicable group assignment may match, guarded hook,
+  proxy, inspect and ACP requests are refused until membership is confirmed.
+  The refusal gives the exact `defenseclaw guardrail profile explain --user`
+  command for the verified account. One that lists only other uids or SIDs, or another agent or
   connector, is skipped. The lookup is retried 15 seconds later. Later
   requests use the cached answer. A lookup counts as failed unless every part
   of it finished: an account whose group list timed out, or that is in more

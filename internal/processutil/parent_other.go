@@ -20,7 +20,7 @@ package processutil
 
 import "os/exec"
 
-// exitWithParent has no kernel support here (macOS); cmd runs as is.
+// exitWithParent has no kernel support on these platforms; cmd runs as is.
 func exitWithParent(_ *exec.Cmd) {}
 
 // killDescendantsAtExit is Linux only (parent_linux.go).

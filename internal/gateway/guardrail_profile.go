@@ -159,6 +159,10 @@ type profileDecision struct {
 	Match         string
 	MatchedGroup  string
 	SubjectSource string
+	// RefuseUnconfirmedGroups means an applicable group assignment could
+	// match, but current directory membership did not answer. The default
+	// profile is still reported for explain, never used to admit the call.
+	RefuseUnconfirmedGroups bool
 	// Assignment is the 1-based index of the assignment that matched, 0 for
 	// the default.
 	Assignment int
@@ -537,8 +541,29 @@ func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(r.Context(), "")))
+		r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), ""))
+		if reason, refused := profileUnconfirmedGroupReason(r.Context()); refused {
+			a.writeJSON(w, http.StatusForbidden, map[string]string{"error": reason})
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
+}
+
+// profileUnconfirmedGroupReason gives every guarded request surface the
+// same refusal and an exact diagnostic command. The UID/SID comes from the
+// authenticated subject, never a request header or hook payload.
+func profileUnconfirmedGroupReason(ctx context.Context) (string, bool) {
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if resolved == nil || !resolved.decision.RefuseUnconfirmedGroups {
+		return "", false
+	}
+	subject, _ := profileRequestSubject(ctx)
+	command := "defenseclaw guardrail profile list"
+	if subject != nil && subject.UserID != "" && !strings.ContainsAny(subject.UserID, " \t\r\n`$\\\"'") {
+		command = "defenseclaw guardrail profile explain --user " + subject.UserID
+	}
+	return "directory group membership is unconfirmed; run `" + command + "` after the directory recovers", true
 }
 
 func resolvedGuardrailProfileFrom(ctx context.Context) *resolvedGuardrailProfile {
@@ -931,14 +956,16 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 
 // matchWithUnknownGroups preserves verified user and agent assignments in
 // order. An earlier group assignment whose other conditions match could
-// preempt them, so use the default until a current desktop token supplies
-// its membership.
+// preempt them, so report the default and refuse guarded requests until a
+// current desktop token supplies membership.
 func (set *guardrailProfileSet) matchWithUnknownGroups(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	fallback := func() profileDecision {
-		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+	fallback := func(refuse bool) profileDecision {
+		decision := set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+		decision.RefuseUnconfirmedGroups = refuse
+		return decision
 	}
 	if source == "" || subject.UserID == "" {
-		return fallback()
+		return fallback(false)
 	}
 	for i, assignment := range set.assignments {
 		m := assignment.Match
@@ -948,33 +975,35 @@ func (set *guardrailProfileSet) matchWithUnknownGroups(subject *profileSubject, 
 		known := m
 		known.Groups = nil
 		if known.Empty() {
-			return fallback()
+			return fallback(len(m.Groups) > 0)
 		}
 		reason, group, ok := assignmentMatches(known, subject, &subjectGroups{}, true, connectorName, agent)
 		if !ok {
 			continue
 		}
 		if len(m.Groups) > 0 {
-			return fallback()
+			return fallback(true)
 		}
 		decision := set.decision(assignment.Profile, reason, group, source)
 		decision.Assignment = i + 1
 		return decision
 	}
-	return fallback()
+	return fallback(false)
 }
 
 // matchWithFailedLookup can use a kernel-verified UID or SID or a
 // verified agent even when directory names and groups are unknown. Preserve
 // assignment order: an earlier assignment that could depend on missing facts
-// still selects the
-// outage default rather than letting a later assignment shadow it.
+// still reports the outage default rather than letting a later assignment
+// shadow it. An applicable group condition also refuses guarded requests.
 func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	fallback := func() profileDecision {
-		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+	fallback := func(refuse bool) profileDecision {
+		decision := set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+		decision.RefuseUnconfirmedGroups = refuse
+		return decision
 	}
 	if source == "" || subject.UserID == "" {
-		return fallback()
+		return fallback(false)
 	}
 	idOnly := &profileSubject{UserID: subject.UserID, IDKind: subject.IDKind}
 	for i, assignment := range set.assignments {
@@ -998,13 +1027,13 @@ func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, s
 			// name this account, so fail closed.
 			for _, entry := range m.Users {
 				if useridentity.KindForID(entry) == "" {
-					return fallback()
+					return fallback(len(m.Groups) > 0)
 				}
 			}
 			continue
 		}
 		if len(m.Groups) > 0 || (len(m.Users) == 0 && len(m.Agents) == 0) {
-			return fallback()
+			return fallback(len(m.Groups) > 0)
 		}
 		reason, group, ok := assignmentMatches(m, idOnly, &subjectGroups{}, true, connectorName, agent)
 		if ok {
@@ -1013,7 +1042,7 @@ func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, s
 			return decision
 		}
 	}
-	return fallback()
+	return fallback(false)
 }
 
 func (set *guardrailProfileSet) decision(name, reason, group, source string) profileDecision {
@@ -1739,6 +1768,10 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["subject_source"] = decision.SubjectSource
 	out["assignment"] = decision.Assignment
 	warnings := profileExplainWarnings(set, decision, subject)
+	if decision.RefuseUnconfirmedGroups {
+		out["refused"] = true
+		warnings = append(warnings, "applicable group membership is unconfirmed; guarded requests are refused until the directory answers")
+	}
 	if agent != "" {
 		warnings = append(warnings, fmt.Sprintf("agent %q is not verified against a host identity record by profile-explain; confirm it with agent identities before relying on this answer", agent))
 	}
