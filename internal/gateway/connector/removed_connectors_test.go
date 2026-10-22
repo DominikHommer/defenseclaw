@@ -373,13 +373,10 @@ func TestRemovedConnectorLockEntryIsNeverCleared(t *testing.T) {
 	}
 }
 
-// Review fixes (G-deadcode loop round 1): a step that failed after the file
-// changes rolled them back, which put the working hook back. Now the stub is
-// the only file change and it goes first. A stub that cannot be written
-// changes nothing; a token that cannot be revoked leaves the stub (never the
-// old hook) and every other file as they are, VerifyClean fails, and the next
-// teardown finishes.
-func TestRemovedTeardownThatFailsNeverPutsTheOldHookBack(t *testing.T) {
+// A known token-path refusal is found before the stub changes anything. Once
+// the stub is written, a later failure keeps it in place so a retry can finish
+// without putting an old hook back. VerifyClean fails until cleanup finishes.
+func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 	for _, c := range removedConnectorsUnderTest() {
 		t.Run(c.name+"/a token cannot be revoked", func(t *testing.T) {
 			h := newRemovedHost(t)
@@ -389,15 +386,13 @@ func TestRemovedTeardownThatFailsNeverPutsTheOldHookBack(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeRemovedFile(t, filepath.Join(otlp, "blocker"), "x", 0o600)
-			skip := []string{h.script(c), removedTokenPath(t, h.dataDir, c.name)}
-			before := h.snapshot(t, skip...)
+			before := h.snapshot(t)
 			conn, _ := RetiredConnector(c.name)
 			err := conn.Teardown(context.Background(), h.opts)
-			if err == nil || !strings.Contains(err.Error(), otlp) {
+			if err == nil || !strings.Contains(err.Error(), otlp) || !strings.Contains(err.Error(), "nothing was changed") {
 				t.Fatalf("Teardown = %v, want the token failure naming %s", err, otlp)
 			}
-			h.requireStub(t, c)
-			requireRemovedSame(t, "a teardown that failed", h.snapshot(t, skip...), before)
+			requireRemovedSame(t, "a teardown refused at preflight", h.snapshot(t), before)
 			if err := conn.VerifyClean(h.opts); err == nil {
 				t.Fatal("VerifyClean passed with a token left")
 			}

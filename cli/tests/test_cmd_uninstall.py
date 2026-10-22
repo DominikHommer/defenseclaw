@@ -1508,6 +1508,35 @@ class RemovedConnectorLeftoversTests(unittest.TestCase):
         self.assertNotIn("error", calls)
         self.assertNotIn("echo", calls)
 
+    def test_omnigent_uninstall_reports_manual_steps_with_edited_vendor_config(self):
+        with tempfile.TemporaryDirectory() as home, patch(
+            "os.path.expanduser", side_effect=lambda p: p.replace("~", home, 1)
+        ):
+            data_dir = os.path.join(home, ".defenseclaw")
+            config = os.path.join(home, ".omnigent", "config.yaml")
+            module = os.path.join(data_dir, "hooks", "defenseclaw_omnigent_policy.py")
+            pth = os.path.join(home, "venv", "site-packages", "defenseclaw_omnigent.pth")
+            backup_dir = os.path.join(data_dir, "connector_backups", "omnigent")
+            record = os.path.join(backup_dir, "pth.json")
+            files = {
+                config: "policy_modules: [defenseclaw_omnigent_policy]\nmodel: local\n",
+                module: "# defenseclaw-managed-policy v0\n# support was removed in DefenseClaw 1.0.4\n",
+                pth: os.path.join(data_dir, "hooks") + "\n",
+                record: json.dumps({"connector": "omnigent", "logical_name": "pth", "path": pth}),
+            }
+            for path, body in files.items():
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(body)
+            plan = cmd_uninstall.UninstallPlan(data_dir=data_dir, connectors=("codex", "omnigent"), stop_gateway=True)
+            calls = self._run(plan)
+            self.assertNotIn("error", calls)
+            report = "\n".join(calls.get("echo", []))
+            self.assertIn("OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:", report)
+            for path in (config, module, pth, backup_dir):
+                self.assertIn(path, report)
+            self.assertIn("remove defenseclaw_omnigent_policy from policy_modules", report)
+
 
 class ConnectorTeardownDispatchTests(unittest.TestCase):
     def _plan(self, connector: str) -> cmd_uninstall.UninstallPlan:

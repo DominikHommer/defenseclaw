@@ -133,15 +133,27 @@ const removedOpenHandsDenyReason = "DefenseClaw blocked this call: OpenHands sup
 	" from your OpenHands hooks.json (~/.openhands/hooks.json, or .openhands/hooks.json in a workspace), then restart OpenHands."
 
 // removedOpenHandsTombstone is the hook script an OpenHands teardown leaves.
-// OpenHands blocks a call on exit status 2 and shows the deny reason. The
-// stub runs no program: sh -p reads no startup file (ENV, BASH_ENV), and the
-// body is only echo and exit.
+// OpenHands blocks a call on exit status 2 and shows the deny reason.
+// A direct run uses sh -p, which ignores startup files and imported functions.
+// An older hooks.json may instead run `bash script`, which ignores the shebang
+// and imports functions before reading this file. In that case a Bash keyword
+// starts a privileged Bash by absolute path. The parent script ends with the
+// child's status; no imported exit, echo or command function can change it.
 const removedOpenHandsTombstone = "#!/bin/sh -p\n" +
 	"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
 	"# OpenHands support was removed in DefenseClaw 1.0.4. This hook blocks every\n" +
 	"# call. Remove the hooks that run it from your OpenHands hooks.json.\n" +
-	"echo '{\"decision\":\"deny\",\"reason\":\"" + removedOpenHandsDenyReason + "\"}'\n" +
-	"exit 2\n"
+	"removed_deny() {\n" +
+	"    echo '{\"decision\":\"deny\",\"reason\":\"" + removedOpenHandsDenyReason + "\"}'\n" +
+	"    exit 2\n" +
+	"}\n" +
+	"case ${BASH_VERSION-} in\n" +
+	"    ?*) case $- in\n" +
+	"            *p*) removed_deny ;;\n" +
+	"            *) /bin/bash -p \"$0\" \"$@\" ;;\n" +
+	"        esac ;;\n" +
+	"    *) removed_deny ;;\n" +
+	"esac\n"
 
 // removedOmnigentDenyReason is the reason the OmniGent stub gives.
 const removedOmnigentDenyReason = "DefenseClaw blocked this action: OmniGent support was removed in DefenseClaw 1.0.4. " +
@@ -198,7 +210,10 @@ var (
 	removedOpenHands = removedOnlyConnector{
 		name: removedOpenHandsID, label: "OpenHands",
 		script: removedOpenHandsHookScript, marker: "# defenseclaw-managed-hook v",
-		tombstone: removedOpenHandsTombstone, inPlaceTail: "exit 2\n", mode: 0o700,
+		// A process already reading a longer, hard-linked old script can
+		// reach only the tail. `command` bypasses an exit function; a final
+		// syntax error still exits nonzero if command was overridden too.
+		tombstone: removedOpenHandsTombstone, inPlaceTail: "command exit 2\n)\n", mode: 0o700,
 		keepHookToken: true,
 		configStep:    "remove every hook whose command runs " + removedOpenHandsHookScript + " (or defenseclaw-hook --connector openhands) from this file, then restart OpenHands",
 	}
@@ -371,16 +386,54 @@ func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error 
 	if strings.TrimSpace(opts.DataDir) == "" {
 		return fmt.Errorf("%s teardown: empty data directory", c.name)
 	}
-	// The stub goes first: while an old hook may still run, its tokens stay
-	// with it. A token that cannot be revoked after it leaves the stub in
-	// place; the next start tries again.
+	// Validate every later token removal before changing the script. An
+	// invalid path (including a directory or link at a legacy .tmp name)
+	// leaves the prior installation intact for a retry after manual repair.
+	if err := c.preflightTokens(opts.DataDir); err != nil {
+		return fmt.Errorf("%s teardown: %w; nothing was changed", c.name, err)
+	}
+	// The stub is the security commit point: once it is in place, a later
+	// token I/O failure must roll forward on retry. Restoring an old hook
+	// after some tokens were revoked could let it fail open. Backup receipts
+	// stay intact, and neither the vendor config nor import path is changed.
 	if err := c.replaceScript(opts.DataDir); err != nil {
 		return fmt.Errorf("%s teardown: %w; its tokens were kept (with them an old hook reaches the gateway, which blocks every call), and the next start tries again", c.name, err)
 	}
 	if err := c.hookLeft(opts.DataDir); err != nil {
 		return fmt.Errorf("%s teardown: %w; its tokens were kept, so the old hook still reaches the gateway, which blocks every call", c.name, err)
 	}
-	return c.revokeTokens(opts.DataDir)
+	if err := c.revokeTokens(opts.DataDir); err != nil {
+		return fmt.Errorf("%s teardown: %w; the deny stub and backup receipts were kept, and the next start retries token revocation", c.name, err)
+	}
+	return nil
+}
+
+func (c removedOnlyConnector) preflightTokens(dataDir string) error {
+	if !c.keepHookToken {
+		path := c.hookTokenPath(dataDir)
+		if path == "" {
+			return fmt.Errorf("resolve the %s hook token path", c.name)
+		}
+		for _, candidate := range []string{path, path + ".tmp"} {
+			if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+				continue
+			} else if err != nil {
+				return fmt.Errorf("inspect hook token %s: %w", candidate, err)
+			}
+			if err := validateHookAPITokenLocation(dataDir, candidate); err != nil {
+				return fmt.Errorf("hook token %s is not safe to revoke: %w", candidate, err)
+			}
+			if err := checkOwnedOTLPPathTokenFile(candidate); err != nil {
+				return fmt.Errorf("hook token %s is not safe to revoke: %w", candidate, err)
+			}
+		}
+	}
+	for _, path := range []string{c.otlpTokenPath(dataDir), c.otlpTokenPath(dataDir) + ".tmp"} {
+		if err := checkOwnedOTLPPathTokenFile(path); err != nil {
+			return fmt.Errorf("OTLP token %s is not safe to revoke: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // replaceScript writes the deny stub over a script an older release wrote.
