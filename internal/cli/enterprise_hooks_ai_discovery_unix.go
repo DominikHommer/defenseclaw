@@ -155,7 +155,7 @@ func (b *enterpriseHookScanBreaker) keep(enrolled map[int]string) {
 
 func init() {
 	enterpriseHookAfterWatchReconcile = func(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
-		run.Rows = enterpriseHookEnrolledAccountRows(stderr, run)
+		run.Rows = enterpriseHookEnrolledAccountRows(ctx, stderr, run)
 		restoreEnterprisePolicyDirs(stderr)
 		startEnterpriseHookAIDiscovery(ctx, stderr, run)
 		startEnterpriseHookIdentitySpool(ctx, stderr, run)
@@ -205,7 +205,7 @@ func enterpriseHookManifestEnrollment() bool {
 // An eligible account the current exclude_users or exempt_users name gets
 // none: eligible-accounts.json can be older than the settings and the
 // manifest, when its write failed after the manifest's.
-func enterpriseHookEnrolledAccountRows(stderr io.Writer, run enterpriseHookReconcileRun) []enterpriseHookReconcileRow {
+func enterpriseHookEnrolledAccountRows(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) []enterpriseHookReconcileRow {
 	rows := append([]enterpriseHookReconcileRow(nil), run.Rows...)
 	manifest := strings.TrimSpace(run.Manifest)
 	if manifest == "" || enterpriseHookManifestEnrollment() {
@@ -220,7 +220,7 @@ func enterpriseHookEnrolledAccountRows(stderr io.Writer, run enterpriseHookRecon
 	for _, row := range rows {
 		seen[row.UID] = true
 	}
-	leftOut := enterpriseHookEnrollmentLeftOut()
+	leftOut := enterpriseHookEnrollmentLeftOut(ctx, enterpriseHookIdentitySpoolDirForConfig())
 	for _, account := range accounts {
 		if account.UID <= 0 || seen[account.UID] || leftOut.has(account.UID, account.User) {
 			continue

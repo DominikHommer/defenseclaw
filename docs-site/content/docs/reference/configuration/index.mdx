@@ -314,7 +314,7 @@ guardrail:
       mode: action
       block_at: MEDIUM
       hilt: {enabled: true, min_severity: HIGH}
-  profile_assignments:        # ordered: the first match wins; keys AND, values OR
+  profile_assignments:        # the strictest match wins; keys AND, values OR
     - profile: contractors
       match: {groups: ["contractors@corp.example.com"]}   # or "CORP\\Contractors" on Windows
   default_profile: ""          # "" keeps the guardrail.* settings above

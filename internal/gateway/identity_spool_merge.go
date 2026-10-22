@@ -4,11 +4,12 @@
 package gateway
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -103,15 +104,79 @@ var spoolRecordSignInHint = func() string {
 // readIdentitySpoolFacts returns the guardian's record for key (a uid or
 // SID), when one exists, is trusted and is current.
 func readIdentitySpoolFacts(key string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool) {
+	record, state := readIdentitySpoolState(key, now)
+	return record, state == identitySpoolCurrent
+}
+
+// identitySpoolState is what the gateway finds for an account's guardian
+// identity record.
+type identitySpoolState int
+
+const (
+	// identitySpoolCurrent is a trusted record inside its trust window.
+	identitySpoolCurrent identitySpoolState = iota
+	// identitySpoolAbsent is no record at all. On Windows the enumerator
+	// removed it (the account left its group cache or the enrollment, or a
+	// publication it could not complete disproved it, GAP-0329) or never
+	// wrote one. On Linux and macOS it is not a withdrawal: the guardian
+	// has not written the record yet, or removed one the gateway no longer
+	// needs; it withdraws an identity explicitly
+	// (identitySpoolWithdrawnAt).
+	identitySpoolAbsent
+	// identitySpoolUnreadable is a record the gateway cannot use now: a
+	// read, parse or trust failure (a sharing violation while the
+	// enumerator replaces the file), or a timestamp outside its trust
+	// window. It withdraws nothing the record proved before.
+	identitySpoolUnreadable
+)
+
+// readIdentitySpoolState reads the guardian's record for key and says
+// whether it is current, absent or unreadable.
+func readIdentitySpoolState(key string, now time.Time) (enterprisehooks.IdentitySpoolRecord, identitySpoolState) {
 	dir := currentIdentitySpoolDir()
 	if dir == "" {
-		return enterprisehooks.IdentitySpoolRecord{}, false
+		return enterprisehooks.IdentitySpoolRecord{}, identitySpoolAbsent
 	}
 	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, key, validateManagedGuardianAuthorization)
-	if err != nil || record.UpdatedAt.After(now) || now.Sub(record.UpdatedAt) > identitySpoolMaxAge {
-		return enterprisehooks.IdentitySpoolRecord{}, false
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return enterprisehooks.IdentitySpoolRecord{}, identitySpoolAbsent
+	case err != nil || record.UpdatedAt.After(now) || now.Sub(record.UpdatedAt) > identitySpoolMaxAge:
+		return enterprisehooks.IdentitySpoolRecord{}, identitySpoolUnreadable
 	}
-	return record, true
+	return record, identitySpoolCurrent
+}
+
+// identitySpoolWithdrawnAt is when the Linux or macOS guardian last withdrew
+// the identity it had published for the uid key: the uid now names another
+// account, the same name in another domain or directory, or a recreated
+// account (enterprisehooks.IdentitySpoolWithdrawalSuffix). Zero for none,
+// for one the gateway cannot trust, and for one older than
+// identitySpoolMaxAge, by when every fact merged from the record it
+// withdraws has aged out anyway.
+func identitySpoolWithdrawnAt(key string, now time.Time) time.Time {
+	dir := currentIdentitySpoolDir()
+	if dir == "" {
+		return time.Time{}
+	}
+	at, err := enterprisehooks.ReadIdentitySpoolWithdrawal(dir, key, validateManagedGuardianAuthorization)
+	if err != nil || now.Sub(at) > identitySpoolMaxAge {
+		return time.Time{}
+	}
+	return at
+}
+
+// identitySpoolSeenAt is the newest guardian record or withdrawal of key a
+// lookup starting at now reads (useridentity.DirectoryFacts.SpoolSeenAt).
+// It is read before the record itself, so a record the guardian writes
+// during the lookup only makes it older: the next request then looks at that
+// record once more.
+func identitySpoolSeenAt(key string, now time.Time) time.Time {
+	seen := identitySpoolWithdrawnAt(key, now)
+	if record, ok := readIdentitySpoolFacts(key, now); ok && record.UpdatedAt.After(seen) {
+		seen = record.UpdatedAt
+	}
+	return seen
 }
 
 // identitySpoolConnectorEmail is the connector address the enumerator
@@ -162,14 +227,22 @@ func identitySpoolAccountName(sid string) string {
 // missing name is also unverified; Windows uses the stable SID path above.
 // accountSID is the SID the gateway resolved for the uid now ("" for none):
 // a record that names another SID is an account recreated under the same
-// uid and name, whose UPN is not this one's.
-func readIdentitySpoolFactsForAccount(key, accountName, accountSID string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool) {
+// uid and name, whose UPN is not this one's. The account's own UPN is then
+// unknown until the guardian writes its record, so the error makes the
+// lookup a failed one (identityFactsUnconfirmedError): a users entry written
+// as a UPN selects default_lookup_failed, which is retried every
+// identityDirectoryRetry, instead of the plain default as a verified answer.
+func readIdentitySpoolFactsForAccount(key, accountName, accountSID string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool, error) {
 	record, ok := readIdentitySpoolFacts(key, now)
-	if !ok || record.User == "" || accountName == "" || !strings.EqualFold(record.User, accountName) ||
-		(record.AccountSID != "" && accountSID != "" && !strings.EqualFold(record.AccountSID, accountSID)) {
-		return enterprisehooks.IdentitySpoolRecord{}, false
+	if !ok || record.User == "" || accountName == "" || !strings.EqualFold(record.User, accountName) {
+		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
-	return record, true
+	if record.AccountSID != "" && accountSID != "" && !strings.EqualFold(record.AccountSID, accountSID) {
+		return enterprisehooks.IdentitySpoolRecord{}, false, &identityFactsUnconfirmedError{err: fmt.Errorf("the hook guardian's identity "+
+			"record for uid %s is of another account under the same uid and name (another SID): this account's UPN is unknown until the "+
+			"guardian's next pass writes its record; the lookup is retried every %s", key, identityDirectoryRetry)}
+	}
+	return record, true, nil
 }
 
 // mergeSpoolFacts overlays the guardian's root-resolved record on the facts
@@ -228,24 +301,48 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 	return merged
 }
 
-// spoolGroupsCheckInterval is how often a request re-reads an account's
-// guardian identity record to see whether its group set changed.
-const spoolGroupsCheckInterval = 5 * time.Second
-
-var spoolGroupChecks struct {
-	sync.Mutex
-	at map[string]time.Time
-}
-
 // forgetOnSpoolGroupChange drops key's cached facts when the guardian's
 // identity record lists another group set than the one they were built
 // from. On Windows the groups come from the account's sign-in token: after a
 // user signed out and in again the enumerator recorded the new groups at
 // once and `profile-explain` showed them, while hooks kept the cached old
 // ones for up to 15 more minutes (GAP-1027). A new sign-in now applies at the
-// next request, and explain and the hooks agree. The record is read at most
-// every spoolGroupsCheckInterval per account.
+// next request, and explain and the hooks agree. A removed record also drops
+// cached token groups before the next request makes a policy decision.
 func forgetOnSpoolGroupChange(cache *identityDirectoryCache, key string, now time.Time) {
+	forgetOnSpoolChange(cache, key, now, true)
+}
+
+// forgetOnSpoolChange drops key's cached facts when the guardian's record
+// contradicts them or the guardian withdrew them. A record that is there but
+// cannot be read now withdraws nothing: the facts it proved stay, bounded by
+// their lifetime and the record's trust window (identitySpoolTrustedUntil),
+// as cached facts stay through a directory outage. Dropping them on such a
+// miss let the next request resolve without the record and select the
+// outage default, which can be weaker than the assignment the facts select.
+//
+// On Windows (checkGroups) the record is the only source of an account's
+// token groups, so a record that is gone ends the cached groups: the
+// enumerator removes it when the account left its group cache or the
+// enrollment, or when it could not publish groups that changed (GAP-0329).
+// The next lookup has no groups and takes the outage path
+// (default_lookup_failed).
+//
+// On Linux and macOS the gateway resolves the account's groups and SID
+// through NSS itself and takes only the UPN and its realm from the record.
+// A missing record is no withdrawal there: before the guardian's first
+// record, an NSS-verified account's facts were dropped at every request,
+// and a slow directory then sent it to a possibly weaker
+// default_lookup_failed profile; a record without a SID dropped them at
+// every request too (loop round 3). The guardian withdraws an identity
+// explicitly instead (identitySpoolWithdrawnAt), and a withdrawal written
+// after the facts were resolved drops them. A current record drops them
+// when it names another SID or another UPN than they do; a fact either one
+// lacks contradicts nothing. A record that adds to them (a UPN) refreshes
+// them in place (refreshSoon): they stay if the refresh fails. Each record
+// and withdrawal is acted on once: the facts note the newest one their
+// lookup read (useridentity.DirectoryFacts.SpoolSeenAt).
+func forgetOnSpoolChange(cache *identityDirectoryCache, key string, now time.Time, checkGroups bool) {
 	if cache == nil || key == "" || currentIdentitySpoolDir() == "" {
 		return
 	}
@@ -253,23 +350,53 @@ func forgetOnSpoolGroupChange(cache *identityDirectoryCache, key string, now tim
 	if !ok {
 		return
 	}
-	spoolGroupChecks.Lock()
-	if last, seen := spoolGroupChecks.at[key]; seen && now.Sub(last) >= 0 && now.Sub(last) < spoolGroupsCheckInterval {
-		spoolGroupChecks.Unlock()
+	record, state := readIdentitySpoolState(key, now)
+	if checkGroups {
+		switch {
+		case state == identitySpoolUnreadable:
+		case state == identitySpoolAbsent:
+			if len(cached.Groups) > 0 {
+				cache.forget(key)
+			}
+		case cached.GroupsPartial != record.Facts.GroupsPartial || !sameGroupSet(cached.Groups, record.Facts.Groups):
+			cache.forget(key)
+		}
 		return
 	}
-	if spoolGroupChecks.at == nil || len(spoolGroupChecks.at) >= identityDirectoryMax {
-		spoolGroupChecks.at = map[string]time.Time{}
-	}
-	spoolGroupChecks.at[key] = now
-	spoolGroupChecks.Unlock()
-	record, ok := readIdentitySpoolFacts(key, now)
-	if !ok {
-		return
-	}
-	if cached.GroupsPartial != record.Facts.GroupsPartial || !sameGroupSet(cached.Groups, record.Facts.Groups) {
+	if withdrawn := identitySpoolWithdrawnAt(key, now); withdrawn.After(cached.SpoolSeenAt) {
 		cache.forget(key)
+		return
 	}
+	if state != identitySpoolCurrent || !record.UpdatedAt.After(cached.SpoolSeenAt) {
+		return
+	}
+	switch {
+	case spoolRecordContradicts(cached, record):
+		cache.forget(key)
+	case spoolRecordAddsFacts(cached, record):
+		cache.refreshSoon(key)
+	}
+}
+
+// spoolRecordContradicts reports whether a guardian record names another
+// directory identity than the cached facts: another SID than the one SSSD
+// gave for the uid, or another UPN. A fact that either side lacks
+// contradicts nothing.
+func spoolRecordContradicts(cached useridentity.DirectoryFacts, record enterprisehooks.IdentitySpoolRecord) bool {
+	differ := func(a, b string) bool {
+		a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+		return a != "" && b != "" && !strings.EqualFold(a, b)
+	}
+	return differ(cached.AccountSID, record.AccountSID) || differ(cached.UPN, record.Facts.UPN)
+}
+
+// spoolRecordAddsFacts reports whether merging record would change the
+// identity facts the cached ones name.
+func spoolRecordAddsFacts(cached useridentity.DirectoryFacts, record enterprisehooks.IdentitySpoolRecord) bool {
+	merged := mergeSpoolFacts(cached, record)
+	return merged.UPN != cached.UPN || merged.Principal != cached.Principal || merged.Realm != cached.Realm ||
+		merged.Domain != cached.Domain || merged.AccountDomain != cached.AccountDomain || merged.Directory != cached.Directory ||
+		merged.TenantID != cached.TenantID
 }
 
 // sameGroupSet compares two group lists as sets, ignoring case and order.

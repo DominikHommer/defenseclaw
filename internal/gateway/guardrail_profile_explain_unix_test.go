@@ -8,6 +8,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -99,7 +100,7 @@ func TestProfileExplainUIDTheDirectoryCannotNameMatchesItsUsersEntry(t *testing.
 	profileExplainDirectoryFacts = func(string) (useridentity.DirectoryFacts, error) {
 		return useridentity.DirectoryFacts{}, errors.New("SSSD NSS responder: i/o timeout")
 	}
-	profileExplainCachedSubject = func(string, time.Time) (profileSubject, bool) { return profileSubject{}, false }
+	profileExplainCachedSubject = func(string, time.Time) (profileSubject, error) { return profileSubject{}, errNoCachedHolder }
 	setIdentityLookupBlocking(true)
 	subject, err := profileExplainUnresolved("94404076", unixidentity.ErrNotFound)
 	if err != nil || subject.UserID != "94404076" || !subject.LookupFailed || !strings.Contains(subject.LookupError, "i/o timeout") {
@@ -113,8 +114,12 @@ func TestProfileExplainUIDTheDirectoryCannotNameMatchesItsUsersEntry(t *testing.
 		},
 		defaultProfile: "offline-floor",
 	}
-	if decision := set.match(&subject, profileSubjectLookup, "claudecode", ""); decision.Name != "contractors" || decision.Match != profileMatchUser {
-		t.Fatalf("decision = %+v; want contractors by the uid entry", decision)
+	// r104 identity: the uid entry matches, and the group entry may: the
+	// strictest of them and the default decides, here a refusal, since
+	// these profiles (no settings to compare) do not cover each other.
+	if decision := set.match(&subject, profileSubjectLookup, "claudecode", ""); decision.Refused == "" ||
+		!slices.Contains(decision.Candidates, "contractors") || !slices.Contains(decision.Candidates, "engineering") {
+		t.Fatalf("decision = %+v; want a refusal among contractors (by the uid entry) and engineering", decision)
 	}
 	other, _ := profileExplainUnresolved("94404077", unixidentity.ErrNotFound)
 	if decision := set.match(&other, profileSubjectLookup, "claudecode", ""); decision.Match != profileMatchDefaultLookupFailed {

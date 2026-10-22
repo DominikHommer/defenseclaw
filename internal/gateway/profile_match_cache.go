@@ -50,9 +50,8 @@ func profileMatchKey(subject *profileSubject, source, connectorName, agent strin
 	put(source)
 	put(connectorName)
 	put(agent)
-	if subject == nil {
-		put("\x00nil")
-	} else {
+	var putSubject func(subject *profileSubject)
+	putSubject = func(subject *profileSubject) {
 		put("subject")
 		put(subject.UserID)
 		put(subject.IDKind)
@@ -83,6 +82,14 @@ func profileMatchKey(subject *profileSubject, source, connectorName, agent strin
 		for _, g := range subject.Groups {
 			put(g)
 		}
+		// The incarnation names the account the last proven profile is kept
+		// for (provenProfileStore).
+		put(subject.accountToken)
+	}
+	if subject == nil {
+		put("\x00nil")
+	} else {
+		putSubject(subject)
 	}
 	var key [sha256.Size]byte
 	h.Sum(key[:0])

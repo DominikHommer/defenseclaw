@@ -53,20 +53,37 @@ var managedHookPeerAccountIncarnation = func(account unixidentity.Account) (stri
 // guardian's), or an incarnation that cannot be told now, proves nothing:
 // the facts are then the gateway's own, as without a guardian, and the
 // cache looks them up again soon (awaitingSpoolUPN).
-func holderSpoolRecord(key string, account unixidentity.Account, accountSID string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool) {
-	record, ok := readIdentitySpoolFactsForAccount(key, account.Name, accountSID, now)
+// A record of another SID is an error (readIdentitySpoolFactsForAccount): the
+// account's own facts are then unproven.
+func holderSpoolRecord(key string, account unixidentity.Account, accountSID string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool, error) {
+	record, ok, err := readIdentitySpoolFactsForAccount(key, account.Name, accountSID, now)
+	if err != nil {
+		return enterprisehooks.IdentitySpoolRecord{}, false, err
+	}
 	if !ok || record.AccountIncarnation == "" {
-		return enterprisehooks.IdentitySpoolRecord{}, false
+		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
 	if incarnation, known := managedHookPeerAccountIncarnation(account); !known || incarnation != record.AccountIncarnation {
-		return enterprisehooks.IdentitySpoolRecord{}, false
+		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
-	return record, true
+	return record, true, nil
 }
 
-// resolvePeerDirectoryFacts resolves a verified uid's facts through NSS and
-// merges the guardian's identity spool record for it.
+// peerNSSFacts resolves a verified uid's facts (resolveNSSPeerFacts);
+// tests replace it.
+var peerNSSFacts = resolveNSSPeerFacts
+
+// resolvePeerDirectoryFacts is the peer directory cache's lookup
+// (peerNSSFacts). A lookup that fails leaves the account and its groups
+// unproven, and the profile matcher selects the strictest profile that
+// could apply (resolveIdentity); nothing is kept from it.
 func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) {
+	return peerNSSFacts(key)
+}
+
+// resolveNSSPeerFacts resolves a verified uid's facts through NSS and
+// merges the guardian's identity spool record for it.
+func resolveNSSPeerFacts(key string) (useridentity.DirectoryFacts, error) {
 	uid, err := strconv.Atoi(key)
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
@@ -86,7 +103,11 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
-	record, ok := holderSpoolRecord(key, account, facts.AccountSID, now)
+	facts.SpoolSeenAt = identitySpoolSeenAt(key, now)
+	record, ok, err := holderSpoolRecord(key, account, facts.AccountSID, now)
+	if err != nil {
+		return useridentity.DirectoryFacts{}, err
+	}
 	var spool *enterprisehooks.IdentitySpoolRecord
 	if ok {
 		spool = &record

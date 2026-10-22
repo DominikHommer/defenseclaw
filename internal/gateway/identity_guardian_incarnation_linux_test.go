@@ -58,7 +58,7 @@ func TestGuardianRecordOfAPriorHolderIsNotLaidOver(t *testing.T) {
 	own := useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Domain: "other.example", Realm: "OTHER.EXAMPLE",
 		Directory: useridentity.DirectoryActiveDirectory, Groups: []string{"other-open"}}
 	facts := func() useridentity.DirectoryFacts {
-		record, ok := holderSpoolRecord(key, alice, "", time.Now())
+		record, ok, _ := holderSpoolRecord(key, alice, "", time.Now())
 		if !ok {
 			return own
 		}

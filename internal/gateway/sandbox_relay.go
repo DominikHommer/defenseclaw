@@ -327,6 +327,10 @@ func (a *APIServer) sandboxRelayServe(routes map[string]sandboxRelayRoute) http.
 			// registry; restore the registration's user on top of it.
 			ctx = contextWithSandboxUser(ctx, binding)
 			ctx = a.withGuardrailProfileDecision(ctx, binding.Connector)
+			if reason := profileRefusal(ctx); reason != "" {
+				a.writeJSON(w, http.StatusForbidden, map[string]string{"error": reason})
+				return
+			}
 			r = r.WithContext(ctx)
 			if route.class == sandboxauth.RouteOTLP {
 				a.serveSandboxRelayOTLP(w, r, route, binding)

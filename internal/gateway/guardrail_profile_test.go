@@ -456,8 +456,10 @@ func TestGuardrailProfileSelectionIgnoresClaimedIdentity(t *testing.T) {
 		{name: "claimed headers alone", ctx: []func(context.Context) context.Context{claimedAlice}, connector: "cursor", profile: "watch", match: profileMatchDefaultUnverified},
 		{name: "claimed headers over a verified other user", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1003", UserName: "bob"}), claimedAlice}, connector: "cursor", profile: "watch", match: profileMatchDefault},
 		{name: "unverified connector-only assignment", ctx: []func(context.Context) context.Context{claimedAlice}, connector: "codex", profile: "tooling", match: profileMatchConnector},
-		{name: "failed directory lookup", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1001", UPN: "alice@corp.example", LookupFailed: true})}, connector: "cursor", profile: "watch", match: profileMatchDefaultLookupFailed},
-		{name: "failed directory lookup on a connector-only assignment", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1002", LookupFailed: true})}, connector: "codex", profile: "watch", match: profileMatchDefaultLookupFailed},
+		// GAP-0323: a failed lookup never selects the weaker default: the
+		// strictest profile that could apply does.
+		{name: "failed directory lookup", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1001", UPN: "alice@corp.example", LookupFailed: true})}, connector: "cursor", profile: "strict", match: profileMatchDefaultLookupFailed},
+		{name: "failed directory lookup on a connector-only assignment", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1002", LookupFailed: true})}, connector: "codex", profile: "strict", match: profileMatchDefaultLookupFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -562,7 +564,9 @@ func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 		} {
 			pinned := &config.Config{}
 			pinned.Guardrail.Mode = "action"
-			pinned.Guardrail.Profiles = map[string]config.GuardrailProfile{"pin": {Mode: "observe"}, "ml": {Mode: "action"}}
+			// The pin is the strictest, so it wins over the group whatever
+			// the order (r104 identity).
+			pinned.Guardrail.Profiles = map[string]config.GuardrailProfile{"pin": {Mode: "action", BlockAt: "LOW"}, "ml": {Mode: "observe"}}
 			pinned.Guardrail.ProfileAssignments = []config.ProfileAssignment{
 				{Profile: "pin", Match: want},
 				{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"dc-ml-team@dclab.test"}}},
@@ -577,8 +581,8 @@ func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 			}
 			proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "zeptoclaw"}}
 			r := proxy.withProxyAgent(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(subject))
-			if mode, _ := proxy.profileModeFor(r.Context(), "action", ""); mode != "observe" {
-				t.Fatalf("proxy mode with %s pin = %q, want observe", match, mode)
+			if mode, _ := proxy.profileModeFor(r.Context(), "observe", ""); mode != "action" {
+				t.Fatalf("proxy mode with %s pin = %q, want action", match, mode)
 			}
 			if id, _ := agentIdentityFromContext(r.Context()); id != agent {
 				t.Fatalf("proxy agent identity = %q, want %q", id, agent)
@@ -586,7 +590,7 @@ func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 		}
 	})
 	t.Run("unresolved lookup", func(t *testing.T) {
-		check(t, withVerifiedSubject(context.Background(), unresolved), "watch", profileMatchDefaultLookupFailed, "")
+		check(t, withVerifiedSubject(context.Background(), unresolved), "ml", profileMatchDefaultLookupFailed, "")
 	})
 	t.Run("claimed headers", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", nil)
@@ -1880,8 +1884,12 @@ func TestProfileWindowsPartialGroupsUseLookupFailed(t *testing.T) {
 		t.Fatalf("last-session group selected %+v, want strict default_lookup_failed", got)
 	}
 	set.assignments = append([]config.ProfileAssignment{{Profile: "user", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}}}, set.assignments...)
-	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Name != "user" || got.Match != profileMatchUser {
-		t.Fatalf("verified UPN selected %+v, want user assignment", got)
+	// r104 identity: the UPN assignment matches, the unknown groups may
+	// match lenient, and strict is the default; these profiles (no settings
+	// to compare) do not cover each other, so the request is refused, and
+	// never decided by the last session's lenient group.
+	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Refused == "" || got.Name == "lenient" {
+		t.Fatalf("verified UPN with unknown groups selected %+v, want a refusal", got)
 	}
 	set.assignments = set.assignments[1:]
 	facts.GroupsPartial = false

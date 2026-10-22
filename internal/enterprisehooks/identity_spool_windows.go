@@ -55,10 +55,11 @@ const (
 // until the deadline, and for one account at most windowsIdentityAccountWait;
 // an answer that comes later is not used. An account whose earlier lookup
 // still runs is skipped. The accounts it did not reach or refresh keep their
-// previous records, and the next pass starts with the oldest records and
-// takes the accounts whose last lookup did not answer in time last, so
-// neither a slow directory nor one account it never answers for can keep
-// the other accounts from being refreshed.
+// previous records, with this cycle's token groups when those changed
+// (IdentitySpoolTokenGroupRecord), and the next pass starts with the oldest
+// records and takes the accounts whose last lookup did not answer in time
+// last, so neither a slow directory nor one account it never answers for
+// can keep the other accounts from being refreshed.
 func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEnrollmentGroupCache, excluded []string,
 	emails map[string]map[string]string, setOwnership func(string) error, logf func(string, ...any)) error {
 	if dir == "" || cache == nil {
@@ -80,9 +81,11 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 		skip[strings.ToUpper(strings.TrimSpace(sid))] = true
 	}
 	type account struct {
-		sid, key    string
-		previous    IdentitySpoolRecord
-		hasPrevious bool
+		sid, key string
+		previous IdentitySpoolRecord
+		// previousErr is why previous could not be read: os.ErrNotExist
+		// when the account has no record.
+		previousErr error
 		// late: the account's last lookup did not answer in time.
 		late bool
 	}
@@ -95,9 +98,7 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 		}
 		keep[strings.ToLower(key+".json")] = true
 		entry := account{sid: sid, key: key, late: windowsIdentityLookupGate.isLate(key)}
-		if previous, err := ReadIdentitySpoolRecord(dir, key, nil); err == nil {
-			entry.previous, entry.hasPrevious = previous, true
-		}
+		entry.previous, entry.previousErr = ReadIdentitySpoolRecord(dir, key, nil)
 		accounts = append(accounts, entry)
 	}
 	// Oldest record first (none at all before any), and the accounts whose
@@ -118,9 +119,42 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 	}
 	var stopped error
 	var unanswered []string
+	// publish writes record for entry. A failed publication withdraws the
+	// previous record only when this pass disproved it: the token groups or
+	// the identity changed (GAP-0329). The gateway then stops trusting the
+	// old groups at its next spool check instead of for another hour. A
+	// record that still says what this pass found stays: withdrawing it
+	// dropped the cached groups of a user whose strict groups had not
+	// changed, and the request took a possibly weaker default
+	// (default_lookup_failed). So does one the pass could not read
+	// (IdentitySpoolWithdrawnByFailedWrite).
+	publish := func(entry account, record IdentitySpoolRecord) {
+		name := entry.key + ".json"
+		err := writeIdentitySpoolFile(dir, name, record, setOwnership)
+		if err == nil {
+			return
+		}
+		if IdentitySpoolWithdrawnByFailedWrite(entry.previous, entry.previousErr, record) {
+			if removeErr := os.Remove(filepath.Join(dir, name)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("withdraw previous identity record: %w", removeErr))
+			}
+		}
+		stopped = errors.Join(stopped, fmt.Errorf("identity facts for %s: %w", entry.key, err))
+		if logf != nil {
+			logf("[hook-enumerator] WARN identity facts for %s: %v", entry.key, err)
+		}
+	}
+	// publishTokenGroups publishes this cycle's token groups of an account
+	// whose lookups did not answer in time, when its record names others.
+	publishTokenGroups := func(entry account) {
+		if record, changed := IdentitySpoolTokenGroupRecord(entry.previous, entry.previousErr, entry.key, cache.Users[entry.sid],
+			cache.SignedIn[entry.sid], time.Now().UTC()); changed {
+			record.ConnectorEmails = emails[entry.key]
+			publish(entry, record)
+		}
+	}
 	for i, entry := range accounts {
 		sid, key := entry.sid, entry.key
-		name := key + ".json"
 		now := time.Now().UTC()
 		groupSIDs := cache.Users[sid]
 		// The enrollment cache retains last-session groups for enrollment
@@ -150,11 +184,15 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 		cancel()
 		if err != nil {
 			if cycleErr := ctx.Err(); cycleErr != nil {
-				stopped = fmt.Errorf("identity facts of %d of %d accounts were not refreshed before the enumerator cycle ended; their previous records stay: %w",
-					len(accounts)-i, len(accounts), cycleErr)
+				stopped = errors.Join(stopped, fmt.Errorf("identity facts of %d of %d accounts were not refreshed before the enumerator "+
+					"cycle ended; their previous records stay, with this cycle's token groups: %w", len(accounts)-i, len(accounts), cycleErr))
+				for _, rest := range accounts[i:] {
+					publishTokenGroups(rest)
+				}
 				break
 			}
 			unanswered = append(unanswered, fmt.Sprintf("%s (%v)", key, err))
+			publishTokenGroups(entry)
 			continue
 		}
 		facts := resolved.facts
@@ -169,12 +207,10 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 		case facts.UPN != "":
 			record.UPNSource = UPNSourceTranslateName
 		}
-		if entry.hasPrevious {
+		if entry.previousErr == nil {
 			record = KeepLastKnownUPN(record, entry.previous)
 		}
-		if err := writeIdentitySpoolFile(dir, name, record, setOwnership); err != nil && logf != nil {
-			logf("[hook-enumerator] WARN identity facts for %s: %v", key, err)
-		}
+		publish(entry, record)
 	}
 	if entries, err := os.ReadDir(dir); err == nil {
 		for _, entry := range entries {
@@ -184,8 +220,8 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 		}
 	}
 	if len(unanswered) > 0 {
-		stopped = errors.Join(stopped, fmt.Errorf("the directory lookups of %d account(s) did not answer in time; their previous records stay: %s",
-			len(unanswered), strings.Join(unanswered, ", ")))
+		stopped = errors.Join(stopped, fmt.Errorf("the directory lookups of %d account(s) did not answer in time; their previous records "+
+			"stay, with this cycle's token groups: %s", len(unanswered), strings.Join(unanswered, ", ")))
 	}
 	return stopped
 }

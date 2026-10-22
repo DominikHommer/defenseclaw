@@ -131,17 +131,21 @@ func loadManifestWithSHA256(path string, validateTarget func(int, ManifestTarget
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	decodeErr := decoder.Decode(&manifest)
-	if decodeErr != nil && decodeErr != io.EOF {
+	if decodeErr == io.EOF {
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest %s is empty; refusing to withdraw enrolled hooks", path)
+	}
+	if decodeErr != nil {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, decodeErr)
 	}
-	if decodeErr == nil {
-		var trailing any
-		if err := decoder.Decode(&trailing); err != io.EOF {
-			if err == nil {
-				err = fmt.Errorf("multiple YAML documents are not allowed")
-			}
-			return Manifest{}, "", fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, err)
+	if manifest.Targets == nil {
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest %s has no explicit targets; refusing to withdraw enrolled hooks", path)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple YAML documents are not allowed")
 		}
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, err)
 	}
 	if manifest.Version == 0 {
 		manifest.Version = 1

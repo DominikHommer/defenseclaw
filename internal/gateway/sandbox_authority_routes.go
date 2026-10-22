@@ -554,6 +554,10 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	match := a.sandboxMatchPeer(r.Context(), peer, req.Connector, sandboxResolveWait)
+	if match.decision.Refused != "" {
+		refuse(sandboxrelay.ReasonUnavailable, match.decision.Refused, baseAccess)
+		return
+	}
 	attempt.Profile, attempt.ProfileMatch, attempt.MatchedGroup = match.decision.Name, match.decision.Match, match.decision.MatchedGroup
 	attempt.ProfileDigest, attempt.Provisional = match.decision.Digest, match.provisional
 	floor, floorDigest, err := sandboxFloorFor(cfg, match.decision.Name)

@@ -125,14 +125,14 @@ func TestL1ExplainedDirectoryHolderSurvivesOutageOnlyWhileFactsAreServed(t *test
 	if gotUID, _, ok := managedHookPeerHomes.cachedHolder("alice"); !ok || gotUID != uid {
 		t.Fatalf("cached name during outage = %d, %t", gotUID, ok)
 	}
-	if _, ok := profileExplainCachedSubject("alice", now()); !ok {
+	if _, err := profileExplainCachedSubject("alice", now()); err != nil {
 		t.Fatal("explain lost the account whose cached facts hooks still serve")
 	}
 	clock.Add(int64(identityDirectoryMaxAge + time.Minute))
 	if gotUID, _, ok := managedHookPeerHomes.cachedHolder("alice"); ok {
 		t.Fatalf("expired directory holder still names uid %d", gotUID)
 	}
-	if _, ok := profileExplainCachedSubject("alice", now()); ok {
+	if _, err := profileExplainCachedSubject("alice", now()); err == nil {
 		t.Fatal("explain used facts the hooks no longer serve")
 	}
 }

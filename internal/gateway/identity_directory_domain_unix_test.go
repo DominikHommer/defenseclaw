@@ -44,13 +44,20 @@ func TestProfileExplainDuringOutageAcceptsEverySpelling(t *testing.T) {
 	const uid = 1_870_400_551
 	const name = "alice"
 	accounts := map[int]unixidentity.Account{uid: {Name: name, UID: uid, Home: "/home/" + name}}
-	previous, previousFacts := managedHookPeerHomes, identityFactsEnabled.Load()
+	previous, previousFacts, previousIncarnation := managedHookPeerHomes, identityFactsEnabled.Load(), managedHookPeerAccountIncarnation
 	managedHookPeerHomes = &managedHookPeerHomeCache{
 		newResolver: func() unixidentity.Resolver { return &fakePeerHomeResolver{accounts: accounts} },
 		now:         time.Now,
 	}
+	// SSSDs offline cache still names the accounts SID: a spelling only
+	// the cached facts confirm needs the incarnation they were cached for
+	// (review of r104 W2B, loop round 3).
+	managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool) { return "sid:S-1-5-21-1-2-3-551", true }
 	setIdentityFactsEnabled(true)
-	t.Cleanup(func() { managedHookPeerHomes = previous; setIdentityFactsEnabled(previousFacts) })
+	t.Cleanup(func() {
+		managedHookPeerHomes, managedHookPeerAccountIncarnation = previous, previousIncarnation
+		setIdentityFactsEnabled(previousFacts)
+	})
 	facts := useridentity.DirectoryFacts{
 		Domain: "corp.example", AccountDomain: "CORP", Realm: "CORP.EXAMPLE", UPN: "alice.smith@corp.example",
 		Principal: "alice.smith@corp.example", Groups: []string{"engineering"}, ResolvedAt: time.Now(),

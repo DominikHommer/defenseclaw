@@ -69,9 +69,24 @@ type profileSubject struct {
 	// GroupsUnknown means the Windows enumerator has no current desktop
 	// token for group matching; other verified identity fields remain usable.
 	GroupsUnknown bool
+	// unconfirmedGroups are the gids among Groups, as numbers, whose names
+	// no NSS group service could give or prove absent
+	// (useridentity.DirectoryFacts.UnconfirmedGroups): the account is in
+	// them, but a group assignment that names a group may or may not apply
+	// (identityResolution).
+	unconfirmedGroups []string
+	// accountToken names the account incarnation that holds UserID (the
+	// SSSD or AD account SID); "" when the facts give none
+	// (identityIncarnation).
+	accountToken string
+	// upnUnproven marks guardian-backed facts whose UPN the guardian has
+	// not given yet (awaitingSpoolUPN): a users entry written as a UPN or
+	// DOMAIN\name may name the account.
+	upnUnproven bool
 	// LookupFailed is set when the directory lookup for this subject failed
-	// and no cached facts within their TTL exist. Directory-dependent
-	// assignments then select default_lookup_failed; a verified ID can match.
+	// and no cached facts within their TTL exist: the account and its groups
+	// are unproven (resolveIdentity), and only a uid or SID entry, an agent
+	// and a connector match for sure.
 	LookupFailed bool
 	// LookupError is why the lookup failed, when `explain` knows (the live
 	// path only records default_lookup_failed).
@@ -128,6 +143,9 @@ var (
 	// profileAgentSource returns the request's verified agent identity
 	// (defenseclaw.agent.identity.id, agt-...).
 	profileAgentSource = requestAgentIdentity
+	// profileAgentLegacySource returns the 1.0.3 identity of the request's
+	// agent agent (requestLegacyAgentIdentity).
+	profileAgentLegacySource = requestLegacyAgentIdentity
 	// profileExplainSubjectLookup resolves the subject an administrator
 	// names to `guardrail profile explain --user`.
 	profileExplainSubjectLookup = lookupDirectoryProfileSubject
@@ -162,6 +180,27 @@ type profileDecision struct {
 	// Assignment is the 1-based index of the assignment that matched, 0 for
 	// the default.
 	Assignment int
+	// Refused, when set, says why the request is refused: no single profile
+	// is safe for it, because a fact that decides its profile is unproven
+	// and the profiles that may apply do not cover each other
+	// (resolveProfileUnproven). The request is refused wherever its surface
+	// can block it (guardrail_profile_refusal.go); Name is the strictest of
+	// those profiles by hook mode and block_at, for the rest.
+	Refused string
+	// Unproven names the identity facts this pass did not prove, and
+	// Candidates the profiles the decision chose among (selectProfile);
+	// both empty for a fully proven decision.
+	Unproven   []string
+	Candidates []string
+}
+
+// profileRefusal is why the request on ctx is refused (profileDecision.Refused),
+// or "".
+func profileRefusal(ctx context.Context) string {
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil {
+		return resolved.decision.Refused
+	}
+	return ""
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
@@ -191,6 +230,9 @@ type guardrailProfileSet struct {
 	// agentBridge links agents entries written for 1.0.3 identities to the
 	// identities their accounts have now (profileAgent).
 	agentBridge profileAgentBridge
+	// provenProfiles holds the last fully proven profile of each account
+	// incarnation (selectProfile).
+	provenProfiles *provenProfileStore
 }
 
 // newGuardrailProfileSet derives every profile of cfg and preloads their rule
@@ -215,6 +257,7 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 		rules:          make(map[string]*compiledRulePackCategories),
 		packs:          make(map[string]*guardrail.RulePack),
 		matches:        newProfileMatchCache(),
+		provenProfiles: &provenProfileStore{},
 	}
 	if runtime.GOOS == "windows" && cfg.StandaloneEnterprise() && profileGroupSIDLookup != nil {
 		set.groupSIDs = buildProfileGroupSIDs(set.assignments, profileGroupSIDLookup, profileGroupLocalSIDLookup, profileGroupSIDWait)
@@ -533,10 +576,32 @@ func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
 	return facts.ID, facts.Verified
 }
 
+// requestLegacyAgentIdentity is the legacy identity (1.0.0 to 1.0.3,
+// agentidentity.LegacyAgentID) of agent, the agent identity of ctx, and
+// true; "" and true for an account without a domain, whose identity did not
+// change. It derives the identity again for ctx's verified user and
+// connector, as the hook path does, and returns false when that derivation
+// is not agent. Every request derives its own: no state is kept, so none
+// can be dropped.
+func requestLegacyAgentIdentity(ctx context.Context, agent string) (string, bool) {
+	connectorName := profileRequestConnector(ctx)
+	if connectorName == "" || agent == "" {
+		return "", false
+	}
+	facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName})
+	if facts.ID == "" || !strings.EqualFold(facts.ID, agent) {
+		return "", false
+	}
+	return facts.LegacyID, true
+}
+
 // guardrailProfileInspectMiddleware resolves the profile for the inspect
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A refused decision is answered by each inspect handler
+		// (refuseProfileInspect), so a sandbox relay of the request is
+		// refused the same way.
 		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(r.Context(), "")))
 	})
 }
@@ -575,12 +640,14 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 	}
 	subject, source := profileRequestSubject(ctx)
 	agent := ""
+	var legacy profileAgentLegacy
 	if source != "" && subject != nil {
 		if id, ok := profileAgentSource(ctx); ok {
 			agent = strings.TrimSpace(id)
+			legacy = func() (string, bool) { return profileAgentLegacySource(ctx, agent) }
 		}
 	}
-	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent)
+	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent, legacy)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
 		if derived, ok := set.profiles[decision.Name]; ok {
@@ -714,7 +781,11 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 		Domain:        s.Directory.Domain,
 		AccountDomain: accountDomain,
 		Groups:        s.Directory.Groups,
-		GroupsUnknown: lookupAttempted && s.Directory.GroupsPartial,
+		// The names of these gids are unknown, not absent.
+		unconfirmedGroups: s.Directory.UnconfirmedGroups,
+		accountToken:      s.Directory.AccountSID,
+		upnUnproven:       lookupAttempted && !s.Directory.ResolvedAt.IsZero() && awaitingSpoolUPN(s.Directory),
+		GroupsUnknown:     lookupAttempted && s.Directory.GroupsPartial,
 		LookupFailed: lookupAttempted && (s.Directory.ResolvedAt.IsZero() ||
 			(s.Directory.Source == useridentity.SourceWindowsLSA ||
 				s.Directory.Source == useridentity.SourceWindowsIdentityStore) && awaitingSpool(s.Directory) && !s.Directory.GroupsPartial),
@@ -875,17 +946,18 @@ func accountGroups(account *osuser.User) ([]string, error) {
 	return groups, nil
 }
 
-// match runs the ordered assignments: the first match wins; within one
-// assignment the set keys AND together and the values of a key OR together.
-// Identity keys (users, groups, agents) match only a verified subject; a
-// connector-only assignment matches any other request authenticated for that
-// connector. A failed directory lookup leaves groups and names unknown, so
-// their assignments select default_lookup_failed (GAP-0312). An assignment
-// naming the kernel-verified UID or SID, or a verified agent, can still
-// select its profile.
+// match is selectProfile for a request without an unresolved agents entry
+// (matchAgent has the bridge's answer).
 func (set *guardrailProfileSet) match(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	if set.matches == nil {
-		return set.matchUncached(subject, source, connectorName, agent)
+	return set.matchResolved(subject, resolveIdentity(subject, nil), source, connectorName, agent)
+}
+
+// matchResolved is selectProfile, memoised for repeated subjects whose
+// facts are all proven. A decision taken on unproven facts is never cached:
+// it reads the last proven profile of the incarnation, which changes.
+func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res identityResolution, source, connectorName, agent string) profileDecision {
+	if set.matches == nil || !res.proven() {
+		return set.selectProfile(subject, res, source, connectorName, agent)
 	}
 	key := profileMatchKey(subject, source, connectorName, agent)
 	if set.groupSIDs != nil {
@@ -896,124 +968,15 @@ func (set *guardrailProfileSet) match(subject *profileSubject, source, connector
 	if decision, ok := set.matches.get(key); ok {
 		return decision
 	}
-	decision := set.matchUncached(subject, source, connectorName, agent)
+	decision := set.selectProfile(subject, res, source, connectorName, agent)
 	set.matches.put(key, decision)
 	return decision
 }
 
+// matchUncached is selectProfile without the memo, for a request without an
+// unresolved agents entry.
 func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	if subject != nil && subject.LookupFailed {
-		return set.matchWithFailedLookup(subject, source, connectorName, agent)
-	}
-	if subject != nil && subject.GroupsUnknown {
-		return set.matchWithUnknownGroups(subject, source, connectorName, agent)
-	}
-	verified := subject != nil && source != ""
-	groups := &subjectGroups{sids: set.groupSIDs}
-	if verified {
-		groups.list = subject.Groups
-	}
-	for i, assignment := range set.assignments {
-		reason, group, ok := assignmentMatches(assignment.Match, subject, groups, verified, connectorName, agent)
-		if !ok {
-			continue
-		}
-		decision := set.decision(assignment.Profile, reason, group, source)
-		decision.Assignment = i + 1
-		return decision
-	}
-	reason := profileMatchDefault
-	if !verified {
-		reason = profileMatchDefaultUnverified
-	}
-	return set.decision(set.defaultProfile, reason, "", source)
-}
-
-// matchWithUnknownGroups preserves verified user and agent assignments in
-// order. An earlier group assignment whose other conditions match could
-// preempt them, so use the default until a current desktop token supplies
-// its membership.
-func (set *guardrailProfileSet) matchWithUnknownGroups(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	fallback := func() profileDecision {
-		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
-	}
-	if source == "" || subject.UserID == "" {
-		return fallback()
-	}
-	for i, assignment := range set.assignments {
-		m := assignment.Match
-		if m.Empty() {
-			continue
-		}
-		known := m
-		known.Groups = nil
-		if known.Empty() {
-			return fallback()
-		}
-		reason, group, ok := assignmentMatches(known, subject, &subjectGroups{}, true, connectorName, agent)
-		if !ok {
-			continue
-		}
-		if len(m.Groups) > 0 {
-			return fallback()
-		}
-		decision := set.decision(assignment.Profile, reason, group, source)
-		decision.Assignment = i + 1
-		return decision
-	}
-	return fallback()
-}
-
-// matchWithFailedLookup can use a kernel-verified UID or SID or a
-// verified agent even when directory names and groups are unknown. Preserve
-// assignment order: an earlier assignment that could depend on missing facts
-// still selects the
-// outage default rather than letting a later assignment shadow it.
-func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	fallback := func() profileDecision {
-		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
-	}
-	if source == "" || subject.UserID == "" {
-		return fallback()
-	}
-	idOnly := &profileSubject{UserID: subject.UserID, IDKind: subject.IDKind}
-	for i, assignment := range set.assignments {
-		m := assignment.Match
-		if len(m.Connectors) > 0 && !anyMatches(m.Connectors, func(v string) bool {
-			return config.NormalizeConnectorName(v) == connectorName && connectorName != ""
-		}) {
-			continue
-		}
-		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool {
-			return strings.EqualFold(strings.TrimSpace(v), agent) && agent != ""
-		}) {
-			continue
-		}
-		uidMatches := anyMatches(m.Users, func(v string) bool {
-			return useridentity.EqualFold(strings.TrimSpace(v), subject.UserID)
-		})
-		if len(m.Users) > 0 && !uidMatches {
-			// A list of other IDs is known not to match, regardless of
-			// its group condition. A name or principal could still
-			// name this account, so fail closed.
-			for _, entry := range m.Users {
-				if useridentity.KindForID(entry) == "" {
-					return fallback()
-				}
-			}
-			continue
-		}
-		if len(m.Groups) > 0 || (len(m.Users) == 0 && len(m.Agents) == 0) {
-			return fallback()
-		}
-		reason, group, ok := assignmentMatches(m, idOnly, &subjectGroups{}, true, connectorName, agent)
-		if ok {
-			decision := set.decision(assignment.Profile, reason, group, source)
-			decision.Assignment = i + 1
-			return decision
-		}
-	}
-	return fallback()
+	return set.selectProfile(subject, resolveIdentity(subject, nil), source, connectorName, agent)
 }
 
 func (set *guardrailProfileSet) decision(name, reason, group, source string) profileDecision {
@@ -1061,12 +1024,17 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 		reason, group = profileMatchUser, ""
 	}
 	if len(m.Agents) > 0 {
-		if agent == "" || !anyMatches(m.Agents, func(v string) bool { return strings.EqualFold(strings.TrimSpace(v), agent) }) {
+		if !anyMatches(m.Agents, func(v string) bool { return agentEntryMatches(v, agent) }) {
 			return "", "", false
 		}
 		reason, group = profileMatchAgent, ""
 	}
 	return reason, group, true
+}
+
+// agentEntryMatches reports whether an agents entry names agent.
+func agentEntryMatches(entry, agent string) bool {
+	return agent != "" && strings.EqualFold(strings.TrimSpace(entry), agent)
 }
 
 // profileUserName is the name users entries match: the bare account, or,
@@ -1724,7 +1692,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if source == "" {
 		agent = ""
 	}
-	decision := set.matchAgent(subject, source, connectorName, agent)
+	decision := set.matchAgent(subject, source, connectorName, agent, nil)
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match
@@ -1739,6 +1707,15 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["subject_source"] = decision.SubjectSource
 	out["assignment"] = decision.Assignment
 	warnings := profileExplainWarnings(set, decision, subject)
+	if len(decision.Unproven) > 0 {
+		out["unproven_facts"] = decision.Unproven
+		out["candidate_profiles"] = decision.Candidates
+	}
+	if decision.Refused != "" {
+		out["refused"] = true
+		out["refused_reason"] = decision.Refused
+		warnings = append(warnings, unprovenRefusalNote(decision))
+	}
 	if agent != "" {
 		warnings = append(warnings, fmt.Sprintf("agent %q is not verified against a host identity record by profile-explain; confirm it with agent identities before relying on this answer", agent))
 	}

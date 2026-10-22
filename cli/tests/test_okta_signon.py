@@ -198,6 +198,20 @@ def test_group_coverage_skips_members_an_earlier_rule_allowed(monkeypatch, capsy
     assert "leaves out" not in output
 
 
+def test_group_wide_deny_does_not_override_members_allowed_first(monkeypatch, capsys):
+    """Every member already settled by an allow keeps its first Okta decision."""
+    rules = [
+        _rule("allow U1", 1, {"users": {"include": ["U1"]}}),
+        _rule("allow U2", 2, {"users": {"include": ["U2"]}}),
+        _rule("deny engineering", 3, {"groups": {"include": ["G1"]}}, "DENY"),
+    ]
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"]}).problems == 0
+    assert "password-only sign-on covers group engineering" in capsys.readouterr().out
+    # An unsettled member still reaches the later deny.
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2", "U3"]}).problems == 1
+    assert "no active password-only ALLOW rule covers group engineering" in capsys.readouterr().out
+
+
 def test_group_coverage_names_a_member_once_for_its_first_deny(monkeypatch, capsys):
     """A member an earlier deny decided for is not counted again by a later rule."""
     rules = [_rule("deny U1", 1, {"users": {"include": ["U1"]}}, "DENY"),

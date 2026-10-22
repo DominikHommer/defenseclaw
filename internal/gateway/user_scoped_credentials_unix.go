@@ -95,6 +95,24 @@ var agentIdentityAccountToken = func(identity string) string {
 	return managedHookPeerHomes.rowToken(uid)
 }
 
+// agentIdentityVerifiedAccountToken names only the account proven to hold the
+// uid now. Inventory must not use rowToken's last-known fallback as proof of
+// ownership when the account lookup is unavailable.
+var agentIdentityVerifiedAccountToken = func(identity string) string {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return ""
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return ""
+	}
+	token, known := managedHookPeerHomes.accountToken(uid)
+	if !known {
+		return ""
+	}
+	return token
+}
+
 // agentIdentityHolderHistory is the last account token of a uid and whether
 // another account is known to have held it (managedHookPeerHomeCache.holderHistory).
 // Tests replace it.
