@@ -207,6 +207,8 @@ func hookSourceReason(resp agentHookResponse) string {
 // after its client has gone away. A var so tests can expire it.
 var agentHookDisconnectGrace = 30 * time.Second
 
+type hookClientContextKey struct{}
+
 // agentHookPersistGrace bounds the terminal audit, hook_decision and receipt
 // writes once the hook's own work has been cancelled.
 const agentHookPersistGrace = 10 * time.Second
@@ -218,7 +220,10 @@ const agentHookPersistGrace = 10 * time.Second
 // hook_decision. The work is cancelled agentHookDisconnectGrace after the
 // disconnect, or when the handler returns.
 func agentHookCompletionContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return contextWithCancelGrace(parent, agentHookDisconnectGrace)
+	ctx, cancel := contextWithCancelGrace(parent, agentHookDisconnectGrace)
+	// Persistence may outlive the HTTP connection, but the connection's
+	// cancellation remains evidence that its client cannot receive an allow.
+	return context.WithValue(ctx, hookClientContextKey{}, parent), cancel
 }
 
 // agentHookPersistenceContext carries the terminal persistence of a verdict.
@@ -773,6 +778,18 @@ func (a *APIServer) finalizeAgentHook(
 	panicked bool,
 	extra map[string]string,
 ) hookFinalizationResult {
+	if client, ok := ctx.Value(hookClientContextKey{}).(context.Context); ok && client.Err() != nil && resp.Action != "block" {
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			failed := a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, req.Payload, hookCheckFailure{
+				base:  agentHookResponse{Severity: "WARN", Reason: "hook client disconnected before the gateway decision was delivered"},
+				cause: "because the hook client disconnected before it received the gateway decision",
+			})
+			if failed.Action == "block" {
+				failed.EvaluationID = resp.EvaluationID
+				resp = failed
+			}
+		}
+	}
 	// Treat a block response as enforced unless identity stamping proves
 	// otherwise. If identity stamping itself panics, notification stays
 	// fail-closed behind canonical enforcement persistence.
