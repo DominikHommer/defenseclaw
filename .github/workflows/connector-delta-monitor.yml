@@ -39,11 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          persist-credentials: false
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
           ref: main
-          path: integration
           persist-credentials: false
       - name: Restore the last committed checkpoint from this main-only workflow
         env:
@@ -67,11 +63,8 @@ jobs:
       - name: Compare unseen merged PRs with current DefenseClaw main
         env:
           GH_TOKEN: ${{ github.token }}
-          CONNECTOR_DELTA_AI_ENABLED: ${{ vars.CONNECTOR_DELTA_AI_ENABLED != 'false' }}
-          CONNECTOR_DELTA_MODEL: ${{ vars.CONNECTOR_DELTA_MODEL }}
-          CONNECTOR_DELTA_ANTHROPIC_API_KEY: ${{ secrets.CONNECTOR_DELTA_ANTHROPIC_API_KEY || secrets.ANTHROPIC_API_KEY }}
-          CONNECTOR_DELTA_BEDROCK_API_KEY: ${{ secrets.BIFROST_API_KEY }}
-        run: python3 scripts/connector_delta_monitor.py analyze --repo integration --state monitor/checkpoint/state.json --output monitor --limit 100
+          CONNECTOR_DELTA_AI_ENABLED: 'false' # Local LLM evaluation first; SRE will provision CI access.
+        run: python3 scripts/connector_delta_monitor.py analyze --state monitor/checkpoint/state.json --output monitor --limit 100
       - name: Prepare metadata-only notices and candidate checkpoint
         id: bundle
         if: ${{ always() }}

@@ -198,7 +198,7 @@ class MonitorTests(unittest.TestCase):
         self.assertFalse(bundle["state"]["cursors"])
 
     def test_ai_quotes_are_checked_and_cannot_promote_a_break(self):
-        fake = Fake(after=json.dumps({**json.loads(schema()), "description": "changed documentation"}))
+        fake = Fake(after=json.dumps({**json.loads(schema()), "additionalProperties": False}))
         with patch.dict(os.environ, {"CONNECTOR_DELTA_MODEL": "test-model"}):
             bundle, report = self.run_fake(fake, ai=True)
         self.assertFalse(bundle["gaps"])
@@ -345,7 +345,7 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(m.load(root / "checkpoint/state.json"), self.empty)
 
     def test_ai_suspicion_is_private_and_not_a_static_proof(self):
-        fake = Fake(after=json.dumps({**json.loads(schema()), "description": "changed"}))
+        fake = Fake(after=json.dumps({**json.loads(schema()), "additionalProperties": False}))
 
         def suspicious(url, *args, **kwargs):
             result = fake(url, *args, **kwargs)

@@ -25,6 +25,7 @@
       "local_files": [
         "internal/gateway/codex_hook.go",
         "internal/gateway/connector/codex.go",
+        "internal/gateway/connector/codex_policy_windows.go",
         "internal/enterprisepolicy/paths.go",
         "internal/gateway/connector/hookexec/spec.go"
       ]

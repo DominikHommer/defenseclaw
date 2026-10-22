@@ -55,11 +55,13 @@ Conflict classifications, evidence and model output stay in the owner-readable
 `private-report.json`, never uploaded or included in notices/logs. On hosted CI
 this file is ephemeral; reproduce a PR locally to inspect it. There is no durable
 private report archive or private email delivery in this version.
-AI defaults on; set `CONNECTOR_DELTA_AI_ENABLED=false` to opt out. It prefers the
-existing `BIFROST_API_KEY` Bedrock secret (Haiku 4.5, us-east-1); without it, uses
-`CONNECTOR_DELTA_ANTHROPIC_API_KEY` or the existing `ANTHROPIC_API_KEY` secret.
-`CONNECTOR_DELTA_MODEL` overrides the model. Selected source/contracts and deltas
-are sent to Bedrock or Anthropic; no model tools or code execution are granted.
+AI is a second layer after file selection and static checks. CI keeps it off until
+SRE provisions access; local use accepts `CONNECTOR_DELTA_AI_ENDPOINT`,
+`CONNECTOR_DELTA_AI_API_KEY` and `CONNECTOR_DELTA_MODEL` in the process environment.
+Supported routes are Anthropic, Azure Foundry Claude, Azure OpenAI chat completions
+and Bedrock. Azure endpoints must match the vendor host/path allowlist; redirects
+are refused. Optional `CONNECTOR_DELTA_REASONING_EFFORT` controls reasoning effort.
+Selected snippets/deltas leave the host; no model tools or execution are granted.
 
 State is a main-only Actions artifact retained 90 days. Missing state after prior
 runs fails visibly. The scanner reads at most 300 recently updated closed PRs and
@@ -73,8 +75,8 @@ python3 -m unittest cli.tests.test_connector_delta -v
 CONNECTOR_DELTA_AI_ENABLED=false python3 scripts/connector_delta_monitor.py analyze --pr codex 44349 --output /tmp/connector-replay
 ```
 
-Replay uses the supplied checkout as its local comparison target (`--repo` can
-select a current-main checkout). Inspect `private-report.json` locally; never
+Replay pins current DefenseClaw main, just like production; the private report
+records its commit. Inspect `private-report.json` locally; never
 upload it publicly. Replay output cannot publish or advance production state.
 No live model calls are needed by tests. Selected regression examples are not a
 population accuracy benchmark or live-client certification.
