@@ -209,6 +209,8 @@ func TestEditedHookEntriesReplacedAndRemoved(t *testing.T) {
 		if tc.foreign {
 			variants["foreign"] = [2]string{"/.defenseclaw/hooks/" + tc.script, "/bin/" + stem + "X.sh"}
 		}
+		// rel-1-0-4 GAP-0600: an old copy of the script in another folder.
+		variants["copy"] = [2]string{"/.defenseclaw/hooks/" + tc.script, "/lane/" + tc.script}
 		for variant, edit := range variants {
 			t.Run(name+"/"+variant, func(t *testing.T) {
 				root := testenv.PrivateTempDir(t)
@@ -229,6 +231,9 @@ func TestEditedHookEntriesReplacedAndRemoved(t *testing.T) {
 				sets := strings.Count(installed, current)
 				edited := strings.ReplaceAll(installed, edit[0], edit[1])
 				editedPath := filepath.ToSlash(root) + edit[1]
+				if variant == "copy" {
+					writeOldHookCopyForTest(t, editedPath)
+				}
 				kept := strings.Count(edited, editedPath)
 				if sets == 0 || kept == 0 || strings.Contains(edited, current) {
 					t.Fatalf("fixture did not edit every hook entry (%d sets, %d edited):\n%s", sets, kept, edited)
@@ -450,6 +455,33 @@ func TestOwnedHooksPresentRejectsSingleEditedEntry(t *testing.T) {
 					}
 					expectRepaired(t, path, "edited copy", pristine, encodeHookFileForTest(t, path, document))
 				}
+				// rel-1-0-4 GAP-0600: an entry repointed at an old copy of
+				// the script in another folder, alone or beside the working
+				// entry, and then with that copy deleted.
+				registered := filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", tc.script))
+				lane := filepath.ToSlash(filepath.Join(testenv.PrivateTempDir(t), "lane", tc.script))
+				if !bytes.Contains(pristine, []byte(registered)) {
+					t.Fatalf("%s does not name %s", path, registered)
+				}
+				writeOldHookCopyForTest(t, lane)
+				repointed := replaceNthForTest(pristine, registered, lane, 0)
+				expectRepaired(t, path, "repointed at a copy", pristine, repointed)
+				if filepath.Ext(path) != ".toml" {
+					document := decodeHookFileForTest(t, path)
+					if !insertEditedHookCopyForTest(document, registered, lane) {
+						t.Fatal("no hook handler to copy")
+					}
+					expectRepaired(t, path, "copy beside", pristine, encodeHookFileForTest(t, path, document))
+				}
+				if err := os.Remove(lane); err != nil {
+					t.Fatal(err)
+				}
+				// Without DefenseClaw's --event binding nothing marks a
+				// deleted copy as DefenseClaw's; a user's own hook of that
+				// name is kept.
+				if bytes.Contains(repointed, []byte(lane+" --")) || bytes.Contains(repointed, []byte(lane+"' --")) {
+					expectRepaired(t, path, "repointed at a deleted copy", pristine, repointed)
+				}
 				if name != "hermes" && name != "copilot" {
 					continue
 				}
@@ -481,6 +513,18 @@ func TestOwnedHooksPresentRejectsSingleEditedEntry(t *testing.T) {
 				t.Fatal("no hook config file references the hook script")
 			}
 		})
+	}
+}
+
+// writeOldHookCopyForTest writes an earlier release's generated hook script
+// (its marker line, no check of the call) at path.
+func writeOldHookCopyForTest(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("#!/bin/bash\n# defenseclaw-managed-hook v6\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
 	}
 }
 

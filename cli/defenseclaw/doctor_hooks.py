@@ -3061,6 +3061,19 @@ def _contract_evidence(data_dir: str, connector: str, config_path: str) -> tuple
     return f"contract={contract} version={version} status={status}", version, contract
 
 
+def _locked_hook_script_digest(data_dir: str, connector: str, name: str) -> str:
+    """The digest Setup sealed in hook_contract_lock.json for *connector*'s hook script *name*, or ""."""
+
+    try:
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as handle:
+            lock = json.load(handle)
+    except (OSError, ValueError):
+        return ""  # _contract_evidence reports a missing or unreadable lock
+    entry = (lock.get("connectors") or {}).get(connector) if isinstance(lock, dict) else None
+    digests = entry.get("hook_script_digests") if isinstance(entry, dict) else None
+    return str(digests.get(name) or "") if isinstance(digests, dict) else ""
+
+
 def _copilot_powershell_binding(command: str) -> tuple[str, str] | None:
     match = _COPILOT_POWERSHELL_COMMAND.fullmatch(command.strip())
     if match:
@@ -3291,6 +3304,17 @@ def validate_windows_copilot_hook_registration(
         runtime_root = _windows_hook_runtime_root(resolved) or install_root
         if _stable_regular_file(resolved, runtime_root, read_limit=2) != b"MZ":
             raise _InspectionError("foreign", f"registered hook executable is not a Windows PE file: {resolved}")
+        # The markers above are in every release's adapter; only the digest
+        # Setup sealed tells an old copy from the current one (rel-1-0-4 GAP-0600).
+        sealed = _locked_hook_script_digest(data_dir, "copilot", "copilot-hook.ps1")
+        if not sealed:
+            raise _InspectionError("stale", "hook contract lock has no digest for the Copilot adapter")
+        if not hmac.compare_digest("sha256:" + hashlib.sha256(adapter_bytes).hexdigest(), sealed):
+            raise _InspectionError(
+                "stale",
+                f"registered Copilot adapter {resolved_adapter} changed since setup (an edit, or a copy from "
+                "another build; it does not match hook_contract_lock.json)",
+            )
         mode_detail = (
             f"configured mode={configured_mode}; "
             if configured_mode in {"action", "observe"}

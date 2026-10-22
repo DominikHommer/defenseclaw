@@ -215,6 +215,42 @@ def _is_disabled_placeholder(path: Path) -> bool:
         return False
 
 
+def _trusted_owner_uids() -> set[int]:
+    return {os.geteuid(), 0}
+
+
+def _untrusted_hook_file(connector: str, script: Path) -> HookProblem | str:
+    """Why another account can change the generated hook *script* or its folder, or "" (rel-1-0-4 GAP-0600).
+
+    Setup writes the script 0700 in a 0700 folder of this account (or root,
+    for a managed install). A script another account owns or may write runs
+    whatever that account puts there.
+    """
+
+    for item, kind in ((script, "script"), (script.parent, "folder")):
+        try:
+            info = item.stat()
+        except OSError:
+            return ""  # the missing and unreadable checks report it
+        writable = info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        if info.st_uid in _trusted_owner_uids() and not writable:
+            continue
+        why = f"is owned by uid {info.st_uid}" if info.st_uid not in _trusted_owner_uids() else (
+            f"is writable by other accounts (mode {stat.S_IMODE(info.st_mode):04o})"
+        )
+        if kind == "script":
+            repair = f"run `{setup_command(connector)} --yes`; it writes the hook script again for this account"
+        elif info.st_uid in _trusted_owner_uids():
+            repair = f"run `chmod go-w {shlex.quote(str(item))}`"
+        else:
+            repair = f"give {item} back to this account (`chown`), then run `{setup_command(connector)} --yes`"
+        return HookProblem(
+            f"hook {kind} {item} {why}, so another account can change the hook DefenseClaw runs",
+            repair,
+        )
+    return ""
+
+
 def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     """Return short descriptions of drifted hook files for *connector*."""
 
@@ -273,6 +309,14 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
                 f"hook script {script} changed since setup (an edit, or a copy from another build; "
                 "it does not match hook_contract_lock.json)"
             )
+            break
+
+    hooks_dir = Path(str(getattr(cfg, "data_dir", "") or ""), "hooks")
+    for script in scripts:
+        if script in missing or script.parent != hooks_dir:
+            continue  # managed plugin artifacts live in the agent's folders
+        if untrusted := _untrusted_hook_file(connector, script):
+            problems.append(untrusted)
             break
 
     for script in non_executable_hook_scripts(cfg, connector):
@@ -925,15 +969,82 @@ def _split_hook_command(command: str) -> tuple[str, str] | None:
 def edited_hook_script(command: str, script_name: str) -> str:
     """The script path when *command* has the shape of a DefenseClaw hook entry, else "".
 
-    Mirrors ``editedDefenseClawHookScript`` / ``editedDefenseClawHookCommand``
-    in internal/gateway/connector/helpers.go (the shared golden
+    Mirrors ``editedDefenseClawHookCommand`` in
+    internal/gateway/connector/helpers.go (the shared golden
     testdata/hook_edited_commands.json keeps them in step): an absolute,
     clean script path whose name is the connector's script name, possibly
     edited around ".sh" (copilot-hookX.sh), under a .defenseclaw directory,
     or the exact name under an edited DefenseClaw data directory, alone or
-    with ``--event`` or ``--hook-surface``. Setup replaces such entries; doctor reports the ones
-    that are not the current command (GAP-0906, GAP-0907).
+    with ``--event`` or ``--hook-surface``; or a copy of a DefenseClaw hook
+    script anywhere (:func:`copied_hook_script`). Setup replaces such
+    entries; doctor reports the ones that are not the current command
+    (GAP-0906, GAP-0907, rel-1-0-4 GAP-0600).
     """
+
+    return _edited_hook_shape(command, script_name) or copied_hook_script(command, script_name)
+
+
+# The line every generated hook script of every release carries
+# (hookSchemaVersionMarker in internal/gateway/connector/subprocess.go).
+_HOOK_SCRIPT_MARKER = b"# defenseclaw-managed-hook v"
+_HOOK_SCRIPT_HEAD = 512
+_HOOK_BINDINGS = (" --event ", " --hook-surface ")
+
+
+def _is_defenseclaw_hook_file(path: str) -> bool:
+    """Whether *path* is a regular file that starts like a generated DefenseClaw hook script."""
+
+    if os.name == "nt":
+        return False
+    try:
+        # Non-blocking, so a named pipe in its place is refused, not waited on.
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return False
+    try:
+        return stat.S_ISREG(os.fstat(descriptor).st_mode) and _HOOK_SCRIPT_MARKER in os.read(
+            descriptor, _HOOK_SCRIPT_HEAD
+        )
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def copied_hook_script(command: str, script_name: str) -> str:
+    """The script path when *command* runs a copy of a DefenseClaw hook script, else "".
+
+    Mirrors ``copiedDefenseClawHookCommand`` in
+    internal/gateway/connector/helpers.go: the first shell word is an
+    absolute, clean path to a file that carries the generated-hook marker of
+    any release (whatever follows it: Antigravity passes the event bare,
+    Claude Code appends its missing-script guard), or a path with the
+    connector's script name followed by DefenseClaw's ``--event`` /
+    ``--hook-surface`` binding (the copy may have been deleted since). An entry repointed at
+    an old copy in another folder kept doctor and ``guardrail fail-mode``
+    green while the running gateway had added its own entry back beside it
+    (rel-1-0-4 GAP-0600). Only DefenseClaw's current hook is a working
+    registration, so Setup replaces such an entry wherever it points.
+    """
+
+    split = _split_hook_command(command.strip())
+    if split is None:
+        return ""
+    word, rest = split
+    if (
+        any(char in word for char in "\x00\r\n")
+        or not word.startswith("/")
+        or word.startswith("//")
+        or posixpath.normpath(word) != word
+    ):
+        return ""
+    if rest.startswith(_HOOK_BINDINGS) and posixpath.basename(word) == script_name:
+        return word
+    return word if _is_defenseclaw_hook_file(word) else ""
+
+
+def _edited_hook_shape(command: str, script_name: str) -> str:
+    """The script path when *command* runs the connector's script at an edited DefenseClaw path, else ""."""
 
     stem = script_name[:-3] if script_name.endswith(".sh") else ""
     if not stem.endswith("-hook") or "/" in script_name:
@@ -949,7 +1060,7 @@ def edited_hook_script(command: str, script_name: str) -> str:
         or posixpath.normpath(word) != word
     ):
         return ""
-    if rest and not rest.startswith((" --event ", " --hook-surface ")):
+    if rest and not rest.startswith(_HOOK_BINDINGS):
         return ""
     base = posixpath.basename(word)
     if not base.startswith(stem):
@@ -990,8 +1101,10 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
 
     An edited entry keeps running a script that is not there: Copilot then
     denied every call next to the set setup added again, and Hermes, whose
-    hook failures are fail-open, ran unguarded (GAP-0906, GAP-0907). Setup
-    (``doctor --fix`` restarts the gateway, which runs it) replaces them.
+    hook failures are fail-open, ran unguarded (GAP-0906, GAP-0907). An
+    entry repointed at a copy of the script runs a hook DefenseClaw does not
+    keep current, from any folder (rel-1-0-4 GAP-0600). Setup (``doctor
+    --fix`` restarts the gateway, which runs it) replaces them.
     """
 
     script_name = HOOK_SCRIPT_NAMES.get(connector)
@@ -1011,7 +1124,7 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
             continue
         for command in _hook_command_strings(document):
             word = edited_hook_script(command, script_name)
-            if word and word != current and word.startswith(owner):
+            if word and word != current and (word.startswith(owner) or copied_hook_script(command, script_name)):
                 return [
                     HookProblem(
                         f"{_EDITED_HOOK_PREFIX}{connector}: {path} runs {word}, not the hook script setup "

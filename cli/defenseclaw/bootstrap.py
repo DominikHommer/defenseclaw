@@ -1772,9 +1772,14 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
     if not problems:
         return None
     # A hook command the shell cannot run guards nothing (GAP-0382), and an
-    # agent setting that turns its hooks off is not repaired by a gateway
-    # restart (rel-1-0-4 GAP-0580).
-    blocking = problems[0].startswith("hook command ") or problems[0] in agent_hook_switch_problems(cfg, connector)
+    # agent setting that turns its hooks off, or a hook file another account
+    # can change, is not repaired by a gateway restart (rel-1-0-4 GAP-0580,
+    # GAP-0600).
+    blocking = (
+        problems[0].startswith("hook command ")
+        or "another account can change" in problems[0]
+        or problems[0] in agent_hook_switch_problems(cfg, connector)
+    )
     return StepResult(
         "Connector runtime",
         "fail" if blocking else "warn",

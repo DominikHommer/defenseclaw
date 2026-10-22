@@ -597,9 +597,10 @@ func ownedHookConfigHoldsEditedEntry(conn Connector, opts SetupOpts) bool {
 // applies (cli/defenseclaw/hook_integrity.py; both read
 // testdata/hook_edited_entries.json): a command or bash string whose script
 // word has DefenseClaw's hook shape for scriptName
-// (editedDefenseClawHookCommand), lies under the data directory's parent and
-// is not the script Setup registers. Claude Code's missing-script guard is
-// unwrapped first.
+// (editedDefenseClawHookCommand), lies under the data directory's parent or
+// runs a copy of a DefenseClaw hook script in any folder
+// (copiedDefenseClawHookCommand, rel-1-0-4 GAP-0600), and is not the script
+// Setup registers. Claude Code's missing-script guard is unwrapped first.
 func hookDocumentHoldsEditedEntry(document interface{}, dataDir, scriptName string) bool {
 	dataDir = filepath.ToSlash(filepath.Clean(dataDir))
 	current := path.Join(dataDir, "hooks", scriptName)
@@ -609,7 +610,8 @@ func hookDocumentHoldsEditedEntry(document interface{}, dataDir, scriptName stri
 		if !editedDefenseClawHookCommand(command, scriptName) {
 			continue
 		}
-		if word, _, ok := posixHookCommandSplit(command); ok && word != current && strings.HasPrefix(word, home) {
+		if word, _, ok := posixHookCommandSplit(command); ok && word != current &&
+			(strings.HasPrefix(word, home) || copiedDefenseClawHookCommand(command, scriptName)) {
 			return true
 		}
 	}

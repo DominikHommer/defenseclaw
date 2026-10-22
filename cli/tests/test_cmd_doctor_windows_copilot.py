@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,12 +93,17 @@ def _fixture(
                 "raw_agent_version": agent_version,
                 "normalized_agent_version": agent_version,
                 "hook_script_version": "v7",
+                "hook_script_digests": {adapter.name: _digest(adapter)},
                 "locations": locations,
             }
         },
     }
     (data / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
     return install, data, config
+
+
+def _digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _validate(install: Path, data: Path, config: Path, *, configured_mode: str = ""):
@@ -449,3 +455,42 @@ def test_copilot_adapter_rejected_when_input_encoding_follows_read(tmp_path):
         "$process.StandardInput.Write($payload)",
     ):
         assert marker in broken
+
+
+# rel-1-0-4 GAP-0600: only DefenseClaw's own current adapter, at the path
+# Setup registers and with the bytes it sealed, is a healthy registration.
+_OLD_ADAPTER_LINE = "# an earlier release's adapter\n"
+
+
+@pytest.mark.parametrize("tamper", ["old-copy-in-place", "repointed-every-event", "repointed-beside", "unsealed"])
+def test_windows_copilot_doctor_requires_the_current_sealed_adapter(tmp_path: Path, tamper: str) -> None:
+    install, data, config = _fixture(tmp_path)
+    adapter = data / "hooks" / "copilot-hook.ps1"
+    lane = tmp_path / "lane" / "copilot-hook.ps1"
+    lane.parent.mkdir()
+    lane.write_text(_OLD_ADAPTER_LINE + adapter.read_text(encoding="utf-8"), encoding="utf-8")
+    document = json.loads(config.read_text(encoding="utf-8"))
+    if tamper == "old-copy-in-place":
+        adapter.write_text(lane.read_text(encoding="utf-8"), encoding="utf-8")
+        expected = "changed since setup"
+    elif tamper == "repointed-every-event":
+        for event, entries in document["hooks"].items():
+            entries[0]["powershell"] = _powershell_command(lane, event)
+        expected = "outside the DefenseClaw runtime"
+    elif tamper == "repointed-beside":
+        repointed = dict(document["hooks"]["preToolUse"][0], powershell=_powershell_command(lane, "preToolUse"))
+        document["hooks"]["preToolUse"].insert(0, repointed)
+        expected = "2 DefenseClaw handlers"
+    else:
+        lock_path = data / "hook_contract_lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        del lock["connectors"]["copilot"]["hook_script_digests"]
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        expected = "no digest for the Copilot adapter"
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    check = _validate(install, data, config)
+
+    assert not check.healthy
+    assert expected in check.detail, check.detail
+    assert "setup copilot --yes --restart" in check.detail
