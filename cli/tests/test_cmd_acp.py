@@ -263,6 +263,94 @@ def test_verify_reports_a_copied_guard_entry_the_guard_refuses(tmp_path, monkeyp
         cleanup_app(app, db_path, data_dir)
 
 
+def _flag_removed(args: list[str], flag: str) -> list[str]:
+    index = args.index(flag)
+    return args[:index] + args[index + 2:]
+
+
+def _flag_set(args: list[str], flag: str, value: str) -> list[str]:
+    return [*args[:args.index(flag) + 1], value, *args[args.index(flag) + 2:]]
+
+
+def test_verify_checks_copied_guard_entries_by_the_guards_rules(tmp_path, monkeypatch):
+    """GAP-0525: verify reports exactly the copies the guard refuses.
+
+    The guard defaults --client, --profile and --mode, compares paths after
+    making them absolute (ignoring case on Windows), checks --token-file, and
+    falls back to the catalog command without --. A copy is this lock's when
+    its --contract-lock is the same file, whatever its --client or --agent.
+    """
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    setup = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
+    verify = ["verify", "--client", "zed", "--agent", "kiro"]
+    try:
+        assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
+        exact = json.loads(settings.read_text())["agent_servers"]["DefenseClaw · Kiro"]
+        args = list(exact["args"])
+        lock = args[args.index("--contract-lock") + 1]
+        (tmp_path / "linked").symlink_to(Path(lock).parent, target_is_directory=True)
+        (tmp_path / "loose.token").write_text("token\n")
+        (tmp_path / "loose.token").chmod(0o644)
+        (tmp_path / "empty.token").write_text("\n")
+        (tmp_path / "empty.token").chmod(0o600)
+        starts = {
+            "Defaults": _flag_removed(_flag_removed(args, "--profile"), "--mode"),
+            "Equals form": [
+                *_flag_removed(args, "--profile")[:args.index("--profile")], "-profile=default",
+                *_flag_removed(args, "--profile")[args.index("--profile"):],
+            ],
+        }
+        refused = {
+            "Other agent": _flag_set(args, "--agent", "cursor"),
+            "No client": _flag_removed(args, "--client"),
+            "Linked lock": _flag_set(_flag_set(args, "--contract-lock", str(tmp_path / "linked" / Path(lock).name)),
+                                     "--profile", "watch"),
+            "Catalog fallback": args[:args.index("--")],
+            "No token": _flag_removed(args, "--token-file"),
+            "Missing token": _flag_set(args, "--token-file", str(tmp_path / "missing.token")),
+            "Loose token": _flag_set(args, "--token-file", str(tmp_path / "loose.token")),
+            "Empty token": _flag_set(args, "--token-file", str(tmp_path / "empty.token")),
+            "Unknown flag": ["--sandbox", "on", *args],
+        }
+        document = json.loads(settings.read_text())
+        for name, copy_args in {**starts, **refused}.items():
+            document["agent_servers"][name] = dict(exact, args=copy_args)
+        settings.write_text(json.dumps(document))
+        assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
+
+        result = CliRunner().invoke(acp_cmd, verify, obj=app)
+        assert result.exit_code != 0, result.output
+        for name in starts:
+            assert f"{name!r}" not in result.output, (name, result.output)
+        for name in refused:
+            assert f"{name!r} cannot start" in result.output, (name, result.output)
+
+        # Only the refused copies fail it: without them verify passes.
+        document = json.loads(settings.read_text())
+        for name in refused:
+            del document["agent_servers"][name]
+        settings.write_text(json.dumps(document))
+        assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
+        result = CliRunner().invoke(acp_cmd, verify, obj=app)
+        assert result.exit_code == 0, result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_copied_entry_paths_compare_like_the_guard(monkeypatch):
+    """GAP-0525: on Windows the guard ignores case and separators in paths."""
+    upper, lower = "/Users/Me/Bin/kiro-cli", "/users/me/bin/kiro-cli"
+    monkeypatch.setattr(cmd_acp_module, "_GUARD_PATHS_FOLD_CASE", False)
+    assert not cmd_acp_module._same_guard_path(upper, lower)
+    monkeypatch.setattr(cmd_acp_module, "_GUARD_PATHS_FOLD_CASE", True)
+    assert cmd_acp_module._same_guard_path(upper, lower)
+    assert cmd_acp_module._same_guard_path(r"C:\Users\Me\kiro-cli.exe", "c:/users/me/./KIRO-CLI.exe")
+
+
 def test_doctor_reports_acp_bindings_and_fails_on_drift(tmp_path, monkeypatch):
     """GAP-1534: doctor lists each binding and FAILs with the fix on drift."""
     from defenseclaw.commands.cmd_doctor import _check_acp_bindings, _DoctorResult

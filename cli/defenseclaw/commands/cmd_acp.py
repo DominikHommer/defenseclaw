@@ -10,11 +10,13 @@ import copy
 import hashlib
 import io
 import json
+import ntpath
 import os
 import secrets
 import shlex
 import shutil
 import stat
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -709,6 +711,146 @@ def _managed_guard_custody_is_trusted(path_value: str) -> bool:
         return False
 
 
+# The guard's flags and their defaults (run in cmd/defenseclaw-acp/main.go).
+_GUARD_FLAG_DEFAULTS = {
+    "agent": "",
+    "client": "custom",
+    "profile": "default",
+    "mode": "observe",
+    "gateway": "http://127.0.0.1:18970/api/v1/acp/evaluate",
+    "token-file": "",
+    "contract-lock": "",
+}
+
+# samePath in internal/acp/contract.go ignores case on Windows.
+_GUARD_PATHS_FOLD_CASE = os.name == "nt"
+
+
+def _same_guard_path(left: str, right: str) -> bool:
+    """The guard's path comparison: filepath.Abs, then samePath."""
+    left, right = os.path.abspath(left), os.path.abspath(right)
+    if _GUARD_PATHS_FOLD_CASE:
+        return ntpath.normcase(ntpath.normpath(left)) == ntpath.normcase(ntpath.normpath(right))
+    return left == right
+
+
+def _guard_argv(args: Any) -> tuple[dict[str, str], list[str]] | None:
+    """The guard's flags and agent command line for an entry's args.
+
+    Parses like Go's flag package: -name or --name, with =value or the next
+    argument, up to -- or the first argument that is not a flag. None when
+    the guard does not start an agent from them (an unknown flag, a missing
+    value, --catalog or --version).
+    """
+    if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+        return None
+    values = dict(_GUARD_FLAG_DEFAULTS)
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if len(arg) < 2 or arg[0] != "-":
+            break
+        index += 1
+        if arg == "--":
+            break
+        name = arg[2:] if arg.startswith("--") else arg[1:]
+        if not name or name[0] in "-=":
+            return None
+        name, has_value, value = name.partition("=")
+        if name not in values:
+            return None
+        if not has_value:
+            if index == len(args):
+                return None
+            value = args[index]
+            index += 1
+        values[name] = value
+    return values, args[index:]
+
+
+def _names_file(value: str, path: Path) -> bool:
+    """Whether an argv path is this file by any path (symlinked directory, case)."""
+    if not value:
+        return False
+    try:
+        return os.path.samefile(value, path)
+    except OSError:
+        return _same_guard_path(value, str(path))
+
+
+def _guard_token_problem(value: str) -> str | None:
+    """The guard's checks of --token-file (run in cmd/defenseclaw-acp/main.go)."""
+    if not value:
+        return "it has no --token-file"
+    path = Path(os.path.normpath(value))
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            return f"its --token-file {path} is not a regular file"
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+            return f"its --token-file {path} permissions are too broad"
+        if info.st_size > 16 << 10:
+            return f"its --token-file {path} is unexpectedly large"
+        if not path.read_bytes().strip():
+            return f"its --token-file {path} is empty"
+    except OSError:
+        return f"its --token-file {path} cannot be read"
+    return None
+
+
+def _copy_refusal(entry: dict[str, Any], lock: dict[str, Any], lock_path: Path) -> str | None:
+    """Why the guard refuses a copied entry that names this lock, or None.
+
+    None also for an entry that names another lock, which is not this
+    binding's. Follows run in cmd/defenseclaw-acp/main.go and
+    ValidateRuntimeContract: flags take the guard's defaults, paths compare
+    as the guard compares them, the guard falls back to the catalog command
+    without a command after --, and --token-file is checked. The lock itself
+    (its digests and pins) is checked once for the binding.
+    """
+    args = entry.get("args")
+    parsed = _guard_argv(args)
+    if parsed is None:
+        named = isinstance(args, list) and any(isinstance(arg, str) and _names_file(arg, lock_path) for arg in args)
+        return "the guard does not accept its arguments" if named else None
+    values, launch = parsed
+    if not _names_file(values["contract-lock"], lock_path):
+        return None
+    if Path(values["contract-lock"]).is_symlink():
+        return "its --contract-lock is a symlink, which the guard does not open"
+    if launch:
+        command = launch[0]
+    elif values["agent"] in _AGENTS:
+        command = _AGENTS[values["agent"]][0]
+    else:
+        return "it names no agent command"
+    lock_client, lock_agent, lock_guard = lock.get("client"), lock.get("agent"), lock.get("guard")
+    if (
+        not isinstance(lock_client, dict)
+        or not isinstance(lock_agent, dict)
+        or not isinstance(lock_guard, dict)
+        or [lock_client.get("id"), lock_agent.get("id"), lock.get("profile"), lock.get("mode")]
+        != [values["client"], values["agent"], values["profile"], values["mode"]]
+    ):
+        return "its --client, --agent, --profile or --mode does not match the lock"
+    if not isinstance(lock_agent.get("path"), str) or not _same_guard_path(command, lock_agent["path"]):
+        return "it launches another agent executable than the lock"
+    guard = entry.get("command")
+    guard = guard if isinstance(guard, str) and os.path.isabs(guard) else shutil.which(str(guard or ""))
+    if guard is None:
+        # The editor cannot start it at all; the guard never runs.
+        return None
+    if os.name == "nt" and not os.path.splitext(guard)[1]:
+        # Windows starts <path>.exe, which os.Executable then reports.
+        guard += ".exe"
+    if sys.platform.startswith("linux"):
+        # os.Executable resolves symlinks on Linux.
+        guard = os.path.realpath(guard)
+    if not isinstance(lock_guard.get("path"), str) or not _same_guard_path(guard, lock_guard["path"]):
+        return "it starts another guard executable than the lock"
+    return _guard_token_problem(values["token-file"])
+
+
 def _verify_binding(
     data_dir: str,
     client: str,
@@ -840,28 +982,16 @@ def _verify_binding(
         ):
             problems.append(f"editor launch command does not match the lock: {name}")
     # An entry setup did not write (a copy) that starts the guard on this
-    # pair's lock with another profile, mode, guard or agent: the guard
-    # refuses it and sends the user here, so Verified contradicted it
-    # (GAP-0525).
+    # pair's lock: the guard refuses it and sends the user here, so verify
+    # must report exactly the copies the guard refuses (GAP-0525).
     for name, entry in servers.items() if isinstance(servers, dict) else ():
         if name in names or not isinstance(entry, dict) or not _entry_is_guarded(entry):
             continue
-        options = _guard_options(entry)
-        args = entry.get("args")
-        if options.get("--client") != client or options.get("--agent") != agent or (
-            options.get("--contract-lock") != str(lock_path.resolve())
-        ):
-            continue
-        launched = args[args.index("--") + 1:args.index("--") + 2] if isinstance(args, list) and "--" in args else []
-        if (
-            options.get("--profile") != lock.get("profile")
-            or options.get("--mode") != lock.get("mode")
-            or entry.get("command") != (lock_guard.get("path") if isinstance(lock_guard, dict) else None)
-            or launched != [lock_agent.get("path") if isinstance(lock_agent, dict) else None]
-        ):
+        reason = _copy_refusal(entry, lock, lock_path)
+        if reason:
             problems.append(
-                f"editor entry {name!r} cannot start: setup did not write it and its profile, mode or "
-                f"executables do not match the lock (delete it from {client_path})"
+                f"editor entry {name!r} cannot start: setup did not write it and {reason} "
+                f"(delete it from {client_path})"
             )
     return problems
 
