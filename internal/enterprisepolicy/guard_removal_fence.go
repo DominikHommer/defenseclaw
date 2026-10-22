@@ -24,8 +24,9 @@ const ForeignHookRemovalsFenceFile = "foreign-hook-removals.lock"
 
 // ForeignHookRemovalsLedgerLockFile is the guardian's second permanent lock
 // file. It serializes ledger commits, from every guardian process, through
-// their read, publish and wait; exchanges never take it, so it never delays
-// one.
+// their read and publish only: a guardian releases it before it waits for
+// exchanges, so one account's wait never delays another account's
+// publication. Exchanges never take it, so it never delays one.
 const ForeignHookRemovalsLedgerLockFile = "foreign-hook-removals-ledger.lock"
 
 // ForeignHookRemovalExchangeHold bounds an online exchange's allow: an
@@ -72,8 +73,9 @@ func LockForeignHookRemovalsDrain(ctx context.Context, dir string) (func(), erro
 }
 
 // LockForeignHookRemovalsLedger holds the guardian's ledger lock through one
-// commit (read, publish and AwaitForeignHookRemovalExchanges), so commits of
-// different guardian processes do not lose each other's removals.
+// commit's read and publish, so commits of different guardian processes do
+// not lose each other's removals. The guardian releases it before
+// AwaitForeignHookRemovalExchanges.
 func LockForeignHookRemovalsLedger(ctx context.Context, dir string) (func(), error) {
 	return lockForeignHookRemovalPath(ctx, filepath.Join(dir, ForeignHookRemovalsLedgerLockFile), true)
 }

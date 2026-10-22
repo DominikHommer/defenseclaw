@@ -9,9 +9,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -216,4 +218,42 @@ func TestWindowsCopilotVSCodeUserOwnsTheLocalHookFile(t *testing.T) {
 	if _, err := os.Lstat(hookFile); !os.IsNotExist(err) {
 		t.Fatalf("hook file left behind: %v", err)
 	}
+}
+
+// The Windows guardian marks each removal when its cleanup returned, not
+// when the commit got the ledger lock: an agent that starts while the
+// commit waits never loaded the removed hook.
+func TestWindowsGuardianMarksTheRemovalWhenTheCleanupReturns(t *testing.T) {
+	guardianDir := setupForeignHookRemovalGuardian(t)
+	previousOptions, previousProfiles := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles
+	previousCleanup, previousBlocks := enterpriseForeignHookCleanup, enterpriseForeignHookCollectBlocks
+	previousRunAs := enterpriseForeignHookRunAsTarget
+	t.Cleanup(func() {
+		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles = previousOptions, previousProfiles
+		enterpriseForeignHookCleanup, enterpriseForeignHookCollectBlocks = previousCleanup, previousBlocks
+		enterpriseForeignHookRunAsTarget = previousRunAs
+		enterpriseHookWindowsForeignCleanupState.last, enterpriseHookWindowsForeignCleanupState.fingerprint = time.Time{}, ""
+	})
+	enterpriseHookWindowsForeignCleanupState.last, enterpriseHookWindowsForeignCleanupState.fingerprint = time.Time{}, ""
+	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
+		return enterprisepolicy.Options{}, []string{"cursor"}, true, nil
+	}
+	// The WSL editor pass runs as the user; this test has no such user.
+	enterpriseForeignHookRunAsTarget = func(enterprisehooks.TargetCredentials, func() error) error { return nil }
+	const alice = "S-1-5-21-1-2-3-1001"
+	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) {
+		return []enterprisehooks.TargetCredentials{{UserHome: `C:\Users\alice`, UID: -1, GID: -1, SID: alice}}, nil
+	}
+	cleaned := make(chan struct{})
+	var once sync.Once
+	enterpriseForeignHookCleanup = func(enterprisehooks.TargetCredentials, string, string) (enterprisepolicy.CleanupResult, error) {
+		defer once.Do(func() { close(cleaned) })
+		return enterprisepolicy.CleanupResult{Removed: []enterprisepolicy.Finding{{Connector: "cursor", Path: `C:\Users\alice\.cursor\hooks.json`}}}, nil
+	}
+	enterpriseForeignHookCollectBlocks = func(enterprisehooks.TargetCredentials) ([]enterprisepolicy.BlockSummary, int, error) {
+		return nil, 0, nil
+	}
+	checkRemovalMarkedAtCleanup(t, guardianDir, alice, cleaned, func() {
+		enterpriseHookStandalonePlatformFinish(context.Background(), io.Discard, nil, time.Now())
+	})
 }

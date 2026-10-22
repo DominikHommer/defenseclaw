@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -49,13 +51,104 @@ func setupForeignHookRemovalGuardian(t *testing.T) string {
 }
 
 func recordAliceForeignHookRemoval() <-chan string {
+	return recordForeignHookRemoval("1001", "/home/alice")
+}
+
+// recordForeignHookRemoval records the removal of the account's Claude Code
+// settings hook, marked as the cleanup returned, and sends what it logged.
+func recordForeignHookRemoval(account, home string) <-chan string {
 	done := make(chan string, 1)
 	go func() {
 		var stderr bytes.Buffer
-		recordEnterpriseForeignHookRemovals(&stderr, "1001", "/home/alice", "claudecode", []string{"/home/alice/.claude/settings.json"})
+		recordEnterpriseForeignHookRemovals(&stderr, agentprocess.Now(), account, home, "claudecode", []string{home + "/.claude/settings.json"})
 		done <- stderr.String()
 	}()
 	return done
+}
+
+// waitForForeignHookRemovalOf waits until the ledger records a removal for
+// the identity.
+func waitForForeignHookRemovalOf(t *testing.T, guardianDir, identity string, within time.Duration) {
+	t.Helper()
+	ledger := filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile)
+	deadline := time.Now().Add(within)
+	for {
+		removals, err := loadEnterpriseForeignHookRemovals(ledger)
+		for _, removal := range removals {
+			if removal.Identity == identity {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the ledger did not record the removal for %s within %v: %+v, %v", identity, within, removals, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// processStartedAt names an agent process that started at mark, an
+// agentprocess.Now value.
+func processStartedAt(t *testing.T, mark string) string {
+	t.Helper()
+	parts := strings.Split(mark, ":")
+	if len(parts) != 3 {
+		t.Fatalf("unexpected process-time mark %q", mark)
+	}
+	return parts[0] + ":" + parts[1] + ":1:" + parts[2]
+}
+
+// checkRemovalMarkedAtCleanup runs record while another guardian's commit
+// holds the ledger lock, and an agent process starts after the cleanup
+// returned and before the lock is free. Every removal record writes for the
+// identity must deny a process that started before the cleanup, and not
+// the one that started after it: it never loaded the removed hook.
+func checkRemovalMarkedAtCleanup(t *testing.T, guardianDir, identity string, cleaned <-chan struct{}, record func()) {
+	t.Helper()
+	before := processStartedAt(t, agentprocess.Now())
+	unlock, err := enterprisepolicy.LockForeignHookRemovalsLedger(context.Background(), guardianDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		record()
+	}()
+	select {
+	case <-cleaned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cleanup did not run")
+	}
+	time.Sleep(50 * time.Millisecond)
+	after := processStartedAt(t, agentprocess.Now())
+	time.Sleep(50 * time.Millisecond)
+	unlock()
+	select {
+	case <-done:
+	case <-time.After(foreignHookRemovalLedgerLockWait + enterprisepolicy.ForeignHookRemovalDrainWait + 2*time.Second):
+		t.Fatal("the guardian did not finish")
+	}
+	removals, err := loadEnterpriseForeignHookRemovals(filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, removal := range removals {
+		if removal.Identity != identity {
+			continue
+		}
+		found++
+		if !agentprocess.StartedBefore(before, removal.Mark) {
+			t.Fatalf("an agent process that started before the cleanup is not denied: %+v", removal)
+		}
+		if agentprocess.StartedBefore(after, removal.Mark) {
+			t.Fatalf("an agent process that started after the cleanup, while the commit waited for the ledger lock, is denied as if it loaded the removed hook: %+v", removal)
+		}
+	}
+	if found == 0 {
+		t.Fatalf("no removal recorded for %s: %+v", identity, removals)
+	}
 }
 
 // waitForAliceForeignHookRemoval waits until the ledger records alice's
@@ -166,6 +259,64 @@ func TestGuardianRemovalCommitLandsUnderSustainedExchanges(t *testing.T) {
 	if n := refused.Load(); n != 0 {
 		t.Fatalf("%d exchanges were refused during the commit", n)
 	}
+}
+
+// One account's wait for the exchanges that may have read the previous
+// ledger never holds off another account's publication: neither this
+// guardian's (the in-process lock) nor another guardian process's (the
+// ledger lock).
+func TestGuardianRemovalWaitDoesNotHoldOffAnotherAccountsPublication(t *testing.T) {
+	guardianDir := setupForeignHookRemovalGuardian(t)
+	// An allow being written holds the fence shared: alice's commit waits,
+	// after its publication, until it is done or the drain wait passes.
+	held, err := enterprisepolicy.LockForeignHookRemovalsExchange(context.Background(), guardianDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held()
+	aliceDone := recordForeignHookRemoval("1001", "/home/alice")
+	waitForForeignHookRemovalOf(t, guardianDir, "1001", time.Second)
+	// Another guardian process commits bob's removal while alice waits.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	unlock, err := enterprisepolicy.LockForeignHookRemovalsLedger(ctx, guardianDir)
+	cancel()
+	if err != nil {
+		t.Fatalf("alice's wait for the exchanges holds the ledger lock: %v", err)
+	}
+	unlock()
+	// This guardian publishes carol's removal while alice waits.
+	carolDone := recordForeignHookRemoval("1003", "/home/carol")
+	waitForForeignHookRemovalOf(t, guardianDir, "1003", 700*time.Millisecond)
+	held()
+	for _, done := range []<-chan string{aliceDone, carolDone} {
+		select {
+		case message := <-done:
+			if message != "" {
+				t.Fatal(message)
+			}
+		case <-time.After(enterprisepolicy.ForeignHookRemovalDrainWait + 2*time.Second):
+			t.Fatal("a commit did not finish after the allow was written")
+		}
+	}
+}
+
+// Reconcile marks the removal when the cleanup returned, however long the
+// commit then waits for another guardian's.
+func TestReconcileMarksTheForeignHookRemovalWhenTheCleanupReturns(t *testing.T) {
+	guardianDir := setupForeignHookRemovalGuardian(t)
+	previousCleanup := enterpriseForeignHookCleanup
+	t.Cleanup(func() { enterpriseForeignHookCleanup = previousCleanup })
+	cleaned := make(chan struct{})
+	var once sync.Once
+	enterpriseForeignHookCleanup = func(enterprisehooks.TargetCredentials, string, string) (enterprisepolicy.CleanupResult, error) {
+		defer once.Do(func() { close(cleaned) })
+		return enterprisepolicy.CleanupResult{Removed: []enterprisepolicy.Finding{{Connector: "claudecode", Path: "/home/alice/.claude/settings.json"}}}, nil
+	}
+	checkRemovalMarkedAtCleanup(t, guardianDir, "1001", cleaned, func() {
+		reconcileEnterpriseForeignHooks(enterprisehooks.InstallOptions{
+			ConnectorName: "claudecode", UserHome: "/home/alice", OwnerUID: 1001, OwnerGID: 1001, DataDir: "/home/alice/.defenseclaw",
+		})
+	})
 }
 
 // Reconcile creates the fence's lock files that are missing, as on an

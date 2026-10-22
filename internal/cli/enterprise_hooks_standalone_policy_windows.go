@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -474,11 +475,12 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 				continue
 			}
 			result, err := enterpriseForeignHookCleanup(current.creds, name, current.dataDir)
+			mark := agentprocess.Now()
 			for _, finding := range result.Removed {
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: removed %s %s hook from %s (sha256:%s); backup in %s\n",
 					finding.Connector, dashIfEmpty(finding.Event), finding.Path, finding.Digest, result.BackupDir)
 			}
-			recordEnterpriseForeignHookRemovals(stderr, current.creds.SID, current.creds.UserHome, name, removedForeignHookPaths(result))
+			recordEnterpriseForeignHookRemovals(stderr, mark, current.creds.SID, current.creds.UserHome, name, removedForeignHookPaths(result))
 			if err != nil {
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s %s: %v\n", name, current.creds.UserHome, err)
 			}

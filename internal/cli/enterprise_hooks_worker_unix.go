@@ -1339,7 +1339,8 @@ func runEnterpriseHookWorkerPool(ctx context.Context, jobs []enterpriseHookWorke
 
 // runEnterpriseHookWorkerPoolReporting is runEnterpriseHookWorkerPool that
 // also hands each outcome to done, when set, as soon as its worker ends
-// (concurrently with the other workers).
+// (concurrently with the other workers). The worker's slot is free by then:
+// a slow done never holds off another account's worker.
 func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int, done func(enterpriseHookWorkerOutcome)) []enterpriseHookWorkerOutcome {
 	if parallelism <= 0 {
 		parallelism = enterpriseHookWorkerParallelism
@@ -1352,8 +1353,8 @@ func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterprise
 		go func(i int) {
 			defer wg.Done()
 			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
 			response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
+			<-semaphore
 			outcomes[i] = enterpriseHookWorkerOutcome{Job: jobs[i], Response: response, Err: err}
 			if done != nil {
 				done(outcomes[i])
