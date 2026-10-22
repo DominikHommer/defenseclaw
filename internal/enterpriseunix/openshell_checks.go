@@ -168,7 +168,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	// required agent cannot move into a sandbox. status and verify only read.
 	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify {
 		if err := env.publishPrerequisites(ctx, settings); err != nil {
-			r.AddWarning(codeState, "could not record "+openshell.PrerequisitesFile+": "+err.Error())
+			r.AddWarning(stateWriteCode(err, codeState), "could not record "+openshell.PrerequisitesFile+": "+err.Error())
 		}
 	}
 }

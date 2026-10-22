@@ -910,14 +910,14 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		run.warnings = append(run.warnings, prepared.Warnings...)
 	}
 	if err != nil {
-		return refuseAnchors(string(windowsBundleCode(err, enterprisebundle.CodeApplyFailed)), windowsBundleNotApplied(prepared, err.Error(), windowsBundleHasCurrent(driver.Store)))
+		return refuseAnchors(string(enterprisebundle.FailureCode(err)), windowsBundleNotApplied(prepared, err.Error(), windowsBundleHasCurrent(driver.Store)))
 	}
 	path := filepath.Join(layout.LifecycleDir, windowsBundleConfigName)
 	if err := writeWindowsBundleAdminFile(path, prepared.Config); err != nil {
 		if prepared.Receipt != nil {
-			_ = driver.Store.Fail(prepared.Receipt, enterprisebundle.CodeApplyFailed, "cannot write the rendered bundle config")
+			_ = driver.Store.Fail(prepared.Receipt, enterprisebundle.FailureCode(err), "cannot write the rendered bundle config")
 		}
-		return refuseAnchors(string(enterprisebundle.CodeApplyFailed), "cannot write the rendered bundle config: "+err.Error())
+		return refuseAnchors(string(enterprisebundle.FailureCode(err)), "cannot write the rendered bundle config: "+err.Error())
 	}
 	opts.configPath = path
 	// finish (or release) records the staged anchors from here.
@@ -1177,7 +1177,7 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 			return rollbackWindowsBundle(cmd, opts, run)
 		})
 		if err != nil {
-			code := string(windowsBundleCode(err, enterprisebundle.CodeApplyFailed))
+			code := string(enterprisebundle.FailureCode(err))
 			switch {
 			case windowsBundleHasCode(result.Errors, code):
 			case p.Receipt.State == enterprisebundle.StateApplied:

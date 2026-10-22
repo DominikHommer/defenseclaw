@@ -446,15 +446,15 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	defer func() { l.scopeLateConfirmWarning(id, version, manifestSHA, repeat) }()
 	receipt, err := store.Receive(id, version, l.opts.DeliveryID)
 	if err != nil {
-		r.AddError(codeBundleStateUnreadable, "cannot write the policy bundle receipt, so the bundle is not applied: "+err.Error())
+		r.AddError(stateWriteCode(err, codeBundleStateUnreadable), "cannot write the policy bundle receipt, so the bundle is not applied: "+err.Error()+stateWriteAction(err))
 		l.describe(ctx, record, false)
 		return 0
 	}
 	run := &bundleRun{store: store, receipt: receipt}
 	refuse := func(err error) int {
-		code := enterprisebundle.CodeOf(err)
-		if code == "" {
-			code = enterprisebundle.CodeApplyFailed
+		code := enterprisebundle.FailureCode(err)
+		if code == enterprisebundle.CodeApplyFailed && noSpace(err) {
+			code = enterprisebundle.CodeDiskFull
 		}
 		l.failBundle(ctx, run, record, code, err.Error())
 		l.describe(ctx, record, false)
@@ -884,7 +884,7 @@ func (l *lifecycle) failBundle(ctx context.Context, run *bundleRun, record *Depl
 		rc.EnforcingDigest, _ = l.gatewayPolicyNow(ctx, record.ServiceUID)
 	}
 	if err := run.store.Fail(rc, code, message); err != nil {
-		r.AddWarning(codeBundleStateUnreadable, "could not record the failed policy bundle receipt: "+err.Error())
+		r.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), "could not record the failed policy bundle receipt: "+err.Error())
 	}
 	if !hasMessageCode(r.Errors, string(code)) {
 		r.AddError(string(code), fmt.Sprintf("policy bundle %s version %d was not applied: %s; the last good policy keeps enforcing", displayID(rc), rc.Version, message))

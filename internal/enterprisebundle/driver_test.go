@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -753,5 +754,26 @@ func TestDriverRecordsDeliveryID(t *testing.T) {
 	}
 	if p.Receipt.DeliveryID != d.DeliveryID || p.Receipt.Status(nil).DeliveryID != d.DeliveryID {
 		t.Fatalf("receipt delivery id = %q", p.Receipt.DeliveryID)
+	}
+}
+
+// GAP-0609: a receipt the driver cannot write on a full volume is disk_full
+// with the write cause, not state_invalid (a state that cannot be read).
+func TestDriverReceiptWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	d.Store.EnsurePrivateDirectory = func(path string) error {
+		return &os.PathError{Op: "mkdir", Path: path, Err: syscall.ENOSPC}
+	}
+	_, err := d.Prepare(t.Context(), f.bundle, nil)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeDiskFull || !strings.Contains(err.Error(), "cannot write the policy bundle receipt") ||
+		!strings.Contains(err.Error(), "free space on that volume") {
+		t.Fatalf("receipt write error = %v; want disk_full naming the receipt", err)
+	}
+	if got := enterprisebundle.FailureCode(fmt.Errorf("write: %w", syscall.ENOSPC)); got != enterprisebundle.CodeDiskFull {
+		t.Fatalf("FailureCode(ENOSPC) = %s", got)
+	}
+	if got := enterprisebundle.FailureCode(errors.New("other")); got != enterprisebundle.CodeApplyFailed {
+		t.Fatalf("FailureCode(other) = %s", got)
 	}
 }

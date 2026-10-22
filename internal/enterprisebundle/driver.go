@@ -140,13 +140,12 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	}
 	receipt, err := d.Store.Receive(id, version, d.DeliveryID)
 	if err != nil {
-		return nil, &Error{Code: CodeStateInvalid, Detail: "cannot write the policy bundle receipt: " + err.Error()}
+		return nil, StateWriteError("cannot write the policy bundle receipt", err)
 	}
 	p := &Prepared{Receipt: receipt}
 	refuse := func(err error) (*Prepared, error) {
-		code := CodeOf(err)
-		if code == "" {
-			code = CodeApplyFailed
+		code := FailureCode(err)
+		if CodeOf(err) == "" {
 			err = &Error{Code: code, Detail: err.Error()}
 		}
 		_ = d.Store.Fail(receipt, code, err.Error())
@@ -271,7 +270,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 		receipt.BaseConfigSHA256 = sha256Hex(d.EnforcedConfig)
 	}
 	if err := d.Store.writeReceipt(receipt); err != nil {
-		return refuse(&Error{Code: CodeStateInvalid, Detail: "cannot write the policy bundle receipt: " + err.Error()})
+		return refuse(StateWriteError("cannot write the policy bundle receipt", err))
 	}
 	return p, nil
 }
@@ -359,7 +358,11 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 		// next run (Store.Settle), one that stopped before it is checked
 		// against the gateway again. It is never failed or rolled back here
 		// (GAP-0485).
-		return st, &Error{Code: CodeStateInvalid, Detail: "the gateway enforces this bundle, but recording its confirmation failed (" +
+		code := CodeStateInvalid
+		if diskFull(err) {
+			code = CodeDiskFull
+		}
+		return st, &Error{Code: code, cause: err, Detail: "the gateway enforces this bundle, but recording its confirmation failed (" +
 			boundedDetail(err.Error()) + "); the bundle stays applied: run `defenseclaw enterprise windows ensure --profile standalone` to finish confirming it"}
 	}
 	return st, nil

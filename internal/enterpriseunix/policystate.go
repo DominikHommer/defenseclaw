@@ -209,7 +209,7 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 		ConfigGeneration: state.ConfigGeneration,
 		AppliedAt:        env.Now().UTC().Format(time.RFC3339),
 	})); err != nil {
-		r.AddWarning(codeState, "could not record "+enterprisestatus.PolicyStateFileName+": "+err.Error())
+		r.AddWarning(stateWriteCode(err, codeState), "could not record "+enterprisestatus.PolicyStateFileName+": "+err.Error())
 	}
 }
 

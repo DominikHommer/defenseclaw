@@ -10,6 +10,6 @@ import (
 	"syscall"
 )
 
-func stageDiskFull(err error) bool {
+func diskFull(err error) bool {
 	return errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT)
 }

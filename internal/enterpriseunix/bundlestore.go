@@ -11,6 +11,7 @@ package enterpriseunix
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -39,6 +40,14 @@ func (e *Env) bundleStore() *enterprisebundle.Store {
 			}
 		}
 		return e.fixMetadata(path, 0o644, rootOwner())
+	}
+	if e.bundleFault != nil {
+		s.EnsurePrivateDirectory = func(path string) error {
+			if err := e.bundleFault("private-dir " + filepath.Base(path)); err != nil {
+				return err
+			}
+			return os.MkdirAll(path, 0o700)
+		}
 	}
 	return s
 }
