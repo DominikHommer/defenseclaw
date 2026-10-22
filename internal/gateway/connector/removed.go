@@ -426,26 +426,6 @@ func (p *removedCleanupPlan) addUnrecorded(path string, kind removedFileKind) er
 	return nil
 }
 
-// planned returns the change the plan makes to path; lists reports whether
-// the plan leaves path for the user.
-func (p *removedCleanupPlan) planned(path string) (removedFile, bool) {
-	for _, file := range p.files {
-		if sameManagedTargetPath(file.path, path) {
-			return file, true
-		}
-	}
-	return removedFile{}, false
-}
-
-func (p *removedCleanupPlan) lists(path string) bool {
-	for _, item := range p.manual {
-		if sameManagedTargetPath(item.Path, path) {
-			return true
-		}
-	}
-	return false
-}
-
 func (p *removedCleanupPlan) addFound(path string, data []byte, kind removedFileKind, reason string) {
 	names, err := kind.names(data)
 	switch {
