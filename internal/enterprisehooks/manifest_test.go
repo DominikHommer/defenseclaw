@@ -73,7 +73,7 @@ func TestLoadManifestRejectsTrailingDocument(t *testing.T) {
 
 func TestLoadManifestRejectsAnEmptyDocument(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
-	for _, data := range []string{"", " \n", "# no managed targets yet\n", "---\n", "{}\n", "null\n", "targets:\n"} {
+	for _, data := range []string{"", " \n", "# no managed targets yet\n", "---\n", "{}\n", "null\n", "targets:\n", "version: 1\n", "version: 1\ntargets:\n"} {
 		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}

@@ -137,8 +137,8 @@ func loadManifestWithSHA256(path string, validateTarget func(int, ManifestTarget
 	if decodeErr != nil {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, decodeErr)
 	}
-	if manifest.Version == 0 && manifest.Targets == nil {
-		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest %s has no version or targets; refusing to withdraw enrolled hooks", path)
+	if manifest.Targets == nil {
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest %s has no explicit targets; refusing to withdraw enrolled hooks", path)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
