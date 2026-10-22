@@ -148,11 +148,13 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 	keys := []string{}
 	seen := map[int]bool{}
 	var leftUIDs []int
-	// The current exclude_users and exempt_users apply before any row or
+	// The current exclude_users apply before any row or
 	// eligible account: the manifest and eligible-accounts.json the
 	// enumerator wrote can be older than them (a later write failed), and an
-	// account they still list must not keep its record (left).
+	// account they still list must not keep its record (left). Exempt users
+	// still call the hook socket, so their identity records keep refreshing.
 	leftOut := enterpriseHookEnrollmentLeftOut()
+	exempt := enterpriseHookEnrollmentExempt()
 	left := map[int]bool{}
 	leave := func(uid int) {
 		if !left[uid] {
@@ -222,8 +224,23 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 			keys = append(keys, strconv.Itoa(account.UID)+":"+user)
 		}
 	}
-	// The accounts the enrollment settings leave out (excluded, exempt, out
-	// of the manifest) lose their record at once. A directory account the
+	// Even without a row or eligible-account entry, an exempt caller can
+	// reach the managed hook socket. Refresh its record by its resolved UID.
+	for _, uid := range exempt.uids {
+		if uid <= 0 || seen[uid] || left[uid] {
+			continue
+		}
+		user := canonicalUser(uid)
+		if leftOut.has(uid, user) {
+			leave(uid)
+			continue
+		}
+		seen[uid] = true
+		accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: uid, User: user})
+		keys = append(keys, strconv.Itoa(uid)+":"+user)
+	}
+	// Excluded accounts, and accounts outside the manifest, lose their
+	// record at once. A directory account the
 	// pass merely does not list keeps it until the directory shows that it
 	// left, since a listing can be partial (GAP-1113, GAP-1236).
 	for _, uid := range leftOut.uids {
@@ -243,32 +260,53 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 	return accounts, keys
 }
 
-// enterpriseHookLeftOutAccounts is what enterprise.enrollment.exclude_users
-// and exempt_users name, matched as the enumerator matches them: an account
+// enterpriseHookAccountSet holds account names and UIDs from enrollment
+// settings, matched as the enumerator matches them: an account
 // name or its decimal uid. A name is also resolved to its uid, so another
 // spelling of the account matches too, and a name that does not resolve
 // (the directory does not answer) still matches the name a row or an
 // eligible account carries.
-type enterpriseHookLeftOutAccounts struct {
+type enterpriseHookAccountSet struct {
 	uids  []int
 	byUID map[int]bool
 	names map[string]bool
 }
 
-// enterpriseHookEnrollmentLeftOut resolves the current settings' exclude_users
-// and exempt_users.
-func enterpriseHookEnrollmentLeftOut() enterpriseHookLeftOutAccounts {
-	out := enterpriseHookLeftOutAccounts{byUID: map[int]bool{}, names: map[string]bool{}}
+// enterpriseHookEnrollmentLeftOut resolves exclude_users. Exemption does not
+// exclude a caller from the identity spool: its hooks still reach policy.
+func enterpriseHookEnrollmentLeftOut() enterpriseHookAccountSet {
 	if cfg == nil {
-		return out
+		return enterpriseHookEnrollmentSet(nil)
 	}
+	return enterpriseHookEnrollmentSet(cfg.Enterprise.Enrollment.ExcludeUsers)
+}
+
+func enterpriseHookEnrollmentExempt() enterpriseHookAccountSet {
+	if cfg == nil {
+		return enterpriseHookEnrollmentSet(nil)
+	}
+	return enterpriseHookEnrollmentSet(cfg.Enterprise.Enrollment.ExemptUsers)
+}
+
+// Per-user scans and hook enrollment still omit exempt accounts. Their
+// identity records are handled separately because their hooks stay active.
+func enterpriseHookEnrollmentScanLeftOut() enterpriseHookAccountSet {
+	if cfg == nil {
+		return enterpriseHookEnrollmentSet(nil)
+	}
+	entries := append(slices.Clone(cfg.Enterprise.Enrollment.ExcludeUsers), cfg.Enterprise.Enrollment.ExemptUsers...)
+	return enterpriseHookEnrollmentSet(entries)
+}
+
+func enterpriseHookEnrollmentSet(entries []string) enterpriseHookAccountSet {
+	out := enterpriseHookAccountSet{byUID: map[int]bool{}, names: map[string]bool{}}
 	add := func(uid int) {
 		if uid > 0 && !out.byUID[uid] {
 			out.byUID[uid] = true
 			out.uids = append(out.uids, uid)
 		}
 	}
-	for _, entry := range append(slices.Clone(cfg.Enterprise.Enrollment.ExcludeUsers), cfg.Enterprise.Enrollment.ExemptUsers...) {
+	for _, entry := range entries {
 		if entry = strings.TrimSpace(entry); entry == "" {
 			continue
 		}
@@ -285,7 +323,7 @@ func enterpriseHookEnrollmentLeftOut() enterpriseHookLeftOutAccounts {
 // has reports whether the settings leave out the account with uid, by uid
 // or by one of names (its spelling in a row or an eligible account, its
 // name by uid).
-func (l enterpriseHookLeftOutAccounts) has(uid int, names ...string) bool {
+func (l enterpriseHookAccountSet) has(uid int, names ...string) bool {
 	if l.byUID[uid] {
 		return true
 	}

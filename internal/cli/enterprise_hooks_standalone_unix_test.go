@@ -1742,6 +1742,35 @@ func TestIdentitySpoolKeysChangeWhenAnOmittedAccountLeaves(t *testing.T) {
 	}
 }
 
+// An exempt account can still call the managed hook socket even when the
+// enumerator gives it no row or eligible-account entry. Its verified UPN
+// must therefore keep a fresh spool record through the next hourly expiry.
+func TestW4B2ExemptUnlistedCallerKeepsIdentityRecord(t *testing.T) {
+	previousCfg := cfg
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterprisehooks.SetStandaloneResolver(nil)
+	})
+	const uid = 94401104
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"bob":              {Name: "bob@corp.example", UID: uid, GID: uid},
+		"bob@corp.example": {Name: "bob@corp.example", UID: uid, GID: uid},
+	}})
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	cfg.Enterprise.Enrollment.ExemptUsers = []string{"bob"}
+	accounts, keys := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{})
+	if len(accounts) != 1 || accounts[0].UID != uid || accounts[0].User != "bob@corp.example" || accounts[0].Left ||
+		!slices.Contains(keys, "94401104:bob@corp.example") {
+		t.Fatalf("unlisted exempt identity accounts = %+v, keys = %v; want a refreshed record", accounts, keys)
+	}
+	cfg.Enterprise.Enrollment.ExcludeUsers = []string{"bob@corp.example"}
+	accounts, _ = enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{})
+	if len(accounts) != 1 || !accounts[0].Left || accounts[0].UID != uid {
+		t.Fatalf("excluded and exempt identity accounts = %+v; exclusion must win", accounts)
+	}
+}
+
 // W2B-G-enum review loop 4: the enumerator published a manifest that leaves
 // out an account the settings now exclude, but its later write of
 // eligible-accounts.json failed and left the old file. The guardian took the
@@ -1811,7 +1840,11 @@ func TestStaleEligibleAccountsDoNotOverrideAnExclusion(t *testing.T) {
 						enrolled = append(enrolled, account.UID)
 					}
 				}
-				if !slices.Equal(enrolled, []int{aliceUID}) || !slices.Equal(left, []int{bobUID}) || !slices.Contains(keys, "left:"+strconv.Itoa(bobUID)) {
+				if len(tc.exempt) > 0 {
+					if !slices.Equal(enrolled, []int{aliceUID, bobUID}) || len(left) != 0 || !slices.Contains(keys, strconv.Itoa(bobUID)+":bob@corp.example") {
+						t.Fatalf("%s: identity accounts %+v (keys %v), want exempt bob refreshed", when, accounts, keys)
+					}
+				} else if !slices.Equal(enrolled, []int{aliceUID}) || !slices.Equal(left, []int{bobUID}) || !slices.Contains(keys, "left:"+strconv.Itoa(bobUID)) {
 					t.Fatalf("%s: identity accounts %+v (keys %v), want alice enrolled and bob's record withdrawn", when, accounts, keys)
 				}
 			}

@@ -220,7 +220,7 @@ func enterpriseHookEnrolledAccountRows(stderr io.Writer, run enterpriseHookRecon
 	for _, row := range rows {
 		seen[row.UID] = true
 	}
-	leftOut := enterpriseHookEnrollmentLeftOut()
+	leftOut := enterpriseHookEnrollmentScanLeftOut()
 	for _, account := range accounts {
 		if account.UID <= 0 || seen[account.UID] || leftOut.has(account.UID, account.User) {
 			continue
