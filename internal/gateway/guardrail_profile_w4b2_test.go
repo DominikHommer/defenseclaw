@@ -9,12 +9,42 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+func TestW4B2ManagedGroupRefusalNamesInstalledProfileExplain(t *testing.T) {
+	stubProfileSources(t)
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
+	ctx = context.WithValue(ctx, profileRouteConnectorKey{}, "claudecode")
+	ctx = context.WithValue(ctx, resolvedGuardrailProfileKey{}, &resolvedGuardrailProfile{
+		decision: profileDecision{RefuseUnconfirmedGroups: true}, set: &guardrailProfileSet{base: cfg},
+	})
+	reason, refused := profileUnconfirmedGroupReason(ctx)
+	want := ""
+	switch runtime.GOOS {
+	case "linux":
+		want = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user 1001 --connector claudecode"
+	case "darwin":
+		want = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user 1001 --connector claudecode"
+	case "windows":
+		want = `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user 1001 --connector claudecode`
+	}
+	if !refused || want != "" && !strings.Contains(reason, want) {
+		t.Fatalf("managed refusal %q, refused=%t; want installed command %q", reason, refused, want)
+	}
+	ctx = context.WithValue(ctx, profileRouteConnectorKey{}, "codex;touch /tmp/unsafe")
+	if unsafe, _ := profileUnconfirmedGroupReason(ctx); strings.Contains(unsafe, "touch") {
+		t.Fatalf("unsafe connector appeared in a suggested shell command: %q", unsafe)
+	}
+}
 
 func TestW4B2UnconfirmedGroupRefusesInsteadOfLenientDefault(t *testing.T) {
 	set := &guardrailProfileSet{

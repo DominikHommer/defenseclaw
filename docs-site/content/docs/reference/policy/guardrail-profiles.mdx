@@ -262,8 +262,9 @@ What follows when the identity is missing:
   default profile is reported (`default_lookup_failed`) and later assignments
   are not read. If an applicable group assignment may match, guarded hook,
   proxy, inspect, managed sandbox relay and ACP requests are refused until membership is confirmed.
-  The refusal gives the exact `defenseclaw guardrail profile explain --user`
-  command for the verified account. One that lists only other uids or SIDs, or another agent or
+  The refusal gives the platform's exact profile-explain command for the
+  verified account (`enterprise <os> profile-explain` on a managed host).
+  One that lists only other uids or SIDs, or another agent or
   connector, is skipped. The lookup is retried 15 seconds later. Later
   requests use the cached answer. A lookup counts as failed unless every part
   of it finished: an account whose group list timed out, or that is in more

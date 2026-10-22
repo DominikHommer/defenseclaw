@@ -560,10 +560,38 @@ func profileUnconfirmedGroupReason(ctx context.Context) (string, bool) {
 	}
 	subject, _ := profileRequestSubject(ctx)
 	command := "defenseclaw guardrail profile list"
-	if subject != nil && subject.UserID != "" && !strings.ContainsAny(subject.UserID, " \t\r\n`$\\\"'") {
+	if subject != nil && subject.UserID == strings.TrimSpace(subject.UserID) && useridentity.KindForID(subject.UserID) != "" {
 		command = "defenseclaw guardrail profile explain --user " + subject.UserID
+		if resolved.set != nil && resolved.set.base != nil && resolved.set.base.StandaloneEnterprise() {
+			switch runtime.GOOS {
+			case "linux":
+				command = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user " + subject.UserID
+			case "darwin":
+				command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + subject.UserID
+			case "windows":
+				command = `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user ` + subject.UserID
+			}
+		}
+		if connector := profileRequestConnector(ctx); profileCommandToken(connector) {
+			command += " --connector " + connector
+		}
 	}
 	return "directory group membership is unconfirmed; run `" + command + "` after the directory recovers", true
+}
+
+// profileCommandToken is a shell-safe connector argument in a diagnostic
+// command. The subject ID above is validated as a numeric UID or SID.
+func profileCommandToken(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func resolvedGuardrailProfileFrom(ctx context.Context) *resolvedGuardrailProfile {
