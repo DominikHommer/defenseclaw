@@ -85,3 +85,45 @@ func TestForeignHookRemovalLedgerKeepsEveryAccountsDenialWhenFull(t *testing.T) 
 		t.Fatalf("a ledger that holds every pair is written: %v", err)
 	}
 }
+
+// W4 re-fix loop 3: per account, connector and file the removal with the
+// later mark wins, whatever order the guardian processes published in, so
+// an older cleanup published last never erases a newer removal; a commit
+// drops only its own first record (matched without its time, which the
+// horizon may move).
+func TestForeignHookRemovalLaterMarkWinsAndTheCommitDropsItsFirstRecord(t *testing.T) {
+	now := time.Now().UTC()
+	at := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339Nano) }
+	newer := ForeignHookRemoval{Identity: "1001", Connector: "cursor", Path: "/h/.cursor/hooks.json", At: at(-time.Minute), Mark: "linux:b:900"}
+	older := ForeignHookRemoval{Identity: "1001", Connector: "cursor", Path: "/h/.cursor/hooks.json", At: at(0), Mark: "linux:b:500"}
+	data, err := EncodeForeignHookRemovals([]ForeignHookRemoval{newer}, []ForeignHookRemoval{older}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removals, err := ParseForeignHookRemovals(data)
+	if err != nil || len(removals) != 1 || removals[0].Mark != newer.Mark {
+		t.Fatalf("the later mark must win over an older cleanup published last: %+v %v", removals, err)
+	}
+	key := SessionKey{Connector: "cursor", Session: "s", Process: "linux:b:1:700"}
+	if !ApplyForeignHookRemovals(GuardDecision{}, key, removals, nil, now).Deny {
+		t.Fatal("an agent that started before the newer removal must stay denied")
+	}
+	first := ForeignHookRemoval{Identity: "1001", Connector: "cursor", Path: newer.Path + ForeignHookRemovalInProgressSuffix, At: at(0), Mark: "linux:b:2000"}
+	data, err = EncodeForeignHookRemovals(removals, []ForeignHookRemoval{first}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removals, err = ParseForeignHookRemovals(data); err != nil || len(removals) != 2 {
+		t.Fatalf("the first record is kept next to the removal: %+v %v", removals, err)
+	}
+	moved := first
+	moved.At = at(time.Second)
+	post := ForeignHookRemoval{Identity: "1001", Connector: "cursor", Path: newer.Path, At: at(time.Second), Mark: "linux:b:1000"}
+	data, err = EncodeForeignHookRemovalsDropping(removals, []ForeignHookRemoval{post}, []ForeignHookRemoval{moved}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removals, err = ParseForeignHookRemovals(data); err != nil || len(removals) != 1 || removals[0].Mark != post.Mark || removals[0].Path != post.Path {
+		t.Fatalf("the commit must drop its first record and keep its own later mark: %+v %v", removals, err)
+	}
+}

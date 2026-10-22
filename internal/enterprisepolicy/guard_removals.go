@@ -46,6 +46,13 @@ const (
 	foreignHookRemovalsLimit = 1024
 )
 
+// ForeignHookRemovalInProgressSuffix ends the path of the first record of a
+// removal (made before the file changes, with a mark ahead): the removal's
+// commit drops that exact entry when it records the change
+// (EncodeForeignHookRemovalsDropping). One a guardian left when it ended
+// mid-removal stays, and denies, for its TTL.
+const ForeignHookRemovalInProgressSuffix = " (removal in progress)"
+
 // ForeignHookRemoval is one hook file the guardian cleaned for an account.
 type ForeignHookRemoval struct {
 	// Identity is the account as the gateway names a verified caller: a
@@ -123,6 +130,28 @@ const foreignHookRemovalIndent = 64
 // encoding fails, and the guardian removes nothing: the hook stays in
 // place, so the scan keeps blocking (ErrForeignHookRemovalLedgerFull).
 func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Time) ([]byte, error) {
+	return EncodeForeignHookRemovalsDropping(existing, added, nil, now)
+}
+
+// EncodeForeignHookRemovalsDropping is EncodeForeignHookRemovals that first
+// drops the entries of existing equal to one of dropped: a removal commit
+// drops its own first record. Per account, connector and file the entry
+// with the later mark wins (removalMarkedAfter), whatever order the
+// guardian processes published in, so an older cleanup published last never
+// replaces a newer removal.
+func EncodeForeignHookRemovalsDropping(existing, added, dropped []ForeignHookRemoval, now time.Time) ([]byte, error) {
+	if len(dropped) != 0 {
+		kept := make([]ForeignHookRemoval, 0, len(existing))
+		for _, removal := range existing {
+			// The time is not compared: the horizon may have moved it.
+			if !slices.ContainsFunc(dropped, func(drop ForeignHookRemoval) bool {
+				return drop.Identity == removal.Identity && drop.Connector == removal.Connector && drop.Path == removal.Path && drop.Mark == removal.Mark
+			}) {
+				kept = append(kept, removal)
+			}
+		}
+		existing = kept
+	}
 	type dated struct {
 		removal ForeignHookRemoval
 		at      time.Time
@@ -137,7 +166,7 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 			continue
 		}
 		key := removal.Identity + "\x00" + removal.Connector + "\x00" + removal.Path
-		if previous, ok := latest[key]; !ok || !at.Before(previous.at) {
+		if previous, ok := latest[key]; !ok || removalMarkedAfter(removal, at, previous.removal, previous.at) {
 			latest[key] = dated{removal: removal, at: at, key: key}
 		}
 	}
@@ -226,6 +255,17 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 // ErrForeignHookRemovalLedgerFull is a ledger that cannot keep the denial of
 // every account and connector together with the new removals.
 var ErrForeignHookRemovalLedgerFull = errors.New("the foreign-hook removal ledger cannot keep every account's denial")
+
+// removalMarkedAfter reports whether removal (dated at) denies no fewer
+// agent processes than previous (dated previousAt): its mark is later in
+// the same boot, or, when the marks cannot be ordered or are equal, it was
+// recorded no earlier.
+func removalMarkedAfter(removal ForeignHookRemoval, at time.Time, previous ForeignHookRemoval, previousAt time.Time) bool {
+	if order, ok := agentprocess.CompareMarks(removal.Mark, previous.Mark); ok && order != 0 {
+		return order > 0
+	}
+	return !at.Before(previousAt)
+}
 
 // foreignHookRemovalHorizon names the pair (account, connector and the boot
 // of the mark) a removal denies agent processes for, and the mark's clock.

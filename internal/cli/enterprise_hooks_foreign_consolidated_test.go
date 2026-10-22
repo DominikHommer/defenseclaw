@@ -572,7 +572,7 @@ func runForeignHookRemovalOrderCases(t *testing.T, cases []foreignHookRemovalOrd
 						removals, err := loadEnterpriseForeignHookRemovals(g.ledger)
 						found := false
 						for _, removal := range removals {
-							if removal.Identity == identity && removal.Connector == "cursor" && removal.Path == path {
+							if removal.Identity == identity && removal.Connector == "cursor" && removal.Path == path+enterprisepolicy.ForeignHookRemovalInProgressSuffix {
 								found = true
 								if err := foreignHookMarkAhead(removal.Mark); err != nil {
 									t.Error(err)
@@ -803,7 +803,7 @@ func TestForeignHookRemovalIsRecordedAheadBeforeTheFileChanges(t *testing.T) {
 	var running string
 	guard := enterpriseForeignHookRemovalGuard("cursor", newEnterpriseForeignHookInProcessFence("1001", home))
 	if err := guard([]string{path}, func() error {
-		removal, ok := g.entry(t, "1001", "cursor", path)
+		removal, ok := g.entry(t, "1001", "cursor", path+enterprisepolicy.ForeignHookRemovalInProgressSuffix)
 		if !ok {
 			t.Fatal("the file changes before the ledger holds its removal")
 		}

@@ -58,6 +58,9 @@ type enterpriseForeignHookRemovalTx struct {
 	connector string
 	paths     []string
 	release   func()
+	// first is the first record (with ForeignHookRemovalInProgressSuffix),
+	// which the commit drops.
+	first []enterprisepolicy.ForeignHookRemoval
 }
 
 // beginEnterpriseForeignHookRemoval opens the commit of one removal of
@@ -116,10 +119,12 @@ func beginEnterpriseForeignHookRemovalMarked(ctx context.Context, stderr io.Writ
 	if mark == "" {
 		mark = agentprocess.NowAfter(enterpriseForeignHookRemovalMarkAhead)
 	}
-	if err := tx.record(mark); err != nil {
+	first, err := tx.record(mark, enterprisepolicy.ForeignHookRemovalInProgressSuffix, nil)
+	if err != nil {
 		release()
 		return nil, fmt.Errorf("record the removal before it is made: %w", err)
 	}
+	tx.first = first
 	return tx, nil
 }
 
@@ -162,9 +167,9 @@ func (tx *enterpriseForeignHookRemovalTx) rotate() error {
 // and file, the entry recorded last, and records of one account are made
 // in commit order under its removal lock, so the second record of a commit
 // always replaces its first, and a later commit an earlier one.
-func (tx *enterpriseForeignHookRemovalTx) record(mark string) error {
+func (tx *enterpriseForeignHookRemovalTx) record(mark, suffix string, dropped []enterprisepolicy.ForeignHookRemoval) ([]enterprisepolicy.ForeignHookRemoval, error) {
 	if mark == "" {
-		return errors.New("the process clock is unavailable")
+		return nil, errors.New("the process clock is unavailable")
 	}
 	now := time.Now().UTC()
 	connectors := enterprisepolicy.StandaloneConnectors(cfg)
@@ -172,14 +177,14 @@ func (tx *enterpriseForeignHookRemovalTx) record(mark string) error {
 	for _, path := range tx.paths {
 		for _, name := range enterprisepolicy.ForeignHookRemovalConnectors(tx.home, path, tx.connector, connectors) {
 			added = append(added, enterprisepolicy.ForeignHookRemoval{
-				Identity: tx.identity, Connector: name, Path: foreignGuardLogField(path, 512),
+				Identity: tx.identity, Connector: name, Path: foreignGuardLogField(path, 512) + suffix,
 				At: now.Format(time.RFC3339Nano), Mark: mark,
 			})
 		}
 	}
 	enterpriseForeignHookRemovalsMu.Lock()
 	defer enterpriseForeignHookRemovalsMu.Unlock()
-	return writeEnterpriseForeignHookRemovalLedger(added, now)
+	return added, writeEnterpriseForeignHookRemovalLedger(added, dropped, now)
 }
 
 // commit records the transaction's files again with the mark of now, which
@@ -197,7 +202,7 @@ func (tx *enterpriseForeignHookRemovalTx) commit(removed []string) error {
 // before it.
 func (tx *enterpriseForeignHookRemovalTx) commitAt(mark string, removed []string) error {
 	defer tx.release()
-	err := tx.record(mark)
+	_, err := tx.record(mark, "", tx.first)
 	if err != nil {
 		fmt.Fprintf(tx.stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s after it was made (the record made before it still denies): %v\n",
 			tx.connector, foreignGuardLogField(tx.identity, 256), err)
@@ -268,7 +273,7 @@ func ensureEnterpriseForeignHookSessionKey(stderr io.Writer) {
 // The new file has its final mode and owner before it is renamed into
 // place (writeEnterpriseHookGatewayRecord). The caller holds
 // enterpriseForeignHookRemovalsMu.
-func writeEnterpriseForeignHookRemovalLedger(added []enterprisepolicy.ForeignHookRemoval, now time.Time) error {
+func writeEnterpriseForeignHookRemovalLedger(added, dropped []enterprisepolicy.ForeignHookRemoval, now time.Time) error {
 	dataDir := cfg.DataDir
 	if !filepath.IsAbs(managed.HookGuardianAuthorizationDir(dataDir)) {
 		return errors.New("the data directory is not an absolute path")
@@ -289,7 +294,7 @@ func writeEnterpriseForeignHookRemovalLedger(added []enterprisepolicy.ForeignHoo
 	if err != nil {
 		return fmt.Errorf("the removal ledger cannot be read and is kept until it can be read again or an administrator removes %s: %w", path, err)
 	}
-	data, err := enterprisepolicy.EncodeForeignHookRemovals(existing, added, now)
+	data, err := enterprisepolicy.EncodeForeignHookRemovalsDropping(existing, added, dropped, now)
 	if err != nil {
 		return err
 	}
