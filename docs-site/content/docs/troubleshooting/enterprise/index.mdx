@@ -308,10 +308,6 @@ report `enterprise_managed_runtime_state_invalid` instead.
 
 ### Known limits for managed hooks
 
-- On a managed standalone host with `foreign_hooks: remove`, the foreign-hook guard blocks GitHub
-  Copilot CLI, Cursor, Devin, OpenCode, Amp and Hermes tool calls while the gateway is stopped or
-  restarting, even under `hook_fail_mode: open`. Start the gateway again; see
-  [Foreign hook guard](/docs/enterprise/configure/foreign-hook-guard#gateway-outages).
 - A managed Claude Code or Codex shell command is blocked if it has more write targets than the
   hook can report: more than 512 targets or more than 64 KiB of target paths. The refusal says
   DefenseClaw blocked the action under your organization's policy and may name "SSH authorized keys
