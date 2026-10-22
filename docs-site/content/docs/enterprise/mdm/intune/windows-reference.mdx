@@ -30,6 +30,13 @@ allowed). It also refuses a top-level key that is not plain lowercase (a tag,
 anchor, escape or `?` key) and a quoted value or `{...}` or `[...]` that
 continues on the next line.
 
+When you also supply a signed rule bundle, the packager compares the base
+`guardrail:` block with the bundle, allowing only the custom pack path mapping.
+It also requires identical `claude_code:`, `codex:`, `connector_hooks:` and
+`application_protection:` blocks, or their absence from both files. No other
+setting is compared. Put any other policy, such as `asset_policy:`, into the base
+config too so it applies before the bundle arrives.
+
 The script verifies the Setup against `-Sha256` (and, for Authenticode, its
 signer); writes `content\` with the Setup, `config.yaml`,
 `Install-DefenseClawIntune.ps1` and `intune-package.json` (the SHA-256 pins

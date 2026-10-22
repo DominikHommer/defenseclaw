@@ -14,6 +14,14 @@ function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
 
+describe('Rollback gateway state', () => {
+  it('qualifies automatic startup and names the command for a stopped gateway', () => {
+    const text = page('get-started/upgrade.mdx').split('## Rollback')[1].split('## Update notices')[0];
+    assert.match(text, /stopped[^.]*stopped/);
+    assert.match(text, /`defenseclaw-gateway start`/);
+  });
+});
+
 describe('Intune base config versus the signed bundle', () => {
   it('names exactly the blocks the packager compares', () => {
     const packager = readFileSync(
@@ -25,7 +33,7 @@ describe('Intune base config versus the signed bundle', () => {
     assert.ok(list, 'packager hook-block key list not found');
     const compared = [...list[1].matchAll(/'([a-z_]+)'/g)].map((match) => match[1]);
     assert.ok(compared.length > 0);
-    for (const name of ['enterprise/mdm/intune-windows.mdx', 'enterprise/mdm/index.mdx']) {
+    for (const name of ['enterprise/mdm/intune/windows-reference.mdx']) {
       const text = page(name);
       assert.ok(!text.includes('the packager checks this) so that window does not change what is blocked'), name);
       assert.ok(text.includes('No other setting is compared'), name);
@@ -39,14 +47,14 @@ describe('Intune base config versus the signed bundle', () => {
 
 describe('fail mode of Copilot CLI and Antigravity hooks', () => {
   it('says the hooks follow a closed fail mode', () => {
-    const failModes = page('reference/fail-modes.mdx');
+    const failModes = page('reference/configuration/fail-modes.mdx');
     assert.ok(!failModes.includes('The generated hooks stay open even when the effective mode is `closed`'));
     assert.ok(failModes.includes('Copilot and Antigravity still run a call when the hook times out or cannot start'));
     assert.ok(failModes.includes('Under Secure Client they stay open'));
     for (const name of ['reference/connectors/copilot.mdx', 'connectors/copilot.mdx']) {
       const text = page(name);
       assert.ok(!/no fail-closed hook transport/i.test(text), name);
-      assert.ok(text.includes('in fail mode `closed`, the default'), name);
+      assert.match(text, /in fail mode `closed`, the default/i, name);
     }
     for (const name of ['reference/connectors/antigravity.mdx', 'connectors/antigravity.mdx']) {
       const text = page(name);
@@ -67,6 +75,6 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
 
   it('says an upgrade keeps only an open the config sets', () => {
     assert.ok(page('get-started/upgrade.mdx').includes("An upgrade sets each hook's fail mode from your config before the new hook runs"));
-    assert.ok(page('reference/fail-modes.mdx').includes('Hooks follow an open fail mode only when your config sets it'));
+    assert.ok(page('reference/configuration/fail-modes.mdx').includes('Hooks follow an open fail mode only when your config sets it'));
   });
 });

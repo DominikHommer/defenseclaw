@@ -24,6 +24,8 @@ for current behavior.
 
 ### Fixed
 
+- **Rollback guidance explains a stopped gateway.** When both the current and saved gateway states are stopped, rollback leaves the restored gateway stopped and the upgrade guide names the command to start it, including 0.8.x round trips.
+
 - **Local Splunk starts under a private umask.** Both packagers make the nonsecret app archive readable by the container. Setup reports ready only after the installed app, Web UI and HEC are available, and refuses incomplete startup with a repair command.
 
 - **Local and remote Splunk credentials stay separate.** Unix local setup uses its own token reference, and remote setup refuses a generated local credential, including one saved by an older setup.

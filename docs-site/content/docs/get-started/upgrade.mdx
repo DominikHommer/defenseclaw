@@ -52,7 +52,7 @@ Rollback swaps the live install with the one the last upgrade replaced: programs
 
 - Between releases from 1.0.1 on, rollback also carries your sandbox setup: sandbox records, hook bindings and harness images. A release before 1.0.1 cannot take over that setup.
 - Each install shows only its own audit events. Read the other install's with `~/.defenseclaw/previous/bin/defenseclaw-gateway audit export --db ~/.defenseclaw/previous/data/audit.db`.
-- Rollback starts the restored gateway and waits up to 3 minutes. If it does not come up, rollback exits `1` and agent hooks are not guarded until `defenseclaw-gateway start` succeeds.
+- Rollback restarts the restored gateway if the current gateway is running or the saved install records that it was running, and waits up to 3 minutes. If both were stopped, the restored gateway stays stopped; start it with `defenseclaw-gateway start` when you are ready to resume agent work. This also applies when rolling back to 0.8.x and rolling forward again. If a required restart fails, rollback exits `1` and agent hooks are not guarded until the gateway starts successfully.
 - If an upgrade or rollback is interrupted, run the same command again. The installer first restores the install it was replacing.
 - Rolling back to 0.8.x, and the Windows 0.8.7-0.8.10 Setup case, are covered in [Upgrade from 0.8.x](/docs/appendix/upgrade-from-0-8#roll-back-to-08x).
 
