@@ -123,7 +123,7 @@ $DeveloperFiles = @("litellm.exe", "skill-scanner.exe", "skill-scanner-api.exe",
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done",
-    ".lifecycle-txn.json", ".lifecycle-txn.json.new")
+    ".lifecycle-txn.json", ".lifecycle-txn.json.new", ".lifecycle-closer")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
 $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity",
     "opencode", "amp", "kiro", "none")
@@ -1470,6 +1470,10 @@ function Invoke-UvPipInstall([string[]]$UvArgs) {
 #      install stays locked and its hooks closed, and the run exits non-zero
 #      with the next step.
 $LifecycleManifest = Join-Path $DataDir ".lifecycle-txn.json"
+# A copy of the checked staged gateway, kept while the record is: once a
+# restore has consumed the snapshot (and its closer\), it is the gateway that
+# can close every hook, also over an older release's hooks.
+$LifecycleCloser = Join-Path $DataDir ".lifecycle-closer"
 
 function Write-DurableText([string]$Path, [string]$Text) {
     # A crash leaves the old file or the whole new one: the bytes are flushed
@@ -1585,6 +1589,14 @@ function Get-LifecycleState {
     }
 }
 
+function Test-SameBinaries($Live, $Expected) {
+    $live = ConvertTo-Map $Live
+    $expected = ConvertTo-Map $Expected
+    if ($live.Count -ne $expected.Count) { return $false }
+    foreach ($name in $expected.Keys) { if (-not $live.Contains($name) -or $live[$name] -ne $expected[$name]) { return $false } }
+    return $true
+}
+
 function Write-LifecycleManifest([string]$Operation, [string]$From, [string]$To, [string]$Slot, [hashtable]$Extra = @{}) {
     # Step 1: the working state this step starts from, durable before
     # anything changes. A manifest an earlier run left is still being
@@ -1642,6 +1654,32 @@ function Complete-LifecycleManifest {
 
 function Remove-LifecycleManifest {
     if (Test-Path -LiteralPath $LifecycleManifest) { Remove-Item -LiteralPath $LifecycleManifest -Force -ErrorAction Stop }
+    $closer = Get-Variable -Name LifecycleCloser -ValueOnly -ErrorAction SilentlyContinue
+    if ($closer -and (Test-Path -LiteralPath $closer)) { Remove-Item -LiteralPath $closer -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Save-LifecycleCloser([string]$Slot) {
+    # Keep the slot's closer (the checked staged gateway) beside the record
+    # before a restore consumes the slot. Best effort: without it the gateway
+    # in place or the previous one closes the hooks if it can.
+    $closer = Join-Path $Slot "closer\defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $closer -PathType Leaf)) { return }
+    try {
+        New-Item -ItemType Directory -Path $LifecycleCloser -Force -ErrorAction Stop | Out-Null
+        Copy-Item -LiteralPath $closer -Destination (Join-Path $LifecycleCloser "defenseclaw-gateway.exe") -Force -ErrorAction Stop
+    } catch { Write-Warn "Could not keep the hook closer in ${LifecycleCloser}: $($_.Exception.Message)" }
+}
+
+function Close-AllHooks([string[]]$Gateways) {
+    # Close every installed hook (refresh-fail-modes --closed) with the first
+    # of $Gateways that can; true once one did.
+    foreach ($gateway in $Gateways) {
+        if (-not $gateway -or -not (Test-Path -LiteralPath $gateway -PathType Leaf)) { continue }
+        $probe = Get-NativeProbe $gateway @("connector", "refresh-fail-modes", "--help")
+        if ($probe.Exit -ne 0 -or $probe.Output -notmatch "--closed") { continue }
+        if ((Invoke-Native $gateway @("connector", "refresh-fail-modes", "--closed", "--data-dir", $DataDir.TrimEnd([char]92))) -eq 0) { return $true }
+    }
+    return $false
 }
 
 function Test-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors = @(), [switch]$RequireDigest, [bool]$RequireProtected = $true,
@@ -1757,6 +1795,18 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped) {
     }
     if ([string](Get-Field $Manifest "HookFailModes") -and -not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) {
         $problems += "the hooks' outage modes ($(Join-Path $DataDir 'hooks\.hookcfg')) are missing"
+    }
+    if (-not $problems.Count -and $KeepStopped -and [bool](Get-Field $Manifest "GatewayWasRunning") -and
+        (Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container)) {
+        # The gateway stays stopped on purpose (GAP-0407): its hooks block
+        # until it runs again, an outage open the config chooses included,
+        # because the gateway that ran before is down.
+        $gateways = @((Join-Path $LifecycleCloser "defenseclaw-gateway.exe"), (Join-Path $BinDir "defenseclaw-gateway.exe"))
+        if (Close-AllHooks $gateways) {
+            Write-Warn "Every agent hook blocks tool calls until the gateway runs again"
+        } else {
+            $problems += "the hooks could not be closed while the restored gateway stays stopped"
+        }
     }
     if ($problems.Count) {
         Set-RecoveryPending
@@ -2418,21 +2468,23 @@ function Close-UnfinishedInstallHooks {
     # open the config chooses included, until the gateway renders them again
     # (the next run of the installer, or a gateway start). The gateway in
     # place, or a saved one, that has 'refresh-fail-modes --closed' does it.
+    # A lifecycle record still pending (a restore not proven yet, whose
+    # snapshot may already be consumed) is an unfinished install too.
+    $record = Get-Variable -Name LifecycleManifest -ValueOnly -ErrorAction SilentlyContinue
+    $closer = Get-Variable -Name LifecycleCloser -ValueOnly -ErrorAction SilentlyContinue
     $unfinished = @(@((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"), (Join-Path $DataDir ".rollback-hold")) |
         Where-Object { Test-Path -LiteralPath $_ })
-    if (-not $unfinished.Count -or (Get-GatewayProcess)) { return }
+    $pending = $record -and (Test-Path -LiteralPath $record -PathType Leaf)
+    if ((-not $unfinished.Count -and -not $pending) -or (Get-GatewayProcess)) { return }
     if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container)) { return }
-    $gateways = @((Join-Path $BinDir "defenseclaw-gateway.exe")) +
+    $gateways = @()
+    if ($closer) { $gateways += Join-Path $closer "defenseclaw-gateway.exe" }
+    $gateways += @((Join-Path $BinDir "defenseclaw-gateway.exe")) +
         @($unfinished | ForEach-Object { (Join-Path $_ "closer\defenseclaw-gateway.exe"), (Join-Path $_ "bin\defenseclaw-gateway.exe") }) +
         @(Join-Path $Previous "bin\defenseclaw-gateway.exe")
-    foreach ($gateway in $gateways) {
-        if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) { continue }
-        $probe = Get-NativeProbe $gateway @("connector", "refresh-fail-modes", "--help")
-        if ($probe.Exit -ne 0 -or $probe.Output -notmatch "--closed") { continue }
-        if ((Invoke-Native $gateway @("connector", "refresh-fail-modes", "--closed", "--data-dir", $DataDir.TrimEnd([char]92))) -eq 0) {
-            Write-Warn "The install is not finished, so every agent hook blocks tool calls until the gateway runs again. Run the installer again to finish it"
-            return
-        }
+    if (Close-AllHooks $gateways) {
+        Write-Warn "The install is not finished, so every agent hook blocks tool calls until the gateway runs again. Run the installer again to finish it"
+        return
     }
     Write-Err ("The install is not finished and the agent hooks could not be closed: until the gateway runs, they follow the outage fail mode " +
         "in your config. Run the installer again to finish it")
@@ -2450,6 +2502,7 @@ function Clear-SetupDataDir([string]$Failed) {
 function Restore-Snapshot {
     Clear-StagedRelease
     $keepStopped = Test-Path -LiteralPath (Join-Path $Snap "GATEWAY_RESTART_UNPROVEN")
+    Save-LifecycleCloser $Snap
     try { $failed = Restore-Slot $Snap } catch {
         # The snapshot stays marked complete, so the next run restores it.
         $Run.RestorePending = $true
@@ -2599,6 +2652,7 @@ function Resume-InterruptedRun {
             }
             [void](Stop-Gateway)
             $keepStopped = Test-Path -LiteralPath (Join-Path $slot "GATEWAY_RESTART_UNPROVEN")
+            Save-LifecycleCloser $slot
             $failed = Restore-Slot $slot
             # A DefenseClaw Setup install that was replaced runs its own gateway (GAP-1839).
             $setupInstall = Find-SetupInstall
@@ -2684,6 +2738,32 @@ function Resume-InterruptedRun {
     }
     # A record with no snapshot left: the run stopped after its record and
     # before its first change, or after its restore and before the proof.
+    if ($manifest -and (Get-Field $manifest "Operation") -eq "rollback") {
+        # A rollback whose swap finished (its hold already renamed into
+        # previous\) and that stopped before its proof: the live install is
+        # its target, proven as the finished rollback is.
+        $target = Get-Field $manifest "TargetBins"
+        if (Test-SameBinaries (Get-BinariesState $BinDir) $target) {
+            $wanted = [bool](Get-Field $manifest "StartAfter")
+            if ($wanted -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "rolled-back" }
+            $problems = @(Wait-LifecycleProof $target $wanted)
+            if ($problems.Count) {
+                Set-RecoveryPending
+                Die "The finished rollback is not proven: $($problems -join '; '). Fix the cause, then run: $(Get-LifecycleNextStep)"
+            }
+            Remove-LifecycleManifest
+            return
+        }
+    }
+    $recordedBins = if ($manifest) { ConvertTo-Map (Get-Field $manifest "Bins") } else { @{} }
+    if ($manifest -and $recordedBins.Count -and
+        -not @($recordedBins.Keys | Where-Object { Test-Path -LiteralPath (Join-Path $BinDir $_) }).Count -and -not (Find-SetupInstall)) {
+        # The install the record names was uninstalled since (none of its
+        # programs is left, and no snapshot): nothing to restore or start.
+        Write-Warn "The install an earlier run recorded is no longer there (uninstalled); its record is dropped"
+        Remove-LifecycleManifest
+        return
+    }
     if ($manifest) { $restart = $restart -or [bool](Get-Field $manifest "GatewayWasRunning") }
     if ($restart -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "recovered" }
     Set-RecoverySetupRoot $manifest
@@ -3069,7 +3149,7 @@ function Invoke-Rollback {
     # back by Undo-Rollback on any failure) and the one it goes to, which
     # stays in previous\ until this rollback is proven.
     try {
-        $Manifest = Write-LifecycleManifest "rollback" $current $backTo "" @{ TargetBins = (Get-BinariesState (Join-Path $Previous "bin")) }
+        $Manifest = Write-LifecycleManifest "rollback" $current $backTo "" @{ TargetBins = (Get-BinariesState (Join-Path $Previous "bin")); StartAfter = $startAfter }
     } catch { Die "Could not record the current install before the rollback ($($_.Exception.Message)); nothing was changed" }
     if (-not (Stop-Gateway)) {
         Remove-LifecycleManifest

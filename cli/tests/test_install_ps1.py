@@ -358,6 +358,7 @@ _NO_TXN = (
     "function Start-HookFailModeHold { return $true }\n"
     "function Stop-HookFailModeHold { }\n"
     "function Set-RecoverySetupRoot { param($Manifest) }\n"
+    "function Save-LifecycleCloser { param([string]$Slot) }\n"
     "function Set-RecoveryPending { param([string]$Flag = 'RestorePending') if (Get-Variable -Name Run -ErrorAction SilentlyContinue) { $Run.$Flag = $true } }\n"
     "function Start-RecoveredGateway { param([string]$What) if ((Start-Gateway) -notin @(0, 3)) { throw \"The $What gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again\" } }\n"
 )
@@ -391,6 +392,7 @@ function Read-LifecycleManifest { return $null }
 function New-RecoveryManifest { return $null }
 function Assert-LifecycleRestored { param($Manifest, [switch]$KeepStopped) }
 function Set-RecoverySetupRoot { param($Manifest) }
+function Save-LifecycleCloser { param([string]$Slot) }
 function Start-RecoveredGateway { param([string]$What) if ((Start-Gateway) -notin @(0, 3)) { throw "The $What gateway did not become healthy" } }
 function Clear-SetupDataDir { param($Failed) }
 function Remove-Tree { param($Path) }
@@ -985,6 +987,7 @@ def _lifecycle_record(path: Path, running: bool = True) -> None:
 _TXN_REAL = ("Write-DurableText", "ConvertTo-Map", "Get-BinariesState", "Get-OptionalSha256", "Get-GuardedConnectors",
              "Read-LifecycleManifest", "New-RecoveryManifest", "Remove-LifecycleManifest", "Test-LifecycleProof",
              "Set-RecoveryPending", "Set-RecoverySetupRoot", "Wait-LifecycleProof", "Get-LifecycleNextStep", "Assert-LifecycleRestored",
+             "Close-AllHooks", "Save-LifecycleCloser", "Test-SameBinaries",
              "Get-Field", "Get-Sha256")
 
 
@@ -1065,7 +1068,8 @@ function Get-GatewayDigestProblem {{ return 'unsupported' }}
 function Test-BinDirProtected {{ return $true }}
 {chr(10).join(_ps1_function(name) for name in ('Write-DurableText', 'ConvertTo-Map', 'Get-BinariesState', 'Get-OptionalSha256',
     'Get-GuardedConnectors', 'Read-LifecycleManifest', 'New-RecoveryManifest', 'Remove-LifecycleManifest', 'Test-LifecycleProof',
-    'Set-RecoveryPending', 'Set-RecoverySetupRoot', 'Wait-LifecycleProof', 'Get-LifecycleNextStep', 'Assert-LifecycleRestored', 'Get-Field', 'Get-Sha256'))}
+    'Set-RecoveryPending', 'Set-RecoverySetupRoot', 'Wait-LifecycleProof', 'Get-LifecycleNextStep', 'Assert-LifecycleRestored', 'Get-Field', 'Get-Sha256',
+    'Close-AllHooks', 'Save-LifecycleCloser', 'Test-SameBinaries'))}
 $LifecycleProofSeconds = 0
 function Find-SetupInstall {{ return $null }}
 function Die([string]$Message) {{ throw $Message }}
@@ -2514,6 +2518,7 @@ def _close_mocks(capable: str = "new ", close_rc: int = 0, running: bool = False
         "    Write-Host \"RAN: $FilePath $($Arguments -join ' ')\"\n"
         f"    return {close_rc}\n}}\n"
         + _ps1_function("Close-UnfinishedInstallHooks")
+        + _ps1_function("Close-AllHooks")
     )
 
 
@@ -2904,6 +2909,7 @@ _TXN_FUNCTIONS = (
     "Get-GuardedConnectors", "Get-GatewayDigestProblem", "Get-LifecycleState", "Write-LifecycleManifest",
     "Read-LifecycleManifest", "Complete-LifecycleManifest", "Remove-LifecycleManifest", "Test-LifecycleProof",
     "Set-RecoveryPending", "Wait-LifecycleProof", "Get-LifecycleNextStep", "Assert-LifecycleRestored", "Get-Field", "Get-Sha256", "New-RecoveryManifest",
+    "Close-AllHooks", "Save-LifecycleCloser", "Test-SameBinaries",
     "Set-RecoverySetupRoot", "Start-RecoveredGateway",
 )
 
@@ -2925,19 +2931,22 @@ def _txn_harness(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
         f"$DataDir = '{data}'\n$BinDir = '{bin_dir}'\n$Local = ''\n$Setup = $null\n"
         "$ManagedBinaries = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe', 'defenseclaw-acp.exe')\n"
         "$LifecycleManifest = Join-Path $DataDir '.lifecycle-txn.json'\n"
+        "$LifecycleCloser = Join-Path $DataDir '.lifecycle-closer'\n"
         "$Run = @{ RestorePending = $false; UndoPending = $false }\n"
         "$LifecycleProofSeconds = 0\n"
         "$script:gateway = $null; $script:health = ''; $script:digest = ''; $script:digestHelp = $true; $script:protected = $true\n"
         "function Get-GatewayProcess { return $script:gateway }\n"
         "function Get-ExternalConfig { return '' }\n"
         "function Test-BinDirProtected { return $script:protected }\n"
-        "function Invoke-Native { param($FilePath, $Arguments, [switch]$Quiet) if ($script:health) { return 0 } return 1 }\n"
+        "$script:closes = 0\n"
+        "function Invoke-Native { param($FilePath, $Arguments, [switch]$Quiet) if (($Arguments -join ' ') -like 'connector refresh-fail-modes --closed*') { $script:closes++; return 0 }; if ($script:health) { return 0 } return 1 }\n"
         "function Get-NativeProbe {\n"
         "    param($FilePath, $Arguments)\n"
         "    $line = $Arguments -join ' '\n"
         "    if ($line -eq 'status --json') { return [pscustomobject]@{ Exit = 0; Output = $script:health } }\n"
         "    if ($line -eq 'policy digest --help') { return [pscustomobject]@{ Exit = 0; Output = $(if ($script:digestHelp) { '--check-gateway' } else { 'usage' }) } }\n"
         "    if ($line -eq 'policy digest --json --check-gateway') { return [pscustomobject]@{ Exit = 0; Output = $script:digest } }\n"
+        "    if ($line -eq 'connector refresh-fail-modes --help') { return [pscustomobject]@{ Exit = 0; Output = '--closed  close every installed hook' } }\n"
         "    throw \"unexpected probe $line\"\n"
         "}\n"
         + "\n".join(_ps1_function(name) for name in _TXN_FUNCTIONS)
@@ -3098,7 +3107,7 @@ function Start-Gateway {
     if ($script:startRc -eq 0) { $script:gateway = [pscustomobject]@{ Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') } }
     return $script:startRc
 }
-function Invoke-Native { param($FilePath, $Arguments, [switch]$Quiet) if ($script:gateway) { return 0 } return 1 }
+function Invoke-Native { param($FilePath, $Arguments, [switch]$Quiet) if (($Arguments -join ' ') -like 'connector refresh-fail-modes --closed*') { $script:closes++; return 0 }; if ($script:gateway) { return 0 } return 1 }
 function Put-Bins([string]$Kind) {
     foreach ($name in @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')) { [IO.File]::WriteAllText((Join-Path $BinDir $name), "$Kind $name") }
 }
@@ -3137,6 +3146,9 @@ _BOUNDARIES = {
     "after-commit": ("New-Slot @('BIN_SAVED', 'HOOK_FIRST'); Put-Bins 'new'; Complete-LifecycleManifest", "committed", [], ["undo-snapshot", "restore-slot"]),
     "restore-not-proven": ("New-Slot @('BIN_SAVED', 'HOOK_FIRST', 'COMPLETE'); Put-Bins 'new'; $script:restoreLeavesNewHook = $true; $script:gateway = $null", "kept", ["restore-slot"], []),
     "restored-gateway-does-not-start": ("New-Slot @('BIN_SAVED', 'HOOK_FIRST', 'COMPLETE'); $script:startRc = 1; $script:gateway = $null", "kept", ["restore-slot", "start"], []),
+    # The install the record names was uninstalled since: nothing to restore
+    # or start, so the record goes instead of blocking every later install.
+    "uninstalled-since": ("Remove-Item -LiteralPath (Join-Path $BinDir 'defenseclaw-gateway.exe'), (Join-Path $BinDir 'defenseclaw-hook.exe'); $script:gateway = $null", "dropped", [], ["start"]),
 }
 
 
@@ -3151,8 +3163,10 @@ try { Resume-InterruptedRun } catch { $failure = $_.Exception.Message }
 "CALLS=$($script:calls -join ',')"
 "RECORD=$(Test-Path -LiteralPath $LifecycleManifest)"
 "PENDING=$($Run.RestorePending)"
-"HOOK=$([IO.File]::ReadAllText((Join-Path $BinDir 'defenseclaw-hook.exe')))"
+$hookPath = Join-Path $BinDir 'defenseclaw-hook.exe'
+"HOOK=$(if (Test-Path -LiteralPath $hookPath) { [IO.File]::ReadAllText($hookPath) })"
 "SLOT=$(Test-Path -LiteralPath $slot)"
+"CLOSES=$script:closes"
 """)
     out = result.stdout + result.stderr
     assert result.returncode == 0, out
@@ -3166,6 +3180,11 @@ try { Resume-InterruptedRun } catch { $failure = $_.Exception.Message }
     if want == "proven":
         assert rows["FAILURE"] == "" and rows["RECORD"] == "False", out
         assert rows["HOOK"] == "old defenseclaw-hook.exe", out
+        # A restore that keeps its gateway stopped (GAP-0407) closes every
+        # hook before its record goes; one whose gateway runs does not.
+        assert rows["CLOSES"] == ("1" if boundary == "after-unproven-new-start" else "0"), out
+    elif want == "dropped":
+        assert rows["FAILURE"] == "" and rows["RECORD"] == "False", out
     elif want == "committed":
         assert rows["FAILURE"] == "" and rows["RECORD"] == "False", out
         assert rows["HOOK"] == "new defenseclaw-hook.exe", out
@@ -3178,6 +3197,9 @@ try { Resume-InterruptedRun } catch { $failure = $_.Exception.Message }
 
 
 _ROLLBACK_BOUNDARIES = {
+    # The swap finished and its hold was renamed into previous\ before the
+    # run stopped: the live install is the target, proven like a finished one.
+    "swapped-before-proof": ("", "target", "proven"),
     # An interrupted rollback that had set the live install aside goes back to it.
     "stashed": ("STASHED", "old", "proven"),
     # A rollback that had finished is proven against its target.
@@ -3195,12 +3217,12 @@ Remove-LifecycleManifest
 Put-Bins 'target'
 $target = Get-BinariesState $BinDir
 Put-Bins 'old'
-[void](Write-LifecycleManifest 'rollback' '1.0.4' '1.0.3' '' @{ TargetBins = $target })
+[void](Write-LifecycleManifest 'rollback' '1.0.4' '1.0.3' '' @{ TargetBins = $target; StartAfter = $true })
 $hold = Join-Path $DataDir '.rollback-hold'
 [void][IO.Directory]::CreateDirectory($hold)
 Set-Content -LiteralPath (Join-Path $hold 'GATEWAY_WAS_RUNNING') -Value 'true'
 Set-Content -LiteralPath (Join-Path $hold 'START_AFTER') -Value 'true'
-Set-Content -LiteralPath (Join-Path $hold '__MARKER__') -Value ''
+if ('__MARKER__') { Set-Content -LiteralPath (Join-Path $hold '__MARKER__') -Value '' } else { Remove-Item -LiteralPath $hold -Recurse -Force }
 if ('__LIVE__' -ne 'old') { Put-Bins '__LIVE__' }
 $script:gateway = $null
 $failure = ''
@@ -3295,3 +3317,33 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
     else:
         assert "rc: 1 undone: 1 removed: 0" in out and "Now running" not in out, out
         assert ("did not start" in out) if case.startswith("start-fails") else ("not proven running" in out), out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_pending_lifecycle_record_closes_the_hooks_with_the_kept_closer(tmp_path: Path) -> None:
+    # fix/r104-windows review: a restore that consumed its snapshot and then
+    # failed its proof keeps the lifecycle record and the lock, but nothing
+    # counted as unfinished, so no hook was closed and an older restored hook
+    # followed a configured open while the gateway was down. The record is
+    # unfinished too, and the closer kept beside it (the checked staged
+    # gateway) closes the hooks first.
+    data, bin_dir = tmp_path / "data", tmp_path / "bin"
+    (data / "hooks").mkdir(parents=True)
+    (data / ".lifecycle-txn.json").write_text("{}", encoding="utf-8")
+    (data / ".lifecycle-closer").mkdir()
+    (data / ".lifecycle-closer" / "defenseclaw-gateway.exe").write_text("new closer", encoding="ascii")
+    bin_dir.mkdir()
+    (bin_dir / "defenseclaw-gateway.exe").write_text("old gateway", encoding="ascii")
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data}'\n$BinDir = '{bin_dir}'\n"
+        "$LifecycleManifest = Join-Path $DataDir '.lifecycle-txn.json'\n$LifecycleCloser = Join-Path $DataDir '.lifecycle-closer'\n"
+        "function Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
+        + _close_mocks(capable="new ")
+        + "\nClose-UnfinishedInstallHooks\n"
+    )
+    out = _run_powershell(script)
+    text = out.stdout + out.stderr
+    assert out.returncode == 0, text
+    assert "RAN: " in text and ".lifecycle-closer" in text.split("RAN: ", 1)[1].splitlines()[0], text
+    assert "every agent hook blocks tool calls" in text, text
