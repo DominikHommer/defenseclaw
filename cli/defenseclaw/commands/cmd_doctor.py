@@ -5939,6 +5939,71 @@ def _managed_gateway_listener_evidence(
     return _lsof_gateway_listener_evidence(port, host=host)
 
 
+#: How long doctor waits for a gateway start or restart in progress to finish
+#: before it reports the restart instead of listener ownership.
+_GATEWAY_RESTART_WAIT_SECONDS = 20.0
+
+#: The lock ``defenseclaw-gateway start`` and ``restart`` hold until the
+#: gateway is ready (internal/cli/gateway_cold_start.go gatewayStartLockName).
+_GATEWAY_START_LOCK_NAME = "gateway.start.lock"
+
+
+def _gateway_start_lock_holder(data_dir: str, *, proc_locks: str = "/proc/locks") -> int | None:
+    """Return the PID holding the gateway start lock, 0 if unknown, None if free.
+
+    On Linux ``/proc/locks`` names the holder without touching the lock, so
+    doctor never makes a hook's cold start give way to it. Elsewhere on POSIX
+    a shared non-blocking ``flock`` is taken and dropped at once. Windows is
+    not inspected (None).
+    """
+    path = os.path.join(data_dir, _GATEWAY_START_LOCK_NAME)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        if sys.platform.startswith("linux"):
+            info = os.fstat(fd)
+            device = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
+            try:
+                with open(proc_locks, encoding="ascii", errors="replace") as locks:
+                    rows = locks.read().splitlines()
+            except OSError:
+                rows = None
+            if rows is not None:
+                for row in rows:
+                    # "N: FLOCK ADVISORY WRITE pid maj:min:inode 0 EOF"; a
+                    # "N: -> ..." row is a waiter, not a holder.
+                    fields = row.split()
+                    if len(fields) >= 6 and fields[1] == "FLOCK" and fields[5] == device:
+                        return int(fields[4]) if fields[4].isdigit() else 0
+                return None
+        try:
+            import fcntl
+        except ImportError:
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        except OSError:
+            return None
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return None
+    finally:
+        os.close(fd)
+
+
+def _wait_for_gateway_start_lock(data_dir: str, timeout: float) -> bool:
+    """Wait until no start or restart holds the gateway start lock."""
+    deadline = time.monotonic() + timeout
+    while _gateway_start_lock_holder(data_dir) is not None:
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+    return True
+
+
 def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
     """Report home ownership only from the same strong trust chain as auth."""
     code, _ = _http_probe(
@@ -5950,6 +6015,22 @@ def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
         return
 
     trust = _trusted_gateway_listener(cfg)
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not trust.trusted and data_dir and (holder := _gateway_start_lock_holder(data_dir)) is not None:
+        # A start or restart holds the gateway start lock, so the listener can
+        # be mid-handover (GAP-0535). Check ownership once it has finished.
+        if not _wait_for_gateway_start_lock(data_dir, _GATEWAY_RESTART_WAIT_SECONDS):
+            by = f" (PID {holder})" if holder else ""
+            _emit(
+                "warn",
+                "Gateway home",
+                f"a gateway start or restart{by} was still in progress after "
+                f"{_GATEWAY_RESTART_WAIT_SECONDS:.0f} s; listener ownership was not checked",
+                r=r,
+                remediation="rerun `defenseclaw doctor` when the gateway start or restart finishes",
+            )
+            return
+        trust = _trusted_gateway_listener(cfg)
     if trust.trusted:
         _emit(
             "pass",
