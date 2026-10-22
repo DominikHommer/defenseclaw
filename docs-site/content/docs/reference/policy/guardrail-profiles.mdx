@@ -414,8 +414,10 @@ defenseclaw agent identities --user alice --connector codex
 ```
 
 Copy the `agt-` ID into an `agents` assignment. The ID names one connector
-install for one user on one machine and stays the same across sessions,
-restarts and upgrades. See [Agent identity](/docs/enterprise/identity/authentication#agent-identity).
+install for one user on one machine and stays the same across sessions and
+restarts. On upgrade from 1.0.0–1.0.3 to 1.0.4, a bare account gets a new ID
+to separate it from a qualified account's legacy ID; rebind its assignment.
+See [Agent identity](/docs/enterprise/identity/authentication#agent-identity).
 
 The pin applies to every decision the gateway makes for that install: its
 hooks, its `/api/v1/inspect` calls and, for OpenClaw and ZeptoClaw, its LLM
