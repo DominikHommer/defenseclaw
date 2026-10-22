@@ -9,9 +9,11 @@ keywords:
 
 `defenseclaw setup splunk` has three independent modes. Each adds its own destination, so you can run more than one.
 
-Local Splunk keeps its generated HEC credential separate from your remote collector's token. Remote setup refuses a local credential, including one saved by an older local setup; supply the remote collector's token as shown below.
+Each Splunk destination keeps its HEC token under its own reference in `~/.defenseclaw/.env`, so setting up one never changes another's token. Remote setup takes the token only from `--hec-token`, `DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN` or the prompt, never from a token saved for another destination.
 
-If a destination from an older local setup may still share the remote credential reference, remote setup names it and stops before changing either credential. If it is your local Splunk sink, run `defenseclaw setup splunk --logs --accept-splunk-license` to separate the local reference. If it is a remote Splunk, for example through an SSH tunnel, give it its own token with `defenseclaw setup observability add splunk-enterprise --name <name> --endpoint <its HEC URL> --allow-private-networks` (token in `DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN`), or remove it with `defenseclaw setup observability remove <name>`. Then repeat remote setup with the remote collector's token. Once local setup has separated the local reference, removing the local sink later does not block remote setup.
+A destination is local Splunk only if local setup created it: setup records the container it started in that destination. Every other Splunk destination is remote, whatever its address, including a remote Splunk reached through an SSH tunnel on `127.0.0.1`. `setup splunk --disable --logs` disables only the recorded local destination, and `--disable --enterprise` disables the others.
+
+A local destination from DefenseClaw 1.0.3 or earlier has no record, so it counts as remote and keeps working unchanged. If local setup finds a destination it did not record under the name it uses, it stops before changing anything and names it. If an older local setup created it, remove it with `defenseclaw setup observability remove <name> --yes` and run local setup again.
 
 | Mode | Use it for | What it sends |
 | --- | --- | --- |

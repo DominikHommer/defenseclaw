@@ -5367,7 +5367,7 @@
     {
       "name": "DEFENSECLAW_SPLUNK_HEC_TOKEN",
       "category": "credential",
-      "purpose": "Alternative HEC token consulted by the Python sink wiring when the canonical splunk_hec.token_env points to a different var.",
+      "purpose": "Credential reference of remote Splunk HEC destinations written before 1.0.4. Setup now stores each remote Splunk destination's token under its own reference, this name followed by an underscore and the destination name in capitals, and never reads a saved reference as input: pass the token with DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN.",
       "default": "unset",
       "accepted_values": [
         "HEC token",
@@ -5378,8 +5378,8 @@
       "managed": "allow",
       "consumers": [
         {
-          "location": "cli/defenseclaw/commands/cmd_setup.py",
-          "description": "Python Splunk wiring fallback"
+          "location": "cli/defenseclaw/observability/presets.py",
+          "description": "Splunk HEC preset reference, the prefix of each destination's own reference"
         }
       ],
       "since": "0.4.0"

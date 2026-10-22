@@ -485,6 +485,42 @@ def _remove_safe_tree(path: Path) -> None:
     shutil.rmtree(path)
 
 
+def running_splunk_container_id(
+    docker_path: str | os.PathLike[str],
+    runner: CommandRunner,
+    environment: Mapping[str, str] | None,
+) -> str:
+    """Return the full ID of the running Splunk container of the local stack.
+
+    Local setup stores it in the sink's record after it started the stack.
+    """
+
+    result = runner.run(
+        [
+            str(docker_path),
+            "ps",
+            "--no-trunc",
+            "--filter",
+            f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+            "--filter",
+            "label=com.docker.compose.service=splunk",
+            "--filter",
+            "status=running",
+            "--format",
+            "{{.ID}}",
+        ],
+        timeout=10,
+        env=environment,
+    )
+    found = [line.strip() for line in result.stdout.splitlines() if line.strip()] if result.returncode == 0 else []
+    if len(found) != 1 or not re.fullmatch(r"[0-9a-f]{64}", found[0]):
+        raise LocalStackError(
+            "could not read the ID of the running local Splunk container; "
+            "run defenseclaw setup splunk --logs again once the container runs"
+        )
+    return found[0]
+
+
 class NativeLocalSplunkController:
     """One exact Compose project rooted at an already-validated stack tree."""
 

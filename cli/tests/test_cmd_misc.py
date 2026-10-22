@@ -1329,6 +1329,13 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self._v8_status.start()
         self.addCleanup(self._v8_status.stop)
+        # Local setup records the container it started; no Docker here.
+        self._container = patch(
+            "defenseclaw.commands.cmd_setup._local_splunk_container_id",
+            return_value="0123456789abcdef" * 4,
+        )
+        self._container.start()
+        self.addCleanup(self._container.stop)
 
     def _operator_status(self, data_dir: str) -> SimpleNamespace:
         destinations = self._v8_destinations(data_dir)
@@ -1532,17 +1539,19 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertTrue(destination["enabled"])
         self.assertEqual(destination["endpoint"], endpoint)
-        self.assertEqual(destination["token_env"], "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+        # Each remote Splunk destination keeps its credential under its own reference.
+        own_reference = "DEFENSECLAW_SPLUNK_HEC_TOKEN" + "_SPLUNK_ENTERPRISE_SPLUNK_EXAMPLE_COM"
+        self.assertEqual(destination["token_env"], own_reference)
 
         with open(os.path.join(self.tmp_dir, ".env")) as f:
             dotenv = f.read()
-        self.assertIn("DEFENSECLAW_SPLUNK_HEC_TOKEN=hec-token", dotenv)
+        self.assertIn(f"{own_reference}=hec-token", dotenv)
 
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             cfg = f.read()
         self.assertIn("name: splunk-enterprise-splunk-example-com", cfg)
         self.assertIn("kind: splunk_hec", cfg)
-        self.assertIn("token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN", cfg)
+        self.assertIn(f"token_env: {own_reference}", cfg)
         # production preset relies on the Go sink's secure
         # default (TLS verification ON) and must not emit any
         # insecure_skip_verify opt-out. The legacy verify_tls flag is

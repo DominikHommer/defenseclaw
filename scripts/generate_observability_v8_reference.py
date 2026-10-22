@@ -454,6 +454,18 @@ def _reference_document() -> dict[str, Any]:
                     "token_credential": "splunk-hec-token",
                 },
                 {
+                    "name": "local-splunk",
+                    "kind": "splunk_hec",
+                    "enabled": False,
+                    "endpoint": "http://127.0.0.1:8088/services/collector/event",
+                    "token_env": "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN",
+                    "network_safety": {"allow_private_networks": True},
+                    "local_stack": {
+                        "marker": "defenseclaw-local-splunk",
+                        "container_id": "0123456789abcdef" * 4,
+                    },
+                },
+                {
                     "name": "http-standalone",
                     "kind": "http_jsonl",
                     "enabled": False,
