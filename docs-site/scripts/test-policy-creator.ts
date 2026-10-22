@@ -253,7 +253,7 @@ test('deterministic inventory: fixed chain and YARA IDs match runtime sources', 
     YARA_RULES.map((rule) => rule.id).sort(),
     sourceYaraIds,
   );
-  assert.equal(sourceYaraIds.length, 10);
+  assert.equal(sourceYaraIds.length, 11);
 });
 
 test('deterministic docs: profile totals and chain posture match canonical sources', () => {
