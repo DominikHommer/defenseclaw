@@ -1364,6 +1364,22 @@ test('validators: empty correlator pattern surfaces CORRELATOR_PATTERN_EMPTY', (
   assert.ok(codes.includes('CORRELATOR_PATTERN_EMPTY'), `expected CORRELATOR_PATTERN_EMPTY in ${codes.join(',')}`);
 });
 
+test('validators: blanket pre-judge strips warn like other blanket suppressions', () => {
+  const policy = makePolicy({
+    suppressions: {
+      pre_judge_strips: [{ id: 'STRIP-ALL', pattern: '.*', context: 'test', applies_to: ['pii'] }],
+      finding_suppressions: [],
+      tool_suppressions: [],
+    },
+  });
+  const broad = validatePolicy(policy).filter((f) => f.code === 'SUPP_OVER_BROAD');
+  assert.equal(broad.length, 1);
+  assert.equal(broad[0].level, 'warning');
+  assert.match(broad[0].location, /pre_judge/);
+  policy.suppressions.pre_judge_strips[0].pattern = '^sender: system$';
+  assert.equal(validatePolicy(policy).filter((f) => f.code === 'SUPP_OVER_BROAD').length, 0);
+});
+
 test('validators: window_events=0 surfaces CORRELATOR_WINDOW_INVALID as error', () => {
   const policy = makePolicy({
     correlator: [

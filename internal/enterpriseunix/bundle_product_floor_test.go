@@ -130,6 +130,10 @@ func TestEveryPayloadIsCheckedAgainstTheConfirmedBundleFloor(t *testing.T) {
 			h := newTestHost(t, goos)
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
 			writeBundleAnchors(t, h)
+			useConfirmedProductFloor(t, "1.0.5", nil)
+			for _, action := range []string{ActionEnsure, ActionRepair} {
+				requireError(t, h.run(Options{Action: action}), codeProductFloor)
+			}
 			useConfirmedProductFloor(t, "1.0.4", nil)
 			for _, opts := range []Options{
 				{Action: ActionEnsure, PayloadDir: h.payload("dev")},

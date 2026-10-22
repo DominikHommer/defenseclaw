@@ -93,7 +93,10 @@ lifecycle itself.
 
 A signed policy bundle (`--bundle-file`, `-BundlePath`, Setup `BUNDLE=`) uses
 the same exit codes. Its refusals (`signature_invalid`, `version_not_newer`,
-`secret_ref_missing`, `not_confirmed` and the rest) exit `1603` / `1`;
+`secret_ref_missing`, `not_confirmed` and the rest) exit `1603` / `1`.
+`disk_full` identifies a staging write that exhausted the destination volume
+or quota. The failed receipt carries the same code; free space and redeliver
+the bundle. An invalid archive remains `archive_invalid`.
 `lifecycle_busy` exits `1618` / `75`. On Linux and macOS a bundle whose
 config the transaction committed, but whose gateway stopped reporting its
 policy (it crashed or was killed) before the receipt was confirmed, exits

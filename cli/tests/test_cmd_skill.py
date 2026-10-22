@@ -3114,6 +3114,19 @@ class TestSkillScanURL(SkillCommandTestBase):
         self.assertIsNone(version)
 
     @patch("defenseclaw.registries.adapters._base.http_get")
+    def test_versioned_clawhub_scan_refuses_before_fetch(self, mock_http_get):
+        result = self.invoke(["scan", "clawhub://weather@1.0.0"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("version", result.output.lower())
+        mock_http_get.assert_not_called()
+
+        mock_http_get.return_value = b'{"dist":{"tarball":"https://other.example/openclaw.tgz"}}'
+        result = self.invoke(["scan", "clawhub://weather"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("untrusted", result.output.lower())
+        self.assertEqual(mock_http_get.call_count, 1)
+
+    @patch("defenseclaw.registries.adapters._base.http_get")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scan_from_url_tar(self, mock_scanner_cls, mock_http_get):
         import tarfile

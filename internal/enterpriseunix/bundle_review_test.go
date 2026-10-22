@@ -37,11 +37,10 @@ func damageCurrentVersion(t *testing.T, b *bundleHost) {
 	}
 }
 
-// With the current bundle damaged, a changing run without --config repairs
-// the host with the config the deployment committed, never with an
-// unsigned edit of config.yaml; with no copy that matches the deployment
-// record it applies nothing.
-func TestBundleDamagedCurrentVersionRevertsAnUnsignedConfigEdit(t *testing.T) {
+// With the current bundle damaged, a changing run cannot prove the release
+// floor. It refuses without applying an unsigned edit of config.yaml; with
+// no copy that matches the deployment record it also applies nothing.
+func TestBundleDamagedCurrentVersionRefusesAnUnsignedConfigEdit(t *testing.T) {
 	b := newBundleHost(t)
 	v1, _, _ := bundleConfigs(b.testHost)
 	requireOK(t, b.apply(b.dir(1, v1)))
@@ -50,20 +49,23 @@ func TestBundleDamagedCurrentVersionRevertsAnUnsignedConfigEdit(t *testing.T) {
 	edited := installed + "\n# an unsigned edit\n"
 	writeRooted(t, b.env.P(b.env.Layout.ConfigPath), edited)
 
+	from := len(b.services.calls)
 	r := b.run(Options{Action: ActionEnsure})
-	requireOK(t, r)
+	requireError(t, r, codeProductFloor)
 	if !hasWarning(r, codeBundleStateUnreadable) {
 		t.Fatalf("warnings = %+v", r.Warnings)
 	}
-	if got := b.read(b.env.Layout.ConfigPath); got != installed {
-		t.Fatalf("the run applied an unsigned config edit:\n%s", got)
+	if got := b.read(b.env.Layout.ConfigPath); got != edited {
+		t.Fatalf("the refused run wrote config.yaml:\n%s", got)
+	}
+	if gatewayTouched(b.testHost, from) {
+		t.Fatal("a run with an unknown floor touched the gateway")
 	}
 
-	writeRooted(t, b.env.P(b.env.Layout.ConfigPath), edited)
 	if err := os.Remove(b.env.committedConfigPath()); err != nil {
 		t.Fatal(err)
 	}
-	from := len(b.services.calls)
+	from = len(b.services.calls)
 	requireError(t, b.run(Options{Action: ActionEnsure}), codeBundleStateUnreadable)
 	if gatewayTouched(b.testHost, from) {
 		t.Fatal("a run with no verified config touched the gateway")
