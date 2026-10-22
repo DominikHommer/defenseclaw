@@ -802,7 +802,7 @@ func windowsHotConfigWriteOptions(opts *windowsEnterpriseLifecycleOptions, expec
 	if opts != nil && opts.bundleRollbackTo != nil {
 		// A rollback to the confirmed bundle records it as that bundle again,
 		// so /health and the digest scope name the bundle that enforces.
-		return opts.bundleRollbackTo.writeOptions(expectSHA), nil
+		return opts.bundleRollbackTo.writeOptions(expectSHA)
 	}
 	if opts != nil && opts.bundle != nil && opts.bundle.prepared != nil && !opts.bundle.prepared.AlreadyApplied {
 		if opt, ok := enterprisebundle.GenerationOptions(opts.bundle.prepared.Receipt); ok {

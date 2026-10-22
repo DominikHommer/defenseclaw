@@ -1176,8 +1176,29 @@ type windowsBundleRollbackTarget struct {
 // writeOptions records the rollback write as the confirmed bundle: its
 // principal and bundle fields, so the gateway digests the restored config in
 // the bundle's scope and status, verify and ensure find the bundle enforcing.
-func (t *windowsBundleRollbackTarget) writeOptions(expectSHA string) configwrite.Options {
-	return configwrite.RestoreOptions(t.before, t.restored, windowsBundleRestoreWriteOptions(t.store, t.ref, expectSHA))
+func (t *windowsBundleRollbackTarget) writeOptions(expectSHA string) (configwrite.Options, error) {
+	driver := &enterprisebundle.Driver{Store: t.store}
+	raw, ref, err := driver.CurrentConfig()
+	if err != nil {
+		return configwrite.Options{}, err
+	}
+	if ref == nil || t.ref == nil || ref.BundleID != t.ref.BundleID || ref.Version != t.ref.Version ||
+		ref.ManifestSHA256 != t.ref.ManifestSHA256 || configwrite.SHA256Hex(raw) != t.restored {
+		return configwrite.Options{}, errors.New("confirmed bundle changed before rollback; run enterprise windows ensure --profile standalone")
+	}
+	opt, ok, err := driver.ConfigGenerationOptions(raw)
+	if err != nil {
+		return opt, err
+	}
+	if !ok {
+		return opt, errors.New("cannot prove the confirmed rollback principal; run enterprise windows ensure --profile standalone")
+	}
+	opt.ExpectSHA256 = expectSHA
+	if t.before.BundleID == ref.BundleID && t.before.BundleVersion == ref.Version &&
+		t.before.SignerKeyID == opt.Bundle.SignerKeyID && t.before.Actor == opt.Actor {
+		opt = configwrite.RestoreOptions(t.before, t.restored, opt)
+	}
+	return opt, nil
 }
 
 // rollbackWindowsBundle installs the last good config again (the current
