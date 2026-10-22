@@ -56,7 +56,10 @@ asset_policy:
 
 A threshold comes from the most specific place that sets it: profile connector, profile, `guardrail.connectors`, application protection, global, then the rule pack's default. The file is checked against the closed config schema: a key that does not exist, or that a version 9 file no longer accepts (for example `skill_actions`, `mcp_actions`, `plugin_actions` or `guardrail.rule_pack_dir`), fails validation and the host keeps its current config.
 
-On managed standalone hosts, `guardrail.hook_fail_mode: open` does not override fail-closed gateway peer verification when the gateway is down.
+On managed standalone hosts the default is closed. An administrator's
+`hook_fail_mode: open` can allow a call during a gateway outage. Failed peer
+verification and guarded session checks still block; see [Refusals that ignore
+the fail mode](/docs/reference/configuration/fail-modes#refusals-that-ignore-the-fail-mode).
 
 ### Custom rule packs
 
@@ -859,14 +862,13 @@ trailing whitespace.
 
 ### Remove the key
 
-Remove the reference first. The removal refuses a credential the installed config
-still names (`enterprise.inspection.ai_defense.credential`), so the key stays
-stored until you do this:
+Removal refuses a credential named by enabled AI Defense
+(`enterprise.inspection.ai_defense.credential`). A disabled AI Defense reference
+alone does not prevent removal. Remove the reference and apply the config first
+so a later enable cannot name a deleted key:
 
 1. In the config you deploy, set `enabled: false` under
-   `enterprise.inspection.ai_defense` and delete its `credential` line. Otherwise
-   the gateway keeps logging that the credential is missing, while the local
-   engine decides alone.
+   `enterprise.inspection.ai_defense` and delete its `credential` line.
 2. Apply the config with `ensure`.
 3. Remove the key:
 
@@ -879,7 +881,7 @@ On macOS use `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise sec
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret remove --name ai-defense-api-key
 ```
 
-If the config still names the key, the command exits `1` (`1603` on Windows)
+If enabled AI Defense still names the key, the command exits `1` (`1603` on Windows)
 with `the installed config still references credential ai-defense-api-key`, and
 nothing is removed. On Linux and macOS a successful removal prints
 `- removed credential ai-defense-api-key`, or

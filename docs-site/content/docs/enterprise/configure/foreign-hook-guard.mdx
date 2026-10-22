@@ -48,13 +48,28 @@ The last sentence appears only when the hook was present at session start. With 
 
 ## Gateway outages
 
-While the gateway cannot answer (it is stopped or restarting), guarded tool calls are blocked whatever the fail mode, `open` included:
+While the gateway cannot answer (it is stopped or restarting), guarded tool calls are blocked whatever the fail mode, `open` included. A session-record check can return:
 
 ```text
 enterprise_foreign_hook_blocked: DefenseClaw could not check this agent
 session's hook record with its gateway, so the call is blocked. Retry when
 the DefenseClaw gateway is running; if the block continues, restart the agent.
 ```
+
+The managed transport can refuse first. For example, a guarded Claude Code
+prompt or tool call can report:
+
+```text
+DefenseClaw blocked this tool call: the DefenseClaw gateway service is not
+running on this computer. Try again in a moment; if this continues, ask your
+administrator to check DefenseClaw on this computer.
+(enterprise_managed_gateway_not_running)
+```
+
+Both refusals block the call. The service refusal also names the administrator's
+`enterprise linux status`, `enterprise macos status` or
+`enterprise windows status` command for that OS; follow its recovery
+advice before retrying. The exact message depends on which check refuses first.
 
 This is a known limit in 1.0.4: the guard keeps each session's hook record in the gateway, so it cannot prove during an outage that a session is clean. Calls of unguarded connectors follow the fail mode as usual. Stop and session-end events get the agent's normal allow, so a blocked agent can still end its turn and exit.
 

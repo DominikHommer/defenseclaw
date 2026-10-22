@@ -70,7 +70,14 @@ defenseclaw observability destination test engineering
 
 {/* needs-live-capture: destination test output against a reachable collector */}
 
-Add `--write-probe` to send one marked, content-free record. The test connects from your shell, while the gateway delivers through the proxy it was started with. If the test passes but `defenseclaw doctor` reports `delivery_failed`, look for `export failed` lines in the gateway log.
+`--write-probe` is not supported for OTLP: it would create ordinary logs,
+traces or metrics. The handshake checks connectivity and does not prove delivery
+from the gateway. To check delivery, make a benign agent call, find its event ID
+in the local audit log, then find that ID at the collector or its destination.
+
+The test connects from your shell, while the gateway delivers through the proxy
+it was started with. If the test passes but `defenseclaw doctor` reports
+`delivery_failed`, look for `export failed` lines in the gateway log.
 
 ## Undo
 
