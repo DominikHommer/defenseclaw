@@ -339,19 +339,20 @@ port, `guardrail.enabled` or a hook fail mode):
 
 #### On a managed device
 
-On a managed standalone device the administrator owns `config.yaml`, so the
-editor cannot write it. The editor still opens and shows the values, but
-confirming a save is refused and nothing changes:
+Managed packages ship no TUI. On Linux and macOS the user's `defenseclaw` launcher
+offers only sandbox commands, `help` and `--version`; `defenseclaw tui` exits `2`.
+Windows ships the native administrator CLI. Check the deployment with the packaged binary:
 
-```text
-Config save failed: This device is managed: change config.yaml in the admin config (MDM or management plane), not on the device
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
 ```
 
-The OpenShell Sandboxes section is read-only before you try (see
-[below](#sandbox-settings-in-the-config-editor)). The actions of the other
-panels run the CLI and are refused the same way; see
-[Managed devices](/docs/reference/commands/cli#managed-devices-and-exit-code-3). Read-only
-views, such as the Policies posture, Alerts and Audit, keep working.
+On Windows, run `defenseclaw.exe enterprise windows status --json` from an elevated
+PowerShell. Change the administrator config through the
+[managed lifecycle](/docs/enterprise/operate/lifecycle#change-the-config).
+If a separately installed Python TUI reads a managed config, its writer refuses
+local saves with exit `3`; this does not make the TUI available in managed packages.
 
 ## Sandboxes panel
 

@@ -121,6 +121,10 @@ Exit codes: `0` success, `1603` failed (retried up to **Retry Count**; read
 ([Exit codes](/docs/enterprise/mdm#exit-codes)). Logs: the app's **Details View**,
 `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` and the `DefenseClaw` event log.
 
+A malformed, non-UTF-8 or invalid Windows candidate config returns
+`invalid_arguments` and exit `1639`. Fix the content before retrying; the
+installed config stays in force.
+
 ## macOS
 
 ### Install the package
