@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 
 from defenseclaw.config import default_config
 from defenseclaw.tui.panels.overview import DoctorCache, DoctorCheck
+from defenseclaw.tui.services.overview_state import OVERVIEW_NOTICE_WIDTH
 from fixtures import screen_text, snapshot_app
+from rich.text import Text
 
 
 async def test_config_editor_keeps_health_visible(tmp_path):
@@ -31,6 +33,8 @@ async def test_doctor_failure_notice_keeps_the_remediation_command(tmp_path):
                 checks=(DoctorCheck("fail", "Hermes hooks", "unverified"),),
             )
         )
+        notice = next(n for n in app.overview_model.build_notices() if "defenseclaw doctor" in n.message)
+        assert Text.from_markup(notice.message).cell_len <= OVERVIEW_NOTICE_WIDTH
         app.action_switch_panel("overview")
         await pilot.pause()
         screen = screen_text(app)
