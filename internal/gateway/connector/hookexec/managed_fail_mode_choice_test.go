@@ -310,14 +310,15 @@ func TestStandaloneManagedNoAnswerAfterASlowLocalStepStaysClosed(t *testing.T) {
 			}
 		})
 		t.Run("hook request: "+tc.name, func(t *testing.T) {
-			started := time.Now().Add(-tc.spent)
 			result := run(t, "codex", nil, func(o *Options) {
 				managedCodex(o)
 				o.ExplainUnenrolledAccount = true
 				o.FailMode = "open"
 				o.APIAddr = addr
 				o.HTTPClient = &http.Client{}
-				o.StartedAt = started
+				// run prepares the on-disk test home before this callback.
+				// Only the simulated hook work belongs to this budget.
+				o.StartedAt = time.Now().Add(-tc.spent)
 			})
 			if blocked(result) == tc.open {
 				t.Fatalf("blocked = %v, want %v: code=%d stdout=%q stderr=%q", blocked(result), !tc.open, result.code, result.stdout, result.stderr)
