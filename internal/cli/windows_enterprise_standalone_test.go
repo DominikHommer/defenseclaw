@@ -809,12 +809,29 @@ func TestWindowsEnterpriseUnparseableConfigRefusalReportsTheRunningDeployment(t 
 // preflight failure (1603).
 func TestWindowsEnterpriseMissingConfigRefusalReportsTheRunningDeployment(t *testing.T) {
 	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
+	// The running deployment enrolls one target.
+	state := t.TempDir()
+	layout := managed.StandaloneLayout{
+		ConfigPath:      filepath.Join(state, "config.yaml"),
+		ManifestPath:    filepath.Join(state, "targets.yaml"),
+		DataDir:         filepath.Join(state, "runtime"),
+		GuardianAuthDir: filepath.Join(state, "hook-guardian-state"),
+	}
+	if err := os.WriteFile(layout.ManifestPath, []byte("version: 1\ntargets:\n"+
+		"  - {sid: S-1-12-1-1-2-3-1001, connector: cursor, enabled: true, deferred: true}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousLayout := windowsEnterpriseHotConfigLayout
+	t.Cleanup(func() { windowsEnterpriseHotConfigLayout = previousLayout })
+	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
 	opts := ensureTestOptions()
 	opts.configPath = filepath.Join(t.TempDir(), "absent.yaml")
 	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", opts); err != nil || opts.suppliedConfigRefusal == nil {
 		t.Fatalf("missing config: %v, deferred refusal %v", err, opts.suppliedConfigRefusal)
 	}
-	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status")}}
+	status := installedStatus("status")
+	status["cursor_target_enabled"] = true
+	stub := &ensureStub{t: t, replies: []map[string]any{status}}
 	stub.install(t)
 	command := &cobra.Command{}
 	var stdout bytes.Buffer
@@ -831,6 +848,18 @@ func TestWindowsEnterpriseMissingConfigRefusalReportsTheRunningDeployment(t *tes
 		!strings.Contains(result.Errors[0].Message, "absent.yaml") ||
 		windowsBundleHasCode(result.Warnings, windowsEnterpriseHealthNotChecked) {
 		t.Fatalf("result %+v", result)
+	}
+	if result.Enrollment.Targets != 1 {
+		t.Fatalf("enrollment %+v, want the running deployment's 1 target", result.Enrollment)
+	}
+	// The running deployment's advisory is reported, labelled as its own.
+	if !windowsBundleHasCode(result.Warnings, "cursor_agent_prompt_hook_unavailable") {
+		t.Fatalf("warnings %+v lack the running deployment's advisory", result.Warnings)
+	}
+	for _, warning := range result.Warnings {
+		if !strings.HasPrefix(warning.Message, enterprisestatus.RunningDeploymentPrefix) {
+			t.Fatalf("warning %s is not labelled as the running deployment's: %q", warning.Code, warning.Message)
+		}
 	}
 }
 

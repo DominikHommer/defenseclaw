@@ -2852,8 +2852,6 @@ func windowsEnterpriseFootprintUserCreated(path string) bool {
 	return err == nil && owner != nil && !windowsEnterpriseAdminSID(owner)
 }
 
-// readWindowsEnterpriseStandaloneEnrollment summarizes the installed
-// guardian manifest when this token can read it.
 // readWindowsEnterpriseStandaloneDestinations lists, for status, the
 // observability destinations the installed config.yaml compiles to with each
 // one's effective redaction profiles. `defenseclaw observability plan` is a
@@ -2875,8 +2873,10 @@ func readWindowsEnterpriseStandaloneDestinations() []enterprisestatus.Destinatio
 	return enterprisestatus.DestinationsFromSummaries(summaries)
 }
 
+// readWindowsEnterpriseStandaloneEnrollment summarizes the installed
+// guardian manifest when this token can read it.
 func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
 		return enterprisestatus.Enrollment{}, err
 	}
