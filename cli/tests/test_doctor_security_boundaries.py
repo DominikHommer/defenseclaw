@@ -151,8 +151,11 @@ def test_process_fail_mode_variable_is_named_as_unread_with_its_persistent_comma
     assert [row["status"] for row in result.checks] == ["warn"]
     assert command in str(result.checks[0])
     monkeypatch.setattr(config_module, "load", lambda **_kwargs: _fail_mode_cfg())
-    (notice,) = cmd_migrate._process_fail_mode_notices("/nonexistent-data-dir", "1.0.4", MigrateResult(9, 9))
-    assert command in notice
+    (notice,), needs_consent = cmd_migrate._process_fail_mode_notices(
+        "/nonexistent-data-dir", "1.0.4", MigrateResult(9, 9)
+    )
+    # Not an upgrade from a release whose hooks read it: named, never a stop.
+    assert command in notice and needs_consent is False
 
     monkeypatch.delenv(name)
     result = cmd_doctor._DoctorResult()

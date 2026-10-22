@@ -93,9 +93,7 @@ def _validate_from_version(_ctx, _param, value):
     ),
 )
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def migrate_cmd(
-    check, from_version, data_dir, openclaw_home, gateway_binary, accept_fail_mode_change, as_json
-) -> None:
+def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, accept_fail_mode_change, as_json) -> None:
     """Bring config and data to this version's schema."""
     from defenseclaw.migrations import ConfigTooNewError, MigrationError, display_step_name, migrate
 
@@ -128,9 +126,7 @@ def migrate_cmd(
     # accepted (GAP-0361): the installers ask, and an unattended upgrade
     # must not make it silently.
     with progress:
-        warnings, needs_acceptance = _process_fail_mode_notices(
-            data_dir or _default_data_dir(), from_version, result
-        )
+        warnings, needs_acceptance = _process_fail_mode_notices(data_dir or _default_data_dir(), from_version, result)
     refused = check and needs_acceptance and not accept_fail_mode_change
     if as_json:
         # In check mode nothing ran: list the steps under "pending" and keep
