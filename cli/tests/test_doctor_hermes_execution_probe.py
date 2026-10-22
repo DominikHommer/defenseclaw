@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from defenseclaw import fail_mode
 from defenseclaw.commands import cmd_doctor
 from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, WindowsHookCheck
 
@@ -30,16 +31,22 @@ def _registered_unix_hermes(tmp_path, monkeypatch):
     command = "'" + str(script) + "'"
     config = tmp_path / "hermes" / "config.yaml"
     config.parent.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(config.parent))
     hooks = {
         event: [{"command": command, "timeout": 30, **({"matcher": matcher} if matcher else {})}]
         for event, matcher in _HERMES_REQUIRED_HOOKS.items()
     }
-    config.write_text(yaml.safe_dump({"hooks": hooks}), encoding="utf-8")
+    config.write_text(yaml.safe_dump({"hooks": hooks, "hooks_auto_accept": False}), encoding="utf-8")
+    allowlist = config.with_name("shell-hooks-allowlist.json")
+    allowlist.write_text(json.dumps({"approvals": [
+        {"event": event, "command": command, "defenseclaw_managed": True}
+        for event in _HERMES_REQUIRED_HOOKS
+    ]}), encoding="utf-8")
     lock_path = data_dir / "hook_contract_lock.json"
 
     def seal():
         lock_path.write_text(json.dumps({"connectors": {"hermes": {"hook_script_digests": {
-            "hermes-hook.sh": hashlib.sha256(script.read_bytes()).hexdigest(),
+            "hermes-hook.sh": "sha256:" + hashlib.sha256(script.read_bytes()).hexdigest(),
         }, "locations": {
             "hook_config_paths": [str(config)], "hook_script_paths": [str(script)],
         }}}}), encoding="utf-8")
@@ -56,6 +63,136 @@ def _registered_unix_hermes(tmp_path, monkeypatch):
         return result.checks[-1]
 
     return script, check
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_doctor_uses_current_home_after_move(tmp_path, monkeypatch):
+    _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    assert check()["status"] == "pass"
+    new_home = tmp_path / "new-hermes-home"
+    new_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(new_home))
+    row = check(reseal=False)
+    assert row["status"] == "fail", row
+    assert str(new_home / "config.yaml") in row["detail"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_doctor_rejects_old_lock_path_with_valid_new_home(tmp_path, monkeypatch):
+    _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    old_home = tmp_path / "hermes"
+    new_home = tmp_path / "new-hermes-home"
+    new_home.mkdir()
+    for name in ("config.yaml", "shell-hooks-allowlist.json"):
+        (new_home / name).write_bytes((old_home / name).read_bytes())
+    monkeypatch.setenv("HERMES_HOME", str(new_home))
+    row = check(reseal=False)
+    assert row["status"] == "fail", row
+    assert "lock" in row["detail"]
+
+
+def test_windows_hermes_doctor_rejects_old_lock_path_before_runtime_check(tmp_path, monkeypatch):
+    _script, _check = _registered_unix_hermes(tmp_path, monkeypatch)
+    new_home = tmp_path / "new-hermes-home"
+    new_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(new_home))
+    monkeypatch.setattr(cmd_doctor, "hermes_profile_unsupported_reason", lambda _path: None)
+    called = []
+    monkeypatch.setattr(cmd_doctor, "_check_windows_native_hooks", lambda *_args, **_kwargs: called.append(True))
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_hermes_hooks(SimpleNamespace(data_dir=str(tmp_path / "dc")), result, platform_name="nt")
+    assert result.checks[-1]["status"] == "fail"
+    assert str(new_home / "config.yaml") in result.checks[-1]["detail"]
+    assert not called
+
+
+def test_windows_hermes_fail_mode_rejects_old_lock_path(tmp_path, monkeypatch):
+    from defenseclaw import doctor_hooks
+
+    current = str(tmp_path / "new-home" / "config.yaml")
+    old = str(tmp_path / "old-home" / "config.yaml")
+    monkeypatch.setattr(fail_mode, "_is_windows", lambda: True)
+    monkeypatch.setattr(fail_mode, "hermes_config_path", lambda: current)
+    monkeypatch.setattr(fail_mode, "_registration_hook_config_paths", lambda *_args: (old,))
+    calls = []
+    monkeypatch.setattr(doctor_hooks, "validate_windows_hook_registration", lambda **_kwargs: calls.append(True))
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+    assert fail_mode._native_deny_registration_freshness(cfg, "hermes") == "registration-config-binding-stale"
+    assert not calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_doctor_requires_approval_for_every_event(tmp_path, monkeypatch):
+    _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    assert check()["status"] == "pass"
+    allowlist = tmp_path / "hermes" / "shell-hooks-allowlist.json"
+    document = json.loads(allowlist.read_text(encoding="utf-8"))
+    document["approvals"] = document["approvals"][1:]
+    allowlist.write_text(json.dumps(document), encoding="utf-8")
+    row = check(reseal=False)
+    assert row["status"] == "fail", row
+    assert "approval" in row["detail"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_doctor_fails_for_malformed_approval_and_lock(tmp_path, monkeypatch):
+    _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    allowlist = tmp_path / "hermes" / "shell-hooks-allowlist.json"
+    allowlist.write_text(json.dumps({"approvals": [{"event": ["pre_tool_call"], "command": "hook"}]}), encoding="utf-8")
+    assert check(reseal=False)["status"] == "fail"
+    lock_path = tmp_path / "dc" / "hook_contract_lock.json"
+    lock_path.write_text("[]", encoding="utf-8")
+    assert check(reseal=False)["status"] == "fail"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_doctor_rejects_lock_with_hidden_invalid_path(tmp_path, monkeypatch):
+    _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    lock_path = tmp_path / "dc" / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["connectors"]["hermes"]["locations"]["hook_config_paths"].append(None)
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    row = check(reseal=False)
+    assert row["status"] == "fail", row
+    assert "lock" in row["detail"]
+    assert fail_mode._registration_hook_config_paths(SimpleNamespace(data_dir=str(tmp_path / "dc")), "hermes") == ()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_doctor_names_setup_for_missing_current_registration(tmp_path, monkeypatch):
+    _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    (tmp_path / "hermes" / "config.yaml").unlink()
+    row = check(reseal=False)
+    assert row["status"] == "fail"
+    assert "active hook registration is missing" in row["detail"]
+    assert "setup hermes --yes --restart" in row["remediation"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_fail_mode_rejects_stale_open_command(tmp_path, monkeypatch):
+    script, _check = _registered_unix_hermes(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    stale = script.with_name(script.name + ".old")
+    stale.write_text("#!/bin/sh\nFAIL_MODE=\"open\"\n", encoding="utf-8")
+    stale.chmod(0o700)
+    config = tmp_path / "hermes" / "config.yaml"
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    for entries in document["hooks"].values():
+        entries[0]["command"] = "'" + str(stale) + "'"
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+    assert fail_mode._unix_registration_freshness(cfg, "hermes") == "registration-command-stale"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_fail_mode_rejects_unresolvable_current_home(tmp_path, monkeypatch):
+    def unresolvable_home():
+        raise ValueError("bad home")
+
+    monkeypatch.setattr(fail_mode, "hermes_config_path", unresolvable_home)
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+    assert fail_mode._unix_registration_freshness(cfg, "hermes") == "registration-config-binding-stale"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
@@ -275,6 +412,8 @@ class _EmulatedWindowsJob:
         self.terminated += 1
         if self.fail == "terminate":
             raise OSError("TerminateJobObject failed")
+        if self.fail == "stall":
+            return False
         import signal
 
         with contextlib.suppress(ProcessLookupError):
@@ -282,7 +421,23 @@ class _EmulatedWindowsJob:
         return self.fail != "linger"
 
     def close(self) -> None:
+        if self.fail == "stall":
+            _kill_quietly(self.pid)
         self.closed = True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="emulates an unresponsive Windows job on POSIX")
+def test_windows_hermes_probe_has_hard_deadline_if_job_cannot_end(tmp_path, monkeypatch):
+    target = _probe_stub(tmp_path, "exec sleep 60\n")
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_TIMEOUT", 0.2)
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_TREE_REAP", 0.2)
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.2)
+    _launches, jobs = _emulate_windows_probe(monkeypatch, fail="stall")
+    start = time.monotonic()
+    returncode, _stdout = cmd_doctor._run_hermes_execution_probe([str(target)])
+    assert returncode is None
+    assert time.monotonic() - start < 2.0
+    assert jobs[0].closed
 
 
 def _emulate_windows_probe(monkeypatch, *, fail: str = ""):

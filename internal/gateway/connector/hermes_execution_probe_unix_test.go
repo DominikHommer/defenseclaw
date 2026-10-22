@@ -38,6 +38,10 @@ func TestHermesRegistrationRequiresExecutableProbe(t *testing.T) {
 	if err := patchHermesHooks(configPath, script, ""); err != nil {
 		t.Fatal(err)
 	}
+	if err := patchHermesAllowlist(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
+		hermesConfiguredHookCommand(script, ""), script); err != nil {
+		t.Fatal(err)
+	}
 	conn := NewHermesConnector()
 	if present, err := conn.ownedHookContractPresent(opts); err != nil || !present {
 		t.Fatalf("executable registration present=%v err=%v", present, err)

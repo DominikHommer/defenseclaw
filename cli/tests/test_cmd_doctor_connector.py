@@ -1979,7 +1979,9 @@ class TestCheckHookHealth(unittest.TestCase):
             results = {}
             for running in (True, False):
                 r = _DoctorResult()
-                with patch("defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running):
+                with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=hook), patch(
+                    "defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running
+                ):
                     _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
                 results[running] = r.checks[-1]
         self.assertEqual(results[True]["status"], "fail")
@@ -2038,20 +2040,20 @@ class TestCheckHookHealth(unittest.TestCase):
             with open(hook, "w", encoding="utf-8") as fh:
                 fh.write("hooks: []\n")
             r = _DoctorResult()
-            _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+            with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=hook):
+                _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
         self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("does not reference", r.checks[-1]["detail"])
+        self.assertIn("sealed hook script", r.checks[-1]["detail"])
 
     def test_missing_hook_file_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             r = _DoctorResult()
-            _check_hook_health(
-                self._cfg(tmp, "hermes", [os.path.join(tmp, "nope.yaml")]),
-                "hermes",
-                r,
-            )
+            missing = os.path.join(tmp, "nope.yaml")
+            with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=missing):
+                _check_hook_health(self._cfg(tmp, "hermes", [missing]), "hermes", r)
         self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("not found", r.checks[-1]["detail"])
+        self.assertIn("active hook registration is missing", r.checks[-1]["detail"])
+        self.assertIn("setup hermes --yes --restart", r.checks[-1]["remediation"])
 
     @patch("defenseclaw.commands.cmd_doctor._check_cursor_configured_runtime")
     def test_passive_cursor_health_disables_runtime_probe(self, configured_runtime) -> None:

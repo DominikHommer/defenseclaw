@@ -417,9 +417,18 @@ def _native_deny_registration_freshness(cfg: Any, name: str) -> str | None:
         )
 
         locked = _registration_hook_config_paths(cfg, name)
+        config_path = locked[0] if locked else _native_deny_registration_path(cfg, name)
+        if name == "hermes":
+            try:
+                current_config = hermes_config_path()
+            except ValueError:
+                return "registration-config-binding-stale"
+            if locked != (current_config,):
+                return "registration-config-binding-stale"
+            config_path = current_config
         install_root = _packaged_windows_install_root(str(cfg.data_dir)) or str(Path.home() / ".local" / "bin")
         common = {
-            "config_path": locked[0] if locked else _native_deny_registration_path(cfg, name),
+            "config_path": config_path,
             "data_dir": str(cfg.data_dir),
             "install_root": install_root,
             "search_path": os.environ.get("PATH", ""),
@@ -964,13 +973,27 @@ def _registration_hook_config_paths(cfg: Any, connector: str) -> tuple[str, ...]
     entry = connectors.get(connector) if isinstance(connectors, dict) else None
     locations = entry.get("locations") if isinstance(entry, dict) else None
     raw_paths = locations.get("hook_config_paths") if isinstance(locations, dict) else None
-    if not isinstance(raw_paths, list):
+    if not isinstance(raw_paths, list) or not all(isinstance(path, str) and path for path in raw_paths):
         return ()
-    return tuple(str(path) for path in raw_paths if isinstance(path, str) and path)
+    return tuple(raw_paths)
 
 
 def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
     """Verify the live Unix agent registration points at this data dir's hook."""
+
+    if connector == "hermes":
+        try:
+            current = hermes_config_path()
+        except ValueError:
+            return "registration-config-binding-stale"
+        if _registration_hook_config_paths(cfg, connector) != (current,):
+            return "registration-config-binding-stale"
+        # The fail-mode status must not call a stale open command "closed".
+        # Doctor's Hermes validator reads the full event matrix, approvals,
+        # sealed target and bounded execution proof from the active config.
+        from defenseclaw.commands.cmd_doctor import _hermes_registered_execution_problem
+
+        return "registration-command-stale" if _hermes_registered_execution_problem(cfg, current) else None
 
     paths = connector_config_files(connector, workspace_dir=_connector_workspace(cfg))
     script_name = _UNIX_REGISTRATION_HOOK_SCRIPTS.get(connector)

@@ -19,6 +19,7 @@ import (
 func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) {
 	sid := "S-1-5-21-1111-2222-3333-1042"
 	report := refusalpipe.Report{Connector: "claudecode", Reason: refusalpipe.ReasonSIDUnregistered, Tool: "Bash"}
+	codexReport := refusalpipe.Report{Connector: "codex", Reason: refusalpipe.ReasonSIDUnregistered}
 	ctx, cancel := context.WithCancel(context.Background())
 	release := make(chan struct{})
 	var mu sync.Mutex
@@ -39,7 +40,7 @@ func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) 
 			for range 50 {
 				auditor.record(sid, report)
 			}
-			auditor.record(sid, refusalpipe.Report{Connector: "codex", Reason: refusalpipe.ReasonSIDUnregistered})
+			auditor.record(sid, codexReport)
 			cancel()
 			<-ctx.Done()
 		}, write)
@@ -53,12 +54,18 @@ func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) 
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	attempts := 0
+	// The first Claude row can join the same queued window as its repeats
+	// when the writer stalls. Either row count is valid; the per-report totals
+	// must survive the stop without loss or duplication.
+	counts := make(map[refusalpipe.Report]int)
 	for _, row := range rows {
-		attempts += row.Attempts
+		if row.SID != sid {
+			t.Fatalf("row has SID %q, want %q", row.SID, sid)
+		}
+		counts[row.Report] += row.Attempts
 	}
-	if len(rows) != 3 || attempts != 51 {
-		t.Fatalf("rows after the stop = %+v (attempts %d), want 3 rows covering all 51 refusals", rows, attempts)
+	if len(counts) != 2 || counts[report] != 50 || counts[codexReport] != 1 {
+		t.Fatalf("rows after the stop = %+v (counts %+v), want 50 Claude and 1 Codex refusal", rows, counts)
 	}
 }
 

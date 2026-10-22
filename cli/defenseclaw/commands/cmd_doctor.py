@@ -6058,7 +6058,15 @@ def _collect_hermes_execution_probe(proc: subprocess.Popen, job, limit: int) -> 
         except subprocess.TimeoutExpired:
             if overflow.is_set() or time.monotonic() >= deadline:
                 kill_tree()
-                proc.wait()
+                try:
+                    proc.wait(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+                except subprocess.TimeoutExpired:
+                    # A failed Job Object termination must never turn the
+                    # hard probe deadline into an unbounded leader wait.
+                    with contextlib.suppress(OSError):
+                        proc.kill()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
                 returncode = None
                 break
     # The probe exited or was killed: end whatever it left running.
@@ -6906,7 +6914,23 @@ def _check_hermes_hooks(
     search_path: str | None = None,
     pathext: str | None = None,
 ) -> None:
-    selected_config = config_path or hermes_config_path()
+    try:
+        current_config = hermes_config_path()
+    except ValueError as exc:
+        _emit(
+            "fail", _HERMES_HOOKS_LABEL,
+            f"Hermes active config path cannot be resolved: {exc}; live=false", r=r,
+            remediation="set HERMES_HOME to the home in use, then run 'defenseclaw setup hermes --yes --restart'",
+        )
+        return
+    selected_config = config_path or current_config
+    if selected_config != current_config:
+        _emit(
+            "fail", _HERMES_HOOKS_LABEL,
+            f"Hermes requested config {selected_config} differs from current config {current_config}; live=false",
+            r=r, remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME",
+        )
+        return
     unsupported = hermes_profile_unsupported_reason(selected_config)
     if unsupported:
         _emit(
@@ -6917,6 +6941,11 @@ def _check_hermes_hooks(
         )
         return
     if (platform_name or os.name) == "nt":
+        if _hook_health_paths_from_lock(cfg, "hermes") != [current_config]:
+            _emit("fail", _HERMES_HOOKS_LABEL,
+                  f"Hermes lock does not bind its current effective config {current_config}; live=false", r=r,
+                  remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME")
+            return
         _check_windows_native_hooks(
             cfg,
             "hermes",
@@ -6966,10 +6995,9 @@ def _check_devin_hooks(
 # substrings). The fallback paths mirror the Go source of truth in
 # ``internal/gateway/connector/hook_only.go`` (hermesConfigPath / cursorHooksPath
 # / devinHooksPath / opencodePluginPath); the gateway's
-# hook_contract_lock.json is consulted first and these are only the offline
-# fallback. Markers are matched as raw substrings (see _file_references_marker)
-# so the check stays format-agnostic: hermes is YAML, cursor/devin
-# are JSON, opencode is a flat ``.js`` plugin (existence + substring).
+# hook_contract_lock.json is consulted first. Hermes requires a lock for the
+# current HERMES_HOME and parses its YAML matrix and approvals. Other entries
+# retain offline fallbacks and marker checks.
 _HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "hermes": (
         (os.path.join(".hermes", "config.yaml"),),
@@ -7171,9 +7199,8 @@ def _check_kiro_custom_default_agent(r: _DoctorResult) -> None:
 def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
     """Report whether the file at ``path`` contains any ``markers`` substring.
 
-    Deliberately format-agnostic — no JSON/YAML parse — because these
-    connectors this serves store hook entries in different shapes: Hermes uses
-    YAML, Cursor and Devin use JSON, and OpenCode uses a flat ``.js`` plugin.
+    Deliberately format-agnostic for Cursor/Devin JSON and the OpenCode
+    ``.js`` plugin. Hermes has a structured read-back in _check_hook_health.
     Mirrors the Go self-heal guard's ``configFileReferencesHook`` (raw-bytes
     substring match) so doctor and the guard agree on what "the hook is
     installed" means. A missing/unreadable file reports ``False``.
@@ -7876,25 +7903,30 @@ def _hook_health_paths_from_lock(cfg, connector: str) -> list[str]:
     """Return the hook config path(s) the gateway actually wrote for
     ``connector``, read from ``hook_contract_lock.json``.
 
-    This is the authoritative source — exactly what Setup patched, captured
-    from ``HookConfigPathsForConnector`` / ``ResolvedConnectorLocations`` on
-    the Go side — so doctor watches the real files rather than guessing.
-    Returns ``[]`` when the lock file is absent/unreadable or carries no path
-    for the connector; the caller then falls back to the static map.
+    These paths are captured from Go's ``HookConfigPathsForConnector`` /
+    ``ResolvedConnectorLocations``. Hermes compares the receipt with the
+    current effective config path; other callers may use a static fallback.
     """
+    from defenseclaw.doctor_hooks import _InspectionError, _read_config
+
     data_dir = getattr(cfg, "data_dir", "") or ""
     if not data_dir:
         return []
     try:
-        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as fh:
-            lock = json.load(fh)
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        lock = _read_config(os.path.join(data_dir, "hook_contract_lock.json"), "hook-lock")
+    except _InspectionError:
         return []
-    entry = (lock.get("connectors") or {}).get(connector) or {}
-    locations = entry.get("locations") or {}
+    connectors = lock.get("connectors")
+    entry = connectors.get(connector) if isinstance(connectors, dict) else None
+    if not isinstance(entry, dict):
+        return []
+    locations = entry.get("locations")
     if not isinstance(locations, dict):
         return []
-    return [str(p) for p in (locations.get("hook_config_paths") or []) if p]
+    paths = locations.get("hook_config_paths")
+    if not isinstance(paths, list) or not all(isinstance(path, str) and path for path in paths):
+        return []
+    return paths
 
 
 def _hook_runtime_paths_from_lock(cfg, connector: str) -> list[str]:
@@ -8416,13 +8448,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     Covers active generic-hook connectors that previously got no Services hook
     row at all, so an operator
     could not tell from doctor whether their hooks were installed (D4).
-    Resolves the hook file from ``hook_contract_lock.json`` first (what the
-    gateway actually wrote), then the static fallback map, and
-    checks it for a DefenseClaw registration. Cursor and Kiro use the parsed
-    registration check when the lock records their paths, because Windows
-    encodes the native hook command in PowerShell. (The Connectors section's
-    ``_check_hook_contract_lock`` validates contract/version drift — a
-    different concern from "does the hook file exist and reference us".)
+    Hermes binds the current config path to the lock, then checks its matrix,
+    approvals and sealed execution proof. Other hooks use their lock path or
+    static fallback. The Connectors section checks contract/version drift.
     """
     fallback = _HOOK_HEALTH_FALLBACK.get(connector)
     if fallback is None:
@@ -8430,13 +8458,29 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     rel_candidates, markers = fallback
     label = _HOOK_HEALTH_LABELS.get(connector, f"{connector} hooks")
     home = os.path.expanduser("~")
-    # Prefer the lock-file's recorded paths; fall back to the static map.
+    # Hermes must read the path the agent resolves now. A lock for a former
+    # HERMES_HOME cannot prove the active registration, even if it still runs.
     locked_paths = _hook_health_paths_from_lock(cfg, connector)
-    candidates = locked_paths
+    if connector == "hermes":
+        try:
+            current_config = hermes_config_path()
+        except ValueError as exc:
+            _emit(
+                "fail", label, f"Hermes active config path cannot be resolved: {exc}; live=false", r=r,
+                remediation="set HERMES_HOME to the home in use, then run 'defenseclaw setup hermes --yes --restart'",
+            )
+            return
+        if locked_paths != [current_config]:
+            _emit("fail", label,
+                  f"Hermes lock does not bind its current effective config {current_config}; live=false", r=r,
+                  remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME")
+            return
+        candidates = [current_config]
+    else:
+        # Other connectors retain their existing lock-path and fallback rules.
+        candidates = locked_paths
     if not candidates:
-        if connector == "hermes":
-            candidates = [hermes_config_path()]
-        elif connector == "opencode":
+        if connector == "opencode":
             # The official custom config directory is also a plugin search
             # root. Match Setup/discovery instead of silently inspecting the
             # unrelated default home when the lock is unavailable.
@@ -8447,6 +8491,12 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             candidates = [os.path.join(home, rel) for rel in rel_candidates]
     present = [p for p in candidates if os.path.isfile(p)]
     if not present:
+        if connector == "hermes":
+            _emit(
+                "fail", label, f"Hermes active hook registration is missing at {candidates[0]}; live=false", r=r,
+                remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME",
+            )
+            return
         if connector == "opencode" and (loose := opencode_writable_plugin_folder(candidates)):
             # The gateway refuses to publish the plugin into a folder other
             # accounts can write, and stops; the other rows only showed the
@@ -8466,7 +8516,8 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("fail", label, edited, r=r, remediation=edited.repair)
         return
     for path in present:
-        registered = _file_references_marker(path, markers)
+        # The Hermes branch below parses the bounded YAML matrix directly.
+        registered = connector == "hermes" or _file_references_marker(path, markers)
         if not registered and connector in ("cursor", "kiro") and locked_paths:
             from defenseclaw.hook_integrity import _registers_defenseclaw_hooks
 
@@ -8565,10 +8616,15 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
 
 def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
     """Read Hermes' active matrix and execute its sealed command as a bounded probe."""
-    import yaml
-
-    from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS
+    from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, _InspectionError, _read_config
     from defenseclaw.hook_integrity import _locked_hook_scripts
+
+    try:
+        current_config = hermes_config_path()
+    except ValueError:
+        return "Hermes current effective config path cannot be resolved"
+    if config_path != current_config:
+        return f"Hermes config {config_path} differs from current effective config {current_config}"
 
     data_dir = str(getattr(cfg, "data_dir", "") or "")
     expected = os.path.join(data_dir, "hooks", "hermes-hook.sh")
@@ -8585,14 +8641,25 @@ def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
             return "Hermes registered hook is not a regular executable file"
         if script_stat.st_size > 4 * 1024 * 1024:
             return "Hermes registered hook exceeds the bounded script size"
-        if len(digest) != 64 or hashlib.sha256(Path(expected).read_bytes()).hexdigest() != digest:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(expected, flags), "rb") as script_file:
+            opened = os.fstat(script_file.fileno())
+            if not os.path.samestat(script_stat, opened):
+                return "Hermes registered hook changed during inspection"
+            script_body = script_file.read(4 * 1024 * 1024 + 1)
+            after = os.fstat(script_file.fileno())
+        if len(script_body) > 4 * 1024 * 1024 or not os.path.samestat(opened, after) or opened.st_size != after.st_size:
+            return "Hermes registered hook changed or exceeded the bounded script size"
+        actual_digest = "sha256:" + hashlib.sha256(script_body).hexdigest()
+        if not hmac.compare_digest(digest, actual_digest):
             return "Hermes registered hook has no matching sealed digest"
-        document = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        document = _read_config(config_path, "hermes")
+    except (OSError, UnicodeError, _InspectionError) as exc:
         return f"Hermes active registration or hook cannot be read: {type(exc).__name__}"
     hooks = document.get("hooks") if isinstance(document, dict) else None
     if not isinstance(hooks, dict):
         return "Hermes active registration has no hooks table"
+    registered_commands: set[str] = set()
     for event, matcher in _HERMES_REQUIRED_HOOKS.items():
         entries = hooks.get(event)
         if not isinstance(entries, list):
@@ -8609,6 +8676,7 @@ def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
             if argv != [expected]:
                 return f"Hermes {event} does not run the sealed hook command"
             owned.append(entry)
+            registered_commands.add(command)
         if len(owned) != 1:
             return f"Hermes {event} has {len(owned)} registered DefenseClaw commands; expected one"
         entry = owned[0]
@@ -8622,6 +8690,24 @@ def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
             for entry in entries
         ):
             return f"unexpected Hermes event {event} registers a DefenseClaw hook"
+    if len(registered_commands) != 1:
+        return "Hermes events do not use one exact approved hook command"
+    command = registered_commands.pop()
+    allowlist_path = os.path.join(os.path.dirname(config_path), "shell-hooks-allowlist.json")
+    try:
+        allowlist = _read_config(allowlist_path, "hermes-allowlist")
+    except _InspectionError as exc:
+        return f"Hermes hook approvals cannot be read at {allowlist_path}: {exc.detail}"
+    approvals = allowlist.get("approvals")
+    if not isinstance(approvals, list):
+        return f"Hermes hook approvals are missing at {allowlist_path}"
+    approved = {
+        entry["event"] for entry in approvals
+        if isinstance(entry, dict) and isinstance(entry.get("event"), str) and entry.get("command") == command
+    }
+    for event in _HERMES_REQUIRED_HOOKS:
+        if event not in approved:
+            return f"Hermes hook approval for {event} is missing at {allowlist_path}"
     returncode, stdout = _run_hermes_execution_probe([expected, "--defenseclaw-execution-probe"])
     if returncode is None:
         return "Hermes registered hook execution probe could not run"
