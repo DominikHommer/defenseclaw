@@ -294,6 +294,20 @@ def _pair_entry_names(servers: dict[str, Any], client: str, agent: str) -> list[
     ]
 
 
+def _check_reserved_entry(client: str, agent: str, action: str, adopting: str | None = None) -> None:
+    path = _client_path(client)
+    servers = _read_json_object(path).get("agent_servers")
+    name = _managed_name(agent)
+    if not isinstance(servers, dict) or name not in servers or name == adopting:
+        return
+    entry = servers[name]
+    if not isinstance(entry, dict) or _guarded_pair(entry) != (client, agent):
+        raise click.ClickException(
+            f"cannot identify editor entry {name!r} as DefenseClaw-owned; "
+            f"rename that entry in {path}, then run defenseclaw acp {action} --client {client} --agent {agent}"
+        )
+
+
 def _set_client_entry(
     client: str, agent: str, command: str, args: list[str], entry_name: str | None = None,
 ) -> Path:
@@ -310,6 +324,15 @@ def _set_client_entry(
                 f"ACP entry {entry_name!r} changed before adoption; run defenseclaw acp adopt again"
             )
         names.append(entry_name)
+    for name in names:
+        if name == entry_name:
+            continue
+        existing = servers[name]
+        if not isinstance(existing, dict) or _guarded_pair(existing) != (client, agent):
+            raise click.ClickException(
+                f"cannot identify editor entry {name!r} as DefenseClaw-owned; "
+                f"rename that entry in {path}, then run defenseclaw acp setup --client {client} --agent {agent}"
+            )
     aliases = [name for name in names if name != _managed_name(agent)]
     if aliases and _managed_name(agent) in servers:
         canonical = servers[_managed_name(agent)]
@@ -338,7 +361,15 @@ def _remove_client_entry(client: str, agent: str) -> Path:
     servers = document.get("agent_servers")
     if not isinstance(servers, dict):
         return path
-    for name in _pair_entry_names(servers, client, agent):
+    names = _pair_entry_names(servers, client, agent)
+    for name in names:
+        entry = servers[name]
+        if not isinstance(entry, dict) or _guarded_pair(entry) != (client, agent):
+            raise click.ClickException(
+                f"cannot identify editor entry {name!r} as DefenseClaw-owned; "
+                f"rename that entry in {path}, then run defenseclaw acp remove --client {client} --agent {agent}"
+            )
+    for name in names:
         servers.pop(name)
     if not servers:
         # Don't leave an empty agent_servers object (or a file that setup
@@ -650,6 +681,7 @@ def setup_cmd(
                 f"central enterprise ACP policy does not authorize {client}/{agent} in {profile} {mode} mode"
             )
     client_path = _client_path(client)
+    _check_reserved_entry(client, agent, "setup", entry_name)
     token_candidate = (
         Path(data_dir) / "acp" / f"{client}-{agent}.token" if managed else Path(data_dir) / "acp" / ".token"
     )
@@ -850,6 +882,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
     path = _client_path(client)
+    _check_reserved_entry(client, agent, "remove")
     path_snapshot = _snapshot(path)
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
     if managed and app.cfg.deployment_mode != "managed_enterprise":

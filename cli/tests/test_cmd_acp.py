@@ -623,6 +623,17 @@ def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch
         removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
         assert removed.exit_code == 0, removed.output
         assert json.loads(settings.read_text())["agent_servers"] == {"Foreign": {"command": "other", "args": []}}
+        collision = {"agent_servers": {"DefenseClaw · Kiro": {"command": "other", "args": []}}}
+        settings.write_text(json.dumps(collision))
+        before = settings.read_bytes()
+        for command in (
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            ["remove", "--client", "zed", "--agent", "kiro"],
+        ):
+            refused = CliRunner().invoke(acp_cmd, command, obj=app)
+            assert refused.exit_code != 0, refused.output
+            assert "rename that entry" in refused.output
+            assert settings.read_bytes() == before
     finally:
         cleanup_app(app, db_path, data_dir)
 
