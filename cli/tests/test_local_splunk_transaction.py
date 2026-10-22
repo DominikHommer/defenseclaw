@@ -575,30 +575,31 @@ def test_remote_splunk_through_a_loopback_tunnel_is_not_the_local_sink(
 
 
 @pytest.mark.parametrize(
-    ("endpoint", "where"),
+    ("bridge_url", "where"),
     [
-        ("https://127.0.0.1:8088/services/collector/event", "dotenv"),
-        # The bridge credential marks the sink on any host name and port.
+        (None, "dotenv"),
+        # The bridge contract records where the local sink points, on any
+        # host name and port.
         ("https://localhost:28088/services/collector/event", "dotenv"),
         # A credential exported in the environment counts as saved.
-        ("https://127.0.0.1:8088/services/collector/event", "environment"),
+        (None, "environment"),
     ],
     ids=["dotenv", "other-port", "environment"],
 )
 def test_older_local_sink_sharing_the_remote_reference_is_refused(
-    tmp_path: Path, monkeypatch, endpoint: str, where: str
+    tmp_path: Path, monkeypatch, bridge_url: str | None, where: str
 ) -> None:
     app = _app(tmp_path)
     monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", raising=False)
     monkeypatch.delenv(LOCAL_TOKEN_ENV, raising=False)
     local_token = "local fixture credential"
-    _write_bridge_contract(tmp_path, local_token, None)
+    _write_bridge_contract(tmp_path, local_token, bridge_url)
     status, validate = _v8_writer_patches()
     with (
         status, validate,
         patch.object(cmd_setup, "_native_windows_local_splunk", return_value=False),
         patch.object(cmd_setup, "_bootstrap_bridge", return_value={
-            "hec_url": "https://127.0.0.1:8088/services/collector/event",
+            "hec_url": bridge_url or "https://127.0.0.1:8088/services/collector/event",
             "hec_token": local_token,
         }),
         patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
@@ -610,9 +611,7 @@ def test_older_local_sink_sharing_the_remote_reference_is_refused(
         )
         monkeypatch.delenv(LOCAL_TOKEN_ENV, raising=False)
         legacy = yaml.safe_load((tmp_path / "config.yaml").read_bytes())
-        legacy["observability"]["destinations"][0].update(
-            endpoint=endpoint, token_env="DEFENSECLAW_SPLUNK_HEC_TOKEN"
-        )
+        legacy["observability"]["destinations"][0].update(token_env="DEFENSECLAW_SPLUNK_HEC_TOKEN")
         atomic_write_private_bytes(tmp_path / "config.yaml", yaml.safe_dump(legacy).encode())
         if where == "dotenv":
             atomic_write_private_bytes(
@@ -634,24 +633,41 @@ def test_older_local_sink_sharing_the_remote_reference_is_refused(
     assert (tmp_path / ".env").read_bytes() == dotenv_before
 
 
+_BRIDGE_ELSEWHERE = "https://localhost:28088/services/collector/event"
+
+
 @pytest.mark.parametrize(
-    ("bridge_url", "old_remote_endpoint", "where"),
+    ("bridge_url", "old_remote_endpoint", "old_remote_name", "where"),
     [
-        (None, "https://splunk-old.example.test:8088/services/collector/event", "dotenv"),
-        (None, "https://splunk-old.example.test:8088/services/collector/event", "environment"),
+        (None, "https://splunk-old.example.test:8088/services/collector/event", "old-remote", "dotenv"),
+        (None, "https://splunk-old.example.test:8088/services/collector/event", "old-remote", "environment"),
         # An older remote reached through a loopback tunnel, on the bridge port.
-        (None, "https://127.0.0.1:8088/services/collector/event", "dotenv"),
+        (None, "https://127.0.0.1:8088/services/collector/event", "old-remote", "dotenv"),
         # A bridge on another loopback name owns a differently named sink.
+        (_BRIDGE_ELSEWHERE, "https://splunk-old.example.test:8088/services/collector/event", "old-remote", "dotenv"),
+        # GAP-0488: an older tunnel carries the fallback name that local setup
+        # gives a sink on 127.0.0.1, while the bridge records another
+        # listener. Neither that name nor its stale token makes it local.
+        (_BRIDGE_ELSEWHERE, "https://127.0.0.1:8088/services/collector/event", "splunk-hec-127-0-0-1", "dotenv"),
         (
-            "https://localhost:28088/services/collector/event",
-            "https://splunk-old.example.test:8088/services/collector/event",
-            "dotenv",
+            _BRIDGE_ELSEWHERE,
+            "https://127.0.0.1:18088/services/collector/event",
+            "splunk-hec-127-0-0-1",
+            "environment",
         ),
     ],
-    ids=["dotenv", "environment", "loopback-remote", "bridge-host"],
+    ids=[
+        "dotenv", "environment", "loopback-remote", "bridge-host",
+        "fallback-name-tunnel", "fallback-name-tunnel-other-port",
+    ],
 )
 def test_repaired_local_sink_frees_the_remote_reference(
-    tmp_path: Path, monkeypatch, bridge_url: str | None, old_remote_endpoint: str, where: str
+    tmp_path: Path,
+    monkeypatch,
+    bridge_url: str | None,
+    old_remote_endpoint: str,
+    old_remote_name: str,
+    where: str,
 ) -> None:
     # After a legacy local setup an older remote destination keeps the old
     # local token on the shared reference. Once local repair moves the local
@@ -678,7 +694,7 @@ def test_repaired_local_sink_frees_the_remote_reference(
         local_name = local_sink["name"]
         local_sink["token_env"] = "DEFENSECLAW_SPLUNK_HEC_TOKEN"
         legacy["observability"]["destinations"].append(
-            dict(copy.deepcopy(local_sink), name="old-remote", endpoint=old_remote_endpoint)
+            dict(copy.deepcopy(local_sink), name=old_remote_name, endpoint=old_remote_endpoint)
         )
         atomic_write_private_bytes(tmp_path / "config.yaml", yaml.safe_dump(legacy).encode())
         if where == "dotenv":
@@ -702,38 +718,69 @@ def test_repaired_local_sink_frees_the_remote_reference(
     sinks = {item["name"]: item["token_env"] for item in raw["observability"]["destinations"]}
     assert sinks == {
         local_name: LOCAL_TOKEN_ENV,
-        "old-remote": "DEFENSECLAW_SPLUNK_HEC_TOKEN",
+        old_remote_name: "DEFENSECLAW_SPLUNK_HEC_TOKEN",
         "new-remote": "DEFENSECLAW_SPLUNK_HEC_TOKEN",
     }
     assert remote_token in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
+_DEFAULT_HEC = "https://127.0.0.1:8088/services/collector/event"
+_NO_BRIDGE = "no-bridge"
+
+
 @pytest.mark.parametrize(
-    ("name", "bridge_url", "refused"),
+    ("name", "endpoint", "bridge_url", "refused"),
     [
-        ("splunk-hec-127-0-0-1", None, True),
-        ("splunk-hec-localhost", "https://localhost:28088/services/collector/event", True),
-        ("local-splunk", None, True),
+        ("splunk-hec-127-0-0-1", _DEFAULT_HEC, None, True),
+        ("splunk-hec-127-0-0-1", _DEFAULT_HEC, _DEFAULT_HEC, True),
+        ("splunk-hec-localhost", _BRIDGE_ELSEWHERE, _BRIDGE_ELSEWHERE, True),
+        ("local-splunk", _DEFAULT_HEC, None, True),
         # Credential equality alone does not make a destination the local sink.
-        ("old-remote", None, False),
-        ("splunk-hec-localhost", None, False),
+        ("old-remote", _DEFAULT_HEC, None, False),
+        ("splunk-hec-localhost", _BRIDGE_ELSEWHERE, None, False),
+        # GAP-0488: the fallback name is not ownership while the bridge records
+        # another listener, nor on another port of the same host.
+        ("splunk-hec-127-0-0-1", _DEFAULT_HEC, _BRIDGE_ELSEWHERE, False),
+        ("splunk-hec-127-0-0-1", "https://127.0.0.1:18088/services/collector/event", None, False),
+        ("local-splunk", "https://splunk.example.test:8088/services/collector/event", None, False),
+        # No local stack, so no local sink.
+        ("splunk-hec-127-0-0-1", _DEFAULT_HEC, _NO_BRIDGE, False),
     ],
 )
 def test_only_the_owned_local_sink_blocks_the_shared_reference(
-    tmp_path: Path, monkeypatch, name: str, bridge_url: str | None, refused: bool
+    tmp_path: Path, monkeypatch, name: str, endpoint: str, bridge_url: str | None, refused: bool
 ) -> None:
     from defenseclaw.observability.v8_presets import local_splunk_sink_shares_reference
 
     monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", raising=False)
-    _write_bridge_contract(tmp_path, "local fixture credential", bridge_url)
+    monkeypatch.setenv(LOCAL_TOKEN_ENV, "local fixture credential")
+    if bridge_url != _NO_BRIDGE:
+        _write_bridge_contract(tmp_path, "local fixture credential", bridge_url)
     atomic_write_private_bytes(tmp_path / ".env", b"DEFENSECLAW_SPLUNK_HEC_TOKEN='local fixture credential'\n")
     destinations = [
-        {"name": name, "kind": "splunk_hec", "token_env": "DEFENSECLAW_SPLUNK_HEC_TOKEN"},
-        {"name": "other-ref", "kind": "splunk_hec", "token_env": LOCAL_TOKEN_ENV},
+        {"name": name, "kind": "splunk_hec", "endpoint": endpoint, "token_env": "DEFENSECLAW_SPLUNK_HEC_TOKEN"},
+        {"name": "other-ref", "kind": "splunk_hec", "endpoint": _DEFAULT_HEC, "token_env": LOCAL_TOKEN_ENV},
     ]
     assert (
         local_splunk_sink_shares_reference(str(tmp_path), "DEFENSECLAW_SPLUNK_HEC_TOKEN", destinations) is refused
     )
+
+
+def test_repaired_owned_sink_releases_the_shared_reference(tmp_path: Path, monkeypatch) -> None:
+    # Once the sink local setup owns uses the isolated reference, another
+    # destination that only looks owned does not keep the shared one locked.
+    from defenseclaw.observability.v8_presets import local_splunk_sink_shares_reference
+
+    monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", raising=False)
+    _write_bridge_contract(tmp_path, "local fixture credential", None)
+    atomic_write_private_bytes(tmp_path / ".env", b"DEFENSECLAW_SPLUNK_HEC_TOKEN='local fixture credential'\n")
+    shared = "DEFENSECLAW_SPLUNK_HEC_TOKEN"
+    repaired = {
+        "name": "splunk-hec-127-0-0-1", "kind": "splunk_hec", "endpoint": _DEFAULT_HEC, "token_env": LOCAL_TOKEN_ENV,
+    }
+    look_alike = {"name": "local-splunk", "kind": "splunk_hec", "endpoint": _DEFAULT_HEC, "token_env": shared}
+    assert local_splunk_sink_shares_reference(str(tmp_path), shared, [look_alike]) is True
+    assert local_splunk_sink_shares_reference(str(tmp_path), shared, [repaired, look_alike]) is False
 
 
 def test_native_disable_selects_only_owned_local_sink(tmp_path: Path) -> None:

@@ -347,7 +347,7 @@ readiness_probe_limit() {
 # wait_for_hec_ready <seconds> waits until HEC, the installed DefenseClaw app
 # and Web UI all answer, and fails when the seconds run out.
 wait_for_hec_ready() {
-  local deadline limit status web_status restarts
+  local deadline limit status web_status restarts last_logs
   deadline=$((SECONDS + $1))
   while limit="$(readiness_probe_limit "${deadline}")"; do
     status="$(
@@ -375,8 +375,18 @@ wait_for_hec_ready() {
     restarts="$(run_with_time_limit "${limit}" service_restart_count 2>/dev/null || true)"
     [[ "${restarts}" =~ ^[0-9]+$ ]] || restarts=0
     if (( restarts >= 2 )); then
-      fail "the ${SERVICE_NAME} container keeps restarting, so Splunk never became ready; its last log lines:
-$(run_compose logs --no-color --no-log-prefix --tail 5 "${SERVICE_NAME}" 2>&1 | tail -n 5)
+      # The log lines share the readiness deadline: a stalled docker compose
+      # logs must not keep setup waiting. Without time left, report without them.
+      last_logs=""
+      if limit="$(readiness_probe_limit "${deadline}")"; then
+        last_logs="$(run_with_time_limit "${limit}" run_compose logs --no-color --no-log-prefix --tail 5 \
+          "${SERVICE_NAME}" 2>&1 | tail -n 5 || true)"
+      fi
+      if [[ -n "${last_logs}" ]]; then
+        last_logs="; its last log lines:
+${last_logs}"
+      fi
+      fail "the ${SERVICE_NAME} container keeps restarting, so Splunk never became ready${last_logs}
 all of them: docker logs $(compose_project_name)-${SERVICE_NAME}-1"
     fi
     limit="$(readiness_probe_limit "${deadline}")" || break

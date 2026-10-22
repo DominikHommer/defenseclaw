@@ -181,14 +181,27 @@ def local_splunk_destination_name(hec_url: str) -> str:
     return destination_name(SPLUNK_HEC, None, {"host": parsed.hostname or "127.0.0.1", "endpoint": hec_url})
 
 
-def _local_splunk_state(data_dir: str) -> tuple[set[str], dict[str, str], set[str]]:
-    """Return the local Splunk credentials, the saved .env values and the owned sink names."""
+def _hec_listener(endpoint: str) -> tuple[str, int]:
+    parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
+    try:
+        port = parsed.port or 8088
+    except ValueError:
+        port = -1
+    return (parsed.hostname or "").lower(), port
+
+
+def _local_splunk_state(data_dir: str) -> tuple[set[str], dict[str, str], str | None]:
+    """Return the local Splunk credentials, the saved .env values and the bridge HEC URL.
+
+    The URL is the one the private bridge contract records (the default when
+    an older contract has none), or None when there is no local stack.
+    """
 
     from defenseclaw.observability.local_splunk import DEFAULT_HEC_URL, LOCAL_TOKEN_ENV
 
     local_tokens = {os.environ.get(LOCAL_TOKEN_ENV, "")}
     saved: dict[str, str] = {}
-    owned = {NATIVE_LOCAL_SPLUNK_DESTINATION, local_splunk_destination_name(DEFAULT_HEC_URL)}
+    bridge_url: str | None = None
     for relative in (DOTENV_FILE_NAME, _LOCAL_SPLUNK_BRIDGE_ENV):
         try:
             payload = read_regular_file_no_follow(os.path.join(data_dir, relative), max_bytes=MAX_DOTENV_BYTES)
@@ -207,34 +220,54 @@ def _local_splunk_state(data_dir: str) -> tuple[set[str], dict[str, str], set[st
             local_tokens.update(
                 values.get(key, "") for key in ("DEFENSECLAW_HEC_TOKEN", "SPLUNK_HEC_TOKEN", LOCAL_TOKEN_ENV)
             )
-            if values.get("DEFENSECLAW_HEC_URL"):
-                owned.add(local_splunk_destination_name(values["DEFENSECLAW_HEC_URL"]))
+            bridge_url = values.get("DEFENSECLAW_HEC_URL") or DEFAULT_HEC_URL
     local_tokens.discard("")
-    return local_tokens, saved, owned
+    return local_tokens, saved, bridge_url
+
+
+def _is_owned_local_splunk_sink(destination, bridge_url: str) -> bool:
+    """Return whether *destination* is the sink local setup wrote for the recorded bridge.
+
+    Local setup names the sink from the bridge contract URL (or uses the
+    native Windows name) and points it at that same URL. Both must match: a
+    loopback endpoint, or a fallback name such as ``splunk-hec-127-0-0-1``
+    that remote setup also gives a tunnel, is not ownership.
+    """
+
+    return (
+        destination.get("kind") == "splunk_hec"
+        and destination.get("name")
+        in {NATIVE_LOCAL_SPLUNK_DESTINATION, local_splunk_destination_name(bridge_url)}
+        and _hec_listener(str(destination.get("endpoint") or "")) == _hec_listener(bridge_url)
+    )
 
 
 def local_splunk_sink_shares_reference(data_dir: str, token_env: str, destinations) -> bool:
-    """Return whether a DefenseClaw-managed local sink in *destinations* still uses *token_env*.
+    """Return whether the DefenseClaw-managed local sink in *destinations* still uses *token_env*.
 
     Earlier Unix local setups saved the generated local credential under the
     remote reference; writing a remote token there would break that sink. The
-    sink is the destination local setup owns (the name it writes) while the
-    reference still holds the private bridge credential. Neither alone marks
-    it: an older remote destination can keep the old local credential after
-    the local sink moved to its own reference, and a remote Splunk reached
-    through an SSH tunnel is loopback too, even on the port of a stopped local
-    stack.
+    sink is the destination local setup owns for the recorded bridge (its
+    name and the bridge HEC URL), while the reference still holds the private
+    bridge credential. Once that sink uses the isolated local reference the
+    shared reference is free. A credential alone never marks a sink: an older
+    remote destination can keep the old local credential after repair, and a
+    remote Splunk reached through an SSH tunnel is loopback too, even on the
+    port of a stopped local stack.
     """
 
-    sharing = {
-        destination.get("name")
+    if not any(
+        destination.get("kind") == "splunk_hec" and destination.get("token_env") == token_env
         for destination in destinations
-        if destination.get("kind") == "splunk_hec" and destination.get("token_env") == token_env
-    }
-    if not sharing:
+    ):
         return False
-    local_tokens, saved, owned = _local_splunk_state(data_dir)
-    if not sharing & owned:
+    local_tokens, saved, bridge_url = _local_splunk_state(data_dir)
+    if bridge_url is None:
+        return False
+    owned = [destination for destination in destinations if _is_owned_local_splunk_sink(destination, bridge_url)]
+    # Local repair writes the sink with the isolated reference; from then on
+    # the shared reference is released.
+    if not owned or any(destination.get("token_env") != token_env for destination in owned):
         return False
     return bool({saved.get(token_env, ""), os.environ.get(token_env, "")} & local_tokens)
 
@@ -246,7 +279,7 @@ def _validate_splunk_credential_isolation(data_dir: str, preset: Preset, supplie
         return
     # Earlier Unix local setups used the remote name. A saved or ambient
     # value is not a remote credential if it belongs to the local container.
-    local_tokens, saved, _owned = _local_splunk_state(data_dir)
+    local_tokens, saved, _bridge_url = _local_splunk_state(data_dir)
     token = supplied or os.environ.get(preset.token_env) or saved.get(preset.token_env)
     if token and token in local_tokens:
         raise ValueError(

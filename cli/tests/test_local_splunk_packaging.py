@@ -133,6 +133,58 @@ def test_bridge_readiness_deadline_bounds_a_stalled_app_probe(tmp_path: Path, ig
     assert limits and all(1 <= limit <= 3 for limit in limits), limits
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Unix bridge runs under bash")
+@pytest.mark.parametrize("logs", ["answers", "stalls", "stalls-ignoring-term", "no-time-left"])
+def test_bridge_restart_diagnostics_share_the_readiness_deadline(tmp_path: Path, logs: str) -> None:
+    # GAP-0489: HEC answers, the app probe fails and the container keeps
+    # restarting. Its last log lines are collected only within what is left
+    # of the readiness deadline; with nothing left the error comes without them.
+    pid_file = tmp_path / "logs.pid"
+    called = tmp_path / "logs.called"
+    stall = 'echo $$ > "$PROBE_PID"; i=0; while [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done'
+    body = 'touch "$LOGS_CALLED"; echo "fixture log line"'
+    if logs == "stalls":
+        body += "; " + stall
+    elif logs in {"stalls-ignoring-term", "no-time-left"}:
+        body += '; trap "" TERM; ' + stall
+    # In the last case the restart probe itself uses up the deadline.
+    restart_count = "echo 2; sleep 10" if logs == "no-time-left" else "echo 2"
+    probe = _readiness_probe(
+        tmp_path / "readiness.sh",
+        "curl() { printf 200; }\n"
+        f"run_compose() {{ if [[ \"$1\" == logs ]]; then sh -c '{body}'; else return 1; fi; }}\n"
+        f"service_restart_count() {{ {restart_count}; }}",
+        3,
+    )
+    started = time.monotonic()
+    result = subprocess.run(
+        ["bash", str(probe)],
+        env={**os.environ, "PROBE_PID": str(pid_file), "LOGS_CALLED": str(called)},
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    elapsed = time.monotonic() - started
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "keeps restarting" in result.stderr, result.stderr
+    # Three seconds of deadline, plus one second for a probe that ignores TERM.
+    assert elapsed < 5.5, f"restart diagnostics took {elapsed:.1f}s past a 3s deadline"
+    if logs == "no-time-left":
+        assert not called.exists(), "logs were collected after the deadline"
+        assert "last log lines" not in result.stderr, result.stderr
+    else:
+        assert "last log lines" in result.stderr and "fixture log line" in result.stderr, result.stderr
+    if pid_file.exists():
+        stalled = int(pid_file.read_text(encoding="utf-8"))
+        for _ in range(30):
+            try:
+                os.kill(stalled, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(stalled, 9)
+            pytest.fail("the stalled log probe outlived the readiness deadline")
+
+
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required to build wheels")
 def test_wheel_resolves_complete_splunk_bundle_outside_checkout(
     tmp_path: Path,
