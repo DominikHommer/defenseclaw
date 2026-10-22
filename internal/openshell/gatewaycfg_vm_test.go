@@ -386,7 +386,7 @@ func TestCheckSandboxesStoppedBeforeARestart(t *testing.T) {
 		}
 	}
 	phases := map[string]openshell.SandboxPhase{"dc-a": openshell.PhaseReady, "dc-b": openshell.PhaseStopped, "theirs": openshell.PhaseReady}
-	const refused = "; OpenShell has not reported these stopped: dc-a (ready): `defenseclaw sandbox stop dc-a`; theirs (ready): `defenseclaw sandbox stop theirs`; then try again"
+	const refused = "; OpenShell has not reported these stopped: dc-a (ready): `defenseclaw sandbox stop dc-a` (DefenseClaw sandbox), or `openshell sandbox stop dc-a` (raw OpenShell sandbox); theirs (ready): `defenseclaw sandbox stop theirs` (DefenseClaw sandbox), or `openshell sandbox stop theirs` (raw OpenShell sandbox); then try again"
 
 	for _, release := range []string{openshell.SupportedMin, "0.1.3", "0.1.5-pre.3"} {
 		vm := gateway(t, openshell.DriverVM, release, phases)
@@ -521,12 +521,12 @@ func TestARestartChecksTheSandboxesRightBeforeItActs(t *testing.T) {
 	f.verify = errors.New("gateway not healthy")
 	restarts := f.brewRestarts()
 	_, err := f.apply(f.plan(t, microVMs))
-	if err == nil || !strings.Contains(err.Error(), "gateway not healthy") || !strings.Contains(err.Error(), "still runs on the new ones, since it was not restarted again") ||
+	if err == nil || !strings.Contains(err.Error(), "gateway not healthy") || !strings.Contains(err.Error(), "active gateway files were kept without another restart") ||
 		!errors.Is(err, openshell.ErrUnflushed) || f.brewRestarts() != restarts+1 {
 		t.Fatalf("Apply whose rollback finds a MicroVM started on the restarted gateway = %v (restarts %d)", err, f.brewRestarts()-restarts)
 	}
-	if st, _ := f.cfg.Read(); st.RestartPendingSince.IsZero() {
-		t.Fatalf("the restart that was not made is not pending: %+v", st)
+	if st, _ := f.cfg.Read(); !st.RestartPendingSince.IsZero() {
+		t.Fatalf("the active configuration still needs no restart after the rollback was refused: %+v", st)
 	}
 }
 
@@ -579,7 +579,7 @@ func TestGatewayRestartsHoldTheLifecycleLock(t *testing.T) {
 	if err := f.cfg.Rollback(context.Background(), res); err != nil {
 		t.Fatal(err)
 	}
-	held("Rollback", 2)
+	held("Rollback", 3)
 	f.flush = fmt.Errorf("%w (dc-a: ready)", openshell.ErrUnflushed)
 	if err := f.cfg.Restart(context.Background()); !errors.Is(err, openshell.ErrUnflushed) {
 		t.Fatalf("Restart = %v", err)

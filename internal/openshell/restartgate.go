@@ -110,7 +110,7 @@ func StopWayOn(name string, p SandboxPhase, said string, runs bool) string {
 	del := "`defenseclaw sandbox delete " + name + "`, which deletes it and its work"
 	switch {
 	case p == PhaseReady:
-		return stop
+		return stop + " (DefenseClaw sandbox), or `openshell sandbox stop " + name + "` (raw OpenShell sandbox)"
 	case p != PhaseCompleted && p != PhaseError:
 		return "wait until `defenseclaw sandbox list` shows it ready or stopped, then " + stop + " if it is ready"
 	case !runs && p == PhaseCompleted:

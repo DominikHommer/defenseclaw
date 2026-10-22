@@ -1114,7 +1114,7 @@ func (a *App) manualRestartStops(ctx context.Context, microVM bool, gone []strin
 	if known && len(running) > 0 {
 		names = " (" + shortList(running) + ")"
 	}
-	stop := "`" + CommandName + " stop NAME`"
+	stop := "`" + CommandName + " stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes"
 	switch {
 	case !microVM && names != "":
 		return "restarting it stops every sandbox on it, and " + plural(int64(len(running)), "sandbox runs", "sandboxes run") + " on it now" + names

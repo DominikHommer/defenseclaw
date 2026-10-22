@@ -427,7 +427,7 @@ func TestDoctorOffersTheUpgrade(t *testing.T) {
 	f.onMicroVMs()
 	c = expectCheck(t, f.run(), openshell.CheckIDCLI, openshell.StatusWarn, "0.1.1 at ")
 	if c.Fix == nil || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" ||
-		c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" in place (this restarts the gateway; stop the running MicroVM sandboxes first with `defenseclaw sandbox stop NAME`)" {
+		c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" in place (this restarts the gateway; stop running MicroVM sandboxes first with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes)" {
 		t.Fatalf("openshell-cli fix on MicroVMs = %+v", c.Fix)
 	}
 }
