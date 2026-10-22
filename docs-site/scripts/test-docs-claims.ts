@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 // page as one line of words, so a reflowed paragraph still matches.
 
 const site = join(dirname(fileURLToPath(import.meta.url)), '..');
+const repo = join(site, '..');
 
 function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
