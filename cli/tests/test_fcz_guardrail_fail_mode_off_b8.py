@@ -23,11 +23,11 @@ def test_fail_mode_while_off_counts_every_saved_connector(monkeypatch: pytest.Mo
     out = " ".join(result.output.split())
     assert (
         "Codex (codex): disabled (no hooks); closed is saved; it stays disabled until "
-        "'defenseclaw guardrail enable --connector codex'" in out
+        "'defenseclaw guardrail enable', then 'defenseclaw guardrail enable --connector codex'" in out
     )
     assert (
         "Config saved (global default + 3 connector overrides = closed; Codex saved, stays disabled until "
-        "'defenseclaw guardrail enable --connector codex') — applies when the guardrail is enabled" in out
+        "'defenseclaw guardrail enable', then 'defenseclaw guardrail enable --connector codex') — applies when the guardrail is enabled" in out
     )
     assert "active connector" not in out
     assert "currently disabled" not in out

@@ -740,6 +740,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         verify = True
 
     connector_settings, unselectable = _leave_out_unselectable_connectors(connector_settings, data_dir)
+    connector_settings, no_contract = _leave_out_no_contract_connectors(connector_settings, data_dir)
     primary = connector_settings[0]
     extras = connector_settings[1:]
     # When extra connectors will be merged in after the primary bootstrap,
@@ -790,6 +791,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     report = run_first_run(opts)
     if unselectable:
         _report_unselectable_connectors(report, unselectable)
+    if no_contract:
+        _report_no_contract_connectors(report, no_contract)
     if not start_gateway:
         _word_sidecar_skip(report, prompted=interactive_wizard, flag=start_gateway_flag)
 
@@ -1553,7 +1556,9 @@ def _supported_action_connectors(
     instead) with a warning, matching the gate the Go gateway applies at boot
     and that :func:`_activate_additional_connectors` applies to extras. Gating
     here means the primary connector is checked too, so first-run never writes
-    a global action mode the gateway then refuses to enforce."""
+    a global action mode the gateway then refuses to enforce. A version with no
+    hook contract gets no downgrade warning: setup refuses it in observe too,
+    so first run leaves it out (:func:`_leave_out_no_contract_connectors`)."""
     from defenseclaw.commands.cmd_setup import (
         _check_connector_version_supported_for_setup,
     )
@@ -1613,7 +1618,13 @@ def _supported_action_connectors(
                     still_failed.append(key)
             failed = still_failed
 
+    from defenseclaw.bootstrap import _first_run_setup_refusal
+
     for key in failed:
+        if _first_run_setup_refusal(key, data_dir):
+            # Setup refuses it in observe too; first run leaves it out
+            # instead of downgrading it (GAP-0554).
+            continue
         warning = _fresh_action_downgrade_record(
             key,
             data_dir=data_dir,
@@ -1761,6 +1772,51 @@ def _leave_out_unselectable_connectors(
     if not problems or not kept:
         return connector_settings, {}
     return kept, problems
+
+
+def _leave_out_no_contract_connectors(
+    connector_settings: list[dict],
+    data_dir,
+) -> tuple[list[dict], dict[str, str]]:
+    """Drop connectors whose agent version setup refuses in every mode.
+
+    The gateway refuses an agent version with no hook contract at start, in
+    observe mode too, and stays down (GAP-0554). When at least one selected
+    connector remains, the refused ones are left out and reported. A lone
+    refused connector is refused by ``run_first_run`` before any change.
+    """
+    if len(connector_settings) < 2:
+        return connector_settings, {}
+    from defenseclaw.bootstrap import _first_run_setup_refusal
+
+    problems: dict[str, str] = {}
+    kept: list[dict] = []
+    for setting in connector_settings:
+        name = connector_paths.normalize(setting["connector"])
+        reason = _first_run_setup_refusal(name, data_dir)
+        if reason:
+            problems[name] = reason
+        else:
+            kept.append(setting)
+    if not problems or not kept:
+        return connector_settings, {}
+    return kept, problems
+
+
+def _report_no_contract_connectors(report, problems: dict[str, str]) -> None:
+    from defenseclaw.bootstrap import StepResult, _next_commands, _rollup_status
+
+    report.setup.append(
+        StepResult(
+            "Hook contract",
+            "warn",
+            f"left out {', '.join(sorted(problems))}: "
+            + " ".join(reason for _name, reason in sorted(problems.items())),
+            "defenseclaw init",
+        )
+    )
+    report.status = _rollup_status(report.setup, report.readiness)
+    report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
 
 
 def _report_unselectable_connectors(report, problems: dict[str, str]) -> None:

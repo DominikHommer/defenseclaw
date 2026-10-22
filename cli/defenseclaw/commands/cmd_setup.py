@@ -5802,10 +5802,9 @@ def _check_connector_version_supported_for_setup(
         label,
         compatibility.normalized_version,
     )
-    # Refused in observe mode too: the gateway does not start a connector
-    # whose version has no contract (Claude Code and Codex render their hooks
-    # from it), so "continuing in observe mode" left the gateway down for
-    # every connector after the restart (GAP-0554).
+    # Refused in observe mode too: a gateway started with this connector alone
+    # refuses a version with no contract in every mode, so "continuing in
+    # observe mode" left the gateway down after the restart (GAP-0554).
     if compatibility.status == STATUS_UNKNOWN and not allow_drift:
         if emit:
             ux.err(detail)
@@ -5818,8 +5817,8 @@ def _check_connector_version_supported_for_setup(
             else:
                 mode_name = "action" if action_mode else "observe"
                 ux.subhead(
-                    f"Refusing {mode_name}-mode connector setup before activation: the gateway installs no "
-                    "hooks for a version without a hook contract. Nothing was changed."
+                    f"Refusing {mode_name}-mode connector setup before activation: a gateway started with "
+                    "this connector alone refuses a version without a hook contract. Nothing was changed."
                 )
             ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
         return False

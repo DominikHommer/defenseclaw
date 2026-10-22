@@ -75,6 +75,36 @@ def test_turn_off_page_says_what_a_scoped_enable_does_after_a_global_disable():
     assert "Add `--connector codex` to bring back one agent" not in text
     assert "After `setup guardrail --disable`, `defenseclaw guardrail enable --connector codex` changes nothing" in text
     assert "exits `1`" in text
+    assert "it names both steps: `defenseclaw guardrail enable`, then `defenseclaw guardrail enable --connector codex`" in text
+
+
+def test_no_contract_pages_describe_the_gateway_start_gates_as_the_code_does():
+    # The page said the gateway installs no hooks for a version with no
+    # contract, and first-run named only Claude Code and Codex. Single-connector
+    # boot refuses any hook connector in every mode; multi-connector boot
+    # refuses in action mode (OpenCode in both) and only warns in observe.
+    sidecar = (REPO / "internal/gateway/sidecar.go").read_text(encoding="utf-8")
+    single = re.search(
+        r"if !guardianManagedLifecycle && contractResolution\.Status == connector\.HookCompatibilityUnknown && "
+        r'envvars\.Getenv\("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT"\) != "1" \{',
+        sidecar,
+    )
+    assert single, "runGuardrail no longer refuses an unknown version in every mode; update the page"
+    assert "(actionMode || strictUnknownVersion) &&" in sidecar
+    assert "is not covered by a known hook contract; continuing in observe mode" in sidecar
+    text = _page("reference/apis/hook-contracts.mdx")
+    assert "The gateway installs no hooks for such a version" not in text
+    assert (
+        "With one connector, a version with no contract is refused in observe and action mode for every hook "
+        "connector, and the gateway does not start." in text
+    )
+    assert "In observe mode the gateway logs a warning and continues." in text
+    setup = (REPO / "cli/defenseclaw/commands/cmd_setup.py").read_text(encoding="utf-8")
+    assert "the gateway installs no" not in setup
+    first_run = _page("reference/commands/first-run.mdx")
+    assert "has no hook contract is downgraded to observe" not in first_run
+    assert "For Claude Code and Codex the gateway then does not start" not in first_run
+    assert "A connector whose installed version has no hook contract is left out in observe and action mode" in first_run
 
 
 def test_rule_recipes_page_names_the_suppressions_the_catalog_holds():

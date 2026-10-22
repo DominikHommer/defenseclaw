@@ -325,7 +325,7 @@ def _toggle_connector_guardrail(
     if enable and not app.cfg.guardrail.enabled:
         ux.err(f"The guardrail is off for every agent, so {label} stays off.", indent="  ")
         ux.subhead(
-            "Run 'defenseclaw guardrail enable' to turn it back on; nothing was changed.",
+            f"Run {_turn_on_steps(app.cfg.guardrail, key)} to turn it back on; nothing was changed.",
             indent="    ",
         )
         raise SystemExit(1)
@@ -1663,8 +1663,7 @@ def _apply_global_fail_mode_transaction(
                     if value != mode and name not in disabled
                 )
                 kept += "".join(
-                    f"; {_connector_label(name)} saved, stays disabled until "
-                    f"'defenseclaw guardrail enable --connector {name}'"
+                    f"; {_connector_label(name)} saved, stays disabled until {_turn_on_steps(gc, name)}"
                     for name in sorted(disabled)
                 )
                 changed = sum(1 for value in pinned.values() if value == mode)
@@ -1981,8 +1980,7 @@ def fail_mode_cmd(
             if guardrail_off and _disabled_on_its_own(gc, name):
                 click.echo(
                     f"      - {_connector_label(name)} ({name}): disabled (no hooks); "
-                    f"{desired_modes[name]} is saved; it stays disabled until "
-                    f"'defenseclaw guardrail enable --connector {name}'"
+                    f"{desired_modes[name]} is saved; it stays disabled until {_turn_on_steps(gc, name)}"
                 )
                 continue
             if guardrail_off:
@@ -3335,6 +3333,20 @@ def _cursor_stays_fail_closed(gc, name: str) -> bool:
 def _disabled_on_its_own(gc, name: str) -> bool:
     """Whether *name* was turned off with `guardrail disable --connector` (no hooks)."""
     return hasattr(gc, "effective_enabled") and not gc.effective_enabled(name)
+
+
+def _turn_on_steps(gc, name: str) -> str:
+    """The commands that bring back *name*'s hooks, in order (GAP-0550).
+
+    With the global switch off, `guardrail enable --connector` exits 1, and
+    the global enable keeps a connector disabled on its own off.
+    """
+    steps = []
+    if not gc.enabled:
+        steps.append("'defenseclaw guardrail enable'")
+    if _disabled_on_its_own(gc, name):
+        steps.append(f"'defenseclaw guardrail enable --connector {name}'")
+    return ", then ".join(steps)
 
 
 def _gateway_running(app: AppContext) -> bool:

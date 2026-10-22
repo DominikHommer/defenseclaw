@@ -800,6 +800,25 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             next_commands=["defenseclaw init"],
             connector_mode_warnings=connector_mode_warnings,
         )
+
+    # Before any write: a connector setup refuses in every mode is not
+    # configured in observe either (GAP-0554).
+    refusal = ""
+    if connector != "none":
+        refusal = _first_run_setup_refusal(connector, getattr(cfg, "data_dir", ""))
+    if refusal:
+        setup.append(StepResult("Hook contract", "fail", f"{refusal} Nothing was changed.", "defenseclaw init"))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=["defenseclaw init"],
+            connector_mode_warnings=connector_mode_warnings,
+        )
+
     selection_targets: tuple[str, ...] | None = None
     if platform_support.host_os() == "windows":
         from defenseclaw.agent_selection import setup_agent_selection_connectors
@@ -1300,11 +1319,58 @@ def _preflight_first_run_agent_selections(
     return verified, ""
 
 
+def _first_run_setup_refusal(connector: str, data_dir) -> str:
+    """Say why setup refuses *connector* in observe and action mode, or "".
+
+    Setup refuses an installed agent version with no hook contract in both
+    modes, because the gateway refuses it at start and stays down (GAP-0554).
+    First run must not write such a connector in either mode, so it is left
+    out instead of downgraded to observe. A version that is only unverified
+    (not probed, or outside a trusted prefix) still gets observe.
+    """
+    from defenseclaw import envvars
+    from defenseclaw.agent_selection import codex_setup_version_problem
+    from defenseclaw.commands.cmd_setup import _CONNECTOR_META, _connector_contract_upgrade_guidance
+    from defenseclaw.connector_contracts import STATUS_UNKNOWN, resolve_connector_contract
+
+    key = _normalize_connector(connector)
+    if key == "none" or envvars.lookup("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1":
+        return ""
+    if key == "opencode" and platform_support.host_os() == "windows":
+        # The exact SST selection gates native-Windows OpenCode.
+        return ""
+    try:
+        discovery = agent_discovery.discover_with_probes(
+            [key], use_cache=False, refresh=True, data_dir=data_dir, persist_cache=False
+        )
+    except Exception:  # noqa: BLE001 - setup's own gate runs again on the same agent
+        return ""
+    signal = discovery.agents.get(key)
+    if signal is None or not signal.installed:
+        return ""
+    raw_version = signal.version or ""
+    label = _CONNECTOR_META.get(key, {}).get("label", key)
+    if key == "codex" and (problem := codex_setup_version_problem(raw_version)):
+        return problem
+    compatibility = resolve_connector_contract(key, raw_version)
+    if compatibility.status != STATUS_UNKNOWN:
+        return ""
+    version = raw_version.rstrip(".") or "(not probed)"
+    return (
+        f"{label} {version} has no DefenseClaw hook contract ({compatibility.reason}), so setup refuses it "
+        "in observe and action mode and the gateway does not start it. "
+        + _connector_contract_upgrade_guidance(key, label, compatibility.normalized_version)
+    )
+
+
 def _first_run_action_mode_warning(
     connector: str,
     data_dir: str,
 ) -> dict | None:
-    """Return structured action-to-observe remediation for first-run flows."""
+    """Return structured action-to-observe remediation for first-run flows.
+
+    Called only for a connector :func:`_first_run_setup_refusal` accepted, so
+    observe is a mode setup and the gateway run."""
     from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
 
     if _check_connector_version_supported_for_setup(

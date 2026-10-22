@@ -1443,7 +1443,9 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
-        mock_discover.assert_called_once_with(refresh=False)
+        # The hook-contract gate adds a read-only probe (persist_cache=False).
+        scans = [c.kwargs for c in mock_discover.call_args_list if c.kwargs.get("persist_cache") is not False]
+        self.assertEqual(scans, [{"refresh": False}])
 
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
@@ -1520,7 +1522,9 @@ class TestInitFirstRunBackend(unittest.TestCase):
         ])
 
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        mock_discover.assert_called_once_with(refresh=True)
+        # The hook-contract gate adds a read-only probe (persist_cache=False).
+        scans = [c.kwargs for c in mock_discover.call_args_list if c.kwargs.get("persist_cache") is not False]
+        self.assertEqual(scans, [{"refresh": True}])
 
 class TestInitVersionDisplay(unittest.TestCase):
     """Tests for version info in init Environment section."""
@@ -4589,7 +4593,10 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=False)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
-    def test_action_connector_downgrade_refreshes_discovery_for_trusted_path_details(self, mock_discover, _gate):
+    @patch("defenseclaw.bootstrap._first_run_setup_refusal", return_value="")
+    def test_action_connector_downgrade_refreshes_discovery_for_trusted_path_details(
+        self, _no_contract_gate, mock_discover, _gate
+    ):
         from defenseclaw.inventory import agent_discovery as ad
 
         stale = self._disc({"codex", "hermes"})
