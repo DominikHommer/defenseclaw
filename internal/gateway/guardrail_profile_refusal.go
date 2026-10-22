@@ -15,8 +15,10 @@ import (
 // A Refused profile decision (profileDecision.Refused).
 //
 // An agents entry that may be a request agent's 1.0.3 identity, which the
-// agent ledger does not prove, leaves more than one profile that may apply
-// (matchAgent). When none of them enforces at least what each of the
+// agent ledger does not prove (matchAgent), or a group assignment that may
+// name a group whose name no NSS provider confirms
+// (matchWithUnconfirmedGroups), leaves more than one profile that may
+// apply. When none of them enforces at least what each of the
 // others does (profileCovers), no single profile is safe to apply: the
 // request is refused wherever its surface can block it, on the connector
 // hook, the inspect endpoints, ACP and the guardrail proxy. What a surface
@@ -30,6 +32,12 @@ import (
 const profileRefusedReason = "DefenseClaw refused this request: a guardrail profile assignment names an agent identity from before the upgrade " +
 	"that cannot be matched to this account, and the profiles that may apply enforce different rules. " +
 	"Ask your administrator to replace the entry with the agent identity `defenseclaw agent identities` shows now."
+
+// profileRefusedGroupsReason is what a request refused for an unconfirmed
+// group name (matchWithUnconfirmedGroups) tells the agent and its user.
+const profileRefusedGroupsReason = "DefenseClaw refused this request: the names of some of your groups cannot be confirmed now " +
+	"(a directory group provider did not answer), a guardrail profile assignment may name one of them, and the profiles that may apply " +
+	"enforce different rules. Try again shortly; if it persists, ask your administrator to check the host's directory group provider."
 
 // profileRefused is why ctx's profile decision is Refused, or "".
 func (a *APIServer) profileRefused(ctx context.Context) string {

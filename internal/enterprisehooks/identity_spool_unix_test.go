@@ -100,6 +100,11 @@ func TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("reassigned uid kept previous account record: %v", err)
 	}
+	// Loop round 3: the gateway takes no missing record as a withdrawal, so
+	// the previous owner's identity is withdrawn explicitly.
+	if _, err := ReadIdentitySpoolWithdrawal(dir, reassigned, nil); err != nil {
+		t.Fatalf("the reassigned uid's previous identity was not withdrawn: %v", err)
+	}
 }
 
 // A successful refresh of one SSSD domain cannot establish that a missing
@@ -435,6 +440,13 @@ func TestIdentitySpoolKeepsAnAccountPartialListingsOmitWhileItResolves(t *testin
 	if has("94401303") || !has("94401302") {
 		t.Fatalf("after carol's uid was reassigned: carol %v, bob %v; want carol's record gone and bob's kept", has("94401303"), has("94401302"))
 	}
+	withdrawn := func(key string) bool {
+		_, err := ReadIdentitySpoolWithdrawal(dir, key, nil)
+		return err == nil
+	}
+	if !withdrawn("94401303") || withdrawn("94401302") {
+		t.Fatalf("withdrawals: carol %v, bob %v; want carol's departed identity withdrawn and bob's not", withdrawn("94401303"), withdrawn("94401302"))
+	}
 	// bob's record ages out while every listing still omits him.
 	old := time.Now().Add(-IdentitySpoolMaxAge - time.Minute)
 	if err := os.Chtimes(filepath.Join(dir, "94401302.json"), old, old); err != nil {
@@ -443,6 +455,16 @@ func TestIdentitySpoolKeepsAnAccountPartialListingsOmitWhileItResolves(t *testin
 	pass(alice)
 	if has("94401302") {
 		t.Fatal("the record of an account the listings omit outlived its maximum age")
+	}
+	if !withdrawn("94401303") {
+		t.Fatal("a young withdrawal went at the next pass; the gateway trusts the record it withdraws for an hour")
+	}
+	if err := os.Chtimes(filepath.Join(dir, "94401303"+IdentitySpoolWithdrawalSuffix), old, old); err != nil {
+		t.Fatal(err)
+	}
+	pass(alice)
+	if withdrawn("94401303") {
+		t.Fatal("a withdrawal outlived its maximum age")
 	}
 	// An account the enrollment settings leave out goes at once, also while
 	// it resolves.
@@ -556,6 +578,9 @@ func TestIdentitySpoolDropsTheRecordOfAUIDReusedBySameNameInAnotherDomain(t *tes
 				if readErr == nil && record.Facts.UPN != "dcad-bob@dclab.test" {
 					t.Fatalf("pass %d: bob's record changed: %+v", pass+1, record)
 				}
+				if _, err := ReadIdentitySpoolWithdrawal(dir, strconv.Itoa(bobUID), nil); (err == nil) == tc.wantKept {
+					t.Fatalf("pass %d: bob's identity withdrawn = %v, want %v", pass+1, err == nil, !tc.wantKept)
+				}
 			}
 		})
 	}
@@ -589,6 +614,11 @@ func TestIdentitySpoolFailedLookupDoesNotKeepAnotherDomainsUPN(t *testing.T) {
 		record, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(bobUID), nil)
 		if readErr != nil || record.Facts.UPN != tc.wantUPN {
 			t.Fatalf("%s: record %+v (%v), want UPN %q", tc.domain, record, readErr, tc.wantUPN)
+		}
+		// The basic facts of the other domain's account name no UPN to
+		// contradict the gateway's cached one, so the identity is withdrawn.
+		if _, err := ReadIdentitySpoolWithdrawal(dir, strconv.Itoa(bobUID), nil); (err == nil) != (tc.wantUPN == "") {
+			t.Fatalf("%s: identity withdrawn = %v, want %v", tc.domain, err == nil, tc.wantUPN == "")
 		}
 	}
 }

@@ -50,6 +50,8 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 		Groups:     groups,
 		Assurance:  useridentity.AssuranceVerified,
 		ResolvedAt: now,
+		// Read before the record (forgetOnSpoolChange).
+		SpoolSeenAt: identitySpoolSeenAt(key, now),
 	}
 	// Open Directory answers a bound Mac's directory accounts too, so only an
 	// account of the local node is local. Calling every account local let no

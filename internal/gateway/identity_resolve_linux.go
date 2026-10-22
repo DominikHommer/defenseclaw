@@ -238,6 +238,7 @@ func resolveNSSPeerFacts(key string) (useridentity.DirectoryFacts, error) {
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
+	facts.SpoolSeenAt = identitySpoolSeenAt(key, now)
 	record, ok, err := holderSpoolRecord(key, account, facts.AccountSID, now)
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err

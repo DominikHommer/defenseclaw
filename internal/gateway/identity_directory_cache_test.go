@@ -531,8 +531,15 @@ func TestSpoolGroupChangeDropsCachedFacts(t *testing.T) {
 		t.Fatalf("first lookup = %+v, %v", facts, ok)
 	}
 	write(`DCLAB\Domain Users`, `DCLAB\dc-w3w-pilot`)
-	forgetOnSpoolGroupChange(cache, key, time.Now().Add(time.Minute))
+	forgetOnSpoolGroupChange(cache, key, time.Now())
 	if facts, ok := cache.get(key, true); !ok || len(facts.Groups) != 2 {
 		t.Fatalf("after a new sign-in the cache served %+v, %v; want the new group set", facts, ok)
+	}
+	if err := os.Remove(filepath.Join(dir, key+".json")); err != nil {
+		t.Fatal(err)
+	}
+	forgetOnSpoolGroupChange(cache, key, time.Now())
+	if facts, ok := cache.get(key, true); ok && len(facts.Groups) != 0 {
+		t.Fatalf("withdrawn record left old token groups in the cache: %+v", facts)
 	}
 }

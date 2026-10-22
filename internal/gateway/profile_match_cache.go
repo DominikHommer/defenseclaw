@@ -96,6 +96,11 @@ func profileMatchKey(subject *profileSubject, source, connectorName, agent strin
 			}
 			put(subject.unprovenReason)
 		}
+		// A gid whose name is unconfirmed selects apart from one proved to
+		// have none.
+		for _, g := range subject.unconfirmedGroups {
+			put("unconfirmed:" + g)
+		}
 	}
 	if subject == nil {
 		put("\x00nil")

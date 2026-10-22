@@ -69,6 +69,12 @@ type profileSubject struct {
 	// GroupsUnknown means the Windows enumerator has no current desktop
 	// token for group matching; other verified identity fields remain usable.
 	GroupsUnknown bool
+	// unconfirmedGroups are the gids among Groups, as numbers, whose names
+	// no NSS group service could give or prove absent
+	// (useridentity.DirectoryFacts.UnconfirmedGroups): the account is in
+	// them, but a group assignment that names a group may or may not apply
+	// (matchWithUnconfirmedGroups).
+	unconfirmedGroups []string
 	// LookupFailed is set when the directory lookup for this subject failed
 	// and no cached facts within their TTL exist. Directory-dependent
 	// assignments then select default_lookup_failed; a verified ID can match.
@@ -769,7 +775,9 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 		Domain:        s.Directory.Domain,
 		AccountDomain: accountDomain,
 		Groups:        s.Directory.Groups,
-		GroupsUnknown: lookupAttempted && s.Directory.GroupsPartial,
+		// The names of these gids are unknown, not absent.
+		unconfirmedGroups: s.Directory.UnconfirmedGroups,
+		GroupsUnknown:     lookupAttempted && s.Directory.GroupsPartial,
 		LookupFailed: lookupAttempted && (s.Directory.ResolvedAt.IsZero() ||
 			(s.Directory.Source == useridentity.SourceWindowsLSA ||
 				s.Directory.Source == useridentity.SourceWindowsIdentityStore) && awaitingSpool(s.Directory) && !s.Directory.GroupsPartial),
@@ -974,6 +982,9 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 		return set.matchWithUnknownGroups(subject, source, connectorName, agent)
 	}
 	verified := subject != nil && source != ""
+	if verified && len(subject.unconfirmedGroups) > 0 {
+		return set.matchWithUnconfirmedGroups(subject, source, connectorName, agent)
+	}
 	groups := &subjectGroups{sids: set.groupSIDs}
 	if verified {
 		groups.list = subject.Groups
@@ -1104,6 +1115,99 @@ func unprovenRefusalNote(set *guardrailProfileSet, subject *profileSubject, deci
 	return fmt.Sprintf("requests from this account are refused (hooks fail closed): its directory lookup has not proved the account (%s). "+
 		"If the directory holds nothing more of it, the account selects %s; a failed lookup selects %s. Neither applies until the directory answers; "+
 		"an assignment by uid selects a profile without the proof", subject.unprovenReason, name(candidate.Name), name(decision.Name))
+}
+
+// matchWithUnconfirmedGroups is match for a verified subject some of whose
+// gids no NSS group service could name or prove unnamed (a Himmelblau or
+// aad module DefenseClaw cannot check, a provider that failed or answered
+// what the system's lookup did not take). The account is in those groups,
+// initgroups proved it, but their names are unknown. An assignment the
+// proven groups satisfy applies, in order. One whose groups entry may name
+// an unconfirmed gid, by a name the gid may have or by its number (which
+// matches only a gid without a name), may or may not apply: the request
+// then gets a profile that enforces at least what each such assignment and
+// the decision after them enforce, or is refused (coverUnproven), never a
+// weaker profile. Failing the whole lookup instead sent the account to
+// default_lookup_failed and a possibly weaker default, even where its
+// proven gid selected a strict profile.
+func (set *guardrailProfileSet) matchWithUnconfirmedGroups(subject *profileSubject, source, connectorName, agent string) profileDecision {
+	proven := &subjectGroups{list: provenGroups(subject), sids: set.groupSIDs}
+	decision := set.decision(set.defaultProfile, profileMatchDefault, "", source)
+	var mayApply []string
+	for i, assignment := range set.assignments {
+		if reason, group, ok := assignmentMatches(assignment.Match, subject, proven, true, connectorName, agent); ok {
+			decision = set.decision(assignment.Profile, reason, group, source)
+			decision.Assignment = i + 1
+			break
+		}
+		if set.unconfirmedGroupMayMatch(assignment.Match, subject, connectorName, agent) {
+			mayApply = append(mayApply, strings.TrimSpace(assignment.Profile))
+		}
+	}
+	if len(mayApply) == 0 {
+		return decision
+	}
+	return set.coverUnproven(append(mayApply, decision.Name), connectorName, source, profileRefusedGroupsReason)
+}
+
+// provenGroups is subject's groups without the gids whose names are
+// unconfirmed.
+func provenGroups(subject *profileSubject) []string {
+	if len(subject.unconfirmedGroups) == 0 {
+		return subject.Groups
+	}
+	return slices.DeleteFunc(slices.Clone(subject.Groups), func(group string) bool {
+		return slices.Contains(subject.unconfirmedGroups, strings.TrimSpace(group))
+	})
+}
+
+// unconfirmedGroupMayMatch reports whether m's groups entry may name one of
+// subject's unconfirmed gids while its other keys hold: any group name may
+// be such a gid's, and a number names the gid only when it has no name.
+func (set *guardrailProfileSet) unconfirmedGroupMayMatch(m config.ProfileMatch, subject *profileSubject, connectorName, agent string) bool {
+	if len(m.Groups) == 0 || len(subject.unconfirmedGroups) == 0 {
+		return false
+	}
+	others := m
+	others.Groups = nil
+	if !others.Empty() {
+		if _, _, ok := assignmentMatches(others, subject, &subjectGroups{}, true, connectorName, agent); !ok {
+			return false
+		}
+	}
+	return slices.ContainsFunc(m.Groups, func(want string) bool {
+		want = strings.TrimSpace(want)
+		if want != "" && strings.Trim(want, "0123456789") == "" {
+			return slices.Contains(subject.unconfirmedGroups, want)
+		}
+		return want != ""
+	})
+}
+
+// coverUnproven is the decision for a request that may get any of the
+// profiles candidates (an unproven fact decides between them), reported as
+// default_lookup_failed: a profile that enforces at least what each of
+// them enforces (profileCovers), the default when it does, else the first
+// of them that does. When none does, the decision is Refused, and its Name
+// is the strictest of them by hook mode and block_at (profileStricter), for
+// what the request's surface cannot refuse. Unproven facts never resolve
+// to a weaker profile, whatever default_profile says.
+func (set *guardrailProfileSet) coverUnproven(candidates []string, connectorName, source, refusal string) profileDecision {
+	connectors := profileCoverConnectors(connectorName)
+	for _, name := range append([]string{set.defaultProfile}, candidates...) {
+		if !slices.ContainsFunc(candidates, func(other string) bool { return !set.profileCovers(name, other, connectors) }) {
+			return set.decision(name, profileMatchDefaultLookupFailed, "", source)
+		}
+	}
+	strictest := set.defaultProfile
+	for _, name := range candidates {
+		if set.profileStricter(name, strictest, connectorName) {
+			strictest = name
+		}
+	}
+	refused := set.decision(strictest, profileMatchDefaultLookupFailed, "", source)
+	refused.Refused = refusal
+	return refused
 }
 
 // matchWithUnknownGroups preserves verified user and agent assignments in
@@ -1244,28 +1348,9 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 	return reason, group, true
 }
 
-// profileAgentIDSep separates the identities of match's agent argument
-// (profileAgentIDs).
-const profileAgentIDSep = "\x00"
-
-// profileAgentIDs is match's agent argument for an agent matched as each
-// of ids: its identity and the 1.0.3 identity the agent ledger links to its
-// account (profileAgent). An assignment naming any of them matches, so the
-// first such assignment applies, whichever identity it names.
-func profileAgentIDs(ids ...string) string {
-	return strings.Join(ids, profileAgentIDSep)
-}
-
-// agentEntryMatches reports whether an agents entry names agent, match's
-// agent argument: one identity, or several (profileAgentIDs).
+// agentEntryMatches reports whether an agents entry names agent.
 func agentEntryMatches(entry, agent string) bool {
-	entry = strings.TrimSpace(entry)
-	for id := range strings.SplitSeq(agent, profileAgentIDSep) {
-		if id != "" && strings.EqualFold(entry, id) {
-			return true
-		}
-	}
-	return false
+	return agent != "" && strings.EqualFold(strings.TrimSpace(entry), agent)
 }
 
 // profileUserName is the name users entries match: the bare account, or,
@@ -1835,11 +1920,6 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	user := strings.TrimSpace(query.Get("user"))
 	connectorName := config.NormalizeConnectorName(query.Get("connector"))
 	agent := strings.TrimSpace(query.Get("agent"))
-	if strings.Contains(agent, profileAgentIDSep) {
-		// It would be matched as two identities (profileAgentIDs).
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent: an agent identity has no NUL character"})
-		return
-	}
 
 	set := a.guardrailProfileSet()
 	if connectorName != "" && !connector.IsKnownBuiltinConnector(connectorName) &&

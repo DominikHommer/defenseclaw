@@ -40,6 +40,20 @@ func TestAccountFilterKeepsAPriorHoldersRowsOut(t *testing.T) {
 	}
 }
 
+// A qualified filter that resolves to a live account must not take a
+// tokenless row of a previous holder merely because its recorded name is
+// identical. A name-only lookup remains useful after account deletion.
+func TestQualifiedAccountFilterRejectsPriorUIDWithTheSameRecordedName(t *testing.T) {
+	resolved := NewAccountFilter(`CORP\alice`, "2002")
+	if resolved.MatchesIn("1001", `CORP\alice`, "corp") || !resolved.MatchesIn("2002", "alice", "corp") {
+		t.Fatal("resolved account filter selected the old UID or missed the live UID")
+	}
+	unresolved := NewAccountFilter(`CORP\alice`)
+	if !unresolved.MatchesIn("1001", `CORP\alice`, "corp") {
+		t.Fatal("unresolved qualified name lost its recorded-name fallback")
+	}
+}
+
 // Since loop 3 the provenance names only the domains that own the account:
 // a UPN suffix is an alias two domains' accounts can share.
 func TestAccountDomainsNamesTheOwningDomains(t *testing.T) {

@@ -510,6 +510,13 @@ func (c *managedHookPeerHomeCache) incarnation(uid int) (string, bool) {
 	}
 }
 
+// forgetOnSpoolAccountChange checks a managed Unix UID's spool identity. The
+// account database cache may still name the preceding owner of the same UID,
+// name and home while the guardian has published a new SID.
+func forgetOnSpoolAccountChange(cache *identityDirectoryCache, key string, now time.Time) {
+	forgetOnSpoolChange(cache, key, now, false)
+}
+
 // directory returns uid's verified directory facts from the cache, waiting
 // for a cold lookup up to its budget only when block is set.
 func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.DirectoryFacts, bool) {
@@ -518,7 +525,9 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	}
 	key := strconv.Itoa(uid)
 	c.noteHolder(uid, key)
-	return c.directoryCache().get(key, block)
+	cache := c.directoryCache()
+	forgetOnSpoolAccountChange(cache, key, time.Now())
+	return cache.get(key, block)
 }
 
 // explainDirectory is directory for `guardrail profile explain`: the facts a
@@ -533,7 +542,9 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 func (c *managedHookPeerHomeCache) explainDirectory(uid int) (useridentity.DirectoryFacts, error) {
 	key := strconv.Itoa(uid)
 	c.noteHolder(uid, key)
-	return explainDirectoryFacts(c.directoryCache(), key)
+	cache := c.directoryCache()
+	forgetOnSpoolAccountChange(cache, key, time.Now())
+	return explainDirectoryFacts(cache, key)
 }
 
 // noteHolder records the account (name and home) that uid's cached

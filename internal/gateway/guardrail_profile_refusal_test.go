@@ -161,9 +161,10 @@ func TestProfileCoversKnowsEveryProfileField(t *testing.T) {
 // catches the marker. alice's 1.0.3 agents entry assigns strict, the
 // default is permissive, and the ledger cannot be read. Before, the hook,
 // the inspect endpoints, ACP and the proxy decided under permissive and the
-// marker passed. Now each refuses the request, and explain says so. Once
-// the ledger proves the entry is alice's, strict applies and its own rule
-// blocks the marker, and nothing is refused.
+// marker passed. Now each refuses the request, and explain says so; a sole
+// ledger record of the entry proves nothing (GAP-0337). Once the entry
+// names alice's current identity, strict applies and its own rule blocks
+// the marker, and nothing is refused.
 func TestRefusedProfileDecisionIsRefusedOnEverySurface(t *testing.T) {
 	resetConnectorRuleCategories(t)
 	withLocalPatternsRestored(t)
@@ -308,9 +309,19 @@ rules:
 		}
 	})
 
-	t.Run("the ledger proves the entry", func(t *testing.T) {
+	t.Run("a sole ledger record of the entry", func(t *testing.T) {
 		refusalLedger(t, []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice@corp.example")})
 		api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+		if action, reason := hook(api, "ls"); action != "block" || !refused(reason) {
+			t.Errorf("hook: action %q, reason %q; want the refusal", action, reason)
+		}
+	})
+
+	t.Run("the entry names the current identity", func(t *testing.T) {
+		refusalLedger(t, []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice@corp.example")})
+		rebound := *cfg
+		rebound.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Agents: []string{agent}}}}
+		api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, &rebound)
 		if action, reason := hook(api, "ls"); action == "block" || refused(reason) {
 			t.Errorf("hook: action %q, reason %q; want it decided under strict, not refused", action, reason)
 		}

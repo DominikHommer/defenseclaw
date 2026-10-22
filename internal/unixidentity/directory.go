@@ -345,7 +345,7 @@ func (r *NSSResolver) provenFactsForUID(uid int, now time.Time, includeGroups bo
 			// and from the member lists of a directory that holds no account
 			// of that name (localAccountGroupsWithDirectory). A name-only
 			// NSS lookup can combine groups of distinct accounts.
-			_, facts.Groups, err = r.localAccountGroupsWithDirectory(account)
+			_, facts.Groups, facts.UnconfirmedGroups, err = r.localAccountGroupsWithDirectory(account)
 		} else {
 			var ids []int
 			var qualified bool
@@ -354,7 +354,7 @@ func (r *NSSResolver) provenFactsForUID(uid int, now time.Time, includeGroups bo
 				ids, err = r.sssdGroupsOfDomain(sssd, ids, account, sidDomain(sid))
 			}
 			if err == nil {
-				facts.Groups, err = r.groupNames(ids)
+				facts.Groups, facts.UnconfirmedGroups, err = r.groupNames(ids)
 			}
 			if err == nil && sssd != nil {
 				facts.OnlyPrimaryGroup, err = sssdListsOnlyPrimaryGroup(sssd, ids, account)
@@ -976,14 +976,16 @@ var memberListServices = map[string]bool{"ldap": true, "nis": true, "nisplus": t
 // (fail closed). So does one that holds no account of the name, lists the
 // name in no group and cannot show that it answers at all, which is how
 // getent reports an nslcd that cannot reach LDAP (memberListGroupsOf).
-func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, []string, error) {
-	ids, names, err := localAccountGroups(account)
+// unconfirmed lists the gids among names that stay numbers although no NSS
+// group service proved they have no name (groupNames).
+func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) (ids []int, names, unconfirmed []string, err error) {
+	ids, names, err = localAccountGroups(account)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	services, err := nssInitgroupsServices()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	named := make(map[int]string, len(ids))
 	for i, id := range ids {
@@ -998,7 +1000,7 @@ func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, [
 		}
 		listed, skip, listErr := r.memberListGroupsOf(service, account)
 		if listErr = r.unproven(listErr); listErr != nil {
-			return nil, nil, listErr
+			return nil, nil, nil, listErr
 		}
 		if skip {
 			continue
@@ -1013,7 +1015,7 @@ func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, [
 	if extra {
 		slices.Sort(ids)
 		if len(ids) > maxDirectoryGroups {
-			return nil, nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
+			return nil, nil, nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
 		}
 	}
 	var unnamed []int
@@ -1023,15 +1025,16 @@ func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, [
 		}
 	}
 	if len(unnamed) > 0 && slices.ContainsFunc(services, func(service string) bool { return service != "files" }) {
-		resolved, nameErr := r.groupNames(unnamed)
+		resolved, unconfirmedNames, nameErr := r.groupNames(unnamed)
 		if nameErr != nil {
-			return nil, nil, nameErr
+			return nil, nil, nil, nameErr
 		}
 		for i, id := range unnamed {
 			if resolved[i] != strconv.Itoa(id) {
 				named[id] = resolved[i]
 			}
 		}
+		unconfirmed = unconfirmedNames
 	}
 	names = make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -1041,7 +1044,7 @@ func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, [
 			names = append(names, strconv.Itoa(id))
 		}
 	}
-	return ids, names, nil
+	return ids, names, unconfirmed, nil
 }
 
 // errDirectoryUnconfirmed marks a directory answer DefenseClaw cannot tell
@@ -1151,32 +1154,171 @@ func localGroupsListing(name string) ([]int, error) {
 
 // groupNames names group ids with getent group calls of groupQueryBatch ids
 // each, one after the other. An id no group answers for is kept as its
-// number once every service of the group line shows that it has no group of
-// that id (confirmUnnamedGroups).
-func (r *NSSResolver) groupNames(ids []int) ([]string, error) {
+// number. It is a fact only when every NSS group service glibc asks proved
+// that it has no group of that id; unconfirmed lists the ids, as numbers,
+// whose lack of a name is not proved (unconfirmedGroupIDs). Their
+// membership is still proved, by initgroups; their name is unknown.
+func (r *NSSResolver) groupNames(ids []int) (names, unconfirmed []string, err error) {
 	if len(ids) > maxDirectoryGroups {
-		return nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
+		return nil, nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
 	}
-	names := make(map[int]string, len(ids))
+	byID := make(map[int]string, len(ids))
+	var unnamed []int
 	for start := 0; start < len(ids); start += groupQueryBatch {
-		found, queryErr := r.groupBatchNames(ids[start:min(start+groupQueryBatch, len(ids))])
+		batch := ids[start:min(start+groupQueryBatch, len(ids))]
+		found, queryErr := r.groupBatchNames(batch)
 		if queryErr != nil {
-			return nil, queryErr
+			return nil, nil, queryErr
 		}
-		maps.Copy(names, found)
+		for _, id := range batch {
+			if found[id] == "" {
+				unnamed = append(unnamed, id)
+			}
+		}
+		maps.Copy(byID, found)
 	}
-	if err := r.confirmUnnamedGroups(ids, names); err != nil {
-		return nil, err
+	for _, id := range r.unconfirmedGroupIDs(unnamed) {
+		unconfirmed = append(unconfirmed, strconv.Itoa(id))
 	}
-	out := make([]string, 0, len(ids))
+	names = make([]string, 0, len(ids))
 	for _, id := range ids {
-		if name := names[id]; name != "" {
-			out = append(out, name)
+		if name := byID[id]; name != "" {
+			names = append(names, name)
 		} else {
-			out = append(out, strconv.Itoa(id))
+			names = append(names, strconv.Itoa(id))
 		}
 	}
-	return out, nil
+	return names, unconfirmed, nil
+}
+
+// unconfirmedGroupIDs returns the ids, of those no getent group answer
+// named, whose lack of a name is not proved. A composite getent miss cannot
+// tell a group with no name from a service that did not answer, so each
+// service of the group line is asked on its own, in order, as glibc asks
+// it. An id is proved unnamed once every service before glibc stops shows
+// a definitive miss: files (the composite answer already read it), or a
+// service that misses it and shows that it answers (passwdServiceAnswers).
+// glibc stops after a service whose action is [NOTFOUND=return]. An id is
+// unconfirmed when a service cannot be asked or checked (a module with no
+// health check, such as himmelblau or aad, an invalid name, a failed or
+// garbled answer), and also when a service names it although the composite
+// answer did not: glibc did not take that name (an action stopped before
+// the service, or the service failed during the composite lookup), and two
+// services may name one gid differently, so no name is taken from such an
+// answer. An nsswitch.conf that cannot be read leaves every id unconfirmed.
+func (r *NSSResolver) unconfirmedGroupIDs(ids []int) []int {
+	if len(ids) == 0 {
+		return nil
+	}
+	data, err := readSmallFile(nsswitchPath, 1<<20)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return slices.Clone(ids)
+	}
+	content := string(data)
+	stops := nssStopsAtNotFound(content, "group")
+	pending := slices.Clone(ids)
+	var unconfirmed []int
+	for _, service := range nssServicesInUse(content, "group", localGroupPath) {
+		if len(pending) == 0 {
+			break
+		}
+		if service != "files" {
+			named, definitive := r.serviceGroupMisses(service, pending)
+			next := make([]int, 0, len(pending))
+			for _, id := range pending {
+				if named[id] || !definitive {
+					unconfirmed = append(unconfirmed, id)
+				} else {
+					next = append(next, id)
+				}
+			}
+			pending = next
+		}
+		if stops[service] {
+			break
+		}
+	}
+	slices.Sort(unconfirmed)
+	return unconfirmed
+}
+
+// serviceGroupMisses asks one NSS service for the groups of ids. named
+// holds the ids it names; definitive says that its miss of the others is a
+// fact (passwdServiceAnswers). A service that cannot be asked, fails or
+// gives an answer that does not parse names nothing definitively.
+func (r *NSSResolver) serviceGroupMisses(service string, ids []int) (named map[int]bool, definitive bool) {
+	if !validServiceName(service) {
+		return nil, false
+	}
+	named = make(map[int]bool, len(ids))
+	for start := 0; start < len(ids); start += groupQueryBatch {
+		batch := ids[start:min(start+groupQueryBatch, len(ids))]
+		args := []string{"-s", service, "group"}
+		for _, id := range batch {
+			args = append(args, strconv.Itoa(id))
+		}
+		result, err := r.runner(r.context(), r.path, args, withoutGroupMembers)
+		if err != nil || result.exitCode != getentExitOK && result.exitCode != getentExitNotFound {
+			return nil, false
+		}
+		for _, line := range nonEmptyLines(string(result.stdout)) {
+			id, _, ok := parseGroupName(line)
+			if !ok || !slices.Contains(batch, id) {
+				return nil, false
+			}
+			named[id] = true
+		}
+	}
+	for _, id := range ids {
+		if !named[id] && !r.groupMissDefinitive(service, id) {
+			return named, false
+		}
+	}
+	return named, true
+}
+
+// groupMissDefinitive reports whether service not naming gid is a fact:
+// nslcd completes the search for the gid and finds none (LDAP), or the
+// service passes passwdAbsent for it (local files, an unconfigured
+// directory, an SSSD or winbind whose domains answer). NIS, and a service
+// DefenseClaw has no check for, never show it.
+func (r *NSSResolver) groupMissDefinitive(service string, gid int) bool {
+	if service == "ldap" {
+		_, found, err := nslcdGroupByGID(r.context(), gid)
+		return err == nil && !found
+	}
+	return r.passwdAbsent(service, strconv.Itoa(gid), true) == nil
+}
+
+// nssStopsAtNotFound lists the services of database's nsswitch.conf line
+// that an action stops the lookup after when they find nothing
+// ([NOTFOUND=return], in any case, alone or with other actions).
+func nssStopsAtNotFound(content, database string) map[string]bool {
+	stops := map[string]bool{}
+	for _, line := range strings.Split(content, "\n") {
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		key, sources, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok || strings.TrimSpace(key) != database {
+			continue
+		}
+		last := ""
+		inAction := false
+		for _, field := range strings.Fields(sources) {
+			if strings.HasPrefix(field, "[") || inAction {
+				inAction = !strings.HasSuffix(field, "]")
+				action := strings.ToLower(strings.Trim(field, "[]"))
+				if last != "" && action == "notfound=return" {
+					stops[last] = true
+				}
+				continue
+			}
+			last = strings.ToLower(field)
+		}
+		return stops
+	}
+	return stops
 }
 
 // groupBatchNames asks one getent group call for the names of ids. The
@@ -1191,8 +1333,8 @@ func (r *NSSResolver) groupBatchNames(ids []int) (map[int]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Exit 2 means getent named no group for some id; confirmUnnamedGroups
-	// decides whether it stays a number.
+	// Exit 2 means getent named no group for some id; unconfirmedGroupIDs
+	// decides whether it stays a number as a fact.
 	if result.exitCode != getentExitOK && result.exitCode != getentExitNotFound {
 		return nil, fmt.Errorf("getent group exited %d", result.exitCode)
 	}
@@ -1203,78 +1345,6 @@ func (r *NSSResolver) groupBatchNames(ids []int) (map[int]string, error) {
 		}
 	}
 	return names, nil
-}
-
-// confirmUnnamedGroups names, or shows that no group has, each of ids that
-// getent group named none for (names, which it completes). getent exits 2
-// both when no group has a gid and when a directory module cannot answer
-// (nslcd that cannot reach LDAP, ypbind or winbindd down, SSSD stopped), so
-// a membership the directory confirmed kept its gid as a number that no
-// assignment names, and the lookup did not fail: a strict profile's group
-// was dropped (review of GAP-0212, loop 4). Each directory service of the
-// group line must show it: nslcd is asked for the gid itself, and its
-// completed search names the group or shows that none has the gid; SSSD
-// and winbind must answer (passwdAbsent); getent cannot show it for NIS, so
-// a gid NIS names no group for fails the lookup (fail closed). Local
-// sources answer definitively, and a service DefenseClaw has no check for
-// is taken at its word, as passwdOwner takes it.
-func (r *NSSResolver) confirmUnnamedGroups(ids []int, names map[int]string) error {
-	var unnamed []int
-	for _, id := range ids {
-		if names[id] == "" && !slices.Contains(unnamed, id) {
-			unnamed = append(unnamed, id)
-		}
-	}
-	if len(unnamed) == 0 {
-		return nil
-	}
-	services, err := groupProviders()
-	if err != nil {
-		return err
-	}
-	for _, service := range services {
-		if !validServiceName(service) || nssLocalPasswdSources[service] {
-			continue
-		}
-		switch {
-		case service == "ldap":
-			for _, gid := range unnamed {
-				if names[gid] != "" {
-					continue
-				}
-				name, found, err := nslcdGroupByGID(r.context(), gid)
-				if err = r.unproven(err); err != nil {
-					return fmt.Errorf("unixidentity: ldap group %d: %w", gid, err)
-				}
-				if found {
-					names[gid] = name
-				}
-			}
-		case service == "sss" || service == "winbind":
-			// passwdAbsent checks these services as a whole: the key is not
-			// asked.
-			if err := r.unproven(r.passwdAbsent(service, strconv.Itoa(unnamed[0]), true)); err != nil {
-				return fmt.Errorf("unixidentity: no group answers for gid %d, and %s cannot show that it answers: %w", unnamed[0], service, err)
-			}
-		case memberListServices[service] && !r.provisional():
-			return fmt.Errorf("unixidentity: no group answers for gid %d, and getent answers %s so also when %s did not answer: %w",
-				unnamed[0], service, service, errDirectoryUnconfirmed)
-		}
-	}
-	return nil
-}
-
-// groupProviders lists the services NSS asks for a group: the group line
-// of nsswitch.conf as nssServicesInUse reads it, or glibc's default, files.
-func groupProviders() ([]string, error) {
-	data, err := readSmallFile(nsswitchPath, 1<<20)
-	if errors.Is(err, os.ErrNotExist) {
-		return []string{"files"}, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("unixidentity: read NSS configuration: %w", err)
-	}
-	return nssServicesInUse(string(data), "group", localGroupPath), nil
 }
 
 // ParseNSSwitchServices lists the services on the line of database
