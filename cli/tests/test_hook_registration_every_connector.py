@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from defenseclaw import bootstrap, fail_mode, hook_integrity
 from defenseclaw.commands import cmd_doctor, cmd_status
 from defenseclaw.config import default_config
@@ -123,6 +124,19 @@ def _install(tmp_path: Path, monkeypatch, case: dict[str, Any], *, removed: bool
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content.replace("{data_dir}", str(data_dir)).replace("{home}", str(home)), encoding="utf-8")
         paths.append(str(path))
+    if case["connector"] == "hermes" and case["os"] == "posix":
+        # Hermes also reads an approval file that the registration golden
+        # deliberately omits; doctor must see the same approved command.
+        config_path = next(Path(path) for path in paths if path.endswith("config.yaml"))
+        hooks = yaml.safe_load(config_path.read_text(encoding="utf-8"))["hooks"]
+        approvals = [
+            {"event": event, "command": entry["command"]}
+            for event, entries in hooks.items()
+            for entry in entries
+        ]
+        (config_path.parent / "shell-hooks-allowlist.json").write_text(
+            json.dumps({"approvals": approvals}), encoding="utf-8"
+        )
     lock = {"version": 2, "connectors": {case["connector"]: {"locations": {"hook_config_paths": paths}}}}
     (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
     cfg = default_config()
