@@ -63,7 +63,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.config import _assert_config_write_allowed, config_path_for_data_dir
 from defenseclaw.config_writer import ConfigWriteError
-from defenseclaw.connector_contracts import normalize_connector
+from defenseclaw.connector_contracts import has_native_approval_prompt, normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
 from defenseclaw.fail_mode import (
@@ -677,6 +677,8 @@ def _echo_status_json(
     for row in rows:
         item = {"connector": row["key"][0], "label": row["label"][0]}
         item.update({("fail_mode" if key == "fail" else key): row[key][0] for key in keys})
+        if item["fail_mode"] == "-":
+            item["fail_mode"] = None
         connectors.append(item)
     payload = {
         "enabled": (
@@ -765,7 +767,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     secure_client = _enterprise_profile(app.cfg) == "secure_client"
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
-    fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
+    fail_mode = (getattr(gc, "hook_fail_mode", "") or "closed").lower()
     if not as_json:
         ux.section("Guardrail status", indent="  ")
         if secure_client:
@@ -955,7 +957,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 )
         fail_raw = cfm
         cfm_display = _style_fail_mode(cfm)
-        if not (gc.enabled and c_enabled) and not as_json:
+        if not (gc.enabled and c_enabled):
             # A disabled connector has no hooks and so no fail mode; match
             # `guardrail fail-mode`, which shows "disabled (no hooks)" (GAP-1953).
             fail_raw = "-"
@@ -2200,6 +2202,19 @@ def _warn_still_fail_open(gc, open_names: list[str]) -> None:
 _HILT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
 
+def _hilt_enable_notice(connector: str, severity: str) -> str:
+    label = _connector_label(connector)
+    if has_native_approval_prompt(connector):
+        return (
+            f"{label} will prompt for approval on supported confirmable actions at/above "
+            f"{severity} (CRITICAL findings still block outright)."
+        )
+    return (
+        f"{label} has no implemented native approval prompt; confirm verdicts at/above "
+        f"{severity} produce alerts with raw_action=confirm preserved. CRITICAL findings still block outright."
+    )
+
+
 def _set_connector_hilt(
     app: AppContext,
     requested: str,
@@ -2287,8 +2302,7 @@ def _set_connector_hilt(
     )
     if new_enabled:
         ux.subhead(
-            f"{label} will prompt for approval on confirmable actions at/above "
-            f"{new_min} (CRITICAL findings still block outright).",
+            _hilt_enable_notice(key, new_min),
             indent="  ",
         )
     else:
@@ -3608,6 +3622,70 @@ def _scope_rules(cfg, connector_key: str | None, profile: str | None):
     return getattr(block, "rules", None) if block is not None else None
 
 
+def _scope_pack_selections(cfg) -> dict[str, tuple[str | None, str | None, str]]:
+    """Every guardrail scope block: config path -> (connector, profile, its ``rule_pack``)."""
+    gc = cfg.guardrail
+    selected = {"guardrail": (None, None, str(getattr(gc, "rule_pack", "") or "").strip())}
+    for connector, block in sorted((getattr(gc, "connectors", None) or {}).items()):
+        selected[_scope_key(connector, None)] = (connector, None, str(getattr(block, "rule_pack", "") or "").strip())
+    for profile, block in sorted((getattr(gc, "profiles", None) or {}).items()):
+        selected[_scope_key(None, profile)] = (None, profile, str(getattr(block, "rule_pack", "") or "").strip())
+        for connector, sub in sorted((getattr(block, "connectors", None) or {}).items()):
+            selected[_scope_key(connector, profile)] = (
+                connector,
+                profile,
+                str(getattr(sub, "rule_pack", "") or "").strip(),
+            )
+    return selected
+
+
+def _app_protection_pack_selections(cfg) -> dict[str, tuple[str | None, str, bool]]:
+    """Every automatic-protection guardrail block: config path -> (connector,
+    its ``rule_pack``, whether it is on). The gateway loads these packs for
+    the connectors it protects automatically (appProtectionGuardrailOverride
+    in internal/config/application_protection.go); use-pack never writes them."""
+    ap = getattr(cfg, "application_protection", None)
+    if ap is None:
+        return {}
+    on = bool(getattr(ap, "enabled", False))
+
+    def _pack(block) -> str:
+        return str(getattr(getattr(block, "guardrail", None), "rule_pack", "") or "").strip()
+
+    selected = {"application_protection.guardrail": (None, _pack(ap), on)}
+    for connector, entry in sorted((getattr(ap, "connectors", None) or {}).items()):
+        selected[f"application_protection.connectors.{connector}.guardrail"] = (
+            connector,
+            _pack(entry),
+            on and getattr(entry, "enabled", None) is not False,
+        )
+    return selected
+
+
+def _repin_shared_scopes(cfg, name: str, written: set[str]) -> list[str]:
+    """The scopes outside *written* (config paths) that select custom pack
+    *name*: re-pinning its digest changes their policy too, so the prompt
+    and the result name them, automatic-protection scopes included."""
+    shared = []
+    for path, (connector, profile, selected) in _scope_pack_selections(cfg).items():
+        if path in written or selected != name:
+            continue
+        if connector is None and profile is None:
+            shared.append("the global pack (every connector without its own pack)")
+        else:
+            shared.append(_scope_words(connector, profile))
+    for path, (connector, selected, on) in _app_protection_pack_selections(cfg).items():
+        if selected != name:
+            continue
+        words = (
+            f"automatic protection for {_connector_label(connector)}"
+            if connector
+            else "automatic protection (connectors it protects that are not set up manually)"
+        )
+        shared.append(f"{words} ({path}{'' if on else ', when turned on'})")
+    return shared
+
+
 def _unused_pin_changes(cfg, after: dict[str, str]) -> tuple[list, list[str]]:
     """Unset the ``guardrail.custom_packs`` pins no scope selects once the
     scopes in *after* (config path -> its new ``rule_pack``, "" when unset)
@@ -3616,14 +3694,11 @@ def _unused_pin_changes(cfg, after: dict[str, str]) -> tuple[list, list[str]]:
     from defenseclaw import config_writer
 
     gc = cfg.guardrail
-    selected = {"guardrail": getattr(gc, "rule_pack", "")}
-    for connector, block in (getattr(gc, "connectors", None) or {}).items():
-        selected[_scope_key(connector, None)] = getattr(block, "rule_pack", "")
-    for profile, block in (getattr(gc, "profiles", None) or {}).items():
-        selected[_scope_key(None, profile)] = getattr(block, "rule_pack", "")
-        for connector, sub in (getattr(block, "connectors", None) or {}).items():
-            selected[_scope_key(connector, profile)] = getattr(sub, "rule_pack", "")
+    selected = {path: pack for path, (_c, _p, pack) in _scope_pack_selections(cfg).items()}
     selected.update(after)
+    # An automatic-protection pack keeps its pin; the gateway refuses a pack
+    # name that is neither built in nor a custom_packs key.
+    selected.update({path: pack for path, (_c, pack, _on) in _app_protection_pack_selections(cfg).items()})
     used = {str(name or "").strip() for name in selected.values()}
     dropped = sorted(name for name in (getattr(gc, "custom_packs", None) or {}) if name not in used)
     return [config_writer.Change(f"guardrail.custom_packs.{name}", unset=True) for name in dropped], dropped
@@ -3683,15 +3758,24 @@ def _guardrail_write_error(exc: BaseException) -> str:
     return f"Failed to save config: {config_writer.plain_error(exc)}"
 
 
-def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> object:
+def _write_guardrail_config(
+    app: AppContext, changes, reason: str, fail, *, snapshot: tuple[str, str] | None = None
+) -> object:
     """Apply *changes* through the config writer; *fail(exit_code, message)*
-    reports a refused or failed write and exits."""
+    reports a refused or failed write and exits. With *snapshot* (the
+    ``(path, sha256)`` :func:`_read_config_snapshot` returned) the write is a
+    compare-and-swap: it lands only on those config.yaml bytes, and a file
+    changed or removed since then raises
+    :class:`config_writer.ConfigConflictError` for the caller."""
     from defenseclaw import config_writer
 
+    target, expect_sha256 = snapshot or (str(config_path_for_data_dir(app.cfg.data_dir)), None)
     try:
-        return config_writer.apply(
-            changes, _cli_actor(), reason, path=str(config_path_for_data_dir(app.cfg.data_dir))
-        )
+        return config_writer.apply(changes, _cli_actor(), reason, expect_sha256=expect_sha256, path=target)
+    except config_writer.ConfigConflictError as exc:
+        if expect_sha256 is not None:
+            raise
+        fail(1, _guardrail_write_error(exc))
     except config_writer.ManagedConfigWriteError:
         _refuse_managed_write(getattr(changes[0], "path", "") or "guardrail", reason, fail)
     except (config_writer.ConfigWriteError, OSError) as exc:
@@ -3703,6 +3787,56 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
             detail += " The global rule pack was checked; use --connector or --profile for another scope."
         fail(1, detail)
     return None
+
+
+def _read_config_snapshot(app: AppContext, fail) -> tuple[str, str]:
+    """Read config.yaml once, load ``app.cfg`` from exactly those bytes, and
+    return ``(path, sha256)`` for a compare-and-swap write.
+
+    ``use-pack --repin`` shows every change from this one read and asks;
+    the write then lands only on these bytes. A pin lives in config.yaml, so
+    a missing or empty file is refused: the config still in memory is not
+    what is on disk, and nothing may build a config.yaml from it.
+    """
+    import hashlib
+
+    from defenseclaw import config as cfg_mod
+
+    path = config_path_for_data_dir(app.cfg.data_dir)
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except FileNotFoundError:
+        fail(1, f"--repin replaces a pin in config.yaml, and there is no {path}. Nothing was changed.")
+        raise
+    except OSError as exc:
+        fail(1, f"Failed to read config: {exc}. Nothing was changed.")
+        raise
+    try:
+        source = cfg_mod.parse_config_yaml(cfg_mod.decode_config_bytes(raw)) or {}
+    except Exception as exc:
+        fail(1, f"Failed to load config: {exc}. Nothing was changed.")
+        raise
+    if not source:
+        fail(1, f"--repin replaces a pin in config.yaml, and {path} is empty. Nothing was changed.")
+    try:
+        app.cfg = cfg_mod.load(parsed_source=source)
+    except Exception as exc:
+        fail(1, f"Failed to load config: {exc}. Nothing was changed.")
+        raise
+    return str(path), hashlib.sha256(raw).hexdigest()
+
+
+def _planned_change_lines(changes) -> list[str]:
+    """One line per config.yaml edit, exactly as the writer gets it."""
+    lines = []
+    for change in changes:
+        if change.unset:
+            lines.append(f"remove {change.path}")
+        else:
+            value = change.value if isinstance(change.value, str) else json.dumps(change.value, sort_keys=True)
+            lines.append(f"set {change.path} = {value}")
+    return lines
 
 
 @contextmanager
@@ -3801,6 +3935,12 @@ def _with_scope_options(fn):
     is_flag=True,
     help="Skip validating a built-in pack (a custom pack is always validated: its digest is pinned).",
 )
+@click.option(
+    "--repin",
+    is_flag=True,
+    help="Replace the pinned digest of a custom pack edited since it was pinned (shows both digests and asks).",
+)
+@click.option("--yes", is_flag=True, help="With --repin: skip the confirmation prompt.")
 @click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def use_pack_cmd(
@@ -3809,6 +3949,8 @@ def use_pack_cmd(
     connector: str | None,
     clear: bool,
     no_validate: bool,
+    repin: bool,
+    yes: bool,
     json_out: bool,
 ) -> None:
     """Switch the guardrail rule pack, globally or for one connector.
@@ -3819,8 +3961,9 @@ def use_pack_cmd(
     for a folder in the current directory that shares a pack's name). It is
     written as ``guardrail.rule_pack``; a custom directory is also pinned as
     ``guardrail.custom_packs.NAME`` with its validated digest, so an edited
-    pack is refused until ``use-pack NAME`` pins it again (it runs while that
-    stale pin fails the config check). Without ``--connector`` every
+    pack is refused until ``use-pack NAME --repin`` pins it again: it shows
+    the pinned and the new digest and asks (``--yes`` for scripts), and it
+    runs while that stale pin fails the config check. Without ``--connector`` every
     connector uses PACK and per-connector packs are removed. ``--clear
     --connector X`` removes X's pack. The running gateway picks it up on its
     next reload; nothing is restarted.
@@ -3878,8 +4021,13 @@ def use_pack_cmd(
         raise click.UsageError("--clear needs --connector NAME (the global pack can't be cleared, only switched).")
     if clear and pack:
         raise click.UsageError("Pass either PACK or --clear, not both.")
+    if clear and repin:
+        raise click.UsageError("--repin re-pins a custom pack; it can't be combined with --clear.")
     if not clear and not (pack or "").strip():
         raise click.UsageError("Missing PACK: a preset (default, strict, permissive) or a rule-pack directory.")
+    # A re-pin previews, confirms and writes one read of config.yaml.
+    snapshot = _read_config_snapshot(app, _fail) if repin else None
+    gc = app.cfg.guardrail
 
     if connector:
         connector_key, problem = _resolve_scope_connector(app, connector)
@@ -3983,10 +4131,31 @@ def use_pack_cmd(
             path=path,
             message=f"The '{pack_name}' preset isn't installed at {path}; run defenseclaw init. Nothing was changed.",
         )
+    if kind == "preset" and repin:
+        raise click.UsageError(f"--repin re-pins a custom pack; '{pack_name}' is a built-in preset.")
 
     validation: dict | None = None
     warning = ""
     digest = ""
+    # (pinned, new) when --repin replaces a stale pin; never without --repin.
+    repinned: tuple[str, str] | None = None
+
+    def _refuse_stale_pin(pinned: str) -> None:
+        _finish(
+            ok=False,
+            exit_code=1,
+            pack_name=pack_name,
+            path=path,
+            validation=validation,
+            message=(
+                f"Rule pack {pack_name!r} no longer matches the digest pinned for it ({pinned or 'none'}; "
+                f"the pack is now sha256:{digest}). Review the pack, then re-pin it: defenseclaw guardrail "
+                f"use-pack {raw} --repin (or defenseclaw config set guardrail.custom_packs.{name_for_pin}.digest "
+                f"sha256:{digest}). Nothing was changed."
+            ),
+        )
+
+    name_for_pin = pack_name
     if kind != "preset" or not no_validate:
         try:
             result = rulepack_validation.validate_rule_pack(path)
@@ -4019,18 +4188,10 @@ def use_pack_cmd(
             digest = str((result.summary or {}).get("files_digest", "") or "")
             pinned = str(getattr(registered, "digest", "") or "").strip().lower().removeprefix("sha256:")
             if kind == "registered" and digest.lower() != pinned:
-                _finish(
-                    ok=False,
-                    exit_code=1,
-                    pack_name=pack_name,
-                    path=path,
-                    validation=validation,
-                    message=(
-                        f"Rule pack {pack_name!r} no longer matches the digest registered for it. Review the pack, "
-                        f"then pin it: defenseclaw config set guardrail.custom_packs.{pack_name}.digest "
-                        f"sha256:{digest}. Nothing was changed."
-                    ),
-                )
+                old_pin = f"sha256:{pinned}" if pinned else ""
+                if not repin:
+                    _refuse_stale_pin(old_pin)
+                repinned = (old_pin, f"sha256:{digest}")
 
     _preflight_config_write(app)
     changes: list = []
@@ -4043,16 +4204,40 @@ def use_pack_cmd(
         if existing is not None:
             existing_path = policy_catalog.normalize_pack_path(str(getattr(existing, "path", "") or ""))
             existing_digest = str(getattr(existing, "digest", "") or "").lower()
-            if existing_path != path or existing_digest != f"sha256:{digest.lower()}":
+            if existing_path != path:
                 _fail(
                     1,
                     f"Custom pack name {name!r} is already registered at {existing_path}. "
                     "Choose a different pack name or update the registered pack explicitly. Nothing was changed.",
                 )
-        else:
+            if existing_digest != f"sha256:{digest.lower()}":
+                # Same directory, edited since it was pinned: only --repin replaces the pin.
+                name_for_pin = name
+                if not repin:
+                    _refuse_stale_pin(existing_digest)
+                repinned = (existing_digest, f"sha256:{digest}")
+        if existing is None or repinned is not None:
             changes.append(
                 config_writer.Change(f"guardrail.custom_packs.{name}", {"path": path, "digest": f"sha256:{digest}"})
             )
+    elif repinned is not None:
+        changes.append(
+            config_writer.Change(
+                f"guardrail.custom_packs.{name}",
+                {"path": str(getattr(registered, "path", "") or ""), "digest": repinned[1]},
+            )
+        )
+    shared: list[str] = []
+    if repinned is not None:
+        # The pin is one guardrail.custom_packs key: every other scope that
+        # selects it enforces the edited pack too, so name them before asking.
+        written = {_scope_key(connector_key, None)}
+        if connector_key is None:
+            written |= {_scope_key(other, None) for other in (getattr(gc, "connectors", None) or {})}
+        shared = _repin_shared_scopes(app.cfg, name, written)
+    shared_note = (
+        f" The pin is shared, so the edited pack also applies to {', '.join(shared)}." if shared else ""
+    )
     key = _scope_key(connector_key, None)
     changes.append(config_writer.Change(f"{key}.rule_pack", name))
     cleared: list[str] = []
@@ -4069,6 +4254,28 @@ def use_pack_cmd(
     # Rule references the new pack does not ship would fail the whole save (GAP-0258, GAP-0261).
     stale, dropped = _stale_rule_changes(app.cfg, path, connector_key)
     changes.extend(stale)
+    if repinned is not None:
+        # Every edit the write makes, from the one read it is bound to.
+        planned = _planned_change_lines(changes)
+        if json_out and not yes:
+            _fail(
+                2,
+                f"Re-pinning {name!r} from {repinned[0] or 'none'} to {repinned[1]} needs your confirmation; "
+                f"pass --yes with --json.{shared_note} It would change config.yaml: {'; '.join(planned)}. "
+                "Nothing was changed.",
+            )
+        if not json_out:
+            ux.warn(
+                f"Re-pin {name!r} at {path}: pinned {repinned[0] or 'none'}, the pack is now {repinned[1]}. "
+                f"The gateway then enforces the edited pack.{shared_note}",
+                indent="  ",
+            )
+            click.echo("  This changes config.yaml:")
+            for line in planned:
+                click.echo(f"    {line}")
+            if not yes and not _confirm_proceed():
+                click.echo(f"  {ux.dim('Cancelled.')} Nothing was changed.")
+                raise SystemExit(1)
     previous_pack = (
         policy_catalog.pack_name_for_path(
             app.cfg, policy_catalog.configured_pack_dir(app.cfg, _scope_block(app.cfg, connector_key, None))
@@ -4076,7 +4283,15 @@ def use_pack_cmd(
         if connector_key and policy_catalog.configured_pack_dir(app.cfg, _scope_block(app.cfg, connector_key, None))
         else policy_catalog.global_pack(app.cfg).pack
     )
-    result = _write_guardrail_config(app, changes, f"guardrail use-pack {name}", _fail)
+    try:
+        result = _write_guardrail_config(app, changes, f"guardrail use-pack {name}", _fail, snapshot=snapshot)
+    except config_writer.ConfigConflictError:
+        # config.yaml changed or went away after the read the preview showed.
+        _fail(
+            1,
+            f"config changed, run again: {snapshot[0] if snapshot else 'config.yaml'} changed or was removed "
+            "after --repin read it. Nothing was changed.",
+        )
     if connector_key is None:
         message = f"All connectors now use the '{pack_name}' rule pack."
         if cleared:
@@ -4085,11 +4300,15 @@ def use_pack_cmd(
         message = f"{_connector_label(connector_key)} now uses the '{pack_name}' rule pack."
     if dropped:
         message += f" Dropped rule references the pack does not have: {'; '.join(dropped)}."
+    if repinned is not None:
+        message += f" Re-pinned {name!r} from {repinned[0] or 'none'} to {repinned[1]}.{shared_note}"
     _log_guardrail_change(
         app,
         "guardrail-use-pack",
         f"scope={connector_key or scope} pack={name} previous={previous_pack}"
-        + (f" cleared={','.join(cleared)}" if cleared else ""),
+        + (f" cleared={','.join(cleared)}" if cleared else "")
+        + (f" repinned={repinned[0] or 'none'}->{repinned[1]}" if repinned is not None else "")
+        + (f" repin_shared={';'.join(shared)}" if shared else ""),
     )
     _finish(
         ok=True,

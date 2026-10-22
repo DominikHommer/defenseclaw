@@ -29,6 +29,14 @@ from defenseclaw.config_writer import Change
 from defenseclaw.observability.v8_config import V8ConfigError
 
 
+@pytest.fixture(autouse=True)
+def _offline_config_writer_audit(monkeypatch):
+    """Writer unit tests do not emit facts to the developer's live gateway."""
+    from defenseclaw.logger import Logger
+
+    monkeypatch.setattr(Logger, "from_config", classmethod(lambda cls, cfg: cls.no_runtime()))
+
+
 def _reference_page(name: str) -> str:
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     with open(os.path.join(root, "docs-site", "content", "docs", "reference", name), encoding="utf-8") as stream:
@@ -99,6 +107,11 @@ def test_unset_removes_a_dependent_pair_in_one_write(tmp_path, monkeypatch):
         tmp_path,
         "openshell:\n  admin:\n    required_pack: balanced\n    required_pack_digest: sha256:" + "ab" * 32 + "\n",
     )
+    # A live gateway must never affect a writer unit test or receive its events.
+    def refuse_transport(*_args, **_kwargs):
+        pytest.fail("config writer test reached the host gateway")
+
+    monkeypatch.setattr("defenseclaw.logger._GatewayConfigRecorder.emit_cli_observability", refuse_transport)
     pack, digest = "openshell.admin.required_pack", "openshell.admin.required_pack_digest"
     with (
         patch.object(cmd_config.config_module, "config_path", return_value=tmp_path / "config.yaml"),

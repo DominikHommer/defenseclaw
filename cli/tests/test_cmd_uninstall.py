@@ -1795,7 +1795,7 @@ class GatewayTeardownOutputTests(unittest.TestCase):
         completed = type(
             "Completed",
             (),
-            {"returncode": 0, "stdout": "✓ restored\n", "stderr": ""},
+            {"returncode": 0, "stdout": "✓ restored\n", "stderr": "WARNING: manual cleanup required; remove the edited hook entry\n"},
         )()
         with (
             patch("shutil.which", return_value="defenseclaw-gateway.exe"),
@@ -1805,6 +1805,7 @@ class GatewayTeardownOutputTests(unittest.TestCase):
             self.assertTrue(cmd_uninstall._run_gateway_connector_teardown("codex"))
 
         self.assertIn("✓ restored", buf.getvalue())
+        self.assertIn("manual cleanup required; remove the edited hook entry", buf.getvalue())
         kwargs = run_mock.call_args.kwargs
         self.assertEqual(kwargs["encoding"], "utf-8")
         self.assertEqual(kwargs["errors"], "replace")

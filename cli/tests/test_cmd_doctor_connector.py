@@ -1986,6 +1986,9 @@ class TestCheckHookHealth(unittest.TestCase):
         self.assertEqual(results[True]["label"], _HERMES_HOOKS_LABEL)
         self.assertIn(hook, results[True]["detail"])
         self.assertIn("live=false", results[True]["detail"])
+        self.assertIn("cannot verify", results[True]["detail"])
+        self.assertIn("close", results[True]["remediation"].lower())
+        self.assertIn("defenseclaw doctor", results[True]["remediation"])
         # With no Hermes host running there is nothing to reload.
         self.assertEqual(results[False]["status"], "pass", results[False])
 

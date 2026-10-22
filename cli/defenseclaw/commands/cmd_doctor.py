@@ -8399,9 +8399,13 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     "fail",
                     label,
                     f"on-disk registration is present at {path}, but running Hermes hosts "
-                    "are unverified; reload or restart every Hermes CLI/TUI/gateway/desktop/service host; live=false",
+                    "are unverified: doctor cannot verify which hooks an already running host loaded, "
+                    "even after a restart or successful hook traffic; live=false",
                     r=r,
-                    remediation="restart every running Hermes host, then rerun 'defenseclaw doctor'",
+                remediation=(
+                    "close every Hermes CLI/TUI/gateway/desktop/service host, then run 'defenseclaw doctor'; "
+                    "start Hermes again after the on-disk checks pass. Running-host load verification is unavailable"
+                ),
                 )
             elif connector == "amp":
                 _emit(
