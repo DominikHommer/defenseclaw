@@ -164,7 +164,7 @@ func (c removedConnectorBase) teardown(opts SetupOpts, plan removedPlanner, logi
 	if err := c.removeCredentials(opts.DataDir); err != nil {
 		return err
 	}
-	if err := os.Remove(removedCleanupRecordPath(opts.DataDir, c.name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := c.removeRecord(opts.DataDir); err != nil {
 		return fmt.Errorf("%s cleanup: %w", c.name, err)
 	}
 	return nil
@@ -178,7 +178,7 @@ func (c removedConnectorBase) verifyClean(opts SetupOpts, plan removedPlanner) e
 		return fmt.Errorf("%s cleanup: %w", c.name, err)
 	}
 	if len(p.manual) > 0 {
-		recorded := loadRemovedCleanupRecord(opts.DataDir, c.name)
+		recorded := c.loadRecord(opts.DataDir)
 		for _, item := range p.manual {
 			if !recorded.lists(item.Path) {
 				return fmt.Errorf("%s cleanup incomplete: %s still names DefenseClaw (%s), and no manual cleanup step was recorded for it", c.name, item.Path, item.Reason)
@@ -217,12 +217,173 @@ func removedCleanupRecordPath(dataDir, connectorName string) string {
 	return filepath.Join(dataDir, removedCleanupDir, connectorName+".json")
 }
 
-func loadRemovedCleanupRecord(dataDir, connectorName string) removedCleanupRecord {
-	var record removedCleanupRecord
-	if data, err := os.ReadFile(removedCleanupRecordPath(dataDir, connectorName)); err == nil {
-		_ = json.Unmarshal(data, &record)
+// removedCleanupRecordLimit bounds what is read of a file at a record path.
+const removedCleanupRecordLimit = 1 << 20
+
+// errRemovedRecordForeign marks a file at the record path that is not
+// exactly a record teardown writes: it may be anyone's.
+var errRemovedRecordForeign = errors.New("it is not a manual cleanup record DefenseClaw wrote")
+
+func (c removedConnectorBase) recordName() string { return c.name + ".json" }
+
+// recordBytes are the exact bytes teardown writes for a record of items. A
+// file at the record path is DefenseClaw's only while it holds exactly these
+// bytes for the items it lists.
+func (c removedConnectorBase) recordBytes(items []removedCleanupItem) ([]byte, error) {
+	data, err := json.MarshalIndent(removedCleanupRecord{
+		Version:   1,
+		Connector: c.name,
+		Label:     c.label,
+		Items:     items,
+		Finish:    "defenseclaw-gateway connector teardown --connector " + c.name,
+	}, "", "  ")
+	if err != nil {
+		return nil, err
 	}
-	return record
+	return append(data, '\n'), nil
+}
+
+// openRemovedCleanupDir opens the record folder under dataDir without
+// following a link: it must be a real directory, not a symlink, junction or
+// other reparse point, and the folder opened must be the one checked. With
+// create it is made when missing; without, a missing folder is nil, nil.
+func openRemovedCleanupDir(dataDir string, create bool) (*os.Root, error) {
+	dir := filepath.Join(dataDir, removedCleanupDir)
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		if !create {
+			return nil, nil
+		}
+		if err := os.MkdirAll(dataDir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		info, err = os.Lstat(dir)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode().Type() != os.ModeDir {
+		return nil, fmt.Errorf("%s is not a plain directory (a link or another kind of file); move it away", dir)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	if opened, err := root.Stat("."); err != nil || !os.SameFile(info, opened) {
+		_ = root.Close()
+		return nil, fmt.Errorf("%s changed while it was opened", dir)
+	}
+	return root, nil
+}
+
+// ownedRecord is a record file teardown can prove it wrote.
+type ownedRecord struct {
+	record removedCleanupRecord
+	data   []byte
+	info   os.FileInfo
+}
+
+// readOwnedRecord reads c's record in dir without following a link; nil, nil
+// when there is none. Any other file there (a link, another kind of file,
+// other bytes, another connector's record) is an error: it is never trusted,
+// replaced or removed.
+func (c removedConnectorBase) readOwnedRecord(dir *os.Root) (*ownedRecord, error) {
+	name := c.recordName()
+	info, err := dir.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errRemovedNotRegular
+	}
+	if info.Size() > removedCleanupRecordLimit {
+		return nil, errRemovedRecordForeign
+	}
+	file, err := dir.OpenFile(name, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if opened, err := file.Stat(); err != nil || !os.SameFile(info, opened) {
+		return nil, errors.New("it changed while it was read")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, removedCleanupRecordLimit+1))
+	if err != nil {
+		return nil, err
+	}
+	var record removedCleanupRecord
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil {
+		return nil, errRemovedRecordForeign
+	}
+	want, err := c.recordBytes(record.Items)
+	if err != nil || !bytes.Equal(data, want) {
+		return nil, errRemovedRecordForeign
+	}
+	return &ownedRecord{record: record, data: data, info: info}, nil
+}
+
+// dropOwnedRecord removes c's record once it is read again as the same file
+// with the same bytes.
+func (c removedConnectorBase) dropOwnedRecord(dir *os.Root, owned *ownedRecord) error {
+	again, err := c.readOwnedRecord(dir)
+	if err != nil {
+		return err
+	}
+	if again == nil {
+		return nil
+	}
+	if !os.SameFile(owned.info, again.info) || !bytes.Equal(owned.data, again.data) {
+		return errors.New("it changed while teardown read it")
+	}
+	if err := dir.Remove(c.recordName()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// loadRecord is c's record, or none when there is no record DefenseClaw
+// wrote (a file it cannot prove is its own lists no steps).
+func (c removedConnectorBase) loadRecord(dataDir string) removedCleanupRecord {
+	dir, err := openRemovedCleanupDir(dataDir, false)
+	if err != nil || dir == nil {
+		return removedCleanupRecord{}
+	}
+	defer dir.Close()
+	owned, err := c.readOwnedRecord(dir)
+	if err != nil || owned == nil {
+		return removedCleanupRecord{}
+	}
+	return owned.record
+}
+
+// removeRecord removes c's record after a finished cleanup. A file at the
+// record path that DefenseClaw cannot prove it wrote is left as it is.
+func (c removedConnectorBase) removeRecord(dataDir string) error {
+	path := removedCleanupRecordPath(dataDir, c.name)
+	dir, err := openRemovedCleanupDir(dataDir, false)
+	if err != nil {
+		return fmt.Errorf("left %s: %w", path, err)
+	}
+	if dir == nil {
+		return nil
+	}
+	defer dir.Close()
+	owned, err := c.readOwnedRecord(dir)
+	if err == nil && owned != nil {
+		err = c.dropOwnedRecord(dir, owned)
+	}
+	if err != nil {
+		return fmt.Errorf("left %s: %w; remove it by hand", path, err)
+	}
+	return nil
 }
 
 func (r removedCleanupRecord) lists(path string) bool {
@@ -234,33 +395,62 @@ func (r removedCleanupRecord) lists(path string) bool {
 	return false
 }
 
+// leaveForManualCleanup records the manual steps and prints them. The record
+// is created exclusively in a folder that is not a link, and a record already
+// there is replaced only when it is exactly one DefenseClaw wrote.
 func (c removedConnectorBase) leaveForManualCleanup(dataDir string, items []removedCleanupItem) error {
-	record := removedCleanupRecord{
-		Version:   1,
-		Connector: c.name,
-		Label:     c.label,
-		Items:     items,
-		Finish:    "defenseclaw-gateway connector teardown --connector " + c.name,
-	}
-	data, err := json.MarshalIndent(record, "", "  ")
+	data, err := c.recordBytes(items)
 	if err != nil {
 		return err
 	}
 	path := removedCleanupRecordPath(dataDir, c.name)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("%s cleanup: record the manual steps: %w", c.name, err)
-	}
-	if err := atomicWriteFileNoFollow(path, append(data, '\n'), 0o600); err != nil {
-		return fmt.Errorf("%s cleanup: record the manual steps: %w", c.name, err)
+	if err := c.writeRecord(dataDir, data); err != nil {
+		return fmt.Errorf("%s cleanup: record the manual steps in %s: %w", c.name, path, err)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "[%s] WARNING: the %s connector was removed in DefenseClaw 1.0.4, but its cleanup changed nothing: these files are not exactly as DefenseClaw wrote them, so they are yours to finish.\n", c.name, c.label)
 	for _, item := range items {
 		fmt.Fprintf(&b, "  - %s (%s): %s\n", item.Path, item.Reason, item.Step)
 	}
-	fmt.Fprintf(&b, "  Then run `%s` to remove the rest. `defenseclaw doctor` lists these steps.\n", record.Finish)
+	fmt.Fprintf(&b, "  Then run `defenseclaw-gateway connector teardown --connector %s` to remove the rest. `defenseclaw doctor` lists these steps.\n", c.name)
 	fmt.Fprint(removedConnectorNotices, b.String())
 	return nil
+}
+
+func (c removedConnectorBase) writeRecord(dataDir string, data []byte) error {
+	dir, err := openRemovedCleanupDir(dataDir, true)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	owned, err := c.readOwnedRecord(dir)
+	if err != nil {
+		return fmt.Errorf("%w; move it away and run teardown again", err)
+	}
+	if owned != nil {
+		if bytes.Equal(owned.data, data) {
+			return nil
+		}
+		if err := c.dropOwnedRecord(dir, owned); err != nil {
+			return err
+		}
+	}
+	file, err := dir.OpenFile(c.recordName(), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(data)
+	if err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		// The file is the one this call created exclusively.
+		_ = dir.Remove(c.recordName())
+	}
+	return err
 }
 
 // --- Plan ---

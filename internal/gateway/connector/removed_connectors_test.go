@@ -2153,3 +2153,161 @@ func TestRemovedResolvedPaths(t *testing.T) {
 		}
 	}
 }
+
+// --- Review fixes (G-deadcode loop round 2) ---
+
+// removedRecordVariants are files at the OmniGent record path that
+// DefenseClaw cannot prove it wrote: a user's file, another connector's
+// record, its own record with one byte more, and one with a field it never
+// writes.
+func removedRecordVariants(t *testing.T) map[string]string {
+	t.Helper()
+	items := []removedCleanupItem{{Path: "/x", Reason: "r", Step: "s"}}
+	own, err := removedConnectorBase{name: removedOmnigentID, label: "OmniGent"}.recordBytes(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := removedConnectorBase{name: removedOpenHandsID, label: "OpenHands"}.recordBytes(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := strings.Replace(string(own), `"version": 1,`, `"version": 1, "owner": "me",`, 1)
+	return map[string]string{
+		"a user file":              "theirs",
+		"another connector record": string(other),
+		"one byte more":            string(own) + "\n",
+		"an unknown field":         extra,
+	}
+}
+
+// A file at the record path that DefenseClaw cannot prove it wrote is never
+// overwritten (cleanup left for the user) nor removed (finished cleanup), and
+// lists no steps for VerifyClean.
+func TestRemovedManualCleanupRecordNeverReplacesOrRemovesAForeignFile(t *testing.T) {
+	for name, body := range removedRecordVariants(t) {
+		t.Run(name, func(t *testing.T) {
+			for _, finished := range []bool{false, true} {
+				t.Run(map[bool]string{false: "left", true: "finished"}[finished], func(t *testing.T) {
+					h := newOmnigentHarness(t, false)
+					h.setUp(t, omnigentSetup{config: omnigentOperatorConfig})
+					if !finished {
+						writeRemovedFixture(t, h.configPath, omnigentPatchedConfig+"model: local\n", 0o600)
+					}
+					record := removedCleanupRecordPath(h.dataDir, removedOmnigentID)
+					writeRemovedFixture(t, record, body, 0o600)
+					err := h.teardown(t)
+					if err == nil || !strings.Contains(err.Error(), record) {
+						t.Fatalf("finished=%t: Teardown = %v, want the file at the record path left and named", finished, err)
+					}
+					requireRemovedSnapshot(t, "a foreign record", map[string]string{record: body})
+					if !finished {
+						if err := h.verify(); err == nil {
+							t.Fatal("VerifyClean trusted steps from a file DefenseClaw did not write")
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+// The record folder is never a link: no record is written, replaced, removed
+// or read through one, wherever it leads.
+func TestRemovedManualCleanupRecordFolderIsNeverALink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	ownBytes := func(t *testing.T, h *omnigentHarness) string {
+		t.Helper()
+		// Exactly the record teardown would write for this state.
+		conn := removedOmnigentConnector{removedConnectorBase{name: removedOmnigentID, label: "OmniGent"}}
+		p, err := conn.plan(h.opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := conn.recordBytes(p.manual)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	for _, tc := range []struct {
+		name     string
+		finished bool
+		existing func(*testing.T, *omnigentHarness) string // "" = no file where the link leads
+	}{
+		{name: "left, nothing there", existing: func(*testing.T, *omnigentHarness) string { return "" }},
+		{name: "left, a user file", existing: func(*testing.T, *omnigentHarness) string { return "theirs" }},
+		{name: "left, a record", existing: ownBytes},
+		{name: "finished, a user file", finished: true, existing: func(*testing.T, *omnigentHarness) string { return "theirs" }},
+		{name: "finished, a record", finished: true, existing: ownBytes},
+	} {
+		for _, inHome := range []bool{true, false} {
+			t.Run(tc.name+map[bool]string{true: ", in the home", false: ", outside the home"}[inHome], func(t *testing.T) {
+				h := newOmnigentHarness(t, false)
+				h.setUp(t, omnigentSetup{config: omnigentOperatorConfig})
+				if !tc.finished {
+					writeRemovedFixture(t, h.configPath, omnigentPatchedConfig+"model: local\n", 0o600)
+				}
+				elsewhere := t.TempDir()
+				if inHome {
+					elsewhere = filepath.Join(h.home, "elsewhere")
+					if err := os.Mkdir(elsewhere, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				target := filepath.Join(elsewhere, removedOmnigentID+".json")
+				want := map[string]string{target: removedMissing}
+				if body := tc.existing(t, h); body != "" {
+					writeRemovedFixture(t, target, body, 0o600)
+					want[target] = body
+				}
+				folder := filepath.Join(h.dataDir, removedCleanupDir)
+				if err := os.Symlink(elsewhere, folder); err != nil {
+					t.Fatal(err)
+				}
+				if !tc.finished {
+					// A record where the link leads lists no steps.
+					if err := h.verify(); err == nil {
+						t.Fatal("VerifyClean read the record through a linked folder")
+					}
+				}
+				if err := h.teardown(t); err == nil || !strings.Contains(err.Error(), "not a plain directory") {
+					t.Fatalf("Teardown = %v, want the linked record folder refused", err)
+				}
+				requireRemovedSnapshot(t, "a linked record folder", want)
+				requireRemovedSnapshot(t, "a linked record folder", map[string]string{folder: "symlink:" + elsewhere})
+			})
+		}
+	}
+}
+
+// A record DefenseClaw wrote is replaced when the steps change and removed
+// when the cleanup finishes.
+func TestRemovedManualCleanupRecordReplacesAndRemovesItsOwn(t *testing.T) {
+	h := newOmnigentHarness(t, false)
+	h.setUp(t, omnigentSetup{config: omnigentOperatorConfig})
+	writeRemovedFixture(t, h.configPath, omnigentPatchedConfig+"model: local\n", 0o600)
+	stale, err := removedConnectorBase{name: removedOmnigentID, label: "OmniGent"}.recordBytes(
+		[]removedCleanupItem{{Path: filepath.Join(h.home, "stale"), Reason: "r", Step: "s"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := removedCleanupRecordPath(h.dataDir, removedOmnigentID)
+	writeRemovedFixture(t, record, string(stale), 0o600)
+	if err := h.teardown(t); err != nil {
+		t.Fatalf("Teardown over its own record: %v", err)
+	}
+	got, ok := h.manualRecord(t, removedOmnigentID)
+	if !ok || !got.lists(h.configPath) || got.lists(filepath.Join(h.home, "stale")) {
+		t.Fatalf("record = %+v, %t; want the current steps only", got, ok)
+	}
+	if err := h.verify(); err != nil {
+		t.Fatalf("VerifyClean with its own record: %v", err)
+	}
+	writeRemovedFixture(t, h.configPath, omnigentCleanedConfig, 0o600)
+	if err := h.teardown(t); err != nil {
+		t.Fatalf("Teardown after the manual step: %v", err)
+	}
+	h.requireDone(t)
+}
