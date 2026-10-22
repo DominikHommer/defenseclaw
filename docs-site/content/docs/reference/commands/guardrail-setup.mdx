@@ -247,7 +247,7 @@ The table follows `defenseclaw setup guardrail --help`.
     },
     "--human-approval / --no-human-approval": {
       type: "flag",
-      description: "Turn human approval (HITL) on or off. Applies in action mode.",
+      description: "Turn human approval (HITL) on or off. Applies in action mode. Without --connector it changes only the global guardrail.hilt; a connector's own hilt block keeps its value.",
     },
     "--hilt-min-severity": {
       type: "high|medium|low|critical",
