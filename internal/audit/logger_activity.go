@@ -66,9 +66,15 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	summaryBlob, _ := json.Marshal(summary)
 
 	auditID := uuid.New().String()
+	ctx := context.Background()
 	if in.OccurrenceID != "" {
+		// The producer keeps this occurrence queued under its stable id and
+		// offers it until it is stored: export it only after the local
+		// write, so a failed write that is offered again is not exported
+		// again, and record it once.
 		auditID = in.OccurrenceID
-		stored, err := l.store.hasAuditEvent(context.Background(), auditID)
+		ctx = observability.WithExportAfterLocalWrite(ctx)
+		stored, err := l.store.hasAuditEvent(ctx, auditID)
 		if err != nil {
 			return err
 		}
@@ -93,8 +99,14 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
 	stampAuditEventEnvelope(&auditEv)
+	metricActor := actor
+	if in.ConfigChange != nil {
+		// The audit record keeps the OS account of a change; its counters
+		// carry a fixed actor label, never an account name or SID.
+		metricActor = configChangeMetricActor
+	}
 	activityMetrics, metricErr := newActivityRuntimeV8GeneratedMetrics(
-		auditEv, action, targetType, actor, len(in.Diff),
+		auditEv, action, targetType, metricActor, len(in.Diff),
 	)
 	if metricErr != nil {
 		return metricErr
@@ -105,7 +117,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		return evidenceErr
 	}
 	disposition, emitErr := l.emitControlPlaneV8WithEvidenceAndMetrics(
-		context.Background(), auditEv, evidence, activityMetrics,
+		ctx, auditEv, evidence, activityMetrics,
 	)
 	if emitErr != nil {
 		return emitErr
@@ -119,7 +131,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		return nil
 	}
 	disposition, emitErr = l.emitCompatibilityAuditV8(
-		context.Background(), auditEv,
+		ctx, auditEv,
 		compatibilityAuditV8Options{
 			classification: observability.ClassificationContext{
 				MandatoryFacts: observability.MandatoryFacts{ControlPlaneMutation: true},

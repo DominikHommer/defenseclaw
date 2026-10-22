@@ -285,12 +285,15 @@ func (*recordBuildFailure) Error() string { return "canonical log record build f
 // Process evaluates collection exactly once through the router, persists the
 // required local projection, and only then creates optional destination work.
 // Optional projection failures are isolated and returned as bounded identities.
+// A failed local write still returns the remote projections (GAP-1536),
+// except for an occurrence marked observability.WithExportAfterLocalWrite,
+// whose producer offers it again until it is stored.
 func (pipeline *LocalLogPipeline) Process(
 	ctx context.Context,
 	metadata router.Metadata,
 	builder router.RecordBuilder,
 ) (LocalLogOutcome, error) {
-	return pipeline.process(ctx, metadata, builder, false, "", true)
+	return pipeline.process(ctx, metadata, builder, false, "", !observability.ExportAfterLocalWrite(ctx))
 }
 
 // ProcessLocalOnly applies the same collection, mandatory-floor, generated
@@ -585,7 +588,7 @@ func (pipeline *LocalLogPipeline) ProcessAtomicBatch(
 	sinkPolicy := legacyredaction.SinkPolicyFromContext(ctx)
 	if err := batcher.AppendBatchContext(ctx, records, projections); err != nil {
 		writeErr := boundedPipelineError(ErrorLocalWrite, err)
-		if writeErr.contextCause == nil {
+		if writeErr.contextCause == nil && !observability.ExportAfterLocalWrite(ctx) {
 			for index, ready := range prepared {
 				pipeline.projectOptional(&outcomes[at[index]], ready.record, ready.optional, sinkPolicy, "")
 			}

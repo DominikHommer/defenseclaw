@@ -48,6 +48,11 @@ type ConfigChange struct {
 	SecretName string
 }
 
+// configChangeMetricActor is the only actor label of the activity counters
+// of a change (defenseclaw.activity.total, defenseclaw.activity.diff_entries).
+// Actor, the OS account with its uid or SID, stays in the audit record.
+const configChangeMetricActor = "local_account"
+
 // Kinds and outcomes of a ConfigChange (enterprisestatus.ChangeEvent).
 const (
 	ConfigChangeTrustAnchors = "trust_anchors"

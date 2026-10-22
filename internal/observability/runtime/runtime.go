@@ -480,7 +480,9 @@ func (runtime *Runtime) emitWithLeaseControls(
 		// A failed SQLite write (disk full) still hands back the remote
 		// projections: export this gateway's own records so the decision and
 		// the outage stay visible remotely while the local store is down
-		// (GAP-1536). Imported records stay SQLite-first.
+		// (GAP-1536). Imported records, and records marked
+		// observability.WithExportAfterLocalWrite (Process returns no
+		// remote work for them), stay SQLite-first.
 		if len(outcome.OptionalWork()) > 0 {
 			if inbound {
 				return pipeline.LocalLogOutcome{}, processErr
@@ -567,7 +569,8 @@ func leaseRecordBuilder(
 // hands each persisted record's optional work to that generation's
 // dispatchers, as Emit does for one. A dropped item takes Emit's
 // managed-destination fallback. When the commit fails nothing is persisted and
-// the remote projections are dispatched, as Emit does on a failed write.
+// the remote projections are dispatched, as Emit does on a failed write,
+// except those of an item marked observability.WithExportAfterLocalWrite.
 func (runtime *Runtime) EmitAtomicBatch(
 	ctx context.Context,
 	items []LogBatchItem,
@@ -617,7 +620,8 @@ func (runtime *Runtime) EmitAtomicBatch(
 		}
 		outcome := outcomes[index]
 		if outcome.LocalPersisted() || outcome.ManagedOnly() ||
-			(processErr != nil && len(outcome.OptionalWork()) > 0) {
+			(processErr != nil && len(outcome.OptionalWork()) > 0 &&
+				!observability.ExportAfterLocalWrite(items[index].Context)) {
 			runtime.dispatchOptional(lease, graph, outcome)
 		}
 	}

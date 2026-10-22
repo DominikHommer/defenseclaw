@@ -370,6 +370,41 @@ func TestLocalLogPipelineLocalFailureContracts(t *testing.T) {
 		}
 	})
 
+	// A trust anchor or credential change event is offered again until it
+	// is stored: its failed write hands back no remote work, alone or in an
+	// atomic batch, so no offer is exported twice; its stored write does.
+	t.Run("write of a record exported after its local write", func(t *testing.T) {
+		marked := observability.WithExportAfterLocalWrite(t.Context())
+		build := func(admission router.Admission) (observability.Record, error) {
+			return buildClassifiedLog(test, admission, "marked-write")
+		}
+		pipeline, appender := mustPipeline(t, source, mustEngine(t))
+		appender.err = errors.New("database or disk is full")
+		outcome, err := pipeline.Process(marked, metadata, build)
+		assertPipelineError(t, err, ErrorLocalWrite)
+		if outcome.LocalPersisted() || len(outcome.OptionalWork()) != 0 {
+			t.Fatalf("marked write failure outcome: %+v", outcome)
+		}
+		plan, evaluator := mustPlanEvaluator(t, source)
+		batch := &batchAppender{recordingAppender: &recordingAppender{
+			graphDigest: plan.Digest(), err: errors.New("database or disk is full"),
+		}}
+		batchPipeline, buildErr := NewLocalLogPipeline(plan, evaluator, mustEngine(t), batch, mustFailureFactory(t))
+		if buildErr != nil {
+			t.Fatal(buildErr)
+		}
+		outcomes, err := batchPipeline.ProcessAtomicBatch(marked, []AtomicBatchItem{{Metadata: metadata, Builder: build}})
+		assertPipelineError(t, err, ErrorLocalWrite)
+		if len(outcomes) != 1 || outcomes[0].LocalPersisted() || len(outcomes[0].OptionalWork()) != 0 {
+			t.Fatalf("marked batch write failure outcomes: %+v", outcomes)
+		}
+		appender.err = nil
+		outcome, err = pipeline.Process(marked, metadata, build)
+		if err != nil || !outcome.LocalPersisted() || len(outcome.OptionalWork()) != 2 {
+			t.Fatalf("marked stored write: %+v %v", outcome, err)
+		}
+	})
+
 	t.Run("cancel during write", func(t *testing.T) {
 		pipeline, appender := mustPipeline(t, source, mustEngine(t))
 		appender.err = context.Canceled

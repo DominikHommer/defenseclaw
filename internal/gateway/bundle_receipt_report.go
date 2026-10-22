@@ -274,7 +274,9 @@ func (r *bundleReceiptReporter) reportSpool() {
 // skipped. An event is marked reported only once the audit logger recorded
 // it: one it refuses is offered again at every poll, and the logger stores
 // each change event id once, so a marker lost after the audit write cannot
-// report it twice. A reservation the next command moves into the spool
+// report it twice. The logger hands a change to the remote destinations only
+// after the local write (observability.WithExportAfterLocalWrite), so an
+// offer the audit store refuses exports nothing. A reservation the next command moves into the spool
 // keeps its id, so it is not reported again.
 func (r *bundleReceiptReporter) reportChanges() {
 	dir := r.changeDir()

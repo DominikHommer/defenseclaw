@@ -39,6 +39,8 @@ type testRuntimeV8Emitter struct {
 	metadata []router.Metadata
 	records  []observability.Record
 	metrics  []observability.Record
+	// exportAfterWrite is observability.ExportAfterLocalWrite of each emit.
+	exportAfterWrite []bool
 }
 
 type rejectingRuntimeV8Emitter struct {
@@ -103,6 +105,9 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 	if emitter == nil || emitter.writer == nil || builder == nil {
 		return RuntimeV8EmitOutcome{}, fmt.Errorf("test runtime emitter is unavailable")
 	}
+	emitter.mu.Lock()
+	emitter.exportAfterWrite = append(emitter.exportAfterWrite, observability.ExportAfterLocalWrite(ctx))
+	emitter.mu.Unlock()
 	if emitter.admission == router.AdmissionDrop {
 		emitter.mu.Lock()
 		emitter.metadata = append(emitter.metadata, metadata)

@@ -17,6 +17,7 @@
 package audit
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -160,5 +161,101 @@ func TestLogConfigChangeFailsWhileTheStoreIsClosed(t *testing.T) {
 		Outcome: ConfigChangeRefused, ReasonCode: "lifecycle_busy", Actor: "os:uid:0:root"}
 	if err := logger.LogConfigChange(change); err == nil {
 		t.Fatal("LogConfigChange succeeded with the audit store closed")
+	}
+}
+
+// A change is offered again until the audit store records it, so the
+// runtime must export it only after its local write: LogConfigChange marks
+// its occurrence for every kind and outcome, an ordinary activity is not
+// marked and is still exported while the store is down (GAP-1536).
+func TestLogConfigChangeIsExportedOnlyAfterTheLocalWrite(t *testing.T) {
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	ids := []string{testConfigChangeID, "c-01JB8Z4X6T2Q9V3M5N7P1R0S4X", "c-01JB8Z4X6T2Q9V3M5N7P1R0S4Y"}
+	for index, change := range []ConfigChange{
+		{Kind: ConfigChangeTrustAnchors, Action: "install", Outcome: ConfigChangeApplied, SHA256: strings.Repeat("a", 64)},
+		{Kind: ConfigChangeSecret, Action: "set", Outcome: ConfigChangeApplied, SecretName: "splunk-hec-token"},
+		{Kind: ConfigChangeSecret, Action: "remove", Outcome: ConfigChangeFailed, ReasonCode: "interrupted", SecretName: "otlp-token"},
+	} {
+		change.EventID, change.Actor = ids[index], "os:uid:0:root"
+		if err := logger.LogConfigChange(change); err != nil {
+			t.Fatalf("LogConfigChange %d: %v", index, err)
+		}
+	}
+	if err := logger.LogActivity(ActivityInput{
+		Actor: "watcher", Action: ActionPolicyReload, TargetType: "policy", TargetID: "default",
+	}); err != nil {
+		t.Fatalf("LogActivity: %v", err)
+	}
+	runtime.mu.Lock()
+	marks := append([]bool(nil), runtime.exportAfterWrite...)
+	runtime.mu.Unlock()
+	if want := []bool{true, true, true, false}; fmt.Sprint(marks) != fmt.Sprint(want) {
+		t.Fatalf("export-after-local-write marks = %v, want %v", marks, want)
+	}
+}
+
+// The activity counters of a change carry one fixed actor label for every
+// kind and outcome. The OS account (a Windows administrator SID and name,
+// or a uid and user name) stays in the audit record and enters no metric
+// label. Before, it was the actor label of defenseclaw.activity.total and
+// defenseclaw.activity.diff_entries.
+func TestLogConfigChangeKeepsTheAccountOffTheCounters(t *testing.T) {
+	const sid, account = "S-1-5-21-1004336348-1177238915-682003330-500", "CORP/Administrator"
+	for name, change := range map[string]ConfigChange{
+		"anchors installed": {Kind: ConfigChangeTrustAnchors, Action: "install", Outcome: ConfigChangeApplied,
+			SHA256: strings.Repeat("a", 64)},
+		"anchors refused": {Kind: ConfigChangeTrustAnchors, Action: "install", Outcome: ConfigChangeRefused,
+			ReasonCode: "anchor_invalid"},
+		"credential set": {Kind: ConfigChangeSecret, Action: "set", Outcome: ConfigChangeApplied,
+			SecretName: "splunk-hec-token"},
+		"credential removal interrupted": {Kind: ConfigChangeSecret, Action: "remove", Outcome: ConfigChangeFailed,
+			ReasonCode: "interrupted", SecretName: "otlp-token"},
+		"credential name refused": {Kind: ConfigChangeSecret, Action: "set", Outcome: ConfigChangeRefused,
+			ReasonCode: "invalid_arguments"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, actor := range []string{"os:sid:" + sid + ":" + account, "os:uid:0:root"} {
+				change.EventID, change.Actor = testConfigChangeID, actor
+				logger := newTestLogger(t)
+				runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+				logger.SetRuntimeV8Emitter(runtime)
+				if err := logger.LogConfigChange(change); err != nil {
+					t.Fatalf("LogConfigChange: %v", err)
+				}
+				_, records := runtime.snapshot()
+				if len(records) != 1 {
+					t.Fatalf("records = %d", len(records))
+				}
+				if encoded, err := records[0].Bytes(); err != nil ||
+					!strings.Contains(string(encoded), `"defenseclaw.admin.actor_ref":"`+actor+`"`) {
+					t.Fatalf("the audit record lost the actor %s: %s %v", actor, encoded, err)
+				}
+				activity := 0
+				for _, metric := range runtime.metricSnapshot() {
+					encoded, err := metric.Bytes()
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, part := range []string{sid, account, "Administrator", "root", "uid:0", actor} {
+						if strings.Contains(string(encoded), part) {
+							t.Fatalf("metric %s carries %q: %s", metric.EventName(), part, encoded)
+						}
+					}
+					switch metric.EventName() {
+					case observability.EventName(observability.TelemetryInstrumentDefenseClawActivityTotal),
+						observability.EventName(observability.TelemetryInstrumentDefenseClawActivityDiffEntries):
+						activity++
+						if !strings.Contains(string(encoded), `"defenseclaw.metric.actor":"`+configChangeMetricActor+`"`) {
+							t.Fatalf("metric %s actor label is not %s: %s", metric.EventName(), configChangeMetricActor, encoded)
+						}
+					}
+				}
+				if activity != 2 {
+					t.Fatalf("activity counters = %d, want 2", activity)
+				}
+			}
+		})
 	}
 }
