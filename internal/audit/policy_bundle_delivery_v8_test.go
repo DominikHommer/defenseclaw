@@ -7,6 +7,7 @@
 package audit
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -54,9 +55,9 @@ func TestLogPolicyBundleReceiptOmitsPrincipalRefOutsideTheSafeTokenSet(t *testin
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
 	logger.SetRuntimeV8Emitter(runtime)
 	principals := []string{"control-plane:acme/alice", "control-plane:acme/alice@example.com", `operator:CORP\admin`}
-	for _, principal := range principals {
+	for i, principal := range principals {
 		if err := logger.LogPolicyBundleReceipt(principal, PolicyBundle{ID: testPolicyBundleID, Version: 5},
-			PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: PolicyBundleConfirmed, EnforcingVersion: 5}); err != nil {
+			PolicyBundleReceipt{ReceiptID: testPolicyBundleID, DeliveryID: "delivery-" + strconv.Itoa(i), State: PolicyBundleConfirmed, EnforcingVersion: 5}); err != nil {
 			t.Fatalf("LogPolicyBundleReceipt(%q): %v", principal, err)
 		}
 	}

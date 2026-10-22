@@ -130,6 +130,13 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 	return RuntimeV8EmitOutcome{Admission: emitter.admission, LocalPersisted: true}, nil
 }
 
+func (emitter *testRuntimeV8Emitter) EmitRuntimeV8Confirmed(ctx context.Context, metadata router.Metadata, builder RuntimeV8Builder, replay bool) (RuntimeV8EmitOutcome, error) {
+	if replay {
+		return RuntimeV8EmitOutcome{Admission: router.AdmissionOrdinary, LocalPersisted: true}, nil
+	}
+	return emitter.EmitRuntimeV8(ctx, metadata, builder)
+}
+
 func (emitter *testRuntimeV8Emitter) FingerprintRuntimeV8FindingContent(
 	value string,
 ) (string, error) {

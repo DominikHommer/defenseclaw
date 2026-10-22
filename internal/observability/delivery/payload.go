@@ -38,8 +38,9 @@ type RoutingIdentity struct {
 // Payload is an immutable projected encoding. Its byte slice is never exposed;
 // every accessor returns a copy so adapters cannot mutate a queued retry.
 type Payload struct {
-	encoded  []byte
-	identity RoutingIdentity
+	encoded      []byte
+	identity     RoutingIdentity
+	acknowledged chan error
 }
 
 // NewPayload validates bounded routing identity and snapshots projected bytes.

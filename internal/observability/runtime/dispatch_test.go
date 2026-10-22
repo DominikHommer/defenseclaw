@@ -244,6 +244,82 @@ func TestOTLPInboundDestinationFanoutAndRedactionIsolation(t *testing.T) {
 	}
 }
 
+type receiptConfirmationAdapter struct {
+	*runtimeRecordingAdapter
+	refuse atomic.Bool
+}
+
+func (adapter *receiptConfirmationAdapter) Deliver(ctx context.Context, batch delivery.Batch) delivery.DeliveryResult {
+	result := adapter.runtimeRecordingAdapter.Deliver(ctx, batch)
+	if adapter.refuse.Load() {
+		return delivery.DeliveryResult{Outcome: delivery.OutcomeAuthentication}
+	}
+	return result
+}
+
+func TestConfirmedReceiptDeliveryReplaysWithoutRepeatingLocalPersistence(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	plan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 91, func(source *config.ObservabilityV8Source) {
+		source.Destinations = []config.ObservabilityV8DestinationSource{runtimeConsoleDestination("receipt-destination", "none", 0)}
+	})
+	adapter := &receiptConfirmationAdapter{runtimeRecordingAdapter: newRuntimeRecordingAdapter(128)}
+	adapter.refuse.Store(true)
+	release := make(chan struct{})
+	adapter.release = release
+	factory := runtimeAdapterFactoryFunc(func(context.Context, config.ObservabilityV8EffectiveDestination, telemetry.V8ResourceContext) (delivery.Adapter, DestinationAdapterCleanup, error) {
+		return adapter, func(context.Context) error { return nil }, nil
+	})
+	runtime := runtimeWithAdapterFactory(t, dependencies, plan, factory, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	const id = "confirmed-receipt"
+	done := make(chan error, 1)
+	go func() {
+		_, err := runtime.EmitConfirmed(ctx, diagnosticMetadata(t), runtimeContentRecordBuilder(id, "receipt"), false)
+		done <- err
+	}()
+	<-adapter.started
+	select {
+	case err := <-done:
+		t.Fatalf("confirmed before the destination answered: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-done; err == nil {
+		t.Fatal("rejected destination delivery was confirmed")
+	}
+	adapter.refuse.Store(false)
+	// The durable local row survives a new runtime generation; its fresh
+	// dispatcher can retry after the destination's authentication is repaired.
+	repaired := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 92, func(source *config.ObservabilityV8Source) {
+		source.Destinations = []config.ObservabilityV8DestinationSource{runtimeConsoleDestination("receipt-destination", "none", 0)}
+	})
+	if _, err := runtime.Reload(ctx, runtimegraph.ConfigFromPlan(repaired, false)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.EmitConfirmed(ctx, diagnosticMetadata(t), runtimeContentRecordBuilder(id, "receipt"), true); err != nil {
+		t.Fatal(err)
+	}
+	for seen := 0; seen < 2; {
+		if item := receiveRuntimeDelivery(t, adapter.runtimeRecordingAdapter); item.identity.RecordID == id {
+			seen++
+		}
+	}
+	rows, err := dependencies.store.ListEvents(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, row := range rows {
+		if row.ID == id {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("local receipt rows=%d, want 1", count)
+	}
+}
+
 func TestQueueOnlyDispatcherSeparatesProjectedQueueBytesFromEncodedWriteBytes(t *testing.T) {
 	destination := config.ObservabilityV8EffectiveDestination{
 		Name: "bounded-console", Kind: config.ObservabilityV8DestinationConsole,

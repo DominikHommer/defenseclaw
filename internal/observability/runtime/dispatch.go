@@ -12,6 +12,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -363,6 +364,30 @@ func (component *destinationDispatchComponent) Enqueue(work pipeline.ProjectedDe
 	if result.Disposition == delivery.EnqueueRejected {
 		component.observeBoundedFailure(route.DestinationName)
 	}
+}
+
+func (component *destinationDispatchComponent) EnqueueConfirmed(ctx context.Context, work pipeline.ProjectedDelivery) error {
+	if component == nil {
+		return errors.New("receipt dispatcher is unavailable")
+	}
+	route := work.Delivery()
+	entry := component.byName[route.DestinationName]
+	if entry == nil || entry.dispatcher == nil || entry.kind != route.DestinationKind {
+		return errors.New("receipt destination is unavailable")
+	}
+	encoded, err := work.Projection().Bytes()
+	if err != nil {
+		return err
+	}
+	identity := work.Identity()
+	payload, err := delivery.NewPayload(encoded, delivery.RoutingIdentity{
+		RecordID: identity.RecordID(), Bucket: string(identity.Bucket()), Signal: string(identity.Signal()),
+		EventName: string(identity.EventName()), OriginDestination: identity.OriginDestination(),
+	})
+	if err != nil {
+		return err
+	}
+	return entry.dispatcher.EnqueueConfirmed(ctx, payload)
 }
 
 func (component *destinationDispatchComponent) ObserveProjectionFailure(failure pipeline.OptionalFailure) {

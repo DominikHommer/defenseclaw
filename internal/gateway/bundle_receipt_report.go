@@ -43,17 +43,11 @@ import (
 // while the gateway was stopped is reported at its next start. Reporting
 // only: nothing here changes what is enforced.
 
-var (
-	// bundleReceiptPollInterval is how often the receipt spool is read.
-	bundleReceiptPollInterval = 5 * time.Second
-	// bundleReceiptRetries bounds how often one receipt is offered to an
-	// audit logger that refuses it before the reporter waits for the next
-	// receipt.
-	bundleReceiptRetries = 12
-)
+// bundleReceiptPollInterval is how often the receipt spool is read.
+var bundleReceiptPollInterval = 5 * time.Second
 
-// These legacy single-slot markers also let a new reporter recognize events
-// emitted before the per-receipt marker directory existed.
+// Single-slot markers cover the receipt.json fallback. Only the confirmed
+// marker format can suppress replay after a restart.
 const bundleReceiptMarkerName = "bundle-receipt.reported"
 const bundleRefusalMarkerName = "bundle-refusal.reported"
 
@@ -74,7 +68,6 @@ type bundleReceiptReporter struct {
 	lastSize        int64
 	reported        string
 	reportedRefusal string
-	attempts        int
 	gaugeVersion    uint64
 	seen            map[string]bool
 }
@@ -135,7 +128,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 	if info.ModTime().Equal(r.lastModTime) && info.Size() == r.lastSize {
 		return
 	}
-	seen := func() { r.lastModTime, r.lastSize, r.attempts = info.ModTime(), info.Size(), 0 }
+	seen := func() { r.lastModTime, r.lastSize = info.ModTime(), info.Size() }
 	receipt, err := enterprisestatus.ReadPublicReceipt(r.receiptPath)
 	if err != nil {
 		seen()
@@ -147,19 +140,16 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 		// is refused. Its separate refusal still needs an audit event.
 	} else {
 		if err := r.report(receipt); err != nil {
-			if r.attempts++; r.attempts >= bundleReceiptRetries {
-				seen()
-			}
 			return
 		}
 		r.reported = key
-		_ = configwrite.WriteFileDurable(r.markerPath, []byte(key+"\n"), 0o600)
+		_ = configwrite.WriteFileDurable(r.markerPath, []byte(enterprisestatus.ReceiptReportedMarker+key+"\n"), 0o600)
 		r.markSeen(receipt.ReceiptID)
 	}
 	if refusal := receipt.LastRefusal; refusal != nil && refusal.ReceiptID == receipt.ReceiptID {
 		r.reportedRefusal = refusal.ReceiptID + "|" + refusal.Time
 		if r.refusalMarkerPath != "" {
-			_ = configwrite.WriteFileDurable(r.refusalMarkerPath, []byte(r.reportedRefusal+"\n"), 0o600)
+			_ = configwrite.WriteFileDurable(r.refusalMarkerPath, []byte(enterprisestatus.ReceiptReportedMarker+r.reportedRefusal+"\n"), 0o600)
 		}
 	}
 	if refusal := receipt.LastRefusal; refusal != nil && refusal.ReceiptID != receipt.ReceiptID {
@@ -170,15 +160,12 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 				ErrorCode: refusal.ErrorCode, FinishedAt: refusal.Time,
 				WarningCodes: refusal.WarningCodes, DisabledByBundle: refusal.DisabledByBundle,
 				CurrentBundleID: receipt.CurrentBundleID, CurrentVersion: receipt.CurrentVersion}); err != nil {
-				if r.attempts++; r.attempts >= bundleReceiptRetries {
-					seen()
-				}
 				return
 			}
 			r.reportedRefusal = refusalKey
 			r.markSeen(refusal.ReceiptID)
 			if r.refusalMarkerPath != "" {
-				_ = configwrite.WriteFileDurable(r.refusalMarkerPath, []byte(refusalKey+"\n"), 0o600)
+				_ = configwrite.WriteFileDurable(r.refusalMarkerPath, []byte(enterprisestatus.ReceiptReportedMarker+refusalKey+"\n"), 0o600)
 			}
 		}
 	}
@@ -213,6 +200,9 @@ func (r *bundleReceiptReporter) hasSeen(id string) bool {
 	if r.seen[id] {
 		return true
 	}
+	if enterprisestatus.ValidReceiptID(id) {
+		return enterprisestatus.ReceiptEventReported(filepath.Dir(r.markerPath), id)
+	}
 	info, err := os.Lstat(filepath.Join(r.seenDir(), id))
 	return err == nil && info.Mode().IsRegular()
 }
@@ -225,8 +215,12 @@ func (r *bundleReceiptReporter) markSeen(id string) {
 		r.seen = make(map[string]bool)
 	}
 	r.seen[id] = true
+	body := "reported\n"
+	if enterprisestatus.ValidReceiptID(id) {
+		body = enterprisestatus.ReceiptReportedMarker
+	}
 	if err := os.MkdirAll(r.seenDir(), 0o700); err == nil {
-		_ = configwrite.WriteFileDurable(filepath.Join(r.seenDir(), id), []byte("reported\n"), 0o600)
+		_ = configwrite.WriteFileDurable(filepath.Join(r.seenDir(), id), []byte(body), 0o600)
 	}
 }
 
@@ -298,6 +292,7 @@ func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt) error {
 	bundle := audit.PolicyBundle{ID: p.BundleID, Version: p.Version, SignerKeyID: p.SignerKeyID, ChangeSummary: p.ChangeSummary}
 	err := r.sink.LogPolicyBundleReceipt(p.Principal, bundle, audit.PolicyBundleReceipt{
 		ReceiptID: p.ReceiptID, DeliveryID: p.DeliveryID, Actor: p.Actor, State: p.State, ErrorCode: p.ErrorCode,
+		FinishedAt:            p.FinishedAt,
 		EffectivePolicyDigest: p.EffectivePolicyDigest, EnforcingDigest: p.EnforcingDigest,
 		ConfigGeneration: p.ConfigGeneration, RolledBack: p.RolledBack, Restart: p.Restart,
 		RestartRequired:  p.RestartRequired,
@@ -325,5 +320,9 @@ func readBundleMarker(path string) string {
 	}
 	defer f.Close()
 	raw, _ := io.ReadAll(io.LimitReader(f, 512))
-	return strings.TrimSpace(string(raw))
+	value, confirmed := strings.CutPrefix(string(raw), enterprisestatus.ReceiptReportedMarker)
+	if !confirmed {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }

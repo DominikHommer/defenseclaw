@@ -84,6 +84,14 @@ type RuntimeV8Emitter interface {
 	) (RuntimeV8EmitOutcome, error)
 }
 
+// RuntimeV8ConfirmedEmitter confirms every selected remote receipt delivery.
+// replay is true only after the producer proved its stable local row exists.
+type RuntimeV8ConfirmedEmitter interface {
+	EmitRuntimeV8Confirmed(context.Context, router.Metadata, RuntimeV8Builder, bool) (RuntimeV8EmitOutcome, error)
+}
+
+type receiptReplayContextKey struct{}
+
 // RuntimeV8FindingContentFingerprinter is the optional key-custody capability
 // used at the forensic persistence boundary. Implementations retain the
 // installation correlation key and return only the schema-sized keyed token;
@@ -217,9 +225,18 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 			event, family, source, classification, normalized, snapshot, admission, evidence,
 		)
 	}
-	result, err := binding.emitter.EmitRuntimeV8(
-		contextWithLegacyEventProjection(ctx, event), metadata, build,
-	)
+	emitCtx := contextWithLegacyEventProjection(ctx, event)
+	var result RuntimeV8EmitOutcome
+	if family == controlPlaneV8FamilyBundleReceipt {
+		confirmed, ok := binding.emitter.(RuntimeV8ConfirmedEmitter)
+		if !ok {
+			return auditV8Persisted, fmt.Errorf("audit: receipt delivery confirmation is unavailable")
+		}
+		replay, _ := ctx.Value(receiptReplayContextKey{}).(bool)
+		result, err = confirmed.EmitRuntimeV8Confirmed(emitCtx, metadata, build, replay)
+	} else {
+		result, err = binding.emitter.EmitRuntimeV8(emitCtx, metadata, build)
+	}
 	if err != nil {
 		return auditV8Persisted, fmt.Errorf("audit: emit v8 control-plane action %q: %w", event.Action, err)
 	}
@@ -227,7 +244,7 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 	if outcomeErr != nil {
 		return auditV8Persisted, fmt.Errorf("audit: v8 control-plane action %q: %w", event.Action, outcomeErr)
 	}
-	if disposition == auditV8Persisted {
+	if disposition == auditV8Persisted && ctx.Value(receiptReplayContextKey{}) != true {
 		auditMetric, metricErr := newAuditEventRuntimeV8GeneratedMetric(event)
 		if metricErr == nil {
 			metrics := make([]RuntimeV8GeneratedMetric, 0, 1+len(companionMetrics))

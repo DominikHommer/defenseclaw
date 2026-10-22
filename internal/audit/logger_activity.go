@@ -43,6 +43,9 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	}
 
 	activityID := observability.NewTimeOrderedID()
+	if in.OccurrenceID != "" {
+		activityID = in.OccurrenceID
+	}
 	runID := in.RunID
 	if runID == "" {
 		runID = currentRunID()
@@ -64,15 +67,24 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	summaryBlob, _ := json.Marshal(summary)
 
 	auditID := observability.NewTimeOrderedID()
+	stored := false
 	if in.OccurrenceID != "" {
 		auditID = in.OccurrenceID
-		stored, err := l.store.hasAuditEvent(context.Background(), auditID)
+		var err error
+		stored, err = l.store.hasAuditEvent(context.Background(), auditID)
 		if err != nil {
 			return err
 		}
-		if stored {
+		if stored && in.BundleReceipt == nil {
 			return nil
 		}
+	}
+	ctx := context.Background()
+	if in.BundleReceipt != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		ctx = context.WithValue(ctx, receiptReplayContextKey{}, stored)
 	}
 	// v7 clean break: AgentInstanceID is per-session (unset for
 	// activity/mutation events that have no session anchor);
@@ -90,6 +102,11 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		TraceID:           in.TraceID,
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
+	if in.BundleReceipt != nil {
+		if finished, err := time.Parse(time.RFC3339Nano, in.BundleReceipt.FinishedAt); err == nil {
+			auditEv.Timestamp = finished.UTC()
+		}
+	}
 	stampAuditEventEnvelope(&auditEv)
 	activityMetrics, metricErr := newActivityRuntimeV8GeneratedMetrics(
 		auditEv, action, targetType, len(in.Diff),
@@ -103,7 +120,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		return evidenceErr
 	}
 	disposition, emitErr := l.emitControlPlaneV8WithEvidenceAndMetrics(
-		context.Background(), auditEv, evidence, activityMetrics,
+		ctx, auditEv, evidence, activityMetrics,
 	)
 	if emitErr != nil {
 		return emitErr

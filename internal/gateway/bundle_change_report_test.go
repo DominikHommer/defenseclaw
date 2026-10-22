@@ -95,7 +95,7 @@ func TestBundleReceiptReporterKeepsRefusedChangeEventsUntilRecorded(t *testing.T
 		markerPath: filepath.Join(dir, bundleReceiptMarkerName), sink: sink, enforcedVersion: func() uint64 { return 0 }}
 	ev := writeTestChangeEvent(t, spool, enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionRemove,
 		enterprisestatus.ChangeApplied, "", func(ev *enterprisestatus.ChangeEvent) { ev.SecretName = "otlp-token" })
-	for i := 0; i < 3*bundleReceiptRetries; i++ {
+	for range 36 { // More than the retired receipt retry cap.
 		reporter.poll(context.Background())
 	}
 	if reporter.hasSeen(ev.EventID) || enterprisestatus.ChangeReported(dir, ev.EventID) {

@@ -12,6 +12,7 @@ package delivery
 
 import (
 	"context"
+	"errors"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -242,6 +243,39 @@ func (dispatcher *Dispatcher) Enqueue(payload Payload) EnqueueResult {
 	dispatcher.lifecycleMu.Unlock()
 	dispatcher.signalWorker()
 	return EnqueueResult{Disposition: EnqueueAccepted, Reason: ReasonNone}
+}
+
+// EnqueueConfirmed uses the same bounded queue, retries and adapter worker as
+// ordinary delivery. Completion means the adapter acknowledged this payload;
+// a flush alone also completes dropped and rejected work and is not proof.
+func (dispatcher *Dispatcher) EnqueueConfirmed(ctx context.Context, payload Payload) error {
+	if ctx == nil {
+		return newError(ErrorInvalidContext)
+	}
+	payload.acknowledged = make(chan error, 1)
+	if !dispatcher.Enqueue(payload).Accepted() {
+		return errors.New("destination did not accept the receipt")
+	}
+	if err := dispatcher.Flush(ctx); err != nil {
+		return err
+	}
+	select {
+	case err := <-payload.acknowledged:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func acknowledgePayloads(payloads []Payload, err error) {
+	for _, payload := range payloads {
+		if payload.acknowledged != nil {
+			select {
+			case payload.acknowledged <- err:
+			default:
+			}
+		}
+	}
 }
 
 // StopIntake closes producer admission without waiting for delivery.
@@ -825,6 +859,7 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 			dispatcher.counters.delivered.Add(uint64(len(payloads)))
 			dispatcher.recordSuccess(dispatcher.nowUTC())
 			dispatcher.recordCircuitSuccess()
+			acknowledgePayloads(payloads, nil)
 			dispatcher.release(payloads)
 			dispatcher.setOperationalHealth(HealthHealthy, HealthReasonRecovered)
 			return true
@@ -1056,6 +1091,7 @@ func (dispatcher *Dispatcher) releaseDropped(payloads []Payload) {
 }
 
 func (dispatcher *Dispatcher) releaseLocked(payloads []Payload) {
+	acknowledgePayloads(payloads, errors.New("destination delivery was not acknowledged"))
 	for _, payload := range payloads {
 		dispatcher.chargedItems--
 		dispatcher.chargedBytes -= payload.Size()
@@ -1067,6 +1103,7 @@ func (dispatcher *Dispatcher) releaseLocked(payloads []Payload) {
 func (dispatcher *Dispatcher) abandonPending() {
 	dispatcher.queueMu.Lock()
 	dropped := len(dispatcher.pending)
+	acknowledgePayloads(dispatcher.pending, errors.New("destination stopped before acknowledgement"))
 	// Count the drop before the queue charge falls, as release requires: a
 	// reader that finds the queue empty then also finds every abandoned record
 	// counted, which the shutdown loss count relies on (GAP-1096).

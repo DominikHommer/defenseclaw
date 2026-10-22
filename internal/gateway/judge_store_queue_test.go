@@ -86,6 +86,11 @@ func (e *captureJudgeRuntimeV8Emitter) snapshot() []observability.Record {
 	return append([]observability.Record(nil), e.records...)
 }
 
+func (e *captureJudgeRuntimeV8Emitter) EmitRuntimeV8Confirmed(ctx context.Context, metadata router.Metadata, build audit.RuntimeV8Builder, _ bool) (audit.RuntimeV8EmitOutcome, error) {
+	// This capture has no remote destinations; it models successful delivery.
+	return e.EmitRuntimeV8(ctx, metadata, build)
+}
+
 func (e *captureJudgeRuntimeV8Emitter) RecordGeneratedMetricBatch(
 	_ context.Context,
 	items []observabilityruntime.GeneratedMetricBatchItem,

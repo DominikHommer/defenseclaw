@@ -18,6 +18,7 @@ package audit
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"math"
 	"regexp"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
+	"github.com/google/uuid"
 )
 
 // PolicyBundle names the signed policy bundle a config.change.applied
@@ -47,6 +49,8 @@ type PolicyBundleReceipt struct {
 	// ReceiptID is the bundle id, or r-<ULID> for a delivery whose manifest
 	// could not be read.
 	ReceiptID string
+	// FinishedAt is the terminal transition time, stable across spool replays.
+	FinishedAt string
 	// DeliveryID is the caller-supplied --delivery-id of the apply, "" for
 	// none. It is opaque and not authenticated.
 	DeliveryID string
@@ -222,11 +226,19 @@ func (l *Logger) LogPolicyBundleReceipt(principal string, bundle PolicyBundle, r
 	if actor == "" {
 		actor = strings.TrimSpace(principal)
 	}
-	return l.logActivityImpl(ActivityInput{
+	err := l.logActivityImpl(ActivityInput{
 		Actor: actor, Principal: strings.TrimSpace(principal), Action: ActionConfigBundleReceipt,
 		TargetType: "policy_bundle", TargetID: receipt.ReceiptID, Reason: reason,
 		After: after, Severity: severity, Bundle: &bundle, BundleReceipt: &receipt,
+		OccurrenceID: uuid.NewHash(sha256.New(), stableOccurrenceNamespace,
+			[]byte("policy.bundle.receipt\x00"+receipt.ReceiptID+"|"+receipt.State+"|"+receipt.FinishedAt+"|"+receipt.DeliveryID), 8).String(),
 	})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return l.store.SyncEventHistory(ctx)
 }
 
 // RecordPolicyBundleVersion records the defenseclaw.policy.bundle.version

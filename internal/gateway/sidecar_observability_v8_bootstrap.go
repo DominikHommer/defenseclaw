@@ -545,6 +545,21 @@ func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8(
 	}, err
 }
 
+func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8Confirmed(ctx context.Context, metadata router.Metadata, builder audit.RuntimeV8Builder, replay bool) (audit.RuntimeV8EmitOutcome, error) {
+	if owner == nil || owner.runtime == nil || builder == nil {
+		return audit.RuntimeV8EmitOutcome{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	if owner.closed {
+		return audit.RuntimeV8EmitOutcome{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	outcome, err := owner.runtime.EmitConfirmed(ctx, metadata, func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
+		return builder(audit.RuntimeV8BuildContext{ConfigGeneration: snapshot.Generation(), ConfigDigest: snapshot.Digest()}, admission)
+	}, replay)
+	return audit.RuntimeV8EmitOutcome{Admission: outcome.Admission(), LocalPersisted: outcome.LocalPersisted()}, err
+}
+
 // EmitRuntimeV8LogBatch adapts audit's opaque generated operations to the
 // runtime's short-lived generation-pinned batch. Collection, local
 // persistence, redaction, and destination routing remain independent per

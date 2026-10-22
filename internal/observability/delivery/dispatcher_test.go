@@ -463,6 +463,35 @@ func TestFlushWaitsForAcceptedPayloadWithoutStoppingIntake(t *testing.T) {
 	}
 }
 
+func TestConfirmedDeliveryRequiresAnAcknowledgementRatherThanQueueCompletion(t *testing.T) {
+	for _, outcome := range []delivery.DeliveryOutcome{delivery.OutcomeDelivered, delivery.OutcomeAuthentication} {
+		t.Run(string(outcome), func(t *testing.T) {
+			release := make(chan struct{})
+			adapter := &fakeAdapter{started: make(chan struct{}, 1), release: release, outcomes: []delivery.DeliveryOutcome{outcome}}
+			dispatcher, err := delivery.NewDispatcher(testConfig("receipt-confirmation"), adapter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dispatcher.Activate()
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- dispatcher.EnqueueConfirmed(ctx, payload(t, "receipt-id", "receipt")) }()
+			<-adapter.started
+			select {
+			case err := <-done:
+				t.Fatalf("confirmed before acknowledgement: %v", err)
+			default:
+			}
+			close(release)
+			if err := <-done; (err == nil) != (outcome == delivery.OutcomeDelivered) {
+				t.Fatalf("outcome=%s confirmation=%v", outcome, err)
+			}
+			closeDispatcher(t, dispatcher)
+		})
+	}
+}
+
 func TestFlushCancellationDoesNotStopIntake(t *testing.T) {
 	release := make(chan struct{})
 	adapter := &fakeAdapter{started: make(chan struct{}, 1), release: release}

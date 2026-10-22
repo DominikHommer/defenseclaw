@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const (
@@ -38,6 +40,9 @@ const (
 	PublicReceiptEventsDirName = "receipt-events"
 	// PublicReceiptSchemaVersion is the receipt.json schema.
 	PublicReceiptSchemaVersion = 1
+	// ReceiptReportedMarker proves the reporter completed durable local and
+	// acknowledged remote delivery. Older enqueue-only markers prove neither.
+	ReceiptReportedMarker = "confirmed-v2\n"
 
 	maxPublicReceiptBytes = 16 << 10
 
@@ -113,15 +118,15 @@ func PublicReceiptPath(configDir string) string {
 func ValidReceiptID(id string) bool { return receiptIDPattern.MatchString(id) }
 
 // ReceiptEventReported reports whether the gateway with data_dir dataDir
-// reported the receipt event id (its marker file exists). The lifecycle
+// confirmed delivery of receipt event id (its versioned marker is complete). The lifecycle
 // keeps an event the gateway has not reported when it trims
 // receipt-events/.
 func ReceiptEventReported(dataDir, id string) bool {
 	if !ValidReceiptID(id) || dataDir == "" {
 		return false
 	}
-	info, err := os.Lstat(filepath.Join(dataDir, ReportedMarkersDirName, id))
-	return err == nil && info.Mode().IsRegular()
+	body, err := safefile.ReadRegularFileBounded(filepath.Join(dataDir, ReportedMarkersDirName, id), 128)
+	return err == nil && string(body) == ReceiptReportedMarker
 }
 
 // CheckDeliveryID explains why id is not a delivery id `enterprise bundle
