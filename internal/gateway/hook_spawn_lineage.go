@@ -252,6 +252,15 @@ func (a *APIServer) rememberHookSpawnIntentAt(
 	}
 
 	if toolKey != "" {
+		if _, taken := a.hookSpawnTakenCalls[toolKey]; taken {
+			// The child's start already took this call's intent. Its result
+			// must not leave a second intent, which tied with the next
+			// spawn's and left that child's start a root (GAP-0533).
+			if phase == hookSpawnIntentCompleted {
+				delete(a.hookSpawnTakenCalls, toolKey)
+			}
+			return
+		}
 		if existing, ok := a.hookSpawnIntents[toolKey]; ok {
 			if existing.parent.AgentID != parent.AgentID || existing.parent.ExecutionID != parent.ExecutionID {
 				existing.ambiguous = true
@@ -671,6 +680,7 @@ func (a *APIServer) discardHookSpawnIntentLocked(
 ) {
 	if toolKey != "" {
 		a.removeHookSpawnIntentLocked(toolKey)
+		delete(a.hookSpawnTakenCalls, toolKey)
 		return
 	}
 	candidates := a.hookSpawnIntentCandidatesLocked(scope, parentAgentID, aliases)
@@ -710,6 +720,11 @@ func (a *APIServer) removeHookSpawnIntentLocked(key string) {
 }
 
 func (a *APIServer) evictHookSpawnIntentsLocked(now time.Time) {
+	for key, at := range a.hookSpawnTakenCalls {
+		if now.Sub(at) > hookSpawnIntentTTL {
+			delete(a.hookSpawnTakenCalls, key)
+		}
+	}
 	if len(a.hookSpawnIntentOrder) == 0 {
 		return
 	}
@@ -788,7 +803,29 @@ func (a *APIServer) takeHookSpawnIntentAt(
 	}
 	intent := a.hookSpawnIntents[best.key]
 	a.removeHookSpawnIntentLocked(best.key)
+	if intent.toolKey != "" && !intent.resultObserved {
+		a.noteTakenHookSpawnCallLocked(intent.toolKey, now)
+	}
 	return intent, true
+}
+
+// noteTakenHookSpawnCallLocked remembers a spawn call whose intent a child's
+// start took before the call's result arrived, until that result arrives or
+// the intent TTL ends. Caller holds a.llmPromptMu.
+func (a *APIServer) noteTakenHookSpawnCallLocked(toolKey string, now time.Time) {
+	if a.hookSpawnTakenCalls == nil {
+		a.hookSpawnTakenCalls = make(map[string]time.Time)
+	}
+	for len(a.hookSpawnTakenCalls) >= hookSpawnIntentMaxEntries {
+		oldest, oldestAt := "", now
+		for key, at := range a.hookSpawnTakenCalls {
+			if oldest == "" || at.Before(oldestAt) {
+				oldest, oldestAt = key, at
+			}
+		}
+		delete(a.hookSpawnTakenCalls, oldest)
+	}
+	a.hookSpawnTakenCalls[toolKey] = now
 }
 
 // hookSpawnTieSharesParentLocked reports whether a tie between the best
