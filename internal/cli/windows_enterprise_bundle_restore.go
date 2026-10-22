@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -247,7 +248,7 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 		out.warnings = append(out.warnings, enterprisestatus.Message{Code: "bundle_reload_request_failed",
 			Message: "the direct gateway reload request failed; waiting for the gateway's file watcher: " + windowsEnterpriseBoundedDiagnostic(err.Error())})
 	}
-	if windowsEnterpriseHotConfigAdopted(ctx, windowsEnterpriseHotConfigTimeout, nil) {
+	if windowsEnterpriseHotConfigAdopted(ctx, windowsEnterpriseHotConfigTimeout, configwrite.BundleRef{}) {
 		return out
 	}
 	// A key the gateway reads only at start (the edit may have changed one)
@@ -263,6 +264,6 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 		return out
 	}
 	out.changes = append(out.changes, "restarted the gateway on the re-applied "+label)
-	_ = windowsEnterpriseHotConfigAdopted(ctx, windowsEnterpriseHotConfigRestartTimeout, nil)
+	_ = windowsEnterpriseHotConfigAdopted(ctx, windowsEnterpriseHotConfigRestartTimeout, configwrite.BundleRef{})
 	return out
 }

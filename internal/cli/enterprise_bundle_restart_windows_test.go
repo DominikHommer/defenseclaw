@@ -48,7 +48,7 @@ func TestWindowsBundleRestartPredictionMatchesTheHotPath(t *testing.T) {
 
 			host, opts := newHotConfigHost(t, tc.previous, tc.next)
 			host.adopted = true
-			opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+			opts.bundle = host.bundleRun()
 			savedRestart, savedDigest := windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest
 			savedProcesses, savedMetadata := windowsEnterpriseAgentProcesses, windowsEnterpriseActivationMetadata
 			t.Cleanup(func() {

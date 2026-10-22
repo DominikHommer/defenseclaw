@@ -322,7 +322,10 @@ func windowsEnterpriseHotConfigApply(
 	state, stateErr := configwrite.ReadGenerationState(layout.ConfigPath)
 	recordedBefore := stateErr == nil && strings.EqualFold(state.ConfigSHA256, configwrite.SHA256Hex(previous))
 	connectorChangeStartedAt := time.Now().UTC()
-	writeOptions, err := windowsHotConfigWriteOptions(opts, configwrite.SHA256Hex(previous))
+	// A bundle config is adopted only once the gateway names the bundle the
+	// record names, including a repeated delivery of the confirmed bundle,
+	// which has no receipt.
+	writeOptions, adoptedBundle, err := windowsHotConfigWriteOptions(opts, configwrite.SHA256Hex(previous))
 	if err != nil {
 		failBundle("bundle_state_invalid", "cannot prove the signed config principal: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 		return false, nil
@@ -472,7 +475,7 @@ func windowsEnterpriseHotConfigApply(
 	if gatewayOnNewConfig() {
 		adoptionWait = windowsEnterpriseHotConfigRestartTimeout
 	}
-	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait, opts.bundle) {
+	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait, adoptedBundle) {
 		undo()
 		failBundle("bundle_policy_not_adopted", "the gateway did not report the bundle policy, generation and identity before the apply deadline")
 		return false, nil
@@ -562,22 +565,15 @@ var windowsEnterpriseHotConfigRefreshTargets = func(ctx context.Context, layout 
 }
 
 // windowsEnterpriseHotConfigAdopted waits for the gateway to report the
-// effective policy the installed config computes to, with no rejected reload
-// and the config recorded.
-func windowsEnterpriseHotConfigAdopted(ctx context.Context, wait time.Duration, bundle *windowsBundleRun) bool {
+// effective policy the installed config computes to, with no rejected reload,
+// the config recorded and, for a bundle config (bundle.ID set), that bundle's
+// ID and version (windowsHotConfigReportAdopted).
+func windowsEnterpriseHotConfigAdopted(ctx context.Context, wait time.Duration, bundle configwrite.BundleRef) bool {
 	deadline := time.Now().Add(wait)
 	for {
 		out, _ := windowsEnterprisePolicyDigest(ctx)
 		var report policyDigestReport
-		decoded := json.Unmarshal(out, &report) == nil
-		bundleApplied := true
-		if bundle != nil && bundle.prepared != nil && bundle.prepared.Receipt != nil && bundle.prepared.Receipt.BundleID != "" {
-			bundleApplied = report.GatewayReportedBundleID == bundle.prepared.Receipt.BundleID &&
-				report.GatewayReportedBundleVersion == bundle.prepared.Receipt.Version
-		}
-		if decoded && report.Digest != "" && report.Digest == report.GatewayReportedDigest &&
-			report.GatewayLastReloadError == "" && report.ConfigGeneration > 0 && report.ConfigGenerationRecorded &&
-			report.GatewayReportedConfigGeneration == report.ConfigGeneration && bundleApplied {
+		if json.Unmarshal(out, &report) == nil && windowsHotConfigReportAdopted(report, bundle) {
 			return true
 		}
 		if ctx.Err() != nil || !time.Now().Before(deadline) {
@@ -797,33 +793,59 @@ func acquireWindowsEnterpriseLifecycleLock(path string) (func(), error) {
 // windowsHotConfigWriteOptions records the hot-applied config as the
 // lifecycle, or, when the run applies a signed policy bundle, as the bundle
 // principal with the bundle fields, so config.generation.json and the
-// gateway's config.change.applied event name the bundle.
-func windowsHotConfigWriteOptions(opts *windowsEnterpriseLifecycleOptions, expectSHA string) (configwrite.Options, error) {
+// gateway's config.change.applied event name the bundle. For a bundle run it
+// also returns the bundle the gateway must then report before the config is
+// adopted (windowsHotBundleIdentity); the zero BundleRef otherwise.
+func windowsHotConfigWriteOptions(opts *windowsEnterpriseLifecycleOptions, expectSHA string) (configwrite.Options, configwrite.BundleRef, error) {
 	if opts != nil && opts.bundleRollbackTo != nil {
 		// A rollback to the confirmed bundle records it as that bundle again,
 		// so /health and the digest scope name the bundle that enforces.
-		return opts.bundleRollbackTo.writeOptions(expectSHA)
+		opt, err := opts.bundleRollbackTo.writeOptions(expectSHA)
+		return opt, configwrite.BundleRef{}, err
 	}
-	if opts != nil && opts.bundle != nil && opts.bundle.prepared != nil && !opts.bundle.prepared.AlreadyApplied {
-		if opt, ok := enterprisebundle.GenerationOptions(opts.bundle.prepared.Receipt); ok {
-			opt.ExpectSHA256 = expectSHA
-			return opt, nil
-		}
-		return configwrite.Options{}, errors.New("staged bundle has no principal")
+	if opts == nil || opts.bundle == nil || opts.bundle.prepared == nil || (opts.bundle.prepared.Receipt == nil && !opts.bundle.prepared.AlreadyApplied) {
+		return configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure", ExpectSHA256: expectSHA}, configwrite.BundleRef{}, nil
 	}
-	if opts != nil && opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.AlreadyApplied {
-		if opts.bundle.driver == nil {
-			return configwrite.Options{}, errors.New("confirmed bundle store is unavailable")
+	prepared := opts.bundle.prepared
+	var opt configwrite.Options
+	var current []byte
+	var ref *enterprisebundle.Ref
+	if !prepared.AlreadyApplied {
+		var ok bool
+		if opt, ok = enterprisebundle.GenerationOptions(prepared.Receipt); !ok {
+			return configwrite.Options{}, configwrite.BundleRef{}, errors.New("staged bundle has no principal")
 		}
-		opt, ok, err := opts.bundle.driver.ConfigGenerationOptions(opts.bundle.prepared.Config)
-		if err != nil {
-			return opt, err
+	} else {
+		var err error
+		if opt, current, ref, err = windowsHotConfirmedBundle(opts.bundle.driver, prepared.Config); err != nil {
+			return configwrite.Options{}, configwrite.BundleRef{}, err
 		}
-		if !ok {
-			return opt, errors.New("confirmed bundle principal is unavailable")
-		}
-		opt.ExpectSHA256 = expectSHA
-		return opt, nil
 	}
-	return configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure", ExpectSHA256: expectSHA}, nil
+	bundle, err := windowsHotBundleIdentity(prepared, opt.Bundle, current, ref)
+	if err != nil {
+		return configwrite.Options{}, configwrite.BundleRef{}, err
+	}
+	opt.ExpectSHA256 = expectSHA
+	return opt, bundle, nil
+}
+
+// windowsHotConfirmedBundle reads, for a repeated delivery of the confirmed
+// bundle, the options that record config as that bundle's principal, and the
+// confirmed current bundle's rendered config and reference. A seam for tests.
+var windowsHotConfirmedBundle = func(driver *enterprisebundle.Driver, config []byte) (configwrite.Options, []byte, *enterprisebundle.Ref, error) {
+	if driver == nil {
+		return configwrite.Options{}, nil, nil, errors.New("confirmed bundle store is unavailable")
+	}
+	opt, ok, err := driver.ConfigGenerationOptions(config)
+	if err != nil {
+		return configwrite.Options{}, nil, nil, err
+	}
+	if !ok {
+		return configwrite.Options{}, nil, nil, errors.New("confirmed bundle principal is unavailable")
+	}
+	current, ref, err := driver.CurrentConfig()
+	if err != nil {
+		return configwrite.Options{}, nil, nil, err
+	}
+	return opt, current, ref, nil
 }

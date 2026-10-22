@@ -39,14 +39,14 @@ func TestWindowsBundleHotWriteRecordsPrincipalAndSignedMetadata(t *testing.T) {
 	opts := &windowsEnterpriseLifecycleOptions{bundle: &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{
 		BundleID: id, Version: 3, Principal: "control-plane:acme/alice", SignerKeyID: "k1", ChangeSummary: "guardrail pack update",
 	}}}}
-	got, err := windowsHotConfigWriteOptions(opts, "abc")
+	got, bundle, err := windowsHotConfigWriteOptions(opts, "abc")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Actor != "control-plane:acme/alice" || got.LocalActor != configwrite.CurrentOSActor() || got.Bundle.ID != id || got.Bundle.Version != 3 ||
 		got.Bundle.SignerKeyID != "k1" || got.Reason != configwrite.BundleReason(id, 3, "guardrail pack update") ||
-		!got.Lifecycle || got.ExpectSHA256 != "abc" {
-		t.Fatalf("Windows bundle hot write = %+v", got)
+		!got.Lifecycle || got.ExpectSHA256 != "abc" || bundle.ID != id || bundle.Version != 3 {
+		t.Fatalf("Windows bundle hot write = %+v, adoption identity %+v", got, bundle)
 	}
 }
 
@@ -63,7 +63,7 @@ func TestWindowsBundleHotWriteAttributesAppliedAudit(t *testing.T) {
 	opts := &windowsEnterpriseLifecycleOptions{bundle: &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{
 		BundleID: id, Version: 3, Principal: "control-plane:acme/alice", SignerKeyID: "k1", ChangeSummary: "guardrail pack update",
 	}}}}
-	opt, err := windowsHotConfigWriteOptions(opts, configwrite.SHA256Hex(previous))
+	opt, _, err := windowsHotConfigWriteOptions(opts, configwrite.SHA256Hex(previous))
 	if err != nil {
 		t.Fatal(err)
 	}

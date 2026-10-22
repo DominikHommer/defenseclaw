@@ -300,7 +300,7 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoIsNotRestarted(t *testing.T) {
 		if err := os.WriteFile(configwrite.GenerationPath(host.configPath), []byte(recorded), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+		opts.bundle = host.bundleRun()
 		apply := windowsEnterpriseHotConfigWrite
 		windowsEnterpriseHotConfigWrite = func(ctx context.Context, path string, raw []byte, opt configwrite.Options) error {
 			if strings.Contains(opt.Reason, "not applied") {
