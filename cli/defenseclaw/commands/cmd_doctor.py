@@ -8462,7 +8462,7 @@ def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
     expected = os.path.join(data_dir, "hooks", "hermes-hook.sh")
     scripts, digests = _locked_hook_scripts(cfg, "hermes")
     if not data_dir or [os.fspath(script) for script in scripts] != [expected]:
-        return "Hermes execution probe has no exact sealed hook script; run setup"
+        return f"Hermes execution probe for {config_path} has no exact sealed hook script; live=false; run setup"
     digest = digests.get("hermes-hook.sh", "")
     try:
         config_stat = os.lstat(config_path)
