@@ -1024,30 +1024,59 @@ func TestClaudeCodeOutput_LegacyMirrorReturnsDynamicWatchPaths(t *testing.T) {
 func TestManagedClaudeCodeWatchPathsUseVerifiedCallerHome(t *testing.T) {
 	callerHome := t.TempDir()
 	project := filepath.Join(callerHome, "project")
+	command := filepath.Join(project, ".claude", "commands", "review.md")
+	if err := os.MkdirAll(filepath.Dir(command), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(command, []byte("# review\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	serviceHome := t.TempDir()
 	t.Setenv("HOME", serviceHome)
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(serviceHome, ".claude"))
+	known := withManagedHookPeer(withServiceAccountGateway(t.Context()), managedHookPeer{UID: 1001, Home: callerHome})
+	unresolvedPeer := withManagedHookPeer(withServiceAccountGateway(t.Context()), managedHookPeer{UID: 1001})
+	unknownIdentity := context.WithValue(withServiceAccountGateway(t.Context()), verifiedUserScopedIdentityContextKey{}, "4102")
+	projectEntries := []string{
+		filepath.Join(project, ".mcp.json"),
+		filepath.Join(project, ".claude", "settings.json"),
+		filepath.Join(project, ".claude", "settings.local.json"),
+		filepath.Join(project, "CLAUDE.md"),
+		command,
+	}
 	for _, tc := range []struct {
-		name     string
-		home     string
-		wantHome bool
+		name string
+		req  claudeCodeHookRequest
+		home bool
 	}{
-		{"known caller", callerHome, true},
-		{"unresolved caller", "", false},
+		{"known caller", (claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project}).withWatchHome(known), true},
+		{"unresolved caller", (claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project}).withWatchHome(unresolvedPeer), false},
+		{"unknown user-scoped identity", (claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project}).withWatchHome(unknownIdentity), false},
+		{"panic recovery shape", claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project, managedWatch: true, watchHome: unresolvedCallerHome}, false},
+		{"cwd change, unresolved caller", (claudeCodeHookRequest{HookEventName: "CwdChanged", CWD: project}).withWatchHome(unresolvedPeer), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := withManagedHookPeer(withServiceAccountGateway(t.Context()), managedHookPeer{UID: 1001, Home: tc.home})
-			req := (claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project}).withWatchHome(ctx)
-			out := claudeCodeOutput(req, "allow", "allow", "", "")
-			paths := out["hookSpecificOutput"].(map[string]interface{})["watchPaths"].([]string)
-			if containsString(paths, filepath.Join(serviceHome, ".claude", "settings.json")) {
-				t.Fatalf("service account watch path leaked: %v", paths)
+			out := claudeCodeOutput(tc.req, "allow", "allow", "", "")
+			var paths []string
+			if specific, ok := out["hookSpecificOutput"].(map[string]interface{}); ok {
+				paths, _ = specific["watchPaths"].([]string)
+			} else {
+				paths, _ = out["watchPaths"].([]string)
 			}
-			if got := containsString(paths, filepath.Join(callerHome, ".claude", "settings.json")); got != tc.wantHome {
-				t.Fatalf("caller home watch path present=%v, want %v: %v", got, tc.wantHome, paths)
+			for _, want := range projectEntries {
+				if !containsString(paths, want) {
+					t.Fatalf("project watch path %s missing: %v", want, paths)
+				}
 			}
-			if tc.wantHome && !containsString(paths, filepath.Join(project, ".mcp.json")) {
-				t.Fatalf("caller project watch path missing: %v", paths)
+			if got := containsString(paths, filepath.Join(callerHome, ".claude", "settings.json")); got != tc.home {
+				t.Fatalf("caller home watch path present=%v, want %v: %v", got, tc.home, paths)
+			}
+			for _, path := range paths {
+				if strings.HasPrefix(path, serviceHome+string(filepath.Separator)) ||
+					strings.HasPrefix(path, unresolvedCallerHome) ||
+					(!tc.home && !strings.HasPrefix(path, project+string(filepath.Separator))) {
+					t.Fatalf("unverified watch path %s: %v", path, paths)
+				}
 			}
 		})
 	}
@@ -1063,13 +1092,21 @@ func TestManagedClaudeCodeSessionStartWatchesTheAuthenticatedCaller(t *testing.T
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
 	api := &APIServer{scannerCfg: cfg}
-	ctx := withManagedHookPeer(withServiceAccountGateway(t.Context()), managedHookPeer{UID: 1001, Home: callerHome})
-	response := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project})
-	paths := response.ClaudeCodeOutput["hookSpecificOutput"].(map[string]interface{})["watchPaths"].([]string)
-	if !containsString(paths, filepath.Join(callerHome, ".claude", "settings.json")) ||
-		!containsString(paths, filepath.Join(project, ".mcp.json")) ||
-		containsString(paths, filepath.Join(serviceHome, ".claude", "settings.json")) {
-		t.Fatalf("managed SessionStart watch paths = %v", paths)
+	for _, tc := range []struct {
+		name string
+		home string
+	}{{"known caller", callerHome}, {"unresolved caller", ""}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := withManagedHookPeer(withServiceAccountGateway(t.Context()), managedHookPeer{UID: 1001, Home: tc.home})
+			response := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project})
+			paths := response.ClaudeCodeOutput["hookSpecificOutput"].(map[string]interface{})["watchPaths"].([]string)
+			if containsString(paths, filepath.Join(callerHome, ".claude", "settings.json")) != (tc.home != "") ||
+				!containsString(paths, filepath.Join(project, ".mcp.json")) ||
+				!containsString(paths, filepath.Join(project, ".claude", "settings.local.json")) ||
+				containsString(paths, filepath.Join(serviceHome, ".claude", "settings.json")) {
+				t.Fatalf("managed SessionStart watch paths = %v", paths)
+			}
+		})
 	}
 }
 

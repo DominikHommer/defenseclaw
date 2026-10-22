@@ -519,10 +519,13 @@ func sandboxStopTargets(ctx context.Context, view *sandboxauth.FSView, hostCWD s
 func claudeCodeWatchPathsForRequest(req claudeCodeHookRequest, root string) []string {
 	if req.sandboxView == nil {
 		if req.managedWatch {
-			if req.watchHome == unresolvedCallerHome {
-				return []string{}
+			// An unresolved caller keeps its project entries; only the
+			// home entries it cannot prove are left out.
+			home := req.watchHome
+			if home == unresolvedCallerHome {
+				home = ""
 			}
-			return connector.ClaudeCodeWatchPathsForHome(root, req.watchHome)
+			return connector.ClaudeCodeWatchPathsForHome(root, home)
 		}
 		return connector.ClaudeCodeWatchPaths(root)
 	}

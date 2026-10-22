@@ -899,10 +899,12 @@ func ClaudeCodeWatchPaths(cwd string) []string {
 
 // ClaudeCodeWatchPathsForHome uses the verified caller's home on a standalone
 // gateway. The service account's environment belongs to another user and
-// cannot select the paths watched by the caller's Claude Code process.
+// cannot select the paths watched by the caller's Claude Code process. A
+// caller whose home is unverified ("", relative or "/") gets no home entries
+// but keeps every project entry under cwd.
 func ClaudeCodeWatchPathsForHome(cwd, home string) []string {
-	if !filepath.IsAbs(home) || home == string(filepath.Separator) {
-		return nil
+	if !filepath.IsAbs(home) || filepath.Clean(home) == string(filepath.Separator) {
+		return claudeCodeWatchPaths(cwd, "", "")
 	}
 	return claudeCodeWatchPaths(cwd, filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json"))
 }
@@ -942,7 +944,15 @@ func claudeCodeWatchPaths(cwd, configDir, mcpState string) []string {
 		)
 		rulesDirs = append(rulesDirs, filepath.Join(root, ".claude", "rules"))
 	}
-	skillRoots := []string{filepath.Join(userDir, "skills")}
+	var skillRoots, commandRoots, agentRoots []string
+	if userDir != "" {
+		skillRoots = append(skillRoots, filepath.Join(userDir, "skills"))
+		commandRoots = append(commandRoots, filepath.Join(userDir, "commands"))
+		agentRoots = append(agentRoots, filepath.Join(userDir, "agents"))
+	}
+	if root != "" {
+		commandRoots = append(commandRoots, filepath.Join(root, ".claude", "commands"))
+	}
 	skillRoots = append(skillRoots, claudecodepath.ProjectSkillDirs(root)...)
 	for _, skillRoot := range skillRoots {
 		for _, skillDir := range claudecodepath.SkillDirs(skillRoot) {
@@ -952,10 +962,7 @@ func claudeCodeWatchPaths(cwd, configDir, mcpState string) []string {
 			}
 		}
 	}
-	for _, commandRoot := range []string{
-		filepath.Join(userDir, "commands"),
-		filepath.Join(root, ".claude", "commands"),
-	} {
+	for _, commandRoot := range commandRoots {
 		entries, err := os.ReadDir(commandRoot)
 		if err != nil {
 			continue
@@ -970,15 +977,17 @@ func claudeCodeWatchPaths(cwd, configDir, mcpState string) []string {
 			}
 		}
 	}
-	agentRoots := []string{filepath.Join(userDir, "agents")}
 	agentRoots = append(agentRoots, claudecodepath.ProjectAgentDirs(root)...)
 	for _, agentRoot := range agentRoots {
 		candidates = append(candidates, claudecodepath.AgentFiles(agentRoot)...)
 	}
-	memory := claudecodepath.ResolveAutoMemory(userDir, root, nil)
-	if memory.Path != "" {
-		candidates = append(candidates, filepath.Join(memory.Path, "MEMORY.md"))
-		candidates = append(candidates, claudecodepath.AutoMemoryFiles(memory)...)
+	// Auto-memory resolves from the user's settings and lives under the
+	// user's Claude home by default: none without a user directory.
+	if userDir != "" {
+		if memory := claudecodepath.ResolveAutoMemory(userDir, root, nil); memory.Path != "" {
+			candidates = append(candidates, filepath.Join(memory.Path, "MEMORY.md"))
+			candidates = append(candidates, claudecodepath.AutoMemoryFiles(memory)...)
+		}
 	}
 	for _, rulesDir := range rulesDirs {
 		_ = filepath.WalkDir(rulesDir, func(path string, entry os.DirEntry, err error) error {
