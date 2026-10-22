@@ -18,7 +18,9 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -539,5 +541,56 @@ func TestSandboxAuthorityStopFailsClosedWhenTheRevokeIsNotStored(t *testing.T) {
 				t.Fatalf("the revoke was not stored once the store is writable: %+v", reg)
 			}
 		})
+	}
+}
+
+// GAP-0367: a managed Mac's burst of 200 relayed PreToolUse calls from one
+// sandbox, 32 at a time, had half its calls answered after more than 5 s
+// while the gateway's own evaluation took about 50 ms: every relayed call
+// took the registration's re-match lock, so the sandbox's calls waited in
+// one line, and behind whatever a call holding it waited for. A call with
+// nothing due now never takes the lock: 32 concurrent calls are answered
+// while a re-match holds it, and their latency stays far inside the budget.
+func TestSandboxRelayedHookBurstDoesNotQueueOnTheRematchLock(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.publishFirstGeneration()
+	resp := f.live(sbxAlice, 1)
+	if rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Code != http.StatusOK {
+		t.Fatalf("first hook: %d %s", rec.Code, rec.Body.String())
+	}
+	auth, _ := f.api.sandboxAuth()
+	const held, budget = 3 * time.Second, time.Second
+	// 32 as in the cell, within what one caller may hold at once here (a
+	// quarter of the gateway's bound, which follows GOMAXPROCS).
+	workers := min(32, max(1, f.api.hookCallerLimits.globalLimit()/4))
+	unlock := auth.rematch.lock(resp.Registration.ID)
+	release := time.AfterFunc(held, unlock)
+	defer func() {
+		if release.Stop() {
+			unlock()
+		}
+	}()
+	latencies := make([]time.Duration, workers)
+	codes := make([]int, workers)
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			began := time.Now()
+			codes[i] = f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil).Code
+			latencies[i] = time.Since(began)
+		}()
+	}
+	wg.Wait()
+	slices.Sort(latencies)
+	t.Logf("%d concurrent relayed hooks while a re-match holds the lock: p50=%v max=%v", workers, latencies[workers/2], latencies[workers-1])
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("call %d: status %d", i, code)
+		}
+	}
+	if latencies[workers-1] >= budget {
+		t.Fatalf("slowest relayed hook took %v; a call with no re-match due waited for the lock (budget %v)", latencies[workers-1], budget)
 	}
 }
