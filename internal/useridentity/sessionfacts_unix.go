@@ -25,7 +25,7 @@ const (
 	// kcmCallTimeout covers a socket-activated sssd-kcm starting after its
 	// idle exit, which took about 0.4 s on RHEL 9; a running KCM answers in
 	// milliseconds.
-	kcmCallTimeout = 2 * time.Second
+	kcmCallTimeout = time.Second
 	krb5ConfPath   = "/etc/krb5.conf"
 	maxKrb5Conf    = 256 << 10
 	// macOS's own Heimdal klist reads the API: cache; it answers in about
@@ -34,9 +34,10 @@ const (
 	klistTimeout   = kcmCallTimeout
 	maxKlistOutput = 64 << 10
 	klistWaitDelay = 100 * time.Millisecond
-	// sessionFactsDeadline bounds the whole read; the KCM call and klist
-	// finish well inside it.
-	sessionFactsDeadline = kcmCallTimeout + time.Second
+	// sessionFactsDeadline bounds the whole read, krb5.conf included; the
+	// KCM dial and call, and klist, finish inside it. Managed OpenCode spends
+	// about 1.8 s of the 3.5 s hook answer budget itself (GAP-0582).
+	sessionFactsDeadline = kcmDialTimeout + kcmCallTimeout
 	// fileCCacheDeadline bounds the read of a FILE or DIR cache, a local
 	// file that answers in milliseconds unless its mount stopped answering.
 	fileCCacheDeadline = 500 * time.Millisecond
@@ -48,6 +49,13 @@ const (
 // ccacheStat is os.Stat; tests replace it with a stalled mount.
 var ccacheStat = os.Stat
 
+// kcmSocketPaths are the KCM sockets tried in order; tests replace them.
+var kcmSocketPaths = []string{DefaultKCMSocketPath, LegacyKCMSocketPath}
+
+// krb5ConfDefaultCCache is the krb5.conf default_ccache_name; tests replace
+// it with a stalled include.
+var krb5ConfDefaultCCache = func() string { return krb5ConfDefaultCCacheName(krb5ConfPath, 0) }
+
 // currentSessionFactsHeader gives up after its deadline and sends the
 // session variables alone. A credential cache, or the home holding the facts
 // cache, on a network or FUSE mount that stopped answering blocks in the
@@ -55,21 +63,23 @@ var ccacheStat = os.Stat
 // own, so the hook still answers inside the agent's deadline. The session
 // variables alone are then cached for sessionFactsRetryAfter, so the hooks
 // in that time do not touch the credential cache at all.
+//
+// The deadline is chosen from KRB5CCNAME alone: the krb5.conf a default
+// cache name comes from is read inside the bound too.
 func currentSessionFactsHeader(now time.Time) string {
-	ccname, platformDefault := ccacheNameFromEnv(os.Getenv)
-	kind, _ := SplitCCacheName(ccname)
+	named := strings.TrimSpace(os.Getenv("KRB5CCNAME"))
 	cachePath := ""
 	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
 		cachePath = filepath.Join(home, ".defenseclaw", SessionFactsCacheFileName)
 	}
 	envKey := SessionFactsEnvKey(os.Getenv)
-	stalledKey := stalledCCacheKeyPrefix + ccname
+	stalledKey := stalledCCacheKeyPrefix + named
 	deadline := sessionFactsDeadline
-	if kind == CCacheFile || kind == CCacheDir {
+	if kind, _ := SplitCCacheName(named); kind == CCacheFile || kind == CCacheDir {
 		deadline = fileCCacheDeadline
 	}
 	done := make(chan string, 1)
-	go func() { done <- readSessionFactsHeader(now, ccname, platformDefault, cachePath, stalledKey, envKey) }()
+	go func() { done <- readSessionFactsHeader(now, cachePath, stalledKey, envKey) }()
 	timer := time.NewTimer(deadline)
 	defer timer.Stop()
 	select {
@@ -94,12 +104,13 @@ func currentSessionFactsHeader(now time.Time) string {
 	return header
 }
 
-func readSessionFactsHeader(now time.Time, ccname string, platformDefault bool, cachePath, stalledKey, envKey string) string {
+func readSessionFactsHeader(now time.Time, cachePath, stalledKey, envKey string) string {
 	if cachePath != "" {
 		if header, ok := cachedSessionFactsHeader(cachePath, stalledKey, envKey, now); ok {
 			return header
 		}
 	}
+	ccname, platformDefault := ccacheNameFromEnv(os.Getenv)
 	kind, residual := SplitCCacheName(ccname)
 	mtime := ccacheModTime(kind, residual)
 	key := strings.Join([]string{
@@ -143,7 +154,7 @@ func ccacheNameFromEnv(getenv func(string) string) (name string, platformDefault
 	if name := strings.TrimSpace(getenv("KRB5CCNAME")); name != "" {
 		return name, false
 	}
-	if name := krb5ConfDefaultCCacheName(krb5ConfPath, 0); name != "" {
+	if name := krb5ConfDefaultCCache(); name != "" {
 		return expandCCacheName(name), false
 	}
 	if runtime.GOOS == "darwin" {
@@ -385,7 +396,7 @@ func readDirCCachePrincipal(residual string) string {
 // a dial or call that timed out or broke off does not (kcmReadSettled).
 func readKCMPrincipal(cacheName string) (principal string, settled bool) {
 	settled = true
-	for _, socket := range []string{DefaultKCMSocketPath, LegacyKCMSocketPath} {
+	for _, socket := range kcmSocketPaths {
 		conn, err := net.DialTimeout("unix", socket, kcmDialTimeout)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
