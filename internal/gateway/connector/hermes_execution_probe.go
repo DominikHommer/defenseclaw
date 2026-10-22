@@ -7,14 +7,24 @@ package connector
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 const hermesExecutionProbeResponse = "defenseclaw-execution-probe-ok\n"
+
+// hermesExecutionProbeTimeout bounds one probe run; tests shorten it.
+// hermesExecutionProbePipeWait bounds the wait for stdout to close after the
+// probe exits or is killed: a descendant that inherited stdout cannot hold
+// Verify open.
+var (
+	hermesExecutionProbeTimeout  = 3 * time.Second
+	hermesExecutionProbePipeWait = time.Second
+)
 
 // hermesRegisteredCommandExecutable probes only the target Setup computed.
 // ownedHooksPresentInConfig has already read back the exact agent registration,
@@ -38,9 +48,20 @@ func hermesRegisteredCommandExecutable(opts SetupOpts, hookCommand string) bool 
 	} else if info.Mode().Perm()&0o111 == 0 {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	return runHermesExecutionProbe(target, args)
+}
+
+// runHermesExecutionProbe keeps no more stdout than the proof itself: one
+// byte more fails the write, which closes the pipe and ends the probe. The
+// process tree is killed at the timeout, and stdout left open by a
+// descendant is closed after hermesExecutionProbePipeWait.
+func runHermesExecutionProbe(target string, args []string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), hermesExecutionProbeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, target, args...)
-	output, err := cmd.Output()
-	return err == nil && string(output) == hermesExecutionProbeResponse
+	cmd := processutil.CommandContext(ctx, target, args...)
+	stdout := &hermesBoundedCommandBuffer{limit: int64(len(hermesExecutionProbeResponse))}
+	cmd.Stdout = stdout
+	cmd.WaitDelay = hermesExecutionProbePipeWait
+	err := processutil.RunTree(cmd)
+	return err == nil && stdout.String() == hermesExecutionProbeResponse
 }

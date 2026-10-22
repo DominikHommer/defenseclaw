@@ -38,6 +38,7 @@ import queue
 import re
 import shlex
 import shutil
+import signal
 import socket
 import ssl
 import stat
@@ -5953,19 +5954,87 @@ def _check_windows_native_hooks(
     _emit(status, label, f"{check.state}: {check.detail}", r=r, remediation=check.repair)
 
 
+_HERMES_EXECUTION_PROBE_RESPONSE = b"defenseclaw-execution-probe-ok\n"
+# One probe run, and the wait for stdout to close once the probe has exited or
+# been killed (a descendant can inherit it). Tests shorten both.
+_HERMES_EXECUTION_PROBE_TIMEOUT = 3.0
+_HERMES_EXECUTION_PROBE_PIPE_WAIT = 1.0
+
+
+def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
+    """Run a registered Hermes command with bounded output and time.
+
+    Returns the exit code and stdout, or ``None`` for the exit code when the
+    command could not start, timed out, wrote more than the proof, or left
+    stdout open past the pipe wait. One byte more than the proof closes the
+    pipe, so the hook's output never accumulates in Doctor.
+    """
+    limit = len(_HERMES_EXECUTION_PROBE_RESPONSE)
+    try:
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            start_new_session=os.name != "nt",
+        )
+    except (OSError, ValueError):
+        return None, b""
+    captured = bytearray()
+    overflow = threading.Event()
+
+    def drain() -> None:
+        fd = proc.stdout.fileno()
+        try:
+            while True:
+                chunk = os.read(fd, limit + 1 - len(captured))
+                if not chunk:
+                    return
+                captured.extend(chunk)
+                if len(captured) > limit:
+                    overflow.set()
+                    return
+        except OSError:
+            return
+        finally:
+            proc.stdout.close()
+
+    reader = threading.Thread(target=drain, name="hermes-execution-probe", daemon=True)
+    reader.start()
+
+    def kill_tree() -> None:
+        with contextlib.suppress(OSError):
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+
+    deadline = time.monotonic() + _HERMES_EXECUTION_PROBE_TIMEOUT
+    returncode: int | None
+    while True:
+        try:
+            returncode = proc.wait(timeout=0.05)
+            break
+        except subprocess.TimeoutExpired:
+            if overflow.is_set() or time.monotonic() >= deadline:
+                kill_tree()
+                proc.wait()
+                returncode = None
+                break
+    if returncode is not None and os.name != "nt":
+        # The probe exited: end whatever it left running in its session.
+        kill_tree()
+    reader.join(_HERMES_EXECUTION_PROBE_PIPE_WAIT)
+    if reader.is_alive() or overflow.is_set():
+        return None, bytes(captured[:limit])
+    return returncode, bytes(captured)
+
+
 def _hermes_windows_execution_probe(check: WindowsHookCheck) -> WindowsHookCheck:
     """Execute the exact active Windows target after the registration validator read it."""
     if not check.healthy:
         return check
-    try:
-        probe = subprocess.run(
-            [check.target, "hook", "--connector", "hermes", "--defenseclaw-execution-probe"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=3, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        probe = None
-    if probe is not None and probe.returncode == 0 and probe.stdout == b"defenseclaw-execution-probe-ok\n":
+    returncode, stdout = _run_hermes_execution_probe(
+        [check.target, "hook", "--connector", "hermes", "--defenseclaw-execution-probe"],
+    )
+    if returncode == 0 and stdout == _HERMES_EXECUTION_PROBE_RESPONSE:
         return check
     return WindowsHookCheck(
         "unexecutable", "registered Hermes command did not complete its active runtime execution probe",
@@ -8510,15 +8579,11 @@ def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
             for entry in entries
         ):
             return f"unexpected Hermes event {event} registers a DefenseClaw hook"
-    try:
-        probe = subprocess.run(
-            [expected, "--defenseclaw-execution-probe"], stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    returncode, stdout = _run_hermes_execution_probe([expected, "--defenseclaw-execution-probe"])
+    if returncode is None:
         return "Hermes registered hook execution probe could not run"
-    if probe.returncode != 0 or probe.stdout != b"defenseclaw-execution-probe-ok\n":
-        return f"Hermes registered hook execution probe failed (exit {probe.returncode})"
+    if returncode != 0 or stdout != _HERMES_EXECUTION_PROBE_RESPONSE:
+        return f"Hermes registered hook execution probe failed (exit {returncode})"
     return ""
 
 
