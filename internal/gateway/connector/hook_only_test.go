@@ -112,6 +112,37 @@ func TestCopilotReconcileReplacesRegisteredOldOpenCopy(t *testing.T) {
 		!bytes.Contains(repaired, []byte(operatorCommand)) {
 		t.Fatalf("repair lost the canonical or operator hook: %s", repaired)
 	}
+	// A copied launcher is still DefenseClaw-owned when the user renamed it.
+	// The registered command, rather than its basename, determines exposure.
+	renamed := filepath.Join(root, "project", "old-open", "retired-open.sh")
+	if err := os.Rename(old, renamed); err != nil {
+		t.Fatal(err)
+	}
+	renamedCommand := copilotHookInvocationCommandForEvent("linux", "preToolUse", renamed)
+	data, err = json.Marshal(map[string]interface{}{"hooks": map[string]interface{}{
+		"preToolUse": []interface{}{
+			map[string]interface{}{"type": "command", "bash": renamedCommand, "timeoutSec": 30},
+			map[string]interface{}{"type": "command", "bash": operatorCommand, "timeoutSec": 30},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchCopilotHooksForOS(path, current, []string{"preToolUse"}, "linux"); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(repaired, []byte(renamedCommand)) ||
+		!bytes.Contains(repaired, []byte(copilotHookInvocationCommandForEvent("linux", "preToolUse", current))) ||
+		!bytes.Contains(repaired, []byte(operatorCommand)) {
+		t.Fatalf("renamed managed copy survived repair or operator hook was lost: %s", repaired)
+	}
 }
 
 func TestHardeningJQFallbackRejectsStructuredOutputWithoutParser(t *testing.T) {

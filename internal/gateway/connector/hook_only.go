@@ -5009,7 +5009,6 @@ func copilotOldManagedCopyEntry(raw interface{}) bool {
 		command, _ := entry[key].(string)
 		word, rest, parsed := posixHookCommandSplit(strings.TrimSpace(command))
 		if !parsed || !filepath.IsAbs(word) || filepath.Clean(word) != word ||
-			filepath.Base(word) != "copilot-hook.sh" ||
 			(rest != "" && !strings.HasPrefix(rest, " --event ")) {
 			continue
 		}
