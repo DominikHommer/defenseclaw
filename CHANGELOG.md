@@ -16,6 +16,10 @@ for current behavior.
 
 ### Changed
 
+- **Bare policy updates include connectors stored under an alias.** HILT, hook fail-mode and block-message commands resolve active names to their configured keys, so saved overrides and Protection center readback agree.
+- **Refused action setup exits with an error before staging another mode.** Single, batch and guardrail setup keep the prior roster and hooks when action preflight fails; choose observe explicitly to stage observation.
+- **The Overview gateway-down notice keeps its full recovery command at 80×24.** The approval guide also documents piped confirmation input and EOF accurately.
+
 - **OpenShell 0.1.5.** `defenseclaw sandbox setup` and the managed `install: setup` mode now install NVIDIA OpenShell 0.1.5 (installer script and release tarballs pinned by SHA-256). What 0.1.5 also brings: a MicroVM flushes its disk before a stop, and a sandbox in OpenShell's error state (after a Docker restart, for one) can be stopped and started again, so the feed, the stop and start errors, `sandbox doctor` and the session messages now say `defenseclaw sandbox stop NAME` and `start NAME` instead of a delete. A sandbox whose provisioning timed out (`ProvisioningTimedOut`, `ImagePreparationTimedOut`), whose stop OpenShell refuses, is told to wait for OpenShell's cleanup and start again with no stop. The supervisor's OCSF log files are named `openshell-ocsf.*.jsonl` from 0.1.5; DefenseClaw does not read them. The first MicroVM start of each image after the upgrade prepares its disk again (about a minute and 5 GB); `sandbox image prune` removes the older release's disks.
 
 ### Security
