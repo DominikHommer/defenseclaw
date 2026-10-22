@@ -173,19 +173,61 @@ def test_registered_custom_pack_key_is_selected_by_name(env):
     assert unknown.exit_code == 1 and "guardrail.custom_packs name (team)" in unknown.output
 
 
-def test_explicit_custom_path_repins_only_the_same_validated_directory(env, monkeypatch):
+@pytest.mark.parametrize("by_name", [False, True], ids=["path", "name"])
+def test_stale_pin_is_replaced_only_by_a_confirmed_repin(env, monkeypatch, by_name):
+    """W4 review: plain use-pack never replaces a stale pin; --repin shows both digests and asks."""
     app, _root, custom, writes = env
     app.cfg.guardrail.rule_pack = "team"
     app.cfg.guardrail.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)}
-    result = _run(app, ["use-pack", str(custom), "--json"])
-    assert result.exit_code == 0, result.output
-    assert config_writer.Change(
-        "guardrail.custom_packs.team", {"path": str(custom), "digest": "sha256:" + "a" * 64}
-    ) in writes[-1]
+    pack = "team" if by_name else str(custom)
+    repinned = config_writer.Change("guardrail.custom_packs.team", {"path": str(custom), "digest": "sha256:" + "a" * 64})
+
+    for args in (["--json"], []):
+        refused = _run(app, ["use-pack", pack, *args])
+        assert refused.exit_code == 1 and writes == [], refused.output
+        assert "sha256:" + "b" * 64 in refused.output and "sha256:" + "a" * 64 in refused.output
+        assert f"use-pack {pack} --repin" in refused.output
+
+    unattended = _run(app, ["use-pack", pack, "--repin", "--json"])
+    assert unattended.exit_code == 2 and writes == [], unattended.output
+    assert "--yes" in json.loads(unattended.output)["message"]
+
+    declined = CliRunner().invoke(cmd_guardrail.guardrail, ["use-pack", pack, "--repin"], obj=app, input="n\n")
+    assert declined.exit_code == 1 and writes == [], declined.output
+    assert "sha256:" + "b" * 64 in declined.output and "sha256:" + "a" * 64 in declined.output
+
+    confirmed = CliRunner().invoke(cmd_guardrail.guardrail, ["use-pack", pack, "--repin"], obj=app, input="y\n")
+    assert confirmed.exit_code == 0, confirmed.output
+    assert repinned in writes[-1] and "Re-pinned 'team'" in confirmed.output
     writes.clear()
+
+    scripted = _run(app, ["use-pack", pack, "--repin", "--yes", "--json"])
+    assert scripted.exit_code == 0, scripted.output
+    assert repinned in writes[-1] and "Re-pinned" in json.loads(scripted.output)["message"]
+    writes.clear()
+
+    # --repin never pins content that does not validate.
     monkeypatch.setattr(rulepack_validation, "validate_rule_pack", _invalid)
-    refused = _run(app, ["use-pack", str(custom), "--json"])
-    assert refused.exit_code == 1 and writes == []
+    assert _run(app, ["use-pack", pack, "--repin", "--yes", "--json"]).exit_code == 1 and writes == []
+    monkeypatch.setattr(rulepack_validation, "validate_rule_pack", _unavailable)
+    assert _run(app, ["use-pack", pack, "--repin", "--yes", "--json"]).exit_code == 2 and writes == []
+
+
+def test_repin_of_an_unchanged_or_new_pack_needs_no_confirmation(env):
+    app, _root, custom, writes = env
+    first = _run(app, ["use-pack", str(custom), "--repin", "--json"])
+    assert first.exit_code == 0, first.output
+    assert "Re-pinned" not in json.loads(first.output)["message"]
+    app.cfg.guardrail.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64)}
+    same = _run(app, ["use-pack", str(custom), "--repin", "--json"])
+    assert same.exit_code == 0 and not any(c.path.startswith("guardrail.custom_packs") for c in writes[-1])
+
+
+def test_repin_refuses_presets_and_clear(env):
+    app, _root, _custom, writes = env
+    assert _run(app, ["use-pack", "strict", "--repin"]).exit_code == 2
+    assert _run(app, ["use-pack", "--clear", "--connector", "codex", "--repin"]).exit_code == 2
+    assert writes == []
 
 
 def test_bare_name_selects_installed_pack_over_cwd_folder(env, tmp_path, monkeypatch):

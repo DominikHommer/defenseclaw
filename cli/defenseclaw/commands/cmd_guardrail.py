@@ -63,7 +63,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.config import _assert_config_write_allowed, config_path_for_data_dir
 from defenseclaw.config_writer import ConfigWriteError
-from defenseclaw.connector_contracts import normalize_connector
+from defenseclaw.connector_contracts import has_native_approval_prompt, normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
 from defenseclaw.fail_mode import (
@@ -2204,7 +2204,7 @@ _HILT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
 def _hilt_enable_notice(connector: str, severity: str) -> str:
     label = _connector_label(connector)
-    if normalize_connector(connector) in {"claudecode", "openclaw", "copilot", "antigravity", "amp"}:
+    if has_native_approval_prompt(connector):
         return (
             f"{label} will prompt for approval on supported confirmable actions at/above "
             f"{severity} (CRITICAL findings still block outright)."
@@ -3815,6 +3815,12 @@ def _with_scope_options(fn):
     is_flag=True,
     help="Skip validating a built-in pack (a custom pack is always validated: its digest is pinned).",
 )
+@click.option(
+    "--repin",
+    is_flag=True,
+    help="Replace the pinned digest of a custom pack edited since it was pinned (shows both digests and asks).",
+)
+@click.option("--yes", is_flag=True, help="With --repin: skip the confirmation prompt.")
 @click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def use_pack_cmd(
@@ -3823,6 +3829,8 @@ def use_pack_cmd(
     connector: str | None,
     clear: bool,
     no_validate: bool,
+    repin: bool,
+    yes: bool,
     json_out: bool,
 ) -> None:
     """Switch the guardrail rule pack, globally or for one connector.
@@ -3833,8 +3841,9 @@ def use_pack_cmd(
     for a folder in the current directory that shares a pack's name). It is
     written as ``guardrail.rule_pack``; a custom directory is also pinned as
     ``guardrail.custom_packs.NAME`` with its validated digest, so an edited
-    pack is refused until ``use-pack NAME`` pins it again (it runs while that
-    stale pin fails the config check). Without ``--connector`` every
+    pack is refused until ``use-pack NAME --repin`` pins it again: it shows
+    the pinned and the new digest and asks (``--yes`` for scripts), and it
+    runs while that stale pin fails the config check. Without ``--connector`` every
     connector uses PACK and per-connector packs are removed. ``--clear
     --connector X`` removes X's pack. The running gateway picks it up on its
     next reload; nothing is restarted.
@@ -3892,6 +3901,8 @@ def use_pack_cmd(
         raise click.UsageError("--clear needs --connector NAME (the global pack can't be cleared, only switched).")
     if clear and pack:
         raise click.UsageError("Pass either PACK or --clear, not both.")
+    if clear and repin:
+        raise click.UsageError("--repin re-pins a custom pack; it can't be combined with --clear.")
     if not clear and not (pack or "").strip():
         raise click.UsageError("Missing PACK: a preset (default, strict, permissive) or a rule-pack directory.")
 
@@ -3997,10 +4008,31 @@ def use_pack_cmd(
             path=path,
             message=f"The '{pack_name}' preset isn't installed at {path}; run defenseclaw init. Nothing was changed.",
         )
+    if kind == "preset" and repin:
+        raise click.UsageError(f"--repin re-pins a custom pack; '{pack_name}' is a built-in preset.")
 
     validation: dict | None = None
     warning = ""
     digest = ""
+    # (pinned, new) when --repin replaces a stale pin; never without --repin.
+    repinned: tuple[str, str] | None = None
+
+    def _refuse_stale_pin(pinned: str) -> None:
+        _finish(
+            ok=False,
+            exit_code=1,
+            pack_name=pack_name,
+            path=path,
+            validation=validation,
+            message=(
+                f"Rule pack {pack_name!r} no longer matches the digest pinned for it ({pinned or 'none'}; "
+                f"the pack is now sha256:{digest}). Review the pack, then re-pin it: defenseclaw guardrail "
+                f"use-pack {raw} --repin (or defenseclaw config set guardrail.custom_packs.{name_for_pin}.digest "
+                f"sha256:{digest}). Nothing was changed."
+            ),
+        )
+
+    name_for_pin = pack_name
     if kind != "preset" or not no_validate:
         try:
             result = rulepack_validation.validate_rule_pack(path)
@@ -4033,18 +4065,10 @@ def use_pack_cmd(
             digest = str((result.summary or {}).get("files_digest", "") or "")
             pinned = str(getattr(registered, "digest", "") or "").strip().lower().removeprefix("sha256:")
             if kind == "registered" and digest.lower() != pinned:
-                _finish(
-                    ok=False,
-                    exit_code=1,
-                    pack_name=pack_name,
-                    path=path,
-                    validation=validation,
-                    message=(
-                        f"Rule pack {pack_name!r} no longer matches the digest registered for it. Review the pack, "
-                        f"then pin it: defenseclaw config set guardrail.custom_packs.{pack_name}.digest "
-                        f"sha256:{digest}. Nothing was changed."
-                    ),
-                )
+                old_pin = f"sha256:{pinned}" if pinned else ""
+                if not repin:
+                    _refuse_stale_pin(old_pin)
+                repinned = (old_pin, f"sha256:{digest}")
 
     _preflight_config_write(app)
     changes: list = []
@@ -4063,10 +4087,39 @@ def use_pack_cmd(
                     f"Custom pack name {name!r} is already registered at {existing_path}. "
                     "Choose a different pack name or update the registered pack explicitly. Nothing was changed.",
                 )
-        if existing is None or existing_digest != f"sha256:{digest.lower()}":
+            if existing_digest != f"sha256:{digest.lower()}":
+                # Same directory, edited since it was pinned: only --repin replaces the pin.
+                name_for_pin = name
+                if not repin:
+                    _refuse_stale_pin(existing_digest)
+                repinned = (existing_digest, f"sha256:{digest}")
+        if existing is None or repinned is not None:
             changes.append(
                 config_writer.Change(f"guardrail.custom_packs.{name}", {"path": path, "digest": f"sha256:{digest}"})
             )
+    elif repinned is not None:
+        changes.append(
+            config_writer.Change(
+                f"guardrail.custom_packs.{name}",
+                {"path": str(getattr(registered, "path", "") or ""), "digest": repinned[1]},
+            )
+        )
+    if repinned is not None:
+        if json_out and not yes:
+            _fail(
+                2,
+                f"Re-pinning {name!r} from {repinned[0] or 'none'} to {repinned[1]} needs your confirmation; "
+                "pass --yes with --json. Nothing was changed.",
+            )
+        if not json_out:
+            ux.warn(
+                f"Re-pin {name!r} at {path}: pinned {repinned[0] or 'none'}, the pack is now {repinned[1]}. "
+                "The gateway then enforces the edited pack.",
+                indent="  ",
+            )
+            if not yes and not _confirm_proceed():
+                click.echo(f"  {ux.dim('Cancelled.')} Nothing was changed.")
+                raise SystemExit(1)
     key = _scope_key(connector_key, None)
     changes.append(config_writer.Change(f"{key}.rule_pack", name))
     cleared: list[str] = []
@@ -4099,11 +4152,14 @@ def use_pack_cmd(
         message = f"{_connector_label(connector_key)} now uses the '{pack_name}' rule pack."
     if dropped:
         message += f" Dropped rule references the pack does not have: {'; '.join(dropped)}."
+    if repinned is not None:
+        message += f" Re-pinned {name!r} from {repinned[0] or 'none'} to {repinned[1]}."
     _log_guardrail_change(
         app,
         "guardrail-use-pack",
         f"scope={connector_key or scope} pack={name} previous={previous_pack}"
-        + (f" cleared={','.join(cleared)}" if cleared else ""),
+        + (f" cleared={','.join(cleared)}" if cleared else "")
+        + (f" repinned={repinned[0] or 'none'}->{repinned[1]}" if repinned is not None else ""),
     )
     _finish(
         ok=True,

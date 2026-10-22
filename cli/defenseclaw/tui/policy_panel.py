@@ -41,6 +41,7 @@ from typing import Any
 
 from rich.console import RenderableType
 
+from defenseclaw.connector_contracts import has_native_approval_prompt
 from defenseclaw.platform_support import openshell_sandboxes_supported
 from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.screens.consequence import (
@@ -1023,8 +1024,26 @@ def hilt_change_modal(
     affected = [r for r in model.postures if model.connector_of(r)] if all_connectors else [row]
     weaker = any(hilt_weakens(str(getattr(r, "hilt", "") or "off"), level) for r in affected)
     details = [] if all_connectors else [posture_summary(scope, "action", block, alert, level)]
+    # The connectors this reaches, and how each answers a confirm verdict.
+    reached = affected if connector or all_connectors else [r for r in model.postures if model.connector_of(r)]
+    observing = [str(getattr(r, "scope", "")) for r in affected if str(getattr(r, "mode", "") or "observe") != "action"]
+    alerting = [model.connector_of(r) for r in reached if not has_native_approval_prompt(model.connector_of(r))]
+    prompting = [model.connector_of(r) for r in reached if has_native_approval_prompt(model.connector_of(r))]
     if mode != "action" and not all_connectors:
         details.append(f"{scope} is in observe mode, so nothing waits for approval until it runs in action mode.")
+    elif observing:
+        verb = ("is", "it runs") if len(observing) == 1 else ("are", "they run")
+        details.append(
+            f"{', '.join(observing)} {verb[0]} in observe mode, so nothing waits for approval there "
+            f"until {verb[1]} in action mode."
+        )
+    if level != "off" and alerting:
+        has, its = ("has", "its") if len(alerting) == 1 else ("have", "their")
+        details.append(
+            f"{', '.join(alerting)} {has} no native approval prompt: {its} confirm verdicts raise alerts instead."
+        )
+        if prompting:
+            details.append("Asks in the agent's own approval prompt: " + ", ".join(prompting) + ".")
     if connector and not model.multi_connector:
         details.append("This install has one connector, so this sets approval for every connector.")
     elif all_connectors:
@@ -1052,7 +1071,11 @@ def hilt_change_modal(
             )
         else:
             consequence = f"This weakens protection: {scope} asks a person for fewer findings."
-    title = "Turn off human approval" if level == "off" else f"Ask a human for {level}"
+    asks_everywhere = not observing and not alerting
+    if level == "off":
+        title = "Turn off human approval"
+    else:
+        title = f"Ask a human for {level}" if asks_everywhere else f"Set human approval to {level}"
     return _modal(
         f"{title} on {'every active connector' if all_connectors else _scope_words(model, row)}?",
         f"{'Connector overrides' if all_connectors else old} → {level}",
