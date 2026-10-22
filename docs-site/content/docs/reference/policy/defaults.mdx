@@ -178,8 +178,11 @@ There is no `--reset` flag. To go back to the defaults:
 
 ```bash
 defenseclaw setup guardrail --rule-pack default --no-human-approval
+defenseclaw guardrail hilt off --yes
 defenseclaw policy activate default
 ```
+
+`--no-human-approval` without `--connector` turns off only the global `guardrail.hilt`. A connector set up with `--connector <name> --human-approval` keeps its own `guardrail.connectors.<name>.hilt` block, so human approval stays on for it. `guardrail hilt off --yes` turns it off for every active connector; `--yes` skips the confirmation prompt.
 
 To reset user state, copy `~/.defenseclaw` somewhere first (`reset` creates no archive), then run `defenseclaw reset` and `defenseclaw quickstart --connector <name>` (for example `claudecode`). Bare `defenseclaw quickstart` works only when one agent is installed; with several it exits with "Multiple connectors detected" and asks for `--connector`. The runtime and installed plugin are kept. On Windows copy `%USERPROFILE%\.defenseclaw` with `Copy-Item -Recurse`. A managed install resets through its [lifecycle commands](/docs/enterprise/operate/lifecycle).
 

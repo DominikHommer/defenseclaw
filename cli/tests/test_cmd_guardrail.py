@@ -1646,6 +1646,45 @@ class HILTCommandTests(unittest.TestCase):
         app.cfg.save.assert_not_called()
 
 
+    def test_documented_default_reset_turns_human_approval_off(self):
+        # GAP-0544: reference/policy/defaults.mdx "go back to the defaults"
+        # must also clear a per-connector override from `setup guardrail
+        # --connector X --human-approval`.
+        import re
+        from pathlib import Path
+
+        from defenseclaw import config as dcconfig
+        from defenseclaw.commands import cmd_setup
+
+        page = Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/policy/defaults.mdx"
+        block = re.search(r"go back to the defaults:\n\n```bash\n(.*?)```", page.read_text(), re.S)
+        self.assertIsNotNone(block)
+        app = make_multi_ctx({"claudecode": None})
+        gc = app.cfg.guardrail
+        gc.hilt = dcconfig.HILTConfig(enabled=True, min_severity="HIGH")
+        gc.connectors["claudecode"].hilt = dcconfig.HILTConfig(enabled=True, min_severity="HIGH")
+        for line in block[1].splitlines():
+            args = line.split()[1:]
+            if args[:2] == ["setup", "guardrail"]:
+                self.assertNotIn("--connector", args)
+                approval = {"--human-approval": True, "--no-human-approval": False}
+                cmd_setup._apply_guardrail_extra_options(
+                    gc,
+                    rule_pack=None,
+                    human_approval=next((approval[a] for a in args if a in approval), None),
+                    hilt_min_severity=None,
+                )
+            elif args[:2] == ["guardrail", "hilt"]:
+                result = CliRunner().invoke(cmd_guardrail.hilt_cmd, args[2:], obj=app, input="")
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+            else:
+                # `policy activate` does not copy a preset's hilt section.
+                self.assertEqual(args[:2], ["policy", "activate"], msg=line)
+        self.assertFalse(gc.effective_hilt("claudecode").enabled)
+        flag_doc = page.parents[1] / "commands/guardrail-setup.mdx"
+        self.assertIn("Without --connector it changes only the global guardrail.hilt", flag_doc.read_text())
+
+
 class BlockMessageCommandTests(unittest.TestCase):
     """`guardrail block-message [TEXT] [--clear] [--connector X]`."""
 
