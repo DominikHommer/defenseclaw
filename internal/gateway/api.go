@@ -3854,6 +3854,11 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
+		// until 1.1: a removed connector's hook route blocks every call
+		// with no token (retired_connector_hook.go); it never allows.
+		if serveRetiredConnectorHook(w, r) {
+			return
+		}
 		// Fleet API routes carry their own token auth (fleet.API's
 		// authMiddleware). Skip the gateway token only when Fleet is wired
 		// and its token is configured, decided per request: a token read

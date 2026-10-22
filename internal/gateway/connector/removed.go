@@ -23,9 +23,10 @@ package connector
 //
 //  1. It replaces the hook script an older release wrote for the connector
 //     (OpenHands' openhands-hook.sh, OmniGent's policy module), proven by its
-//     DefenseClaw marker, with a static deny stub, in one atomic rename. A
-//     stub an older teardown left that allowed every call is replaced the
-//     same way. The stub blocks every call and says that support was
+//     DefenseClaw marker, with a static deny stub, in one atomic rename (a
+//     file with a second name, a hard link, gets the stub written into it,
+//     so every name blocks). A stub an older teardown left that allowed
+//     every call is replaced the same way. The stub blocks every call and says that support was
 //     removed in 1.0.4 and how to remove the hook.
 //  2. It revokes the DefenseClaw tokens issued for the connector.
 //
@@ -33,19 +34,24 @@ package connector
 // import paths (.pth), runtime records (.hookcfg), backups, the hook
 // contract lock and every other connector's files stay as they are.
 // RemovedConnectorLeftovers lists what is left, with the steps to remove it
-// by hand; status, doctor and every uninstall form show that list. Delete
-// this file in 1.1.
+// by hand; status, doctor and every uninstall form show that list. The
+// gateway keeps the old hook routes, which block every call
+// (gateway/retired_connector_hook.go). Delete this file in 1.1.
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -59,7 +65,37 @@ const (
 	removedScriptReadLimit = 1 << 20
 	// removedMarkerLines is how many leading lines may hold the marker.
 	removedMarkerLines = 3
+	// removedConfigReadLimit bounds the read of an agent config; a larger
+	// one cannot be checked and is listed for a check by hand.
+	removedConfigReadLimit = 16 << 20
 )
+
+// RemovedConnectorForHookPath returns the removed connector whose gateway
+// hook route path is: the route every 0.8.10 to 1.0.3 OpenHands hook and
+// OmniGent policy module posts to. until 1.1.
+func RemovedConnectorForHookPath(path string) (string, bool) {
+	switch path {
+	case "/api/v1/" + removedOpenHandsID + "/hook":
+		return removedOpenHandsID, true
+	case "/api/v1/" + removedOmnigentID + "/hook":
+		return removedOmnigentID, true
+	}
+	return "", false
+}
+
+// RemovedConnectorDenyReason is the reason DefenseClaw gives when it blocks
+// a call of a removed connector: the stub's, and the retired gateway
+// route's. until 1.1.
+func RemovedConnectorDenyReason(name string) (string, bool) {
+	c, ok := removedConnectorFor(name)
+	if !ok {
+		return "", false
+	}
+	if c.name == removedOmnigentID {
+		return removedOmnigentDenyReason, true
+	}
+	return removedOpenHandsDenyReason, true
+}
 
 // removedOpenHandsDenyReason is the reason the OpenHands stub gives with every
 // block. It holds no $, !, backslash or single quote, so every shell prints it
@@ -112,26 +148,25 @@ type removedOnlyConnector struct {
 	script, marker string
 	tombstone      string
 	mode           os.FileMode
-	// configNeedles are what an agent config that still runs or imports the
-	// script contains.
-	configNeedles []string
-	configStep    string
+	configStep     string
 }
+
+// removedOpenHandsLauncherFlag is how a Windows hooks.json command names the
+// OpenHands connector of the native launcher (defenseclaw-hook --connector
+// openhands).
+var removedOpenHandsLauncherFlag = regexp.MustCompile(`(?i)--connector(?:\s*=\s*|\s+)["']?open[-_]?hands\b`)
 
 var (
 	removedOpenHands = removedOnlyConnector{
 		name: removedOpenHandsID, label: "OpenHands",
 		script: removedOpenHandsHookScript, marker: "# defenseclaw-managed-hook v",
 		tombstone: removedOpenHandsTombstone, mode: 0o700,
-		// Windows registered the native launcher, not the script.
-		configNeedles: []string{removedOpenHandsHookScript, "--connector openhands"},
-		configStep:    "remove every hook whose command runs " + removedOpenHandsHookScript + " (or defenseclaw-hook --connector openhands) from this file, then restart OpenHands",
+		configStep: "remove every hook whose command runs " + removedOpenHandsHookScript + " (or defenseclaw-hook --connector openhands) from this file, then restart OpenHands",
 	}
 	removedOmnigent = removedOnlyConnector{
 		name: removedOmnigentID, label: "OmniGent",
 		script: removedOmnigentModuleName + ".py", marker: "# defenseclaw-managed-policy v",
 		tombstone: removedOmnigentTombstone, mode: 0o600,
-		configNeedles: []string{removedOmnigentModuleName},
 		configStep: "remove " + removedOmnigentModuleName + " from policy_modules and the " + removedOmnigentPolicyKey +
 			" policy (handler " + removedOmnigentModuleName + ".defenseclaw_policy) from this file, then restart OmniGent",
 	}
@@ -206,32 +241,47 @@ const (
 )
 
 func (c removedOnlyConnector) scriptState(path string) (removedScriptState, error) {
+	state, _, err := c.scriptStateAndLinks(path)
+	return state, err
+}
+
+// scriptStateAndLinks is scriptState and, for a regular file, how many names
+// (hard links) the file has.
+func (c removedOnlyConnector) scriptStateAndLinks(path string) (removedScriptState, uint32, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return removedScriptAbsent, nil
+		return removedScriptAbsent, 0, nil
 	}
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > removedScriptReadLimit {
-		return removedScriptForeign, nil
+		return removedScriptForeign, 0, nil
 	}
-	file, err := os.Open(path)
+	file, err := os.OpenFile(path, os.O_RDONLY|otlpOpenNoFollow(), 0)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer file.Close()
+	links, err := atomicTransformBoundLinkCountPlatform(file)
+	if err != nil {
+		return 0, 0, err
+	}
 	data, err := io.ReadAll(io.LimitReader(file, removedScriptReadLimit+1))
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
+	return c.classifyScript(data), links, nil
+}
+
+func (c removedOnlyConnector) classifyScript(data []byte) removedScriptState {
 	switch {
 	case string(data) == c.tombstone:
-		return removedScriptStub, nil
+		return removedScriptStub
 	case len(data) <= removedScriptReadLimit && removedHasMarker(data, c.marker):
-		return removedScriptOwned, nil
+		return removedScriptOwned
 	}
-	return removedScriptForeign, nil
+	return removedScriptForeign
 }
 
 // removedHasMarker reports whether one of the first lines of data starts with
@@ -266,19 +316,68 @@ func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error 
 
 // replaceScript writes the deny stub over a script an older release wrote, in
 // one atomic rename that replaces the file itself, never a link's target.
+//
+// A file with more than one name (a hard link elsewhere) is written in
+// place instead: a rename gives only this name the stub, and the old hook
+// under its other name would go on running with its tokens revoked, which
+// in fail mode open lets every call run.
 func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	path := c.scriptPath(dataDir)
-	state, err := c.scriptState(path)
+	state, links, err := c.scriptStateAndLinks(path)
 	if err != nil {
 		return fmt.Errorf("%s teardown: read %s: %w", c.name, path, err)
 	}
 	if state != removedScriptOwned {
 		return nil
 	}
+	if links > 1 {
+		if err := c.writeStubIntoFile(path); err != nil {
+			return fmt.Errorf("%s teardown: write the stub that blocks every call into %s (%d names): %w", c.name, path, links, err)
+		}
+		return nil
+	}
 	if err := atomicWriteFileNoFollow(path, []byte(c.tombstone), c.mode); err != nil {
 		return fmt.Errorf("%s teardown: replace %s with the stub that blocks every call: %w", c.name, path, err)
 	}
 	return nil
+}
+
+// writeStubIntoFile writes the stub into the file at path, which every one
+// of its names shares. The whole stub goes in first and the old tail is cut
+// after it, so a reader that sees the new first bytes runs the stub to its
+// end; a failed cut leaves a file that still has the marker, which the next
+// start writes again. The file is checked again through the open handle: one
+// that is no longer an older release's script is left alone.
+func (c removedOnlyConnector) writeStubIntoFile(path string) error {
+	file, err := os.OpenFile(path, os.O_RDWR|otlpOpenNoFollow(), 0)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() > removedScriptReadLimit {
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(file, removedScriptReadLimit+1))
+	if err != nil {
+		return err
+	}
+	if c.classifyScript(data) != removedScriptOwned {
+		return nil
+	}
+	if _, err := file.WriteAt([]byte(c.tombstone), 0); err != nil {
+		return err
+	}
+	if err := file.Truncate(int64(len(c.tombstone))); err != nil {
+		return err
+	}
+	if err := file.Chmod(c.mode); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 func (c removedOnlyConnector) otlpTokenPath(dataDir string) string {
@@ -372,12 +471,19 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 	}
 	for _, path := range c.configPaths(opts) {
 		data, err := readRemovedConfig(path)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-		case err != nil:
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
 			add(path, fmt.Sprintf("could not be read (%v)", err), "check it by hand: "+c.configStep)
-		case c.configNames(data):
+			continue
+		}
+		names, checkErr := c.configNames(data)
+		switch {
+		case names:
 			add(path, c.configWhat(), c.configStep)
+		case checkErr != nil:
+			add(path, fmt.Sprintf("could not be checked (%v), so it may still name DefenseClaw's hook", checkErr), "check it by hand: "+c.configStep)
 		}
 	}
 	if strings.TrimSpace(opts.DataDir) == "" {
@@ -385,9 +491,8 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 	}
 	if c.name == removedOmnigentID {
 		if pth := managedFileBackupTargetPath(opts.DataDir, c.name, "pth", ""); pth != "" {
-			if _, err := os.Lstat(pth); err == nil {
-				add(pth, "adds DefenseClaw's hook folder to OmniGent's Python import path",
-					"delete this file once no OmniGent config.yaml names "+removedOmnigentModuleName)
+			if item, ok := removedPthLeftover(pth, filepath.Join(opts.DataDir, "hooks")); ok {
+				out = append(out, item)
 			}
 		}
 	}
@@ -430,19 +535,112 @@ func (c removedOnlyConnector) configWhat() string {
 	return "OpenHands still runs DefenseClaw's hook from here; it blocks every call"
 }
 
-func (c removedOnlyConnector) configNames(data []byte) bool {
-	for _, needle := range c.configNeedles {
-		if bytes.Contains(data, []byte(needle)) {
-			return true
+// configNames reports whether an agent config still runs or imports the
+// script. It checks the bytes and the decoded values (JSON for hooks.json,
+// YAML for config.yaml), so a name written with escapes is found too. The
+// error says why a file that does not name it could not be checked: too
+// large, or not JSON or YAML.
+func (c removedOnlyConnector) configNames(data []byte) (bool, error) {
+	if c.textNames(string(data)) {
+		return true, nil
+	}
+	if len(data) > removedConfigReadLimit {
+		return false, fmt.Errorf("it is larger than %d MiB", removedConfigReadLimit>>20)
+	}
+	body := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	if len(bytes.TrimSpace(body)) == 0 {
+		return false, nil
+	}
+	var doc any
+	if c.name == removedOpenHandsID {
+		if err := json.Unmarshal(body, &doc); err != nil {
+			return false, fmt.Errorf("it is not JSON: %w", err)
+		}
+	} else if err := yaml.Unmarshal(body, &doc); err != nil {
+		return false, fmt.Errorf("it is not YAML: %w", err)
+	}
+	return removedValueNames(doc, c.textNames), nil
+}
+
+// textNames reports whether one config text (a command, a module name)
+// names the script: OpenHands' hook script or the native launcher's
+// OpenHands connector, OmniGent's policy module.
+func (c removedOnlyConnector) textNames(text string) bool {
+	lower := strings.ToLower(text)
+	if c.name == removedOmnigentID {
+		return strings.Contains(lower, removedOmnigentModuleName)
+	}
+	return strings.Contains(lower, removedOpenHandsHookScript) || removedOpenHandsLauncherFlag.MatchString(text)
+}
+
+// removedValueNames reports whether a string or key anywhere in a decoded
+// JSON or YAML value names the script.
+func removedValueNames(value any, names func(string) bool) bool {
+	switch v := value.(type) {
+	case string:
+		return names(v)
+	case []any:
+		for _, item := range v {
+			if removedValueNames(item, names) {
+				return true
+			}
+		}
+	case map[string]any:
+		for key, item := range v {
+			if names(key) || removedValueNames(item, names) {
+				return true
+			}
+		}
+	case map[any]any:
+		for key, item := range v {
+			if names(fmt.Sprint(key)) || removedValueNames(item, names) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
+// removedPthLeftover lists OmniGent's import-path file when it still holds
+// DefenseClaw's line (the hook folder), with a step that takes out only that
+// line when the file holds other import paths too.
+func removedPthLeftover(pth, hooks string) (RemovedLeftover, bool) {
+	data, err := readRemovedConfig(pth)
+	if errors.Is(err, os.ErrNotExist) {
+		return RemovedLeftover{}, false
+	}
+	lineStep := "remove only the line " + hooks + " (DefenseClaw's hook folder) from this file, and keep every other line, once no OmniGent config.yaml names " + removedOmnigentModuleName
+	if err != nil || len(data) > removedConfigReadLimit {
+		if err == nil {
+			err = fmt.Errorf("it is larger than %d MiB", removedConfigReadLimit>>20)
+		}
+		return RemovedLeftover{Path: pth, What: fmt.Sprintf("could not be read (%v)", err), Step: "check it by hand: " + lineStep}, true
+	}
+	own, other := false, false
+	for _, line := range strings.Split(string(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "" || strings.HasPrefix(line, "#"):
+		case sameManagedTargetPath(line, hooks):
+			own = true
+		default:
+			other = true
+		}
+	}
+	switch {
+	case !own:
+		return RemovedLeftover{}, false
+	case other:
+		return RemovedLeftover{Path: pth, What: "adds DefenseClaw's hook folder to OmniGent's Python import path; it holds other import paths too", Step: lineStep}, true
+	}
+	return RemovedLeftover{Path: pth, What: "adds DefenseClaw's hook folder to OmniGent's Python import path; it holds nothing else",
+		Step: "delete this file once no OmniGent config.yaml names " + removedOmnigentModuleName}, true
+}
+
 // configPaths are the agent config files an older setup may have changed:
 // the one its backup record names, the ones the hook contract lock names,
-// the explicit config home, the agent's default, and for OmniGent the files
-// OMNIGENT_CONFIG and OMNIGENT_CONFIG_HOME select.
+// the explicit config home and the agent's default (both), and for OmniGent
+// the files OMNIGENT_CONFIG and OMNIGENT_CONFIG_HOME select.
 func (c removedOnlyConnector) configPaths(opts SetupOpts) []string {
 	file, defaultDir := "hooks.json", ".openhands"
 	if c.name == removedOmnigentID {
@@ -459,11 +657,11 @@ func (c removedOnlyConnector) configPaths(opts SetupOpts) []string {
 			}
 		}
 	}
+	// The agent may read its default config as well as the explicit one.
 	if home := strings.TrimSpace(opts.ConfigHome); home != "" {
 		paths = append(paths, filepath.Join(removedAbsolute(home), file))
-	} else {
-		paths = append(paths, homePath(defaultDir, file))
 	}
+	paths = append(paths, homePath(defaultDir, file))
 	if c.name == removedOmnigentID {
 		paths = append(paths, removedAbsolute(os.Getenv("OMNIGENT_CONFIG")))
 		if home := strings.TrimSpace(os.Getenv("OMNIGENT_CONFIG_HOME")); home != "" {
@@ -505,7 +703,8 @@ func removedAbsolute(value string) string {
 }
 
 // readRemovedConfig reads an agent config through links, as the agent does,
-// up to a bound.
+// up to one byte past removedConfigReadLimit (more is a file too large to
+// check).
 func readRemovedConfig(path string) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -519,7 +718,7 @@ func readRemovedConfig(path string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	return io.ReadAll(io.LimitReader(file, 16<<20))
+	return io.ReadAll(io.LimitReader(file, removedConfigReadLimit+1))
 }
 
 // FormatRemovedLeftovers renders leftovers as the lines status, uninstall and

@@ -430,10 +430,16 @@ or OmniGent before 1.0.4:
     `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`, with a stub that
     blocks every call. The stub says that support was removed in 1.0.4 and how
     to remove the hook. Only a file with DefenseClaw's marker is replaced,
-    including a stub an older teardown left that allowed every call. On
-    Windows, an OpenHands hook that runs `defenseclaw-hook` blocks the same
-    way.
+    including a stub an older teardown left that allowed every call. A
+    script with a second name (a hard link) gets the stub under every name.
+    On Windows, an OpenHands hook that runs `defenseclaw-hook` blocks the
+    same way.
   - It revokes DefenseClaw's tokens for them.
+
+  The gateway still answers the old hook routes (`/api/v1/openhands/hook`,
+  `/api/v1/omnigent/hook`), and they block every call. An OmniGent process
+  that loaded the old policy module before the upgrade is blocked until you
+  restart it.
 
   It doesn't change your agent's config files (`~/.openhands/hooks.json`, a
   workspace `.openhands/hooks.json`, `~/.omnigent/config.yaml`, the file
@@ -448,8 +454,10 @@ or OmniGent before 1.0.4:
     (or `defenseclaw-hook --connector openhands`) from `hooks.json`, then
     restart OpenHands.
   - **OmniGent:** remove `defenseclaw_omnigent_policy` from `policy_modules`
-    and the `defenseclaw_guardrail` policy from `config.yaml`, then delete
-    `defenseclaw_omnigent.pth` and restart OmniGent.
+    and the `defenseclaw_guardrail` policy from `config.yaml`. Then remove
+    DefenseClaw's line (its hook folder, `~/.defenseclaw/hooks`) from
+    `defenseclaw_omnigent.pth` and keep the other lines. Delete the file
+    only if that was its only line. Restart OmniGent.
   - Then delete the stub, `.hookcfg.openhands` and
     `~/.defenseclaw/connector_backups/<connector>`. The backups hold the
     files as they were before DefenseClaw's setup (`pristine_bytes`, base64),

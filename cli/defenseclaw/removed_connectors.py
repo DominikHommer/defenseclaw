@@ -26,7 +26,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
+
+import yaml
 
 _READ_LIMIT = 16 << 20
 _SCRIPT_LIMIT = 1 << 20
@@ -46,7 +49,6 @@ class _Removed:
     marker: str
     config_file: str
     default_dir: str
-    needles: tuple[str, ...]
     config_what: str
     config_step: str
 
@@ -59,8 +61,6 @@ _CONNECTORS: tuple[_Removed, ...] = (
         marker="# defenseclaw-managed-hook v",
         config_file="hooks.json",
         default_dir=".openhands",
-        # Windows registered the native launcher, not the script.
-        needles=("openhands-hook.sh", "--connector openhands"),
         config_what="OpenHands still runs DefenseClaw's hook from here; it blocks every call",
         config_step=(
             "remove every hook whose command runs openhands-hook.sh (or defenseclaw-hook --connector openhands) "
@@ -74,7 +74,6 @@ _CONNECTORS: tuple[_Removed, ...] = (
         marker="# defenseclaw-managed-policy v",
         config_file="config.yaml",
         default_dir=".omnigent",
-        needles=(_MODULE,),
         config_what="OmniGent still imports DefenseClaw's policy module from here; it denies every request",
         config_step=(
             f"remove {_MODULE} from policy_modules and the {_POLICY_KEY} policy (handler "
@@ -84,6 +83,104 @@ _CONNECTORS: tuple[_Removed, ...] = (
 )
 
 NAMES: tuple[str, ...] = tuple(c.name for c in _CONNECTORS)
+
+# How a Windows hooks.json command names the OpenHands connector of the
+# native launcher (defenseclaw-hook --connector openhands).
+_LAUNCHER_FLAG = re.compile(r"--connector(?:\s*=\s*|\s+)[\"']?open[-_]?hands\b", re.IGNORECASE)
+_BOM = b"\xef\xbb\xbf"
+
+
+def _text_names(c: _Removed, text: str) -> bool:
+    """Whether one config text (a command, a module name) names the script."""
+    lower = text.lower()
+    if c.name == "omnigent":
+        return _MODULE in lower
+    return "openhands-hook.sh" in lower or bool(_LAUNCHER_FLAG.search(text))
+
+
+def _value_names(c: _Removed, value: object) -> bool:
+    """Whether a string or key anywhere in a decoded JSON or YAML value names the script."""
+    stack, seen = [value], set()
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            if _text_names(c, item):
+                return True
+        elif isinstance(item, (dict, list, tuple)):
+            # YAML aliases share one object: visit it once.
+            if id(item) in seen:
+                continue
+            seen.add(id(item))
+            if isinstance(item, dict):
+                for key, val in item.items():
+                    if _text_names(c, str(key)):
+                        return True
+                    stack.append(val)
+            else:
+                stack.extend(item)
+    return False
+
+
+def _config_names(c: _Removed, data: bytes) -> tuple[bool, str]:
+    """Whether an agent config still runs or imports the script, and why it could not be checked.
+
+    The bytes and the decoded values (JSON for hooks.json, YAML for
+    config.yaml) are checked, so a name written with escapes is found too.
+    """
+    if _text_names(c, data.decode("utf-8", "replace")):
+        return True, ""
+    if len(data) > _READ_LIMIT:
+        return False, f"it is larger than {_READ_LIMIT >> 20} MiB"
+    body = data[len(_BOM) :] if data.startswith(_BOM) else data
+    if not body.strip():
+        return False, ""
+    try:
+        text = body.decode("utf-8")
+        doc = json.loads(text) if c.name == "openhands" else yaml.safe_load(text)
+    except (UnicodeDecodeError, ValueError, yaml.YAMLError, RecursionError) as exc:
+        kind = "JSON" if c.name == "openhands" else "YAML"
+        return False, f"it is not {kind}: {exc}"
+    return _value_names(c, doc), ""
+
+
+def _same_path(left: str, right: str) -> bool:
+    return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
+
+
+def _pth_leftover(pth: str, hooks: str) -> Leftover | None:
+    """OmniGent's import-path file, while it still holds DefenseClaw's line (the hook folder)."""
+    line_step = (
+        f"remove only the line {hooks} (DefenseClaw's hook folder) from this file, and keep every other line, "
+        f"once no OmniGent config.yaml names {_MODULE}"
+    )
+    try:
+        if not os.path.exists(pth):
+            return None
+        with open(pth, "rb") as fh:
+            data = fh.read(_READ_LIMIT + 1)
+        if len(data) > _READ_LIMIT:
+            raise OSError(f"it is larger than {_READ_LIMIT >> 20} MiB")
+    except OSError as exc:
+        return Leftover(pth, f"could not be read ({exc})", "check it by hand: " + line_step)
+    if data.startswith(_BOM):
+        data = data[len(_BOM) :]
+    own = other = False
+    for line in data.decode("utf-8", "replace").split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if _same_path(line, hooks):
+            own = True
+        else:
+            other = True
+    if not own:
+        return None
+    what = "adds DefenseClaw's hook folder to OmniGent's Python import path"
+    if other:
+        return Leftover(pth, what + "; it holds other import paths too", line_step)
+    return Leftover(
+        pth, what + "; it holds nothing else", f"delete this file once no OmniGent config.yaml names {_MODULE}"
+    )
 
 
 @dataclass(frozen=True)
@@ -213,25 +310,29 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
             if not os.path.exists(path):
                 continue
             with open(path, "rb") as fh:
-                data = fh.read(_READ_LIMIT)
+                data = fh.read(_READ_LIMIT + 1)
         except OSError as exc:
             items.append(Leftover(path, f"could not be read ({exc})", "check it by hand: " + c.config_step))
             continue
-        if any(needle.encode() in data for needle in c.needles):
+        names, why = _config_names(c, data)
+        if names:
             items.append(Leftover(path, c.config_what, c.config_step))
-    if c.name == "omnigent" and data_dir:
-        pth = _backup_target(data_dir, c.name, "pth")
-        if pth and os.path.lexists(pth):
+        elif why:
             items.append(
                 Leftover(
-                    pth,
-                    "adds DefenseClaw's hook folder to OmniGent's Python import path",
-                    f"delete this file once no OmniGent config.yaml names {_MODULE}",
+                    path,
+                    f"could not be checked ({why}), so it may still name DefenseClaw's hook",
+                    "check it by hand: " + c.config_step,
                 )
             )
     if not data_dir:
         return items
     hooks = os.path.join(data_dir, "hooks")
+    if c.name == "omnigent":
+        pth = _backup_target(data_dir, c.name, "pth")
+        left = _pth_leftover(pth, hooks) if pth else None
+        if left:
+            items.append(left)
     script = os.path.join(hooks, c.script)
     state = _script_state(script, c)
     if state == "stub":

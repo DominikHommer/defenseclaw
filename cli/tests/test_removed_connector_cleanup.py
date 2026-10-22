@@ -173,6 +173,109 @@ class LeftoversTests(_Host):
         self.assertEqual(left.as_json()["items"][0]["path"], config)
 
 
+class DecodedConfigTests(_Host):
+    """Review fixes (G-deadcode loop round 2): configs are read for their decoded values."""
+
+    def _item(self, name: str, path: str):
+        return self.items(name).get(path)
+
+    def test_openhands_names_written_with_escapes_or_other_spellings_are_listed(self):
+        config = os.path.join(self.home, ".openhands", "hooks.json")
+        for body in (
+            r'{"pre_tool_use":[{"hooks":[{"command":"/h/.defenseclaw/hooks/openhands\u002dhook.sh"}]}]}',
+            r'{"pre_tool_use":[{"hooks":[{"command":"\u006f\u0070\u0065\u006e\u0068\u0061\u006e\u0064\u0073-hook.sh"}]}]}',
+            '{"pre_tool_use":[{"hooks":[{"command":"C:/dc/OpenHands-Hook.SH"}]}]}',
+            '{"pre_tool_use":[{"hooks":[{"command":"defenseclaw-hook.exe hook --connector=openhands"}]}]}',
+            r'{"pre_tool_use":[{"hooks":[{"command":"defenseclaw-hook.exe hook --connector \"openhands\""}]}]}',
+            r'{"pre_tool_use":[{"hooks":[{"command":"defenseclaw-hook.exe hook \u002d\u002dconnector open-hands"}]}]}',
+            r'{"pre_tool_use":[{"hooks":[{"command":"defenseclaw-hook.exe hook --connector\tOpenHands"}]}]}',
+            "\ufeff" + r'{"pre_tool_use":[{"hooks":[{"command":"openhands\u002dhook.sh"}]}]}',
+        ):
+            with self.subTest(body=body):
+                _write(config, body)
+                item = self._item("openhands", config)
+                self.assertIsNotNone(item, body)
+                self.assertIn("remove every hook whose command runs openhands-hook.sh", item.step)
+
+    def test_omnigent_names_written_with_yaml_escapes_are_listed(self):
+        config = os.path.join(self.home, ".omnigent", "config.yaml")
+        for body in (
+            'policy_modules: ["defenseclaw_omnigent_polic\\x79"]\n',
+            'policy_modules:\n  - "\\u0064efenseclaw_omnigent_policy"\n',
+            'x: &h "defenseclaw_omnigent_polic\\x79.defenseclaw_policy"\npolicies:\n  g:\n    handler: *h\n',
+            'policies:\n  ? "defenseclaw_omnigent_polic\\x79"\n  : {}\n',
+        ):
+            with self.subTest(body=body):
+                _write(config, body)
+                item = self._item("omnigent", config)
+                self.assertIsNotNone(item, body)
+                self.assertIn("remove defenseclaw_omnigent_policy from policy_modules", item.step)
+
+    def test_a_config_that_cannot_be_checked_is_listed_for_a_check_by_hand(self):
+        for name, path, body in (
+            ("openhands", os.path.join(self.home, ".openhands", "hooks.json"), '{"pre_tool_use": ['),
+            ("omnigent", os.path.join(self.home, ".omnigent", "config.yaml"), "policy_modules: [\n"),
+        ):
+            with self.subTest(name=name):
+                _write(path, body)
+                item = self._item(name, path)
+                self.assertIsNotNone(item)
+                self.assertIn("could not be checked", item.what)
+                self.assertTrue(item.step.startswith("check it by hand: "), item.step)
+
+    def test_configs_that_do_not_name_the_hook_are_not_listed(self):
+        for name, path, body in (
+            ("openhands", os.path.join(self.home, ".openhands", "hooks.json"), '{"pre_tool_use": []}'),
+            (
+                "openhands",
+                os.path.join(self.home, ".openhands", "hooks.json"),
+                '{"pre_tool_use":[{"hooks":[{"command":"defenseclaw-hook.exe hook --connector opencode"}]}]}',
+            ),
+            ("openhands", os.path.join(self.home, ".openhands", "hooks.json"), "  \n"),
+            ("omnigent", os.path.join(self.home, ".omnigent", "config.yaml"), "policy_modules:\n  - corp_policy\n"),
+        ):
+            with self.subTest(name=name, body=body):
+                _write(path, body)
+                self.assertIsNone(self._item(name, path))
+
+    def test_a_yaml_alias_bomb_is_checked_quickly(self):
+        lines = ['a0: &a0 ["x", "y"]']
+        for i in range(1, 30):
+            lines.append(f"a{i}: &a{i} [*a{i - 1}, *a{i - 1}]")
+        config = _write(os.path.join(self.home, ".omnigent", "config.yaml"), "\n".join(lines) + "\n")
+        self.assertIsNone(self._item("omnigent", config))
+
+
+class PthTests(_Host):
+    """Review fixes (G-deadcode loop round 2): only DefenseClaw's .pth line is removed by hand."""
+
+    def _pth(self, body: str):
+        pth = _write(os.path.join(self.home, "venv", "defenseclaw_omnigent.pth"), body.replace("{hooks}", self.hooks))
+        _backup(self.data, "omnigent", "pth", pth)
+        return pth, self.items("omnigent").get(pth)
+
+    def test_a_pth_with_only_defenseclaws_line_is_deleted(self):
+        for body in ("{hooks}\n", "\ufeff{hooks}\r\n"):
+            with self.subTest(body=body):
+                _, item = self._pth(body)
+                self.assertIsNotNone(item)
+                self.assertTrue(item.step.startswith("delete this file once no OmniGent config.yaml names"), item.step)
+
+    def test_a_pth_with_other_import_paths_keeps_them(self):
+        for body in ("/opt/corp/lib\n{hooks}\n", "{hooks}\nimport corp_site\n"):
+            with self.subTest(body=body):
+                _, item = self._pth(body)
+                self.assertIsNotNone(item)
+                self.assertTrue(item.step.startswith(f"remove only the line {self.hooks} "), item.step)
+                self.assertNotIn("delete this file", item.step)
+
+    def test_a_pth_without_defenseclaws_line_is_not_listed(self):
+        for body in ("/opt/corp/lib\n", ""):
+            with self.subTest(body=body):
+                _, item = self._pth(body)
+                self.assertIsNone(item)
+
+
 class GoParityTests(unittest.TestCase):
     """The Go teardown writes the stubs these readers recognize, with the same steps."""
 
@@ -191,6 +294,10 @@ class GoParityTests(unittest.TestCase):
             "the stub that blocks every ",
             "delete it once nothing above runs it",
             "copy back what you need, then delete this folder",
+            " (DefenseClaw's hook folder) from this file, and keep every other line, once no OmniGent config.yaml names ",
+            "; it holds other import paths too",
+            "; it holds nothing else",
+            "), so it may still name DefenseClaw's hook",
         ):
             self.assertIn(phrase, source)
 
