@@ -658,7 +658,7 @@ def _set_client_entry(
         if name not in taken_over and not (lock and _pin_proves_entry(lock["client"], name, client, agent)):
             if entry.get("env"):
                 # stderr: setup --json prints exactly one document on stdout.
-                click.echo(
+                ux.echo(
                     f"⚠ Reset the env of editor entry {name!r} in {path}: its contract pin does not prove it. "
                     f"To keep an env, point the entry at {agent} directly and run "
                     f"defenseclaw acp adopt --client {client}.",
