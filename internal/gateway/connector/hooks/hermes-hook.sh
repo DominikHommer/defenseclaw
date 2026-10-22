@@ -3,6 +3,21 @@
 # DefenseClaw Hermes hook — forwards Hermes shell-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
+{{if .Sandbox}}_DC_BOOT_FAIL_MODE="closed"
+{{else if .SecureClientDelivery}}_DC_BOOT_FAIL_MODE="open"
+{{else}}_DC_BOOT_FAIL_MODE="{{.FailMode}}"
+{{if not .Managed}}case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) _DC_BOOT_FAIL_MODE="closed" ;; esac
+case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_BOOT_FAIL_MODE="closed" ;; esac
+{{end}}{{end}}_DC_BOOTSTRAP=1
+hermes_bootstrap_failure() {
+  local status="$1"
+  if [ "$status" -ne 0 ] && [ "${_DC_BOOTSTRAP:-0}" = 1 ] && [ "$_DC_BOOT_FAIL_MODE" = "closed" ]; then
+    printf '%s\n' '{"action":"block","message":"DefenseClaw hook failed closed"}'
+    exit 0
+  fi
+  exit "$status"
+}
+trap 'hermes_bootstrap_failure "$?"' EXIT
 # Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
@@ -77,7 +92,10 @@ fi
 # (mktemp in defenseclaw_harden_env) or helper call.
 . "${HOOK_DIR}/_sandbox.sh"
 {{end}}defenseclaw_harden_resources
-defenseclaw_harden_env
+defenseclaw_harden_env || hermes_bootstrap_failure "$?"
+trap '_dc_boot_rc=$?; _defenseclaw_hook_cleanup; if [ "${_DC_BOOTSTRAP:-0}" = 1 ]; then hermes_bootstrap_failure "$_dc_boot_rc"; fi' EXIT
+{{if .Sandbox}}_DC_BOOTSTRAP=0
+{{end}}
 
 # FAIL_MODE set BEFORE the missing-token check so the helper has a
 # stable FAIL_MODE to log against. Response-layer and transport-layer
@@ -105,6 +123,7 @@ FAIL_MODE="{{.FailMode}}"{{else if .SecureClientDelivery}}FAIL_MODE="${DEFENSECL
 # An inherited DEFENSECLAW_FAIL_MODE can only tighten the installed mode:
 # a project or parent process cannot reopen a closed hook (GAP-0315).
 case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) FAIL_MODE="closed" ;; esac{{end}}
+{{if not .Managed}}case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) FAIL_MODE="closed" ;; esac{{end}}
 
 # Bail early on missing token via the shared helper so the bypass is
 # logged to hook-failures.jsonl AND honors strict availability — the
@@ -137,6 +156,7 @@ fail_response() {
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token hermes hermes-hook "hermes tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi
+_DC_BOOTSTRAP=0
 
 # hermes_block_message is the message of a block this hook makes itself.
 # Hermes shows it as the reason the tool call did not run, so it says why

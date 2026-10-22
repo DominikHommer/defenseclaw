@@ -145,7 +145,7 @@ func TestOnlyTheStandaloneHermesHookRendersTheForeignHookGuard(t *testing.T) {
 		t.Fatal("the standalone Hermes hook does not run the guard binary as one shell word")
 	}
 	capture := strings.Index(hook, `DEFENSECLAW_GUARD_AGENT_HOME="$HOME"`)
-	hardening := strings.Index(hook, "defenseclaw_harden_env\n")
+	hardening := strings.Index(hook, "defenseclaw_harden_env || hermes_bootstrap_failure")
 	trust := strings.Index(hook, "defenseclaw_hook_socket_trusted() {")
 	guard := strings.Index(hook, "DEFENSECLAW_FOREIGN_GUARD=")
 	missing := strings.Index(hook, `if [ ! -e "$DEFENSECLAW_HOOK_SOCKET" ]`)
