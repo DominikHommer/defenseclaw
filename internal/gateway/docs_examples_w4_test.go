@@ -61,8 +61,10 @@ func TestDocsApprovalExampleUsesAnEnforceableRule(t *testing.T) {
 		{"printf harmless-near-miss", "allow"},
 	} {
 		t.Run(test.command, func(t *testing.T) {
+			// Claude Code asks only in its Manual permission mode
+			// ("default"); other modes block a confirm (g-hilt).
 			resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
-				HookEventName: "PreToolUse", ToolName: "Bash",
+				HookEventName: "PreToolUse", PermissionMode: "default", ToolName: "Bash",
 				ToolInput: map[string]interface{}{"command": test.command},
 			})
 			if resp.Action != test.action {
