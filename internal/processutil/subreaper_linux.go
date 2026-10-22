@@ -120,14 +120,22 @@ func runSubreaperHelper() int {
 		fmt.Fprintln(os.Stderr, "scanner: start contained command:", err)
 		return 1
 	}
+	done := make(chan struct{})
 	go func() {
 		var b [1]byte
 		_, _ = control.Read(b[:])
+		select {
+		case <-done:
+			return
+		default:
+		}
 		_ = killAdoptedChildren()
 		os.Exit(137)
 	}()
 	err := child.Wait()
-	if cleanupErr := killAdoptedChildren(); cleanupErr != nil {
+	cleanupErr := killAdoptedChildren()
+	close(done)
+	if cleanupErr != nil {
 		fmt.Fprintln(os.Stderr, "scanner: cannot confirm MCP server cleanup:", cleanupErr)
 		return 1
 	}

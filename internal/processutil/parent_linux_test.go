@@ -204,6 +204,14 @@ func TestRunTreeIsolatedHelperGateway(t *testing.T) {
 	_ = RunTreeIsolated(context.Background(), cmd)
 }
 
+func TestRunTreeIsolatedKeepsNormalScannerExitStatus(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		if err := RunTreeIsolated(context.Background(), CommandContext(context.Background(), "/bin/true")); err != nil {
+			t.Fatalf("normal scanner exit %d: %v", i, err)
+		}
+	}
+}
+
 // sleepWithArg is the pid of a running "sleep arg", or 0.
 func sleepWithArg(arg string) int {
 	entries, _ := os.ReadDir("/proc")
