@@ -1271,6 +1271,32 @@ Later bundles go through 5.2.
    the sessions restarted (4.3, sessions that need a restart). Report anchor
    and credential changes yourself (section 0).
 
+### 5.3 Lower the release floor
+
+On Linux and macOS a device does not install a release below the confirmed
+bundle's `min_product_version` (`product_floor_refused`). The rollback marker
+and `--allow-downgrade` do not lift it. To roll devices back below it:
+
+1. The control plane signs the next bundle with `enterprise bundle sign`
+   (section 7): a `--version` above the confirmed bundle's, and the oldest
+   release needed as `--min-product-version` (leave the flag out for no
+   floor).
+2. Deliver it as in 5.2.
+3. Check the older release as root before you install it: exit `0` allows
+   it, exit `3` refuses it and says why. Packages of 1.0.4 and later run the
+   same check before they replace files; older packages do not.
+4. Install the older release.
+
+```sh
+defenseclaw-gateway enterprise bundle sign --in ./policy --out v13.dcbundle \
+  --key signing.pem --key-id acme-2026a --tenant acme --device-group eng-laptops \
+  --version 13 --created-by operator:alice --min-product-version 1.0.3 \
+  --summary "Allow rollback to 1.0.3"
+```
+```sh
+"$GW" enterprise bundle floor-check --product-version 1.0.3
+```
+
 ## 6. Locks
 
 | Command | Linux / macOS | Windows |

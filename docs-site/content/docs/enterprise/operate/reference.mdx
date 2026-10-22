@@ -120,43 +120,11 @@ back](/docs/enterprise/operate/lifecycle#roll-back) for the supported procedure.
 
 ### Lower the release floor
 
-To install a release below the confirmed bundle's `min_product_version`, first
-replace that bundle with one signed with a lower floor. The rollback marker and
-`--allow-downgrade` do not lift the floor.
-
-1. Sign your policy directory again with your bundle signing key. Give a
-   `--version` above the confirmed bundle's version, and the oldest release you
-   need as `--min-product-version` (leave the flag out for no floor). Sign with
-   the release the devices run now.
-
-   ```bash
-   defenseclaw-gateway enterprise bundle sign --in ./policy --out v13.dcbundle \
-     --key signing.pem --key-id acme-2026a --tenant acme --device-group eng-laptops \
-     --version 13 --created-by operator:alice --min-product-version 1.0.3 \
-     --summary "Allow rollback to 1.0.3"
-   ```
-
-2. Check it on a device, as root. On macOS the gateway is
-   `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`.
-
-   ```bash
-   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise bundle verify --bundle v13.dcbundle --json
-   ```
-
-3. Deliver it the way you deliver your bundles, or apply it as root:
-
-   ```bash
-   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise bundle apply --bundle v13.dcbundle --json
-   ```
-
-4. Check that the new floor allows the release. Exit `0` allows it; exit `3`
-   refuses it and says why.
-
-   ```bash
-   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise bundle floor-check --product-version 1.0.3
-   ```
-
-5. Roll back as in [Roll back](/docs/enterprise/operate/lifecycle#roll-back).
+To install a release below the confirmed bundle's `min_product_version`, the
+device must first confirm a newer signed bundle with a lower floor, or with no
+floor. The rollback marker and `--allow-downgrade` do not lift the floor. Once
+the device has confirmed that bundle, roll back as in [Roll
+back](/docs/enterprise/operate/lifecycle#roll-back).
 
 ### Applying a config change
 

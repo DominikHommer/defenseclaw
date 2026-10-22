@@ -10,11 +10,13 @@
 
 """Operator contracts for the 1.0.4 wave 4b documentation gaps."""
 
+import re
 from pathlib import Path
 
 import pytest
 
-DOCS = Path(__file__).resolve().parents[2] / "docs-site/content/docs"
+REPO = Path(__file__).resolve().parents[2]
+DOCS = REPO / "docs-site/content/docs"
 
 
 def _flat(page: str) -> str:
@@ -38,6 +40,48 @@ def test_gap_0373_otlp_guide_does_not_promise_an_unsupported_write() -> None:
     assert "OTLP supports the handshake only" in _flat("reference/commands/cli.mdx")
     runbooks = _flat("reference/observability/index.mdx")
     assert runbooks.count("OTLP supports the handshake only") == 2
+
+
+def _known_buckets() -> set[str]:
+    source = (REPO / "internal/observability/taxonomy.go").read_text(encoding="utf-8")
+    return set(re.findall(r'^\s*Bucket[A-Za-z]+\s+Bucket = "([a-z._]+)"', source, flags=re.MULTILINE))
+
+
+def _delivery_check_pages() -> list[Path]:
+    """How-to pages that narrow a destination's buckets and check delivery by an event ID."""
+    pages = []
+    for page in sorted((DOCS / "how-to").rglob("*.mdx")):
+        text = page.read_text(encoding="utf-8")
+        if (
+            re.search(r"^\s*buckets: \[", text, flags=re.MULTILINE)
+            and "## Check it worked" in text
+            and "event ID" in text
+        ):
+            pages.append(page)
+    return pages
+
+
+def test_delivery_check_pages_are_found() -> None:
+    assert DOCS / "how-to/observability/send-to-an-otlp-collector.mdx" in _delivery_check_pages()
+
+
+@pytest.mark.parametrize("page", _delivery_check_pages(), ids=lambda p: p.name)
+def test_delivery_check_uses_an_event_the_example_filter_sends(page: Path) -> None:
+    text = page.read_text(encoding="utf-8")
+    [filtered] = [set(m.split(", ")) for m in re.findall(r"^\s*buckets: \[([^\]]+)\]", text, flags=re.MULTILINE)]
+    known = _known_buckets()
+    assert filtered <= known, filtered - known
+    check = text[text.index("## Check it worked") :]
+    check = " ".join(check[: check.index("\n## ", 1)].split())
+    # A clean call proves nothing through a filter that drops its buckets.
+    assert not re.search(r"(?:benign|clean) (?:agent )?call, (?:then )?find its event ID", check), check
+    # The check names the filter's buckets, confirms the route sends, or runs before the filter.
+    for bucket in filtered:
+        assert f"`{bucket}`" in check, bucket
+    assert "before you add the filter" in check
+    assert "run step 3 with its bucket" in check and "shows `send`" in check
+    step3 = text[text.index("3. Review the result.") : text.index("## Check it worked")]
+    assert "defenseclaw observability plan --bucket" in step3
 
 
 @pytest.mark.parametrize(
