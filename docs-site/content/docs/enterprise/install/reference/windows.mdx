@@ -419,8 +419,14 @@ transaction stays pending: the result reports `transaction_pending: true` and na
 the services that stay stopped. `status` shows it and `verify` refuses until it is
 recovered. While the gateway is stopped, users' agents block with
 `enterprise_managed_gateway_not_running`. Starting a service by hand does not
-recover it. A run that hit `TIMEOUTSECONDS` (`lifecycle_timeout`) can leave one
-too.
+recover it.
+
+A run that hits `TIMEOUTSECONDS` (`lifecycle_timeout`) is stopped, and Setup then
+runs one recovery of its own, limited to 10 minutes, that replays the pending
+transaction. The run still fails. When no lifecycle record is left, its result
+is the recovered deployment's status, with `transaction_pending: false`. When the
+recovery cannot prove that, the error names what is left (for example a purge or
+install-rollback intent), and the run below recovers it.
 
 Recover by running Setup as LocalSystem (Intune install behavior **System**).
 `/ensure` recovers the transaction then installs or upgrades; `/uninstall` recovers

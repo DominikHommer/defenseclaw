@@ -857,8 +857,8 @@ func writeEnterpriseSetupFailureAs(stdout, stderr io.Writer, name string, opts e
 // writeEnterpriseSetupFailureFor reports a failure of Setup itself. With
 // JSON=1 the standalone Setup prints the lifecycle's schema-2 result, so an
 // MDM reads one shape whether Setup or the lifecycle refused (GAP-0562). It
-// reports no deployment state unless a bounded timeout recovery inspected
-// and proved the settled host state.
+// reports no deployment state unless Setup's bounded timeout recovery
+// proved one: its replay left no lifecycle record, and its status is shown.
 func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, name string, opts enterpriseSetupOptions, err error, exitCode int) {
 	if !standalone || !opts.JSON || err == nil {
 		writeEnterpriseSetupFailureAs(stdout, stderr, name, opts, err)
@@ -921,8 +921,8 @@ func standaloneEnterpriseSetupTimeoutWithRecovery(opts enterpriseSetupOptions, c
 	if report != nil {
 		return enterpriseSetupLifecycleTimeout{error: fmt.Errorf(
 			"enterprise %s did not finish within TIMEOUTSECONDS=%d and Setup stopped it (%w). "+
-				"Setup replayed the pending transaction and verified a settled deployment state; the requested action may be incomplete. "+
-				"Run %s /status JSON=1, then retry the requested action",
+				"Setup replayed its pending transaction and no lifecycle record remains; this result is the recovered deployment's status, "+
+				"and the requested action did not finish. Run %s /status JSON=1, then retry the requested action",
 			opts.Action, int(opts.LifecycleTimeout/time.Second), cause, standaloneSetupArtifactName,
 		), recovery: report}
 	}

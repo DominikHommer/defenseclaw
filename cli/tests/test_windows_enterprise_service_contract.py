@@ -3653,13 +3653,12 @@ def test_timeout_recovery_replays_the_pending_journal_under_the_lifecycle_lock()
     next_action = lifecycle.index("if ($Action -in @('Install', 'Upgrade', 'Repair')", recovery)
     replay = lifecycle[recovery:next_action]
     assert lock < recovery
-    assert "Recover-DefenseClawPendingTransaction" in replay
-    assert "Get-DefenseClawLifecycleStatus" in replay
-    assert "transaction_pending" in replay
-    assert "-AllowDeferredActivation" not in replay
-    assert setup.index("recoveryReport, recoveryErr = recoverTimedOutStandaloneLifecycle") < setup.index(
-        "\n\tcleanupErr := cleanup()"
-    )
+    assert "Invoke-DefenseClawTimeoutRecovery" in replay
+    # The replay and its report are executed by
+    # test_timeout_recovery_reports_settled_only_when_no_lifecycle_record_remains
+    # and the Setup kill and recovery by
+    # TestTimeoutKillsTheLifecycleChildThenRecoversBeforeReturning.
+    assert setup.index("lifecycle := runEnterpriseLifecycleChild(") < setup.index("\n\tcleanupErr := cleanup()")
 
 
 def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:

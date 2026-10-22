@@ -825,6 +825,136 @@ def _run_lifecycle_functions(tmp_path, names, body, replacements=()) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+
+_TIMEOUT_RECOVERY_HARNESS = r"""
+class FakeTimeoutNative {
+    static [object] GetRegularFileSecuritySnapshotNoFollowIfExists([string]$Path) {
+        if ([IO.File]::Exists($Path)) { return 'file' }
+        return $null
+    }
+    static [object] GetDirectorySecuritySnapshotNoFollowIfExists([string]$Path) {
+        if ([IO.Directory]::Exists($Path)) { return 'directory' }
+        return $null
+    }
+}
+function Initialize-DefenseClawNativeSecurity { return [FakeTimeoutNative] }
+$script:DefenseClawUnfinishedTransactionDirectory = 'unfinished transaction directory'
+$root = '__ROOT__'
+$layout = @{
+    PendingPath = [IO.Path]::Combine($root, 'install', 'pending.json')
+    ManagedHooksLifecycleJournalPath = [IO.Path]::Combine($root, 'install', 'managed-hooks-lifecycle-journal.json')
+    ManagedHooksTeardownJournalPath = [IO.Path]::Combine($root, 'install', 'managed-hooks-teardown-journal.json')
+    PurgeIntentPath = [IO.Path]::Combine($root, 'lock', 'purge-scope.json')
+    SelfUninstallReceiptPath = [IO.Path]::Combine($root, 'lock', 'self-uninstall.json')
+    InstallRollbackIntentPath = [IO.Path]::Combine($root, 'lock', 'install-rollback-scope.json')
+    ManagedHookContractCleanupReceiptPath = [IO.Path]::Combine($root, 'lock', 'managed-hook-contract-cleanup-scope.json')
+    TransactionsDirectory = [IO.Path]::Combine($root, 'install', 'transactions')
+}
+function Recover-DefenseClawPendingTransaction {
+    param($Layout, $GatewayServiceName, $GuardianServiceName, [switch]$AllowDeferredActivation)
+    if ($AllowDeferredActivation) { throw 'timeout recovery must reactivate the restored release' }
+    $global:Replays++
+    if ($global:ReplayClears) { [IO.File]::Delete($Layout.PendingPath) }
+}
+function Get-DefenseClawLifecycleStatus {
+    param($Action, $Layout, $GatewayServiceName, $GuardianServiceName)
+    [pscustomobject]@{ action = $Action.ToLowerInvariant(); ok = $true; transaction_pending = [IO.File]::Exists($Layout.PendingPath) }
+}
+function Invoke-DefenseClawExactScopeRecoveryPurge { return 'purged' }
+function Invoke-Case([string]$Name, [string[]]$Records, [bool]$Transaction, [bool]$ReplayClears) {
+    if ([IO.Directory]::Exists($root)) { [IO.Directory]::Delete($root, $true) }
+    foreach ($folder in 'install', 'lock') { [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($root, $folder)) }
+    foreach ($record in $Records) { [IO.File]::WriteAllText($layout[$record], '{}') }
+    if ($Transaction) { [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($layout.TransactionsDirectory, 'txn-1')) }
+    $global:Replays = 0
+    $global:ReplayClears = $ReplayClears
+    $outcome = 'settled'
+    try {
+        $status = Invoke-DefenseClawTimeoutRecovery -Layout $layout -GatewayServiceName gateway -GuardianServiceName guardian
+        if ($status.action -cne 'recover' -or [bool]$status.transaction_pending) { $outcome = 'wrong status' }
+    }
+    catch { $outcome = $_.Exception.Message }
+    $purge = 'purged'
+    try {
+        [void](Invoke-DefenseClawUntrustedMetadataRecoveryPurge -Layout $layout -Sources @{} -GatewayServiceName gateway -GuardianServiceName guardian -Reason test)
+    }
+    catch { $purge = $_.Exception.Message }
+    $kept = @($Records | Where-Object { [IO.File]::Exists($layout[$_]) })
+    [pscustomobject]@{ name = $Name; outcome = $outcome; replays = $global:Replays; kept = $kept; purge = $purge } |
+        ConvertTo-Json -Compress
+}
+Invoke-Case 'replayed' @('PendingPath') $false $true
+Invoke-Case 'replay kept pending' @('PendingPath') $false $false
+Invoke-Case 'nothing left' @() $false $false
+Invoke-Case 'purge intent' @('PurgeIntentPath') $false $false
+Invoke-Case 'pending and rollback intent' @('PendingPath', 'InstallRollbackIntentPath') $false $true
+Invoke-Case 'journals' @('ManagedHooksTeardownJournalPath', 'SelfUninstallReceiptPath') $false $false
+Invoke-Case 'transaction directory' @() $true $false
+"""
+
+
+def test_timeout_recovery_reports_settled_only_when_no_lifecycle_record_remains(tmp_path: Path) -> None:
+    """Finding 4 of the r104 Windows re-fix review, executed: Setup's timeout
+    recovery replays only pending.json, so it reports a settled deployment only
+    when neither that journal nor any other lifecycle record remains, keeps
+    every record it cannot replay and names it. The untrusted-metadata purge
+    refuses on the same records, from the same list."""
+    import json
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    module = _text(MODULE)
+    functions = "\n".join(
+        _function_body(module, name)
+        for name in (
+            "Get-DefenseClawUnfinishedLifecycleEvidence",
+            "Invoke-DefenseClawTimeoutRecovery",
+            "Invoke-DefenseClawUntrustedMetadataRecoveryPurge",
+        )
+    )
+    harness = tmp_path / "timeout-recovery.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
+        + functions
+        + "\n"
+        + _TIMEOUT_RECOVERY_HARNESS.replace("__ROOT__", str(tmp_path / "state")),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    cases = {case["name"]: case for case in map(json.loads, completed.stdout.strip().splitlines())}
+
+    def kept(name: str) -> list[str]:
+        value = cases[name]["kept"]
+        return [value] if isinstance(value, str) else list(value or [])
+
+    assert cases["replayed"]["outcome"] == "settled" and cases["replayed"]["replays"] == 1
+    assert cases["nothing left"]["outcome"] == "settled" and cases["nothing left"]["replays"] == 0
+    assert "still pending" in cases["replay kept pending"]["outcome"]
+    assert kept("replay kept pending") == ["PendingPath"]
+    assert cases["purge intent"]["outcome"].endswith("as LocalSystem: state-purge intent")
+    assert cases["purge intent"]["replays"] == 0 and kept("purge intent") == ["PurgeIntentPath"]
+    rollback = cases["pending and rollback intent"]
+    assert rollback["replays"] == 1 and rollback["outcome"].endswith(": install-rollback intent")
+    assert kept("pending and rollback intent") == ["InstallRollbackIntentPath"]
+    assert cases["journals"]["outcome"].endswith(": managed-hook teardown journal, self-uninstall receipt")
+    assert cases["transaction directory"]["outcome"].endswith(": unfinished transaction directory")
+    for name in ("purge intent", "pending and rollback intent", "journals", "transaction directory"):
+        assert "is not reported settled" in cases[name]["outcome"], name
+    for name in ("nothing left", "replayed"):
+        assert cases[name]["purge"] == "purged", cases[name]
+    assert "requires authenticated recovery of the existing state-purge intent" in cases["purge intent"]["purge"]
+    assert "unfinished transaction directory; exact-scope fallback" in cases["transaction directory"]["purge"]
+    assert "existing pending transaction" in cases["replay kept pending"]["purge"]
+
+
 _FAKE_RENAME_NATIVE = r"""
 class FakeNative {
     static [object[]] GetFileHolders([string[]]$Paths) {

@@ -27,7 +27,6 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
@@ -128,7 +127,6 @@ const (
 	// enforces on stageRoot itself. Removed recursively before the outer
 	// stage cleanup runs.
 	enterpriseSetupScratchDirName = "scratch"
-	maximumLifecycleOutput        = 2 << 20
 	enterpriseBusyExitCode        = 1618 // ERROR_INSTALL_ALREADY_RUNNING
 	// enterpriseSetupStageStaleAge is the age after which a staging folder
 	// belongs to no Setup still staging: unpacking the payload takes
@@ -233,15 +231,14 @@ func executeEnterpriseSetup(
 	if err != nil {
 		return 0, err
 	}
-	ctx, cancel := context.WithTimeout(parent, opts.LifecycleTimeout)
-	defer cancel()
 	cliPath := filepath.Join(stageRoot, "defenseclaw.exe")
-	child := processutil.CommandContext(ctx, cliPath, arguments...)
-	child.Dir = stageRoot
-	child.Env = childEnvironment
-	var output []byte
-	var runErr error
-	if opts.Standalone {
+	lifecycle := runEnterpriseLifecycleChild(parent, opts, func(ctx context.Context) ([]byte, error) {
+		child := processutil.CommandContext(ctx, cliPath, arguments...)
+		child.Dir = stageRoot
+		child.Env = childEnvironment
+		if !opts.Standalone {
+			return processutil.CombinedOutputTree(child, false)
+		}
 		// Pass the lifecycle's stderr (diagnostics of a failing run) on at
 		// once. Its scanner runtime progress goes to stdout for a person and
 		// to the lifecycle log in a JSON run, never to stderr, which an MDM
@@ -249,21 +246,15 @@ func executeEnterpriseSetup(
 		var captured bytes.Buffer
 		child.Stdout = &captured
 		child.Stderr = lifecycleProgress{stderr}
-		runErr = processutil.RunTree(child)
-		output = captured.Bytes()
-	} else {
-		output, runErr = processutil.CombinedOutputTree(child, false)
-	}
-	timedOut := ctx.Err() != nil
-	var recoveryErr error
-	var recoveryReport *enterprisestatus.Result
-	if timedOut && opts.Standalone &&
-		(enterpriseSetupMutation(opts.Action, true) || opts.Action == "uninstall") {
-		// Keep the trusted staged CLI and module until the old deployment has
-		// been restored. The original child and its timeout context are gone;
-		// a second, bounded child only replays the protected pending journal.
-		recoveryReport, recoveryErr = recoverTimedOutStandaloneLifecycle(parent, stageRoot, opts, childEnvironment)
-	}
+		err := processutil.RunTree(child)
+		return captured.Bytes(), err
+	}, func(ctx context.Context) ([]byte, error) {
+		// The trusted staged CLI and module stay until this recovery ends:
+		// cleanup runs below. It only replays the protected pending journal.
+		return enterpriseSetupRecoveryRunner(ctx, cliPath,
+			enterpriseLifecycleArguments(stageRoot, standaloneRecoveryOptions(opts)), stageRoot, childEnvironment)
+	})
+	output, runErr, timedOut := lifecycle.output, lifecycle.runErr, lifecycle.timedOut
 	if len(output) > maximumLifecycleOutput {
 		if !timedOut {
 			return 0, fmt.Errorf("enterprise lifecycle output exceeded %d bytes", maximumLifecycleOutput)
@@ -309,17 +300,7 @@ func executeEnterpriseSetup(
 		}
 	}
 	if timedOut {
-		if opts.Standalone {
-			if recoveryReport != nil && recoveryErr == nil {
-				return 0, standaloneEnterpriseSetupTimeoutWithRecovery(opts, ctx.Err(), recoveryReport)
-			}
-			if recoveryErr != nil {
-				return 0, fmt.Errorf("%w; Setup's bounded transaction recovery failed: %v",
-					standaloneEnterpriseSetupTimeout(opts, ctx.Err()), recoveryErr)
-			}
-			return 0, standaloneEnterpriseSetupTimeout(opts, ctx.Err())
-		}
-		return 0, fmt.Errorf("enterprise %s exceeded the bounded %s timeout: %w", opts.Action, opts.LifecycleTimeout, ctx.Err())
+		return 0, timedOutEnterpriseLifecycleError(opts, lifecycle)
 	}
 	if runErr == nil {
 		return 0, nil
@@ -343,49 +324,12 @@ func executeEnterpriseSetup(
 	return enterpriseFailureExitCode, nil
 }
 
-const enterpriseSetupRecoveryTimeout = 10 * time.Minute
-
 // Recovery uses this seam so the timeout contract can be exercised without
 // installing services in the Setup unit test.
 var enterpriseSetupRecoveryRunner = func(ctx context.Context, path string, args []string, dir string, env []string) ([]byte, error) {
 	child := processutil.CommandContext(ctx, path, args...)
 	child.Dir, child.Env = dir, env
 	return processutil.CombinedOutputTree(child, false)
-}
-
-func recoverTimedOutStandaloneLifecycle(parent context.Context, stageRoot string, opts enterpriseSetupOptions, env []string) (*enterprisestatus.Result, error) {
-	recoveryOpts := opts
-	recoveryOpts.Action = "recover"
-	recoveryOpts.JSON = true
-	recoveryOpts.NoStart = false
-	recoveryOpts.Force = false
-	recoveryOpts.Purge = false
-	recoveryOpts.AttestAgentApplicationControl = false
-	recoveryOpts.AttestClaudeEffectivePolicy = false
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), enterpriseSetupRecoveryTimeout)
-	defer cancel()
-	output, runErr := enterpriseSetupRecoveryRunner(ctx, filepath.Join(stageRoot, "defenseclaw.exe"),
-		enterpriseLifecycleArguments(stageRoot, recoveryOpts), stageRoot, env)
-	if ctx.Err() != nil {
-		return nil, fmt.Errorf("replay pending lifecycle transaction within %s: %w", enterpriseSetupRecoveryTimeout, ctx.Err())
-	}
-	if runErr != nil {
-		return nil, fmt.Errorf("replay pending lifecycle transaction: %w", runErr)
-	}
-	if len(output) > maximumLifecycleOutput {
-		return nil, fmt.Errorf("recovery report exceeded %d bytes", maximumLifecycleOutput)
-	}
-	document, _ := splitStandaloneLifecycleJSON(output)
-	var report enterprisestatus.Result
-	if err := json.Unmarshal(document, &report); err != nil {
-		return nil, fmt.Errorf("decode transaction recovery report: %w", err)
-	}
-	if report.SchemaVersion != 2 || report.Action != "recover" ||
-		report.Profile != "standalone" || report.Platform != "windows" || !report.OK ||
-		report.ExitCode != 0 || len(report.Errors) != 0 || report.TransactionPending {
-		return nil, errors.New("transaction recovery did not prove a settled deployment state")
-	}
-	return &report, nil
 }
 
 // enterpriseSetupPathError is a CONFIG=/MANIFEST= value that is not an

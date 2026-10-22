@@ -945,6 +945,9 @@ func runWindowsEnterpriseStandaloneInstaller(
 	if opts != nil && opts.force && windowsEnterpriseInstallerAction(args) == "Uninstall" {
 		ctx = context.WithValue(ctx, windowsEnterpriseForcedUninstallKey{}, true)
 	}
+	if err := retireUntrustedWindowsScannerRuntimeBeforeStart(windowsEnterpriseInstallerAction(args), opts); err != nil {
+		return nil, windowsEnterpriseStandaloneRun{}, err
+	}
 	migrationRecord := readWindowsEnterpriseMigrationRecord()
 	run, err := windowsEnterpriseStandaloneRunner(ctx, cmd, script, args)
 	if opts != nil {

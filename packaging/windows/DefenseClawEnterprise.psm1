@@ -30823,17 +30823,18 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
     return $result
 }
 
-function Invoke-DefenseClawUntrustedMetadataRecoveryPurge {
-    param(
-        [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][hashtable]$Sources,
-        [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName,
-        [Parameter(Mandatory)][string]$Reason
-    )
-    # A live transaction or external receipt may own the next uninstall
-    # action. Do not bypass its replay by running the metadata-free sweep.
+$script:DefenseClawUnfinishedTransactionDirectory = 'unfinished transaction directory'
+
+function Get-DefenseClawUnfinishedLifecycleEvidence {
+    <#
+        Names every protected lifecycle record that is present, in a fixed
+        order: each one is a step only the full recovery of a later run
+        replays. A metadata-free purge refuses while one remains, and so does
+        Setup's timeout recovery before it reports a settled deployment.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
     $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $found = [Collections.Generic.List[string]]::new()
     foreach ($evidence in @(
         @('pending transaction', [string]$Layout.PendingPath),
         @('managed-hook lifecycle journal',
@@ -30850,11 +30851,7 @@ function Invoke-DefenseClawUntrustedMetadataRecoveryPurge {
             $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
                 [string]$evidence[1]
             )) {
-            throw (
-                'untrusted deployment evidence requires authenticated ' +
-                "recovery of the existing $($evidence[0]); exact-scope " +
-                'fallback did not modify the deployment'
-            )
+            $found.Add([string]$evidence[0])
         }
     }
     $transactionDirectory =
@@ -30866,9 +30863,74 @@ function Invoke-DefenseClawUntrustedMetadataRecoveryPurge {
             -LiteralPath $Layout.TransactionsDirectory `
             -Force -ErrorAction Stop |
             Microsoft.PowerShell.Utility\Select-Object -First 1).Count -gt 0) {
+        $found.Add($script:DefenseClawUnfinishedTransactionDirectory)
+    }
+    return $found.ToArray()
+}
+
+function Invoke-DefenseClawTimeoutRecovery {
+    <#
+        Setup's one bounded recovery after it stopped a lifecycle child at
+        TIMEOUTSECONDS (GAP-0501). The interrupted request is gone, so it
+        replays only pending.json, the journal it can finish alone, and runs
+        no new install. It reports the deployment settled only when that
+        replay left no pending transaction and no other lifecycle record:
+        a purge or install-rollback intent, a self-uninstall receipt, a
+        managed-hook journal or a transaction directory is replayed only by
+        the full recovery of a later ensure, so it throws and keeps them.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf) {
+        [void](Recover-DefenseClawPendingTransaction `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName)
+    }
+    $status = Get-DefenseClawLifecycleStatus `
+        -Action Recover `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName
+    if ([bool]$status.transaction_pending) {
+        throw 'the lifecycle recovery is still pending; the protected journal was kept'
+    }
+    $unfinished = @(Get-DefenseClawUnfinishedLifecycleEvidence -Layout $Layout)
+    if ($unfinished.Count -gt 0) {
         throw (
-            'untrusted deployment evidence has an unfinished transaction ' +
-            'directory; exact-scope fallback did not modify the deployment'
+            'Setup replayed only the pending transaction, so the deployment ' +
+            'is not reported settled: these lifecycle records remain for the ' +
+            'full recovery of an ensure run as LocalSystem: ' +
+            ($unfinished -join ', ')
+        )
+    }
+    return $status
+}
+
+function Invoke-DefenseClawUntrustedMetadataRecoveryPurge {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [Parameter(Mandatory)][string]$Reason
+    )
+    # A live transaction or external receipt may own the next uninstall
+    # action. Do not bypass its replay by running the metadata-free sweep.
+    foreach ($evidence in @(Get-DefenseClawUnfinishedLifecycleEvidence -Layout $Layout)) {
+        if ($evidence -ceq $script:DefenseClawUnfinishedTransactionDirectory) {
+            throw (
+                'untrusted deployment evidence has an unfinished transaction ' +
+                'directory; exact-scope fallback did not modify the deployment'
+            )
+        }
+        throw (
+            'untrusted deployment evidence requires authenticated ' +
+            "recovery of the existing $evidence; exact-scope " +
+            'fallback did not modify the deployment'
         )
     }
     try {
@@ -35739,21 +35801,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             # Setup's original child is gone. Reuse the protected pending
             # journal under the same lifecycle lock, then stop: starting a
             # second install here could time out and stop the services again.
-            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $layout.PendingPath -PathType Leaf) {
-                [void](Recover-DefenseClawPendingTransaction `
-                    -Layout $layout `
-                    -GatewayServiceName $GatewayServiceName `
-                    -GuardianServiceName $GuardianServiceName)
-            }
-            $recoveredStatus = Get-DefenseClawLifecycleStatus `
-                -Action $Action `
+            return Invoke-DefenseClawTimeoutRecovery `
                 -Layout $layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName
-            if ([bool]$recoveredStatus.transaction_pending) {
-                throw 'the lifecycle recovery is still pending; the protected journal was kept'
-            }
-            return $recoveredStatus
         }
         if ($Action -in @('Install', 'Upgrade', 'Repair') -and
             $GatewayServiceName -ceq 'DefenseClawGateway') {

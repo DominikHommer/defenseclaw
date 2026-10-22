@@ -42,7 +42,13 @@ func TestTimedOutStandaloneSetupRecoveryUsesBoundedJournalReplay(t *testing.T) {
 	}
 	parent, cancel := context.WithCancel(context.Background())
 	cancel() // The timed-out lifecycle context cannot bound its recovery.
-	recovered, err := recoverTimedOutStandaloneLifecycle(parent, stage, opts, []string{"trusted=test"})
+	recoverChild := func(env []string) func(context.Context) ([]byte, error) {
+		return func(ctx context.Context) ([]byte, error) {
+			return enterpriseSetupRecoveryRunner(ctx, filepath.Join(stage, "defenseclaw.exe"),
+				enterpriseLifecycleArguments(stage, standaloneRecoveryOptions(opts)), stage, env)
+		}
+	}
+	recovered, err := recoverTimedOutStandaloneLifecycle(parent, recoverChild([]string{"trusted=test"}))
 	if err != nil || called != 1 || recovered == nil {
 		t.Fatalf("recovery call=%d error=%v", called, err)
 	}
@@ -67,7 +73,7 @@ func TestTimedOutStandaloneSetupRecoveryUsesBoundedJournalReplay(t *testing.T) {
 	enterpriseSetupRecoveryRunner = func(context.Context, string, []string, string, []string) ([]byte, error) {
 		return []byte(`{"schema_version":2,"action":"recover","profile":"standalone","platform":"windows","ok":true,"transaction_pending":true}`), nil
 	}
-	if _, err := recoverTimedOutStandaloneLifecycle(parent, stage, opts, nil); err == nil {
+	if _, err := recoverTimedOutStandaloneLifecycle(parent, recoverChild(nil)); err == nil {
 		t.Fatal("a pending transaction was reported as restored")
 	}
 }
