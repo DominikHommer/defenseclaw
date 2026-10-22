@@ -20,12 +20,10 @@ import (
 )
 
 // Privacy (decision 4 of the 1.0.4 identity design). A caller whose facts
-// are unproven gets the strictest combination of the profiles that may
-// apply, and one of them may be another account's (an assignment that may
-// name the caller while its facts are unproven). Settings, policy/explain,
-// policy/test and policy/packs must not show that profile: its name, its
-// description or its egress policy. The combination is enforced; a live
-// registration takes it through a re-match, and stays live.
+// are unproven is refused. Settings, policy/explain, policy/test and
+// policy/packs must name the missing fact without showing a candidate
+// profile, its description or its egress policy. A live registration keeps
+// its last proven profile during a re-match and stays live.
 func TestSandboxPolicyViewsOfAnUnprovenDecisionNameNoOtherProfile(t *testing.T) {
 	const secret = "bob-internal.example"
 	setup := func(t *testing.T) *sandboxFixture {
@@ -51,7 +49,7 @@ func TestSandboxPolicyViewsOfAnUnprovenDecisionNameNoOtherProfile(t *testing.T) 
 	leaks := func(body string) bool {
 		return strings.Contains(body, "bob-only") || strings.Contains(body, "Bob private") || strings.Contains(body, secret)
 	}
-	views := func(t *testing.T, f *sandboxFixture, header map[string]string, registration string) {
+	views := func(t *testing.T, f *sandboxFixture, header map[string]string, registration, missingFact string) {
 		t.Helper()
 		for _, call := range []struct {
 			name, method, path string
@@ -63,8 +61,8 @@ func TestSandboxPolicyViewsOfAnUnprovenDecisionNameNoOtherProfile(t *testing.T) 
 			{"packs", http.MethodGet, sandboxrelay.PathPolicyPacks, nil},
 		} {
 			rec := f.do(sbxAlice, call.method, call.path, call.body, header)
-			if rec.Code != http.StatusOK {
-				t.Errorf("%s: %d %s; want the view (no refusal)", call.name, rec.Code, rec.Body.String())
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), missingFact) {
+				t.Errorf("%s: %d %s; want refusal naming %s", call.name, rec.Code, rec.Body.String(), missingFact)
 			}
 			if leaks(rec.Body.String()) {
 				t.Errorf("%s: %d %s names another account's profile", call.name, rec.Code, rec.Body.String())
@@ -75,12 +73,12 @@ func TestSandboxPolicyViewsOfAnUnprovenDecisionNameNoOtherProfile(t *testing.T) 
 		f := setup(t)
 		// explain, test and packs wait identityDirectoryBudget for the lookup.
 		f.coldCache(sbxAlice)
-		views(t, f, map[string]string{sandboxrelay.ConnectorHeader: "claudecode"}, "")
+		views(t, f, map[string]string{sandboxrelay.ConnectorHeader: "claudecode"}, "", "account")
 	})
 	t.Run("groups unknown", func(t *testing.T) {
 		f := setup(t)
 		groupsUnknown(f, sbxAlice)
-		views(t, f, map[string]string{sandboxrelay.ConnectorHeader: "claudecode"}, "")
+		views(t, f, map[string]string{sandboxrelay.ConnectorHeader: "claudecode"}, "", "group")
 	})
 	t.Run("a live registration re-matched while its facts are unproven", func(t *testing.T) {
 		f := setup(t)
@@ -90,12 +88,53 @@ func TestSandboxPolicyViewsOfAnUnprovenDecisionNameNoOtherProfile(t *testing.T) 
 			t.Fatalf("create: %+v %+v", resp.Registration, resp.Banner)
 		}
 		groupsUnknown(f, sbxAlice)
-		views(t, f, map[string]string{sandboxrelay.ConnectorHeader: "claudecode", sandboxrelay.RegistrationHeader: resp.Registration.ID}, resp.Registration.ID)
+		views(t, f, map[string]string{sandboxrelay.ConnectorHeader: "claudecode", sandboxrelay.RegistrationHeader: resp.Registration.ID}, resp.Registration.ID, "group")
+		// A decision is checked against the person's own floor, which no
+		// proven fact gives now.
+		rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathDecisions, sandboxrelay.DecisionRequest{
+			V: 1, Registration: resp.Registration.ID, Kind: sandboxrelay.DecisionEgressBlock, Host: "example.org",
+			Scope: sandboxrelay.DecisionScopeAlways,
+		}, nil)
+		if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "group membership is unconfirmed") || leaks(rec.Body.String()) {
+			t.Errorf("decision: %d %s; want a refusal naming the group fact", rec.Code, rec.Body.String())
+		}
 		auth, _ := f.api.sandboxAuth()
 		reg, ok, err := auth.store.Get(sbxAlice.UID, resp.Registration.ID)
 		members, _ := config.ProfileMeetMembers(reg.Profile)
-		if err != nil || !ok || (reg.Profile != "contractors" && !slices.Contains(members, "contractors")) || reg.State != sandboxreg.StateLive {
-			t.Errorf("registration after the unproven re-match: %+v (%v); want contractors or a combination with it, live", reg, err)
+		if err != nil || !ok || reg.Profile != "contractors" || slices.Contains(members, "bob-only") || reg.State != sandboxreg.StateLive {
+			t.Errorf("registration after the unproven re-match: %+v (%v); want the last proven contractors profile, live", reg, err)
 		}
 	})
+}
+
+// A configuration change while a registration's facts are unproven keeps
+// its profile; once the facts are proven again, unchanged, it re-matches
+// under the new configuration instead of keeping the profile of the old one.
+func TestSandboxRematchAfterUnprovenFactsUsesTheNewConfiguration(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
+	f.publishFirstGeneration()
+	resp := f.live(sbxAlice, 1)
+	if resp.Banner.Profile != "contractors" {
+		t.Fatalf("create: %+v", resp.Banner)
+	}
+	moved := newSandboxFixtureOn(t, f)
+	moved.cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "engineering", Match: config.ProfileMatch{Groups: []string{"dc-sbx-contractors"}}},
+	}
+	moved.publishFirstGeneration()
+	moved.mu.Lock()
+	moved.facts[sbxAlice.UID] = useridentity.DirectoryFacts{
+		Principal: sbxAlice.Name + "@DCLAB.TEST", Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
+		Source: "sssd", GroupsPartial: true, ResolvedAt: time.Now(),
+	}
+	moved.mu.Unlock()
+	if rec := moved.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Header().Get(sandboxrelay.ProfileHeader) != "contractors" {
+		t.Fatalf("hook while the groups are unknown: %d %v; want the kept contractors profile", rec.Code, rec.Header())
+	}
+	moved.setGroups(sbxAlice, "dc-sbx-contractors")
+	if rec := moved.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Code != http.StatusOK ||
+		rec.Header().Get(sandboxrelay.ProfileHeader) != "engineering" {
+		t.Fatalf("hook once the groups are proven again: %d %s %v; want engineering", rec.Code, rec.Body.String(), rec.Header())
+	}
 }

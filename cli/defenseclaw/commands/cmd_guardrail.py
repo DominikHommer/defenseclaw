@@ -5508,6 +5508,10 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
         if cache.get("match") == "default_lookup_failed" and result["match"] != "default_lookup_failed":
             reason += " (requests get default_lookup_failed: the gateway's directory lookup for this account fails)"
         click.echo(f"  match:   {reason}")
+    if result.get("refused"):
+        # GAP-0522: requests that need an unproven identity fact are refused;
+        # the profile above is a candidate, not what the account gets.
+        click.echo(f"  refused: {result.get('refused_reason') or 'an identity fact is unproven'}")
     if result.get("digest"):
         click.echo(f"  digest:  {result['digest']}")
     if cache:

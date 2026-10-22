@@ -84,6 +84,9 @@ type profileSubject struct {
 	// not given yet (awaitingSpoolUPN): a users entry written as a UPN or
 	// DOMAIN\name may name the account.
 	upnUnproven bool
+	// tokenGroupsCause says why the enumerator has no current sign-in token
+	// groups for a Windows account, "" when it has them; a refusal names it.
+	tokenGroupsCause string
 	// LookupFailed is set when the directory lookup for this subject failed
 	// and no cached facts within their TTL exist: the account and its groups
 	// are unproven (resolveIdentity), and only a uid or SID entry, an agent
@@ -178,6 +181,9 @@ type profileDecision struct {
 	Match         string
 	MatchedGroup  string
 	SubjectSource string
+	// Refused names an unproven identity fact the decision depends on.
+	// Enforcement surfaces block it; Name remains diagnostic context.
+	Refused string
 	// Assignment is the 1-based index of the assignment that matched, 0 for
 	// the default.
 	Assignment int
@@ -752,6 +758,15 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 	if s.IDKind == useridentity.KindWindowsSID {
 		userName, nameUnconfirmed = verifiedAccountName(s.UserID, s.UserName), false
 	}
+	windowsToken := s.Directory.Source == useridentity.SourceWindowsLSA || s.Directory.Source == useridentity.SourceWindowsIdentityStore
+	tokenGroupsCause := ""
+	switch {
+	case !lookupAttempted || !windowsToken:
+	case s.Directory.GroupsPartial:
+		tokenGroupsCause = "the account has no desktop session, so its sign-in token groups are unknown until it signs in at the desktop again"
+	case awaitingSpool(s.Directory):
+		tokenGroupsCause = "the guardian has no identity record for this account yet; a desktop sign-in (console or Remote Desktop) writes it"
+	}
 	accountDomain := s.Directory.AccountDomain
 	if accountDomain == "" && runtime.GOOS == "windows" {
 		if domain, _, qualified := strings.Cut(s.UserName, `\`); qualified {
@@ -774,11 +789,11 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 		upnUnproven:       lookupAttempted && !s.Directory.ResolvedAt.IsZero() && awaitingSpoolUPN(s.Directory),
 		GroupsUnknown:     lookupAttempted && s.Directory.GroupsPartial,
 		LookupFailed: lookupAttempted && (s.Directory.ResolvedAt.IsZero() ||
-			(s.Directory.Source == useridentity.SourceWindowsLSA ||
-				s.Directory.Source == useridentity.SourceWindowsIdentityStore) && awaitingSpool(s.Directory) && !s.Directory.GroupsPartial),
-		viaProcessOwner: s.Source == subjectSourceProcessOwner,
-		nameUnconfirmed: nameUnconfirmed,
-		localAccount:    s.Directory.Directory == useridentity.DirectoryLocal,
+			windowsToken && awaitingSpool(s.Directory) && !s.Directory.GroupsPartial),
+		tokenGroupsCause: tokenGroupsCause,
+		viaProcessOwner:  s.Source == subjectSourceProcessOwner,
+		nameUnconfirmed:  nameUnconfirmed,
+		localAccount:     s.Directory.Directory == useridentity.DirectoryLocal,
 	}
 }
 
@@ -940,8 +955,8 @@ func (set *guardrailProfileSet) match(subject *profileSubject, source, connector
 }
 
 // matchResolved is selectProfile, memoised for repeated subjects whose
-// facts are all proven. A decision taken on unproven facts is never cached:
-// it reads the last proven profile of the incarnation, which changes.
+// facts are all proven. An uncertain decision is never cached, including a
+// pending Windows assignment group SID lookup.
 func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res identityResolution, source, connectorName, agent string) profileDecision {
 	if set.matches == nil || !res.proven() {
 		return set.selectProfile(subject, res, source, connectorName, agent)
@@ -956,7 +971,9 @@ func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res ident
 		return decision
 	}
 	decision := set.selectProfile(subject, res, source, connectorName, agent)
-	set.matches.put(key, decision)
+	if decision.Refused == "" {
+		set.matches.put(key, decision)
+	}
 	return decision
 }
 
@@ -1439,6 +1456,11 @@ func guardrailProfileTelemetryFor(ctx context.Context) guardrailProfileTelemetry
 
 func guardrailProfileTelemetryFromDecision(d profileDecision) guardrailProfileTelemetry {
 	out := guardrailProfileTelemetry{Match: observability.Present(d.Match)}
+	if d.Refused != "" {
+		// A candidate profile is not the caller's proven policy. Keep the
+		// refusal match without recording an inferred profile or group.
+		return out
+	}
 	if d.Name != "" {
 		out.Name = observability.Present(d.Name)
 		out.Digest = observability.Present(d.Digest)
@@ -1717,13 +1739,22 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if len(decision.Unproven) > 0 {
 		out["unproven_facts"] = decision.Unproven
 	}
+	if decision.Refused != "" {
+		out["refused"] = true
+		out["refused_reason"] = decision.Refused
+	}
 	if len(decision.Candidates) > 0 {
 		// An administrator view: the profiles that may apply, and the
-		// strictest combination of them that does.
+		// candidate floor. A refused decision cannot authorize a request.
 		out["candidate_profiles"] = decision.Candidates
 		if config.IsProfileMeet(decision.Name) {
-			warnings = append(warnings, fmt.Sprintf("more than one profile may apply (%s): their strictest combination applies, "+
-				"with every block, rule pack and sandbox limit of each and only the allows they share", strings.Join(decision.Candidates, ", ")))
+			if decision.Refused != "" {
+				warnings = append(warnings, fmt.Sprintf("more than one profile may apply (%s): their strictest combination is diagnostic; "+
+					"requests are refused until identity facts are confirmed", strings.Join(decision.Candidates, ", ")))
+			} else {
+				warnings = append(warnings, fmt.Sprintf("more than one profile may apply (%s): their strictest combination applies, "+
+					"with every block, rule pack and sandbox limit of each and only the allows they share", strings.Join(decision.Candidates, ", ")))
+			}
 		}
 	}
 	if agent != "" {

@@ -8,7 +8,7 @@ keywords:
   - identity-based policy
 ---
 
-A guardrail profile is a named set of guardrail overrides. When several profiles may apply to a request, the profile that enforces at least what each of the others does applies; when none does, their strictest combination applies. A default profile catches everyone else. For the task, see [Give a group its own policy](/docs/how-to/policies/give-a-group-its-own-policy).
+A guardrail profile is a named set of guardrail overrides. When several profiles are proven to match a request, the profile that enforces at least what each of the others does applies; when none does, their strictest combination applies. If an assignment needs an identity fact the OS has not confirmed, the request is refused and the missing fact is named. A default profile catches everyone else. For the task, see [Give a group its own policy](/docs/how-to/policies/give-a-group-its-own-policy).
 
 <Callout type="info" title="Where the identity comes from">
 DefenseClaw reads who a user is from the operating system and never calls
@@ -117,9 +117,8 @@ On Linux, a group ID with no name counts as unnamed only when every NSS
 group provider the system asks shows that it has no name for it. A provider
 DefenseClaw cannot check (Himmelblau, aad) leaves the name unknown. The
 account is still in the group, so a `groups` entry with the number can
-match. An earlier assignment whose `groups` entry may name that group makes
-the request take the profile that covers the other candidates, or their
-strictest combination (`default_lookup_failed`), never a weaker default.
+match. An assignment whose `groups` entry may name that group makes the
+request refuse with the missing group fact named (`default_lookup_failed`).
 
 After upgrading from 1.0.0–1.0.3 on Linux or macOS, an `agents` entry written
 for a 1.0.x agent ID keeps applying, with no rebind step, to the account that
@@ -131,8 +130,8 @@ other spool files and never changes afterwards.
 
 An account the map does not record (a later account given the UID, a namesake
 from another domain, an account created again) does not get the entry as a
-match. The entry's profile is one of the candidates of the strictest
-combination, so its blocks still apply. Windows needs nothing: the 1.0.x agent
+match. The request is refused until ownership of the entry is proven; its
+profile is listed as a candidate for diagnosis. Windows needs nothing: the 1.0.x agent
 IDs of a SID are unchanged. A per-user (non-managed) gateway keeps its own
 account's entries.
 
@@ -142,13 +141,11 @@ How the keys combine:
   For one key, any one value is enough. `{groups: [a, b], connectors: [codex]}`
   means "in group a or b, **and** using Codex".
 - **The profile that covers the others applies, or their strictest
-  combination.** When several profiles may apply to a request (several
-  assignments match, or a fact is not proven, see the next point), DefenseClaw
+  combination.** When several profiles are proven to match a request, DefenseClaw
   applies the profile that enforces at least what each of the others does.
   When none does, it applies their strictest combination, whatever the order
   of the assignments. Order only sets which assignment `explain` reports when
-  two give the same profile. A request is never refused because profiles
-  differ, and never resolved to a weaker default.
+  two give the same profile. Different proven profiles do not cause a refusal.
 - **The strictest combination.** Every block of any candidate applies: the
   action applies wherever one blocks, with the lowest `block_at` of those that
   block. The strictest HILT applies. The rules of every rule pack are
@@ -164,14 +161,15 @@ How the keys combine:
   `candidate_profiles`. A user sees "strictest combination" and never the
   names of the other profiles: `explain` and `status` show a user only their
   own effective policy.
-- **Unproven facts never select a weaker profile.** When a fact an
+- **Unproven facts refuse a decision that needs them.** When a fact an
   assignment needs is not proven in this pass (the directory lookup failed or
   timed out, a group name no provider confirms, a UPN the guardian has not
   written yet, a Windows group name whose SID lookup is pending, a uid more
   than one account holds, or a pre-1.0.4 `agents` entry the upgrade did not
-  bind), the candidates are every profile that could apply, the default
-  profile and the last profile proven for this account incarnation
-  (`default_lookup_failed`). An account is recognized by its SID (SSSD or
+  bind), the request is refused with the missing fact named. `profile explain`
+  shows `refused`, `refused_reason`, `unproven_facts` and the candidate profiles
+  (`default_lookup_failed`). A fact no assignment needs does not make the
+  decision uncertain. An account is recognized by its SID (SSSD or
   Windows) or by its macOS local record; for an account that has neither (a
   local or LDAP Linux account, a macOS directory account with no local record)
   no profile is kept, so an account deleted and created again under the same
@@ -210,9 +208,9 @@ How the keys combine:
   account never gets the AD principal, whatever its name. While SSSD does not
   answer (stopped,
   restarting, or no answer within 2 seconds) the lookup fails and the account
-  keeps its last facts for up to an hour; with none, it gets the profile that
-  covers the other candidates, or their strictest combination
-  (`default_lookup_failed`). Add the uid to the assignment when the
+  keeps its last facts for up to an hour; with none, a principal-dependent
+  assignment refuses the request (`default_lookup_failed`) and names the
+  missing account fact. Add the uid to the assignment when the
   account must match regardless. Groups follow the same rule: an account keeps
   only the groups inside the domain of its SID (an LDAP `carol` next to an AD
   `carol` does not get the AD `carol`'s groups), and an account whose
@@ -282,7 +280,7 @@ than one key, the reason names the most specific key, in the order
 | `connector` | Only a `connectors` entry matched. |
 | `default` | The user is verified, but no assignment matched, so `default_profile` applied. |
 | `default_unverified` | No verified user reached the gateway, so only assignments that match on `connectors` alone could apply. |
-| `default_lookup_failed` | A fact an assignment needs was not proven in this pass (a failed or slow directory lookup, a group name no provider confirms, a UPN the guardian has not written yet, a Windows group name whose SID lookup is pending, a uid more than one account holds, a pre-1.0.4 `agents` entry the upgrade did not bind). The profile that covers the other candidates, or their strictest combination, applied; the candidates are every profile that could apply, the default profile and the last profile proven for this account incarnation. `explain` lists the facts as `unproven_facts` and the profiles as `candidate_profiles`. |
+| `default_lookup_failed` | A fact an assignment needs was not proven in this pass (a failed or slow directory lookup, a group name no provider confirms, a UPN the guardian has not written yet, a Windows group name whose SID lookup is pending, a uid more than one account holds, a pre-1.0.4 `agents` entry the upgrade did not bind). The request is refused. `explain` lists `refused_reason`, `unproven_facts` and `candidate_profiles`; the candidate profile is diagnostic and does not authorize the request. |
 
 ## Only verified facts select a profile
 
@@ -314,9 +312,9 @@ What follows when the identity is missing:
   One that matches on the verified uid, SID, agent or connector alone
   matches. One that names groups, or lists users by name but not this uid or
   SID, may match. One that lists only other uids or SIDs, or another agent or
-  connector, does not. The request gets the profile that covers the
-  others among those that match or may match and the default profile, or their
-  strictest combination (`default_lookup_failed`). The lookup is retried 15 seconds later. Later
+  connector, does not. If an assignment may match on the missing facts, the
+  request is refused and names them (`default_lookup_failed`). If no
+  assignment needs them, the proven match or default applies. The lookup is retried 15 seconds later. Later
   requests use the cached answer. A lookup counts as failed unless every part
   of it finished: an account whose group list timed out, or that is in more
   than 2,048 groups, has no facts rather than part of its membership. On
@@ -334,7 +332,7 @@ What follows when the identity is missing:
   groups per account within the two-second lookup budget. Additional groups
   remain as SIDs. Use a group SID in the assignment when the named group may
   be beyond that limit; `profile explain` warns about unresolved names.
-- **macOS group facts must be newer than the account listing.** A group fact newer than the last account listing is not proven. A request that finds the listing expired waits up to 250 ms for a new one. Until a listing confirms the account, or after the account's own record changed since the listing, its groups are unproven and the strictest combination of the profiles its groups may select applies.
+- **macOS group facts must be newer than the account listing.** A group fact newer than the last account listing is not proven. A request that finds the listing expired waits up to 250 ms for a new one. Until a listing confirms the account, or after the account's own record changed since the listing, its groups are unproven and a group-dependent assignment refuses the request with the missing group fact named.
 - **Group changes take time.** SSSD caches the account first (90 minutes by
   default). The gateway caches each successful directory lookup for up to
   15 minutes from the last successful lookup, then starts a background refresh
@@ -356,24 +354,22 @@ What follows when the identity is missing:
   (a removed member stayed in the group for more than ten minutes): flush it
   with `dscacheutil -flushcache` and `dsmemberutil flushcache`, then explain
   the account, restart the gateway, or wait for its 15-minute refresh. On Windows, group profiles use a current desktop sign-in token. After sign-out,
-  group membership is unknown: an SSH or scheduled-task agent gets the
-  strictest combination of the profiles a group-dependent assignment could
-  give it until the user signs in at the desktop again. Set a strict default profile. A membership change also needs a new
+  group membership is unknown: a group-dependent assignment refuses an SSH
+  or scheduled-task agent until the user signs in at the desktop again. A membership change also needs a new
   desktop sign-in. While the directory does not answer, the gateway keeps using a
   user's last facts, for at most an hour (four times the cache lifetime). After
-  that group-dependent assignments cannot match. A verified UID, SID or agent
-  assignment still matches, and the profile that covers the other candidates, or
-  their strictest combination, applies (`default_lookup_failed`) until a lookup succeeds, so a user removed from a
-  group does not keep its group profile for the whole outage. `defenseclaw doctor`,
+  that group-dependent assignments cannot be proven and refuse requests until
+  a lookup succeeds (`default_lookup_failed`). A verified UID, SID or agent
+  assignment still matches when no assignment needs the missing group fact.
+  `defenseclaw doctor`,
   `guardrail status` and `guardrail profile explain` warn while lookups are
   failing, with the number of accounts, the first failure and the reason; the
   gateway log has one line when an account's lookups start to fail and one when
   they work again.
 
 An unverified request that no `connectors`-only assignment selects gets the
-default profile, and the default is one of the profiles an unproven request
-chooses among, so **set a strict `default_profile`**: it is the fallback an
-outage cannot go below.
+default profile. Set a strict `default_profile` for requests whose identity
+facts are fully known but no assignment matches.
 
 <Callout type="warn" title="Per-user installs on Windows have no groups">
 On a per-user Windows install the gateway cannot read the sign-in token's

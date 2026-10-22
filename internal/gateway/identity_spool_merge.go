@@ -58,9 +58,11 @@ func awaitingSpool(facts useridentity.DirectoryFacts) bool {
 // short incomplete lifetime so a restored guardian record does not leave a
 // users-by-UPN assignment on the default profile for the full directory TTL.
 // An account the guardian never names keeps refreshing at that pace, which
-// costs a directory cache read.
+// costs a directory cache read. Facts its current record was merged into
+// await nothing: a local Mac account, or an SSSD account whose directory
+// gives no UPN, has none (GAP-0522).
 func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
-	if currentIdentitySpoolDir() == "" {
+	if currentIdentitySpoolDir() == "" || facts.GuardianRecord {
 		return false
 	}
 	switch facts.Source {
@@ -298,6 +300,7 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 		merged.ResolvedAt = spool.ResolvedAt
 	}
 	merged.Assurance = useridentity.AssuranceVerified
+	merged.GuardianRecord = true
 	return merged
 }
 

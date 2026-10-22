@@ -38,8 +38,8 @@ import (
 // The file is written once, never changed, owned by the guardian
 // authorization and read by the gateway only after that trust check. A
 // legacy entry then keeps applying to the account the map records, and to
-// no other; an account the map does not record gets the strictest
-// combination of the profiles that may apply (the gateway's selectProfile).
+// no other; a request of an account the map does not record is refused,
+// naming the unproven agent ownership (the gateway's selectProfile).
 // Windows needs no map: 1.0.x keyed its identities on the SID, which is
 // what they are keyed on now. Remove with agentidentity.LegacyAgentID.
 

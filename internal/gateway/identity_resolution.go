@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -20,28 +21,28 @@ import (
 // the account (which account holds the verified uid or SID, its name,
 // domain and UPN), its groups, and the request agent's ownership of a
 // pre-1.0.4 agents entry. Each fact is proven, unknown or failed
-// (proofStatus). selectProfile then applies one rule, with no exception:
+// (proofStatus). selectProfile then applies one rule (record, never infer):
 //
 //   - Every assignment is evaluated against the facts as yes, no or maybe:
-//     maybe when a fact it needs is not proven in this pass.
-//   - The candidates are the profiles of the assignments that match (yes)
-//     when every fact is proven, or default_profile when none does. When any
-//     fact is not proven (absent, incomplete, timed out, a provider error
-//     anywhere in the NSS, SSSD, LDAP, winbind or Windows token chain, an
-//     ambiguous name or uid, a pre-1.0.4 agents entry the upgrade did not
-//     bind, a group fact newer than the last macOS account listing), they
-//     are default_profile, every profile that matches or could match
-//     (maybe) and the last profile proven for this exact incarnation.
-//   - A candidate that enforces at least what each of the others does
-//     applies under its own name (profileCovers); otherwise their meet, the
-//     strictest combination field by field (guardrail_profile_meet_gw.go).
-//     Profiles that differ never refuse a request, and a request never
-//     resolves to a weaker default.
+//     maybe when a fact it needs is not proven in this pass (absent,
+//     incomplete, timed out, a provider error anywhere in the NSS, SSSD,
+//     LDAP, winbind or Windows token chain, an ambiguous name or uid, a
+//     pre-1.0.4 agents entry the upgrade did not bind, a group fact newer
+//     than the last macOS account listing).
+//   - A maybe whose profile the proven facts already give (a yes
+//     assignment's, or with no yes the default) changes nothing. Otherwise
+//     the request is refused, naming the facts those maybes need
+//     (profileDecision.Refused); Name is then the strictest combination of
+//     default_profile and every profile that matches or could match, for
+//     the administrator's explain, and authorizes nothing.
+//   - Else the profiles of the yes assignments apply, or default_profile
+//     when none matches: the one that enforces at least what each of the
+//     others does (profileCovers), otherwise their meet, the strictest
+//     combination field by field (guardrail_profile_meet_gw.go).
 //
 // This replaces the earlier special cases (matchWithFailedLookup,
-// matchWithUnknownGroups, matchWithUnconfirmedGroups, the refusals of
-// profiles that did not cover each other, and the legacy agent layering of
-// matchAgent).
+// matchWithUnknownGroups, matchWithUnconfirmedGroups, and the legacy agent
+// layering of matchAgent).
 
 // proofStatus is how one identity fact is known in this pass.
 type proofStatus string
@@ -113,20 +114,6 @@ func (r identityResolution) proven() bool {
 	return r.Account == proofProven && r.UPN == proofProven && r.Groups == proofProven && r.Agent == proofProven
 }
 
-// unprovenFacts names the facts that are not proven, for explain.
-func (r identityResolution) unprovenFacts() []string {
-	var out []string
-	for _, fact := range []struct {
-		name   string
-		status proofStatus
-	}{{"account", r.Account}, {"upn", r.UPN}, {"groups", r.Groups}, {"agent", r.Agent}} {
-		if fact.status != proofProven {
-			out = append(out, fact.name+":"+string(fact.status))
-		}
-	}
-	return out
-}
-
 // resolveIdentity computes the identity facts of a verified subject and
 // their proof status. agentUnresolved is the bridge's answer for the
 // request agent (profileAgent). An unverified request (no subject) names no
@@ -183,17 +170,18 @@ const (
 // assignmentState evaluates m for the request: yes when the proven facts
 // satisfy every key, no when a proven fact rules a key out, and maybe when
 // a key depends on a fact that is not proven. reason and group are the
-// match reason of a yes, as assignmentMatches gives them.
+// match reason of a yes, as assignmentMatches gives them; needs names the
+// unproven facts a maybe depends on, as <fact>:<proofStatus> (upn:unknown).
 func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *profileSubject, res identityResolution,
-	verified bool, connectorName, agent string) (state matchState, reason, group string) {
+	verified bool, connectorName, agent string) (state matchState, reason, group string, needs []string) {
 	if !verified || subject == nil {
 		if reason, group, ok := assignmentMatches(m, subject, &subjectGroups{}, false, connectorName, agent); ok {
-			return matchYes, reason, group
+			return matchYes, reason, group, nil
 		}
-		return matchNo, "", ""
+		return matchNo, "", "", nil
 	}
 	if m.Empty() {
-		return matchNo, "", ""
+		return matchNo, "", "", nil
 	}
 	state = matchYes
 	lower := func(next matchState) {
@@ -201,24 +189,36 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 			state = next
 		}
 	}
+	need := func(fact string) {
+		if !slices.Contains(needs, fact) {
+			needs = append(needs, fact)
+		}
+	}
 	if len(m.Connectors) > 0 {
 		if connectorName == "" || !anyMatches(m.Connectors, func(v string) bool { return config.NormalizeConnectorName(v) == connectorName }) {
-			return matchNo, "", ""
+			return matchNo, "", "", nil
 		}
 		reason = profileMatchConnector
 	}
 	if len(m.Groups) > 0 {
 		groupState, matched := set.groupsState(m.Groups, subject, res)
 		if groupState == matchNo {
-			return matchNo, "", ""
+			return matchNo, "", "", nil
 		}
 		lower(groupState)
-		if groupState == matchYes {
+		switch {
+		case groupState == matchYes:
 			reason, group = profileMatchGroup, matched
+		case res.Groups == proofProven:
+			// The account's groups are proven; an assignment group name's
+			// SID is not (groupsState, GAP-0487).
+			need(factAssignmentGroupSID)
+		default:
+			need("groups:" + string(res.Groups))
 		}
 	}
 	if len(m.Users) > 0 {
-		userState := matchNo
+		userState, userNeed := matchNo, ""
 		for _, entry := range m.Users {
 			entry = strings.TrimSpace(entry)
 			switch {
@@ -231,25 +231,28 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 			case res.Account == proofProven:
 				if userEntryMatches(subject, entry) {
 					userState = matchYes
-				} else if res.UPN != proofProven && strings.ContainsAny(entry, `@\`) {
+				} else if res.UPN != proofProven && strings.ContainsAny(entry, `@\`) && !strings.HasPrefix(entry, `.\`) {
 					// A UPN or DOMAIN\name entry may name the account
-					// through the UPN the guardian has not given yet.
-					userState = max(userState, matchMaybe)
+					// through the UPN the guardian has not given yet. A
+					// .\name entry names a local account, never a UPN.
+					userState, userNeed = max(userState, matchMaybe), "upn:"+string(res.UPN)
 				}
 			default:
 				// Any name, UPN or principal may be the unproven account's.
-				userState = max(userState, matchMaybe)
+				userState, userNeed = max(userState, matchMaybe), "account:"+string(res.Account)
 			}
 			if userState == matchYes {
 				break
 			}
 		}
 		if userState == matchNo {
-			return matchNo, "", ""
+			return matchNo, "", "", nil
 		}
 		lower(userState)
 		if userState == matchYes {
 			reason, group = profileMatchUser, ""
+		} else {
+			need(userNeed)
 		}
 	}
 	if len(m.Agents) > 0 {
@@ -263,18 +266,24 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 			agentState = matchMaybe
 		}
 		if agentState == matchNo {
-			return matchNo, "", ""
+			return matchNo, "", "", nil
 		}
 		lower(agentState)
 		if agentState == matchYes {
 			reason, group = profileMatchAgent, ""
+		} else {
+			need("agent:" + string(res.Agent))
 		}
 	}
 	if state != matchYes {
-		return state, "", ""
+		return state, "", "", needs
 	}
-	return matchYes, reason, group
+	return matchYes, reason, group, nil
 }
+
+// factAssignmentGroupSID is the unproven fact of an assignment group name
+// whose Windows SID lookup has not answered.
+const factAssignmentGroupSID = "assignment_group_sid:unknown"
 
 // groupsState evaluates a groups key. Proven groups decide it. Unknown
 // groups make every entry a maybe. With some gids unconfirmed, a proven
@@ -337,13 +346,15 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	}
 	var yes []hit
 	var maybe []string
+	var maybeNeeds [][]string
 	for i, assignment := range set.assignments {
-		state, reason, group := set.assignmentState(assignment.Match, subject, res, verified, connectorName, agent)
+		state, reason, group, needs := set.assignmentState(assignment.Match, subject, res, verified, connectorName, agent)
 		switch state {
 		case matchYes:
 			yes = append(yes, hit{index: i + 1, profile: strings.TrimSpace(assignment.Profile), reason: reason, group: group})
 		case matchMaybe:
 			maybe = append(maybe, strings.TrimSpace(assignment.Profile))
+			maybeNeeds = append(maybeNeeds, needs)
 		}
 	}
 	definite := func(name string) (profileDecision, bool) {
@@ -356,7 +367,22 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		}
 		return profileDecision{}, false
 	}
-	if !verified || len(maybe) == 0 {
+	// An assignment that may apply changes nothing when its profile is one
+	// the proven facts already give: a matching assignment's, or with none
+	// matching, the default. The decision needs the unproven facts of the
+	// others only.
+	var needed []string
+	for i, name := range maybe {
+		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && slices.ContainsFunc(yes, func(h hit) bool { return h.profile == name }) {
+			continue
+		}
+		for _, fact := range maybeNeeds[i] {
+			if !slices.Contains(needed, fact) {
+				needed = append(needed, fact)
+			}
+		}
+	}
+	if !verified || len(needed) == 0 {
 		// No assignment depends on a fact that is not proven: the profiles
 		// of the matching assignments, or the default.
 		var decision profileDecision
@@ -413,9 +439,92 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		// the others; any other is the unproven fallback.
 		decision = set.decision(name, profileMatchDefaultLookupFailed, "", source)
 	}
-	decision.Unproven = res.unprovenFacts()
+	decision.Unproven = orderedFacts(needed)
 	decision.Candidates = candidates
+	decision.Refused = set.identityUncertaintyReason(subject, decision.Unproven, connectorName)
 	return decision
+}
+
+// orderedFacts is facts in a fixed order: account, upn, groups, the
+// assignment group SID, agent.
+func orderedFacts(facts []string) []string {
+	rank := func(fact string) int {
+		for i, prefix := range []string{"account:", "upn:", "groups:", factAssignmentGroupSID, "agent:"} {
+			if strings.HasPrefix(fact, prefix) {
+				return i
+			}
+		}
+		return 5
+	}
+	out := slices.Clone(facts)
+	slices.SortStableFunc(out, func(a, b string) int { return rank(a) - rank(b) })
+	return out
+}
+
+// identityUncertaintyReason names each missing fact without naming a group,
+// another account or a candidate profile. The same text is used by hooks,
+// inspect, ACP, proxy, sandbox and the administrator's explain response.
+func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubject, facts []string, connectorName string) string {
+	why := make([]string, 0, len(facts))
+	for _, fact := range facts {
+		switch fact {
+		case "account:failed":
+			why = append(why, "the account holder is ambiguous")
+		case "account:unknown":
+			why = append(why, "the account holder is unconfirmed")
+		case "upn:unknown":
+			why = append(why, "this account's UPN is unconfirmed")
+		case "groups:unknown":
+			why = append(why, "group membership is unconfirmed")
+		case "agent:unknown":
+			why = append(why, "ownership of a pre-upgrade agent identity is unconfirmed")
+		case factAssignmentGroupSID:
+			why = append(why, "an assignment group SID is unconfirmed")
+		default:
+			why = append(why, "identity fact "+fact+" is unconfirmed")
+		}
+	}
+	if subject != nil && subject.tokenGroupsCause != "" {
+		why = append(why, subject.tokenGroupsCause)
+	}
+	return "DefenseClaw refused this request: " + strings.Join(why, "; ") +
+		"; run `" + set.profileExplainCommand(subject, connectorName) + "` to inspect the identity decision"
+}
+
+// profileExplainCommand names the installed administrator command for the
+// verified ID. Only a numeric uid or SID and a safe connector are included.
+func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName string) string {
+	if subject == nil || subject.UserID != strings.TrimSpace(subject.UserID) || useridentity.KindForID(subject.UserID) == "" {
+		return "defenseclaw guardrail profile list"
+	}
+	command := "defenseclaw guardrail profile explain --user " + subject.UserID
+	if set.base != nil && set.base.StandaloneEnterprise() {
+		switch runtime.GOOS {
+		case "linux":
+			command = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user " + subject.UserID
+		case "darwin":
+			command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + subject.UserID
+		case "windows":
+			command = `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user ` + subject.UserID
+		}
+	}
+	if profileCommandToken(connectorName) {
+		command += " --connector " + connectorName
+	}
+	return command
+}
+
+func profileCommandToken(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // compactProfiles drops repeated names, keeping the first.

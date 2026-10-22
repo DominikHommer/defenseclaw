@@ -64,5 +64,8 @@ func profileExplainCallerSubject(raw, user string) (profileSubject, bool) {
 		UserID: id, IDKind: useridentity.KindPOSIXUID, UserName: caller.Name, Directory: caller.Facts,
 	}, false)
 	subject.accountName = caller.Name
+	// A group list the caller's lookup could not finish is unknown, as it
+	// is for a hook: explain must not read it as no groups.
+	subject.GroupsUnknown = caller.Facts.GroupsPartial
 	return subject, true
 }

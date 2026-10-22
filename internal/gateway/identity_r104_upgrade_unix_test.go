@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -96,9 +97,9 @@ func TestUpgradeKeepsAgentsAssignmentsWorking(t *testing.T) {
 }
 
 // Without a binding (no map yet, another account under the uid, a namesake
-// of another domain) the entry is a candidate: the request gets the
-// strictest combination of the profiles that may apply, which keeps its
-// blocks, never a refusal and never the weaker default.
+// of another domain) the entry is a candidate: the request is refused with
+// the missing agent ownership fact named. The candidate profile remains
+// diagnostic context only.
 func TestUnboundLegacyAgentsEntryIsACandidate(t *testing.T) {
 	incomparable := map[string]config.GuardrailProfile{
 		"relaxed": {Mode: "action", BlockAt: "HIGH", RulePack: "permissive"},
@@ -129,8 +130,9 @@ func TestUnboundLegacyAgentsEntryIsACandidate(t *testing.T) {
 			legacy := agentidentity.LegacyAgentID(b.inputs(70001, "alice@corp.example"))
 			tc.migrate(b)
 			got, mode := b.hook(legacyConfig(legacy, tc.profiles), 70001, profileSubject{UserID: "70001", UserName: "alice@corp.example"})
-			if got.Name != tc.want || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
-				t.Fatalf("%+v, mode %q; want %s as default_lookup_failed", got, mode, tc.want)
+			if got.Name != tc.want || got.Match != profileMatchDefaultLookupFailed || mode != "action" ||
+				got.Refused == "" || !strings.Contains(got.Refused, "agent identity") {
+				t.Fatalf("%+v, mode %q; want refused candidate %s as default_lookup_failed", got, mode, tc.want)
 			}
 		})
 	}

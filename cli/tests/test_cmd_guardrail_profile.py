@@ -228,6 +228,26 @@ def test_explain_fails_for_an_account_it_could_not_resolve(monkeypatch):
     assert _explain(monkeypatch, resolved, "--json").exit_code == 0
 
 
+def test_explain_prints_the_refusal_and_its_missing_fact(monkeypatch):
+    """GAP-0522: a refused decision names the missing fact, not just a profile."""
+    reason = ("DefenseClaw refused this request: this account's UPN is unconfirmed; run "
+              "`sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user 502` "
+              "to inspect the identity decision")
+    answer = {
+        "profiles_configured": True,
+        "profile": "strict",
+        "match": "default_lookup_failed",
+        "subject": {"user_id": "502", "user_name": "dcm-std1", "group_count": 2},
+        "unproven_facts": ["upn:unknown"],
+        "refused": True,
+        "refused_reason": reason,
+    }
+    result = _explain(monkeypatch, answer)
+    assert result.exit_code == 0
+    assert f"refused: {reason}" in result.output
+    assert "refused:" not in _explain(monkeypatch, dict(answer, refused=False, refused_reason="")).output
+
+
 def test_explain_match_line_names_default_lookup_failed(monkeypatch):
     """GAP-0275: "match: default" while requests get default_lookup_failed."""
     result = _explain(

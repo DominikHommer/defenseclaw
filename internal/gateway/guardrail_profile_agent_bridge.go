@@ -30,10 +30,9 @@ import (
 // matches as the agent's current identity does, with no rebind.
 //
 // Any other entry the request derives (no map entry, another holder,
-// another domain's namesake) is a candidate, not a match: the request gets
-// the strictest combination of the profiles that may apply (selectProfile),
-// which keeps the entry's blocks, never a refusal and never a weaker
-// default. Windows identities are SIDs, which 1.0.3 keyed the same way, so
+// another domain's namesake) is a candidate, not a match: the request is
+// refused until the entry's owner is proven (selectProfile). Windows
+// identities are SIDs, which 1.0.3 keyed the same way, so
 // their entries match as they did. Remove with agentidentity.LegacyAgentID.
 type profileAgentBridge struct {
 	once sync.Once
@@ -118,8 +117,8 @@ type profileAgentLegacy func() (claim profileAgentClaim, known bool)
 // matchAgent is set.match for a request of the agent identity agent;
 // legacy, when not nil, derives agent's 1.0.3 identity. An agents entry that
 // may be that identity, which the upgrade did not bind, leaves the agent
-// fact unproven (resolveIdentity): its assignment is a candidate of the
-// strictest combination selectProfile applies. An entry the upgrade bound
+// fact unproven (resolveIdentity): its assignment is a candidate and the
+// request is refused. An entry the upgrade bound
 // matches as agent does.
 func (set *guardrailProfileSet) matchAgent(subject *profileSubject, source, connectorName, agent string, legacy profileAgentLegacy) profileDecision {
 	matched, unresolved, owned := set.profileAgent(agent, legacy)
@@ -204,8 +203,8 @@ func (b *profileAgentBridge) resolve(agent string, claim profileAgentClaim, know
 	if !b.noted["?"+legacy] {
 		b.note("?" + legacy)
 		fmt.Fprintf(os.Stderr, "[guardrail] profile assignment agent %s: the upgrade did not record the account holding uid %s now as the "+
-			"one 1.0.3 derived it for; agent %s gets the strictest combination of the profiles that may apply (default_lookup_failed), "+
-			"which keeps every block of the entry's profile\n", legacy, claim.UserID, agent)
+			"one 1.0.3 derived it for; agent %s is refused until ownership is proven (default_lookup_failed)\n",
+			legacy, claim.UserID, agent)
 	}
 	return func(entry string) bool { return entry == legacy }, nil
 }

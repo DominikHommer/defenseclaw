@@ -1550,6 +1550,9 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/tool", "inspect-tool-block", "tool") {
+		return
+	}
 
 	var req ToolInspectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

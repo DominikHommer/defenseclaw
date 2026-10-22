@@ -39,7 +39,7 @@ FACTS = [
         (('enterprise/runtime/sandbox-reference.mdx',),
          "This isn't your organization's sandbox policy."),
         (('enterprise/runtime/sandbox-reference.mdx',),
-         'A slow or failed group lookup never refuses a create or a hook.'),
+         'If a profile assignment needs the unanswered identity fact, the create and hooks are refused with that fact named.'),
     ]),
     ('managed_start_session_rule_row', [
         (('troubleshooting/sandboxes/runs-and-sessions.mdx',),

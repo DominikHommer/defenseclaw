@@ -540,8 +540,8 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 		// A group fact newer than the last macOS account listing is not
 		// proven: the listing that would tie the cached facts to the
 		// account holding the uid now has not ended (GAP-0392, GAP-0494).
-		// The request is decided as one of an unproven account, by the
-		// strictest combination of the profiles that may apply.
+		// An assignment that needs the unproven account or group fact
+		// refuses the request with that fact named.
 		return useridentity.DirectoryFacts{}, false
 	}
 	cache := c.directoryCache()

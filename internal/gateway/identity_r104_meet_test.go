@@ -6,6 +6,7 @@ package gateway
 import (
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
@@ -287,6 +288,13 @@ func TestPendingWindowsGroupNameIsACandidate(t *testing.T) {
 			got := set.matchUncached(&subject, profileSubjectVerified, "codex", "")
 			if got.Name != tc.want {
 				t.Fatalf("%+v; want %s", got, tc.want)
+			}
+			if tc.err != errProfileGroupUnknown &&
+				(got.Refused == "" || !strings.Contains(got.Refused, "assignment group SID is unconfirmed")) {
+				t.Fatalf("pending SID lookup did not refuse with its missing fact: %+v", got)
+			}
+			if tc.err == errProfileGroupUnknown && got.Refused != "" {
+				t.Fatalf("proven absent group refused: %+v", got)
 			}
 		})
 	}

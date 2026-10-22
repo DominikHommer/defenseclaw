@@ -136,6 +136,9 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/request", "inspect-request-block", "pre-request") {
+		return
+	}
 
 	var req RequestInspectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -220,6 +223,9 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/response", "inspect-response-block", "post-response") {
+		return
+	}
 
 	var req ResponseInspectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -299,6 +305,9 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/tool-response", "inspect-tool-response-block", "tool") {
 		return
 	}
 

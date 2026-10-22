@@ -21,10 +21,11 @@ import (
 
 // The meet of guardrail profiles: what applies when several profiles may.
 //
-// selectProfile never refuses a request because the profiles that may
-// apply differ. When one of them enforces at least what each of the others
-// does (profileCovers), it applies under its own name. Otherwise their meet
-// applies (config.ProfileMeetName, "strictest.<members>"): for every
+// When proven assignments select different profiles, their meet applies.
+// For an unproven identity fact, the meet is diagnostic context and the
+// request is refused. When one candidate enforces at least what each of the
+// others does (profileCovers), it has its own name. Otherwise their meet
+// is config.ProfileMeetName, "strictest.<members>": for every
 // connector, action wherever a member blocks, the lowest block level and
 // the strictest HILT of the members that block, the lowest alert level, the
 // rules of every member's rule pack (a rule any member enforces is enforced),

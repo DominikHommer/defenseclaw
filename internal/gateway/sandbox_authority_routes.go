@@ -294,6 +294,10 @@ func (a *APIServer) handleSandboxSettings(w http.ResponseWriter, r *http.Request
 	}
 	cfg := a.liveBaseConfig(r.Context())
 	match := a.sandboxMatchPeer(r.Context(), peer, connectorName, 0)
+	if match.decision.Refused != "" {
+		sandboxRefuseView(w, match.decision)
+		return
+	}
 	floor, floorDigest, err := sandboxFloorFor(cfg, match.decision.Name)
 	if err != nil {
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
@@ -543,6 +547,10 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	match := a.sandboxMatchPeer(r.Context(), peer, req.Connector, sandboxResolveWait)
+	if match.decision.Refused != "" {
+		refuse(sandboxrelay.ReasonUnavailable, match.decision.Refused, baseAccess)
+		return
+	}
 	attempt.Profile, attempt.ProfileMatch, attempt.MatchedGroup = match.decision.Name, match.decision.Match, match.decision.MatchedGroup
 	attempt.ProfileDigest, attempt.Provisional = match.decision.Digest, match.provisional
 	floor, floorDigest, err := sandboxFloorFor(cfg, match.decision.Name)
@@ -924,6 +932,10 @@ func (a *APIServer) sandboxScope(w http.ResponseWriter, r *http.Request, auth *s
 			return sandboxOwnScope{}, false
 		}
 		reg = a.sandboxRematchIfDue(r.Context(), auth, peer, reg)
+		if match := a.sandboxMatchPeer(r.Context(), peer, reg.Connector, sandboxExplainLookupIn); match.decision.Refused != "" {
+			sandboxRefuseView(w, match.decision)
+			return sandboxOwnScope{}, false
+		}
 		return sandboxOwnScope{
 			reg: reg, registered: true, connector: reg.Connector,
 			match: sandboxMatch{
@@ -941,7 +953,17 @@ func (a *APIServer) sandboxScope(w http.ResponseWriter, r *http.Request, auth *s
 		return sandboxOwnScope{}, false
 	}
 	match := a.sandboxMatchPeer(r.Context(), peer, connectorName, sandboxExplainLookupIn)
+	if match.decision.Refused != "" {
+		sandboxRefuseView(w, match.decision)
+		return sandboxOwnScope{}, false
+	}
 	return sandboxOwnScope{connector: connectorName, match: match}, true
+}
+
+// sandboxRefuseView does not expose Name: it may include a candidate
+// profile whose membership was not proven for this account.
+func sandboxRefuseView(w http.ResponseWriter, decision profileDecision) {
+	writeSandboxReason(w, sandboxrelay.ReasonUnavailable, decision.Refused)
 }
 
 // sandboxScopeFloor is the floor of scope: its sandbox's registration floor
@@ -1422,6 +1444,12 @@ func (a *APIServer) handleSandboxDecide(w http.ResponseWriter, r *http.Request) 
 	reg = a.sandboxRematchIfDue(r.Context(), auth, peer, reg)
 	if reg.State == sandboxreg.StateRevoked {
 		writeSandboxReason(w, sandboxrelay.ReasonRegistrationRevoked, sandboxTextRegistrationGone)
+		return
+	}
+	if match := a.sandboxMatchPeer(r.Context(), peer, reg.Connector, 0); match.decision.Refused != "" {
+		// The floor a decision is checked against is the person's own:
+		// none is proven while a fact an assignment needs is not.
+		sandboxRefuseView(w, match.decision)
 		return
 	}
 	if !sandboxDecisionStored(req) && !sandboxAdmitsCalls(w, auth, reg) {

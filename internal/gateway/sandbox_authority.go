@@ -232,7 +232,8 @@ func sandboxSubjectMatches(key []byte, reg sandboxreg.Registration, peer managed
 // sandboxFactsDigest is a registration's facts digest: DigestPrefix and
 // the HMAC of the directory facts a profile match uses (principal, UPN,
 // domain, directory, tenant, sorted groups) and whether they resolved. A
-// change re-matches the registration; it never refuses it.
+// change re-matches the registration without revoking it. Requests whose
+// assignments need the unresolved fact are refused until it is confirmed.
 func sandboxFactsDigest(key []byte, facts useridentity.DirectoryFacts, resolved bool) string {
 	groups := slices.Clone(facts.Groups)
 	for i := range groups {
