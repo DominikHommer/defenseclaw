@@ -72,7 +72,17 @@ The per-user files in [Files it changes](#files-it-changes) are not used there. 
 | macOS | `/etc/codex/requirements.toml` | `/opt/cisco/defenseclaw/bin/defenseclaw-hook` |
 | Windows | `C:\ProgramData\OpenAI\Codex\requirements.toml` | `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe` |
 
-`enterprise policy verify` prints both, for example on Windows `Standalone machine agent policy (hook binary C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe)` and, under `codex`, `file: C:\ProgramData\OpenAI\Codex\requirements.toml`.
+`enterprise policy verify` prints both. On Windows its first line names the hook program:
+
+```text
+Standalone machine agent policy (hook binary C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe)
+```
+
+and the line under the `codex` row names the requirements file:
+
+```text
+    file:      C:\ProgramData\OpenAI\Codex\requirements.toml
+```
 
 The administrator manages Codex in the managed `config.yaml` under `guardrail.connectors.codex` (`{}` adds it, `enabled: false` removes it). Apply the change as in [Change the config](/docs/enterprise/operate/lifecycle#change-the-config), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/configure/machine-policy#inspect-export-and-verify)).
 

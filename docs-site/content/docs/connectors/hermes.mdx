@@ -24,7 +24,7 @@ defenseclaw setup hermes --mode action  # block on policy hits
 
 On Windows, run the same commands in PowerShell. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 
-Then reload or restart every Hermes host. Hermes registers hooks in each running process, so restarting the DefenseClaw gateway does not reload them. Until you reload, setup and doctor report `pending_reload`.
+Then reload or restart every Hermes host. Hermes registers hooks in each running process, so restarting the DefenseClaw gateway does not reload them. If a Hermes host is running when setup checks the hooks, setup ends that line with `! (restart any open Hermes session so it loads the DefenseClaw hooks)`. Doctor cannot tell when a host has reloaded; see [Check it](#check-it).
 
 ## Check it
 

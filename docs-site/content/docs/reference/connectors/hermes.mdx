@@ -32,7 +32,7 @@ On Windows the command is one directly quoted absolute `defenseclaw-hook.exe` ar
 
 The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-message, add/replace and workspace options ([quick-alias reference](/docs/reference/commands/guardrail-setup#aliases)). To tune Hermes later, use [`defenseclaw setup guardrail --connector hermes`](/docs/features/guardrail). On a host with several connectors, `defenseclaw setup guardrail --connector hermes --mode action` switches only Hermes.
 
-Hermes registers shell callbacks in each running process, and DefenseClaw has no vendor-proven command that reloads every Hermes CLI, gateway, desktop and service host. So setup and doctor report `pending_reload` and `live: false`, and doctor shows the staged state as unhealthy. Reload every host after setup and after disable. Restarting `defenseclaw-gateway` does not reload Hermes. On Windows, disable first writes a direct-native disabled tombstone (`hermes-direct-native-state.json`) so stale cached callbacks no-op while revocation is pending.
+Hermes registers shell callbacks in each running process, and DefenseClaw has no vendor-proven command that reloads every Hermes CLI, gateway, desktop and service host. So the gateway records `"status": "pending_reload"` in `hooks/hermes-direct-native-state.json` under the data directory. While a Hermes host runs, setup ends its check line with `! (restart any open Hermes session so it loads the DefenseClaw hooks)` and doctor fails the **Hermes hooks** row with `live=false`, also after a restart ([Check it](/docs/connectors/hermes#check-it)). Reload every host after setup and after disable. Restarting `defenseclaw-gateway` does not reload Hermes. On Windows, disable first writes a direct-native disabled tombstone (`hermes-direct-native-state.json`) so stale cached callbacks no-op while revocation is pending.
 
 ### Files
 
@@ -132,6 +132,6 @@ Fail closed: no on Hermes's side. The DefenseClaw hook follows the effective fai
 ## Limits
 
 - Only `pre_tool_call` blocks. The other events are attributed audit unless Hermes documents a compatible effect.
-- Hermes registers shell callbacks per process, so setup and disable stay `pending_reload` until every Hermes host is reloaded.
+- Hermes registers shell callbacks per process, so a running Hermes host keeps its old hooks after setup or disable until it is reloaded.
 - `hermes --safe-mode` or a `HERMES_HOME` without the `hooks` block runs with no DefenseClaw hook, and status keeps reporting Hermes ready.
 - Hermes cannot lock or order hooks, so a foreign `pre_tool_call` hook can rewrite tool input.

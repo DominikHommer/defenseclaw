@@ -4,6 +4,7 @@
 """Pages that quote command output quote what the command prints."""
 
 import io
+import os
 import re
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -12,8 +13,8 @@ from unittest import mock
 
 import pytest
 from click.testing import CliRunner
-from defenseclaw import config
-from defenseclaw.commands import cmd_doctor, cmd_guardrail
+from defenseclaw import config, ux
+from defenseclaw.commands import cmd_doctor, cmd_guardrail, cmd_setup
 from defenseclaw.commands.cmd_doctor import _DoctorResult
 from defenseclaw.context import AppContext
 
@@ -31,6 +32,17 @@ def _flat(text: str) -> str:
 
 def _text_blocks(text: str) -> list[str]:
     return re.findall(r"```text\n(.*?)```", text, flags=re.S)
+
+
+@pytest.fixture(autouse=True)
+def _unicode_output():
+    # The quoted output carries Unicode glyphs; TERM=dumb or another test's
+    # console snapshot must not swap them for ASCII.
+    with (
+        mock.patch.object(ux, "_configured_unicode_output", True),
+        mock.patch.dict(os.environ, {"TERM": "xterm-256color"}),
+    ):
+        yield
 
 
 # GAP-0567: the Hermes page said doctor reports no failed check, but doctor
@@ -64,6 +76,13 @@ def test_hermes_page_quotes_the_doctor_row(tmp_path, running, tag):
         assert line.startswith(f"{tag} Hermes hooks [hermes]"), line
         assert line + "\n" in _text_blocks(_page("connectors/hermes.mdx")), line
     assert "reports no failed check" not in page
+    # Setup prints a restart hint, not a pending_reload state, and doctor
+    # has no such row. Only the gateway's state file holds pending_reload.
+    hint = f"! ({cmd_setup._pending_reload_hint('hermes')})"
+    reference = _flat(_page("reference/connectors/hermes.mdx"))
+    assert hint in page and hint in reference
+    assert "pending_reload" not in page
+    assert re.findall(r"`[^`]*pending_reload[^`]*`", reference) == ['`"status": "pending_reload"`'], reference
 
 
 def _fail_mode_view(tmp_path, body: str) -> str:
