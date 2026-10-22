@@ -15,7 +15,8 @@ import (
 	"testing"
 )
 
-// startCopiedSleep copies sleep to dir/name and runs it, so the test can
+// startCopiedSleep copies sleep to dir/name and runs it with the
+// environment Daemon.Start gives the gateway of home dir, so the test can
 // replace or move the file while it runs.
 func startCopiedSleep(t *testing.T, dir, name string) (*exec.Cmd, string) {
 	t.Helper()
@@ -41,7 +42,7 @@ func startCopiedSleep(t *testing.T, dir, name string) (*exec.Cmd, string) {
 		t.Fatal(err)
 	}
 	// argv[0] "sleep" keeps a multi-call coreutils binary working.
-	cmd := &exec.Cmd{Path: path, Args: []string{"sleep", "60"}}
+	cmd := &exec.Cmd{Path: path, Args: []string{"sleep", "60"}, Env: gatewayEnvironment(EnvDaemon+"=1", EnvDataDir+"="+dir)}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -60,10 +61,10 @@ func TestProveOwnGatewayKeepsAGatewayWhoseFileWasReplaced(t *testing.T) {
 	dir := t.TempDir()
 	cmd, path := startCopiedSleep(t, dir, "defenseclaw-gateway")
 	pid := cmd.Process.Pid
-	if _, err := proveOwnGateway(pid, path); err != nil {
+	if _, err := proveOwnGateway(pid, path, dir); err != nil {
 		t.Fatalf("the binary itself: %v", err)
 	}
-	if _, err := proveOwnGateway(pid, path+"-other"); !errors.Is(err, ErrGatewayNotVerified) {
+	if _, err := proveOwnGateway(pid, path+"-other", dir); !errors.Is(err, ErrGatewayNotVerified) {
 		t.Fatalf("another path: %v", err)
 	}
 	if err := os.Remove(path); err != nil {
@@ -72,10 +73,10 @@ func TestProveOwnGatewayKeepsAGatewayWhoseFileWasReplaced(t *testing.T) {
 	if live, _ := processExecutable(pid); live != path+" (deleted)" {
 		t.Fatalf("precondition: live executable %q", live)
 	}
-	if _, err := proveOwnGateway(pid, path); err != nil {
+	if _, err := proveOwnGateway(pid, path, dir); err != nil {
 		t.Fatalf("a replaced binary: %v", err)
 	}
-	if _, err := proveOwnGateway(pid, filepath.Join(dir, "elsewhere")); !errors.Is(err, ErrGatewayNotVerified) {
+	if _, err := proveOwnGateway(pid, filepath.Join(dir, "elsewhere"), dir); !errors.Is(err, ErrGatewayNotVerified) {
 		t.Fatalf("a replaced binary of another path: %v", err)
 	}
 
@@ -88,7 +89,7 @@ func TestProveOwnGatewayKeepsAGatewayWhoseFileWasReplaced(t *testing.T) {
 	if err := os.Rename(movedPath, retired); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := proveOwnGateway(moved.Process.Pid, movedPath); err != nil {
+	if _, err := proveOwnGateway(moved.Process.Pid, movedPath, dir); err != nil {
 		t.Fatalf("a binary moved into the install custody: %v", err)
 	}
 }

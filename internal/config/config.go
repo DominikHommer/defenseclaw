@@ -2443,15 +2443,21 @@ const legacyGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
 // the bug via EnsureGatewayToken's own fallback, so it only
 // surfaced in obscure code paths until investigation.
 func (g *GatewayConfig) ResolvedToken() string {
+	return g.ResolvedTokenWith(os.Getenv)
+}
+
+// ResolvedTokenWith resolves the token as ResolvedToken does, reading the
+// environment through lookup.
+func (g *GatewayConfig) ResolvedTokenWith(lookup func(string) string) string {
 	if g.TokenEnv != "" {
-		if v := os.Getenv(g.TokenEnv); v != "" {
+		if v := lookup(g.TokenEnv); v != "" {
 			return v
 		}
 	}
-	if v := os.Getenv(defaultGatewayTokenEnv); v != "" {
+	if v := lookup(defaultGatewayTokenEnv); v != "" {
 		return v
 	}
-	if v := os.Getenv(legacyGatewayTokenEnv); v != "" {
+	if v := lookup(legacyGatewayTokenEnv); v != "" {
 		return v
 	}
 	return g.Token

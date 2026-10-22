@@ -563,10 +563,21 @@ func exitCodeFor(err error) int {
 // token_env/bearer_env references and non-observability application secrets
 // available when the sidecar runs without an interactive shell.
 func loadDotEnvIntoOS(path string) {
+	for _, pair := range dotEnvValues(path) {
+		if os.Getenv(pair[0]) == "" {
+			os.Setenv(pair[0], pair[1])
+		}
+	}
+}
+
+// dotEnvValues is the KEY=VALUE pairs of path that loadDotEnvIntoOS loads,
+// in file order.
+func dotEnvValues(path string) [][2]string {
 	data, err := safefile.ReadRegularFileBounded(path, safefile.MaxDotEnvBytes)
 	if err != nil {
-		return
+		return nil
 	}
+	var pairs [][2]string
 	managedHost := envvars.ManagedStandalone() || dotEnvManagedSource()
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -589,10 +600,11 @@ func loadDotEnvIntoOS(path string) {
 		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
 			v = v[1 : len(v)-1]
 		}
-		if k != "" && os.Getenv(k) == "" {
-			os.Setenv(k, v)
+		if k != "" {
+			pairs = append(pairs, [2]string{k, v})
 		}
 	}
+	return pairs
 }
 
 // dotEnvManagedSource reports whether the active config.yaml describes a

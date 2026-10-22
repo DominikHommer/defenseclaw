@@ -19,14 +19,17 @@ import (
 const AppliedAuthFileName = "gateway-auth.json"
 
 // AppliedAuth is the gateway credential configuration a running gateway
-// applied when it started: the variable it reads its token from and the
-// inline token of the config it loaded. A gateway reads it once (a change
-// needs a restart), so it holds for the life of the process, also after
-// config.yaml was edited into a state the gateway rejected or holds. A value
-// that came from the process environment is never written.
+// applied when it started: the variable it reads its token from, the inline
+// token of the config it loaded, and the data directory it runs on (the
+// config's data_dir, whose .env it read its token from). A gateway reads
+// them once (a change needs a restart), so they hold for the life of the
+// process, also after config.yaml was edited into a state the gateway
+// rejected or holds. A value that came from the process environment is
+// never written.
 type AppliedAuth struct {
 	TokenEnv string `json:"token_env,omitempty"`
 	Token    string `json:"token,omitempty"`
+	DataDir  string `json:"data_dir,omitempty"`
 }
 
 type appliedAuthRecord struct {

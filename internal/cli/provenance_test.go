@@ -73,13 +73,20 @@ func (g *provenanceTestGateway) ServeHTTP(w http.ResponseWriter, r *http.Request
 	}
 }
 
-// stubProvenanceGateway makes gateway the process provenance trusts, the
-// listener holders holders, and gateway the process this home's PID record
-// names (which a rejected config.yaml uses to find the API listener).
+// stubProvenanceGateway makes gateway the process provenance trusts (and
+// proves as this home's gateway), the listener holders holders, and gateway
+// the process this home's PID record names (which a rejected config.yaml
+// uses to find the API listener). Any other process is proven for real.
 func stubProvenanceGateway(t *testing.T, gateway provenanceGateway, holders func(host string, port int) ([]daemon.PortHolder, error)) {
 	t.Helper()
 	stubProvenanceSeams(t)
 	provenanceGatewayIdentity = func(context.Context, []net.IP, int) (provenanceGateway, error) { return gateway, nil }
+	provenanceProveGateway = func(pid int, home string) (string, error) {
+		if gateway.PID > 0 && pid == gateway.PID {
+			return "stub-start-identity", nil
+		}
+		return daemon.ProveOwnGateway(pid, home)
+	}
 	gatewayPortHolders = holders
 	gatewayManagedState = func() (bool, int) { return gateway.PID > 0, gateway.PID }
 }
@@ -90,10 +97,12 @@ func stubProvenanceSeams(t *testing.T) {
 	previous, previousVersion := cfg, appVersion
 	oldIdentity, oldHolders, oldLookup := provenanceGatewayIdentity, gatewayPortHolders, provenanceLookupIP
 	oldState, oldProve, oldListeners := gatewayManagedState, provenanceProveGateway, provenanceGatewayListeners
+	oldStartEnvironment := provenanceStartEnvironment
 	t.Cleanup(func() {
 		cfg, appVersion = previous, previousVersion
 		provenanceGatewayIdentity, gatewayPortHolders, provenanceLookupIP = oldIdentity, oldHolders, oldLookup
 		gatewayManagedState, provenanceProveGateway, provenanceGatewayListeners = oldState, oldProve, oldListeners
+		provenanceStartEnvironment = oldStartEnvironment
 	})
 	appVersion = "cli-test"
 }
@@ -433,6 +442,43 @@ func TestProvenanceAppliedConfigOfAStandaloneDeploymentIgnoresTheRejectedFile(t 
 	}
 }
 
+// provenanceGatewayHelperEnv makes this test binary a long-running stand-in
+// for a gateway process (TestProvenanceGatewayHelperProcess).
+const provenanceGatewayHelperEnv = "DEFENSECLAW_TEST_PROVENANCE_GATEWAY_HELPER"
+
+// TestProvenanceGatewayHelperProcess is the stand-in gateway: this binary,
+// running as this account with the environment its parent gave it.
+func TestProvenanceGatewayHelperProcess(*testing.T) {
+	if os.Getenv(provenanceGatewayHelperEnv) != "1" {
+		return
+	}
+	time.Sleep(time.Minute)
+	os.Exit(0)
+}
+
+// startProvenanceTestGateway starts this test binary with the environment
+// Daemon.Start gives the gateway of home: the per-user gateway of home that
+// the operating system can prove.
+func startProvenanceTestGateway(t *testing.T, home string) int {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestProvenanceGatewayHelperProcess$")
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !provenanceEnvironmentKeyIs(key, daemon.EnvDaemon) && !provenanceEnvironmentKeyIs(key, daemon.EnvDataDir) {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	cmd.Env = append(cmd.Env, provenanceGatewayHelperEnv+"=1", daemon.EnvDaemon+"=1", daemon.EnvDataDir+"="+home)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd.Process.Pid
+}
+
 // otherProvenanceProgram starts a long-running program of this account that
 // is not this binary.
 func otherProvenanceProgram(t *testing.T) *exec.Cmd {
@@ -453,14 +499,16 @@ func otherProvenanceProgram(t *testing.T) *exec.Cmd {
 
 // Provenance sends the gateway token only to the process the kernel names
 // as the holder of the API listener, and only once the operating system
-// shows that process runs as this account from this DefenseClaw binary. No
-// PID record is read: this home's record, whatever it names (here the
-// strongest kind, naming this process), proves nothing. Every other holder
-// gets no request: another program of this account, another account's
-// process, a process that has exited, an unknown or shared holder, a
-// listener that cannot be inspected. A process proven and then replaced
-// before the connection gets nothing, and the gateway of another home of
-// this account (same account, same binary) is not this home's provenance.
+// shows that process runs as this account from this DefenseClaw binary and
+// was started as this home's gateway. No PID record is read: this home's
+// record, whatever it names (here the strongest kind, naming this process),
+// proves nothing. Every other holder gets no request: another program of
+// this account, another account's process, a process that has exited, an
+// unknown or shared holder, a listener that cannot be inspected, and the
+// gateway of another home of this account (same account, same binary),
+// which before got this home's token and was refused only after it
+// answered. A process proven and then replaced before the connection gets
+// nothing, and an answer naming another data directory is refused.
 func TestProvenanceShowSendsTheTokenOnlyToAGatewayProvenNow(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 		t.Skipf("gateway processes cannot be proven on %s", runtime.GOOS)
@@ -477,12 +525,14 @@ func TestProvenanceShowSendsTheTokenOnlyToAGatewayProvenNow(t *testing.T) {
 	defer server.Close()
 	stubProvenanceSeams(t)
 	cfg = provenanceTestConfig(t, server)
-	pid := os.Getpid()
+	pid := startProvenanceTestGateway(t, home)
+	gateway.pid = func() int { return pid }
+	anotherHome := startProvenanceTestGateway(t, filepath.Join(t.TempDir(), "another-home"))
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := json.Marshal(map[string]any{"pid": pid, "executable": executable, "data_dir": home,
+	record, err := json.Marshal(map[string]any{"pid": os.Getpid(), "executable": executable, "data_dir": home,
 		"start_identity": provenanceTestStartIdentity(t, home), "start_time": time.Now().Unix()})
 	if err != nil {
 		t.Fatal(err)
@@ -490,7 +540,7 @@ func TestProvenanceShowSendsTheTokenOnlyToAGatewayProvenNow(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, daemon.PIDFileName), record, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !daemon.New(home).HasManagedProcessIdentity(pid) {
+	if !daemon.New(home).HasManagedProcessIdentity(os.Getpid()) {
 		t.Fatal("precondition: this home's PID record must be the strongest kind")
 	}
 	other := otherProvenanceProgram(t)
@@ -513,6 +563,8 @@ func TestProvenanceShowSendsTheTokenOnlyToAGatewayProvenNow(t *testing.T) {
 		{"the gateway and another program", []daemon.PortHolder{{PID: pid}, {PID: other.Process.Pid}}, nil},
 		{"no listener seen", nil, daemon.ErrNoListener},
 		{"inspection failed", nil, errors.New("inspection denied")},
+		{"another home's gateway of this account", []daemon.PortHolder{{PID: anotherHome}}, nil},
+		{"this process, not started as a gateway", []daemon.PortHolder{{PID: os.Getpid()}}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gatewayPortHolders = func(string, int) ([]daemon.PortHolder, error) { return tc.holders, tc.err }
@@ -530,8 +582,8 @@ func TestProvenanceShowSendsTheTokenOnlyToAGatewayProvenNow(t *testing.T) {
 		})
 	}
 
-	// The holder is this binary's process of this account: it is read.
-	gatewayPortHolders = ownProcessHolds
+	// The holder is this home's gateway of this account: it is read.
+	gatewayPortHolders = func(string, int) ([]daemon.PortHolder, error) { return []daemon.PortHolder{{PID: pid}}, nil }
 	cfg.Gateway.Token = provenanceTestToken
 	cmd, buf, _ := provenanceTestCommand()
 	if err := runProvenanceShow(cmd, nil); err != nil || !strings.Contains(buf.String(), "generation: 7\n") {
@@ -540,7 +592,7 @@ func TestProvenanceShowSendsTheTokenOnlyToAGatewayProvenNow(t *testing.T) {
 
 	// Proven, then another process by the time of the connection.
 	proofs := 0
-	provenanceProveGateway = func(got int) (string, error) {
+	provenanceProveGateway = func(int, string) (string, error) {
 		proofs++
 		return "start-" + strconv.Itoa(proofs), nil
 	}

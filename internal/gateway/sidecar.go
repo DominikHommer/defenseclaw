@@ -8246,7 +8246,9 @@ func (s *Sidecar) ensureGatewayTokenSynthesis() (string, error) {
 
 // recordAppliedGatewayAuth records the credential configuration a per-user
 // gateway started with (daemon.AppliedAuth): the token_env and the inline
-// token of the config it loaded, never a token from the environment or one
+// token of the config it loaded and its data directory (whose .env holds the
+// token, and which it reports as runtime.data_dir), never a token from the
+// environment or one
 // synthesized into .env, which the CLI reads from there itself. The gateway
 // reads its token once, so `provenance show` sends the token this resolves
 // to, and only to this proven process, also after config.yaml was edited
@@ -8257,7 +8259,8 @@ func (s *Sidecar) recordAppliedGatewayAuth(loaded config.GatewayConfig) {
 	if s.currentConfig().StandaloneEnterprise() {
 		return
 	}
-	if err := daemon.RecordAppliedAuth(daemon.AppliedAuth{TokenEnv: loaded.TokenEnv, Token: loaded.Token}); err != nil {
+	applied := daemon.AppliedAuth{TokenEnv: loaded.TokenEnv, Token: loaded.Token, DataDir: s.currentConfig().DataDir}
+	if err := daemon.RecordAppliedAuth(applied); err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] warning: cannot record the applied gateway credential configuration: %v\n", err)
 	}
 }

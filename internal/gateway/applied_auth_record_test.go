@@ -23,13 +23,14 @@ func TestRecordAppliedGatewayAuthKeepsTheLoadedCredentialConfiguration(t *testin
 	t.Setenv(daemon.EnvDaemon, "1")
 	t.Setenv(daemon.EnvDataDir, dir)
 	cfg := config.DefaultConfig()
-	cfg.DataDir = dir
+	// The config's data_dir is not the home that started the gateway.
+	cfg.DataDir = filepath.Join(dir, "data-dir")
 	cfg.Gateway.TokenEnv = "R104_CUSTOM_TOKEN"
 	cfg.Gateway.Token = "inline token"
 	s := &Sidecar{cfg: cfg}
 	s.recordAppliedGatewayAuth(cfg.Gateway)
 	got, ok := daemon.New(dir).AppliedAuth(os.Getpid())
-	if want := (daemon.AppliedAuth{TokenEnv: "R104_CUSTOM_TOKEN", Token: "inline token"}); !ok || got != want {
+	if want := (daemon.AppliedAuth{TokenEnv: "R104_CUSTOM_TOKEN", Token: "inline token", DataDir: cfg.DataDir}); !ok || got != want {
 		t.Fatalf("applied auth = %+v, %v; want %+v", got, ok, want)
 	}
 
