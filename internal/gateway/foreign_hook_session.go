@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -75,10 +76,46 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	stateDir := foreignHookSessionStateDir(dataDir, identity)
-	removals, removalsErr := a.foreignHookRemovals.forIdentity(managed.HookGuardianAuthorizationDir(dataDir), identity)
 	// Each identity has its own store, so only that identity's exchanges
 	// are serialized; another account's exchange never waits on this one.
-	unlock := a.foreignHookSessionLocks.lock(stateDir)
+	// An allow holds the lock through its fenced response write, so one
+	// identity holds the shared removal fence for at most one exchange at a
+	// time, however many requests it sends.
+	unlock := sync.OnceFunc(a.foreignHookSessionLocks.lock(stateDir))
+	defer unlock()
+	guardianDir := managed.HookGuardianAuthorizationDir(dataDir)
+	cleanupFence := filepath.Join(guardianDir, enterprisepolicy.ForeignHookCleanupFenceFile)
+	if err := validateManagedGuardianAuthorization(cleanupFence, "hook guardian foreign-hook cleanup fence"); err != nil {
+		unlock()
+		writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_cleanup_fence_unavailable")
+		return
+	}
+	fence := filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFenceFile)
+	if err := validateManagedGuardianAuthorization(fence, "hook guardian foreign-hook removal fence"); err != nil {
+		unlock()
+		writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_removal_fence_unavailable")
+		return
+	}
+	lockCtx, cancel := context.WithTimeout(r.Context(), foreignHookFenceWait)
+	cleanupUnlock, err := enterprisepolicy.LockForeignHookRemovals(lockCtx, cleanupFence)
+	if err != nil {
+		cancel()
+		unlock()
+		writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_cleanup_fence_unavailable")
+		return
+	}
+	cleanupUnlock = sync.OnceFunc(cleanupUnlock)
+	defer cleanupUnlock()
+	fenceUnlock, err := a.foreignHookFence.lock(lockCtx, fence)
+	cancel()
+	if err != nil {
+		cleanupUnlock()
+		unlock()
+		writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_removal_fence_unavailable")
+		return
+	}
+	defer fenceUnlock()
+	removals, removalsErr := a.foreignHookRemovals.forIdentity(guardianDir, identity)
 	decision := enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
 		StateDir:     stateDir,
 		Key:          exchange.Key,
@@ -88,12 +125,97 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		RemovalsErr:  removalsErr,
 		Now:          time.Now(),
 	})
-	unlock()
 	if decision.Deny {
+		// A denial cannot become an allow when the guardian commits a
+		// removal, so do not hold the fence through audit export or the
+		// response write.
+		fenceUnlock()
+		cleanupUnlock()
+		unlock()
 		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(decision)
+		return
+	}
+	if !writeFencedForeignHookAllow(w, decision) {
+		fenceUnlock()
+		cleanupUnlock()
+		unlock()
+		writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_response_unbounded")
+	}
+}
+
+// foreignHookFenceWait bounds how long an exchange waits for the removal
+// fence before it is refused. foreignHookFencedWriteTimeout bounds an
+// allow's response write while the exchange holds the fence, and stays
+// under foreignHookFenceWait: a client that stops reading its response must
+// not keep another identity's exchange or the guardian's removal commit
+// from the fence. A response that fits the socket buffer is written without
+// the client reading; one the client does not take in time is cut, and the
+// client's hook fails closed on the incomplete response.
+const (
+	foreignHookFenceWait          = 500 * time.Millisecond
+	foreignHookFencedWriteTimeout = 250 * time.Millisecond
+)
+
+// writeFencedForeignHookAllow writes an allow and flushes it to the
+// connection within foreignHookFencedWriteTimeout. It reports false, having
+// written nothing, when the connection cannot bound the write: the caller
+// then refuses the call instead of answering without a bound while it holds
+// the fence. A write cut at the deadline leaves the expired deadline in
+// place, so the server's own finishing writes fail at once too.
+func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolicy.GuardDecision) bool {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(decision); err != nil {
+		return false
+	}
+	controller := http.NewResponseController(w)
+	if err := controller.SetWriteDeadline(time.Now().Add(foreignHookFencedWriteTimeout)); err != nil {
+		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(decision)
+	w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(body.Bytes()); err != nil {
+		return true
+	}
+	if err := controller.Flush(); err != nil {
+		return true
+	}
+	// A keep-alive connection serves the caller's next request: clear the
+	// deadline only after the whole allow has reached it.
+	_ = controller.SetWriteDeadline(time.Time{})
+	return true
+}
+
+// foreignHookFenceQueue admits this gateway's exchanges to the
+// interprocess removal fence one at a time and in arrival order. Polling
+// the file lock alone lets an identity whose exchanges arrive back to back
+// win it every time, so an exchange of another identity that was already
+// waiting would run out of foreignHookFenceWait.
+type foreignHookFenceQueue struct {
+	once sync.Once
+	slot chan struct{}
+}
+
+// lock takes the queue's slot, then the fence file lock, both within ctx.
+// The returned function releases both and may be called more than once.
+func (q *foreignHookFenceQueue) lock(ctx context.Context, fence string) (func(), error) {
+	q.once.Do(func() { q.slot = make(chan struct{}, 1) })
+	select {
+	case q.slot <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	unlock, err := enterprisepolicy.LockForeignHookRemovals(ctx, fence)
+	if err != nil {
+		<-q.slot
+		return nil, err
+	}
+	return sync.OnceFunc(func() {
+		unlock()
+		<-q.slot
+	}), nil
 }
 
 // foreignHookAuditReasonLimit bounds the reason an audit row repeats, and
@@ -310,8 +432,7 @@ func foreignHookSessionDenialTarget(exchange enterprisepolicy.SessionExchange) (
 type foreignHookRemovalCache struct {
 	mu        sync.Mutex
 	path      string
-	modTime   time.Time
-	size      int64
+	info      fs.FileInfo
 	checkedAt time.Time
 	removals  []enterprisepolicy.ForeignHookRemoval
 	err       error
@@ -328,16 +449,17 @@ func (c *foreignHookRemovalCache) forIdentity(dir, identity string) ([]enterpris
 	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		c.path, c.removals, c.err = "", nil, nil
+		c.path, c.info, c.removals, c.err = "", nil, nil, nil
 		return nil, nil
 	}
 	now := time.Now()
 	// A failed read is not cached: the guardian sets the file's group only
 	// after it replaces the file, and a read in between must not deny every
 	// account's calls until the next recheck.
-	if err == nil && (c.err != nil || path != c.path || !info.ModTime().Equal(c.modTime) || info.Size() != c.size ||
+	if err == nil && (c.err != nil || path != c.path || c.info == nil || !os.SameFile(info, c.info) ||
+		!info.ModTime().Equal(c.info.ModTime()) || info.Size() != c.info.Size() ||
 		now.Sub(c.checkedAt) >= foreignHookRemovalRecheck) {
-		c.path, c.modTime, c.size, c.checkedAt = path, info.ModTime(), info.Size(), now
+		c.path, c.info, c.checkedAt = path, info, now
 		c.removals, c.err = readForeignHookRemovals(path)
 	}
 	if err != nil {

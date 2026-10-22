@@ -355,7 +355,26 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	createdDirs := map[int][]string{}
 	var auditRepairs []enterpriseHookGuardianAuditReport
 	reportedUIDs := map[int]bool{}
-	for _, outcome := range runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, recordRemovals) {
+	var outcomes []enterpriseHookWorkerOutcome
+	foreignCleanup := false
+	for _, job := range jobs {
+		if len(job.Request.ForeignCleanup) != 0 {
+			foreignCleanup = true
+			break
+		}
+	}
+	if foreignCleanup {
+		if err := withEnterpriseForeignHookCleanupFence(cfg.DataDir, func() error {
+			outcomes = runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, recordRemovals)
+			return nil
+		}); err != nil {
+			clean = false
+			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup fence: %v\n", err)
+		}
+	} else {
+		outcomes = runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, recordRemovals)
+	}
+	for _, outcome := range outcomes {
 		user := outcome.Job.Account.User
 		if outcome.Err != nil {
 			clean = false

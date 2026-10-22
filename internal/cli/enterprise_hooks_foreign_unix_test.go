@@ -33,6 +33,23 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
+func useStandaloneForeignHookFenceFixture(t *testing.T) {
+	t.Helper()
+	cfg.DataDir = t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, filepath.Join(cfg.DataDir, "guardian"))
+	previousOwner := enterpriseHookAuthorizationOwnershipSetter
+	previousDirTrust := enterpriseHookAuthorizationDirTrustCheck
+	previousFileTrust := enterpriseHookAuthorizationFileTrustCheck
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	enterpriseHookAuthorizationDirTrustCheck = func(string) error { return nil }
+	enterpriseHookAuthorizationFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() {
+		enterpriseHookAuthorizationOwnershipSetter = previousOwner
+		enterpriseHookAuthorizationDirTrustCheck = previousDirTrust
+		enterpriseHookAuthorizationFileTrustCheck = previousFileTrust
+	})
+}
+
 func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
 	home := t.TempDir()
 	hooks := filepath.Join(home, ".cursor", "hooks.json")
@@ -129,6 +146,7 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 			}},
 		},
 	}
+	useStandaloneForeignHookFenceFixture(t)
 	enterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
 	accounts := []enterprisehooks.UnixEligibleAccount{{User: "alice", UID: 4242, GID: 4242, Home: "/home/alice", HomeInode: 7}}
 	var loadedFrom string
@@ -437,6 +455,7 @@ func TestStandaloneForeignCleanupRewritesADeletedCopilotLocalHookFileAtOnce(t *t
 			MachinePolicy: config.EnterpriseMachinePolicyConfig{Connectors: map[string]config.EnterpriseConnectorPolicy{"copilot": {}}},
 		},
 	}
+	useStandaloneForeignHookFenceFixture(t)
 	home := t.TempDir()
 	enterpriseHookLoadEligibleAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
 		return []enterprisehooks.UnixEligibleAccount{{User: "alice", UID: 4242, GID: 4242, Home: home}}, nil
@@ -497,13 +516,19 @@ func TestStandaloneForeignCleanupRemovesVSCodeHooksOfAccountsNoLongerEligible(t 
 			MachinePolicy: config.EnterpriseMachinePolicyConfig{Connectors: map[string]config.EnterpriseConnectorPolicy{"cursor": {}}},
 		},
 	}
+	useStandaloneForeignHookFenceFixture(t)
 	enterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
 	// The record lives in the guardian's authorization directory: the
 	// guardian service cannot write the manifest folder (ReadOnlyPaths=
 	// /etc/defenseclaw), so a record next to the manifest was never written.
-	cfg.DataDir = "/var/lib/defenseclaw"
-	t.Setenv(managed.HookGuardianAuthorizationDirEnv, "/var/lib/defenseclaw-hook-guardian")
-	recordPath := "/var/lib/defenseclaw-hook-guardian/" + enterprisehooks.UnixCopilotVSCodeAccountsFileName
+	stateRoot := t.TempDir()
+	cfg.DataDir = filepath.Join(stateRoot, "var", "lib", "defenseclaw")
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	guardianRoot := filepath.Join(stateRoot, "var", "lib", "defenseclaw-hook-guardian")
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianRoot)
+	recordPath := filepath.Join(guardianRoot, enterprisehooks.UnixCopilotVSCodeAccountsFileName)
 	alice := enterprisehooks.UnixEligibleAccount{User: "alice", UID: 4242, GID: 4242, Home: "/home/alice", HomeInode: 7}
 	// dave got the VS Code Local files while eligible, then was excluded.
 	dave := enterprisehooks.UnixEligibleAccount{User: "dave", UID: 4343, GID: 4343, Home: "/home/dave", HomeInode: 7,

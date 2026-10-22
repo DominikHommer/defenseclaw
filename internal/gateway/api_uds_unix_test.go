@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
@@ -213,6 +214,10 @@ func startTestHookSocketServer(t *testing.T, opts hookSocketTestServer) (string,
 		if err := os.WriteFile(managed.HookGuardianAuthorizationPath(dataDir), []byte(opts.ledger), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFenceFile), nil, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		writeForeignHookCleanupFence(t, managed.HookGuardianAuthorizationDir(dataDir))
 		restoreValidate := validateManagedGuardianAuthorization
 		validateManagedGuardianAuthorization = func(string, string) error { return nil }
 		t.Cleanup(func() { validateManagedGuardianAuthorization = restoreValidate })
