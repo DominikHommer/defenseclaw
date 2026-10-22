@@ -805,3 +805,42 @@ func readerToolSets(t *testing.T) []struct {
 	}
 	return sets
 }
+
+// GAP-0610: the upgrade's refresh rewrote .hookcfg.openhands of the removed
+// OpenHands connector (adding FAIL_MODE_SOURCE). A retired connector's
+// records, flat and in the shared sidecar, are left byte for byte; the live
+// connectors beside them are refreshed.
+func TestRefreshHookFailModesLeavesRetiredConnectorsUntouched(t *testing.T) {
+	hookDir := t.TempDir()
+	shared := `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open","openhands":"open","omnigent":"open"}}` + "\n"
+	files := map[string]string{
+		hookConfigSidecarName:                shared,
+		hookConfigSidecarName + ".openhands": "DEFENSECLAW_CONNECTOR=openhands\nDEFENSECLAW_FAIL_MODE=open\n",
+		hookConfigSidecarName + ".omnigent":  "DEFENSECLAW_CONNECTOR=omnigent\nDEFENSECLAW_FAIL_MODE=open\n",
+		hookConfigSidecarName + ".windsurf":  "DEFENSECLAW_CONNECTOR=windsurf\nDEFENSECLAW_FAIL_MODE=open\n",
+		hookConfigSidecarName + ".codex":     "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(hookDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refreshed, err := RefreshHookFailModes(hookDir, func(string) string { return "closed" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(refreshed.Sidecar, []string{"codex"}) {
+		t.Fatalf("refreshed %+v, want codex only", refreshed)
+	}
+	for _, retired := range []string{"openhands", "omnigent", "windsurf"} {
+		name := hookConfigSidecarName + "." + retired
+		if body, _ := os.ReadFile(filepath.Join(hookDir, name)); string(body) != files[name] {
+			t.Fatalf("%s rewritten: %q", name, body)
+		}
+	}
+	state := readHookConfigSidecarForTest(t, hookDir)
+	if state.FailModes["openhands"] != "open" || state.FailModes["omnigent"] != "open" ||
+		state.FailModeSources["openhands"] != "" || state.FailModeSources["omnigent"] != "" || state.FailModes["codex"] != "closed" {
+		t.Fatalf("shared sidecar after refresh: %+v", state)
+	}
+}

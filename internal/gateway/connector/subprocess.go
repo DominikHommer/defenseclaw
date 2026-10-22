@@ -1313,6 +1313,12 @@ func refreshHookFailModesLocked(hookDir string, mode func(connector string) stri
 		names[name] = true
 	}
 	for _, name := range sortedNames(names) {
+		if _, retired := RetiredConnector(name); retired {
+			// A retired connector's files are removed by its teardown or
+			// left as they are, never refreshed: the upgrade rewrote
+			// .hookcfg.openhands of the removed OpenHands (GAP-0610).
+			continue
+		}
 		want := mode(name)
 		if want == "" {
 			continue
