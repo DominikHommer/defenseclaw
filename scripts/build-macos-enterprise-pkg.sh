@@ -175,28 +175,91 @@ owner_mode() { stat -f '%u %Lp' "$1" 2>/dev/null; }
 root_owned() {
     [ -f "$1" ] && [ ! -L "$1" ] && ro_info=$(owner_mode "$1") && [ "${ro_info%% *}" = 0 ]
 }
-# trusted PATH: PATH is a regular file, not a symlink, and it and every
-# folder above it, as the kernel resolves them, belong to root, and neither
-# their mode nor an access control entry lets another account write them.
-# Only root can then have changed what the package scripts run as root. An
-# owner, mode or access control list that cannot be read is not trusted.
+# acl_closed PATH: no access control entry on PATH itself lets another
+# account change it. A list that cannot be read is not closed.
+acl_closed() {
+    t_acl=$(ls -lde "$1" 2>/dev/null) || return 1
+    ! printf '%s\n' "$t_acl" | sed 1d | grep -Eq ' allow .*(write|append|add_|delete|chown)'
+}
+# root_only PATH: PATH itself, not a symlink's target, belongs to root, and
+# neither its mode nor an access control entry lets another account write
+# it. An owner, mode or access control list that cannot be read is not
+# root's.
+root_only() {
+    t_info=$(owner_mode "$1") || return 1
+    case $t_info in
+        "0 "[0-7]*) t_mode=${t_info#0 } ;;
+        *) return 1 ;;
+    esac
+    case $t_mode in *[!0-7]*) return 1 ;; esac
+    [ $((0$t_mode & 022)) -eq 0 ] || return 1
+    acl_closed "$1"
+}
+# trusted PATH: PATH is a regular file, not a symlink, and only root can
+# change what it names. PATH is looked up one entry at a time, as the kernel
+# looks it up, following every symlink on the way (its target from / or from
+# the folder that holds it): every folder an entry is found in, and the
+# file, are root_only, and every symlink belongs to root and no access
+# control entry lets another account change it. A check of only the
+# folders the path ends in missed the folder that holds a symlink and the
+# folders a symlink's target passes through: an account that could write
+# one could swap the symlink between the check and the run. t_real is
+# then the file PATH names, reached through folders only, and the caller
+# runs that file. A symlink that cannot be read, or more than 32 of them,
+# is not trusted.
 trusted() {
+    t_real=
     [ -f "$1" ] && [ ! -L "$1" ] || return 1
-    t_dir=$(cd -P -- "${1%/*}/" 2>/dev/null && pwd -P) || return 1
-    t_path=${t_dir%/}/${1##*/}
+    case $1 in /*) ;; *) return 1 ;; esac
+    root_only / || return 1
+    t_dir=/
+    t_rest=$1
+    t_hops=0
     while :; do
-        t_info=$(owner_mode "$t_path") || return 1
-        case $t_info in
-            "0 "[0-7]*) t_mode=${t_info#0 } ;;
-            *) return 1 ;;
+        case $t_rest in
+            /*) t_rest=${t_rest#/}; continue ;;
+            "") return 1 ;;
+            */*)
+                t_name=${t_rest%%/*}
+                t_rest=${t_rest#*/}
+                t_more=/
+                ;;
+            *)
+                t_name=$t_rest
+                t_rest=
+                t_more=
+                ;;
         esac
-        case $t_mode in *[!0-7]*) return 1 ;; esac
-        [ $((0$t_mode & 022)) -eq 0 ] || return 1
-        t_acl=$(ls -lde "$t_path" 2>/dev/null) || return 1
-        ! printf '%s\n' "$t_acl" | sed 1d | grep -Eq ' allow .*(write|append|add_|delete|chown)' || return 1
-        [ "$t_path" != / ] || return 0
-        t_path=${t_path%/*}
-        [ -n "$t_path" ] || t_path=/
+        case $t_name in
+            .) continue ;;
+            ..)
+                t_dir=${t_dir%/*}
+                t_dir=${t_dir:-/}
+                continue
+                ;;
+        esac
+        t_path=${t_dir%/}/$t_name
+        if [ -L "$t_path" ]; then
+            t_hops=$((t_hops + 1))
+            [ "$t_hops" -le 32 ] || return 1
+            t_info=$(owner_mode "$t_path") || return 1
+            [ "${t_info%% *}" = 0 ] || return 1
+            acl_closed "$t_path" || return 1
+            t_link=$(readlink "$t_path") || return 1
+            case $t_link in
+                "") return 1 ;;
+                /*) t_dir=/ ;;
+            esac
+            t_rest=$t_link$t_more$t_rest
+            continue
+        fi
+        root_only "$t_path" || return 1
+        if [ -z "$t_more" ] && [ -f "$t_path" ]; then
+            t_real=$t_path
+            return 0
+        fi
+        [ -d "$t_path" ] || return 1
+        t_dir=$t_path
     done
 }
 installed=
@@ -218,7 +281,7 @@ refuse() {
     error="{\"code\":\"$code\",\"message\":\"$message\"}"
     present=true
     [ -n "$installed" ] || present=false
-    if ! { [ -x "$gateway" ] && trusted "$gateway" && "$gateway" enterprise macos status --json 2>/dev/null | sed \
+    if ! { [ -x "$gateway" ] && trusted "$gateway" && "$t_real" enterprise macos status --json 2>/dev/null | sed \
         -e 's/^  "ok": [a-z]*,$/  "ok": false,/' \
         -e 's/^  "action": "[a-z-]*",$/  "action": "ensure",/' \
         -e 's/^  "noop": [a-z]*,$/  "noop": false,/' \
@@ -246,10 +309,11 @@ refuse() {
 # in the lifecycle folder answers. Only a gateway that was read and has no
 # marker is an older one: a gateway that cannot be read, and a gateway with
 # the marker or a kept copy that is not a root-owned file only root can
-# change (trusted: another account cannot write it or a folder above it, by
-# mode or access control entry), or whose owner or mode
-# cannot be read), leave the floor unchecked unless the other one answers,
-# and the install is refused. Only exit 0 lets the install go on: exit 3
+# change (trusted: another account cannot change it, a folder above it, or
+# a symlink on the way to it, by mode or access control entry), or whose
+# owner or mode cannot be read, leave the floor unchecked unless the other
+# one answers, and the install is refused; a trusted checker is run by the
+# path it resolves to. Only exit 0 lets the install go on: exit 3
 # is the refusal, and any other result (execution denied, killed, crashed)
 # leaves the floor unchecked, so the install is refused too.
 floor_check_marker=defenseclaw-package-floor-check/1
@@ -261,9 +325,9 @@ if [ -e "$gateway" ] || [ -L "$gateway" ]; then
     case $? in
     0)
         if trusted "$gateway"; then
-            checker=$gateway
+            checker=$t_real
         else
-            unchecked="$gateway has the floor check, but it is not a root-owned file that only root can change (it, or a folder above it, can be written by another account), or its owner or mode could not be read"
+            unchecked="$gateway has the floor check, but it is not a root-owned file that only root can change (another account can change it, a folder above it, or a symlink on the way to it), or its owner or mode could not be read"
         fi
         ;;
     1) ;; # a gateway before 1.0.4: it has no floor check
@@ -272,10 +336,10 @@ if [ -e "$gateway" ] || [ -L "$gateway" ]; then
 fi
 if [ -z "$checker" ]; then
     if [ ! -L "$kept" ] && trusted "$kept/defenseclaw-gateway"; then
-        checker="$kept/defenseclaw-gateway"
+        checker=$t_real
         unchecked=
     elif [ -L "$kept" ] || [ -e "$kept/defenseclaw-gateway" ] || [ -L "$kept/defenseclaw-gateway" ]; then
-        unchecked="$kept/defenseclaw-gateway, the gateway an uninstall kept for the floor check, is not a root-owned file that only root can change, in a folder that is not a symlink (it, or a folder above it, can be written by another account), or its owner or mode could not be read"
+        unchecked="$kept/defenseclaw-gateway, the gateway an uninstall kept for the floor check, is not a root-owned file that only root can change, in a folder that is not a symlink (another account can change it, a folder above it, or a symlink on the way to it), or its owner or mode could not be read"
     fi
 fi
 if [ -n "$checker" ]; then

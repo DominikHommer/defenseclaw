@@ -71,27 +71,82 @@ owner_mode() { stat -c '%u %a' "$1" 2>/dev/null; }
 root_owned() {
     [ -f "$1" ] && [ ! -L "$1" ] && ro_info=$(owner_mode "$1") && [ "${ro_info%% *}" = 0 ]
 }
-# trusted PATH: PATH is a regular file, not a symlink, and it and every
-# folder above it, as the kernel resolves them, belong to root and no group
-# or other account can write them (an ACL that lets another account write
-# shows in the group bits, which are then its mask). Only root can then have
-# changed what the package scripts run as root. An owner or mode that cannot
-# be read is not trusted.
+# root_only PATH: PATH itself, not a symlink's target, belongs to root, and
+# no group or other account can write it (an ACL that lets another account
+# write shows in the group bits, which are then its mask). An owner or mode
+# that cannot be read is not root's.
+root_only() {
+    t_info=$(owner_mode "$1") || return 1
+    case $t_info in
+        "0 "[0-7]*) t_mode=${t_info#0 } ;;
+        *) return 1 ;;
+    esac
+    case $t_mode in *[!0-7]*) return 1 ;; esac
+    [ $((0$t_mode & 022)) -eq 0 ]
+}
+# trusted PATH: PATH is a regular file, not a symlink, and only root can
+# change what it names. PATH is looked up one entry at a time, as the kernel
+# looks it up, following every symlink on the way (its target from / or from
+# the folder that holds it): every folder an entry is found in, and the
+# file, are root_only, and every symlink belongs to root. A check
+# of only the folders the path ends in missed the folder that holds a
+# symlink and the folders a symlink's target passes through: an account
+# that could write one could swap the symlink between the check and the
+# run. t_real is then the file PATH names, reached through folders only, and
+# the caller runs that file. A symlink that cannot be read, or more than 32
+# of them, is not trusted.
 trusted() {
+    t_real=
     [ -f "$1" ] && [ ! -L "$1" ] || return 1
-    t_dir=$(cd -P -- "${1%/*}/" 2>/dev/null && pwd -P) || return 1
-    t_path=${t_dir%/}/${1##*/}
+    case $1 in /*) ;; *) return 1 ;; esac
+    root_only / || return 1
+    t_dir=/
+    t_rest=$1
+    t_hops=0
     while :; do
-        t_info=$(owner_mode "$t_path") || return 1
-        case $t_info in
-            "0 "[0-7]*) t_mode=${t_info#0 } ;;
-            *) return 1 ;;
+        case $t_rest in
+            /*) t_rest=${t_rest#/}; continue ;;
+            "") return 1 ;;
+            */*)
+                t_name=${t_rest%%/*}
+                t_rest=${t_rest#*/}
+                t_more=/
+                ;;
+            *)
+                t_name=$t_rest
+                t_rest=
+                t_more=
+                ;;
         esac
-        case $t_mode in *[!0-7]*) return 1 ;; esac
-        [ $((0$t_mode & 022)) -eq 0 ] || return 1
-        [ "$t_path" != / ] || return 0
-        t_path=${t_path%/*}
-        [ -n "$t_path" ] || t_path=/
+        case $t_name in
+            .) continue ;;
+            ..)
+                t_dir=${t_dir%/*}
+                t_dir=${t_dir:-/}
+                continue
+                ;;
+        esac
+        t_path=${t_dir%/}/$t_name
+        if [ -L "$t_path" ]; then
+            t_hops=$((t_hops + 1))
+            [ "$t_hops" -le 32 ] || return 1
+            t_info=$(owner_mode "$t_path") || return 1
+            [ "${t_info%% *}" = 0 ] || return 1
+            t_link=$(readlink "$t_path") || return 1
+            case $t_link in
+                "") return 1 ;;
+                /*) t_dir=/ ;;
+            esac
+            t_rest=$t_link$t_more$t_rest
+            continue
+        fi
+        root_only "$t_path" || return 1
+        if [ -z "$t_more" ] && [ -f "$t_path" ]; then
+            t_real=$t_path
+            return 0
+        fi
+        [ -d "$t_path" ] || return 1
+        t_dir=$t_path
     done
 }
 # The installed gateway answers the floor check when its binary carries
@@ -102,9 +157,10 @@ trusted() {
 # does. Only a gateway that was read and has no marker is an older one: a
 # gateway that cannot be read, and a gateway with the marker or a kept copy
 # that is not a root-owned file only root can change (trusted: another
-# account cannot write it or a folder above it), or whose owner or mode
-# cannot be read, leave the
-# floor unchecked unless the other one answers, and every install is refused.
+# account cannot change it, a folder above it, or a symlink on the way to
+# it), or whose owner or mode cannot be read, leave the floor unchecked
+# unless the other one answers, and every install is refused. A trusted
+# checker is run by the path it resolves to.
 floor_check_marker=defenseclaw-package-floor-check/1
 kept="$state/floor-check"
 checker=
@@ -114,9 +170,9 @@ if [ -e "$gateway" ] || [ -L "$gateway" ]; then
     case $? in
     0)
         if trusted "$gateway"; then
-            checker=$gateway
+            checker=$t_real
         else
-            unchecked="$gateway has the floor check, but it is not a root-owned file that only root can change (it, or a folder above it, can be written by another account), or its owner or mode could not be read"
+            unchecked="$gateway has the floor check, but it is not a root-owned file that only root can change (another account can change it, a folder above it, or a symlink on the way to it), or its owner or mode could not be read"
         fi
         ;;
     1) ;; # a gateway before 1.0.4: it has no floor check
@@ -125,10 +181,10 @@ if [ -e "$gateway" ] || [ -L "$gateway" ]; then
 fi
 if [ -z "$checker" ]; then
     if [ ! -L "$kept" ] && trusted "$kept/defenseclaw-gateway"; then
-        checker="$kept/defenseclaw-gateway"
+        checker=$t_real
         unchecked=
     elif [ -L "$kept" ] || [ -e "$kept/defenseclaw-gateway" ] || [ -L "$kept/defenseclaw-gateway" ]; then
-        unchecked="$kept/defenseclaw-gateway, the gateway an uninstall kept for the floor check, is not a root-owned file that only root can change, in a folder that is not a symlink (it, or a folder above it, can be written by another account), or its owner or mode could not be read"
+        unchecked="$kept/defenseclaw-gateway, the gateway an uninstall kept for the floor check, is not a root-owned file that only root can change, in a folder that is not a symlink (another account can change it, a folder above it, or a symlink on the way to it), or its owner or mode could not be read"
     fi
 fi
 
