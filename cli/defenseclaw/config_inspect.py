@@ -243,7 +243,9 @@ def connector_hilt_preview(
         payload = json.loads(completed.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
         # An older gateway has no hilt-preview and prints its help instead.
-        raise ConfigInspectError("this defenseclaw-gateway cannot resolve the preview; run defenseclaw upgrade") from exc
+        raise ConfigInspectError(
+            "this defenseclaw-gateway cannot resolve the preview; run defenseclaw upgrade"
+        ) from exc
     return _decode_hilt_preview(payload)
 
 
