@@ -17688,10 +17688,13 @@ def _apply_logs_config(
         if not contract:
             raise SystemExit(1)
 
+    from defenseclaw.observability.v8_presets import local_splunk_destination_name
+
     hec_url = (contract or {}).get("hec_url", _SPLUNK_LOCAL_HEC_DEFAULTS["hec_endpoint"])
     hec_token = (contract or {}).get("hec_token", "")
-    # Pull host/port from the contract URL so the preset writer derives a
-    # stable name ("splunk-hec-127-0-0-1") and the endpoint matches exactly.
+    # Pull host/port from the contract URL so the endpoint matches exactly.
+    # The name ("splunk-hec-127-0-0-1") marks the sink local setup owns; the
+    # remote credential check finds it with the same function.
     parsed = urlparse(hec_url)
     host = parsed.hostname or "127.0.0.1"
     port = str(parsed.port or 8088)
@@ -17711,6 +17714,7 @@ def _apply_logs_config(
             "sourcetype": sourcetype,
             "verify_tls": "false",
         },
+        name=local_splunk_destination_name(hec_url),
         secret_value=hec_token or None,
         secret_env_name=LOCAL_TOKEN_ENV,
         # The local Splunk container listens on this computer.
@@ -17745,6 +17749,7 @@ def _apply_native_windows_logs_config(
         start_native_local_splunk,
     )
     from defenseclaw.observability.local_stack import LocalStackError
+    from defenseclaw.observability.v8_presets import NATIVE_LOCAL_SPLUNK_DESTINATION
 
     config_path = str(config_path_for_data_dir(app.cfg.data_dir))
     dotenv_path = os.path.join(app.cfg.data_dir, ".env")
@@ -17794,7 +17799,7 @@ def _apply_native_windows_logs_config(
                 "sourcetype": contract.sourcetype,
                 "verify_tls": "false",
             },
-            name="local-splunk",
+            name=NATIVE_LOCAL_SPLUNK_DESTINATION,
             secret_value=contract.hec_token,
             secret_env_name=LOCAL_TOKEN_ENV,
             allow_private_networks=True,
@@ -18393,8 +18398,10 @@ def _is_local_splunk_destination(dest) -> bool:
 def _is_owned_native_local_splunk_destination(dest) -> bool:
     """Return whether *dest* is the exact enabled sink owned by native setup."""
 
+    from defenseclaw.observability.v8_presets import NATIVE_LOCAL_SPLUNK_DESTINATION
+
     return (
-        getattr(dest, "name", "") == "local-splunk"
+        getattr(dest, "name", "") == NATIVE_LOCAL_SPLUNK_DESTINATION
         and getattr(dest, "kind", "") == "splunk_hec"
         and bool(getattr(dest, "enabled", False))
         and _is_local_splunk_destination(dest)
@@ -18503,7 +18510,9 @@ def _disable_splunk(
                 is_local = _is_local_splunk_destination(destination)
                 if is_local and not manage_local:
                     continue
-                if is_local and _native_windows_local_splunk() and getattr(destination, "name", "") != "local-splunk":
+                if is_local and _native_windows_local_splunk() and not _is_owned_native_local_splunk_destination(
+                    destination
+                ):
                     # Loopback alone is not ownership. Native disable manages
                     # only the exact sink created by this controller.
                     continue

@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from defenseclaw.file_permissions import MAX_DOTENV_BYTES, read_regular_file_no_follow
-from defenseclaw.observability.presets import Preset
+from defenseclaw.observability.presets import SPLUNK_HEC, Preset
 from defenseclaw.observability.v8_activation import update_private_file
 from defenseclaw.safety import sanitize_dotenv_value
 
@@ -167,15 +167,28 @@ def apply_secret(
 
 
 _LOCAL_SPLUNK_BRIDGE_ENV = os.path.join("splunk-bridge", "env", ".env")
+NATIVE_LOCAL_SPLUNK_DESTINATION = "local-splunk"
 
 
-def _local_splunk_state(data_dir: str) -> tuple[set[str], dict[str, str]]:
-    """Return the local Splunk credentials and the saved .env values."""
+def local_splunk_destination_name(hec_url: str) -> str:
+    """Return the name the macOS and Linux local setup gives the sink it owns.
 
-    from defenseclaw.observability.local_splunk import LOCAL_TOKEN_ENV
+    The setup and the credential check both call this, so the check always
+    finds the destination the setup wrote, on any bridge host name.
+    """
+
+    parsed = urlparse(hec_url if "://" in hec_url else f"//{hec_url}")
+    return destination_name(SPLUNK_HEC, None, {"host": parsed.hostname or "127.0.0.1", "endpoint": hec_url})
+
+
+def _local_splunk_state(data_dir: str) -> tuple[set[str], dict[str, str], set[str]]:
+    """Return the local Splunk credentials, the saved .env values and the owned sink names."""
+
+    from defenseclaw.observability.local_splunk import DEFAULT_HEC_URL, LOCAL_TOKEN_ENV
 
     local_tokens = {os.environ.get(LOCAL_TOKEN_ENV, "")}
     saved: dict[str, str] = {}
+    owned = {NATIVE_LOCAL_SPLUNK_DESTINATION, local_splunk_destination_name(DEFAULT_HEC_URL)}
     for relative in (DOTENV_FILE_NAME, _LOCAL_SPLUNK_BRIDGE_ENV):
         try:
             payload = read_regular_file_no_follow(os.path.join(data_dir, relative), max_bytes=MAX_DOTENV_BYTES)
@@ -194,28 +207,35 @@ def _local_splunk_state(data_dir: str) -> tuple[set[str], dict[str, str]]:
             local_tokens.update(
                 values.get(key, "") for key in ("DEFENSECLAW_HEC_TOKEN", "SPLUNK_HEC_TOKEN", LOCAL_TOKEN_ENV)
             )
+            if values.get("DEFENSECLAW_HEC_URL"):
+                owned.add(local_splunk_destination_name(values["DEFENSECLAW_HEC_URL"]))
     local_tokens.discard("")
-    return local_tokens, saved
+    return local_tokens, saved, owned
 
 
 def local_splunk_sink_shares_reference(data_dir: str, token_env: str, destinations) -> bool:
     """Return whether a DefenseClaw-managed local sink in *destinations* still uses *token_env*.
 
     Earlier Unix local setups saved the generated local credential under the
-    remote reference; writing a remote token there would break that sink. Only
-    the private bridge credential identifies it: the reference still holds it.
-    An endpoint proves nothing, because a remote Splunk reached through an SSH
-    tunnel is loopback too, even on the port a stopped local stack used.
+    remote reference; writing a remote token there would break that sink. The
+    sink is the destination local setup owns (the name it writes) while the
+    reference still holds the private bridge credential. Neither alone marks
+    it: an older remote destination can keep the old local credential after
+    the local sink moved to its own reference, and a remote Splunk reached
+    through an SSH tunnel is loopback too, even on the port of a stopped local
+    stack.
     """
 
-    sharing = [
-        destination
+    sharing = {
+        destination.get("name")
         for destination in destinations
         if destination.get("kind") == "splunk_hec" and destination.get("token_env") == token_env
-    ]
+    }
     if not sharing:
         return False
-    local_tokens, saved = _local_splunk_state(data_dir)
+    local_tokens, saved, owned = _local_splunk_state(data_dir)
+    if not sharing & owned:
+        return False
     return bool({saved.get(token_env, ""), os.environ.get(token_env, "")} & local_tokens)
 
 
@@ -226,7 +246,7 @@ def _validate_splunk_credential_isolation(data_dir: str, preset: Preset, supplie
         return
     # Earlier Unix local setups used the remote name. A saved or ambient
     # value is not a remote credential if it belongs to the local container.
-    local_tokens, saved = _local_splunk_state(data_dir)
+    local_tokens, saved, _owned = _local_splunk_state(data_dir)
     token = supplied or os.environ.get(preset.token_env) or saved.get(preset.token_env)
     if token and token in local_tokens:
         raise ValueError(
@@ -309,6 +329,8 @@ __all__ = [
     "adapter_destination_fields",
     "apply_secret",
     "destination_name",
+    "local_splunk_destination_name",
+    "local_splunk_sink_shares_reference",
     "parse_bool",
     "render_header_template",
     "render_template",
