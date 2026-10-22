@@ -153,9 +153,8 @@ case "$status" in
         cause=$(printf '%s\n' "$result" |
             sed -n 's/.*"errors":[[:space:]]*\[[[:space:]]*{[[:space:]]*"code":[[:space:]]*"\([^"]*\)",[[:space:]]*"message":[[:space:]]*"\(\([^"\\]\|\\.\)*\)".*/\1: \2/p' |
             head -n 1 | unescape)
-        # A run that refused the config, or rolled its change back, leaves the
-        # previous deployment running; only a first install, or a failed
-        # rollback, leaves none (GAP-0176).
+        # A refused config or successful rollback names the previous version
+        # (GAP-0176). A missing version is not proof that no service is active.
         running=$(printf '%s\n' "$result" | sed -n 's/.*"installed_version":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
         if [ "$lifecycle_started" = 0 ]; then
             echo "defenseclaw-enterprise: the package is installed but not applied; the lifecycle did not run, so the previous deployment was not changed." >&2
@@ -167,7 +166,7 @@ case "$status" in
             echo "defenseclaw-enterprise: the package is installed but not applied; the previous deployment ($running) keeps running unchanged." >&2
             finish="apply this package with"
         else
-            echo "defenseclaw-enterprise: installed, but the lifecycle reported a problem, so no deployment is active." >&2
+            echo "defenseclaw-enterprise: installed, but the lifecycle reported a problem; deployment state could not be confirmed." >&2
             finish="finish the install with"
         fi
         if [ -n "$cause" ]; then

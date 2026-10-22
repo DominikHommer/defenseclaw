@@ -1107,6 +1107,8 @@ def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_pat
         assert "no deployment is active" not in result.stderr
         assert f"apply this package with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
     else:
+        assert "deployment state could not be confirmed" in result.stderr
+        assert "no deployment is active" not in result.stderr
         assert f"finish the install with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
 
 
