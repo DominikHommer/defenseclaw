@@ -688,7 +688,6 @@ def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch
         stale["args"][stale["args"].index("--profile") + 1] = "default"
         for name in ("DefenseClaw · Kiro", "Stale"):
             settings.write_text(json.dumps({"agent_servers": {**servers, name: stale}}))
-            cmd_acp_module._refresh_client_contract_digests(str(data_dir), "zed", settings)
             verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
             problems = cmd_acp_module._verify_binding(str(data_dir), "zed", "kiro", app.cfg.acp)
             if name == "Stale":
@@ -698,7 +697,6 @@ def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch
                 assert verified.exit_code != 0, verified.output
                 assert f"editor launch command does not match the lock: {name}" in problems, problems
         settings.write_text(json.dumps({"agent_servers": servers}))
-        cmd_acp_module._refresh_client_contract_digests(str(data_dir), "zed", settings)
 
         # Re-running finds nothing to adopt rather than double-wrapping.
         again = CliRunner().invoke(acp_cmd, ["adopt", "--client", "zed", "--yes", "--json-output"], obj=app)
@@ -2241,5 +2239,142 @@ def test_valid_legacy_client_pin_follows_another_binding_change(tmp_path, monkey
         current = json.loads(lock_path.read_text())
         assert current["client"]["config_sha256"] == cmd_acp_module._sha256_file(str(settings))
         assert runner.invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app).exit_code == 0
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+@pytest.mark.parametrize("target_names", [[], ["My Kiro"]], ids=["reserved", "adopted"])
+def test_verify_accepts_another_bindings_adopted_entry_only_under_its_own_pin(tmp_path, monkeypatch, target_names):
+    """Another pair's adopted entry keeps operator env; its own pin, not this binding, proves it."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    kiro = _binary(tmp_path / "kiro-cli")
+    cursor = _binary(tmp_path / ("agent.exe" if os.name == "nt" else "agent"))
+    servers = {"My Cursor": {"command": cursor, "args": ["acp"], "env": {"CURSOR_LOG": "1"}}}
+    if target_names:
+        servers["My Kiro"] = {"command": kiro, "args": ["acp"], "env": {"KIRO_LOG": "1"}}
+    settings.write_text(json.dumps({"agent_servers": servers}))
+    runner = CliRunner()
+
+    def verify(agent):
+        return runner.invoke(acp_cmd, ["verify", "--client", "zed", "--agent", agent], obj=app)
+
+    try:
+        adopted = runner.invoke(
+            acp_cmd, ["adopt", "--client", "zed", "--guard-binary", guard, "--activate", "--yes"], obj=app,
+        )
+        assert adopted.exit_code == 0, adopted.output
+        if not target_names:
+            setup = runner.invoke(
+                acp_cmd, ["setup", "--client", "zed", "--agent", "kiro", "--activate",
+                          "--guard-binary", guard, "--agent-binary", kiro], obj=app,
+            )
+            assert setup.exit_code == 0, setup.output
+        document = json.loads(settings.read_text())
+        assert document["agent_servers"]["My Cursor"]["env"] == {"CURSOR_LOG": "1"}
+        document["theme"] = "Ayu"
+        settings.write_text(json.dumps(document))
+        for agent in ("kiro", "cursor"):
+            assert verify(agent).exit_code == 0, (agent, verify(agent).output)
+        assert runner.invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
+
+        # The env belongs to the cursor binding's own launch fields. Once its
+        # own pin no longer proves them, cursor fails, and kiro cannot treat
+        # that unproven launch as mediated either.
+        drifted = json.loads(json.dumps(document))
+        drifted["agent_servers"]["My Cursor"]["env"]["LD_PRELOAD"] = str(tmp_path / "x.so")
+        settings.write_text(json.dumps(drifted))
+        assert verify("cursor").exit_code != 0
+        result = verify("kiro")
+        assert result.exit_code != 0 and "My Cursor" in result.output, result.output
+
+        # A guarded entry the cursor pin does not cover (a copy under a new
+        # name) is not proven by that pin, so its env is unproven too.
+        copied = json.loads(json.dumps(document))
+        copied["agent_servers"]["Cursor copy"] = copied["agent_servers"]["My Cursor"]
+        settings.write_text(json.dumps(copied))
+        result = verify("kiro")
+        assert result.exit_code != 0 and "Cursor copy" in result.output, result.output
+        settings.write_text(json.dumps(document))
+        assert verify("kiro").exit_code == 0
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def _break_lock(lock: Path, defect: str) -> None:
+    if defect == "missing":
+        lock.unlink()
+    elif defect == "symlink":
+        target = lock.with_name("elsewhere.json")
+        target.write_bytes(lock.read_bytes())
+        lock.unlink()
+        lock.symlink_to(target)
+    elif defect == "unreadable":
+        cmd_acp_module.atomic_write_private_bytes(lock, b"{not json")
+    elif defect == "not-private":
+        lock.chmod(0o644)
+    else:
+        document = json.loads(lock.read_text())
+        if defect == "incomplete":
+            del document["guard"]["sha256"]
+        elif defect == "unknown-field":
+            document["client"]["extra"] = "x"
+        elif defect == "identity":
+            document["agent"]["id"] = "cursor"
+        cmd_acp_module.atomic_write_private_bytes(lock, json.dumps(document).encode())
+
+
+@pytest.mark.parametrize("operation", ["setup", "remove"])
+@pytest.mark.parametrize(
+    "defect", ["missing", "symlink", "unreadable", "not-private", "incomplete", "unknown-field", "identity"],
+)
+def test_another_pairs_unproven_lock_does_not_block_this_pairs_write(tmp_path, monkeypatch, operation, defect):
+    """Setup and remove check only the pair being written; the broken pair stays broken."""
+    if os.name == "nt" and defect in {"symlink", "not-private"}:
+        pytest.skip("POSIX lock custody")
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agents = {name: _binary(tmp_path / ("kiro-cli" if name == "kiro" else "agent"))
+              for name in ("kiro", "cursor")}
+    runner = CliRunner()
+    try:
+        for name in agents:
+            result = runner.invoke(
+                acp_cmd, ["setup", "--client", "zed", "--agent", name, "--guard-binary", guard,
+                          "--agent-binary", agents[name]], obj=app,
+            )
+            assert result.exit_code == 0, result.output
+        lock = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+        _break_lock(lock, defect)
+        before = (lock.is_symlink(), lock.read_bytes() if lock.exists() else b"")
+        args = [operation, "--client", "zed", "--agent", "cursor"]
+        if operation == "setup":
+            args += ["--guard-binary", guard, "--agent-binary", agents["cursor"]]
+        result = runner.invoke(acp_cmd, args, obj=app)
+        assert result.exit_code == 0, result.output
+        assert (lock.is_symlink(), lock.read_bytes() if lock.exists() else b"") == before
+        servers = json.loads(settings.read_text())["agent_servers"]
+        assert ("DefenseClaw · Cursor" in servers) == (operation == "setup")
+        assert "DefenseClaw · Kiro" in servers
+        verified = runner.invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert verified.exit_code != 0 and "zed/kiro" in verified.output, verified.output
+        if operation == "setup":
+            # Fail closed: the kiro entry's launch is unknown while its lock
+            # is unproven, so cursor names it until kiro's own setup.
+            verified = runner.invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "cursor"], obj=app)
+            assert verified.exit_code != 0 and "DefenseClaw · Kiro" in verified.output, verified.output
+        if lock.is_symlink():
+            lock.unlink()
+        repaired = runner.invoke(
+            acp_cmd, ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard,
+                      "--agent-binary", agents["kiro"]], obj=app,
+        )
+        assert repaired.exit_code == 0, repaired.output
+        assert runner.invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
     finally:
         cleanup_app(app, db_path, data_dir)

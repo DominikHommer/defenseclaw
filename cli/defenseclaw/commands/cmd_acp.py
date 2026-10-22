@@ -291,31 +291,34 @@ def _lock_document(path: Path, client: str, agent: str) -> dict[str, Any] | None
     return document
 
 
-def _client_contract_snapshots(data_dir: str, client: str, agent: str) -> list[tuple[Path, tuple[bool, bytes]]]:
+def _client_contract_snapshots(
+    data_dir: str, client: str, agent: str, validated_pins: dict[str, str]
+) -> list[tuple[Path, tuple[bool, bytes]]]:
+    """Snapshot only the locks this operation may write: its own and the proven pins it re-pins."""
     paths = {_contract_lock_path(data_dir, client, agent)}
-    paths.update(
-        _contract_lock_path(data_dir, pair_client, pair_agent)
-        for pair_client, pair_agent in _managed_pairs(data_dir)
-        if pair_client == client
-    )
+    paths.update(_contract_lock_path(data_dir, client, pair_agent) for pair_agent in validated_pins)
     return [(path, _snapshot(path)) for path in sorted(paths)]
 
 
 def _preflight_other_client_pins(
     data_dir: str, client: str, client_path: Path, changing_agent: str, *, pin_entries: bool
 ) -> dict[str, str]:
-    """Prove other pins before an editor write can change a whole-file digest."""
+    """Prove other pins before an editor write can change a whole-file digest.
+
+    Only the pair being written is this operation's to check. Another pair's
+    missing, unsafe or unproven lock is left exactly as it is, so verify
+    keeps reporting that pair until its own setup; it never blocks this one.
+    """
     if not client_path.is_file():
         return {}
     current_digest = _sha256_file(str(client_path))
     validated: dict[str, str] = {}
-    for pair_client, pair_agent in sorted(_managed_pairs(data_dir)):
-        if pair_client != client or pair_agent == changing_agent:
+    for pair_client, pair_agent in sorted(_managed_pairs(data_dir, client)):
+        if pair_agent == changing_agent:
             continue
-        path = _contract_lock_path(data_dir, pair_client, pair_agent)
-        lock = _proven_lock(path, pair_client, pair_agent)
+        lock = _proven_lock(_contract_lock_path(data_dir, pair_client, pair_agent), pair_client, pair_agent)
         if lock is None:
-            raise click.ClickException(f"{client}/{pair_agent} contract lock is unsafe; run defenseclaw acp verify")
+            continue
         pinned = lock["client"]["config_sha256"]
         if pinned.startswith(_ENTRY_DIGEST_PREFIX):
             if (
@@ -331,43 +334,23 @@ def _preflight_other_client_pins(
 
 
 def _refresh_client_contract_digests(
-    data_dir: str, client: str, client_path: Path, *, pin_entries: bool = True,
-    changing_agent: str = "", validated_pins: dict[str, str] | None = None,
+    data_dir: str, client: str, client_path: Path, validated_pins: dict[str, str]
 ) -> None:
-    """Refresh only legacy file pins proven sound before the editor write."""
+    """Re-pin only the whole-file pins the preflight proved sound before the editor write.
+
+    Every other lock (entry pins, which only their own setup can repair, and
+    pins that had already drifted or were unproven) keeps its old digest, so
+    verify keeps requiring that pair's own setup.
+    """
     if not client_path.is_file():
         return
-    for pair_client, pair_agent in sorted(_managed_pairs(data_dir)):
-        if pair_client != client or pair_agent == changing_agent:
+    for pair_agent, pinned in sorted(validated_pins.items()):
+        path = _contract_lock_path(data_dir, client, pair_agent)
+        document = _proven_lock(path, client, pair_agent)
+        if document is None or document["client"]["config_sha256"] != pinned:
             continue
-        path = _contract_lock_path(data_dir, pair_client, pair_agent)
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 << 10:
-            raise click.ClickException(f"managed ACP contract lock is missing or unsafe: {path}")
-        try:
-            document = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise click.ClickException(f"managed ACP contract lock is unreadable: {path}: {exc}") from exc
-        lock_client = document.get("client") if isinstance(document, dict) else None
-        lock_agent = document.get("agent") if isinstance(document, dict) else None
-        if (
-            not isinstance(lock_client, dict)
-            or not isinstance(lock_agent, dict)
-            or lock_client.get("id") != pair_client
-            or lock_agent.get("id") != pair_agent
-        ):
-            raise click.ClickException(f"managed ACP contract lock identity does not match: {path}")
-        if pin_entries and str(lock_client.get("config_sha256", "")).startswith(_ENTRY_DIGEST_PREFIX):
-            if lock_client.get("config_path") != str(client_path.resolve()):
-                raise click.ClickException("entry-pinned client path changed; run: defenseclaw acp verify")
-            # This setup did not authorize another binding's changed launch
-            # fields. Only its own setup can repair entry drift.
-            continue
-        if validated_pins is None or validated_pins.get(pair_agent) != lock_client.get("config_sha256"):
-            # The file had already drifted before this operation. Preserve
-            # that lock so verify keeps requiring its own explicit setup.
-            continue
-        lock_client["config_path"] = str(client_path.resolve())
-        lock_client["config_sha256"] = _sha256_file(str(client_path))
+        document["client"]["config_path"] = str(client_path.resolve())
+        document["client"]["config_sha256"] = _sha256_file(str(client_path))
         atomic_write_private_bytes(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
 
 
@@ -714,10 +697,10 @@ def _remove_client_entry(client: str, agent: str, data_dir: str) -> Path:
     return path
 
 
-def _managed_pairs(data_dir: str | None) -> set[tuple[str, str]]:
-    """Pairs with an editor entry this runtime (data_dir) can prove it wrote."""
+def _managed_pairs(data_dir: str | None, only_client: str | None = None) -> set[tuple[str, str]]:
+    """Pairs with an editor entry this runtime (data_dir) can prove it wrote, in one editor or all."""
     pairs: set[tuple[str, str]] = set()
-    for client in sorted(_CLIENTS):
+    for client in sorted(_CLIENTS) if only_client is None else [only_client]:
         document = _read_json_object(_client_path(client))
         servers = document.get(_CLIENT_CAPABILITIES[client].entries_key)
         if not isinstance(servers, dict):
@@ -811,12 +794,28 @@ def _entry_launch_shape_known(entry: Any, client: str) -> bool:
     )
 
 
+def _pin_proves_entry(lock_client: dict[str, Any], name: str, client: str, agent: str) -> bool:
+    """Whether a binding's own client pin still covers this entry exactly as it is."""
+    pinned = lock_client["config_sha256"]
+    if pinned.startswith(_ENTRY_DIGEST_PREFIX) and name not in (
+        lock_client.get("adopted_entries") or [_managed_name(agent)]
+    ):
+        return False
+    return _client_digest(_client_path(client), client, agent, lock_client) == pinned
+
+
 def _guard_mediates_entry(
-    entry: dict[str, Any], client: str, target_agent: str,
+    entry: dict[str, Any], name: str, client: str, target_agent: str,
     target_lock_agent: dict[str, Any], target_lock_guard: dict[str, Any], data_dir: str,
 ) -> bool:
-    """A different picker entry must use our pinned guard for a different executable."""
-    if not _entry_launch_shape_known(entry, client) or entry.get("env", {}):
+    """A different picker entry must use our pinned guard for a different executable.
+
+    Its env (an adopted entry keeps the operator's) is that other binding's
+    launch field, which this binding cannot read. It is accepted while that
+    binding's own pin proves the entry, so a healthy other binding never
+    fails this verify, and one whose pin no longer covers the env is unknown.
+    """
+    if not _entry_launch_shape_known(entry, client):
         return False
     if entry.get("command") != target_lock_guard.get("path"):
         return False
@@ -840,6 +839,7 @@ def _guard_mediates_entry(
         options["--token-file"] == str(lock_path.parent / token_name)
         and lock["client"]["config_path"] == str(_client_path(client).resolve())
         and _launches_locked_agent(entry, options, lock, agent)
+        and (not entry.get("env") or _pin_proves_entry(lock["client"], name, client, agent))
     )
 
 
@@ -859,7 +859,7 @@ def _unverified_editor_entries(
         if name not in guarded
         and (
             not isinstance(entry, dict)
-            or not _guard_mediates_entry(entry, client, agent, locked_agent, locked_guard, data_dir)
+            or not _guard_mediates_entry(entry, name, client, agent, locked_agent, locked_guard, data_dir)
         )
     )
 
@@ -916,7 +916,11 @@ def _verify_binding(
         or lock_agent.get("id") != agent
     ):
         problems.append("contract lock identity does not match")
-    adopted = lock_client.get("adopted_entries", []) if isinstance(lock_client, dict) else []
+    elif _proven_lock(lock_path, client, agent) is None:
+        # The guard refuses a lock that is incomplete, carries a field its
+        # decoder does not know, or that others can read or rewrite.
+        problems.append("contract lock is incomplete, has fields the guard refuses, or is not private")
+    adopted =lock_client.get("adopted_entries", []) if isinstance(lock_client, dict) else []
     if not isinstance(adopted, list) or not all(isinstance(name, str) for name in adopted):
         problems.append("contract lock adopted entries are malformed")
     else:
@@ -1157,7 +1161,7 @@ def setup_cmd(
     )
     client_snapshot = _snapshot(client_path)
     token_snapshot = _snapshot(token_candidate)
-    lock_snapshots = _client_contract_snapshots(data_dir, client, agent)
+    lock_snapshots = _client_contract_snapshots(data_dir, client, agent, validated_pins)
     acp_snapshot = copy.deepcopy(app.cfg.acp)
     token_path = _managed_token(str(token_file or ""), data_dir, client, agent) if managed else _write_token(data_dir)
     args = [
@@ -1196,10 +1200,7 @@ def setup_cmd(
             adopted_entries=[name for name in written if name != _managed_name(agent)],
             pin_entries=pin_entries,
         )
-        _refresh_client_contract_digests(
-            data_dir, client, path, pin_entries=pin_entries,
-            changing_agent=agent, validated_pins=validated_pins,
-        )
+        _refresh_client_contract_digests(data_dir, client, path, validated_pins)
         if not managed:
             app.cfg.acp.enabled = True
             # These two are global fallbacks, not this pair's policy. Writing
@@ -1365,7 +1366,6 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
     if not managed and runtime_data_dir:
         raise click.ClickException("--runtime-data-dir is a managed-enrollment option")
     lock_path = _contract_lock_path(data_dir, client, agent)
-    lock_snapshots = _client_contract_snapshots(data_dir, client, agent)
     had_entry = _has_client_entry(client, agent, data_dir)
     had_policy = not managed and app.cfg.acp.binding_key(client, agent) in app.cfg.acp.bindings
     if not (had_entry or had_policy or lock_path.exists()):
@@ -1374,6 +1374,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
         return
     pin_entries = not is_secure_client(app.cfg)
     validated_pins = _preflight_other_client_pins(data_dir, client, path, agent, pin_entries=pin_entries)
+    lock_snapshots = _client_contract_snapshots(data_dir, client, agent, validated_pins)
     acp_snapshot = copy.deepcopy(app.cfg.acp)
     try:
         _progress(True, f"Removing the DefenseClaw {agent} entry from {path}...")
@@ -1389,10 +1390,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
                 app.cfg.acp.agents.pop(agent, None)
         if lock_path.exists():
             lock_path.unlink()
-        _refresh_client_contract_digests(
-            data_dir, client, path, pin_entries=pin_entries,
-            changing_agent=agent, validated_pins=validated_pins,
-        )
+        _refresh_client_contract_digests(data_dir, client, path, validated_pins)
         if not managed:
             active_clients = set(app.cfg.acp.clients)
             active_agents = set(app.cfg.acp.agents)

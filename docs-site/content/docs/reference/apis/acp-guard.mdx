@@ -115,6 +115,9 @@ approve changes to another binding's launch fields.
 `defenseclaw acp verify` and `defenseclaw acp status` check every configured
 agent-server entry in the editor file. Another entry is verified only when it
 uses the same pinned guard with a private lock and a distinct agent executable.
+Such an entry that keeps its own environment, as an adopted entry does, is
+verified while its own binding's pin still covers it, so a healthy binding never
+fails another binding's verify.
 A direct agent entry, an opaque wrapper, a registry entry or an unfamiliar
 launch field leaves verification unhealthy because it could start the agent
 without the guard. A catalog command alone is insufficient: the program on
@@ -134,7 +137,9 @@ binding, with its `--profile` (and `--activate` for an action profile). After a
 drift, `defenseclaw acp verify` prints that exact command. Setup or removal of
 a different binding updates an older whole-file pin only when its previous
 digest still matches. A drifted binding keeps its old pin until its own
-explicit setup.
+explicit setup. Setup and removal check only the binding they change: another
+binding's missing, unsafe or unproven lock does not block them and is left as
+it is, so verify keeps reporting that binding.
 
 ## Telemetry
 
