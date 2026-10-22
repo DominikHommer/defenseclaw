@@ -521,6 +521,111 @@ def test_local_and_remote_splunk_tokens_remain_independent(tmp_path: Path, monke
     assert "DEFENSECLAW_SPLUNK_HEC_TOKEN" in dotenv
 
 
+def _v8_writer_patches():
+    return (
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=SimpleNamespace(destinations=()),
+        ),
+        patch("defenseclaw.observability.v8_writer._validate_candidate"),
+    )
+
+
+def _write_bridge_contract(data_dir: Path, token: str, url: str | None) -> None:
+    bridge_env = data_dir / "splunk-bridge" / "env" / ".env"
+    bridge_env.parent.mkdir(parents=True)
+    lines = f"DEFENSECLAW_HEC_TOKEN='{token}'\n" + (f"DEFENSECLAW_HEC_URL={url}\n" if url else "")
+    atomic_write_private_bytes(bridge_env, lines.encode())
+
+
+@pytest.mark.parametrize("local_stack", [False, True], ids=["no-local-stack", "local-stack"])
+def test_remote_splunk_through_a_loopback_tunnel_is_not_the_local_sink(
+    tmp_path: Path, monkeypatch, local_stack: bool
+) -> None:
+    # An SSH tunnel to a remote Splunk listens on loopback too. Only the
+    # bridge credential or the port the bridge owns marks the local sink.
+    app = _app(tmp_path)
+    monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", raising=False)
+    monkeypatch.delenv(LOCAL_TOKEN_ENV, raising=False)
+    remote_token = "remote tunnel fixture credential"
+    if local_stack:
+        _write_bridge_contract(
+            tmp_path, "local fixture credential", "https://127.0.0.1:8088/services/collector/event"
+        )
+    tunnels = {
+        "tunnel-a": ("https://127.0.0.1:18088/services/collector/event", remote_token),
+        "tunnel-b": ("https://localhost:18089/services/collector/event", remote_token),
+        # A further endpoint in the same cluster may reuse the saved token.
+        "tunnel-c": ("https://[::1]:18090/services/collector/event", None),
+    }
+    status, validate = _v8_writer_patches()
+    with status, validate:
+        for name, (endpoint, token) in tunnels.items():
+            cmd_setup._apply_v8_observability_preset(
+                app, "splunk-enterprise", {"endpoint": endpoint},
+                name=name, secret_value=token, allow_private_networks=True,
+            )
+    raw = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    sinks = {item["name"]: item["token_env"] for item in raw["observability"]["destinations"]}
+    assert sinks == dict.fromkeys(tunnels, "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+    assert remote_token in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "saved_token"),
+    [
+        # The shared reference still holds the bridge credential, on any port.
+        ("https://localhost:28088/services/collector/event", "local fixture credential"),
+        # The sink sends to the port the bridge owns, even with a stale value.
+        ("https://127.0.0.1:8088/services/collector/event", "stale fixture credential"),
+    ],
+    ids=["bridge-credential", "owned-port"],
+)
+def test_older_local_sink_sharing_the_remote_reference_is_refused(
+    tmp_path: Path, monkeypatch, endpoint: str, saved_token: str
+) -> None:
+    app = _app(tmp_path)
+    monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", raising=False)
+    monkeypatch.delenv(LOCAL_TOKEN_ENV, raising=False)
+    local_token = "local fixture credential"
+    _write_bridge_contract(tmp_path, local_token, None)
+    status, validate = _v8_writer_patches()
+    with (
+        status, validate,
+        patch.object(cmd_setup, "_native_windows_local_splunk", return_value=False),
+        patch.object(cmd_setup, "_bootstrap_bridge", return_value={
+            "hec_url": "https://127.0.0.1:8088/services/collector/event",
+            "hec_token": local_token,
+        }),
+        patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
+    ):
+        cmd_setup._apply_logs_config(
+            app,
+            index="defenseclaw_local", source="defenseclaw", sourcetype="defenseclaw:json",
+            bootstrap_bridge=True,
+        )
+        monkeypatch.delenv(LOCAL_TOKEN_ENV, raising=False)
+        legacy = yaml.safe_load((tmp_path / "config.yaml").read_bytes())
+        legacy["observability"]["destinations"][0].update(
+            endpoint=endpoint, token_env="DEFENSECLAW_SPLUNK_HEC_TOKEN"
+        )
+        atomic_write_private_bytes(tmp_path / "config.yaml", yaml.safe_dump(legacy).encode())
+        atomic_write_private_bytes(
+            tmp_path / ".env", f"DEFENSECLAW_SPLUNK_HEC_TOKEN='{saved_token}'\n".encode()
+        )
+        config_before = (tmp_path / "config.yaml").read_bytes()
+        dotenv_before = (tmp_path / ".env").read_bytes()
+        with pytest.raises(ValueError, match="defenseclaw setup splunk --logs"):
+            cmd_setup._apply_v8_observability_preset(
+                app, "splunk-enterprise",
+                {"endpoint": "https://127.0.0.1:18088/services/collector/event"},
+                name="tunnel-a", secret_value="independent remote fixture credential",
+                allow_private_networks=True,
+            )
+    assert (tmp_path / "config.yaml").read_bytes() == config_before
+    assert (tmp_path / ".env").read_bytes() == dotenv_before
+
+
 def test_native_disable_selects_only_owned_local_sink(tmp_path: Path) -> None:
     app = _app(tmp_path)
     custom_name = "OPERATOR_MANAGED_GATEWAY_TOKEN"

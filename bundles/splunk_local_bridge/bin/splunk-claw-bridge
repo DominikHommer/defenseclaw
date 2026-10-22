@@ -296,13 +296,62 @@ service_restart_count() {
   docker inspect --format '{{.RestartCount}}' "${container_id}" 2>/dev/null || echo 0
 }
 
+# process_tree prints a process ID and the IDs of everything it started.
+process_tree() {
+  local child
+  echo "$1"
+  for child in $(pgrep -P "$1" 2>/dev/null || true); do
+    process_tree "${child}"
+  done
+}
+
+# run_with_time_limit runs a command for at most $1 seconds and fails when it
+# runs out. docker compose exec can stall; one stalled probe must not outlast
+# the readiness deadline. The tree is taken before the first signal because a
+# child that ignores TERM outlives its parent.
+run_with_time_limit() {
+  local limit="$1" probe_pid watcher_pid status=0
+  shift
+  "$@" &
+  probe_pid=$!
+  (
+    sleep "${limit}"
+    tree="$(process_tree "${probe_pid}")"
+    # shellcheck disable=SC2086 # one PID per word
+    kill -TERM ${tree} 2>/dev/null || true
+    sleep 1
+    # shellcheck disable=SC2086
+    kill -KILL ${tree} 2>/dev/null || true
+  ) >/dev/null 2>&1 &
+  watcher_pid=$!
+  wait "${probe_pid}" || status=$?
+  if (( status > 128 )); then
+    # The watcher stopped the probe; let it finish with what the probe started.
+    wait "${watcher_pid}" 2>/dev/null || true
+  else
+    # shellcheck disable=SC2046
+    kill $(process_tree "${watcher_pid}") 2>/dev/null || true
+    wait "${watcher_pid}" 2>/dev/null || true
+  fi
+  return "${status}"
+}
+
+# readiness_probe_limit prints how long the next probe may run: five seconds,
+# or less near the deadline ($1, in SECONDS). It fails once the deadline passed.
+readiness_probe_limit() {
+  local remaining=$(($1 - SECONDS))
+  (( remaining > 0 )) || return 1
+  echo $(( remaining < 5 ? remaining : 5 ))
+}
+
+# wait_for_hec_ready <seconds> waits until HEC, the installed DefenseClaw app
+# and Web UI all answer, and fails when the seconds run out.
 wait_for_hec_ready() {
-  local deadline
-  deadline=$((SECONDS + 240))
-  while (( SECONDS < deadline )); do
-    local status
+  local deadline limit status web_status restarts
+  deadline=$((SECONDS + $1))
+  while limit="$(readiness_probe_limit "${deadline}")"; do
     status="$(
-      curl -sk --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' \
+      curl -sk --connect-timeout 2 --max-time "${limit}" -o /dev/null -w '%{http_code}' \
         -H "Authorization: Splunk ${DEFENSECLAW_HEC_TOKEN}" \
         -H 'Content-Type: application/json' \
         "${DEFENSECLAW_HEC_URL}" \
@@ -310,10 +359,11 @@ wait_for_hec_ready() {
     )"
     # HEC can answer while app installation is still failing. Require the
     # installed app (not its bind-mounted source) and Web UI before ready.
-    if [[ "${status}" == "200" ]] && run_compose exec -T -u splunk splunk \
-      test -r /opt/splunk/etc/apps/defenseclaw_local_mode/default/app.conf >/dev/null 2>&1; then
-      local web_status
-      web_status="$(curl -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/ || true)"
+    if [[ "${status}" == "200" ]] && limit="$(readiness_probe_limit "${deadline}")" \
+      && run_with_time_limit "${limit}" run_compose exec -T -u splunk splunk \
+        test -r /opt/splunk/etc/apps/defenseclaw_local_mode/default/app.conf >/dev/null 2>&1 \
+      && limit="$(readiness_probe_limit "${deadline}")"; then
+      web_status="$(curl -s --connect-timeout 2 --max-time "${limit}" -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/ || true)"
       case "${web_status}" in
         2??|3??) return 0 ;;
       esac
@@ -321,12 +371,16 @@ wait_for_hec_ready() {
     # Splunk does not restart while it starts: a container that keeps
     # exiting never gets ready, so say so now with its last log lines
     # instead of waiting out the deadline (GAP-0341).
-    if (( $(service_restart_count) >= 2 )); then
+    limit="$(readiness_probe_limit "${deadline}")" || break
+    restarts="$(run_with_time_limit "${limit}" service_restart_count 2>/dev/null || true)"
+    [[ "${restarts}" =~ ^[0-9]+$ ]] || restarts=0
+    if (( restarts >= 2 )); then
       fail "the ${SERVICE_NAME} container keeps restarting, so Splunk never became ready; its last log lines:
 $(run_compose logs --no-color --no-log-prefix --tail 5 "${SERVICE_NAME}" 2>&1 | tail -n 5)
 all of them: docker logs $(compose_project_name)-${SERVICE_NAME}-1"
     fi
-    sleep 5
+    limit="$(readiness_probe_limit "${deadline}")" || break
+    sleep "${limit}"
   done
   return 1
 }
@@ -502,7 +556,7 @@ cmd_up() {
   package_path="$(package_app)"
   cleanup_stopped_service_containers
   run_compose up -d --remove-orphans
-  wait_for_hec_ready || fail "timed out waiting for the Splunk app, Web UI and HEC; run defenseclaw setup splunk --logs again after repairing the local stack"
+  wait_for_hec_ready 240 || fail "timed out waiting for the Splunk app, Web UI and HEC; run defenseclaw setup splunk --logs again after repairing the local stack"
   emit_product_telemetry startup
   if is_truthy "${DEFENSECLAW_INTEGRATION_ENABLED:-false}"; then
     emit_product_telemetry integration_configured

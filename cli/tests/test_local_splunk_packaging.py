@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,23 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = REPO_ROOT / "bundles" / "splunk_local_bridge"
+
+
+def _readiness_probe(path: Path, stubs: str, seconds: int) -> Path:
+    """Write a script that runs the bridge readiness loop against stubbed probes."""
+
+    bridge = (BUNDLE / "bin" / "splunk-claw-bridge").read_text(encoding="utf-8")
+    readiness = bridge[bridge.index("service_restart_count() {"):bridge.index("\nprint_up_text() {")]
+    path.write_text(
+        'set -euo pipefail\nDEFENSECLAW_HEC_TOKEN="fixture credential"\n'
+        'DEFENSECLAW_HEC_URL="https://127.0.0.1:8088/services/collector/event"\n'
+        'SERVICE_NAME=splunk\ncompose_project_name() { echo fixture; }\n'
+        'fail() { printf "%s\\n" "$1" >&2; exit 1; }\n'
+        # The stubs come after the bridge functions so that they replace them.
+        + readiness + "\n" + stubs + f"\nwait_for_hec_ready {seconds}\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX bind-mount permissions")
@@ -50,17 +68,11 @@ def test_app_packages_are_container_readable_under_private_umask(tmp_path: Path,
         assert stat.S_IMODE(archive.stat().st_mode) == 0o644
 
     # Healthy listeners alone cannot prove that Splunk installed the app.
-    bridge = (BUNDLE / "bin" / "splunk-claw-bridge").read_text(encoding="utf-8")
-    readiness = bridge[bridge.index("wait_for_hec_ready() {"):bridge.index("\nprint_up_text() {")]
-    probe = tmp_path / "readiness.sh"
-    probe.write_text(
-        'set -euo pipefail\nDEFENSECLAW_HEC_TOKEN="fixture credential"\n'
-        'DEFENSECLAW_HEC_URL="https://127.0.0.1:8088/services/collector/event"\n'
-        'SERVICE_NAME=splunk\ncurl() { printf 200; }\n'
-        'run_compose() { [[ "$APP_READY" == true ]]; }\n'
-        'service_restart_count() { echo 2; }\ncompose_project_name() { echo fixture; }\n'
-        'fail() { printf "%s\\n" "$1" >&2; exit 1; }\n'
-        + readiness + '\nwait_for_hec_ready\n', encoding="utf-8",
+    probe = _readiness_probe(
+        tmp_path / "readiness.sh",
+        'curl() { printf 200; }\nrun_compose() { [[ "$APP_READY" == true ]]; }\n'
+        "service_restart_count() { echo 2; }",
+        10,
     )
     for ready in (False, True):
         result = subprocess.run(
@@ -79,6 +91,46 @@ def test_app_packages_are_container_readable_under_private_umask(tmp_path: Path,
     compose.return_value.returncode = 0
     controller.wait_for_readiness(1)
     assert "test" in compose.call_args.args
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Unix bridge runs under bash")
+@pytest.mark.parametrize("ignores_term", [False, True], ids=["stalls", "stalls-ignoring-term"])
+def test_bridge_readiness_deadline_bounds_a_stalled_app_probe(tmp_path: Path, ignores_term: bool) -> None:
+    # HEC answers, but docker compose exec never returns. The readiness
+    # deadline must still fire, and the stalled probe must not outlive it.
+    pid_file = tmp_path / "probe.pid"
+    curl_log = tmp_path / "curl.log"
+    stall = ('trap "" TERM; ' if ignores_term else "") + (
+        'echo $$ > "$PROBE_PID"; i=0; while [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done'
+    )
+    probe = _readiness_probe(
+        tmp_path / "readiness.sh",
+        'curl() { printf "%s\\n" "$*" >> "$CURL_LOG"; printf 200; }\n'
+        f"run_compose() {{ sh -c '{stall}'; }}\nservice_restart_count() {{ echo 0; }}",
+        3,
+    )
+    started = time.monotonic()
+    result = subprocess.run(
+        ["bash", str(probe)],
+        env={**os.environ, "PROBE_PID": str(pid_file), "CURL_LOG": str(curl_log)},
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    elapsed = time.monotonic() - started
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert elapsed < 10, f"readiness took {elapsed:.1f}s past a 3s deadline"
+    stalled = int(pid_file.read_text(encoding="utf-8"))
+    for _ in range(30):
+        try:
+            os.kill(stalled, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(stalled, 9)
+        pytest.fail("the stalled app probe outlived the readiness deadline")
+    # Every HTTP probe is bounded by what is left of the deadline as well.
+    limits = [int(line.split("--max-time ")[1].split()[0]) for line in curl_log.read_text().splitlines()]
+    assert limits and all(1 <= limit <= 3 for limit in limits), limits
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required to build wheels")
