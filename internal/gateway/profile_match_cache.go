@@ -50,8 +50,7 @@ func profileMatchKey(subject *profileSubject, source, connectorName, agent strin
 	put(source)
 	put(connectorName)
 	put(agent)
-	var putSubject func(subject *profileSubject)
-	putSubject = func(subject *profileSubject) {
+	putSubject := func(subject *profileSubject) {
 		put("subject")
 		put(subject.UserID)
 		put(subject.IDKind)
