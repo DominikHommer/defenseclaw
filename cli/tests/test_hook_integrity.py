@@ -37,6 +37,8 @@ from defenseclaw.hook_integrity import (
     unrunnable_hook_problem,
 )
 
+from tests.test_hook_integrity_layouts import approve_hermes_hooks
+
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix hook scripts only")
 
 
@@ -451,6 +453,7 @@ def test_edited_hook_entry_fails_doctor_and_fix_reruns_setup(tmp_path, monkeypat
         if connector == "hermes":
             entries = "".join(f"  - command: \"'{path}'\"\n    matcher: .*\n    timeout: 30\n" for path in paths)
             config.write_text("hooks:\n  pre_tool_call:\n" + entries)
+            approve_hermes_hooks(config)
         elif connector == "copilot":
             entries = [{"type": "command", "bash": f"'{path}' --event 'preToolUse'", "timeoutSec": 30} for path in paths]
             config.write_text(json.dumps({"version": 1, "hooks": {"preToolUse": entries}}))

@@ -39,7 +39,12 @@ import yaml
 from defenseclaw import codex_toml, connector_paths
 from defenseclaw.connector_contracts import resolve_connector_contract
 from defenseclaw.hook_guard_matrix import TOOL_GUARD_HOOKS
-from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP, claude_launcher_guard_view
+from defenseclaw.hook_integrity import (
+    HERMES_ALLOWLIST_FILE,
+    LAUNCHER_REINSTALL_STEP,
+    claude_launcher_guard_view,
+    hermes_approved_pairs,
+)
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 
 _SAFE_PATHEXT = (".exe", ".cmd")
@@ -2673,12 +2678,11 @@ def _validate_hermes_hook_matrix(document: dict[str, Any]) -> int:
 
 
 def _validate_hermes_allowlist(config_path: str, command: str) -> int:
-    path = os.path.join(os.path.dirname(config_path), "shell-hooks-allowlist.json")
+    path = os.path.join(os.path.dirname(config_path), HERMES_ALLOWLIST_FILE)
     document = _read_config(path, "hermes-allowlist")
     approvals = document.get("approvals")
     if not isinstance(approvals, list):
         raise _InspectionError("malformed", "Hermes shell hook allowlist approvals is not an array")
-    pairs: set[tuple[str, str]] = set()
     for raw in approvals:
         if not isinstance(raw, dict):
             continue
@@ -2698,7 +2702,6 @@ def _validate_hermes_allowlist(config_path: str, command: str) -> int:
                     # command or one an older release approved (a PowerShell
                     # launcher) cannot conflict with ours. Failing here kept
                     # Hermes unenrollable after an upgrade (GAP-1304).
-                    pairs.add((event, approved_command))
                     continue
                 if (
                     kind == "direct"
@@ -2709,8 +2712,9 @@ def _validate_hermes_allowlist(config_path: str, command: str) -> int:
                         "stale",
                         f"Hermes event {event} has an inconsistent DefenseClaw approval",
                     )
-            pairs.add((event, approved_command))
-    missing = [event for event in _HERMES_REQUIRED_HOOKS if (event, command) not in pairs]
+    # The approval rule Linux and macOS doctor read too (rel-1-0-4 GAP-0339).
+    approved = hermes_approved_pairs(document)
+    missing = [event for event in _HERMES_REQUIRED_HOOKS if (event, command) not in approved]
     if missing:
         raise _InspectionError(
             "stale",

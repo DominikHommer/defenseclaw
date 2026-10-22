@@ -35,6 +35,7 @@ import copy
 import json
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -341,3 +342,80 @@ def test_the_windows_validators_agree_with_the_shared_table():
     assert matcher in codex.matchers and timeout == codex.timeout
     assert doctor_hooks._HERMES_REQUIRED_HOOKS["pre_tool_call"] in TOOL_GUARD_HOOKS["hermes"].matchers
     assert doctor_hooks._ANTIGRAVITY_REQUIRED_HOOKS["PreToolUse"] is True
+
+
+# Hermes runs a shell hook only once shell-hooks-allowlist.json approves its
+# (event, command); a non-interactive Hermes skips the others. Doctor on Linux
+# and macOS passed a registration whose approvals were gone while Hermes ran
+# every tool call unchecked; only the Windows validator read the file
+# (rel-1-0-4 GAP-0339).
+_HERMES = next(c for c in _CASES if c["connector"] == "hermes" and c["os"] == "posix")
+
+
+def _drop_approval(event: str) -> Callable[[dict[str, Any]], Any]:
+    def edit(document: dict[str, Any]) -> Any:
+        document["approvals"] = [item for item in document["approvals"] if item["event"] != event]
+        return document
+
+    return edit
+
+
+def _change_command(document: dict[str, Any]) -> Any:
+    for item in document["approvals"]:
+        if item["event"] == "pre_tool_call":
+            item["command"] += " --other"
+    return document
+
+
+_APPROVAL_EDITS = {
+    "pre_tool_call-removed": ("pre_tool_call", _drop_approval("pre_tool_call")),
+    "post_llm_call-removed": ("post_llm_call", _drop_approval("post_llm_call")),
+    "pre_tool_call-other-command": ("pre_tool_call", _change_command),
+    "emptied": ("pre_tool_call", lambda _document: {}),
+    "not-json": ("pre_tool_call", lambda _document: "not json"),
+    "deleted": ("pre_tool_call", lambda _document: None),
+}
+
+
+def _hermes_with_approvals(edit: Callable[[dict[str, Any]], Any]) -> dict[str, Any]:
+    case = copy.deepcopy(_HERMES)
+    (allowlist,) = case["agent_files"]
+    edited = edit(json.loads(allowlist["content"]))
+    if edited is None:
+        case["agent_files"] = []
+    else:
+        allowlist["content"] = edited if isinstance(edited, str) else json.dumps(edited, indent=2)
+    return case
+
+
+def test_hermes_setup_approves_every_hook_it_registers():
+    approved = hook_integrity.hermes_approved_pairs(json.loads(_HERMES["agent_files"][0]["content"]))
+    assert {event for event, _command in approved} == set(doctor_hooks._HERMES_REQUIRED_HOOKS)
+
+
+@pytest.mark.parametrize("managed", [False, True], ids=["per-user", "managed"])
+@pytest.mark.parametrize("edit", sorted(_APPROVAL_EDITS))
+def test_status_and_fail_mode_report_a_hermes_hook_without_its_approval(tmp_path, monkeypatch, edit, managed):
+    event, change = _APPROVAL_EDITS[edit]
+    cfg, paths = _install(tmp_path, monkeypatch, _hermes_with_approvals(change))
+    if managed:
+        cfg.deployment_mode = "managed_enterprise"
+    problems = hook_integrity.unguarded_tool_call_hooks(cfg, "hermes")
+    assert problems and event in problems[0] and "shell-hooks-allowlist.json" in problems[0], problems
+    expected = "tool calls can run unchecked" if event == "pre_tool_call" else f"runs its {event} events"
+    assert expected in problems[0], problems
+    assert hook_integrity.repair_command("hermes", problems[0]).startswith("run `defenseclaw setup hermes")
+    assert fail_mode.REGISTRATION_UNGUARDED in _fail_mode_drift(cfg, "hermes")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook layouts")
+@pytest.mark.parametrize("edit", sorted(_APPROVAL_EDITS))
+def test_doctor_fails_a_hermes_hook_without_its_approval(tmp_path, monkeypatch, edit):
+    event, change = _APPROVAL_EDITS[edit]
+    label = cmd_doctor._SETUP_READINESS_PRIMARY_LABELS["hermes"]
+    cfg, _paths = _install(tmp_path, monkeypatch, _hermes_with_approvals(change))
+    rows = [row for row in _doctor_rows(cfg, "hermes", monkeypatch) if row["label"] == label]
+    failed = [row for row in rows if row["status"] == "fail" and event in str(row.get("detail"))]
+    assert failed, rows
+    assert not any(row["status"] == "pass" for row in rows), rows
+    assert "defenseclaw setup hermes" in str(failed[0].get("remediation"))

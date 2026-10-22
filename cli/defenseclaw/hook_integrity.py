@@ -35,6 +35,7 @@ import re
 import shlex
 import stat
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -621,15 +622,69 @@ def _unguarded_tool_events(cfg: Any, connector: str, document: Any, path: Path) 
     ):
         return False, []
     managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
-    return True, unguarded_tool_events(connector, document, owns, managed=managed)
+    unguarded = unguarded_tool_events(connector, document, owns, managed=managed)
+    if connector == "hermes" and not unguarded:
+        unguarded = _hermes_unapproved_hooks(document, path, owns)
+    return True, unguarded
+
+
+# Hermes runs a shell hook only once (event, command) is approved in this
+# file beside config.yaml; a non-interactive Hermes skips an unapproved hook.
+HERMES_ALLOWLIST_FILE = "shell-hooks-allowlist.json"
+
+
+def hermes_approved_pairs(document: Any) -> set[tuple[str, str]]:
+    """The (event, command) pairs a decoded Hermes shell-hooks-allowlist.json approves."""
+
+    approvals = document.get("approvals") if isinstance(document, dict) else None
+    if not isinstance(approvals, list):
+        return set()
+    return {
+        (raw["event"], raw["command"])
+        for raw in approvals
+        if isinstance(raw, dict) and isinstance(raw.get("event"), str) and isinstance(raw.get("command"), str)
+    }
+
+
+def _hermes_unapproved_hooks(document: Any, path: Path, owns: Callable[[Any], bool]) -> list[tuple[str, str]]:
+    """The DefenseClaw Hermes hooks of *document* that the allowlist beside *path* does not approve.
+
+    Doctor on Linux and macOS passed a Hermes registration whose approvals
+    were removed from the allowlist while Hermes skipped every hook; only
+    the Windows validator read the file (rel-1-0-4 GAP-0339). The tool-guard
+    events come first.
+    """
+
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        return []
+    allowlist = path.parent / HERMES_ALLOWLIST_FILE
+    try:
+        approved = hermes_approved_pairs(json.loads(allowlist.read_bytes()))
+    except (OSError, ValueError):
+        # A missing or unreadable allowlist approves nothing for Hermes either.
+        approved = set()
+    tool_events = TOOL_GUARD_HOOKS["hermes"].events
+    events = sorted(hooks, key=lambda event: (event not in tool_events, str(event)))
+    for event in events:
+        entries = hooks[event]
+        for entry in entries if isinstance(entries, list) else ():
+            command = str(entry.get("command") or "").strip() if isinstance(entry, dict) else ""
+            if command and owns(entry) and (event, command) not in approved:
+                return [(event, f"has no approval in {allowlist}, and Hermes skips a shell hook it has not approved")]
+    return []
 
 
 def _unguarded_problem(connector: str, event: str, why: str, where: str) -> HookProblem:
     if not why:
         return tool_inspection_hook_problem(connector, event, where)
     label = "Claude Code" if connector == "claudecode" else connector
+    if event in TOOL_GUARD_HOOKS[connector].events:
+        consequence = f"{label} tool calls can run unchecked"
+    else:
+        consequence = f"{label} runs its {event} events without DefenseClaw"
     return HookProblem(
-        f"the DefenseClaw {event} hook in {where} {why}, so {label} tool calls can run unchecked",
+        f"the DefenseClaw {event} hook in {where} {why}, so {consequence}",
         f"run `{setup_command(connector)} --yes`; it registers the hook again",
     )
 
