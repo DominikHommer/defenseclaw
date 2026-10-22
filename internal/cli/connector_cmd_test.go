@@ -393,6 +393,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		err = runConnectorPruneOrphans(cmd, nil)
 	case "reconcile":
 		err = runConnectorReconcile(cmd, nil)
+	case "check-agent-settings":
+		err = runConnectorCheckAgentSettings(cmd, nil)
 	case "launch":
 		launchArgs := []string{}
 		for index, value := range tail {
