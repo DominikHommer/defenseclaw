@@ -6068,9 +6068,6 @@ def _check_guardrail_setup_connector_versions(
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
-            if (mode or "").strip().lower() == "action":
-                _downgrade_guardrail_setup_action_connector(gc, connector)
-                continue
             _restore_setup_config_snapshot(app, setup_snapshot)
             return False
     if exact_windows_opencode:
@@ -6101,34 +6098,9 @@ def _check_guardrail_setup_connector_versions(
             tuple(targets),
             _prior_snapshot=setup_snapshot,
         )
-    # Version validation can refuse a requested action mode and persist an
-    # observe fallback. Reconcile the hook-lane judge gate after every target
-    # has reached its final mode so a refused connector cannot remain judged
-    # when execute_guardrail_setup() saves the configuration below.
+    # Reconcile the judge gate only after every requested mode is admitted.
     _prune_judge_gate_to_action_scope(gc, targets)
     return True
-
-
-def _downgrade_guardrail_setup_action_connector(gc, connector: str) -> None:
-    """Persist an observe fallback when guardrail setup refuses action mode."""
-    label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
-    ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
-
-    connectors = getattr(gc, "connectors", None)
-    if connectors:
-        key = connector
-        if key not in connectors:
-            wanted = normalize_connector(connector)
-            for existing_key in connectors:
-                if normalize_connector(str(existing_key)) == wanted:
-                    key = existing_key
-                    break
-        if key not in connectors:
-            connectors[key] = PerConnectorGuardrailConfig()
-        connectors[key].mode = "observe"
-        return
-
-    gc.mode = "observe"
 
 
 def _hilt_support_note(connector: str) -> str:
@@ -7212,7 +7184,10 @@ def setup_guardrail(
         rollback_status = restore_guardrail_secret_publication()
         if not rollback_status.complete:
             raise _GuardrailSecretFailure("validation-refused-rollback-incomplete") from None
-        return
+        raise click.ClickException(
+            "guardrail setup did not pass connector preflight; prior settings were restored. "
+            "Resolve the error above, then rerun: defenseclaw setup guardrail"
+        )
     if non_interactive and judge_on_before_versions and not gc.judge.enabled and not judge_gate_was_all:
         # GAP-2175: the judge was requested, but every connector in scope is
         # in observe mode, so the gate prune turned it back off. Say so.
@@ -9851,7 +9826,6 @@ def _apply_hook_connector_setup(
     judge_hook_connectors: str | None = None,
     allow_trusted_path_prompt: bool = True,
     trusted_prompt_cache: dict[str, bool] | None = None,
-    _downgrade_refused_action: bool = False,
     _version_preflighted: bool = False,
     _protected_selection: _VerifiedSetupAgentSelections | None = None,
     _selection_transaction_snapshot: _SetupConfigSnapshot | None = None,
@@ -9926,18 +9900,7 @@ def _apply_hook_connector_setup(
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
-            # Every non-OpenCode hook contract deliberately permits observe
-            # when action admission is refused (missing, unversioned, or
-            # outside the validated range).  Reusing that decision avoids a
-            # second discovery/probe whose answer can drift within the same
-            # setup transaction.  OpenCode is the strict exception: unknown
-            # versions are refused in both modes and never reach this fallback.
-            if desired_mode == "action" and _downgrade_refused_action and connector not in {"opencode", "codex"}:
-                label = _CONNECTOR_META.get(connector, {}).get("label", connector)
-                ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
-                desired_mode = "observe"
-            else:
-                return False
+            return False
 
     cfg = app.cfg
     gc = cfg.guardrail
@@ -10918,10 +10881,12 @@ def _setup_observability_alias(
         judge_hook_connectors=judge_hook_connectors,
         allow_trusted_path_prompt=interactive,
         trusted_prompt_cache=trusted_prompt_cache,
-        _downgrade_refused_action=True,
     )
     if not ok:
-        raise click.ClickException(f"failed to configure {connector} (mode={normalized_mode}) — see errors above")
+        raise click.ClickException(
+            f"failed to configure {connector} (mode={normalized_mode}); resolve the error above, then rerun: "
+            f"defenseclaw setup {connector} --yes --mode {normalized_mode}"
+        )
     normalized_mode = app.cfg.guardrail.effective_mode(connector)
 
     if interactive:
@@ -11486,14 +11451,11 @@ def _apply_setup_batch(
         if trusted_prompt_cache is not None:
             preflight_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector_name, **preflight_kwargs):
-            if (connector_mode or "").strip().lower() == "action" and connector_name not in {"opencode", "codex"}:
-                label = _CONNECTOR_META.get(connector_name, {}).get("label", connector_name)
-                ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
-                resolved_connector_modes[connector_name] = "observe"
-                continue
             _restore_setup_config_snapshot(app, setup_snapshot)
             raise click.ClickException(
-                f"connector {connector_name!r} did not pass setup preflight; prior roster was not changed"
+                f"connector {connector_name!r} did not pass setup preflight; prior roster was not changed. "
+                "Resolve the error above, then rerun: "
+                f"defenseclaw setup {connector_name} --yes --mode {connector_mode}"
             )
 
     if batch_discovery is not None and not agent_discovery._write_cache(
@@ -11580,7 +11542,6 @@ def _apply_setup_batch(
                 judge_hook_connectors=None,
                 allow_trusted_path_prompt=allow_trusted_path_prompt,
                 trusted_prompt_cache=trusted_prompt_cache,
-                _downgrade_refused_action=True,
                 _version_preflighted=True,
                 _protected_selection=protected_selection,
                 _selection_transaction_snapshot=setup_snapshot,

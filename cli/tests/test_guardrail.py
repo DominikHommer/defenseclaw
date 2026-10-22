@@ -16,6 +16,7 @@
 
 """Tests for the guardrail integration — config, utilities, and CLI command."""
 
+import copy
 import hashlib
 import json
 import os
@@ -1086,10 +1087,11 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
         self.assertEqual(self.app.cfg.guardrail.mode, "action")
 
-    def test_non_interactive_missing_action_connector_downgrades_to_observe(self):
+    def test_non_interactive_missing_action_connector_refuses_without_saving(self):
         from defenseclaw.commands.cmd_setup import setup
 
         self.app.cfg.claw.home_dir = self.tmp_dir
+        before = copy.deepcopy(self.app.cfg.guardrail)
         signal = SimpleNamespace(version="", installed=False, error="", binary_path="")
         disc = SimpleNamespace(agents={"claudecode": signal})
 
@@ -1117,11 +1119,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 obj=self.app,
             )
 
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("Claude Code: connector was not detected locally", result.output)
-        self.assertIn("Claude Code: requested action mode was refused", result.output)
-        self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
-        self.assertEqual(self.app.cfg.guardrail.mode, "observe")
+        self.assertIn("defenseclaw setup guardrail", result.output)
+        self.assertEqual(self.app.cfg.guardrail, before)
 
     def test_non_interactive_codex_observe_flag_enables_enforcement(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1749,9 +1750,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         checked = {call.args[0] for call in version_check.call_args_list}
         self.assertEqual(checked, {"codex", "claudecode"})
 
-    def test_interactive_multi_connector_downgrades_refused_action_mode(self):
-        """Action connectors refused by setup guardrail validation fall back
-        to observe so status reflects effective posture after the run."""
+    def test_interactive_multi_connector_refuses_unverified_action_mode(self):
         from defenseclaw.commands.cmd_setup import setup
         from defenseclaw.config import PerConnectorGuardrailConfig
 
@@ -1763,6 +1762,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "cursor": PerConnectorGuardrailConfig(mode="action"),
             "claudecode": PerConnectorGuardrailConfig(mode="action"),
         }
+        before = copy.deepcopy(gc)
 
         def version_gate(connector, *, mode="observe", **_kwargs):
             return not (connector == "cursor" and mode == "action")
@@ -1784,14 +1784,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 input="\n" * 15,
             )
 
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn(
-            "Cursor: requested action mode was refused; configuring observe mode instead.",
-            result.output,
-        )
-        execute_setup.assert_called_once()
-        self.assertEqual(gc.connectors["cursor"].mode, "observe")
-        self.assertEqual(gc.connectors["claudecode"].mode, "action")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("did not pass connector preflight", result.output)
+        execute_setup.assert_not_called()
+        self.assertEqual(self.app.cfg.guardrail, before)
 
     def test_interactive_multi_connector_offers_hilt_when_any_action(self):
         """In multi-connector mode HILT is gated on whether ANY connector
