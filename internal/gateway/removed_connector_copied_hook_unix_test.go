@@ -40,7 +40,7 @@ if [ ! -f "${HOOK_DIR}/.hook-openhands.token" ]; then
 fi
 IFS= read -r API_TOKEN < "${HOOK_DIR}/.hook-openhands.token" || true
 PAYLOAD="$(cat)"
-RESPONSE="$(curl -sS --max-time 20 -X POST -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json" --data "$PAYLOAD" "${DEFENSECLAW_TEST_GATEWAY}/api/v1/openhands/hook")" || {
+RESPONSE="$(curl -sS --max-time 20 -X POST -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json" --data "$PAYLOAD" "${RETIRED_HOOK_TEST_GATEWAY}/api/v1/openhands/hook")" || {
   [ "$FAIL_MODE" = "closed" ] && exit 2
   exit 0
 }
@@ -93,7 +93,7 @@ func TestUpgradeKeepsACopiedOpenHandsHookBlocking(t *testing.T) {
 		t.Helper()
 		for _, mode := range []string{"open", "closed"} {
 			cmd := exec.Command(sh, copied)
-			cmd.Env = append(os.Environ(), "DEFENSECLAW_FAIL_MODE="+mode, "DEFENSECLAW_TEST_GATEWAY="+server.URL,
+			cmd.Env = append(os.Environ(), "DEFENSECLAW_FAIL_MODE="+mode, "RETIRED_HOOK_TEST_GATEWAY="+server.URL,
 				"PATH="+filepath.Dir(curl)+string(os.PathListSeparator)+os.Getenv("PATH"))
 			cmd.Stdin = strings.NewReader(payload)
 			var out bytes.Buffer
