@@ -641,6 +641,7 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 // guardian's verify-or-repair pass reinstalls them, and must pass again only
 // after an Install renders the socket transport.
 func TestVerifyFailsWhenHooksPredateTheConfiguredHookSocket(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
