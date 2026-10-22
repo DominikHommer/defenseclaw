@@ -86,6 +86,7 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
+	facts.SpoolSeenAt = identitySpoolSeenAt(key, now)
 	record, ok := holderSpoolRecord(key, account, facts.AccountSID, now)
 	var spool *enterprisehooks.IdentitySpoolRecord
 	if ok {

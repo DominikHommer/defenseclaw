@@ -92,11 +92,24 @@ func TestManagedHookPeerDirectoryRefreshesOnSpoolSIDChange(t *testing.T) {
 	if facts, ok := cache.directory(uid, true); !ok || facts.UPN != "new@corp.example" {
 		t.Fatalf("recreated account kept predecessor's UPN: %+v, %v", facts, ok)
 	}
+	// Loop round 3: a missing record is no withdrawal (the guardian has not
+	// written one yet, or removed one), and the verified facts stay.
 	if err := os.Remove(filepath.Join(dir, key+".json")); err != nil {
 		t.Fatal(err)
 	}
+	if facts, ok := cache.directory(uid, true); !ok || facts.UPN != "new@corp.example" {
+		t.Fatalf("a removed record dropped the verified facts: %+v, %v", facts, ok)
+	}
+	// The guardian's explicit withdrawal drops them.
+	data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{Key: key, UpdatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, key+enterprisehooks.IdentitySpoolWithdrawalSuffix), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if facts, ok := cache.directory(uid, true); ok && facts.UPN != "" {
-		t.Fatalf("withdrawn record kept its UPN: %+v", facts)
+		t.Fatalf("withdrawn identity kept its UPN: %+v", facts)
 	}
 }
 

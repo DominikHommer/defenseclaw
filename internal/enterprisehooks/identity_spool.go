@@ -190,21 +190,48 @@ func IdentitySpoolDir(authorizationDir string) string {
 // the file (root- or SYSTEM-owned, not writable by others) before it is
 // opened. A missing record is os.ErrNotExist.
 func ReadIdentitySpoolRecord(dir, key string, trust func(path, label string) error) (IdentitySpoolRecord, error) {
+	return readIdentitySpoolFile(dir, key, ".json", "identity spool record", trust)
+}
+
+// IdentitySpoolWithdrawalSuffix names the file, <uid>.withdrawn, in which the
+// Linux or macOS guardian withdraws the identity it published for a uid
+// that now names another account: another name, the same name in another
+// domain or directory, or a recreated account (WriteIdentitySpool). A
+// missing record is no withdrawal: it is also missing before the guardian
+// first writes it, and the gateway keeps the facts it verified itself
+// through that. A withdrawal is written like a record, root-owned and
+// readable by the gateway's group, and holds only the uid and its time; the
+// gateway drops the facts it cached for the uid before that time. It stays
+// for IdentitySpoolMaxAge, as long as the gateway trusts the record it
+// withdraws, and other files ignore it (IdentitySpoolStale,
+// ReadIdentitySpoolRecords).
+const IdentitySpoolWithdrawalSuffix = ".withdrawn"
+
+// ReadIdentitySpoolWithdrawal returns when the guardian last withdrew the
+// identity it published for key, validated by trust as a record is;
+// os.ErrNotExist when it withdrew none.
+func ReadIdentitySpoolWithdrawal(dir, key string, trust func(path, label string) error) (time.Time, error) {
+	record, err := readIdentitySpoolFile(dir, key, IdentitySpoolWithdrawalSuffix, "identity spool withdrawal", trust)
+	return record.UpdatedAt, err
+}
+
+// readIdentitySpoolFile reads dir/<key><suffix>, a record or a withdrawal.
+func readIdentitySpoolFile(dir, key, suffix, label string, trust func(path, label string) error) (IdentitySpoolRecord, error) {
 	var record IdentitySpoolRecord
 	key = strings.TrimSpace(key)
 	if dir == "" || !validIdentitySpoolKey(key) {
 		return record, os.ErrNotExist
 	}
-	path := filepath.Join(dir, key+".json")
+	path := filepath.Join(dir, key+suffix)
 	info, err := os.Lstat(path)
 	if err != nil {
 		return record, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > maxIdentitySpoolRecordBytes {
-		return record, errors.New("identity spool record is not a regular file within the size limit")
+		return record, fmt.Errorf("%s is not a regular file within the size limit", label)
 	}
 	if trust != nil {
-		if err := trust(path, "identity spool record"); err != nil {
+		if err := trust(path, label); err != nil {
 			return record, err
 		}
 	}
@@ -312,6 +339,81 @@ func sameGroupSIDs(a, b []string) bool {
 		return out
 	}
 	return maps.Equal(sids(a), sids(b))
+}
+
+// IdentitySpoolWithdrawnByFailedWrite reports whether a Windows pass that
+// could not publish record must withdraw the account's previous record:
+// only one it read (previousErr nil) and disproved
+// (IdentitySpoolRecordStillProves). A record it could not read is unknown,
+// not disproved: removing it dropped groups that may not have changed, and
+// the gateway then took a possibly weaker default. It stays, as the release
+// writer left every record whose replacement failed (loop round 3). With no
+// record there is nothing to withdraw.
+func IdentitySpoolWithdrawnByFailedWrite(previous IdentitySpoolRecord, previousErr error, record IdentitySpoolRecord) bool {
+	return previousErr == nil && !IdentitySpoolRecordStillProves(previous, record)
+}
+
+// IdentitySpoolTokenGroupRecord is the record a Windows pass publishes for an
+// account whose directory lookups did not answer in time (past
+// windowsIdentityAccountWait, still running from an earlier pass, or cut by
+// the end of the cycle): the token groups the enumerator holds for the
+// account this cycle (groupSIDs; known only while signedIn), which need no
+// lookup, over the facts of its previous record. Kept as it was, the
+// previous record went on naming an earlier sign-in's groups, so a user who
+// had gained a strict group kept the weaker profile of the old ones until a
+// lookup answered in time or the record aged out (loop round 3). The
+// groups are their SIDs, which the gateway matches assignments by, each
+// followed by the name the previous record gave it. publish is false when
+// the previous record already says this (the same SIDs, or groups unknown
+// in both), and when it could not be read: an unknown record is neither
+// replaced nor withdrawn here. An account without a record gets one only
+// for a signed-in session, the only one with groups to publish.
+func IdentitySpoolTokenGroupRecord(previous IdentitySpoolRecord, previousErr error, key string, groupSIDs []string, signedIn bool,
+	now time.Time) (record IdentitySpoolRecord, publish bool) {
+	switch {
+	case previousErr == nil:
+		if previous.Facts.GroupsPartial == !signedIn && (!signedIn || sameGroupSIDs(previous.Facts.Groups, groupSIDs)) {
+			return previous, false
+		}
+	case errors.Is(previousErr, os.ErrNotExist) && signedIn:
+		previous = IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{ResolvedAt: now}}
+	default:
+		return previous, false
+	}
+	record = previous
+	record.Key, record.UpdatedAt = key, now
+	record.Facts.GroupsPartial = !signedIn
+	record.Facts.Groups = nil
+	if signedIn {
+		record.Facts.Groups = groupsWithNames(groupSIDs, previous.Facts.Groups)
+	}
+	return record, true
+}
+
+// groupsWithNames lists sids, each followed by the name previous (a record's
+// groups: each SID followed by its name where one resolved) gave it.
+func groupsWithNames(sids, previous []string) []string {
+	names := map[string]string{}
+	sid := ""
+	for _, group := range previous {
+		group = strings.TrimSpace(group)
+		if strings.HasPrefix(strings.ToUpper(group), "S-1-") {
+			sid = strings.ToUpper(group)
+			continue
+		}
+		if sid != "" && group != "" && names[sid] == "" {
+			names[sid] = group
+		}
+		sid = ""
+	}
+	out := make([]string, 0, 2*len(sids))
+	for _, groupSID := range sids {
+		out = append(out, groupSID)
+		if name := names[strings.ToUpper(strings.TrimSpace(groupSID))]; name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // KeepVerifiedInfoPipeUPN carries the UPN an earlier pass read from SSSD

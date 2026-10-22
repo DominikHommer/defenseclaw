@@ -87,6 +87,13 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // marked Left goes at once. A failed pass removes nothing else young. The
 // checks end with ctx: a record whose check did not finish stays, with its
 // mark, for the next pass.
+//
+// Where the uid now names another identity than its record (a reassigned
+// uid, a departure to another account, a failed lookup whose facts name
+// another directory identity), the pass also withdraws the record's
+// identity explicitly (IdentitySpoolWithdrawalSuffix): the gateway does not
+// take a missing record as a withdrawal, since a record is also missing
+// before the guardian first writes it.
 func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoolAccount, setOwnership func(string) error,
 	logf func(string, ...any)) error {
 	if dir == "" {
@@ -124,6 +131,9 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 				if err := os.Remove(filepath.Join(dir, name)); err != nil {
 					return fmt.Errorf("remove reassigned identity spool record: %w", err)
 				}
+				if err := writeIdentitySpoolWithdrawal(dir, strconv.Itoa(account.UID), setOwnership); err != nil {
+					passErr = errors.Join(passErr, fmt.Errorf("uid %d: withdraw the reassigned identity: %w", account.UID, err))
+				}
 			}
 		}
 		keep[name] = true
@@ -160,7 +170,11 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			// while the privileged lookup is retried.
 			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil &&
 				identitySpoolSameIdentity(previous, record, false) == identitySpoolDepartureOther {
-				err = errors.Join(err, writeIdentitySpoolFile(dir, name, record, setOwnership))
+				// The basic facts name another identity, and need not
+				// contradict the gateway's cached ones (they have no UPN):
+				// the old identity is withdrawn as well.
+				err = errors.Join(err, writeIdentitySpoolFile(dir, name, record, setOwnership),
+					writeIdentitySpoolWithdrawal(dir, strconv.Itoa(account.UID), setOwnership))
 			} else if _, statErr := os.Stat(filepath.Join(dir, name)); errors.Is(statErr, os.ErrNotExist) {
 				err = errors.Join(err, writeIdentitySpoolFile(dir, name, record, setOwnership))
 			} else if statErr != nil {
@@ -184,6 +198,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	unresolvedBefore := identitySpoolUnresolved.byDir[dir]
 	identitySpoolUnresolved.Unlock()
 	unresolved := map[string]bool{}
+	var withdrawErr error
 	for _, entry := range entries {
 		if keep[entry.Name()] {
 			continue
@@ -197,7 +212,12 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 					// The uid now names another account, or the same name in
 					// another domain or directory: the record's verified
 					// identity is no longer this uid's, whatever the pass or
-					// the record's own directory says. It goes now.
+					// the record's own directory says. It goes now, and is
+					// withdrawn.
+					key, _ := strings.CutSuffix(entry.Name(), ".json")
+					if err := writeIdentitySpoolWithdrawal(dir, key, setOwnership); err != nil {
+						withdrawErr = errors.Join(withdrawErr, fmt.Errorf("uid %s: withdraw the departed identity: %w", key, err))
+					}
 				case departure == identitySpoolDepartureStays:
 					// The uid still names the record's account: the listing
 					// merely omitted it, and an earlier not-found answer was a
@@ -240,7 +260,15 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	} else {
 		identitySpoolUnresolved.byDir[dir] = unresolved
 	}
-	return passErr
+	return errors.Join(passErr, withdrawErr)
+}
+
+// writeIdentitySpoolWithdrawal withdraws the identity the guardian
+// published for the uid key, as of now (IdentitySpoolWithdrawalSuffix). A
+// young withdrawal stays through the cleanup of later passes (its name is
+// no record's), and goes once it is IdentitySpoolMaxAge old.
+func writeIdentitySpoolWithdrawal(dir, key string, setOwnership func(string) error) error {
+	return writeIdentitySpoolFile(dir, key+IdentitySpoolWithdrawalSuffix, IdentitySpoolRecord{Key: key, UpdatedAt: time.Now().UTC()}, setOwnership)
 }
 
 // identitySpoolCollect is collectIdentitySpoolRecord; tests replace it.

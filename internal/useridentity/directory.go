@@ -139,6 +139,14 @@ type DirectoryFacts struct {
 	// binds a guardian record to the directory object it was resolved for,
 	// which the uid and name alone do not. Never emitted or stored.
 	AccountSID string `json:"-"`
+	// SpoolSeenAt is when the guardian wrote the newest identity record or
+	// withdrawal of the account that the lookup of these facts read (Linux
+	// and macOS), zero for none. The gateway acts once on a record or a
+	// withdrawal written after it and never again on one the lookup already
+	// took into account, so a record that lacks a fact (a SID) or that the
+	// lookup refused does not discard the facts at every request. Never
+	// emitted or stored.
+	SpoolSeenAt time.Time `json:"-"`
 	// Source is the OS facility that resolved these facts, one of the
 	// Source* constants (defenseclaw.user.identity.source).
 	Source string `json:"source,omitempty"`
