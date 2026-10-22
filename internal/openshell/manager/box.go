@@ -129,6 +129,9 @@ type box struct {
 	// hooks.on_silence: stop) scheduled this session's stop.
 	tamperStop  bool
 	silenceSent bool
+	// oldSupervisorStop is set while a stop of a session on an old
+	// supervisor is scheduled (scheduleOldSupervisorStop).
+	oldSupervisorStop bool
 	// toolHostsSaid are the harness tool hosts whose refusal the feed
 	// explained (firstToolHostRefusal).
 	toolHostsSaid map[string]bool
@@ -450,8 +453,10 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		if previous != audit.SandboxPhaseReady {
 			b.rec.Sessions++
 			// The session runs the supervisor of the gateway it started on
-			// (unknown while no gateway is connected: the last one's).
-			if release != "" {
+			// (unknown while no gateway is connected: the last one's). One
+			// back from stopping is the session a stop failed to end
+			// (restorePhase): it keeps the supervisor it ran (GAP-0415).
+			if release != "" && previous != audit.SandboxPhaseStopping {
 				b.rec.SessionRelease = release
 			}
 		}
@@ -534,9 +539,10 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	}
 	if phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(rec.SessionRelease) {
 		// Once a session, and again for a restarted daemon that finds it
-		// still running.
+		// still running: either way DefenseClaw stops it (GAP-0415).
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
 			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorMessage(rec.Name, rec.SessionRelease, m.upgradeWayOn(release))})
+		m.scheduleOldSupervisorStop(b)
 	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
@@ -725,15 +731,19 @@ func (m *Manager) sandboxReleaseRefusal(gw *Gateway) error {
 
 // oldSupervisorWarning is the sandbox's warning while its session runs the
 // supervisor of an OpenShell release older than openshell.SupportedMin
-// (oldSupervisorMessage).
+// (oldSupervisorMessage), which DefenseClaw stops (stopOldSupervisor): a
+// stop that has not happened yet, or failed.
 const oldSupervisorWarning = "this session may run the supervisor of an OpenShell older than " + openshell.SupportedMin +
 	", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494): " +
-	"stop and start the sandbox on OpenShell " + openshell.SupportedMin + " or later"
+	"DefenseClaw stops it, `defenseclaw sandbox exec` runs nothing in it, and `defenseclaw sandbox connect` stops it and starts it again " +
+	"on OpenShell " + openshell.SupportedMin + " or later"
 
 // oldSupervisorMessage is the feed's warning about the sandbox name whose
 // session started on OpenShell release (a record from before DefenseClaw
 // kept it: ""), older than openshell.SupportedMin: it runs that release's
-// supervisor until it stops, whatever the gateway runs now.
+// supervisor until it stops, whatever the gateway runs now, so DefenseClaw
+// stops it (stopOldSupervisor). upgrade is the way on of a gateway that
+// starts no sandbox (Manager.upgradeWayOn).
 func oldSupervisorMessage(name, release, upgrade string) string {
 	msg := "⚠ " + name + "'s session started on OpenShell " + release + ", whose network broker can let the sandbox's connections bypass its policy " +
 		"(NVIDIA/OpenShell#4494), and it keeps that supervisor while it runs: "
@@ -741,10 +751,99 @@ func oldSupervisorMessage(name, release, upgrade string) string {
 		msg = "⚠ " + name + "'s session started before DefenseClaw kept the OpenShell release a session starts on, so it may run a supervisor older than " +
 			openshell.SupportedMin + ", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494): "
 	}
+	msg += "DefenseClaw stops it now, as `defenseclaw sandbox stop " + name + "` does; "
 	if upgrade != "" {
-		return msg + "stop it (`defenseclaw sandbox stop " + name + "`), " + upgrade + ", then start it"
+		return msg + upgrade + ", then `defenseclaw sandbox start " + name + "` starts it on that release's supervisor"
 	}
-	return msg + "`defenseclaw sandbox stop " + name + "` and `defenseclaw sandbox start " + name + "` restart it on this gateway's supervisor"
+	return msg + "`defenseclaw sandbox start " + name + "` (or `connect`) starts it again on this gateway's supervisor"
+}
+
+// scheduleOldSupervisorStop stops in the background the sandbox of b, which
+// is ready on the supervisor of an OpenShell release older than
+// openshell.SupportedMin, or of one its record does not name (a record from
+// DefenseClaw 1.0.3 or older), unless that session is over by then. That
+// supervisor's network broker can let the sandbox's connections bypass its
+// policy (NVIDIA/OpenShell#4494) for as long as the session runs, whatever
+// the gateway runs now, so DefenseClaw leaves none running (GAP-0415): the
+// next start runs the gateway's own supervisor, and a gateway older than
+// SupportedMin starts none (sandboxReleaseRefusal). Once a stop is
+// scheduled, another sight of the session waits for it.
+func (m *Manager) scheduleOldSupervisorStop(b *box) {
+	m.mu.Lock()
+	if b.oldSupervisorStop {
+		m.mu.Unlock()
+		return
+	}
+	b.oldSupervisorStop = true
+	name, bindingID := b.rec.Name, b.rec.BindingID
+	m.mu.Unlock()
+	m.tamperStops.Add(1)
+	go func() {
+		defer m.tamperStops.Done()
+		defer func() {
+			m.mu.Lock()
+			b.oldSupervisorStop = false
+			m.mu.Unlock()
+		}()
+		m.stopOldSupervisor(name, bindingID)
+	}()
+}
+
+// retryOldSupervisorStop schedules the stop of b again while its session is
+// still ready on an old supervisor: a stop that failed (stopOldSupervisor)
+// returned it to ready, which lifecycle sees as no transition, so each
+// reconcile tries again, and the reconcile interval is the backoff
+// (GAP-0415).
+func (m *Manager) retryOldSupervisorStop(b *box) {
+	m.mu.Lock()
+	old := b.phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(b.rec.SessionRelease)
+	m.mu.Unlock()
+	if old {
+		m.scheduleOldSupervisorStop(b)
+	}
+}
+
+// stopOldSupervisor stops the sandbox name while the session bindingID
+// still runs an old supervisor (scheduleOldSupervisorStop). A stop that
+// fails leaves it running on it: the feed says so, and its view tells the
+// CLI (sandboxapi.Sandbox.OldSupervisor), whose exec refuses it and whose
+// connect stops it first.
+func (m *Manager) stopOldSupervisor(name, bindingID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
+	defer cancel()
+	b, unlock, err := m.lockBox(name)
+	if err != nil {
+		m.logf("old supervisor: stop %s: %v", name, err)
+		return
+	}
+	defer unlock()
+	m.mu.Lock()
+	release := b.rec.SessionRelease
+	current := b.rec.BindingID == bindingID && b.phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(release)
+	m.mu.Unlock()
+	if !current {
+		return
+	}
+	if err := m.stop(ctx, b); err != nil {
+		m.logf("old supervisor: stop %s: %v", name, err)
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
+			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorStopFailed(name, release, err)})
+		return
+	}
+	m.logf("old supervisor: stopped %s", name)
+}
+
+// oldSupervisorStopFailed is the feed's line for the sandbox name whose
+// session runs the supervisor of OpenShell release ("" when its record
+// names none) and which DefenseClaw could not stop (err).
+func oldSupervisorStopFailed(name, release string, err error) string {
+	which := "OpenShell " + release
+	if release == "" {
+		which = "an OpenShell release older than " + openshell.SupportedMin + ", as far as DefenseClaw knows"
+	}
+	return "⚠ DefenseClaw could not stop " + name + ", whose session still runs the supervisor of " + which +
+		" (NVIDIA/OpenShell#4494): " + err.Error() + "; stop it with `defenseclaw sandbox stop " + name +
+		"`: until it stops, `defenseclaw sandbox exec` runs nothing in it, and `defenseclaw sandbox connect` stops it first"
 }
 
 // unflushedStopMessage is the feed's warning about the MicroVM name that
@@ -1115,6 +1214,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	}
 	if b.phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(r.SessionRelease) {
 		v.Warnings = append(slices.Clone(v.Warnings), oldSupervisorWarning)
+		v.OldSupervisor = true
 	}
 	v.Hooks = sandboxapi.HookCoverage{
 		LastHookAt: b.hooks.lastHook, LastOTLPAt: b.hooks.lastOTLP, HookRequests: b.hooks.requests,

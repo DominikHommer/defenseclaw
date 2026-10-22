@@ -104,6 +104,21 @@ func TestSandboxPrerequisiteVersions(t *testing.T) {
 				t.Errorf("%s = %q, want the pin mismatch", row, state)
 			}
 		}
+		requireRefusedReleases(t, h, "0.1.5", "openshell cli", "openshell gateway", "microvm driver")
+	})
+	// GAP-0266: an installed release below SupportedMin is recorded with
+	// its version, so the gateway says it is installed and unsupported.
+	t.Run("an installed release older than the floor", func(t *testing.T) {
+		h := newOSHost(t, "linux")
+		h.writeExecutables(t, "/usr/bin/openshell", "/usr/bin/openshell-gateway", "/usr/libexec/openshell/openshell-driver-vm", "/usr/sbin/mke2fs")
+		h.runner.replies = map[string]fakeReply{
+			"rpm -q --qf %{VERSION} openshell":         {result: CommandResult{Stdout: []byte("0.1.3")}},
+			"rpm -q --qf %{VERSION} openshell-gateway": {result: CommandResult{Stdout: []byte("0.1.3")}},
+			"openshell-driver-vm --version":            {result: CommandResult{Stdout: []byte("openshell-driver-vm 0.1.3\n")}},
+		}
+		r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "vm"}))
+		requireOK(t, r)
+		requireRefusedReleases(t, h, "0.1.3", "openshell cli", "openshell gateway", "microvm driver")
 	})
 	t.Run("parts of different releases", func(t *testing.T) {
 		h := newOSHost(t, "linux")
@@ -124,6 +139,32 @@ func TestSandboxPrerequisiteVersions(t *testing.T) {
 			t.Errorf("prerequisites.json = %+v %v, want not ready", record, err)
 		}
 	})
+}
+
+// requireRefusedReleases checks that the published prerequisites.json
+// names release for each of items, the OpenShell parts whose release the
+// lifecycle refused (GAP-0266).
+func requireRefusedReleases(t *testing.T, h *osHost, release string, items ...string) {
+	t.Helper()
+	var record struct {
+		Ready   bool `json:"ready"`
+		Missing []struct {
+			Item    string `json:"item"`
+			Version string `json:"version"`
+		} `json:"missing"`
+	}
+	if err := json.Unmarshal([]byte(h.read(h.env.prerequisitesPath())), &record); err != nil || record.Ready {
+		t.Fatalf("prerequisites.json = %+v %v, want not ready", record, err)
+	}
+	got := map[string]string{}
+	for _, m := range record.Missing {
+		got[m.Item] = m.Version
+	}
+	for _, item := range items {
+		if got[item] != release {
+			t.Errorf("prerequisites.json %s version = %q, want %q (missing %+v)", item, got[item], release, record.Missing)
+		}
+	}
 }
 
 // GAP-0472: the gateway runs only in DefenseClaw's own unit, whose shim sets

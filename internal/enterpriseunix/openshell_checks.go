@@ -799,7 +799,7 @@ func (e *Env) publishPrerequisites(ctx context.Context, s openshellSettings) err
 	for _, row := range primary {
 		if !row.OK {
 			record.Ready = false
-			record.Missing = append(record.Missing, openshell.PrerequisiteMissing{Item: row.Name, Detail: row.Detail, Fix: row.Fix})
+			record.Missing = append(record.Missing, openshell.PrerequisiteMissing{Item: row.Name, Detail: row.Detail, Fix: row.Fix, Version: row.Version})
 		}
 	}
 	if fallback != nil {
@@ -807,7 +807,7 @@ func (e *Env) publishPrerequisites(ctx context.Context, s openshellSettings) err
 		for _, row := range fallback {
 			if !row.OK {
 				record.Fallback.Ready = false
-				record.Fallback.Missing = append(record.Fallback.Missing, openshell.PrerequisiteMissing{Item: row.Name, Detail: row.Detail, Fix: row.Fix})
+				record.Fallback.Missing = append(record.Fallback.Missing, openshell.PrerequisiteMissing{Item: row.Name, Detail: row.Detail, Fix: row.Fix, Version: row.Version})
 			}
 		}
 	}

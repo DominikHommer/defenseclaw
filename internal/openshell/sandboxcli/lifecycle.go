@@ -525,6 +525,17 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	if err != nil {
 		return apiError(err)
 	}
+	if sb.Phase == "ready" && sb.OldSupervisor {
+		// Its session runs a supervisor whose network broker can let its
+		// connections bypass its policy: it stops, and the start below runs
+		// the gateway's own (GAP-0415).
+		a.note(sb.Name + " still runs the supervisor of an OpenShell release older than " + openshell.SupportedMin + "; stopping it to start it on the gateway's own…")
+		stopped, serr := api.Stop(ctx, sb.Name)
+		if serr != nil {
+			return oldSupervisorRefusal(sb.Name, apiError(serr))
+		}
+		sb = stopped
+	}
 	spec, err := ResolveHarness(sb.Harness)
 	if err != nil {
 		return err
@@ -631,6 +642,21 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	return s.exit(code)
 }
 
+// oldSupervisorRefusal refuses to run anything in the sandbox name, ready on
+// the supervisor of an OpenShell release older than openshell.SupportedMin
+// (sandboxapi.Sandbox.OldSupervisor), whose network broker can let its
+// connections bypass its policy (NVIDIA/OpenShell#4494): stopErr is why a
+// connect could not stop it, nil for an exec, which does not try.
+func oldSupervisorRefusal(name string, stopErr error) error {
+	msg := name + " runs the supervisor of an OpenShell release older than " + openshell.SupportedMin +
+		", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494), so DefenseClaw runs nothing in it"
+	if stopErr != nil {
+		return fmt.Errorf("%s, and it could not stop it (%v): stop it with `%s stop %s`, then connect again", msg, stopErr, CommandName, name)
+	}
+	return fmt.Errorf("%s until it starts again on the gateway's own supervisor: `%s connect %s` stops and starts it (or `%s stop %s`, then `%s start %s`)",
+		msg, CommandName, name, CommandName, name, CommandName, name)
+}
+
 // refreshCopy re-stages a copy-mode sandbox's project and uploads it.
 func (a *App) refreshCopy(ctx context.Context, s *session) error {
 	// The sandbox's own policy decides what is held back, as at its run,
@@ -700,6 +726,9 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 	sb, err := api.Get(ctx, o.Name)
 	if err != nil {
 		return apiError(err)
+	}
+	if sb.Phase == "ready" && sb.OldSupervisor {
+		return oldSupervisorRefusal(sb.Name, nil)
 	}
 	if sb.Phase != "ready" {
 		return fmt.Errorf("%s is %s; start it with `%s start %s`", sb.Name, sb.Phase, CommandName, sb.Name)

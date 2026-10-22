@@ -457,7 +457,8 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			if sb.Phase != "ready" {
 				sb.Session++
 			}
-			sb.Phase = "ready"
+			// The session runs the gateway's own supervisor.
+			sb.Phase, sb.OldSupervisor = "ready", false
 			if sb.WorkdirMode == "mount" && sb.Snapshot != nil {
 				// Like the manager: a start takes a new snapshot unless
 				// changes nobody undid or accepted sit on the undo point, and
