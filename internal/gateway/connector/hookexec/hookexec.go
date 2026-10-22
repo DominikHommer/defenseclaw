@@ -35,6 +35,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -42,6 +43,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
@@ -962,7 +964,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// managedPeerFailMode).
 			return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 		}
-		if reason == "gateway unreachable" && !opts.SecureClient && !secureClientHook(opts) && gatewayTookCallWithoutAnswer(err) {
+		if reason == "gateway unreachable" && !opts.SecureClient && !secureClientHook(opts) && errors.Is(err, errGatewayTookCallNoAnswer) {
 			// Same fail mode; the record says the gateway stalled, not that
 			// it could not be reached. Secure Client keeps its reason.
 			reason = noAnswerReason(opts)
@@ -1171,7 +1173,12 @@ func sendHookRequest(
 	}
 	opts.requestFacts.set(req.Header, opts, payload)
 
-	return opts.HTTPClient.Do(req)
+	var connected atomic.Bool
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	}))
+	resp, err := opts.HTTPClient.Do(req)
+	return resp, markConnectedTimeout(err, connected.Load())
 }
 
 // hookRequestFacts are the headers of a hook call that cost work to

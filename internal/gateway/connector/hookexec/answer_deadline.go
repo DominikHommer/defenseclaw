@@ -6,6 +6,7 @@ package hookexec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -260,18 +261,21 @@ func noAnswerReason(opts Options) string {
 	return perUserGatewayNoAnswerReason
 }
 
-// gatewayTookCallWithoutAnswer reports a request error that ended a call the
-// gateway had taken: the client's own timeout ran out while it waited for
-// the answer. The gateway was reached and stalled; a dial that timed out
-// never reached it. A stop or session event has no answer budget, so this
-// is how its stall ends (GAP-0527).
-func gatewayTookCallWithoutAnswer(err error) bool {
+// errGatewayTookCallNoAnswer wraps the error of a hook request whose
+// connection to the gateway was made and whose own timeout then ran out
+// while it waited for the answer: the gateway was reached and stalled, it
+// was not unreachable. A stop or session event has no answer budget, so
+// this is how its stall ends (GAP-0527).
+var errGatewayTookCallNoAnswer = errors.New("the gateway took the call and did not answer before the request timed out")
+
+// markConnectedTimeout wraps err with errGatewayTookCallNoAnswer when the
+// request had its connection and then timed out.
+func markConnectedTimeout(err error, connected bool) error {
 	var netErr net.Error
-	if !errors.As(err, &netErr) || !netErr.Timeout() {
-		return false
+	if err == nil || !connected || !errors.As(err, &netErr) || !netErr.Timeout() {
+		return err
 	}
-	var opErr *net.OpError
-	return !errors.As(err, &opErr) || opErr.Op != "dial"
+	return fmt.Errorf("%w: %w", errGatewayTookCallNoAnswer, err)
 }
 
 // retryFitsAnswer reports whether a resend that starts after delay still
