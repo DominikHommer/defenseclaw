@@ -7236,8 +7236,10 @@ func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.
 		clearLock = connector.ClearHookContractLockEntry
 	}
 	opts := connector.SetupOpts{DataDir: dataDir}
-	if err := retired.Teardown(ctx, opts); err != nil {
-		return fmt.Errorf("cleanup of retired connector %s: %w; %s", retired.Name(), err, removedConnectorDocHint)
+	teardownErr := retired.Teardown(ctx, opts)
+	logRemovedConnectorLeftovers(retired.Name(), opts)
+	if teardownErr != nil {
+		return fmt.Errorf("cleanup of retired connector %s: %w; %s", retired.Name(), teardownErr, removedConnectorDocHint)
 	}
 	if err := retired.VerifyClean(opts); err != nil {
 		return fmt.Errorf("retired connector %s left state: %w; %s", retired.Name(), err, removedConnectorDocHint)
@@ -7247,6 +7249,17 @@ func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.
 	}
 	RemoveConnectorRulePackOverrides(retired.Name())
 	return nil
+}
+
+// logRemovedConnectorLeftovers logs one line for each thing a removed
+// connector's teardown leaves for the user to remove by hand (an agent config
+// that still names its hook or policy module, its stub, a kept token), with
+// the step, so the upgrade log names every such file. until 1.1.
+func logRemovedConnectorLeftovers(name string, opts connector.SetupOpts) {
+	leftovers, _ := connector.RemovedConnectorLeftovers(name, opts)
+	for _, left := range leftovers {
+		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s left %s: %s; to remove it: %s\n", name, left.Path, left.What, left.Step)
+	}
 }
 
 // removedConnectorAlreadyTornDown reports whether name is a removed connector
