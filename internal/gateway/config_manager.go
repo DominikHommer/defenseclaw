@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -334,11 +335,22 @@ func (m *ConfigManager) bindInitialObservabilityV8Plan(plan *config.Observabilit
 	m.v8PlanDigest = plan.Digest()
 }
 
-func (m *ConfigManager) recordLoadError(ctx context.Context, errorType string) {
+func (m *ConfigManager) recordLoadError(ctx context.Context, errorType string, cause error) {
 	if m == nil || m.observabilityV8 == nil {
 		return
 	}
 	recordConfigLoadErrorV8(ctx, m.observabilityV8, errorType)
+	// The graph owns its own rejection reports and their retry identities.
+	// Do not duplicate those, or report an intentional shutdown as rejection.
+	var graphError *runtimegraph.Error
+	if ctx == nil || ctx.Err() != nil || errors.As(cause, &graphError) {
+		return
+	}
+	if emitter, ok := m.observabilityV8.(sidecarRuntimeEmitter); ok {
+		if err := emitConfigReloadRejectionV8(ctx, emitter, errorType); err != nil {
+			fmt.Fprintf(os.Stderr, "[config] could not persist config.reload.rejected: %v\n", err)
+		}
+	}
 }
 
 // getEnvConfigPath returns the current env_config.json overlay path, or
@@ -1127,7 +1139,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		m.rejected = true
 		m.permissionRetry = errors.Is(err, os.ErrPermission)
 		recordGenerationBuildError(err)
-		m.recordLoadError(ctx, "candidate_invalid")
+		m.recordLoadError(ctx, "candidate_invalid", err)
 		if m.health != nil {
 			m.setConfigHealth(StateError, err.Error(), map[string]interface{}{
 				"path":       m.path,
@@ -1140,11 +1152,11 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	m.permissionRetry = false
 	if oldCfg == nil || !config.CurrentSchemaVersion(oldCfg.ConfigVersion) ||
 		!config.CurrentSchemaVersion(next.ConfigVersion) {
-		m.recordLoadError(ctx, "schema_version")
+		m.recordLoadError(ctx, "schema_version", nil)
 		return fmt.Errorf("config reload: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
 	if oldCfg != nil && managed.IsManagedEnterprise(oldCfg.DeploymentMode) && !managed.IsManagedEnterprise(next.DeploymentMode) {
-		m.recordLoadError(ctx, "managed_downgrade")
+		m.recordLoadError(ctx, "managed_downgrade", nil)
 		return fmt.Errorf("config reload cannot downgrade deployment_mode from managed_enterprise")
 	}
 	// Only a change between two managed profiles is a reinstall. An unmanaged
@@ -1153,7 +1165,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if oldCfg != nil && managed.IsManagedEnterprise(oldCfg.DeploymentMode) &&
 		managed.IsManagedEnterprise(next.DeploymentMode) &&
 		oldCfg.EnterpriseProfile() != next.EnterpriseProfile() {
-		m.recordLoadError(ctx, "enterprise_profile_change")
+		m.recordLoadError(ctx, "enterprise_profile_change", nil)
 		return fmt.Errorf("config reload cannot change the enterprise profile from %q to %q; reinstall through the lifecycle", oldCfg.EnterpriseProfile(), next.EnterpriseProfile())
 	}
 	// AVC env_config.json overlay. When present and well-formed the
@@ -1237,7 +1249,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 			source.compiledV8,
 			sidecarObservabilityV8ManagedOptionsFromConfig(next, source.raw),
 		); err != nil {
-			m.recordLoadError(ctx, "managed_destination_rejected")
+			m.recordLoadError(ctx, "managed_destination_rejected", nil)
 			if m.health != nil {
 				m.setConfigHealth(StateError, err.Error(), map[string]interface{}{
 					"path":       m.path,
@@ -1336,7 +1348,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		return nil
 	}
 	if m.applySnapshot == nil {
-		m.recordLoadError(ctx, "apply_unavailable")
+		m.recordLoadError(ctx, "apply_unavailable", nil)
 		return fmt.Errorf("config reload schema v8 requires a source-aware apply callback")
 	}
 	applyStarted := time.Now()
@@ -1379,7 +1391,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		m.noteRejectedCandidateAssets(next)
 		m.permissionRetry = errors.Is(applyErr, os.ErrPermission)
 		recordGenerationBuildError(applyErr)
-		m.recordLoadError(ctx, "apply_rejected")
+		m.recordLoadError(ctx, "apply_rejected", applyErr)
 		if m.health != nil {
 			m.setConfigHealth(StateError, applyErr.Error(), map[string]interface{}{
 				"path":             m.path,

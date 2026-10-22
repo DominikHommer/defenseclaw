@@ -138,6 +138,15 @@ func TestApplicationProtectionModeMatrixPreservesUnmanagedBaselineRepair(t *test
 				"127.0.0.1:18970",
 				"master-token",
 			)
+			stopGuards := func() int {
+				controller.mu.Lock()
+				defer controller.mu.Unlock()
+				for _, guard := range controller.guards {
+					guard.Stop()
+				}
+				return len(controller.guards)
+			}
+			t.Cleanup(func() { stopGuards() })
 
 			now := time.Now().UTC()
 			controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -152,6 +161,16 @@ func TestApplicationProtectionModeMatrixPreservesUnmanagedBaselineRepair(t *test
 				}},
 			})
 
+			// Join self-heal workers before reading their fake connector's
+			// counters and before TempDir cleanup can trigger another repair.
+			guardsStarted := stopGuards()
+			wantGuards := 1
+			if tc.wantGuardianOwn {
+				wantGuards = 0
+			}
+			if guardsStarted != wantGuards {
+				t.Fatalf("mode=%q started %d gateway guards, want %d", tc.mode, guardsStarted, wantGuards)
+			}
 			if conn.setupCalls != tc.wantSetupCalls {
 				t.Fatalf(
 					"mode=%q automatic repair Setup calls = %d, want %d",
