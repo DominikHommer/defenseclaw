@@ -148,7 +148,9 @@ type foreignHookPublishTestServer struct {
 	call                 func(token string, update map[string]any) enterprisepolicy.GuardDecision
 	// exchange is call without failing the test, for another goroutine.
 	exchange func(token string, update map[string]any) (int, []byte)
-	t        *testing.T
+	// exchangeCtx is exchange from a hook whose request ends with ctx.
+	exchangeCtx func(ctx context.Context, token string, update map[string]any) (int, []byte)
+	t           *testing.T
 }
 
 // keyID names identity's current record key ("" for none).
@@ -275,7 +277,7 @@ func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, 
 	}
 	server.api = api
 	server.dataDir = api.configDataDir()
-	handler := api.tokenAuth(api.managedHookSocketMux())
+	handler := api.answerForeignHooks(api.tokenAuth(api.managedHookSocketMux()))
 	aliceToken := userScopedTestToken(t, connector.UserScopedHookCredential, "claudecode", alice)
 	bobToken := userScopedTestToken(t, connector.UserScopedHookCredential, "claudecode", bob)
 	server.aliceToken, server.bobToken = aliceToken, bobToken
@@ -285,7 +287,7 @@ func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, 
 	listener := httptest.NewServer(handler)
 	t.Cleanup(listener.Close)
 	api.serveForeignHooks(listener.Listener)
-	server.exchange = func(token string, update map[string]any) (int, []byte) {
+	server.exchangeCtx = func(ctx context.Context, token string, update map[string]any) (int, []byte) {
 		data, err := json.Marshal(update)
 		if err != nil {
 			return 0, []byte(err.Error())
@@ -295,12 +297,15 @@ func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, 
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-DefenseClaw-Client", "foreign-hook-guard/1.0")
 		req.Header.Set("Authorization", "Bearer "+token)
-		req = req.WithContext(context.WithValue(req.Context(), acpConnPeerKey{}, &acpConnPeer{uid: peerUIDs[token], known: true}))
+		req = req.WithContext(context.WithValue(ctx, acpConnPeerKey{}, &acpConnPeer{uid: peerUIDs[token], known: true}))
 		// Every gateway listener's connection can bound a write; an allow
 		// is refused on one that cannot.
 		response := newDeadlineRecorder()
 		handler.ServeHTTP(response, req)
 		return response.Code, response.Body.Bytes()
+	}
+	server.exchange = func(token string, update map[string]any) (int, []byte) {
+		return server.exchangeCtx(context.Background(), token, update)
 	}
 	server.call = func(token string, update map[string]any) enterprisepolicy.GuardDecision {
 		t.Helper()

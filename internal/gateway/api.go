@@ -1311,6 +1311,8 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// agent parent without creating an unregistered SDK server span.
 	handler = requestIDMiddleware(handler)
 	handler = inboundTraceContextMiddleware(handler)
+	// Outermost, so a session exchange is timed from its arrival.
+	handler = a.answerForeignHooks(handler)
 
 	baseCtx := ctx
 	if managedHookSocketEnabled(a.scannerCfg) {
@@ -1356,7 +1358,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		h = a.metricsMiddleware(h)
 		h = CorrelationMiddleware(reg)(h)
 		h = requestIDMiddleware(h)
-		return inboundTraceContextMiddleware(h)
+		return a.answerForeignHooks(inboundTraceContextMiddleware(h))
 	})
 	apiDetails := map[string]interface{}{"addr": a.addr}
 	if hookErr != nil {

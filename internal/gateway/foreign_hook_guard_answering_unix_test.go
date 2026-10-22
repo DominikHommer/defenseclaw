@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"net"
 	"runtime"
@@ -23,7 +24,8 @@ import (
 // way the gateway can fail to answer: a listener that takes connections
 // but never answers (wedged, out of handler capacity), a listener that
 // takes none, and an exchange that waits on the gateway past the hook's
-// budget. Once the gateway answers again, the proof is renewed again.
+// budget (alice's own: the wait of an exchange counts against its
+// account). Once the gateway answers again, the proof is renewed again.
 func TestForeignHookSessionProofIsRenewedOnlyWhileTheGatewayAnswers(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -52,7 +54,7 @@ func TestForeignHookSessionProofIsRenewedOnlyWhileTheGatewayAnswers(t *testing.T
 			blocked, release := make(chan struct{}), make(chan struct{})
 			previous := foreignHookSessionKey
 			foreignHookSessionKey = func(root, identity string) (enterprisepolicy.SessionRecordKey, error) {
-				if identity == server.bob {
+				if identity == server.alice {
 					close(blocked)
 					<-release
 				}
@@ -61,7 +63,7 @@ func TestForeignHookSessionProofIsRenewedOnlyWhileTheGatewayAnswers(t *testing.T
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				server.exchange(server.bobToken, foreignHookTestCall("s-9", runtime.GOOS+":b:2:500", false))
+				server.exchange(server.aliceToken, foreignHookTestCall("s-1", runtime.GOOS+":b:1:500", false))
 			}()
 			<-blocked
 			foreignHookSessionKey = previous
@@ -69,6 +71,9 @@ func TestForeignHookSessionProofIsRenewedOnlyWhileTheGatewayAnswers(t *testing.T
 			return func() {
 				close(release)
 				<-done
+				// The late answer keeps the account unanswered until a
+				// later exchange is answered in time.
+				server.call(server.aliceToken, foreignHookTestCall("s-1", runtime.GOOS+":b:1:500", false))
 			}
 		}},
 	} {
@@ -101,9 +106,10 @@ func TestForeignHookSessionProofIsRenewedOnlyWhileTheGatewayAnswers(t *testing.T
 			}
 
 			resume()
+			resumed := writes.of(server.alice)
 			server.api.renewForeignHookSessionProofsOnce()
-			if writes.of(server.alice) != stalled+1 {
-				t.Fatalf("the gateway answers again and renews the proof: %d writes, want %d", writes.of(server.alice), stalled+1)
+			if writes.of(server.alice) != resumed+1 {
+				t.Fatalf("the gateway answers again and renews the proof: %d writes, want %d", writes.of(server.alice), resumed+1)
 			}
 			if err := foreignHookOutageAfter(server, server.alice, key, 0); err != nil {
 				t.Fatalf("the renewed allow: %v", err)
@@ -139,4 +145,84 @@ func foreignHookForgetListenersForTest(server *foreignHookPublishTestServer, add
 		}
 	}
 	s.listeners = kept
+}
+
+// The 1.0.4 guard review (round 6, P2): whether the gateway answered a hook
+// is kept, not sampled at the renewal. An exchange that got no answer within
+// the hook's budget, counted from its arrival, stops the renewal of its
+// account's proofs until a later exchange of the account is answered in
+// time, also when it waited outside the handler (for the caller's run slot)
+// or ended before the renewal looked (the hook gave up). Before, only an
+// exchange still being decided at the renewal, counted from after its body
+// was read, stopped it, so a dropped exchange left the proofs renewed for
+// 15 minutes. Another account's proofs are still renewed.
+func TestForeignHookSessionProofIsNotRenewedAfterAnExchangeWentUnanswered(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// drop makes one exchange of alice go unanswered within the budget.
+		drop func(t *testing.T, server *foreignHookPublishTestServer, budget time.Duration)
+	}{
+		{name: "the exchange waits for the caller's run slot until the hook gives up", drop: func(t *testing.T, server *foreignHookPublishTestServer, budget time.Duration) {
+			release, run, refusal, _ := server.api.hookCallerLimits.acquire(server.alice)
+			if refusal != "" {
+				t.Fatalf("holding alice's run slot: %s", refusal)
+			}
+			run <- struct{}{}
+			ctx, cancel := context.WithTimeout(context.Background(), budget)
+			defer cancel()
+			if _, body := server.exchangeCtx(ctx, server.aliceToken, foreignHookTestCall("s-1", runtime.GOOS+":b:1:500", false)); len(body) != 0 {
+				t.Fatalf("an exchange that never got a run slot was answered: %s", body)
+			}
+			<-run
+			release()
+		}},
+		{name: "the exchange is answered after the hook's budget", drop: func(t *testing.T, server *foreignHookPublishTestServer, budget time.Duration) {
+			previous := foreignHookSessionKey
+			foreignHookSessionKey = func(root, identity string) (enterprisepolicy.SessionRecordKey, error) {
+				time.Sleep(2 * budget)
+				return previous(root, identity)
+			}
+			defer func() { foreignHookSessionKey = previous }()
+			server.call(server.aliceToken, foreignHookTestCall("s-1", runtime.GOOS+":b:1:500", false))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newForeignHookRealPublishTestServer(t)
+			server.api.hookCallerLimits.running = 1
+			previousWithin := foreignHookAnswerWithin
+			foreignHookAnswerWithin = 200 * time.Millisecond
+			t.Cleanup(func() { foreignHookAnswerWithin = previousWithin })
+			writes := countForeignHookAllowWrites(t)
+			key := enterprisepolicy.SessionKey{Connector: "claudecode", Session: "s-1", Process: runtime.GOOS + ":b:1:500"}
+			for _, token := range []string{server.aliceToken, server.bobToken} {
+				if got := server.call(token, foreignHookTestCall("s-1", key.Process, true)); got.Deny {
+					t.Fatalf("a clean session start: %+v", got)
+				}
+			}
+
+			tc.drop(t, server, foreignHookAnswerWithin)
+			alice, bob := writes.of(server.alice), writes.of(server.bob)
+			for range 3 {
+				server.api.renewForeignHookSessionProofsOnce()
+			}
+			if writes.of(server.alice) != alice {
+				t.Fatalf("the proof of an account whose exchange went unanswered was renewed: %d writes, want %d", writes.of(server.alice), alice)
+			}
+			if writes.of(server.bob) != bob+3 {
+				t.Fatalf("another account's proof: %d writes, want %d", writes.of(server.bob), bob+3)
+			}
+			if err := foreignHookOutageAfter(server, server.alice, key, foreignHookProofExpired); !errors.Is(err, enterprisepolicy.ErrPublishedSessionUnavailable) {
+				t.Fatalf("the earlier allow 90 s after its last renewal: %v, want ErrPublishedSessionUnavailable", err)
+			}
+
+			if got := server.call(server.aliceToken, foreignHookTestCall("s-1", key.Process, false)); got.Deny {
+				t.Fatalf("alice's next call: %+v", got)
+			}
+			answered := writes.of(server.alice)
+			server.api.renewForeignHookSessionProofsOnce()
+			if writes.of(server.alice) != answered+1 {
+				t.Fatalf("a later exchange answered in time renews the proof again: %d writes, want %d", writes.of(server.alice), answered+1)
+			}
+		})
+	}
 }

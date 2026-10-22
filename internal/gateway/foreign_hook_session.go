@@ -83,10 +83,6 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		writeManagedHookRefusal(w, http.StatusForbidden, "foreign_hook_session_scope_mismatch")
 		return
 	}
-	// From here the answer waits only on the gateway: an exchange that waits
-	// too long stops the renewal of every outage proof
-	// (foreignHookGatewayAnswering).
-	defer a.decideForeignHookExchange()()
 	stateDir := enterprisepolicy.ForeignHookSessionStoreDir(dataDir, identity)
 	// Each identity has its own store, so only that identity's exchanges
 	// are serialized; another account's exchange never waits on this one.
