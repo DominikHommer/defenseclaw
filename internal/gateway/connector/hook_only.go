@@ -382,7 +382,8 @@ func NewCopilotConnector() *hookOnlyConnector {
 // unified hook collector. agy reads global hooks from
 // ~/.gemini/config/hooks.json. PreToolUse and PostToolUse use matcher groups;
 // PreInvocation, PostInvocation, and Stop use direct command-handler lists.
-// PreToolUse supports documented allow/deny/ask/force_ask decisions.
+// PreToolUse supports documented allow/deny/ask/force_ask decisions;
+// DefenseClaw sends deny for a block and force_ask for a confirmation.
 //
 // Scope is intentionally "user" only. Antigravity also discovers
 // <workspace>/.agents/hooks.json, but Setup owns only the global file so the

@@ -303,6 +303,13 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "claudecode", req.HookEventName, action, reason,
 			evalCtx.RuleIDs, policy)
 	}
+	// Claude Code shows the native ask only in its default (Manual) mode; in
+	// any other mode the ask would run the call or be refused without the
+	// reason, so the confirmation blocks with the next step (GAP-0371). The
+	// reason was resolved as a confirmation, so no block message replaces it.
+	if action == "confirm" && req.HookEventName == "PreToolUse" && !gatewayconnector.ClaudeCodeModeCanAsk(req.PermissionMode) {
+		action = "block"
+	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
 	resp.SourceReason = verdict.Reason
 	// Stamp the unified-pipeline correlation keys so the agent-hook
@@ -442,9 +449,19 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 	if rawAction == "" {
 		rawAction = action
 	}
+	// A confirmation blocked because the permission mode cannot ask keeps the
+	// confirmation wording and adds the next step (GAP-0371).
+	noAsk := req.HookEventName == "PreToolUse" && action == "block" && strings.EqualFold(rawAction, "confirm")
+	reasonAction := action
+	if noAsk {
+		reasonAction = "confirm"
+	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
-	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
-	safeReason = agentObservedReason(action, reason, safeReason, notificationSinkPolicy(policy))
+	safeReason = agentVerdictReason(reasonAction, reason, safeReason, notificationSinkPolicy(policy))
+	safeReason = agentObservedReason(reasonAction, reason, safeReason, notificationSinkPolicy(policy))
+	if noAsk {
+		safeReason = gatewayconnector.ClaudeCodeNoAskReason(safeReason, req.PermissionMode)
+	}
 	// wouldBlock remains a shadow-telemetry signal for post-result events, but
 	// the connector cannot enforce those events. Do not describe an advisory
 	// result as something Claude would block in action mode.
@@ -492,6 +509,9 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 			"permissionDecision":       "ask",
 			"permissionDecisionReason": reasonOrDefaultClaudeCode(reason),
 		}}
+	}
+	if action == "block" && event == "PreToolUse" && strings.EqualFold(rawAction, "confirm") {
+		reason = gatewayconnector.ClaudeCodeNoAskReason(reason, req.PermissionMode)
 	}
 	if action == "block" {
 		switch event {

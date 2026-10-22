@@ -59,7 +59,8 @@ func TestPerUserCopilotHookRefusesAnUnboundEvent(t *testing.T) {
 }
 
 // A closed per-user Copilot CLI or Antigravity hook accepts a confirmation
-// only with the agent's native ask and a block only with its native deny, as
+// only with the agent's native ask (Antigravity: force_ask) and a block only
+// with its native deny, as
 // copilot-hook.sh and antigravity-hook.sh check; anything else is no verdict
 // and is denied. A real ask passes through, and fail mode open lets an
 // unusable answer run.
@@ -77,8 +78,12 @@ func TestPerUserHookDeniesAnAnswerWithoutTheNativeDecision(t *testing.T) {
 		{"antigravity confirm allow", "antigravity", "PreToolUse",
 			`{"action":"confirm","hook_output":{"decision":"allow"}}`, "closed", `"decision":"deny"`},
 		{"antigravity block", "antigravity", "PreToolUse", `{"action":"block"}`, "closed", `"decision":"deny"`},
-		{"antigravity ask", "antigravity", "PreToolUse",
-			`{"action":"confirm","hook_output":{"decision":"ask","reason":"check"}}`, "closed", `"decision":"ask"`},
+		// GAP-0405: a plain ask honors a cached Always Allow grant, so only
+		// force_ask is Antigravity's confirmation.
+		{"antigravity plain ask", "antigravity", "PreToolUse",
+			`{"action":"confirm","hook_output":{"decision":"ask","reason":"check"}}`, "closed", `"decision":"deny"`},
+		{"antigravity force_ask", "antigravity", "PreToolUse",
+			`{"action":"confirm","hook_output":{"decision":"force_ask","reason":"check"}}`, "closed", `"decision":"force_ask"`},
 		{"antigravity confirm open", "antigravity", "PreToolUse", `{"action":"confirm"}`, "open", `"decision":"allow"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

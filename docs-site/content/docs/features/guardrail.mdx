@@ -71,7 +71,7 @@ Only these agent events can pause for your approval. Every other agent applies a
 
 | Agent | Event that can ask |
 | --- | --- |
-| Claude Code | `PreToolUse` |
+| Claude Code | `PreToolUse`, in Manual mode only (any other permission mode blocks the call) |
 | GitHub Copilot CLI | `preToolUse` |
 | Antigravity | `PreToolUse` |
 | Amp | `tool.call` and `tool.result` in the active foreground thread |

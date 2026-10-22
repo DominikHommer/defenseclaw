@@ -159,7 +159,7 @@ Not covered yet:
 
 ## Native ask
 
-Only `preToolUse` supports native ask. In action mode a confirm verdict that is eligible becomes Copilot's ask prompt. Confirm findings on other events use a non-pausing audit and alert fallback.
+Only `preToolUse` supports native ask. In action mode a confirm verdict that is eligible becomes Copilot's ask prompt. Copilot's own allow rules and `--allow-all-tools` do not answer it. Where Copilot cannot show a prompt (`copilot -p`) it denies the call. Its hook input does not say which case applies, so the audit log records `confirm` for both. Confirm findings on other events use a non-pausing audit and alert fallback.
 
 ## Fail mode
 
