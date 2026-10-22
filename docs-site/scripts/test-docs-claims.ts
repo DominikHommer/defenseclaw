@@ -120,13 +120,38 @@ describe('managed outage documentation', () => {
       assert.match(text, /Windows[^.]*service manager[^.]*not running[^.]*no listener/i, name);
       assert.match(text, /`enterprise_managed_gateway_restarting`[^.]*`enterprise_managed_gateway_no_answer`[^.]*block[^.]*`open`/i, name);
     }
-    assert.match(modes, /no-answer deadline blocks even under `open`, including Secure Client/);
     const component = readFileSync(join(site, 'components/capability-matrix.tsx'), 'utf8');
     assert.match(component, /Managed standalone, administrator open, proven not-running gateway/);
 
     const threat = readFileSync(join(repo, 'docs/ENTERPRISE-THREAT-MODEL.md'), 'utf8').split(/\s+/).join(' ');
     assert.match(threat, /administrator(?:'s)? `open` applies only when the gateway is proven not running/i);
     assert.doesNotMatch(threat, /gateway service stopped, restarting or no answer in time/i);
+  });
+
+  it('distinguishes Secure Client request timeout from a standalone no-answer deadline', () => {
+    const deadline = readFileSync(join(repo, 'internal/gateway/connector/hookexec/answer_deadline.go'), 'utf8');
+    assert.match(deadline, /if opts\.SecureClient \|\| startedAt\.IsZero\(\) \|\| !bounded \{\s*return time\.Time\{\}/);
+    const hook = readFileSync(join(repo, 'internal/gateway/connector/hookexec/hookexec.go'), 'utf8');
+    assert.match(hook, /if readErr != nil \{\s*return failNoAnswer\(opts, sp, failMode\)/);
+    const modes = page('reference/configuration/fail-modes.mdx');
+    assert.match(modes, /Managed standalone hooks block when the no-answer deadline expires, even under `open`\./);
+    assert.match(modes, /Secure Client hooks have no separate no-answer deadline and keep their whole request budget/);
+    assert.match(modes, /a request that times out before headers follows its effective fail mode/);
+    assert.match(modes, /a successful response cut off after headers blocks/);
+    assert.doesNotMatch(modes, /no-answer deadline[^.]*including Secure Client/i);
+  });
+
+  it('scopes an unreadable Windows listener table to a stopped service', () => {
+    const transport = readFileSync(join(repo, 'internal/gateway/connector/hookexec/managed_transport_windows.go'), 'utf8');
+    assert.match(transport, /if listening, known := managedEnterpriseListening\(canonicalAddr\); known && !listening/);
+    assert.match(transport.split('func stoppedManagedGatewayError')[1] ?? '', /case !known:/);
+    for (const name of ['reference/configuration/fail-modes.mdx', 'reference/apis/capability-matrix.mdx']) {
+      const text = page(name);
+      assert.match(text, /A stopped service whose listener table cannot be read, a stopped service with another listener on its port, or a running service with no listener blocks\./, name);
+      assert.match(text, /A connected listener owned by another process also blocks\./, name);
+      assert.match(text, /When the service is running and the listener table cannot be read, the hook dials and verifies the connected peer\./, name);
+      assert.doesNotMatch(text, /a running service with no listener(?: or|,) an unreadable listener table/i, name);
+    }
   });
 });
 
