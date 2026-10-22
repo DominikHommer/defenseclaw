@@ -139,8 +139,8 @@ func TestHookSidecarShapes(t *testing.T) {
 		`{"Version":2,"version":2}`:     true,
 		`{"verſion":2}`:                 true,
 		`{"versions":2,"fail_mode":{}}`: false,
-		// Deep nesting walks without recursion; past encoding/json's own
-		// depth limit it is not JSON to Go, malformed.
+		// Deep nesting walks without recursion; past 10000 levels it is
+		// malformed.
 		strings.Repeat("[", 5000) + strings.Repeat("]", 5000):                           false,
 		strings.Repeat("[", 200000) + strings.Repeat("]", 200000):                       true,
 		`{"x":` + strings.Repeat("[", 200000) + strings.Repeat("]", 200000) + `,"x":1}`: true,

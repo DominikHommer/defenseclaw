@@ -44,9 +44,15 @@ func HookSidecarJSONAmbiguous(data []byte) bool {
 	return jsonDuplicateKey(data)
 }
 
-// jsonDuplicateKey reports an object of data that names a key twice, or data
-// that is not JSON. It walks the tokens without recursion, so the nesting of
-// the document never grows the stack.
+// hookSidecarJSONMaxNesting bounds the nesting jsonDuplicateKey walks: the
+// writers nest two levels, and encoding/json's own limit is not the same in
+// every Go release.
+const hookSidecarJSONMaxNesting = 10000
+
+// jsonDuplicateKey reports an object of data that names a key twice, data
+// nested deeper than hookSidecarJSONMaxNesting, or data that is not JSON. It
+// walks the tokens without recursion, so the nesting of the document never
+// grows the stack.
 func jsonDuplicateKey(data []byte) bool {
 	type frame struct {
 		keys      map[string]struct{} // nil for an array
@@ -79,6 +85,9 @@ func jsonDuplicateKey(data []byte) bool {
 					next.expectKey = true
 				}
 				stack = append(stack, next)
+				if len(stack) > hookSidecarJSONMaxNesting {
+					return true
+				}
 			default:
 				stack = stack[:len(stack)-1]
 			}
@@ -130,7 +139,7 @@ func legacyHookSidecarKey(key string) bool {
 	}
 	for i := 0; i < len(key); i++ {
 		c := key[i]
-		if !(c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+		if c != '_' && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
 			return false
 		}
 	}
@@ -166,7 +175,7 @@ func flatHookRecordKey(key string) bool {
 	}
 	for i := 0; i < len(key); i++ {
 		c := key[i]
-		if !(c == '_' || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+		if c != '_' && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
 			return false
 		}
 	}
