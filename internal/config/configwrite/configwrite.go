@@ -482,6 +482,9 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 	}
 	if exists && bytes.Equal(candidate, current) {
 		state, stateErr := cfgtxn.ReadGenerationState(txn.Path())
+		if opt.Bundle.ID != "" && stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
+			return Result{}, fmt.Errorf("configwrite: cannot bind a bundle to an unreadable generation record: %w; run `enterprise bundle status --json` and restore the protected generation record before retrying", stateErr)
+		}
 		// A first bundle (or another bundle with equal config bytes) still
 		// changes the policy's provenance and digest scope. The lifecycle
 		// must also clear that identity when undoing to the equal-byte base.

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -64,5 +65,17 @@ func TestEqualConfigBytesRecordANewBundleIdentity(t *testing.T) {
 	state, err := ReadGenerationState(path)
 	if err != nil || restored.Generation != 5 || state.BundleID != "" || state.BundleVersion != 0 || state.SignerKeyID != "" {
 		t.Fatalf("restored base: %+v, %v", state, err)
+	}
+	broken := []byte(`{"generation":5,`)
+	if err := os.WriteFile(GenerationPath(path), broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opt.ExpectSHA256 = SHA256Hex(raw)
+	if _, err := ReplaceDocument(context.Background(), path, raw, opt); err == nil || !strings.Contains(err.Error(), "enterprise bundle status --json") {
+		t.Fatalf("unproven generation: %v", err)
+	}
+	after, err = os.ReadFile(GenerationPath(path))
+	if err != nil || string(after) != string(broken) {
+		t.Fatalf("refusal rewrote the unproven generation: %q, %v", after, err)
 	}
 }
