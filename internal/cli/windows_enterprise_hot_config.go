@@ -813,9 +813,15 @@ func acquireWindowsEnterpriseLifecycleLock(path string) (func(), error) {
 func windowsHotConfigWriteOptions(opts *windowsEnterpriseLifecycleOptions, expectSHA string) (configwrite.Options, configwrite.BundleRef, error) {
 	if opts != nil && opts.bundleRollbackTo != nil {
 		// A rollback to the confirmed bundle records it as that bundle again,
-		// so /health and the digest scope name the bundle that enforces.
+		// so /health and the digest scope name the bundle that enforces. It
+		// is adopted only once the gateway names that bundle and version
+		// (GAP-0445): an incomplete reference refuses before the write.
 		opt, err := opts.bundleRollbackTo.writeOptions(expectSHA)
-		return opt, configwrite.BundleRef{}, err
+		if err != nil {
+			return opt, configwrite.BundleRef{}, err
+		}
+		identity, err := windowsBundleRollbackIdentity(opts.bundleRollbackTo.ref, opt.Bundle)
+		return opt, identity, err
 	}
 	if opts == nil || opts.bundle == nil || opts.bundle.prepared == nil || (opts.bundle.prepared.Receipt == nil && !opts.bundle.prepared.AlreadyApplied) {
 		return configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure", ExpectSHA256: expectSHA}, configwrite.BundleRef{}, nil
@@ -841,6 +847,20 @@ func windowsHotConfigWriteOptions(opts *windowsEnterpriseLifecycleOptions, expec
 	}
 	opt.ExpectSHA256 = expectSHA
 	return opt, bundle, nil
+}
+
+// windowsBundleRollbackIdentity is the bundle a rollback to the confirmed
+// bundle must see the gateway name: the confirmed reference, which the
+// config record names too.
+func windowsBundleRollbackIdentity(ref *enterprisebundle.Ref, written configwrite.BundleRef) (configwrite.BundleRef, error) {
+	if ref == nil || !enterprisebundle.ValidBundleID(ref.BundleID) || ref.Version == 0 {
+		return configwrite.BundleRef{}, errors.New("the confirmed rollback bundle has no bundle ID and version")
+	}
+	if written.ID != ref.BundleID || written.Version != ref.Version {
+		return configwrite.BundleRef{}, fmt.Errorf("the config record would name bundle %q version %d, not the confirmed bundle %s version %d",
+			written.ID, written.Version, ref.BundleID, ref.Version)
+	}
+	return configwrite.BundleRef{ID: ref.BundleID, Version: ref.Version}, nil
 }
 
 // windowsHotConfirmedBundle reads, for a repeated delivery of the confirmed

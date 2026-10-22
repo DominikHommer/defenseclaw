@@ -9,17 +9,17 @@ keywords:
   - DEFENSECLAW_FAIL_MODE
 ---
 
-One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows (`open`) or blocks (`closed`) when the gateway cannot give a usable answer. It covers transport failures and invalid responses alike. The mode is the one installed with the hooks: the environment does not set it, and one variable, `DEFENSECLAW_STRICT_AVAILABILITY`, can only make an outage stricter ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
+One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows (`open`) or blocks (`closed`) when the gateway cannot give a usable answer. Per-user and Secure Client hooks apply it to transport failures and invalid responses; managed standalone hooks allow only the specific outages described below. The mode is the one installed with the hooks: the environment does not set it, and one variable, `DEFENSECLAW_STRICT_AVAILABILITY`, can only make an outage stricter ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
 
 ## Controls
 
 | Control | Effect | Default and scope |
 | --- | --- | --- |
-| `guardrail.hook_fail_mode` | `open` allows, `closed` blocks supported hook events when delivery or the gateway response fails. | `closed`. Under Secure Client an unset value is `open` ([Secure Client](#secure-client)). Per connector: `guardrail.connectors.<name>.hook_fail_mode`. |
+| `guardrail.hook_fail_mode` | `open` allows an eligible outage; `closed` blocks supported hook events when delivery or the gateway response fails. Managed refusals below block in either mode. | `closed`. Under Secure Client an unset value is `open` ([Secure Client](#secure-client)). Per connector: `guardrail.connectors.<name>.hook_fail_mode`. |
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force a closed connector open. | Unset. Per agent process. |
 | `DEFENSECLAW_FAIL_MODE` | Not read by 1.0.4 hooks: the installed mode is the fail mode. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again; Secure Client shell hooks keep it ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)). | Set the mode with `defenseclaw guardrail fail-mode`. |
 
-An explicit value always wins, on every install: the OSS per-user install, the standalone enterprise profile, MDM-managed standalone hosts and Secure Client. On a managed computer the value comes from the administrator's config, so an `open` there is the administrator's choice and the managed hooks follow it. On a managed standalone host `DEFENSECLAW_STRICT_AVAILABILITY` is tighten-only: a stricter value is honored, a looser one is ignored ([Environment variables](/docs/reference/configuration/env-vars)).
+An explicit value selects the fail mode on the OSS per-user install, the standalone enterprise profile, MDM-managed standalone hosts and Secure Client. On a managed computer the value comes from the administrator's config. An administrator-selected `open` permits only eligible outages; integrity and response failures still block as listed below. On a managed standalone host `DEFENSECLAW_STRICT_AVAILABILITY` is tighten-only: a stricter value is honored, a looser one is ignored ([Environment variables](/docs/reference/configuration/env-vars)).
 
 `status --json` and `verify --json` give each protected connector's resolved mode as `connectors.<id>.effective_hook_fail_mode`.
 
@@ -49,7 +49,7 @@ On a managed standalone host `open` applies only to an outage: the gateway servi
 
 ### Secure Client
 
-Under the Secure Client integration only, hooks fail open: an unset `guardrail.hook_fail_mode` resolves to `open` for every connector (Codex and Claude Code included), independent of the guardrail mode, and an explicit `closed` (global or per connector) is kept. With `open`, a Secure Client hook allows the call when the gateway is unreachable, its service is stopped or its answer cannot be used, and records the failure. Only an authenticated Secure Client deployment gets this: the profile the protected config resolves and, for the native Windows hook, a host whose Secure Client installation, deployment record and gateway service check out. Every other install keeps the closed default.
+Under the Secure Client integration only, hooks fail open: an unset `guardrail.hook_fail_mode` resolves to `open` for every connector (Codex and Claude Code included), independent of the guardrail mode, and an explicit `closed` (global or per connector) is kept. With `open`, a Secure Client hook allows the call when the gateway is unreachable, its service is stopped or its answer cannot be used. Failure reporting depends on the connector ([Reporting](#reporting-and-diagnosis)). Only an authenticated Secure Client deployment gets this: the profile the protected config resolves and, for the native Windows hook, a host whose Secure Client installation, deployment record and gateway service check out. Every other install keeps the closed default.
 
 ### Connectors without a fail-closed hook
 
@@ -61,19 +61,22 @@ Under the Secure Client integration only, hooks fail open: an unset `guardrail.h
 
 A GitHub Copilot hook whose registered command names no event DefenseClaw reviewed is refused in fail mode `closed`, and a managed one in every fail mode. Copilot can block only `preToolUse` and `permissionRequest`, and its payload does not name the event, so the hook answers with both of Copilot's deny fields. An Antigravity hook registered without its event denies a tool call in fail mode `closed` and gives anything else its no-op answer. `verify` reports a DefenseClaw hook registered for an event DefenseClaw does not publish, and `ensure` rewrites the drop-in. On a per-user install `defenseclaw doctor` names the entry, and `defenseclaw setup <connector>` registers it again.
 
-On a managed standalone host the administrator-owned hooks of GitHub Copilot CLI and Hermes follow the effective mode on every OS: `closed` blocks a tool call DefenseClaw cannot check (service not running, unusable answer, or a call too large to inspect), and the agent shows why. Only the administrator's `hook_fail_mode: open` lets such a call through.
+On a managed standalone host the administrator-owned hooks of GitHub Copilot CLI and Hermes follow the effective mode on every OS: `closed` blocks a tool call DefenseClaw cannot check, and the agent shows why. The administrator's `hook_fail_mode: open` permits a service outage; an unusable answer or a call too large to inspect still blocks.
 
 ## Effective behavior
 
-| Failure | Effective `open` | Effective `closed` |
-| --- | --- | --- |
-| Gateway connection refused, timeout or 5xx | Allow, warn, record the transport failure. When the gateway starts again it reports the allowed calls as an alert ([Reporting](#reporting-and-diagnosis)). | Return the connector's block response and record the failure. |
-| Connector authentication missing | Allow and record the missing-token failure. | Block and report the token failure. |
-| Gateway returns 4xx, malformed JSON or no action | Allow, warn, record the response failure. | Block with the connector's response shape and record the failure. |
-| Hook input over its bounded payload | Refuse to process it, record it, allow. | Refuse to process it, record it, block where the connector supports a block response. |
-| Valid gateway verdict | Honor the connector and event mapping. | Same. Fail mode does not make an observation-only event blocking. |
-| Internal evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic` and telemetry. | Block when the event supports a block response, otherwise allow with `would_block`; audit row and telemetry either way. Secure Client allows and audits. |
-| Ordered-chain state unavailable or inconsistent | Keep the current event's standalone verdict; skip only the chain join. | Same. Chain storage never creates or removes a single-event block. |
+These outcomes apply to supported blocking events. Stop and session-end exceptions are described below. Failure records and later alerts depend on the connector ([Reporting](#reporting-and-diagnosis)).
+
+| Failure | Per-user / Secure Client `open` | Managed standalone `open` | Effective `closed` |
+| --- | --- | --- | --- |
+| Gateway service not running, restarting or giving no answer in time | Allow. | Allow only when the hook proves an eligible service outage; an unverified peer, a port held by another process or another transport error blocks. The foreign-hook guard can also block. | Block. |
+| Gateway 5xx | Allow. | Block. | Block. |
+| Connector authentication missing | Allow where the connector supports fail-open; Amp's actionable boundaries always block a missing credential. | Block. | Block. |
+| Gateway returns 4xx, malformed JSON or no action | Allow where the connector supports fail-open. | Block. | Block. |
+| Hook input over its bounded payload | Refuse to process it, allow. | Block. | Refuse to process it, block where the connector supports a block response. |
+| Valid gateway verdict | Honor the connector and event mapping. | Same. | Same. Fail mode does not make an observation-only event blocking. |
+| Internal evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic` and telemetry. | Block supported events, in observe mode too; allow stop and session-end events. | Block supported events, otherwise allow with `would_block`; audit row and telemetry either way. Secure Client allows and audits. |
+| Ordered-chain state unavailable or inconsistent | Keep the current event's standalone verdict; skip only the chain join. | Same. | Same. Chain storage never creates or removes a single-event block. |
 
 Observe mode never enforces. A standalone managed host is the exception for a recovered error: it gives no verdict, so the call is blocked as when the gateway is down, in observe mode too and whatever `hook_fail_mode` says, for every event that supports a block response. A stop or session-end event is allowed there. That block is a fail-closed answer without a policy finding: alert on the `defenseclaw.panics.total` counter and on audit rows with result `panic`, and inspect gateway health.
 
@@ -155,8 +158,6 @@ An already-completed result event cannot undo its side effect, and an observatio
 
 `DEFENSECLAW_STRICT_AVAILABILITY=1` is an unconditional closed override for transport and missing-token failures, for managed or compatibility deployments that must never open during a gateway outage. It does not add a missing hook, turn native OTLP into enforcement, or make an unsupported connector block-capable. A strict outage can make the agent unavailable, so use status, gateway monitoring and a tested restart path before applying it broadly. On native Windows, set normal posture with `guardrail fail-mode` so setup, doctor and status can reconcile and report it. Administrator-managed hooks force the unavailable-home and transport failures closed rather than trusting a user-controlled environment.
 
-Administrator-managed hooks force the relevant unavailable-home and transport failures closed rather than trusting a user-controlled process environment.
-
 ## The environment does not set the fail mode
 
 A hook's fail mode is the one installed with it: the mode setup baked into the shell hook or the OpenCode plugin, or the one in `hooks/.hookcfg` that the native Windows hook reads. On a managed computer that is the administrator's config, which only root or SYSTEM can change. Nothing in the agent's environment changes it: `DEFENSECLAW_FAIL_MODE` is not read, so `open` does not open a closed hook and `closed` does not close an open one. A missing, unreadable or malformed installed record is `closed`. To change the mode, run `defenseclaw guardrail fail-mode open|closed`, which saves it in the config and the installed hooks.
@@ -196,9 +197,11 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --js
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone --json
 ```
 
-Hook delivery and response failures are recorded in `$DEFENSECLAW_HOME/logs/hook-failures.jsonl` (`%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl` on packaged native Windows). The file is sensitive; do not publish it whole.
+The shell hook scripts, native hook and OpenCode plugin record hook delivery and response failures in `$DEFENSECLAW_HOME/logs/hook-failures.jsonl` (`%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl` on packaged native Windows). The file is sensitive; do not publish it whole.
 
-A call that ran fail-open is never silent: the hook scripts, the native hook and the OpenCode plugin each write a line to that file. A per-user gateway reads the lines added since its last start and records one `guardrail-degraded` alert (severity HIGH) per connector, for example `2 hermes hook calls ran without a DefenseClaw check (fail-open) while the gateway was unreachable or did not answer (first ..., last ...; last reason: gateway unreachable)`. `defenseclaw alerts` lists it. Fail-closed calls and lines older than 7 days are not reported.
+For those connectors, a per-user gateway reads the lines added since its last start and records one `guardrail-degraded` alert (severity HIGH) per connector, for example `2 hermes hook calls ran without a DefenseClaw check (fail-open) while the gateway was unreachable or did not answer (first ..., last ...; last reason: gateway unreachable)`. `defenseclaw alerts` lists it. Fail-closed calls and lines older than 7 days are not reported.
+
+The Amp plugin does not write `hook-failures.jsonl`. On a per-user Amp install with fail mode `open`, a gateway outage can allow a tool call without a persisted failure record or a later `guardrail-degraded` alert. Keep Amp in fail mode `closed` when unchecked calls are unacceptable, and monitor gateway health directly; the failure-file alert does not cover Amp.
 
 For token, audit database, device key and observability repairs, see [Doctor](/docs/troubleshooting/doctor).
 

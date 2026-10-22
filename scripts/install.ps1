@@ -122,7 +122,7 @@ $DeveloperFiles = @("litellm.exe", "skill-scanner.exe", "skill-scanner-api.exe",
     "skill-scanner-pre-commit.exe", "mcp-scanner.exe", "mcp-scanner-api.exe", ".defenseclaw-source-root")
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*",
-    "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done")
+    "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done", ".gateway-recovery")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
 $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity",
     "opencode", "amp", "kiro", "none")
@@ -391,6 +391,9 @@ function Invoke-Quietly([scriptblock]$Action) {
 function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Quiet) {
     # Output goes through the host, so the install log (a transcript) keeps it.
     $ErrorActionPreference = "Continue"
+    # Failure to launch a native image does not set LASTEXITCODE. Never
+    # mistake an earlier successful command for this command's result.
+    $global:LASTEXITCODE = -1
     if ($Quiet) { & $FilePath @Arguments *> $null } else { & $FilePath @Arguments 2>&1 | ForEach-Object { Write-Host "$_" } }
     return $LASTEXITCODE
 }
@@ -1451,9 +1454,11 @@ function Save-BinarySnapshot {
     # HOOK_FIRST lets interrupted-run recovery restore it before any data
     # snapshot or process shutdown has started.
     New-InstallDirectory $Snap
+    # Recovery needs the running state even if copying the snapshot is
+    # interrupted before COMPLETE can be written.
+    Set-Content -LiteralPath (Join-Path $Snap "GATEWAY_WAS_RUNNING") -Value ([string]$WasRunning).ToLowerInvariant() -Encoding Ascii
     Copy-BinDir (Join-Path $Snap "bin")
     Install-HookFirst $Snap
-    Set-Content -LiteralPath (Join-Path $Snap "GATEWAY_WAS_RUNNING") -Value ([string]$WasRunning).ToLowerInvariant() -Encoding Ascii
     Set-Content -LiteralPath (Join-Path $Snap "BIN_SAVED") -Value "" -Encoding Ascii
 }
 
@@ -1480,7 +1485,6 @@ function Save-Snapshot {
     if (Test-Path -LiteralPath $Venv) { Move-Path $Venv (Join-Path $Snap "venv") 60 }
     if (Test-Path -LiteralPath $InstallerDir) { Move-Path $InstallerDir (Join-Path $Snap "installer") }
     Set-Content -LiteralPath (Join-Path $Snap "VERSION") -Value $PrevVersion -Encoding Ascii
-    Set-Content -LiteralPath (Join-Path $Snap "GATEWAY_WAS_RUNNING") -Value ([string]$WasRunning).ToLowerInvariant() -Encoding Ascii
     Set-Content -LiteralPath (Join-Path $Snap "COMPLETE") -Value "" -Encoding Ascii
     return $true
 }
@@ -1878,7 +1882,11 @@ function Save-ExternalConfig([string]$Slot) {
 
 function Restore-ExternalConfig([string]$Slot) {
     $config = Read-Text (Join-Path $Slot "CONFIG")
-    if ($config) { Copy-Kept (Join-Path $Slot "config\$(Split-Path -Leaf $config)") (Split-Path -Parent $config) }
+    if ($config) {
+        $saved = Join-Path $Slot "config\$(Split-Path -Leaf $config)"
+        Copy-Kept $saved (Split-Path -Parent $config)
+        if ((Get-Sha256 $saved) -cne (Get-Sha256 $config)) { throw "The restored config at $config does not match $saved" }
+    }
 }
 
 function Test-ConnectorRecoveryArtifactName([string]$Name) {
@@ -1964,80 +1972,119 @@ function New-FailedInstallDirectory {
     return $failed
 }
 
-function Move-RestoreConnectorRecovery([string]$Slot, [string]$Failed) {
-    # Receipt moves can refuse. Finish both directions before changing any
-    # live runtime or ordinary data, and undo completed renames on refusal so
-    # retrying the marked snapshot does not exchange the install twice.
-    $moved = New-Object System.Collections.Generic.List[object]
-    try {
-        foreach ($entry in @(Get-DataEntries | Where-Object { Test-ConnectorRecoveryArtifactName $_.Name })) {
-            $to = Join-Path $Failed "data\$($entry.Name)"
-            Move-Path $entry.FullName $to
-            $moved.Add(@{ From = $entry.FullName; To = $to })
-        }
-        foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force | Where-Object { Test-ConnectorRecoveryArtifactName $_.Name })) {
-            $to = Join-Path $DataDir $entry.Name
-            Move-Path $entry.FullName $to
-            $moved.Add(@{ From = $entry.FullName; To = $to })
-        }
-    } catch {
-        Undo-RestoreConnectorRecovery $moved $Slot $Failed $_.Exception.Message
-    }
-    # The caller undoes these renames when a later step of its restore refuses.
-    return ,$moved
-}
-
-function Undo-RestoreConnectorRecovery($Moved, [string]$Slot, [string]$Failed, [string]$Failure) {
-    # Put the receipt renames of Move-RestoreConnectorRecovery back, latest
-    # first, and throw $Failure: with every one back, retrying the marked
-    # snapshot moves each receipt once.
-    $retained = @()
-    for ($index = $Moved.Count - 1; $index -ge 0; $index--) {
-        $entry = $Moved[$index]
-        try { Move-Path $entry.To $entry.From } catch { $retained += $entry.To }
-    }
-    if ($retained.Count) {
-        throw "$Failure; connector receipt moves could not all be undone; keep $Slot and $Failed (retained: $($retained -join ', '))"
-    }
-    throw $Failure
-}
-
 function Restore-Slot([string]$Slot) {
-    # Put the install saved in $Slot back; what it replaces goes to .failed-<time>.
-    $olderFailed = @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".failed-*" -ErrorAction SilentlyContinue)
-    $failed = New-FailedInstallDirectory
-    New-Item -ItemType Directory -Path (Join-Path $failed "data") | Out-Null
-    $receipts = Move-RestoreConnectorRecovery $Slot $failed
-    # A program that cannot go back (a hook of the failed install still
-    # running refuses its in-place switch) stops the restore before any data
-    # or environment moves. $Slot keeps its COMPLETE marker and the only copy
-    # of the previous programs, and the receipts go back, so running the
-    # installer again finishes the restore; what is already back is skipped.
-    try { Restore-BinDir (Join-Path $Slot "bin") } catch {
-        $refused = "$($_.Exception.Message). The previous install was not restored; its copy was kept in $Slot. Run the installer again to finish restoring it"
-        try { Undo-RestoreConnectorRecovery $receipts $Slot $failed $refused } catch {
-            $refused = $_.Exception.Message
+    # Keep a write-ahead move plan in the marked snapshot. A failed rename,
+    # or an interruption after a rename but before its checkpoint, must be
+    # resumable without moving already restored data aside a second time.
+    $planPath = Join-Path $Slot "RESTORE.json"
+    $failed = ""
+    $digest = {
+        param([string]$Path)
+        $root = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $items = @($root)
+        if ($root.PSIsContainer) { $items += @(Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop | Sort-Object FullName) }
+        $lines = foreach ($item in $items) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Cannot prove restored contents through $($item.FullName)" }
+            $name = $item.FullName.Substring($root.FullName.Length)
+            if ($item.PSIsContainer) { "directory:$name" } else { "file:$name`:$(Get-Sha256 $item.FullName)" }
         }
-        # Only this restore's empty .failed folder goes; a non-empty one stays.
-        try { [IO.Directory]::Delete((Join-Path $failed "data"), $false); [IO.Directory]::Delete($failed, $false) } catch { }
-        throw $refused
+        $hash = [Security.Cryptography.SHA256]::Create()
+        try { return ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))))).Replace("-", "").ToLowerInvariant() }
+        finally { $hash.Dispose() }
     }
-    # Only the latest failed install is kept. Do not prune an earlier copy
-    # until the strict receipt phase succeeds; archive its evidence first.
-    foreach ($old in $olderFailed) { Invoke-Quietly { Remove-FailedInstall $old.FullName } }
-    foreach ($part in @(@($Venv, "venv"), @($InstallerDir, "installer"))) {
-        Invoke-Quietly { if (Test-Path -LiteralPath $part[0]) { Move-Path $part[0] (Join-Path $failed $part[1]) 60 } }
-        Invoke-Quietly { if (Test-Path -LiteralPath (Join-Path $Slot $part[1])) { Move-Path (Join-Path $Slot $part[1]) $part[0] 60 } }
+    $save = {
+        [IO.File]::WriteAllText("$planPath.new", ($plan | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding $false))
+        if (Test-Path -LiteralPath $planPath) {
+            [IO.File]::Replace("$planPath.new", $planPath, "$planPath.old")
+            Remove-Item -LiteralPath "$planPath.old" -Force -ErrorAction Stop
+        }
+        else { [IO.File]::Move("$planPath.new", $planPath) }
     }
-    foreach ($entry in @(Get-DataEntries | Where-Object { -not (Test-ConnectorRecoveryArtifactName $_.Name) })) {
-        Invoke-Quietly { try { Move-Path $entry.FullName (Join-Path $failed "data\$($entry.Name)") } catch { Remove-Tree $entry.FullName } }
+    try {
+        # Programs first: a program that cannot go back (a hook of the failed
+        # install still running refuses its in-place switch) stops the
+        # restore before any data or environment moves, with the slot and its
+        # COMPLETE marker kept. Restore-BinDir is idempotent, so a resumed
+        # restore runs it again and proves the bytes.
+        Restore-BinDir (Join-Path $Slot "bin")
+        if (Test-Path -LiteralPath $planPath) {
+            $plan = [IO.File]::ReadAllText($planPath) | ConvertFrom-Json -ErrorAction Stop
+            if ($plan.Schema -ne 1 -or $plan.FailedName -notmatch '^\.failed-[A-Za-z0-9-]+$') { throw "Invalid restore plan at $planPath" }
+            $failed = Join-Path $DataDir $plan.FailedName
+        } else {
+            $failed = New-FailedInstallDirectory
+            New-Item -ItemType Directory -Path (Join-Path $failed "data") -ErrorAction Stop | Out-Null
+            $moves = New-Object System.Collections.Generic.List[object]
+            $add = {
+                param([string]$From, [string]$To)
+                if (Test-Path -LiteralPath $From) { $moves.Add(@{ From = $From; To = $To; Digest = (& $digest $From); Done = $false }) }
+            }
+            $liveData = @(Get-DataEntries)
+            $savedData = @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force -ErrorAction Stop)
+            # Move receipts, never copy them: their file identities are part
+            # of connector recovery proof. Ordinary data follows that phase.
+            foreach ($entry in @($liveData | Where-Object { Test-ConnectorRecoveryArtifactName $_.Name })) {
+                & $add $entry.FullName (Join-Path $failed "data\$($entry.Name)")
+            }
+            foreach ($entry in @($savedData | Where-Object { Test-ConnectorRecoveryArtifactName $_.Name })) {
+                & $add $entry.FullName (Join-Path $DataDir $entry.Name)
+            }
+            foreach ($part in @(@($Venv, "venv"), @($InstallerDir, "installer"))) {
+                & $add $part[0] (Join-Path $failed $part[1])
+                & $add (Join-Path $Slot $part[1]) $part[0]
+            }
+            foreach ($entry in @($liveData | Where-Object { -not (Test-ConnectorRecoveryArtifactName $_.Name) })) {
+                & $add $entry.FullName (Join-Path $failed "data\$($entry.Name)")
+            }
+            foreach ($entry in @($savedData | Where-Object { -not (Test-ConnectorRecoveryArtifactName $_.Name) })) {
+                & $add $entry.FullName (Join-Path $DataDir $entry.Name)
+            }
+            $plan = @{ Schema = 1; FailedName = (Split-Path -Leaf $failed); Moves = @($moves.ToArray()) }
+            & $save
+        }
+        $parent = Get-Item -LiteralPath $failed -Force -ErrorAction Stop
+        if (-not $parent.PSIsContainer -or ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Invalid failed-copy directory $failed" }
+        $prefix = [IO.Path]::GetFullPath($DataDir).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+        foreach ($move in $plan.Moves) {
+            foreach ($path in @($move.From, $move.To)) {
+                if (-not [IO.Path]::GetFullPath($path).StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw "Restore path is outside $DataDir" }
+            }
+            if ($move.Done) { continue }
+            if ((Test-Path -LiteralPath $move.From) -and -not (Test-Path -LiteralPath $move.To)) {
+                if ((& $digest $move.From) -cne $move.Digest) { throw "Restore source changed: $($move.From)" }
+                Move-Path $move.From $move.To 60
+            }
+            if ((Test-Path -LiteralPath $move.From) -or -not (Test-Path -LiteralPath $move.To) -or
+                (& $digest $move.To) -cne $move.Digest) { throw "Could not prove the restore move from $($move.From) to $($move.To)" }
+            $move.Done = $true
+            & $save
+        }
+        Restore-ExternalConfig $Slot
+        Assert-BinDirRestored (Join-Path $Slot "bin")
+        foreach ($move in $plan.Moves) {
+            if ((& $digest $move.To) -cne $move.Digest) { throw "Restored contents changed: $($move.To)" }
+        }
+        # Retire COMPLETE only after all data and environment proofs pass.
+        # Partial cleanup can then never masquerade as a restorable snapshot.
+        Remove-Item -LiteralPath (Join-Path $Slot "COMPLETE") -Force -ErrorAction Stop
+        Invoke-Quietly { Remove-Tree $Slot }
+        foreach ($old in @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".failed-*" -ErrorAction Stop)) {
+            if ($old.Name -ne $plan.FailedName) { Invoke-Quietly { Remove-FailedInstall $old.FullName } }
+        }
+        return $failed
+    } catch {
+        $retry = "defenseclaw upgrade --yes"
+        if ($PSCommandPath) {
+            $retry = "& '$($PSCommandPath.Replace("'", "''"))' -Version '$Ver' -Yes"
+            if ($Local) { $retry += " -Local '$($Local.Replace("'", "''"))'" }
+        }
+        # The slot keeps COMPLETE: the install stays locked (Close-InstallLock)
+        # and the hooks closed (Close-UnfinishedInstallHooks) until a run
+        # proves the restore.
+        $Run.RestorePending = $true
+        $kept = if ($failed) { "Keep $Slot and $failed" } else { "Keep $Slot" }
+        throw "$($_.Exception.Message); restoration is incomplete. $kept. Close the program holding the reported path, then run: $retry"
     }
-    foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force | Where-Object { -not (Test-ConnectorRecoveryArtifactName $_.Name) })) {
-        Invoke-Quietly { Move-Path $entry.FullName (Join-Path $DataDir $entry.Name) }
-    }
-    Invoke-Quietly { Restore-ExternalConfig $Slot }
-    Invoke-Quietly { Remove-Tree $Slot }
-    return $failed
 }
 
 function Close-UnfinishedInstallHooks {
@@ -2173,8 +2220,18 @@ function Resume-InterruptedRun {
     # A run killed mid-swap (closed laptop, power loss) leaves its snapshot
     # behind. Put the install it saved back before doing anything else, so
     # re-running the installer is always the recovery.
+    $pendingGateway = Join-Path $DataDir ".gateway-recovery"
     foreach ($slot in @((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"))) {
         if (-not (Test-Path -LiteralPath $slot)) { continue }
+        $runningState = Read-Text (Join-Path $slot "GATEWAY_WAS_RUNNING")
+        # Older installers wrote this marker last. An incomplete snapshot
+        # without it cannot prove that an installed gateway was stopped on
+        # purpose: require recovery health instead of skipping the gate.
+        $wasRunning = $runningState -eq "true" -or ($runningState -ne "false" -and
+            ((Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe") -PathType Leaf) -or (Find-SetupInstall)))
+        if ($wasRunning) { Set-Content -LiteralPath $pendingGateway -Value "true" -Encoding Ascii }
+        $state = Join-Path $Staging "hook-runtime-state.json"
+        if ((Test-Path -LiteralPath $state) -and -not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
         if (Test-Path -LiteralPath (Join-Path $slot "COMPLETE")) {
             # An interrupted first install replaced nothing (GAP-2618).
             $firstInstall = -not (Read-Text (Join-Path $slot "VERSION"))
@@ -2184,10 +2241,7 @@ function Resume-InterruptedRun {
                 Write-Warn "An earlier install was interrupted; restoring the install it replaced"
             }
             [void](Stop-Gateway)
-            $wasRunning = (Read-Text (Join-Path $slot "GATEWAY_WAS_RUNNING")) -eq "true"
             $keepStopped = Test-Path -LiteralPath (Join-Path $slot "GATEWAY_RESTART_UNPROVEN")
-            $state = Join-Path $Staging "hook-runtime-state.json"
-            if ((Test-Path -LiteralPath $state) -and -not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
             $failed = Restore-Slot $slot
             # A DefenseClaw Setup install that was replaced runs its own gateway (GAP-1839).
             $setupInstall = Find-SetupInstall
@@ -2204,7 +2258,9 @@ function Resume-InterruptedRun {
             } elseif ($wasRunning -and $setupBack) {
                 Start-SetupGateway $setupInstall.Root
             } elseif ($wasRunning) {
-                [void](Start-Gateway)
+                if ((Start-Gateway) -notin @(0, 3)) {
+                    Die "The restored gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again"
+                }
             }
             if ($firstInstall -and -not $setupBack) {
                 Write-Info "Nothing was left installed"
@@ -2213,10 +2269,9 @@ function Resume-InterruptedRun {
             }
         } else {
             # The snapshot never finished, so live data was only copied, not changed.
-            $restart = (Read-Text (Join-Path $slot "GATEWAY_WAS_RUNNING")) -eq "true"
             Undo-Snapshot $slot
-            if ($restart -and -not (Get-GatewayProcess) -and (Test-Path -LiteralPath (Join-Path $BinDir 'defenseclaw-gateway.exe') -PathType Leaf)) {
-                [void](Start-Gateway)
+            if ($wasRunning -and -not (Get-GatewayProcess) -and (Start-Gateway) -notin @(0, 3)) {
+                Die "The recovered gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again"
             }
         }
     }
@@ -2229,10 +2284,12 @@ function Resume-InterruptedRun {
         # START_AFTER is its own decision; previous\ may be half deleted.
         Write-Warn "An earlier rollback was interrupted; finishing it"
         $restart = $restart -or (Read-Text (Join-Path $hold "START_AFTER")) -eq "true"
+        if ($restart) { Set-Content -LiteralPath $pendingGateway -Value "true" -Encoding Ascii }
         Remove-Tree $Previous
         Move-Path $hold $Previous
     } elseif (Test-Path -LiteralPath $hold) {
         Write-Warn "An earlier rollback was interrupted; restoring the install it started from"
+        if ($restart) { Set-Content -LiteralPath $pendingGateway -Value "true" -Encoding Ascii }
         [void](Stop-Gateway)
         if (Test-Path -LiteralPath (Join-Path $hold "STASHED")) {
             # The live install was set aside in full, so anything live now came
@@ -2251,9 +2308,11 @@ function Resume-InterruptedRun {
     } else {
         $restart = $false
     }
+    $restart = $restart -or (Test-Path -LiteralPath $pendingGateway)
     if ($restart -and -not (Get-GatewayProcess) -and (Start-Gateway) -notin @(0, 3)) {
-        Write-Warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
+        Die "The recovered gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again"
     }
+    if ($restart) { Remove-Item -LiteralPath $pendingGateway -Force -ErrorAction SilentlyContinue }
 }
 
 function Remove-Hold([string]$Hold) {
@@ -2985,6 +3044,9 @@ function Invoke-Install {
             if ($Setup) { Restore-SetupInstall }
             Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
         }
+        # Retain the health requirement if this run dies before the snapshot
+        # can even start. Only a confirmed new gateway retires it.
+        Set-Content -LiteralPath (Join-Path $DataDir ".gateway-recovery") -Value "true" -Encoding Ascii
     } elseif (-not (Update-HookFailModes $stagedGateway)) {
         if ($Setup) { Restore-SetupInstall }
         Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
@@ -3093,6 +3155,7 @@ function Invoke-Install {
     }
     Complete-Swap
     Remove-DeveloperFiles
+    Remove-Item -LiteralPath (Join-Path $DataDir ".gateway-recovery") -Force -ErrorAction SilentlyContinue
     try { [Console]::TreatControlCAsInput = $false } catch { }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }
