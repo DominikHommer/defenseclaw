@@ -45,6 +45,41 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	}
 
 	activityID := uuid.New().String()
+	auditID := uuid.New().String()
+	timestamp := time.Now().UTC()
+	ctx := context.Background()
+	stored := false
+	delivery := in.RemoteDelivery
+	if in.OccurrenceID != "" {
+		// The producer keeps this occurrence queued under its stable id and
+		// offers it until it is stored durably and every remote destination
+		// has it. The first offer stores it and exports it only after the
+		// local write (a failed write exports nothing). A later offer finds
+		// it stored and sends the stored record, with its stable ids and
+		// time, to the destinations that do not have it yet.
+		auditID = in.OccurrenceID
+		activityID = uuid.NewSHA1(stableOccurrenceNamespace, []byte("activity\x00"+auditID)).String()
+		if delivery == nil {
+			delivery = observability.NewRemoteDelivery()
+		}
+		storedAt, found, err := l.store.auditEventTime(ctx, auditID)
+		if err != nil {
+			return err
+		}
+		if found {
+			stored, timestamp = true, storedAt
+			// A row a stopped process committed may not be on disk yet.
+			if err := l.syncOccurrence(ctx, delivery); err != nil {
+				return err
+			}
+			ctx = observability.WithStoredReplay(ctx)
+		} else {
+			ctx = observability.WithExportAfterLocalWrite(ctx)
+		}
+		ctx = observability.WithRemoteDelivery(ctx, delivery)
+		delivery.BeginAttempt()
+		defer delivery.EndAttempt()
+	}
 	runID := in.RunID
 	if runID == "" {
 		runID = currentRunID()
@@ -65,29 +100,12 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	}
 	summaryBlob, _ := json.Marshal(summary)
 
-	auditID := uuid.New().String()
-	ctx := context.Background()
-	if in.OccurrenceID != "" {
-		// The producer keeps this occurrence queued under its stable id and
-		// offers it until it is stored: export it only after the local
-		// write, so a failed write that is offered again is not exported
-		// again, and record it once.
-		auditID = in.OccurrenceID
-		ctx = observability.WithExportAfterLocalWrite(ctx)
-		stored, err := l.store.hasAuditEvent(ctx, auditID)
-		if err != nil {
-			return err
-		}
-		if stored {
-			return nil
-		}
-	}
 	// v7 clean break: AgentInstanceID is per-session (unset for
 	// activity/mutation events that have no session anchor);
 	// SidecarInstanceID carries the process UUID.
 	auditEv := Event{
 		ID:                auditID,
-		Timestamp:         time.Now().UTC(),
+		Timestamp:         timestamp,
 		Action:            action,
 		Target:            targetType + ":" + targetID,
 		Actor:             actor,
@@ -128,7 +146,10 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	// metrics are emitted in one generated batch on the same runtime binding as
 	// the canonical occurrence and remain exactly once for dashboard continuity.
 	if disposition != auditV8Unhandled {
-		return nil
+		return l.occurrenceStored(ctx, in.OccurrenceID != "" && !stored, delivery)
+	}
+	if stored {
+		return fmt.Errorf("audit: no generated v8 family replays activity action %q", action)
 	}
 	disposition, emitErr = l.emitCompatibilityAuditV8(
 		ctx, auditEv,
@@ -144,7 +165,29 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		return emitErr
 	}
 	if disposition != auditV8Unhandled {
-		return nil
+		return l.occurrenceStored(ctx, in.OccurrenceID != "", delivery)
 	}
 	return fmt.Errorf("audit: no generated v8 family handled activity action %q", action)
+}
+
+// occurrenceStored makes a newly stored occurrence power-loss durable
+// before its producer may mark it reported.
+func (l *Logger) occurrenceStored(ctx context.Context, newlyStored bool, delivery *observability.RemoteDelivery) error {
+	if !newlyStored {
+		return nil
+	}
+	return l.syncOccurrence(ctx, delivery)
+}
+
+// syncOccurrence flushes the audit store once per delivery: the pool
+// commits with synchronous=NORMAL, which a power loss can take back.
+func (l *Logger) syncOccurrence(ctx context.Context, delivery *observability.RemoteDelivery) error {
+	if delivery.LocalDurable() {
+		return nil
+	}
+	if err := l.store.syncCommittedWrites(ctx); err != nil {
+		return err
+	}
+	delivery.MarkLocalDurable()
+	return nil
 }

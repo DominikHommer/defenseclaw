@@ -413,11 +413,22 @@ func (pipeline *LocalLogPipeline) process(
 	originDestination string,
 	exportOnWriteFailure bool,
 ) (LocalLogOutcome, error) {
+	replay := observability.StoredReplay(ctx)
+	if replay && (localOnly || originDestination != "") {
+		return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
+	}
 	prepared, outcome, admitted, err := pipeline.prepare(ctx, metadata, builder)
 	if err != nil || !admitted {
 		return outcome, err
 	}
 	sinkPolicy := legacyredaction.SinkPolicyFromContext(ctx)
+	if replay {
+		// The store already holds this occurrence under its stable id
+		// (observability.WithStoredReplay): hand back its remote work only.
+		outcome.localPersisted = true
+		pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, "")
+		return outcome, nil
+	}
 	if err := pipeline.appender.AppendContext(ctx, prepared.record.Clone(), prepared.projection); err != nil {
 		// A raw `err` value here may wrap BeginTx / commit / health strings
 		// that leak backend state past the pipeline's bounded projection.
@@ -549,6 +560,10 @@ func (pipeline *LocalLogPipeline) ProcessAtomicBatch(
 ) ([]LocalLogOutcome, error) {
 	if pipeline == nil {
 		return nil, &Error{code: ErrorInvalidDependency}
+	}
+	if observability.StoredReplay(ctx) {
+		// A batch writes every item; a stored replay goes through Process.
+		return nil, &Error{code: ErrorInvalidInput}
 	}
 	outcomes := make([]LocalLogOutcome, 0, len(items))
 	batcher, ok := pipeline.appender.(LocalEventBatchAppender)

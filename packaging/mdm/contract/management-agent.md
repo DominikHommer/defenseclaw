@@ -39,7 +39,12 @@ gateway.
   `config.secret.changed` and `config.secret.change_failed` (actor,
   credential name, action, outcome, reason code). A change made while the
   gateway is stopped is reported when it starts. An event stays in the
-  spool until the gateway has reported it. A command that cannot record
+  spool until the gateway has reported it: its audit row is flushed to disk
+  (it survives a power loss) and every OTel destination acknowledged it. A
+  destination that refuses it or cannot be reached gets it again, under the
+  same record id, at a later poll; after a gateway restart an unreported
+  event goes to every destination again, so a destination can receive it
+  twice with the same id. A command that cannot record
   its change (the spool cannot be written, or holds 4096 events the gateway
   has not reported) refuses it with `state_invalid` before anything is
   changed. The command holds room for its event from that check until the
@@ -1280,8 +1285,9 @@ the read-only commands answer (section 4).
   records the delivery channel (MDM, agent, administrator): the apply cannot
   tell them apart without trusting the caller (2.6).
 - Trust anchor and credential change events reach the audit log only
-  when the gateway runs; while it is stopped, 4096 unreported events fill
-  the spool and further changes are refused (`state_invalid`). Builds
+  when the gateway runs; while it is stopped, or while an OTel destination
+  keeps refusing them, 4096 unreported events fill the spool and further
+  changes are refused (`state_invalid`). Builds
   before 1.0.4 record none (section 0). A refusal before the command knows
   it runs as root (or elevated), or that the device is managed, records
   nothing.

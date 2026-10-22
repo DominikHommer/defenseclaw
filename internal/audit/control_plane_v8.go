@@ -227,7 +227,10 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 	if outcomeErr != nil {
 		return auditV8Persisted, fmt.Errorf("audit: v8 control-plane action %q: %w", event.Action, outcomeErr)
 	}
-	if disposition == auditV8Persisted {
+	// A stored replay (observability.WithStoredReplay) only sends the
+	// record to the remote destinations again: its metrics were recorded
+	// when it was stored.
+	if disposition == auditV8Persisted && !observability.StoredReplay(ctx) {
 		auditMetric, metricErr := newAuditEventRuntimeV8GeneratedMetric(event)
 		if metricErr == nil {
 			metrics := make([]RuntimeV8GeneratedMetric, 0, 1+len(companionMetrics))

@@ -98,7 +98,8 @@ var (
 
 // ErrChangeSpoolFull refuses a change event while the spool holds
 // maxPendingChangeEvents events the gateway has not reported.
-var ErrChangeSpoolFull = errors.New("the change spool is full of events the gateway has not reported yet; start the gateway so it reports them")
+var ErrChangeSpoolFull = errors.New("the change spool is full of events the gateway has not reported yet " +
+	"(it is stopped, or a remote destination has not acknowledged them); start the gateway, or fix the destination, so it reports them")
 
 // ChangeReported reports whether the gateway with the data directory
 // dataDir has marked change event id reported.

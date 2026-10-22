@@ -42,3 +42,24 @@ func ExportAfterLocalWrite(ctx context.Context) bool {
 	marked, _ := ctx.Value(exportAfterLocalWriteKey{}).(bool)
 	return marked
 }
+
+type storedReplayKey struct{}
+
+// WithStoredReplay marks an offer of an occurrence the local store already
+// holds under its stable id (an earlier offer stored it, then a destination
+// failed or the process stopped before every destination had it). The
+// pipeline does not write it locally again and hands back only its
+// optional-destination projections; the producer emits no metric for it.
+// It implies WithExportAfterLocalWrite.
+func WithStoredReplay(ctx context.Context) context.Context {
+	return context.WithValue(WithExportAfterLocalWrite(ctx), storedReplayKey{}, true)
+}
+
+// StoredReplay reports whether ctx carries WithStoredReplay.
+func StoredReplay(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	marked, _ := ctx.Value(storedReplayKey{}).(bool)
+	return marked
+}

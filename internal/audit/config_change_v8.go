@@ -165,8 +165,10 @@ func configChangeKeyIDs(ids []string) observability.Optional[[]string] {
 
 // LogConfigChange records one trust anchor or protected credential change:
 // config.trust_anchors.changed, config.secret.changed or
-// config.secret.change_failed. It reports only.
-func (l *Logger) LogConfigChange(change ConfigChange) error {
+// config.secret.change_failed. It reports only. It returns nil once the
+// record survives a power loss; delivery, kept by the caller across offers
+// of the same change, then tells when every remote destination has it.
+func (l *Logger) LogConfigChange(change ConfigChange, delivery *observability.RemoteDelivery) error {
 	if l == nil {
 		return nil
 	}
@@ -219,7 +221,8 @@ func (l *Logger) LogConfigChange(change ConfigChange) error {
 	return l.logActivityImpl(ActivityInput{
 		Actor: actor, Action: action, TargetType: targetType, TargetID: targetID, Reason: reason,
 		After: after, Severity: severity, ConfigChange: &change,
-		OccurrenceID: stableOccurrenceID("config.change", change.EventID),
+		OccurrenceID:   stableOccurrenceID("config.change", change.EventID),
+		RemoteDelivery: delivery,
 	})
 }
 

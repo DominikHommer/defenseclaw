@@ -41,6 +41,8 @@ type testRuntimeV8Emitter struct {
 	metrics  []observability.Record
 	// exportAfterWrite is observability.ExportAfterLocalWrite of each emit.
 	exportAfterWrite []bool
+	// replays is observability.StoredReplay of each emitted record.
+	replays []bool
 }
 
 type rejectingRuntimeV8Emitter struct {
@@ -125,12 +127,17 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 	if err != nil {
 		return RuntimeV8EmitOutcome{}, err
 	}
-	if err := emitter.writer.AppendContext(ctx, record, projection); err != nil {
-		return RuntimeV8EmitOutcome{}, err
+	// A stored replay is not written again (the runtime's pipeline skips
+	// its local append).
+	if !observability.StoredReplay(ctx) {
+		if err := emitter.writer.AppendContext(ctx, record, projection); err != nil {
+			return RuntimeV8EmitOutcome{}, err
+		}
 	}
 	emitter.mu.Lock()
 	emitter.metadata = append(emitter.metadata, metadata)
 	emitter.records = append(emitter.records, record.Clone())
+	emitter.replays = append(emitter.replays, observability.StoredReplay(ctx))
 	emitter.mu.Unlock()
 	return RuntimeV8EmitOutcome{Admission: emitter.admission, LocalPersisted: true}, nil
 }

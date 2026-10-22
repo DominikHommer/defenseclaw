@@ -44,7 +44,7 @@ type fakeBundleReceiptSink struct {
 	changeErr  error
 }
 
-func (f *fakeBundleReceiptSink) LogConfigChange(change audit.ConfigChange) error {
+func (f *fakeBundleReceiptSink) LogConfigChange(change audit.ConfigChange, _ *observability.RemoteDelivery) error {
 	if f.changeErr != nil {
 		return f.changeErr
 	}
