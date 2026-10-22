@@ -441,13 +441,16 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 		rollback bool
 		// staged: the transaction committed the config but the run stopped
 		// before Finish moved the receipt to applied.
-		staged bool
+		staged        bool
+		markedCurrent bool
 	}{
 		{name: "enforced", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}, holds: true, confirm: true},
 		{name: "gateway enforces another policy", policy: &enterprisebundle.GatewayPolicy{Digest: "sha256:" + fmt.Sprintf("%064d", 2), Applied: true}, holds: true, rollback: true},
 		{name: "config rolled back", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}},
 		{name: "committed, run stopped before finish", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}, holds: true, staged: true, confirm: true},
 		{name: "committed, gateway does not enforce it", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest}, holds: true, staged: true, rollback: true},
+		{name: "state marker without live confirmation", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest}, holds: true, markedCurrent: true, rollback: true},
+		{name: "state marker with live confirmation", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}, holds: true, markedCurrent: true, confirm: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, bundleConfig(t), nil)
@@ -474,13 +477,32 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 			if tc.holds {
 				installed = p.Config
 			}
+			if tc.markedCurrent {
+				rc := p.Receipt
+				state := enterprisebundle.State{SchemaVersion: enterprisebundle.StateSchemaVersion, Floor: rc.Version,
+					Current: &enterprisebundle.Ref{BundleID: rc.BundleID, Version: rc.Version, ManifestSHA256: rc.ManifestSHA256, Dir: rc.Dir}}
+				raw, err := json.Marshal(state)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(d.Store.StatePath(), raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			report, rollback, err := d.SettleRun(installed, &policy)
 			if err != nil {
 				t.Fatal(err)
 			}
 			st, _ := d.Store.LoadState()
-			if confirmed := st.Current != nil && st.Current.BundleID == p.Receipt.BundleID; confirmed != tc.confirm {
+			receipts, err := d.Store.Receipts()
+			if err != nil || len(receipts) != 1 {
+				t.Fatalf("receipts = %+v, %v", receipts, err)
+			}
+			if confirmed := receipts[0].State == enterprisebundle.StateConfirmed; confirmed != tc.confirm {
 				t.Fatalf("confirmed = %v (report %+v)", confirmed, report)
+			}
+			if tc.confirm && (st.Current == nil || st.Current.BundleID != p.Receipt.BundleID) {
+				t.Fatalf("confirmed receipt has no matching current bundle: %+v", st)
 			}
 			if (len(rollback) == 1) != tc.rollback {
 				t.Fatalf("rollback = %v", rollback)

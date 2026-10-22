@@ -1229,6 +1229,14 @@ type SettleReport struct {
 // to return to or a rollback that did not finish, keeps enforcing from its
 // directory, so that directory must stay.
 func (s *Store) Settle(keep ...string) (SettleReport, error) {
+	return s.settle(true, keep...)
+}
+
+// The external Windows transaction must recheck every applied receipt against
+// the live deployment, including a cut between the state and receipt writes.
+// Its driver disables the marker-only completion used by the store's callers
+// whose lifecycle already proved the transaction before publishing the state.
+func (s *Store) settle(completeCurrent bool, keep ...string) (SettleReport, error) {
 	var report SettleReport
 	st, err := s.LoadState()
 	if err != nil {
@@ -1250,7 +1258,7 @@ func (s *Store) Settle(keep ...string) (SettleReport, error) {
 			}
 			report.Interrupted = append(report.Interrupted, r.ReceiptID)
 		case StateApplied:
-			if c := st.Current; c != nil && c.BundleID == r.BundleID && c.ManifestSHA256 == r.ManifestSHA256 {
+			if c := st.Current; completeCurrent && c != nil && c.BundleID == r.BundleID && c.ManifestSHA256 == r.ManifestSHA256 {
 				if err := s.Advance(r, StateConfirmed, func(r *Receipt) { r.ConfirmedAt = c.ConfirmedAt }); err != nil {
 					return report, err
 				}

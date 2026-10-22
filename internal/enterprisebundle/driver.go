@@ -351,7 +351,7 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 	if err != nil {
 		return report, rollback, err
 	}
-	report, err = d.Store.Settle(installedDirs...)
+	report, err = d.Store.settle(false, installedDirs...)
 	report.Completed = append(completed, report.Completed...)
 	if err != nil {
 		return report, rollback, err
