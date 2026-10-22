@@ -124,6 +124,11 @@ import (
 //     deny entry, and is on a writable volume (publishedSessionRevocable).
 //     Otherwise a block the gateway decided may have changed nothing the
 //     hook reads, so no allow of the account proves anything;
+//   - the gateway's run mark is not there (publishedSessionGatewayRunEnded):
+//     the gateway that wrote the records stopped cleanly with no revocation
+//     owed. While it still runs, after it stopped owing one, or after a
+//     crash, no allow proves anything, since a refusal the hook cannot see
+//     may have kept a block it decided from reaching any folder;
 //   - the key is the same at the end of the check.
 //
 // Any error reading the key, a record or a folder above them blocks. No
@@ -510,6 +515,12 @@ func RevokePublishedSessionKey(root, identity string) error {
 	if !ok {
 		return fmt.Errorf("%w: invalid caller identity", ErrPublishedSessionKeyAlive)
 	}
+	return revokePublishedSessionAccountKey(root, digest)
+}
+
+// revokePublishedSessionAccountKey is RevokePublishedSessionKey for the
+// account whose folder name is digest.
+func revokePublishedSessionAccountKey(root, digest string) error {
 	dir, prefix, ok := publishedSessionKeyPlace(root, digest)
 	if !ok {
 		return fmt.Errorf("%w: no protected session record folder %q", ErrPublishedSessionKeyAlive, root)
@@ -969,8 +980,9 @@ func publishedSessionKeysLeft(keys []SessionRecordKey) []SessionRecordKey {
 }
 
 // RemovePublishedSessionKeys removes every key file of the record folder
-// root, every file with its key prefix this account may remove, and its
-// revocation marks: for uninstall, which removes the folder.
+// root, every file with its key prefix this account may remove, its
+// revocation marks and the gateway's run mark: for uninstall, which removes
+// the folder.
 func RemovePublishedSessionKeys(root string) error {
 	if err := KillAllPublishedSessionKeys(root); err != nil {
 		return err
@@ -985,7 +997,7 @@ func RemovePublishedSessionKeys(root string) error {
 			return err
 		}
 		for _, name := range names {
-			if hasPrefixFold(name, rootPrefix) && (IsPublishedSessionKeyName(name) || isPublishedSessionMarkName(name, rootPrefix)) {
+			if hasPrefixFold(name, rootPrefix) && (IsPublishedSessionKeyName(name) || isPublishedSessionMarkName(name, rootPrefix) || strings.EqualFold(name, rootPrefix+publishedSessionGatewayRunName)) {
 				_ = os.Remove(filepath.Join(folder, name))
 			}
 		}
@@ -1161,7 +1173,8 @@ func WritePublishedSessionRecordsForTest(root, identity string, key SessionKey, 
 // (publishedSessionRevocable); a denial with the gateway's reason when a record blocks it;
 // and ErrPublishedSessionUnavailable otherwise. An agent process the hook
 // cannot name is never proven: it may be one that started during the
-// outage and resumed the session ID. trust checks a record or key file path
+// outage and resumed the session ID. Nothing is proven while the gateway's
+// run mark is there (publishedSessionGatewayRunEnded). trust checks a record or key file path
 // and every folder above it (ValidatePublishedSessionPath in production).
 func CheckPublishedForeignHookSession(root, identity string, key SessionKey, decision GuardDecision, trust func(path string) error) (GuardDecision, error) {
 	name := strings.TrimSpace(key.Connector)
@@ -1211,6 +1224,13 @@ func CheckPublishedForeignHookSession(root, identity string, key SessionKey, dec
 		if !publishedSessionMACValid(recordKey, canonical, record) {
 			return decision, fmt.Errorf("%w: the %s record was not written under the record folder's current key", ErrPublishedSessionUnavailable, record.Kind)
 		}
+	}
+	// Nothing passes an outage while the gateway that wrote the records has
+	// not ended cleanly: it still runs, it stopped owing a revocation that
+	// did not take, or it ended without a last step (a crash), so a block
+	// it decided may have reached no folder the hook reads.
+	if err := publishedSessionGatewayRunEnded(root); err != nil {
+		return decision, fmt.Errorf("%w: %v", ErrPublishedSessionUnavailable, err)
 	}
 	// A record folder on a volume that is read-only proves nothing: no key
 	// could be removed there.

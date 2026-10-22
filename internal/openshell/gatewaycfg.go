@@ -1532,7 +1532,15 @@ func envFlag(v string) bool {
 // gateway again when it was already restarted with the new files. That
 // second restart makes the same check as the first (CheckStopped), still
 // under Apply's lifecycle lock. If another OpenShell client started a
-// sandbox, keep the active gateway files and refuse the second restart.
+// sandbox, keep the active gateway files and refuse the second restart,
+// unless the restarted gateway failed the security check
+// (ErrBindMountsRefused: it lets in clients without the registration's
+// certificate while it honours bind mounts). Files that failed it are
+// never kept and such a gateway never keeps running: the previous files
+// stay restored and it is restarted on them all the same (a raw OpenShell
+// start during Apply is unsupported). When that restart fails, the
+// restart stays pending and the error says the gateway may still run the
+// configuration that failed.
 func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApplyResult, cause error, restart bool) error {
 	var activeFiles []gatewayFileState
 	if restart {
@@ -1546,7 +1554,16 @@ func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApp
 		return fmt.Errorf("%w; restoring the previous configuration also failed: %v", cause, err)
 	}
 	if restart {
-		if err := g.CheckStopped(ctx); err != nil {
+		// The restarted gateway runs the new files, which its restart
+		// cleared the mark of: the restored ones wait for a restart until
+		// one succeeds.
+		_ = g.markRestartPending()
+		if err := g.CheckStopped(ctx); err != nil && errors.Is(cause, ErrBindMountsRefused) {
+			if restartErr := g.restart(ctx); restartErr != nil {
+				return fmt.Errorf("%w; the previous configuration was restored, but the gateway could not be restarted on it (%v), so it may still run the configuration that failed the check, reachable without the registration's certificate: restart it with `%s` before you use a sandbox", cause, restartErr, g.restartCommand())
+			}
+			return fmt.Errorf("%w; the previous configuration was restored and the gateway restarted on it although OpenShell did not report every sandbox stopped (%v): a gateway that failed the security check is never kept running", cause, err)
+		} else if err != nil {
 			if restoreErr := g.restoreGatewayFiles(ctx, activeFiles, res); restoreErr != nil {
 				return fmt.Errorf("%w; the rollback was refused (%v) and restoring the active gateway files failed: %v", cause, err, restoreErr)
 			}

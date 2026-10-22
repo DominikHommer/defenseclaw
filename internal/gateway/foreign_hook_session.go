@@ -120,7 +120,9 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	// carries a key, so none passes an outage (foreign_hook_revocation_owed.go).
 	paid := a.payForeignHookRevocation(places, identity, connector)
 	recordKey := places.key(identity)
-	if !paid {
+	if !paid || a.foreignHookGatewayRunUnmarked() {
+		// A run without its run mark publishes no allow with a key either
+		// (foreign_hook_gateway_run.go).
 		recordKey = enterprisepolicy.SessionRecordKey{}
 	}
 	removals, ledgerErr := a.foreignHookRemovals.forIdentity(places.removalsDir, identity)
