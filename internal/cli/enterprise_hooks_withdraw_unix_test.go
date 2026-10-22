@@ -61,6 +61,7 @@ func withdrawTestSettings(t *testing.T) func(exclude, exempt []string) {
 	t.Helper()
 	previousCfg, previousAccepted := cfg, enterpriseHookLoadAcceptedTargets
 	previousEligible, previousIdentity := enterpriseHookLoadEligibleAccounts, enterpriseHookLoadIdentityAccounts
+	previousMachine := enterpriseHookLoadMachinePolicyConnectors
 	enterpriseHookLeftOutProven.Lock()
 	previousProofs := enterpriseHookLeftOutProven.proofs
 	enterpriseHookLeftOutProven.proofs = map[string]enterpriseHookLeftOutProof{}
@@ -68,6 +69,7 @@ func withdrawTestSettings(t *testing.T) func(exclude, exempt []string) {
 	t.Cleanup(func() {
 		cfg, enterpriseHookLoadAcceptedTargets = previousCfg, previousAccepted
 		enterpriseHookLoadEligibleAccounts, enterpriseHookLoadIdentityAccounts = previousEligible, previousIdentity
+		enterpriseHookLoadMachinePolicyConnectors = previousMachine
 		enterpriseHookLeftOutProven.Lock()
 		enterpriseHookLeftOutProven.proofs = previousProofs
 		enterpriseHookLeftOutProven.Unlock()
@@ -77,6 +79,9 @@ func withdrawTestSettings(t *testing.T) func(exclude, exempt []string) {
 		cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
 		cfg.Enterprise.Profile = managed.ProfileStandalone
 		cfg.Enterprise.Enrollment.ExcludeUsers, cfg.Enterprise.Enrollment.ExemptUsers = exclude, exempt
+		// No machine-policy connector: the gateway accepts only enrolled
+		// and exempt callers.
+		enterpriseHookLoadMachinePolicyConnectors = func() ([]string, error) { return nil, nil }
 	}
 }
 
@@ -502,6 +507,270 @@ func TestALastExclusionAnswerNeverDropsTheScanOfTheUIDsNewHolder(t *testing.T) {
 			enterpriseHookLeftOutProven.Unlock()
 			if kept == tc.forgets {
 				t.Fatalf("the alias's last answer kept %t, want %t", kept, !tc.forgets)
+			}
+		})
+	}
+}
+
+// W2B-G-enum loop round 1 (P1): an account the manifest left out lost its
+// identity record at once, and so did an excluded account, although the
+// gateway still accepted its hook calls: exempt_users are authorized
+// without enrollment, and a machine-policy connector under
+// unenrolled_users other than deny is inspected for every account. Their
+// calls then no longer selected the profile assigned to the account's UPN,
+// and the default can be less restrictive. Every caller the gateway still
+// accepts now keeps a refreshed record; only a caller it refuses loses it.
+func TestIdentityRecordStaysForEveryCallerTheGatewayStillAccepts(t *testing.T) {
+	settings := withdrawTestSettings(t)
+	const bobUID = 4243
+	bob := unixidentity.Account{Name: "bob", UID: bobUID, GID: bobUID}
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"bob": bob, "bob-alias": bob,
+	}})
+	const manifest = "/etc/defenseclaw/hooks/manifest.json"
+	staleBob := []enterprisehooks.UnixEligibleAccount{{User: "bob", UID: bobUID, Home: "/home/bob"}}
+	bobRow := enterpriseHookReconcileRow{User: "bob", UserHome: "/home/bob", Connector: "opencode", OK: true, UID: bobUID}
+	claude := func() ([]string, error) { return []string{"claudecode"}, nil }
+	unreadable := func() ([]string, error) { return nil, errors.New("managed runtime descriptor is not a regular file") }
+	for _, tc := range []struct {
+		name            string
+		exclude, exempt []string
+		manifestMode    bool
+		unenrolled      string
+		machine         func() ([]string, error)
+		eligible        []enterprisehooks.UnixEligibleAccount
+		rows            []enterpriseHookReconcileRow
+		kept            bool
+		listed          bool
+	}{
+		// The gateway still accepts bob's hook calls.
+		{name: "exempt by name, out of the manifest", exempt: []string{"bob"},
+			manifestMode: true, eligible: staleBob, kept: true, listed: true},
+		{name: "exempt by the UPN, out of the manifest", exempt: []string{"bob@corp.example"},
+			manifestMode: true, eligible: staleBob, kept: true, listed: true},
+		{name: "exempt as DOMAIN\\name, out of the manifest", exempt: []string{`CORP\bob`},
+			manifestMode: true, eligible: staleBob, kept: true, listed: true},
+		{name: "exempt by uid, out of the manifest", exempt: []string{strconv.Itoa(bobUID)},
+			manifestMode: true, eligible: staleBob, kept: true, listed: true},
+		{name: "exempt by an alias that resolves to bob, out of the manifest", exempt: []string{"bob-alias"},
+			manifestMode: true, eligible: staleBob, kept: true, listed: true},
+		{name: "exempt and excluded, out of the manifest", exclude: []string{"bob"}, exempt: []string{"bob"},
+			manifestMode: true, eligible: staleBob, kept: true, listed: true},
+		{name: "exempt and excluded, an unlisted record", exclude: []string{"bob"}, exempt: []string{"bob"}, kept: true},
+		{name: "a machine-policy connector, out of the manifest", machine: claude,
+			manifestMode: true, eligible: staleBob, kept: true, listed: true},
+		{name: "a machine-policy connector, excluded, an old row", exclude: []string{"bob"}, machine: claude,
+			rows: []enterpriseHookReconcileRow{bobRow}, kept: true, listed: true},
+		{name: "a machine-policy connector, excluded, an unlisted record", exclude: []string{"bob"}, machine: claude, kept: true},
+		{name: "a machine-policy connector under unenrolled_users inspect, excluded", exclude: []string{"bob"},
+			machine: claude, unenrolled: config.EnterpriseUnenrolledInspect, kept: true},
+		{name: "the runtime descriptor does not read, excluded", exclude: []string{"bob"}, machine: unreadable, kept: true},
+		// The gateway refuses bob's hook calls.
+		{name: "out of the manifest, not exempt, no machine-policy connector",
+			manifestMode: true, eligible: staleBob},
+		{name: "out of the manifest, exempt_users names another account", exempt: []string{"carol", "bobby@corp.example"},
+			manifestMode: true, eligible: staleBob},
+		{name: "a machine-policy connector under unenrolled_users deny, excluded", exclude: []string{"bob"},
+			machine: claude, unenrolled: config.EnterpriseUnenrolledDeny, rows: []enterpriseHookReconcileRow{bobRow}},
+		{name: "excluded, no machine-policy connector, an unlisted record", exclude: []string{"bob"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settings(tc.exclude, tc.exempt)
+			if tc.manifestMode {
+				cfg.Enterprise.Enrollment.Mode = config.EnterpriseEnrollmentManifest
+			}
+			cfg.Enterprise.Enrollment.UnenrolledUsers = tc.unenrolled
+			enterpriseHookLoadMachinePolicyConnectors = func() ([]string, error) { return nil, nil }
+			if tc.machine != nil {
+				enterpriseHookLoadMachinePolicyConnectors = tc.machine
+			}
+			load := func(string) ([]enterprisehooks.UnixEligibleAccount, error) { return tc.eligible, nil }
+			enterpriseHookLoadEligibleAccounts, enterpriseHookLoadIdentityAccounts = load, load
+			enterpriseHookLoadAcceptedTargets = func() ([]enterpriseHookReconcileRow, error) { return nil, nil }
+			enterpriseHookLeftOutProven.Lock()
+			enterpriseHookLeftOutProven.proofs = map[string]enterpriseHookLeftOutProof{}
+			enterpriseHookLeftOutProven.Unlock()
+			dir := t.TempDir()
+			record := enterprisehooks.IdentitySpoolRecord{Key: strconv.Itoa(bobUID), User: "bob", SSSDDomain: "corp.example"}
+			record.Facts.UPN, record.Facts.Principal = "bob@corp.example", "bob@corp.example"
+			writeWithdrawTestRecord(t, dir, record)
+			run := enterpriseHookReconcileRun{Manifest: manifest, Rows: tc.rows}
+			accounts, keys, withdraw := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, run)
+			listed := slices.ContainsFunc(accounts, func(a enterprisehooks.IdentitySpoolAccount) bool { return a.UID == bobUID && !a.Left })
+			left := slices.ContainsFunc(accounts, func(a enterprisehooks.IdentitySpoolAccount) bool { return a.UID == bobUID && a.Left })
+			if listed != tc.listed || (tc.kept && left) {
+				t.Fatalf("identity accounts %+v (keys %v): bob listed %t, left %t; want listed %t, kept %t",
+					accounts, keys, listed, left, tc.listed, tc.kept)
+			}
+			if !listed && !left && withdraw(bobUID, record) == tc.kept {
+				t.Fatalf("the pass withdraws bob's unlisted record %t, want %t", tc.kept, !tc.kept)
+			}
+			canceled, cancel := context.WithCancel(context.Background())
+			cancel()
+			_ = enterprisehooks.WriteIdentitySpool(canceled, dir, accounts, nil, nil, withdraw)
+			if got := withdrawTestRecordExists(t, dir, bobUID); got != tc.kept {
+				t.Fatalf("bob's identity record exists %t after the pass, want %t", got, tc.kept)
+			}
+		})
+	}
+}
+
+// staleNameTestResolver answers names and uids from separate tables, as a
+// directory cache can: a name can still give the uid of an account that
+// has left, while the uid lookup names the account that holds it now.
+// transient lists the names, and "uid" for the uid lookups, whose lookup
+// fails without an answer.
+type staleNameTestResolver struct {
+	standaloneTestResolver
+	names     map[string]unixidentity.Account
+	uids      map[int]unixidentity.Account
+	transient map[string]bool
+}
+
+func (r staleNameTestResolver) LookupUser(name string) (unixidentity.Account, error) {
+	if r.transient[name] {
+		return unixidentity.Account{}, errors.New("sssd: backend offline")
+	}
+	if account, ok := r.names[name]; ok {
+		return account, nil
+	}
+	return unixidentity.Account{}, unixidentity.ErrNotFound
+}
+
+func (r staleNameTestResolver) LookupUID(uid int) (unixidentity.Account, error) {
+	if r.transient["uid"] {
+		return unixidentity.Account{}, errors.New("sssd: backend offline")
+	}
+	if account, ok := r.uids[uid]; ok {
+		return account, nil
+	}
+	return unixidentity.Account{}, unixidentity.ErrNotFound
+}
+
+// W2B-G-enum loop round 1 (P1): a name entry's lookup that answered marked
+// the uid it gave as excluded or exempt, whoever held that uid now. A
+// directory cache can still answer an alias of alice, who left, with her
+// old uid after charlie got it: the uid was then kept out of the scans, so
+// charlie got no scan row, and his identity record was withdrawn. A name's
+// answer now binds to the account it named: it applies to the uid only
+// while the account the uid holds now (the uid lookup, or else the uid's
+// identity record) is not shown to be another account no entry names, and
+// it withdraws a record only when that account is the one it named. A uid
+// entry still binds to the uid.
+func TestANameAnswerNeverBindsTheUIDOfAnotherAccount(t *testing.T) {
+	settings := withdrawTestSettings(t)
+	const uid = 4242
+	const sidA, sidC = "S-1-5-21-1-2-3-1101", "S-1-5-21-1-2-3-1301"
+	alice := unixidentity.Account{Name: "alice", UID: uid, GID: uid}
+	charlie := unixidentity.Account{Name: "charlie", UID: uid, GID: uid}
+	authDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authDir)
+	dir := enterprisehooks.IdentitySpoolDir(authDir)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	enterpriseHookLoadAcceptedTargets = func() ([]enterpriseHookReconcileRow, error) { return nil, nil }
+	for _, tc := range []struct {
+		name            string
+		kind            string
+		entries         []string
+		holder          *unixidentity.Account
+		recordUser, sid string
+		listed          string
+		scanned         bool
+		withdrawn       bool
+	}{
+		// The alias still answers with alice's old uid; charlie holds it.
+		{name: "the uid lookup names charlie", kind: "exclude", holder: &charlie,
+			recordUser: "charlie", sid: sidC, listed: "charlie", scanned: true},
+		{name: "the uid lookup names charlie, who has no record yet", kind: "exclude", holder: &charlie,
+			listed: "charlie", scanned: true},
+		{name: "only charlie's record says so", kind: "exclude",
+			recordUser: "charlie", sid: sidC, listed: "charlie", scanned: true},
+		{name: "the exemption: the uid lookup names charlie", kind: "exempt", holder: &charlie,
+			recordUser: "charlie", sid: sidC, listed: "charlie", scanned: true},
+		{name: "the exemption: only charlie's record says so", kind: "exempt",
+			recordUser: "charlie", sid: sidC, listed: "charlie", scanned: true},
+		// The answer names the account the uid holds.
+		{name: "the uid lookup names alice", kind: "exclude", holder: &alice,
+			recordUser: "alice", sid: sidA, listed: "alice", withdrawn: true},
+		{name: "only alice's record says so", kind: "exclude",
+			recordUser: "alice", sid: sidA, listed: "alice", withdrawn: true},
+		{name: "the exemption: the uid lookup names alice", kind: "exempt", holder: &alice,
+			recordUser: "alice", sid: sidA, listed: "alice"},
+		// Nothing shows who holds the uid: the scans stay strict, and
+		// there is no record to withdraw.
+		{name: "no record and the uid lookup does not answer", kind: "exclude", listed: "charlie"},
+		// Charlie is left out by an entry of his own.
+		{name: "charlie holds the uid and is excluded too", kind: "exclude", entries: []string{"alice-alias", "charlie"},
+			holder: &charlie, recordUser: "charlie", sid: sidC, listed: "charlie.other", withdrawn: true},
+		{name: "a uid entry binds to the uid", kind: "exclude", entries: []string{strconv.Itoa(uid)},
+			holder: &charlie, recordUser: "charlie", sid: sidC, listed: "charlie", withdrawn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := tc.entries
+			if entries == nil {
+				entries = []string{"alice-alias"}
+			}
+			if tc.kind == "exclude" {
+				settings(entries, nil)
+			} else {
+				settings(nil, entries)
+			}
+			enterpriseHookLeftOutProven.Lock()
+			enterpriseHookLeftOutProven.proofs = map[string]enterpriseHookLeftOutProof{}
+			enterpriseHookLeftOutProven.Unlock()
+			r := staleNameTestResolver{
+				names:     map[string]unixidentity.Account{"alice-alias": alice},
+				uids:      map[int]unixidentity.Account{},
+				transient: map[string]bool{},
+			}
+			if tc.holder != nil {
+				r.names[tc.holder.Name] = *tc.holder
+				r.uids[uid] = *tc.holder
+			} else {
+				r.transient["uid"] = true
+			}
+			enterprisehooks.SetStandaloneResolver(r)
+			if err := os.Remove(filepath.Join(dir, strconv.Itoa(uid)+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			record := enterprisehooks.IdentitySpoolRecord{Key: strconv.Itoa(uid), User: tc.recordUser, AccountSID: tc.sid}
+			if tc.recordUser != "" {
+				writeWithdrawTestRecord(t, dir, record)
+			}
+			eligible := []enterprisehooks.UnixEligibleAccount{{User: tc.listed, UID: uid, Home: "/home/" + tc.listed}}
+			load := func(string) ([]enterprisehooks.UnixEligibleAccount, error) { return eligible, nil }
+			enterpriseHookLoadEligibleAccounts, enterpriseHookLoadIdentityAccounts = load, load
+			run := enterpriseHookReconcileRun{Manifest: "/etc/defenseclaw/hooks/manifest.json"}
+
+			// The scans.
+			rows := enterpriseHookEnrolledAccountRows(context.Background(), io.Discard, run)
+			scanned := slices.ContainsFunc(rows, func(row enterpriseHookReconcileRow) bool { return row.UID == uid })
+			if scanned != tc.scanned {
+				t.Fatalf("scan rows %+v: uid %d scanned %t, want %t", rows, uid, scanned, tc.scanned)
+			}
+			if tc.kind != "exclude" {
+				return
+			}
+			// The record path: the record of an account the pass does not
+			// list.
+			if tc.recordUser != "" {
+				if got := enterpriseHookEnrollmentLeftOut(context.Background(), dir).withdraws(uid, tc.recordUser); got != tc.withdrawn {
+					t.Fatalf("record path: withdrawn %t, want %t", got, tc.withdrawn)
+				}
+			}
+			// The listing path, and the pass.
+			accounts, _, withdraw := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, run)
+			left := slices.ContainsFunc(accounts, func(a enterprisehooks.IdentitySpoolAccount) bool { return a.UID == uid && a.Left })
+			if left != tc.withdrawn {
+				t.Fatalf("listing path: accounts %+v, left %t, want %t", accounts, left, tc.withdrawn)
+			}
+			canceled, cancel := context.WithCancel(context.Background())
+			cancel()
+			_ = enterprisehooks.WriteIdentitySpool(canceled, dir, accounts, nil, nil, withdraw)
+			if tc.recordUser != "" && withdrawTestRecordExists(t, dir, uid) == tc.withdrawn {
+				t.Fatalf("record exists %t after the pass, want %t", !tc.withdrawn, !tc.withdrawn)
 			}
 		})
 	}

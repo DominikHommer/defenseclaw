@@ -249,16 +249,19 @@ decides the domain of an SSSD account from its uid, not from its name:
   records every 15 minutes, and within about a minute after the clock is
   stepped (an NTP correction, a resume from suspend). It removes the record of
   an account the enrollment leaves out (excluded, or out of the manifest) at
-  its next pass, once the guardian authorization no longer accepts the
-  account's hook calls: while the guardian still protects a hook of the
-  account (the manifest that leaves it out was not published, or could not
-  be applied), the record stays, so those calls keep the profile assigned to
-  the account's UPN. An `exclude_users` name withdraws a record only while
-  the uid still names the excluded account, by the directory's answer or, when
-  the directory does not answer, by the record itself (and its SID, where
-  SSSD holds one). An account that reused the uid keeps its record. An
-  `exempt_users` entry withdraws no record: the gateway still accepts and
-  inspects that account's hook calls under its own profile. The record of a
+  its next pass, once the gateway no longer accepts the account's hook calls.
+  While the guardian still protects a hook of the account (the manifest that
+  leaves it out was not published, or could not be applied), the record
+  stays, so those calls keep the profile assigned to the account's UPN. The
+  record of an `exempt_users` account stays too, and so does every account's
+  while a machine-policy connector is deployed and `unenrolled_users` is not
+  `deny`: the gateway still accepts and inspects those hook calls under the
+  account's own profile. An `exclude_users` name withdraws a record only
+  while the uid still names the excluded account, by the directory's answer
+  or, when the directory does not answer, by the record itself (and its SID,
+  where SSSD holds one). An account that reused the uid keeps its record and
+  its scans, also while a directory cache still answers the excluded name
+  with that uid. The record of a
   deleted local account goes at the guardian's next pass in which every
   enrolled account resolves. A directory account that a
   pass does not list (a partial listing, an account that is not signed in)
