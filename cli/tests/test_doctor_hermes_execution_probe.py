@@ -4,16 +4,15 @@
 
 """Hermes health requires a runnable command read from the agent registration."""
 
-import json
 import hashlib
+import json
 import os
 from types import SimpleNamespace
 
 import pytest
 import yaml
-
 from defenseclaw.commands import cmd_doctor
-from defenseclaw.doctor_hooks import WindowsHookCheck, _HERMES_REQUIRED_HOOKS
+from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, WindowsHookCheck
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
