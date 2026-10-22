@@ -859,6 +859,162 @@ def _run_powershell(script: str) -> subprocess.CompletedProcess[str]:
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("snapshot", ["complete", "incomplete", "incomplete-legacy", "rollback"])
+def test_interrupted_recovery_refuses_to_continue_when_the_gateway_cannot_start(
+    tmp_path: Path, snapshot: str
+) -> None:
+    # GAP-0444: losing the saved running state let the resumed install skip
+    # its health gate and report success with the gateway still down.
+    slot = tmp_path / (".rollback-hold" if snapshot == "rollback" else "previous.new")
+    slot.mkdir()
+    if snapshot == "incomplete-legacy":
+        (tmp_path / "bin").mkdir()
+        (tmp_path / "bin" / "defenseclaw-gateway.exe").touch()
+    else:
+        (slot / "GATEWAY_WAS_RUNNING").write_text("true", encoding="ascii")
+    (slot / "VERSION").write_text("1.0.3", encoding="ascii")
+    if snapshot == "complete":
+        (slot / "COMPLETE").touch()
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{tmp_path}'
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+$BinDir = Join-Path $DataDir 'bin'
+$Staging = Join-Path $DataDir '.staging'
+$Previous = Join-Path $DataDir 'previous'
+$SetupHookState = Join-Path $DataDir 'hook-runtime-state.json'
+{_ps_functions("Invoke-Native")}
+$global:LASTEXITCODE = 0
+$failedLaunch = Invoke-Native (Join-Path $DataDir 'missing-gateway.exe') -Quiet
+$successfulLaunch = Invoke-Native '{POWERSHELL}' @('-NoProfile', '-NonInteractive', '-Command', 'exit 0') -Quiet
+Write-Output "FAILED_LAUNCH=$failedLaunch SUCCESSFUL_LAUNCH=$successfulLaunch"
+$script:starts = 0
+$script:startCode = 1
+function Write-Warn([string]$Message) {{ Write-Host $Message }}
+function Write-Info([string]$Message) {{ Write-Host $Message }}
+function Stop-Gateway {{ return $true }}
+function Get-GatewayProcess {{ return $null }}
+function Start-Gateway {{ $script:starts++; return $script:startCode }}
+function Find-SetupInstall {{ return $null }}
+function Die([string]$Message) {{ throw $Message }}
+function Undo-HookFirst {{ }}
+function Restore-LiveTree {{ }}
+function Move-Path([string]$From, [string]$To) {{ Move-Item -LiteralPath $From -Destination $To }}
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
+function Restore-Slot([string]$Slot) {{ Remove-Tree $Slot; return (Join-Path $DataDir '.failed-test') }}
+{_ps_functions("Read-Text", "Undo-Snapshot", "Remove-Hold")}
+{_ps1_function("Resume-InterruptedRun")}
+foreach ($attempt in 1..2) {{
+    try {{ Resume-InterruptedRun; Write-Output 'CONTINUED' }} catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
+}}
+$script:startCode = 3
+Resume-InterruptedRun
+Write-Output 'RECOVERED'
+Write-Output "STARTS=$script:starts"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "CONTINUED" not in out and "REFUSED:" in out, out
+    assert out.count("REFUSED:") == 2 and "defenseclaw-gateway start" in out, out
+    assert "STARTS=3" in out and "RECOVERED" in out, out
+    assert "FAILED_LAUNCH=0 " not in out and "SUCCESSFUL_LAUNCH=0" in out, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("failure", ["live-data", "saved-venv", "external-config", "after-data", "unproven-data"])
+def test_snapshot_restore_preserves_failed_moves_and_can_resume(tmp_path: Path, failure: str) -> None:
+    # GAP-0450: required moves and external-config restoration must all
+    # succeed before the snapshot is consumed or recovery is announced.
+    data = tmp_path / "data"
+    slot = data / "previous.new"
+    external = tmp_path / "external.yaml"
+    for path, body in {
+        data / "config.yaml": "new data",
+        slot / "data" / "config.yaml": "old data",
+        data / ".venv" / "runtime.txt": "new environment",
+        slot / "venv" / "runtime.txt": "old environment",
+        data / ".defenseclaw-cas-intent": "new receipt",
+        slot / "data" / ".defenseclaw-cas-intent": "old receipt",
+        external: "new external config",
+        slot / "config" / external.name: "old external config",
+        slot / "CONFIG": str(external),
+        slot / "COMPLETE": "",
+    }.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="ascii")
+    move = _ps1_function("Move-Path").replace("function Move-Path(", "function Move-PathReal(", 1)
+    functions = "\n".join(
+        _ps1_function(name)
+        for name in re.findall(r"^function ([\w-]+)[ (]", _text(), re.M)
+        if name in {
+            "Get-Sha256", "Get-DataEntries", "Read-Text", "Restore-ExternalConfig",
+            "Test-ConnectorRecoveryArtifactName", "Move-RestoreConnectorRecovery", "Restore-Slot", "Invoke-Quietly",
+        }
+    )
+    script = f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$Slot = '{slot}'
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+$NotData = @('.venv', 'installer', 'previous.new', '.failed-*')
+$Ver = '1.0.4'
+$Local = ''
+$script:inject = $true
+function Write-Warn([string]$Message) {{ Write-Host $Message }}
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
+function Remove-FailedInstall([string]$Path) {{ Remove-Tree $Path }}
+function Restore-BinDir {{ }}
+function New-FailedInstallDirectory {{
+    $path = Join-Path $DataDir ('.failed-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $path | Out-Null
+    return $path
+}}
+function Copy-Kept([string]$From, [string]$To) {{
+    if ($script:inject -and '{failure}' -eq 'external-config') {{ throw 'injected external config refusal' }}
+    Copy-Item -LiteralPath $From -Destination $To -Force
+}}
+{move}
+function Move-Path([string]$From, [string]$To, [int]$Seconds = 0) {{
+    if ($script:inject) {{
+        if (('{failure}' -eq 'live-data' -and $From -eq (Join-Path $DataDir 'config.yaml')) -or
+            ('{failure}' -eq 'saved-venv' -and $From -eq (Join-Path $Slot 'venv'))) {{ throw 'injected move refusal' }}
+        if ('{failure}' -eq 'unproven-data' -and $From -eq (Join-Path $Slot 'data/config.yaml')) {{ return }}
+    }}
+    Move-PathReal $From $To 0
+    if ($script:inject -and '{failure}' -eq 'after-data' -and $From -eq (Join-Path $Slot 'data/config.yaml')) {{
+        throw 'injected interruption after rename'
+    }}
+}}
+{functions}
+try {{ Restore-Slot $Slot | Out-Null; Write-Output 'RESTORED-EARLY' }} catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
+if (-not (Test-Path -LiteralPath (Join-Path $Slot 'COMPLETE'))) {{ throw 'snapshot was discarded before recovery' }}
+$script:inject = $false
+Restore-Slot $Slot | Out-Null
+Write-Output 'RESTORED'
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "REFUSED:" in out and "RESTORED-EARLY" not in out, out
+    if failure != "unproven-data":
+        assert "injected" in out, out
+    assert not slot.exists()
+    assert (data / "config.yaml").read_text(encoding="ascii") == "old data"
+    assert (data / ".venv" / "runtime.txt").read_text(encoding="ascii") == "old environment"
+    assert (data / ".defenseclaw-cas-intent").read_text(encoding="ascii") == "old receipt"
+    assert external.read_text(encoding="ascii") == "old external config"
+    failed = list(data.glob(".failed-*"))
+    assert len(failed) == 1
+    assert (failed[0] / "data" / "config.yaml").read_text(encoding="ascii") == "new data"
+    assert (failed[0] / "venv" / "runtime.txt").read_text(encoding="ascii") == "new environment"
+    assert (failed[0] / "data" / ".defenseclaw-cas-intent").read_text(encoding="ascii") == "new receipt"
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configured(tmp_path: Path) -> None:
     # rel-1-0-1:GAP-0009 on Windows: the newer gateway of the two removes the
     # DefenseClaw hook entries of a connector the live install does not

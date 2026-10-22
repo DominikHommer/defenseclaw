@@ -24,6 +24,8 @@ for current behavior.
 
 ### Fixed
 
+- An interrupted Windows upgrade refuses to continue when gateway recovery fails, including on another retry. Restoring a snapshot now checkpoints and verifies required data and environment moves, retains recovery state on failure, and verifies an external config before reporting recovery (GAP-0444, GAP-0450).
+
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
 
 ### Removed
