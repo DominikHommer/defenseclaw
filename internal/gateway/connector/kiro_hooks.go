@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 )
 
@@ -97,24 +98,30 @@ func patchKiroV3Hooks(path, hookScript string) error {
 		kept = append(kept, item)
 	}
 	for _, spec := range kiroV3HookSpecs {
-		entry := map[string]interface{}{
-			"name":        spec.name,
-			"description": spec.description,
-			"trigger":     spec.trigger,
-			"action": map[string]interface{}{
-				"type":    "command",
-				"command": hookScript,
-			},
-			"timeout": 30,
-			"enabled": true,
-		}
-		if spec.matcher != "" {
-			entry["matcher"] = spec.matcher
-		}
-		kept = append(kept, entry)
+		kept = append(kept, kiroV3HookEntry(spec.name, spec.description, spec.trigger, spec.matcher, hookScript))
 	}
 	cfg["hooks"] = kept
 	return writeJSONObject(path, cfg)
+}
+
+// kiroV3HookEntry is the v3 hook entry Setup writes for one kiroV3HookSpecs
+// trigger.
+func kiroV3HookEntry(name, description, trigger, matcher, hookScript string) map[string]interface{} {
+	entry := map[string]interface{}{
+		"name":        name,
+		"description": description,
+		"trigger":     trigger,
+		"action": map[string]interface{}{
+			"type":    "command",
+			"command": hookScript,
+		},
+		"timeout": 30,
+		"enabled": true,
+	}
+	if matcher != "" {
+		entry["matcher"] = matcher
+	}
+	return entry
 }
 
 func removeKiroV3Hooks(path, hookScript string) error {
@@ -338,14 +345,14 @@ func kiroV3FileReferencesHook(path, hookScript string) (bool, error) {
 
 // kiroV3HooksCurrent reports whether the v3 hook file at path holds
 // DefenseClaw's entry for every kiroV3HookSpecs trigger exactly as Setup
-// writes it: the command hookCommand, the matcher, the 30-second timeout,
-// and not turned off. Kiro skips an entry with "enabled": false
+// writes it (kiroV3HookEntry), and no other entry on those triggers
+// (kiroV3BoundTrigger). Kiro skips an entry with "enabled": false
 // (kiro.dev/docs/hooks: "Set false to skip the hook without deleting it"),
 // and the presence check kiroV3FileReferencesHook, which teardown uses,
 // accepts any entry named defenseclaw-*, so a user who turned DefenseClaw's
-// entries off or pointed them at another command still passed verification
-// and the guardian never repaired the file. No other entry may sit on those
-// triggers (kiroV3BoundTrigger).
+// entries off, pointed them at another command or gave them another key (a
+// per-entry env or cwd) still passed verification and the guardian never
+// repaired the file.
 func kiroV3HooksCurrent(path, hookCommand string) (bool, error) {
 	cfg, err := readJSONObject(path)
 	if err != nil {
@@ -353,22 +360,8 @@ func kiroV3HooksCurrent(path, hookCommand string) (bool, error) {
 	}
 	hooks, _ := cfg["hooks"].([]interface{})
 	for _, spec := range kiroV3HookSpecs {
-		current := false
-		for _, item := range hooks {
-			obj, _ := item.(map[string]interface{})
-			action, _ := obj["action"].(map[string]interface{})
-			if obj == nil || action == nil || obj["name"] != spec.name || obj["trigger"] != spec.trigger ||
-				action["type"] != "command" || action["command"] != hookCommand ||
-				obj["enabled"] == false || !kiroV2HookTimeoutIs(obj["timeout"], 30) {
-				continue
-			}
-			if matcher, _ := obj["matcher"].(string); matcher != spec.matcher {
-				continue
-			}
-			current = true
-			break
-		}
-		if !current {
+		want := kiroV3HookEntry(spec.name, spec.description, spec.trigger, spec.matcher, hookCommand)
+		if !slices.ContainsFunc(hooks, func(item interface{}) bool { return sameHookJSON(item, want) }) {
 			return false, nil
 		}
 	}

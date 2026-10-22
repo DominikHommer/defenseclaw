@@ -1167,7 +1167,13 @@ def _hook_command_strings(value: Any) -> list[str]:
 # Kiro's .kiro/hooks/defenseclaw.json. On an event DefenseClaw binds, Setup
 # leaves its own entry alone there (patchCopilotHooksForOS, patchKiroV3Hooks).
 _OWNED_HOOK_FILE = "defenseclaw.json"
-_KIRO_V3_TRIGGERS = ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
+# kiroV3HookSpecs: name, description, trigger and matcher of each entry.
+_KIRO_V3_SPECS = (
+    ("defenseclaw-user-prompt", "DefenseClaw prompt inspection", "UserPromptSubmit", ""),
+    ("defenseclaw-pre-tool", "DefenseClaw tool-use inspection", "PreToolUse", ".*"),
+    ("defenseclaw-post-tool", "DefenseClaw tool-use audit", "PostToolUse", ".*"),
+    ("defenseclaw-stop", "DefenseClaw session stop", "Stop", ""),
+)
 _POSIX_SAFE_WORD = re.compile(r"[A-Za-z0-9/._\-+=:,@%]+")
 
 
@@ -1186,39 +1192,85 @@ def _locked_contract_id(cfg: Any, connector: str) -> str:
     return str(entry.get("contract_id") or "") if isinstance(entry, dict) else ""
 
 
-def _foreign_owned_file_command(cfg: Any, connector: str, path: Path, document: Any, current: str) -> str | None:
-    """The first command in DefenseClaw's own hook file, on an event it binds, that is not Setup's render.
+def _owned_file_renders(cfg: Any, connector: str, current: str) -> dict[str, dict[str, Any]]:
+    """Setup's entry for each event DefenseClaw binds in its own hook file of *connector*."""
+
+    if connector == "copilot":
+        from defenseclaw.doctor_hooks import _COPILOT_CONTRACT_EVENTS
+
+        events = _COPILOT_CONTRACT_EVENTS.get(_locked_contract_id(cfg, connector)) or tuple(
+            {event for contract in _COPILOT_CONTRACT_EVENTS.values() for event in contract}
+        )
+        return {
+            event: {
+                "type": "command",
+                "bash": f"{_shell_quote(current)} --event {_shell_quote(event)}",
+                "timeoutSec": TOOL_GUARD_HOOKS["copilot"].timeout,
+            }
+            for event in events
+        }
+    if connector == "kiro":
+        word = current if _POSIX_SAFE_WORD.fullmatch(current) else _shell_quote(current)
+        renders = {}
+        for name, description, trigger, matcher in _KIRO_V3_SPECS:
+            entry: dict[str, Any] = {
+                "name": name,
+                "description": description,
+                "trigger": trigger,
+                "action": {"type": "command", "command": f"{word} --hook-surface v3"},
+                "timeout": TOOL_GUARD_HOOKS["kiro"].timeout,
+                "enabled": True,
+            }
+            if matcher:
+                entry["matcher"] = matcher
+            renders[trigger] = entry
+        return renders
+    return {}
+
+
+def _same_hook_json(left: Any, right: Any) -> bool:
+    # sameHookJSON: true is not 1, and key order does not matter.
+    return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+
+
+def _foreign_owned_file_entry(
+    cfg: Any, connector: str, path: Path, document: Any, current: str
+) -> tuple[str, bool] | None:
+    """The first entry in DefenseClaw's own hook file, on an event it binds, that is not Setup's render.
 
     A wrapper (``bash <copy>``), a renamed copy or a copy without the
     generated-hook marker beside DefenseClaw's entry was not claimed by the
     command shape, so the agent ran it while doctor, status and fail-mode
-    passed (rel-1-0-4 GAP-0600).
+    passed (rel-1-0-4 GAP-0600). DefenseClaw's own entry with Setup's command
+    but another key (a per-entry ``env`` such as ``BASH_ENV``, a ``cwd``, a
+    shorter timeout) runs the hook under the user's terms, so the whole entry
+    must be Setup's, as the gateway's presence check requires. Returns the
+    entry's command and True when that is what differs, else the entry and
+    False.
     """
 
     if _is_windows() or path.name != _OWNED_HOOK_FILE or not isinstance(document, dict):
         return None  # Windows: the native validators check the handlers
-    if connector == "copilot":
-        from defenseclaw.doctor_hooks import _COPILOT_CONTRACT_EVENTS
-
-        hooks = document.get("hooks")
-        events = _COPILOT_CONTRACT_EVENTS.get(_locked_contract_id(cfg, connector)) or tuple(
-            {event for contract in _COPILOT_CONTRACT_EVENTS.values() for event in contract}
-        )
-        for event in events:
-            entries = hooks.get(event) if isinstance(hooks, dict) else None
-            render = f"{_shell_quote(current)} --event {_shell_quote(event)}"
-            for command in _hook_command_strings(entries if isinstance(entries, list) else []):
-                if command != render:
-                    return command
-    elif connector == "kiro":
-        word = current if _POSIX_SAFE_WORD.fullmatch(current) else _shell_quote(current)
-        render = f"{word} --hook-surface v3"
-        hooks = document.get("hooks")
-        for entry in hooks if isinstance(hooks, list) else []:
-            if isinstance(entry, dict) and entry.get("trigger") in _KIRO_V3_TRIGGERS:
-                for command in _hook_command_strings(entry):
-                    if command != render:
-                        return command
+    renders = _owned_file_renders(cfg, connector, current)
+    hooks = document.get("hooks")
+    if connector == "copilot" and isinstance(hooks, dict):
+        bound = [(event, entry) for event in renders if isinstance(hooks.get(event), list) for entry in hooks[event]]
+    elif connector == "kiro" and isinstance(hooks, list):
+        bound = [
+            (entry.get("trigger"), entry)
+            for entry in hooks
+            if isinstance(entry, dict) and entry.get("trigger") in renders
+        ]
+    else:
+        return None
+    matched: set[str] = set()
+    for event, entry in bound:
+        if event not in matched and _same_hook_json(entry, renders[event]):
+            matched.add(event)
+            continue
+        expected = _hook_command_strings(renders[event])
+        changed = [command for command in _hook_command_strings(entry) if command not in expected]
+        return (changed[0], True) if changed else (json.dumps(entry, sort_keys=True), False)
     return None
 
 
@@ -1239,7 +1291,7 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
     entry repointed at a copy of the script runs a hook DefenseClaw does not
     keep current, from any folder (rel-1-0-4 GAP-0600), and in DefenseClaw's
     own file any entry on a bound event that is not Setup's render
-    (:func:`_foreign_owned_file_command`). Setup (``doctor --fix`` restarts
+    (:func:`_foreign_owned_file_entry`). Setup (``doctor --fix`` restarts
     the gateway, which runs it) replaces them.
     """
 
@@ -1260,9 +1312,13 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
             document = _load_agent_document(path)
         except (OSError, ValueError, ImportError):
             continue
-        foreign = _foreign_owned_file_command(cfg, connector, path, document, current)
+        foreign = _foreign_owned_file_entry(cfg, connector, path, document, current)
         if foreign is not None:
-            return [_edited_hook_problem(connector, path, repr(foreign.strip()), current)]
+            runs, command_changed = foreign
+            # Setup's command with a type, timeout, matcher or enabled flag
+            # that leaves the tool call unchecked: that check names the field.
+            unguarded = [] if command_changed else unguarded_tool_call_hooks(cfg, connector)
+            return unguarded or [_edited_hook_problem(connector, path, repr(runs.strip()), current)]
         for command in _hook_command_strings(document):
             word = edited_hook_script(command, script_name)
             first = (_split_hook_command(command.strip()) or ("",))[0]

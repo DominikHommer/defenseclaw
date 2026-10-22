@@ -735,3 +735,96 @@ func TestOwnedHookFileHoldsOnlyTheSetupRender(t *testing.T) {
 		})
 	}
 }
+
+// DefenseClaw's own entry in its own hook file with Setup's command but
+// another key (a per-entry env such as BASH_ENV, a cwd, an edited
+// description) runs the hook under the user's terms: only Setup's whole
+// entry is DefenseClaw's current hook. Presence fails and Setup restores it.
+func TestOwnedHookFileEntryIsTheWholeSetupRender(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows registers the native hook launcher, not a hook script")
+	}
+	override := func(t *testing.T, target *string, value string) {
+		previous := *target
+		*target = value
+		t.Cleanup(func() { *target = previous })
+	}
+	cases := map[string]struct {
+		install func(t *testing.T) Connector
+		own     func(document map[string]interface{}) (entry, action map[string]interface{})
+	}{
+		"copilot": {
+			install: func(t *testing.T) Connector {
+				override(t, &CopilotHooksPathOverride, filepath.Join(t.TempDir(), "defenseclaw.json"))
+				return NewCopilotConnector()
+			},
+			own: func(document map[string]interface{}) (map[string]interface{}, map[string]interface{}) {
+				entry := document["hooks"].(map[string]interface{})["preToolUse"].([]interface{})[0].(map[string]interface{})
+				return entry, entry
+			},
+		},
+		"kiro": {
+			install: func(t *testing.T) Connector {
+				override(t, &KiroHomeOverride, t.TempDir())
+				return NewKiroConnector()
+			},
+			own: func(document map[string]interface{}) (map[string]interface{}, map[string]interface{}) {
+				for _, item := range document["hooks"].([]interface{}) {
+					if entry := item.(map[string]interface{}); entry["trigger"] == "PreToolUse" {
+						return entry, entry["action"].(map[string]interface{})
+					}
+				}
+				return nil, nil
+			},
+		},
+	}
+	edits := map[string]func(entry, action map[string]interface{}){
+		"env": func(entry, _ map[string]interface{}) {
+			entry["env"] = map[string]interface{}{"BASH_ENV": "/tmp/exit-0.sh"}
+		},
+		"cwd": func(entry, _ map[string]interface{}) { entry["cwd"] = "/tmp" },
+		"action env": func(_, action map[string]interface{}) {
+			action["env"] = map[string]interface{}{"BASH_ENV": "/tmp/exit-0.sh"}
+		},
+		"description": func(entry, _ map[string]interface{}) { entry["description"] = "audit" },
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			conn := tc.install(t)
+			opts := SetupOpts{
+				DataDir:  filepath.Join(testenv.PrivateTempDir(t), ".defenseclaw"),
+				APIAddr:  "127.0.0.1:18970",
+				APIToken: "tok-test",
+			}
+			ctx := context.Background()
+			if err := conn.Setup(ctx, opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			path := HookConfigPathsForConnector(conn, opts)[0]
+			pristine, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+				t.Fatalf("pristine: OwnedHooksPresent = %v, %v; want true", present, err)
+			}
+			for label, edit := range edits {
+				document := decodeHookFileForTest(t, path)
+				entry, action := tc.own(document)
+				edit(entry, action)
+				if err := os.WriteFile(path, encodeHookFileForTest(t, path, document), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if present, err := OwnedHooksPresent(conn, opts); err != nil || present {
+					t.Fatalf("%s: OwnedHooksPresent = %v, %v; want false", label, present, err)
+				}
+				if err := conn.Setup(ctx, opts); err != nil {
+					t.Fatalf("%s: repair: %v", label, err)
+				}
+				if got := readHookFileForTest(t, path); got != string(pristine) {
+					t.Fatalf("%s: repair is not the Setup render:\n%s", label, got)
+				}
+			}
+		})
+	}
+}

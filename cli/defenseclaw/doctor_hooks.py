@@ -3170,6 +3170,14 @@ def _validate_copilot_hook_matrix(
                 "stale",
                 f"Copilot event {event} mixes the Windows powershell handler with another command field",
             )
+        extra = sorted(set(entry) - {"type", "powershell", "timeoutSec"})
+        if extra:
+            # Setup writes these three keys only (copilotHookRegistration); a
+            # per-entry env or cwd runs DefenseClaw's hook under other terms.
+            raise _InspectionError(
+                "foreign",
+                f"Copilot event {event} handler has keys Setup does not write: {', '.join(extra)}",
+            )
         commands[event] = command
         targets.add(target)
         count += 1

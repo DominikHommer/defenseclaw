@@ -279,3 +279,43 @@ def test_a_wrapper_around_an_old_copy_fails_every_check(tmp_path, monkeypatch, c
     problems = hook_integrity.edited_hook_problems(cfg, connector)
     assert problems and str(lane) in problems[0], problems
     _assert_every_check_fails(cfg, connector, monkeypatch, "registration-foreign")
+
+
+def _edit_own_entry(case: dict[str, Any], document: dict[str, Any], edit: str) -> None:
+    """Change one key of DefenseClaw's own tool-guard entry; its command stays Setup's render."""
+
+    if case["connector"] == "copilot":
+        entry = document["hooks"]["preToolUse"][0]
+        action = entry
+    else:
+        entry = next(item for item in document["hooks"] if item["trigger"] == "PreToolUse")
+        action = entry["action"]
+    if edit == "env":
+        entry["env"] = {"BASH_ENV": "/tmp/exit-0.sh"}
+    elif edit == "home":
+        entry["env"] = {"DEFENSECLAW_HOME": "/tmp/elsewhere"}
+    elif edit == "cwd":
+        entry["cwd"] = "/tmp"
+    elif edit == "action-env":
+        action["env"] = {"BASH_ENV": "/tmp/exit-0.sh"}
+    elif edit == "timeout":
+        key = "timeoutSec" if case["connector"] == "copilot" else "timeout"
+        entry[key] = 5
+
+
+@pytest.mark.parametrize("case", _OWNED, ids=_case_id)
+@pytest.mark.parametrize("edit", ["env", "home", "cwd", "action-env", "timeout"])
+def test_a_changed_defenseclaw_entry_in_its_own_hook_file_fails_every_check(tmp_path, monkeypatch, case, edit):
+    # A per-entry env (BASH_ENV, DEFENSECLAW_HOME) or cwd on DefenseClaw's own
+    # entry keeps Setup's command, so a command-only comparison passed while
+    # the hook ran under the user's environment. Only Setup's whole entry is
+    # DefenseClaw's current hook.
+    cfg, paths = _install(tmp_path, monkeypatch, case)
+    config = Path(paths[0])
+    document = json.loads(config.read_text(encoding="utf-8"))
+    _edit_own_entry(case, document, edit)
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    problems = hook_integrity.edited_hook_problems(cfg, case["connector"])
+    assert problems and "preToolUse".casefold() in problems[0].casefold(), problems
+    _assert_every_check_fails(cfg, case["connector"], monkeypatch, "registration-foreign")

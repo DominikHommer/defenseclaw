@@ -512,6 +512,21 @@ def test_windows_copilot_doctor_rejects_another_handler_in_defenseclaws_file(tmp
     assert "other handler" in check.detail
 
 
+@pytest.mark.parametrize("key, value", [("env", {"DEFENSECLAW_HOME": "C:/lane"}), ("cwd", "C:/lane")])
+def test_windows_copilot_doctor_rejects_a_changed_defenseclaw_handler(tmp_path: Path, key: str, value: object) -> None:
+    # DefenseClaw's own handler with Setup's command but a key Setup does not
+    # write runs the hook under the user's environment or folder.
+    install, data, config = _fixture(tmp_path)
+    document = json.loads(config.read_text(encoding="utf-8"))
+    document["hooks"]["preToolUse"][0][key] = value
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    check = _validate(install, data, config)
+
+    assert check.state == "foreign", check
+    assert key in check.detail
+
+
 @pytest.mark.parametrize(
     "tamper, drift",
     [
