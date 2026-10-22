@@ -170,11 +170,14 @@ func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellA
 			want = config.EnterpriseOpenShellDriverVM
 		}
 		if driver != want {
-			return "", "", &sandboxrelay.Refusal{Reason: sandboxrelay.DetailSetupChanging,
-				Message: "Your organization now runs sandboxes on the " + want + " driver on this computer, but your sandbox service still uses " + driver +
-					". Stop your sandboxes with `defenseclaw sandbox stop NAME`, then retry the command so the authorized update can finish."}
+			return "", "", sandboxDriverSwitchRefusal(driver, want)
 		}
 		return driver, openshell.DriverReasonConfigured, nil
+	case driver == config.EnterpriseOpenShellDriverDocker && reason == openshell.DriverReasonConfigured:
+		// A daemon holding the earlier explicit Docker configuration must
+		// refresh it before claiming a VM or an auto-selected fallback. It
+		// receives no registration or permission to keep the old choice.
+		return "", "", sandboxDriverSwitchRefusal(driver, want)
 	case driver == config.EnterpriseOpenShellDriverVM:
 		if want == config.EnterpriseOpenShellDriverAuto {
 			return driver, openshell.DriverReasonKVMAvailable, nil
@@ -186,6 +189,12 @@ func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellA
 		return "", "", &sandboxrelay.Refusal{Reason: sandboxrelay.ReasonUnavailable, Message: sandboxUnavailableText(sandboxVMRequired(reason))}
 	}
 	return driver, reason, nil
+}
+
+func sandboxDriverSwitchRefusal(running, selected string) *sandboxrelay.Refusal {
+	return &sandboxrelay.Refusal{Reason: sandboxrelay.DetailSetupChanging,
+		Message: "Your sandbox service still uses the " + running + " driver, but the current sandbox configuration selects " + selected +
+			". Stop your sandboxes with `defenseclaw sandbox stop NAME`, then retry the command so the authorized update can finish."}
 }
 
 func sandboxOperational(cfg *config.Config, floor config.OpenShellAdminConfig) sandboxrelay.OperationalSettings {
