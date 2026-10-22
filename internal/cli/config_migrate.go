@@ -520,6 +520,7 @@ func repairManagedStandaloneConfigGeneration(ctx context.Context, path string, a
 		opt = bundleOpt
 		opt.GenerationFloor = max(bundleOpt.GenerationFloor, floor)
 	}
+	opt.RecordSHA256 = configwrite.SHA256Hex(approved)
 	if opt.GenerationFloor == 0 {
 		return false, fmt.Errorf("cannot prove the previous config generation; restore %s from the last verified administrator backup, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", configwrite.GenerationPath(path))
 	}

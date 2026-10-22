@@ -58,6 +58,9 @@ func repairWindowsEnterpriseConfigGeneration(ctx context.Context, opts *windowsE
 	if err := windowsEnterpriseStandaloneConfigSource(opts.configPath); err != nil {
 		return false, err
 	}
+	if err := managed.ValidateTrustedFilePath(layout.ConfigPath, "installed config for generation recovery"); err != nil {
+		return false, fmt.Errorf("refuse generation recovery from an untrusted installed config: %w; restore its administrator-only write ACL, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", err)
+	}
 	out, _ := windowsEnterprisePolicyDigest(ctx)
 	var report policyDigestReport
 	_ = json.Unmarshal(out, &report)
