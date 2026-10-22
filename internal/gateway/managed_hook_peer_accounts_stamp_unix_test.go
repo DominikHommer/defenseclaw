@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -331,7 +332,46 @@ func TestL1SameNameAndUIDReplacementRevalidatesCachedFacts(t *testing.T) {
 				resolver.accounts[uid] = unixidentity.Account{Name: "alice", UID: uid, Home: tc.after.Home}
 				facts.set("staff")
 				listing.set(map[string]unixidentity.LocalAccountRecord{"alice": tc.after})
-				managedHookPeerAccountsRefresh() // the listing the next request starts
+				if path == "hook" {
+					// The first call after an idle interval starts a slow listing.
+					// Its old dc-admins membership must not decide this call.
+					var clock atomic.Int64
+					clock.Store(time.Now().Add(managedHookPeerListedStampInterval).UnixNano())
+					managedHookPeerAccounts.now = func() time.Time { return time.Unix(0, clock.Load()) }
+					gate := make(chan struct{})
+					listing.mu.Lock()
+					listing.gate = gate
+					listing.mu.Unlock()
+					got, ok := managedHookPeerDirectory(uid, true)
+					close(gate)
+					waitListed(t, managedHookPeerAccounts)
+					cfg := config.DefaultConfig()
+					cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+						"strict": {Mode: "action"}, "admins": {Mode: "observe"},
+					}
+					cfg.Guardrail.DefaultProfile = "strict"
+					cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+						{Profile: "admins", Match: config.ProfileMatch{Groups: []string{"dc-admins"}}},
+					}
+					profiles, err := cfg.DeriveGuardrailProfiles()
+					if err != nil {
+						t.Fatal(err)
+					}
+					subject := profileSubjectFromVerified(VerifiedSubject{
+						UserID: strconv.Itoa(uid), IDKind: useridentity.KindForID(strconv.Itoa(uid)), UserName: "alice", Directory: got,
+					}, true)
+					if !ok {
+						subject.LookupFailed = true
+					}
+					set := &guardrailProfileSet{base: cfg, profiles: profiles,
+						assignments: cfg.Guardrail.ProfileAssignments, defaultProfile: "strict"}
+					decision := set.match(&subject, profileSubjectVerified, "claudecode", "")
+					if ok || decision.Name != "strict" || profiles[decision.Name].Config.Guardrail.Mode != "action" {
+						t.Fatalf("first stale hook facts=%+v ok=%v decision=%+v: must use strict action policy", got, ok, decision)
+					}
+				} else {
+					managedHookPeerAccountsRefresh()
+				}
 				switch path {
 				case "hook":
 					if home := managedHookPeerHome(uid); home != tc.after.Home {
@@ -355,8 +395,8 @@ func TestL1SameNameAndUIDReplacementRevalidatesCachedFacts(t *testing.T) {
 	}
 }
 
-// A listing that fails gives no record: the cached facts stay (the TTL
-// applies, as before), and the same record listed again changes nothing.
+// A failed listing cannot serve the stored facts. The same record
+// confirmed again may reuse them within their existing TTL.
 func TestL1FailedListingKeepsCachedFacts(t *testing.T) {
 	const uid = 94301
 	record := unixidentity.LocalAccountRecord{UID: uid, RecordID: "0C3D", Home: "/Users/Shared/bob", PrimaryGID: "20"}
@@ -368,7 +408,9 @@ func TestL1FailedListingKeepsCachedFacts(t *testing.T) {
 	managedHookPeerDirectory(uid, true)
 	listing.setFail(true)
 	managedHookPeerAccountsRefresh()
-	managedHookPeerDirectory(uid, true)
+	if facts, ok := managedHookPeerDirectory(uid, true); ok {
+		t.Fatalf("failed account listing served unconfirmed groups: %+v", facts)
+	}
 	listing.setFail(false)
 	managedHookPeerAccountsRefresh()
 	got, ok := managedHookPeerDirectory(uid, true)

@@ -42,6 +42,12 @@ const managedHookPeerHomeTTL = 5 * time.Minute
 // cold cache answers it for directory accounts until it is back (GAP-0256).
 const managedHookPeerLookupRetry = 15 * time.Second
 
+// managedHookPeerAccountBudget leaves room for the directory-facts budget
+// and the verdict inside the managed hook's answer watchdog. Account and
+// incarnation lookups continue once per uid in the background; subsequent
+// requests never queue behind an unresolved lookup.
+const managedHookPeerAccountBudget = 250 * time.Millisecond
+
 // managedHookPeerAccountRecheck is how long a uid's account (name, home and
 // incarnation) is served before a request asks the account database again,
 // while identity facts are on. A directory hands a uid from one account to
@@ -369,6 +375,9 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 		return unixidentity.Account{}, false
 	}
 	stamp := managedHookPeerStamp()
+	if !ManagedEnterpriseActive() && managedHookPeerAccounts.list != nil && stamp == "" {
+		return unixidentity.Account{}, false
+	}
 	c.mu.Lock()
 	now := c.now()
 	if c.resolver == nil || now.Sub(c.resolvedAt) > managedHookPeerHomeTTL || stamp != c.stamp {
@@ -382,9 +391,18 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 		case <-entry.ready:
 			if now.Before(entry.expires) {
 				if entry.ok && rechecksAccounts() && !now.Before(entry.checked.Add(managedHookPeerAccountRecheck)) {
+					if entry.recheck != nil {
+						c.mu.Unlock()
+						return unixidentity.Account{}, false
+					}
 					resolver := c.resolver
+					done := make(chan struct{})
+					entry.recheck = done
 					c.mu.Unlock()
-					c.recheckAccount(uid, entry, resolver)
+					go c.recheckAccount(uid, entry, resolver, done)
+					if !waitManagedHookAccount(done) {
+						return unixidentity.Account{}, false
+					}
 					c.mu.Lock()
 				}
 				account, ok := entry.account, entry.ok
@@ -392,6 +410,10 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 				return account, ok
 			}
 		default:
+			if !ManagedEnterpriseActive() {
+				c.mu.Unlock()
+				return unixidentity.Account{}, false
+			}
 			c.mu.Unlock()
 			<-entry.ready
 			c.mu.Lock()
@@ -408,6 +430,31 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	resolver := c.resolver
 	c.mu.Unlock()
 
+	if ManagedEnterpriseActive() {
+		c.resolveAccount(uid, entry, resolver)
+	} else {
+		go c.resolveAccount(uid, entry, resolver)
+		if !waitManagedHookAccount(entry.ready) {
+			return unixidentity.Account{}, false
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return entry.account, entry.ok
+}
+
+func waitManagedHookAccount(done <-chan struct{}) bool {
+	timer := time.NewTimer(managedHookPeerAccountBudget)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func (c *managedHookPeerHomeCache) resolveAccount(uid int, entry *managedHookPeerAccount, resolver unixidentity.Resolver) {
 	account, err := unixidentity.Account{}, errManagedHookPeerNoResolver
 	if resolver != nil {
 		account, err = resolver.LookupUID(uid)
@@ -436,30 +483,17 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	entry.checked = c.now()
 	c.mu.Unlock()
 	close(entry.ready)
-	return account, ok
 }
 
 // recheckAccount asks the account database again for the account of uid
 // that entry holds (managedHookPeerAccountRecheck), and records its answer:
 // another name, home or incarnation then makes noteHolder drop the facts
 // cached for the former account before they are served. Concurrent
-// requests of the uid wait for the one recheck. An answer the directory
+// requests of the uid share the recheck and return no account while it is
+// unresolved. An answer the directory
 // cannot give (a failed lookup, an incarnation it cannot name) keeps the
 // last one and is asked again after managedHookPeerLookupRetry.
-func (c *managedHookPeerHomeCache) recheckAccount(uid int, entry *managedHookPeerAccount, resolver unixidentity.Resolver) {
-	c.mu.Lock()
-	if wait := entry.recheck; wait != nil {
-		c.mu.Unlock()
-		<-wait
-		return
-	}
-	if c.now().Before(entry.checked.Add(managedHookPeerAccountRecheck)) {
-		c.mu.Unlock()
-		return
-	}
-	done := make(chan struct{})
-	entry.recheck = done
-	c.mu.Unlock()
+func (c *managedHookPeerHomeCache) recheckAccount(uid int, entry *managedHookPeerAccount, resolver unixidentity.Resolver, done chan struct{}) {
 	defer close(done)
 
 	account, err := unixidentity.Account{}, errManagedHookPeerNoResolver
@@ -515,8 +549,23 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	if uid < 0 {
 		return useridentity.DirectoryFacts{}, false
 	}
+	if !ManagedEnterpriseActive() && managedHookPeerAccounts.list != nil && managedHookPeerStamp() == "" {
+		// A stale or failed macOS account listing proves no membership.
+		// Keep the hook bounded and use the failed-lookup policy until the
+		// background listing confirms which account owns these facts.
+		return useridentity.DirectoryFacts{}, false
+	}
 	key := strconv.Itoa(uid)
-	c.noteHolder(uid, key)
+	confirmed := c.noteHolder(uid, key)
+	if !ManagedEnterpriseActive() && !confirmed {
+		// An unresolved account may have changed holders. Do not let a
+		// lookup completing between this check and the cache read revive
+		// the former holder's facts for this request.
+		return useridentity.DirectoryFacts{}, false
+	}
+	if !ManagedEnterpriseActive() && managedHookPeerAccounts.list != nil && managedHookPeerStamp() == "" {
+		return useridentity.DirectoryFacts{}, false
+	}
 	return c.directoryCache().get(key, block)
 }
 
@@ -539,13 +588,13 @@ func (c *managedHookPeerHomeCache) explainDirectory(uid int) (useridentity.Direc
 // directory facts are used for, when the account database names uid now.
 // When another account holds the uid (a removed account's uid given to a new
 // one), its facts are dropped first (GAP-0720).
-func (c *managedHookPeerHomeCache) noteHolder(uid int, key string) {
+func (c *managedHookPeerHomeCache) noteHolder(uid int, key string) bool {
 	if uid < 0 || !identityFactsEnabled.Load() {
-		return
+		return false
 	}
 	account, ok := c.account(uid)
 	if !ok {
-		return
+		return false
 	}
 	incarnation, incarnationKnown := c.incarnation(uid)
 	holder := managedHookPeerHolder{name: account.Name, home: account.Home, stamp: managedHookPeerStamp(),
@@ -570,6 +619,7 @@ func (c *managedHookPeerHomeCache) noteHolder(uid int, key string) {
 	if changed {
 		c.directoryCache().forget(key)
 	}
+	return true
 }
 
 // directoryCache returns the cache of verified directory facts per uid,

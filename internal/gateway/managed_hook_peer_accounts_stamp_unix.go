@@ -32,7 +32,8 @@ import (
 // managedHookPeerListedStampInterval bounds the age of a listed account
 // database stamp that a hook request reads: a request never waits for the
 // listing, which runs in the background at most once per interval while
-// requests come in. Explain lists at once (managedHookPeerAccountsRefresh).
+// requests come in. An expired listing is unconfirmed until that refresh
+// finishes. Explain lists at once (managedHookPeerAccountsRefresh).
 const managedHookPeerListedStampInterval = 2 * time.Second
 
 // managedHookPeerListTimeout bounds one listing of the local accounts.
@@ -87,9 +88,9 @@ func (s *managedHookPeerAccountsSource) fileStamped() (string, bool) {
 	return stamp, stamp != ""
 }
 
-// get returns the stamp a request reads: the file's, else the last listed
-// one, starting a listing in the background when it is older than the
-// interval. "" until the first listing ends, or when neither source works.
+// get returns the file stamp or a fresh listed stamp. An expired listing
+// starts one background refresh and returns no stamp, so its old account
+// record cannot select a profile for the request that started the refresh.
 func (s *managedHookPeerAccountsSource) get() string {
 	if stamp, ok := s.fileStamped(); ok {
 		return stamp
@@ -99,12 +100,19 @@ func (s *managedHookPeerAccountsSource) get() string {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.refreshing && (s.listedAt.IsZero() || s.now().Sub(s.listedAt) >= managedHookPeerListedStampInterval) {
-		s.refreshing = true
-		seq := s.startLocked()
-		go s.listInto(seq, true)
+	if !s.freshLocked() {
+		if !s.refreshing {
+			s.refreshing = true
+			seq := s.startLocked()
+			go s.listInto(seq, true)
+		}
+		return ""
 	}
 	return s.listed.stamp
+}
+
+func (s *managedHookPeerAccountsSource) freshLocked() bool {
+	return !s.listedAt.IsZero() && s.now().Sub(s.listedAt) < managedHookPeerListedStampInterval
 }
 
 // record returns the listed record of the local account name: "" where the
@@ -119,6 +127,9 @@ func (s *managedHookPeerAccountsSource) record(name string) string {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.freshLocked() {
+		return ""
+	}
 	return s.listed.records[name]
 }
 
