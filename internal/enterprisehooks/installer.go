@@ -1395,15 +1395,16 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 		return fmt.Errorf("enterprise hooks: load hook contract lock: %w", err)
 	}
 	// The standalone floor of a not-gated connector (Kiro) gates new
-	// enrollments only. A user whose hooks an earlier release installed
-	// below the floor already has a contract lock: keep repairing that
-	// user's hooks at the version they were rendered for (a version change
-	// below the floor is still refused as drift, below), because refusing
-	// the repair would leave the row not OK, the gateway would then refuse
-	// the user's hook calls, and the hook script fails open by default.
-	if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" &&
-		resolution.Status == connector.HookCompatibilityNotGated && previous.Connector == "" {
-		if admitted, reason := standaloneNotGatedVersionAdmitted(resolution); !admitted {
+	// enrollments only, on every OS: managed Windows Kiro resolves to its
+	// reviewed contract, which still covers the builds an earlier release
+	// enrolled. A user whose hooks an earlier release installed below the
+	// floor already has a contract lock: keep repairing that user's hooks
+	// at the version they were rendered for (a version change below the
+	// floor is still refused as drift, below), because refusing the repair
+	// would leave the row not OK, the gateway would then refuse the user's
+	// hook calls, and the hook script fails open by default.
+	if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" && previous.Connector == "" {
+		if reason := standaloneAgentFloorRefusal(resolution); reason != "" {
 			return fmt.Errorf("enterprise hooks: connector %s agent version %q is not certified for the standalone profile: %s", conn.Name(), opts.AgentVersion, reason)
 		}
 	}
@@ -1423,7 +1424,7 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 			}
 			floorNote := ""
 			if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" {
-				if _, reason := standaloneNotGatedVersionAdmitted(resolution); reason != "" {
+				if reason := standaloneAgentFloorRefusal(resolution); reason != "" {
 					floorNote = "; " + reason
 				}
 			}
@@ -1451,7 +1452,9 @@ func standaloneAcceptsAgentVersionChange(resolution connector.HookContractResolu
 		return false
 	}
 	if resolution.Status == connector.HookCompatibilityKnown {
-		return true
+		// Managed Windows Kiro's contract covers builds below the floor
+		// that only an earlier release's rows keep.
+		return standaloneKiroCLIFloorRefusal(resolution) == ""
 	}
 	admitted, _ := standaloneNotGatedVersionAdmitted(resolution)
 	return admitted

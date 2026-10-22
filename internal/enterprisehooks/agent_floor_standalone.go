@@ -83,6 +83,36 @@ func standaloneNotGatedVersionAdmitted(resolution connector.HookContractResoluti
 	return true, ""
 }
 
+// standaloneKiroCLIFloorRefusal explains why the standalone profile does not
+// enroll a kiro-cli at a version that resolves to the managed Windows
+// contract, or follow a row to it: the contract still covers the builds 1.0.3
+// and earlier enrolled (connector.KiroWindowsManagedCLIContractFloor) so
+// those rows keep being repaired, but only connector.KiroCLIHookFloor and
+// later load hooks on every engine. Empty when it may, and for every other
+// resolution (Unix Kiro is not gated: standaloneNotGatedVersionAdmitted).
+func standaloneKiroCLIFloorRefusal(resolution connector.HookContractResolution) string {
+	if resolution.Connector != "kiro" || resolution.Status != connector.HookCompatibilityKnown ||
+		strings.HasSuffix(strings.TrimSpace(resolution.RawVersion), KiroIDEVersionSuffix) {
+		return ""
+	}
+	normalized := strings.TrimSpace(resolution.NormalizedVersion)
+	if normalized == "" || compareStandaloneFloorVersion(normalized, connector.KiroCLIHookFloor) >= 0 {
+		return ""
+	}
+	return connector.KiroCLIBelowHookFloorReason(normalized)
+}
+
+// standaloneAgentFloorRefusal explains why resolution's version is below
+// its connector's standalone floor, not-gated (Unix Kiro) or under the
+// managed Windows Kiro contract; empty when it is not.
+func standaloneAgentFloorRefusal(resolution connector.HookContractResolution) string {
+	if resolution.Status == connector.HookCompatibilityNotGated {
+		_, reason := standaloneNotGatedVersionAdmitted(resolution)
+		return reason
+	}
+	return standaloneKiroCLIFloorRefusal(resolution)
+}
+
 // compareStandaloneFloorVersion compares two normalized major.minor.patch
 // versions numerically (missing parts count as 0).
 func compareStandaloneFloorVersion(left, right string) int {

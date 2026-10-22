@@ -156,7 +156,10 @@ func applyStandaloneRowState(row *ManifestTarget, previous map[string]ManifestTa
 // (hook_contract_unverified for an unverified version). So does a Claude
 // Code change to an older hook contract: the one machine-wide Claude policy
 // is rendered from the oldest enrolled contract, so following it would let
-// one user weaken the policy every user shares. A signed-out user's
+// one user weaken the policy every user shares. A kiro-cli row an earlier
+// release enrolled below connector.KiroCLIHookFloor is kept and repaired at
+// its version, as on Unix, and follows only a version at or above the floor;
+// a new row below it is not written. A signed-out user's
 // version is left alone: the guardian could not repair their hooks until
 // they sign in, and the failure would withhold enrollment publication for
 // every other user.
@@ -198,7 +201,7 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 			// rejected surface next to the CLI is reported.
 			discovered := windowsStandaloneSurfaceVersion(row, logf, rowContext, cliVersion)
 			if discovered != "" && discovered != prev.AgentVersion {
-				ok, reason := windowsStandaloneRowAdmission(row.UserHome, row.Connector, discovered)
+				ok, reason := windowsStandaloneEnrollmentAdmission(row.UserHome, row.Connector, discovered)
 				if ok {
 					if lowered := claudeMachineContractLowered(row.Connector, prev.AgentVersion, discovered); lowered != "" {
 						ok, reason = false, lowered
@@ -284,7 +287,7 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 			return false
 		}
 	}
-	if ok, reason := windowsStandaloneRowAdmission(row.UserHome, row.Connector, version); !ok {
+	if ok, reason := windowsStandaloneEnrollmentAdmission(row.UserHome, row.Connector, version); !ok {
 		logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row skipped: %s", row.Connector, reason))
 		rowContext.unprotected(row, version, reason)
 		return false

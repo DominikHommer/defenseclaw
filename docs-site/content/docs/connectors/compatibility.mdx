@@ -59,8 +59,9 @@ agent config. Per-user installs have no hook contract, but kiro-cli must be
 2.27.1 or later: before it, a non-interactive `kiro-cli chat --v3` run loads
 no hooks, so setup refuses an older kiro-cli in both modes and doctor reports
 it as unsupported. Managed Windows pins `kiro-cli-windows-managed-hooks-v1`
-(kiro-cli `>=2.27.1`) or `kiro-ide-windows-managed-hooks-v1` (Kiro IDE
-`>=1.0.182`).
+(kiro-cli `>=2.27.1`; a user an earlier release enrolled at 2.24.1 or later
+keeps being repaired at that version) or `kiro-ide-windows-managed-hooks-v1`
+(Kiro IDE `>=1.0.182`).
 
 **Cursor.** DefenseClaw reads the version from `agent --version`. A
 semantic version is covered from `2.4.0`, and from `4.0.0` on it runs as an

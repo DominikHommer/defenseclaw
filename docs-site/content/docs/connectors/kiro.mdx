@@ -242,7 +242,7 @@ The standalone profile certifies kiro-cli 2.27.1 and later (see
 [Supported versions](#supported-versions)). In action mode the guardian
 refuses to enroll a new user whose kiro-cli is older and reports the reason. A
 user an earlier release already enrolled below 2.27.1 keeps being repaired at
-that version, so the interactive sessions stay enforced, but that kiro-cli's
+that version, on every OS, so the interactive sessions stay enforced, but that kiro-cli's
 non-interactive `--v3` runs send no hooks until it is updated. A kiro-cli
 change to another version below 2.27.1 is refused as hook contract drift until
 kiro-cli reaches 2.27.1. The guardian follows a kiro-cli self-update at or
@@ -327,7 +327,11 @@ replaces that list, so name every harness you want:
   It also drops the other Kiro variables that move Kiro's agents, settings or
   shell, and refuses `--agent`, `--v3`, `--agent-engine`, `--cloud` and
   `--repo`: DefenseClaw runs Kiro's local V2 agent engine, whose hooks it
-  verified. Kiro has no system settings tier and still loads user and project
+  verified. The image still pins kiro-cli 2.24.1, below the 2.27.1 floor in
+  [Supported versions](#supported-versions). Because the launcher refuses
+  `--v3`, the V3 non-interactive run that loads no hooks before 2.27.1 cannot
+  start there. The pin is a known limit until the image moves to a newly
+  pinned, hash-verified build. Kiro has no system settings tier and still loads user and project
   settings and MCP servers, and an interactive session runs the TUI runtime
   Kiro unpacks into the sandbox home (`~/.local/share/kiro-cli`), which the
   agent can change for the next session, so the tier is user. Kiro vetoes a tool only on

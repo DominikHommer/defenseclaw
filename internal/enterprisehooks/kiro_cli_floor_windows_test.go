@@ -1,0 +1,123 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package enterprisehooks
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+)
+
+// kiroCLIProfile is a profile whose kiro-cli last ran as version.
+func kiroCLIProfile(t *testing.T, version string) string {
+	t.Helper()
+	home := t.TempDir()
+	root := filepath.Join(home, "AppData", "Local", "Kiro-Cli")
+	for path, content := range map[string]string{
+		filepath.Join(root, "kiro-cli.exe"):                    "MZ-current",
+		filepath.Join(root, "run", "chat-cli-"+version+".exe"): "MZ-current",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return home
+}
+
+// 1.0.3 enrolled kiro-cli from 2.24.1. After the upgrade to the 2.27.1
+// floor, such a row is kept and repaired at its version, as on Unix, instead
+// of being dropped to unprotected; only new enrollments and version changes
+// below the floor are refused.
+func TestApplyStandaloneRowStateKeepsAKiroRowAnEarlierReleaseEnrolledBelowTheFloor(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	enabled := true
+	prior := ManifestTarget{SID: testLocalUserSID, Connector: "kiro", AgentVersion: "2.24.1", Enabled: &enabled}
+	previous := map[string]ManifestTarget{previousManifestKey(prior.SID, prior.Connector): prior}
+
+	for _, tc := range []struct {
+		name, installed, want string
+		session               bool
+		keptReport            bool
+	}{
+		{name: "signed out", installed: "2.24.1", want: "2.24.1"},
+		{name: "unchanged", installed: "2.24.1", want: "2.24.1", session: true},
+		{name: "change below the floor", installed: "2.26.1", want: "2.24.1", session: true, keptReport: true},
+		{name: "upgrade to the floor", installed: "2.27.1", want: "2.27.1", session: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reports []UnprotectedAgent
+			var logged []string
+			row := ManifestTarget{SID: testLocalUserSID, Connector: "kiro", UserHome: kiroCLIProfile(t, tc.installed)}
+			ctx := windowsStandaloneRowContext{sessionActive: tc.session, user: "alice", report: func(a UnprotectedAgent) { reports = append(reports, a) }}
+			if !applyStandaloneRowStateFor(&row, previous, func(_, reason string) { logged = append(logged, reason) }, ctx) {
+				t.Fatalf("row dropped; log:\n%s\nreports: %+v", strings.Join(logged, "\n"), reports)
+			}
+			if row.AgentVersion != tc.want || !row.IsEnabled() {
+				t.Fatalf("row = %+v, want enabled at %s", row, tc.want)
+			}
+			if tc.keptReport != (len(reports) == 1) {
+				t.Fatalf("reports = %+v, want kept report %t", reports, tc.keptReport)
+			}
+			if tc.keptReport && (reports[0].Version != tc.installed || !strings.Contains(reports[0].Reason, "is below 2.27.1") ||
+				!strings.Contains(reports[0].Reason, "the row stays enrolled at 2.24.1")) {
+				t.Fatalf("report = %+v, want the version below the floor kept at 2.24.1", reports[0])
+			}
+		})
+	}
+
+	// A new row below the floor is not written.
+	var reports []UnprotectedAgent
+	row := ManifestTarget{SID: testLocalUserSID, Connector: "kiro", UserHome: kiroCLIProfile(t, "2.26.1")}
+	ctx := windowsStandaloneRowContext{sessionActive: true, user: "alice", report: func(a UnprotectedAgent) { reports = append(reports, a) }}
+	if applyStandaloneRowStateFor(&row, map[string]ManifestTarget{}, nil, ctx) {
+		t.Fatalf("new kiro-cli 2.26.1 row written: %+v", row)
+	}
+	if len(reports) != 1 || reports[0].Version != "2.26.1" || !strings.Contains(reports[0].Reason, "is below 2.27.1") {
+		t.Fatalf("reports = %+v, want the new row below the floor reported", reports)
+	}
+}
+
+// The guardian install keeps repairing the hooks 1.0.3 installed at kiro-cli
+// 2.24.1, refuses a change to another version below the floor as drift,
+// follows an upgrade to the floor, and refuses a new enrollment below it.
+func TestValidateHookContractRepairsAWindowsKiroLockBelowTheFloor(t *testing.T) {
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	setStandaloneProfileForTest(t, true)
+	conn := connector.NewKiroConnector()
+	opts := func(dataDir, version string) connector.SetupOpts {
+		return connector.SetupOpts{DataDir: dataDir, AgentVersion: version, HookContractID: connector.KiroWindowsManagedCLIContractID}
+	}
+	enrolled := t.TempDir()
+	if err := connector.SaveHookContractLockEntry(enrolled, connector.NewHookContractLockEntry(opts(enrolled, "2.24.1"), conn, "1.0.3")); err != nil {
+		t.Fatalf("seed the 1.0.3 lock: %v", err)
+	}
+	if err := validateHookContract("action", conn, opts(enrolled, "2.24.1")); err != nil {
+		t.Fatalf("repair at the enrolled version: %v", err)
+	}
+	if err := validateHookContract("action", conn, opts(enrolled, "2.26.1")); err == nil ||
+		!strings.Contains(err.Error(), "hook contract drift detected") || !strings.Contains(err.Error(), "is below 2.27.1") {
+		t.Fatalf("a change below the floor = %v, want the drift refusal", err)
+	}
+	if err := validateHookContract("action", conn, opts(enrolled, "2.27.1")); err != nil {
+		t.Fatalf("upgrade to the floor: %v", err)
+	}
+
+	fresh := t.TempDir()
+	if err := validateHookContract("action", conn, opts(fresh, "2.24.1")); err == nil ||
+		!strings.Contains(err.Error(), "not certified for the standalone profile") || !strings.Contains(err.Error(), "is below 2.27.1") {
+		t.Fatalf("new enrollment below the floor = %v, want the certified-minimum refusal", err)
+	}
+	if err := validateHookContract("action", conn, opts(fresh, "2.27.1")); err != nil {
+		t.Fatalf("new enrollment at the floor: %v", err)
+	}
+}
