@@ -51,35 +51,38 @@ func foreignHookRecorder(writes *[]foreignHookPublished, result func() error) fu
 // into the caller's protected session record, for the verified caller only:
 // a block for the session start that found an unapproved hook, the block it
 // then enforces, and the allow of another account. The block removed the
-// key before it was recorded, so the allow published after it carries no
-// key until the guardian makes a new one, and then carries that one.
+// blocked account's key only: the other account's allow still carries its
+// own key, and every later denial of the blocked account removes its key
+// again (a new one the guardian made included).
 func TestForeignHookSessionGatewayPublishesTheProtectedRecord(t *testing.T) {
 	var writes []foreignHookPublished
 	server := newForeignHookPublishTestServer(t, foreignHookRecorder(&writes, nil))
-	first := server.keyID()
-	if first == "" {
-		t.Fatal("the test record folder has no key")
-	}
 	alice, bob := server.alice, server.bob
+	bobKey := server.keyID(bob)
+	if server.keyID(alice) == "" || bobKey == "" {
+		t.Fatal("the test record folder has no keys")
+	}
 	key := map[string]any{"connector": "claudecode", "session": "s-1", "process": "process-1"}
 	server.call(server.aliceToken, map[string]any{"key": key, "session_start": true,
 		"decision": map[string]any{"deny": true, "reason": "enterprise_foreign_hook_blocked: project hook",
 			"findings": []map[string]any{{"connector": "claudecode", "scope": "project", "path": "/repo/.claude/settings.json", "digest": "abcd"}}}})
-	if server.keyID() != "" {
-		t.Fatal("the block must remove the key")
+	if server.keyID(alice) != "" || server.keyID(bob) != bobKey {
+		t.Fatalf("the block must remove the blocked account's key only (alice %q, bob %q)", server.keyID(alice), server.keyID(bob))
 	}
 	server.call(server.aliceToken, map[string]any{"key": key, "decision": map[string]any{"deny": false}})
 	server.call(server.bobToken, map[string]any{"key": key, "decision": map[string]any{"deny": false}})
-	server.newKey()
-	second := server.keyID()
-	server.call(server.bobToken, map[string]any{"key": key, "decision": map[string]any{"deny": false}})
+	server.newKey(alice)
+	server.call(server.aliceToken, map[string]any{"key": key, "decision": map[string]any{"deny": false}})
+	if server.keyID(alice) != "" {
+		t.Fatal("a later denial must remove the account's new key too")
+	}
 	root := server.root
 	sessionKey := enterprisepolicy.SessionKey{Connector: "claudecode", Session: "s-1", Process: "process-1"}
 	want := []foreignHookPublished{
 		{root, alice, sessionKey, true, ""},
 		{root, alice, sessionKey, true, ""},
-		{root, bob, sessionKey, false, ""},
-		{root, bob, sessionKey, false, second},
+		{root, bob, sessionKey, false, bobKey},
+		{root, alice, sessionKey, true, ""},
 	}
 	if len(writes) != len(want) {
 		t.Fatalf("published %+v, want %+v", writes, want)
@@ -91,147 +94,79 @@ func TestForeignHookSessionGatewayPublishesTheProtectedRecord(t *testing.T) {
 	}
 }
 
-// Kill switch (GAP-0352): the gateway reads the record key before the
-// guardian's removals, and the guardian removes the key before it records a
-// removal and makes a new one after, so no interleaving leaves an allow
-// that a removal should have ended:
-//   - the guardian records after the gateway read the ledger, before the
-//     exchange answers: the allow it published first (from the earlier
-//     ledger) carries the key the guardian removed, so the hook refuses it,
-//     and the exchange reads the removals again before it answers, so this
-//     call is denied too and the denial is published after a kill;
-//   - the guardian records after the gateway read the key, before the
-//     ledger: the exchange reads the new ledger and is denied;
-//   - the guardian rewrites the ledger in place, keeping its file, time and
-//     size, and makes a new key: the cached ledger is read again because the
-//     key changed.
-func TestForeignHookSessionGatewayUsesTheKeyItReadBeforeTheRemovals(t *testing.T) {
+// Kill switch (GAP-0352): the gateway reads the account's record key before
+// the guardian's removals, both under the account's lock. A removal that
+// still lands between the two (one whose drain wait ran out) rotated the
+// key first, so the exchange reads its ledger and is denied, the denial is
+// published after the gateway removed the account's key, and the allow
+// published under the earlier key proves nothing any more.
+func TestForeignHookSessionGatewayReadsTheKeyBeforeTheRemovals(t *testing.T) {
 	var writes []foreignHookPublished
-	var afterRead func()
 	server := newForeignHookPublishTestServer(t, foreignHookRecorder(&writes, nil))
 	early := runtime.GOOS + ":b:1:100"
 	allow := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": early}, "decision": map[string]any{"deny": false}}
-	last := func() foreignHookPublished {
-		t.Helper()
-		if len(writes) == 0 {
-			t.Fatal("nothing was published")
-		}
-		return writes[len(writes)-1]
-	}
-
-	// After the ledger read: the publish runs the guardian first.
-	previous := foreignHookSessionPublish
-	foreignHookSessionPublish = func(r, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, recordKey enterprisepolicy.SessionRecordKey, now time.Time) error {
-		if afterRead != nil {
-			afterRead()
-			afterRead = nil
-		}
-		return previous(r, identity, key, decision, recordKey, now)
-	}
-	t.Cleanup(func() { foreignHookSessionPublish = previous })
-	afterRead = func() { server.guardian(server.alice, "/home/alice/.claude/settings.json") }
-	before := server.keyID()
-	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "started before DefenseClaw removed") {
-		t.Fatalf("an exchange whose removal the guardian recorded before it answered must be denied: %+v", got)
-	}
-	if len(writes) < 2 {
-		t.Fatalf("the allow and the denial that replaces it must both be published: %+v", writes)
-	}
-	if published := writes[len(writes)-2]; published.deny || published.keyID != before || published.keyID == server.keyID() {
-		t.Fatalf("its first allow must carry the key the guardian removed (%s, now %s): %+v", before, server.keyID(), published)
-	}
-	if published := last(); !published.deny || server.keyID() != "" {
-		t.Fatalf("the denial that replaces it is published after a kill: %+v (key %q)", published, server.keyID())
-	}
-	server.newKey()
-	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "started before DefenseClaw removed") {
-		t.Fatalf("the next exchange must be denied: %+v", got)
-	}
-
-	// After the key read, before the ledger read.
-	if err := os.Remove(filepath.Join(server.guardianDir, enterprisepolicy.ForeignHookRemovalsFile)); err != nil {
-		t.Fatal(err)
-	}
-	server.newKey()
+	first := server.keyID(server.alice)
 	if got := server.call(server.aliceToken, allow); got.Deny {
 		t.Fatalf("no ledger allows: %+v", got)
 	}
+	if len(writes) != 1 || writes[0].deny || writes[0].keyID != first || first == "" {
+		t.Fatalf("the allow carries the key read under the lock (%s): %+v", first, writes)
+	}
 	previousKey := foreignHookSessionKey
-	foreignHookSessionKey = func(r string) (enterprisepolicy.SessionRecordKey, error) {
-		key, err := previousKey(r)
+	foreignHookSessionKey = func(r, identity string) (enterprisepolicy.SessionRecordKey, error) {
+		key, err := previousKey(r, identity)
 		foreignHookSessionKey = previousKey
 		server.guardian(server.alice, "/home/alice/.claude/settings.json")
 		return key, err
 	}
 	t.Cleanup(func() { foreignHookSessionKey = previousKey })
-	if got := server.call(server.aliceToken, allow); !got.Deny {
+	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "started before DefenseClaw removed") {
 		t.Fatalf("an exchange that read the key before the guardian's removal reads the new ledger and is denied: %+v", got)
 	}
-
-	// The cached ledger follows the key, whatever the file says.
-	ledgerPath := filepath.Join(server.guardianDir, enterprisepolicy.ForeignHookRemovalsFile)
-	other := server.encode(server.bob, "/home/x/.claude/settings.json")
-	mine := server.encode(server.alice, "/home/x/.claude/settings.json")
-	if len(other) != len(mine) {
-		t.Fatalf("the two ledgers must have one size: %d %d", len(other), len(mine))
+	if last := writes[len(writes)-1]; len(writes) != 2 || !last.deny || last.keyID != "" || server.keyID(server.alice) != "" {
+		t.Fatalf("the denial is published after a kill: %+v (key %q)", writes, server.keyID(server.alice))
 	}
-	if err := os.WriteFile(ledgerPath, other, 0o640); err != nil {
-		t.Fatal(err)
+	server.newKey(server.alice)
+	if current := server.keyID(server.alice); current == first {
+		t.Fatalf("the allow's key %s is still current", first)
 	}
-	stamp := time.Now().Add(-time.Minute).Truncate(time.Second)
-	if err := os.Chtimes(ledgerPath, stamp, stamp); err != nil {
-		t.Fatal(err)
-	}
-	server.newKey()
-	if got := server.call(server.aliceToken, allow); got.Deny {
-		t.Fatalf("another account's removal must not deny: %+v", got)
-	}
-	file, err := os.OpenFile(ledgerPath, os.O_WRONLY|os.O_TRUNC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := file.Write(mine); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(ledgerPath, stamp, stamp); err != nil {
-		t.Fatal(err)
-	}
-	server.newKey()
-	if got := server.call(server.aliceToken, allow); !got.Deny {
-		t.Fatalf("a ledger rewritten in place before a new key must be read again: %+v", got)
+	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "started before DefenseClaw removed") {
+		t.Fatalf("the next exchange must be denied: %+v", got)
 	}
 }
 
 // foreignHookPublishTestServer is a standalone user-scoped gateway with two
-// enrolled accounts whose protected-record writes go to publish. Its record
-// folder has a key the test account made.
+// enrolled accounts whose protected-record writes go to publish. Each
+// account has a key in its record folder that the test account made.
 type foreignHookPublishTestServer struct {
 	alice, bob           string
 	aliceToken, bobToken string
 	guardianDir          string
 	dataDir              string
 	root                 string
+	api                  *APIServer
 	call                 func(token string, update map[string]any) enterprisepolicy.GuardDecision
 	t                    *testing.T
 }
 
-// keyID names the record folder's current key ("" for none).
-func (s *foreignHookPublishTestServer) keyID() string {
-	key, err := foreignHookSessionKey(s.root)
+// keyID names identity's current record key ("" for none).
+func (s *foreignHookPublishTestServer) keyID(identity string) string {
+	key, err := enterprisepolicy.ReadPublishedSessionKey(s.root, identity)
 	if err != nil {
 		return ""
 	}
 	return key.ID()
 }
 
-// newKey makes a new record key, as the guardian and the lifecycle do.
-func (s *foreignHookPublishTestServer) newKey() {
+// newKey gives identity a key when it has none, as the guardian does at
+// every pass.
+func (s *foreignHookPublishTestServer) newKey(identity string) {
 	s.t.Helper()
-	if err := enterprisepolicy.CreatePublishedSessionKey(s.root, foreignHookTestTrust); err != nil {
+	if err := enterprisepolicy.EnsurePublishedSessionKey(s.root, identity, foreignHookTestTrust); err != nil {
 		s.t.Fatal(err)
+	}
+	if s.keyID(identity) == "" {
+		s.t.Fatalf("%s has no key", identity)
 	}
 }
 
@@ -239,7 +174,7 @@ func (s *foreignHookPublishTestServer) newKey() {
 func (s *foreignHookPublishTestServer) encode(identity, file string) []byte {
 	s.t.Helper()
 	now := time.Now().UTC()
-	data, _, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
+	data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
 		Identity: identity, Connector: "claudecode", Path: file, At: now.Format(time.RFC3339), Mark: runtime.GOOS + ":b:200",
 	}}, now)
 	if err != nil {
@@ -260,15 +195,29 @@ func (s *foreignHookPublishTestServer) ledger(identity, file string) {
 	}
 }
 
-// guardian records a removal the way the guardian does: the key goes
-// first, then the ledger, then a new key.
+// guardian records a removal the way the guardian's commit does, without
+// the account's lock (the caller holds it, or its drain wait ran out): the
+// account's key is rotated first, then the ledger is written.
 func (s *foreignHookPublishTestServer) guardian(identity, file string) {
 	s.t.Helper()
-	if err := enterprisepolicy.KillPublishedSessionKey(s.root); err != nil {
+	if err := enterprisepolicy.RotatePublishedSessionKey(s.root, identity, foreignHookTestTrust); err != nil {
 		s.t.Fatal(err)
 	}
 	s.ledger(identity, file)
-	s.newKey()
+}
+
+// direct runs one exchange of identity straight into the handler, writing
+// to w (no token: the identity is the verified caller).
+func (s *foreignHookPublishTestServer) direct(w http.ResponseWriter, identity string, update map[string]any) {
+	s.t.Helper()
+	data, err := json.Marshal(update)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(data))
+	ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")
+	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
+	s.api.handleForeignHookSession(w, req.WithContext(ctx))
 }
 
 func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, enterprisepolicy.SessionKey, enterprisepolicy.GuardDecision, enterprisepolicy.SessionRecordKey, time.Time) error) *foreignHookPublishTestServer {
@@ -293,12 +242,9 @@ func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, 
 		)
 	}
 	server.alice, server.bob = alice, bob
-	server.guardianDir = t.TempDir()
-	t.Setenv(managed.HookGuardianAuthorizationDirEnv, server.guardianDir)
-	restoreValidate := validateManagedGuardianAuthorization
-	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	server.guardianDir = foreignHookGuardianDirForTest(t)
 	// The gateway accepts only root's, SYSTEM's or Administrators' keys; the
-	// test account made this one.
+	// test account made these.
 	restoreOwner := enterprisepolicy.OverridePublishedSessionKeyOwnerForTest(func(path string) (bool, error) {
 		info, err := os.Lstat(path)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -310,18 +256,21 @@ func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, 
 		return info.Mode().IsRegular(), nil
 	})
 	previousRoot, previousPublish, previousKey, previousKill := foreignHookSessionPublishRoot, foreignHookSessionPublish, foreignHookSessionKey, foreignHookSessionKill
+	previousDataDirRoot := foreignHookSessionRootForDataDir
 	foreignHookSessionPublishRoot = func() (string, error) { return root, nil }
 	foreignHookSessionPublish = publish
 	t.Cleanup(func() {
-		validateManagedGuardianAuthorization = restoreValidate
 		restoreOwner()
 		foreignHookSessionPublishRoot, foreignHookSessionPublish, foreignHookSessionKey, foreignHookSessionKill = previousRoot, previousPublish, previousKey, previousKill
+		foreignHookSessionRootForDataDir = previousDataDirRoot
 	})
-	server.newKey()
+	server.newKey(alice)
+	server.newKey(bob)
 	api, _, _ := newUserScopedTestServer(t, true, ledger, map[string]string{alice: "alice", bob: "bob"})
 	if api.scannerCfg == nil || !api.scannerCfg.StandaloneEnterprise() {
 		t.Skip("the user-scoped test server is not a standalone deployment")
 	}
+	server.api = api
 	server.dataDir = api.configDataDir()
 	handler := api.tokenAuth(api.managedHookSocketMux())
 	aliceToken := userScopedTestToken(t, connector.UserScopedHookCredential, "claudecode", alice)
@@ -340,7 +289,9 @@ func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, 
 		req.Header.Set("X-DefenseClaw-Client", "foreign-hook-guard/1.0")
 		req.Header.Set("Authorization", "Bearer "+token)
 		req = req.WithContext(context.WithValue(req.Context(), acpConnPeerKey{}, &acpConnPeer{uid: peerUIDs[token], known: true}))
-		response := httptest.NewRecorder()
+		// Every gateway listener's connection can bound a write; an allow
+		// is refused on one that cannot.
+		response := newDeadlineRecorder()
 		handler.ServeHTTP(response, req)
 		if response.Code != http.StatusOK {
 			t.Fatalf("exchange: %d %s", response.Code, response.Body.String())
@@ -354,66 +305,18 @@ func newForeignHookPublishTestServer(t *testing.T, publish func(string, string, 
 	return server
 }
 
-// Review P2 (GAP-0352, loop round 2; loop round 3): while the guardian holds
-// an account closed because it could not record a removal, every guarded
-// call of the account is denied and only blocks are published; another
-// account is not affected, and the account is allowed again once the mark
-// is cleared. The mark is on the account's private session store, so an
-// account that deletes or moves its folder of protected records, or empties
-// the record root, does not clear it.
-func TestForeignHookSessionGatewayDeniesAnAccountWhoseRemovalIsPending(t *testing.T) {
-	var writes []foreignHookPublished
-	server := newForeignHookPublishTestServer(t, foreignHookRecorder(&writes, nil))
-	accountDir, _ := enterprisepolicy.PublishedSessionIdentityDir(server.root, server.alice)
-	if err := os.MkdirAll(accountDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := enterprisepolicy.MarkForeignHookRemovalPending(server.dataDir, server.alice); err != nil {
-		t.Fatal(err)
-	}
-	allow := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": runtime.GOOS + ":b:1:500"}, "decision": map[string]any{"deny": false}}
-	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "could not record the removal yet") {
-		t.Fatalf("a held account must be denied: %+v", got)
-	}
-	if err := os.RemoveAll(accountDir); err != nil {
-		t.Fatal(err)
-	}
-	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "could not record the removal yet") {
-		t.Fatalf("a held account whose record folder is gone must still be denied: %+v", got)
-	}
-	server.newKey()
-	if got := server.call(server.bobToken, allow); got.Deny {
-		t.Fatalf("another account must be allowed: %+v", got)
-	}
-	if err := enterprisepolicy.ClearForeignHookRemovalPending(server.dataDir, server.alice); err != nil {
-		t.Fatal(err)
-	}
-	if got := server.call(server.aliceToken, allow); got.Deny {
-		t.Fatalf("the account must be allowed once the mark is cleared: %+v", got)
-	}
-	var got []string
-	for _, w := range writes {
-		got = append(got, w.identity+" deny="+map[bool]string{true: "true", false: "false"}[w.deny])
-	}
-	want := []string{server.alice + " deny=true", server.alice + " deny=true", server.bob + " deny=false", server.alice + " deny=false"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("published %v, want %v", got, want)
-	}
-}
-
 // Review P2 (GAP-0352, loop round 3): a standalone gateway that cannot
 // locate its protected session record folder at all denies the exchange:
 // it can neither remove the key nor publish its answer. Nothing is
-// published, the account's pending mark keeps its own reason, and the
-// exchange is allowed again once the folder is found. A record folder whose
-// key cannot be read is published to without a key, so the allow proves
-// nothing during an outage.
+// published, a removal of the account in progress keeps its own reason, and
+// the exchange is allowed again once the folder is found. A record folder
+// whose key cannot be read is published to without a key, so the allow
+// proves nothing during an outage.
 func TestForeignHookSessionGatewayDeniesWhenTheRecordFolderCannotBeLocated(t *testing.T) {
 	var writes []foreignHookPublished
 	server := newForeignHookPublishTestServer(t, foreignHookRecorder(&writes, nil))
-	previousDataDir := foreignHookSessionRootForDataDir
+	setForeignHookExchangeWaitForTest(t, 50*time.Millisecond)
 	foreignHookSessionRootForDataDir = func(string) (string, bool) { return "", false }
-	t.Cleanup(func() { foreignHookSessionRootForDataDir = previousDataDir })
 	lookupErr := errors.New("the protected ProgramData registration cannot be read")
 	foreignHookSessionPublishRoot = func() (string, error) {
 		if lookupErr != nil {
@@ -425,105 +328,27 @@ func TestForeignHookSessionGatewayDeniesWhenTheRecordFolderCannotBeLocated(t *te
 	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "cannot verify") {
 		t.Fatalf("an exchange without its record folder must be denied: %+v", got)
 	}
-	if err := enterprisepolicy.MarkForeignHookRemovalPending(server.dataDir, server.alice); err != nil {
-		t.Fatal(err)
+	release, drained, err := lockForeignHookAccountRemovalForTest(t, server.dataDir, server.alice, time.Second)
+	if err != nil || !drained {
+		t.Fatalf("take the removal lock: drained %v, %v", drained, err)
 	}
-	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "could not record the removal yet") {
-		t.Fatalf("the pending mark must deny with its own reason: %+v", got)
+	got := server.call(server.aliceToken, allow)
+	release()
+	if !got.Deny || !strings.Contains(got.Reason, "is removing an unapproved hook") {
+		t.Fatalf("a removal in progress must deny with its own reason: %+v", got)
 	}
 	if len(writes) != 0 {
 		t.Fatalf("nothing can be published without the folder: %+v", writes)
 	}
-	if err := enterprisepolicy.ClearForeignHookRemovalPending(server.dataDir, server.alice); err != nil {
-		t.Fatal(err)
-	}
 	lookupErr = nil
-	if got := server.call(server.aliceToken, allow); got.Deny || len(writes) != 1 || writes[0].keyID != server.keyID() || writes[0].keyID == "" {
+	if got := server.call(server.aliceToken, allow); got.Deny || len(writes) != 1 || writes[0].keyID != server.keyID(server.alice) || writes[0].keyID == "" {
 		t.Fatalf("once the folder is found the exchange is allowed and published with the key: %+v %+v", got, writes)
 	}
-	foreignHookSessionKey = func(string) (enterprisepolicy.SessionRecordKey, error) {
+	foreignHookSessionKey = func(string, string) (enterprisepolicy.SessionRecordKey, error) {
 		return enterprisepolicy.SessionRecordKey{}, errors.New("the key file is not root's")
 	}
 	if got := server.call(server.aliceToken, allow); got.Deny || len(writes) != 2 || writes[1].keyID != "" {
 		t.Fatalf("without a key the allow is published without one: %+v %+v", got, writes)
-	}
-}
-
-// Review P2 (GAP-0352, 1.0.4 loop round 4): the guardian records a removal
-// after an exchange read the removals and before it answers. The exchange
-// reads the key and the removals again before it answers, so every way the
-// guardian records one denies this call, and the denial, published after a
-// kill, is the record the hook finds: a ledger write between a kill and a
-// new key, a pending mark (a ledger write that failed), and a ledger write
-// the guardian made no new key after yet. A removal for another account, or
-// a new key alone, keeps the allow, published again with the new key. With
-// nothing recorded, or a denial from the scan, the exchange publishes once.
-func TestForeignHookSessionGatewayRechecksTheRemovalsBeforeItAnswers(t *testing.T) {
-	process := runtime.GOOS + ":b:1:100"
-	allow := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": process}, "decision": map[string]any{"deny": false}}
-	deny := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-2", "process": process},
-		"decision": map[string]any{"deny": true, "reason": "enterprise_foreign_hook_blocked: unverifiable hook"}}
-	kill := func(s *foreignHookPublishTestServer) {
-		if err := enterprisepolicy.KillPublishedSessionKey(s.root); err != nil {
-			s.t.Fatal(err)
-		}
-	}
-	mark := func(s *foreignHookPublishTestServer) {
-		if err := enterprisepolicy.MarkForeignHookRemovalPending(s.dataDir, s.alice); err != nil {
-			s.t.Fatal(err)
-		}
-	}
-	const file = "/home/x/.claude/settings.json"
-	for _, c := range []struct {
-		name     string
-		guardian func(s *foreignHookPublishTestServer)
-		update   map[string]any
-		deny     string // the reason the answer must carry, "" for an allow
-		writes   int
-	}{
-		{name: "ledger and a new key", guardian: func(s *foreignHookPublishTestServer) { s.guardian(s.alice, file) }, update: allow, deny: "started before DefenseClaw removed", writes: 2},
-		{name: "pending mark and a new key", guardian: func(s *foreignHookPublishTestServer) { kill(s); mark(s); s.newKey() }, update: allow, deny: "could not record the removal yet", writes: 2},
-		{name: "pending mark, no new key", guardian: func(s *foreignHookPublishTestServer) { kill(s); mark(s) }, update: allow, deny: "could not record the removal yet", writes: 2},
-		{name: "ledger, no new key yet", guardian: func(s *foreignHookPublishTestServer) { kill(s); s.ledger(s.alice, file) }, update: allow, deny: "started before DefenseClaw removed", writes: 2},
-		{name: "another account's removal", guardian: func(s *foreignHookPublishTestServer) { s.guardian(s.bob, file) }, update: allow, writes: 2},
-		{name: "a new key alone", guardian: func(s *foreignHookPublishTestServer) { s.newKey() }, update: allow, writes: 2},
-		{name: "nothing recorded", guardian: func(*foreignHookPublishTestServer) {}, update: allow, writes: 1},
-		{name: "a denial from the scan", guardian: func(s *foreignHookPublishTestServer) { s.guardian(s.alice, file) }, update: deny, deny: "unverifiable hook", writes: 1},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			var writes []foreignHookPublished
-			var server *foreignHookPublishTestServer
-			ran := false
-			server = newForeignHookPublishTestServer(t, func(r, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, recordKey enterprisepolicy.SessionRecordKey, _ time.Time) error {
-				writes = append(writes, foreignHookPublished{r, identity, key, decision.Deny, recordKey.ID()})
-				if !ran {
-					// The guardian runs after the exchange decided, before
-					// it answers.
-					ran = true
-					c.guardian(server)
-				}
-				return nil
-			})
-			before := server.keyID()
-			scanDenies := c.update["decision"].(map[string]any)["deny"] == true
-			got := server.call(server.aliceToken, c.update)
-			if c.deny == "" && got.Deny || c.deny != "" && (!got.Deny || !strings.Contains(got.Reason, c.deny)) {
-				t.Fatalf("answer %+v, want deny reason %q", got, c.deny)
-			}
-			if len(writes) != c.writes {
-				t.Fatalf("published %+v, want %d writes", writes, c.writes)
-			}
-			if first := writes[0]; first.deny != scanDenies || !scanDenies && first.keyID != before {
-				t.Fatalf("the first record is the exchange's own answer, with the key it read first: %+v (key %s)", first, before)
-			}
-			final := writes[len(writes)-1]
-			if final.deny != got.Deny || !got.Deny && len(writes) > 1 && final.keyID != server.keyID() {
-				t.Fatalf("the last record is the answer, with the current key %s: %+v", server.keyID(), final)
-			}
-			if got.Deny && !scanDenies && server.keyID() != "" {
-				t.Fatalf("a denial the recheck found is published after a kill: key %s", server.keyID())
-			}
-		})
 	}
 }
 
@@ -543,9 +368,9 @@ func foreignHookTestStoreRecord(dataDir, identity, connectorName, kind, id strin
 }
 
 // Kill switch (round 2 and 3 scenarios): the exchange that records a block
-// in the gateway's private store removes the record key first, under the
-// account's lock. A gateway that stops after the store write and before it
-// publishes the block (here: the publication is lost), or whose
+// in the gateway's private store removes the account's record key first,
+// under the account's lock. A gateway that stops after the store write and
+// before it publishes the block (here: the publication is lost), or whose
 // publication fails, leaves no allow the hook would honor during the
 // outage: the earlier allow carries the removed key. An exchange that
 // records no block removes nothing, and the gateway, back, denies from its
@@ -563,21 +388,21 @@ func TestForeignHookSessionGatewayKillsTheKeyBeforeItRecordsABlock(t *testing.T)
 	kills := 0
 	previousKill := foreignHookSessionKill
 	blockedRecord := foreignHookTestStoreRecord(server.dataDir, server.alice, "claudecode", "s", "s-2")
-	foreignHookSessionKill = func(r string) error {
+	foreignHookSessionKill = func(r, identity string) error {
 		kills++
-		if r != server.root {
-			t.Errorf("killed the key of %s, want %s", r, server.root)
+		if r != server.root || identity != server.alice {
+			t.Errorf("killed the key of %s under %s, want %s under %s", identity, r, server.alice, server.root)
 		}
 		if _, err := os.Lstat(blockedRecord); kills == 1 && !errors.Is(err, fs.ErrNotExist) {
 			t.Error("the block must not be in the private store before the key is removed")
 		}
-		return previousKill(r)
+		return previousKill(r, identity)
 	}
 	process := map[string]any{"connector": "claudecode", "session": "s-1", "process": "process-1"}
 	if got := server.call(server.aliceToken, map[string]any{"key": process, "session_start": true, "decision": map[string]any{"deny": false}}); got.Deny {
 		t.Fatalf("a clean session start is allowed: %+v", got)
 	}
-	allowedUnder := server.keyID()
+	allowedUnder := server.keyID(server.alice)
 	if kills != 0 || len(writes) != 1 || writes[0].deny || writes[0].keyID != allowedUnder {
 		t.Fatalf("a clean exchange publishes its allow and removes nothing: %d %+v", kills, writes)
 	}
@@ -585,31 +410,29 @@ func TestForeignHookSessionGatewayKillsTheKeyBeforeItRecordsABlock(t *testing.T)
 	if got := server.call(server.aliceToken, foreignHookPublishTestBlock("s-2", "process-1")); !got.Deny {
 		t.Fatalf("the session start that found the hook is blocked: %+v", got)
 	}
-	if kills != 1 || server.keyID() == allowedUnder || server.keyID() != "" {
-		t.Fatalf("the key the earlier allow carries must be gone before the block (%d kills, key %q)", kills, server.keyID())
+	if kills != 1 || server.keyID(server.alice) != "" {
+		t.Fatalf("the key the earlier allow carries must be gone before the block (%d kills, key %q)", kills, server.keyID(server.alice))
 	}
 	if _, err := os.Lstat(blockedRecord); err != nil {
 		t.Fatalf("the block is in the private store: %v", err)
 	}
 	lost = false
-	server.newKey()
+	server.newKey(server.alice)
 	if got := server.call(server.aliceToken, map[string]any{"key": process, "decision": map[string]any{"deny": false}}); !got.Deny {
 		t.Fatalf("the gateway, back, denies from its store: %+v", got)
 	}
-	if last := writes[len(writes)-1]; !last.deny || last.keyID != "" {
-		t.Fatalf("the block is published after a kill: %+v", last)
+	if last := writes[len(writes)-1]; !last.deny || last.keyID != "" || server.keyID(server.alice) != "" {
+		t.Fatalf("the block is published after a kill: %+v (key %q)", last, server.keyID(server.alice))
 	}
 }
 
 // Review P1 (round 3 scenario 1, kill switch): a gateway whose lookup of
 // the record folder failed (on Windows, the protected ProgramData
-// registration) used to deny the session start that found an unapproved
-// hook before it recorded the block, and closed nothing: the agent
-// process's earlier allow stayed usable, and once the lookup recovered the
-// gateway allowed the process too. The gateway falls back to the folder it
-// located last, or else to the one its data directory names, removes the
-// key there before it records the block, and publishes the block there;
-// the process stays blocked once the lookup recovers.
+// registration) falls back to the folder it located last, or else to the
+// one its data directory names, removes the account's key there before it
+// records the block, and publishes the block there; the process stays
+// blocked once the lookup recovers. (Without any fallback, see
+// TestForeignHookSessionRecordRootLookupFailureStillRecordsTheBlock.)
 func TestForeignHookSessionGatewayRecordsABlockWhileItsLayoutLookupFails(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -619,11 +442,10 @@ func TestForeignHookSessionGatewayRecordsABlockWhileItsLayoutLookupFails(t *test
 			var writes []foreignHookPublished
 			server := newForeignHookPublishTestServer(t, foreignHookRecorder(&writes, nil))
 			var killed []string
-			previousKill, previousDataDir := foreignHookSessionKill, foreignHookSessionRootForDataDir
-			t.Cleanup(func() { foreignHookSessionRootForDataDir = previousDataDir })
-			foreignHookSessionKill = func(r string) error {
-				killed = append(killed, r)
-				return previousKill(r)
+			previousKill := foreignHookSessionKill
+			foreignHookSessionKill = func(r, identity string) error {
+				killed = append(killed, r+"|"+identity)
+				return previousKill(r, identity)
 			}
 			foreignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
 				return server.root, !tc.located && dataDir == server.dataDir
@@ -641,8 +463,8 @@ func TestForeignHookSessionGatewayRecordsABlockWhileItsLayoutLookupFails(t *test
 			if got := server.call(server.aliceToken, foreignHookPublishTestBlock("s-2", process)); !got.Deny {
 				t.Fatalf("the session start that found the hook is blocked: %+v", got)
 			}
-			if len(killed) != 1 || killed[0] != server.root || server.keyID() != "" {
-				t.Fatalf("the key must be removed where the hook reads it: %v", killed)
+			if len(killed) != 1 || killed[0] != server.root+"|"+server.alice || server.keyID(server.alice) != "" || server.keyID(server.bob) == "" {
+				t.Fatalf("the account's key must be removed where the hook reads it, and only its key: %v", killed)
 			}
 			if len(writes) == 0 || writes[len(writes)-1].root != server.root || !writes[len(writes)-1].deny {
 				t.Fatalf("the block is published where the hook reads it: %+v", writes)
@@ -652,95 +474,5 @@ func TestForeignHookSessionGatewayRecordsABlockWhileItsLayoutLookupFails(t *test
 				t.Fatalf("the agent process the block recorded stays blocked once the lookup recovers: %+v", got)
 			}
 		})
-	}
-}
-
-// Kill switch (round 3 scenario 2): a key that cannot be removed (the
-// volume refuses it) is logged, the block is still recorded, and it is
-// published, which denies during an outage; the next denial tries the kill
-// again. No denial is ever published before a kill was tried for it, and
-// every one is published after a kill that took, or after one that took
-// for the same process and session with no allow published for them since.
-func TestForeignHookSessionGatewayPublishesNoDenialBeforeTheKill(t *testing.T) {
-	var events []string
-	server := newForeignHookPublishTestServer(t, func(_, _ string, _ enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, recordKey enterprisepolicy.SessionRecordKey, _ time.Time) error {
-		events = append(events, map[bool]string{true: "deny", false: "allow"}[decision.Deny])
-		return nil
-	})
-	var killErr error
-	previousKill := foreignHookSessionKill
-	foreignHookSessionKill = func(r string) error {
-		if killErr != nil {
-			events = append(events, "kill failed")
-			return killErr
-		}
-		events = append(events, "kill")
-		return previousKill(r)
-	}
-	process := runtime.GOOS + ":b:1:500"
-	clean := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": process}, "decision": map[string]any{"deny": false}}
-	killErr = errors.New("read-only file system")
-	if got := server.call(server.aliceToken, foreignHookPublishTestBlock("s-2", process)); !got.Deny {
-		t.Fatalf("a block is recorded when the key cannot be removed: %+v", got)
-	}
-	if got := server.call(server.aliceToken, clean); !got.Deny {
-		t.Fatalf("the process stays blocked in the gateway: %+v", got)
-	}
-	killErr = nil
-	if got := server.call(server.aliceToken, clean); !got.Deny {
-		t.Fatalf("the process stays blocked: %+v", got)
-	}
-	// A blocked agent that keeps calling: the key is not removed again for
-	// the same process and session.
-	server.newKey()
-	if got := server.call(server.aliceToken, clean); !got.Deny || server.keyID() == "" {
-		t.Fatalf("a denial the gateway already removed the key for keeps the new key: %+v %q", got, server.keyID())
-	}
-	// Another account's allow, then a denial for a new session of the
-	// blocked process: that session was never covered.
-	other := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-3", "process": runtime.GOOS + ":b:1:600"}, "decision": map[string]any{"deny": false}}
-	if got := server.call(server.bobToken, other); got.Deny {
-		t.Fatalf("another account is allowed: %+v", got)
-	}
-	if got := server.call(server.aliceToken, map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-4", "process": process}, "decision": map[string]any{"deny": false}}); !got.Deny {
-		t.Fatalf("a new session of the blocked process is denied: %+v", got)
-	}
-	want := []string{
-		"kill failed", "kill failed", "deny", // the block: before it is recorded, then again before it is published
-		"kill failed", "kill failed", "deny", // the block carried to the next call's session
-		"kill", "deny", // the kill takes
-		"deny",         // the same process and session: covered
-		"allow",        // another account
-		"kill", "deny", // the block carried to a new session of the blocked process
-	}
-	if strings.Join(events, ",") != strings.Join(want, ",") {
-		t.Fatalf("events %v, want %v", events, want)
-	}
-}
-
-// The key removal cache forgets a process or session once an allow is
-// published for it: a later denial removes the key again.
-func TestForeignHookSessionKillCacheForgetsAnAllowedKey(t *testing.T) {
-	var cache foreignHookSessionKillCache
-	key := enterprisepolicy.SessionKey{Connector: "claudecode", Session: "s-1", Process: "p-1"}
-	if cache.covers("1001", key) {
-		t.Fatal("an empty cache covers nothing")
-	}
-	cache.add("1001", key)
-	if !cache.covers("1001", key) || cache.covers("1002", key) {
-		t.Fatal("only the account's denial is covered")
-	}
-	if cache.covers("1001", enterprisepolicy.SessionKey{Connector: "claudecode", Session: "s-2", Process: "p-1"}) {
-		t.Fatal("a new session of the process is not covered")
-	}
-	cache.forget("1001", enterprisepolicy.SessionKey{Connector: "claudecode", Session: "s-9", Process: "p-1"})
-	if cache.covers("1001", key) {
-		t.Fatal("an allow for the process must end the cover")
-	}
-	for i := 0; i <= foreignHookSessionKillCacheLimit; i++ {
-		cache.add("1001", enterprisepolicy.SessionKey{Connector: "claudecode", Process: "p-" + time.Duration(i).String()})
-	}
-	if len(cache.entries) > foreignHookSessionKillCacheLimit {
-		t.Fatalf("the cache must stay within its limit: %d", len(cache.entries))
 	}
 }

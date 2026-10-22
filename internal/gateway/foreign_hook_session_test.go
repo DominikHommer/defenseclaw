@@ -33,53 +33,78 @@ type foreignSessionResult struct {
 	Reason string `json:"reason"`
 }
 
-func TestForeignHookRemovalSourceSeesPendingLedgerWithUnchangedMetadata(t *testing.T) {
-	dir := t.TempDir()
+// The guardian's ledger is read at every exchange, with no cache: a
+// replacement of the same size and time, written in place or renamed over
+// the old one, is seen by the next exchange.
+func TestForeignHookRemovalSourceReadsTheLedgerAtEveryExchange(t *testing.T) {
 	previous := validateManagedGuardianAuthorization
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
-	const identity = "1001"
-	pendingPath := enterprisepolicy.ForeignHookCleanupPendingPrefix + "0123456789abcdef>"
-	oldPath := strings.Replace(pendingPath, "pending", "cleaner", 1)
+	alice, bob := "1001", "1002"
 	at := time.Now().UTC().Format(time.RFC3339)
-	makeLedger := func(path string) []byte {
+	makeLedger := func(t *testing.T, identity string) []byte {
 		t.Helper()
 		data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
-			Identity: identity, Connector: "cursor", Path: path, At: at, Mark: "linux:b:100",
+			Identity: identity, Connector: "claudecode", Path: "/home/alice/.claude/settings.json",
+			At: at, Mark: runtime.GOOS + ":b:200",
 		}}, time.Now())
 		if err != nil {
 			t.Fatal(err)
 		}
 		return data
 	}
-	oldData, pendingData := makeLedger(oldPath), makeLedger(pendingPath)
-	if len(oldData) != len(pendingData) {
-		t.Fatalf("fixture ledger sizes differ: %d, %d", len(oldData), len(pendingData))
-	}
-	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
-	if err := os.WriteFile(path, oldData, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var source foreignHookRemovalSource
-	if got, err := source.forIdentity(dir, identity); err != nil || len(got) != 1 || got[0].Path != oldPath {
-		t.Fatalf("initial ledger: %+v (%v)", got, err)
-	}
-	before, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, pendingData, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
-		t.Fatal(err)
-	}
-	after, err := os.Stat(path)
-	if err != nil || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
-		t.Fatalf("fixture metadata changed: before=%v after=%v err=%v", before, after, err)
-	}
-	if got, err := source.forIdentity(dir, identity); err != nil || len(got) != 1 || got[0].Path != pendingPath {
-		t.Fatalf("pending denial hidden by unchanged file metadata: %+v (%v)", got, err)
+	for _, tc := range []struct {
+		name    string
+		replace func(t *testing.T, path string, data []byte, mod time.Time)
+	}{
+		{"rewritten in place", func(t *testing.T, path string, data []byte, mod time.Time) {
+			if err := os.WriteFile(path, data, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(path, mod, mod); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"replaced atomically", func(t *testing.T, path string, data []byte, mod time.Time) {
+			tmp := filepath.Join(filepath.Dir(path), "replacement")
+			if err := os.WriteFile(tmp, data, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(tmp, mod, mod); err != nil {
+				t.Fatal(err)
+			}
+			if err := safefile.ReplaceFile(tmp, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			first, second := makeLedger(t, bob), makeLedger(t, alice)
+			if len(first) != len(second) {
+				t.Fatalf("fixture ledger sizes differ: %d, %d", len(first), len(second))
+			}
+			path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
+			if err := os.WriteFile(path, first, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			var source foreignHookRemovalSource
+			if got, err := source.forIdentity(dir, alice); err != nil || len(got) != 0 {
+				t.Fatalf("first ledger = %+v, %v", got, err)
+			}
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.replace(t, path, second, before.ModTime())
+			after, err := os.Stat(path)
+			if err != nil || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+				t.Fatalf("fixture metadata changed: before=%v after=%v err=%v", before, after, err)
+			}
+			if got, err := source.forIdentity(dir, alice); err != nil || len(got) != 1 || got[0].Identity != alice {
+				t.Fatalf("a replacement of the same size and time was missed: %+v, %v", got, err)
+			}
+		})
 	}
 }
 
@@ -100,7 +125,6 @@ func TestForeignHookSessionGatewayPersistsAndBindsTheCaller(t *testing.T) {
 	}
 	guardianDir := t.TempDir()
 	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
-	writeForeignHookRemovalFenceFiles(t, guardianDir)
 	restoreValidate := validateManagedGuardianAuthorization
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	t.Cleanup(func() { validateManagedGuardianAuthorization = restoreValidate })
@@ -169,7 +193,7 @@ func TestForeignHookSessionGatewayPersistsAndBindsTheCaller(t *testing.T) {
 		flood = append(flood, enterprisepolicy.ForeignHookRemoval{Identity: bob, Connector: "codex",
 			Path: "/home/bob/" + strconv.Itoa(i) + strings.Repeat("<", 480), At: earlier, Mark: runtime.GOOS + ":b:900"})
 	}
-	data, _, err := enterprisepolicy.EncodeForeignHookRemovals(flood, []enterprisepolicy.ForeignHookRemoval{
+	data, err := enterprisepolicy.EncodeForeignHookRemovals(flood, []enterprisepolicy.ForeignHookRemoval{
 		{Identity: alice, Connector: "claudecode", Path: removed, At: time.Now().UTC().Format(time.RFC3339), Mark: runtime.GOOS + ":b:200"},
 		{Identity: alice, Connector: "codex", Path: "/home/alice/.codex/hooks.json", At: time.Now().UTC().Format(time.RFC3339), Mark: runtime.GOOS + ":b:900"},
 	}, time.Now())
@@ -228,108 +252,26 @@ func (w pausedForeignHookResponse) Write(data []byte) (int, error) {
 	return w.ResponseWriter.Write(data)
 }
 
-// GAP-0348: an allow's response write and a guardian removal commit must
-// have one order across processes. The permanent fence cannot be replaced
-// when the ledger is atomically replaced.
-func TestForeignHookSessionAllowResponseFencesRemovalCommit(t *testing.T) {
+// foreignHookGuardianDirForTest is a guardian authorization folder the
+// gateway trusts without the ownership checks.
+func foreignHookGuardianDirForTest(t *testing.T) string {
+	t.Helper()
 	guardianDir := t.TempDir()
 	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
 	previous := validateManagedGuardianAuthorization
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
-	writeForeignHookRemovalFenceFiles(t, guardianDir)
-	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
-	identity := "1001"
-	if runtime.GOOS == "windows" {
-		identity = "S-1-5-21-1111-2222-3333-1001"
-	}
-	body := []byte(`{"key":{"connector":"claudecode","session":"s-1","process":"` + runtime.GOOS + `:b:4242:100"},"session_start":true,"decision":{"deny":false}}`)
-	request := func() *http.Request {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(body))
-		ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")
-		ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
-		return req.WithContext(ctx)
-	}
-	ledger := filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile)
-	commit := func() {
-		t.Helper()
-		data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
-			Identity: identity, Connector: "claudecode", Path: "/home/alice/.claude/settings.json",
-			At: time.Now().UTC().Format(time.RFC3339), Mark: runtime.GOOS + ":b:200",
-		}}, time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(ledger, data, 0o640); err != nil {
-			t.Fatal(err)
-		}
-	}
+	return guardianDir
+}
 
-	// A commit that owns the fence first must be visible to the exchange.
-	unlock, err := enterprisepolicy.LockForeignHookRemovalsDrain(context.Background(), guardianDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		recorder := httptest.NewRecorder()
-		api.handleForeignHookSession(deadlineRecorder{recorder}, request())
-		done <- recorder
-	}()
-	select {
-	case response := <-done:
-		unlock()
-		t.Fatalf("exchange answered before the removal commit: %s", response.Body.String())
-	case <-time.After(100 * time.Millisecond):
-	}
-	commit()
-	unlock()
-	select {
-	case response := <-done:
-		if !strings.Contains(response.Body.String(), `"deny":true`) {
-			t.Fatalf("removal before exchange: %s", response.Body.String())
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("exchange did not answer after the commit")
-	}
-
-	// Reset the ledger, then pause an allow during Encode. The guardian's
-	// exclusive commit must wait until that response has been written.
-	if err := os.Remove(ledger); err != nil {
-		t.Fatal(err)
-	}
-	recorder := httptest.NewRecorder()
-	paused := pausedForeignHookResponse{ResponseWriter: deadlineRecorder{recorder}, entered: make(chan struct{}), resume: make(chan struct{})}
-	answered := make(chan struct{})
-	go func() { api.handleForeignHookSession(paused, request()); close(answered) }()
-	select {
-	case <-paused.entered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("allow did not reach its response write")
-	}
-	writerDone := make(chan func(), 1)
-	go func() {
-		unlock, err := enterprisepolicy.LockForeignHookRemovalsDrain(context.Background(), guardianDir)
-		if err == nil {
-			writerDone <- unlock
-		}
-	}()
-	select {
-	case unlock := <-writerDone:
-		unlock()
-		close(paused.resume)
-		t.Fatal("guardian commit overtook an allow response write")
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(paused.resume)
-	<-answered
-	select {
-	case unlock := <-writerDone:
-		commit()
-		unlock()
-	case <-time.After(3 * time.Second):
-		t.Fatal("guardian did not acquire the fence after the response")
-	}
+// lockForeignHookAccountRemovalForTest takes identity's removal lock as the
+// hook guardian does, within timeout. drained reports that no exchange of
+// the account was inside when it went on.
+func lockForeignHookAccountRemovalForTest(t *testing.T, dataDir, identity string, timeout time.Duration) (release func(), drained bool, err error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return enterprisepolicy.LockForeignHookAccountRemoval(ctx, dataDir, identity)
 }
 
 // foreignHookPipeListener serves HTTP over synchronous in-memory pipes: a
@@ -374,18 +316,15 @@ func (l *foreignHookPipeListener) dial() (net.Conn, error) {
 }
 
 // A client that stops reading a large allow, or reads it a byte at a time,
-// must not hold the shared removal fence past foreignHookFencedWriteTimeout:
-// the guardian's removal commit still takes the fence, another identity's
-// exchange is still answered although the same identity has a second slow
-// exchange queued, and neither slow client receives a complete allow.
-func TestForeignHookSessionSlowAllowReaderDoesNotHoldTheFence(t *testing.T) {
-	guardianDir := t.TempDir()
-	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
-	previous := validateManagedGuardianAuthorization
-	validateManagedGuardianAuthorization = func(string, string) error { return nil }
-	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
-	writeForeignHookRemovalFenceFiles(t, guardianDir)
+// must not hold its account's removal lock past
+// foreignHookFencedWriteTimeout: the guardian's removal of the account still
+// drains the lock, another account's exchange is still answered although
+// the same account has a second slow exchange queued, and neither slow
+// client receives a complete allow (GAP-0348).
+func TestForeignHookSessionSlowAllowReaderDoesNotHoldTheAccountLock(t *testing.T) {
+	foreignHookGuardianDirForTest(t)
 	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
+	dataDir := api.configDataDir()
 	alice, bob := "1001", "1002"
 	if runtime.GOOS == "windows" {
 		alice, bob = "S-1-5-21-1111-2222-3333-1001", "S-1-5-21-1111-2222-3333-1002"
@@ -457,32 +396,32 @@ func TestForeignHookSessionSlowAllowReaderDoesNotHoldTheFence(t *testing.T) {
 		}
 	}(request(alice, 2))
 
+	// Wait until a slow allow holds alice's lock: a removal probe then
+	// finds an exchange inside.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		unlock, err := enterprisepolicy.LockForeignHookRemovalsDrain(ctx, guardianDir)
-		cancel()
-		if err != nil {
-			break
+		release, drained, err := lockForeignHookAccountRemovalForTest(t, dataDir, alice, 10*time.Millisecond)
+		if err == nil {
+			release()
+			if !drained {
+				break
+			}
 		}
-		unlock()
 		if time.Now().After(deadline) {
-			t.Fatal("no slow allow took the removal fence")
+			t.Fatal("no slow allow took the account's removal lock")
 		}
 		time.Sleep(time.Millisecond)
 	}
 
-	// The guardian's removal commit waits for at most one bounded write.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	unlock, err := enterprisepolicy.LockForeignHookRemovalsDrain(ctx, guardianDir)
-	cancel()
-	if err != nil {
-		t.Fatalf("guardian removal commit could not take the fence past a slow allow: %v", err)
+	// The guardian's removal waits for at most one bounded write.
+	release, drained, err := lockForeignHookAccountRemovalForTest(t, dataDir, alice, 3*time.Second)
+	if err != nil || !drained {
+		t.Fatalf("the guardian's removal did not drain the lock past a slow allow: drained %v, %v", drained, err)
 	}
-	unlock()
+	release()
 
-	// Bob's exchange is answered within the fence wait, ahead of alice's
-	// second slow exchange.
+	// Bob's exchange is answered at once, ahead of alice's second slow
+	// exchange.
 	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
 		DialContext: func(context.Context, string, string) (net.Conn, error) { return listener.dial() },
 	}}
@@ -525,21 +464,13 @@ func TestForeignHookSessionSlowAllowReaderDoesNotHoldTheFence(t *testing.T) {
 	}
 }
 
-// A connection that cannot bound the write gets no allow while the fence
-// is held: the call is refused and the fence is free at once. A denial
-// needs no fence and is still answered.
+// A connection that cannot bound the write gets no allow while the account's
+// removal lock is held: the call is refused and the lock is free at once. A
+// denial needs no bound and is still answered.
 func TestForeignHookSessionRefusesAnAllowItCannotBound(t *testing.T) {
-	guardianDir := t.TempDir()
-	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
-	previous := validateManagedGuardianAuthorization
-	validateManagedGuardianAuthorization = func(string, string) error { return nil }
-	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
-	writeForeignHookRemovalFenceFiles(t, guardianDir)
+	foreignHookGuardianDirForTest(t)
 	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
-	identity := "1001"
-	if runtime.GOOS == "windows" {
-		identity = "S-1-5-21-1111-2222-3333-1001"
-	}
+	identity := foreignHookTestIdentities(1)[0]
 	exchange := func(session string, deny bool) *httptest.ResponseRecorder {
 		t.Helper()
 		body := `{"key":{"connector":"claudecode","session":"` + session + `","process":"` + runtime.GOOS + `:b:4242:100"},"session_start":true,"decision":{"deny":` + strconv.FormatBool(deny) + `,"reason":"enterprise_foreign_hook_blocked: project hook"}}`
@@ -556,77 +487,13 @@ func TestForeignHookSessionRefusesAnAllowItCannotBound(t *testing.T) {
 	if allow.Code != http.StatusServiceUnavailable || !strings.Contains(allow.Body.String(), "foreign_hook_response_unbounded") || strings.Contains(allow.Body.String(), `"deny":false`) {
 		t.Fatalf("unbounded allow: %d %s", allow.Code, allow.Body.String())
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	unlock, err := enterprisepolicy.LockForeignHookRemovalsDrain(ctx, guardianDir)
-	cancel()
-	if err != nil {
-		t.Fatalf("the refused allow kept the fence: %v", err)
+	release, drained, err := lockForeignHookAccountRemovalForTest(t, api.configDataDir(), identity, 100*time.Millisecond)
+	if err != nil || !drained {
+		t.Fatalf("the refused allow kept the account's removal lock: drained %v, %v", drained, err)
 	}
-	unlock()
+	release()
 	if deny := exchange("s-2", true); deny.Code != http.StatusOK || !strings.Contains(deny.Body.String(), `"deny":true`) {
 		t.Fatalf("denial: %d %s", deny.Code, deny.Body.String())
-	}
-}
-
-// An atomic guardian commit can have the same length and mtime as the old
-// ledger. Its new file identity must invalidate the cache under the fence.
-func TestForeignHookRemovalCacheSeesEqualSizeEqualTimeReplacement(t *testing.T) {
-	dir := t.TempDir()
-	previous := validateManagedGuardianAuthorization
-	validateManagedGuardianAuthorization = func(string, string) error { return nil }
-	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
-	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
-	at := time.Now().UTC().Format(time.RFC3339)
-	makeLedger := func(identity string) []byte {
-		t.Helper()
-		data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
-			Identity: identity, Connector: "claudecode", Path: "/home/alice/.claude/settings.json",
-			At: at, Mark: runtime.GOOS + ":b:200",
-		}}, time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-		return data
-	}
-	alice, bob := "1001", "1002"
-	first, second := makeLedger(bob), makeLedger(alice)
-	if len(first) != len(second) {
-		t.Fatal("the replacement is not the same size")
-	}
-	if err := os.WriteFile(path, first, 0o640); err != nil {
-		t.Fatal(err)
-	}
-	cache := &foreignHookRemovalCache{}
-	if got, err := cache.forIdentity(dir, alice); err != nil || len(got) != 0 {
-		t.Fatalf("first ledger = %+v, %v", got, err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmp := filepath.Join(dir, "replacement")
-	if err := os.WriteFile(tmp, second, 0o640); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(tmp, info.ModTime(), info.ModTime()); err != nil {
-		t.Fatal(err)
-	}
-	if err := safefile.ReplaceFile(tmp, path); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := cache.forIdentity(dir, alice); err != nil || len(got) != 1 || got[0].Identity != alice {
-		t.Fatalf("same-size and same-mtime removal was missed: %+v, %v", got, err)
-	}
-}
-
-// writeForeignHookRemovalFenceFiles creates the guardian's lock files (the
-// fence and the ledger lock) in dir.
-func writeForeignHookRemovalFenceFiles(t *testing.T, dir string) {
-	t.Helper()
-	for _, name := range enterprisepolicy.ForeignHookRemovalFenceFiles() {
-		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o640); err != nil {
-			t.Fatal(err)
-		}
 	}
 }
 
@@ -649,18 +516,14 @@ func foreignHookAllowRequest(identity, session string) *http.Request {
 	return req.WithContext(ctx)
 }
 
-// Allows of two identities whose clients read slowly hold the removal fence
-// together, and a third identity's exchange is answered at once: exchanges
-// share the fence and only a guardian commit excludes them. The commit
-// still waits for every allow being written.
+// Allows of two accounts whose clients read slowly each hold only their own
+// account's removal lock, and a third account's exchange is answered at
+// once. A removal of either account still waits for that account's allow,
+// and drains as soon as it is written.
 func TestForeignHookSessionSlowAllowsOfOtherIdentitiesDoNotRefuseAnExchange(t *testing.T) {
-	guardianDir := t.TempDir()
-	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
-	previous := validateManagedGuardianAuthorization
-	validateManagedGuardianAuthorization = func(string, string) error { return nil }
-	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
-	writeForeignHookRemovalFenceFiles(t, guardianDir)
+	foreignHookGuardianDirForTest(t)
 	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
+	dataDir := api.configDataDir()
 	ids := foreignHookTestIdentities(3)
 
 	type slowAllow struct {
@@ -703,31 +566,30 @@ func TestForeignHookSessionSlowAllowsOfOtherIdentitiesDoNotRefuseAnExchange(t *t
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"deny":false`) {
 			t.Fatalf("a third identity behind two slow allows: %d %s", response.Code, response.Body.String())
 		}
-	case <-time.After(foreignHookFenceWait):
+	case <-time.After(foreignHookExchangeWait):
 		t.Fatal("a third identity's exchange waited on two slow allows of other identities")
 	}
 
-	commit := func() (func(), error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		defer cancel()
-		return enterprisepolicy.LockForeignHookRemovalsDrain(ctx, guardianDir)
-	}
 	for i, s := range slow {
-		if unlock, err := commit(); err == nil {
-			unlock()
-			t.Fatalf("a guardian commit overtook %d allows being written", len(slow)-i)
+		release, drained, err := lockForeignHookAccountRemovalForTest(t, dataDir, ids[i], 100*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+		if drained {
+			t.Fatalf("a removal of identity %d drained its lock while its allow was being written", i)
 		}
 		s.resume()
 		<-s.answered
 		if s.recorder.Code != http.StatusOK || !strings.Contains(s.recorder.Body.String(), `"deny":false`) {
 			t.Fatalf("slow allow %d: %d %s", i, s.recorder.Code, s.recorder.Body.String())
 		}
+		release, drained, err = lockForeignHookAccountRemovalForTest(t, dataDir, ids[i], 100*time.Millisecond)
+		if err != nil || !drained {
+			t.Fatalf("the removal of identity %d did not drain its lock after the allow: drained %v, %v", i, drained, err)
+		}
+		release()
 	}
-	unlock, err := commit()
-	if err != nil {
-		t.Fatalf("the guardian commit did not take the fence after the allows: %v", err)
-	}
-	unlock()
 }
 
 // slowForeignHookResponse takes delay to write each response, as a client
@@ -748,8 +610,7 @@ func (w slowForeignHookResponse) Write(data []byte) (int, error) {
 }
 
 // publishForeignHookRemovalsForTest replaces the ledger as the guardian
-// does, with an atomic rename and no fence, removing the given identities'
-// hooks.
+// does, with an atomic rename, removing the given identities' hooks.
 func publishForeignHookRemovalsForTest(t *testing.T, guardianDir string, identities ...string) {
 	t.Helper()
 	removals := make([]enterprisepolicy.ForeignHookRemoval, 0, len(identities))
@@ -772,20 +633,16 @@ func publishForeignHookRemovalsForTest(t *testing.T, guardianDir string, identit
 	}
 }
 
-// A guardian removal commit lands while exchanges of several identities
-// arrive without a pause and overlap so the fence is never free. The
-// guardian publishes at once and waits a bounded time only. No exchange of
-// any identity is refused, every allow of the removed identity was written
-// before the guardian finished, and its exchanges that start after the
-// publication are denied.
+// A guardian removal of one account lands while exchanges of several
+// accounts arrive without a pause (GAP-0348, GAP-0414). The removal takes
+// the account's lock within a bounded wait, every allow of the removed
+// account was written before the removal held the lock, no exchange of the
+// account that started after that is allowed, and the other accounts are
+// never denied or refused.
 func TestForeignHookSessionRemovalCommitLandsUnderSustainedExchanges(t *testing.T) {
-	guardianDir := t.TempDir()
-	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
-	previous := validateManagedGuardianAuthorization
-	validateManagedGuardianAuthorization = func(string, string) error { return nil }
-	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
-	writeForeignHookRemovalFenceFiles(t, guardianDir)
+	guardianDir := foreignHookGuardianDirForTest(t)
 	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
+	dataDir := api.configDataDir()
 	ids := foreignHookTestIdentities(4)
 	alice := ids[0]
 
@@ -856,26 +713,28 @@ func TestForeignHookSessionRemovalCommitLandsUnderSustainedExchanges(t *testing.
 	}
 	waitFor("exchanges served", 8, func(outcome) bool { return true })
 
-	publishedAt := time.Now()
-	publishForeignHookRemovalsForTest(t, guardianDir, alice)
-	drained, err := enterprisepolicy.AwaitForeignHookRemovalExchanges(guardianDir)
-	finishedAt := time.Now()
+	asked := time.Now()
+	release, drained, err := lockForeignHookAccountRemovalForTest(t, dataDir, alice, 5*time.Second)
+	lockedAt := time.Now()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := finishedAt.Sub(publishedAt); elapsed > enterprisepolicy.ForeignHookRemovalDrainWait+time.Second {
+	publishForeignHookRemovalsForTest(t, guardianDir, alice)
+	release()
+	finishedAt := time.Now()
+	if elapsed := lockedAt.Sub(asked); !drained || elapsed > enterprisepolicy.ForeignHookRemovalDrainWait+time.Second {
 		t.Fatalf("sustained exchanges held the guardian for %v (drained %v)", elapsed, drained)
 	}
-	waitFor("of alice's exchanges after the publication denied", 3, func(o outcome) bool {
-		return o.identity == alice && o.deny && o.started.After(publishedAt)
+	waitFor("of alice's exchanges after the removal denied", 3, func(o outcome) bool {
+		return o.identity == alice && o.deny && o.started.After(finishedAt)
 	})
-	waitFor("exchanges of other identities after the guardian finished", 3, func(o outcome) bool {
+	waitFor("exchanges of other identities after the removal", 3, func(o outcome) bool {
 		return o.identity != alice && o.started.After(finishedAt)
 	})
 	stopped()
 	for i, o := range outcomes {
 		if o.code != http.StatusOK {
-			t.Fatalf("exchange %d of %s was refused (%d) around a removal commit", i, o.identity, o.code)
+			t.Fatalf("exchange %d of %s was refused (%d) around a removal", i, o.identity, o.code)
 		}
 		if o.identity != alice {
 			if !o.allow {
@@ -883,158 +742,51 @@ func TestForeignHookSessionRemovalCommitLandsUnderSustainedExchanges(t *testing.
 			}
 			continue
 		}
-		if o.allow && !o.written.Before(finishedAt) {
-			t.Fatalf("alice's allow %d was written after the guardian finished the removal commit", i)
+		if o.allow && !o.written.Before(lockedAt) {
+			t.Fatalf("alice's allow %d was written after the guardian took her removal lock", i)
 		}
-		if o.allow && o.started.After(publishedAt) {
-			t.Fatalf("alice's exchange %d started after the publication and was allowed", i)
+		if o.allow && o.started.After(lockedAt) {
+			t.Fatalf("alice's exchange %d started after the guardian took her removal lock and was allowed", i)
 		}
 	}
 }
 
-// A pending removal blocks the new calls of the removed account only, at
-// once: while the guardian waits for another account's allow being
-// written, the removed account's new exchange is denied, a third account's
-// is allowed, and neither waits. The guardian goes on when the allow is
-// written.
-func TestForeignHookSessionPendingRemovalDeniesOnlyTheRemovedAccountsNewCalls(t *testing.T) {
-	guardianDir := t.TempDir()
-	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
-	previous := validateManagedGuardianAuthorization
-	validateManagedGuardianAuthorization = func(string, string) error { return nil }
-	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
-	writeForeignHookRemovalFenceFiles(t, guardianDir)
-	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
-	ids := foreignHookTestIdentities(3)
-	alice, bob, carol := ids[0], ids[1], ids[2]
-
-	recorder := httptest.NewRecorder()
-	paused := pausedForeignHookResponse{ResponseWriter: deadlineRecorder{recorder}, entered: make(chan struct{}), resume: make(chan struct{})}
-	resume := sync.OnceFunc(func() { close(paused.resume) })
-	t.Cleanup(resume)
-	answered := make(chan struct{})
-	go func() {
-		api.handleForeignHookSession(paused, foreignHookAllowRequest(alice, "s-held"))
-		close(answered)
-	}()
-	select {
-	case <-paused.entered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("alice's allow did not reach its response write")
-	}
-
-	publishForeignHookRemovalsForTest(t, guardianDir, bob)
-	type awaitResult struct {
-		drained bool
-		err     error
-	}
-	awaited := make(chan awaitResult, 1)
-	go func() {
-		drained, err := enterprisepolicy.AwaitForeignHookRemovalExchanges(guardianDir)
-		awaited <- awaitResult{drained, err}
-	}()
-
-	for _, want := range []struct {
-		identity string
-		deny     bool
-	}{{bob, true}, {carol, false}, {bob, true}} {
-		result := make(chan deadlineRecorder, 1)
-		go func() {
-			response := newDeadlineRecorder()
-			api.handleForeignHookSession(response, foreignHookAllowRequest(want.identity, "s-later"))
-			result <- response
-		}()
-		select {
-		case response := <-result:
-			if response.Code != http.StatusOK || strings.Contains(response.Body.String(), `"deny":true`) != want.deny {
-				t.Fatalf("an exchange of %s while a removal was pending: %d %s", want.identity, response.Code, response.Body.String())
-			}
-		case <-time.After(foreignHookFenceWait):
-			t.Fatalf("an exchange of %s waited on a pending removal", want.identity)
-		}
-	}
-	select {
-	case <-awaited:
-		t.Fatal("the guardian went on while alice's allow was being written")
-	default:
-	}
-	resume()
-	<-answered
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"deny":false`) {
-		t.Fatalf("alice's allow: %d %s", recorder.Code, recorder.Body.String())
-	}
-	select {
-	case result := <-awaited:
-		if result.err != nil || !result.drained {
-			t.Fatalf("the guardian did not see the allow finish: drained %v, %v", result.drained, result.err)
-		}
-	case <-time.After(enterprisepolicy.ForeignHookRemovalDrainWait):
-		t.Fatal("the guardian did not go on after the allow was written")
-	}
-}
-
-// A fence the guardian would refuse, one with content, refuses the
-// exchange too: the gateway must not allow from a ledger the guardian may
-// have stopped updating.
-func TestForeignHookSessionRefusesANonEmptyRemovalFence(t *testing.T) {
-	guardianDir := t.TempDir()
-	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
-	previous := validateManagedGuardianAuthorization
-	validateManagedGuardianAuthorization = func(string, string) error { return nil }
-	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
-	writeForeignHookRemovalFenceFiles(t, guardianDir)
-	if err := os.WriteFile(filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFenceFile), []byte("x"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
-	response := newDeadlineRecorder()
-	api.handleForeignHookSession(response, foreignHookAllowRequest(foreignHookTestIdentities(1)[0], "s-1"))
-	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "foreign_hook_removal_fence_unavailable") || strings.Contains(response.Body.String(), `"deny":false`) {
-		t.Fatalf("exchange with a non-empty fence: %d %s", response.Code, response.Body.String())
-	}
-}
-
-// An allow is answered only within its hold after the exchange took the
-// fence, because the guardian waits no longer than that for it: past the
-// hold the call is refused, and the fence is free at once. A denial is not
-// bound by the hold.
-func TestForeignHookSessionAllowPastItsHoldIsRefused(t *testing.T) {
-	if foreignHookFencedWriteTimeout >= enterprisepolicy.ForeignHookRemovalExchangeHold ||
-		enterprisepolicy.ForeignHookRemovalExchangeHold >= enterprisepolicy.ForeignHookRemovalDrainWait {
+// An allow is answered only within foreignHookExchangeHold of taking the
+// account's lock, because a removal waits no longer than
+// ForeignHookRemovalDrainWait for it: an exchange that decided allow past
+// the hold answers a denial instead (it cannot verify the session's record),
+// and the lock is free at once. A denial is not bound by the hold.
+func TestForeignHookSessionAllowPastItsHoldIsDenied(t *testing.T) {
+	if foreignHookFencedWriteTimeout >= enterprisepolicy.ForeignHookExchangeHold ||
+		enterprisepolicy.ForeignHookExchangeHold >= enterprisepolicy.ForeignHookRemovalDrainWait {
 		t.Fatal("the write timeout, the exchange hold and the guardian's drain wait are out of order")
 	}
-	guardianDir := t.TempDir()
-	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
-	previous := validateManagedGuardianAuthorization
-	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	if foreignHookExchangeHold != enterprisepolicy.ForeignHookExchangeHold || foreignHookExchangeWait != enterprisepolicy.ForeignHookExchangeWait {
+		t.Fatal("the gateway's exchange hold and wait are not the guardian's")
+	}
+	foreignHookGuardianDirForTest(t)
 	previousHold := foreignHookExchangeHold
 	foreignHookExchangeHold = 0
-	t.Cleanup(func() {
-		validateManagedGuardianAuthorization = previous
-		foreignHookExchangeHold = previousHold
-	})
-	writeForeignHookRemovalFenceFiles(t, guardianDir)
+	t.Cleanup(func() { foreignHookExchangeHold = previousHold })
 	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
 	identity := foreignHookTestIdentities(1)[0]
 	allow := newDeadlineRecorder()
 	api.handleForeignHookSession(allow, foreignHookAllowRequest(identity, "s-1"))
-	if allow.Code != http.StatusServiceUnavailable || !strings.Contains(allow.Body.String(), "foreign_hook_removal_fence_expired") || strings.Contains(allow.Body.String(), `"deny":false`) {
+	if allow.Code != http.StatusOK || !strings.Contains(allow.Body.String(), `"deny":true`) || !strings.Contains(allow.Body.String(), "cannot verify this agent session") {
 		t.Fatalf("allow past its hold: %d %s", allow.Code, allow.Body.String())
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	unlock, err := enterprisepolicy.LockForeignHookRemovalsDrain(ctx, guardianDir)
-	cancel()
-	if err != nil {
-		t.Fatalf("the refused allow kept the fence: %v", err)
+	release, drained, err := lockForeignHookAccountRemovalForTest(t, api.configDataDir(), identity, 100*time.Millisecond)
+	if err != nil || !drained {
+		t.Fatalf("the denied allow kept the account's removal lock: drained %v, %v", drained, err)
 	}
-	unlock()
+	release()
 	body := `{"key":{"connector":"claudecode","session":"s-2","process":"` + runtime.GOOS + `:b:4242:100"},"session_start":true,"decision":{"deny":true,"reason":"enterprise_foreign_hook_blocked: project hook"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", strings.NewReader(body))
 	reqCtx := withAuthenticatedHookConnector(req.Context(), "claudecode")
 	reqCtx = context.WithValue(reqCtx, verifiedUserScopedIdentityContextKey{}, identity)
 	deny := newDeadlineRecorder()
 	api.handleForeignHookSession(deny, req.WithContext(reqCtx))
-	if deny.Code != http.StatusOK || !strings.Contains(deny.Body.String(), `"deny":true`) {
+	if deny.Code != http.StatusOK || !strings.Contains(deny.Body.String(), `"deny":true`) || !strings.Contains(deny.Body.String(), "project hook") {
 		t.Fatalf("denial: %d %s", deny.Code, deny.Body.String())
 	}
 }

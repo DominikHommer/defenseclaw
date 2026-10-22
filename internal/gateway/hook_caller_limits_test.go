@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -319,7 +318,6 @@ func TestForeignHookSessionExchangesDoNotWaitOnOtherIdentities(t *testing.T) {
 	}
 	guardianDir := t.TempDir()
 	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
-	writeForeignHookRemovalFenceFiles(t, guardianDir)
 	previous := validateManagedGuardianAuthorization
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })

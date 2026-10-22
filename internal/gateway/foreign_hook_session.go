@@ -109,11 +109,9 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	// key read before a removal proves nothing during an outage.
 	recordKey := places.key(identity)
 	removals, ledgerErr := a.foreignHookRemovals.forIdentity(places.removalsDir, identity)
+	// A removal in progress keeps its own reason through the join
+	// (ApplyForeignHookRemovals checks it first).
 	removalsErr := errors.Join(lockErr, ledgerErr, places.rootErr)
-	if lockErr != nil && errors.Is(lockErr, enterprisepolicy.ErrForeignHookRemovalPending) {
-		// A removal in progress has its own reason; join hides it otherwise.
-		removalsErr = lockErr
-	}
 	killed := false
 	decision := enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
 		StateDir:     stateDir,
