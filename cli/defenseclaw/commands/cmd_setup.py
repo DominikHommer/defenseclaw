@@ -17319,9 +17319,7 @@ def _interactive_logs(app: AppContext) -> bool:
         return False
 
     if not _native_windows_local_splunk():
-        ok, _reason = _preflight_docker()
-        if not ok:
-            return False
+        _require_local_splunk_docker()
 
     index = click.prompt("  Index name", default="defenseclaw_local")
     source = click.prompt("  Source", default="defenseclaw")
@@ -17419,27 +17417,8 @@ def _setup_logs(
     ):
         return False
 
-    ok, reason = (True, "") if _native_windows_local_splunk() else _preflight_docker()
-    if not ok:
-        if non_interactive:
-            # Map the pre-flight reason code to a one-line, accurate
-            # error so the operator does not have to re-read the
-            # checklist above. Historically this branch always said
-            # "Docker is required for --logs", which was misleading
-            # when the actual failure was a busy port.
-            detail = {
-                "docker_not_installed": "Docker is not installed",
-                "docker_daemon_not_running": "Docker daemon is not running",
-            }.get(reason)
-            if detail is None and reason.startswith("port_") and reason.endswith("_in_use"):
-                # reason looks like "port_8000_in_use"
-                port = reason.split("_", 2)[1]
-                detail = f"port {port} is already in use — free it (or stop the existing Splunk instance) and re-run"
-            if detail is None:
-                detail = "pre-flight checks failed (see messages above)"
-            click.echo(f"  error: {detail}", err=True)
-            raise SystemExit(1)
-        return False
+    if not _native_windows_local_splunk():
+        _require_local_splunk_docker()
 
     if s3_export and not (s3_bucket or os.environ.get("S3_BUCKET")):
         click.echo("  error: --s3-bucket is required with --s3-export (or set S3_BUCKET)", err=True)
@@ -18374,6 +18353,23 @@ def _preflight_docker() -> tuple[bool, str]:
         click.echo(f"    Port {port} ({label})... available")
 
     return True, ""
+
+
+def _require_local_splunk_docker() -> None:
+    """Refuse setup on a failed prerequisite in both CLI and wizard flows."""
+    ok, reason = _preflight_docker()
+    if ok:
+        return
+    detail = {
+        "docker_not_installed": "Docker is not installed",
+        "docker_daemon_not_running": "Docker daemon is not running",
+    }.get(reason)
+    if detail is None and reason.startswith("port_") and reason.endswith("_in_use"):
+        port = reason.split("_", 2)[1]
+        detail = f"port {port} is already in use — free it (or stop the existing Splunk instance) and re-run"
+    if detail is None:
+        detail = "pre-flight checks failed (see messages above)"
+    raise click.ClickException(f"Local Splunk preflight failed: {detail}")
 
 
 def _port_in_use(port: int) -> bool:

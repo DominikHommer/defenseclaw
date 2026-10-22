@@ -12,8 +12,8 @@ keywords:
 
 The current schema is `config_version: 9`. `defenseclaw config reference --format json-schema` prints the schema of every section with allowed values, and `defenseclaw config validate` checks a file. A version 8 file (written by 0.8.5 to 0.8.10) is migrated in memory when the gateway loads it; see [Migrate to config version 9](/docs/appendix/migrate-v9).
 
-<Callout title="Native Windows uses the packaged layout">
-The native Windows package uses an embedded runtime and `defenseclaw-hook.exe`; it installs no `.venv` and no shell hook scripts. See [Paths](/docs/reference/configuration/paths) before locating or editing Windows state.
+<Callout title="Windows layouts depend on the installer">
+The Windows Setup package uses an embedded runtime and `defenseclaw-hook.exe`, without a `.venv`. The supported per-user `install.ps1` route manages a private `.venv` and generates hook scripts under the data home. See [Paths](/docs/reference/configuration/paths) before locating or editing Windows state.
 </Callout>
 
 <Callout title="Managed computers">

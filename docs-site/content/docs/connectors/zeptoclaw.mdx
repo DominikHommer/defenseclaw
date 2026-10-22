@@ -58,11 +58,17 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 
 ## Turn it off
 
+For a per-user, single-connector install:
+
 ```bash
 defenseclaw guardrail disable --yes
 ```
 
 To drop the connector from the configuration, run `defenseclaw setup remove zeptoclaw --yes`.
+
+Turn it back on with `defenseclaw guardrail enable`.
+
+On a multi-connector install, add `--connector zeptoclaw` to `guardrail disable` and `guardrail enable` to change only this agent.
 
 ## Details
 

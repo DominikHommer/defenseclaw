@@ -102,7 +102,7 @@ A group name that resolved before but does not resolve now (the directory is unr
 
 ## New, changed and removed users
 
-- **New user.** Enrolled on the next enumerator cycle, within five minutes, once the agent is installed. Machine-policy agents run DefenseClaw hooks from the first call.
+- **New user.** Enrolled on the next enumerator cycle, within five minutes once the account is signed in and the agent is installed. On Windows, Claude Code must also start once so its build can be verified; if that happens later, the five-minute wait starts then. Machine-policy agents run DefenseClaw hooks from the first call and block until enrollment.
 - **Excluded user or agent removed from the config.** Rows are removed on the next cycle, and the guardian removes DefenseClaw's own hook registration from that user's agent config. The user's own hooks stay.
 - **Deleted user (Linux and macOS).** Rows are removed after three consecutive definitive "no such user" cycles, 10 to 15 minutes. A directory outage never removes anyone. Run `enterprise linux repair` or `enterprise macos repair` as root to remove them at once.
 

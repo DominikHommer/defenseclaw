@@ -64,11 +64,15 @@ Setup backs up `hooks.json` and keeps unrelated hooks. It writes only the global
 
 ## Turn it off
 
+For a per-user, single-connector install:
+
 ```bash
-defenseclaw guardrail disable --connector antigravity --yes
+defenseclaw guardrail disable --yes
 ```
 
-This keeps Antigravity's settings. Turn it back on with `defenseclaw guardrail enable --connector antigravity`. To remove the connector, run `defenseclaw setup remove antigravity --yes` (add `--force` if it is the last one).
+This keeps Antigravity's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove antigravity --yes` (add `--force` if it is the last one).
+
+On a multi-connector install, add `--connector antigravity` to `guardrail disable` and `guardrail enable` to change only this agent.
 
 ## Details
 

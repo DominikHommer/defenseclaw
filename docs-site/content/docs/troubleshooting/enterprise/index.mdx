@@ -266,7 +266,7 @@ and the full meaning are in [Exit codes](/docs/enterprise/mdm#exit-codes).
 | `mdm_staging_untrusted`, `mdm_package_incomplete` | The private staging folder or the Intune content is not as expected |
 | `mdm_staging_noexec` | Linux: the staging folder is on a `noexec` mount; pass `--staging-dir` with a root-only folder that allows execution, or use the deb or rpm |
 | `mdm_staging_full`, `mdm_cancelled` | Linux and macOS: the staging filesystem filled while extracting a payload; or the MDM stopped the wrapper and its lifecycle child (inspect the deployment before a fresh run) |
-| `mdm_base_config_mismatch`, `mdm_tar_missing`, `mdm_anchor_install_failed` | Linux and macOS, signed bundles: the base config does not match the bundle, `tar` is missing so the comparison cannot run, or the trust anchor file could not be installed. See [Install order with a signed bundle](/docs/enterprise/mdm#what-you-deliver) |
+| `mdm_base_config_mismatch`, `mdm_tar_missing`, `mdm_anchor_install_failed` | Linux and macOS, signed bundles: the base config does not match the bundle, `tar` is missing so the comparison cannot run, or the trust anchor file could not be installed. |
 
 Wrapper logs: `/var/log/defenseclaw-enterprise-mdm.log` on Linux,
 `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` on macOS, and

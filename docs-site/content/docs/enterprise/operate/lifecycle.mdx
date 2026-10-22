@@ -135,6 +135,8 @@ The managed config is administrator-owned. For what it contains, see
 | macOS | `/opt/cisco/defenseclaw/etc/config.yaml` | The `com.cisco.defenseclaw.apply` daemon runs `ensure --reason path` when the file changes, or when an entry directly inside `etc/secrets` or `etc/policies` is added, removed or replaced, at most once every 30 seconds |
 | Windows | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` | The lifecycle does not watch it. Run Setup `/ensure` again with the new file |
 
+**Bundle mode.** On a device whose MDM installed bundle trust anchors, the config comes only from signed bundles. `ensure --config`, Setup `CONFIG=` or a wrapper run with a config that is not the current bundle's is refused with `bundle_required`, and on Linux and macOS an edit of the installed file is reverted to the bundle's config. Deliver a new bundle instead. The rest of this section is for devices without bundle trust anchors.
+
 A change is applied by the apply trigger on Linux and macOS. While it runs, `status` and `verify` report `lifecycle_busy` and exit `75`; that is not a failure, so run them again. A hand edit of the config as root is applied, not reported as drift. Details: [Lifecycle detail](/docs/enterprise/operate/reference#applying-a-config-change).
 
 On Linux and macOS you can also hand the new file to `ensure`. It validates the file,

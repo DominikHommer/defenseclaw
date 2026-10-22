@@ -140,7 +140,13 @@ ai_discovery:
   ide_inventory: ai_only          # all | ai_only | off
 ```
 
-Check the file with `defenseclaw config validate`. On a managed host, edit the [machine configuration](/docs/enterprise/configure/configuration#where-the-config-lives) instead. The user ID, account name, domain, directory type, assurance and client address stay on in either case. More in [Identity detail](/docs/enterprise/identity/reference#what-stays-on).
+On a per-user install, check the file with `defenseclaw config validate`; the running gateway reloads it. On a managed host, change the [machine configuration](/docs/enterprise/configure/configuration#where-the-config-lives) and apply it with `ensure` ([Change the config](/docs/enterprise/operate/lifecycle#change-the-config)). To validate the installed file on managed Windows, run from an elevated PowerShell:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' config validate --config 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml' --json
+```
+
+ The user ID, account name, domain, directory type, assurance and client address stay on in either case. More in [Identity detail](/docs/enterprise/identity/reference#what-stays-on).
 
 ## Next
 

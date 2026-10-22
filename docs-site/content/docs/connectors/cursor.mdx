@@ -63,11 +63,15 @@ Teardown restores the earlier file, or removes only DefenseClaw's entries, then 
 
 ## Turn it off
 
+For a per-user, single-connector install:
+
 ```bash
-defenseclaw guardrail disable --connector cursor --yes
+defenseclaw guardrail disable --yes
 ```
 
-This keeps Cursor's settings. Turn it back on with `defenseclaw guardrail enable --connector cursor`. To remove the connector, run `defenseclaw setup remove cursor --yes` (add `--force` if it is the last one).
+This keeps Cursor's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove cursor --yes` (add `--force` if it is the last one).
+
+On a multi-connector install, add `--connector cursor` to `guardrail disable` and `guardrail enable` to change only this agent.
 
 ## Details
 

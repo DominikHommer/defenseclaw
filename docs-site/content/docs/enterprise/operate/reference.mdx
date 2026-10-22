@@ -96,6 +96,12 @@ and for a rejected edit (`config_rejected`), not for a valid edit of the config 
 `ensure --config` with the reviewed file puts the reviewed version back and records it as
 the applied config.
 
+In bundle mode (bundle trust anchors installed), the managed config is the current
+bundle's config. On Linux and macOS the apply trigger reverts an edit to that config.
+Windows does not watch the file: the edit stays until a later Setup `/ensure` or
+`/repair` without `CONFIG=` puts the bundle's config back and keeps the edit as
+`rejected-config.yaml`.
+
 ### Invalid and rejected configs
 
 If the new config is invalid, `ensure` fails and does not apply it: on Linux and macOS

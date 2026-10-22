@@ -71,7 +71,13 @@ After an account is deleted, `agent-identities --user` still finds its identitie
 
 ## What stays on
 
-Check the file with `defenseclaw config validate`. A running gateway applies the change on its next reload; on a managed host, edit the [machine configuration](/docs/enterprise/configure/configuration#where-the-config-lives) instead. Confirm with the audit export in [Join a Linux host to AD](/docs/enterprise/identity/ad-linux): the projected `principal` and `kerberos_principal` values are `null` while the setting is off. A home-directory path can still contain the UPN on SSSD hosts with fully qualified names; see [End-user identity](/docs/reference/observability/telemetry-identity/#optional-principal).
+On a per-user install, check the file with `defenseclaw config validate`; the running gateway reloads it. On a managed host, change the [machine configuration](/docs/enterprise/configure/configuration#where-the-config-lives) and apply it with `ensure` ([Change the config](/docs/enterprise/operate/lifecycle#change-the-config)). To validate the installed file on managed Windows, run from an elevated PowerShell:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' config validate --config 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml' --json
+```
+
+ Confirm with the audit export in [Join a Linux host to AD](/docs/enterprise/identity/ad-linux): the projected `principal` and `kerberos_principal` values are `null` while the setting is off. A home-directory path can still contain the UPN on SSSD hosts with fully qualified names; see [End-user identity](/docs/reference/observability/telemetry-identity/#optional-principal).
 
 What stays on in either case: `user.id`, the account name, the domain, the directory type, the assurance, the session kind and the client address. There is no separate switch for them, so choose destinations accordingly. The principal, the Kerberos principal, the client address and the tenant ID are marked sensitive; the `strict` redaction profile (and a custom profile that extends it) removes them from what a destination receives, while `none`, `sensitive` and `content` keep them. See [Redaction](/docs/reference/observability/redaction). The `identity.observed` record carries a group count, never group names. The Secure Client profile collects none of these facts.
 

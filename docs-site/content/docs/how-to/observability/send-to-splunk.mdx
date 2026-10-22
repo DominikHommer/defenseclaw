@@ -31,6 +31,8 @@ keywords:
 
    {/* needs-live-capture: output of `setup splunk --logs` (Docker not run on the shared dev host) */}
 
+   Setup exits nonzero if Docker is missing, its daemon is stopped, or a required port is busy. Fix the reported prerequisite and run the command again.
+
    Setup starts Splunk in Free mode, installs the **DefenseClaw Local Mode** app, and adds a `splunk_hec` destination for index `defenseclaw_local`. Open [http://localhost:8000](http://localhost:8000). The HEC token stays hidden unless you pass `--show-credentials`.
 
 ## Splunk Enterprise

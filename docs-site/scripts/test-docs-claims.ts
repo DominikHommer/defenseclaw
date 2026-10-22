@@ -13,9 +13,26 @@ function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
 
-// The signed-policy-bundle documentation is deferred until the sync service.
-// Packager behavior belongs to its private implementation tests, not a claim
-// about a public page that no longer exists.
+describe('Intune base config versus the signed bundle', () => {
+  it('names exactly the blocks the packager compares', () => {
+    const packager = readFileSync(
+      join(repo, 'packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1'),
+      'utf8',
+    );
+    assert.ok(packager.includes('No other key is compared'), 'packager no longer says what it compares');
+    const list = /foreach \(\$key in ((?:'[a-z_]+'(?:, )?)+)\)/.exec(packager);
+    assert.ok(list, 'packager hook-block key list not found');
+    const compared = [...list[1].matchAll(/'([a-z_]+)'/g)].map((match) => match[1]);
+    assert.ok(compared.length > 0);
+    const reference = readFileSync(join(site, 'content/docs/enterprise/mdm/intune/windows-reference.mdx'), 'utf8');
+    const row = reference.split('\n').find((line) => line.startsWith('| `-BaseConfigPath` |'));
+    assert.ok(row, 'windows-reference has no -BaseConfigPath row');
+    assert.ok(row.includes('No other setting is compared'), 'the -BaseConfigPath row does not say nothing else is compared');
+    for (const key of ['guardrail', ...compared]) {
+      assert.ok(row.includes(`\`${key}:\``), `the -BaseConfigPath row does not name the compared ${key}: block`);
+    }
+  });
+});
 
 describe('fail mode of Copilot CLI and Antigravity hooks', () => {
   it('says the hooks follow a closed fail mode', () => {

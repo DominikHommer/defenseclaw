@@ -182,6 +182,8 @@ Then set `enterprise.inspection.ai_defense.enabled: true` and
 | Roll back | [Roll back](/docs/enterprise/operate/lifecycle#roll-back) | [Roll back](/docs/enterprise/operate/lifecycle#roll-back) |
 | Change the config | Edit the inline config in the ensure script | Edit the inline config in the ensure script |
 
+In bundle mode, deliver a new signed bundle instead; a plain config is refused with `bundle_required`.
+
 ## Deliver a custom macOS rule pack
 
 Before the first pkg install, add a root **stage-pack** script that copies the pack

@@ -2203,6 +2203,10 @@ func TestWindowsUnenrolledRefusalLeadsWithTheNextStep(t *testing.T) {
 			Stderr:                   &errb,
 			HTTPClient:               &http.Client{Transport: rt},
 		})
+		if !strings.Contains(errb.String(), "once you have signed in and the agent is installed") ||
+			!strings.Contains(errb.String(), "first start if that is later") {
+			t.Fatalf("enrollment wait must name its prerequisites and later starting point: %q", errb.String())
+		}
 		first, _, _ := strings.Cut(errb.String(), "\n")
 		if code == 0 || rt.requests != 0 || !strings.HasPrefix(first, lead) || len(lead) > 80 {
 			t.Fatalf("%s: code %d requests %d first stderr line %q, want a block that starts %q", reason, code, rt.requests, first, lead)

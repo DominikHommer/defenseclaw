@@ -68,13 +68,15 @@ The administrator manages Claude Code in the managed `config.yaml`. `guardrail.c
 
 ## Turn it off
 
-These commands are for a per-user install.
+For a per-user, single-connector install:
 
 ```bash
-defenseclaw guardrail disable --connector claudecode --yes
+defenseclaw guardrail disable --yes
 ```
 
-This keeps Claude Code's settings. Turn it back on with `defenseclaw guardrail enable --connector claudecode`. To remove the connector, run `defenseclaw setup remove claudecode --yes` (add `--force` if it is the last one). With a single connector, `defenseclaw guardrail disable --yes` turns the whole guardrail off.
+This keeps Claude Code's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove claudecode --yes` (add `--force` if it is the last one).
+
+On a multi-connector install, add `--connector claudecode` to `guardrail disable` and `guardrail enable` to change only this agent.
 
 ## Details
 

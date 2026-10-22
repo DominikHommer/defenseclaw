@@ -64,11 +64,15 @@ Teardown restores the exact earlier file when DefenseClaw's copy is unchanged. O
 
 ## Turn it off
 
+For a per-user, single-connector install:
+
 ```bash
-defenseclaw guardrail disable --connector copilot --yes
+defenseclaw guardrail disable --yes
 ```
 
-This keeps Copilot's settings. Turn it back on with `defenseclaw guardrail enable --connector copilot`. To remove the connector, run `defenseclaw setup remove copilot --yes` (add `--force` if it is the last one).
+This keeps Copilot's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove copilot --yes` (add `--force` if it is the last one).
+
+On a multi-connector install, add `--connector copilot` to `guardrail disable` and `guardrail enable` to change only this agent.
 
 ## Details
 

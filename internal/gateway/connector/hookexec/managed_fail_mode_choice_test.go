@@ -316,7 +316,8 @@ func TestStandaloneManagedNoAnswerAfterASlowLocalStepStaysClosed(t *testing.T) {
 				o.FailMode = "open"
 				o.APIAddr = addr
 				o.HTTPClient = &http.Client{}
-				// Count only the simulated local step, after fixture I/O.
+				// run prepares the on-disk test home before this callback.
+				// Only the simulated hook work belongs to this budget.
 				o.StartedAt = time.Now().Add(-tc.spent)
 			})
 			if blocked(result) == tc.open {

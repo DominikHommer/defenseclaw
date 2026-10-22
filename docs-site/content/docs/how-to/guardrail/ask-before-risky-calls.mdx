@@ -37,7 +37,7 @@ Human approval (HITL) pauses a risky call and asks you instead of silently allow
 
    The list names every agent you have set up, so yours will differ. Scripts can supply confirmation on standard input: a newline accepts the default yes, and `y` confirms explicitly. If standard input ends without an answer, the command aborts. Use `--yes` to skip the prompt. If input is still a terminal but both output streams are piped, the command refuses because the prompt would be hidden; remove the pipe or add `--yes`.
 
-   `--min-severity` takes `low`, `medium`, `high` or `critical`. Add `--connector claudecode` to change one agent only. Add `--yes` to skip the prompt in a script. The running gateway applies the change without a restart.
+   `--min-severity` takes `low`, `medium`, `high` or `critical`. On a multi-connector install, add `--connector claudecode` to change one agent only. With a single connector, omit `--connector`. Add `--yes` to skip the prompt in a script. The running gateway applies the change without a restart.
 
 2. Ask Claude Code to run a command that matches a HIGH rule and sends no data:
 
