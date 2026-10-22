@@ -67,7 +67,7 @@ guardrail:
 `openclaw` and `zeptoclaw` need the guardrail proxy, which a managed host does not run, so they are not managed. Per-user enrollment also depends on the [enrollment settings](/docs/enterprise/configure/enrollment) and on a supported agent version. The full route table is in [Machine policy](/docs/enterprise/configure/machine-policy#routes-by-connector).
 
 <Callout type="warn" title="Leave an agent out to leave it unprotected">
-`guardrail.connectors.<name>.enabled: false` disables the connector and removes its machine policy and hooks. An empty entry (`{}`) enables it. To leave an agent unprotected, omit it from `guardrail.connectors` and `enterprise.machine_policy.connectors`, or set that connector's `ownership: "off"`. Then run `enterprise policy show` and `enterprise verify` to see which agents still have coverage.
+`guardrail.connectors.<name>.enabled: false` disables the connector and removes its machine policy and hooks. An empty entry (`{}`) enables it. To leave an agent unprotected, omit it from `guardrail.connectors` and `enterprise.machine_policy.connectors`, or set that connector's `ownership: "off"`. Then run `defenseclaw-gateway enterprise policy show --json` and the OS-specific coverage check: `enterprise linux verify --json`, `enterprise macos verify --json` or `enterprise windows verify --json`, using the installed gateway as administrator.
 </Callout>
 
 ## Apply and check

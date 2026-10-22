@@ -654,11 +654,12 @@ Guardrail events keep matching rule IDs, evaluation IDs, reasons and severity in
 | High-assurance packs | `policies/guardrail-use-cases/` |
 | Reproducible public scores | `benchmarks/` |
 
-Run the repository checks after changing a detector:
+Run the repository checks after changing a detector, using Go 1.26.4 (the CI toolchain). Run the gateway suite through the shard runner:
 
 ```bash
 make check-guardrail-catalog
-go test -timeout 30m ./internal/actionfacts ./internal/guardrail ./internal/gateway
+go test -timeout 30m ./internal/actionfacts ./internal/guardrail
+python3 scripts/go_test_shards.py --package-dir internal/gateway --shard-count 16 -- go test -timeout 30m ./internal/gateway
 go test ./benchmarks/...
 ```
 

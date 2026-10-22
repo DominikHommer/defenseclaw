@@ -8,6 +8,10 @@ keywords:
   - HMAC webhook
 ---
 
+<Callout title="Shell examples">
+The shell examples require Bash. On native Windows, use Git Bash or WSL; PowerShell uses different continuation and environment-variable syntax.
+</Callout>
+
 A webhook notifier posts a chat or incident message when an event meets your minimum severity. Notifiers are separate from telemetry destinations: they filter by severity, deduplicate, and format the message for the receiver.
 
 To export every event as JSON Lines to a SIEM instead, add an `http_jsonl` destination with `defenseclaw setup observability add webhook`.
@@ -62,6 +66,8 @@ To export every event as JSON Lines to a SIEM instead, add an `http_jsonl` desti
    <Tab value="Generic HMAC">
 
    The body is signed with HMAC-SHA256 in the `X-Hub-Signature-256` header, as `sha256=<hex>`.
+
+   Generic test events include `event.host`, the CLI machine's hostname. Each test uses a new event ID. `show` and `list` redact URL paths and queries because they can carry credentials.
 
    ```bash
    defenseclaw keys set DEFENSECLAW_SIEM_SECRET
@@ -138,6 +144,7 @@ defenseclaw setup webhook remove slack-alerts --yes
 
 - **`does not look like an environment variable name`.** `--secret-env` takes a name made of capital letters, digits and underscores. Store the value with `defenseclaw keys set`.
 - **`private or reserved address`.** The URL fails the address check. For a receiver on your own machine during development, set `DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1` where the gateway starts. It allows loopback only.
+- **PagerDuty key is unset.** Set the environment variable named by `secret_env` before testing, including with `--dry-run`; the routing key is needed to format the payload.
 
 ## Next
 

@@ -505,8 +505,10 @@ the machine config, not in a user's home, and apply to every enrolled user.
    ```
 
    `ensure` validates the file first. A config with an unknown profile or a
-   forbidden key fails with `config_invalid` and the installed config stays
-   in force. See [Change the config](/docs/enterprise/operate/lifecycle#change-the-config).
+   forbidden key is refused and the installed config stays in force. Linux and
+   macOS report `config_invalid`; Windows argument preflight reports
+   `invalid_arguments` (exit `1639`), with the reason in `errors[].message`.
+   See [Change the config](/docs/enterprise/operate/lifecycle#change-the-config).
 3. Check the result as root. A managed install has no `defenseclaw` Python CLI,
    so the checks use the gateway binary and print JSON:
 

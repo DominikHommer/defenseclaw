@@ -44,7 +44,7 @@ Hermes registers shell callbacks in each running process, and DefenseClaw has no
 | Reload state | `~/.defenseclaw/` managed connector data, `hermes-direct-native-state.json` |
 | Hook runtime, Windows | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
-Disable removes only DefenseClaw's entries, keeping every byte outside the `hooks` mapping (comments included) and removing its approvals. On Linux and macOS `hermes-hook.sh` stays as an inert stub, because a running Hermes keeps calling it until it restarts.
+Disable removes only DefenseClaw's entries and approvals. Settings and comments outside the `hooks` mapping are kept; whitespace can change. On Linux and macOS `hermes-hook.sh` stays as an inert stub, because a running Hermes keeps calling it until it restarts.
 
 ### Inventory
 

@@ -164,7 +164,8 @@ The layers divide the work so that two of them never make the same decision:
    pins already confine. On a host, DefenseClaw's kernel layer enforces only its fixed
    two controls; hooks keep everything that needs intent.
 2. **The kernel mode never exceeds the guardrail mode.** A connector whose
-   hooks run in observe mode fails open and only reports "would block". The
+   hooks run in observe mode reports findings as "would block". Hook failures
+   still follow the effective hook fail mode. The
    kernel controls do not deny for that connector either: they stay in monitor
    mode and status says `kernel_enforce_guardrail_observe`.
 3. **The kernel never denies what the hook path needs.** The controls cover
@@ -188,9 +189,8 @@ The layers divide the work so that two of them never make the same decision:
 
 | Layer and failure | What happens |
 | --- | --- |
-| A hook cannot reach the gateway, in action mode | Closed: the call is denied |
-| A hook cannot reach the gateway, in observe mode | Open: the call runs and the failure is recorded |
-| Managed Claude Code and Codex hooks | Always closed |
+| A hook cannot reach the gateway, in observe or action mode | Follows the effective hook fail mode: `closed` by default outside Secure Client; an explicit `open` allows the call on supported hooks |
+| Managed standalone Claude Code and Codex hooks | Closed by default. An administrator's explicit `open` allows an outage; integrity and credential refusals still block |
 | Sandbox hooks | Always closed; silence is detected and can stop the sandbox |
 | The judge is unavailable | Falls back to the local verdict |
 | The egress proxy, credential revoked or deny mode | Closed: 403 or 407, and open tunnels are closed |

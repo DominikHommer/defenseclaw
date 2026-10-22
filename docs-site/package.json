@@ -23,6 +23,7 @@
     "test:docs-claims": "tsx --test ./scripts/test-docs-claims.ts",
     "test:search": "tsx --test ./scripts/test-search.tsx",
     "check-search-index-size": "tsx ./scripts/check-search-index-size.ts",
+    "test:docs-w4": "tsx --test ./scripts/test-docs-w4.ts",
     "postinstall": "fumadocs-mdx && tsx ./scripts/build-policy-assets.ts && tsx ./scripts/sync-connector-icons.ts"
   },
   "dependencies": {

@@ -12,7 +12,7 @@ keywords:
 ---
 
 DefenseClaw ties each agent action to a person without integrating with your
-identity provider. It makes **no calls to Active Directory, Okta or Entra**,
+identity provider. It makes **no directory API calls to Active Directory, Okta or Entra**,
 and it needs **no credentials, tokens, service accounts or app
 registrations**. It reads what the operating system already knows about the
 account that is running the agent, and it says how far each fact can be
@@ -24,9 +24,11 @@ For the supported identity types and the checks, see
 
 ## What it never does
 
-- It never contacts an identity provider, a domain controller or a directory
-  API of its own. A lookup is a call to the host's own account database
+- It makes no identity-provider or directory API calls. A lookup is a call to the host's own account database
   (`getent`, SSSD, the Windows token and registry, Open Directory).
+- On a domain-bound Mac, the root guardian makes a TCP port 389 reachability
+  probe to a domain controller to detect directory recovery. It sends no LDAP
+  query or credentials. See [Limits](#limits-stated-plainly).
 - It holds no identity credentials: no passwords, tokens, tickets or keys. It
   records the Kerberos principal name, not the ticket contents. On macOS, it may
   run `/usr/bin/klist --json` to read the default API cache.
