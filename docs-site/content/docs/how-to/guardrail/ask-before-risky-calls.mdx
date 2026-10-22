@@ -61,10 +61,10 @@ List Claude Code's latest alerts, newest first:
 defenseclaw alerts --connector claudecode --limit 3
 ```
 
-Each time Claude Code asked, the list has a `claudecode:PreToolUse` row with `decision=confirm`. When Claude Code's reply after you approve quotes the URL, that reply is a newer `claudecode:MessageDisplay` row with `decision=alert`, so the confirm row is not always #1. Show the newest `decision=confirm` row by its number, #2 after one deny and one approve:
+Each time Claude Code asked, the list has a `claudecode:PreToolUse` row with `decision=confirm`. Find the newest such row and note its number. The confirm row is not always #1. When Claude Code's reply after you approve quotes the URL, that reply is a newer `claudecode:MessageDisplay` row with `decision=alert`. Show the confirm row by its number, with the same `--connector`, so the number refers to the list above. In this example you approved, the reply quoted the URL, and the confirm row is #2. After a deny it is usually #1.
 
 ```bash
-defenseclaw alerts --show 2
+defenseclaw alerts --connector claudecode --show 2
 ```
 
 ```text

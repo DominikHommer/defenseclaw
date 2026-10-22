@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """GAP-0611: the "Check it worked" commands of ask-before-risky-calls.mdx run
-against the audit rows the page's steps leave (deny once, approve once, then
-Claude Code's reply that quotes the URL) and print what the page shows."""
+against the audit rows the page's steps leave (deny, approve, or both, with
+Claude Code's reply that quotes the URL after an approve, and a newer alert
+from another connector) and print what the page shows."""
 
 from __future__ import annotations
 
@@ -60,24 +61,26 @@ def app():
         os.environ["COLUMNS"] = saved_columns
 
 
-def _hook_finding(app, request_id: str, hook_event: str, action: str, at: datetime) -> None:
+def _hook_finding(
+    app, request_id: str, hook_event: str, action: str, at: datetime, connector: str = "claudecode"
+) -> None:
     """The connector-hook row and the hook-rule finding the gateway writes for one hook call."""
     hook = Event(
         action="connector-hook",
         target=hook_event,
         severity="INFO",
-        connector="claudecode",
-        details=f"connector=claudecode action={action} severity=HIGH",
+        connector=connector,
+        details=f"connector={connector} action={action} severity=HIGH",
         timestamp=at,
     )
     finding = Event(
         action="scan-finding",
         target="",
         severity="HIGH",
-        connector="claudecode",
+        connector=connector,
         details="finding.observed",
         timestamp=at,
-        structured={**RULE, "defenseclaw.finding.target_ref": f"claudecode:{hook_event}"},
+        structured={**RULE, "defenseclaw.finding.target_ref": f"{connector}:{hook_event}"},
     )
     app.store.log_event(hook)
     app.store.log_event(finding)
@@ -85,12 +88,25 @@ def _hook_finding(app, request_id: str, hook_event: str, action: str, at: dateti
     app.store.db.commit()
 
 
-def _field_run(app) -> None:
-    start = datetime.now(timezone.utc) - timedelta(minutes=5)
-    _hook_finding(app, "req-deny", "PreToolUse", "confirm", start)
-    _hook_finding(app, "req-approve", "PreToolUse", "confirm", start + timedelta(seconds=48))
-    # The reply after the approved run quotes the URL (T6Z2-11).
-    _hook_finding(app, "req-reply", "MessageDisplay", "alert", start + timedelta(seconds=69))
+# Answers the reader may give in step 2. An approve run makes the command
+# run, and Claude Code's reply quotes the URL (T6Z2-11).
+RUNS = {
+    "approve": ("approve",),
+    "deny": ("deny",),
+    "deny-then-approve": ("deny", "approve"),
+}
+
+
+def _run(app, answers: tuple[str, ...]) -> None:
+    at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    for n, answer in enumerate(answers):
+        _hook_finding(app, f"req-{n}", "PreToolUse", "confirm", at)
+        at += timedelta(seconds=30)
+        if answer == "approve":
+            _hook_finding(app, f"req-{n}-reply", "MessageDisplay", "alert", at)
+            at += timedelta(seconds=30)
+    # Step 1 sets up Codex too; a newer Codex alert moves the global numbering.
+    _hook_finding(app, "req-codex", "PreToolUse", "alert", at, connector="codex")
 
 
 def _expected_lines() -> list[str]:
@@ -107,30 +123,50 @@ def _same_line(page: str, shown: str) -> bool:
     return " ".join(page.split()) == " ".join(shown.split())
 
 
-def test_check_it_worked_shows_the_confirm_alert(app):
-    _field_run(app)
-    runner = CliRunner()
-    outputs = []
-    for args in _commands():
-        result = runner.invoke(alerts, args, obj=app, catch_exceptions=False)
-        assert result.exit_code == 0, (args, result.output)
-        outputs.append((args, result.output))
+def _show_number(args: list[str]) -> int:
+    return int(args[args.index("--show") + 1])
 
-    show_args, shown = next((a, o) for a, o in outputs if "--show" in a)
-    lines = shown.splitlines()
+
+@pytest.mark.parametrize("run", sorted(RUNS))
+def test_check_it_worked_shows_the_confirm_alert(app, run):
+    _run(app, RUNS[run])
+    runner = CliRunner()
+    commands = _commands()
+    list_args = [a for a in commands if "--show" not in a]
+    show_args = [a for a in commands if "--show" in a]
+    assert len(list_args) == 1 and len(show_args) == 1, commands
+    list_args, show_args = list_args[0], show_args[0]
+
+    listed = runner.invoke(alerts, list_args, obj=app, catch_exceptions=False)
+    assert listed.exit_code == 0, (list_args, listed.output)
+    targets = re.findall(r"claudecode:(PreToolUse|MessageDisplay)\s*[|│]\s*decision=(\w+)", listed.output)
+    assert ("PreToolUse", "confirm") in targets, listed.output
+    # The page's rule: the number of the newest PreToolUse confirm row of this list.
+    newest_confirm = 1 + targets.index(("PreToolUse", "confirm"))
+
+    # --show must number the same list the reader just read.
+    def scope(args: list[str]) -> list[str]:
+        return [args[i + 1] for i, a in enumerate(args) if a == "--connector"]
+
+    assert scope(show_args) == scope(list_args), (list_args, show_args)
+
+    # The page's example number holds for the approve run it describes.
+    if run == "approve":
+        assert _show_number(show_args) == newest_confirm, (show_args, listed.output)
+    args = list(show_args)
+    args[args.index("--show") + 1] = str(newest_confirm)
+    result = runner.invoke(alerts, args, obj=app, catch_exceptions=False)
+    assert result.exit_code == 0, (args, result.output)
+
+    lines = result.output.splitlines()
     at = 0
     for expected in _expected_lines():
+        if expected.startswith("Alert #"):
+            expected = f"Alert #{newest_confirm}"
         while at < len(lines) and not _same_line(expected, lines[at]):
             at += 1
-        assert at < len(lines), (show_args, expected, shown)
+        assert at < len(lines), (args, expected, result.output)
         at += 1
-
-    listed = [o for a, o in outputs if "--show" not in a]
-    assert listed, "the page lists the alerts before it picks one"
-    targets = re.findall(r"claudecode:(PreToolUse|MessageDisplay)\s*[|│]\s*decision=(\w+)", listed[0])
-    assert targets == [("MessageDisplay", "alert"), ("PreToolUse", "confirm"), ("PreToolUse", "confirm")], listed[0]
-    newest_confirm = 1 + targets.index(("PreToolUse", "confirm"))
-    assert show_args[show_args.index("--show") + 1] == str(newest_confirm)
 
 
 def test_check_it_worked_names_the_later_reply_alert():
