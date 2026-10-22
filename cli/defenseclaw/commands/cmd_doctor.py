@@ -3985,20 +3985,27 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         return None
     bind = _gateway_api_host(cfg)
     url = _gateway_api_url(cfg, "/health")
-    code, body = _http_probe(
-        url,
-        timeout=5.0,
-        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
-        allow_truncation=False,
-        bypass_proxy=True,
-    )
-    if code == 200:
-        trust = _trusted_gateway_listener(cfg)
+    while True:
+        code, body = _http_probe(
+            url,
+            timeout=5.0,
+            response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+            allow_truncation=False,
+            bypass_proxy=True,
+        )
         lock_holder = None
-        if not trust.trusted:
-            locked, lock_holder = _gateway_start_in_progress(cfg, r)
-            if locked and lock_holder is None:
-                trust = _trusted_gateway_listener(cfg)
+        if code != 200:
+            break
+        trust = _trusted_gateway_listener(cfg)
+        if trust.trusted:
+            break
+        locked, lock_holder = _gateway_start_in_progress(cfg, r)
+        if not locked or lock_holder is not None:
+            break
+        # The start lock was released, so the listener may have changed hands:
+        # the /health read before the wait is no evidence about it. Probe
+        # again; the run waits for the lock only once, so this ends.
+    if code == 200:
         holder = "" if trust.trusted or lock_holder is not None else _gateway_port_holder(cfg)
         if lock_holder is not None:
             # The listener can be mid-handover (GAP-0535): it is neither this

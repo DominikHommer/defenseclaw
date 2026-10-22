@@ -2719,10 +2719,11 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
             self.assertIn(f"(PID {os.getpid()})", detail)
         listener.assert_called_once()
 
-    def _run_gateway_rows_during_restart(self, tmp: str, during, *, release_after: float | None):
+    def _run_gateway_rows_during_restart(self, tmp: str, during, *, release_after: float | None, probe=None):
         """Run Sidecar API, Gateway authentication and Gateway home while a
         start, restart or stop holds the start lock; release it after
-        ``release_after`` seconds, or never."""
+        ``release_after`` seconds, or never. ``probe(released)`` answers each
+        /health request; by default the same document every time."""
         import threading
 
         from defenseclaw.commands import cmd_doctor
@@ -2744,7 +2745,11 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
             timer.start()
         try:
             with (
-                patch.object(cmd_doctor, "_http_probe", return_value=(200, json.dumps(health))),
+                patch.object(
+                    cmd_doctor,
+                    "_http_probe",
+                    side_effect=lambda *_a, **_k: probe(released.is_set()) if probe else (200, json.dumps(health)),
+                ),
                 patch.object(cmd_doctor, "_daemon_effective_gateway_token", return_value=("t", "", "")),
                 patch.object(cmd_doctor, "_authenticated_runtime_matches", return_value=(True, "")),
                 patch.object(cmd_doctor, "_gateway_cli_token_mismatch_detail", return_value=""),
@@ -2762,7 +2767,7 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
                     cmd_doctor, "_wait_for_gateway_start_lock", wraps=cmd_doctor._wait_for_gateway_start_lock
                 ) as wait,
             ):
-                cmd_doctor._check_sidecar(cfg, result)
+                sidecar_health = cmd_doctor._check_sidecar(cfg, result)
                 cmd_doctor._check_gateway_auth(cfg, result)
                 cmd_doctor._check_gateway_home_mismatch(cfg, result)
         finally:
@@ -2772,7 +2777,7 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
         rows = {
             c["label"]: c for c in result.checks if c["label"] in {"Sidecar API", "Gateway authentication", "Gateway home"}
         }
-        return result, rows, wait
+        return result, rows, wait, sidecar_health
 
     _MID_RESTART_LISTENERS = {
         "ambiguous": ("ambiguous", "multiple processes own listeners for the configured API endpoint: PIDs 4321, 9001", 0),
@@ -2789,7 +2794,7 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
         for name, (status, reason, pid) in self._MID_RESTART_LISTENERS.items():
             during = cmd_doctor.ListenerEvidence(status, reason=reason, pid=pid)
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
-                result, rows, wait = self._run_gateway_rows_during_restart(tmp, during, release_after=0.3)
+                result, rows, wait, _ = self._run_gateway_rows_during_restart(tmp, during, release_after=0.3)
                 self.assertEqual(
                     {label: row["status"] for label, row in rows.items()},
                     {"Sidecar API": "pass", "Gateway authentication": "pass", "Gateway home": "pass"},
@@ -2800,13 +2805,55 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
                 wait.assert_called_once()
 
     @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_sidecar_api_reads_health_again_after_a_restart_in_progress_finishes(self):
+        # The /health read before the wait came from a listener that was never
+        # verified (here another process's); only the document read once this
+        # account's gateway holds the port describes it.
+        from defenseclaw.commands import cmd_doctor
+
+        foreign = {sub: {"state": "running"} for sub in ("gateway", "watcher", "guardrail", "api", "telemetry")}
+        foreign["policy"] = {"digest": "FOREIGN-DIGEST"}
+        ours = {sub: {"state": "disabled"} for sub in ("gateway", "watcher", "guardrail", "sandbox")}
+        ours.update(api={"state": "running"}, telemetry={"state": "running"}, policy={"digest": "OURS"})
+        during = cmd_doctor.ListenerEvidence("ok", pid=9001)
+        with tempfile.TemporaryDirectory() as tmp:
+            result, rows, wait, health = self._run_gateway_rows_during_restart(
+                tmp,
+                during,
+                release_after=0.3,
+                probe=lambda released: (200, json.dumps(ours if released else foreign)),
+            )
+        self.assertEqual(rows["Sidecar API"]["status"], "pass", result.checks)
+        self.assertEqual(health, ours)
+        subsystems = {c["label"].strip(" └─"): c["status"] for c in result.checks if "└─" in c["label"]}
+        self.assertEqual(subsystems["guardrail"], "skip", result.checks)
+        self.assertEqual(subsystems["sandbox"], "skip", result.checks)
+        self.assertFalse(result.sidecar_unverified)
+        wait.assert_called_once()
+
+        # The gateway stopped while the lock was held: the earlier 200 is not
+        # reported as a running sidecar.
+        with tempfile.TemporaryDirectory() as tmp:
+            result, rows, wait, health = self._run_gateway_rows_during_restart(
+                tmp,
+                during,
+                release_after=0.3,
+                probe=lambda released: (0, "connection refused") if released else (200, json.dumps(foreign)),
+            )
+        self.assertEqual(rows["Sidecar API"]["status"], "fail", result.checks)
+        self.assertIn("the gateway is not running", rows["Sidecar API"]["detail"])
+        self.assertEqual(result.gateway_down, "stopped")
+        self.assertIsNone(health)
+        self.assertFalse([c for c in result.checks if "└─" in c["label"]], result.checks)
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
     def test_restart_never_finishing_warns_on_every_gateway_row_after_one_wait(self):
         from defenseclaw.commands import cmd_doctor
 
         for name, (status, reason, pid) in self._MID_RESTART_LISTENERS.items():
             during = cmd_doctor.ListenerEvidence(status, reason=reason, pid=pid)
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
-                result, rows, wait = self._run_gateway_rows_during_restart(tmp, during, release_after=None)
+                result, rows, wait, _ = self._run_gateway_rows_during_restart(tmp, during, release_after=None)
                 self.assertEqual(
                     {label: row["status"] for label, row in rows.items()},
                     {"Sidecar API": "warn", "Gateway authentication": "warn", "Gateway home": "warn"},
