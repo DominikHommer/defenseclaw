@@ -130,8 +130,8 @@ including `defenseclaw upgrade`, or DefenseClaw will look for a different
 install.
 
 `DEFENSECLAW_FAIL_MODE` is not a path setting and no 1.0.4 hook reads it;
-`DEFENSECLAW_STRICT_AVAILABILITY` can only make an outage block. Set the fail
-mode with
+`DEFENSECLAW_STRICT_AVAILABILITY` can only make an outage block, on the hooks
+that read it (see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Set the fail mode with
 `defenseclaw guardrail fail-mode open|closed`; setup writes it into the hooks
 and the OpenCode plugin, and `defenseclaw status` and `defenseclaw doctor`
 report it.

@@ -1,6 +1,6 @@
 ---
 title: Capability matrix
-description: Per-connector breakdown of block capability, native ask events, fail-closed support, subprocess policy, OpenShell sandbox tier, and HITL behaviour. The single source of truth for "can this connector do X?"
+description: Per-connector breakdown of block capability, native ask events, fail-closed support, gateway outage behaviour by fail mode, subprocess policy, OpenShell sandbox tier, and HITL behaviour. The single source of truth for "can this connector do X?"
 keywords:
   - DefenseClaw capability matrix
   - DefenseClaw connector capabilities
@@ -72,6 +72,44 @@ The component renders from `data/capability-matrix.json`, which is the single ed
 
 </Accordion>
 </Accordions>
+
+## Gateway outage
+
+What each connector's hooks do with a call they can't check because the
+gateway is not running, is still restarting or gives no answer in time. This
+table is the only place the docs give it per connector, and it is checked
+against the hook code on every change.
+
+<OutageMatrix />
+
+- **Per-user** is an install without a managed deployment: the fail mode is
+  the one `defenseclaw guardrail fail-mode` installed with the hooks.
+- **Managed standalone** is an enterprise host outside Secure Client. Its fail
+  mode is the administrator's `hook_fail_mode`: `closed`, the default, blocks
+  the outage on every connector, and the column gives `open`. A managed
+  connector runs either through vendor
+  [machine policy](/docs/enterprise/machine-policy) (the administrator-owned
+  `defenseclaw-hook --enterprise-managed`) or through a hook or plugin the
+  guardian writes into the user's home (the per-user route, for the
+  connectors without machine policy and for one whose machine policy is off).
+- **Secure Client** hooks let an outage run in `open`, which is also their
+  default when no fail mode is set.
+- **`DEFENSECLAW_STRICT_AVAILABILITY=1`** makes an outage block on a hook that
+  reads it, whatever the fail mode. *Managed hooks only*: the per-user hook
+  does not read it.
+- **`DEFENSECLAW_FAIL_MODE`** is read only by the hooks marked
+  *Secure Client only*, on an authenticated Secure Client deployment, where it
+  is a full override. No other hook reads it.
+- A proxy-backed connector has no hooks: its requests are blocked while the
+  gateway is down.
+- `status --json` reports the administrator's resolved value as
+  `effective_hook_fail_mode`, also for a hook that blocks the outage anyway.
+
+Refusals that are not an outage block in every fail mode: an unapproved hook
+the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) finds, an
+invalid managed runtime, a refused credential, and, on a managed standalone
+host, input over the size limit and an answer DefenseClaw cannot use. See
+[Fail modes](/docs/reference/fail-modes).
 
 ## Common patterns
 
@@ -151,4 +189,4 @@ Every sandbox hook fails closed.
 
 Fail-closed here means the hook blocks when it cannot reach the gateway (a transport failure). It does not cover a hook process that the user kills, stops or starves: the agent then decides, and Claude Code, Codex, OpenHands and Devin treat a hook that dies or times out as non-blocking and run the call (see the [enterprise threat model](/docs/enterprise/threat-model#residual-risks)).
 
-Pick a row with **Fail-closed: Yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, OpenCode, Amp, OpenHands, Kiro, and OmniGent. GitHub Copilot CLI, Hermes, and Antigravity do not expose a generic DefenseClaw-controlled fail-closed transport response. On a managed standalone host (Linux, macOS and Windows) the administrator-owned GitHub Copilot CLI and Hermes hooks still block a tool call DefenseClaw cannot check in the effective mode `closed` (the default) or with [strict availability](/docs/reference/fail-modes#strict-availability), in observe mode too. A managed hook lets a call run during a gateway outage only when the administrator set `hook_fail_mode: open`, and never with strict availability. The managed Copilot hook on Linux and macOS never lets `preToolUse` or `permissionRequest` run during an outage, `open` included. Neither do the managed Amp and OpenCode plugins on Linux and macOS, for any call they check. On a per-user install a fail-open call is not silent: when the gateway starts again it records a `guardrail-degraded` alert per connector for the calls that ran unchecked ([Fail modes](/docs/reference/fail-modes#reporting-and-diagnosis)). Cursor's support is mode-matched: action writes `failClosed: true`, while observe writes `failClosed: false`. Devin can map DefenseClaw availability failures to vendor exit `2` only on its four declared block-capable events.
+Pick a row with **Fail-closed: Yes** in the matrix, then check the [gateway outage table](#gateway-outage) for your install and fail mode. On a per-user install a fail-open call is not silent: when the gateway starts again it records a `guardrail-degraded` alert per connector for the calls that ran unchecked ([Fail modes](/docs/reference/fail-modes#reporting-and-diagnosis)). Devin can map DefenseClaw availability failures to vendor exit `2` only on its four declared block-capable events.

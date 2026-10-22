@@ -15,21 +15,26 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
-// 1.0.4 review (loop round 1 of G-hooks-upg): the docs said the
-// administrator's hook_fail_mode: open lets a managed standalone call run
-// during a gateway outage for every connector but the Linux and macOS
-// Copilot hook. The Amp and OpenCode plugins are rendered with
-// DC_FAIL_MODE "closed" for a managed standalone install that has the hook
-// socket (Linux and macOS), so they block an outage in every fail mode,
-// whatever the administrator chose; the Windows standalone render keeps the
-// resolved mode. That is the closed side, so the docs follow the plugins,
-// not the other way round. This renders the plugins the way Setup does
-// (renderPluginArtifact) for both installed modes and both layouts, runs
-// them against a stopped gateway, and pins that every page that describes
-// the managed outage says so.
-func TestManagedAmpAndOpenCodeOutageFollowTheDocumentedFailMode(t *testing.T) {
+// The managed Amp and OpenCode plugins Setup renders for a standalone install
+// (renderPluginArtifact). On Linux and macOS the per-user-route plugin (the
+// hook socket) is rendered with DC_FAIL_MODE "closed" whatever the
+// administrator chose (HookOutage.ManagedOpenUnixPerUserRoute, the gateway
+// outage table); the Windows standalone render keeps the resolved mode. The
+// machine-policy OpenCode plugin is defenseclaw-hook --enterprise-managed,
+// which follows the mode (hookexec
+// TestStandaloneManagedOpenCodeAndCopilotFollowTheAdministratorsFailMode).
+// This renders both layouts in both installed modes and runs them against a
+// stopped gateway.
+func TestManagedPluginOutageFollowsHookOutage(t *testing.T) {
 	failModeRE := regexp.MustCompile(`const DC_FAIL_MODE(?:: string)? = "([a-z]*)"`)
 	plugins := map[string]*hookOnlyConnector{"amp": NewAMPConnector().hookOnlyConnector, "opencode": NewOpenCodeConnector()}
+	// blocks is whether an outage blocks name's plugin in layout and mode.
+	blocks := func(name, layout, mode string) bool {
+		if mode == "closed" {
+			return true
+		}
+		return layout == "unix" && ConnectorHookOutage(plugins[name]).ManagedOpenUnixPerUserRoute == OutageBlocks
+	}
 	for name, c := range plugins {
 		for _, layout := range []string{"unix", "windows"} {
 			for _, mode := range []string{"open", "closed"} {
@@ -38,9 +43,9 @@ func TestManagedAmpAndOpenCodeOutageFollowTheDocumentedFailMode(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%s %s %s: render: %v", name, layout, mode, err)
 				}
-				want := mode
-				if layout == "unix" {
-					want = "closed" // every fail mode, the administrator's open included
+				want := "open"
+				if blocks(name, layout, mode) {
+					want = "closed"
 				}
 				if got := failModeRE.FindSubmatch(body); got == nil || string(got[1]) != want {
 					t.Errorf("%s %s installed mode %q: rendered %q, want DC_FAIL_MODE %q", name, layout, mode, got, want)
@@ -51,90 +56,33 @@ func TestManagedAmpAndOpenCodeOutageFollowTheDocumentedFailMode(t *testing.T) {
 
 	if runtime.GOOS == "windows" {
 		t.Log("the plugin runs below use a shell stand-in for the hook binary; the render checks above cover Windows")
-	} else {
-		nodeForTest(t)
-		for name, c := range plugins {
-			for _, layout := range []string{"unix", "windows"} {
-				for _, mode := range []string{"open", "closed"} {
-					root := testenv.PrivateTempDir(t)
-					guard := filepath.Join(root, "defenseclaw-hook")
-					// The foreign-hook check answers allow; any other call of the
-					// hook binary (session facts) gets no answer.
-					if err := os.WriteFile(guard, []byte("#!/bin/sh\ncat >/dev/null\ncase \" $* \" in\n  *\" --foreign-hook-check \"*) printf '{\"deny\":false}\\n' ;;\n  *) exit 1 ;;\nesac\n"), 0o700); err != nil {
-						t.Fatal(err)
-					}
-					opts := managedPluginOutageOpts(t, name, layout, mode, guard, stoppedGatewayAddr(t))
-					body, err := c.renderPluginArtifact(opts)
-					if err != nil {
-						t.Fatal(err)
-					}
-					want := "allow"
-					if layout == "unix" || mode == "closed" {
-						want = "block"
-					}
-					for _, got := range runManagedPluginOutage(t, name, root, body) {
-						if !strings.HasPrefix(got, want) {
-							t.Errorf("%s %s installed mode %q, gateway stopped: %q, want %s", name, layout, mode, got, want)
-						}
+		return
+	}
+	nodeForTest(t)
+	for name, c := range plugins {
+		for _, layout := range []string{"unix", "windows"} {
+			for _, mode := range []string{"open", "closed"} {
+				root := testenv.PrivateTempDir(t)
+				guard := filepath.Join(root, "defenseclaw-hook")
+				// The foreign-hook check answers allow; any other call of the
+				// hook binary (session facts) gets no answer.
+				if err := os.WriteFile(guard, []byte("#!/bin/sh\ncat >/dev/null\ncase \" $* \" in\n  *\" --foreign-hook-check \"*) printf '{\"deny\":false}\\n' ;;\n  *) exit 1 ;;\nesac\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				opts := managedPluginOutageOpts(t, name, layout, mode, guard, stoppedGatewayAddr(t))
+				body, err := c.renderPluginArtifact(opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := "allow"
+				if blocks(name, layout, mode) {
+					want = "block"
+				}
+				for _, got := range runManagedPluginOutage(t, name, root, body) {
+					if !strings.HasPrefix(got, want) {
+						t.Errorf("%s %s installed mode %q, gateway stopped: %q, want %s", name, layout, mode, got, want)
 					}
 				}
-			}
-		}
-	}
-
-	docs := filepath.Join("..", "..", "..", "docs-site", "content", "docs")
-	for _, doc := range []struct {
-		path      string
-		want      []string
-		forbidden []string
-	}{
-		{filepath.Join(docs, "reference", "fail-modes.mdx"), []string{
-			"On Linux and macOS three managed hooks are the exception and block during an outage in every fail mode: the Amp and OpenCode plugins",
-			"That is the administrator's resolved value, so on Linux and macOS it can say `open` for the Amp and OpenCode plugins and the GitHub Copilot CLI hook while they block an outage.",
-			"On Linux and macOS the Amp and OpenCode plugins and the GitHub Copilot CLI hook block an outage in `open` too.",
-			"so an outage still lets the call run (on Linux and macOS not through the Amp and OpenCode plugins or the GitHub Copilot CLI hook, which block it in every fail mode).",
-			"| OpenCode | `tool.execute.before` | None | Yes (managed standalone on Linux and macOS: blocks while the gateway is down in every fail mode, `open` included) |",
-			"| Amp | `tool.call`, `tool.result` | `tool.call`, `tool.result` (foreground thread) | Yes (managed standalone on Linux and macOS: blocks while the gateway is down in every fail mode, `open` included) |",
-			"the managed Amp plugin on Linux and macOS blocks an outage in every fail mode",
-			"## Managed Amp and OpenCode plugins On a managed standalone Linux or macOS host the administrator-owned Amp and OpenCode plugins are installed fail-closed whatever `hook_fail_mode` says.",
-			"On a managed Windows host they follow the effective mode: `closed` (the default) blocks an outage, and the administrator's `hook_fail_mode: open` lets the call run.",
-		}, []string{
-			"The one exception is the managed GitHub Copilot CLI hook",
-			"as every other connector does in fail mode `open`",
-			"| OpenCode | `tool.execute.before` | None | Yes |",
-			"| Amp | `tool.call`, `tool.result` | `tool.call`, `tool.result` (foreground thread) | Yes |",
-		}},
-		{filepath.Join(docs, "connectors", "capability-matrix.mdx"), []string{
-			"Neither do the managed Amp and OpenCode plugins on Linux and macOS, for any call they check.",
-		}, nil},
-		{filepath.Join(docs, "enterprise", "troubleshooting.mdx"), []string{
-			"and the Amp and OpenCode plugins on Linux and macOS, which deny the call in every fail mode; see [Fail modes](/docs/reference/fail-modes))",
-			"So is a call the Amp or OpenCode plugin checks on Linux and macOS.",
-		}, []string{
-			"It is never an allow unless the administrator set `hook_fail_mode: open`. ",
-		}},
-		{filepath.Join(docs, "connectors", "amp.mdx"), []string{
-			"hook failure mode, except on a managed standalone Linux or macOS host, where the administrator-owned plugin blocks in every fail mode, the administrator's `hook_fail_mode: open` included",
-		}, []string{
-			"Gateway errors honor the configured open/closed hook failure mode. ",
-		}},
-		{filepath.Join(docs, "connectors", "opencode.mdx"), []string{
-			"`FAIL_MODE=open` allows. On a managed standalone Linux or macOS host the administrator-owned plugin blocks in every fail mode, the administrator's `hook_fail_mode: open` included",
-		}, nil},
-	} {
-		data, err := os.ReadFile(doc.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := strings.Join(strings.Fields(string(data)), " ")
-		for _, want := range doc.want {
-			if !strings.Contains(text, want) {
-				t.Errorf("%s: missing %q", doc.path, want)
-			}
-		}
-		for _, forbidden := range doc.forbidden {
-			if strings.Contains(text, forbidden) {
-				t.Errorf("%s: still says %q", doc.path, forbidden)
 			}
 		}
 	}

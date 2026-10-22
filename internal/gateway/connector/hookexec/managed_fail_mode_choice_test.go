@@ -9,11 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -141,15 +137,13 @@ func TestStandaloneManagedCopilotFollowsTheAdministratorsFailMode(t *testing.T) 
 	}
 }
 
-// 1.0.4 review (loop round 3 of G-hooks-upg): the docs promised that a
-// managed standalone Copilot hook blocks during a gateway outage, but one
-// whose administrator chose open lets the call run (managedCopilotOpen).
-// The outage blocks only in the effective mode closed or with strict
-// availability; this pins the behavior and that the docs say so. hookexec
-// runs the managed Copilot hook on Windows only: the Linux and macOS
-// managed hook is copilot-hook.sh, which blocks in every fail mode
-// (connector.TestManagedUnixCopilotOutageBlocksInEveryFailModeAsDocumented).
-func TestManagedCopilotOutageBlockingDocsFollowTheFailMode(t *testing.T) {
+// The managed Copilot hook a standalone install publishes through machine
+// policy (defenseclaw-hook --enterprise-managed, on Linux, macOS and Windows)
+// follows the administrator's fail mode during an outage: closed and strict
+// availability deny, open lets the call run. The gateway outage table says so
+// (enterprisepolicy TestDocsCapabilityMatrixOutageMatchesTheHooks); the
+// per-user-route shell hook is checked in the connector package.
+func TestManagedCopilotOutageFollowsTheFailMode(t *testing.T) {
 	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 	for _, tc := range []struct {
 		mode    string
@@ -172,62 +166,15 @@ func TestManagedCopilotOutageBlockingDocsFollowTheFailMode(t *testing.T) {
 			t.Fatalf("fail mode %q, strict %v: blocked = %v, want %v: stdout=%q", tc.mode, tc.strict, got, tc.blocked, result.stdout)
 		}
 	}
-	docs := filepath.Join("..", "..", "..", "..", "docs-site", "content", "docs")
-	for _, doc := range []struct {
-		path      string
-		want      []string
-		forbidden []string
-	}{
-		{filepath.Join(docs, "reference", "fail-modes.mdx"), []string{
-			"on Windows in the effective mode `closed`, the default, or with strict availability) |",
-			"On Windows it blocks them only in the effective mode `closed` (the default) or with [strict availability](#strict-availability); with the administrator's `hook_fail_mode: open` it lets the call run",
-		}, []string{
-			"No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down) |",
-			"Only an administrator-managed standalone Copilot hook blocks",
-		}},
-		{filepath.Join(docs, "connectors", "copilot.mdx"), []string{
-			"On Windows it denies them in the effective mode `closed` (the default) or with [strict availability](/docs/reference/fail-modes#strict-availability), and the administrator's `hook_fail_mode: open` lets them run.",
-		}, []string{
-			"the administrator-owned hook is stricter: it denies",
-		}},
-		{filepath.Join(docs, "connectors", "capability-matrix.mdx"), []string{
-			"A managed hook lets a call run during a gateway outage only when the administrator set `hook_fail_mode: open`, and never with strict availability.",
-		}, []string{
-			"a managed hook never fails open on a gateway outage",
-		}},
-		{filepath.Join(docs, "enterprise", "troubleshooting.mdx"), []string{
-			"with the administrator's `hook_fail_mode: open`, an outage lets it run.",
-		}, []string{
-			"stops. Every call checked while the gateway is down is blocked.",
-		}},
-	} {
-		data, err := os.ReadFile(doc.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := strings.Join(strings.Fields(string(data)), " ")
-		for _, want := range doc.want {
-			if !strings.Contains(text, want) {
-				t.Errorf("%s: missing %q", doc.path, want)
-			}
-		}
-		for _, forbidden := range doc.forbidden {
-			if strings.Contains(text, forbidden) {
-				t.Errorf("%s still promises outage blocking whatever the fail mode: %q", doc.path, forbidden)
-			}
-		}
-	}
 }
 
-// 1.0.4 review (loop round 4 of G-hooks-upg): the fail-modes page, the
-// enterprise overview, troubleshooting, the threat model and the source of
-// truth said DEFENSECLAW_FAIL_MODE=closed is honored on a managed host when
-// it tightens. No hook reads it (the native hook resolves the administrator's
-// mode before hookexec runs; TestManagedWindowsHookIgnoresTheEnvironmentFailMode
+// 1.0.4 review (loop round 4 of G-hooks-upg): no managed hook reads
+// DEFENSECLAW_FAIL_MODE (the native hook resolves the administrator's mode
+// before hookexec runs; TestManagedWindowsHookIgnoresTheEnvironmentFailMode
 // pins that on Windows), so an open managed Copilot hook still lets a call
 // run during an outage whatever the environment says. Only the installed
-// mode and strict availability decide. This pins that behavior and the docs.
-func TestManagedFailModeDocsDoNotPromiseAnEnvironmentOverride(t *testing.T) {
+// mode and strict availability decide.
+func TestManagedHookIgnoresTheEnvironmentFailMode(t *testing.T) {
 	t.Setenv("DEFENSECLAW_FAIL_MODE", "closed")
 	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 	for _, tc := range []struct {
@@ -251,164 +198,6 @@ func TestManagedFailModeDocsDoNotPromiseAnEnvironmentOverride(t *testing.T) {
 			t.Fatalf("installed mode %q, strict %v, DEFENSECLAW_FAIL_MODE=closed: blocked = %v, want %v: stdout=%q",
 				tc.mode, tc.strict, got, tc.blocked, result.stdout)
 		}
-	}
-	docs := filepath.Join("..", "..", "..", "..", "docs-site", "content", "docs")
-	for _, doc := range []struct {
-		path      string
-		want      []string
-		forbidden []string
-	}{
-		{filepath.Join(docs, "reference", "fail-modes.mdx"), []string{
-			"`DEFENSECLAW_FAIL_MODE` in the agent's environment does not change it: `closed` there does not close a hook the administrator set to `open`, so an outage still lets the call run (on Linux and macOS not through the Amp and OpenCode plugins or the GitHub Copilot CLI hook, which block it in every fail mode).",
-			"`DEFENSECLAW_STRICT_AVAILABILITY=1`, which a managed hook honors because it can only close.",
-		}, []string{
-			"both variables are *tighten-only*",
-			"a value that makes hooks stricter is honored",
-		}},
-		{filepath.Join(docs, "enterprise", "troubleshooting.mdx"), []string{
-			"No managed standalone hook reads `DEFENSECLAW_FAIL_MODE` (the Antigravity, Devin, Hermes and Kiro shell hooks of a Secure Client deployment still take it as a full override)",
-		}, []string{
-			"(`DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_HOOK_MAX_BODY` are `tighten_only`: honored only when stricter)",
-		}},
-		{filepath.Join(docs, "enterprise", "index.mdx"), []string{
-			"`DEFENSECLAW_FAIL_MODE` is in this group too, but no managed standalone hook reads it",
-		}, []string{
-			"variables (`DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY`) are honored only when they make the setting stricter",
-		}},
-		{filepath.Join(docs, "enterprise", "threat-model.mdx"), []string{
-			"reads no fail mode from the environment: it follows the administrator's installed `hook_fail_mode`",
-			"and no managed standalone hook reads `DEFENSECLAW_FAIL_MODE`",
-		}, []string{
-			"always fails closed, never open",
-			"Three variables (`DEFENSECLAW_FAIL_MODE`",
-		}},
-		{filepath.Join(docs, "reference", "source-of-truth.mdx"), []string{
-			"`DEFENSECLAW_FAIL_MODE`, which no managed standalone hook reads",
-		}, []string{
-			"| `DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY` |",
-		}},
-	} {
-		data, err := os.ReadFile(doc.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := strings.Join(strings.Fields(string(data)), " ")
-		for _, want := range doc.want {
-			if !strings.Contains(text, want) {
-				t.Errorf("%s: missing %q", doc.path, want)
-			}
-		}
-		for _, forbidden := range doc.forbidden {
-			if strings.Contains(text, forbidden) {
-				t.Errorf("%s still promises an environment fail-mode override: %q", doc.path, forbidden)
-			}
-		}
-	}
-}
-
-// 1.0.4 review (loop round 2 after round 4 of G-hooks-upg): pages said no
-// hook reads DEFENSECLAW_FAIL_MODE, while the Antigravity, Devin, Hermes and
-// Kiro shell hooks of a Secure Client deployment take it as a full override
-// (FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-...}" in their SecureClientDelivery
-// branch). Every docs paragraph or table row that says the variable is not
-// read names that exception, and so does the registry sentence the env-var
-// reference shows.
-func TestFailModeEnvDocsNameTheSecureClientException(t *testing.T) {
-	repo := filepath.Join("..", "..", "..", "..")
-	for _, script := range []string{"antigravity-hook.sh", "devin-hook.sh", "hermes-hook.sh", "kiro-hook.sh"} {
-		data, err := os.ReadFile(filepath.Join(repo, "internal", "gateway", "connector", "hooks", script))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(string(data), `{{else if .SecureClientDelivery}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-`) {
-			t.Fatalf("%s: the Secure Client render no longer reads DEFENSECLAW_FAIL_MODE; update the docs and this test", script)
-		}
-	}
-	claim := regexp.MustCompile("(?i)\\bno (?:[a-z]+ ){0,3}hooks? reads?\\b|\\bnot read by [^|]{0,40}?hooks\\b|`DEFENSECLAW_FAIL_MODE` is not read")
-	unqualified := regexp.MustCompile(`(?i)\bno hooks? reads?\b`)
-	units := func(text string) []string {
-		var out []string
-		var paragraph []string
-		flush := func() {
-			if len(paragraph) > 0 {
-				out = append(out, strings.Join(paragraph, " "))
-				paragraph = nil
-			}
-		}
-		for _, line := range strings.Split(text, "\n") {
-			trimmed := strings.TrimSpace(line)
-			switch {
-			case trimmed == "":
-				flush()
-			case strings.HasPrefix(trimmed, "|"):
-				flush()
-				out = append(out, trimmed)
-			default:
-				paragraph = append(paragraph, trimmed)
-			}
-		}
-		flush()
-		return out
-	}
-	checked := 0
-	err := filepath.WalkDir(filepath.Join(repo, "docs-site", "content"), func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".mdx") {
-			return err
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		for _, unit := range units(string(data)) {
-			unit = strings.Join(strings.Fields(unit), " ")
-			if !strings.Contains(unit, "DEFENSECLAW_FAIL_MODE") || !claim.MatchString(unit) {
-				continue
-			}
-			checked++
-			if !strings.Contains(unit, "Secure Client") {
-				t.Errorf("%s: says DEFENSECLAW_FAIL_MODE is not read without the Secure Client exception: %.200q", path, unit)
-			}
-			if unqualified.MatchString(unit) {
-				t.Errorf("%s: says no hook reads it at all: %.200q", path, unit)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Source of truth, enterprise overview, threat model, troubleshooting,
-	// the env-var reference, and two in the fail-mode reference.
-	if checked < 7 {
-		t.Fatalf("checked %d docs statements, want the seven that make one", checked)
-	}
-	data, err := os.ReadFile(filepath.Join(repo, "internal", "envvars", "registry.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var registry struct {
-		Entries []struct {
-			Name    string `json:"name"`
-			Purpose string `json:"purpose"`
-		} `json:"entries"`
-	}
-	if err := json.Unmarshal(data, &registry); err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, variable := range registry.Entries {
-		if variable.Name != "DEFENSECLAW_FAIL_MODE" {
-			continue
-		}
-		found = true
-		// The env-var reference shows the first sentence only.
-		first, _, _ := strings.Cut(variable.Purpose, ". ")
-		if !strings.Contains(first, "Secure Client") {
-			t.Errorf("registry purpose first sentence leaves out the Secure Client exception: %q", first)
-		}
-	}
-	if !found {
-		t.Fatal("DEFENSECLAW_FAIL_MODE is not in the registry")
 	}
 }
 

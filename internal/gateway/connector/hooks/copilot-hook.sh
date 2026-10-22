@@ -132,7 +132,7 @@ fi
 # Copilot documents timeout failures as fail-open and has no connector-wide
 # transport fail-closed switch. Ignore inherited strict/closed settings here;
 # only a valid event-native gateway response may request enforcement.
-FAIL_MODE="{{if and .Managed (not .SecureClient)}}closed{{else}}open{{end}}"
+FAIL_MODE="{{if .ManagedOutageClosed}}closed{{else}}open{{end}}"
 {{end}}
 DEFENSECLAW_HOOK_CONNECTOR="copilot"
 DEFENSECLAW_HOOK_NAME="copilot-hook"

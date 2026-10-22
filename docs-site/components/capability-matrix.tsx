@@ -182,6 +182,93 @@ export function SandboxHarnessTable() {
   );
 }
 
+// What a connector's hooks do with a call they cannot check because the
+// gateway is down, still restarting or gives no answer in time. This table
+// is the one place the docs state it per connector; every other page links
+// here (#gateway-outage). The values are checked against the code by
+// TestDocsCapabilityMatrixOutageMatchesTheHooks (internal/enterprisepolicy).
+interface OutageRow {
+  perUserClosed: 'blocks' | 'runs' | 'guardrail-mode';
+  perUserOpen: 'blocks' | 'runs' | 'guardrail-mode';
+  managedOpen: 'blocks' | 'runs' | 'blocks-linux-macos' | 'per-user-route-blocks-linux-macos';
+  secureClientClosed: 'blocks' | 'runs';
+  strictAvailability: 'yes' | 'no' | 'managed-only' | 'n/a';
+  envFailMode: 'secure-client' | 'no';
+}
+
+const outageText: Record<string, string> = {
+  blocks: 'Blocks',
+  runs: 'Runs',
+  'guardrail-mode': 'Blocks in action mode, runs in observe mode',
+  'blocks-linux-macos': 'Blocks on Linux and macOS; runs on Windows',
+  'per-user-route-blocks-linux-macos':
+    'Runs through machine policy (the default); blocks on Linux and macOS on the per-user route',
+};
+
+const strictText: Record<OutageRow['strictAvailability'], string> = {
+  yes: 'Read',
+  no: 'Not read',
+  'managed-only': 'Managed hooks only',
+  'n/a': 'No hooks',
+};
+
+function Outcome({ value }: { value: string }) {
+  const blocks = value === 'blocks';
+  return (
+    <span
+      className={
+        blocks
+          ? 'inline-flex rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-800 dark:text-emerald-300'
+          : 'text-xs leading-relaxed'
+      }
+    >
+      {outageText[value] ?? value}
+    </span>
+  );
+}
+
+export function OutageMatrix() {
+  const rows = data.connectors as (ConnectorRow & { outage: OutageRow })[];
+  return (
+    <CapabilityMatrixWrapper
+      className="capability-matrix not-prose my-6 overflow-x-auto border border-fd-border"
+      ariaLabel="Gateway outage by fail mode"
+    >
+      <table className="w-full min-w-[900px] border-collapse text-sm">
+        <thead>
+          <tr className="bg-fd-card text-left">
+            <Th>Connector</Th>
+            <Th>Per-user, fail mode closed</Th>
+            <Th>Per-user, fail mode open</Th>
+            <Th>Managed standalone, administrator chose open</Th>
+            <Th>Secure Client, fail mode closed</Th>
+            <Th>DEFENSECLAW_STRICT_AVAILABILITY</Th>
+            <Th>DEFENSECLAW_FAIL_MODE</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((c, i) => (
+            <tr key={c.id} className="fd-row border-t border-fd-border" style={{ animationDelay: `${i * 35}ms` }}>
+              <Td>
+                <Link href={`/docs/connectors/${c.id}`} className="connector-matrix-name font-medium text-[var(--brand-cisco-strong)] hover:underline">
+                  <ConnectorBrand id={c.id} size="sm" />
+                  <span>{c.label}</span>
+                </Link>
+              </Td>
+              <Td><Outcome value={c.outage.perUserClosed} /></Td>
+              <Td><Outcome value={c.outage.perUserOpen} /></Td>
+              <Td className="max-w-[240px]"><Outcome value={c.outage.managedOpen} /></Td>
+              <Td><Outcome value={c.outage.secureClientClosed} /></Td>
+              <Td className="text-xs">{strictText[c.outage.strictAvailability]}</Td>
+              <Td className="text-xs">{c.outage.envFailMode === 'secure-client' ? 'Secure Client only' : 'Not read'}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </CapabilityMatrixWrapper>
+  );
+}
+
 export function CapabilityMatrix() {
   return (
     <>

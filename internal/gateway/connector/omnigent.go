@@ -989,8 +989,9 @@ func renderOmnigentPolicyFull(template, apiAddr, tokenFile, failMode, hookSocket
 		secureClientFlag = "1"
 	}
 	// Keep the OSS and Secure Client module bytes unchanged. Standalone
-	// managed installs pin the value substituted into the same template.
-	if managed && !secureClient {
+	// managed installs pin closed into the same template whatever the
+	// administrator chose (managedUnixOutageClosed, HookOutage).
+	if managed && !secureClient && managedUnixOutageClosed["omnigent"] {
 		failMode = "closed"
 	}
 	replacer := strings.NewReplacer(

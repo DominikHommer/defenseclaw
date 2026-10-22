@@ -15,11 +15,15 @@ import (
 // 1.0.4 lead directive: the per-user GitHub Copilot CLI hook fails open
 // upstream (Copilot has no fail-closed hook surface), so a gateway outage
 // lets its tool call through whatever is installed or set in the
-// environment. The docs say so plainly and promise no blocking; DefenseClaw
-// records and reports the call. This pins the behavior and that text.
-func TestPerUserCopilotHookFailsOpenUpstreamAsDocumented(t *testing.T) {
+// environment, strict availability included, as HookOutage (and the gateway
+// outage table) says. DefenseClaw records and reports the call.
+func TestPerUserCopilotHookFailsOpenUpstream(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hooks")
+	}
+	outage := ConnectorHookOutage(NewCopilotConnector())
+	if outage.PerUserClosed != OutageRuns || outage.StrictAvailability == StrictAvailabilityRead {
+		t.Fatalf("HookOutage says the per-user Copilot hook can block an outage: %+v", outage)
 	}
 	for _, installed := range []string{"closed", "open"} {
 		t.Run("installed="+installed, func(t *testing.T) {
@@ -38,31 +42,5 @@ func TestPerUserCopilotHookFailsOpenUpstreamAsDocumented(t *testing.T) {
 				t.Fatalf("per-user Copilot hook blocked an outage under env closed: err=%v\n%s", err, out)
 			}
 		})
-	}
-	for _, doc := range []struct {
-		path string
-		want []string
-	}{
-		{filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "fail-modes.mdx"), []string{
-			"The per-user GitHub Copilot CLI hook cannot block a call while the gateway is down, on Linux, macOS and Windows.",
-			"No setting changes this for a per-user install, `DEFENSECLAW_STRICT_AVAILABILITY=1` included.",
-			"The per-user GitHub Copilot CLI hook and the Amp plugin do not read it",
-			"`DEFENSECLAW_FAIL_MODE` is not read",
-		}},
-		{filepath.Join("..", "..", "envvars", "registry.json"), []string{
-			"Not read by 1.0.4 hooks",
-			"the per-user GitHub Copilot CLI hook and the Amp plugin do not read it",
-		}},
-	} {
-		data, err := os.ReadFile(doc.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := strings.Join(strings.Fields(string(data)), " ")
-		for _, want := range doc.want {
-			if !strings.Contains(text, want) {
-				t.Errorf("%s does not name the per-user Copilot exception: missing %q", doc.path, want)
-			}
-		}
 	}
 }

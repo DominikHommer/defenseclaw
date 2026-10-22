@@ -1503,7 +1503,7 @@
     {
       "name": "DEFENSECLAW_FAIL_MODE",
       "category": "security_opt_out",
-      "purpose": "Not read by 1.0.4 hooks except the Antigravity, Devin, Hermes and Kiro shell hooks of an authenticated Secure Client deployment, which keep it as a full override; every other hook's fail mode is the guardrail.hook_fail_mode installed with it (the shell hook, the OpenCode plugin, hooks/.hookcfg for the native Windows hook), and status and doctor report that. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again. Set the mode with defenseclaw guardrail fail-mode.",
+      "purpose": "Not read by 1.0.4 hooks except the Secure Client shell hooks the gateway outage table of the connectors capability matrix marks, which keep it as a full override on an authenticated Secure Client deployment; every other hook's fail mode is the guardrail.hook_fail_mode installed with it (the shell hook, the in-agent plugin, hooks/.hookcfg for the native Windows hook), and status and doctor report that. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again. Set the mode with defenseclaw guardrail fail-mode.",
       "default": "(value from guardrail.hook_fail_mode in config.yaml)",
       "accepted_values": [
         "open",
@@ -5409,7 +5409,7 @@
     {
       "name": "DEFENSECLAW_STRICT_AVAILABILITY",
       "category": "security_opt_out",
-      "purpose": "Force transport and missing-token hook failures closed even when the effective fail mode is open (the OpenCode plugin: a gateway outage; the per-user GitHub Copilot CLI hook and the Amp plugin do not read it). Invalid gateway responses still follow guardrail.hook_fail_mode.",
+      "purpose": "Force transport and missing-token hook failures closed even when the effective fail mode is open, on the hooks that read it (the gateway outage table of the connectors capability matrix lists them). Invalid gateway responses still follow guardrail.hook_fail_mode.",
       "default": "unset (no additional force-closed override)",
       "accepted_values": [
         "1",

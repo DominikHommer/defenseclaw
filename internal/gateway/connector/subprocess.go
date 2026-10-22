@@ -1915,6 +1915,19 @@ func disabledHookTombstone(vendorLabel string) string {
 		"exit 0\n"
 }
 
+// ManagedOutageClosed reports a render whose hooks block a gateway outage
+// whatever FailMode says: a managed render outside the Secure Client profile
+// (the Linux and macOS standalone hook socket, and the sandbox) of a
+// connector in managedUnixOutageClosed (HookOutage). Only the templates of
+// those connectors call it, so a render that names no connector keeps the
+// closed side.
+func (d templateData) ManagedOutageClosed() bool {
+	if !d.Managed || d.SecureClient {
+		return false
+	}
+	return d.ConnectorName == "" || managedUnixOutageClosed[d.ConnectorName]
+}
+
 func renderTemplate(tmpl string, data templateData) (string, error) {
 	t, err := template.New("").Parse(tmpl)
 	if err != nil {

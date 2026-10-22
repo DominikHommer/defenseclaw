@@ -21,7 +21,7 @@ invalid-response failures.
 | Control | Effect | Default and scope |
 | --- | --- | --- |
 | `guardrail.hook_fail_mode` | `open` allows or `closed` blocks supported hook events when delivery or the gateway response fails. | `closed` on a fresh install. Migrated legacy configs can retain explicit `open`. Secure Client deployments default to `open` when it is unset (see [Secure Client](#secure-client)). Can be overridden per connector. See [Which value applies](#which-value-applies). |
-| `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed on a hook that can block. It cannot force an otherwise closed connector open. The per-user GitHub Copilot CLI hook and the Amp plugin do not read it (see [Strict availability](#strict-availability)). | Unset. Per agent process; compatibility/managed-deployment override. |
+| `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed on a hook that can block. It cannot force an otherwise closed connector open. Not every hook reads it: see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage). | Unset. Per agent process; compatibility/managed-deployment override. |
 | `DEFENSECLAW_FAIL_MODE` | Not read by 1.0.4 hooks: the installed mode is the fail mode. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again; Secure Client shell hooks keep it (see [The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)). | Set the mode with `defenseclaw guardrail fail-mode`. |
 
 You choose `open` or `closed`, and the default is `closed`. An explicit value
@@ -30,20 +30,18 @@ enterprise profile, MDM-managed standalone hosts and Secure Client. On a
 managed computer the value comes from the administrator's config (the managed
 `config.yaml`, which only root or SYSTEM can change, delivered by the
 installer, `ensure`, a signed policy bundle or an MDM/Intune payload), so an
-`open` there is the administrator's choice and the managed hooks follow it.
-On Linux and macOS three managed hooks are the exception and block during an
-outage in every fail mode: the Amp and OpenCode plugins (see
-[Managed Amp and OpenCode plugins](#managed-amp-and-opencode-plugins)) and the
-GitHub Copilot CLI hook (see
-[GitHub Copilot CLI fails open upstream](#github-copilot-cli-fails-open-upstream)).
+`open` there is the administrator's choice. What each connector's hooks do
+with it during an outage, per install, is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage):
+some managed Linux and macOS hooks block an outage whatever the administrator
+chose.
 A fail mode that is not set is `closed` everywhere except under Secure
 Client, where it is `open` (see [Secure Client](#secure-client)).
 
 `status --json` and `verify --json` give the resolved fail mode of each
 connector a managed deployment protects as
 `connectors.<id>.effective_hook_fail_mode`. That is the administrator's
-resolved value, so on Linux and macOS it can say `open` for the Amp and
-OpenCode plugins and the GitHub Copilot CLI hook while they block an outage.
+resolved value, so it can say `open` for a hook that blocks an outage in every
+fail mode.
 
 Some refusals do not depend on the fail mode, because they are not an outage:
 on a managed computer a hook still blocks when its administrator-owned runtime
@@ -52,18 +50,17 @@ Windows) is missing or fails its checks, when another program answers in
 place of the gateway service, when its token is missing, when the gateway
 refuses its credential (HTTP 401 or 403, also when the rest of that answer is
 cut off or too large), when the call does not match the
-event or hook contract the hook was registered for (Codex, GitHub Copilot),
-and when the account is not enrolled. An unapproved hook that the foreign-hook
+event or hook contract the hook was registered for, and when the account is
+not enrolled. An unapproved hook that the foreign-hook
 guard finds blocks in every fail mode too, and so does a call the guard cannot
 check against the agent session's hook record because the gateway cannot
-answer (GitHub Copilot, Cursor, Devin, OpenCode, Amp and Hermes on a
-standalone host with `foreign_hooks: remove`): only the gateway holds that
-record, and a session it blocked may still run the hook it loaded.
+answer (on a standalone host with `foreign_hooks: remove`, for the connectors
+the [foreign-hook guard](/docs/enterprise/foreign-hook-guard#which-connectors-it-covers)
+covers): only the gateway holds that record, and a session it blocked may still run the hook it loaded.
 
 On a managed standalone host `open` applies only to an outage: the gateway
-service is not running, is still restarting, or gives no answer in time. On
-Linux and macOS the Amp and OpenCode plugins and the GitHub Copilot CLI hook
-block an outage in `open` too.
+service is not running, is still restarting, or gives no answer in time
+(the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) says which hooks let such a call run).
 Every other failure blocks in fail mode `open` too, for every connector:
 tool input over the hook's 1 MiB limit, a gateway error status (5xx), an
 answer DefenseClaw cannot use, and any other transport error. Per-user and
@@ -72,13 +69,12 @@ Secure Client hooks are unchanged.
 On a managed standalone host the fail mode is the administrator's installed
 `hook_fail_mode`, and `DEFENSECLAW_FAIL_MODE` in the agent's environment does
 not change it: `closed` there does not close a hook the administrator set to
-`open`, so an outage still lets the call run (on Linux and macOS not through
-the Amp and OpenCode plugins or the GitHub Copilot CLI hook, which block it in
-every fail mode). To block during an outage, set
+`open`. To block during an outage, set
 `hook_fail_mode: closed` (the default) in the admin config, or use the
 separate [strict availability](#strict-availability) setting,
-`DEFENSECLAW_STRICT_AVAILABILITY=1`, which a managed hook honors because it
-can only close. See [Environment variables](/docs/reference/env-vars).
+`DEFENSECLAW_STRICT_AVAILABILITY=1`, which the hooks that read it honor
+because it can only close (see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). See
+[Environment variables](/docs/reference/env-vars).
 
 <Callout type="warning" title="Older transport-only descriptions are stale">
 The effective hook fail mode now covers connection refusal, timeout, gateway
@@ -103,10 +99,9 @@ action mode alike:
    opens a hook there, also for a connector in observe mode. Under Secure
    Client an unset value is `open`.
 
-Any value other than `open` (in any case) is `closed`. Cursor follows its
-guardrail mode on a per-user install: action writes `failClosed: true` and
-observe writes `failClosed: false`. On a managed computer Cursor follows the
-resolved fail mode like every other connector.
+Any value other than `open` (in any case) is `closed`. The
+[gateway outage table](/docs/connectors/capability-matrix#gateway-outage) lists the per-user hooks that follow their
+guardrail mode instead.
 
 <Callout type="info" title="Changed in 1.0.3">
 On a managed computer outside Secure Client an explicit
@@ -144,26 +139,18 @@ The administrator owns that config, and the gateway resolves its default.
 Every other install, including OSS, the standalone enterprise profile and
 MDM-managed standalone hosts, keeps the closed default above.
 
-GitHub Copilot CLI and Antigravity have no fail-closed hook surface: their
-generated hooks stay open even when the effective mode is `closed`, and
-`guardrail fail-mode closed` saves `closed` for them only as the requested
-value (`guardrail fail-mode` shows them as upstream fail-open). Hermes has
-none of its own either, but on Linux, macOS and Windows its DefenseClaw hook follows the
-effective mode: `closed` (also when no value is set) blocks a tool call while
-the gateway is down or gives an unusable answer. Hermes itself still lets a
-call run when the hook times out or cannot start. See
-[Connector response shapes](#connector-response-shapes).
+An agent that gives a hook no way to fail closed lets the call run in
+`closed` too: `guardrail fail-mode closed` saves `closed` for it only as the
+requested value, and `guardrail fail-mode` shows it as upstream fail-open. The
+[gateway outage table](/docs/connectors/capability-matrix#gateway-outage) says which connectors that is, per install. An
+agent can also run a call when its hook times out or cannot start; see the
+[residual risks](/docs/enterprise/threat-model#residual-risks).
 
-A managed standalone host is stricter. There the administrator-owned hooks of
-GitHub Copilot CLI and Hermes follow the effective mode too: `closed` (also
-when no value is set) blocks a tool call DefenseClaw cannot check (the gateway
-service is not running, its answer cannot be used, or the call is too large to
+A managed standalone host is stricter: in `closed` (also when no value is
+set) its hooks block a tool call DefenseClaw cannot check (the gateway service
+is not running, its answer cannot be used, or the call is too large to
 inspect), on Linux, macOS and Windows alike, and the agent shows why, for
 example that the DefenseClaw gateway service is not running on this computer.
-Only the administrator's `hook_fail_mode: open` lets such a call through,
-and for GitHub Copilot CLI only on Windows: on Linux and macOS the managed
-Copilot hook blocks `preToolUse` and `permissionRequest` during an outage in
-`open` too.
 
 A managed GitHub Copilot hook whose registered command names no Copilot event
 DefenseClaw reviewed (a registration DefenseClaw did not write) is refused in
@@ -333,10 +320,9 @@ A connector turned off with `guardrail disable --connector X` has no hooks, so
 it has no fail mode: `guardrail status` shows `-` in its Fail column and
 `guardrail fail-mode` lists it as `disabled (no hooks)`.
 
-OpenClaw and ZeptoClaw are proxy-backed and have no hooks, so the hook fail
-mode does not apply to them: while the gateway is down, their requests are
-blocked (fail-closed) whatever `guardrail.hook_fail_mode` says.
-`guardrail fail-mode` lists them as `closed (proxy-backed, no hooks ...)`.
+Proxy-backed connectors have no hooks, so the hook fail mode does not apply to
+them (see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage)); `guardrail fail-mode` lists them as
+`closed (proxy-backed, no hooks ...)`.
 
 ## Connector response shapes
 
@@ -344,28 +330,30 @@ Fail mode can block only where the agent protocol has a block shape. A
 closed failure returns the same block response a policy denial would, on the
 events below:
 
-| Connector | Events that can block | Native ask | Fail closed |
-| --- | --- | --- | --- |
-| Claude Code | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` | Yes |
-| Codex | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStop`, `PreCompact`, `PostCompact`, `Stop` | None | Yes |
-| Cursor | `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt` | None | Yes |
-| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down; on Linux and macOS in every fail mode, on Windows in the effective mode `closed`, the default, or with strict availability) |
-| Devin | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop` | None | Yes |
-| Antigravity | `PreToolUse` | `PreToolUse` | No |
-| Hermes | `pre_tool_call` | None | No (managed standalone: blocks `pre_tool_call` when DefenseClaw cannot check it) |
-| OpenCode | `tool.execute.before` | None | Yes (managed standalone on Linux and macOS: blocks while the gateway is down in every fail mode, `open` included) |
-| OpenHands | `pre_tool_use`, `user_prompt_submit`, `stop` | None | Yes |
-| Kiro | `UserPromptSubmit`, `PreToolUse` | None | Yes |
-| Amp | `tool.call`, `tool.result` | `tool.call`, `tool.result` (foreground thread) | Yes (managed standalone on Linux and macOS: blocks while the gateway is down in every fail mode, `open` included) |
-| OmniGent | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `AfterAgentResponse`, `BeforeModel`, `AfterModel` | `UserPromptSubmit`, `PreToolUse`, `BeforeModel` | Yes |
+| Connector | Events that can block | Native ask |
+| --- | --- | --- |
+| Claude Code | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` |
+| Codex | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStop`, `PreCompact`, `PostCompact`, `Stop` | None |
+| Cursor | `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt` | None |
+| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` |
+| Devin | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop` | None |
+| Antigravity | `PreToolUse` | `PreToolUse` |
+| Hermes | `pre_tool_call` | None |
+| OpenCode | `tool.execute.before` | None |
+| OpenHands | `pre_tool_use`, `user_prompt_submit`, `stop` | None |
+| Kiro | `UserPromptSubmit`, `PreToolUse` | None |
+| Amp | `tool.call`, `tool.result` | `tool.call`, `tool.result` (foreground thread) |
+| OmniGent | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `AfterAgentResponse`, `BeforeModel`, `AfterModel` | `UserPromptSubmit`, `PreToolUse`, `BeforeModel` |
 
 - An already-completed result event cannot undo its original side effect.
 - An observation-only event remains observation-only even when fail mode is
   closed.
 
-See the [connector platform details](/docs/connectors#platform-support)
-or the [capability matrix](/docs/connectors/capability-matrix) before relying on a specific
-event.
+Whether a connector fails closed, and what an outage does on it per install
+and fail mode, is in the [capability matrix](/docs/connectors/capability-matrix)
+and its [gateway outage table](/docs/connectors/capability-matrix#gateway-outage). See the
+[connector platform details](/docs/connectors#platform-support) before relying
+on a specific event.
 
 ## Strict availability
 
@@ -375,13 +363,10 @@ exists for managed or compatibility deployments that must never open during
 a gateway outage. It does not add a missing hook, convert native OTLP into
 enforcement, or make an unsupported connector block-capable.
 
-Two hooks do not read it. The per-user GitHub Copilot CLI hook lets a call
-run while the gateway is down whatever is set (see
-[GitHub Copilot CLI fails open upstream](#github-copilot-cli-fails-open-upstream)).
-The Amp plugin uses the fail mode setup wrote into it; to make Amp block
-during an outage, run `defenseclaw guardrail fail-mode closed` (on a managed
-host the administrator sets `hook_fail_mode: closed`; the managed Amp plugin
-on Linux and macOS blocks an outage in every fail mode).
+Not every hook reads it; the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) says which do. A
+hook that does not read it uses the fail mode setup installed with it: run
+`defenseclaw guardrail fail-mode closed` (on a managed host the administrator
+sets `hook_fail_mode: closed`).
 
 Because a strict outage can make the agent unavailable, use persisted status,
 gateway monitoring, and a tested restart path before applying it broadly. On
@@ -416,15 +401,14 @@ an elevated prompt, checks the runtime itself.
 
 `DEFENSECLAW_STRICT_AVAILABILITY=1` is the one process setting the hooks
 read. It can only close: on a hook that can block, it blocks a call while the
-gateway is down, even when the hook is installed open. The per-user GitHub
-Copilot CLI hook and the Amp plugin do not read it (see
-[Strict availability](#strict-availability)). Status still reports the
-installed mode.
+gateway is down, even when the hook is installed open. Not every hook reads
+it (see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Status still reports the installed mode.
 
 Hooks rendered by 1.0.3 or earlier read `DEFENSECLAW_FAIL_MODE` until the
 upgrade's connector refresh renders them again. Under an authenticated Secure
-Client deployment, the Antigravity, Devin, Hermes and Kiro shell hooks still
-take it as a full override (Secure Client delivery is unchanged in 1.0.4).
+Client deployment, the shell hooks the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) marks
+*Secure Client only* still take it as a full override (Secure Client delivery
+is unchanged in 1.0.4).
 Status and doctor cannot see the agent's environment, so they never report
 such a hook as current: the provenance and the drift are
 `agent-env-unverified`, and doctor's Mode row fails when the config asks for
@@ -433,24 +417,7 @@ Claude Code's settings `env`: `open` there is reported as the mode the hook
 runs. Run `defenseclaw-gateway restart` to render the Claude Code and Codex
 hooks again.
 
-## GitHub Copilot CLI fails open upstream
-
-The per-user GitHub Copilot CLI hook cannot block a call while the gateway is
-down, on Linux, macOS and Windows. Copilot gives a hook no way to fail
-closed, so DefenseClaw lets that call run. It records the call in
-`hook-failures.jsonl` and reports it: `guardrail fail-mode` and `status` show
-Copilot as upstream fail-open, and the gateway raises a `guardrail-degraded`
-alert when it starts again. No setting changes this for a per-user install,
-`DEFENSECLAW_STRICT_AVAILABILITY=1` included.
-An administrator-managed standalone Copilot hook blocks `preToolUse` and
-`permissionRequest` while the gateway service is not running. On Linux and
-macOS it blocks them in every fail mode, the administrator's
-`hook_fail_mode: open` included. On Windows it blocks them only in the
-effective mode `closed` (the default) or with
-[strict availability](#strict-availability); with the administrator's
-`hook_fail_mode: open` it lets the call run, as the other managed hooks do in
-fail mode `open` (on Linux and macOS the Amp and OpenCode plugins block too;
-see [Managed Amp and OpenCode plugins](#managed-amp-and-opencode-plugins)).
+## Shared inspect scripts
 
 The shared `inspect-*.sh` scripts serve every connector of one data
 directory, and `DEFENSECLAW_CONNECTOR` only picks the connector they report
@@ -464,23 +431,6 @@ read `hooks/.hookcfg` (Secure Client delivery is unchanged).
 
 Environment keys are case-insensitive on Windows. Do not define multiple
 case-variants with different values.
-
-## Managed Amp and OpenCode plugins
-
-On a managed standalone Linux or macOS host the administrator-owned Amp and
-OpenCode plugins are installed fail-closed whatever `hook_fail_mode` says.
-While the gateway service is not running, is restarting, or gives no usable
-answer, they block the call in every fail mode, the administrator's
-`hook_fail_mode: open` included: Amp rejects `tool.call` and withholds the
-`tool.result`, and OpenCode's `tool.execute.before` throws. On a managed
-Windows host they follow the effective mode: `closed` (the default) blocks an
-outage, and the administrator's `hook_fail_mode: open` lets the call run.
-Under Secure Client and on a per-user install they follow the effective mode
-too.
-
-`status --json` and `verify --json` report the administrator's value as
-`effective_hook_fail_mode`, so on Linux and macOS they can show `open` for
-these plugins while the plugins block an outage.
 
 ## Reporting and diagnosis
 

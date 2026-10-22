@@ -185,18 +185,10 @@ non-pausing audit/alert fallback. `permissionRequest`, `agentStop`, and
 `subagentStop` can return their official deny/block responses; the
 post-action `postToolUseFailure` event can provide recovery
 `additionalContext` but cannot block or reverse the failed tool.
-Copilot does not expose a fail-closed hook transport surface; `--fail-mode
-closed`, inherited strict availability, missing auth, timeouts, and malformed
-responses cannot make an unavailable hook block the agent. Such a call is
-recorded in `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports
-it as a `guardrail-degraded` alert when it starts again. On a managed
-standalone host the administrator-owned hook is stricter. On Linux and macOS
-it denies `preToolUse` and `permissionRequest` while the gateway service is
-not running in every fail mode, the administrator's `hook_fail_mode: open`
-included. On Windows it denies them in the effective mode `closed` (the
-default) or with
-[strict availability](/docs/reference/fail-modes#strict-availability), and
-the administrator's `hook_fail_mode: open` lets them run.
+What a gateway outage does to a Copilot call, per install and fail mode, is
+in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage). A call that ran
+unchecked is recorded in `~/.defenseclaw/logs/hook-failures.jsonl`, and the
+gateway reports it as a `guardrail-degraded` alert when it starts again.
 The gateway also
 requires the exact trusted event-specific registration header and never
 infers Copilot event identity from stdin fields.

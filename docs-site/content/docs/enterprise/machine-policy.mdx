@@ -70,9 +70,8 @@ The per-user registrations differ by OS:
   in-agent plugin that calls the gateway (Amp).
 - **Linux and macOS, Devin.** Devin's registration in each user's
   `~/.config/devin/config.json` runs the same administrator-owned command,
-  so each Devin hook runs the foreign-hook guard and fails closed; its fail
-  mode is always `closed`, whatever `hook_fail_mode` says for Devin, and
-  `status` and the hook-contract lock report it that way. A registration an
+  so each Devin hook runs the foreign-hook guard. What it does during a
+  gateway outage is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage). A registration an
   earlier release wrote (`~/.defenseclaw/hooks/devin-hook.sh`) is replaced at
   the guardian's next repair.
 - **Linux and macOS, other per-user agents.** Antigravity, Hermes,
