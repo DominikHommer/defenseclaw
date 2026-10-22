@@ -68,10 +68,13 @@ describe('managed outage documentation', () => {
     const scope = source.split('func GuardApplies')[1]?.split('func BuildPublicPolicy')[0];
     assert.match(scope ?? '', /if unixGuardConnectors\[connector\] {\s*return goos != "windows"/);
     const matrix = page('reference/apis/capability-matrix.mdx');
-    const guard = matrix.split('**The foreign-hook guard can still block.**')[1]?.split('- **Unix socket trust')[0];
-    assert.ok(guard, 'foreign-hook guard note');
-    assert.match(guard, /Hermes on Linux and macOS/);
-    assert.match(guard, /Windows.*Hermes.*administrator.*outage mode/i);
+    // The note ends at the next bullet; without it the rest of the page would match.
+    const next = '- **A hook must run to deny';
+    const guard = matrix.split('**The foreign-hook guard can still block.**')[1];
+    assert.ok(guard?.includes(next), 'foreign-hook guard note and the bullet after it');
+    const note = guard.split(next)[0];
+    assert.match(note, /Hermes on Linux and macOS/);
+    assert.match(note, /Windows.*Hermes.*administrator.*outage mode/i);
   });
 
   it('keeps an unverified gateway socket or peer closed in every fail mode', () => {
@@ -84,6 +87,20 @@ describe('managed outage documentation', () => {
     const modes = page('reference/configuration/fail-modes.mdx');
     assert.match(modes, /hooks reject an invalid runtime, an unverified gateway peer or missing or refused credentials in every fail mode/);
     assert.match(modes, /- Another program answers in place of the gateway service\./);
+  });
+
+  it('scopes the administrator outage mode to a missing socket on Linux and macOS', () => {
+    // A Linux or macOS hook opens only when its trusted socket directory has
+    // no socket. Once the socket exists, the hook forces FAIL_MODE=closed
+    // (hook_socket_transport.go shellHookSocketTransportBlock), and the native
+    // hook turns a refused dial into a peer error (managedStandaloneHTTPClient).
+    const outage = /`?open`?[^.]*(stopped|not running)[^.]*restart[^.]*no answer in time/i;
+    const scope = /On Linux and macOS a hook treats only a missing gateway socket as an outage; once the socket exists, every later failure blocks, `open` included\./;
+    const pages = docPages().filter((path) => outage.test(readFileSync(path, 'utf8').split(/\s+/).join(' ')));
+    assert.ok(pages.length >= 5, 'outage-mode pages');
+    for (const path of pages) {
+      assert.match(readFileSync(path, 'utf8').split(/\s+/).join(' '), scope, path);
+    }
   });
 });
 
@@ -140,9 +157,15 @@ describe('observe mode scope', () => {
   // Observe mode turns policy verdicts into alerts. A check that cannot
   // complete still follows the hook fail mode (agent_hook.go
   // hookFailedCheckResponse), and the ACP guard can refuse an unchecked frame.
-  const unscoped = /\b(never blocks?|blocks? nothing|allows? everything|(?<!\()cannot block|nothing is (stopped|blocked)|only logs|logs only|does not block(?! on)|without blocking(?! on))\b/i;
+  const unscoped = /\b(never blocks?|blocks? nothing|allows? everything|(?<!\()cannot block|nothing is (stopped|blocked)|logs? only|only logs?|does not block(?! on)|without blocking(?! on))\b/i;
+
+  // Already scoped claims the sweep cannot tell apart: a quoted CLI message
+  // (pinned to the source that prints it) and the asset policy's `require`.
+  const cliSample = 'The global mode is observe, so connectors that follow it only log';
+  const scoped = [cliSample, 'so `require` alone blocks nothing and the CLI says so'];
 
   it('scopes every observe-mode no-block claim to policy findings', () => {
+    assert.ok(readFileSync(join(repo, 'cli/defenseclaw/commands/cmd_guardrail.py'), 'utf8').includes(cliSample));
     const files = [
       ...docPages(),
       ...docPages(join(site, 'components'), /\.tsx?$/),
@@ -150,9 +173,13 @@ describe('observe mode scope', () => {
     ];
     const claims: string[] = [];
     for (const path of files) {
-      const text = readFileSync(path, 'utf8');
-      for (const clause of text.split(/[.;|\n]\s*/)) {
-        if (/\bobserv/i.test(clause) && unscoped.test(clause)) claims.push(`${path.slice(site.length + 1)}: ${clause.trim()}`);
+      // Blocks end at a blank line, list item, table row or heading; inside a
+      // block, a sentence wrapped across lines is read as one line.
+      const blocks = readFileSync(path, 'utf8').split(/\n\s*(?=\n|[-*#|>]|\d+\.\s)/);
+      for (const clause of blocks.flatMap((block) => block.split(/\s+/).join(' ').split(/[.;|]\s*/))) {
+        if (/\bobserv/i.test(clause) && unscoped.test(clause) && !scoped.some((claim) => clause.includes(claim))) {
+          claims.push(`${path.slice(site.length + 1)}: ${clause.trim()}`);
+        }
       }
     }
     assert.deepEqual(claims, []);

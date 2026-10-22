@@ -410,9 +410,9 @@ setting first:
 
 The alert level is then lowered to the block level if it sits above it. A
 global level therefore also replaces a stricter pack's level on every
-connector without its own; the command names those. In observe mode nothing is
-blocked; the levels apply once the scope is in action mode. `guardrail
-block-at` and `alert-at` write steps 3 and 5; profiles are edited in
+connector without its own; the command names those. In observe mode the gateway
+does not block on findings; the levels apply once the scope is in action mode.
+`guardrail block-at` and `alert-at` write steps 3 and 5; profiles are edited in
 `config.yaml` (see
 [Guardrail profiles](/docs/reference/policy/guardrail-profiles)).
 `defenseclaw config get guardrail.block_at --effective` prints the level the

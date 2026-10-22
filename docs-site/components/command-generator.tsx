@@ -659,7 +659,7 @@ export function CommandGenerator() {
           <SegmentedControl<Mode>
             name="mode"
             options={[
-              { value: 'observe', label: 'observe', hint: 'log only' },
+              { value: 'observe', label: 'observe', hint: 'logs findings' },
               { value: 'action', label: 'action', hint: 'block on findings' },
             ]}
             value={state.mode}

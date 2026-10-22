@@ -45,7 +45,7 @@ These are not an outage, so they block in every fail mode on a managed computer:
 - The account is not enrolled.
 - A foreign hook the guard finds, or a session record it cannot verify. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#gateway-outages).
 
-On a managed standalone host `open` applies only to an outage: the gateway service is not running, is restarting, or gives no answer in time. Every other failure blocks in `open` too: input over the hook's 1 MiB limit, a gateway 5xx, an unusable answer and any other transport error. Per-user and Secure Client hooks are unchanged.
+On a managed standalone host `open` applies only to an outage: the gateway service is not running, is restarting, or gives no answer in time. Every other failure blocks in `open` too: input over the hook's 1 MiB limit, a gateway 5xx, an unusable answer and any other transport error. On Linux and macOS a hook treats only a missing gateway socket as an outage; once the socket exists, every later failure blocks, `open` included. Per-user and Secure Client hooks are unchanged.
 
 Event-specific outage limits are in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
 

@@ -64,7 +64,7 @@ Use the [gateway outage table](#gateway-outage). The first table's Fail-closed c
 
 ## Gateway outage
 
-The default is `closed` everywhere except Secure Client. On a managed standalone host, only an administrator can choose `open`, and it covers a stopped gateway, a restart or no answer in time. Rate limits, failed identity or credential checks, oversized input and unusable answers still block. The environment never selects the installed mode. [Fail modes](/docs/reference/configuration/fail-modes) explains how to set and inspect it.
+The default is `closed` everywhere except Secure Client. On a managed standalone host, only an administrator can choose `open`, and it covers a stopped gateway, a restart or no answer in time. On Linux and macOS a hook treats only a missing gateway socket as an outage; once the socket exists, every later failure blocks, `open` included. Rate limits, failed identity or credential checks, oversized input and unusable answers still block. The environment never selects the installed mode. [Fail modes](/docs/reference/configuration/fail-modes) explains how to set and inspect it.
 
 <OutageMatrix />
 

@@ -508,7 +508,7 @@ The fields you can override per connector mirror the global guardrail knobs:
 | Field | Meaning | Inherits when unset |
 | --- | --- | --- |
 | `enabled` | Per-connector on/off switch (`guardrail disable --connector X`). Drops it from the active set and removes its hooks; re-enable restores it with no re-prompt. | enabled |
-| `mode` | `observe` (log only) or `action` (enforce). | global `guardrail.mode` |
+| `mode` | `observe` (log findings without blocking on them) or `action` (enforce). | global `guardrail.mode` |
 | `hook_fail_mode` | `open` / `closed` — what to do when hook delivery/authentication fails or the gateway response is invalid. | global `guardrail.hook_fail_mode` |
 | `hilt` | `{ enabled, min_severity }` — per-connector human-in-the-loop policy. | global `guardrail.hilt` |
 | `block_message` | Custom block text shown to this connector's agent. | global `guardrail.block_message` |
