@@ -131,8 +131,8 @@ func applyManagedSandboxHelp() {
 		case "doctor":
 			cmd.Long = `Checks that your account can run sandboxes under the policy your organization set
 for you: the platform, sandbox service, OpenShell CLI and compute driver, harness
-images, shell wrappers and organization policy. Exits 1 when a check fails (with
---output json the result is printed and the exit status is 0; read "ok"). Your
+images, shell wrappers and organization policy. Exits 1 when a check fails, with
+--output json too (the JSON "ok" is false then). Your
 organization sets up and repairs sandboxes; if a check fails, ask your administrator.`
 		case "run":
 			cmd.Long = launcherRunLong
@@ -455,8 +455,7 @@ func newSandboxDoctorCmd() *cobra.Command {
 version and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature,
 the sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw
 daemon, harness images, shell wrappers and the organization policy. Exits 1 when a
-check fails (with --output json the result is printed and the exit status is 0; read
-"ok").`,
+check fails, with --output json too (the JSON "ok" is false then).`,
 		Args: cobra.NoArgs,
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())

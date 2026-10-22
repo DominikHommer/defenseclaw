@@ -1284,6 +1284,11 @@ defenseclaw_response_failure_reason() {
         printf '%s' 'this account is not enrolled in DefenseClaw on this computer yet. DefenseClaw enrolls a new account within about five minutes of its first sign-in, so try again then; if this continues, the policy may exclude this account, so ask your administrator (enterprise_managed_uid_unregistered)'
         return 0
         ;;
+      *"HTTP 403"*"|"*enterprise_managed_root_denied*)
+        # Not token drift: the policy refuses root (GAP-0556).
+        printf '%s' 'your organization does not allow agents to run as root on this computer. Run the agent from your own account. (enterprise_managed_root_denied)'
+        return 0
+        ;;
     esac
   fi
   case "$1" in

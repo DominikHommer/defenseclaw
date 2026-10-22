@@ -101,7 +101,7 @@ Devin CLI cannot run in a sandbox yet. The image is **unverified**, so `defensec
 | W3C traceparent | yes |
 | Fail closed | yes |
 
-The contract was reviewed against Devin CLI `3000.4.25` on Windows, macOS and Linux. On Linux it is also pinned to `3000.11.3`, which a live check showed delivers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` under these names and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse` (`PermissionRequest` and `PostCompaction` are not verified). Any other CLI from `3000.4.25` on, on every OS, runs as an untested newer version unless known broken ([version policy](/docs/reference/apis/hook-contracts#version-policy)). On Windows a CLI older than `3000.4.25` has no contract, so setup keeps it in observe mode and refuses action mode.
+The contract was reviewed against Devin CLI `3000.4.25` on Windows, macOS and Linux. On Linux it is also pinned to `3000.11.3`, which a live check showed delivers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` under these names and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse` (`PermissionRequest` and `PostCompaction` are not verified). Any other CLI from `3000.4.25` on, on every OS, runs as an untested newer version unless known broken ([version policy](/docs/reference/apis/hook-contracts#version-policy)). On Windows a CLI older than `3000.4.25` has no contract, so setup refuses it in observe and action mode.
 
 ## Verdict mapping
 

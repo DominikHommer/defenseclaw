@@ -274,7 +274,13 @@ Wrapper logs: `/var/log/defenseclaw-enterprise-mdm.log` on Linux,
 
 ## Hook refusal codes
 
-An agent reports these codes in its hook output when DefenseClaw refuses a hook call. The
+When DefenseClaw refuses a hook call, the agent shows a sentence that names the cause. Some of
+these sentences end with the code; an unenrolled account's does not. For a refusal the gateway
+made, such as `enterprise_managed_uid_unregistered` or `enterprise_managed_root_denied`, the
+gateway log has the code (`journalctl -u defenseclaw-gateway` on Linux), and so does the audit
+log, as the `defenseclaw.admin.reason` of an `api-auth-failure` event
+(`sudo defenseclaw-gateway audit export`). A code the hook raises
+itself, such as `enterprise_managed_gateway_not_running`, is not in the gateway log. The
 runtime-folder codes apply to per-user-runtime agents. A machine-policy Claude Code hook can
 recreate a missing user folder and keeps using the machine gateway; a `.disabled` file in that
 folder does not disable its machine-policy enforcement. If its trusted state is invalid, it may
