@@ -231,14 +231,17 @@ func TestCheckpointWALIfLargeTrimsAtTheIdleThreshold(t *testing.T) {
 				original, originalTrickle := walIdleTrimBytes, walTrickleFrames
 				walIdleTrimBytes, walTrickleFrames = grown+offset, 16
 				t.Cleanup(func() { walIdleTrimBytes, walTrickleFrames = original, originalTrickle })
-				if _, err := store.CheckpointWALIfLarge(t.Context(), math.MaxInt64, testWALWriterBudget); err != nil {
+				// This regression checks the size boundary, not the writer's
+				// deadline. Allow shared CI to deschedule a completed truncate.
+				const budget = 10 * time.Second
+				if _, err := store.CheckpointWALIfLarge(t.Context(), math.MaxInt64, budget); err != nil {
 					t.Fatal(err)
 				}
 				if trickle {
 					walTrickleFrames = originalTrickle
 					logWALGuardEvents(t, store, 1)
 				}
-				pass, err := store.CheckpointWALIfLarge(t.Context(), math.MaxInt64, testWALWriterBudget)
+				pass, err := store.CheckpointWALIfLarge(t.Context(), math.MaxInt64, budget)
 				wantTrim := offset <= 0
 				if err != nil || pass.Truncated != wantTrim || (wantTrim && pass.FileBytes != 0) || (!wantTrim && pass.FileBytes != grown) {
 					t.Fatalf("pass = %+v, %v; want trimmed=%t", pass, err, wantTrim)
