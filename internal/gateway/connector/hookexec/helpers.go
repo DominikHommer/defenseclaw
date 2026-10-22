@@ -18,6 +18,7 @@ package hookexec
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -125,13 +126,12 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 	}
 	// Never create the DefenseClaw folder itself for a log line: a managed
 	// hook whose folder was missing recreated it here, and the next event's
-	// hook found a folder and no longer said it was missing (GAP-0154).
-	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
-		return
-	}
+	// hook found a folder and no longer said it was missing (GAP-0154). Mkdir
+	// creates only logs, so a purge that removes the folder while the call
+	// runs is not undone either (GAP-0654).
 	failMode = loggedFailMode(opts, sp, failMode)
 	logDir := filepath.Join(opts.Home, "logs")
-	if err := os.MkdirAll(logDir, 0o700); err != nil {
+	if err := os.Mkdir(logDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return
 	}
 	entry := struct {

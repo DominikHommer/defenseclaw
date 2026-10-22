@@ -189,7 +189,8 @@ defenseclaw_harden_env() {
   fi
   if [ -z "${DEFENSECLAW_HOOK_HOME:-}" ]; then
     DEFENSECLAW_HOOK_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/hook-tmp.$$"
-    mkdir -p "$DEFENSECLAW_HOOK_HOME" 2>/dev/null || true
+    # Never the DefenseClaw folder itself: a purge removed it (GAP-0654).
+    mkdir "$DEFENSECLAW_HOOK_HOME" 2>/dev/null || true
   fi
   export HOME="$DEFENSECLAW_HOOK_HOME"
   trap '_defenseclaw_hook_cleanup' EXIT
@@ -800,7 +801,9 @@ defenseclaw_log_hook_failure() {
       "$(defenseclaw_json_escape "$category")" "$(defenseclaw_json_escape "$reason")" >&2 || true
   fi
   local log_dir="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/logs"
-  mkdir -p "$log_dir" 2>/dev/null || return 0
+  # Only logs: a log line never creates the DefenseClaw folder a purge
+  # removed (GAP-0654).
+  [ -d "$log_dir" ] || mkdir "$log_dir" 2>/dev/null || return 0
   chmod 700 "$log_dir" 2>/dev/null || true
   local log_file="${log_dir}/hook-failures.jsonl"
   local ts

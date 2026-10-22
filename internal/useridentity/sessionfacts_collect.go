@@ -94,16 +94,15 @@ func cachedSessionFactsHeader(path, key, envKey string, now time.Time) (string, 
 
 // writeSessionFactsCache replaces the cache atomically, owner-only, written
 // at now: its modification time too, which the shell hooks age it by.
-// Errors are ignored by the caller: the cache is an optimisation.
+// Errors are ignored by the caller: the cache is an optimisation. It never
+// creates the DefenseClaw folder: a hook call after a purge removed it
+// recreated the account's ~/.defenseclaw (GAP-0654).
 func writeSessionFactsCache(path, key, envKey, header string, now time.Time) error {
 	data, err := json.Marshal(sessionFactsCacheFile{Key: key, EnvKey: envKey, WrittenAt: now.UTC(), Header: header})
 	if err != nil {
 		return err
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
 	tmp, err := os.CreateTemp(dir, ".session-facts-*")
 	if err != nil {
 		return err
