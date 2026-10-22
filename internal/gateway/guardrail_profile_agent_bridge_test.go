@@ -46,6 +46,22 @@ func legacyBridgeRecord(id, account string) inventory.AgentIdentityRecord {
 	}
 }
 
+// legacyBridgeDerives stands in for the hook path's derivation of a
+// request's 1.0.3 identity, for the agents of accounts.
+func legacyBridgeDerives(t *testing.T, accounts ...agentidentity.Inputs) {
+	t.Helper()
+	previous := profileAgentLegacySource
+	t.Cleanup(func() { profileAgentLegacySource = previous })
+	profileAgentLegacySource = func(_ context.Context, agent string) (string, bool) {
+		for _, in := range accounts {
+			if agentidentity.AgentID(in) == agent {
+				return agentidentity.LegacyAgentID(in), true
+			}
+		}
+		return "", false
+	}
+}
+
 // A 1.0.3 row can have been overwritten by the last namesake under a shared
 // UID. Even a sole surviving row cannot prove who owned its legacy ID.
 func TestSoleLegacyRowCannotGrantItsRecordedNamesakePolicy(t *testing.T) {
@@ -73,10 +89,10 @@ func TestLegacyAgentAssignmentNeedsACurrentIDRebind(t *testing.T) {
 	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
 	}}
-	if got, unresolved := set.profileAgent(corp); got != corp || unresolved == nil || !unresolved(legacy) {
+	if got, unresolved := set.profileAgent(corp, nil); got != corp || unresolved == nil || !unresolved(legacy) {
 		t.Errorf("corp's agent matched as %q without an unresolved legacy entry", got)
 	}
-	if got, _ := set.profileAgent(lab); got != lab {
+	if got, _ := set.profileAgent(lab, nil); got != lab {
 		t.Errorf("the lab namesake's agent matches as %q, want its own identity %q", got, lab)
 	}
 	if *asked != 1 {
@@ -86,7 +102,7 @@ func TestLegacyAgentAssignmentNeedsACurrentIDRebind(t *testing.T) {
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
 		{Profile: "strict", Match: config.ProfileMatch{Agents: []string{corp}}},
 	}}
-	if got, _ := named.profileAgent(corp); got != corp {
+	if got, _ := named.profileAgent(corp, nil); got != corp {
 		t.Errorf("an assignment naming the current identity lost to the legacy one: %q", got)
 	}
 }
@@ -103,19 +119,19 @@ func TestLegacyAgentAssignmentWithAnOverwrittenRecordSelectsNeitherAccount(t *te
 	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
 	}}
-	if got, unresolved := set.profileAgent(lab); got != lab || unresolved == nil || !unresolved(legacy) {
+	if got, unresolved := set.profileAgent(lab, nil); got != lab || unresolved == nil || !unresolved(legacy) {
 		t.Fatalf("one overwritten row selected %q without unresolved legacy ownership", got)
 	}
 	// corp's agent is seen after the upgrade.
 	records = append(records, legacyBridgeRecord(corp, "alice@corp.example"))
-	if got, _ := set.profileAgent(lab); got != lab {
+	if got, _ := set.profileAgent(lab, nil); got != lab {
 		t.Fatalf("the legacy row selected an account before refresh: %q", got)
 	}
 	set.agentBridge.readAt = time.Time{}
-	if got, _ := set.profileAgent(lab); got != lab {
+	if got, _ := set.profileAgent(lab, nil); got != lab {
 		t.Errorf("lab's agent matches as %q after corp was recorded, want its own identity %q", got, lab)
 	}
-	if got, _ := set.profileAgent(corp); got != corp {
+	if got, _ := set.profileAgent(corp, nil); got != corp {
 		t.Errorf("corp's agent matches as %q, want its own identity %q", got, corp)
 	}
 	// Another machine's, or another uid's, namesake proves nothing here.
@@ -123,7 +139,7 @@ func TestLegacyAgentAssignmentWithAnOverwrittenRecordSelectsNeitherAccount(t *te
 	other.MachineHash = agentidentity.MachineHash("fedcba9876543210fedcba9876543210")
 	records = []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice@lab.example"), other}
 	fresh := &guardrailProfileSet{assignments: set.assignments}
-	if got, _ := fresh.profileAgent(lab); got != lab {
+	if got, _ := fresh.profileAgent(lab, nil); got != lab {
 		t.Errorf("a namesake on another machine selected the legacy policy: %q", got)
 	}
 }
@@ -134,15 +150,14 @@ func TestLegacyAgentAssignmentWithAnOverwrittenRecordSelectsNeitherAccount(t *te
 // apply in its place. An agent the entry cannot name keeps its own match.
 func TestUnresolvedLegacyAgentAssignmentSelectsTheOutageDefault(t *testing.T) {
 	stubProfileSources(t)
-	previousDerived := derivedLegacyAgentIDs.ids
-	t.Cleanup(func() { derivedLegacyAgentIDs.ids = previousDerived })
-	derivedLegacyAgentIDs.ids = nil
 	legacy := agentidentity.LegacyAgentID(legacyBridgeInputs("alice@corp.example"))
 	corp, lab := agentidentity.AgentID(legacyBridgeInputs("alice@corp.example")), agentidentity.AgentID(legacyBridgeInputs("alice@lab.example"))
-	other := agentidentity.AgentID(agentidentity.Inputs{
+	bob := agentidentity.Inputs{
 		MachineHash: agentidentity.MachineHash("0123456789abcdef0123456789abcdef"), UserID: "70002",
 		Connector: "codex", InstallFP: "/home/bob/.codex", Account: "bob@corp.example",
-	})
+	}
+	other := agentidentity.AgentID(bob)
+	legacyBridgeDerives(t, legacyBridgeInputs("alice@corp.example"), legacyBridgeInputs("alice@lab.example"), bob)
 	// 1.0.3 recorded the entry for both namesakes of uid 70001.
 	records := []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice@lab.example"), legacyBridgeRecord(corp, "alice@corp.example")}
 	legacyBridgeLedger(t, &records)
@@ -169,19 +184,27 @@ func TestUnresolvedLegacyAgentAssignmentSelectsTheOutageDefault(t *testing.T) {
 	if got, mode := hook(other); got.Name != "watch" || got.Match != profileMatchConnector || mode != "observe" {
 		t.Errorf("another account's agent: profile %+v, mode %q; want its connector assignment", got, mode)
 	}
-	// The ledger cannot be read: the entry may be any agent's.
+	// The ledger cannot be read: the entry may be the agent's own legacy
+	// identity, and any agent's when the request does not derive that.
 	profileAgentLedger = func(inventory.AgentIdentityFilter) ([]inventory.AgentIdentityRecord, bool) { return nil, false }
+	if got, mode := hook(corp); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
+		t.Errorf("unreadable ledger, corp: profile %+v, mode %q; want the outage default strict (action)", got, mode)
+	}
+	if got, mode := hook(other); got.Name != "watch" || got.Match != profileMatchConnector || mode != "observe" {
+		t.Errorf("unreadable ledger, another account: profile %+v, mode %q; want its connector assignment", got, mode)
+	}
+	legacyBridgeDerives(t)
 	if got, mode := hook(other); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
-		t.Errorf("unreadable ledger: profile %+v, mode %q; want the outage default strict (action)", got, mode)
+		t.Errorf("unreadable ledger, not derived: profile %+v, mode %q; want the outage default strict (action)", got, mode)
 	}
 	// A current-ID assignment later in the list cannot skip an earlier
-	// legacy entry whose owner remains unproven: the hook path derived that
-	// entry for corp's agent, as it does for every request.
-	noteDerivedLegacyAgentID(legacyBridgeInputs("alice@corp.example"))
-	cfg.Guardrail.ProfileAssignments = append(cfg.Guardrail.ProfileAssignments,
+	// legacy entry whose owner is unproven: the hook path derives that entry
+	// for corp's agent with its request.
+	legacyBridgeDerives(t, legacyBridgeInputs("alice@corp.example"))
+	cfg.Guardrail.ProfileAssignments = append(slices.Clone(cfg.Guardrail.ProfileAssignments),
 		config.ProfileAssignment{Profile: "watch", Match: config.ProfileMatch{Agents: []string{corp}}})
 	if got, mode := hook(corp); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
-		t.Errorf("later current identity bypassed unresolved legacy entry: %+v, mode %q", got, mode)
+		t.Errorf("later current identity bypassed the unresolved legacy entry: %+v, mode %q", got, mode)
 	}
 	// An assignment naming the agent's current identity needs no ledger.
 	cfg.Guardrail.ProfileAssignments = append([]config.ProfileAssignment{
@@ -275,17 +298,15 @@ func TestPrunedLegacyAgentAssignmentNeedsRebind(t *testing.T) {
 	})
 	t.Run("not recorded yet", func(t *testing.T) {
 		pruned(t)
-		previous := derivedLegacyAgentIDs.ids
-		t.Cleanup(func() { derivedLegacyAgentIDs.ids = previous })
-		derivedLegacyAgentIDs.ids = nil
-		noteDerivedLegacyAgentID(legacyBridgeInputs("alice@corp.example"))
+		bobIn := agentidentity.Inputs{
+			MachineHash: agentidentity.MachineHash("0123456789abcdef0123456789abcdef"), UserID: "70002",
+			Connector: "codex", InstallFP: "/home/bob/.codex", Account: "bob@corp.example",
+		}
+		legacyBridgeDerives(t, legacyBridgeInputs("alice@corp.example"), bobIn)
 		hook := legacyBridgeHook(t, legacy)
 		got, mode := hook(corp)
 		outage(t, "corp's agent the hook path derived", got, mode)
-		bob := agentidentity.AgentID(agentidentity.Inputs{
-			MachineHash: agentidentity.MachineHash("0123456789abcdef0123456789abcdef"), UserID: "70002",
-			Connector: "codex", InstallFP: "/home/bob/.codex", Account: "bob@corp.example",
-		})
+		bob := agentidentity.AgentID(bobIn)
 		if got, mode := hook(bob); got.Name != "watch" || got.Match != profileMatchConnector || mode != "observe" {
 			t.Errorf("another account's agent: profile %+v, mode %q; want its connector assignment", got, mode)
 		}
@@ -293,17 +314,19 @@ func TestPrunedLegacyAgentAssignmentNeedsRebind(t *testing.T) {
 }
 
 // An agent ledger that cannot be read does not make every agents entry a
-// possible legacy identity. Another account's current identity listed first
-// leaves this account's exact current-identity assignment in force, as it
-// was before the upgrade bridge, instead of sending it to a weaker
-// default_lookup_failed. Only the legacy identity derived for this agent is
-// a real conflict, and then the outage path applies.
+// possible legacy identity once the hook path derived the agent's own.
+// Another account's current identity listed first leaves this account's
+// exact current-identity assignment in force, as it was before the upgrade
+// bridge, instead of sending it to a weaker default_lookup_failed. Only the
+// legacy identity derived for this agent is a real conflict; then, and when
+// nothing is derived, the request gets the strictest profile that may
+// apply, never a weaker one.
 func TestUnreadableLedgerKeepsExactCurrentAgentAssignment(t *testing.T) {
 	stubProfileSources(t)
-	previousLedger, previousDerived := profileAgentLedger, derivedLegacyAgentIDs.ids
-	t.Cleanup(func() { profileAgentLedger, derivedLegacyAgentIDs.ids = previousLedger, previousDerived })
+	previousLedger := profileAgentLedger
+	t.Cleanup(func() { profileAgentLedger = previousLedger })
 	profileAgentLedger = func(inventory.AgentIdentityFilter) ([]inventory.AgentIdentityRecord, bool) { return nil, false }
-	derivedLegacyAgentIDs.ids = nil
+	legacyBridgeDerives(t)
 	aliceInputs := legacyBridgeInputs("alice@corp.example")
 	alice, legacy := agentidentity.AgentID(aliceInputs), agentidentity.LegacyAgentID(aliceInputs)
 	bob := agentidentity.AgentID(agentidentity.Inputs{
@@ -335,9 +358,12 @@ func TestUnreadableLedgerKeepsExactCurrentAgentAssignment(t *testing.T) {
 		{Profile: "watch", Match: config.ProfileMatch{Agents: []string{bob}}},
 		{Profile: "strict", Match: config.ProfileMatch{Agents: []string{alice}}},
 	}
+	// Nothing derived: bob's entry may be alice's legacy identity, so the
+	// request gets the strictest profile that may apply, never weaker than
+	// its exact assignment.
 	got, mode := hook(alice)
-	want("exact current identity, nothing derived", got, mode, "strict", profileMatchAgent, "action")
-	noteDerivedLegacyAgentID(aliceInputs)
+	want("exact current identity, nothing derived", got, mode, "strict", profileMatchDefaultLookupFailed, "action")
+	legacyBridgeDerives(t, aliceInputs)
 	got, mode = hook(alice)
 	want("exact current identity, legacy derived but not assigned", got, mode, "strict", profileMatchAgent, "action")
 
@@ -351,12 +377,14 @@ func TestUnreadableLedgerKeepsExactCurrentAgentAssignment(t *testing.T) {
 	want("connector assignment after another agent's entry", got, mode, "strict", profileMatchConnector, "action")
 
 	// The legacy identity derived for this agent, listed first, is a real
-	// conflict: the exact assignment after it waits for a rebind.
+	// conflict: the exact assignment after it does not skip it, and the
+	// request gets the strictest profile that may apply, never the entry's
+	// weaker one or the default.
 	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
 		{Profile: "watch", Match: config.ProfileMatch{Agents: []string{bob}}},
 		{Profile: "watch", Match: config.ProfileMatch{Agents: []string{legacy}}},
 		{Profile: "strict", Match: config.ProfileMatch{Agents: []string{alice}}},
 	}
 	got, mode = hook(alice)
-	want("exact identity after its own legacy entry", got, mode, "watch", profileMatchDefaultLookupFailed, "observe")
+	want("exact identity after its own legacy entry", got, mode, "strict", profileMatchDefaultLookupFailed, "action")
 }

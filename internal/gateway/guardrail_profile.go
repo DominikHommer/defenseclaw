@@ -128,6 +128,9 @@ var (
 	// profileAgentSource returns the request's verified agent identity
 	// (defenseclaw.agent.identity.id, agt-...).
 	profileAgentSource = requestAgentIdentity
+	// profileAgentLegacySource returns the 1.0.3 identity of the request's
+	// agent agent (requestLegacyAgentIdentity).
+	profileAgentLegacySource = requestLegacyAgentIdentity
 	// profileExplainSubjectLookup resolves the subject an administrator
 	// names to `guardrail profile explain --user`.
 	profileExplainSubjectLookup = lookupDirectoryProfileSubject
@@ -162,6 +165,12 @@ type profileDecision struct {
 	// Assignment is the 1-based index of the assignment that matched, 0 for
 	// the default.
 	Assignment int
+	// Refused marks a decision no profile is safe for: an unproven 1.0.3
+	// agents entry leaves profiles that may apply, none of which enforces
+	// what each of the others does (matchAgent). The request is refused
+	// where it can be blocked (guardrail_profile_refusal.go); Name is the
+	// strictest of them by hook mode and block_at, for the rest.
+	Refused bool
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
@@ -533,6 +542,25 @@ func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
 	return facts.ID, facts.Verified
 }
 
+// requestLegacyAgentIdentity is the legacy identity (1.0.0 to 1.0.3,
+// agentidentity.LegacyAgentID) of agent, the agent identity of ctx, and
+// true; "" and true for an account without a domain, whose identity did not
+// change. It derives the identity again for ctx's verified user and
+// connector, as the hook path does, and returns false when that derivation
+// is not agent. Every request derives its own: no state is kept, so none
+// can be dropped.
+func requestLegacyAgentIdentity(ctx context.Context, agent string) (string, bool) {
+	connectorName := profileRequestConnector(ctx)
+	if connectorName == "" || agent == "" {
+		return "", false
+	}
+	facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName})
+	if facts.ID == "" || !strings.EqualFold(facts.ID, agent) {
+		return "", false
+	}
+	return facts.LegacyID, true
+}
+
 // guardrailProfileInspectMiddleware resolves the profile for the inspect
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
@@ -575,12 +603,14 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 	}
 	subject, source := profileRequestSubject(ctx)
 	agent := ""
+	var legacy profileAgentLegacy
 	if source != "" && subject != nil {
 		if id, ok := profileAgentSource(ctx); ok {
 			agent = strings.TrimSpace(id)
+			legacy = func() (string, bool) { return profileAgentLegacySource(ctx, agent) }
 		}
 	}
-	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent)
+	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent, legacy)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
 		if derived, ok := set.profiles[decision.Name]; ok {
@@ -984,9 +1014,7 @@ func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, s
 		}) {
 			continue
 		}
-		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool {
-			return strings.EqualFold(strings.TrimSpace(v), agent) && agent != ""
-		}) {
+		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool { return agentEntryMatches(v, agent) }) {
 			continue
 		}
 		uidMatches := anyMatches(m.Users, func(v string) bool {
@@ -1061,12 +1089,17 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 		reason, group = profileMatchUser, ""
 	}
 	if len(m.Agents) > 0 {
-		if agent == "" || !anyMatches(m.Agents, func(v string) bool { return strings.EqualFold(strings.TrimSpace(v), agent) }) {
+		if !anyMatches(m.Agents, func(v string) bool { return agentEntryMatches(v, agent) }) {
 			return "", "", false
 		}
 		reason, group = profileMatchAgent, ""
 	}
 	return reason, group, true
+}
+
+// agentEntryMatches reports whether an agents entry names agent.
+func agentEntryMatches(entry, agent string) bool {
+	return agent != "" && strings.EqualFold(strings.TrimSpace(entry), agent)
 }
 
 // profileUserName is the name users entries match: the bare account, or,
@@ -1724,7 +1757,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if source == "" {
 		agent = ""
 	}
-	decision := set.matchAgent(subject, source, connectorName, agent)
+	decision := set.matchAgent(subject, source, connectorName, agent, nil)
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match
@@ -1739,6 +1772,12 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["subject_source"] = decision.SubjectSource
 	out["assignment"] = decision.Assignment
 	warnings := profileExplainWarnings(set, decision, subject)
+	if decision.Refused {
+		out["refused"] = true
+		warnings = append(warnings, "a profile assignment's agents entry may be this agent's 1.0.3 identity and no profile of those that may apply "+
+			"enforces what each of the others does: requests of this agent are refused where they can be blocked; replace the entry with "+
+			"the agent identity `defenseclaw agent identities` shows now")
+	}
 	if agent != "" {
 		warnings = append(warnings, fmt.Sprintf("agent %q is not verified against a host identity record by profile-explain; confirm it with agent identities before relying on this answer", agent))
 	}
