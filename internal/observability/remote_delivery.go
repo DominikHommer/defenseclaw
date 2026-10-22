@@ -29,9 +29,10 @@ type remoteDeliveryKey struct{}
 // destination has it. The producer keeps one RemoteDelivery per occurrence
 // across offers: each offer is an attempt, a destination that acknowledged
 // an earlier attempt is not sent the occurrence again, and the occurrence
-// is delivered once an attempt ends with no destination left to fail. The
-// state is in memory only: after a restart the queued occurrence is offered
-// to every destination again under the same record id.
+// is delivered once an attempt ends with no destination left to fail. A
+// producer that keeps the acknowledgements on disk
+// (NewRecordedRemoteDelivery) does not send the occurrence again to those
+// destinations after a restart; otherwise the state is in memory only.
 type RemoteDelivery struct {
 	mu       sync.Mutex
 	attempt  uint64
@@ -44,11 +45,27 @@ type RemoteDelivery struct {
 	// localDurable records that the local store made the occurrence
 	// power-loss durable, so a later offer need not flush it again.
 	localDurable bool
+	// record, if set, keeps a destination's acknowledgement on disk.
+	record func(destination string)
 }
 
 // NewRemoteDelivery returns the delivery state of one occurrence.
 func NewRemoteDelivery() *RemoteDelivery {
 	return &RemoteDelivery{delivered: make(map[string]bool)}
+}
+
+// NewRecordedRemoteDelivery returns the delivery state of one occurrence
+// whose acknowledged destinations were recorded by an earlier process.
+// record is called with each destination that acknowledges it, before the
+// acknowledgement counts, so a restart between the acknowledgement and the
+// producer's next offer does not send the occurrence to it again.
+func NewRecordedRemoteDelivery(acknowledged []string, record func(destination string)) *RemoteDelivery {
+	delivery := NewRemoteDelivery()
+	for _, destination := range acknowledged {
+		delivery.delivered[destination] = true
+	}
+	delivery.record = record
+	return delivery
 }
 
 // WithRemoteDelivery attaches delivery to ctx, so the runtime reports every
@@ -133,6 +150,9 @@ func (delivery *RemoteDelivery) Track(destination string) func(delivered bool) {
 	var once sync.Once
 	return func(delivered bool) {
 		once.Do(func() {
+			if delivered && delivery.record != nil {
+				delivery.record(destination)
+			}
 			delivery.mu.Lock()
 			defer delivery.mu.Unlock()
 			delivery.inFlight--

@@ -42,6 +42,8 @@ type changeExportFixture struct {
 	capture  *hookModelV8OTLPCapture
 	refusing atomic.Bool
 	refused  atomic.Int64
+	// slow delays the destination's answer to the change's exports.
+	slow     atomic.Bool
 	logger   *audit.Logger
 	database *sql.DB
 	dir      string
@@ -54,13 +56,15 @@ func newChangeExportFixture(t *testing.T) *changeExportFixture {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Refuse only the change's exports: refusing every record would
 		// open the destination's circuit for 30 s.
-		if f.refusing.Load() && r.URL.Path == "/v1/logs" {
+		if (f.refusing.Load() || f.slow.Load()) && r.URL.Path == "/v1/logs" {
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, "read", http.StatusBadRequest)
 				return
 			}
-			if bytes.Contains(body, []byte(f.ev.EventID)) {
+			if f.slow.Load() && bytes.Contains(body, []byte(f.ev.EventID)) {
+				time.Sleep(300 * time.Millisecond)
+			} else if bytes.Contains(body, []byte(f.ev.EventID)) {
 				f.refused.Add(1)
 				http.Error(w, "refused", http.StatusBadRequest)
 				return
@@ -189,6 +193,11 @@ func TestBundleReceiptReporterKeepsAChangeUntilTheDestinationHasIt(t *testing.T)
 	if n := f.storedRows(t); n != 1 {
 		t.Fatalf("the offers stored %d rows, want 1", n)
 	}
+	// A restarted gateway follows a stopped one: the first gateway's retry
+	// must not still be in flight when the destination starts accepting.
+	for settled := false; !settled; time.Sleep(20 * time.Millisecond) {
+		settled, _ = first.changes[f.ev.EventID].delivery.Settled()
+	}
 	restarted := f.reporter()
 	restarted.poll(t.Context())
 	if restarted.hasSeen(f.ev.EventID) {
@@ -239,4 +248,36 @@ func TestBundleReceiptReporterMarksAChangeOnlyOnceItsRowIsDurable(t *testing.T) 
 		t.Fatal(err)
 	}
 	pollUntil(t, restarted, func() bool { return restarted.hasSeen(f.ev.EventID) })
+}
+
+// A gateway that stops after the destination acknowledged a change but
+// before its next poll marked it reported (a credential change restarts
+// the gateway within seconds) must not send it again from the next
+// gateway: the acknowledgement is recorded on disk as it arrives
+// (GAP-0526). Before, the delivery state was in memory only and the
+// restarted gateway exported the change a second time.
+func TestBundleReceiptReporterDoesNotExportAnAcknowledgedChangeAgainAfterARestart(t *testing.T) {
+	f := newChangeExportFixture(t)
+	f.slow.Store(true)
+	first := f.reporter()
+	first.poll(t.Context())
+	deadline := time.Now().Add(20 * time.Second)
+	for settled, delivered := false, false; !settled || !delivered; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the destination never acknowledged the change")
+		}
+		settled, delivered = first.changes[f.ev.EventID].delivery.Settled()
+	}
+	if first.hasSeen(f.ev.EventID) {
+		t.Fatal("the change was marked reported without a second poll")
+	}
+	restarted := f.reporter()
+	pollUntil(t, restarted, func() bool { return restarted.hasSeen(f.ev.EventID) })
+	for range 3 {
+		restarted.poll(t.Context())
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := f.exported(); n != 1 {
+		t.Fatalf("the destination has the change %d times after a restart, want once", n)
+	}
 }

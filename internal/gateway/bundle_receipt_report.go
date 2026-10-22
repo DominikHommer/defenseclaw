@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -30,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // The gateway reports the signed policy bundle receipts of a standalone
@@ -61,6 +64,10 @@ var (
 // emitted before the per-receipt marker directory existed.
 const bundleReceiptMarkerName = "bundle-receipt.reported"
 const bundleRefusalMarkerName = "bundle-refusal.reported"
+
+// bundleAcknowledgedDirName keeps the remote acknowledgements of the change
+// events not reported yet (bundleReceiptReporter.acknowledgedDir).
+const bundleAcknowledgedDirName = "bundle-receipt.acknowledged.d"
 
 // bundleReceiptSink is the audit surface the reporter uses (*audit.Logger).
 type bundleReceiptSink interface {
@@ -319,13 +326,16 @@ func (r *bundleReceiptReporter) reportChanges() {
 // acknowledged it. While its deliveries are in flight the change is not
 // offered again; once one failed (refused, dropped, abandoned at shutdown)
 // the next poll offers it again, and the logger sends the stored record to
-// the destinations that do not have it. After a restart the delivery state
-// is gone and an unreported change goes to every destination again, under
-// the same record id.
+// the destinations that do not have it. Each acknowledgement is recorded on
+// disk as it arrives, so a gateway restarted before its next poll marked the
+// change reported does not send it again to a destination that has it
+// (GAP-0526); the others get it again under the same record id.
 func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 	state := r.changes[ev.EventID]
 	if state == nil {
-		state = &changeDelivery{delivery: observability.NewRemoteDelivery()}
+		id := ev.EventID
+		state = &changeDelivery{delivery: observability.NewRecordedRemoteDelivery(
+			r.acknowledgedDestinations(id), func(destination string) { r.recordAcknowledged(id, destination) })}
 		if r.changes == nil {
 			r.changes = make(map[string]*changeDelivery)
 		}
@@ -358,6 +368,58 @@ func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 func (r *bundleReceiptReporter) changeReported(id string) {
 	delete(r.changes, id)
 	r.markSeen(id)
+	if r.hasSeen(id) {
+		_ = os.RemoveAll(filepath.Join(r.acknowledgedDir(), id))
+	}
+}
+
+// acknowledgedDir is <data_dir>/bundle-receipt.acknowledged.d: per change
+// event not reported yet, one file per remote destination that has it.
+func (r *bundleReceiptReporter) acknowledgedDir() string {
+	return filepath.Join(filepath.Dir(r.markerPath), bundleAcknowledgedDirName)
+}
+
+// acknowledgedDestinations returns the destinations recorded as having
+// change event id.
+func (r *bundleReceiptReporter) acknowledgedDestinations(id string) []string {
+	if !enterprisestatus.ValidChangeEventID(id) {
+		return nil
+	}
+	dir := filepath.Join(r.acknowledgedDir(), id)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var destinations []string
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		raw, err := safefile.ReadRegularFileBounded(filepath.Join(dir, entry.Name()), 1<<10)
+		if name := string(raw); err == nil && acknowledgedFileName(name) == entry.Name() {
+			destinations = append(destinations, name)
+		}
+	}
+	return destinations
+}
+
+// recordAcknowledged records that destination has change event id. It runs
+// on the destination's queue.
+func (r *bundleReceiptReporter) recordAcknowledged(id, destination string) {
+	if !enterprisestatus.ValidChangeEventID(id) || destination == "" {
+		return
+	}
+	dir := filepath.Join(r.acknowledgedDir(), id)
+	if err := os.MkdirAll(dir, 0o700); err == nil {
+		_ = configwrite.WriteFileDurable(filepath.Join(dir, acknowledgedFileName(destination)), []byte(destination), 0o600)
+	}
+}
+
+// acknowledgedFileName names a destination's file: destination names are
+// configuration text, not file names.
+func acknowledgedFileName(destination string) string {
+	sum := sha256.Sum256([]byte(destination))
+	return hex.EncodeToString(sum[:16])
 }
 
 func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt) error {
