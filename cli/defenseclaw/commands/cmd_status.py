@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -609,9 +610,14 @@ def _status_refused_detail(cfg, client, public) -> str:
             with open(dotenv, "rb"):
                 pass
         except PermissionError:
+            repair = (
+                "run defenseclaw doctor to repair this account's file access"
+                if sys.platform == "win32"
+                else f"restore read access (chmod 600 {dotenv})"
+            )
             return (
                 f"this account cannot read {dotenv}, so status has no gateway token to read the live "
-                f"state; restore read access (chmod 600 {dotenv})"
+                f"state; {repair}"
             )
         except OSError:
             pass
