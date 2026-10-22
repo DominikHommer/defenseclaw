@@ -561,7 +561,13 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		err := l.opts.Mutate(ctx)
 		resume()
 		if err != nil {
-			r.AddError(codeChange, err.Error())
+			// A bundle refusal (secret set to a value the signed bundle does
+			// not bind) keeps its code.
+			code := codeChange
+			if bundleCode := enterprisebundle.CodeOf(err); bundleCode != "" {
+				code = string(bundleCode)
+			}
+			r.AddError(code, err.Error())
 			return 0
 		}
 		if record == nil && l.opts.PayloadDir == "" && !l.opts.FromPackage {

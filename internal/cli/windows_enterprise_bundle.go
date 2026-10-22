@@ -359,7 +359,7 @@ func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.D
 		}(),
 		AnchorsPath: filepath.Join(layout.ConfigDir, "trust", enterprisebundle.AnchorsName),
 		AnchorTrust: bundleAnchorTrust, Platform: enterprisebundle.PlatformWindows, ProductVersion: appVersion,
-		SecretPresent: bundleSecretPresent, Digester: bundleDigester,
+		SecretValue: bundleSecretValue, Digester: bundleDigester,
 		TrustVersion: func(dir string) error {
 			return windowsBundleTrust(filepath.Join(dir, enterprisebundle.ManifestName))
 		},

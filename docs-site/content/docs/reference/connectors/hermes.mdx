@@ -87,6 +87,8 @@ To check the current hook files on Linux, run `sudo /opt/defenseclaw/bin/defense
 
 `enterprise policy verify` checks machine-policy connectors; Hermes uses per-user hooks, so that command can succeed while its hooks are missing.
 
+The guardian sets up and checks the Hermes home each account configured, not the profile default. On Windows that is the `HERMES_HOME` of the account's persistent environment (its own variable, else the machine's), else `hermes` under the Local AppData of its sign-in, read from the account's loaded registry hive. While the account is signed out the hive is not loaded, so its hooks are not set up or verified until it signs in; the check never falls back to the default folder. On Linux and macOS there is no persistent per-account environment to read, so the guardian uses `~/.hermes`. On every platform a named profile Hermes would run from (`active_profile` naming another profile, or a folder under `profiles/`) fails the check, because the hooks are in the default profile. A `HERMES_HOME` set only in a shell is not seen; see the limits above.
+
 ## Hook events
 
 | Contract | Agent versions | Hook script | Events | Can block | Can ask |

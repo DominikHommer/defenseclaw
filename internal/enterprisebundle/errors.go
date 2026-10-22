@@ -52,8 +52,16 @@ const (
 	CodeVersionNotNewer Code = "version_not_newer"
 	CodeProductTooOld   Code = "product_too_old"
 
-	// Device facts: secret presence and the effective policy digest.
+	// Device facts: secret presence, the signed credential values and the
+	// effective policy digest.
 	CodeSecretRefMissing Code = "secret_ref_missing"
+	// CodeSecretRefMismatch: a stored credential is not the value its
+	// secret_refs entry signs (value_sha256).
+	CodeSecretRefMismatch Code = "secret_ref_mismatch"
+	// CodeSecretRefUnbound: a secret_refs entry signs no value_sha256. Bundles
+	// signed before 1.0.4 bound credential names only; sign them again with
+	// --secret-file.
+	CodeSecretRefUnbound Code = "secret_ref_unbound"
 	CodeDigestMismatch   Code = "digest_mismatch"
 
 	// Apply and the receipt state machine (spec section 7).

@@ -1032,7 +1032,10 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		}
 	}
 	if c.name == "hermes" {
-		configPath := c.configPath(opts)
+		configPath, err := hermesResolvedConfigPath(opts)
+		if err != nil {
+			return fmt.Errorf("%w; no changes made", err)
+		}
 		if err := validateHermesWindowsConfigPath(configPath); err != nil {
 			return err
 		}
@@ -1181,6 +1184,15 @@ func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label st
 // is present in the installed regular file.
 func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	if !c.pluginArtifact {
+		hermesConfig := ""
+		if c.name == "hermes" {
+			// Without a resolved config the generic reader finds no path
+			// and reports the hooks present.
+			var err error
+			if hermesConfig, err = hermesVerifiedConfigPath(opts); err != nil {
+				return false, err
+			}
+		}
 		present, err := ownedHooksPresentInConfig(c, opts)
 		if err != nil || !present || c.name != "hermes" || !opts.ManagedEnterprise {
 			return present, err
@@ -1191,7 +1203,7 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 		// call unchecked while verify passes and the guardian repairs
 		// nothing.
 		command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
-		return hermesOwnedApprovalsPresent(filepath.Join(filepath.Dir(hermesConfigPath(opts)), hermesAllowlistFileName), command)
+		return hermesOwnedApprovalsPresent(filepath.Join(filepath.Dir(hermesConfig), hermesAllowlistFileName), command)
 	}
 	path := c.configPath(opts)
 	const maxManagedPluginBytes = 4 << 20
@@ -1832,6 +1844,11 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 	logicalName := c.managedBackupLogicalName()
 	configPath := c.configPath(opts)
 	if c.name == "hermes" {
+		resolved, err := hermesResolvedConfigPath(opts)
+		if err != nil {
+			return fmt.Errorf("hermes teardown not verified: %w", err)
+		}
+		configPath = resolved
 		if err := validateHermesWindowsConfigPath(configPath); err != nil {
 			return err
 		}
@@ -2416,20 +2433,66 @@ func (c *hookOnlyConnector) effectiveFailClosed(opts SetupOpts) bool {
 	return cap.SupportsFailClosed && resolveHookFailMode(opts, c) == "closed"
 }
 
-func hermesConfigPath(SetupOpts) string {
-	if HermesConfigPathOverride != "" {
-		return HermesConfigPathOverride
+// hermesConfigPath is hermesResolvedConfigPath for the lists that only name
+// what to watch, grant or clean up. When the account's home cannot be
+// resolved they keep the profile default of the bound home. Setup and every
+// check resolve the home themselves (hermesResolvedConfigPath,
+// hermesVerifiedConfigPath) and fail instead, so the default is never what
+// a check proves.
+func hermesConfigPath(opts SetupOpts) string {
+	path, err := hermesResolvedConfigPath(opts)
+	if err == nil {
+		return path
 	}
-	// A privileged service acting for another user (the managed guardian)
-	// must resolve that user's profile, not its own token's known folders
-	// or, on Linux and macOS, its own home: the root guardian watched
-	// root's ~/.hermes instead of the user's, so an in-place rewrite of the
-	// user's Hermes config waited for the interval pass (GAP-0122). In the
-	// process's own home HERMES_HOME still applies.
 	if home := activeUserHomeOverride(); home != "" && (runtime.GOOS == "windows" || !isProcessUserHome(home)) {
 		return hermespath.ConfigPathForUserHome(home)
 	}
-	return hermesConfigPathResolver()
+	return ""
+}
+
+// hermesResolvedConfigPath resolves the config.yaml of the Hermes home the
+// hooks belong in. A privileged service acting for another user (the
+// managed guardian) must resolve that user's home, not its own token's known
+// folders or, on Linux and macOS, its own home: the root guardian watched
+// root's ~/.hermes instead of the user's, so an in-place rewrite of the
+// user's Hermes config waited for the interval pass (GAP-0122). It is the
+// home the account configured (hermespath.ConfigPathForAccount: on Windows
+// the HERMES_HOME of its persistent environment), never a profile default
+// substituted for a home that cannot be read, so setup and verification
+// work on the home the account's Hermes reads (GAP-0499). In the process's
+// own home HERMES_HOME still applies.
+func hermesResolvedConfigPath(SetupOpts) (string, error) {
+	if HermesConfigPathOverride != "" {
+		return HermesConfigPathOverride, nil
+	}
+	if home := activeUserHomeOverride(); home != "" && (runtime.GOOS == "windows" || !isProcessUserHome(home)) {
+		return hermespath.ConfigPathForAccount(home)
+	}
+	path := hermesConfigPathResolver()
+	if strings.TrimSpace(path) == "" {
+		return "", errors.New("Hermes config path is unavailable; current-user LocalAppData or an absolute HERMES_HOME is required") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+	}
+	return path, nil
+}
+
+// hermesVerifiedConfigPath resolves the Hermes config a check inspects and
+// fails, rather than inspecting another home, when the Hermes the account
+// runs would not read it: a home that cannot be resolved, or a named
+// profile Hermes selects instead of the default one DefenseClaw set up
+// (GAP-0499). A check that passed on the default profile proved nothing
+// about a profile Hermes runs from.
+func hermesVerifiedConfigPath(opts SetupOpts) (string, error) {
+	configPath, err := hermesResolvedConfigPath(opts)
+	if err != nil {
+		return "", fmt.Errorf("hermes hooks not verified: %w", err)
+	}
+	if err := validateHermesWindowsConfigPath(configPath); err != nil {
+		return "", fmt.Errorf("hermes hooks not verified: %w", err)
+	}
+	if err := validateHermesSingleProfile(configPath); err != nil {
+		return "", fmt.Errorf("hermes hooks not verified: %w", err)
+	}
+	return configPath, nil
 }
 
 // isProcessUserHome reports whether home is this process's own home folder.

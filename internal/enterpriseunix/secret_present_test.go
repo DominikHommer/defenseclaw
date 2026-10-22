@@ -20,12 +20,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
-// Bundle verify and apply read credential presence through
-// Env.SecretPresent: a file the `secret status` listing names is present
-// only when the gateway could use it, so a required reference to an empty
-// or otherwise unusable file refuses secret_ref_missing on both. A file the
-// host trust check refuses is missing too.
-func TestSecretPresentClassifiesUsabilityLikeTheGateway(t *testing.T) {
+// Bundle verify and apply read credentials through Env.SecretValue: a file
+// the `secret status` listing names has a value only when the gateway could
+// use it, so a required reference to an empty or otherwise unusable file
+// refuses secret_ref_missing on both. A file the host trust check refuses is
+// missing too. The value is the one the gateway reads (one line).
+func TestSecretValueClassifiesUsabilityLikeTheGateway(t *testing.T) {
 	h := newTestHost(t, "linux")
 	dir := h.env.P(h.env.Layout.SecretsDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -49,11 +49,11 @@ func TestSecretPresentClassifiesUsabilityLikeTheGateway(t *testing.T) {
 	if err != nil || len(names) != 4 {
 		t.Fatalf("secret status lists %v (%v), want every stored file", names, err)
 	}
-	for name, want := range map[string]bool{
-		"ai-defense-api-key": true, "empty-key": false, "multi-line": false, "untrusted-key": false, "not-stored": false,
+	for name, want := range map[string]string{
+		"ai-defense-api-key": "key-1", "empty-key": "", "multi-line": "", "untrusted-key": "", "not-stored": "",
 	} {
-		if present, err := h.env.SecretPresent(name); err != nil || present != want {
-			t.Errorf("%s: present %v, err %v; want %v", name, present, err, want)
+		if value, err := h.env.SecretValue(name); err != nil || string(value) != want || (want == "") != (value == nil) {
+			t.Errorf("%s: value %q, err %v; want %q", name, value, err, want)
 		}
 	}
 }
@@ -80,8 +80,8 @@ func TestBundleApplyRefusesARequiredCredentialItCannotCheck(t *testing.T) {
 		}
 		return trust(path, kind)
 	}
-	if _, err := b.env.SecretPresent("ai-defense-api-key"); err == nil {
-		t.Fatal("presence of a credential whose metadata cannot be read: no error")
+	if _, err := b.env.SecretValue("ai-defense-api-key"); err == nil {
+		t.Fatal("a credential whose metadata cannot be read: no error")
 	}
 	b.mapPromotedBundleOwners(1)
 	r := b.apply(b.dir(1, cfg))

@@ -492,7 +492,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	}
 	res, err := enterprisebundle.Verify(ctx, enterprisebundle.VerifyInput{
 		Bundle: staged, Anchors: anchors, Platform: env.GOOS, Now: env.Now().UTC(), Confirmed: st.Confirmed(),
-		ProductVersion: env.ProductVersion, SecretPresent: env.SecretPresent, RequireSecretPresence: true,
+		ProductVersion: env.ProductVersion, SecretValue: env.SecretValue, RequireSecretPresence: true,
 		DeviceLayout: func() *enterprisebundle.DeviceLayout {
 			layout := enterprisebundle.DeviceLayoutFromManaged(env.Layout)
 			return &layout

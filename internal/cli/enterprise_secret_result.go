@@ -36,6 +36,10 @@ type secretFailureResult struct {
 	ExitCode         int                        `json:"exit_code"`
 }
 
+// codeSecretChangeFailed is the code of a write or removal that did not
+// happen, as the lifecycle reports a failed protected-state change.
+const codeSecretChangeFailed = "change_failed"
+
 // secretRefusal names the errors[].code of a secret failure.
 type secretRefusal struct {
 	code string

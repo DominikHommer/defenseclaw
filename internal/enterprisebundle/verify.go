@@ -132,9 +132,12 @@ type VerifyInput struct {
 	// DeviceLayout is the installed layout on a device. Nil uses the target's
 	// standard layout for offline verification.
 	DeviceLayout *DeviceLayout
-	// SecretPresent reports whether the device holds an enterprise
-	// credential; nil does not check presence (off a device).
-	SecretPresent func(name string) (bool, error)
+	// SecretValue reads an enterprise credential as the gateway would: the
+	// value when it is stored and usable, nil when it is missing or the
+	// gateway's read would refuse it, an error when the store could not be
+	// read. Verify compares the value with the signed value_sha256 and
+	// clears it. Nil checks no credential (off a device).
+	SecretValue func(name string) ([]byte, error)
 	// RequireSecretPresence is set by the apply: a required reference whose
 	// presence could not be checked refuses (secret_ref_missing) instead of
 	// only warning secret_presence_unchecked, as read-only verify does.
@@ -166,10 +169,12 @@ type VerifyResult struct {
 	DigestLayoutUnverifiable bool
 	Warnings                 []Warning
 	// SecretRefsMissing names, in manifest order, every secret_refs entry
-	// (required or optional) the device does not hold. It is nil unless the
-	// presence of every reference was checked: off a device, with a store
-	// that could not be read, or on a refusal before that step.
-	SecretRefsMissing []string
+	// (required or optional) the device does not hold, and
+	// SecretRefsMismatch every one it holds with a value the entry does not
+	// sign. Both are nil unless every reference was checked: off a device,
+	// with a store that could not be read, or on a refusal before that step.
+	SecretRefsMissing  []string
+	SecretRefsMismatch []string
 	// Rendered is the config.yaml Verify validated, rendered for the device
 	// layout against the private stage directory. The apply renders the
 	// same file against its version directory, so the two differ only in
@@ -249,39 +254,48 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	if err := CheckSecretRefs(m, b); err != nil {
 		return res, err
 	}
-	if in.SecretPresent != nil {
+	if in.SecretValue != nil {
 		// Every reference is looked up, so a refusal names the first
-		// required credential missing and the result lists all of them: the
-		// caller stores them in one pass.
-		unchecked, missing, required, requiredUnchecked := false, []string{}, "", false
+		// required credential missing or the first one stored with another
+		// value, and the result lists all of them: the caller stores them
+		// in one pass.
+		unchecked, missing, mismatch := false, []string{}, []string{}
+		var refusal error
 		for _, ref := range m.SecretRefs {
-			present, err := in.SecretPresent(ref.Name())
+			value, err := in.SecretValue(ref.Name())
+			bound := err == nil && ref.Binds(m.TenantID, value)
+			stored := len(value) > 0
+			clear(value)
 			switch {
 			case err != nil:
 				unchecked = true
-				if in.RequireSecretPresence && ref.Required && required == "" {
-					required, requiredUnchecked = ref.Name(), true
+				if in.RequireSecretPresence && ref.Required && refusal == nil {
+					refusal = refuse(CodeSecretRefMissing, "secret_refs", "credential %s could not be checked, so the apply does not rely on it; store it again with enterprise secret set", safePath(ref.Name()))
 				}
-			case !present:
+			case !stored:
 				missing = append(missing, ref.Name())
-				if ref.Required && required == "" {
-					required = ref.Name()
+				if ref.Required && refusal == nil {
+					refusal = refuse(CodeSecretRefMissing, "secret_refs", "this device has no credential %s", safePath(ref.Name()))
+				}
+			case !bound:
+				// The gateway would use a value the bundle does not sign,
+				// also for an optional reference.
+				mismatch = append(mismatch, ref.Name())
+				if refusal == nil {
+					refusal = refuse(CodeSecretRefMismatch, "secret_refs", "credential %s on this device is not the value the bundle signs; store the value it signs with enterprise secret set --bundle and this bundle, or sign the bundle again with --secret-file for the stored one", safePath(ref.Name()))
 				}
 			}
 		}
-		// The warning comes before a refusal for another missing required
-		// credential, so the refusal still says the store was partly
-		// unreadable and the list is incomplete.
+		// The warning comes before a refusal for another credential, so the
+		// refusal still says the store was partly unreadable and the lists
+		// are incomplete.
 		if unchecked {
-			res.Warnings = append(res.Warnings, Warning{Code: WarnSecretPresenceUnchecked, Message: "the enterprise secret store could not be read; credential presence was not checked"})
+			res.Warnings = append(res.Warnings, Warning{Code: WarnSecretPresenceUnchecked, Message: "the enterprise secret store could not be read; credential presence and values were not checked"})
 		} else {
-			res.SecretRefsMissing = missing
+			res.SecretRefsMissing, res.SecretRefsMismatch = missing, mismatch
 		}
-		if requiredUnchecked {
-			return res, refuse(CodeSecretRefMissing, "secret_refs", "credential %s could not be checked, so the apply does not rely on it; store it again with enterprise secret set", safePath(required))
-		}
-		if required != "" {
-			return res, refuse(CodeSecretRefMissing, "secret_refs", "this device has no credential %s", safePath(required))
+		if refusal != nil {
+			return res, refusal
 		}
 	}
 	root, err := in.Stage(b)

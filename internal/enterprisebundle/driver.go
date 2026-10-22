@@ -41,9 +41,9 @@ type Driver struct {
 	ProductVersion string
 	DeviceLayout   *DeviceLayout
 	Now            func() time.Time
-	// SecretPresent reports whether the device holds a credential.
-	SecretPresent func(name string) (bool, error)
-	Digester      PolicyDigester
+	// SecretValue reads a credential as the gateway would (VerifyInput).
+	SecretValue func(name string) ([]byte, error)
+	Digester    PolicyDigester
 	// TrustVersion checks the promoted version directory before its config
 	// is rendered (Windows: owned by SYSTEM or Administrators, no write
 	// entry for another account); nil skips it.
@@ -176,7 +176,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	}
 	res, err := Verify(ctx, VerifyInput{
 		Bundle: staged, Anchors: anchors, Platform: d.Platform, Now: d.now().UTC(), Confirmed: st.Confirmed(),
-		ProductVersion: d.ProductVersion, DeviceLayout: d.DeviceLayout, SecretPresent: d.SecretPresent, RequireSecretPresence: true,
+		ProductVersion: d.ProductVersion, DeviceLayout: d.DeviceLayout, SecretValue: d.SecretValue, RequireSecretPresence: true,
 		Stage:    func(*Bundle) (string, error) { return staging, nil },
 		Digester: d.Digester,
 	})
