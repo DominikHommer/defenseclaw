@@ -293,8 +293,10 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 		return err
 	}
 	// Without a bundle an unreadable record is still the only evidence of
-	// the generation the gateway enforces: never reset it (GAP-0236).
-	if state, err := configwrite.ReadGenerationState(path); err != nil && !errors.Is(err, fs.ErrNotExist) && state.Generation == 0 {
+	// the generation the gateway enforces: never reset it (GAP-0236). A
+	// record that decodes only in part (a truncated write) proves no counter
+	// either; the Windows ensure recovers a provable one before this step.
+	if _, err := configwrite.ReadGenerationState(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("cannot prove the previous config generation from %s; restore that file from the last verified administrator backup, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", configwrite.GenerationPath(path))
 	}
 	restoreACL, err := keepConfigDACL(path)
