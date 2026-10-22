@@ -247,7 +247,7 @@ const connectorSources: ConnectorSource[] = [
     id: 'kiro',
     integration: 'Native hooks',
     minVersion: 'Not gated',
-    versionNote: 'Per-user installs are not version-gated. The enterprise standalone profile requires kiro-cli 2.24.1 or Kiro IDE 1.0.182.',
+    versionNote: 'kiro-cli 2.27.1 or later: setup and doctor refuse an older kiro-cli, whose non-interactive --v3 runs load no hooks, and the enterprise standalone profile does not enroll one. Kiro IDE is not gated per user; the enterprise standalone profile requires Kiro IDE 1.0.182.',
     route: PER_USER,
     routeNote: 'ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.',
   },
