@@ -75,7 +75,7 @@ func TestManagedCodeScanJSONLeavesServiceStateAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	var result map[string]any
-	if err := json.Unmarshal(output.Bytes(), &result); err != nil || result["target"] != target {
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil || result["scanner"] != "codeguard" || result["schema_version"] != float64(7) {
 		t.Fatalf("scan JSON=%s, error=%v", output.Bytes(), err)
 	}
 	if raw, err := os.ReadFile(cfg.DataDir); err != nil || string(raw) != sentinel {
