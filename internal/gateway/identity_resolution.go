@@ -19,7 +19,7 @@ import (
 // from and how each fact that can decide its guardrail profile is known:
 // the account (which account holds the verified uid or SID, its name,
 // domain and UPN), its groups, and the request agent's ownership of a
-// pre-1.0.4 agents entry. Each fact is proven, stale, unknown or failed
+// pre-1.0.4 agents entry. Each fact is proven, unknown or failed
 // (proofStatus). selectProfile then applies one rule, with no exception:
 //
 //   - Every assignment is evaluated against the facts as yes, no or maybe:
@@ -51,11 +51,6 @@ const (
 	// identity cache holds within their TTL (hooks and explain apply the
 	// same cached facts during an outage).
 	proofProven proofStatus = "proven"
-	// proofStale: the fact is a proof of an earlier pass that this pass
-	// could not repeat, past the TTL the cache trusts it for. The cache
-	// drops such facts, so a request sees them as unknown; explain names
-	// the state.
-	proofStale proofStatus = "stale"
 	// proofUnknown: the fact is not known (a lookup that has not answered,
 	// timed out, or left the fact out).
 	proofUnknown proofStatus = "unknown"

@@ -125,6 +125,32 @@ func platformLocalAccountRecords(ctx context.Context) (map[string]LocalAccountRe
 	return mergeDSCLAccountRecords(listed[0], listed[1], listed[2], listed[3]), nil
 }
 
+// parseDSCLRead parses `dscl . -read /Users/<name> <attributes>` output
+// ("Attribute: value", or "Attribute:" with the value on the next,
+// indented line) into attribute -> value.
+func parseDSCLRead(output string) map[string]string {
+	out := map[string]string{}
+	pending := ""
+	for _, line := range strings.Split(output, "\n") {
+		if pending != "" && strings.HasPrefix(line, " ") {
+			out[pending] = strings.TrimSpace(line)
+			pending = ""
+			continue
+		}
+		pending = ""
+		key, value, ok := strings.Cut(line, ":")
+		if !ok || key == "" || strings.ContainsAny(key, " \t") {
+			continue
+		}
+		if value = strings.TrimSpace(value); value == "" {
+			pending = key
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
 // platformLocalAccountRecord reads one local account's record.
 func platformLocalAccountRecord(ctx context.Context, name string) (LocalAccountRecord, bool, error) {
 	if err := validateTrustedTool(darwinDSCL); err != nil {

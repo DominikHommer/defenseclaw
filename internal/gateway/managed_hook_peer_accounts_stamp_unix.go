@@ -280,12 +280,16 @@ var managedHookPeerRecordChanged = func(account unixidentity.Account) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), managedHookPeerListTimeout)
 	defer cancel()
-	record, found, err := unixidentity.LocalAccountRecordByName(ctx, account.Name)
+	record, found, err := managedHookPeerReadAccountRecord(ctx, account.Name)
 	if err != nil {
 		return false
 	}
 	return !found || localAccountRecordString(record) != listed
 }
+
+// managedHookPeerReadAccountRecord reads one local account's record
+// (macOS); tests replace it.
+var managedHookPeerReadAccountRecord = unixidentity.LocalAccountRecordByName
 
 // localAccountRecordString is the listing's form of one account's record.
 func localAccountRecordString(account unixidentity.LocalAccountRecord) string {
