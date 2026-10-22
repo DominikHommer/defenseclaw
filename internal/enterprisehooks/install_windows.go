@@ -1767,7 +1767,7 @@ func teardownWindowsGenericManagedTarget(
 	if len(remaining) != 0 {
 		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration in %s", name, strings.Join(remaining, ", "))
 	}
-	return nil
+	return returnWindowsStandalonePatchedFilesToOwner(target, configPaths, footprint)
 }
 
 // windowsRelaxedPathsToRestoreAfterTeardown returns the paths relaxed for a
