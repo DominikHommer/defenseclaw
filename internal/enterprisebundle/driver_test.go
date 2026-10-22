@@ -7,6 +7,7 @@
 package enterprisebundle_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/base64"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,13 +55,85 @@ func driverFor(t *testing.T, f *fixture) *enterprisebundle.Driver {
 	store := enterprisebundle.NewStore(filepath.Join(root, "etc", enterprisebundle.BundlesDirName), filepath.Join(root, "lifecycle"))
 	store.Now = func() time.Time { return verifyAt }
 	return &enterprisebundle.Driver{
-		Store: store, AnchorsPath: anchorsPath, AnchorTrust: func(string) error { return nil },
+		Store: store, ConfigPath: filepath.Join(root, "etc", "config.yaml"), AnchorsPath: anchorsPath, AnchorTrust: func(string) error { return nil },
 		Platform: runtime.GOOS, ProductVersion: "1.0.2", Now: func() time.Time { return verifyAt }, Digester: digester,
 	}
 }
 
 func enforcing(digest string) enterprisebundle.GatewayPolicy {
 	return enterprisebundle.GatewayPolicy{EffectiveDigest: digest, Digest: digest, Generation: 4, Applied: true}
+}
+
+// installPreparedBundle models the lifecycle commit, including its durable
+// signed-bundle attribution, before the gateway adopts that generation.
+func installPreparedBundle(t *testing.T, d *enterprisebundle.Driver, p *enterprisebundle.Prepared) enterprisebundle.GatewayPolicy {
+	t.Helper()
+	opt, ok := enterprisebundle.GenerationOptions(p.Receipt)
+	if !ok {
+		t.Fatal("bundle receipt has no principal")
+	}
+	result, err := configwrite.Locked(t.Context(), d.ConfigPath, opt, func() (bool, error) {
+		return true, os.WriteFile(d.ConfigPath, p.Config, 0o600)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := enforcing(p.Receipt.ExpectedDigest)
+	policy.Generation = result.Generation
+	policy.BundleID, policy.BundleVersion = p.Receipt.BundleID, p.Receipt.Version
+	return policy
+}
+
+func TestDriverInterruptedIdenticalConfigKeepsConfirmedBundle(t *testing.T) {
+	settings := strings.Replace(bundleConfig(t), "  signature_packs:\n    - discovery/signature-packs/team.json\n  confidence_policy_path: discovery/confidence.yaml\n", "", 1)
+	f := newFixture(t, settings, nil)
+	d := driverFor(t, f)
+	current, err := d.Prepare(t.Context(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := installPreparedBundle(t, d, current)
+	if _, err := d.Finish(current, current.ConfigSHA256, nil, policy, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.in.Version++
+	f.in.BundleID = "b-01JA0000000000000000000042"
+	_, raw, err := enterprisebundle.Compose(t.Context(), f.in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := d.Prepare(t.Context(), f.signed(t, raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(current.Config, staged.Config) {
+		t.Fatal("regression requires identical rendered configs")
+	}
+	if _, _, err := d.SettleRun(current.Config, &policy); err != nil {
+		t.Fatal(err)
+	}
+	state, err := d.Store.LoadState()
+	if err != nil || state.Current == nil || state.Current.BundleID != current.Receipt.BundleID || state.Floor != current.Receipt.Version {
+		t.Fatalf("an interrupted delivery replaced the applied bundle: %+v, %v", state, err)
+	}
+	receipts, err := d.Store.Receipts()
+	if err != nil || len(receipts) == 0 || receipts[0].State != enterprisebundle.StateFailed || receipts[0].ConfigGeneration != 0 {
+		t.Fatalf("unapplied receipt borrowed the installed generation: %+v, %v", receipts, err)
+	}
+	// A retry can recover after a real lifecycle commit even though its
+	// bytes are identical: the generation and the gateway now identify B.
+	retry, err := d.Prepare(t.Context(), f.signed(t, raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy = installPreparedBundle(t, d, retry)
+	if _, _, err := d.SettleRun(retry.Config, &policy); err != nil {
+		t.Fatal(err)
+	}
+	state, err = d.Store.LoadState()
+	if err != nil || state.Current == nil || state.Current.BundleID != retry.Receipt.BundleID || state.Floor != retry.Receipt.Version {
+		t.Fatalf("proven retry was not confirmed: %+v, %v", state, err)
+	}
 }
 
 func TestDriverConfirmedRollbackRecordsSignedProvenance(t *testing.T) {
@@ -75,7 +149,7 @@ func TestDriverConfirmedRollbackRecordsSignedProvenance(t *testing.T) {
 	if p.Receipt.RollbackOf != earlier {
 		t.Fatalf("verified receipt rollback_of = %q", p.Receipt.RollbackOf)
 	}
-	if _, err := d.Finish(p, p.ConfigSHA256, nil, enforcing(p.Receipt.ExpectedDigest), false, nil); err != nil {
+	if _, err := d.Finish(p, p.ConfigSHA256, nil, installPreparedBundle(t, d, p), false, nil); err != nil {
 		t.Fatal(err)
 	}
 	last, _, err := d.Store.Latest()
@@ -183,7 +257,8 @@ func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 				if tc.mismatch {
 					digest = gatewayDigest
 				}
-				policy := enforcing(digest)
+				policy := installPreparedBundle(t, d, p)
+				policy.Digest, policy.EffectiveDigest = digest, digest
 				if tc.gatewayMismatch {
 					policy.Digest = gatewayDigest
 					policy.Applied = false
@@ -327,7 +402,7 @@ func TestDriverConfirmsOnlyAnInstalledAndEnforcedBundle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("third prepare: %v", err)
 	}
-	st, err := d.Finish(good, good.ConfigSHA256, nil, enforcing(good.Receipt.ExpectedDigest), true, rollback)
+	st, err := d.Finish(good, good.ConfigSHA256, nil, installPreparedBundle(t, d, good), true, rollback)
 	if err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
@@ -381,14 +456,16 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			committed := installPreparedBundle(t, d, p)
 			policy := *tc.policy
+			policy.Generation, policy.BundleID, policy.BundleVersion = committed.Generation, committed.BundleID, committed.BundleVersion
 			policy.EffectiveDigest = p.Receipt.ExpectedDigest
 			if policy.Digest == gatewayDigest {
 				policy.Digest = p.Receipt.ExpectedDigest
 			}
 			if !tc.staged {
 				if err := d.Store.Advance(p.Receipt, enterprisebundle.StateApplied, func(rc *enterprisebundle.Receipt) {
-					rc.EffectivePolicyDigest, rc.ConfigSHA256 = p.Receipt.ExpectedDigest, p.ConfigSHA256
+					rc.EffectivePolicyDigest, rc.ConfigSHA256, rc.ConfigGeneration = p.Receipt.ExpectedDigest, p.ConfigSHA256, committed.Generation
 				}); err != nil {
 					t.Fatal(err)
 				}
