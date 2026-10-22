@@ -536,6 +536,9 @@ func TestSharedShellReaderFollowsAManagedSidecarsOpen(t *testing.T) {
 					t.Fatal(err)
 				}
 				test.setup(t, hookDir)
+				if noParserReadsJSONClosed(t, hookDir, tools.json) {
+					want = "closed"
+				}
 				cmd := exec.Command(bash, "-c", `. "$1/_hardening.sh"; defenseclaw_shared_runtime_fail_mode "$1" "$2"`, "test", hookDir, test.connector)
 				cmd.Env = []string{"PATH=" + tools.path, "HOME=" + t.TempDir()}
 				if test.managed {
@@ -626,6 +629,9 @@ func TestManagedSharedHookCombinesSeveralConnectorRecordsToTheStrictest(t *testi
 							t.Fatal(err)
 						}
 					}
+				}
+				if noParserReadsJSONClosed(t, hookDir, tools.json) {
+					want = "closed"
 				}
 				run := func(env ...string) (connector, mode string) {
 					t.Helper()
@@ -811,4 +817,17 @@ func readerToolSets(t *testing.T) []struct {
 func flatRecordValueForTest(data []byte, key string) string {
 	value, _ := flatHookRecordValue(data, key)
 	return value
+}
+
+// noParserReadsJSONClosed reports a reader without jq or python3 beside a
+// hooks/.hookcfg JSON: it cannot read the JSON, which may record a connector
+// no flat record names, so the shared hooks run closed (G-hooks-upg R2-1;
+// only Secure Client delivery keeps its flat-record reading).
+func noParserReadsJSONClosed(t *testing.T, hookDir string, parser bool) bool {
+	t.Helper()
+	if parser {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(hookDir, hookConfigSidecarName))
+	return err == nil
 }

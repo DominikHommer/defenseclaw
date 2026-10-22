@@ -145,6 +145,12 @@ func TestShellHookFailureRecordsNameTheOutcomeTheHookApplied(t *testing.T) {
 					if mode == "closed" {
 						perUser = outage.PerUserClosed
 					}
+					if perUser == OutageFollowsGuardrailMode {
+						// Cursor: the run sets no guardrail mode, and the
+						// train renders such a hook in its closed (action)
+						// posture, so the outage blocks.
+						perUser = OutageBlocks
+					}
 					switch scenario {
 					case "outage":
 						if want := perUser == OutageBlocks; blocked != want {
