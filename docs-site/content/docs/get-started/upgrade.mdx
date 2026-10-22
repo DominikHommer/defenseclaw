@@ -430,15 +430,17 @@ or OmniGent before 1.0.4:
   the file `OMNIGENT_CONFIG` selects and the one under `OMNIGENT_CONFIG_HOME`.
   It changes a file only when the file is exactly as that setup left
   it: the file goes back to what it was before setup, is removed if setup
-  created it, or (the OpenHands hook script) becomes a stub that does nothing.
-  If you changed one of these files since, replaced it with a link,
-  DefenseClaw has no record of writing it, the copy DefenseClaw saved before
-  its setup already named DefenseClaw, an OmniGent config still names the
-  module, or an OpenHands hook may still run the hook script another way, the
-  gateway changes none of them. That includes a hook in the `hooks.json` it
-  would put back, and one it can't follow: a link or wrapper script, a command
-  found on `PATH`, a relative path, or shell syntax such as `$HOME`, `~` or
-  `&&`. Deleting the hook script also clears that step.
+  created it, or (the OpenHands hook script) becomes a stub that blocks every
+  call. If a hook still runs that script, by any path, link, wrapper or shell,
+  OpenHands blocks the call and shows that OpenHands support was removed in
+  1.0.4 and how to remove the hook: delete every hook that runs
+  `openhands-hook.sh` from `~/.openhands/hooks.json` (and any workspace
+  `.openhands/hooks.json`), then restart OpenHands.
+  If you changed one of these files since, replaced it with a link (or made a
+  hard link to the hook script), DefenseClaw has no record of writing it,
+  the copy DefenseClaw saved before its setup already named DefenseClaw, or
+  an OmniGent config still names the module, the gateway changes none of
+  them.
   It prints one warning with the steps to remove
   DefenseClaw's entries by hand, and `defenseclaw status` and
   `defenseclaw doctor` show the same steps. When you have done them, run

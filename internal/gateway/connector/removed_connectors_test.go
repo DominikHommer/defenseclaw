@@ -10,12 +10,10 @@ package connector
 import (
 	"bytes"
 	"context"
-	"debug/elf"
-	"debug/macho"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -133,9 +131,9 @@ type removedHarness struct {
 
 func newRemovedHarness(t *testing.T) *removedHarness {
 	t.Helper()
-	// The home is not named after the test, as t.TempDir is: a comma or a
-	// # in a test's name made every path under it one the OpenHands check
-	// cannot rule out, so a case passed for its name alone.
+	// The home is not named after the test, as t.TempDir is: the OpenHands
+	// tests run hook commands under it, and a blank, a quote or a # from a
+	// test's name would change how the shell reads them.
 	home, err := os.MkdirTemp("", "removed-home-")
 	if err != nil {
 		t.Fatal(err)
@@ -148,9 +146,6 @@ func newRemovedHarness(t *testing.T) *removedHarness {
 	t.Cleanup(restoreHome)
 	t.Setenv("OMNIGENT_CONFIG_HOME", "")
 	t.Setenv("OMNIGENT_CONFIG", "")
-	// The startup file a shell reads when these are set is checked too.
-	t.Setenv("BASH_ENV", "")
-	t.Setenv("ENV", "")
 	notices := &bytes.Buffer{}
 	previous := removedConnectorNotices
 	removedConnectorNotices = notices
@@ -844,10 +839,10 @@ func TestRemovedOpenHandsTeardownUndoesByteIdenticalSetup(t *testing.T) {
 	}
 }
 
-// An OpenHands hooks file that is not as DefenseClaw wrote it and still runs
+// An OpenHands hooks file that is not as DefenseClaw wrote it and still names
 // its hook script (or cannot be read) is left alone, and so is everything
-// else: the hook script stays as it is (no allow-all tombstone while a hook
-// still runs it), the token stays, and one warning gives the step.
+// else: the hook script stays as it is, the token stays, and one warning
+// gives the step.
 func TestRemovedOpenHandsTeardownLeavesUnprovableStateUntouched(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -887,143 +882,11 @@ func TestRemovedOpenHandsTeardownLeavesUnprovableStateUntouched(t *testing.T) {
 				t.Fatalf("VerifyClean with the steps recorded: %v", err)
 			}
 
-			if _, err := os.Lstat(managedFileBackupPath(h.dataDir, removedOpenHandsID, "config")); os.IsNotExist(err) {
-				// With no record of the hooks file setup found, a hook
-				// DefenseClaw cannot see through (here a command found on
-				// PATH) keeps the script, not the tombstone (review loop
-				// round 3); one it can rule out lets the cleanup finish
-				// (round 4).
-				writeRemovedFixture(t, h.hooksPath, openHandsHooksRunning(t, "audit-hook"), 0o600)
-				h.notices.Reset()
-				if err := h.teardown(); err != nil {
-					t.Fatalf("Teardown after the hooks step: %v", err)
-				}
-				if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(h.script) || !record.lists(h.hooksPath) {
-					t.Fatalf("manual cleanup record = %+v, %v; want the script and hooks.json", record, ok)
-				}
-			}
 			writeRemovedFixture(t, h.hooksPath, openHandsOperatorHooks, 0o600)
 			if err := h.teardown(); err != nil {
 				t.Fatalf("Teardown after the manual step: %v", err)
 			}
 			h.requireDone(t)
-		})
-	}
-}
-
-// Review loop round 3: a recorded hooks.json the user changed so that it
-// runs DefenseClaw's hook script without naming its path (a link, a
-// wrapper, $HOME, a relative or doubled path) was taken as clean, and the
-// still-run script became the tombstone, which exits 0: an allow-all hook
-// with no warning. Now such a hooks file and the script are left for the
-// user, byte for byte, until the script is gone.
-func TestRemovedOpenHandsTeardownKeepsAScriptAHookMayStillRun(t *testing.T) {
-	hooks := func(command string) string {
-		data, err := json.Marshal(map[string]interface{}{"pre_tool_use": []interface{}{map[string]interface{}{
-			"matcher": "*", "hooks": []interface{}{map[string]interface{}{"type": "command", "command": command}},
-		}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(data)
-	}
-	for _, tc := range []struct {
-		name       string
-		configHome bool
-		noRecord   bool
-		// command returns the hook command and any file it made.
-		command func(t *testing.T, h *openHandsHarness) (string, []string)
-	}{
-		{name: "through a symlink", command: func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := filepath.Join(h.home, "bin", "oh-hook")
-			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(h.script, link); err != nil {
-				t.Fatal(err)
-			}
-			return link, []string{link}
-		}},
-		{name: "through a wrapper", command: func(t *testing.T, h *openHandsHarness) (string, []string) {
-			wrapper := filepath.Join(h.home, "bin", "wrap.sh")
-			writeRemovedFixture(t, wrapper, "#!/bin/sh\nexec \"$HOME/.defenseclaw/hooks/openhands-hook.sh\" \"$@\"\n", 0o700)
-			return wrapper + " --audit", []string{wrapper}
-		}},
-		{name: "through $HOME", command: func(t *testing.T, h *openHandsHarness) (string, []string) {
-			return "$HOME/.defenseclaw/hooks/" + removedOpenHandsHookScript, nil
-		}},
-		{name: "by a relative path", command: func(t *testing.T, h *openHandsHarness) (string, []string) {
-			return "cd ~/.defenseclaw/hooks && ./" + removedOpenHandsHookScript, nil
-		}},
-		{name: "by a doubled path", command: func(t *testing.T, h *openHandsHarness) (string, []string) {
-			return filepath.Join(h.dataDir, "hooks") + "//" + removedOpenHandsHookScript, nil
-		}},
-		{name: "config home, through a symlink", configHome: true, command: func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := filepath.Join(h.home, "oh-hook")
-			if err := os.Symlink(h.script, link); err != nil {
-				t.Fatal(err)
-			}
-			return link, []string{link}
-		}},
-		{name: "no record, through a symlink", noRecord: true, command: func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := filepath.Join(h.home, "oh-hook")
-			if err := os.Symlink(h.script, link); err != nil {
-				t.Fatal(err)
-			}
-			return link, []string{link}
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newOpenHandsHarness(t, tc.configHome)
-			h.setUp(t, true)
-			if tc.noRecord {
-				discardManagedFileBackup(h.dataDir, removedOpenHandsID, "config")
-			}
-			command, made := tc.command(t, h)
-			writeRemovedFixture(t, h.hooksPath, hooks(command), 0o600)
-			before := h.state(t)
-			for path, body := range removedSnapshot(t, made...) {
-				before[path] = body
-			}
-			for run := 1; run <= 2; run++ {
-				h.notices.Reset()
-				if err := h.teardown(); err != nil {
-					t.Fatalf("Teardown run %d = %v, want the state left for manual cleanup", run, err)
-				}
-				requireRemovedSnapshot(t, "a teardown that cannot prove no hook runs the script", before)
-				h.requirePeerUnchanged(t)
-				notice := h.notices.String()
-				if got := strings.Count(notice, "WARNING"); got != 1 || !strings.Contains(notice, h.hooksPath) || !strings.Contains(notice, h.script) {
-					t.Fatalf("run %d printed %d warnings, want one naming %s and %s:\n%s", run, got, h.hooksPath, h.script, notice)
-				}
-				if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(h.hooksPath) || !record.lists(h.script) {
-					t.Fatalf("manual cleanup record = %+v, %v; want hooks.json and the script", record, ok)
-				}
-				if err := h.verify(); err != nil {
-					t.Fatalf("VerifyClean with the steps recorded: %v", err)
-				}
-			}
-			if err := os.Remove(removedCleanupRecordPath(h.dataDir, removedOpenHandsID)); err != nil {
-				t.Fatal(err)
-			}
-			if err := h.verify(); err == nil || !strings.Contains(err.Error(), "openhands cleanup incomplete") {
-				t.Fatalf("VerifyClean without the record = %v, want the cleanup named incomplete", err)
-			}
-
-			// The user removes the script: nothing can run it any more.
-			if err := os.Remove(h.script); err != nil {
-				t.Fatal(err)
-			}
-			h.notices.Reset()
-			if err := h.teardown(); err != nil {
-				t.Fatalf("Teardown after the manual step: %v", err)
-			}
-			if h.notices.Len() != 0 {
-				t.Fatalf("finished teardown printed: %s", h.notices)
-			}
-			h.noScript = true
-			h.requireDone(t)
-			requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: hooks(command)})
 		})
 	}
 }
@@ -1259,7 +1122,9 @@ func TestRemovedOmnigentTeardownPutsSavedCopiesBackExactly(t *testing.T) {
 // an edited script, no digest, not a file) stops the whole cleanup: hooks.json,
 // the script and a link's target stay byte for byte and the step is recorded.
 // Once the user deletes the script, the next teardown restores hooks.json and
-// writes no tombstone. A script that is already a tombstone needs no record.
+// writes no tombstone. A tombstone that exits 0, which a 1.0.x teardown (or
+// an earlier 1.0.4 build) wrote, needs no record: its bytes are DefenseClaw's,
+// and it becomes the tombstone that blocks.
 func TestRemovedOpenHandsTeardownLeavesForeignHookScript(t *testing.T) {
 	const userScript = "#!/bin/sh\nexec /usr/local/bin/my-hook \"$@\"\n"
 	for _, tc := range []struct {
@@ -1352,21 +1217,27 @@ func TestRemovedOpenHandsTeardownLeavesForeignHookScript(t *testing.T) {
 		})
 	}
 	for _, label := range []string{"OpenHands", "openhands"} {
-		t.Run("script is the tombstone "+label+" teardown wrote", func(t *testing.T) {
+		t.Run("script is the tombstone that exits 0 a "+label+" teardown wrote", func(t *testing.T) {
 			h := newOpenHandsHarness(t, false)
-			h.setUp(t, true)
+			// The saved hooks.json runs the script through a link.
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "oh-audit"))
+			saved := openHandsHooksRunning(t, link)
+			h.setUpOver(t, saved, false)
 			writeRemovedFixture(t, h.script, disabledHookTombstone(label), 0o700)
 			if err := ClearHookContractLockEntry(h.dataDir, removedOpenHandsID); err != nil {
 				t.Fatal(err)
 			}
-			if err := h.teardown(); err != nil {
-				t.Fatalf("Teardown: %v", err)
+			for run := 1; run <= 2; run++ {
+				if err := h.teardown(); err != nil {
+					t.Fatalf("Teardown run %d: %v", run, err)
+				}
+				h.requireDone(t)
 			}
-			requireRemovedSnapshot(t, "teardown", map[string]string{h.script: disabledHookTombstone(label)})
-			h.requireDone(t)
 			if h.notices.Len() != 0 {
 				t.Fatalf("a clean teardown printed: %s", h.notices)
 			}
+			requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: saved})
+			requireOpenHandsDeny(t, link, runOpenHandsHook(t, h, link, nil))
 		})
 	}
 }
@@ -1565,577 +1436,334 @@ func (h *openHandsHarness) setUpOver(t *testing.T, saved string, back bool) {
 	}
 }
 
-// Review loop round 4: the copy of hooks.json setup found, which the cleanup
-// puts back, was not checked: a hook in it that ran DefenseClaw's script
-// without naming its path (a link, a wrapper, $HOME) was put back and the
-// script became the tombstone, which exits 0. A hooks file already back to
-// that copy was taken as proof too. Now every command in the hooks the
-// cleanup leaves, the copy it puts back included, must be ruled out first;
-// otherwise nothing changes, hooks.json and the script are left for the
-// user, and the cleanup finishes once the script is gone.
-func TestRemovedOpenHandsTeardownChecksTheHooksItPutsBack(t *testing.T) {
-	wrapper := func(t *testing.T, h *openHandsHarness, body string) string {
-		t.Helper()
-		path := filepath.Join(h.home, "tools", "audit.sh")
-		writeRemovedFixture(t, path, "#!/bin/sh\n"+body, 0o700)
-		return path
-	}
-	// startup makes a startup file (name, under home) that runs a link to
-	// the script, and a wrapper (text) the hook runs; it returns the files
-	// it made, the wrapper first.
-	startup := func(t *testing.T, h *openHandsHarness, name, text string) []string {
-		t.Helper()
-		link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "relay"))
-		file := filepath.Join(h.home, name)
-		writeRemovedFixture(t, file, link+"\n", 0o600)
-		path := filepath.Join(h.home, "tools", "audit")
-		writeRemovedFixture(t, path, text, 0o700)
-		return []string{path, file, link}
-	}
-	// startupRun is startup with a plain wrapper the command runs.
-	startupRun := func(name, command string) func(t *testing.T, h *openHandsHarness) (string, []string) {
-		return func(t *testing.T, h *openHandsHarness) (string, []string) {
-			made := startup(t, h, name, "#!/bin/sh\nexit 0\n")
-			return command + " " + made[0], made
-		}
-	}
-	// startupWrapper is startup with a wrapper (text) the hook runs.
-	startupWrapper := func(name, text string) func(t *testing.T, h *openHandsHarness) (string, []string) {
-		return func(t *testing.T, h *openHandsHarness) (string, []string) {
-			made := startup(t, h, name, text)
-			return made[0], made
-		}
-	}
-	for _, tc := range []struct {
-		name string
-		// command returns the saved hook command and the files it made.
-		command func(t *testing.T, h *openHandsHarness) (string, []string)
-	}{
-		{"a symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
-			return link, []string{link}
-		}},
-		{"a hard link", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := filepath.Join(h.home, "hooks-of-mine", "audit")
-			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Link(h.script, link); err != nil {
-				t.Fatal(err)
-			}
-			return link, []string{link}
-		}},
-		{"an interpreter that runs a symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
-			return "/bin/sh " + link + " --audit 30", []string{link}
-		}},
-		{"an option that names a symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
-			return "/bin/sh --rcfile=" + link, []string{link}
-		}},
-		{"an option that holds code", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
-			return "/bin/sh '-cexec " + link + "'", []string{link}
-		}},
-		{"an option with a relative value", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			return "/bin/sh --rcfile=bin/oh-audit", nil
-		}},
-		{"a quoted symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "my hooks", "audit"))
-			return "'" + link + "'", []string{link}
-		}},
-		{"a wrapper that names the script under HOME", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			path := wrapper(t, h, "exec \"$HOME/.defenseclaw/hooks/openhands-hook.sh\" \"$@\"\n")
-			return path, []string{path}
-		}},
-		{"a wrapper that runs another symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
-			path := wrapper(t, h, "exec "+link+" \"$@\"\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a symlink under ~", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
-			path := wrapper(t, h, "exec ~/lib/run \"$@\"\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a symlink under a quoted HOME", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
-			path := wrapper(t, h, "exec \"$HOME\"/lib/run \"$@\"\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper's wrapper", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			inner := filepath.Join(h.home, "lib", "inner.sh")
-			writeRemovedFixture(t, inner, "#!/bin/sh\nexec \"$HOME/.defenseclaw/hooks/openhands-hook.sh\"\n", 0o700)
-			path := wrapper(t, h, "exec "+inner+"\n")
-			return path, []string{path, inner}
-		}},
-		{"a wrapper that runs a symlink found on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "oh-audit"))
-			path := wrapper(t, h, "exec oh-audit \"$@\"\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a relative path", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
-			path := wrapper(t, h, "cd "+filepath.Dir(link)+" && ./run\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a path from a variable", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
-			path := wrapper(t, h, "LIB="+filepath.Dir(link)+"\nexec \"$LIB/run\"\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a path beside itself", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "tools", "run"))
-			path := wrapper(t, h, "exec \"$(dirname \"$0\")/run\"\n")
-			return path, []string{path, link}
-		}},
-		// Review fixes (loop round 1): a wrapper path the check read only in
-		// part (a blank in quotes, an escape, a joined quote, a character
-		// outside the plain set, a relative path, a PATH list) was ruled out
-		// through the parts it read, which are not there.
-		{"a wrapper that runs a double-quoted path with a blank", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay-zq93"))
-			path := wrapper(t, h, "exec \""+link+"\" \"$@\"\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a single-quoted path with a blank", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
-			path := wrapper(t, h, "exec '"+link+"'\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a quoted path with a blank under HOME", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
-			path := wrapper(t, h, "exec \"$HOME/audit dir/relay\" \"$@\"\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a path with an escaped blank", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
-			path := wrapper(t, h, "exec "+strings.ReplaceAll(link, " ", `\ `)+" \"$@\"\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a path joined from quoted parts", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
-			path := wrapper(t, h, "exec '"+filepath.Dir(link)+"'/relay\n")
-			return path, []string{path, link}
-		}},
-		{"a Python wrapper that runs a quoted path with a blank", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
-			path := wrapper(t, h, "import os, sys\nos.execv(\""+link+"\", [\""+link+"\"] + sys.argv[1:])\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a path with a character outside the plain set", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks#1", "relay"))
-			path := wrapper(t, h, "exec "+link+" \"$@\"\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a path with letters outside ASCII", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "h\u00e4kchen", "relay"))
-			path := wrapper(t, h, "exec "+link+"\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a relative path without ./", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
-			path := wrapper(t, h, "exec lib/run \"$@\"\n")
-			return path, []string{path, link}
-		}},
-		{"a Python wrapper that builds the path at run time", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
-			path := filepath.Join(h.home, "tools", "audit")
-			writeRemovedFixture(t, path, "#!/usr/bin/env python3\nimport os, sys\nos.execv(os.path.join(os.environ[\"HOME\"], \"audit dir\", \"relay\"), sys.argv)\n", 0o700)
-			return path, []string{path, link}
-		}},
-		{"a Python script an interpreter runs", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
-			path := filepath.Join(h.home, "tools", "audit.py")
-			writeRemovedFixture(t, path, "import os, sys\nos.execv(os.path.join(os.environ[\"HOME\"], \"lib\", \"run\"), sys.argv)\n", 0o600)
-			return "/usr/bin/python3 " + path, []string{path, link}
-		}},
-		{"a wrapper that puts a directory on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "oh-relay"))
-			path := wrapper(t, h, "PATH=/usr/bin:"+filepath.Dir(link)+"\nexport PATH\nexec oh-relay \"$@\"\n")
-			return path, []string{path, link}
-		}},
-		{"a directory that holds a symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
-			return "/bin/ls " + filepath.Dir(link), []string{link}
-		}},
-		{"$HOME", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			return "$HOME/.defenseclaw/hooks/" + removedOpenHandsHookScript, nil
-		}},
-		{"~", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			return "~/.defenseclaw/hooks/" + removedOpenHandsHookScript, nil
-		}},
-		{"a doubled path", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			return filepath.Join(h.dataDir, "hooks") + "//" + removedOpenHandsHookScript, nil
-		}},
-		{"a command found on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			return "oh-audit", nil
-		}},
-		{"a relative path", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			return "bin/oh-audit", nil
-		}},
-		{"a shell list", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
-			return "/bin/true; " + link, []string{link}
-		}},
-		// Review fixes (G-deadcode loop round 2): an option or argument the
-		// program runs (env -S, --split-string, -m, --require, a number
-		// found on PATH, a command line split at its blanks, a list, a
-		// shell's own -l) was ruled out as a plain option or a path that is
-		// not there.
-		{"env -S that runs a command found on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
-			return "/usr/bin/env -Srelay", []string{link}
-		}},
-		{"env --split-string that runs a command found on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
-			return "/usr/bin/env --split-string=relay", []string{link}
-		}},
-		{"env -S with its command line in the next word", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
-			return "/usr/bin/env -S '/usr/bin/env relay'", []string{link}
-		}},
-		{"env -S with its command line attached", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
-			return "/usr/bin/env '-S/usr/bin/env relay'", []string{link}
-		}},
-		{"--split-string with an absolute command line", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
-			return "/usr/bin/env '--split-string=/usr/bin/env relay'", []string{link}
-		}},
-		{"an option whose list names a command", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
-			return "/usr/bin/env --list=/dev/null,relay", []string{link}
-		}},
-		{"an interpreter option that runs a module", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
-			return "/usr/bin/python3 -mrelay", []string{link}
-		}},
-		{"an option that names a module to load", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
-			return "/usr/bin/node --require=relay", []string{link}
-		}},
-		{"a number found on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "30"))
-			return "/usr/bin/env 30", []string{link}
-		}},
-		{"a command that is a number found on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "30"))
-			return "30", []string{link}
-		}},
-		{"a login shell", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "relay"))
-			profile := filepath.Join(h.home, ".profile")
-			writeRemovedFixture(t, profile, link+"\n", 0o600)
-			path := wrapper(t, h, "exit 0\n")
-			return "/bin/sh -l " + path, []string{link, profile, path}
-		}},
-		{"a login shell that env runs", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "relay"))
-			profile := filepath.Join(h.home, ".profile")
-			writeRemovedFixture(t, profile, link+"\n", 0o600)
-			path := wrapper(t, h, "exit 0\n")
-			return "/usr/bin/env -i /bin/sh --login " + path, []string{link, profile, path}
-		}},
-		// Review fixes (G-deadcode loop round 3): a file with a NUL byte
-		// was taken for a program and ruled out by the names in its bytes.
-		// But a shell reads a script that holds one, and runs as a script
-		// a file the system cannot load; only machine code the loader runs
-		// is a program now.
-		{"a shell script with a NUL byte that runs a symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
-			path := filepath.Join(h.home, "audit")
-			writeRemovedFixture(t, path, "#!/bin/sh\n: \x00\nexec "+link+" \"$@\"\n", 0o700)
-			return "/bin/sh " + path, []string{path, link}
-		}},
-		{"a script with a NUL byte and no #! line", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
-			path := filepath.Join(h.home, "audit")
-			writeRemovedFixture(t, path, "\x00\nexec "+link+"\n", 0o700)
-			return path, []string{path, link}
-		}},
-		{"a script with a NUL byte after the command", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
-			path := wrapper(t, h, link+"\n# \x00\n")
-			return path, []string{path, link}
-		}},
-		{"a wrapper that runs a script with a NUL byte", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
-			inner := filepath.Join(h.home, "lib", "inner")
-			writeRemovedFixture(t, inner, "#!/bin/sh\n: \x00\nexec "+link+"\n", 0o700)
-			path := wrapper(t, h, "exec "+inner+" \"$@\"\n")
-			return path, []string{path, inner, link}
-		}},
-		{"a script behind an ELF magic number", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
-			path := filepath.Join(h.home, "audit")
-			writeRemovedFixture(t, path, "\x7fELF\x02\x01\x01\x00\x00\nexec "+link+"\n", 0o700)
-			return "/bin/sh " + path, []string{path, link}
-		}},
-		{"a script behind an image this system does not load", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
-			path := filepath.Join(h.home, "audit")
-			writeRemovedFixture(t, path, string(removedTestImage(t, "windows"))+"\nexec "+link+"\n", 0o700)
-			return path, []string{path, link}
-		}},
-		// Review fixes (G-deadcode loop round 4): a shell reads startup
-		// files the command does not show with no option too (zsh, csh,
-		// fish, the file BASH_ENV or ENV names), sudo -i starts a login
-		// shell, and a wrapper starts one through its #! line (#!/bin/sh -l,
-		// env -S bash -l, zsh, a variable env sets) or a command in it
-		// (exec /bin/sh -l, bash -l, $SHELL, sudo -i, or a shell given the
-		// hook's own -l).
-		{"zsh, which reads .zshenv", startupRun(".zshenv", "/bin/zsh")},
-		{"zsh that env runs", startupRun(".zshenv", "/usr/bin/env /bin/zsh")},
-		{"csh, which reads .cshrc", startupRun(".cshrc", "/bin/csh")},
-		{"fish, which reads config.fish", startupRun(".config/fish/config.fish", "/usr/bin/fish")},
-		{"sudo -i, which starts a login shell", startupRun(".profile", "/usr/bin/sudo -i")},
-		{"script, which runs $SHELL", startupRun(".zshenv", "/usr/bin/script")},
-		{"a shell under another name", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			// The system's bash (a program in a shell directory) and a hard
-			// link to it under another name.
-			command, made := startupRun(".profile", "")(t, h)
-			system := filepath.Join(h.home, "system-bin")
-			bash := filepath.Join(system, "bash")
-			writeRemovedFixture(t, bash, string(removedTestImage(t, runtime.GOOS)), 0o700)
-			previous := removedShellDirs
-			removedShellDirs = append([]string{system}, previous...)
-			t.Cleanup(func() { removedShellDirs = previous })
-			shell := filepath.Join(h.home, "bin", "audit-runner")
-			if err := os.MkdirAll(filepath.Dir(shell), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Link(bash, shell); err != nil {
-				t.Fatal(err)
-			}
-			return shell + " -l" + command, append(made, bash, shell)
-		}},
-		{"bash with BASH_ENV set", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			command, made := startupRun(".bashenv", "/bin/bash")(t, h)
-			t.Setenv("BASH_ENV", made[1])
-			return command, made
-		}},
-		{"bash with a BASH_ENV the shell expands", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			command, made := startupRun(".bashenv", "/bin/bash")(t, h)
-			t.Setenv("BASH_ENV", "$HOME/.bashenv")
-			return command, made
-		}},
-		{"a Korn shell with ENV set", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			command, made := startupRun(".kshrc", "/bin/ksh")(t, h)
-			t.Setenv("ENV", made[1])
-			return command, made
-		}},
-		{"a #! line that passes the shell -l", startupWrapper(".profile", "#!/bin/sh -l\nexit 0\n")},
-		{"a #! line that runs bash -l through env -S", startupWrapper(".bash_profile", "#!/usr/bin/env -S bash -l\nexit 0\n")},
-		{"a #! line that runs zsh", startupWrapper(".zshenv", "#!/bin/zsh\nexit 0\n")},
-		{"a #! line that sets BASH_ENV through env", startupWrapper(".bashenv", "#!/usr/bin/env BASH_ENV=.bashenv bash\nexit 0\n")},
-		{"a wrapper that runs a login shell", startupWrapper(".profile", "#!/bin/sh\nexec /bin/sh -l -c true\n")},
-		{"a wrapper that runs bash -l found on PATH", startupWrapper(".bash_profile", "#!/bin/sh\nexec bash -l -c true\n")},
-		{"a wrapper that runs $SHELL", startupWrapper(".zshenv", "#!/bin/sh\nexec \"$SHELL\" -c true\n")},
-		{"a wrapper that runs sudo -i", startupWrapper(".profile", "#!/bin/sh\nexec sudo -i true\n")},
-		{"a wrapper that gives a shell the hook's -l", func(t *testing.T, h *openHandsHarness) (string, []string) {
-			made := startup(t, h, ".profile", "#!/bin/sh\nexec /bin/sh \"$@\"\n")
-			return made[0] + " -l", made
-		}},
-	} {
-		for _, back := range []bool{false, true} {
-			mode := "put back by the cleanup"
-			if back {
-				mode = "already back to the saved copy"
-			}
-			t.Run(tc.name+", "+mode, func(t *testing.T) {
-				h := newOpenHandsHarness(t, false)
-				command, made := tc.command(t, h)
-				saved := openHandsHooksRunning(t, "/usr/local/bin/audit-hook", command)
-				h.setUpOver(t, saved, back)
-				before := h.state(t)
-				for path, body := range removedSnapshot(t, made...) {
-					before[path] = body
-				}
-				for run := 1; run <= 2; run++ {
-					h.notices.Reset()
-					if err := h.teardown(); err != nil {
-						t.Fatalf("Teardown run %d = %v, want the state left for manual cleanup", run, err)
-					}
-					requireRemovedSnapshot(t, "a teardown that cannot rule out a hook it puts back", before)
-					h.requirePeerUnchanged(t)
-					notice := h.notices.String()
-					if got := strings.Count(notice, "WARNING"); got != 1 || !strings.Contains(notice, h.hooksPath) || !strings.Contains(notice, h.script) {
-						t.Fatalf("run %d printed %d warnings, want one naming %s and %s:\n%s", run, got, h.hooksPath, h.script, notice)
-					}
-					if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(h.hooksPath) || !record.lists(h.script) {
-						t.Fatalf("manual cleanup record = %+v, %v; want hooks.json and the script", record, ok)
-					}
-					if err := h.verify(); err != nil {
-						t.Fatalf("VerifyClean with the steps recorded: %v", err)
-					}
-				}
-				if err := os.Remove(removedCleanupRecordPath(h.dataDir, removedOpenHandsID)); err != nil {
-					t.Fatal(err)
-				}
-				if err := h.verify(); err == nil || !strings.Contains(err.Error(), "openhands cleanup incomplete") {
-					t.Fatalf("VerifyClean without the record = %v, want the cleanup named incomplete", err)
-				}
+// --- Review fixes (G-deadcode, the tombstone never allows) ---
 
-				// The user deletes the script: nothing can run it any more.
-				if err := os.Remove(h.script); err != nil {
-					t.Fatal(err)
-				}
-				h.notices.Reset()
-				if err := h.teardown(); err != nil {
-					t.Fatalf("Teardown after the manual step: %v", err)
-				}
-				if h.notices.Len() != 0 {
-					t.Fatalf("finished teardown printed: %s", h.notices)
-				}
-				h.noScript = true
-				h.requireDone(t)
-				requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: saved})
-			})
-		}
+// removedQuote quotes s as one shell word.
+func removedQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// removedHookRun is what running an OpenHands hook command gave.
+type removedHookRun struct {
+	status         int
+	stdout, stderr string
+}
+
+// runOpenHandsHook runs a hook command the way OpenHands runs one (sh -c), as
+// the user (home, with ~/bin first on PATH, plus env), with a tool call on
+// stdin.
+func runOpenHandsHook(t *testing.T, h *openHandsHarness, command string, env []string) removedHookRun {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", command)
+	cmd.Dir = h.home
+	cmd.Env = append([]string{"HOME=" + h.home, "PATH=" + filepath.Join(h.home, "bin") + ":/usr/bin:/bin", "SHELL=/bin/sh", "LC_ALL=C"}, env...)
+	cmd.Stdin = strings.NewReader(`{"event":"pre_tool_use","tool_name":"bash","tool_input":{"command":"rm -rf ~"}}` + "\n")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	run := removedHookRun{}
+	var exit *exec.ExitError
+	switch err := cmd.Run(); {
+	case errors.As(err, &exit):
+		run.status = exit.ExitCode()
+	case err != nil:
+		t.Fatalf("run %q: %v", command, err)
+	}
+	run.stdout, run.stderr = stdout.String(), stderr.String()
+	return run
+}
+
+// requireOpenHandsDeny checks that a hook run blocked the call: exit status 2,
+// and a last line of output that is the deny decision with the message that
+// says OpenHands support was removed and how to remove the hook.
+func requireOpenHandsDeny(t *testing.T, what string, run removedHookRun) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(run.stdout), "\n")
+	var reply struct{ Decision, Reason string }
+	if run.status != 2 || json.Unmarshal([]byte(lines[len(lines)-1]), &reply) != nil || reply.Decision != "deny" ||
+		!strings.Contains(reply.Reason, "OpenHands support was removed in DefenseClaw 1.0.4") ||
+		!strings.Contains(reply.Reason, "remove every hook that runs "+removedOpenHandsHookScript+" from your OpenHands hooks.json") {
+		t.Fatalf("%s: exit %d, stdout %q, stderr %q; want exit 2 and the deny decision with the removal message", what, run.status, run.stdout, run.stderr)
 	}
 }
 
-// A saved hooks.json whose every command is ruled out (a path that is not
-// there, a plain wrapper, an interpreter with a plain script, a quoted path,
-// a binary) is put back and the script becomes the tombstone with no warning.
-func TestRemovedOpenHandsTeardownTombstonesWhenEverySavedHookIsRuledOut(t *testing.T) {
-	for _, back := range []bool{false, true} {
-		t.Run(map[bool]string{false: "put back by the cleanup", true: "already back to the saved copy"}[back], func(t *testing.T) {
+// A hard link to the hook script keeps the old bytes when the tombstone
+// replaces the file, so a hook that runs the link would not run the
+// tombstone. Such a script, the one an older setup wrote or a tombstone that
+// exits 0, is left for the user with hooks.json; once the link is gone the
+// cleanup finishes and the script blocks.
+func TestRemovedOpenHandsTeardownLeavesAHardLinkedScript(t *testing.T) {
+	for _, tc := range []struct{ name, script string }{
+		{name: "the script an older setup wrote"},
+		{name: "a tombstone that exits 0", script: disabledHookTombstone(removedOpenHandsID)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			h := newOpenHandsHarness(t, false)
-			plain := filepath.Join(h.home, "tools", "audit.sh")
-			writeRemovedFixture(t, plain, "#!/bin/sh\n# audit every tool call\necho audited >&2\nexit 0\n", 0o700)
-			spaced := filepath.Join(h.home, "my hooks", "audit.sh")
-			writeRemovedFixture(t, spaced, "#!/usr/bin/env sh\nexit 0\n", 0o700)
-			compiled := filepath.Join(h.home, "tools", "audit-bin")
-			writeRemovedFixture(t, compiled, string(removedTestImage(t, runtime.GOOS))+"/usr/lib/x\x00", 0o700)
-			// A wrapper that runs a quoted path with a blank (checked whole,
-			// and the rest of the string is part of it), a URL and /dev/null.
-			// BASH_ENV names a plain file: bash reads it, and it runs nothing.
-			bashEnv := filepath.Join(h.home, ".bashenv")
-			writeRemovedFixture(t, bashEnv, "umask 077\n", 0o600)
-			t.Setenv("BASH_ENV", bashEnv)
-			quoted := filepath.Join(h.home, "tools", "run-quoted.sh")
-			writeRemovedFixture(t, quoted, "#!/bin/sh\n# runs my audit hook\ncurl -fsS http://127.0.0.1:9/audit || true\nexec \""+spaced+"\" --audit \"$@\" 2>/dev/null\n", 0o700)
-			saved := openHandsHooksRunning(t,
-				"/usr/local/bin/audit-hook",
-				plain,
-				"/bin/sh "+plain+" --audit -x --log="+filepath.Join(h.home, "tools", "audit.log"),
-				"/bin/bash "+plain,
-				"'"+spaced+"'",
-				compiled+" --config="+filepath.Join(h.home, "tools", "missing.toml"),
-				compiled+" -v --paths=/dev/null,"+filepath.Join(h.home, "tools", "missing.d")+" /dev/null",
-				quoted,
-			)
-			h.setUpOver(t, saved, back)
-			if err := h.teardown(); err != nil {
-				t.Fatalf("Teardown: %v", err)
+			if tc.script != "" {
+				writeRemovedFixture(t, h.script, tc.script, 0o700)
 			}
-			if h.notices.Len() != 0 {
-				t.Fatalf("a clean teardown printed: %s", h.notices)
+			hardLink := filepath.Join(h.home, "hooks-of-mine", "audit")
+			if err := os.MkdirAll(filepath.Dir(hardLink), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(h.script, hardLink); err != nil {
+				t.Fatal(err)
+			}
+			saved := openHandsHooksRunning(t, hardLink)
+			h.setUpOver(t, saved, false)
+			before := h.state(t)
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown = %v, want the state left for manual cleanup", err)
+			}
+			requireRemovedSnapshot(t, "a teardown with a hard-linked script", before)
+			if notice := h.notices.String(); strings.Count(notice, "WARNING") != 1 || !strings.Contains(notice, h.script) || !strings.Contains(notice, "hard link") {
+				t.Fatalf("notice = %q, want one warning naming %s and its hard link", notice, h.script)
+			}
+			if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(h.script) {
+				t.Fatalf("manual cleanup record = %+v, %v; want the script", record, ok)
+			}
+			if err := h.verify(); err != nil {
+				t.Fatalf("VerifyClean with the steps recorded: %v", err)
+			}
+			if err := os.Remove(hardLink); err != nil {
+				t.Fatal(err)
+			}
+			h.notices.Reset()
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown after the manual step: %v", err)
 			}
 			h.requireDone(t)
 			requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: saved})
+			requireOpenHandsDeny(t, h.script, runOpenHandsHook(t, h, removedQuote(h.script), nil))
 		})
 	}
 }
 
-// removedTestImage is the smallest program the loader of goos takes: an ELF
-// executable header (Linux and the other Unix systems), a universal Mach-O
-// executable (macOS) or a PE header (Windows).
-func removedTestImage(t *testing.T, goos string) []byte {
-	t.Helper()
-	var b bytes.Buffer
-	write := func(order binary.ByteOrder, v interface{}) {
-		if err := binary.Write(&b, order, v); err != nil {
-			t.Fatal(err)
-		}
-	}
-	switch goos {
-	case "windows":
-		dos := make([]byte, 64)
-		copy(dos, "MZ")
-		binary.LittleEndian.PutUint32(dos[0x3c:], 64)
-		b.Write(dos)
-		b.WriteString("PE\x00\x00")
-		// The fixed part of a PE32+ optional header, no data directories.
-		optional := make([]byte, 112)
-		binary.LittleEndian.PutUint16(optional, 0x20b)
-		write(binary.LittleEndian, struct {
-			Machine, Sections          uint16
-			Time, Symbols, SymbolCount uint32
-			OptionalHeaderSize, Flags  uint16
-		}{Machine: 0x8664, OptionalHeaderSize: uint16(len(optional)), Flags: 0x0002})
-		b.Write(optional)
-	case "darwin":
-		var thin bytes.Buffer
-		// One LC_UUID load command.
-		uuid := make([]byte, 24)
-		binary.LittleEndian.PutUint32(uuid, 0x1b)
-		binary.LittleEndian.PutUint32(uuid[4:], uint32(len(uuid)))
-		if err := binary.Write(&thin, binary.LittleEndian, macho.FileHeader{Magic: macho.Magic64, Cpu: macho.CpuArm64, Type: macho.TypeExec, Ncmd: 1, Cmdsz: uint32(len(uuid))}); err != nil {
-			t.Fatal(err)
-		}
-		thin.Write(make([]byte, 4))
-		thin.Write(uuid)
-		write(binary.BigEndian, []uint32{macho.MagicFat, 1, uint32(macho.CpuArm64), 0, 64, uint32(thin.Len()), 0})
-		b.Write(make([]byte, 64-b.Len()))
-		b.Write(thin.Bytes())
-	default:
-		// An ELF header and one PT_LOAD program header that maps it.
-		header := elf.Header64{Type: uint16(elf.ET_EXEC), Machine: uint16(elf.EM_X86_64), Version: uint32(elf.EV_CURRENT),
-			Phoff: 64, Ehsize: 64, Phentsize: 56, Phnum: 1}
-		copy(header.Ident[:], elf.ELFMAG)
-		header.Ident[elf.EI_CLASS] = byte(elf.ELFCLASS64)
-		header.Ident[elf.EI_DATA] = byte(elf.ELFDATA2LSB)
-		header.Ident[elf.EI_VERSION] = byte(elf.EV_CURRENT)
-		write(binary.LittleEndian, header)
-		write(binary.LittleEndian, elf.Prog64{Type: uint32(elf.PT_LOAD), Flags: uint32(elf.PF_R | elf.PF_X), Filesz: 120, Memsz: 120, Align: 0x1000})
-	}
-	return b.Bytes()
+// envSplitsWords reports whether this system's env takes -S.
+func envSplitsWords() bool {
+	return exec.Command("/usr/bin/env", "-S", "true").Run() == nil
 }
 
-// Only machine code that this system's loader runs is a program the check
-// rules out by its bytes: an image for another system, a header that does
-// not parse, a header the loader refuses (no segment, no load command, no
-// optional header) and an object file are run, if at all, as shell scripts.
-func TestRemovedLoadableImageIsMachineCodeThisSystemRuns(t *testing.T) {
-	changed := func(goos string, at int, change func([]byte)) []byte {
-		image := removedTestImage(t, goos)
-		change(image[at:])
-		return image
+// Review fixes (G-deadcode, class rule): the OpenHands tombstone exited 0, so
+// any hook that still ran the script once the cleanup was done allowed every
+// call; the check that tried to rule such hooks out kept missing some (a
+// login shell under a name it did not know read a profile that ran the
+// script). The tombstone now blocks every call, whatever runs it, with a
+// message that says OpenHands support was removed and how to remove the hook.
+func TestRemovedOpenHandsTombstoneBlocksUnderEveryShell(t *testing.T) {
+	h := newOpenHandsHarness(t, false)
+	h.setUp(t, true)
+	if err := h.teardown(); err != nil {
+		t.Fatalf("Teardown: %v", err)
 	}
-	images := map[string][]byte{
-		"ELF":    removedTestImage(t, "linux"),
-		"Mach-O": removedTestImage(t, "darwin"),
-		"PE":     removedTestImage(t, "windows"),
-		"ELF object": changed("linux", 16, func(b []byte) {
-			binary.LittleEndian.PutUint16(b, uint16(elf.ET_REL))
-		}),
-		"ELF header with no segment": removedTestImage(t, "linux")[:64],
-		"ELF with no loadable segment": changed("linux", 64, func(b []byte) {
-			binary.LittleEndian.PutUint32(b, uint32(elf.PT_NOTE))
-		}),
-		"Mach-O object": changed("darwin", 64+12, func(b []byte) {
-			binary.LittleEndian.PutUint32(b, uint32(macho.TypeObj))
-		}),
-		"Mach-O header with no load command": changed("darwin", 64+16, func(b []byte) {
-			copy(b, make([]byte, 8))
-		}),
-		"PE with no optional header": changed("windows", 64+4+16, func(b []byte) {
-			binary.LittleEndian.PutUint16(b, 0)
-		}),
-		"ELF magic number only": []byte("\x7fELF\x02\x01\x01\x00\x00\nexec /tmp/relay\n"),
-		"MZ only":               []byte("MZ\x00\nexec /tmp/relay\n"),
-		"shell script":          []byte("#!/bin/sh\n: \x00\nexec /tmp/relay\n"),
+	h.requireDone(t)
+	script := removedQuote(h.script)
+	quoted := linkRemovedScript(t, h, filepath.Join(h.home, "my hooks", "openhands hook"))
+	commands := []string{
+		script,
+		script + " --event pre_tool_use 30",
+		removedQuote(quoted),
+		`"` + quoted + `"`,
+		"$HOME/.defenseclaw/hooks/" + removedOpenHandsHookScript,
+		"~/.defenseclaw/hooks/" + removedOpenHandsHookScript,
+		filepath.Join(h.dataDir, "hooks") + "//" + removedOpenHandsHookScript,
+		"exec " + script,
+		"/bin/true; " + script,
+		". " + script,
+		"/bin/sh " + script,
+		"/bin/sh -e " + script,
+		"/bin/sh -l " + script,
+		"/bin/sh -x " + script,
+		"/bin/sh < " + script,
+		"/bin/sh -c " + removedQuote(script+" --audit"),
+		"/bin/sh -c " + removedQuote(". "+script),
+		"/usr/bin/env " + script,
+		"/usr/bin/env -i " + script,
 	}
-	for _, tc := range []struct {
-		goos, loads string
-	}{{"linux", "ELF"}, {"freebsd", "ELF"}, {"darwin", "Mach-O"}, {"windows", "PE"}} {
-		for name, image := range images {
-			if got, want := removedLoadableImage(bytes.NewReader(image), tc.goos), name == tc.loads; got != want {
-				t.Errorf("removedLoadableImage(%s) on %s = %v, want %v", name, tc.goos, got, want)
+	if envSplitsWords() {
+		commands = append(commands, "/usr/bin/env -S "+removedQuote(script+" --audit"))
+	}
+	shells := 0
+	for _, shell := range []string{"bash", "dash", "zsh", "ksh", "mksh", "csh", "tcsh", "fish", "busybox"} {
+		path, err := exec.LookPath(shell)
+		if err != nil {
+			continue
+		}
+		shells++
+		if shell == "busybox" {
+			commands = append(commands, path+" sh "+script)
+			continue
+		}
+		commands = append(commands, path+" "+script, path+" -l "+script)
+	}
+	if shells == 0 {
+		t.Log("no shell but /bin/sh found")
+	}
+	for _, command := range commands {
+		requireOpenHandsDeny(t, command, runOpenHandsHook(t, h, command, nil))
+	}
+}
+
+// Every hook that still runs the script after the cleanup (one in the
+// hooks.json the cleanup puts back, or in the user's own hooks.json) blocks
+// the call with the removal message: the cleanup no longer tries to rule such
+// hooks out. It puts hooks.json back, makes the script the tombstone and
+// prints nothing.
+func TestRemovedOpenHandsTombstoneBlocksEveryHookThatStillRunsIt(t *testing.T) {
+	type hook func(t *testing.T, h *openHandsHarness) (command string, env []string)
+	link := func(name string) hook {
+		return func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return linkRemovedScript(t, h, filepath.Join(h.home, name)), nil
+		}
+	}
+	// wrapper makes ~/tools/audit with text and returns the command that runs it.
+	wrapper := func(t *testing.T, h *openHandsHarness, text string) string {
+		t.Helper()
+		path := filepath.Join(h.home, "tools", "audit")
+		writeRemovedFixture(t, path, text, 0o700)
+		return path
+	}
+	// startup makes the startup file name (under home) exec a link to the
+	// script, and a plain script for the command to run.
+	startup := func(name, command string) hook {
+		return func(t *testing.T, h *openHandsHarness) (string, []string) {
+			relay := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "relay"))
+			writeRemovedFixture(t, filepath.Join(h.home, name), "exec "+relay+"\n", 0o600)
+			return command + " " + wrapper(t, h, "exit 0\n"), nil
+		}
+	}
+	cases := []struct {
+		name string
+		hook hook
+		// needs is a program the case runs ("" for none).
+		needs string
+	}{
+		{name: "a symlink", hook: link("hooks-of-mine/audit")},
+		{name: "a quoted symlink with a blank", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return removedQuote(linkRemovedScript(t, h, filepath.Join(h.home, "my hooks", "audit"))), nil
+		}},
+		{name: "$HOME", hook: func(*testing.T, *openHandsHarness) (string, []string) {
+			return "$HOME/.defenseclaw/hooks/" + removedOpenHandsHookScript, nil
+		}},
+		{name: "~", hook: func(*testing.T, *openHandsHarness) (string, []string) {
+			return "~/.defenseclaw/hooks/" + removedOpenHandsHookScript, nil
+		}},
+		{name: "a doubled path", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return filepath.Join(h.dataDir, "hooks") + "//" + removedOpenHandsHookScript, nil
+		}},
+		{name: "a command found on PATH", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			linkRemovedScript(t, h, filepath.Join(h.home, "bin", "oh-audit"))
+			return "oh-audit --audit", nil
+		}},
+		{name: "a command that is a number found on PATH", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			linkRemovedScript(t, h, filepath.Join(h.home, "bin", "30"))
+			return "30", nil
+		}},
+		{name: "an interpreter that runs a symlink", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "/bin/sh " + linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run")) + " --audit 30", nil
+		}},
+		{name: "sh -c", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "/bin/sh -c " + removedQuote(linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))+" --audit"), nil
+		}},
+		{name: "sh -c that sources a symlink", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "/bin/sh -c " + removedQuote(". "+linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))), nil
+		}},
+		{name: "a shell list", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "/bin/true; " + linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run")), nil
+		}},
+		{name: "env -S that runs a command found on PATH", needs: "env -S", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
+			return "/usr/bin/env -Srelay", nil
+		}},
+		{name: "env -S with its command line in the next word", needs: "env -S", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
+			return "/usr/bin/env -S 'relay --audit'", nil
+		}},
+		{name: "a wrapper that names the script under HOME", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return wrapper(t, h, "#!/bin/sh\nexec \"$HOME/.defenseclaw/hooks/openhands-hook.sh\" \"$@\"\n") + " --audit", nil
+		}},
+		{name: "a wrapper's wrapper", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			inner := filepath.Join(h.home, "lib", "inner.sh")
+			writeRemovedFixture(t, inner, "#!/bin/sh\nexec \"$HOME/.defenseclaw/hooks/openhands-hook.sh\"\n", 0o700)
+			return wrapper(t, h, "#!/bin/sh\nexec "+inner+"\n"), nil
+		}},
+		{name: "a wrapper that runs a quoted path with a blank", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			relay := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
+			return wrapper(t, h, "#!/bin/sh\nexec \""+relay+"\" \"$@\"\n"), nil
+		}},
+		{name: "a wrapper that puts a directory on PATH", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			relay := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "oh-relay"))
+			return wrapper(t, h, "#!/bin/sh\nPATH=/usr/bin:/bin:"+filepath.Dir(relay)+"\nexport PATH\nexec oh-relay \"$@\"\n"), nil
+		}},
+		{name: "a Python wrapper that builds the path at run time", needs: "/usr/bin/python3", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
+			return wrapper(t, h, "#!/usr/bin/python3\nimport os, sys\nos.execv(os.path.join(os.environ[\"HOME\"], \"audit dir\", \"relay\"), sys.argv)\n"), nil
+		}},
+		{name: "a shell script with a NUL byte that sh runs", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			relay := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
+			return "/bin/sh " + wrapper(t, h, "#!/bin/sh\n: \x00\nexec "+relay+" \"$@\"\n"), nil
+		}},
+		{name: "a shell script with a NUL byte run directly", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			relay := linkRemovedScript(t, h, filepath.Join(h.home, "relay"))
+			return wrapper(t, h, "#!/bin/sh\n: \x00\nexec "+relay+" \"$@\"\n"), nil
+		}},
+		{name: "a login shell that runs a symlink", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "/bin/sh -l " + linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run")), nil
+		}},
+		{name: "a login shell whose profile runs a symlink", hook: startup(".profile", "/bin/sh -l")},
+		{name: "a #! line that passes the shell -l", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			relay := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "relay"))
+			writeRemovedFixture(t, filepath.Join(h.home, ".profile"), "exec "+relay+"\n", 0o600)
+			return wrapper(t, h, "#!/bin/sh -l\nexit 0\n"), nil
+		}},
+		{name: "a login shell under a name the system does not know", needs: "/bin/bash", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			// The case the reviewer found: a copy of bash read
+			// ~/.bash_profile, which ran a link to the script.
+			bash, err := os.ReadFile("/bin/bash")
+			if err != nil {
+				t.Fatal(err)
 			}
+			shell := filepath.Join(h.home, "opt", "bin", "bash-static")
+			writeRemovedFixture(t, shell, string(bash), 0o755)
+			return startup(".bash_profile", shell+" -l")(t, h)
+		}},
+		{name: "bash with BASH_ENV set", needs: "/bin/bash", hook: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			command, env := startup(".bashenv", "/bin/bash")(t, h)
+			return command, append(env, "BASH_ENV="+filepath.Join(h.home, ".bashenv"))
+		}},
+	}
+	for _, tc := range cases {
+		for _, back := range []bool{false, true} {
+			mode := "put back by the cleanup"
+			if back {
+				mode = "the user's own hooks.json"
+			}
+			t.Run(tc.name+", "+mode, func(t *testing.T) {
+				switch {
+				case tc.needs == "env -S":
+					if !envSplitsWords() {
+						t.Skip("env does not take -S here")
+					}
+				case tc.needs != "":
+					if _, err := os.Stat(tc.needs); err != nil {
+						t.Skipf("no %s here", tc.needs)
+					}
+				}
+				h := newOpenHandsHarness(t, false)
+				command, env := tc.hook(t, h)
+				saved := openHandsHooksRunning(t, "/usr/local/bin/audit-hook", command)
+				h.setUpOver(t, saved, back)
+				for run := 1; run <= 2; run++ {
+					if err := h.teardown(); err != nil {
+						t.Fatalf("Teardown run %d: %v", run, err)
+					}
+					h.requireDone(t)
+				}
+				if h.notices.Len() != 0 {
+					t.Fatalf("teardown printed: %s", h.notices)
+				}
+				requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: saved})
+				requireOpenHandsDeny(t, command, runOpenHandsHook(t, h, command, env))
+			})
 		}
 	}
 }
@@ -2449,15 +2077,14 @@ func TestRemovedCleanupRollbackKeepsAConcurrentChange(t *testing.T) {
 }
 
 // A hooks file or config teardown only reads (no backup record names it) is
-// read through a link: a link to a hooks file whose hook may run the script
-// keeps the script, and a link to one that runs nothing lets the cleanup
+// read through a link: a link to a hooks file that names the script keeps
+// everything for the user, and a link to one that does not lets the cleanup
 // finish (review loop round 4).
 func TestRemovedOpenHandsTeardownReadsAnUnrecordedHooksFileThroughALink(t *testing.T) {
 	h := newOpenHandsHarness(t, false)
 	h.setUp(t, true)
 	target := filepath.Join(h.home, "dotfiles", "hooks.json")
-	link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "oh-audit"))
-	writeRemovedFixture(t, target, openHandsHooksRunning(t, link), 0o600)
+	writeRemovedFixture(t, target, openHandsHooksRunning(t, h.script), 0o600)
 	workspace := filepath.Join(h.home, "repo", ".openhands", "hooks.json")
 	if err := os.MkdirAll(filepath.Dir(workspace), 0o700); err != nil {
 		t.Fatal(err)
@@ -2477,15 +2104,15 @@ func TestRemovedOpenHandsTeardownReadsAnUnrecordedHooksFileThroughALink(t *testi
 		t.Fatal(err)
 	}
 	before := h.state(t)
-	for path, body := range removedSnapshot(t, workspace, target, link) {
+	for path, body := range removedSnapshot(t, workspace, target) {
 		before[path] = body
 	}
 	if err := h.teardown(); err != nil {
 		t.Fatalf("Teardown = %v, want the state left for manual cleanup", err)
 	}
-	requireRemovedSnapshot(t, "a teardown with a linked hooks file that may run the script", before)
-	if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(workspace) || !record.lists(h.script) {
-		t.Fatalf("manual cleanup record = %+v, %v; want %s and the script", record, ok, workspace)
+	requireRemovedSnapshot(t, "a teardown with a linked hooks file that names the script", before)
+	if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(workspace) {
+		t.Fatalf("manual cleanup record = %+v, %v; want %s", record, ok, workspace)
 	}
 	writeRemovedFixture(t, target, `{}`, 0o600)
 	h.notices.Reset()
@@ -2523,63 +2150,6 @@ func TestRemovedResolvedPaths(t *testing.T) {
 		got := removedResolvedPaths(tc.value)
 		if strings.Join(got, "|") != strings.Join(tc.want, "|") {
 			t.Errorf("removedResolvedPaths(%q) = %q, want %q", tc.value, got, tc.want)
-		}
-	}
-}
-
-// Review loop round 4 (G-deadcode): the one saved hook runs a login shell
-// (/bin/sh -l) over a plain script and ~/.profile runs a link to the hook
-// script. The shell's -l is its own option, so the hook may run the script:
-// nothing is put back and the script is not made the tombstone.
-func TestRemovedOpenHandsTeardownKeepsALoginShellHookAlone(t *testing.T) {
-	for _, back := range []bool{false, true} {
-		t.Run(map[bool]string{false: "put back by the cleanup", true: "already back to the saved copy"}[back], func(t *testing.T) {
-			h := newOpenHandsHarness(t, false)
-			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "relay"))
-			profile := filepath.Join(h.home, ".profile")
-			writeRemovedFixture(t, profile, link+"\n", 0o600)
-			plain := filepath.Join(h.home, "tools", "plain.sh")
-			writeRemovedFixture(t, plain, "exit 0\n", 0o700)
-			saved := openHandsHooksRunning(t, "/bin/sh -l "+plain)
-			h.setUpOver(t, saved, back)
-			before := h.state(t)
-			for path, body := range removedSnapshot(t, link, profile, plain) {
-				before[path] = body
-			}
-			if err := h.teardown(); err != nil {
-				t.Fatalf("Teardown = %v, want the state left for manual cleanup", err)
-			}
-			requireRemovedSnapshot(t, "a teardown that cannot rule out a login shell hook", before)
-			if notice := h.notices.String(); strings.Count(notice, "WARNING") != 1 || !strings.Contains(notice, h.script) {
-				t.Fatalf("notice = %q, want one warning naming %s", notice, h.script)
-			}
-		})
-	}
-}
-
-// removedShellText reads a #! script only when its shell is one the check
-// reads and the line gives it no option and sets no variable.
-func TestRemovedShellTextReadsOnlyAPlainShellLine(t *testing.T) {
-	for _, tc := range []struct {
-		text, interpreter string
-		ok                bool
-	}{
-		{"#!/bin/sh\n", "/bin/sh", true},
-		{"#!/usr/bin/env sh\n", "sh", true},
-		{"#!/usr/bin/env -i bash\n", "bash", true},
-		{"#!/bin/sh -l\n", "", false},
-		{"#!/bin/bash -e\n", "", false},
-		{"#!/usr/bin/env -S bash -l\n", "", false},
-		{"#!/usr/bin/env BASH_ENV=/tmp/x bash\n", "", false},
-		{"#!/usr/bin/env ENV=/tmp/x sh\n", "", false},
-		{"#!/bin/zsh\n", "/bin/zsh", false},
-		{"#!/usr/bin/env\n", "", false},
-		{"#!/usr/bin/python3\n", "/usr/bin/python3", false},
-		{"exit 0\n", "", true},
-	} {
-		interpreter, ok := removedShellText("/tmp/audit", []byte(tc.text))
-		if interpreter != tc.interpreter || ok != tc.ok {
-			t.Errorf("removedShellText(%q) = %q, %v; want %q, %v", tc.text, interpreter, ok, tc.interpreter, tc.ok)
 		}
 	}
 }

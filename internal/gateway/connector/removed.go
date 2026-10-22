@@ -34,8 +34,9 @@ package connector
 // which status and doctor show, and printed once. A file is never parsed and
 // written back: a saved copy goes back byte for byte, and one that names
 // DefenseClaw is dropped only when it is exactly what setup itself wrote. The
-// OpenHands hook script becomes the tombstone only when no hooks file can
-// still run it, the copies teardown puts back included. Writes replace the
+// OpenHands hook script becomes a tombstone that blocks every call and says
+// how to remove the hook, so a hook that still runs it, by any path, link,
+// wrapper or shell, never allows a call. Writes replace the
 // file itself, never a link's target, and a change that fails, even after its
 // new bytes are in place, is rolled back with the changes before it. Rollback
 // writes a file back only while it still holds what teardown wrote: a file
@@ -44,9 +45,6 @@ package connector
 import (
 	"bytes"
 	"context"
-	"debug/elf"
-	"debug/macho"
-	"debug/pe"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -55,8 +53,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
-	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -579,10 +575,6 @@ func (c removedOpenHandsConnector) plan(opts SetupOpts) (*removedCleanupPlan, er
 	if err != nil {
 		return nil, err
 	}
-	var checked []string
-	if recorded != "" {
-		checked = append(checked, recorded)
-	}
 	for _, path := range c.hooksPaths(opts) {
 		if recorded != "" && sameManagedTargetPath(path, recorded) {
 			continue
@@ -590,914 +582,26 @@ func (c removedOpenHandsConnector) plan(opts SetupOpts) (*removedCleanupPlan, er
 		if err := p.addUnrecorded(path, kind); err != nil {
 			return nil, err
 		}
-		checked = append(checked, path)
 	}
-	// Last: the script becomes the tombstone only once no hooks file runs it.
-	if err := c.addHookScript(p, opts, checked); err != nil {
+	// Last: the script becomes the tombstone once the hooks files are back.
+	if err := c.addHookScript(p, opts); err != nil {
 		return nil, err
 	}
 	return p, nil
 }
 
-// removedHooksFile is a hooks file that may still run the hook script once
-// the cleanup is done; restored marks the copy setup found, which the
-// cleanup would put back.
-type removedHooksFile struct {
-	path     string
-	restored bool
-}
-
-// hooksThatMayRunScript lists the hooks files in paths that may still run
-// the hook script (script, read as info) once the plan is done: what the
-// plan leaves in place, and the copy setup found where the plan puts that
-// back. A file the plan leaves for the user is listed already, and one it
-// removes runs nothing. Every command in a hooks file must be ruled out (see
-// removedScriptCheck), the saved copy's included: a copy setup found may run
-// the script through a link or a wrapper too.
-func (c removedOpenHandsConnector) hooksThatMayRunScript(p *removedCleanupPlan, opts SetupOpts, paths []string, script string, info os.FileInfo) []removedHooksFile {
-	check := newRemovedScriptCheck(script, info, opts.DataDir)
-	var out []removedHooksFile
-	for _, path := range paths {
-		if p.lists(path) {
-			continue
-		}
-		if file, ok := p.planned(path); ok {
-			if file.restore != nil && check.hooksMayRun(file.restore) {
-				out = append(out, removedHooksFile{path: path, restored: true})
-			}
-			continue
-		}
-		data, found, err := readRemovedFileThrough(path)
-		if err != nil || found == nil {
-			continue
-		}
-		if check.hooksMayRun(data) {
-			out = append(out, removedHooksFile{path: path})
-		}
-	}
-	return out
-}
-
-// removedScriptCheck tells whether OpenHands hooks may run DefenseClaw's hook
-// script. It rules a command out only when it can see what the command runs:
-// the command is plain words (no variables, ~, globs, pipes, lists or
-// redirections; quotes are fine), it starts with an absolute path, and every
-// other word is an absolute path or a bare flag (-x, or --name with no
-// value) given to a program other than a shell. A program may run what an
-// argument names: a command found on PATH (env -S relay, env 30), a module
-// (python3 -mrelay), a command line split at its blanks (env -S '/bin/env
-// relay') or a list (--require=/a,relay), and a shell (by its name, what it
-// links to, or the shell it is a hard link of) may run its startup files:
-// with its own options (sh -l, sudo -i), always (zsh, csh, tcsh, fish, and
-// su, login, script, screen and tmux, which start one), and the file
-// BASH_ENV or ENV names (ruled out only as a plain absolute path that is
-// ruled out). So an option with a value is ruled out only
-// when the value is an absolute path, an absolute path is ruled out only
-// when it and every part of it (split at blanks, :, , and =) is an absolute
-// path that is ruled out, and a number, any other word, a cluster of flags
-// (-Srelay) and a shell's option before its script may run the script. A
-// command found on PATH, a relative path or any shell syntax may run
-// anything, so it may run the script. A path in the command may run the
-// script when it names
-// DefenseClaw or the script, is the script (through links or as a hard link),
-// is a directory that holds the script or names DefenseClaw, or is a file
-// whose bytes name either. Only a program (machine code this system's loader
-// runs) is ruled out by the names in its bytes alone. Any other file with a
-// NUL byte may run the script: a shell reads a script that holds one, and
-// runs as a script a file the loader cannot run. A text file (a wrapper) may
-// also run it through the paths it names, checked the same way a few levels
-// deep (a quoted path
-// with a blank whole, a list of paths part by part), and through what the
-// check cannot follow: a relative path or cd, a variable or a command
-// substitution in a path, a path that goes on past the plain characters the
-// check reads (an escape, a quote that joins more text, any other character)
-// or that ends a longer word, a script in a language other than the shell,
-// or a command found on PATH while a PATH directory holds the script. A
-// wrapper may also start a shell that reads its startup files: a #! line
-// that passes its shell an option (#!/bin/sh -l) or sets a variable through
-// env (BASH_ENV), or a word outside a comment that names a shell or a
-// program that starts one (bash -l, su -, sudo -i), or $SHELL.
-type removedScriptCheck struct {
-	script  os.FileInfo
-	needles [][]byte // lower case
-	home    string
-	seen    map[string]bool
-	files   int
-	onPath  *bool
-	// shellFiles are the shells in removedShellDirs, by path.
-	shellFiles map[string]os.FileInfo
-}
-
-const (
-	removedScriptCheckDepth      = 4
-	removedScriptCheckFiles      = 64
-	removedScriptCheckDirEntries = 10000
-	removedScriptCheckTextLimit  = 1 << 20
-	removedScriptCheckScanLimit  = 512 << 20
-)
-
-var (
-	// removedTextPath finds the absolute paths a wrapper names, ~ and
-	// $HOME ones included (group 1 is the home prefix, group 2 the path).
-	removedTextPath = regexp.MustCompile(`(~|\$HOME|\$\{HOME\})?["']?((?:/[A-Za-z0-9_.+@%,:=-]+)+)`)
-	// removedTextRelative finds a relative ./ or ../ path, a cd, or a path
-	// that starts with a command substitution.
-	removedTextRelative = regexp.MustCompile("(?:^|[\\s;&|(=\"'`])(?:\\.{1,2}/|(?:cd|pushd)\\s)|[)`][\"']?/")
-	// removedTextVariable finds a path that starts with a variable (group 1
-	// is its name; HOME is followed).
-	removedTextVariable = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?!$-])\}?["']?/`)
-	// removedBareOption is a flag with no value: -x, or --name.
-	removedBareOption = regexp.MustCompile(`^(?:-[A-Za-z0-9]|--[A-Za-z0-9][A-Za-z0-9_.-]*)$`)
-	// removedPathOption is an option whose value is an absolute path
-	// (group 1): -name=/path or --name=/path.
-	removedPathOption = regexp.MustCompile(`^--?[A-Za-z0-9][A-Za-z0-9_.-]*=(/.*)$`)
-	// removedArgument is an absolute path argument the check can read: plain
-	// characters and blanks.
-	removedArgument = regexp.MustCompile(`^/[A-Za-z0-9_./:,@%+= \t-]*$`)
-)
-
-func newRemovedScriptCheck(script string, info os.FileInfo, dataDir string) *removedScriptCheck {
-	names := []string{"defenseclaw", strings.TrimSuffix(removedOpenHandsHookScript, ".sh")}
-	for _, dir := range []string{dataDir, filepath.Dir(script)} {
-		if strings.TrimSpace(dir) == "" {
-			continue
-		}
-		names = append(names, filepath.Clean(dir))
-		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-			names = append(names, resolved)
-		}
-	}
-	check := &removedScriptCheck{script: info, home: homePath(), seen: map[string]bool{}}
-	for _, name := range uniqueNonEmptyStrings(names) {
-		check.needles = append(check.needles, []byte(strings.ToLower(name)))
-	}
-	return check
-}
-
-// hooksMayRun reports whether a hooks file may run the script: a string in it
-// other than a "matcher" or "type" value is a command, and an empty file runs
-// nothing. A file that is not one JSON document may run anything.
-func (c *removedScriptCheck) hooksMayRun(data []byte) bool {
-	if len(bytes.TrimSpace(data)) == 0 {
-		return false
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	var document interface{}
-	if err := decoder.Decode(&document); err != nil {
-		return true
-	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return true
-	}
-	var runs func(value interface{}, key string) bool
-	runs = func(value interface{}, key string) bool {
-		switch v := value.(type) {
-		case string:
-			switch {
-			case key == "matcher", key == "type":
-				return false
-			case key != "command" && strings.Trim(v, " \t0123456789") == "":
-				// A number written as a string (a timeout, say). A
-				// command that is a number runs what PATH finds.
-				return false
-			}
-			return c.commandMayRun(v)
-		case []interface{}:
-			for _, item := range v {
-				if runs(item, key) {
-					return true
-				}
-			}
-		case map[string]interface{}:
-			for k, item := range v {
-				if runs(item, k) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	return runs(document, "")
-}
-
-func (c *removedScriptCheck) commandMayRun(command string) bool {
-	if strings.TrimSpace(command) == "" {
-		return false
-	}
-	words, ok := removedPlainWords(command)
-	if !ok || len(words) == 0 {
-		return true
-	}
-	// shellOptions: the last program named is a shell (or starts one) and
-	// no operand came after it, so an option is the shell's own (-l reads
-	// its profile, sudo -i starts a login shell).
-	shellOptions := false
-	for i, word := range words {
-		if c.names([]byte(word)) {
-			return true
-		}
-		switch {
-		case i == 0:
-			// The shell runs the first word as it is.
-			if !filepath.IsAbs(word) || c.pathMayRun(word, 0) {
-				return true
-			}
-		case strings.HasPrefix(word, "-"):
-			if shellOptions {
-				return true
-			}
-			if removedBareOption.MatchString(word) {
-				continue
-			}
-			match := removedPathOption.FindStringSubmatch(word)
-			if match == nil || c.argumentMayRun(match[1]) {
-				return true
-			}
-			continue
-		case c.argumentMayRun(word):
-			return true
-		}
-		shell, mayRun := c.shellMayRun(word)
-		if mayRun {
-			return true
-		}
-		shellOptions = shell
-	}
-	return false
-}
-
-// argumentMayRun reports whether a word given to a program (an argument or
-// an option's value) may run the script. The program may read it whole, or
-// split it at its blanks (env -S) or as a list (a:b, a,b, a=b), so the whole
-// and every part must be an absolute path that is ruled out.
-func (c *removedScriptCheck) argumentMayRun(value string) bool {
-	if !removedArgument.MatchString(value) || c.pathMayRun(value, 0) {
-		return true
-	}
-	parts := strings.FieldsFunc(value, func(r rune) bool { return strings.ContainsRune(" \t:,=", r) })
-	if len(parts) < 2 {
-		return false
-	}
-	for _, part := range parts {
-		if !filepath.IsAbs(part) || c.pathMayRun(part, 0) {
-			return true
-		}
-	}
-	return false
-}
-
-// removedCommandShells are the shells whose own options (-l, -i, --rcfile,
-// -c) may run code the command does not show.
-var removedCommandShells = map[string]bool{
-	"sh": true, "bash": true, "rbash": true, "dash": true, "zsh": true, "ksh": true, "mksh": true, "pdksh": true,
-	"oksh": true, "ash": true, "csh": true, "tcsh": true, "fish": true, "yash": true, "posh": true, "busybox": true,
-}
-
-// removedStartupShells are the shells that read startup files the command
-// does not show even when they run a script with no option: zsh (.zshenv),
-// csh and tcsh (.cshrc, .tcshrc) and fish (config.fish).
-var removedStartupShells = map[string]bool{"zsh": true, "csh": true, "tcsh": true, "fish": true}
-
-// removedLoginPrograms start a shell of their own. Those set true always do
-// (su, login, and script, screen and tmux, which run $SHELL; the shell reads
-// the user's startup files); the others do with an option (sudo -i, sudo
-// -s), so their options are taken as a shell's.
-var removedLoginPrograms = map[string]bool{
-	"su": true, "runuser": true, "login": true, "script": true, "screen": true, "tmux": true,
-	"sudo": false, "doas": false, "pkexec": false,
-}
-
-// removedShellDirs are where a system keeps its shells. A program that is
-// one of them under another name (a hard link) is that shell.
-var removedShellDirs = []string{"/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", "/sbin", "/usr/sbin"}
-
-// removedShellEnvFiles name the startup file a shell reads when they are
-// set: bash reads BASH_ENV when it runs a script, a Korn shell ENV.
-var removedShellEnvFiles = []string{"BASH_ENV", "ENV"}
-
-// removedProgramName is the name a program goes by: lower case, with a
-// version suffix such as bash5.2 dropped.
-func removedProgramName(path string) string {
-	return strings.TrimRight(strings.ToLower(filepath.Base(path)), "0123456789.-")
-}
-
-// removedStartsShell reports whether a program name (removedProgramName) is
-// a shell or a program that starts one.
-func removedStartsShell(name string) bool {
-	_, login := removedLoginPrograms[name]
-	return removedCommandShells[name] || login
-}
-
-// shellMayRun reports whether path is a shell or a program that starts one,
-// by its name, the name of what it links to or the shell in
-// removedShellDirs it is a hard link of (shell: its options are its own),
-// and whether it may run the script with no option given: through
-// the startup files it always reads, or the file BASH_ENV or ENV names when
-// that is not a plain absolute path that is ruled out.
-func (c *removedScriptCheck) shellMayRun(path string) (shell, mayRun bool) {
-	names := []string{removedProgramName(path)}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		names = append(names, removedProgramName(resolved))
-	}
-	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
-		names = append(names, c.shellNamesOf(info)...)
-	}
-	for _, name := range names {
-		if !removedStartsShell(name) {
-			continue
-		}
-		shell = true
-		if removedStartupShells[name] || removedLoginPrograms[name] {
-			return true, true
-		}
-	}
-	if !shell {
-		return false, false
-	}
-	for _, variable := range removedShellEnvFiles {
-		value := os.Getenv(variable)
-		if value == "" {
-			continue
-		}
-		// The shell expands the value (parameters, command substitution)
-		// before it reads the file.
-		if !removedArgument.MatchString(value) || c.pathMayRun(value, 0) {
-			return true, true
-		}
-	}
-	return true, false
-}
-
-// shellNamesOf returns the names of the shells (and the programs that start
-// one) in removedShellDirs that are the same file as info.
-func (c *removedScriptCheck) shellNamesOf(info os.FileInfo) []string {
-	if c.shellFiles == nil {
-		c.shellFiles = map[string]os.FileInfo{}
-		for _, dir := range removedShellDirs {
-			for _, programs := range []map[string]bool{removedCommandShells, removedLoginPrograms} {
-				for name := range programs {
-					if shell, err := os.Stat(filepath.Join(dir, name)); err == nil {
-						c.shellFiles[filepath.Join(dir, name)] = shell
-					}
-				}
-			}
-		}
-	}
-	var names []string
-	for path, shell := range c.shellFiles {
-		if os.SameFile(info, shell) {
-			names = append(names, filepath.Base(path))
-		}
-	}
-	return names
-}
-
-// removedTextWord is a word of a wrapper's text, its quotes included.
-var removedTextWord = regexp.MustCompile("[^\\s;&|()<>`]+")
-
-// removedTextShellVariable finds $SHELL, the user's shell.
-var removedTextShellVariable = regexp.MustCompile(`\$\{?SHELL\b`)
-
-// removedTextStartsShell reports whether a wrapper's text may start a shell
-// outside a comment: a word (or a part of one split at = : and ,) that
-// names a shell or a program that starts one, as a path or a bare name, or
-// $SHELL. The shell may read startup files, and its options may come from
-// the hook ("$@"), so the wrapper may run the script.
-func removedTextStartsShell(text []byte, quoting removedTextQuoting) bool {
-	for _, match := range removedTextShellVariable.FindAllIndex(text, -1) {
-		if !quoting.comment(match[0]) {
-			return true
-		}
-	}
-	unquote := strings.NewReplacer("'", "", "\"", "", "\\", "")
-	for _, match := range removedTextWord.FindAllIndex(text, -1) {
-		if quoting.comment(match[0]) {
-			continue
-		}
-		word := unquote.Replace(string(text[match[0]:match[1]]))
-		for _, part := range strings.FieldsFunc(word, func(r rune) bool { return r == '=' || r == ':' || r == ',' }) {
-			if removedStartsShell(removedProgramName(part)) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// removedPlainWords splits a command made only of plain words: letters,
-// digits and _ . / - + = : , @ %, separated by blanks, with single quotes and
-// with double quotes that hold no $, `, \ or !. Anything else is shell syntax
-// the check cannot follow (ok is false).
-func removedPlainWords(command string) (words []string, ok bool) {
-	var word strings.Builder
-	inWord := false
-	for i := 0; i < len(command); i++ {
-		ch := command[i]
-		switch {
-		case ch == ' ' || ch == '\t':
-			if inWord {
-				words = append(words, word.String())
-				word.Reset()
-				inWord = false
-			}
-		case ch == '\'' || ch == '"':
-			end := strings.IndexByte(command[i+1:], ch)
-			if end < 0 {
-				return nil, false
-			}
-			quoted := command[i+1 : i+1+end]
-			if ch == '"' && strings.ContainsAny(quoted, "$`\\!") {
-				return nil, false
-			}
-			word.WriteString(quoted)
-			inWord = true
-			i += end + 1
-		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9', strings.IndexByte("_./-+=:,@%", ch) >= 0:
-			word.WriteByte(ch)
-			inWord = true
-		default:
-			return nil, false
-		}
-	}
-	if inWord {
-		words = append(words, word.String())
-	}
-	return words, true
-}
-
-func (c *removedScriptCheck) names(data []byte) bool {
-	lower := bytes.ToLower(data)
-	for _, needle := range c.needles {
-		if bytes.Contains(lower, needle) {
-			return true
-		}
-	}
-	return false
-}
-
-// pathMayRun reports whether an absolute path may run the script. Nothing
-// there runs nothing; a path it cannot look at may run anything.
-func (c *removedScriptCheck) pathMayRun(path string, depth int) bool {
-	path = filepath.Clean(path)
-	if c.names([]byte(path)) {
-		return true
-	}
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false
-	}
-	if err != nil || os.SameFile(info, c.script) {
-		return true
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil || c.names([]byte(resolved)) {
-		return true
-	}
-	switch {
-	case info.IsDir():
-		return c.dirMayRun(resolved)
-	case info.Mode().IsRegular():
-		return c.fileMayRun(resolved, info, depth)
-	}
-	return false
-}
-
-// dirMayRun reports whether a directory holds the script, or an entry whose
-// name names DefenseClaw or the script.
-func (c *removedScriptCheck) dirMayRun(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) > removedScriptCheckDirEntries {
-		return true
-	}
-	for _, entry := range entries {
-		if c.names([]byte(entry.Name())) {
-			return true
-		}
-	}
-	return c.holdsScript(dir)
-}
-
-// fileMayRun reports whether a regular file may run the script: its bytes
-// name DefenseClaw or the script, or it is a text file that may run it
-// through a path it names.
-func (c *removedScriptCheck) fileMayRun(path string, info os.FileInfo, depth int) bool {
-	if c.seen[path] {
-		return false
-	}
-	c.seen[path] = true
-	c.files++
-	if c.files > removedScriptCheckFiles || info.Size() > removedScriptCheckScanLimit {
-		return true
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return true
-	}
-	defer file.Close()
-	overlap := 0
-	for _, needle := range c.needles {
-		if len(needle) > overlap {
-			overlap = len(needle)
-		}
-	}
-	var text, window []byte
-	nul := false
-	chunk := make([]byte, 64<<10)
-	for {
-		n, err := file.Read(chunk)
-		if n > 0 {
-			nul = nul || bytes.IndexByte(chunk[:n], 0) >= 0
-			if !nul && len(text) <= removedScriptCheckTextLimit {
-				text = append(text, chunk[:n]...)
-			}
-			window = append(window, chunk[:n]...)
-			if c.names(window) {
-				return true
-			}
-			if len(window) > overlap {
-				window = append(window[:0], window[len(window)-overlap:]...)
-			}
-		}
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return true
-		}
-	}
-	if nul {
-		// A NUL byte does not make a file a program: dash drops NUL bytes,
-		// bash refuses one only on the first line, and a file the loader
-		// cannot run (a script with no #! line, an image for another
-		// system) is run by the shell as a script (the ENOEXEC fallback).
-		return !removedLoadableImage(file, runtime.GOOS)
-	}
-	interpreter, readable := removedShellText(path, text)
-	if !readable {
-		return true
-	}
-	if interpreter != "" {
-		if _, mayRun := c.shellMayRun(interpreter); mayRun {
-			return true
-		}
-	}
-	if len(text) > removedScriptCheckTextLimit || removedTextRelative.Match(text) || c.scriptOnPath() {
-		return true
-	}
-	for _, match := range removedTextVariable.FindAllSubmatch(text, -1) {
-		if string(match[1]) != "HOME" {
-			return true
-		}
-	}
-	quoting := newRemovedTextQuoting(text)
-	if removedTextStartsShell(text, quoting) {
-		return true
-	}
-	covered := 0
-	for _, match := range removedTextPath.FindAllSubmatchIndex(text, -1) {
-		if match[0] < covered {
-			// Part of a quoted path already checked whole.
-			continue
-		}
-		if depth+1 >= removedScriptCheckDepth {
-			return true
-		}
-		mayRun, through := c.textPathMayRun(text, quoting, match, depth+1)
-		if mayRun {
-			return true
-		}
-		covered = through
-	}
-	return false
-}
-
-// removedLoadableImage reports whether file is machine code that the loader
-// of goos maps itself: an ELF executable or shared object with a loadable
-// segment (Linux and the other Unix systems), a Mach-O executable, library
-// or bundle with load commands, thin or universal (macOS), or a PE image
-// with an optional header (Windows). A header alone (no segment, no load
-// command) is refused by the loader, and the shell then runs the file as a
-// script. A program may run any path it holds; the check rules one out by
-// the names in its bytes alone.
-func removedLoadableImage(file io.ReaderAt, goos string) bool {
-	switch goos {
-	case "windows":
-		image, err := pe.NewFile(file)
-		return err == nil && image.OptionalHeader != nil
-	case "darwin", "ios":
-		if thin, err := macho.NewFile(file); err == nil {
-			return removedMachOLoadable(thin)
-		}
-		fat, err := macho.NewFatFile(file)
-		if err != nil || len(fat.Arches) == 0 {
-			return false
-		}
-		for _, arch := range fat.Arches {
-			if !removedMachOLoadable(arch.File) {
-				return false
-			}
-		}
-		return true
-	}
-	image, err := elf.NewFile(file)
-	if err != nil || image.Type != elf.ET_EXEC && image.Type != elf.ET_DYN {
-		return false
-	}
-	for _, prog := range image.Progs {
-		if prog.Type == elf.PT_LOAD {
-			return true
-		}
-	}
-	return false
-}
-
-func removedMachOLoadable(image *macho.File) bool {
-	switch image.Type {
-	case macho.TypeExec, macho.TypeDylib, macho.TypeBundle:
-		return len(image.Loads) > 0
-	}
-	return false
-}
-
-// removedShells are the interpreters whose scripts the check reads. zsh is
-// not one: it reads .zshenv first, whatever the script holds.
-var removedShells = map[string]bool{"sh": true, "bash": true, "dash": true, "ksh": true, "mksh": true, "ash": true}
-
-// removedScriptExtensions name scripts in a language other than the shell.
-var removedScriptExtensions = map[string]bool{
-	".py": true, ".pyw": true, ".js": true, ".mjs": true, ".cjs": true, ".ts": true, ".mts": true, ".cts": true,
-	".rb": true, ".pl": true, ".pm": true, ".php": true, ".lua": true, ".tcl": true, ".r": true, ".ps1": true,
-	".psm1": true, ".groovy": true, ".kts": true, ".swift": true, ".exs": true, ".jl": true, ".awk": true,
-}
-
-// removedShellText reports whether a text file is one the check can read,
-// and the interpreter its #! line runs ("" with none): a shell script (its
-// #! line runs sh, bash, dash, ksh, mksh or ash, directly or through env,
-// with no option and no variable set: a shell's option such as -l may run
-// its startup files, and env may set BASH_ENV), or a file with no #! line
-// whose name has no extension of another language (a config file, say). A
-// script in another language may build the path it runs at run time
-// (os.path.join, say), so it may run the script.
-func removedShellText(path string, text []byte) (interpreter string, ok bool) {
-	if !bytes.HasPrefix(text, []byte("#!")) {
-		return "", !removedScriptExtensions[strings.ToLower(filepath.Ext(path))]
-	}
-	line, _, _ := bytes.Cut(text[2:], []byte("\n"))
-	fields := strings.Fields(string(line))
-	if len(fields) == 0 {
-		return "", false
-	}
-	interpreter, rest := fields[0], fields[1:]
-	if filepath.Base(interpreter) == "env" {
-		interpreter = ""
-		for i, field := range rest {
-			if strings.Contains(field, "=") {
-				return "", false
-			}
-			if !strings.HasPrefix(field, "-") {
-				interpreter, rest = field, rest[i+1:]
-				break
-			}
-		}
-	}
-	if interpreter == "" || len(rest) > 0 {
-		return "", false
-	}
-	return interpreter, removedShells[filepath.Base(interpreter)]
-}
-
-// textPathMayRun reports whether a path a wrapper names (match, a
-// removedTextPath match in text) may run the script. The pattern reads only
-// plain characters, so a path counts only when it is a word of its own: one
-// that goes on past what the pattern read (a blank inside its quotes, an
-// escape, a quote that joins more text, a character outside the plain set)
-// or that ends a longer word (a relative path such as lib/run, or
-// "dir"/run) is a path the check cannot see, and may run the script. A path
-// that starts a quoted string with a blank in it ("/tmp/audit dir/relay") is
-// checked whole as well; when that path is there, the rest of the string is
-// part of it (through is where the string ends, else 0). A list of paths
-// (a:b, a,b, a=b) is checked part by part. In a comment the path is only
-// read.
-func (c *removedScriptCheck) textPathMayRun(text []byte, quoting removedTextQuoting, match []int, depth int) (mayRun bool, through int) {
-	start, end := match[4], match[5]
-	home := match[2] >= 0
-	if home {
-		start = match[2]
-	}
-	if !quoting.comment(start) {
-		if !quoting.startsWord(text, start) {
-			return true, 0
-		}
-		if !quoting.endsWord(text, start, end) {
-			whole, closing, ok := quoting.quotedPath(text, start, c.home)
-			if !ok || c.pathMayRun(whole, depth) {
-				return true, 0
-			}
-			if _, err := os.Stat(whole); err == nil {
-				through = closing
-			}
-		}
-	}
-	path := string(text[match[4]:match[5]])
-	targets := []string{path}
-	if parts := strings.FieldsFunc(path, func(r rune) bool { return r == ':' || r == ',' || r == '=' }); len(parts) > 1 {
-		targets = append(targets, parts...)
-	}
-	for i, target := range targets {
-		switch {
-		case home && (i == 0 || i == 1):
-			target = filepath.Join(c.home, target)
-		case !strings.HasPrefix(target, "/"):
-			continue
-		}
-		if c.pathMayRun(target, depth) {
-			return true, 0
-		}
-	}
-	return false, through
-}
-
-// removedTextQuoting is how a shell reads the quotes in a wrapper's text:
-// for each byte, the quote it is in (' or ", the quote marks included), '#'
-// in a comment (from a # that starts a word outside quotes to the end of
-// the line) or '\\' for a byte a backslash escapes, else 0; and for each
-// opening quote mark, where its string ends (-1: it does not).
-type removedTextQuoting struct {
-	state  []byte
-	closes map[int]int
-}
-
-func newRemovedTextQuoting(text []byte) removedTextQuoting {
-	q := removedTextQuoting{state: make([]byte, len(text)), closes: map[int]int{}}
-	var quote byte
-	open := -1
-	for i := 0; i < len(text); i++ {
-		ch := text[i]
-		switch {
-		case quote == 0 && ch == '#' && (i == 0 || q.state[i-1] == 0 && removedTextBreak(text[i-1])):
-			for ; i < len(text) && text[i] != '\n'; i++ {
-				q.state[i] = '#'
-			}
-		case quote != '\'' && ch == '\\' && i+1 < len(text):
-			q.state[i] = quote
-			i++
-			q.state[i] = '\\'
-		case quote == 0 && (ch == '\'' || ch == '"'):
-			quote, open = ch, i
-			q.state[i] = ch
-			q.closes[i] = -1
-		case quote != 0 && ch == quote:
-			q.state[i] = quote
-			q.closes[open] = i
-			quote = 0
-		default:
-			q.state[i] = quote
-		}
-	}
-	return q
-}
-
-// removedTextBreak reports whether a shell word ends before ch.
-func removedTextBreak(ch byte) bool {
-	return strings.IndexByte(" \t\r\n;&|()<>`", ch) >= 0
-}
-
-func (q removedTextQuoting) comment(i int) bool { return q.state[i] == '#' }
-
-// delimiter reports whether text[i] is a quote mark that opens or closes a
-// string (not one inside the other kind of quotes, nor an escaped one).
-func (q removedTextQuoting) delimiter(text []byte, i int) bool {
-	return (text[i] == '\'' || text[i] == '"') && q.state[i] == text[i]
-}
-
-// startsWord reports whether a path at start starts a word: what comes
-// before it (past its quote marks, and the slashes of a URL or a doubled
-// slash) is the start of the text, a blank, a shell break or one of = : , @
-// ! [ { that comes before a path in an option, a list or a document.
-func (q removedTextQuoting) startsWord(text []byte, start int) bool {
-	i := start - 1
-	for i >= 0 && text[i] == '/' && q.state[i] != '\\' {
-		i--
-	}
-	for i >= 0 && q.delimiter(text, i) {
-		i--
-	}
-	if i < 0 {
-		return true
-	}
-	return q.state[i] != '\\' && (removedTextBreak(text[i]) || strings.IndexByte("=:,@![{", text[i]) >= 0)
-}
-
-// endsWord reports whether a path that ends at end (and starts at start)
-// ends its word: what comes after it (past its trailing slashes and its
-// closing quote marks) is the end of the text, a shell break, or, after a
-// closing quote, one of , ] } : as in a list or a document. Inside a quoted
-// string a blank or a shell break ends it too ("run /x y"), but not when the
-// path starts the string: then the string is the path.
-func (q removedTextQuoting) endsWord(text []byte, start, end int) bool {
-	i := end
-	for i < len(text) && text[i] == '/' {
-		i++
-	}
-	closed := false
-	for i < len(text) && q.delimiter(text, i) {
-		i++
-		closed = true
-	}
-	switch {
-	case i >= len(text):
-		return true
-	case q.state[i] == '\\':
-		return false
-	case q.state[i] != 0:
-		_, startsString := q.closes[start-1]
-		return !closed && !startsString && removedTextBreak(text[i])
-	case text[i] == '\\':
-		return false
-	}
-	return removedTextBreak(text[i]) || closed && strings.IndexByte(",]}:", text[i]) >= 0
-}
-
-// quotedPath returns the whole quoted string a path at start opens
-// ("/tmp/audit dir/relay") and where it ends, when the check can read it: a
-// leading $HOME, ${HOME} or ~ is the user's home, it holds no other $, no `
-// and no backslash, and no text is joined to it after its closing quote.
-func (q removedTextQuoting) quotedPath(text []byte, start int, home string) (string, int, bool) {
-	open := start - 1
-	if open < 0 {
-		return "", 0, false
-	}
-	closing, ok := q.closes[open]
-	if !ok || closing < 0 {
-		return "", 0, false
-	}
-	whole := string(text[open+1 : closing])
-	if strings.ContainsAny(whole, "`\\") {
-		return "", 0, false
-	}
-	for _, prefix := range []string{"$HOME/", "${HOME}/", "~/"} {
-		if strings.HasPrefix(whole, prefix) {
-			whole = filepath.Join(home, whole[len(prefix)-1:])
-			break
-		}
-	}
-	if strings.Contains(whole, "$") || !filepath.IsAbs(whole) {
-		return "", 0, false
-	}
-	if next := closing + 1; next < len(text) && !removedTextBreak(text[next]) && strings.IndexByte(",]}:", text[next]) < 0 {
-		return "", 0, false
-	}
-	return filepath.Clean(whole), closing, true
-}
-
-// scriptOnPath reports whether a directory a command may be found in holds
-// the script: the gateway's PATH, ~/bin, ~/.local/bin, /usr/local/bin and
-// /opt/homebrew/bin. A directory it cannot list counts as holding it.
-func (c *removedScriptCheck) scriptOnPath() bool {
-	if c.onPath != nil {
-		return *c.onPath
-	}
-	dirs := append(filepath.SplitList(os.Getenv("PATH")),
-		filepath.Join(c.home, "bin"), filepath.Join(c.home, ".local", "bin"), "/usr/local/bin", "/opt/homebrew/bin")
-	found := false
-	for _, dir := range uniqueNonEmptyStrings(dirs) {
-		if info, err := os.Stat(dir); err != nil || !info.IsDir() || !filepath.IsAbs(dir) {
-			continue
-		}
-		if c.holdsScript(dir) {
-			found = true
-			break
-		}
-	}
-	c.onPath = &found
-	return found
-}
-
-// holdsScript reports whether dir holds the script under any name; a
-// directory it cannot list counts as holding it.
-func (c *removedScriptCheck) holdsScript(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) > removedScriptCheckDirEntries {
-		return true
-	}
-	for _, entry := range entries {
-		if info, err := os.Stat(filepath.Join(dir, entry.Name())); err == nil && os.SameFile(info, c.script) {
-			return true
-		}
-	}
-	return false
-}
-
-// addHookScript plans DefenseClaw's hook script: a script exactly as setup
-// wrote it (its digest in the hook contract lock) becomes the disabled
-// tombstone, so an OpenHands conversation that loaded the hook before
-// teardown keeps working. A script DefenseClaw cannot prove it wrote (it
-// changed, there is no digest, or it is a link or not a regular file), or one
-// a hooks file in checked may still run once the cleanup is done, is left for
-// the user with those hooks files, and so is everything else: a tombstone
-// exits 0, so a hook that still ran it would allow everything with no
-// warning.
-func (c removedOpenHandsConnector) addHookScript(p *removedCleanupPlan, opts SetupOpts, checked []string) error {
+// addHookScript plans DefenseClaw's hook script. A script exactly as setup
+// wrote it (its digest in the hook contract lock), or a tombstone that exits
+// 0 (removedOpenHandsAllowTombstone), becomes the OpenHands tombstone, which
+// blocks every call. So a hook that still runs the script once the cleanup is
+// done (one in a hooks.json the cleanup puts back, one the user wrote, or an
+// OpenHands conversation that loaded the hook before teardown) never allows a
+// call, whatever path, link, wrapper or shell runs it, and OpenHands shows
+// how to remove it. A script DefenseClaw cannot prove it wrote (it changed,
+// there is no digest, or it is a link or not a regular file), or one with
+// another name (a hard link, which keeps the old bytes when the tombstone
+// replaces the file), is left for the user, and so is everything else.
+func (c removedOpenHandsConnector) addHookScript(p *removedCleanupPlan, opts SetupOpts) error {
 	script := c.hookScript(opts)
 	const step = "delete it once no OpenHands hooks file runs it"
 	data, info, err := readRemovedFile(script)
@@ -1509,47 +613,88 @@ func (c removedOpenHandsConnector) addHookScript(p *removedCleanupPlan, opts Set
 		return err
 	case info == nil, removedOpenHandsTombstone(data):
 		return nil
-	}
-	mayRun := c.hooksThatMayRunScript(p, opts, checked, script, info)
-	for _, hooks := range mayRun {
-		if hooks.restored {
-			p.leave(hooks.path, "the copy DefenseClaw saved before its setup, which the cleanup puts back, has a hook that may run "+script+" through a link, a wrapper or another path",
-				"remove the hook entries whose command runs "+script+", and every hook that runs it through a link or a wrapper")
-			continue
-		}
-		p.leave(hooks.path, "DefenseClaw cannot prove that none of its hooks runs "+script+" through a link, a wrapper or another path",
-			"remove every hook that runs "+script+", directly or through a link or a wrapper")
-	}
-	entry, err := LoadHookContractLockEntryForMode(opts.DataDir, c.name, opts.ManagedEnterprise)
-	if err != nil {
-		p.leave(script, fmt.Sprintf("DefenseClaw cannot read its record of the script: %v", err), step)
+	case removedHardLinked(script, info):
+		p.leave(script, "it has another name (a hard link), which would keep running it as it is",
+			"delete it and every hard link to it once no OpenHands hooks file runs them")
 		return nil
 	}
-	switch want := entry.HookScriptDigests[removedOpenHandsHookScript]; {
-	case want == "":
-		p.leave(script, "DefenseClaw has no record of writing it", step)
-	case !strings.EqualFold(strings.TrimPrefix(want, "sha256:"), sha256Hex(data)):
-		p.leave(script, "it changed after DefenseClaw wrote it", step)
-	case len(mayRun) > 0:
-		p.leave(script, "an OpenHands hooks file DefenseClaw cannot check may still run it", step)
-	default:
-		p.files = append(p.files, removedFile{
-			path: script, data: data, mode: info.Mode().Perm(),
-			restore: []byte(disabledHookTombstone("OpenHands")), restoreMode: 0o700,
-		})
+	if !removedOpenHandsAllowTombstone(data) {
+		entry, err := LoadHookContractLockEntryForMode(opts.DataDir, c.name, opts.ManagedEnterprise)
+		if err != nil {
+			p.leave(script, fmt.Sprintf("DefenseClaw cannot read its record of the script: %v", err), step)
+			return nil
+		}
+		switch want := entry.HookScriptDigests[removedOpenHandsHookScript]; {
+		case want == "":
+			p.leave(script, "DefenseClaw has no record of writing it", step)
+			return nil
+		case !strings.EqualFold(strings.TrimPrefix(want, "sha256:"), sha256Hex(data)):
+			p.leave(script, "it changed after DefenseClaw wrote it", step)
+			return nil
+		}
 	}
+	p.files = append(p.files, removedFile{
+		path: script, data: data, mode: info.Mode().Perm(),
+		restore: []byte(removedOpenHandsTombstoneBody), restoreMode: 0o700,
+	})
 	return nil
 }
 
-// removedOpenHandsTombstone reports whether data is the disabled tombstone an
-// OpenHands teardown wrote: "OpenHands" in 1.0.4, "openhands" before.
+// removedHardLinked reports whether the file at path (info, from Lstat) has
+// more than one name, or the count cannot be read.
+func removedHardLinked(path string, info os.FileInfo) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(opened, info) {
+		return true
+	}
+	links, err := atomicTransformBoundLinkCountPlatform(file)
+	return err != nil || links != 1
+}
+
+// removedOpenHandsDenyReason is the one line the OpenHands tombstone gives
+// OpenHands with every block.
+const removedOpenHandsDenyReason = "DefenseClaw blocked this call: OpenHands support was removed in DefenseClaw 1.0.4. " +
+	"To use OpenHands without DefenseClaw, remove every hook that runs " + removedOpenHandsHookScript +
+	" from your OpenHands hooks.json (~/.openhands/hooks.json, or .openhands/hooks.json in a workspace), then restart OpenHands."
+
+// removedOpenHandsTombstoneBody is the hook script an OpenHands teardown
+// leaves. It blocks every call: OpenHands blocks on exit status 2 and shows
+// the deny reason. It is the same run directly or by any shell (sh, bash,
+// dash, zsh, ksh, csh, tcsh, fish, busybox), through a link or a wrapper,
+// with any option (-l, -e, -c), or sourced: it uses only echo and exit, and
+// its one quoted string holds no $, !, backslash or single quote, so no
+// shell expands or splits anything in it, and nothing runs before the exit
+// that could end the script with another status. The v0 marker keeps it
+// DefenseClaw's for doctor and the hook owner checks.
+const removedOpenHandsTombstoneBody = "#!/bin/sh\n" +
+	"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
+	"# OpenHands support was removed in DefenseClaw 1.0.4. This hook blocks every\n" +
+	"# call. Remove the hooks that run it from your OpenHands hooks.json.\n" +
+	"echo '{\"decision\":\"deny\",\"reason\":\"" + removedOpenHandsDenyReason + "\"}'\n" +
+	"exit 2\n"
+
+// removedOpenHandsTombstone reports whether data is the tombstone an
+// OpenHands teardown leaves.
 func removedOpenHandsTombstone(data []byte) bool {
-	return string(data) == disabledHookTombstone("OpenHands") || string(data) == disabledHookTombstone(removedOpenHandsID)
+	return string(data) == removedOpenHandsTombstoneBody
+}
+
+// removedOpenHandsAllowTombstone reports whether data is a tombstone that
+// exits 0: the one a 1.0.x OpenHands teardown wrote ("openhands"), or an
+// earlier 1.0.4 build's ("OpenHands"). Its bytes prove it is DefenseClaw's,
+// so teardown replaces it with the tombstone that blocks.
+func removedOpenHandsAllowTombstone(data []byte) bool {
+	return string(data) == disabledHookTombstone(removedOpenHandsID) || string(data) == disabledHookTombstone("OpenHands")
 }
 
 // Teardown puts back the hooks.json an older release's setup found and turns
-// DefenseClaw's hook script into the disabled tombstone, when each is exactly
-// as setup left it (see the file comment).
+// DefenseClaw's hook script into the tombstone that blocks every call, when
+// each is exactly as setup left it (see the file comment).
 func (c removedOpenHandsConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	return c.teardown(opts, c.plan, []string{"config"}, func() error {
 		record := filepath.Join(opts.DataDir, "hooks", hookConfigSidecarName+"."+c.name)
