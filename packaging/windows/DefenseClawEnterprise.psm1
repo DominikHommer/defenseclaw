@@ -27827,8 +27827,11 @@ function Set-DefenseClawSelfUninstallReceiptHelper {
 # the detached finalizer is started: once the CLI exits it retires
 # InstallRoot when the program lets go, runs that cleanup, and removes the
 # retired tree. A finalizer that runs out of time leaves the receipt, and
-# the next Uninstall finishes the same work. The result says the cleanup is
-# pending, and why.
+# the next Uninstall finishes the same work. The result is a retryable
+# uninstall_in_use failure, never ok: InstallRoot (and with purge the
+# purge) is still there when the CLI exits, and nothing it can wait for
+# confirms that the finalizer finishes them. An ok result let an
+# exit-code-driven manager stop retrying (W2B-G-win review, loop round 2).
 function Start-DefenseClawDeferredSelfUninstallRetirement {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -27869,6 +27872,37 @@ function Start-DefenseClawDeferredSelfUninstallRetirement {
                 "a program holds a file in $($Layout.InstallRoot) ($Reason); the detached cleanup " +
                 'removes it, and finishes the uninstall cleanup, once that program closes it'
             )) `
+            -Force
+    $purge = [bool]$receipt.purge_requested
+    $finish = if ($purge) { 'the uninstall cleanup and the purge' } else { 'the uninstall cleanup' }
+    $rerun = if ($purge) { 'run the uninstall with PURGE=1 again' } else { 'run the uninstall again' }
+    $inUse = ConvertTo-DefenseClawBoundedDiagnostic -Value (
+        "uninstall_in_use: a program holds a file in $($Layout.InstallRoot) ($Reason), so the uninstall " +
+        'could not remove that folder. DefenseClaw is already uninstalled (its services and hooks are removed); ' +
+        "a cleanup that starts when this command exits removes the folder and finishes $finish once that " +
+        "program closes the file. Close the program, then $rerun to confirm that it finished"
+    )
+    $errorsProperty = $result.PSObject.Properties['errors']
+    $errors = [Collections.Generic.List[string]]::new()
+    if ($null -ne $errorsProperty) {
+        foreach ($message in @($errorsProperty.Value)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$message)) {
+                $errors.Add([string]$message)
+            }
+        }
+    }
+    $errors.Add($inUse)
+    $result |
+        Microsoft.PowerShell.Utility\Add-Member `
+            -MemberType NoteProperty `
+            -Name ok `
+            -Value $false `
+            -Force
+    $result |
+        Microsoft.PowerShell.Utility\Add-Member `
+            -MemberType NoteProperty `
+            -Name errors `
+            -Value ([string[]]$errors.ToArray()) `
             -Force
     return Add-DefenseClawSelfUninstallResult `
         -Result $result `
