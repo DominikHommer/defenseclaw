@@ -3758,15 +3758,27 @@ def _guardrail_write_error(exc: BaseException) -> str:
     return f"Failed to save config: {config_writer.plain_error(exc)}"
 
 
-def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> object:
+def _write_guardrail_config(
+    app: AppContext, changes, reason: str, fail, *, expect_sha256: str | None = None
+) -> object:
     """Apply *changes* through the config writer; *fail(exit_code, message)*
-    reports a refused or failed write and exits."""
+    reports a refused or failed write and exits. With *expect_sha256* the
+    write lands only on those config.yaml bytes: a file changed since then
+    raises :class:`config_writer.ConfigConflictError` for the caller."""
     from defenseclaw import config_writer
 
     try:
         return config_writer.apply(
-            changes, _cli_actor(), reason, path=str(config_path_for_data_dir(app.cfg.data_dir))
+            changes,
+            _cli_actor(),
+            reason,
+            expect_sha256=expect_sha256,
+            path=str(config_path_for_data_dir(app.cfg.data_dir)),
         )
+    except config_writer.ConfigConflictError as exc:
+        if expect_sha256 is not None:
+            raise
+        fail(1, _guardrail_write_error(exc))
     except config_writer.ManagedConfigWriteError:
         _refuse_managed_write(getattr(changes[0], "path", "") or "guardrail", reason, fail)
     except (config_writer.ConfigWriteError, OSError) as exc:
@@ -3778,6 +3790,41 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
             detail += " The global rule pack was checked; use --connector or --profile for another scope."
         fail(1, detail)
     return None
+
+
+def _bind_config_snapshot(app: AppContext, fail) -> str:
+    """Reload ``app.cfg`` from the config.yaml bytes on disk now; return their
+    sha256 for the writer's ``expect_sha256``.
+
+    ``use-pack --repin`` names every scope that shares the pin and asks
+    before it writes, and the writer merges into the file as it is then. Bound
+    to this snapshot, an edit made meanwhile (another scope selecting the
+    pack) is a conflict, never a re-pin of a scope the prompt did not name.
+    A missing file keeps the loaded defaults; the writer reads it as empty.
+    """
+    import hashlib
+
+    from defenseclaw import config as cfg_mod
+
+    try:
+        with open(config_path_for_data_dir(app.cfg.data_dir), "rb") as handle:
+            raw = handle.read()
+    except FileNotFoundError:
+        return hashlib.sha256(b"").hexdigest()
+    except OSError as exc:
+        fail(1, f"Failed to read config: {exc}. Nothing was changed.")
+        raise
+    try:
+        app.cfg = cfg_mod.load(parsed_source=cfg_mod.parse_config_yaml(cfg_mod.decode_config_bytes(raw)) or {})
+    except Exception as exc:
+        fail(1, f"Failed to load config: {exc}. Nothing was changed.")
+        raise
+    return hashlib.sha256(raw).hexdigest()
+
+
+# How often use-pack --repin reads config.yaml again when it changed while
+# the re-pin waited, before it gives up and saves nothing.
+_REPIN_RECHECKS = 3
 
 
 @contextmanager
@@ -3909,6 +3956,21 @@ def use_pack_cmd(
     --connector X`` removes X's pack. The running gateway picks it up on its
     next reload; nothing is restarted.
     """
+    _use_pack(app, pack, connector, clear, no_validate, repin, yes, json_out)
+
+
+def _use_pack(
+    app: AppContext,
+    pack: str | None,
+    connector: str | None,
+    clear: bool,
+    no_validate: bool,
+    repin: bool,
+    yes: bool,
+    json_out: bool,
+    *,
+    rechecks: int = _REPIN_RECHECKS,
+) -> None:
     from defenseclaw import config_writer, policy_catalog, rulepack_validation
 
     def _finish(
@@ -3966,6 +4028,9 @@ def use_pack_cmd(
         raise click.UsageError("--repin re-pins a custom pack; it can't be combined with --clear.")
     if not clear and not (pack or "").strip():
         raise click.UsageError("Missing PACK: a preset (default, strict, permissive) or a rule-pack directory.")
+    # A re-pin previews, confirms and writes one config.yaml snapshot.
+    snapshot_sha = _bind_config_snapshot(app, _fail) if repin else None
+    gc = app.cfg.guardrail
 
     if connector:
         connector_key, problem = _resolve_scope_connector(app, connector)
@@ -4215,7 +4280,23 @@ def use_pack_cmd(
         if connector_key and policy_catalog.configured_pack_dir(app.cfg, _scope_block(app.cfg, connector_key, None))
         else policy_catalog.global_pack(app.cfg).pack
     )
-    result = _write_guardrail_config(app, changes, f"guardrail use-pack {name}", _fail)
+    try:
+        result = _write_guardrail_config(
+            app, changes, f"guardrail use-pack {name}", _fail, expect_sha256=snapshot_sha
+        )
+    except config_writer.ConfigConflictError:
+        # config.yaml changed after the scopes above were read (and confirmed):
+        # merged into it, the new pin could reach a scope no one was shown.
+        if rechecks <= 0:
+            _fail(
+                1,
+                "config.yaml kept changing while the re-pin waited, so it was not saved. "
+                "Nothing was changed; run it again.",
+            )
+        if not json_out:
+            ux.warn("config.yaml changed while the re-pin waited; nothing was saved. Reading it again.", indent="  ")
+        _use_pack(app, pack, connector, clear, no_validate, repin, yes, json_out, rechecks=rechecks - 1)
+        return
     if connector_key is None:
         message = f"All connectors now use the '{pack_name}' rule pack."
         if cleared:

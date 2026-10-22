@@ -16,10 +16,13 @@ writer; the writer is recorded here, not run.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import pathlib
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from click.testing import CliRunner
 from defenseclaw import config as config_mod
 from defenseclaw import config_writer, policy_catalog, rulepack_validation
@@ -269,6 +272,156 @@ def test_repin_of_a_pin_no_other_scope_uses_names_no_one_else(env):
         result = _run(app, ["use-pack", "team", *args, "--repin", "--yes", "--json"])
         assert result.exit_code == 0, result.output
         assert "shared" not in json.loads(result.output)["message"]
+
+
+@pytest.fixture
+def on_disk(env, monkeypatch):
+    """*env* with config.yaml on disk (Codex selects the stale team pin) and a
+    writer that, like config_writer, refuses a stale ``expect_sha256``."""
+    app, _root, custom, writes = env
+    path = config_mod.config_path_for_data_dir(app.cfg.data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "config_version": config_mod.CURRENT_CONFIG_VERSION,
+        "data_dir": app.cfg.data_dir,
+        "policy_dir": app.cfg.policy_dir,
+        "claw": {"mode": "codex"},
+        "guardrail": {
+            "enabled": True,
+            "connector": "codex",
+            "mode": "action",
+            "port": 4321,
+            "rule_pack": "default",
+            "custom_packs": {"team": {"path": str(custom), "digest": "sha256:" + "b" * 64}},
+            "connectors": {"codex": {"rule_pack": "team"}, "claudecode": {"rule_pack": "strict"}},
+        },
+    }
+    path.write_text(yaml.safe_dump(doc))
+    # The config the command started with: the same file.
+    app.cfg = config_mod.load(parsed_source=yaml.safe_load(path.read_text()))
+    conflicts: list[str] = []
+
+    def _apply(changes, actor, reason, expect_sha256=None, path=None, **_kwargs):
+        current = hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+        if expect_sha256 is not None and expect_sha256 != current:
+            conflicts.append(reason)
+            raise config_writer.ConfigConflictError("config.yaml changed since it was read")
+        writes.append(list(changes))
+        return config_writer.WriteResult(generation=7, sha256=current)
+
+    monkeypatch.setattr(config_writer, "apply", _apply)
+
+    def edit(profile: str = "", **connectors):
+        """Another writer (or a hand edit) selects packs while use-pack waits."""
+        doc["guardrail"]["connectors"].update({name: {"rule_pack": pack} for name, pack in connectors.items()})
+        if profile:
+            doc["guardrail"]["profiles"] = {profile: {"rule_pack": "team"}}
+        path.write_text(yaml.safe_dump(doc))
+
+    return app, writes, conflicts, edit, doc, path
+
+
+def _confirm_after(edits: list, asked: list):
+    """A confirm prompt that runs the next queued edit while it waits."""
+
+    def _confirm():
+        asked.append(True)
+        if edits:
+            edits.pop(0)()
+        return True
+
+    return _confirm
+
+
+@pytest.mark.parametrize(
+    ("args", "change", "named", "audit"),
+    [
+        (["--connector", "codex"], {"claudecode": "team"}, "Claude Code", "repin_shared=Claude Code"),
+        ([], {"profile": "engineering"}, "profile engineering", "repin_shared=profile engineering"),
+    ],
+    ids=["connector-peer", "global-profile"],
+)
+def test_repin_rereads_the_scopes_when_config_changes_while_it_waits(on_disk, monkeypatch, args, change, named, audit):
+    """W4 loop 2: another scope selects the stale pin while the re-pin prompt
+    waits. The confirmed preview did not name it, so that write is refused
+    as a conflict; the scopes are read again, named, and asked again."""
+    app, writes, conflicts, edit, _doc, _path = on_disk
+    asked: list = []
+    monkeypatch.setattr(cmd_guardrail, "_confirm_proceed", _confirm_after([lambda: edit(**change)], asked))
+
+    result = CliRunner().invoke(cmd_guardrail.guardrail, ["use-pack", "team", *args, "--repin"], obj=app)
+
+    out = " ".join(result.output.split())
+    assert result.exit_code == 0, result.output
+    assert len(conflicts) == 1 and len(asked) == 2 and len(writes) == 1
+    assert "config.yaml changed while the re-pin waited; nothing was saved" in out
+    first_prompt, second_prompt = out.split("Reading it again.", 1)
+    assert named not in first_prompt
+    assert f"The pin is shared, so the edited pack also applies to {named}" in second_prompt
+    assert audit in app.logger.log_config_change.call_args.args[-1]
+
+
+def test_repin_yes_rereads_the_scopes_changed_during_validation(on_disk, monkeypatch):
+    """--yes has no prompt, but validating the pack still leaves a window."""
+    app, writes, conflicts, edit, _doc, _path = on_disk
+    edits = [lambda: edit(claudecode="team")]
+
+    def _validate(path, **kwargs):
+        if edits:
+            edits.pop(0)()
+        return _valid(path, **kwargs)
+
+    monkeypatch.setattr(rulepack_validation, "validate_rule_pack", _validate)
+    result = _run(app, ["use-pack", "team", "--connector", "codex", "--repin", "--yes", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert len(conflicts) == 1 and len(writes) == 1
+    assert "also applies to Claude Code" in json.loads(result.output)["message"]
+    assert "repin_shared=Claude Code" in app.logger.log_config_change.call_args.args[-1]
+
+
+def test_repin_reads_the_config_on_disk_not_the_one_loaded_at_start(on_disk):
+    """config.yaml changed between the command's start and the re-pin."""
+    app, writes, conflicts, edit, _doc, _path = on_disk
+    edit(claudecode="team")
+    result = _run(app, ["use-pack", "team", "--connector", "codex", "--repin", "--yes", "--json"])
+    assert result.exit_code == 0, result.output
+    assert conflicts == [] and len(writes) == 1
+    assert "also applies to Claude Code" in json.loads(result.output)["message"]
+
+
+def test_repin_saves_nothing_when_config_keeps_changing(on_disk, monkeypatch):
+    app, writes, conflicts, edit, _doc, _path = on_disk
+    asked: list = []
+    packs = ["team", "strict"] * 4
+    monkeypatch.setattr(
+        cmd_guardrail,
+        "_confirm_proceed",
+        _confirm_after([lambda pack=pack: edit(claudecode=pack) for pack in packs], asked),
+    )
+    result = CliRunner().invoke(cmd_guardrail.guardrail, ["use-pack", "team", "--connector", "codex", "--repin"], obj=app)
+    assert result.exit_code == 1, result.output
+    assert writes == []
+    assert len(conflicts) == cmd_guardrail._REPIN_RECHECKS + 1
+    assert "kept changing while the re-pin waited" in result.output and "Nothing was changed" in result.output
+
+
+def test_repin_does_not_repin_when_the_pin_was_refreshed_meanwhile(on_disk, monkeypatch):
+    """Someone re-pinned team to the pack's digest while the prompt waited: the
+    re-read selects the pack and writes no pin."""
+    app, writes, conflicts, _edit, doc, path = on_disk
+
+    def _refresh():
+        doc["guardrail"]["custom_packs"]["team"]["digest"] = "sha256:" + "a" * 64
+        path.write_text(yaml.safe_dump(doc))
+
+    asked: list = []
+    monkeypatch.setattr(cmd_guardrail, "_confirm_proceed", _confirm_after([_refresh], asked))
+    result = CliRunner().invoke(cmd_guardrail.guardrail, ["use-pack", "team", "--connector", "codex", "--repin"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert len(conflicts) == 1 and len(asked) == 1 and len(writes) == 1
+    assert not any(change.path == "guardrail.custom_packs.team" for change in writes[0])
+    assert "Re-pinned" not in result.output
 
 
 def _app_protection(app, raw: dict) -> None:

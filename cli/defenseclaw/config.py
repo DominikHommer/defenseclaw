@@ -116,7 +116,11 @@ def read_config_text(path: str | os.PathLike[str]) -> str:
     with the locale encoding, as before.
     """
     with open(path, "rb") as handle:
-        data = handle.read()
+        return decode_config_bytes(handle.read())
+
+
+def decode_config_bytes(data: bytes) -> str:
+    """config.yaml bytes as text, the way :func:`read_config_text` reads them."""
     data = data.removeprefix(codecs.BOM_UTF8)
     try:
         return data.decode("utf-8")
