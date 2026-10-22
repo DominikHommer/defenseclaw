@@ -490,9 +490,11 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	}
 	if c.name == "copilot" {
 		// Copilot's hook body uses toolName/toolArgs on PreToolUse, while a
-		// native PermissionRequest edit carries toolInput with a single-file
-		// diff. Event identity remains bound to Setup's registration and is
-		// supplied out-of-band by the authenticated bridge.
+		// native PermissionRequest carries toolInput: the call's arguments
+		// ({"command": ...} for bash and powershell), or a single-file diff
+		// for an edit (copilotargs.PermissionToolArgs). Event identity
+		// remains bound to Setup's registration and is supplied out-of-band
+		// by the authenticated bridge.
 		profile.Decode = copilotProfileDecode
 	}
 	if c.name == "cursor" {
@@ -519,7 +521,7 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 		if hookFirstString(payload, "hookName") == "permissionRequest" {
 			if input, hasInput := payload["toolInput"]; hasInput {
 				req.ToolArgsAuthoritative = true
-				req.ToolArgs = copilotargs.PermissionEditArgs(req.ToolName, input)
+				req.ToolArgs = copilotargs.PermissionToolArgs(req.ToolName, input)
 			}
 		}
 		return req

@@ -71,6 +71,7 @@ func TestResolveConnectorReadsTheGatewayProjection(t *testing.T) {
 		{"cli apply_patch JSON string", "copilot", "", "preToolUse", map[string]any{"toolName": "apply_patch", "toolArgs": jsonText(patch)}, true, false},
 		{"native permissionRequest edit", "copilot", "", "permissionRequest", map[string]any{"hookName": "permissionRequest", "toolName": "edit", "toolInput": map[string]any{"file_path": target, "diff": nativeDiff}}, true, false},
 		{"native permissionRequest mismatched diff", "copilot", "", "permissionRequest", map[string]any{"hookName": "permissionRequest", "toolName": "edit", "toolInput": map[string]any{"file_path": target, "diff": strings.Replace(nativeDiff, "+++ b"+target, "+++ b"+filepath.Join(project, "other.txt"), 1)}}, false, true},
+		{"native permissionRequest shell", "copilot", "", "permissionRequest", map[string]any{"hookName": "permissionRequest", "permissionSuggestions": []any{}, "toolName": "bash", "toolInput": shell}, true, false},
 		{"cli shell toolArgs JSON string", "copilot", "", "preToolUse", map[string]any{"toolName": "bash", "toolArgs": jsonText(shell)}, true, false},
 		{"cli shell toolArgs object", "copilot", "", "preToolUse", map[string]any{"toolName": "bash", "toolArgs": shell}, true, false},
 		{"local create_file", "copilot", local, "PreToolUse", map[string]any{"hook_event_name": "PreToolUse", "tool_name": "create_file",
