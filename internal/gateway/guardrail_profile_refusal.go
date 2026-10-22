@@ -15,8 +15,10 @@ import (
 // A Refused profile decision (profileDecision.Refused).
 //
 // An agents entry that may be a request agent's 1.0.3 identity, which the
-// agent ledger does not prove, leaves more than one profile that may apply
-// (matchAgent). When none of them enforces at least what each of the
+// agent ledger does not prove (matchAgent), or a group assignment that may
+// name a group whose name no NSS provider confirms
+// (matchWithUnconfirmedGroups), leaves more than one profile that may
+// apply. When none of them enforces at least what each of the
 // others does (profileCovers), no single profile is safe to apply: the
 // request is refused wherever its surface can block it, on the connector
 // hook, the inspect endpoints, ACP and the guardrail proxy. What a surface
@@ -30,6 +32,28 @@ import (
 const profileRefusedReason = "DefenseClaw refused this request: a guardrail profile assignment names an agent identity from before the upgrade " +
 	"that cannot be matched to this account, and the profiles that may apply enforce different rules. " +
 	"Ask your administrator to replace the entry with the agent identity `defenseclaw agent identities` shows now."
+
+// profileRefusedGroupsReason is what a request refused for an unconfirmed
+// group name (matchWithUnconfirmedGroups) tells the agent and its user.
+const profileRefusedGroupsReason = "DefenseClaw refused this request: the names of some of your groups cannot be confirmed now " +
+	"(a directory group provider did not answer), a guardrail profile assignment may name one of them, and the profiles that may apply " +
+	"enforce different rules. Try again shortly; if it persists, ask your administrator to check the host's directory group provider."
+
+// refusalReason is what the request d refused tells the agent.
+func (d profileDecision) refusalReason() string {
+	if d.refusedGroups {
+		return profileRefusedGroupsReason
+	}
+	return profileRefusedReason
+}
+
+// profileRefusalReason is what ctx's refused request tells the agent.
+func (a *APIServer) profileRefusalReason(ctx context.Context) string {
+	if resolved := a.resolvedProfile(ctx); resolved != nil {
+		return resolved.decision.refusalReason()
+	}
+	return profileRefusedReason
+}
 
 // profileRefused reports whether ctx's profile decision is Refused.
 func (a *APIServer) profileRefused(ctx context.Context) bool {
@@ -64,7 +88,7 @@ func (a *APIServer) refuseProfileHook(
 	}
 	resp = agentHookResponse{
 		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
-		WouldBlock: wouldBlock, Reason: profileRefusedReason,
+		WouldBlock: wouldBlock, Reason: a.profileRefusalReason(ctx),
 	}
 	refused = true
 	defer func() {
@@ -73,7 +97,7 @@ func (a *APIServer) refuseProfileHook(
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("profile refusal render panic: %v", recovered))
 		}
 	}()
-	resp = a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, profileRefusedReason)
+	resp = a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, resp.Reason)
 	return resp, refused
 }
 
@@ -85,14 +109,14 @@ func (a *APIServer) refuseProfileInspect(w http.ResponseWriter, r *http.Request,
 	if !a.profileRefused(r.Context()) {
 		return false
 	}
-	fmt.Fprintf(os.Stderr, "[inspect] REFUSED %s: no guardrail profile is safe for the request's agent (default_lookup_failed)\n", route)
+	fmt.Fprintf(os.Stderr, "[inspect] REFUSED %s: no guardrail profile is safe for the request (default_lookup_failed)\n", route)
 	if a.logger != nil {
 		_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, route, action, target,
 			"severity=HIGH mode=action reason=guardrail_profile_refused"))
 	}
 	a.writeJSON(w, http.StatusOK, &ToolInspectVerdict{
 		Action: "block", RawAction: "block", Severity: "HIGH", Confidence: 1,
-		Reason: profileRefusedReason, Findings: []string{}, Mode: "action",
+		Reason: a.profileRefusalReason(r.Context()), Findings: []string{}, Mode: "action",
 	})
 	return true
 }
@@ -103,7 +127,7 @@ func refuseProfileProxy(w http.ResponseWriter, r *http.Request) bool {
 	if !proxyProfileRefused(r.Context()) {
 		return false
 	}
-	fmt.Fprintf(os.Stderr, "[guardrail] REFUSED %s: no guardrail profile is safe for the request's agent (default_lookup_failed)\n", r.URL.Path)
-	writeOpenAIError(w, http.StatusForbidden, profileRefusedReason)
+	fmt.Fprintf(os.Stderr, "[guardrail] REFUSED %s: no guardrail profile is safe for the request (default_lookup_failed)\n", r.URL.Path)
+	writeOpenAIError(w, http.StatusForbidden, resolvedGuardrailProfileFrom(r.Context()).decision.refusalReason())
 	return true
 }

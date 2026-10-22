@@ -206,7 +206,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	if slices.Contains(profile.DeniedMethods, req.Method) {
 		blockReason = "method denied by ACP profile"
 	} else if a.profileRefused(ctx) {
-		blockReason = profileRefusedReason
+		blockReason = a.profileRefusalReason(ctx)
 	}
 	if blockReason != "" {
 		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: blockReason,

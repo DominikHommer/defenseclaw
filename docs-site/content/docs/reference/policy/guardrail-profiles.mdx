@@ -113,16 +113,22 @@ Each assignment has a `profile` and a `match` with at least one of four keys.
 | `connectors` | The connector the request comes from: the hook route, the connector an inspect call authenticated for, or the connector the LLM proxy serves | `codex`, `claudecode`, `cursor` and the others. |
 | `agents` | One agent install | An agent identity from `defenseclaw agent identities`: `agt-` and 16 hex digits. |
 
-On Linux, a numeric group ID remains a complete fact only when every NSS
-group provider confirms that it has no name for the ID. If a provider cannot
-be checked, the account's group lookup fails and `default_lookup_failed`
-applies until the provider answers.
+On Linux, a group ID with no name counts as unnamed only when every NSS
+group provider the system asks shows that it has no name for it. A provider
+DefenseClaw cannot check (Himmelblau, aad) leaves the name unknown. The
+account is still in the group, so a `groups` entry with the number can
+match. An earlier assignment whose `groups` entry may name that group makes
+the request take the strictest profile that may apply
+(`default_lookup_failed`), never a weaker default. When those profiles
+enforce different rules, the request is refused until the provider answers.
 
 After upgrading from 1.0.0–1.0.3, rebind any `agents` assignment to the
 current ID shown by `defenseclaw agent identities`. The older ID did not
 include the account domain, and its inventory row could have been overwritten
-by another account with the same UID. Until rebind, an affected request uses
-`default_lookup_failed`; give that path a strict default profile.
+by another account with the same UID. Until rebind, an agent that may own the
+entry gets the strictest profile that may apply (`default_lookup_failed`):
+the entry's own, the default, or the one it matches otherwise. When those
+profiles enforce different rules, its requests are refused.
 
 How the keys combine:
 
@@ -236,7 +242,7 @@ than one key, the reason names the most specific key, in the order
 | `connector` | Only a `connectors` entry matched. |
 | `default` | The user is verified, but no assignment matched, so `default_profile` applied. |
 | `default_unverified` | No verified user reached the gateway, so only assignments that match on `connectors` alone could apply. |
-| `default_lookup_failed` | The directory lookup for a verified user failed or was too slow, so the default profile applied. |
+| `default_lookup_failed` | The directory lookup for a verified user failed or was too slow, so the default profile applied. Or a fact the match needs is unproven (a 1.0.3 `agents` entry, a group name no provider confirms), so the strictest profile that may apply applied, or the request was refused. |
 
 ## Only verified facts select a profile
 

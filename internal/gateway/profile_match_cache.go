@@ -83,6 +83,11 @@ func profileMatchKey(subject *profileSubject, source, connectorName, agent strin
 		for _, g := range subject.Groups {
 			put(g)
 		}
+		// A gid whose name is unconfirmed selects apart from one proved to
+		// have none.
+		for _, g := range subject.unconfirmedGroups {
+			put("unconfirmed:" + g)
+		}
 	}
 	var key [sha256.Size]byte
 	h.Sum(key[:0])

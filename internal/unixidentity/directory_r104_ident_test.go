@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -169,7 +170,7 @@ func TestDirectoryLookupBudgetNamesAColdLargeMembership(t *testing.T) {
 	run := func(budget time.Duration) error {
 		ctx, cancel := context.WithTimeout(context.Background(), budget)
 		defer cancel()
-		_, err := (&NSSResolver{path: "/usr/bin/getent", runner: slow, ctx: ctx}).groupNames(ids)
+		_, _, err := (&NSSResolver{path: "/usr/bin/getent", runner: slow, ctx: ctx}).groupNames(ids)
 		return err
 	}
 	if err := run(DirectoryLookupBudget()); err != nil {
@@ -182,19 +183,87 @@ func TestDirectoryLookupBudgetNamesAColdLargeMembership(t *testing.T) {
 
 // A numeric initgroups GID is not a definitive miss when a configured NSS
 // provider cannot show that its group database answered the name lookup.
+// The membership stays a fact; only the name is unknown (UnconfirmedGroups),
+// so the lookup does not fail: a failed lookup lost a strict assignment that
+// names the numeric gid (loop round 2, finding 3).
 func TestUnnamedGroupNeedsAProvenMissFromEveryNSSProvider(t *testing.T) {
 	accountHost(t, "", "", "passwd: files himmelblau\ninitgroups: files himmelblau\ngroup: files himmelblau\n")
 	r := newFakeNSS(&fakeRun{})
-	if names, err := r.groupNames([]int{7000}); err == nil {
-		t.Fatalf("uncheckable NSS provider gave groups %v as resolved facts", names)
+	names, unconfirmed, err := r.groupNames([]int{7000, 7001})
+	if err != nil || !reflect.DeepEqual(names, []string{"7000", "7001"}) || !reflect.DeepEqual(unconfirmed, []string{"7000", "7001"}) {
+		t.Fatalf("uncheckable NSS provider: names %v, unconfirmed %v, err %v; want both numeric and unconfirmed, no error", names, unconfirmed, err)
 	}
 }
 
 func TestUnnamedGroupKeepsNumericIDWhenLocalNSSProviderAnswers(t *testing.T) {
 	accountHost(t, "", "", "group: files systemd\n")
 	r := newFakeNSS(&fakeRun{})
-	if names, err := r.groupNames([]int{7000}); err != nil || !reflect.DeepEqual(names, []string{"7000"}) {
-		t.Fatalf("confirmed local NSS miss = %v, %v", names, err)
+	if names, unconfirmed, err := r.groupNames([]int{7000}); err != nil || !reflect.DeepEqual(names, []string{"7000"}) || len(unconfirmed) != 0 {
+		t.Fatalf("confirmed local NSS miss = %v, unconfirmed %v, %v", names, unconfirmed, err)
+	}
+}
+
+// Loop round 2, finding 4: a gid the system's group lookup did not name is
+// never given a name one provider answers on its own. glibc did not take
+// that answer (an action stopped before the provider, or the provider failed
+// during the lookup), and two providers can name one gid differently; the
+// last answer used to win, so a gid of one provider could match another
+// provider's group assignment. Such a gid stays a number with its name
+// unconfirmed. An action that stops the lookup after a definitive miss
+// ([NOTFOUND=return]) is honoured: providers after it are not asked.
+func TestUnnamedGroupNeverTakesAProviderName(t *testing.T) {
+	corpA := commandResult{stdout: []byte("corp-a:*:7000:\n")}
+	corpB := commandResult{stdout: []byte("corp-b:*:7000:\n")}
+	for _, tc := range []struct {
+		name, nss       string
+		results         map[string]commandResult
+		errs            map[string]error
+		wantUnconfirmed []string
+	}{
+		{name: "two providers name the gid differently", nss: "group: files himmelblau aad\n",
+			results: map[string]commandResult{"-s himmelblau group 7000": corpA, "-s aad group 7000": corpB}, wantUnconfirmed: []string{"7000"}},
+		{name: "one provider names the gid the lookup missed", nss: "group: files systemd himmelblau\n",
+			results: map[string]commandResult{"-s himmelblau group 7000": corpA}, wantUnconfirmed: []string{"7000"}},
+		{name: "an action stops the lookup before the provider", nss: "group: files [NOTFOUND=return] himmelblau aad\n",
+			results: map[string]commandResult{"-s himmelblau group 7000": corpA, "-s aad group 7000": corpB}},
+		{name: "an action in another case after a local provider", nss: "group: files systemd [notfound=RETURN] himmelblau\n",
+			results: map[string]commandResult{"-s himmelblau group 7000": corpA}},
+		{name: "an action that does not stop at not found", nss: "group: files [UNAVAIL=return] himmelblau\n",
+			results: map[string]commandResult{"-s himmelblau group 7000": corpA}, wantUnconfirmed: []string{"7000"}},
+		{name: "a garbled provider answer", nss: "group: files systemd\n",
+			results: map[string]commandResult{"-s systemd group 7000": {stdout: []byte("not a group line\n")}}, wantUnconfirmed: []string{"7000"}},
+		{name: "a provider answer for another gid", nss: "group: files systemd\n",
+			results: map[string]commandResult{"-s systemd group 7000": {stdout: []byte("other:x:7001:\n")}}, wantUnconfirmed: []string{"7000"}},
+		{name: "a provider that fails", nss: "group: files systemd\n",
+			errs: map[string]error{"-s systemd group 7000": errors.New("getent timed out")}, wantUnconfirmed: []string{"7000"}},
+		{name: "a provider that exits with an error", nss: "group: files systemd\n",
+			results: map[string]commandResult{"-s systemd group 7000": {exitCode: 1}}, wantUnconfirmed: []string{"7000"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			accountHost(t, "", "", tc.nss)
+			r := newFakeNSS(&fakeRun{results: tc.results, errs: tc.errs})
+			names, unconfirmed, err := r.groupNames([]int{7000})
+			if err != nil || !reflect.DeepEqual(names, []string{"7000"}) || !reflect.DeepEqual(unconfirmed, tc.wantUnconfirmed) {
+				t.Fatalf("names %v, unconfirmed %v, err %v; want [7000], unconfirmed %v", names, unconfirmed, err, tc.wantUnconfirmed)
+			}
+		})
+	}
+}
+
+// The facts of an account keep a gid whose name no provider can confirm,
+// marked unconfirmed, instead of failing the lookup (loop round 2,
+// finding 3).
+func TestAccountFactsKeepAGidWhoseNameIsUnconfirmed(t *testing.T) {
+	accountHost(t, "alice:x:1001:7000::/home/alice:/bin/sh\n", "staff:x:5100:alice\n",
+		"passwd: files\ninitgroups: files himmelblau\ngroup: files himmelblau\n")
+	localLine := []byte("alice:x:1001:7000::/home/alice:/bin/sh\n")
+	r := newFakeNSS(&fakeRun{results: map[string]commandResult{
+		"passwd 1001": {stdout: localLine}, "passwd alice": {stdout: localLine},
+	}})
+	facts, err := r.DirectoryFactsForUID(1001, time.Now())
+	if err != nil || !slices.Contains(facts.Groups, "7000") || !slices.Contains(facts.Groups, "staff") ||
+		!reflect.DeepEqual(facts.UnconfirmedGroups, []string{"7000"}) {
+		t.Fatalf("facts = %+v, %v; want groups with staff and 7000, 7000 unconfirmed", facts, err)
 	}
 }
 

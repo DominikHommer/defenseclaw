@@ -188,6 +188,82 @@ func TestWindowsIdentitySpoolWriteFailureWithdrawsOldRecord(t *testing.T) {
 	}
 }
 
+// Loop round 2, finding 1: a failed publication withdraws the previous
+// record only when the pass disproved it. A signed-in user whose token
+// groups did not change keeps the record, so the gateway keeps its strict
+// group profile; withdrawing it sent the request to default_lookup_failed
+// and a possibly weaker default. Changed groups, a sign-out (groups no
+// longer known) and another account name still withdraw it.
+func TestWindowsIdentitySpoolWriteFailureKeepsARecordItDidNotDisprove(t *testing.T) {
+	const strict = "S-1-5-21-111111111-222222222-333333333-7000"
+	named := map[string]string{strict: `CORP\strict`, testSpoolUserA: `CORP\alice`}
+	for _, tc := range []struct {
+		name     string
+		previous IdentitySpoolRecord
+		groups   []string
+		names    map[string]string
+		signedIn bool
+		wantKept bool
+	}{
+		{name: "same token groups", previous: IdentitySpoolRecord{User: `CORP\alice`, Facts: useridentity.DirectoryFacts{Groups: []string{strict, `CORP\strict`}}},
+			groups: []string{strict}, names: named, signedIn: true, wantKept: true},
+		{name: "same token groups, names not resolved this pass", previous: IdentitySpoolRecord{User: `CORP\alice`, Facts: useridentity.DirectoryFacts{Groups: []string{strict, `CORP\strict`}}},
+			groups: []string{strict}, signedIn: true, wantKept: true},
+		{name: "a group added", previous: IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Groups: []string{strict}}},
+			groups: []string{strict, "S-1-5-32-545"}, signedIn: true},
+		{name: "a group removed", previous: IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Groups: []string{strict, "S-1-5-32-545"}}},
+			groups: []string{strict}, signedIn: true},
+		{name: "signed out", previous: IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Groups: []string{strict}}},
+			groups: []string{strict}, signedIn: false},
+		{name: "another account name", previous: IdentitySpoolRecord{User: `CORP\other`, Facts: useridentity.DirectoryFacts{Groups: []string{strict}}},
+			groups: []string{strict}, names: named, signedIn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			previous := tc.previous
+			previous.Key, previous.UpdatedAt = testSpoolUserA, time.Now().UTC().Add(-time.Minute)
+			data, err := MarshalIdentitySpoolRecord(previous)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, testSpoolUserA+".json"), data, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			cache := NewWindowsEnrollmentGroupCache()
+			cache.Users[testSpoolUserA] = tc.groups
+			cache.SignedIn = map[string]bool{testSpoolUserA: tc.signedIn}
+			stubWindowsIdentityLookups(t, nil, nil)
+			windowsIdentityGroupNames = func(sids []string, _ int, _ time.Duration) []string {
+				out := make([]string, 0, len(sids))
+				for _, sid := range sids {
+					if name := tc.names[sid]; name != "" {
+						out = append(out, name)
+					} else {
+						out = append(out, sid)
+					}
+				}
+				return out
+			}
+			protect := func(path string) error {
+				if path == dir {
+					return nil
+				}
+				return os.ErrPermission
+			}
+			if err := WriteWindowsIdentitySpool(context.Background(), dir, cache, nil, nil, protect, nil); err == nil {
+				t.Fatal("failed spool publication was reported as successful")
+			}
+			_, err = ReadIdentitySpoolRecord(dir, testSpoolUserA, nil)
+			if tc.wantKept && err != nil {
+				t.Fatalf("a record the pass did not disprove was withdrawn: %v", err)
+			}
+			if !tc.wantKept && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("a disproved record stayed after the failed publication: %v", err)
+			}
+		})
+	}
+}
+
 // W2B-G-enum review: the pass checked the cycle only between accounts, and
 // an account's directory lookup ran synchronously, so a lookup that stalled
 // held the pass past the cycle's deadline and the other records went

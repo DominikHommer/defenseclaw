@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -101,7 +100,9 @@ type profileAgentLegacy func() (legacy string, known bool)
 func (set *guardrailProfileSet) matchAgent(subject *profileSubject, source, connectorName, agent string, legacy profileAgentLegacy) profileDecision {
 	matched, unresolved := set.profileAgent(agent, legacy)
 	decision := set.match(subject, source, connectorName, matched)
-	if unresolved == nil || subject == nil || source == "" {
+	if unresolved == nil || subject == nil || source == "" || decision.Refused {
+		// A refused decision (an unconfirmed group name) is already the
+		// strictest answer.
 		return decision
 	}
 	earlier := set.assignments
@@ -118,22 +119,11 @@ func (set *guardrailProfileSet) matchAgent(subject *profileSubject, source, conn
 		return decision
 	}
 	mayApply = append(mayApply, decision.Name)
-	connectors := profileCoverConnectors(connectorName)
-	for _, name := range append([]string{set.defaultProfile}, mayApply...) {
-		if !slices.ContainsFunc(mayApply, func(other string) bool { return !set.profileCovers(name, other, connectors) }) {
-			return set.decision(name, profileMatchDefaultLookupFailed, "", source)
-		}
+	resolved := set.coverUnproven(mayApply, connectorName, source)
+	if resolved.Refused {
+		set.agentBridge.noteRefused(agent, mayApply)
 	}
-	strictest := set.defaultProfile
-	for _, name := range mayApply {
-		if set.profileStricter(name, strictest, connectorName) {
-			strictest = name
-		}
-	}
-	refused := set.decision(strictest, profileMatchDefaultLookupFailed, "", source)
-	refused.Refused = true
-	set.agentBridge.noteRefused(agent, mayApply)
-	return refused
+	return resolved
 }
 
 // profileCoverConnectors are the connectors the decisions of a request of
@@ -264,8 +254,10 @@ func (set *guardrailProfileSet) unresolvedAgentMatch(m config.ProfileMatch, subj
 			return connectorName != "" && config.NormalizeConnectorName(v) == connectorName
 		})
 	}
-	_, _, ok := assignmentMatches(others, subject, &subjectGroups{list: subject.Groups, sids: set.groupSIDs}, true, connectorName, "")
-	return ok
+	if _, _, ok := assignmentMatches(others, subject, &subjectGroups{list: provenGroups(subject), sids: set.groupSIDs}, true, connectorName, ""); ok {
+		return true
+	}
+	return set.unconfirmedGroupMayMatch(others, subject, connectorName, "")
 }
 
 // profileAgent is what the request's agent identity agent is matched as

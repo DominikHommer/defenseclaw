@@ -173,11 +173,18 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 			record = KeepLastKnownUPN(record, entry.previous)
 		}
 		if err := writeIdentitySpoolFile(dir, name, record, setOwnership); err != nil {
-			// The previous record is no longer proof of current token groups.
-			// Withdrawing it makes the gateway use unknown-group fallback at
-			// its next spool check, instead of trusting it for another hour.
-			if removeErr := os.Remove(filepath.Join(dir, name)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				err = errors.Join(err, fmt.Errorf("withdraw previous identity record: %w", removeErr))
+			// A pass that cannot publish the account's facts withdraws the
+			// previous record only when this pass disproved it: the token
+			// groups or the identity changed (GAP-0329). The gateway then
+			// stops trusting the old groups at its next spool check instead
+			// of for another hour. A record that still says what this pass
+			// found stays: withdrawing it dropped the cached groups of a
+			// user whose strict groups had not changed, and the request
+			// took a possibly weaker default (default_lookup_failed).
+			if !entry.hasPrevious || !IdentitySpoolRecordStillProves(entry.previous, record) {
+				if removeErr := os.Remove(filepath.Join(dir, name)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					err = errors.Join(err, fmt.Errorf("withdraw previous identity record: %w", removeErr))
+				}
 			}
 			stopped = errors.Join(stopped, fmt.Errorf("identity facts for %s: %w", key, err))
 			if logf != nil {

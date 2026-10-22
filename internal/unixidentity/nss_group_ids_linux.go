@@ -18,7 +18,7 @@ func (r *NSSResolver) platformGroupIDs(account Account) ([]int, error) {
 		return nil, err
 	}
 	if uid, ok := local[account.Name]; ok && uid == account.UID {
-		ids, _, err := r.localAccountGroupsWithDirectory(account)
+		ids, _, _, err := r.localAccountGroupsWithDirectory(account)
 		return ids, err
 	} else if ok {
 		return r.groupIDsInOwnerService(account)

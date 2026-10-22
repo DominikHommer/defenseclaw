@@ -118,6 +118,14 @@ type DirectoryFacts struct {
 	// The gateway refreshes these facts soon and uses the default profile
 	// for group-dependent decisions (GAP-0243).
 	GroupsPartial bool `json:"groups_partial,omitempty"`
+	// UnconfirmedGroups are the gids among Groups, as numbers, that stay
+	// numbers although no NSS group service proved they have no name: one
+	// that cannot be asked or checked (Himmelblau, aad), or one whose answer
+	// the system's lookup did not take. The account is in those groups
+	// (initgroups proved it); their names are unknown, so a group
+	// assignment that names a group may or may not apply. Never emitted or
+	// stored.
+	UnconfirmedGroups []string `json:"-"`
 	// OnlyPrimaryGroup marks the facts of an SSSD account that SSSD listed in
 	// its primary group only (or only Domain Users, when SSSD gives it a
 	// private group), besides the /etc/group groups that list it. While SSSD

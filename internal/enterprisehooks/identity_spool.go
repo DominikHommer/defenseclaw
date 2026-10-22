@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -262,6 +263,55 @@ func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord 
 		record.Facts.Domain = previous.Facts.Domain
 	}
 	return record
+}
+
+// IdentitySpoolRecordStillProves reports whether previous, the record an
+// account has, still proves what current, the record a pass resolved for
+// the same account and could not publish, says, so a failed publication
+// need not withdraw it. The group SIDs (a Windows record's token groups;
+// the names a pass could not resolve this time are not compared) and
+// whether they are known (GroupsPartial) must be the same. A name, UPN,
+// principal, domain, realm, directory, tenant or SID that both name must
+// agree; one the pass did not resolve this time contradicts nothing.
+// Connector addresses and timestamps decide no profile and are not
+// compared.
+func IdentitySpoolRecordStillProves(previous, current IdentitySpoolRecord) bool {
+	if !strings.EqualFold(previous.Key, current.Key) || previous.Facts.GroupsPartial != current.Facts.GroupsPartial {
+		return false
+	}
+	if !current.Facts.GroupsPartial && !sameGroupSIDs(previous.Facts.Groups, current.Facts.Groups) {
+		return false
+	}
+	for _, pair := range [][2]string{
+		{previous.User, current.User},
+		{previous.Facts.UPN, current.Facts.UPN},
+		{previous.Facts.Principal, current.Facts.Principal},
+		{previous.Facts.Domain, current.Facts.Domain},
+		{previous.Facts.Realm, current.Facts.Realm},
+		{string(previous.Facts.Directory), string(current.Facts.Directory)},
+		{previous.Facts.TenantID, current.Facts.TenantID},
+		{previous.AccountSID, current.AccountSID},
+	} {
+		if a, b := strings.TrimSpace(pair[0]), strings.TrimSpace(pair[1]); a != "" && b != "" && !strings.EqualFold(a, b) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameGroupSIDs reports whether two group lists hold the same SIDs (S-1-...),
+// whatever their names and order.
+func sameGroupSIDs(a, b []string) bool {
+	sids := func(groups []string) map[string]bool {
+		out := map[string]bool{}
+		for _, group := range groups {
+			if group = strings.ToUpper(strings.TrimSpace(group)); strings.HasPrefix(group, "S-1-") {
+				out[group] = true
+			}
+		}
+		return out
+	}
+	return maps.Equal(sids(a), sids(b))
 }
 
 // KeepVerifiedInfoPipeUPN carries the UPN an earlier pass read from SSSD
