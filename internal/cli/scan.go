@@ -23,7 +23,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -169,11 +168,11 @@ func loadCodeScanRedactor(dataDir string) (*scanoutput.Redactor, error) {
 		layout, descriptor, err := managedStandaloneAdminDeployment()
 		if layout.DataDir != "" && filepath.Clean(dataDir) == filepath.Clean(layout.DataDir) {
 			if err != nil || descriptor == nil || descriptor.ServiceUID < 0 || uint64(descriptor.ServiceUID) > math.MaxUint32 {
-				return nil, fmt.Errorf("managed redaction key owner is unproven; run sudo defenseclaw-gateway enterprise %s repair", runtime.GOOS)
+				return nil, fmt.Errorf("managed redaction key owner is unproven; run sudo %s enterprise %s repair", managedHostGatewayCommand(), managedHostPlatform())
 			}
 			key, err := observabilityredaction.LoadExistingCorrelationKeyForOwner(dataDir, uint32(descriptor.ServiceUID))
 			if err != nil {
-				return nil, fmt.Errorf("%w; run sudo defenseclaw-gateway enterprise %s repair", err, runtime.GOOS)
+				return nil, fmt.Errorf("%w; run sudo %s enterprise %s repair", err, managedHostGatewayCommand(), managedHostPlatform())
 			}
 			return scanoutput.NewRedactor(key), nil
 		}

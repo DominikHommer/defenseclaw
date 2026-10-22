@@ -84,7 +84,8 @@ func TestManagedRootCodeScanKeepsServiceOwnedRedactionKey(t *testing.T) {
 	managedStandaloneAdminDeployment = func() (managed.StandaloneLayout, *managed.RuntimeDescriptor, error) {
 		return managed.StandaloneLayout{DataDir: dataDir}, &managed.RuntimeDescriptor{ServiceUID: 65533}, nil
 	}
-	if _, err := loadCodeScanRedactor(dataDir); err == nil || !strings.Contains(err.Error(), "repair") {
+	repairCommand := "sudo " + managedHostGatewayCommand() + " enterprise " + managedHostPlatform() + " repair"
+	if _, err := loadCodeScanRedactor(dataDir); err == nil || !strings.Contains(err.Error(), repairCommand) {
 		t.Fatalf("unproven service owner did not refuse with the repair command: %v", err)
 	}
 	managedStandaloneAdminDeployment = func() (managed.StandaloneLayout, *managed.RuntimeDescriptor, error) {
@@ -93,7 +94,7 @@ func TestManagedRootCodeScanKeepsServiceOwnedRedactionKey(t *testing.T) {
 	if err := os.Remove(keyPath); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadCodeScanRedactor(dataDir); err == nil || !strings.Contains(err.Error(), "repair") {
+	if _, err := loadCodeScanRedactor(dataDir); err == nil || !strings.Contains(err.Error(), repairCommand) {
 		t.Fatalf("unproven managed deployment did not refuse with the repair command: %v", err)
 	}
 	if _, err := os.Lstat(keyPath); !os.IsNotExist(err) {
