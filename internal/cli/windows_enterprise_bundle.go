@@ -704,7 +704,22 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	}
 	requested := opts.bundlePath != "" || opts.trustAnchors != ""
 	floorSource := ""
+	anchorRefusalPending := opts.trustAnchors != ""
+	recordArgumentRefusal := func(code string) {
+		if !anchorRefusalPending || !opts.installedBeforeRun || opts.profile != managed.ProfileStandalone || !windowsEnterpriseIsElevated() {
+			return
+		}
+		anchorRefusalPending = false
+		layout, layoutErr := windowsBundleLayout()
+		if layoutErr != nil {
+			warnChangeUnrecorded(cmd.ErrOrStderr(), layoutErr)
+			return
+		}
+		current, _ := safefile.ReadRegularFileBounded(newWindowsBundleDriver(layout).AnchorsPath, windowsBundleMaxAnchors)
+		warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsAnchorsFailure(layout, nil, code, false, current))
+	}
 	refuse := func(code, message string) (bool, error) {
+		recordArgumentRefusal(code)
 		return true, writeWindowsBundleRefusal(cmd, action, opts, code, message, floorSource)
 	}
 	if opts.refuseCapabilityLoss && opts.bundlePath == "" {
@@ -723,6 +738,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		// The code is bundle_required, as for a CONFIG= on a computer
 		// already in bundle mode; the exit stays 1639, because the command
 		// line itself can never succeed (#1288).
+		recordArgumentRefusal(string(enterprisebundle.CodeBundleRequired))
 		return true, writeWindowsBundleRefusalWithExit(cmd, action, opts, string(enterprisebundle.CodeBundleRequired),
 			"TRUSTANCHORS= (--trust-anchors) cannot be combined with CONFIG= (--config): with trust anchors installed the computer takes its policy only from signed bundles; deliver BUNDLE= with TRUSTANCHORS=",
 			floorSource, enterprisestatus.WindowsExitInvalidArgs)
@@ -761,7 +777,6 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	// The same holds for a refusal after the anchors were staged for the
 	// bundle: they are not installed.
 	anchorPath := driver.AnchorsPath
-	anchorRefusalPending := opts.trustAnchors != ""
 	var run *windowsBundleRun
 	refuseAnchors := func(code, message string) (bool, error) {
 		if anchorRefusalPending {
