@@ -708,14 +708,30 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	refuse := func(code, message string) (bool, error) {
 		return true, writeWindowsBundleRefusal(cmd, action, opts, code, message, floorSource)
 	}
+	refusePreflight := func(code, message string, exit int) (bool, error) {
+		// Early argument validation owns its refusal. Later paths record
+		// through the reservation or the staged-anchor run instead.
+		if opts.trustAnchors != "" && opts.installedBeforeRun && windowsSecretIsElevated() {
+			layout, err := windowsBundleLayout()
+			if err == nil {
+				current, _ := safefile.ReadRegularFileBounded(filepath.Join(layout.ConfigDir, "trust", enterprisebundle.AnchorsName), windowsBundleMaxAnchors)
+				err = recordWindowsAnchorsFailure(layout, nil, code, false, current)
+			}
+			warnChangeUnrecorded(cmd.ErrOrStderr(), err)
+		}
+		if exit != 0 {
+			return true, writeWindowsBundleRefusalWithExit(cmd, action, opts, code, message, floorSource, exit)
+		}
+		return refuse(code, message)
+	}
 	if opts.refuseCapabilityLoss && opts.bundlePath == "" {
-		return refuse("invalid_arguments", "--refuse-capability-loss requires --bundle")
+		return refusePreflight("invalid_arguments", "--refuse-capability-loss requires --bundle", 0)
 	}
 	if requested && action != "ensure" {
-		return refuse("invalid_arguments", "--bundle and --trust-anchors are valid only with ensure")
+		return refusePreflight("invalid_arguments", "--bundle and --trust-anchors are valid only with ensure", 0)
 	}
 	if opts.bundlePath != "" && strings.TrimSpace(opts.configPath) != "" {
-		return refuse("invalid_arguments", "BUNDLE= (--bundle) cannot be combined with CONFIG= (--config): the signed bundle carries the config")
+		return refusePreflight("invalid_arguments", "BUNDLE= (--bundle) cannot be combined with CONFIG= (--config): the signed bundle carries the config", 0)
 	}
 	if opts.trustAnchors != "" && strings.TrimSpace(opts.configPath) != "" {
 		// Installing the anchors puts the computer in bundle mode, which
@@ -724,9 +740,9 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		// The code is bundle_required, as for a CONFIG= on a computer
 		// already in bundle mode; the exit stays 1639, because the command
 		// line itself can never succeed (#1288).
-		return true, writeWindowsBundleRefusalWithExit(cmd, action, opts, string(enterprisebundle.CodeBundleRequired),
+		return refusePreflight(string(enterprisebundle.CodeBundleRequired),
 			"TRUSTANCHORS= (--trust-anchors) cannot be combined with CONFIG= (--config): with trust anchors installed the computer takes its policy only from signed bundles; deliver BUNDLE= with TRUSTANCHORS=",
-			floorSource, enterprisestatus.WindowsExitInvalidArgs)
+			enterprisestatus.WindowsExitInvalidArgs)
 	}
 	if !windowsEnterpriseMutationAction(action) {
 		return false, nil
