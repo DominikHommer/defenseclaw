@@ -279,12 +279,8 @@ func releaseStdio() {
 	_ = unix.Close(null)
 }
 
-func withoutEnv(env []string, name string) []string {
-	kept := make([]string, 0, len(env))
-	for _, entry := range env {
-		if !strings.HasPrefix(entry, name+"=") {
-			kept = append(kept, entry)
-		}
-	}
-	return kept
+// runTracked is runContained: the custodian is a child subreaper, so the
+// kernel hands it every orphan of the tree.
+func runTracked(cmd *exec.Cmd) error {
+	return runContained(cmd)
 }

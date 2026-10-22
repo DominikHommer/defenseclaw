@@ -85,3 +85,36 @@ var ErrNotContained = errors.New("processutil: could not establish that the comm
 func RunContained(cmd *exec.Cmd) error {
 	return runContained(cmd)
 }
+
+// RunTracked runs a command whose whole process tree must end with it,
+// without limiting what it may start: the skill-scanner starts helpers on
+// every scan, and the no-fork launcher of RunContained failed every macOS
+// gateway skill scan (r104 W5b). Every process the command starts is
+// killed when the command exits, when cmd is canceled and when this process
+// dies, however it dies.
+//
+// On Linux it is RunContained: the kernel reparents every orphan of the
+// tree to a child-subreaper custodian, also one that left the group or
+// session. On macOS a supervisor, a short-lived copy of this binary in a
+// process group of its own, runs the command in a session of its own. It
+// follows every descendant with kqueue NOTE_FORK and NOTE_EXIT and the
+// process table, by parent, group and session, also once it starts a
+// session of its own; it watches this process with NOTE_EXIT. To end the
+// tree it stops every process, reads the table again until nothing new
+// appears, and only then kills them, so no parent dies with a child it has
+// not seen. It reports each process it follows; if the supervisor itself
+// dies, RunTracked kills those and returns ErrNotContained. Known limit: a
+// child that forks, starts a new session and exits, all before the next
+// table read, hands its own child to launchd unseen; when that child keeps
+// the inherited lifeline descriptor the run fails with ErrNotContained,
+// otherwise it is not found. Processes started through launchd (open,
+// launchctl, XPC) are not descendants. On Windows it is RunTree: the Job
+// Object refuses breakaway. Other platforms never run cmd and return
+// ErrNotContained.
+//
+// cmd must not have been started. On macOS it must not set ExtraFiles and
+// gets a WaitDelay if it has none. On Linux and macOS, cmd.Cancel asks the
+// supervisor to end the tree; set cmd.WaitDelay to bound the wait for it.
+func RunTracked(cmd *exec.Cmd) error {
+	return runTracked(cmd)
+}

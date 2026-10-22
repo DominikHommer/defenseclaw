@@ -24,3 +24,7 @@ import "os/exec"
 func runContained(_ *exec.Cmd) error {
 	return ErrNotContained
 }
+
+func runTracked(_ *exec.Cmd) error {
+	return ErrNotContained
+}

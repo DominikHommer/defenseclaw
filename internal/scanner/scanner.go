@@ -36,8 +36,9 @@ type Scanner interface {
 }
 
 // Every scanner child must be contained for its entire lifetime, including
-// descendants that leave the original process group or session.
-var runScannerCommand func(*exec.Cmd) error = processutil.RunContained
+// descendants that leave the original process group or session, and may
+// start the helpers it needs.
+var runScannerCommand func(*exec.Cmd) error = processutil.RunTracked
 
 // keepFullFailureText is set by KeepFullFailureText.
 var keepFullFailureText atomic.Bool

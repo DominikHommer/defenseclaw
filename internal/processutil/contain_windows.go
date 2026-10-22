@@ -25,3 +25,8 @@ import "os/exec"
 func runContained(cmd *exec.Cmd) error {
 	return runTree(cmd, false)
 }
+
+// runTracked is RunTree: the Job Object refuses breakaway.
+func runTracked(cmd *exec.Cmd) error {
+	return runTree(cmd, false)
+}

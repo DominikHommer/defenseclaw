@@ -13,7 +13,7 @@ Every scanner setting lives in `config.yaml` under `scanners.skill_scanner` and 
 
 Set a key with `defenseclaw config set` (validated, applied at once), with the `defenseclaw setup skill-scanner` or `defenseclaw setup mcp-scanner` wizard, or by editing `config.yaml`. A change that does not validate is refused and the file is left alone.
 
-On macOS, the gateway starts external scanners with a no-fork process limit so a scanner cannot leave a detached child running after the scan or gateway ends. A gateway scan that needs a subprocess, including a local stdio MCP server or a subprocess-based judge, fails closed with a scan error. A gateway running as root cannot establish this non-root process limit, so its external scanner scans fail before launch. Direct CLI scans run in the CLI process and do not use the gateway's child process limit.
+The gateway owns the whole process tree of every external scanner it starts: a child-subreaper supervisor on Linux, a supervisor that follows each process with kqueue on macOS, and a kill-on-close Job Object on Windows. Scanners may start the helpers they need (skill-scanner starts its CEL helper on every scan; a local stdio MCP server or a subprocess-based judge also runs). When the scan ends, is canceled, or the gateway exits or is killed, the scanner and its descendants are ended, including a child that started a session of its own. If the gateway cannot establish that, the scan fails closed with a scan error. Processes a scanner asks launchd or a system service to start (for example with `open` or `launchctl` on macOS) are not its descendants. Direct CLI scans run in the CLI process, not under the gateway.
 
 ## Skill scanner
 

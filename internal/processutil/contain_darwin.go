@@ -81,9 +81,10 @@ func runContained(cmd *exec.Cmd) error {
 }
 
 // The launcher remains in its own process group and waits for one byte before
-// it may execute the scanner. The gateway arms the watchdog first. If the
-// gateway dies before that point, the gate closes and no scanner runs; after
-// that point, the watchdog owns the group until the scanner has exited.
+// it may execute the command. The gateway arms the watchdog first. If the
+// gateway dies before that point, the gate closes and the command does not
+// run; after that point, the watchdog owns the group until the command has
+// exited.
 func runContainedDarwinArmed(cmd *exec.Cmd, gateRead, gateWrite *os.File) error {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -112,13 +113,13 @@ func runContainedDarwinArmed(cmd *exec.Cmd, gateRead, gateWrite *os.File) error 
 	release()
 	waitErr := cmd.Wait()
 	if gateErr != nil || !exited {
-		return fmt.Errorf("%w: scanner launch or exit could not be proven", ErrNotContained)
+		return fmt.Errorf("%w: command launch or exit could not be proven", ErrNotContained)
 	}
 	if waitErr != nil {
 		return waitErr
 	}
 	if !lifelineClosed(r, lifelineWait) {
-		return fmt.Errorf("%w: scanner left an inherited lifeline open", ErrNotContained)
+		return fmt.Errorf("%w: command left an inherited lifeline open", ErrNotContained)
 	}
 	return nil
 }
@@ -128,7 +129,7 @@ func runContainedDarwinArmed(cmd *exec.Cmd, gateRead, gateWrite *os.File) error 
 // retains real UID 0; XNU checks the real UID and exempts root from this
 // limit, so the launcher must irrevocably drop both IDs first.
 func execForklessDarwin(gateFD int, argv []string) int {
-	gate := os.NewFile(uintptr(gateFD), "scanner launch gate")
+	gate := os.NewFile(uintptr(gateFD), "launch gate")
 	if gate == nil {
 		return containExitNotContained
 	}
