@@ -240,7 +240,7 @@ def _active_connector_display(cfg, fallback: str) -> str:
 
 
 def _resolve_member_connector(app, requested: str) -> str | None:
-    """Return the canonical ``guardrail.connectors`` key matching
+    """Return the configured ``guardrail.connectors`` key matching
     ``requested`` (case/alias-insensitive), or ``None`` if it is not a member."""
     conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
     req = normalize_connector(requested)
@@ -2368,14 +2368,11 @@ def _log_hilt(app: AppContext, details: str) -> None:
 
 
 def _multi_connector_hilt_targets(app: AppContext) -> list[str]:
-    """Return active connectors for bare HILT writes in multi installs."""
-    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
-    if not conns:
-        return []
+    """Resolve active names to their configured keys for bare HILT writes."""
     return [
-        name
+        key
         for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
-        if name in conns
+        if (key := _resolve_member_connector(app, name)) is not None
     ]
 
 
@@ -2539,15 +2536,11 @@ def hilt_cmd(
         raise click.Abort()
 
     if hilt_targets:
-        from defenseclaw.config import HILTConfig, PerConnectorGuardrailConfig
+        from defenseclaw.config import HILTConfig
 
         for name in hilt_targets:
             _, _, desired_enabled, desired_min = target_hilts[name]
-            entry = gc.connectors.get(name)
-            if entry is None:
-                entry = PerConnectorGuardrailConfig()
-                gc.connectors[name] = entry
-            entry.hilt = HILTConfig(enabled=desired_enabled, min_severity=desired_min)
+            gc.connectors[name].hilt = HILTConfig(enabled=desired_enabled, min_severity=desired_min)
     else:
         gc.hilt.enabled = new_enabled
         gc.hilt.min_severity = new_min

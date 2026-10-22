@@ -66,3 +66,39 @@ def test_fail_mode_exits_0_with_a_plain_note_when_the_gateway_is_stopped(app) ->
     # GAP-1718: one stopped-gateway note that also names the skipped audit event.
     assert result.output.count("gateway isn't running") == 1, result.output
     assert "the audit event was not recorded" in result.output
+
+
+def test_bare_hilt_updates_alias_keys_and_the_protection_center_readback(app) -> None:
+    from defenseclaw import policy_catalog
+    from defenseclaw.config import HILTConfig
+    from defenseclaw.tui.services.policy_state import PoliciesPanelModel
+
+    gc = app.cfg.guardrail
+    gc.connectors = {
+        "claude-code": PerConnectorGuardrailConfig(hilt=HILTConfig(enabled=False)),
+        "codex": PerConnectorGuardrailConfig(hilt=HILTConfig(enabled=False)),
+    }
+    before = set(gc.connectors)
+    runner = CliRunner()
+    result = runner.invoke(cmd_guardrail.hilt_cmd, ["on", "--min-severity", "MEDIUM", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    app.cfg.save.assert_called_once()
+    assert set(gc.connectors) == before
+    assert all(entry.hilt.enabled and entry.hilt.min_severity == "MEDIUM" for entry in gc.connectors.values())
+    status = runner.invoke(cmd_guardrail.hilt_cmd, [], obj=app)
+    assert status.exit_code == 0, status.output
+    assert status.output.count("enabled=true min_severity=MEDIUM") == 2
+    model = PoliciesPanelModel()
+    model.set_config(app.cfg)
+    model.apply_protection(policy_catalog.scope_postures(app.cfg))
+    rows = {row[0]: row for row in model.data_table_rows(80)}
+    assert rows["claudecode"][4] == rows["codex"][4] == "MEDIUM+"
+
+
+@pytest.mark.parametrize("answer,yes,applied", [("\n", False, True), ("y\n", False, True), ("", False, False), ("", True, True)])
+def test_hilt_scripts_can_answer_confirmation_or_skip_it(app, answer, yes, applied) -> None:
+    args = ["on", "--min-severity", "HIGH"] + (["--yes"] if yes else [])
+    result = CliRunner().invoke(cmd_guardrail.hilt_cmd, args, obj=app, input=answer)
+    assert (result.exit_code == 0) == applied, result.output
+    assert app.cfg.guardrail.hilt.enabled == applied
+    assert app.cfg.save.call_count == int(applied)
