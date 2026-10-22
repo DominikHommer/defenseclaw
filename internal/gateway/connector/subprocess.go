@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -1253,6 +1254,15 @@ func RefreshHookFailModes(hookDir string, mode func(connector string) string) (H
 			}
 		}
 	}
+	if mode("copilot") == "closed" {
+		closed, err := closeReleasedCopilotAdapter(filepath.Join(hookDir, "copilot-hook.ps1"))
+		if err != nil {
+			return out, err
+		}
+		if closed {
+			out.Scripts = append(out.Scripts, "copilot-hook.ps1")
+		}
+	}
 	return out, nil
 }
 
@@ -1349,6 +1359,69 @@ func copilotClosedFailure(open string) string {
 // hookScriptMaxBytes bounds the hook script closeBakedHookFailMode reads.
 const hookScriptMaxBytes = 1 << 20
 
+// closeReleasedCopilotAdapter replaces a released Windows PowerShell adapter
+// before the old gateway stops. Rewriting only its catch was insufficient:
+// a child that exited nonzero returned an empty stdout without throwing.
+// Preserve the pinned executable and budget; refuse an unrecognized adapter.
+func closeReleasedCopilotAdapter(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil // 0.8.10 and Unix installs have no PowerShell adapter.
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect Copilot adapter: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > hookScriptMaxBytes {
+		return false, fmt.Errorf("Copilot adapter is not a bounded regular file; run setup copilot")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read Copilot adapter: %w", err)
+	}
+	current := bytes.Contains(body, []byte("# defenseclaw-copilot-closed-adapter v1"))
+	if !bytes.Contains(body, []byte("# defenseclaw-managed-hook v7")) {
+		return false, fmt.Errorf("unrecognized Copilot adapter; run setup copilot")
+	}
+	var hook, timeoutText string
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if strings.HasPrefix(line, "$hook = '") && strings.HasSuffix(line, "'") {
+			hook = strings.TrimSuffix(strings.TrimPrefix(line, "$hook = '"), "'")
+		}
+		if strings.HasPrefix(line, "$timeoutMS = ") {
+			timeoutText = strings.TrimPrefix(line, "$timeoutMS = ")
+		}
+	}
+	timeout, err := strconv.Atoi(timeoutText)
+	if hook == "" || err != nil || timeout <= 0 || timeout > copilotWindowsHookAdapterTimeoutMS {
+		return false, fmt.Errorf("unrecognized Copilot adapter target or timeout; run setup copilot")
+	}
+	closed, err := renderHookTemplate("copilot-hook.ps1", templateData{
+		HookBinaryPS: hook, CopilotHookTimeoutMS: timeout, FailMode: "closed",
+	})
+	if err != nil {
+		return false, err
+	}
+	if bytes.Equal(body, closed) {
+		return false, nil
+	}
+	if current {
+		open, renderErr := renderHookTemplate("copilot-hook.ps1", templateData{
+			HookBinaryPS: hook, CopilotHookTimeoutMS: timeout, FailMode: "open",
+		})
+		if renderErr != nil {
+			return false, renderErr
+		}
+		if !bytes.Equal(body, open) {
+			return false, fmt.Errorf("unrecognized Copilot adapter contents; run setup copilot")
+		}
+	}
+	if err := atomicWriteFile(path, closed, info.Mode().Perm()); err != nil {
+		return false, fmt.Errorf("close Copilot adapter: %w", err)
+	}
+	return true, nil
+}
+
 // closeBakedHookFailMode rewrites the open a hook script bakes as closed. A
 // missing script, a link or an oversized file is left alone.
 func closeBakedHookFailMode(path string) (bool, error) {
@@ -1367,6 +1440,12 @@ func closeBakedHookFailMode(path string) (bool, error) {
 		return false, fmt.Errorf("read hook %s: %w", filepath.Base(path), err)
 	}
 	closed := bakedHookFailModeOpens.Replace(string(body))
+	if filepath.Base(path) == "copilot-hook.sh" {
+		closed, err = closeReleasedCopilotEarlyFailures(closed)
+		if err != nil {
+			return false, fmt.Errorf("close released Copilot hook %s: %w; run setup copilot to repair it", path, err)
+		}
+	}
 	if closed == string(body) {
 		return false, nil
 	}
@@ -1374,6 +1453,68 @@ func closeBakedHookFailMode(path string) (bool, error) {
 		return false, fmt.Errorf("close hook %s: %w", filepath.Base(path), err)
 	}
 	return true, nil
+}
+
+const copilotUpgradeEarlyMarker = "_DC_COPILOT_UPGRADE_EARLY=1"
+
+// closeReleasedCopilotEarlyFailures covers the 0.8.10 and 1.0.0-1.0.3
+// adapter's paths before its normal failure functions: a missing helper,
+// token or payload cannot be answered by a bare exit code in Copilot CLI.
+// The installer runs this before stopping the old gateway.
+func closeReleasedCopilotEarlyFailures(body string) (string, error) {
+	if strings.Contains(body, copilotUpgradeEarlyMarker) || strings.Contains(body, "copilot_hook_failure()") ||
+		!strings.Contains(body, "# defenseclaw-managed-hook v") {
+		return body, nil
+	}
+	const start = "set -euo pipefail\n"
+	cut := strings.Index(body, "API_ADDR=")
+	if !strings.Contains(body, start) || cut < 0 {
+		return "", fmt.Errorf("unrecognized released hook layout")
+	}
+	prefix, suffix := body[:cut], body[cut:]
+	// The old scripts explicitly allowed helper and token failures with
+	// exit 0. Convert every such early exit, including the no-home and
+	// malformed-event branches, to a native denial on tool boundaries.
+	prefix = strings.ReplaceAll(prefix, "exit 0", "_dc_copilot_upgrade_early_failure")
+	prefix = strings.ReplaceAll(prefix, "allowing copilot tool", "blocking copilot tool")
+	prefix = strings.Replace(prefix,
+		"defenseclaw_handle_missing_token copilot copilot-hook \"copilot tool\"",
+		"(defenseclaw_handle_missing_token copilot copilot-hook \"copilot tool\") || true\n  _dc_copilot_upgrade_early_failure", 1)
+	preamble := copilotUpgradeEarlyMarker + `
+_dc_copilot_upgrade_early_failure() {
+  case "${2:-}" in
+    preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;
+    permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+    sessionStart|sessionEnd|userPromptSubmitted|userPromptTransformed|postToolUse|agentStop|subagentStart|subagentStop|postToolUseFailure|errorOccurred|preCompact|notification) ;;
+    *) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}'
+       printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+  esac
+  exit 0
+}
+trap '_dc_upgrade_rc=$?; if [ "${_DC_COPILOT_UPGRADE_EARLY:-0}" = 1 ] && [ "$_dc_upgrade_rc" -ne 0 ]; then _dc_copilot_upgrade_early_failure; fi' EXIT
+`
+	prefix = strings.Replace(prefix, start, start+preamble, 1)
+	// Hardening installs its cleanup trap. Retain it and re-arm the native
+	// denial until the first gateway-request preparation has completed.
+	cleanup := "trap '_dc_upgrade_rc=$?; _defenseclaw_hook_cleanup; if [ \"${_DC_COPILOT_UPGRADE_EARLY:-0}\" = 1 ] && [ \"$_dc_upgrade_rc\" -ne 0 ]; then _dc_copilot_upgrade_early_failure; fi' EXIT"
+	if strings.Contains(prefix, "if ! defenseclaw_harden_env; then") {
+		anchor := "fi\n\n# Copilot documents timeout failures"
+		if !strings.Contains(prefix, anchor) {
+			return "", fmt.Errorf("unrecognized hardening exit")
+		}
+		prefix = strings.Replace(prefix, anchor, "fi\n"+cleanup+"\n\n# Copilot documents timeout failures", 1)
+	} else if strings.Contains(prefix, "defenseclaw_harden_env\n") {
+		prefix = strings.Replace(prefix, "defenseclaw_harden_env\n",
+			"defenseclaw_harden_env || _dc_copilot_upgrade_early_failure\n"+cleanup+"\n", 1)
+	} else {
+		return "", fmt.Errorf("missing hardening call")
+	}
+	const responseStart = "fail_unreachable() {"
+	at := strings.Index(suffix, responseStart)
+	if at < 0 {
+		return "", fmt.Errorf("missing released failure response")
+	}
+	return prefix + suffix[:at] + "_DC_COPILOT_UPGRADE_EARLY=0\n" + suffix[at:], nil
 }
 
 // OutageHookFailMode is the fail mode conn's hooks follow while the gateway

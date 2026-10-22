@@ -225,3 +225,56 @@ func TestRefreshMakesReleasedHooksBlockWhileTheGatewayIsDown(t *testing.T) {
 		}
 	}
 }
+
+func TestRefreshClosesReleasedCopilotEarlyFailures(t *testing.T) {
+	requireShellHookToolsForTest(t)
+	for _, release := range []string{"0.8.10", "1.0.0", "1.0.3"} {
+		t.Run(release, func(t *testing.T) {
+			home := t.TempDir()
+			dataDir := filepath.Join(home, ".defenseclaw")
+			hookDir := filepath.Join(dataDir, "hooks")
+			if err := os.MkdirAll(hookDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"_hardening.sh", "copilot-hook.sh"} {
+				body, err := os.ReadFile(filepath.Join("testdata", "released-hooks", release, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(hookDir, name), body, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := RefreshHookFailModes(hookDir, func(string) string { return "closed" }); err != nil {
+				t.Fatal(err)
+			}
+			hook := filepath.Join(hookDir, "copilot-hook.sh")
+			for _, event := range []string{"preToolUse", "permissionRequest"} {
+				if err := os.Remove(filepath.Join(hookDir, "_hardening.sh")); err != nil {
+					t.Fatal(err)
+				}
+				out, code := runReleasedCopilotEarlyFailure(t, hook, home, dataDir, event)
+				if code != 0 || !strings.Contains(out, `"deny"`) {
+					t.Fatalf("missing helper %s: exit %d stdout=%q", event, code, out)
+				}
+				body, _ := os.ReadFile(filepath.Join("testdata", "released-hooks", release, "_hardening.sh"))
+				if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), body, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				out, code = runReleasedCopilotEarlyFailure(t, hook, home, dataDir, event)
+				if code != 0 || !strings.Contains(out, `"deny"`) {
+					t.Fatalf("missing token %s: exit %d stdout=%q", event, code, out)
+				}
+			}
+		})
+	}
+}
+
+func runReleasedCopilotEarlyFailure(t *testing.T, hook, home, dataDir, event string) (string, int) {
+	t.Helper()
+	cmd := exec.Command("bash", hook, "--event", event)
+	cmd.Stdin = strings.NewReader(`{"sessionId":"s","toolName":"bash","toolArgs":{"command":"echo ok"}}`)
+	cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+dataDir)
+	out, err := cmd.Output()
+	return string(out), exitCodeOf(err)
+}

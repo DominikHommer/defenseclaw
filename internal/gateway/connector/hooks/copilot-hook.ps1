@@ -1,9 +1,10 @@
 # defenseclaw-managed-hook v7
+# defenseclaw-copilot-closed-adapter v1
 # Copilot CLI on Windows sends each hook event as UTF-8 JSON on stdin. The
 # release hook launcher uses the GUI subsystem, so Start-Process cannot be
 # trusted to inherit redirected stdin/stdout. This adapter preserves the bytes
-# in memory, waits inside Copilot's 30-second hook budget, and deliberately
-# fails open on integration errors to match the Copilot connector contract.
+# in memory, waits inside Copilot's 30-second hook budget, and answers
+# tool-boundary integration errors with Copilot's native denial in closed mode.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -19,6 +20,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $hook = '{{.HookBinaryPS}}'
 $timeoutMS = {{.CopilotHookTimeoutMS}}
+$failClosed = '{{if .SecureClientDelivery}}false{{else}}{{if eq .FailMode "open"}}false{{else}}true{{end}}{{end}}' -eq 'true'
+{{if not .SecureClientDelivery}}if ($env:DEFENSECLAW_STRICT_AVAILABILITY -in @('1', 'true', 'TRUE', 'yes', 'YES')) {
+    $failClosed = $true
+}
+{{end}}
 $process = $null
 $started = $false
 $stdinClosed = $false
@@ -89,6 +95,9 @@ try {
 
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
+    if ($process.ExitCode -ne 0) {
+        throw "DefenseClaw hook launcher exited with status $($process.ExitCode)"
+    }
     if ($stdout.Length -gt 0) {
         [Console]::Out.Write($stdout)
     }
@@ -97,7 +106,14 @@ try {
     }
 }
 catch {
-    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)
+    if ($failClosed -and $Event -eq 'preToolUse') {
+        [Console]::Out.WriteLine('{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}')
+    }
+    elseif ($failClosed -and $Event -eq 'permissionRequest') {
+        [Console]::Out.WriteLine('{"behavior":"deny","message":"DefenseClaw hook failed closed"}')
+    }
+    $mode = if ($failClosed) { 'closed' } else { 'open' }
+    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed ' + $mode + ': ' + $_.Exception.Message)
 }
 finally {
     if ($started -and -not $process.HasExited) {
