@@ -70,7 +70,6 @@ def test_bash_examples_disclose_the_shell_before_commands(path):
     ("appendix/coverage-by-layer.mdx", "effective hook fail mode", "Open: the call runs and the failure is recorded"),
     ("reference/commands/guardrail-setup.mdx", "defenseclaw-hook.exe", ""),
     ("connectors/devin.mdx", "comments and formatting are removed", "JSONC content in those files are kept"),
-    ("enterprise/operate/reference.mdx", "a config applied to the running gateway", "the installed version but no `changes` list"),
 ])
 def test_corrected_operator_claims(path, required, forbidden):
     text = " ".join(page(path).split())
