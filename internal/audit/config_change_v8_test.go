@@ -113,7 +113,7 @@ func TestLogConfigChangeRefusesMalformedChanges(t *testing.T) {
 // The gateway marks a change event reported after the audit write; a
 // restart between the two offers it again. The store keeps each change
 // event id once, so the second offer (in the same process or after the
-// restart) writes nothing and succeeds.
+// restart) replays delivery without writing another local row.
 func TestLogConfigChangeRecordsEachChangeOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	change := ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set",

@@ -105,3 +105,31 @@ func TestPolicyBundleReceiptReplayKeepsOneLocalRowUntilDeliveryIsConfirmed(t *te
 	}
 	assertOneApplyMetric()
 }
+
+func TestConfigChangeReplayRequiresAcknowledgementAfterLocalPersistence(t *testing.T) {
+	for _, change := range []ConfigChange{
+		{EventID: testConfigChangeID, Kind: ConfigChangeTrustAnchors, Action: "install", Outcome: ConfigChangeRefused, ReasonCode: "lifecycle_busy"},
+		{EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set", Outcome: ConfigChangeApplied, SecretName: "test-credential"},
+		{EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "remove", Outcome: ConfigChangeFailed, ReasonCode: "change_failed", SecretName: "test-credential"},
+	} {
+		t.Run(change.Kind+"/"+change.Outcome, func(t *testing.T) {
+			l := newTestLogger(t)
+			e := &receiptReplayEmitter{testRuntimeV8Emitter: newTestRuntimeV8Emitter(t, l.store, router.AdmissionOrdinary), refuse: true}
+			l.SetRuntimeV8Emitter(e)
+			if err := l.LogConfigChange(change); err == nil {
+				t.Fatal("unacknowledged change succeeded")
+			}
+			e.refuse = false
+			if err := l.LogConfigChange(change); err != nil {
+				t.Fatal(err)
+			}
+			if e.attempts != 2 {
+				t.Fatalf("delivery attempts=%d, want a replay after the first local commit", e.attempts)
+			}
+			rows, err := l.store.ListEvents(10)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("replayed change rows=%d, want one: %v", len(rows), err)
+			}
+		})
+	}
+}

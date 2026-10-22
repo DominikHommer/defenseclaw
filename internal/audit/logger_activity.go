@@ -68,6 +68,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 
 	auditID := observability.NewTimeOrderedID()
 	stored := false
+	replayable := in.BundleReceipt != nil || in.ConfigChange != nil
 	if in.OccurrenceID != "" {
 		auditID = in.OccurrenceID
 		var err error
@@ -75,16 +76,16 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		if err != nil {
 			return err
 		}
-		if stored && in.BundleReceipt == nil {
+		if stored && !replayable {
 			return nil
 		}
 	}
 	ctx := context.Background()
-	if in.BundleReceipt != nil {
+	if replayable {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		ctx = context.WithValue(ctx, receiptReplayContextKey{}, stored)
+		ctx = context.WithValue(ctx, spoolReplayContextKey{}, stored)
 	}
 	// v7 clean break: AgentInstanceID is per-session (unset for
 	// activity/mutation events that have no session anchor);

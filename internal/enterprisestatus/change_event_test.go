@@ -63,7 +63,7 @@ func TestChangeSpoolRemovesOnlyReportedEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range ids[:3] {
-		if err := os.WriteFile(filepath.Join(markers, id), []byte("reported\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(markers, id), []byte(ConfirmedDeliveryMarker), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -102,7 +102,7 @@ func TestChangeSpoolRefusesWhenFullOfUnreportedEvents(t *testing.T) {
 	}
 }
 
-// Only a regular marker file named by a change event id counts as reported.
+// Only a confirmed regular marker named by a change event id counts as reported.
 func TestChangeReportedReadsTheGatewayMarker(t *testing.T) {
 	dataDir := t.TempDir()
 	const id = "c-01JB8Z4X6T2Q9V3M5N7P1R0S4W"
@@ -120,6 +120,12 @@ func TestChangeReportedReadsTheGatewayMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(markers, id), []byte("reported\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ChangeReported(dataDir, id) {
+		t.Fatal("an enqueue-only legacy marker counted as confirmed delivery")
+	}
+	if err := os.WriteFile(filepath.Join(markers, id), []byte(ConfirmedDeliveryMarker), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if !ChangeReported(dataDir, id) || ChangeReported("", id) || ChangeReported(dataDir, "../"+id) {

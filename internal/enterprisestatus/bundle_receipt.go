@@ -40,9 +40,9 @@ const (
 	PublicReceiptEventsDirName = "receipt-events"
 	// PublicReceiptSchemaVersion is the receipt.json schema.
 	PublicReceiptSchemaVersion = 1
-	// ReceiptReportedMarker proves the reporter completed durable local and
+	// ConfirmedDeliveryMarker proves the reporter completed durable local and
 	// acknowledged remote delivery. Older enqueue-only markers prove neither.
-	ReceiptReportedMarker = "confirmed-v2\n"
+	ConfirmedDeliveryMarker = "confirmed-v2\n"
 
 	maxPublicReceiptBytes = 16 << 10
 
@@ -126,7 +126,7 @@ func ReceiptEventReported(dataDir, id string) bool {
 		return false
 	}
 	body, err := safefile.ReadRegularFileBounded(filepath.Join(dataDir, ReportedMarkersDirName, id), 128)
-	return err == nil && string(body) == ReceiptReportedMarker
+	return err == nil && string(body) == ConfirmedDeliveryMarker
 }
 
 // CheckDeliveryID explains why id is not a delivery id `enterprise bundle

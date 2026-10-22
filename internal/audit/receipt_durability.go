@@ -6,7 +6,19 @@ package audit
 import (
 	"context"
 	"fmt"
+	"time"
 )
+
+// logDurableActivity retires a producer's spool record only after confirmed
+// delivery and a power-loss barrier for its canonical local row.
+func (l *Logger) logDurableActivity(in ActivityInput) error {
+	if err := l.logActivityImpl(in); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return l.store.SyncEventHistory(ctx)
+}
 
 // SyncEventHistory establishes a power-loss barrier before a producer retires
 // its durable receipt. NORMAL WAL commits alone do not establish that barrier.

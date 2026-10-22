@@ -226,19 +226,13 @@ func (l *Logger) LogPolicyBundleReceipt(principal string, bundle PolicyBundle, r
 	if actor == "" {
 		actor = strings.TrimSpace(principal)
 	}
-	err := l.logActivityImpl(ActivityInput{
+	return l.logDurableActivity(ActivityInput{
 		Actor: actor, Principal: strings.TrimSpace(principal), Action: ActionConfigBundleReceipt,
 		TargetType: "policy_bundle", TargetID: receipt.ReceiptID, Reason: reason,
 		After: after, Severity: severity, Bundle: &bundle, BundleReceipt: &receipt,
 		OccurrenceID: uuid.NewHash(sha256.New(), stableOccurrenceNamespace,
 			[]byte("policy.bundle.receipt\x00"+receipt.ReceiptID+"|"+receipt.State+"|"+receipt.FinishedAt+"|"+receipt.DeliveryID), 8).String(),
 	})
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return l.store.SyncEventHistory(ctx)
 }
 
 // RecordPolicyBundleVersion records the defenseclaw.policy.bundle.version

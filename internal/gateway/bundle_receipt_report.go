@@ -143,13 +143,13 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 			return
 		}
 		r.reported = key
-		_ = configwrite.WriteFileDurable(r.markerPath, []byte(enterprisestatus.ReceiptReportedMarker+key+"\n"), 0o600)
+		_ = configwrite.WriteFileDurable(r.markerPath, []byte(enterprisestatus.ConfirmedDeliveryMarker+key+"\n"), 0o600)
 		r.markSeen(receipt.ReceiptID)
 	}
 	if refusal := receipt.LastRefusal; refusal != nil && refusal.ReceiptID == receipt.ReceiptID {
 		r.reportedRefusal = refusal.ReceiptID + "|" + refusal.Time
 		if r.refusalMarkerPath != "" {
-			_ = configwrite.WriteFileDurable(r.refusalMarkerPath, []byte(enterprisestatus.ReceiptReportedMarker+r.reportedRefusal+"\n"), 0o600)
+			_ = configwrite.WriteFileDurable(r.refusalMarkerPath, []byte(enterprisestatus.ConfirmedDeliveryMarker+r.reportedRefusal+"\n"), 0o600)
 		}
 	}
 	if refusal := receipt.LastRefusal; refusal != nil && refusal.ReceiptID != receipt.ReceiptID {
@@ -165,7 +165,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 			r.reportedRefusal = refusalKey
 			r.markSeen(refusal.ReceiptID)
 			if r.refusalMarkerPath != "" {
-				_ = configwrite.WriteFileDurable(r.refusalMarkerPath, []byte(enterprisestatus.ReceiptReportedMarker+refusalKey+"\n"), 0o600)
+				_ = configwrite.WriteFileDurable(r.refusalMarkerPath, []byte(enterprisestatus.ConfirmedDeliveryMarker+refusalKey+"\n"), 0o600)
 			}
 		}
 	}
@@ -203,8 +203,7 @@ func (r *bundleReceiptReporter) hasSeen(id string) bool {
 	if enterprisestatus.ValidReceiptID(id) {
 		return enterprisestatus.ReceiptEventReported(filepath.Dir(r.markerPath), id)
 	}
-	info, err := os.Lstat(filepath.Join(r.seenDir(), id))
-	return err == nil && info.Mode().IsRegular()
+	return enterprisestatus.ChangeReported(filepath.Dir(r.markerPath), id)
 }
 
 func (r *bundleReceiptReporter) markSeen(id string) {
@@ -215,12 +214,8 @@ func (r *bundleReceiptReporter) markSeen(id string) {
 		r.seen = make(map[string]bool)
 	}
 	r.seen[id] = true
-	body := "reported\n"
-	if enterprisestatus.ValidReceiptID(id) {
-		body = enterprisestatus.ReceiptReportedMarker
-	}
 	if err := os.MkdirAll(r.seenDir(), 0o700); err == nil {
-		_ = configwrite.WriteFileDurable(filepath.Join(r.seenDir(), id), []byte(body), 0o600)
+		_ = configwrite.WriteFileDurable(filepath.Join(r.seenDir(), id), []byte(enterprisestatus.ConfirmedDeliveryMarker), 0o600)
 	}
 }
 
@@ -320,7 +315,7 @@ func readBundleMarker(path string) string {
 	}
 	defer f.Close()
 	raw, _ := io.ReadAll(io.LimitReader(f, 512))
-	value, confirmed := strings.CutPrefix(string(raw), enterprisestatus.ReceiptReportedMarker)
+	value, confirmed := strings.CutPrefix(string(raw), enterprisestatus.ConfirmedDeliveryMarker)
 	if !confirmed {
 		return ""
 	}

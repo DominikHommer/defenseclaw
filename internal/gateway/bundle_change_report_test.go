@@ -113,8 +113,8 @@ func TestBundleReceiptReporterKeepsRefusedChangeEventsUntilRecorded(t *testing.T
 }
 
 // The markers stay where earlier builds wrote them (<data>/bundle-receipt.reported.d),
-// so an upgraded gateway does not report its receipts again and the change
-// commands read the same folder.
+// and the change commands read the same folder. Only the confirmed marker
+// format can suppress replay across an upgrade.
 func TestBundleReceiptReporterMarkersFolderIsStable(t *testing.T) {
 	dir := t.TempDir()
 	reporter := &bundleReceiptReporter{markerPath: filepath.Join(dir, bundleReceiptMarkerName)}

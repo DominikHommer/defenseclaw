@@ -211,7 +211,7 @@ func (l *Logger) LogConfigChange(change ConfigChange) error {
 		severity = "MEDIUM"
 	}
 	actor := strings.TrimSpace(change.Actor)
-	return l.logActivityImpl(ActivityInput{
+	return l.logDurableActivity(ActivityInput{
 		Actor: actor, Action: action, TargetType: targetType, TargetID: targetID, Reason: reason,
 		After: after, Severity: severity, ConfigChange: &change,
 		OccurrenceID: stableOccurrenceID("config.change", change.EventID),

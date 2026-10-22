@@ -149,7 +149,7 @@ func TestBundleReceiptEventsDroppedReachesStatus(t *testing.T) {
 	if ReceiptEventReported(dataDir, id) {
 		t.Fatal("legacy enqueue-only marker suppressed receipt replay")
 	}
-	if err := os.WriteFile(marker, []byte(ReceiptReportedMarker), 0o600); err != nil {
+	if err := os.WriteFile(marker, []byte(ConfirmedDeliveryMarker), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if !ReceiptEventReported(dataDir, id) {

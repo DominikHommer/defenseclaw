@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // A change event is the record a root command leaves when it changes the
@@ -106,8 +107,8 @@ func ChangeReported(dataDir, id string) bool {
 	if strings.TrimSpace(dataDir) == "" || !ValidChangeEventID(id) {
 		return false
 	}
-	info, err := os.Lstat(filepath.Join(dataDir, ReportedMarkersDirName, id))
-	return err == nil && info.Mode().IsRegular()
+	body, err := safefile.ReadRegularFileBounded(filepath.Join(dataDir, ReportedMarkersDirName, id), 128)
+	return err == nil && string(body) == ConfirmedDeliveryMarker
 }
 
 // ChangeEvent is one change-events/<event_id>.json.
