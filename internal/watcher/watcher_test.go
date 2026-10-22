@@ -1470,6 +1470,35 @@ func TestDeniedSkillWhoseQuarantineFailsSaysSo(t *testing.T) {
 // afterwards: the copy may still be there and the record restores it. Only
 // the record this attempt opened, for a move that failed before publishing,
 // is rolled back on an uncertain destination.
+func TestPublishedQuarantineFailureAuditDoesNotClaimSourceRemains(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	capture := &watcherTestRuntime{}
+	logger.SetRuntimeV8Emitter(capture)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	evt := InstallEvent{Type: InstallSkill, Name: "blocked", Path: filepath.Join(skillDir, "blocked"), Connector: "claudecode"}
+	w.emitQuarantineFailure(context.Background(), evt, fmt.Errorf("%w: source cleanup failed", enforce.ErrQuarantinePublished))
+	logs, _ := capture.snapshot()
+	for _, record := range logs {
+		if record.EventName() != "legacy.audit.watcher.block" {
+			continue
+		}
+		body, ok := record.Body()
+		if !ok {
+			t.Fatal("watcher block audit has no body")
+		}
+		fields, err := body.Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		message := fmt.Sprint(fields)
+		if strings.Contains(message, "stays in place") || !strings.Contains(message, "source") || !strings.Contains(message, "quarantine copy") {
+			t.Fatalf("quarantine failure audit = %q, want instructions to inspect both locations without asserting the source exists", message)
+		}
+		return
+	}
+	t.Fatal("missing watcher block audit event")
+}
+
 func TestUncertainQuarantineCopyKeepsItsRecord(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("needs POSIX permissions as a non-root user")

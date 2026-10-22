@@ -6,6 +6,8 @@ package enterprisebundle
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -58,5 +60,35 @@ func TestConfirmedProductFloorIsTheConfirmedBundleMinimum(t *testing.T) {
 	confirmFloorBundle(t, s, 1, 2, "")
 	if floor, err := s.ConfirmedProductFloor(); err != nil || floor != "" {
 		t.Fatalf("lowered floor %q, %v; want none", floor, err)
+	}
+}
+
+func TestConfirmedProductFloorSurvivesDamagedBundleConfigButNotManifest(t *testing.T) {
+	s := testStore(t)
+	confirmFloorBundle(t, s, 1, 1, "1.0.4")
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := s.VersionDir(st.Current.Dir)
+	configPath := filepath.Join(dir, ConfigName)
+	if err := os.Chmod(configPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("damaged: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if floor, err := s.ConfirmedProductFloor(); err != nil || floor != "1.0.4" {
+		t.Fatalf("damaged config: floor %q, %v; want authenticated 1.0.4", floor, err)
+	}
+	manifestPath := filepath.Join(dir, ManifestName)
+	if err := os.Chmod(manifestPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if floor, err := s.ConfirmedProductFloor(); err == nil || floor != "" {
+		t.Fatalf("changed manifest: floor %q, %v; want refusal", floor, err)
 	}
 }

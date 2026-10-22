@@ -1117,6 +1117,12 @@ func writeHookConfigSidecarLocked(
 			return err
 		}
 		if err == nil {
+			if !managed && nullHookFailModeMap(jsonSnapshot.data) {
+				prior.FailModes, err = recoverFlatHookFailModes(hookDir, prior.FailModeSources)
+				if err != nil {
+					return fmt.Errorf("repair null hook fail-mode map: %w", err)
+				}
+			}
 			if prior.FailModes != nil {
 				state.FailModes = prior.FailModes
 			}
@@ -1161,6 +1167,57 @@ func writeHookConfigSidecarLocked(
 		return fmt.Errorf("write shell hook runtime sidecar: %w", err)
 	}
 	return nil
+}
+
+// A present null map is malformed, even though encoding/json decodes it as a
+// nil map. The connector-scoped flat records are the other persisted copy of
+// each mode. Recover only records whose connector, mode and source agree;
+// never invent an open peer mode from the legacy fallback.
+func nullHookFailModeMap(data []byte) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return false
+	}
+	return bytes.Equal(bytes.TrimSpace(fields["fail_modes"]), []byte("null"))
+}
+
+func recoverFlatHookFailModes(hookDir string, sources map[string]string) (map[string]string, error) {
+	modes := make(map[string]string)
+	for _, name := range flatHookRuntimeRecordNames(hookDir) {
+		body, _, err := readStableHookRuntimeSidecar(
+			filepath.Join(hookDir, hookConfigSidecarName+"."+name), "connector hook runtime record", false,
+		)
+		if err != nil {
+			return nil, err
+		}
+		mode := legacyHookConfigValue(body, "DEFENSECLAW_FAIL_MODE")
+		if mode != "open" && mode != "closed" {
+			return nil, fmt.Errorf("%s has no valid fail mode", name)
+		}
+		source := legacyHookConfigValue(body, "FAIL_MODE_SOURCE")
+		if source != "" && source != HookFailModeSourceConfig {
+			return nil, fmt.Errorf("%s has an unrecognized fail-mode source", name)
+		}
+		if recorded, ok := sources[name]; ok && recorded != source {
+			return nil, fmt.Errorf("%s fail-mode source disagrees with its flat record", name)
+		}
+		if mode == "open" && sources[name] != HookFailModeSourceConfig {
+			// A leftover flat file alone cannot authorize an open mode in a
+			// shared map that lost its entries. The current connector is set
+			// from config after recovery; peers need both persisted proofs.
+			continue
+		}
+		modes[name] = mode
+	}
+	for name := range sources {
+		if _, ok := modes[name]; !ok {
+			return nil, fmt.Errorf("%s has no readable flat hook runtime record", name)
+		}
+	}
+	if len(modes) == 0 {
+		return nil, fmt.Errorf("no connector-scoped runtime records prove the previous fail modes")
+	}
+	return modes, nil
 }
 
 // hookRuntimeFlatRecord is a connector's flat shell runtime record. Its

@@ -359,6 +359,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event"})
 				return
 			}
+			if hookName := payloadString(payload, "hookName"); hookName != "" && hookName != event {
+				a.recordConnectorHookRejection(r.Context(), connectorName, event, "bound_event_mismatch", int64(len(b)))
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot stdin event does not match installer-bound event"})
+				return
+			}
 			registeredEvent = event
 		}
 
@@ -419,6 +424,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			profile.ToolCallLifecycle.Version == 0 && isGenericToolInspectionEvent(req.HookEventName) {
 			if !hookToolCallJSONUnambiguous(connectorName, rawBody) {
 				req.ToolCallUnparsed = true
+			}
+			if connectorName == "copilot" && req.HookEventName == "permissionRequest" {
+				_, hasToolArgs := payload["toolArgs"]
+				_, hasToolInput := payload["toolInput"]
+				if hasToolArgs && hasToolInput {
+					req.ToolCallUnparsed = true
+				}
 			}
 			if connectorName == "copilot" && copilotWriteCallUnproven(req.ToolName, req.ToolArgs, req.CWD, hookActiveHome(r.Context())) {
 				req.ToolCallUnparsed = true

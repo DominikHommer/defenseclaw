@@ -227,13 +227,12 @@ func gatewayNoAnswer(ctx context.Context) bool {
 
 // noAnswerFailMode keeps managed non-tool events, locally spent budgets and a
 // call the gateway answered 429 first (Options.gatewayBusy,
-// ManagedOutageFailsOpen) closed. Only a proven tool-gate outage uses the
-// administrator's fail mode (owner decision 2026-10-20) or, per-user, the
-// installed fail mode. failNoAnswer and renderNoAnswer both use it, so the
-// rendered decision and its failure row agree.
+// ManagedOutageFailsOpen) closed. No answer proves no gateway decision, so
+// every managed hook closes; per-user hooks keep their installed fail mode.
+// failNoAnswer and renderNoAnswer both use it, so the decision and failure
+// row agree.
 func noAnswerFailMode(opts Options, failMode string) string {
-	if opts.answerSpentLocally || opts.gatewayBusy || (opts.ManagedEnterprise &&
-		(!managedNativeDecision(opts) || !toolGateEvent(opts.Connector, opts.Event))) {
+	if opts.answerSpentLocally || opts.gatewayBusy || opts.ManagedEnterprise {
 		return "closed"
 	}
 	return failMode
@@ -242,12 +241,6 @@ func noAnswerFailMode(opts Options, failMode string) string {
 func failNoAnswer(opts Options, sp spec, failMode string) int {
 	failMode = noAnswerFailMode(opts, failMode)
 	if opts.ManagedEnterprise {
-		// The existing administrator-selected outage exception applies only
-		// to tool gates. Newly bounded prompt/result events retain their
-		// previous fail-closed outcome, including when outage mode is open.
-		if managedNativeDecision(opts) && toolGateEvent(opts.Connector, opts.Event) && !opts.answerSpentLocally {
-			opts = withManagedOutage(opts, errGatewayNoAnswer)
-		}
 		return failUnreachable(opts, sp, failMode, managedGatewayNoAnswerReason)
 	}
 	return failUnreachable(opts, sp, failMode, perUserGatewayNoAnswerReason)

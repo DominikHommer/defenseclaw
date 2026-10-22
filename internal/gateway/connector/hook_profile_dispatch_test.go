@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -109,6 +110,28 @@ func TestCopilotProfileDecodeUsesDocumentedToolArgsAuthority(t *testing.T) {
 	})
 	if !malformed.ToolArgsAuthoritative || len(malformed.ToolArgs) != 0 {
 		t.Fatalf("non-object Copilot toolArgs became trusted: %+v", malformed)
+	}
+}
+
+func TestCopilotPermissionRequestEditProjectsNativeDiff(t *testing.T) {
+	path := "/home/alice/project/notes.txt"
+	diff := "\ndiff --git a/home/alice/project/notes.txt b/home/alice/project/notes.txt\n" +
+		"index 1234567..abcdef0 100644\n--- a/home/alice/project/notes.txt\n+++ b/home/alice/project/notes.txt\n" +
+		"@@ -1,2 +1,2 @@\n-# base\n+# reviewed\n \n"
+	got := copilotProfileDecode(map[string]interface{}{
+		"hookName": "permissionRequest", "toolName": "edit",
+		"toolInput": map[string]interface{}{"file_path": path, "diff": diff},
+	})
+	if !got.ToolArgsAuthoritative || string(got.ToolArgs) !=
+		`{"new_str":"# reviewed","old_str":"# base","path":"/home/alice/project/notes.txt"}` {
+		t.Fatalf("native permission edit args = %s authoritative=%t", got.ToolArgs, got.ToolArgsAuthoritative)
+	}
+	bad := copilotProfileDecode(map[string]interface{}{
+		"hookName": "permissionRequest", "toolName": "edit",
+		"toolInput": map[string]interface{}{"file_path": path, "diff": strings.Replace(diff, "+++ b/home/alice/project/notes.txt", "+++ b/home/alice/project/other.txt", 1)},
+	})
+	if !bad.ToolArgsAuthoritative || len(bad.ToolArgs) != 0 {
+		t.Fatalf("mismatched diff became trusted: %+v", bad)
 	}
 }
 

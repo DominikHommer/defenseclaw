@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -237,8 +237,14 @@ def resolve_connector_fail_mode(
     sources: list[tuple[str, str | None]] = [("config", configured)]
     drift: list[str] = []
 
+    sidecar_drift = _shared_hook_sidecar_drift(cfg)
+    if sidecar_drift:
+        drift.append(sidecar_drift)
     if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
-        return _resolve_native_deny_fail_mode(cfg, name, configured, desired)
+        state = _resolve_native_deny_fail_mode(cfg, name, configured, desired)
+        if sidecar_drift:
+            return replace(state, drift=(*state.drift, sidecar_drift))
+        return state
 
     runtime_source = _platform_runtime_source(cfg, name)
     sources.append(runtime_source)
@@ -525,6 +531,16 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
         return "windows-sidecar", mode
     script_name = "claude-code-hook.sh" if connector == "claudecode" else f"{connector}-hook.sh"
     return "hook-script", _read_baked_hook_mode(Path(cfg.data_dir) / "hooks" / script_name)
+
+
+def _shared_hook_sidecar_drift(cfg: Any) -> str | None:
+    """A malformed shared map is runtime drift even when a baked hook matches."""
+
+    data = _read_small_file(Path(cfg.data_dir) / "hooks" / ".hookcfg")
+    if data is None:
+        return None
+    values, _ = _native_hook_sidecar_values(data)
+    return "shared-sidecar-malformed" if _MALFORMED_SIDECAR in values else None
 
 
 def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, bool]:
