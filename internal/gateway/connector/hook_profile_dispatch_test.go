@@ -337,7 +337,10 @@ func TestClaudeCodeProfileMapVerdict(t *testing.T) {
 		{"policy_config_change_is_advisory", "block", "ConfigChange", "action", map[string]interface{}{"source": "policy_settings"}, "allow", true},
 		{"user_config_change_is_enforceable", "block", "ConfigChange", "action", map[string]interface{}{"source": "user_settings"}, "block", false},
 		{"action_alert_surfaces", "alert", "UserPromptSubmit", "action", nil, "alert", false},
-		{"action_confirm_ask_event", "confirm", "PreToolUse", "action", nil, "confirm", false},
+		{"action_confirm_ask_event", "confirm", "PreToolUse", "action", map[string]interface{}{"permission_mode": "default"}, "confirm", false},
+		{"action_confirm_accept_edits_blocks", "confirm", "PreToolUse", "action", map[string]interface{}{"permission_mode": "acceptEdits"}, "block", false},
+		{"action_confirm_without_mode_blocks", "confirm", "PreToolUse", "action", nil, "block", false},
+		{"observe_confirm_stays_allow", "confirm", "PreToolUse", "observe", map[string]interface{}{"permission_mode": "acceptEdits"}, "allow", false},
 		{"action_confirm_non_ask_event_demotes_to_alert", "confirm", "PostToolUse", "action", nil, "alert", false},
 	}
 	for _, tc := range cases {

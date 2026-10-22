@@ -117,7 +117,9 @@ func claudeCodeProfileEventContent(payload map[string]interface{}) string {
 //   - observe mode: any block/alert/confirm verdict demotes to
 //     allow; wouldBlock=true for the block case.
 //   - action mode + rawAction=="confirm": stays confirm only on
-//     PreToolUse (the one event that surfaces a native ask);
+//     PreToolUse (the one event that surfaces a native ask) in a
+//     permission mode that shows the ask, and blocks in any other
+//     mode (ClaudeCodeModeCanAsk);
 //     elsewhere demotes to alert.
 func claudeCodeProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 	raw := normalizedGuardrailAction(in.RawAction)
@@ -138,12 +140,48 @@ func claudeCodeProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 		return HookVerdictOutput{Action: "block", WouldBlock: false}
 	case "confirm":
 		if in.Caps.CanAskNative && eventInProfile(in.Event, in.Caps.AskEvents) {
+			if in.Event == "PreToolUse" && !ClaudeCodeModeCanAsk(hookFirstString(in.Payload, "permission_mode", "permissionMode")) {
+				return HookVerdictOutput{Action: "block", WouldBlock: false}
+			}
 			return HookVerdictOutput{Action: "confirm", WouldBlock: false}
 		}
 		return HookVerdictOutput{Action: "alert", WouldBlock: false}
 	default:
 		return HookVerdictOutput{Action: raw, WouldBlock: false}
 	}
+}
+
+// ClaudeCodeModeCanAsk reports whether Claude Code shows its approval dialog
+// for a PreToolUse permissionDecision "ask" in the session's permission_mode.
+// Only "default" (labeled Manual) shows it. In acceptEdits, bypassPermissions
+// and dontAsk Claude Code treats "ask" as "defer", so allow rules or the mode
+// decide and the call can run with no prompt; in auto and plan it treats
+// "ask" as "deny" (code.claude.com/docs/en/hooks, PreToolUse decision
+// control). A missing or unknown mode cannot ask either, so a confirmation
+// fails closed to a block (GAP-0371).
+func ClaudeCodeModeCanAsk(permissionMode string) bool {
+	return strings.TrimSpace(permissionMode) == "default"
+}
+
+// ClaudeCodeNoAskReason adds the next step to the reason of a confirmation
+// that was blocked because the session's permission mode cannot ask. It is
+// idempotent, so each wire shaper may apply it.
+func ClaudeCodeNoAskReason(reason, permissionMode string) string {
+	mode := strings.TrimSpace(permissionMode)
+	where := "this permission mode"
+	if mode != "" {
+		where = mode + " mode"
+	}
+	hint := "Claude Code cannot ask for approval in " + where +
+		", so DefenseClaw blocked the call. To approve it, switch Claude Code to Manual mode (Shift+Tab) and ask again."
+	reason = strings.TrimSpace(reason)
+	if strings.Contains(reason, hint) {
+		return reason
+	}
+	if reason == "" {
+		return hint
+	}
+	return reason + " " + hint
 }
 
 // claudeCodeProfileRespond implements HookProfile.Respond for Claude
@@ -157,9 +195,10 @@ func claudeCodeProfileRespond(in HookRespondInput) HookRespondOutput {
 
 // claudeCodeOutputForProfile mirrors claudeCodeOutput() in
 // gateway/claude_code_hook.go. Duplicated (not imported) because the
-// connector package cannot depend on gateway. PR 7 cleanup deletes
-// the gateway-side helper after PR 6 makes profile.Respond the
-// authoritative path.
+// connector package cannot depend on gateway. Both are live: the
+// gateway helper shapes the Claude Code evaluator's answer, and this one
+// shapes the answer when the ordered-safety-rule merge raises the verdict
+// (mergeAgentHookFindings), so a change to one must reach the other.
 func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reason, additional string) map[string]interface{} {
 	event := req.HookEventName
 	if action == "confirm" && event == "PreToolUse" {
@@ -168,6 +207,9 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 			"permissionDecision":       "ask",
 			"permissionDecisionReason": claudeCodeReasonOrDefault(reason),
 		}}
+	}
+	if action == "block" && event == "PreToolUse" && strings.EqualFold(strings.TrimSpace(rawAction), "confirm") {
+		reason = ClaudeCodeNoAskReason(reason, hookFirstString(req.Payload, "permission_mode", "permissionMode"))
 	}
 	if action == "block" {
 		switch event {

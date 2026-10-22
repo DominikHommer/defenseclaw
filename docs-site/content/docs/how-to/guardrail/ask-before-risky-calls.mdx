@@ -49,6 +49,8 @@ Human approval (HITL) pauses a risky call and asks you instead of silently allow
    DefenseClaw policy needs your confirmation for this action (rule C2-WEBHOOK-SITE: webhook.site (known exfil)).
    ```
 
+   Claude Code shows this prompt only in Manual mode, its default. In any other permission mode (accept edits, plan, auto, bypass permissions, don't ask) it cannot ask, so DefenseClaw blocks the call and the reason ends with the next step: switch Claude Code to Manual mode (Shift+Tab) and ask again.
+
    Not every HIGH finding asks. Only a finding that can block can pause. Alert-only HIGH rules (such as `PATH-AWS-CONFIG`) never ask: the agent shows a notice and the audit log records `alert`.
 
 ## Check it worked
@@ -68,7 +70,7 @@ Alert #1
   …
 ```
 
-`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved.
+`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved. In a mode that cannot ask, the decision is `block`.
 
 ## When the agent cannot ask
 
