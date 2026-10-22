@@ -161,10 +161,19 @@ func trustedGitBashAuthorizedKeysWrite(input actionfacts.Input) bool {
 }
 
 // trustedInlineAuthorizedKeysWrite proves the write of one inline
-// interpreter program (python -c, perl/ruby/node -e). pythonDir is the
-// directory python -c imports from first when the gateway can look at it
-// (trustedPythonImportDir), or "".
-func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts, pythonDir string) bool {
+// interpreter program (python -c, perl/ruby/node -e).
+//
+// A python -c program is read whole, its comments, docstrings and string
+// text included. Whether a string runs depends on the modules the program
+// loads, and the interpreter imports on its own at start-up (site and
+// sitecustomize, a codec): a module that the import path of the shell running
+// the command supplies (its PYTHONPATH, PYTHONHOME or user site, a module of
+// its working directory) can run __main__.__doc__ or any string of
+// sys.orig_argv. The gateway does not see that shell's environment (an
+// export of an earlier call in a persistent shell, a profile, a function
+// standing in for python3), and its own environment is not the shell's, so
+// no string of the program is proven inert.
+func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
 	if len(facts.Commands) != 1 {
 		return false
 	}
@@ -176,15 +185,14 @@ func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts
 	}
 	switch command.Program {
 	case "python", "python3":
-		importPathOverride, shellArgvProven := trustedPythonImportPathOverride(input, command.Argv)
 		if command.Argv[1] != "-c" || facts.ActiveHome == "" ||
-			(!command.ArgvComplete && !shellArgvProven) {
+			(!command.ArgvComplete && !trustedPythonAssignedArgv(input, command.Argv)) {
 			return false
 		}
-		text, calls := trustedPythonExecutedViews(command.Argv[2], pythonDir, importPathOverride)
-		return trustedPathlibAuthorizedKeysWrite(text, calls) ||
-			trustedPythonPathExpandWrite(text, calls) ||
-			trustedInterpreterAuthorizedKeysWrite(text, facts.ActiveHome)
+		code := command.Argv[2]
+		return trustedPathlibAuthorizedKeysWrite(code) ||
+			trustedPythonPathAuthorizedKeysWrite.MatchString(code) ||
+			trustedInterpreterAuthorizedKeysWrite(code, facts.ActiveHome)
 	case "perl":
 		return command.ArgvComplete && command.Argv[1] == "-e" && facts.ActiveHome != "" &&
 			(trustedPerlAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
@@ -197,95 +205,44 @@ func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts
 	}
 }
 
-// trustedPythonExecutedViews returns two views of Python -c code, both with
-// the offsets of code. text has its comments and inert triple-quoted strings
-// blanked (a docstring that spells a write executes nothing, GAP-1199): a
-// path operand is read there. calls has the text of every string blanked,
-// f-string fields kept (guardrail.MaskPythonStrings): a write call must start
-// there, since a call spelled in a string or in the literal text of an
-// f-string is data. When the code that runs may turn a string into code or
-// read one (guardrail.PythonStringsMayRun: exec, a child process, a file it
-// writes, its docstrings, an import of a module that may be a file of the
-// working directory, ...), both views are the code whole, so such a string
-// still proves its write. So does every program when its working directory
-// is not known or may hold a module: the interpreter imports on its own.
-func trustedPythonExecutedViews(code, dir string, importPathOverride bool) (text, calls string) {
-	calls = guardrail.MaskPythonStrings(code)
-	if importPathOverride || guardrail.PythonStringsMayRun(calls, dir) {
-		return code, code
-	}
-	return guardrail.MaskPythonCommentsAndDocstrings(code), calls
-}
-
-// trustedPythonImportDir is the directory python -c imports from first, the
-// command's working directory, when the gateway sees the filesystem the
-// command runs in (as literalStdinFilesOf requires): not a sandbox, and an
-// absolute directory. Otherwise it is "" and every import that may load a
-// module from it keeps the program's strings.
-func trustedPythonImportDir(request trustedActionRequest, facts actionfacts.Facts) string {
-	if request.SkipLocalFilesystemResolution || request.SandboxGuestCWD != "" || !filepath.IsAbs(facts.CWD) {
-		return ""
-	}
-	return facts.CWD
-}
-
-// trustedPythonImportPathOverride checks the shell assignment syntax of the
-// one Python invocation. A per-call PYTHONPATH or PYTHONHOME can load a module
-// outside the inspected cwd, so inert-looking string text remains unproven.
-// A sole such assignment makes ActionFacts leave ArgvComplete false; the AST
-// can still prove the exact three arguments used by the Python call.
-func trustedPythonImportPathOverride(input actionfacts.Input, argv []string) (override, argvProven bool) {
+// trustedPythonAssignedArgv reports whether the shell syntax of the one
+// Python invocation proves its argv when PYTHONPATH or PYTHONHOME
+// assignments prefix it (PYTHONPATH=/x python3 -c '...'). A sole such
+// assignment makes ActionFacts leave ArgvComplete false; the AST can still
+// prove the exact three arguments of the call.
+func trustedPythonAssignedArgv(input actionfacts.Input, argv []string) bool {
 	command, ok := trustedBashCommandInput(input)
 	if !ok || len(command) > 64<<10 {
-		return true, false
+		return false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
 	if err != nil || len(file.Stmts) != 1 {
-		return true, false
+		return false
 	}
 	stmt := file.Stmts[0]
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok {
-		return true, false
+	if !ok || len(call.Assigns) == 0 || stmt.Negated || stmt.Background ||
+		len(stmt.Redirs) != 0 || len(call.Args) != len(argv) {
+		return false
 	}
 	for _, assignment := range call.Assigns {
-		if assignment.Name == nil {
-			return true, false
+		if assignment.Name == nil ||
+			assignment.Name.Value != "PYTHONPATH" && assignment.Name.Value != "PYTHONHOME" {
+			return false
 		}
-		switch assignment.Name.Value {
-		case "PYTHONPATH", "PYTHONHOME":
-			override = true
-		default:
-			return true, false
-		}
-	}
-	if !override || stmt.Negated || stmt.Background || len(stmt.Redirs) != 0 ||
-		len(call.Args) != len(argv) {
-		return override, false
 	}
 	fields, ok := trustedBashStaticFields(call)
-	return override, ok && slices.Equal(fields, argv)
-}
-
-// trustedPythonCodeAt reports whether text[i] is code in calls.
-func trustedPythonCodeAt(text, calls string, i int) bool {
-	return i >= 0 && i < len(text) && len(calls) == len(text) && calls[i] == text[i]
+	return ok && slices.Equal(fields, argv)
 }
 
 // trustedPathlibAuthorizedKeysWrite proves p = Path.home() / ".ssh" /
-// "authorized_keys"; ... p.write_text(...) unless p is bound to another path
-// before the write (trustedPathlibRebound, GAP-1299). Both start in code
-// (calls).
-func trustedPathlibAuthorizedKeysWrite(text, calls string) bool {
-	if len(calls) != len(text) {
-		return false
-	}
-	for _, assign := range trustedPathlibAuthorizedKeysAssign.FindAllStringIndex(text, -1) {
-		if !trustedPythonCodeAt(text, calls, assign[0]) {
-			continue
-		}
-		write := trustedPathlibWriteText.FindStringIndex(calls[assign[1]:])
-		if write != nil && !trustedPathlibRebound(text, assign[1], assign[1]+write[0]) {
+// "authorized_keys"; ... p.write_text(...) in code, string text included
+// (trustedInlineAuthorizedKeysWrite), unless p is bound to another path
+// before the write (trustedPathlibRebound, GAP-1299).
+func trustedPathlibAuthorizedKeysWrite(code string) bool {
+	for _, assign := range trustedPathlibAuthorizedKeysAssign.FindAllStringIndex(code, -1) {
+		write := trustedPathlibWriteText.FindStringIndex(code[assign[1]:])
+		if write != nil && !trustedPathlibRebound(code, assign[1], assign[1]+write[0]) {
 			return true
 		}
 	}
@@ -323,17 +280,6 @@ func trustedPathlibRebound(text string, from, to int) bool {
 		}
 		literal := trustedPythonOtherPath.FindStringSubmatch(strings.TrimSpace(text[start:end]))
 		if literal != nil && !strings.Contains(strings.ToLower(strings.Join(literal[1:], "")), "authorized_keys") {
-			return true
-		}
-	}
-	return false
-}
-
-// trustedPythonPathExpandWrite proves
-// Path("~/.ssh/authorized_keys").expanduser().write_text(...) in code.
-func trustedPythonPathExpandWrite(text, calls string) bool {
-	for _, hit := range trustedPythonPathAuthorizedKeysWrite.FindAllStringIndex(text, -1) {
-		if trustedPythonCodeAt(text, calls, hit[0]) {
 			return true
 		}
 	}

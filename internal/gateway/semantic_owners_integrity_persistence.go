@@ -1479,7 +1479,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	if request.EnforcementCapable &&
-		(trustedAuthorizedKeysWriteProof(input, facts, symlinkWrite, trustedPythonImportDir(request, facts)) ||
+		(trustedAuthorizedKeysWriteProof(input, facts, symlinkWrite) ||
 			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
@@ -1510,10 +1510,8 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 
 // trustedAuthorizedKeysWriteProof reports a bounded positive proof that the
 // call writes an authorized-keys file. input is the request's input with
-// the command text of a shell tool filled in. pythonDir is the directory a
-// python -c program imports from first, "" when the gateway cannot look at
-// it (trustedPythonImportDir).
-func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, pythonDir string) bool {
+// the command text of a shell tool filled in.
+func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool) bool {
 	enforcementFacts := facts.EnforcementProjection()
 	return enforcementFacts.EnforcementEligible() &&
 		(sshAuthorizedKeysCommandPrerequisite(enforcementFacts) ||
@@ -1534,7 +1532,7 @@ func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.
 		trustedWindowsLocationAuthorizedKeysWrite(input) ||
 		trustedShellWrapperAuthorizedKeysWrite(input, facts) ||
 		trustedBase64ShellAuthorizedKeysWrite(input, facts) ||
-		trustedInlineAuthorizedKeysWrite(input, facts, pythonDir) ||
+		trustedInlineAuthorizedKeysWrite(input, facts) ||
 		trustedPOSIXPowerShellAuthorizedKeysWrite(input, facts) ||
 		trustedCMDAuthorizedKeysWrite(input) ||
 		trustedNamedOutFileAuthorizedKeysWrite(input) ||
@@ -1587,8 +1585,7 @@ func trustedSandboxGuestAuthorizedKeysWrite(request trustedActionRequest) bool {
 			input.Command = command
 		}
 	}
-	// The guest's directory is not the gateway's to look at.
-	return trustedAuthorizedKeysWriteProof(input, facts, false, "")
+	return trustedAuthorizedKeysWriteProof(input, facts, false)
 }
 
 func appendTrustedSSHPrivateKeyWriteFinding(
