@@ -82,10 +82,9 @@ func TestUninstallPurgeKeepsTheSessionCacheOfAnAccountWhoseStateStays(t *testing
 }
 
 // #1287: an enrolled account whose home folder is gone (a macOS mobile
-// account's home moved away, say) does not stop a purge: remove-all
-// reports it already clean, the uninstall warns with that reason and
-// removes the deployment.
-func TestUninstallPurgeGoesOnForAnAccountWhoseHomeIsGone(t *testing.T) {
+// account's home moved away, say) is still unresolved while remove-all
+// reports it pending. Purge must retain the deployment until it is confirmed.
+func TestUninstallPurgeRetainsDeploymentUntilPendingCleanupIsConfirmed(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
@@ -95,15 +94,17 @@ func TestUninstallPurgeGoesOnForAnAccountWhoseHomeIsGone(t *testing.T) {
 				return CommandResult{Stdout: []byte(`{"ok":true,"pending":["ctr1/codex: ` + reason + `"]}`)}, nil
 			}}
 			done := h.run(Options{Action: ActionUninstall, Purge: true})
-			requireOK(t, done)
-			if got := messagesOf(done.Warnings, codePerUserHooks); !strings.Contains(got, "codex hooks for user ctr1 were not removed: "+reason) {
+			if done.OK || messagesOf(done.Errors, codeUninstallIncomplete) == "" {
+				t.Fatalf("pending removal must retain the deployment: %+v", done)
+			}
+			if got := messagesOf(done.Errors, codePerUserHooks); !strings.Contains(got, "codex hooks for user ctr1 were not removed: "+reason) {
 				t.Fatalf("the uninstall does not warn with the gone home: %q", got)
 			}
-			if messagesOf(done.Errors, codePerUserHooks) != "" || messagesOf(done.Errors, codeUninstallIncomplete) != "" {
-				t.Fatalf("a gone home must not stop the purge: %+v", done.Errors)
+			if messagesOf(done.Errors, codePerUserHooks) == "" {
+				t.Fatalf("pending cleanup must stop the purge: %+v", done.Errors)
 			}
-			if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || exists(h.env.deploymentPath()) {
-				t.Fatal("the purge did not remove the binaries and the deployment record")
+			if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || !exists(h.env.deploymentPath()) {
+				t.Fatal("the purge lost the binaries or the deployment record")
 			}
 		})
 	}

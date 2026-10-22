@@ -3959,11 +3959,10 @@ func cutPerUserEntry(entry string) (user, connector, reason string, ok bool) {
 
 // removePerUserRegistrations runs `enterprise hooks remove-all` (with
 // --purge on a purge) and reports what it could not do, one message per
-// account and connector: an error for a registration that is still in
-// place, a warning for an account whose home is unavailable, that was
-// removed (with the reason remove-all gives), or whose per-user state
-// stayed, and for a check that names no registration. It
-// returns whether any registration is left.
+// account and connector. Failed checks and pending removals retain the
+// deployment: an unavailable home does not prove its registrations are gone.
+// A retained per-user state is reported separately. It returns whether any
+// registration is left or could not be checked.
 func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	env, r := l.env, l.result
 	args := []string{"enterprise", "hooks", "remove-all", "--manifest", env.Layout.ManifestPath, "--json"}
@@ -3979,8 +3978,9 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		Removed      int                         `json:"removed"`
 		PurgedDetail map[string]purgedUserDetail `json:"purged_detail"`
 	}
-	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
-		return false
+	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil {
+		r.AddError(codePerUserHooks, "the per-user hook removal report could not be read; fix the cause and rerun `"+l.uninstallCommand()+"`")
+		return true
 	}
 	l.perUserRemoved = report.Removed
 	rerun := "`" + l.uninstallCommand() + "`"
@@ -4006,12 +4006,12 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	}
 	for _, entry := range report.Pending {
 		user, connector, reason, _ := cutPerUserEntry(entry)
+		left = true
 		if reason != "" {
-			// A removed account: its reason names the home and the remedy.
-			r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s", connector, user, reason))
+			r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s; confirm cleanup and rerun %s", connector, user, reason, rerun))
 			continue
 		}
-		r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; once it is, remove DefenseClaw's entries from that account's %s config", connector, user, connector))
+		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; restore the home and rerun %s", connector, user, rerun))
 	}
 	for _, entry := range report.StateFailed {
 		user, reason, _ := strings.Cut(entry, ": ")
