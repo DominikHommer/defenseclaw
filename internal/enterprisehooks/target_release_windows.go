@@ -36,23 +36,25 @@ func WindowsProtectedTargetFromOtherRelease(opts InstallOptions) (string, bool, 
 	return written, true, nil
 }
 
-// WindowsProtectedTargetRenderedClosedForOpen reports whether one managed
-// target's protected hook-contract lock records fail mode closed while opts
-// asks for open. An administrator who opens the hook fail mode makes every
-// enrolled target fail verification, and a signed-out (or disconnected)
-// account cannot be re-rendered until its next sign-in; until then its
-// hooks still fail closed, the stricter mode, so the target waits for that
-// sign-in instead of failing the whole change (rel-1-0-4 GAP-0585). A change
-// to closed is not excused: it would leave a running session fail-open.
-func WindowsProtectedTargetRenderedClosedForOpen(opts InstallOptions) (bool, error) {
-	if canonicalHookFailMode(opts.HookFailMode) != "open" {
-		return false, nil
-	}
+// WindowsProtectedTargetHookFailModeChange reads, without writing, one
+// managed target's protected hook-contract lock entry and returns the hook
+// fail mode it records and the one opts asks for, both canonical; locked is
+// "" without an entry for the target's connector. An administrator who
+// changes the hook fail mode makes every enrolled target fail verification,
+// and the guardian asks only after one failed while its account has no
+// active session (rel-1-0-4 GAP-0585): a change to open waits for the next
+// sign-in, its hooks still failing closed, and a change to closed is
+// rendered now, under a disconnected session or an S4U logon.
+func WindowsProtectedTargetHookFailModeChange(opts InstallOptions) (locked, wanted string, err error) {
 	lock, err := windowsProtectedTargetLock(opts)
 	if err != nil {
-		return false, err
+		return "", "", err
 	}
-	return lock.Connector != "" && canonicalHookFailMode(lock.HookFailMode) == "closed", nil
+	wanted = canonicalHookFailMode(opts.HookFailMode)
+	if lock.Connector == "" {
+		return "", wanted, nil
+	}
+	return canonicalHookFailMode(lock.HookFailMode), wanted, nil
 }
 
 // windowsProtectedTargetLock reads, without writing, the protected

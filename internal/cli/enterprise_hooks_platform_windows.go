@@ -106,6 +106,15 @@ func enterpriseHookTargetSessionAvailable(
 	return false, err
 }
 
+// enterpriseHookTargetClosingLogon is enterpriseHookReconcileClosingLogon.
+func enterpriseHookTargetClosingLogon(target enterprisehooks.ManifestTarget) error {
+	return enterprisehooks.RequireWindowsEnterpriseTargetLogon(
+		strings.TrimSpace(target.SID),
+		strings.TrimSpace(target.UserHome),
+		enterprisehooks.WindowsTargetLogonAnyWithS4U,
+	)
+}
+
 func enterpriseHookDeferredTargetSessionAvailable(
 	target enterprisehooks.ManifestTarget,
 ) (bool, error) {
