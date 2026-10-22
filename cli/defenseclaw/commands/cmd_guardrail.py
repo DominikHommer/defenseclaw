@@ -4101,10 +4101,19 @@ def use_pack_cmd(
     # A directory can have several registered names, or another spelling on
     # a case-insensitive filesystem. None of its pins may be bypassed by
     # selecting that same directory through a different name.
+    def _same_directory(pin) -> bool:
+        pinned_path = policy_catalog.normalize_pack_path(pin.path)
+        if not pinned_path:
+            return False
+        try:
+            return os.path.samefile(path, pinned_path)
+        except FileNotFoundError:
+            return os.path.normcase(os.path.realpath(path)) == os.path.normcase(os.path.realpath(pinned_path))
+
     try:
         matching_pins = {
             name: pin for name, pin in sorted((getattr(gc, "custom_packs", None) or {}).items())
-            if policy_catalog.same_pack_path(path, policy_catalog.normalize_pack_path(pin.path))
+            if _same_directory(pin)
         }
     except OSError as exc:
         _fail(1, f"Can't establish rule-pack directory identity ({exc}). Nothing was changed; run defenseclaw doctor.")
@@ -4119,12 +4128,12 @@ def use_pack_cmd(
     repinned: tuple[str, str] | None = None
     stale_pins: dict[str, str] = {}
 
-    if kind != "preset" or not no_validate:
+    if kind != "preset" or matching_pins or not no_validate:
         try:
             result = rulepack_validation.validate_rule_pack(path)
         except rulepack_validation.RulePackValidationBridgeError as exc:
             validation = rulepack_validation.bridge_error_wire(exc)
-            if kind != "preset":
+            if kind != "preset" or matching_pins:
                 _finish(
                     ok=False,
                     exit_code=2,

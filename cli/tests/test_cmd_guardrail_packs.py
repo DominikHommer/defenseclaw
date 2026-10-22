@@ -190,7 +190,7 @@ def test_registered_custom_pack_key_is_selected_by_name(env):
 
 
 def test_directory_identity_cannot_bypass_any_registered_pin(env, monkeypatch):
-    app, _root, custom, writes = env
+    app, root, custom, writes = env
     alias_path = str(custom.with_name("Team"))
     app.cfg.guardrail.custom_packs = {
         "fresh": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64),
@@ -209,6 +209,15 @@ def test_directory_identity_cannot_bypass_any_registered_pin(env, monkeypatch):
         assert result.exit_code == 1, result.output
         assert "stale" in result.output and "--repin" in result.output
         assert writes == []
+
+    # Naming a built-in directory is not a way around an alias pin either,
+    # even when its ordinary built-in validation is explicitly skipped.
+    app.cfg.guardrail.custom_packs = {
+        "stale": CustomRulePack(path=str(root / "strict"), digest="sha256:" + "b" * 64),
+    }
+    refused = _run(app, ["use-pack", "strict", "--no-validate", "--json"])
+    assert refused.exit_code == 1 and "stale" in refused.output, refused.output
+    assert writes == []
 
 
 
