@@ -1271,35 +1271,22 @@ Later bundles go through 5.2.
    the sessions restarted (4.3, sessions that need a restart). Report anchor
    and credential changes yourself (section 0).
 
-### 5.3 Lower the release floor
+### 5.3 Release floor
 
 On Linux and macOS, DefenseClaw 1.0.4 and later refuse to install a release
 below the confirmed bundle's `min_product_version` (`product_floor_refused`).
-The rollback marker and `--allow-downgrade` do not lift it. To roll devices back below it:
+The rollback marker and `--allow-downgrade` do not lift it.
 
-1. The control plane signs the next bundle with `enterprise bundle sign`
-   (section 7): a `--version` above the confirmed bundle's, and the oldest
-   release needed as `--min-product-version` (leave the flag out for no
-   floor).
-2. Deliver it as in 5.2.
-3. Check the older release as root before you install it: exit `0` allows
-   it, exit `3` refuses it and says why. Packages of 1.0.4 and later run the
-   same check before they replace files. After an uninstall that warned
-   `floor_checker_not_kept`, a 1.0.4 or later package is refused only by its
-   postinstall `ensure`, after its files are in place. Older packages do not
-   check the floor in any script and can complete below it, so run this check
-   yourself first.
-4. Install the older release.
-
-```sh
-defenseclaw-gateway enterprise bundle sign --in ./policy --out v13.dcbundle \
-  --key signing.pem --key-id acme-2026a --tenant acme --device-group eng-laptops \
-  --version 13 --created-by operator:alice --min-product-version 1.0.3 \
-  --summary "Allow rollback to 1.0.3"
-```
-```sh
-"$GW" enterprise bundle floor-check --product-version 1.0.3
-```
+The preinstall of a 1.0.4 or later package checks the floor before it replaces
+files, but only with a gateway that has the check: the installed gateway when
+it is 1.0.4 or later, or else the floor checker a non-purge uninstall keeps.
+When the installed gateway is older than 1.0.4 or gone and there is no kept
+checker (an older package was installed below the floor, or an uninstall
+warned `floor_checker_not_kept`), the preinstall installs the files. The
+postinstall `ensure` of a 1.0.4 or later package then refuses a release below
+the floor, after its files are in place. Older packages do not check the floor
+in any script and can complete below it. Install only releases that meet the
+floor; to go below it, contact your administrator.
 
 ## 6. Locks
 

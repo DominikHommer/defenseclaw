@@ -97,18 +97,19 @@ the bundle was checked against that release when it was applied. If the
 confirmed bundle cannot be read, such a run keeps the config the last deployment
 committed, repairs the host and warns `bundle_state_unreadable`. With
 `--config`, or with no committed config, it stops with that code as an error
-instead. Deliver a new signed bundle to replace the damaged one.
+instead. To replace the damaged bundle, contact your administrator.
 
-Package scripts shipped in 1.0.4 and later run the same check with the installed
-gateway before they replace files. When that gateway is gone (after
-`uninstall --keep-state`, or an uninstall that failed after it removed the
-binaries), they use the retained floor checker: a copy of the gateway that a
-non-purge uninstall keeps in the lifecycle directory. A checker that is there
-but cannot be read, is not a root-owned file only root can change, or does not
-run, refuses the install. If the uninstall could not keep the copy, it warns
-`floor_checker_not_kept`. The preinstall of a 1.0.4 or later package then has
-nothing to check with and installs its files; its postinstall `ensure` refuses a
-release below the floor, after the files are in place. A package older than
+Package scripts shipped in 1.0.4 and later run the same check before they
+replace files, but only with a gateway that has the check: the installed
+gateway when it is 1.0.4 or later, or else the retained floor checker, a copy of
+the gateway that a non-purge uninstall keeps in the lifecycle directory. A
+checker that is there but cannot be read, is not a root-owned file only root can
+change, or does not run, refuses the install. The preinstall has nothing to
+check with when the installed gateway is older than 1.0.4 or gone and there is
+no retained floor checker: for example, an older package was installed below the
+floor, or an uninstall warned `floor_checker_not_kept`. The preinstall of a
+1.0.4 or later package then installs its files; its postinstall `ensure` refuses
+a release below the floor, after the files are in place. A package older than
 1.0.4 has no floor check in any of its scripts and completes below the floor.
 The apt hook of an installed 1.0.4 or later package runs the check for older
 packages installed through `apt` or `apt-get`.
@@ -116,16 +117,10 @@ packages installed through `apt` or `apt-get`.
 Packages older than 1.0.4 installed through `rpm`, `dnf`, `dpkg -i` or the
 macOS Installer run their own older scripts, which do not check the floor.
 `dpkg -i` does not run the apt hook. Windows Setup does not check the floor.
-Keep package deployment under administrator control. See [Roll
-back](/docs/enterprise/operate/lifecycle#roll-back) for the supported procedure.
-
-### Lower the release floor
-
-To install a release below the confirmed bundle's `min_product_version`, the
-device must first confirm a newer signed bundle with a lower floor, or with no
-floor. The rollback marker and `--allow-downgrade` do not lift the floor. Once
-the device has confirmed that bundle, roll back as in [Roll
-back](/docs/enterprise/operate/lifecycle#roll-back).
+Keep package deployment under administrator control, and check that the
+release you install meets the floor first. To go below the floor, contact your
+administrator. See [Roll back](/docs/enterprise/operate/lifecycle#roll-back) for
+the supported procedure.
 
 ### Applying a config change
 
