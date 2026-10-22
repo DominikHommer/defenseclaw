@@ -3004,3 +3004,51 @@ def test_every_lifecycle_step_proves_its_result_before_it_reports_success() -> N
     assert "The gateway did not start; run 'defenseclaw-gateway start' and check its log" not in rollback
     undo = _ps1_function("Undo-Rollback")
     assert undo.index("[void](Start-Gateway)") < undo.index("Assert-LifecycleRestored") < undo.index('Write-Ok "DefenseClaw $forward is back')
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("case", ["start-fails-1x", "start-fails-0x", "not-proven", "proven"])
+def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: Path, case: str) -> None:
+    # GAP-0486: a rollback to a 1.x release whose gateway did not start
+    # warned, printed "Now running" and returned 0. It is now undone, as a
+    # rollback to 0.x always was, and only a proven rollback says "Now
+    # running"; its record goes only then.
+    back_to = "0.8.10" if case == "start-fails-0x" else "1.0.3"
+    previous = tmp_path / "previous"
+    (previous / "data").mkdir(parents=True)
+    (previous / "VERSION").write_text(back_to, encoding="ascii")
+    script = tmp_path / "rollback.ps1"
+    script.write_text(
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{tmp_path}'\n$Previous = '{previous}'\n$BinDir = '{tmp_path / 'bin'}'\n$ReleaseBase = 'https://example.invalid'\n"
+        "$Run = @{ Log = 'install.log'; RestorePending = $false }\n"
+        f"$script:case = '{case}'; $script:undone = 0; $script:removed = 0; $script:starts = 0\n"
+        "function Write-Step([string]$m) {}\nfunction Write-Info([string]$m) { Write-Host \"info: $m\" }\n"
+        "function Write-Ok([string]$m) { Write-Host \"ok: $m\" }\nfunction Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
+        "function Die([string]$m) { throw $m }\n"
+        "function Get-InstalledVersion { return '1.0.4' }\n"
+        "function Assert-NoActiveConnectorRecovery { }\nfunction Confirm-Step { return $true }\n"
+        "function Test-HookRollbackRestoreAvailable { return $false }\nfunction Wait-VenvFree { }\n"
+        "function Test-RollbackData { return $false }\nfunction Get-GatewayProcess { return $true }\n"
+        "function Stop-Gateway { return $true }\nfunction Stop-Watchdog { }\nfunction Assert-GatewayQuiescent { }\n"
+        "function Switch-WithPrevious { return 0 }\nfunction Protect-UvDirectory { }\nfunction Invoke-PruneOrphanedHooks { }\n"
+        "function Write-LifecycleManifest { return [pscustomobject]@{ TargetBins = @{} } }\nfunction Get-BinariesState { return @{} }\n"
+        "function Remove-LifecycleManifest { $script:removed++ }\n"
+        "function Start-Gateway { $script:starts++; if ($script:case -like 'start-fails*') { return 1 }; return 0 }\n"
+        "function Test-LifecycleProof { if ($script:case -eq 'not-proven') { return @('the gateway is not running') }; return @() }\n"
+        "function Undo-Rollback { param($Reason) $script:undone++; Write-Host \"undo: $Reason\"; return 1 }\n"
+        + _ps1_function("Get-Field") + _ps1_function("Read-Text") + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
+        + "\n$rc = Invoke-Rollback\nWrite-Host \"rc: $rc undone: $script:undone removed: $script:removed\"\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [str(POWERSHELL), "-NoProfile", "-NonInteractive", "-File", str(script)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+    )
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    if case == "proven":
+        assert "rc: 0 undone: 0 removed: 1" in out and "ok: Now running DefenseClaw 1.0.3" in out, out
+    else:
+        assert "rc: 1 undone: 1 removed: 0" in out and "Now running" not in out, out
+        assert ("did not start" in out) if case.startswith("start-fails") else ("not proven running" in out), out
