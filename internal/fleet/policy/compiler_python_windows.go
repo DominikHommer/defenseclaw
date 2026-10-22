@@ -37,6 +37,9 @@ func installedPythonInterpreter() (string, error) {
 	if err := managed.ValidateTrustedRuntimeImage(root, python, "policy Python runtime"); err != nil {
 		return "", fmt.Errorf("policy Python runtime cannot be trusted; repair the Enterprise Setup installation: %w", err)
 	}
+	if err := managed.ValidateTrustedRuntimeCodeTree(root, "policy Python runtime"); err != nil {
+		return "", fmt.Errorf("policy Python imports cannot be trusted; repair the Enterprise Setup installation: %w", err)
+	}
 	return python, nil
 }
 

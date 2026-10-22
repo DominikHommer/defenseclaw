@@ -34,6 +34,8 @@ cannot change either tree.
 
 The lifecycle also registers the deployment with Windows:
 
+Before the gateway launches a scanner, it checks the access list of the bundled Python interpreter and every directory and file under `python`, including `Lib\site-packages`. Only SYSTEM and Administrators may create or change code there. A failed check blocks the scan and reports the path; an administrator restores the installed runtime with `DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1`.
+
 | Registration | Value |
 | --- | --- |
 | Deployment marker | `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` (`Profile`, `ProductVersion`, `InstallRoot`, `StateRoot`, `TrustMode`, `UpdatedAt`, `DisableSelfUpdate`). For detection only: `verify` never trusts it |

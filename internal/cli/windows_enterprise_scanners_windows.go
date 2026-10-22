@@ -305,6 +305,9 @@ var windowsScannerRuntimeServiceCheck = func() error {
 	if err := managed.ValidateTrustedRuntimeImage(root, filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName), "scanner runtime"); err != nil {
 		return err
 	}
+	if err := managed.ValidateTrustedRuntimeCodeTree(root, "scanner Python runtime"); err != nil {
+		return err
+	}
 	if err := managed.ValidateServiceCanReadTree(root, "scanner runtime", windowsScannerGatewayAccount); err != nil && !managed.IsServiceAccountUnresolved(err) {
 		return err
 	}
@@ -1074,7 +1077,12 @@ func readWindowsScannerRuntime() *enterprisestatus.ScannerRuntime {
 			state.Versions = report.Versions
 			state.Problem = report.Problem
 			if report.Prepared {
-				state.State = "ready"
+				if err := managed.ValidateTrustedRuntimeCodeTree(root, "scanner Python runtime"); err != nil {
+					state.State = "untrusted"
+					state.Problem = err.Error()
+				} else {
+					state.State = "ready"
+				}
 			}
 		}
 	}

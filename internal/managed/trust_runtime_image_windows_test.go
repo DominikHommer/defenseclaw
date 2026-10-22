@@ -6,6 +6,7 @@
 package managed
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -47,6 +48,7 @@ func TestValidateTrustedRuntimeImageRefusesReplaceRightsOnEveryFolder(t *testing
 		{name: "Users can delete the children of the folder above Cisco", element: "base", sddl: "O:BA" + trustedDACL + "(A;;0x1200e9;;;BU)", refused: true},
 		{name: "Users can add a file to the runtime folder", element: "root", sddl: "O:BA" + trustedDACL + "(A;;0x1200ab;;;BU)", refused: true},
 		{name: "Users can delete the children of a folder between", element: "nested", sddl: "O:BA" + trustedDACL + "(A;;0x1200e9;;;BU)", refused: true},
+		{name: "Users can add Python startup code", element: "nested", sddl: "O:BA" + trustedDACL + "(A;;0x1200ab;;;BU)", refused: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cisco, root := testenv.CiscoRuntimeTree(t, runtimeDir)
@@ -100,5 +102,55 @@ func TestValidateTrustedRuntimeImageRefusesReplaceRightsOnEveryFolder(t *testing
 	testenv.WriteAdminOnlyFile(t, outside, []byte("other"))
 	if err := ValidateTrustedRuntimeImage(root, outside, "scanner runtime"); err == nil || !strings.Contains(err.Error(), "not inside") {
 		t.Fatalf("an image outside the runtime folder = %v, want refused", err)
+	}
+}
+
+// The embedded interpreter imports sitecustomize and .pth files from
+// site-packages. A protected python.exe is insufficient if any directory or
+// existing import file beneath it admits an untrusted writer (GAP-0439).
+func TestValidateTrustedRuntimeCodeTreeChecksWholeImportTree(t *testing.T) {
+	const userCreate = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;;0x1200ab;;;BU)"
+	for _, element := range []string{"python", "Lib", "site-packages", "module"} {
+		t.Run(element, func(t *testing.T) {
+			_, root := testenv.CiscoRuntimeTree(t, "DefenseClaw-ScannerRuntime")
+			python := filepath.Join(root, "python")
+			site := filepath.Join(python, "Lib", "site-packages")
+			module := filepath.Join(site, "sitecustomize.py")
+			testenv.WriteAdminOnlyFile(t, filepath.Join(python, "python.exe"), []byte("python"))
+			testenv.WriteAdminOnlyFile(t, module, []byte("pass"))
+			if err := ValidateTrustedRuntimeCodeTree(root, "scanner Python runtime"); err != nil {
+				t.Fatalf("trusted Python tree refused: %v", err)
+			}
+			target := map[string]string{"python": python, "Lib": filepath.Join(python, "Lib"),
+				"site-packages": site, "module": module}[element]
+			testenv.SetSecurity(t, target, userCreate)
+			if err := ValidateTrustedRuntimeCodeTree(root, "scanner Python runtime"); err == nil || !strings.Contains(err.Error(), target) {
+				t.Fatalf("untrusted %s = %v, want refusal naming the path", target, err)
+			}
+		})
+	}
+}
+
+func TestValidateTrustedRuntimeCodeTreeIgnoresRetiredUnpack(t *testing.T) {
+	_, root := testenv.CiscoRuntimeTree(t, "DefenseClaw-ScannerRuntime")
+	testenv.WriteAdminOnlyFile(t, filepath.Join(root, "runtime-digest", "python", "python.exe"), []byte("python"))
+	stale := filepath.Join(root, ".stale-0123456789abcdef")
+	if err := os.Mkdir(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testenv.SetSecurity(t, stale, "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;;0x1200ab;;;BU)")
+	if err := ValidateTrustedRuntimeCodeTree(root, "scanner Python runtime"); err != nil {
+		t.Fatalf("a retired unpack prevented repair of the active runtime: %v", err)
+	}
+}
+
+func TestValidateTrustedInstallMarkerDirRefusesReplaceableAncestor(t *testing.T) {
+	cisco, marker := testenv.CiscoRuntimeTree(t, "DefenseClaw")
+	if err := ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker"); err == nil || !strings.Contains(err.Error(), marker) {
+		t.Fatalf("Administrators-owned marker = %v, want SYSTEM owner refusal", err)
+	}
+	testenv.SetSecurity(t, cisco, "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;;0x1200e9;;;BU)")
+	if err := ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker"); err == nil || !strings.Contains(err.Error(), cisco) {
+		t.Fatalf("replaceable marker ancestor = %v, want refusal naming %s", err, cisco)
 	}
 }
