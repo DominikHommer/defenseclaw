@@ -32,7 +32,7 @@ for current behavior.
 
 - **Copilot on Windows denies an invalid hook event binding.** Missing, empty, unknown or wrongly cased bindings receive both native denial shapes with the setup command before input or runtime checks. Secure Client delivery is unchanged.
 
-- **HILT previews explain observe mode.** A connector in observe mode does not pause actions for approval; the preview distinguishes the saved policy from action-mode prompts.
+- **HILT previews explain observe mode.** A connector in observe mode does not pause actions for approval; the preview distinguishes the saved policy from action-mode prompts. The connector preview also names the guardrail profiles that put the connector in a different mode or set their own HILT policy, so accounts on an action-mode profile are told they will be prompted.
 
 - **Rule-pack switches preserve existing pins.** Selecting a directory keeps its registered identity and refuses a stale digest through any alias. Pins used by application protection survive a global pack switch.
 

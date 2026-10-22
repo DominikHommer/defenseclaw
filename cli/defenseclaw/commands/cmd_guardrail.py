@@ -2164,22 +2164,80 @@ _HERMES_UPSTREAM_TIMEOUT_NOTE = (
 )
 
 
-def _action_profiles_for(gc, connector: str) -> list[str]:
-    """Names of the guardrail profiles that put *connector* in action mode.
+def _profile_connector_policies(gc, connector: str) -> list[tuple[str, str, bool]]:
+    """``(profile, mode, own_hilt)`` for each guardrail profile, for *connector*.
 
-    A profile's own per-connector mode wins over its profile-wide mode, as
-    the gateway resolves it; an unset value inherits and is not counted.
+    *mode* is the mode the profile itself sets for the connector, "" when it
+    inherits. A profile's own per-connector value wins over its profile-wide
+    one, as the gateway resolves it (applyGuardrailProfile). *own_hilt* is
+    True when the profile sets a HILT block (profile-wide or for this
+    connector), which replaces the saved connector HILT for its accounts.
     """
-    names: list[str] = []
+    rows: list[tuple[str, str, bool]] = []
     target = normalize_connector(connector)
     for pname, profile in sorted((getattr(gc, "profiles", None) or {}).items()):
         mode = str(getattr(profile, "mode", "") or "").strip().lower()
+        own_hilt = getattr(profile, "hilt", None) is not None
         for cname, override in (getattr(profile, "connectors", None) or {}).items():
-            if normalize_connector(cname) == target and str(getattr(override, "mode", "") or "").strip():
+            if normalize_connector(cname) != target:
+                continue
+            if str(getattr(override, "mode", "") or "").strip():
                 mode = str(override.mode).strip().lower()
-        if mode == "action":
-            names.append(str(pname))
-    return names
+            if getattr(override, "hilt", None) is not None:
+                own_hilt = True
+        rows.append((str(pname), mode, own_hilt))
+    return rows
+
+
+def _action_profiles_for(gc, connector: str) -> list[str]:
+    """Names of the guardrail profiles that put *connector* in action mode.
+
+    An unset mode inherits and is not counted.
+    """
+    return [name for name, mode, _ in _profile_connector_policies(gc, connector) if mode == "action"]
+
+
+def _hilt_profile_notes(gc, connector: str, label: str, enabled: bool, min_severity: str) -> list[str]:
+    """What a saved *connector* HILT change does for accounts on guardrail profiles.
+
+    A profile that sets its own HILT block is not reached by the change. One
+    that inherits it but sets a different mode than the connector's base mode
+    pauses (action) or does not (observe) where the base preview says the
+    opposite, so its accounts get their own line.
+    """
+    base_mode = (gc.effective_mode(connector) or "observe").strip().lower()
+    action: list[str] = []
+    passive: list[str] = []
+    own: list[str] = []
+    for name, mode, own_hilt in _profile_connector_policies(gc, connector):
+        if own_hilt:
+            own.append(name)
+        elif mode and mode != base_mode:
+            (action if mode == "action" else passive).append(name)
+    notes: list[str] = []
+    if action:
+        names = ", ".join(action)
+        if enabled:
+            notes.append(
+                f"Guardrail profile(s) {names} put {label} in action mode: their accounts will be prompted "
+                f"for approval on confirmable actions at/above {min_severity} (CRITICAL findings still block outright)."
+            )
+        else:
+            notes.append(
+                f"Guardrail profile(s) {names} put {label} in action mode: their accounts will NOT be prompted; "
+                "actions resolve straight to allow/alert/block."
+            )
+    if passive:
+        notes.append(
+            f"Guardrail profile(s) {', '.join(passive)} put {label} in observe mode: "
+            "their accounts are not paused for approval."
+        )
+    if own:
+        notes.append(
+            f"Guardrail profile(s) {', '.join(own)} set their own HILT policy: this change does not apply to "
+            "their accounts."
+        )
+    return notes
 
 
 def _warn_still_fail_open(gc, open_names: list[str]) -> None:
@@ -2302,6 +2360,8 @@ def _set_connector_hilt(
             f"{label} will NOT prompt — actions resolve straight to allow/alert/block.",
             indent="  ",
         )
+    for note in _hilt_profile_notes(gc, key, label, new_enabled, new_min):
+        ux.subhead(note, indent="  ")
     click.echo()
 
     if not yes and not _confirm_proceed():
