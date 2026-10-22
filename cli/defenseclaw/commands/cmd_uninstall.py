@@ -529,18 +529,24 @@ def _dispatch_native_windows_uninstall(
         ux.subhead("Cancelled.")
         raise SystemExit(1)
 
+    data_dir = str(config_module.default_data_path())
+    # until 1.1: read what a removed connector left before Setup runs: Setup
+    # may delete the data folder, and with it the records that name the
+    # agent configs outside it.
+    left_before = _removed_connector_leftover_lines(data_dir, data_removed=True) if wipe_data else []
     try:
         outcome = windows_native_uninstall.execute_native_windows_uninstall(request)
     except windows_native_uninstall.NativeWindowsUninstallRefusal as exc:
         raise click.ClickException(str(exc)) from exc
     if outcome.returncode == 0:
         ux.ok("Native Windows uninstall completed.")
-        _print_removed_connector_leftovers(str(config_module.default_data_path()), data_removed=wipe_data)
+        _relay_native_setup_removed_connector_leftovers(outcome.stdout, left_before, data_dir, wipe_data=wipe_data)
         if binaries:
             _remove_script_install_after_native_setup(request.platform_name)
         return True
     if outcome.restart_required:
         ux.ok("Native Windows uninstall is armed; restart required (Windows exit code 3010).")
+        _relay_native_setup_removed_connector_leftovers(outcome.stdout, left_before, data_dir, wipe_data=wipe_data)
         raise SystemExit(outcome.returncode)
     if outcome.refused:
         ux.err("Authenticated native Setup refused the uninstall (Windows exit code 1603).")
@@ -1812,6 +1818,25 @@ def _teardown_connectors(
     return tuple(out)
 
 
+_DATA_REMOVED_LEFTOVER_NOTE = (
+    "  DefenseClaw's data folder is removed by this uninstall, so a hook or policy listed above "
+    "names a file that no longer exists, and the agent fails on it: remove it from the agent's config."
+)
+_LEFTOVER_HEADER = re.compile(r"^\S.* support was removed in DefenseClaw 1\.0\.4\. Left for you to remove by hand:$")
+
+
+def _removed_connector_leftover_lines(data_dir: str, *, data_removed: bool) -> list[str]:
+    """until 1.1: the lines that list what a removed connector left (none when nothing is)."""
+    if not data_dir:
+        return []
+    from defenseclaw.removed_connectors import leftovers
+
+    lines: list[str] = []
+    for left in leftovers(data_dir):
+        lines.extend(left.lines(without_under=data_dir if data_removed else ""))
+    return lines
+
+
 def _print_removed_connector_leftovers(data_dir: str, *, data_removed: bool) -> None:
     """until 1.1: list what the removed OpenHands/OmniGent teardown left, with the steps.
 
@@ -1820,20 +1845,77 @@ def _print_removed_connector_leftovers(data_dir: str, *, data_removed: bool) -> 
     names it. Every uninstall form prints this. What a data folder removal
     takes away (*data_removed*) is not listed.
     """
-    if not data_dir:
-        return
-    from defenseclaw.removed_connectors import leftovers
-
-    lines: list[str] = []
-    for left in leftovers(data_dir):
-        lines.extend(left.lines(without_under=data_dir if data_removed else ""))
+    lines = _removed_connector_leftover_lines(data_dir, data_removed=data_removed)
     if not lines:
         return
     if data_removed:
-        lines.append(
-            "  DefenseClaw's data folder is removed by this uninstall, so a hook or policy listed above "
-            "names a file that no longer exists, and the agent fails on it: remove it from the agent's config."
-        )
+        lines.append(_DATA_REMOVED_LEFTOVER_NOTE)
+    click.echo("\n".join(lines))
+
+
+def _setup_removed_connector_leftover_lines(stdout: str) -> list[str]:
+    """until 1.1: the removed-connector leftovers native Setup printed in quiet mode."""
+    lines: list[str] = []
+    in_block = False
+    for raw in (stdout or "").splitlines():
+        line = raw.rstrip()
+        if _LEFTOVER_HEADER.match(line):
+            in_block = True
+            lines.append(line)
+        elif in_block and line.startswith("  - "):
+            lines.append(line)
+        else:
+            in_block = False
+    return lines
+
+
+def _merge_leftover_lines(*blocks: list[str]) -> list[str]:
+    """One list of leftover lines: each connector's header once, each item once."""
+    order: list[str] = []
+    items: dict[str, list[str]] = {}
+    for block in blocks:
+        header = ""
+        for line in block:
+            if not line.startswith("  - "):
+                header = line
+                if header not in items:
+                    items[header] = []
+                    order.append(header)
+            elif header and line not in items[header]:
+                items[header].append(line)
+    out: list[str] = []
+    for header in order:
+        if items[header]:
+            out.append(header)
+            out.extend(items[header])
+    return out
+
+
+def _relay_native_setup_removed_connector_leftovers(
+    stdout: str, left_before: list[str], data_dir: str, *, wipe_data: bool
+) -> None:
+    """until 1.1: after native Setup, list what a removed connector left, with the steps.
+
+    Setup's teardown lists its leftovers on stdout in quiet mode, read before
+    it removes any data; *left_before* is this command's own list from before
+    Setup ran (the agent configs outside a data folder Setup deletes). Without
+    data removal the host is read again.
+    """
+    setup_lines = _setup_removed_connector_leftover_lines(stdout)
+    if wipe_data:
+        # What the data removal took is not listed.
+        under = os.path.normcase(os.path.join(os.path.abspath(data_dir), ""))
+        setup_lines = [
+            line
+            for line in setup_lines
+            if not (line.startswith("  - ") and os.path.normcase(line[len("  - ") :]).startswith(under))
+        ]
+    after = [] if wipe_data else _removed_connector_leftover_lines(data_dir, data_removed=False)
+    lines = _merge_leftover_lines(setup_lines, left_before, after)
+    if not lines:
+        return
+    if wipe_data:
+        lines.append(_DATA_REMOVED_LEFTOVER_NOTE)
     click.echo("\n".join(lines))
 
 

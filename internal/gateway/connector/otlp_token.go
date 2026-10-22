@@ -352,7 +352,10 @@ func removeOTLPPathTokenUniqueTemps(tokenPath string) error {
 	return nil
 }
 
-func removeOwnedOTLPPathTokenFile(path string) error {
+// checkOwnedOTLPPathTokenFile performs the same identity and ownership checks
+// as removal without mutating the path. Retired connector cleanup uses it to
+// reject a bad token path before writing its deny stub.
+func checkOwnedOTLPPathTokenFile(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -390,6 +393,13 @@ func removeOwnedOTLPPathTokenFile(path string) error {
 		return err
 	}
 	if err := file.Close(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func removeOwnedOTLPPathTokenFile(path string) error {
+	if err := checkOwnedOTLPPathTokenFile(path); err != nil {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

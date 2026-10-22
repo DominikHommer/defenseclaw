@@ -196,18 +196,24 @@ func (h retiredOmnigentHost) requireStub(t *testing.T) {
 	}
 }
 
-// readOnlyRetiredHooks makes the hook folder read-only, so the stub cannot be
-// written.
+// readOnlyRetiredHooks makes the hook folder and the module read-only, so the
+// stub can be neither written into the module nor renamed over it.
 func readOnlyRetiredHooks(t *testing.T, h retiredOmnigentHost) func() {
 	t.Helper()
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("directory modes do not stop writes here")
 	}
 	dir := filepath.Dir(h.modulePath)
+	if err := os.Chmod(h.modulePath, 0o400); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	restore := func() { _ = os.Chmod(dir, 0o700) }
+	restore := func() {
+		_ = os.Chmod(dir, 0o700)
+		_ = os.Chmod(h.modulePath, 0o600)
+	}
 	t.Cleanup(restore)
 	return restore
 }

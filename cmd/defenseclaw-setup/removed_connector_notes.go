@@ -71,8 +71,11 @@ func removedConnectorNotesText() string {
 			continue
 		}
 		label := name
-		if name == "omnigent" {
+		switch name {
+		case "omnigent":
 			label = "OmniGent"
+		case "openhands":
+			label = "OpenHands"
 		}
 		fmt.Fprintf(&b, "%s support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:\r\n", label)
 		for _, item := range leftovers {

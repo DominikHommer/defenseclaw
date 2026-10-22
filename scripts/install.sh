@@ -59,6 +59,17 @@ readonly OFFICIAL_RELEASE_BASE="https://github.com/${DEFAULT_REPO}"
 readonly RELEASE_SIGNER='^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
 readonly DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 export DEFENSECLAW_HOME
+# until 1.1: a 0.8.x or 1.0.x OmniGent setup may have used a relative
+# config override. Bind it to the caller's directory before the installer
+# starts a gateway from its own runtime directory. Nothing is changed in the
+# caller's shell; the child gateway and the cleanup reporter see one path.
+for retired_config_var in OMNIGENT_CONFIG_HOME OMNIGENT_CONFIG; do
+    retired_config_value="${!retired_config_var:-}"
+    case "${retired_config_value}" in
+        ""|/*|"~"|"~/"*) ;;
+        *) export "${retired_config_var}=$(pwd -P)/${retired_config_value}" ;;
+    esac
+done
 readonly VENV="${DEFENSECLAW_HOME}/.venv"
 readonly BIN_DIR="${HOME}/.local/bin"
 readonly PREVIOUS="${DEFENSECLAW_HOME}/previous"
@@ -1042,6 +1053,7 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     rm -f "${SNAP}/GATEWAY_RESTART_UNPROVEN"
 fi
 finish_swap
+report_retired_connector_leftovers
 trap - HUP PIPE
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
@@ -1878,6 +1890,27 @@ finish_swap() {
     find -H "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
         -exec rm -rf {} + 2>/dev/null || true
     ok "Installed DefenseClaw ${VERSION}"
+}
+
+# until 1.1: the removed connectors' teardown deliberately keeps vendor
+# configs and import paths for manual cleanup. The gateway may complete its
+# deny-only script replacement during start, but its daemon log is not the
+# installer's output. List the remaining paths and exact steps here too.
+report_retired_connector_leftovers() {
+    local notes
+    if ! notes="$("${VENV}/bin/python" -I - "${DEFENSECLAW_HOME}" <<'PY'
+import sys
+from defenseclaw.removed_connectors import leftovers
+
+for left in leftovers(sys.argv[1]):
+    for line in left.lines():
+        print(line)
+PY
+)"; then
+        warn "Could not check removed connector leftovers; run 'defenseclaw status' for manual cleanup steps"
+        return 0
+    fi
+    [[ -z "${notes}" ]] || printf '\n%s\n' "${notes}"
 }
 
 # A rollback parks the data written since the upgrade in previous/, and a 0.x

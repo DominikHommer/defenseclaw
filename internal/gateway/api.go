@@ -633,7 +633,10 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	presented = strings.TrimSpace(presented)
-	if name == "" || presented == "" {
+	// until 1.1: the hook token an upgraded host keeps for a connector 1.0.4
+	// removed (OpenHands) authenticates nothing; old hooks reach the route
+	// that blocks them whatever the token.
+	if name == "" || presented == "" || connector.IsRemovedConnector(name) {
 		return false
 	}
 
@@ -3851,8 +3854,9 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
-// Unwrap lets http.ResponseController reach the connection, so a handler
-// behind the metrics middleware can bound its write (handleForeignHookSession).
+// Unwrap lets http.ResponseController reach the connection through the
+// metrics writer (read deadlines, full duplex, and the bounded write of
+// handleForeignHookSession).
 func (sw *statusWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
 
 type authenticatedInspectConnectorKey struct{}
@@ -3896,6 +3900,12 @@ func requestGatewayToken(r *http.Request) string {
 // and never reaches next.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// until 1.1: a removed connector's hook route blocks every call
+		// before any credential check (retired_connector_hook.go): with a
+		// valid token, a revoked one, none or a sandbox credential.
+		if serveRetiredConnectorHook(w, r) {
+			return
+		}
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
 			return
@@ -4075,7 +4085,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
 			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
 			registered := false
-			if a.connectorRegistry != nil {
+			if a.connectorRegistry != nil && !connector.IsRemovedConnector(hookScope) {
 				_, registered = a.connectorRegistry.Get(hookScope)
 			}
 			if registered {
