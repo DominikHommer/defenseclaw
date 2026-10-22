@@ -110,6 +110,8 @@ not used.
 - It is plain ASCII with LF or CRLF line endings, writes every top-level key plainly
   in lowercase and ends each quoted value and each `{...}` or `[...]` on its line.
   The check compares text.
+- No other setting is compared. Copy the bundle's other settings, such as
+  `asset_policy:`, into the base config too: it applies until the bundle does.
 
 The Windows packager refuses a base config that breaks these rules. The Linux and
 macOS wrappers install nothing and fail with `mdm_base_config_mismatch` (exit `2`).
