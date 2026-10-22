@@ -345,3 +345,19 @@ func TestWindowsAnchorsThatFailTheirCheckAfterTheReplaceRecordAFailedChange(t *t
 		})
 	}
 }
+
+// GAP-0608: the --mode/--connector shorthand renders a config, so with
+// TRUSTANCHORS= it is refused bundle_required like CONFIG=, and the refused
+// anchor install is recorded (Setup passes such a run on to the lifecycle).
+func TestWindowsAnchorsWithTheModeShorthandRecordOneRefusal(t *testing.T) {
+	stubWindowsBundleHost(t)
+	spool := stubWindowsChangeSpool(t)
+	cmd, out := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{trustAnchors: "anchors.json", mode: "action", connector: "codex",
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts)
+	if !done || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || !strings.Contains(out.String(), "bundle_required") {
+		t.Fatalf("anchors with --mode: done=%v, err=%v, output=%s", done, err, out)
+	}
+	assertOneRefusedAnchorInstall(t, spool, "bundle_required")
+}

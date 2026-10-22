@@ -750,7 +750,9 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 		for _, signer := range strings.Split(opts.AllowedSigners, ",") {
 			appendValue("--allowed-signer", strings.ToLower(strings.TrimSpace(signer)))
 		}
-		if opts.Action == "ensure" {
+		if mutation {
+			// The lifecycle refuses BUNDLE= and TRUSTANCHORS= on another
+			// action itself, and records a refused anchor install (GAP-0608).
 			appendValue("--bundle", opts.Bundle)
 			appendValue("--trust-anchors", opts.TrustAnchors)
 			if opts.RefuseCapabilityLoss {

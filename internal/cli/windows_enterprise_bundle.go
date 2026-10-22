@@ -726,10 +726,13 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	if requested && action != "ensure" {
 		return refuseArguments("invalid_arguments", "--bundle and --trust-anchors are valid only with ensure")
 	}
-	if opts.bundlePath != "" && strings.TrimSpace(opts.configPath) != "" {
+	// --mode/--connector is the QA shorthand the installer renders a
+	// config from: a config all the same (Setup refused it with these too).
+	configGiven := strings.TrimSpace(opts.configPath) != "" || opts.mode != "" || opts.connector != ""
+	if opts.bundlePath != "" && configGiven {
 		return refuseArguments("invalid_arguments", "BUNDLE= (--bundle) cannot be combined with CONFIG= (--config): the signed bundle carries the config")
 	}
-	if opts.trustAnchors != "" && strings.TrimSpace(opts.configPath) != "" {
+	if opts.trustAnchors != "" && configGiven {
 		// Installing the anchors puts the computer in bundle mode, which
 		// refuses CONFIG=; installing them first would let this one run
 		// apply an unsigned config past that check.
