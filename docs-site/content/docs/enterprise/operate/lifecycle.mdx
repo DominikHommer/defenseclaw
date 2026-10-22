@@ -106,6 +106,15 @@ lost until the agent is restarted.
 
 ## Roll back
 
+On Linux and macOS with bundle trust anchors, the confirmed bundle's
+`min_product_version` is the oldest release you can install
+(`product_floor_refused`). The rollback marker, `--allow-downgrade` and
+`uninstall --keep-state` do not lift this floor. Deliver a bundle signed with a
+lower `--min-product-version` first, or install a release that meets the floor.
+An unreadable floor also refuses the install. See [Release floor
+limits](/docs/enterprise/operate/reference#release-floor-limits) for older
+packages and Windows Setup.
+
 A failed action rolls itself back. You only need the steps below to go back to an older
 release on purpose. Try the rollback on one test host before the fleet. Every lifecycle
 refuses an older release unless you ask for the rollback (`downgrade_refused`). For an

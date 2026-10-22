@@ -79,6 +79,21 @@ the run warns `retry limit reached`; run `ensure` once the cause is fixed.
 - **MDM wrapper.** The Linux wrapper installs `.rpm` files with `rpm -U`, so it refuses
   older RHEL packages.
 
+### Release floor limits
+
+On Linux and macOS, `ensure` checks the confirmed bundle's release floor before
+applying a payload, including a reinstall or repair. Package scripts shipped in
+1.0.4 and later check before replacing files. The apt hook of an installed
+1.0.4 or later package also checks older packages installed through `apt` or
+`apt-get`. A non-purge uninstall keeps a retained floor checker for later
+packages that support this check; a check that cannot prove the floor refuses.
+
+Packages older than 1.0.4 installed through `rpm`, `dnf`, `dpkg -i` or the
+macOS Installer run their own older scripts, which do not check the floor.
+`dpkg -i` does not run the apt hook. Windows Setup does not check the floor.
+Keep package deployment under administrator control. See [Roll
+back](/docs/enterprise/operate/lifecycle#roll-back) for the supported procedure.
+
 ### Applying a config change
 
 `status` and `verify` wait up to 5 seconds for a running apply trigger. If it is still
