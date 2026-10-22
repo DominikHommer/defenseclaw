@@ -328,6 +328,15 @@ func (a *APIServer) sandboxRelayServe(routes map[string]sandboxRelayRoute) http.
 			ctx = contextWithSandboxUser(ctx, binding)
 			ctx = a.withGuardrailProfileDecision(ctx, binding.Connector)
 			r = r.WithContext(ctx)
+			// Hook, notify and inspect handlers receive this route directly;
+			// the ordinary inspect middleware does not run on the relay.
+			// Telemetry must remain available to report the refusal.
+			if route.class != sandboxauth.RouteOTLP {
+				if reason, refused := profileUnconfirmedGroupReason(ctx); refused {
+					writeSandboxIngressError(w, http.StatusForbidden, reason)
+					return
+				}
+			}
 			if route.class == sandboxauth.RouteOTLP {
 				a.serveSandboxRelayOTLP(w, r, route, binding)
 				return
