@@ -5483,6 +5483,7 @@ function Initialize-DefenseClawTransactionManagedRoot {
         -AllowUsersRead:$AllowUsersRead `
         -PassThruCreationResult `
         -StagingMarkerSID $marker `
+        -KeepProtectedAcl:(Test-DefenseClawStandaloneProfile) `
         -DeferFinalAcl:(-not [string]::IsNullOrWhiteSpace($marker))
     if (-not [bool]$creation.created) {
         [void](Set-DefenseClawInstallPreparationRootIdentity `

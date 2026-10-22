@@ -745,3 +745,36 @@ def test_signed_out_untrusted_folder_is_classified_alike() -> None:
     assert "enterpriseHookSignedOutUntrustedFolder(row, target.DataDir)" in lifecycle
     standalone = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
     assert 'json:"signed_out_untrusted_folders"' in standalone
+
+
+def _run_lifecycle_functions(tmp_path, names, body, replacements=()) -> None:
+    import shutil
+
+    shell = shutil.which("pwsh") or shutil.which("pwsh.exe")
+    if not shell:
+        pytest.skip("PowerShell is unavailable")
+    functions = "\n".join(_function_body(_text(MODULE), name) for name in names)
+    for old, new in replacements:
+        functions = functions.replace(old, new)
+    script = tmp_path / "lifecycle.ps1"
+    script.write_text("$ErrorActionPreference = 'Stop'\n" + functions + "\n" + body, encoding="utf-8")
+    result = subprocess.run([shell, "-NoProfile", "-File", str(script)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+
+def test_install_preparation_keeps_existing_service_read_access(tmp_path) -> None:
+    _run_lifecycle_functions(tmp_path, ["Initialize-DefenseClawTransactionManagedRoot"], r"""
+function Test-DefenseClawStandaloneProfile { return $true }
+function Get-DefenseClawInstallRollbackIntent { return @{ install_root_marker_sid = '' } }
+function Set-DefenseClawInstallPreparationRootIdentity {}
+function Initialize-DefenseClawManagedRoot {
+    param($Path, $Label, $RequiredBase, [switch]$AllowUsersRead, [switch]$PassThruCreationResult,
+        $StagingMarkerSID, [switch]$DeferFinalAcl, [switch]$KeepProtectedAcl)
+    if (-not $KeepProtectedAcl) { throw 'preparation removed the existing gateway read ACE' }
+    return @{ created = $false }
+}
+Initialize-DefenseClawTransactionManagedRoot -Layout @{} -GatewayServiceName Gateway `
+    -GuardianServiceName Guardian -Root install_root -Path existing -Label InstallRoot -RequiredBase base
+""")
+
