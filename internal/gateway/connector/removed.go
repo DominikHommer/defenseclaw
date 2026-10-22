@@ -23,18 +23,22 @@ package connector
 //
 //  1. It replaces the hook script an older release wrote for the connector
 //     (OpenHands' openhands-hook.sh, OmniGent's policy module), proven by its
-//     DefenseClaw marker, with a static deny stub, in one atomic rename. A
-//     stub an older teardown left that allowed every call is replaced the
-//     same way. The stub blocks every call and says that support was removed
-//     in 1.0.4 and how to remove the hook.
+//     DefenseClaw marker, with a static deny stub. A stub an older teardown
+//     left that allowed every call is replaced the same way. The stub blocks
+//     every call and says that support was removed in 1.0.4 and how to
+//     remove the hook. The stub is written into the file itself first (the
+//     same file, so every other name of it, a hard link, gets it too; the
+//     whole stub, synced and read back), and then a copy is renamed over
+//     the path in one atomic step (removedOnlyConnector.replaceScript).
 //  2. It revokes the DefenseClaw tokens issued for the connector, but only
 //     once nothing but the stub is left at the script path. An old hook that
-//     still runs (a file with more than one name, a hard link; a link, or a
-//     file DefenseClaw cannot prove it wrote) keeps its tokens: without them
-//     the old hook allows every call in fail mode open, with them it reaches
-//     the retired gateway route, which blocks every call. The teardown then
-//     fails with the step that resolves it by hand (removedOnlyConnector.
-//     hookLeft), and the next start tries again.
+//     may still run (a hard-linked file the stub could not be written into;
+//     a link, or a file DefenseClaw cannot prove it wrote) keeps its tokens:
+//     without them the old hook allows every call in fail mode open, with
+//     them it reaches the retired gateway route, which blocks every call
+//     whatever the token. The teardown then fails with the step that
+//     resolves it by hand (removedOnlyConnector.hookLeft), and the next
+//     start tries again.
 //
 // Nothing else is touched: agent config files (hooks.json, config.yaml),
 // import paths (.pth), runtime records (.hookcfg), backups, the hook
@@ -154,8 +158,11 @@ type removedOnlyConnector struct {
 	// <data>/hooks; marker starts one of its first lines.
 	script, marker string
 	tombstone      string
-	mode           os.FileMode
-	configStep     string
+	// inPlaceTail ends the stub written into a longer old script, after
+	// blanks out to its old end (inPlaceStub); "" writes the stub alone.
+	inPlaceTail string
+	mode        os.FileMode
+	configStep  string
 }
 
 // removedOpenHandsLauncherFlag is how a Windows hooks.json command names the
@@ -167,7 +174,7 @@ var (
 	removedOpenHands = removedOnlyConnector{
 		name: removedOpenHandsID, label: "OpenHands",
 		script: removedOpenHandsHookScript, marker: "# defenseclaw-managed-hook v",
-		tombstone: removedOpenHandsTombstone, mode: 0o700,
+		tombstone: removedOpenHandsTombstone, inPlaceTail: "exit 2\n", mode: 0o700,
 		configStep: "remove every hook whose command runs " + removedOpenHandsHookScript + " (or defenseclaw-hook --connector openhands) from this file, then restart OpenHands",
 	}
 	removedOmnigent = removedOnlyConnector{
@@ -278,12 +285,44 @@ func (c removedOnlyConnector) scriptStateAndLinks(path string) (removedScriptSta
 
 func (c removedOnlyConnector) classifyScript(data []byte) removedScriptState {
 	switch {
-	case string(data) == c.tombstone:
+	case c.isStub(data):
 		return removedScriptStub
 	case len(data) <= removedScriptReadLimit && removedHasMarker(data, c.marker):
 		return removedScriptOwned
 	}
 	return removedScriptForeign
+}
+
+// isStub reports whether data is the stub, or the stub as writeStubInPlace
+// leaves it in a file that held a longer script (inPlaceStub).
+func (c removedOnlyConnector) isStub(data []byte) bool {
+	rest, ok := bytes.CutPrefix(data, []byte(c.tombstone))
+	switch {
+	case !ok:
+		return false
+	case len(rest) == 0:
+		return true
+	case c.inPlaceTail == "":
+		return false
+	}
+	pad, ok := bytes.CutSuffix(rest, []byte(c.inPlaceTail))
+	return ok && len(bytes.Trim(pad, " ")) == 0
+}
+
+// inPlaceStub is what writeStubInPlace writes into a file that held old
+// bytes of oldLen. A shell that is already running the old OpenHands script
+// reads on from where it was, so the file must not end where the old one
+// went on: after the stub come blanks out to the old end, then exit 2. A
+// run that reads on from anywhere past the stub reaches that exit 2. It
+// stays within removedScriptReadLimit. OmniGent imports the whole module at
+// once, so its stub is written alone.
+func (c removedOnlyConnector) inPlaceStub(oldLen int) []byte {
+	stub := []byte(c.tombstone)
+	if c.inPlaceTail == "" || oldLen <= len(stub) {
+		return stub
+	}
+	pad := min(oldLen-len(stub), removedScriptReadLimit-len(stub)-len(c.inPlaceTail))
+	return append(append(stub, bytes.Repeat([]byte(" "), pad)...), c.inPlaceTail...)
 }
 
 // removedHasMarker reports whether one of the first lines of data starts with
@@ -307,11 +346,11 @@ func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error 
 	if strings.TrimSpace(opts.DataDir) == "" {
 		return fmt.Errorf("%s teardown: empty data directory", c.name)
 	}
-	// The stub goes first: while the old hook still runs, its tokens stay
-	// with it, so a failed write changes nothing. A token that cannot be
-	// revoked after it leaves the stub in place; the next start tries again.
+	// The stub goes first: while an old hook may still run, its tokens stay
+	// with it. A token that cannot be revoked after it leaves the stub in
+	// place; the next start tries again.
 	if err := c.replaceScript(opts.DataDir); err != nil {
-		return fmt.Errorf("%w; nothing was changed, and the next start tries again", err)
+		return fmt.Errorf("%s teardown: %w; its tokens were kept (with them an old hook reaches the gateway, which blocks every call), and the next start tries again", c.name, err)
 	}
 	if err := c.hookLeft(opts.DataDir); err != nil {
 		return fmt.Errorf("%s teardown: %w; its tokens were kept, so the old hook still reaches the gateway, which blocks every call", c.name, err)
@@ -319,24 +358,126 @@ func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error 
 	return c.revokeTokens(opts.DataDir)
 }
 
-// replaceScript writes the deny stub over a script an older release wrote, in
-// one atomic rename that replaces the file itself, never a link's target. A
-// file with more than one name is left as it is: the rename would give only
-// this name the stub, and a later run would then revoke the tokens of the old
-// hook under its other names (hookLeft keeps them).
+// replaceScript writes the deny stub over a script an older release wrote.
+// It writes the stub into the file itself first, so every name of the file
+// (a hard link) blocks, then renames a copy over the path, which replaces
+// the file at the path itself, never a link's target. When the stub cannot
+// be written into a file with more than one name, nothing is renamed: the
+// rename would give only this name the stub, and a later run would then
+// revoke the tokens of the old hook under its other names (hookLeft keeps
+// them while the old file is still at the path).
 func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	path := c.scriptPath(dataDir)
 	state, links, err := c.scriptStateAndLinks(path)
 	if err != nil {
-		return fmt.Errorf("%s teardown: read %s: %w", c.name, path, err)
+		return fmt.Errorf("read %s: %w; nothing was changed", path, err)
 	}
-	if state != removedScriptOwned || links > 1 {
+	if state != removedScriptOwned {
 		return nil
 	}
-	if err := atomicWriteFileNoFollow(path, []byte(c.tombstone), c.mode); err != nil {
-		return fmt.Errorf("%s teardown: replace %s with the stub that blocks every call: %w", c.name, path, err)
+	inPlace := c.writeStubInPlace(path)
+	if inPlace != nil && links > 1 {
+		return fmt.Errorf("%s is the hook script an older DefenseClaw wrote and has %d names (hard links), and the stub could not be written into it: %w. To finish: %s",
+			path, links, inPlace, c.hardLinkStep(path))
+	}
+	if err := atomicReplaceFileNoFollow(path, []byte(c.tombstone), c.mode); err != nil {
+		if inPlace == nil {
+			return fmt.Errorf("%s holds the stub that blocks every call, but its copy could not be renamed over it: %w", path, err)
+		}
+		return fmt.Errorf("replace %s with the stub that blocks every call: %w (writing it into the file: %v)", path, err, inPlace)
 	}
 	return nil
+}
+
+// removedInPlaceWriteAt and removedInPlaceTruncate are the writes of
+// writeStubInPlace; tests replace them to fail part way.
+var (
+	removedInPlaceWriteAt  = func(file *os.File, data []byte, offset int64) (int, error) { return file.WriteAt(data, offset) }
+	removedInPlaceTruncate = func(file *os.File, size int64) error { return file.Truncate(size) }
+)
+
+// writeStubInPlace writes the stub into the file at path, which every one of
+// its names shares. The file is checked again through the handle it writes:
+// one that is no longer an older release's script, or that another account
+// than the hooks folder's owner owns (removedInPlaceRefusal), is not
+// written. The stub itself (well under one page) goes in first; if that
+// write fails part way, the old bytes are put back, so no name is ever left
+// with part of the stub before the old script. Once the whole stub is in,
+// every name runs it to its exit 2 whatever follows, and the rest (the tail
+// of inPlaceStub, the cut, the mode) only finishes the file, which is synced
+// and read back.
+func (c removedOnlyConnector) writeStubInPlace(path string) error {
+	file, err := os.OpenFile(path, os.O_RDWR|otlpOpenNoFollow(), 0)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() > removedScriptReadLimit {
+		return fmt.Errorf("%s changed while it was read", path)
+	}
+	folder, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	if err := removedInPlaceRefusal(info, folder); err != nil {
+		return err
+	}
+	old, err := io.ReadAll(io.LimitReader(file, removedScriptReadLimit+1))
+	if err != nil {
+		return err
+	}
+	if c.classifyScript(old) != removedScriptOwned {
+		return fmt.Errorf("%s changed while it was read", path)
+	}
+	stub := c.inPlaceStub(len(old))
+	head := len(c.tombstone)
+	if n, err := removedInPlaceWriteAt(file, stub[:head], 0); err != nil {
+		return removedPutBack(file, old, n, err)
+	}
+	if _, err := removedInPlaceWriteAt(file, stub[head:], int64(head)); err != nil {
+		return fmt.Errorf("the file begins with the whole stub, which blocks every call, but the rest could not be written: %w", err)
+	}
+	if err := removedInPlaceTruncate(file, int64(len(stub))); err != nil {
+		return fmt.Errorf("the file begins with the whole stub, which blocks every call, but its old tail could not be cut: %w", err)
+	}
+	if err := file.Chmod(c.mode); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	got := make([]byte, len(stub)+1)
+	n, err := file.ReadAt(got, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if !bytes.Equal(got[:n], stub) {
+		return fmt.Errorf("%s does not read back as the stub", path)
+	}
+	return nil
+}
+
+// removedPutBack puts back the old bytes a failed write of the stub's first
+// n bytes changed.
+func removedPutBack(file *os.File, old []byte, n int, cause error) error {
+	if n <= 0 {
+		return fmt.Errorf("%w; nothing was changed", cause)
+	}
+	_, err := removedInPlaceWriteAt(file, old[:min(n, len(old))], 0)
+	if err == nil && n > len(old) {
+		err = removedInPlaceTruncate(file, int64(len(old)))
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	if err != nil {
+		return fmt.Errorf("%w, and the %d bytes it wrote could not be put back (%v), so the file may hold part of the stub", cause, n, err)
+	}
+	return fmt.Errorf("%w; the %d bytes it wrote were put back", cause, n)
 }
 
 // hookLeft returns why an old hook may still run at the script path, with
@@ -352,7 +493,7 @@ func (c removedOnlyConnector) hookLeft(dataDir string) error {
 	case state == removedScriptAbsent || state == removedScriptStub:
 		return nil
 	case state == removedScriptOwned && links > 1:
-		return fmt.Errorf("%s is the hook script an older DefenseClaw wrote and has %d names (hard links), so it was not changed. To finish: %s",
+		return fmt.Errorf("%s is the hook script an older DefenseClaw wrote and has %d names (hard links), and the stub is not in it. To finish: %s",
 			path, links, c.hardLinkStep(path))
 	case state == removedScriptOwned:
 		return fmt.Errorf("%s is still the hook script an older DefenseClaw wrote", path)

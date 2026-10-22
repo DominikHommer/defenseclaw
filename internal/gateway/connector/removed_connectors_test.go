@@ -417,21 +417,68 @@ func TestRemovedTeardownThatFailsNeverPutsTheOldHookBack(t *testing.T) {
 			h.stage(t, c)
 			hooks := filepath.Join(h.dataDir, "hooks")
 			before := h.snapshot(t)
+			if err := os.Chmod(h.script(c), 0o400); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.Chmod(hooks, 0o500); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chmod(hooks, 0o700) })
 			conn, _ := RetiredConnector(c.name)
-			if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+			if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "its tokens were kept") {
 				t.Fatalf("Teardown = %v, want the stub failure", err)
 			}
 			if err := os.Chmod(hooks, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(h.script(c), c.mode); err != nil {
 				t.Fatal(err)
 			}
 			requireRemovedSame(t, "a teardown that could not write the stub", h.snapshot(t), before)
 			if err := conn.VerifyClean(h.opts); err == nil {
 				t.Fatal("VerifyClean passed with the old hook in place")
 			}
+		})
+		// The stub is written into the script, but its copy cannot be
+		// renamed over it: the script blocks already, the tokens stay until
+		// the next start, which revokes them.
+		t.Run(c.name+"/the stub's copy cannot be renamed", func(t *testing.T) {
+			if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+				t.Skip("directory modes do not stop writes here")
+			}
+			h := newRemovedHost(t)
+			h.stage(t, c)
+			hooks := filepath.Join(h.dataDir, "hooks")
+			skip := append([]string{h.script(c)}, h.tokens(c)...)
+			before := h.snapshot(t, skip...)
+			if err := os.Chmod(hooks, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(hooks, 0o700) })
+			conn, _ := RetiredConnector(c.name)
+			if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "could not be renamed over it") {
+				t.Fatalf("Teardown = %v, want the rename failure", err)
+			}
+			if err := os.Chmod(hooks, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if data, err := os.ReadFile(h.script(c)); err != nil || string(data) != c.tombstone {
+				t.Fatalf("%s = %q, %v; want the stub written into it", h.script(c), data, err)
+			}
+			for _, token := range h.tokens(c) {
+				if _, err := os.Lstat(token); err != nil {
+					t.Fatalf("token %s was revoked before the teardown finished: %v", token, err)
+				}
+			}
+			if err := conn.VerifyClean(h.opts); err == nil {
+				t.Fatal("VerifyClean passed with the tokens left")
+			}
+			requireRemovedSame(t, "a teardown whose rename failed", h.snapshot(t, skip...), before)
+			if err := conn.Teardown(context.Background(), h.opts); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			h.requireStub(t, c)
+			h.requireRevoked(t, c)
 		})
 	}
 }

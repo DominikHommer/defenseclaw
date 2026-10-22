@@ -504,11 +504,6 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonPeerUnverified)
 			return
 		}
-		// until 1.1: a removed connector's hook route blocks every call of
-		// a verified peer (retired_connector_hook.go); it never allows.
-		if serveRetiredConnectorHook(w, r) {
-			return
-		}
 		route := r.Pattern
 		if route == "" {
 			route = sanitizeRouteForTelemetry(r.URL.Path)

@@ -4,11 +4,10 @@
 
 package gateway
 
-// until 1.1: the retired OpenHands and OmniGent hook routes
-// (retired_connector_hook.go). Delete with that file.
-
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,14 +16,24 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
+// until 1.1: the retired OpenHands and OmniGent hook routes
+// (retired_connector_hook.go). Delete with that file.
+
+var retiredHookPaths = []string{"/api/v1/openhands/hook", "/api/v1/omnigent/hook"}
+
 // requireRetiredBlock checks the answer is the block verdict both older
 // clients read: action block (the OmniGent module and the OpenHands hook)
 // and a deny hook_output (the OpenHands hook's Secure Client render), with
 // the removal reason.
 func requireRetiredBlock(t *testing.T, what string, response *httptest.ResponseRecorder) {
 	t.Helper()
-	if response.Code != http.StatusOK {
-		t.Fatalf("%s: status %d (%s); an older hook in fail mode open allows on any status but 2xx", what, response.Code, response.Body.String())
+	requireRetiredBlockBody(t, what, response.Code, response.Body.Bytes())
+}
+
+func requireRetiredBlockBody(t *testing.T, what string, status int, body []byte) {
+	t.Helper()
+	if status != http.StatusOK {
+		t.Fatalf("%s: status %d (%s); an older hook in fail mode open allows on any status but 2xx", what, status, body)
 	}
 	var verdict struct {
 		Action     string `json:"action"`
@@ -34,8 +43,8 @@ func requireRetiredBlock(t *testing.T, what string, response *httptest.ResponseR
 			Reason   string `json:"reason"`
 		} `json:"hook_output"`
 	}
-	if err := json.Unmarshal(response.Body.Bytes(), &verdict); err != nil {
-		t.Fatalf("%s: body %q: %v", what, response.Body.String(), err)
+	if err := json.Unmarshal(body, &verdict); err != nil {
+		t.Fatalf("%s: body %q: %v", what, body, err)
 	}
 	if verdict.Action != "block" || verdict.HookOutput.Decision != "deny" ||
 		!strings.Contains(verdict.Reason, "support was removed in DefenseClaw 1.0.4") || verdict.HookOutput.Reason != verdict.Reason {
@@ -43,12 +52,42 @@ func requireRetiredBlock(t *testing.T, what string, response *httptest.ResponseR
 	}
 }
 
-// An OmniGent process that imported the 1.0.3 policy module before the
-// upgrade, or an OpenHands hook the teardown could not reach, still posts to
-// its old route. The gateway answers with a block, with no token (the
-// teardown revoked it) and from any address, never a 404 or 401 that the old
-// hook in fail mode open turns into an allow. Other routes keep their
-// authentication.
+// retiredHookCall is one way an old hook, or anything else, calls a retired
+// route: every credential state and caller.
+type retiredHookCall struct {
+	name, method, remote, header, value string
+}
+
+func retiredHookCalls(master string) []retiredHookCall {
+	return []retiredHookCall{
+		{"no token", http.MethodPost, "127.0.0.1:40000", "", ""},
+		{"the revoked token", http.MethodPost, "127.0.0.1:40000", "Authorization", "Bearer " + strings.Repeat("a", 64)},
+		{"a valid token", http.MethodPost, "127.0.0.1:40000", "Authorization", "Bearer " + master},
+		{"a valid token in X-DC-Auth", http.MethodPost, "127.0.0.1:40000", "X-DC-Auth", master},
+		{"a sandbox credential", http.MethodPost, "127.0.0.1:40000", "Authorization", "Bearer dcsb_" + strings.Repeat("b", 43)},
+		{"a malformed header", http.MethodPost, "127.0.0.1:40000", "Authorization", "Basic Zm9vOmJhcg=="},
+		{"GET", http.MethodGet, "127.0.0.1:40000", "", ""},
+		{"ipv6 loopback", http.MethodPost, "[::1]:40000", "", ""},
+		{"another address", http.MethodPost, "10.0.0.5:40000", "", ""},
+	}
+}
+
+func (c retiredHookCall) request(path string) *http.Request {
+	request := httptest.NewRequest(c.method, path, strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"bash"}`))
+	request.RemoteAddr = c.remote
+	request.Header.Set("Content-Type", "application/json")
+	if c.header != "" {
+		request.Header.Set(c.header, c.value)
+	}
+	return request
+}
+
+// Safety net: an OmniGent process that imported the 1.0.3 policy module
+// before the upgrade, or an OpenHands hook the teardown could not reach,
+// still posts to its old route. The gateway answers with a block before any
+// credential check: with no token, the revoked one, a valid one, a sandbox
+// credential, from any address, never the 401 an old hook in fail mode
+// open turns into an allow. Other routes keep their authentication.
 func TestRetiredConnectorHookRoutesBlockOverTCP(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
 	api.scannerCfg = &config.Config{}
@@ -58,22 +97,11 @@ func TestRetiredConnectorHookRoutesBlockOverTCP(t *testing.T) {
 		reached = true
 		http.NotFound(w, r)
 	}))
-	for _, path := range []string{"/api/v1/openhands/hook", "/api/v1/omnigent/hook"} {
-		for _, tc := range []struct{ name, remote, token string }{
-			{"loopback, no token", "127.0.0.1:40000", ""},
-			{"loopback, the revoked token", "127.0.0.1:40000", strings.Repeat("a", 64)},
-			{"ipv6 loopback", "[::1]:40000", ""},
-			{"another address", "10.0.0.5:40000", ""},
-		} {
-			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"bash"}`))
-			request.RemoteAddr = tc.remote
-			request.Header.Set("Content-Type", "application/json")
-			if tc.token != "" {
-				request.Header.Set("Authorization", "Bearer "+tc.token)
-			}
+	for _, path := range retiredHookPaths {
+		for _, call := range retiredHookCalls("master-token") {
 			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, request)
-			requireRetiredBlock(t, path+" "+tc.name, response)
+			handler.ServeHTTP(response, call.request(path))
+			requireRetiredBlock(t, path+" with "+call.name, response)
 		}
 	}
 	if reached {
@@ -88,26 +116,57 @@ func TestRetiredConnectorHookRoutesBlockOverTCP(t *testing.T) {
 	}
 }
 
-// On a managed Unix host the 1.0.3 OmniGent module posts over the hook
-// socket with no token. A verified peer gets the block; an unverified one is
-// still refused before any route.
-func TestRetiredConnectorHookRoutesBlockOverTheHookSocket(t *testing.T) {
-	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
-	handler := api.managedHookPeerAuth(newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{}, nil, nil), api.managedHookSocketMux())
-	for _, path := range []string{"/api/v1/openhands/hook", "/api/v1/omnigent/hook"} {
-		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"phase":"pre_tool"}`))
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("X-DefenseClaw-Client", "omnigent-policy/1.0")
-		request = request.WithContext(withManagedHookPeer(request.Context(), managedHookPeer{UID: 1001, Name: "alice"}))
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, request)
-		requireRetiredBlock(t, path+" over the hook socket", response)
+// postRetired posts body to url and returns the answer; the server must keep
+// the connection (no Connection: close), so the client reads the block and
+// never a reset.
+func postRetired(t *testing.T, client *http.Client, url string, body []byte) (int, []byte) {
+	t.Helper()
+	response, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s with %d bytes: %v", url, len(body), err)
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read the answer to %s: %v", url, err)
+	}
+	if response.Close {
+		t.Fatalf("POST %s with %d bytes: the server closed the connection after the answer", url, len(body))
+	}
+	return response.StatusCode, data
+}
 
-		unverified := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
-		response = httptest.NewRecorder()
-		handler.ServeHTTP(response, unverified)
-		if response.Code != http.StatusForbidden {
-			t.Fatalf("%s from an unverified peer: status %d, want 403", path, response.Code)
+// A large hook body (the old hooks send up to 1 MiB) gets the block on a
+// connection the server keeps: answering with most of the body unread made
+// the server close the connection, and a client still sending sees a reset.
+func TestRetiredConnectorHookRoutesKeepTheConnectionForTheBlock(t *testing.T) {
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
+	api.scannerCfg = &config.Config{}
+	api.scannerCfg.Gateway.Token = "master-token"
+	server := httptest.NewServer(api.tokenAuth(http.NotFoundHandler()))
+	t.Cleanup(server.Close)
+	client := server.Client()
+	large := append([]byte(`{"tool_input":"`), bytes.Repeat([]byte("x"), 2<<20)...)
+	large = append(large, `"}`...)
+	for _, path := range retiredHookPaths {
+		for _, body := range [][]byte{[]byte(`{}`), large} {
+			status, data := postRetired(t, client, server.URL+path, body)
+			requireRetiredBlockBody(t, path, status, data)
 		}
+	}
+}
+
+// The sandbox ingress answers the retired routes with the block too, before
+// the binding check: an old OpenShell OpenHands hook gets the removal
+// reason, with its binding, a revoked one or none.
+func TestRetiredConnectorHookRoutesBlockOnTheSandboxIngress(t *testing.T) {
+	f := newSandboxIngressFixture(t)
+	for _, path := range retiredHookPaths {
+		for _, token := range []string{"", f.claudeTok, "dcsb_" + strings.Repeat("c", 43), "not-a-sandbox-token"} {
+			requireRetiredBlock(t, path+" on the sandbox ingress", f.do(t, http.MethodPost, path, token, `{"hook_event_name":"PreToolUse"}`))
+		}
+	}
+	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", "", `{}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("claude-code hook on the ingress without a binding: status %d, want 401", rec.Code)
 	}
 }

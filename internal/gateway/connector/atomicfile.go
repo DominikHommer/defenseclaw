@@ -50,7 +50,7 @@ func atomicWriteFileWithPublisher(
 	if err != nil {
 		return err
 	}
-	return atomicWriteFileAt(path, writePath, data, perm, publish)
+	return atomicWriteFileAt(path, writePath, data, perm, publish, false)
 }
 
 // atomicWriteFileNoFollow is atomicWriteFile for a path that must be a regular
@@ -58,6 +58,18 @@ func atomicWriteFileWithPublisher(
 // file there is an error, and the rename replaces the directory entry itself,
 // so a link put there after the check is replaced, not followed.
 func atomicWriteFileNoFollow(path string, data []byte, perm os.FileMode) error {
+	return atomicWriteFileNoFollowAt(path, data, perm, false)
+}
+
+// atomicReplaceFileNoFollow is atomicWriteFileNoFollow that renames a new
+// file over path even when path already holds data and perm: path then names
+// a new file, apart from every other name (hard link) of the old one. until
+// 1.1: only the removed connectors' teardown (removed.go) needs it.
+func atomicReplaceFileNoFollow(path string, data []byte, perm os.FileMode) error {
+	return atomicWriteFileNoFollowAt(path, data, perm, true)
+}
+
+func atomicWriteFileNoFollowAt(path string, data []byte, perm os.FileMode, always bool) error {
 	info, err := os.Lstat(path)
 	switch {
 	case err == nil && !info.Mode().IsRegular():
@@ -65,12 +77,13 @@ func atomicWriteFileNoFollow(path string, data []byte, perm os.FileMode) error {
 	case err != nil && !errors.Is(err, os.ErrNotExist):
 		return fmt.Errorf("lstat %s: %w", path, err)
 	}
-	return atomicWriteFileAt(path, path, data, perm, atomicFilePublish)
+	return atomicWriteFileAt(path, path, data, perm, atomicFilePublish, always)
 }
 
 // atomicWriteFileAt writes data to writePath, path or the file a link at path
-// leads to.
-func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, publish atomicFilePublisher) error {
+// leads to. A writePath that already holds data and perm is left as it is,
+// unless always is set.
+func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, publish atomicFilePublisher, always bool) error {
 	// In an account home bound for the enterprise per-user code, a path
 	// that leads out of the home is never changed, nor a folder created
 	// there; a write that would change nothing is still fine (rel-1-0-3
@@ -90,7 +103,7 @@ func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, pu
 	// on Windows, where a replacement is a file-identity transition and must not
 	// churn NTFS metadata. The platform helper validates the effective owner-only
 	// DACL instead of comparing Go's synthetic 0666 FileMode to 0600.
-	if atomicFileAlreadyMatches(writePath, data, perm) {
+	if !always && atomicFileAlreadyMatches(writePath, data, perm) {
 		return nil
 	}
 
