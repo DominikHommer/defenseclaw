@@ -85,7 +85,7 @@ func newHookCmd() *cobra.Command {
 			if executionProbe {
 				if connector != "hermes" || event != "" || hookContractID != "" || hookSurface != "" ||
 					apiAddr != "" || failMode != "" || inputFile != "" || enterpriseManaged || foreignHookCheck {
-					return fmt.Errorf("Hermes execution probe requires the exact registered command")
+					return fmt.Errorf("hermes execution probe requires the exact registered command")
 				}
 				// cmd/defenseclaw-hook reaches this only after the protected
 				// runtime is active. A disabled stable launcher returns no proof.
