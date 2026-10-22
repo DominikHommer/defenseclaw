@@ -392,7 +392,6 @@ func enterpriseHookWindowsEligibleProfilesFor(ctx context.Context, current *conf
 // the user and is best effort: the hook-side guard still denies tool calls
 // while an unapproved hook remains.
 func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Writer, rows []enterpriseHookReconcileRow, now time.Time) {
-	reconcileEnterpriseForeignHookCleanups(stderr)
 	_, connectors, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone || err != nil || len(connectors) == 0 {
 		return

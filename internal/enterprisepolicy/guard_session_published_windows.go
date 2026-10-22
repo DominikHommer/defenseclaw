@@ -18,8 +18,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"syscall"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -257,47 +255,3 @@ func publishedSessionKeyOwnerCheck(path string) (bool, error) {
 // file's creation and deletion in its journal, and the key file itself is
 // flushed when it is created.
 func publishedSessionSyncDir(string) error { return nil }
-
-// publishedSessionPendingTime is the creation time that is the guardian's
-// pending mark on an account's private session store
-// (MarkForeignHookRemovalPending). The gateway's writes do not change a
-// folder's creation time, no standard user can reach the store, and setting
-// it needs no free space.
-var publishedSessionPendingTime = time.Unix(1, 0).UTC()
-
-// publishedSessionPendingFlag reports the pending mark.
-func publishedSessionPendingFlag(info os.FileInfo) bool {
-	data, ok := info.Sys().(*syscall.Win32FileAttributeData)
-	return ok && data.CreationTime.Nanoseconds() == publishedSessionPendingTime.UnixNano()
-}
-
-// publishedSessionSetPending sets the pending mark of dir, or clears it (the
-// creation time becomes now), through an attributes-only handle that does
-// not follow a reparse point.
-func publishedSessionSetPending(dir string, on bool) error {
-	pointer, err := winpath.UTF16Ptr(dir)
-	if err != nil {
-		return err
-	}
-	handle, err := windows.CreateFile(pointer, windows.FILE_WRITE_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
-		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = windows.CloseHandle(handle) }()
-	created := time.Now()
-	if on {
-		created = publishedSessionPendingTime
-	}
-	stamp := windows.NsecToFiletime(created.UnixNano())
-	return windows.SetFileTime(handle, &stamp, nil, nil)
-}
-
-// publishedSessionCreatePendingDir creates the private session store the
-// guardian marks for an account that has none, and the store folder above
-// it. Both inherit the data directory's access list, so the gateway can use
-// the store once the mark is cleared.
-func publishedSessionCreatePendingDir(_, dir string) error {
-	return os.MkdirAll(dir, 0o700)
-}

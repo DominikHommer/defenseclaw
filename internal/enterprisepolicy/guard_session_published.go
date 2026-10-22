@@ -53,32 +53,39 @@ import (
 //     folder with a protected DACL (SYSTEM and Administrators full, the
 //     gateway service modify, that user read).
 //
-// One kill switch (1.0.4 guard loop, lead directive). Every allow record
-// carries a MAC made with the record folder's key. The key is the name of
-// one file next to the record folder, <folder name>.key-<64 hex>, that only
-// root or SYSTEM creates (CreatePublishedSessionKey). A record whose MAC
-// does not verify with the current key proves nothing. Every revocation
-// removes the key first and only then does anything else:
+// One kill switch per account (1.0.4 guard consolidation). Every allow
+// record carries a MAC made with its account's key. The key is the random
+// name of one file next to the record folder,
+// <folder name>.<account digest>.key-<64 hex>, that only root or SYSTEM
+// creates; no standard user can create, rename or remove it, nor open it
+// for anything a sharing mode applies to. A record whose MAC does not verify
+// with the account's current key proves nothing. Every revocation ends the
+// key first and only then does anything else:
 //
-//   - the gateway, before it records a block and before it publishes any
-//     denial (KillPublishedSessionKey: one unlink, then the folder is
-//     flushed; the gateway may remove the file but never create one);
-//   - the hook guardian, before it records a removal, and it creates a new
-//     key only after the ledger write;
-//   - the lifecycle (install, upgrade, repair, ensure, uninstall), before it
-//     changes anything, and it creates a new key only once the run
-//     succeeded.
+//   - the gateway removes the account's key (KillPublishedSessionKey: one
+//     unlink, then the folder is flushed) before it records a block and
+//     before it publishes any denial;
+//   - the hook guardian rotates it (RotatePublishedSessionKey: one atomic
+//     rename to a new random name, then the folder is flushed) under the
+//     account's removal lock before it records a removal, and removes the
+//     hook file only after that (ForeignHookAccountLockPaths);
+//   - the lifecycle (install, upgrade, repair, ensure, uninstall) removes
+//     every account's key before it changes anything
+//     (KillAllPublishedSessionKeys); the guardian and a lifecycle run that
+//     succeeded make keys again (EnsurePublishedSessionKeys).
 //
 // A new key never brings an earlier record back: its name is random, and
 // no account but root or SYSTEM can give a file that name. So no revocation
 // has to find the records it ends, and no account that kept a way to move
 // records or folders around (a retained Windows handle, a macOS access-list
-// entry) can make an earlier allow count again.
+// entry) can make an earlier allow count again. A rotation that cannot end
+// the key (ErrPublishedSessionKeyAlive) stops the removal before it changes
+// anything: the unapproved hook stays, and the scan keeps blocking.
 //
 // During such an outage the hook allows a call only when all of these hold,
 // and blocks otherwise:
 //
-//   - the record folder has exactly one key file that root, SYSTEM or
+//   - the account has exactly one key file that root, SYSTEM or
 //     Administrators own, and the hook's trust check accepts it and every
 //     folder above it;
 //   - the records of the agent process and of the session (every key part
@@ -89,9 +96,10 @@ import (
 //   - the volume of the record folder is not read-only (where no key could
 //     be removed), and the key is the same at the end of the check.
 //
-// No removal state lives in this tree. The guardian's ledger, and an
-// account's pending mark (MarkForeignHookRemovalPending) for a removal the
-// guardian could not record, are in folders no standard user can reach.
+// Any error reading the key, a record or a folder above them blocks. No
+// removal state lives in this tree: the guardian's ledger is in its
+// authorization folder, and the per-account removal lock in the gateway's
+// data directory, which no standard user can reach.
 
 const (
 	// publishedSessionVersion is the record schema: 3 carries the MAC.
@@ -127,6 +135,7 @@ const (
 // and a folder that cannot be listed).
 var (
 	publishedSessionRemoveKey     = os.Remove
+	publishedSessionRenameKey     = os.Rename
 	publishedSessionCreateKeyFile = createPublishedSessionKeyFile
 	publishedSessionList          = func(dir string) ([]string, error) {
 		folder, err := os.Open(dir)
@@ -258,19 +267,19 @@ func publishedSessionConnector(name string) bool {
 	return true
 }
 
-// PublishedSessionKeyDir is the folder the key file of the record folder
-// root is in: the folder above root (on Linux and macOS the hook socket
+// PublishedSessionKeyDir is the folder the key files of the record folder
+// root are in: the folder above root (on Linux and macOS the hook socket
 // folder, which only root and the gateway service can change; on Windows
 // %ProgramData%\Cisco, where no standard user may rename or delete a file
 // another account made).
 func PublishedSessionKeyDir(root string) (string, bool) {
-	dir, _, ok := publishedSessionKeyPlace(root)
+	dir, _, ok := publishedSessionKeyRoot(root)
 	return dir, ok
 }
 
-// publishedSessionKeyPlace is the key folder of root and the prefix of its
-// key file's name.
-func publishedSessionKeyPlace(root string) (dir, prefix string, ok bool) {
+// publishedSessionKeyRoot is the key folder of root and the prefix every key
+// file of root starts with: <root name>.
+func publishedSessionKeyRoot(root string) (dir, prefix string, ok bool) {
 	root = strings.TrimSpace(root)
 	if root == "" || !filepath.IsAbs(root) {
 		return "", "", false
@@ -279,7 +288,41 @@ func publishedSessionKeyPlace(root string) (dir, prefix string, ok bool) {
 	if root == filepath.Dir(root) {
 		return "", "", false
 	}
-	return filepath.Dir(root), filepath.Base(root) + PublishedSessionKeyInfix, true
+	return filepath.Dir(root), filepath.Base(root) + ".", true
+}
+
+// publishedSessionKeyPlace is the key folder of root and the prefix of the
+// key file of the account whose folder name is digest (the 40 hex digits of
+// PublishedSessionIdentityDir): <root name>.<digest>.key-. Each account has
+// its own key, so one account's revocation never ends another's allows.
+func publishedSessionKeyPlace(root, digest string) (dir, prefix string, ok bool) {
+	dir, rootPrefix, ok := publishedSessionKeyRoot(root)
+	if !ok || !publishedSessionDigest(digest) {
+		return "", "", false
+	}
+	return dir, rootPrefix + digest + PublishedSessionKeyInfix, true
+}
+
+// publishedSessionDigest reports an account folder name: 40 lower-case hex.
+func publishedSessionDigest(name string) bool {
+	if len(name) != 40 {
+		return false
+	}
+	for _, c := range name {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// publishedSessionIdentityDigest is the account folder name of identity.
+func publishedSessionIdentityDigest(identity string) (string, bool) {
+	canonical, ok := connector.CanonicalUserScopedIdentity(identity)
+	if !ok {
+		return "", false
+	}
+	return sha256Hex([]byte(canonical))[:40], true
 }
 
 // IsPublishedSessionKeyName reports a file name that has the form of a key
@@ -302,16 +345,12 @@ func publishedSessionKeySecret(suffix string) ([]byte, bool) {
 	return secret, err == nil
 }
 
-// publishedSessionKeys lists the key files of the record folder root that
-// root, SYSTEM or Administrators own. A file with the key prefix that
+// publishedSessionKeys lists the key files with prefix in the key folder dir
+// that root, SYSTEM or Administrators own. A file with the prefix that
 // another account owns is not a key (on Windows a standard user may create
 // one in %ProgramData%\Cisco) and is skipped; a key folder that cannot be
 // listed, or a file whose owner cannot be read, is an error.
-func publishedSessionKeys(root string) ([]SessionRecordKey, error) {
-	dir, prefix, ok := publishedSessionKeyPlace(root)
-	if !ok {
-		return nil, fmt.Errorf("no protected session record folder %q", root)
-	}
+func publishedSessionKeys(dir, prefix string) ([]SessionRecordKey, error) {
 	names, err := publishedSessionList(dir)
 	if err != nil {
 		return nil, err
@@ -338,11 +377,26 @@ func publishedSessionKeys(root string) ([]SessionRecordKey, error) {
 	return keys, nil
 }
 
-// ReadPublishedSessionKey is the current key of the record folder root:
-// its one key file. None, more than one, or a key folder that cannot be
-// read is an error; an allow published without a key proves nothing.
-func ReadPublishedSessionKey(root string) (SessionRecordKey, error) {
-	keys, err := publishedSessionKeys(root)
+// accountKeys lists the key files of identity's account under root.
+func accountKeys(root, identity string) (dir, prefix string, keys []SessionRecordKey, err error) {
+	digest, ok := publishedSessionIdentityDigest(identity)
+	if !ok {
+		return "", "", nil, fmt.Errorf("invalid caller identity")
+	}
+	dir, prefix, ok = publishedSessionKeyPlace(root, digest)
+	if !ok {
+		return "", "", nil, fmt.Errorf("no protected session record folder %q", root)
+	}
+	keys, err = publishedSessionKeys(dir, prefix)
+	return dir, prefix, keys, err
+}
+
+// ReadPublishedSessionKey is the current key of identity's account in the
+// record folder root: its one key file. None, more than one, or a key
+// folder that cannot be read is an error; an allow published without a key
+// proves nothing.
+func ReadPublishedSessionKey(root, identity string) (SessionRecordKey, error) {
+	_, _, keys, err := accountKeys(root, identity)
 	if err != nil {
 		return SessionRecordKey{}, err
 	}
@@ -350,17 +404,17 @@ func ReadPublishedSessionKey(root string) (SessionRecordKey, error) {
 	case 1:
 		return keys[0], nil
 	case 0:
-		return SessionRecordKey{}, fmt.Errorf("the protected session record folder %s has no key", root)
+		return SessionRecordKey{}, fmt.Errorf("the account has no protected session record key under %s", root)
 	}
-	return SessionRecordKey{}, fmt.Errorf("the protected session record folder %s has %d keys", root, len(keys))
+	return SessionRecordKey{}, fmt.Errorf("the account has %d protected session record keys under %s", len(keys), root)
 }
 
 // readPublishedSessionKeyForHook is ReadPublishedSessionKey after trust
 // accepted the key file and every folder above it
 // (ValidatePublishedSessionPath, which also requires a root, SYSTEM or
 // Administrators owner).
-func readPublishedSessionKeyForHook(root string, trust func(string) error) (SessionRecordKey, error) {
-	key, err := ReadPublishedSessionKey(root)
+func readPublishedSessionKeyForHook(root, identity string, trust func(string) error) (SessionRecordKey, error) {
+	key, err := ReadPublishedSessionKey(root, identity)
 	if err != nil {
 		return SessionRecordKey{}, err
 	}
@@ -370,24 +424,26 @@ func readPublishedSessionKeyForHook(root string, trust func(string) error) (Sess
 	return key, nil
 }
 
-// KillPublishedSessionKey removes every key file of the record folder root,
-// so that no record written before proves anything during an outage, and
-// flushes the key folder. Each removal is one unlink. The gateway calls it
-// before it records a block and before it publishes a denial; the guardian
-// and the lifecycle through RetirePublishedSessionKey. A key folder that
-// does not exist has no key. A key file that is still there is an error.
-func KillPublishedSessionKey(root string) error {
-	dir, _, ok := publishedSessionKeyPlace(root)
-	if !ok {
-		return fmt.Errorf("no protected session record folder %q", root)
-	}
-	keys, err := publishedSessionKeys(root)
+// KillPublishedSessionKey removes every key file of identity's account in
+// the record folder root, so that no record of the account written before
+// proves anything during an outage, and flushes the key folder. Each
+// removal is one unlink. The gateway calls it before it records a block and
+// before it publishes a denial. A key folder that does not exist has no
+// key. A key file that is still there is an error.
+func KillPublishedSessionKey(root, identity string) error {
+	dir, _, keys, err := accountKeys(root, identity)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	return removePublishedSessionKeyFiles(dir, keys)
+}
+
+// removePublishedSessionKeyFiles unlinks keys, each a few times when a
+// reader holds it for a moment, and flushes dir once.
+func removePublishedSessionKeyFiles(dir string, keys []SessionRecordKey) error {
 	var errs []error
 	for _, key := range keys {
 		for attempt := 1; ; attempt++ {
@@ -410,28 +466,67 @@ func KillPublishedSessionKey(root string) error {
 	return errors.Join(errs...)
 }
 
-// RetirePublishedSessionKey is KillPublishedSessionKey for root or SYSTEM.
-// When a key file cannot be removed, it adds a second one next to it: the
-// hook trusts no record folder with more than one key, so the earlier
-// records still prove nothing. The error says which of the two took.
-func RetirePublishedSessionKey(root string, trust PublishedSessionTrust) error {
-	err := KillPublishedSessionKey(root)
-	if err == nil {
+// ErrPublishedSessionKeyAlive is a rotation that could neither rename, nor
+// remove, nor shadow the account's key: a record written under it may still
+// prove an allow during an outage. The caller must not go on with what the
+// rotation was for.
+var ErrPublishedSessionKeyAlive = errors.New("the protected session record key could not be rotated or removed")
+
+// RotatePublishedSessionKey ends every record of identity's account under
+// root (root or SYSTEM only) and leaves the account one new key, in this
+// order:
+//
+//  1. When the account has exactly one key, it is renamed to a fresh random
+//     name in one atomic rename, and the key folder is flushed: from that
+//     moment no earlier record proves anything, and the account already has
+//     its new key.
+//  2. Otherwise, or when the rename fails, every key file of the account is
+//     removed, the folder flushed, and a new key file created.
+//  3. When a key file could not be removed either, a second key is added
+//     next to it: the hook trusts no account with two keys.
+//
+// When none of that took, the error wraps ErrPublishedSessionKeyAlive. A
+// rotation that ended the old key but could not create a new one returns an
+// error without it: guarded calls of the account then block during an
+// outage until a later pass makes a key.
+func RotatePublishedSessionKey(root, identity string, trust PublishedSessionTrust) error {
+	dir, prefix, keys, err := accountKeys(root, identity)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: %v", ErrPublishedSessionKeyAlive, err)
+	}
+	if err == nil && len(keys) == 1 {
+		next, nameErr := newPublishedSessionKeyName(dir, prefix)
+		if nameErr == nil {
+			if renameErr := publishedSessionRenameKey(keys[0].path, next); renameErr == nil {
+				if syncErr := publishedSessionSyncDir(dir); syncErr != nil {
+					return fmt.Errorf("flush %s after the key rotation: %w", dir, syncErr)
+				}
+				return nil
+			}
+		}
+	}
+	if err := publishedSessionRecordRootExists(root); err != nil {
+		// Without a record folder there is no record to end and no key to
+		// make; a key file left over is removed.
+		if killErr := removePublishedSessionKeyFiles(dir, keys); killErr != nil {
+			return fmt.Errorf("%w: %v", ErrPublishedSessionKeyAlive, killErr)
+		}
 		return nil
 	}
-	if _, decoyErr := createPublishedSessionKey(root, trust); decoyErr != nil {
-		return fmt.Errorf("%w; no second key could be added either, so an allow written before may still pass during a gateway outage: %v", err, decoyErr)
+	killErr := removePublishedSessionKeyFiles(dir, keys)
+	_, createErr := createPublishedSessionKey(dir, prefix, trust)
+	switch {
+	case killErr == nil:
+		return createErr
+	case createErr == nil:
+		return fmt.Errorf("%v; a second key was added, so the hook trusts neither until a later pass removes both", killErr)
 	}
-	return fmt.Errorf("%w; a second key was added, so the hook trusts neither until a later run removes both", err)
+	return fmt.Errorf("%w: %v; no second key could be added either: %v", ErrPublishedSessionKeyAlive, killErr, createErr)
 }
 
-// CreatePublishedSessionKey starts a new key of the record folder root
-// (root or SYSTEM only): it retires every key (RetirePublishedSessionKey)
-// and creates a key file with a fresh random name, then flushes the key
-// folder. Only an allow published after it, with removals read after it,
-// proves anything. A key file that could not be removed stays next to the
-// new one, which the hook refuses. The record folder must exist.
-func CreatePublishedSessionKey(root string, trust PublishedSessionTrust) error {
+// publishedSessionRecordRootExists reports a record folder root that is a
+// real folder.
+func publishedSessionRecordRootExists(root string) error {
 	info, err := os.Lstat(strings.TrimSpace(root))
 	if err != nil {
 		return err
@@ -439,67 +534,106 @@ func CreatePublishedSessionKey(root string, trust PublishedSessionTrust) error {
 	if !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
 		return fmt.Errorf("%s is not a folder", root)
 	}
-	if err := KillPublishedSessionKey(root); err != nil {
-		// Whatever the new key is, the hook refuses a folder with two.
-		_, createErr := createPublishedSessionKey(root, trust)
-		return errors.Join(err, createErr)
-	}
-	_, err = createPublishedSessionKey(root, trust)
-	return err
+	return nil
 }
 
-// EnsurePublishedSessionKey gives the record folder root a key when it has
-// none, or more than one (CreatePublishedSessionKey). The hook guardian
-// runs it at every pass, so outage allows work again after a gateway
-// removed the key. A new key never makes an earlier record count, so this
-// is safe at any time. A record folder that does not exist gets none.
-func EnsurePublishedSessionKey(root string, trust PublishedSessionTrust) error {
-	info, err := os.Lstat(strings.TrimSpace(root))
+// EnsurePublishedSessionKey gives identity's account a key when it has none,
+// or more than one (RotatePublishedSessionKey). A new key never makes an
+// earlier record count, so this is safe at any time.
+func EnsurePublishedSessionKey(root, identity string, trust PublishedSessionTrust) error {
+	if err := publishedSessionRecordRootExists(root); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if _, _, keys, err := accountKeys(root, identity); err == nil && len(keys) == 1 {
+		return nil
+	}
+	return RotatePublishedSessionKey(root, identity, trust)
+}
+
+// EnsurePublishedSessionKeys gives every account that has a folder under
+// root exactly one key (root or SYSTEM only): the gateway removes an
+// account's key before every block, and a lifecycle run removes all of
+// them. The hook guardian runs it at every pass and the lifecycle after a
+// run that succeeded.
+func EnsurePublishedSessionKeys(root string, trust PublishedSessionTrust) error {
+	names, err := publishedSessionList(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-		return nil
+	dir, _, ok := publishedSessionKeyRoot(root)
+	if !ok {
+		return fmt.Errorf("no protected session record folder %q", root)
 	}
-	if keys, err := publishedSessionKeys(root); err == nil && len(keys) == 1 {
-		return nil
+	var errs []error
+	for _, name := range names {
+		if !publishedSessionDigest(name) {
+			continue
+		}
+		_, prefix, _ := publishedSessionKeyPlace(root, name)
+		keys, err := publishedSessionKeys(dir, prefix)
+		if err == nil && len(keys) == 1 {
+			continue
+		}
+		if err == nil {
+			err = removePublishedSessionKeyFiles(dir, keys)
+		}
+		if err == nil {
+			_, err = createPublishedSessionKey(dir, prefix, trust)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("account folder %s: %w", name, err))
+		}
 	}
-	return CreatePublishedSessionKey(root, trust)
+	return errors.Join(errs...)
 }
 
-// createPublishedSessionKey creates one key file of root with a fresh
-// random name (createPublishedSessionKeyFile: the name appears at once, in
-// one create that fails when it exists) and flushes the key folder.
-func createPublishedSessionKey(root string, trust PublishedSessionTrust) (string, error) {
-	dir, prefix, ok := publishedSessionKeyPlace(root)
+// KillAllPublishedSessionKeys removes the key of every account under the
+// record folder root (root or SYSTEM): the lifecycle runs it before install,
+// upgrade, repair, ensure and uninstall change anything, so nothing another
+// account did to the record folders while they were loosened brings an
+// allow back. Keys come back per account (EnsurePublishedSessionKeys).
+func KillAllPublishedSessionKeys(root string) error {
+	dir, rootPrefix, ok := publishedSessionKeyRoot(root)
 	if !ok {
-		return "", fmt.Errorf("no protected session record folder %q", root)
+		return fmt.Errorf("no protected session record folder %q", root)
 	}
-	var secret [publishedSessionKeyBytes]byte
-	if _, err := rand.Read(secret[:]); err != nil {
-		return "", err
+	names, err := publishedSessionList(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
 	}
-	path := filepath.Join(dir, prefix+hex.EncodeToString(secret[:]))
-	if err := publishedSessionCreateKeyFile(path, trust); err != nil {
-		return "", fmt.Errorf("create the protected session record key %s: %w", path, err)
+	if err != nil {
+		return err
 	}
-	if err := publishedSessionSyncDir(dir); err != nil {
-		return path, fmt.Errorf("flush %s: %w", dir, err)
+	var keys []SessionRecordKey
+	for _, name := range names {
+		if !hasPrefixFold(name, rootPrefix) || !IsPublishedSessionKeyName(name) {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		owned, err := publishedSessionKeyOwned(path)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		if owned {
+			keys = append(keys, SessionRecordKey{path: path})
+		}
 	}
-	return path, nil
+	return removePublishedSessionKeyFiles(dir, keys)
 }
 
 // RemovePublishedSessionKeys removes every key file of the record folder
-// root and every file with its key prefix that this account may remove:
-// for uninstall, which removes the folder.
+// root and every file with its key prefix this account may remove: for
+// uninstall, which removes the folder.
 func RemovePublishedSessionKeys(root string) error {
-	if err := KillPublishedSessionKey(root); err != nil {
+	if err := KillAllPublishedSessionKeys(root); err != nil {
 		return err
 	}
-	dir, prefix, _ := publishedSessionKeyPlace(root)
+	dir, rootPrefix, _ := publishedSessionKeyRoot(root)
 	names, err := publishedSessionList(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -508,11 +642,38 @@ func RemovePublishedSessionKeys(root string) error {
 		return err
 	}
 	for _, name := range names {
-		if hasPrefixFold(name, prefix) && IsPublishedSessionKeyName(name) {
+		if hasPrefixFold(name, rootPrefix) && IsPublishedSessionKeyName(name) {
 			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}
 	return nil
+}
+
+// newPublishedSessionKeyName is a fresh random key file path with prefix in
+// dir.
+func newPublishedSessionKeyName(dir, prefix string) (string, error) {
+	var secret [publishedSessionKeyBytes]byte
+	if _, err := rand.Read(secret[:]); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, prefix+hex.EncodeToString(secret[:])), nil
+}
+
+// createPublishedSessionKey creates one key file with prefix in dir with a
+// fresh random name (createPublishedSessionKeyFile: the name appears at
+// once, in one create that fails when it exists) and flushes the key folder.
+func createPublishedSessionKey(dir, prefix string, trust PublishedSessionTrust) (string, error) {
+	path, err := newPublishedSessionKeyName(dir, prefix)
+	if err != nil {
+		return "", err
+	}
+	if err := publishedSessionCreateKeyFile(path, trust); err != nil {
+		return "", fmt.Errorf("create the protected session record key %s: %w", path, err)
+	}
+	if err := publishedSessionSyncDir(dir); err != nil {
+		return path, fmt.Errorf("flush %s: %w", dir, err)
+	}
+	return path, nil
 }
 
 // publishedSessionMAC is the MAC of record for the account identity
@@ -639,7 +800,7 @@ func WritePublishedSessionRecordsForTest(root, identity string, key SessionKey, 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	recordKey, _ := ReadPublishedSessionKey(root)
+	recordKey, _ := ReadPublishedSessionKey(root, identity)
 	var errs []error
 	for _, entry := range publishedSessionAnswer(dir, canonical, name, key, decision, recordKey, now) {
 		errs = append(errs, writePublishedSessionRecord(entry.path, entry.record))
@@ -666,7 +827,7 @@ func CheckPublishedForeignHookSession(root, identity string, key SessionKey, dec
 	}
 	// The key first: a record read after it was written under it or under
 	// an earlier one.
-	recordKey, err := readPublishedSessionKeyForHook(root, trust)
+	recordKey, err := readPublishedSessionKeyForHook(root, identity, trust)
 	if err != nil {
 		return decision, fmt.Errorf("%w: the record folder's key: %v", ErrPublishedSessionUnavailable, err)
 	}
@@ -712,7 +873,7 @@ func CheckPublishedForeignHookSession(root, identity string, key SessionKey, dec
 		return decision, fmt.Errorf("%w: the record folder's volume is read-only, or its state cannot be read: %v", ErrPublishedSessionUnavailable, err)
 	}
 	// Last, the key again: one removed while this check ran ends the allow.
-	if again, err := readPublishedSessionKeyForHook(root, trust); err != nil || again.ID() != recordKey.ID() {
+	if again, err := readPublishedSessionKeyForHook(root, identity, trust); err != nil || again.ID() != recordKey.ID() {
 		return decision, fmt.Errorf("%w: the record folder's key changed while the record was checked", ErrPublishedSessionUnavailable)
 	}
 	return decision, nil
@@ -906,97 +1067,4 @@ func ForeignHookSessionStoreDir(dataDir, identity string) string {
 		identity = canonical
 	}
 	return filepath.Join(dataDir, sessionDirName, sha256Hex([]byte(identity))[:40])
-}
-
-// foreignHookRemovalPendingDir is the folder that carries the pending mark
-// of identity: its private session store.
-func foreignHookRemovalPendingDir(dataDir, identity string) (string, bool) {
-	dataDir = strings.TrimSpace(dataDir)
-	if _, ok := connector.CanonicalUserScopedIdentity(identity); !ok || dataDir == "" || !filepath.IsAbs(dataDir) {
-		return "", false
-	}
-	return ForeignHookSessionStoreDir(filepath.Clean(dataDir), identity), true
-}
-
-// ForeignHookRemovalPending reports whether the guardian holds identity's
-// guarded calls closed (MarkForeignHookRemovalPending): it removed one of
-// the account's hooks and could not record the removal in its ledger yet,
-// or could not remove the record key before it. The mark is metadata of
-// the account's private session store under the gateway's data directory
-// dataDir (ForeignHookSessionStoreDir), out of every standard user's reach.
-// While it is set the gateway denies every guarded call of the account. A
-// store that is not a folder or cannot be inspected is an error, which
-// denies the same way.
-func ForeignHookRemovalPending(dataDir, identity string) (bool, error) {
-	dir, ok := foreignHookRemovalPendingDir(dataDir, identity)
-	if !ok {
-		return false, nil
-	}
-	info, err := os.Lstat(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return false, fmt.Errorf("the foreign-hook session store %s is not a folder", dir)
-	}
-	return publishedSessionPendingFlag(info), nil
-}
-
-// MarkForeignHookRemovalPending holds identity's guarded calls closed
-// (ForeignHookRemovalPending) until ClearForeignHookRemovalPending. The
-// guardian (root or SYSTEM) calls it when its ledger did not take a
-// removal, and when it could not remove the record key before one. The
-// mark needs no free space (publishedSessionSetPending), so the failure
-// that refused the ledger does not refuse it. A missing store is created
-// for it, owned like the data directory, so the gateway can use it once
-// the mark is cleared.
-func MarkForeignHookRemovalPending(dataDir, identity string) error {
-	dir, ok := foreignHookRemovalPendingDir(dataDir, identity)
-	if !ok {
-		return errors.New("the account has no foreign-hook session store")
-	}
-	info, err := os.Lstat(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		if err := publishedSessionCreatePendingDir(filepath.Clean(strings.TrimSpace(dataDir)), dir); err != nil && !errors.Is(err, fs.ErrExist) {
-			return err
-		}
-		info, err = os.Lstat(dir)
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("the foreign-hook session store %s is not a folder", dir)
-	}
-	return publishedSessionSetPending(dir, true)
-}
-
-// ClearForeignHookRemovalPending ends the hold of
-// MarkForeignHookRemovalPending. The guardian calls it once its ledger names
-// an account-wide removal that covers the hold, written after it removed
-// the record key, so no allow written before, or while the account was
-// held, proves anything. An empty store (one the mark created) goes too.
-func ClearForeignHookRemovalPending(dataDir, identity string) error {
-	dir, ok := foreignHookRemovalPendingDir(dataDir, identity)
-	if !ok {
-		return nil
-	}
-	info, err := os.Lstat(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !publishedSessionPendingFlag(info) {
-		return nil
-	}
-	if err := publishedSessionSetPending(dir, false); err != nil {
-		return err
-	}
-	_ = os.Remove(dir)
-	return nil
 }

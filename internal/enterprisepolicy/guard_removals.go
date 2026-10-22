@@ -38,74 +38,13 @@ import (
 // authorization directory. The guardian writes it; the gateway reads it.
 const ForeignHookRemovalsFile = "foreign-hook-removals.json"
 
-// ForeignHookCleanupPendingPrefix starts the path of a pending cleanup
-// denial: an account/connector cleanup whose file edits have not yet been
-// committed to the removal ledger. The gateway denies that connector while
-// it is present, including processes with no provable start time. The path
-// is ForeignHookCleanupPendingPath(id, owner): a unique id lets concurrent
-// cleanups coexist, and owner names the guardian process that runs the
-// cleanup, so that a later pass can tell an abandoned denial from a live one.
-const ForeignHookCleanupPendingPrefix = "<foreign-hook cleanup pending:"
-
-// ForeignHookCleanupIncompletePath is the path of the removal a cleanup
-// records when it ended without telling exactly which files it changed (a
-// failed worker, an edit error, an abandoned cleanup): every agent process
-// of the account and connector that started before it may still run a hook
-// that cleanup removed, so it is denied until it restarts, like after any
-// removal. Agents started later loaded the files as they are now.
-const ForeignHookCleanupIncompletePath = "<foreign-hook cleanup incomplete>"
-
 const (
 	foreignHookRemovalsVersion = 1
-	// foreignHookRemovalsLimit bounds the removal entries and
-	// foreignHookRemovalsBytes what they take; the newest are kept.
-	foreignHookRemovalsLimit = 1024
-	foreignHookRemovalsBytes = 1 << 20
-	// foreignHookCleanupLimit and foreignHookCleanupBytes bound the entries
-	// cleanup transactions leave (foreignHookCleanupEntry). They have their
-	// own budget, so a cleanup never pushes a removal out of the ledger,
-	// also one that removed nothing: a cleanup whose pending denial does not
-	// fit is refused before it edits anything, and one whose end does not
-	// fit keeps its pending denial.
-	foreignHookCleanupLimit = 4096
-	foreignHookCleanupBytes = 1 << 20
 	// ForeignHookRemovalsMaxBytes bounds the ledger file.
-	ForeignHookRemovalsMaxBytes = foreignHookRemovalsBytes + foreignHookCleanupBytes
+	ForeignHookRemovalsMaxBytes = 1 << 20
+	// foreignHookRemovalsLimit bounds the entries; the newest are kept.
+	foreignHookRemovalsLimit = 1024
 )
-
-// ForeignHookCleanupPending reports whether path is a pending cleanup
-// denial.
-func ForeignHookCleanupPending(path string) bool {
-	return strings.HasPrefix(path, ForeignHookCleanupPendingPrefix)
-}
-
-// foreignHookCleanupEntry reports whether path is an entry a cleanup
-// transaction leaves: a pending denial or an incomplete cleanup's removal.
-func foreignHookCleanupEntry(path string) bool {
-	return ForeignHookCleanupPending(path) || path == ForeignHookCleanupIncompletePath
-}
-
-// ForeignHookCleanupPendingPath is the path of the pending denial of
-// cleanup id, run by the process whose agentprocess identity is owner ("" if
-// it cannot be named).
-func ForeignHookCleanupPendingPath(id, owner string) string {
-	return ForeignHookCleanupPendingPrefix + id + ":" + owner + ">"
-}
-
-// ForeignHookCleanupPendingOwner returns the owner a pending denial path
-// names, or "".
-func ForeignHookCleanupPendingOwner(path string) string {
-	rest, ok := strings.CutPrefix(path, ForeignHookCleanupPendingPrefix)
-	if !ok {
-		return ""
-	}
-	rest, ok = strings.CutSuffix(rest, ">")
-	if !ok {
-		return ""
-	}
-	_, owner, _ := strings.Cut(rest, ":")
-	return owner
-}
 
 // ForeignHookRemoval is one hook file the guardian cleaned for an account.
 type ForeignHookRemoval struct {
@@ -114,9 +53,13 @@ type ForeignHookRemoval struct {
 	Identity  string `json:"identity"`
 	Connector string `json:"connector"`
 	Path      string `json:"path"`
-	// At is when the removal was recorded, after the file was cleaned, and
-	// Mark is the same instant as an agent process start time
-	// (agentprocess.Now).
+	// At is when the removal was recorded, and Mark an instant as an agent
+	// process start time (agentprocess.Now): processes that started no later
+	// than Mark are denied. The guardian records each removal twice under
+	// the account's removal lock: before the file changes, with Mark a
+	// bounded time ahead (agentprocess.NowAfter), so a guardian that ends
+	// in between leaves every process that may have loaded the file denied,
+	// and once the change is done, with Mark now, which replaces the first.
 	At   string `json:"at"`
 	Mark string `json:"mark"`
 }
@@ -141,22 +84,13 @@ func ParseForeignHookRemovals(data []byte) ([]ForeignHookRemoval, error) {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, errors.New("parse foreign-hook removal ledger: trailing content")
 	}
-	if ledger.Version != foreignHookRemovalsVersion {
+	if ledger.Version != foreignHookRemovalsVersion || len(ledger.Removals) > foreignHookRemovalsLimit {
 		return nil, errors.New("foreign-hook removal ledger has an invalid schema")
 	}
-	removals, cleanups := 0, 0
 	for _, removal := range ledger.Removals {
 		if _, err := time.Parse(time.RFC3339Nano, removal.At); err != nil || !removal.complete() {
 			return nil, errors.New("foreign-hook removal ledger contains an incomplete entry")
 		}
-		if foreignHookCleanupEntry(removal.Path) {
-			cleanups++
-		} else {
-			removals++
-		}
-	}
-	if removals > foreignHookRemovalsLimit || cleanups > foreignHookCleanupLimit {
-		return nil, errors.New("foreign-hook removal ledger has an invalid schema")
 	}
 	return ledger.Removals, nil
 }
@@ -184,11 +118,11 @@ const foreignHookRemovalIndent = 64
 // horizon (foreignHookRemovalHorizon), the one entry that denies every agent
 // process any other entry of the pair denies, newest pair first, and then
 // the other entries, newest first, while they fit. An account can only
-// crowd out its own entries. The accounts whose horizon did not fit (more
-// account and connector pairs within the TTL than the ledger holds) are
-// returned, sorted: the caller holds them closed before it writes the
-// ledger.
-func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Time) ([]byte, []string, error) {
+// crowd out its own entries. When the horizons alone do not fit (more
+// account and connector pairs within the TTL than the ledger holds), the
+// encoding fails, and the guardian removes nothing: the hook stays in
+// place, so the scan keeps blocking (ErrForeignHookRemovalLedgerFull).
+func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Time) ([]byte, error) {
 	type dated struct {
 		removal ForeignHookRemoval
 		at      time.Time
@@ -199,7 +133,7 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 	latest := map[string]dated{}
 	for _, removal := range append(append([]ForeignHookRemoval{}, existing...), added...) {
 		at, err := time.Parse(time.RFC3339Nano, removal.At)
-		if err != nil || now.Sub(at) > sessionRecordTTL && !ForeignHookCleanupPending(removal.Path) || !removal.complete() {
+		if err != nil || now.Sub(at) > sessionRecordTTL || !removal.complete() {
 			continue
 		}
 		key := removal.Identity + "\x00" + removal.Connector + "\x00" + removal.Path
@@ -250,7 +184,7 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 	for i := range entries {
 		encoded, err := json.Marshal(entries[i].removal)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		entries[i].size = len(encoded) + foreignHookRemovalIndent
 	}
@@ -264,14 +198,9 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 		kept, size = append(kept, entry), size+entry.size
 		return true
 	}
-	var evicted []string
 	for _, entry := range entries {
 		if entry.horizon && !fits(entry) {
-			identity := entry.removal.Identity
-			if canonical, ok := connector.CanonicalUserScopedIdentity(identity); ok {
-				identity = canonical
-			}
-			evicted = append(evicted, identity)
+			return nil, ErrForeignHookRemovalLedgerFull
 		}
 	}
 	for _, entry := range entries {
@@ -286,14 +215,17 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 	}
 	data, err := json.MarshalIndent(ledger, "", "  ")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if data = append(data, '\n'); len(data) > ForeignHookRemovalsMaxBytes {
-		return nil, nil, errors.New("foreign-hook removal ledger exceeds the size limit")
+		return nil, errors.New("foreign-hook removal ledger exceeds the size limit")
 	}
-	slices.Sort(evicted)
-	return data, slices.Compact(evicted), nil
+	return data, nil
 }
+
+// ErrForeignHookRemovalLedgerFull is a ledger that cannot keep the denial of
+// every account and connector together with the new removals.
+var ErrForeignHookRemovalLedgerFull = errors.New("the foreign-hook removal ledger cannot keep every account's denial")
 
 // foreignHookRemovalHorizon names the pair (account, connector and the boot
 // of the mark) a removal denies agent processes for, and the mark's clock.
@@ -343,12 +275,11 @@ func removalAfterProcessStart(removals []ForeignHookRemoval, key SessionKey, now
 	var found ForeignHookRemoval
 	var foundAt time.Time
 	for _, removal := range removals {
-		if !strings.EqualFold(removal.Connector, key.Connector) ||
-			!ForeignHookCleanupPending(removal.Path) && !agentprocess.StartedBefore(key.Process, removal.Mark) {
+		if !strings.EqualFold(removal.Connector, key.Connector) || !agentprocess.StartedBefore(key.Process, removal.Mark) {
 			continue
 		}
 		at, err := time.Parse(time.RFC3339Nano, removal.At)
-		if err != nil || now.Sub(at) > sessionRecordTTL && !ForeignHookCleanupPending(removal.Path) {
+		if err != nil || now.Sub(at) > sessionRecordTTL {
 			continue
 		}
 		if foundAt.IsZero() || at.Before(foundAt) {
@@ -370,18 +301,9 @@ const removedSessionReason = "removed after this agent process started"
 // the guardian removed an unapproved hook of its connector for this account.
 func removedHookDecision(decision GuardDecision, connector string, removal ForeignHookRemoval) GuardDecision {
 	decision.Deny = true
-	if ForeignHookCleanupPending(removal.Path) {
-		decision.Reason = "enterprise_foreign_hook_blocked: DefenseClaw is removing unapproved " + connector +
-			" hooks; the cleanup and its denial record are not complete. Retry the tool call after the guardian finishes."
-		return decision
-	}
-	removed := "removed an unapproved hook from " + removal.Path
-	if removal.Path == ForeignHookCleanupIncompletePath {
-		removed = "ran a cleanup of unapproved hooks that did not finish, which may have removed a hook this agent loaded,"
-	}
 	decision.Reason = fmt.Sprintf(
-		"enterprise_foreign_hook_blocked: your organization blocks %s hooks it has not approved, because they can change a tool call after DefenseClaw checks it. This agent started before DefenseClaw %s at %s. %s",
-		connector, removed, removal.At, sessionRemovedNote,
+		"enterprise_foreign_hook_blocked: your organization blocks %s hooks it has not approved, because they can change a tool call after DefenseClaw checks it. This agent started before DefenseClaw removed an unapproved hook from %s at %s. %s",
+		connector, removal.Path, removal.At, sessionRemovedNote,
 	)
 	decision.Findings = append([]Finding{{
 		Connector: connector,

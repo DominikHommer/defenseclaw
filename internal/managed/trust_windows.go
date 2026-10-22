@@ -325,7 +325,7 @@ func validateStrictServiceRuntimePath(path string, isDir bool, label string, ser
 		return err
 	}
 	for level, dir := 0, filepath.Dir(clean); ; level, dir = level+1, filepath.Dir(dir) {
-		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, serviceSID, windowsStrictAncestorScope(level, namedDirs)); err != nil {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, serviceSID, windowsStrictServiceAncestorScope(level, namedDirs)); err != nil {
 			return err
 		}
 		if dir == filepath.Dir(dir) {
@@ -334,10 +334,10 @@ func validateStrictServiceRuntimePath(path string, isDir bool, label string, ser
 	}
 }
 
-// windowsStrictAncestorScope is the scope of the folder level steps above
+// windowsStrictServiceAncestorScope is the scope of the folder level steps above
 // the file in ValidateStrictServiceRuntimeFilePath: the leaf rule for the
 // namedDirs nearest, else the narrow mask, never advisory.
-func windowsStrictAncestorScope(level, namedDirs int) windowsTrustScope {
+func windowsStrictServiceAncestorScope(level, namedDirs int) windowsTrustScope {
 	if level < namedDirs {
 		return windowsTrustLeaf
 	}

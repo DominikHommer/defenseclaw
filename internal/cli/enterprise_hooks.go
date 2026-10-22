@@ -3662,17 +3662,11 @@ func writeEnterpriseHookGuardianState(
 }
 
 // prepareEnterpriseHookAuthorizationDir creates (or re-hardens) the
-// protected directory that holds the guardian's records, and in the
-// standalone profile its foreign-hook removal lock files, and returns it.
+// protected directory that holds the guardian's records and returns it.
 func prepareEnterpriseHookAuthorizationDir(dataDir string) (string, error) {
 	authorizationDir, err := hardenEnterpriseHookAuthorizationDir(dataDir)
 	if err != nil {
 		return "", err
-	}
-	if cfg != nil && cfg.StandaloneEnterprise() {
-		if err := ensureEnterpriseForeignHookRemovalFence(authorizationDir); err != nil {
-			return "", err
-		}
 	}
 	return authorizationDir, nil
 }
@@ -3702,11 +3696,6 @@ func hardenEnterpriseHookAuthorizationDir(dataDir string) (string, error) {
 	}
 	if err := enterpriseHookAuthorizationDirTrustCheck(authorizationDir); err != nil {
 		return "", err
-	}
-	if cfg != nil && cfg.StandaloneEnterprise() {
-		if err := ensureEnterpriseForeignHookRemovalFence(authorizationDir); err != nil {
-			return "", err
-		}
 	}
 	return authorizationDir, nil
 }

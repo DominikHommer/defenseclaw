@@ -81,26 +81,22 @@ func cleanEnterpriseForeignHooksFenced(target enterprisehooks.TargetCredentials,
 var enterpriseForeignHookRunAsTarget = enterprisehooks.RunAsTarget
 
 // cleanEnterpriseForeignHooksAsTarget cleans request's user config as
-// target, within scope: the default locations and every location an
-// environment variable moves it to. uncertain says the cleanup may have
-// changed files its result does not list: an edit failed, or the cleanup
-// did not finish.
-func cleanEnterpriseForeignHooksAsTarget(target enterprisehooks.TargetCredentials, request enterprisepolicy.GuardRequest, scope enterprisepolicy.CleanupScope, now time.Time) (result enterprisepolicy.CleanupResult, uncertain bool, err error) {
-	started, finished := false, false
-	var cleanErr error
-	err = enterpriseForeignHookRunAsTarget(target, func() error {
+// target: the default locations and every location an environment variable
+// moves it to.
+func cleanEnterpriseForeignHooksAsTarget(target enterprisehooks.TargetCredentials, request enterprisepolicy.GuardRequest, now time.Time) (enterprisepolicy.CleanupResult, error) {
+	var result enterprisepolicy.CleanupResult
+	err := enterpriseForeignHookRunAsTarget(target, func() error {
 		// The guardian has no user environment: the user's hooks recorded
 		// the config locations their agents' environment redirects to, and
 		// on Windows the user's persistent environment names more.
 		redirects, redirectErr := enterprisepolicy.LoadEnvRedirects(target.UserHome, request.Connector)
 		userEnv, userEnvErr := enterpriseForeignHookUserEnvRedirects(target, request)
 		redirects = append(redirects, userEnv...)
-		started = true
-		result, cleanErr = enterprisepolicy.CleanUserForeignHooksWithRedirects(request, redirects, scope, now)
-		finished = true
+		var cleanErr error
+		result, cleanErr = enterprisepolicy.CleanUserForeignHooksWithRedirects(request, redirects, now)
 		return errors.Join(cleanErr, redirectErr, userEnvErr)
 	})
-	return result, started && (!finished || cleanErr != nil), err
+	return result, err
 }
 
 // enterpriseForeignHookCollectBlocks takes the foreign-hook blocks one

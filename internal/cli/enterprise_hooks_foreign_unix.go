@@ -142,7 +142,6 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return 0
 	}
-	reconcileEnterpriseForeignHookCleanups(stderr)
 	cleanups, vscode, err := enterpriseHookForeignCleanupConnectors()
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: %v\n", err)
@@ -278,18 +277,13 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup, Standalone: true, CopilotVSCode: vscodeFor(vscode, account.UID)}
 		for _, cleanup := range cleanups {
 			cleanup.OwnedCommands = perUserOwnedHookCommands(cleanup.Connector, account.Home, filepath.Join(account.Home, ".defenseclaw"))
-			// This worker only plans the foreign-hook cleanup; see below.
-			cleanup.Plan = true
 			request.ForeignCleanup = append(request.ForeignCleanup, cleanup)
 		}
 		if len(request.ForeignCleanup) > 0 && cfg != nil && cfg.StandaloneEnterprise() {
-			// The worker takes the cleanup fence only for each removal, and
-			// this session commits that removal to the ledger before the
-			// worker reads on.
-			uid, home := strconv.Itoa(account.UID), account.Home
-			request.cleanupFence = newEnterpriseForeignHookFenceSession(request.ForeignCleanup, func(connector string, removed []string) {
-				recordEnterpriseForeignHookRemovals(stderr, uid, home, connector, removed)
-			})
+			// The worker takes the account's removal lock only for each
+			// removal, and this session commits that removal to the ledger
+			// before the worker reads on.
+			request.cleanupFence = newEnterpriseForeignHookFenceSession(request.ForeignCleanup, stderr, strconv.Itoa(account.UID), account.Home)
 		}
 		names := leftovers(account.User)
 		if len(cleanups) == 0 && len(names) == 0 && vscode == nil {
@@ -353,13 +347,17 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	}
 	// Each account's removals are recorded for the gateway so its agent
 	// processes that started before them stay denied
-	// (recordEnterpriseForeignHookRemovals): through the worker's fence
-	// commit, or here, as soon as its worker ends, for what no commit
-	// recorded. A fence the worker took and never committed is released
-	// only after that. Only the connectors the job asked for count: the
-	// worker runs as the user.
+	// (recordEnterpriseForeignHookRemovals): through the worker's commit,
+	// or here, as soon as its worker ends, for what no commit recorded. A
+	// commit the worker opened and never finished is ended first (its files
+	// are recorded with the mark of now, and the account's lock is let go),
+	// so the record of the rest can take the lock. Only the connectors the
+	// job asked for count: the worker runs as the user.
 	recordRemovals := func(outcome enterpriseHookWorkerOutcome) {
 		session := outcome.Job.Request.cleanupFence
+		if session != nil {
+			session.release()
+		}
 		for _, cleanup := range outcome.Job.Request.ForeignCleanup {
 			report, ok := outcome.Response.Cleanup[cleanup.Connector]
 			if !ok {
@@ -371,9 +369,6 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			}
 			recordEnterpriseForeignHookRemovals(stderr, strconv.Itoa(outcome.Job.Account.UID), outcome.Job.Account.Home,
 				cleanup.Connector, removed)
-		}
-		if session != nil {
-			session.release()
 		}
 	}
 	removed := 0
@@ -628,11 +623,11 @@ func removeEnterpriseHookCopilotVSCodeAccounts(path, manifestPath string) error 
 // only while the process still has its own identity. A root guardian's
 // in-process cleanup changes the effective uid of the whole process, so
 // there fn is refused: the hook stays and the guard keeps denying. The
-// standalone Unix guardian cleans in its per-user worker, which asks for
-// the fence over its pipes instead.
+// standalone Unix guardian cleans in its per-user worker, which opens each
+// removal's commit over its pipes instead.
 func enterpriseForeignHookAsGuardian(fn func() error) error {
 	if os.Geteuid() != os.Getuid() {
-		return errors.New("foreign-hook cleanup fence: an in-process cleanup cannot act as the guardian while it runs as the user")
+		return errors.New("foreign-hook removal: an in-process cleanup cannot act as the guardian while it runs as the user")
 	}
 	return fn()
 }
@@ -675,6 +670,7 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 		}
 		result, err := enterprisepolicy.CleanUserForeignHooksWithRedirects(guard, redirects, now)
 		err = errors.Join(err, redirectErr)
+		report := enterpriseHookWorkerCleanupReport{BackupDir: result.BackupDir}
 		for _, finding := range result.Removed {
 			report.Removed = append(report.Removed, finding.Path)
 		}

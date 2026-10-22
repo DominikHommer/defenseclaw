@@ -81,12 +81,12 @@ func windowsHookSessionTrust() enterprisepolicy.PublishedSessionTrust {
 	return enterprisepolicy.PublishedSessionTrust{ServiceAccount: windowsHookSessionGatewayAccount}
 }
 
-// windowsHookSessionRetireKey removes the records' key before an action
-// changes anything, and windowsHookSessionCreateKey makes a new one after
-// it (replaceable in tests).
+// windowsHookSessionKillKeys removes every account's key of the records
+// before an action changes anything, and windowsHookSessionEnsureKeys makes
+// one for each account that has none after it (replaceable in tests).
 var (
-	windowsHookSessionRetireKey = enterprisepolicy.RetirePublishedSessionKey
-	windowsHookSessionCreateKey = enterprisepolicy.CreatePublishedSessionKey
+	windowsHookSessionKillKeys   = enterprisepolicy.KillAllPublishedSessionKeys
+	windowsHookSessionEnsureKeys = enterprisepolicy.EnsurePublishedSessionKeys
 )
 
 // windowsHookSessionRootTrustProblem reports a record folder, or a folder
@@ -97,12 +97,10 @@ var windowsHookSessionRootTrustProblem = func(root string) error {
 }
 
 // killWindowsHookSessionKey removes the key of the protected session
-// records before an install, upgrade, repair, ensure or uninstall changes
-// anything (GAP-0352): no record written before the action proves anything
-// once it started. A key that cannot be removed gets a second one next to
-// it, which the hook refuses as well. Best effort: the end of the action
-// removes it again before it makes a new key, and status reports a key the
-// hook refuses.
+// records, of every account, before an install, upgrade, repair, ensure or
+// uninstall changes anything (GAP-0352): no record written before the
+// action proves anything once it started. Best effort: the end of the
+// action, and the hook guardian, make new keys.
 func killWindowsHookSessionKey(action string) {
 	switch action {
 	case "install", "upgrade", "repair", "ensure", "uninstall":
@@ -116,7 +114,7 @@ func killWindowsHookSessionKey(action string) {
 	if err != nil || strings.TrimSpace(root) == "" {
 		return
 	}
-	_ = windowsHookSessionRetireKey(root, windowsHookSessionTrust())
+	_ = windowsHookSessionKillKeys(root)
 }
 
 // ensureWindowsHookSessionRoot makes root a folder Administrators own with
@@ -216,22 +214,7 @@ func windowsHookSessionRootProblem() string {
 			" Fix: if a folder above it lets other accounts change it, put that folder's permissions back," +
 			" then run " + windowsEnterpriseAdminCommand("repair")
 	}
-	if err := windowsHookSessionKeyProblem(root); err != nil {
-		return root + ": the key of the protected foreign-hook session records: " + err.Error() + ". A guarded connector's hook blocks during" +
-			" a gateway outage until there is one key it trusts. The gateway removes the key before every block and the hook guardian makes a" +
-			" new one at its next pass; if this stays, run " + windowsEnterpriseAdminCommand("repair")
-	}
 	return ""
-}
-
-// windowsHookSessionKeyProblem reports a key of the records under root that
-// the hook refuses, or none, or more than one; replaceable in tests.
-var windowsHookSessionKeyProblem = func(root string) error {
-	key, err := enterprisepolicy.ReadPublishedSessionKey(root)
-	if err != nil {
-		return err
-	}
-	return enterprisepolicy.ValidatePublishedSessionPath(key.ID(), windowsHookSessionTrust())
 }
 
 // applyWindowsStandaloneHookSessionRecords runs the folder's lifecycle step
@@ -256,7 +239,7 @@ func applyWindowsStandaloneHookSessionRecords(result *enterprisestatus.Result, o
 			}
 		}
 		if err == nil {
-			err = windowsHookSessionCreateKey(root, windowsHookSessionTrust())
+			err = windowsHookSessionEnsureKeys(root, windowsHookSessionTrust())
 		}
 		if err != nil {
 			result.AddWarning("hook_session_records_unavailable", "the protected foreign-hook session record folder could not be prepared ("+

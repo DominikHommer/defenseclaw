@@ -20,15 +20,16 @@ import (
 	"syscall"
 )
 
-// A per-user foreign-cleanup worker runs as the user and cannot open the
-// machine's foreign-hook cleanup fence. It asks the guardian for it over two
-// pipes right before each removal, and hands that removal back once it is
-// done: the guardian commits it to the removal ledger and releases the fence
-// before the worker reads on. A scan, a cleanup that finds nothing to
-// remove, and every other task of the worker
-// (VS Code Local files, leftover and personal Claude Code targets, block
-// records), never holds the fence, so neither the gateway's exchanges nor
-// another account's cleanup waits on them.
+// A per-user foreign-cleanup worker runs as the user and cannot take its
+// account's removal lock, rotate the record key or write the ledger. It asks
+// the guardian over two pipes right before each removal to open its commit
+// (beginEnterpriseForeignHookRemoval: the lock, the key rotation and the
+// first record), and hands that removal back once it is done: the guardian
+// records it again and lets go of the lock before the worker reads on. A
+// scan, a cleanup that finds nothing to remove, and every other task of the
+// worker (VS Code Local files, leftover and personal Claude Code targets,
+// block records), never holds the lock, so neither the gateway's exchanges
+// nor another account's cleanup waits on them.
 const (
 	// enterpriseHookWorkerFenceGrantFD carries the guardian's replies.
 	enterpriseHookWorkerFenceGrantFD = 3
@@ -49,6 +50,7 @@ const (
 type enterpriseHookWorkerFenceAsk struct {
 	Op        string   `json:"op"`
 	Connector string   `json:"connector"`
+	Paths     []string `json:"paths,omitempty"`
 	Removed   []string `json:"removed,omitempty"`
 }
 
@@ -58,76 +60,79 @@ type enterpriseHookWorkerFenceReply struct {
 }
 
 // enterpriseForeignHookFenceSession is the guardian's side of one worker's
-// fence requests. A connector of the job takes the fence for each removal,
-// one removal at a time, and that removal's commit records it in the
-// ledger and releases the fence.
+// removal commits. A connector of the job opens a commit for each removal,
+// one removal at a time, and that removal's commit records it and lets go
+// of the account's lock.
 type enterpriseForeignHookFenceSession struct {
-	record  func(connector string, removed []string)
-	allowed map[string]bool
+	stderr        io.Writer
+	account, home string
+	allowed       map[string]bool
 
 	mu        sync.Mutex
-	unlock    func()
+	tx        *enterpriseForeignHookRemovalTx
 	holder    string
 	locks     map[string]int
 	committed map[string]map[string]bool
 }
 
-func newEnterpriseForeignHookFenceSession(cleanups []enterpriseHookWorkerForeignCleanup, record func(connector string, removed []string)) *enterpriseForeignHookFenceSession {
+func newEnterpriseForeignHookFenceSession(cleanups []enterpriseHookWorkerForeignCleanup, stderr io.Writer, account, home string) *enterpriseForeignHookFenceSession {
 	allowed := map[string]bool{}
 	for _, cleanup := range cleanups {
 		if name := enterpriseHookWorkerFenceConnector(cleanup.Connector); name != "" {
 			allowed[name] = true
 		}
 	}
-	return &enterpriseForeignHookFenceSession{record: record, allowed: allowed, locks: map[string]int{}, committed: map[string]map[string]bool{}}
+	return &enterpriseForeignHookFenceSession{stderr: stderr, account: account, home: home, allowed: allowed, locks: map[string]int{}, committed: map[string]map[string]bool{}}
 }
 
 func enterpriseHookWorkerFenceConnector(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
 
-// lock takes the cleanup fence for one removal of connector, within ctx
-// (the worker's own timeout) for this guardian's turn.
-func (s *enterpriseForeignHookFenceSession) lock(ctx context.Context, connector string) error {
+// lock opens the commit of one removal of connector's files paths, within
+// ctx (the worker's own timeout).
+func (s *enterpriseForeignHookFenceSession) lock(ctx context.Context, connector string, paths []string) error {
 	name := enterpriseHookWorkerFenceConnector(connector)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
 	case !s.allowed[name]:
 		return fmt.Errorf("connector %q is not part of this cleanup", boundedString(connector, 64))
-	case s.unlock != nil:
-		return fmt.Errorf("the %s cleanup already holds the fence", s.holder)
+	case s.tx != nil:
+		return fmt.Errorf("the %s cleanup already holds the account's removal lock", s.holder)
 	case s.locks[name] >= enterpriseHookWorkerFenceLockLimit:
-		return fmt.Errorf("the %s cleanup took the fence %d times", name, enterpriseHookWorkerFenceLockLimit)
+		return fmt.Errorf("the %s cleanup took the account's removal lock %d times", name, enterpriseHookWorkerFenceLockLimit)
+	case len(paths) == 0:
+		return errors.New("a removal names no file")
 	}
-	unlock, err := acquireEnterpriseForeignHookCleanupFence(ctx)
+	tx, err := beginEnterpriseForeignHookRemoval(ctx, s.stderr, s.account, s.home, name, boundedStrings(paths, 32))
 	if err != nil {
 		return err
 	}
-	s.unlock, s.holder = unlock, name
+	s.tx, s.holder = tx, name
 	s.locks[name]++
 	return nil
 }
 
-// commit records the removal that holds the fence in the ledger, then
-// releases the fence.
+// commit records the removal that holds the lock again, then lets go of it.
 func (s *enterpriseForeignHookFenceSession) commit(connector string, removed []string) error {
 	name := enterpriseHookWorkerFenceConnector(connector)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.unlock == nil || s.holder != name {
-		return fmt.Errorf("the %s cleanup does not hold the fence", boundedString(name, 64))
+	if s.tx == nil || s.holder != name {
+		return fmt.Errorf("the %s cleanup does not hold the account's removal lock", boundedString(name, 64))
 	}
 	removed = boundedStrings(removed, 32)
-	s.record(name, removed)
+	tx := s.tx
+	s.tx, s.holder = nil, ""
+	err := tx.commit(removed)
 	if s.committed[name] == nil {
 		s.committed[name] = map[string]bool{}
 	}
-	for _, path := range removed {
+	for _, path := range tx.paths {
 		s.committed[name][path] = true
 	}
-	s.releaseLocked()
-	return nil
+	return err
 }
 
 // uncommitted lists the files of removed that no commit of connector
@@ -145,19 +150,23 @@ func (s *enterpriseForeignHookFenceSession) uncommitted(connector string, remove
 	return out
 }
 
-// release lets go of a fence the worker took and never committed (it
-// failed or timed out after its lock). The caller records what the
-// worker's response reports first.
+// release ends a commit the worker opened and never committed (it failed
+// or timed out after its lock): the worker has ended, so recording its
+// files with the mark of now covers every process that may have loaded
+// one.
 func (s *enterpriseForeignHookFenceSession) release() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.releaseLocked()
-}
-
-func (s *enterpriseForeignHookFenceSession) releaseLocked() {
-	if s.unlock != nil {
-		s.unlock()
-		s.unlock, s.holder = nil, ""
+	if s.tx != nil {
+		tx, name := s.tx, s.holder
+		s.tx, s.holder = nil, ""
+		_ = tx.commit(nil)
+		if s.committed[name] == nil {
+			s.committed[name] = map[string]bool{}
+		}
+		for _, path := range tx.paths {
+			s.committed[name][path] = true
+		}
 	}
 }
 
@@ -177,7 +186,7 @@ func (s *enterpriseForeignHookFenceSession) serve(ctx context.Context, asks io.R
 		var err error
 		switch ask.Op {
 		case enterpriseHookWorkerFenceOpLock:
-			err = s.lock(ctx, ask.Connector)
+			err = s.lock(ctx, ask.Connector, ask.Paths)
 		case enterpriseHookWorkerFenceOpCommit:
 			err = s.commit(ask.Connector, ask.Removed)
 		default:
@@ -282,8 +291,8 @@ func (p *enterpriseHookWorkerFencePipe) exchange(ask enterpriseHookWorkerFenceAs
 	return nil
 }
 
-func (p *enterpriseHookWorkerFencePipe) lock(connector string) error {
-	return p.exchange(enterpriseHookWorkerFenceAsk{Op: enterpriseHookWorkerFenceOpLock, Connector: connector})
+func (p *enterpriseHookWorkerFencePipe) lock(connector string, paths []string) error {
+	return p.exchange(enterpriseHookWorkerFenceAsk{Op: enterpriseHookWorkerFenceOpLock, Connector: connector, Paths: boundedStrings(paths, 32)})
 }
 
 func (p *enterpriseHookWorkerFencePipe) commit(connector string, removed []string) error {
