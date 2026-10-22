@@ -44,6 +44,20 @@ func TestW4B2UnconfirmedGroupRefusesInsteadOfLenientDefault(t *testing.T) {
 	if decision := set.matchUncached(&other, profileSubjectVerified, "codex", ""); decision.RefuseUnconfirmedGroups || decision.Name != "user" {
 		t.Fatalf("an earlier verified UID assignment lost precedence: %+v", decision)
 	}
+	set.assignments[1].Match.Users = nil
+	set.assignments[0].Match.Users = []string{"alice"}
+	failed := profileSubject{UserID: "1001", LookupFailed: true}
+	if decision := set.matchUncached(&failed, profileSubjectVerified, "codex", ""); !decision.RefuseUnconfirmedGroups {
+		t.Fatalf("an unresolved earlier user name hid a later group assignment: %+v", decision)
+	}
+	set.assignments[0].Match = config.ProfileMatch{Connectors: []string{"codex"}}
+	if decision := set.matchUncached(&failed, profileSubjectVerified, "codex", ""); !decision.RefuseUnconfirmedGroups {
+		t.Fatalf("an earlier connector-only assignment hid a later group assignment: %+v", decision)
+	}
+	set.assignments[1].Match.Connectors = []string{"other"}
+	if decision := set.matchUncached(&failed, profileSubjectVerified, "codex", ""); decision.RefuseUnconfirmedGroups {
+		t.Fatalf("a later group assignment for another connector caused refusal: %+v", decision)
+	}
 }
 
 func TestW4B2HookBlocksUnconfirmedGroupMembership(t *testing.T) {

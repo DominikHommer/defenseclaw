@@ -1027,13 +1027,13 @@ func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, s
 			// name this account, so fail closed.
 			for _, entry := range m.Users {
 				if useridentity.KindForID(entry) == "" {
-					return fallback(len(m.Groups) > 0)
+					return fallback(len(m.Groups) > 0 || set.laterUnconfirmedGroupAssignment(i+1, subject.UserID, connectorName, agent))
 				}
 			}
 			continue
 		}
 		if len(m.Groups) > 0 || (len(m.Users) == 0 && len(m.Agents) == 0) {
-			return fallback(len(m.Groups) > 0)
+			return fallback(len(m.Groups) > 0 || set.laterUnconfirmedGroupAssignment(i+1, subject.UserID, connectorName, agent))
 		}
 		reason, group, ok := assignmentMatches(m, idOnly, &subjectGroups{}, true, connectorName, agent)
 		if ok {
@@ -1043,6 +1043,37 @@ func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, s
 		}
 	}
 	return fallback(false)
+}
+
+// An earlier unresolved name or connector-only assignment preserves its
+// place in the ordered list. It must not hide a later group assignment that
+// could match once directory facts return. Known different IDs and other
+// connectors or agents are safe to skip.
+func (set *guardrailProfileSet) laterUnconfirmedGroupAssignment(start int, userID, connectorName, agent string) bool {
+	for _, assignment := range set.assignments[start:] {
+		m := assignment.Match
+		if len(m.Groups) == 0 {
+			continue
+		}
+		if len(m.Connectors) > 0 && !anyMatches(m.Connectors, func(v string) bool {
+			return config.NormalizeConnectorName(v) == connectorName && connectorName != ""
+		}) {
+			continue
+		}
+		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool {
+			return strings.EqualFold(strings.TrimSpace(v), agent) && agent != ""
+		}) {
+			continue
+		}
+		if len(m.Users) > 0 && !anyMatches(m.Users, func(v string) bool {
+			v = strings.TrimSpace(v)
+			return useridentity.EqualFold(v, userID) || useridentity.KindForID(v) == ""
+		}) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func (set *guardrailProfileSet) decision(name, reason, group, source string) profileDecision {
