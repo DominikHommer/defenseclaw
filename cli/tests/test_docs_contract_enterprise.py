@@ -38,7 +38,7 @@ def test_managed_hook_docs_distinguish_outages_from_refusals() -> None:
     rate_limit = next(line for line in threat_model.splitlines() if line.startswith("| R31 |"))
     coverage = _flat("appendix/coverage-by-layer.mdx")
     for text in (rate_limit, coverage):
-        assert not re.search(r"always fail[ -]closed", text, re.IGNORECASE)
+        assert not re.search(r"always fails?[ -]closed", text, re.IGNORECASE)
         assert all(term in text for term in ("default", "closed", "administrator", "open", "outage", "Secure Client"))
         assert all(term in text for term in ("runtime", "peer", "credential"))
     assert "429" in rate_limit and "block" in rate_limit
@@ -49,6 +49,23 @@ def test_managed_hook_docs_distinguish_outages_from_refusals() -> None:
     assert "classified outages" in strict
     assert "force the unavailable-home and transport failures closed" not in strict
     assert "force the relevant unavailable-home and transport failures closed" not in strict
+
+    guidance = (
+        _flat("enterprise/plan/threat-model.mdx").split("### Disable hooks", 1)[1].split("### ", 1)[0],
+        _flat("enterprise/configure/reference.mdx").split("### Hook commands by route", 1)[1].split("## ", 1)[0],
+        _flat("enterprise/operate/lifecycle.mdx").split("## Restart the managed gateway", 1)[1].split("## ", 1)[0],
+        _flat("enterprise/operate/reference.mdx")
+        .split("### Gateway restarts and hook timing", 1)[1].split("### ", 1)[0],
+    )
+    for text in guidance:
+        assert not re.search(r"always fails?[ -]closed|never allows a call because", text, re.IGNORECASE)
+        assert "hook_fail_mode: open" in text and "outage" in text
+
+    troubleshooting = (DOCS / "troubleshooting/enterprise/index.mdx").read_text(encoding="utf-8")
+    for reason in ("enterprise_managed_rate_limited", "enterprise_managed_overloaded"):
+        row = next(line for line in troubleshooting.splitlines() if line.startswith(f"| `{reason}` |"))
+        assert "not a classified" in row and "block" in row
+        assert "always fails closed" not in row
 
 
 # (fact, [(pages that may hold the phrase, phrase), ...])
