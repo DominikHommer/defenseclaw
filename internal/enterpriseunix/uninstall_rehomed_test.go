@@ -55,7 +55,7 @@ func TestUninstallCompletesAfterARehomedCleanupWasRemoved(t *testing.T) {
 	}
 }
 
-func TestUninstallWarnsAndGoesOnForAnUntrustedRecordedHome(t *testing.T) {
+func TestUninstallRetainsDeploymentForAnUntrustedRecordedHome(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
@@ -65,17 +65,15 @@ func TestUninstallWarnsAndGoesOnForAnUntrustedRecordedHome(t *testing.T) {
 				return CommandResult{Stdout: []byte(`{"ok":true,"removed":0,"pending":["sample-user/hermes: ` + reason + `"],"failed":[]}`)}, nil
 			}}
 			done := h.run(Options{Action: ActionUninstall})
-			requireOK(t, done)
-			warning := messagesOf(done.Warnings, codePerUserHooks)
-			if !strings.Contains(warning, "DefenseClaw's hermes hooks for user sample-user were not removed: "+reason) ||
-				!strings.Contains(warning, "/home/sample-user-old") {
-				t.Fatalf("uninstall warning does not name the recorded home: %q", warning)
+			requireError(t, done, codePerUserHooks)
+			requireError(t, done, codeUninstallIncomplete)
+			message := messagesOf(done.Errors, codePerUserHooks)
+			if !strings.Contains(message, "DefenseClaw's hermes hooks for user sample-user were not removed: "+reason) ||
+				!strings.Contains(message, "rerun `"+h.env.lifecycleCommand(ActionUninstall)+"`") {
+				t.Fatalf("uninstall refusal does not name the recorded home and retry: %q", message)
 			}
-			if messagesOf(done.Errors, codePerUserHooks) != "" || messagesOf(done.Errors, codeUninstallIncomplete) != "" {
-				t.Fatalf("pending recorded-home cleanup stopped uninstall: %+v", done.Errors)
-			}
-			if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || exists(h.env.deploymentPath()) {
-				t.Fatal("uninstall kept the binaries or deployment record")
+			if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || !exists(h.env.deploymentPath()) {
+				t.Fatal("uninstall removed the binaries or deployment record before recorded-home cleanup was proven")
 			}
 		})
 	}
