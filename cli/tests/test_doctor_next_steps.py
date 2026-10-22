@@ -78,7 +78,10 @@ def test_claude_code_without_hooks_names_setup(tmp_path) -> None:
     assert "defenseclaw setup claude-code --yes" in r.checks[-1]["remediation"]
 
 
-def test_passive_doctor_fails_an_unproven_idle_hermes(tmp_path) -> None:
+def test_passive_doctor_fails_an_unproven_idle_hermes(tmp_path, monkeypatch) -> None:
+    # The lock binds the current effective config, so the check reaches the
+    # missing sealed hook script on any host, whatever its ~/.hermes holds.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     hook = tmp_path / "config.yaml"
     hook.write_text("hooks:\n  - command: /x/hooks/hermes-hook.sh\n", encoding="utf-8")
     cfg = mock.MagicMock()

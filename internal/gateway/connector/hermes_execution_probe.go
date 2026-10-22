@@ -53,9 +53,13 @@ func hermesRegisteredCommandExecutable(opts SetupOpts, hookCommand string) bool 
 
 // runHermesExecutionProbe keeps no more stdout than the proof itself: one
 // byte more fails the write, which closes the pipe and ends the probe.
-// RunTree ends the process tree when the probe exits and at the timeout (a
-// Job Object on Windows, the process group on Linux and macOS), and stdout
-// left open by a descendant is closed after hermesExecutionProbePipeWait.
+// RunContained ends the process tree when the probe exits and at the
+// timeout (a Job Object on Windows, a subreaper supervisor on Linux, the
+// process group and a lifeline on macOS) and fails the proof when it cannot
+// establish that nothing the hook started still runs: a hook that started a
+// child in a session of its own passed while the child kept running (r104
+// W5b). Stdout left open by a descendant is closed after
+// hermesExecutionProbePipeWait.
 func runHermesExecutionProbe(target string, args []string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), hermesExecutionProbeTimeout)
 	defer cancel()
@@ -63,6 +67,6 @@ func runHermesExecutionProbe(target string, args []string) bool {
 	stdout := &hermesBoundedCommandBuffer{limit: int64(len(hermesExecutionProbeResponse))}
 	cmd.Stdout = stdout
 	cmd.WaitDelay = hermesExecutionProbePipeWait
-	err := processutil.RunTree(cmd)
+	err := processutil.RunContained(cmd)
 	return err == nil && stdout.String() == hermesExecutionProbeResponse
 }

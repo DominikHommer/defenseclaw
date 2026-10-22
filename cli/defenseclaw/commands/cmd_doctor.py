@@ -36,6 +36,7 @@ import os
 import posixpath
 import queue
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -5959,8 +5960,105 @@ _HERMES_EXECUTION_PROBE_RESPONSE = b"defenseclaw-execution-probe-ok\n"
 # been killed (a descendant can inherit it). Tests shorten both.
 _HERMES_EXECUTION_PROBE_TIMEOUT = 3.0
 _HERMES_EXECUTION_PROBE_PIPE_WAIT = 1.0
-# The wait for a terminated Windows probe job to empty.
+# The wait for a terminated Windows probe job to empty, or for the Linux
+# supervisor to end the probe's tree.
 _HERMES_EXECUTION_PROBE_TREE_REAP = 2.0
+# The Linux supervisor's budget to kill and reap what the probe left; tests
+# set it to zero to reach the fail-closed result.
+_HERMES_EXECUTION_PROBE_SWEEP = 2.0
+# How Doctor ends what a Unix probe started. A hook could start a child in a
+# session of its own (setsid) or another process group, out of the session
+# Doctor killed, and Doctor passed while the child kept running (r104 W5b).
+# "subreaper" (Linux): a supervisor that is a child subreaper, so every
+# orphaned descendant becomes its child, kills and reaps them all and fails
+# the proof when it cannot. "lifeline" (macOS, which has no subreaper): the
+# probe's session is killed and a pipe every descendant inherits must then
+# close, or the proof fails; a descendant that left the session and closed
+# its inherited descriptors is not seen.
+_HERMES_PROBE_UNIX_CONTAINMENT = "subreaper" if sys.platform.startswith("linux") else "lifeline"
+# The supervisor's exit code when it cannot establish that nothing is left;
+# any other code is the probe's own (124 when Doctor ended it).
+_HERMES_PROBE_NOT_CONTAINED = 125
+_HERMES_PROBE_SUPERVISOR = r"""
+import ctypes, os, signal, subprocess, sys, time
+
+
+def children(me):
+    found = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/" + name + "/stat", "rb") as stat:
+                fields = stat.read().rsplit(b")", 1)[1].split()
+            if int(fields[1]) == me:
+                found.append(int(name))
+        except (OSError, IndexError, ValueError):
+            pass
+    return found
+
+
+def reap_all(budget):
+    # A subreaper is the parent of every orphaned descendant: no child left
+    # means nothing the probe started is left.
+    deadline = time.monotonic() + budget
+    me = os.getpid()
+    while True:
+        try:
+            while os.waitpid(-1, os.WNOHANG)[0]:
+                pass
+        except ChildProcessError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        for pid in children(me):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(0.005)
+
+
+def main():
+    budget = float(sys.argv[1])
+    parent = os.getppid()
+    libc = ctypes.CDLL(None, use_errno=True)
+    # PR_SET_CHILD_SUBREAPER, then PR_SET_PDEATHSIG: end the tree if Doctor dies.
+    if libc.prctl(36, 1, 0, 0, 0) != 0 or libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
+        return 125
+    if os.getppid() != parent:
+        return 124
+    state = {"proc": None, "ended": False}
+
+    def end(_signum, _frame):
+        state["ended"] = True
+        if state["proc"] is not None:
+            try:
+                os.killpg(state["proc"].pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    signal.signal(signal.SIGTERM, end)
+    try:
+        state["proc"] = subprocess.Popen(sys.argv[2:], start_new_session=True)
+    except (OSError, ValueError):
+        return 127
+    if state["ended"]:
+        end(None, None)
+    # Only the probe and what it started hold Doctor's pipe now.
+    null = os.open(os.devnull, os.O_RDWR)
+    os.dup2(null, 1)
+    os.close(null)
+    code = state["proc"].wait()
+    if not reap_all(budget):
+        return 125
+    if state["ended"]:
+        return 124
+    return code if code >= 0 else 128 - code
+
+
+sys.exit(main())
+"""
 
 
 def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
@@ -5971,24 +6069,45 @@ def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
     stdout open past the pipe wait, or left descendants that could not be
     ended. One byte more than the proof closes the pipe, so the hook's output
     never accumulates in Doctor. Whatever the command started ends with it on
-    exit, overflow and timeout: on Unix its session is killed, on Windows its
+    exit, overflow and timeout: on Linux a subreaper supervisor ends every
+    descendant, also one in a session of its own; on macOS the probe's
+    session is killed and a descendant outside it that kept the lifeline
+    fails the proof (_HERMES_PROBE_UNIX_CONTAINMENT); on Windows its
     kill-on-close job is terminated. A launcher that started a long-lived
     child left it running, one more for each Doctor run (r104 W5b).
     """
     limit = len(_HERMES_EXECUTION_PROBE_RESPONSE)
     windows = os.name == "nt"
     creationflags = 0
+    command = list(argv)
+    supervised = False
+    lifeline: tuple[int, int] | None = None
     if windows:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) | getattr(
             subprocess, "CREATE_SUSPENDED", 0x00000004
         )
+    elif _HERMES_PROBE_UNIX_CONTAINMENT == "subreaper":
+        if not sys.executable:
+            return None, b""
+        command = [
+            sys.executable, "-I", "-S", "-c", _HERMES_PROBE_SUPERVISOR, str(_HERMES_EXECUTION_PROBE_SWEEP), *argv,
+        ]
+        supervised = True
+    else:
+        lifeline = os.pipe()
     try:
         proc = subprocess.Popen(
-            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             start_new_session=not windows, creationflags=creationflags,
+            pass_fds=(lifeline[1],) if lifeline is not None else (),
         )
     except (OSError, ValueError):
+        if lifeline is not None:
+            os.close(lifeline[0])
+            os.close(lifeline[1])
         return None, b""
+    if lifeline is not None:
+        os.close(lifeline[1])
     job = None
     if windows:
         from defenseclaw.tui.windows_process import WindowsJob
@@ -6007,13 +6126,34 @@ def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
             proc.stdout.close()
             return None, b""
     try:
-        return _collect_hermes_execution_probe(proc, job, limit)
+        return _collect_hermes_execution_probe(
+            proc, job, limit, supervised=supervised, lifeline=lifeline[0] if lifeline is not None else None,
+        )
     finally:
         if job is not None:
             job.close()
+        if lifeline is not None:
+            os.close(lifeline[0])
 
 
-def _collect_hermes_execution_probe(proc: subprocess.Popen, job, limit: int) -> tuple[int | None, bytes]:
+def _hermes_probe_lifeline_closed(fd: int, wait: float) -> bool:
+    """Whether every inherited write end of the lifeline closed within ``wait``."""
+    deadline = time.monotonic() + wait
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if ready and not os.read(fd, 4096):
+                return True
+        except (OSError, ValueError):
+            return False
+
+
+def _collect_hermes_execution_probe(
+    proc: subprocess.Popen, job, limit: int, *, supervised: bool = False, lifeline: int | None = None,
+) -> tuple[int | None, bytes]:
     captured = bytearray()
     overflow = threading.Event()
 
@@ -6045,6 +6185,20 @@ def _collect_hermes_execution_probe(proc: subprocess.Popen, job, limit: int) -> 
                 with contextlib.suppress(OSError):
                     proc.kill()
                 return False
+        if supervised:
+            # The supervisor ends and reaps the tree. Killing it instead would
+            # hand what left the probe's session to init.
+            if proc.poll() is None:
+                with contextlib.suppress(OSError):
+                    proc.send_signal(signal.SIGTERM)
+                try:
+                    proc.wait(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(OSError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    return False
+            # Killed by a signal (by the probe, say): what it supervised is unknown.
+            return proc.returncode >= 0 and proc.returncode != _HERMES_PROBE_NOT_CONTAINED
         with contextlib.suppress(OSError):
             os.killpg(proc.pid, signal.SIGKILL)
         return True
@@ -6075,6 +6229,9 @@ def _collect_hermes_execution_probe(proc: subprocess.Popen, job, limit: int) -> 
     reader.join(_HERMES_EXECUTION_PROBE_PIPE_WAIT)
     if reader.is_alive() or overflow.is_set():
         return None, bytes(captured[:limit])
+    if lifeline is not None and not _hermes_probe_lifeline_closed(lifeline, _HERMES_EXECUTION_PROBE_PIPE_WAIT):
+        # A descendant outside the killed session still holds the lifeline.
+        return None, bytes(captured)
     return returncode, bytes(captured)
 
 

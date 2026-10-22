@@ -8,6 +8,8 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
+import sys
 import time
 import tracemalloc
 import types
@@ -525,3 +527,130 @@ def test_windows_hermes_doctor_probe_ends_child_of_exited_launcher(tmp_path):
     assert _process_gone(child), f"Windows Doctor probe left child {child} running"
     assert returncode == 0
     assert stdout == b"defenseclaw-execution-probe-ok\n"
+
+
+# r104 W5b: a sealed, approved hook can start a child out of the probe's
+# session (a new session, its own process group, a double fork) and redirect
+# its streams. Doctor killed only the probe's session and passed while the
+# child kept running.
+_ESCAPE_SESSION = "perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die' "
+_ESCAPE_GROUP = "perl -e 'setpgrp(0, 0) or die; exec @ARGV or die' "
+_ESCAPED_CHILD = "sh -c 'echo $$ > \"$0\"; exec sleep 60' \"$PIDFILE\" </dev/null >/dev/null 2>&1"
+_ESCAPED_CHILD_FDS_CLOSED = (
+    "sh -c 'echo $$ > \"$0\"; exec sleep 60 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-' \"$PIDFILE\" </dev/null >/dev/null 2>&1"
+)
+_WAIT_PID = 'while [ ! -s "$PIDFILE" ]; do sleep 0.01; done\n'
+_ESCAPE_CASES = {
+    # body, timeout, whether the proof holds once the child is ended
+    "new-session": (_PROOF + _ESCAPE_SESSION + _ESCAPED_CHILD + " &\n" + _WAIT_PID + "exit 0\n", 20.0, True),
+    "double-fork-into-new-session": (
+        _PROOF + "( " + _ESCAPE_SESSION + _ESCAPED_CHILD + " & )\n" + _WAIT_PID + "exit 0\n", 20.0, True,
+    ),
+    "own-process-group": (_PROOF + _ESCAPE_GROUP + _ESCAPED_CHILD + " &\n" + _WAIT_PID + "exit 0\n", 20.0, True),
+    "new-session-descriptors-closed": (
+        _PROOF + _ESCAPE_SESSION + _ESCAPED_CHILD_FDS_CLOSED + " &\n" + _WAIT_PID + "exit 0\n", 20.0, True,
+    ),
+    "new-session-then-times-out": (_ESCAPE_SESSION + _ESCAPED_CHILD + " &\n" + _WAIT_PID + "sleep 60\n", 0.5, False),
+    "new-session-then-overflows": (
+        _PROOF + _ESCAPE_SESSION + _ESCAPED_CHILD + " &\n" + _WAIT_PID + "exec yes\n", 20.0, False,
+    ),
+    "new-session-then-fails": (_PROOF + _ESCAPE_SESSION + _ESCAPED_CHILD + " &\n" + _WAIT_PID + "exit 1\n", 20.0, False),
+}
+_LINUX = sys.platform.startswith("linux")
+_needs_perl = pytest.mark.skipif(os.name == "nt" or not shutil.which("perl"), reason="Unix shell stub with perl")
+
+
+def _probe_escape(tmp_path, monkeypatch, body: str, timeout: float = 20.0):
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_TIMEOUT", timeout)
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)
+    target, pid_file = _descendant_stub(tmp_path, body)
+    returncode, stdout = cmd_doctor._run_hermes_execution_probe([str(target)])
+    return returncode, stdout, _read_pid(pid_file)
+
+
+@_needs_perl
+@pytest.mark.parametrize("case", list(_ESCAPE_CASES), ids=list(_ESCAPE_CASES))
+def test_hermes_execution_probe_ends_descendants_that_leave_its_session(tmp_path, monkeypatch, case):
+    body, timeout, proves = _ESCAPE_CASES[case]
+    if case == "new-session-descriptors-closed" and not _LINUX:
+        pytest.skip("macOS cannot follow a descendant outside the session that closed its descriptors")
+    returncode, stdout, descendant = _probe_escape(tmp_path, monkeypatch, body, timeout)
+    try:
+        if not _LINUX:
+            assert returncode is None, f"the probe passed while descendant {descendant} outside its session ran"
+            return
+        assert _process_gone(descendant, wait=0.2), f"probe left descendant {descendant} running"
+        proved = returncode == 0 and stdout == cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE
+        assert proved is proves, (returncode, stdout)
+    finally:
+        _kill_quietly(descendant)
+
+
+@_needs_perl
+@pytest.mark.parametrize(
+    ("body", "escaped"),
+    [
+        (_PROOF + _ESCAPED_CHILD + " &\n" + _WAIT_PID + "exit 0\n", False),
+        (_ESCAPE_CASES["new-session"][0], True),
+        (_ESCAPE_CASES["double-fork-into-new-session"][0], True),
+        (_ESCAPE_CASES["own-process-group"][0], True),
+    ],
+    ids=["child-in-session", "new-session", "double-fork-into-new-session", "own-process-group"],
+)
+def test_hermes_lifeline_probe_fails_closed_for_descendant_outside_its_session(tmp_path, monkeypatch, body, escaped):
+    """The macOS containment, exercised on any POSIX host."""
+    monkeypatch.setattr(cmd_doctor, "_HERMES_PROBE_UNIX_CONTAINMENT", "lifeline")
+    returncode, _stdout, descendant = _probe_escape(tmp_path, monkeypatch, body)
+    try:
+        if escaped:
+            assert returncode is None, f"the probe passed while descendant {descendant} outside its session ran"
+        else:
+            assert returncode == 0
+            assert _process_gone(descendant), f"probe left descendant {descendant} running"
+    finally:
+        _kill_quietly(descendant)
+
+
+@pytest.mark.skipif(not _LINUX or not shutil.which("perl"), reason="Linux subreaper supervisor")
+@pytest.mark.parametrize("fail", ["sweep-exhausted", "supervisor-killed"])
+def test_hermes_probe_supervisor_fails_closed_when_cleanup_is_unproven(tmp_path, monkeypatch, fail):
+    body = _ESCAPE_CASES["new-session"][0]
+    if fail == "sweep-exhausted":
+        monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_SWEEP", 0.0)
+    else:
+        # Only ever the supervisor: never the test runner.
+        body = body.replace("exit 0\n", (
+            "case \"$(tr '\\0' ' ' < /proc/$PPID/cmdline)\" in *PR_SET_CHILD_SUBREAPER*) kill -9 $PPID ;; esac\n"
+            "exit 0\n"
+        ))
+    returncode, _stdout, descendant = _probe_escape(tmp_path, monkeypatch, body)
+    _kill_quietly(descendant)
+    assert returncode is None, "a probe whose descendants could not be proven ended must not pass"
+
+
+@pytest.mark.skipif(not _LINUX, reason="Linux subreaper supervisor")
+@pytest.mark.parametrize(("body", "want"), [("exit 0\n", 0), ("exit 3\n", 3), ("kill -TERM $$\n", 143)])
+def test_hermes_probe_supervisor_keeps_the_hook_exit_status(tmp_path, monkeypatch, body, want):
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)
+    returncode, _stdout = cmd_doctor._run_hermes_execution_probe([str(_probe_stub(tmp_path, body))])
+    assert returncode == want
+
+
+@_needs_perl
+def test_hermes_doctor_ends_hook_child_in_new_session(tmp_path, monkeypatch):
+    script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    pid_file = tmp_path / "escaped.pid"
+    script.write_text(
+        f"#!/bin/sh\nPIDFILE='{pid_file}'\n" + _ESCAPE_CASES["new-session"][0], encoding="utf-8",
+    )
+    script.chmod(0o700)
+    row = check()
+    descendant = _read_pid(pid_file)
+    try:
+        if _LINUX:
+            assert _process_gone(descendant, wait=0.2), f"Doctor left hook child {descendant} running"
+            assert row["status"] == "pass", row
+        else:
+            assert row["status"] == "fail", row
+    finally:
+        _kill_quietly(descendant)

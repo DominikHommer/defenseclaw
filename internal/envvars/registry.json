@@ -8115,6 +8115,26 @@
         }
       ],
       "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_CONTAINED_RUN_SUPERVISOR",
+      "category": "hook_internal",
+      "purpose": "Set to 1, together with the argv[0] defenseclaw-contained-run, only when a DefenseClaw Go binary re-runs itself on Linux as the child-subreaper supervisor of processutil.RunContained (the Hermes Verify execution probe). The supervisor removes it before it starts the probed command.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/processutil/contain_linux.go",
+          "description": "Go reader: selects the supervisor mode at process start"
+        }
+      ],
+      "since": "1.0.4"
     }
   ]
 }

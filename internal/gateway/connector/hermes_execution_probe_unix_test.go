@@ -9,6 +9,7 @@ package connector
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -208,4 +209,65 @@ func hermesProbeProcessRunning(pid int) bool {
 	}
 	fields := strings.Fields(string(raw[strings.LastIndexByte(string(raw), ')')+1:]))
 	return len(fields) == 0 || fields[0] != "Z"
+}
+
+// r104 W5b: a sealed, approved hook can start a child out of the process
+// group (a new session, its own group, a double fork) and redirect its
+// streams; Verify passed while the child kept running. On Linux the probe
+// must end it and may pass only once nothing is left; on macOS, which has
+// no subreaper, a child it cannot end fails the proof.
+func TestHermesExecutionProbeEndsDescendantsThatLeaveTheGroup(t *testing.T) {
+	if _, err := exec.LookPath("perl"); err != nil {
+		t.Skip("perl not installed")
+	}
+	const (
+		proof    = "printf 'defenseclaw-execution-probe-ok\\n'\n"
+		session  = `perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die' `
+		group    = `perl -e 'setpgrp(0, 0) or die; exec @ARGV or die' `
+		child    = `sh -c 'echo $$ > "$0"; exec sleep 60' "$PIDFILE" </dev/null >/dev/null 2>&1`
+		closed   = `sh -c 'echo $$ > "$0"; exec sleep 60 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-' "$PIDFILE" </dev/null >/dev/null 2>&1`
+		waitPID  = "while [ ! -s \"$PIDFILE\" ]; do sleep 0.01; done\n"
+		exitZero = "exit 0\n"
+	)
+	for name, tc := range map[string]struct {
+		body      string
+		timeout   time.Duration
+		proves    bool
+		linuxOnly bool
+	}{
+		"new session":                    {proof + session + child + " &\n" + waitPID + exitZero, 20 * time.Second, true, false},
+		"double fork into a new session": {proof + "( " + session + child + " & )\n" + waitPID + exitZero, 20 * time.Second, true, false},
+		"own process group":              {proof + group + child + " &\n" + waitPID + exitZero, 20 * time.Second, true, false},
+		"new session, descriptors closed": {
+			proof + session + closed + " &\n" + waitPID + exitZero, 20 * time.Second, true, true,
+		},
+		"new session, then times out":  {session + child + " &\n" + waitPID + "sleep 60\n", 500 * time.Millisecond, false, false},
+		"new session, then overflows":  {proof + session + child + " &\n" + waitPID + "exec yes\n", 20 * time.Second, false, false},
+		"new session, then hook fails": {proof + session + child + " &\n" + waitPID + "exit 1\n", 20 * time.Second, false, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if tc.linuxOnly && runtime.GOOS != "linux" {
+				t.Skip("macOS cannot follow a descendant outside the group that closed its descriptors")
+			}
+			setHermesExecutionProbeBounds(t, tc.timeout, 500*time.Millisecond)
+			pidFile := filepath.Join(testenv.PrivateTempDir(t), "escaped.pid")
+			script := writeHermesProbeScript(t, "PIDFILE='"+pidFile+"'\n"+tc.body)
+			ok := runHermesExecutionProbe(script, []string{"--defenseclaw-execution-probe"})
+			pid := readHermesProbePID(t, pidFile)
+			running := hermesProbeProcessRunning(pid)
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			if runtime.GOOS != "linux" {
+				if ok {
+					t.Fatalf("Verify's probe passed while descendant %d outside the group ran", pid)
+				}
+				return
+			}
+			if running {
+				t.Fatalf("Verify's probe left descendant %d running", pid)
+			}
+			if ok != tc.proves {
+				t.Fatalf("probe = %v, want %v", ok, tc.proves)
+			}
+		})
+	}
 }

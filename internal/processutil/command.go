@@ -20,6 +20,7 @@ package processutil
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 )
 
@@ -52,8 +53,32 @@ func CombinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 // restart (GAP-0418); a managed hook that exited once its answer was out
 // left the tools it had started running (G-small); a Hermes hook Verify
 // probed on macOS left the child it started running (r104 W5b). A
-// descendant that leaves the group (setsid, setpgid) is not followed. Other
+// descendant that leaves the group (setsid, setpgid) is not followed; use
+// RunContained when the result must prove that nothing is left. Other
 // platforms run cmd as is.
 func RunTree(cmd *exec.Cmd) error {
 	return runTree(cmd, false)
+}
+
+// ErrNotContained reports that RunContained could not establish that the
+// command left nothing running.
+var ErrNotContained = errors.New("processutil: could not establish that the command left nothing running")
+
+// RunContained is RunTree for a command whose success counts only when
+// nothing it started outlives it. A Hermes hook that Verify probed could
+// start a child in a session of its own (setsid), out of the process group
+// RunTree kills, and Verify passed while the child kept running (r104 W5b).
+//
+// On Linux a child-subreaper supervisor follows every descendant, also one
+// that left the group or session, and kills and reaps them all; when it
+// cannot, RunContained returns ErrNotContained. macOS has no subreaper: a
+// descendant outside the group that kept an inherited descriptor fails the
+// run with ErrNotContained, and one that also closed its descriptors is not
+// seen. On Windows it is RunTree: the Job Object refuses breakaway. Other
+// platforms never run cmd and return ErrNotContained.
+//
+// cmd must not have been started. On Linux, cmd.Cancel asks the supervisor
+// to end the tree; set cmd.WaitDelay to bound the wait for it.
+func RunContained(cmd *exec.Cmd) error {
+	return runContained(cmd)
 }
