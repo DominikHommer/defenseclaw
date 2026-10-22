@@ -2191,7 +2191,7 @@ class TestCheckHookHealth(unittest.TestCase):
             ambiguous = MagicMock(trusted=False, code="ambiguous_listener", detail="multiple listener owners")
             trusted = MagicMock(trusted=True, pid=4242, detail="")
             with (
-                patch("defenseclaw.commands.cmd_doctor._trusted_gateway_listener", side_effect=[ambiguous, trusted]),
+                patch("defenseclaw.commands.cmd_doctor._trusted_gateway_listener_once", side_effect=[ambiguous, trusted]),
                 patch("defenseclaw.commands.cmd_doctor.time.sleep"),
                 patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, status)) as probe,
             ):
@@ -2199,7 +2199,7 @@ class TestCheckHookHealth(unittest.TestCase):
             self.assertIn("reports stopped", detail)
             probe.assert_called_once()
             with (
-                patch("defenseclaw.commands.cmd_doctor._trusted_gateway_listener", return_value=ambiguous),
+                patch("defenseclaw.commands.cmd_doctor._trusted_gateway_listener_once", return_value=ambiguous),
                 patch("defenseclaw.commands.cmd_doctor.time.sleep"),
                 patch("defenseclaw.commands.cmd_doctor._http_probe") as probe,
             ):

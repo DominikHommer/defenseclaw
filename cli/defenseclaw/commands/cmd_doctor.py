@@ -4994,6 +4994,13 @@ def _gateway_listener_trust(
     )
 
 
+# A fork, or the previous gateway closing its listener after a restart, can
+# briefly expose a second holder of the listening socket (GAP-0535). The
+# ambiguity is re-proved over about 3 s before it is reported; it never
+# authorizes anything, and one that persists stays a failure.
+_LISTENER_SETTLE_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.5)
+
+
 def _trusted_gateway_listener(
     cfg,
     *,
@@ -5001,6 +5008,21 @@ def _trusted_gateway_listener(
     platform_name: str | None = None,
 ) -> _GatewayTrust:
     """Prove an exact local API target before sending a master token."""
+    trust = _trusted_gateway_listener_once(cfg, evidence=evidence, platform_name=platform_name)
+    for delay in _LISTENER_SETTLE_DELAYS:
+        if trust.code != "ambiguous_listener":
+            break
+        time.sleep(delay)
+        trust = _trusted_gateway_listener_once(cfg, evidence=evidence, platform_name=platform_name)
+    return trust
+
+
+def _trusted_gateway_listener_once(
+    cfg,
+    *,
+    evidence: GatewayEvidence | None = None,
+    platform_name: str | None = None,
+) -> _GatewayTrust:
     host = _gateway_api_host(cfg)
     api_port = _gateway_api_port(cfg)
     if not api_port:
@@ -7270,14 +7292,6 @@ def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
     if not token:
         return None, "authenticated gateway token is unavailable", True
     trust = _trusted_gateway_listener(cfg)
-    # A fork can briefly expose a second holder of the listening descriptor.
-    # Re-prove the entire identity/endpoint binding; ambiguity itself never
-    # authorizes the authenticated request. Persistent ambiguity stays closed.
-    for delay in (0.05, 0.1, 0.2, 0.4):
-        if trust.code != "ambiguous_listener":
-            break
-        time.sleep(delay)
-        trust = _trusted_gateway_listener(cfg)
     if not trust.trusted and trust.code == "missing":
         return None, "the gateway is not running", False
     if not trust.trusted:

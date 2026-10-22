@@ -2599,6 +2599,32 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
         self.assertEqual(len(rows), 1, result.checks)
         self.assertEqual(rows[0]["status"], "pass")
 
+    def test_listener_ambiguity_that_clears_is_not_reported_as_a_second_owner(self):
+        # GAP-0535: right after a restart a second holder of the listening
+        # socket can show for a moment. It is proved again before doctor
+        # reports it; one that persists stays a failure.
+        from defenseclaw.commands import cmd_doctor
+
+        process = cmd_doctor._GatewayTrust("trusted", "verified", 4321, home_bound=True)
+        ambiguous = cmd_doctor.ListenerEvidence(
+            "ambiguous", reason="multiple processes own listeners for the configured API endpoint"
+        )
+        owned = cmd_doctor.ListenerEvidence("ok", pid=4321)
+        for sequence, status in (([ambiguous, ambiguous, owned], "pass"), ([ambiguous] * 7, "fail")):
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = self._make_cfg(tmp)
+                result = _DoctorResult()
+                with (
+                    patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+                    patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=process),
+                    patch.object(cmd_doctor, "_managed_gateway_listener_evidence", side_effect=sequence),
+                    patch.object(cmd_doctor.time, "sleep"),
+                ):
+                    cmd_doctor._check_gateway_home_mismatch(cfg, result)
+
+            rows = [c for c in result.checks if c["label"] == "Gateway home"]
+            self.assertEqual([row["status"] for row in rows], [status], result.checks)
+
     def test_silent_when_api_not_reachable(self):
         from defenseclaw.commands import cmd_doctor
 
