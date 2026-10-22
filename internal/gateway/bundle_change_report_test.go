@@ -30,13 +30,11 @@ import (
 
 func writeTestChangeEvent(t *testing.T, dir string, kind, action, outcome, code string, edit func(*enterprisestatus.ChangeEvent)) enterprisestatus.ChangeEvent {
 	t.Helper()
-	ev, err := enterprisestatus.NewChangeEvent(kind, action, outcome, code)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ev := enterprisestatus.NewChangeEvent(kind, action, outcome, code)
 	if edit != nil {
 		edit(&ev)
 	}
+	ev.EventID = ev.ContentID()
 	if err := (enterprisestatus.ChangeSpool{Dir: dir, StateDir: t.TempDir()}).Write(ev); err != nil {
 		t.Fatal(err)
 	}
@@ -143,12 +141,10 @@ func TestBundleReceiptReporterReportsAnInterruptedChangeAtRestart(t *testing.T) 
 	defer held.Release()
 	// The reservation of a command that was killed after it changed the
 	// credential: the provisional event, with no lock on it.
-	ended, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet,
+	ended := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet,
 		enterprisestatus.ChangeFailed, enterprisestatus.ChangeInterrupted)
-	if err != nil {
-		t.Fatal(err)
-	}
 	ended.SecretName = "splunk-hec-token"
+	ended.EventID = ended.ContentID()
 	raw, err := json.Marshal(ended)
 	if err != nil {
 		t.Fatal(err)
@@ -168,16 +164,103 @@ func TestBundleReceiptReporterReportsAnInterruptedChangeAtRestart(t *testing.T) 
 	}
 	newReporter().poll(context.Background())
 	// The next change command moves the reservation into the spool.
-	refusal, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionRemove,
+	refusal := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionRemove,
 		enterprisestatus.ChangeRefused, "invalid_arguments")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := spool.Write(refusal); err != nil {
 		t.Fatal(err)
 	}
 	newReporter().poll(context.Background())
 	if len(sink.changes) != 2 || sink.changes[1].EventID != refusal.EventID {
 		t.Fatalf("changes = %+v, want the interrupted set once, then the refusal", sink.changes)
+	}
+}
+
+// The gateway reports a change event only once it is on disk to stay. While
+// the command that writes it still holds its reservation, the rename may
+// not be flushed: a power loss could take the event back after the
+// gateway stored and offered it, and a destination that refused it would
+// never be offered it again. Before, the gateway reported every event it
+// could read, so it reported this one at once.
+func TestBundleReceiptReporterWaitsForTheWriterToFlushAChangeEvent(t *testing.T) {
+	dir := t.TempDir()
+	spool := enterprisestatus.ChangeSpool{Dir: enterprisestatus.ChangeEventsDir(dir), StateDir: t.TempDir()}
+	reservation, err := spool.Reserve(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(spool.Dir, enterprisestatus.ChangeReservedDirName))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("reservations %v err %v", entries, err)
+	}
+	id := strings.TrimSuffix(entries[0].Name(), ".json")
+	ev := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall,
+		enterprisestatus.ChangeApplied, "")
+	ev.SHA256, ev.ReservationID = strings.Repeat("a", 64), id
+	ev.EventID = ev.ContentID()
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The writer renamed the event into the spool and has not flushed it.
+	if err := os.WriteFile(filepath.Join(spool.Dir, ev.EventID+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sink := &fakeBundleReceiptSink{}
+	reporter := &bundleReceiptReporter{receiptPath: enterprisestatus.PublicReceiptPath(dir),
+		markerPath: filepath.Join(dir, bundleReceiptMarkerName), sink: sink, enforcedVersion: func() uint64 { return 0 }}
+	reporter.poll(context.Background())
+	if len(sink.changes) != 0 {
+		t.Fatalf("an event its writer still holds was reported: %+v", sink.changes)
+	}
+	if err := reservation.Write(ev); err != nil {
+		t.Fatal(err)
+	}
+	reporter.poll(context.Background())
+	if len(sink.changes) != 1 || sink.changes[0].EventID != ev.EventID || sink.changes[0].Outcome != enterprisestatus.ChangeApplied {
+		t.Fatalf("changes = %+v", sink.changes)
+	}
+}
+
+// A change event file whose content is not the content its id hashes
+// (edited after its command wrote it: another outcome, account or
+// credential under the same name and event_id) is never reported, so no
+// sink gets another record under the event's id. Before, the gateway
+// reported whatever the file held under its id.
+func TestBundleReceiptReporterSkipsAChangeEventEditedAfterItWasWritten(t *testing.T) {
+	for name, edit := range map[string]func(map[string]any){
+		"another outcome": func(ev map[string]any) { ev["outcome"], ev["reason_code"] = "failed", "change_failed" },
+		"another account": func(ev map[string]any) { ev["actor"] = "os:uid:501:alice" },
+		"another name":    func(ev map[string]any) { ev["secret_name"] = "otlp-token" },
+		"another time":    func(ev map[string]any) { ev["time"] = "2026-10-21T10:00:00Z" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			spool := enterprisestatus.ChangeEventsDir(dir)
+			ev := writeTestChangeEvent(t, spool, enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet,
+				enterprisestatus.ChangeApplied, "", func(ev *enterprisestatus.ChangeEvent) { ev.SecretName = "splunk-hec-token" })
+			path := filepath.Join(spool, ev.EventID+".json")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			edit(fields)
+			if raw, err = json.Marshal(fields); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			sink := &fakeBundleReceiptSink{}
+			reporter := &bundleReceiptReporter{receiptPath: enterprisestatus.PublicReceiptPath(dir),
+				markerPath: filepath.Join(dir, bundleReceiptMarkerName), sink: sink, enforcedVersion: func() uint64 { return 0 }}
+			reporter.poll(context.Background())
+			if len(sink.changes) != 0 {
+				t.Fatalf("an edited change event was reported: %+v", sink.changes)
+			}
+		})
 	}
 }

@@ -258,6 +258,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// when the decision waits on a remote scanner (hook_progress.go).
 		w, r, closeProgress := withHookProgress(w, r)
 		defer closeProgress()
+		delivery := a.beginHookDeliveryReceipt(w, r)
 		// Resolve the identity-based guardrail profile once, after
 		// authentication, from the route's connector, the verified subject
 		// and the agent identity derived from both (never the payload).
@@ -273,8 +274,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// Run installs the same ordinary API ceiling globally. Keep the hook
 		// handler bounded as a standalone unit too because connector tests and
 		// internal adapters invoke it directly.
-		r.Body = http.MaxBytesReader(w, r.Body, apiRequestBodyMaxBytes)
-		rawBody, err := io.ReadAll(r.Body)
+		var rawBody []byte
+		var err error
+		if delivery != nil {
+			rawBody, err = delivery.readPayload()
+		} else {
+			r.Body = http.MaxBytesReader(w, r.Body, apiRequestBodyMaxBytes)
+			rawBody, err = io.ReadAll(r.Body)
+		}
 		if err != nil {
 			var maxBytesError *http.MaxBytesError
 			if errors.As(err, &maxBytesError) {
@@ -481,9 +488,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, copilotDedupedResponse(profile, req, earlier)))
 			return
 		}
-		// From here on the hook is accepted: its verdict is enforced, so its
-		// correlation, hook_decision and audit row must not depend on the client
-		// waiting for the response.
+		// From here on the hook is accepted. A managed native hook confirms
+		// delivery before the hook_decision and audit row claim enforcement.
+		// Other callers keep the ordinary response contract.
 		ctx, cancelCompletion := agentHookCompletionContext(r.Context())
 		defer cancelCompletion()
 		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, b)
@@ -681,12 +688,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// the kernel denials its tool calls hit (kernel_block_notice.go).
 			resp = a.safeAddKernelBlockNotice(ctx, profile, connectorName, req, b, payload, resp)
 		}
-		elapsed := time.Since(t0)
-		enrichAgentHookSpan(ctx, req, resp, elapsed)
-		if panicked {
-			enrichAgentHookSpanPanic(ctx)
-		}
-
 		// Re-inject the cloud-controlled per-inspection redaction
 		// directive the evaluator resolved (evaluate*'s ctx-injection is
 		// local to that call) so finalizeAgentHook emits the
@@ -703,6 +704,28 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
+		// A managed answer is only an evaluated proposal until the hook
+		// commits it to its agent: the audit row, hook_decision and
+		// dedupe get the decision the agent was given (GAP-0286).
+		wireResp := resp
+		if delivery != nil {
+			attemptedWrite = true
+			receipt := delivery.offer(w, func() {
+				a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, wireResp))
+			})
+			if receipt == hookexec.HookDeliveryReleased {
+				resp = a.unreceiptedHookDecision(r.Context(), connectorName, req.HookEventName, resp)
+			} else {
+				resp = a.deliveredHookDecision(connectorName, resp, receipt)
+			}
+		} else {
+			resp = a.unreceiptedHookDecision(r.Context(), connectorName, req.HookEventName, resp)
+		}
+		elapsed := time.Since(t0)
+		enrichAgentHookSpan(ctx, req, resp, elapsed)
+		if panicked {
+			enrichAgentHookSpanPanic(ctx)
+		}
 		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 		defer cancelPersist()
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
@@ -714,7 +737,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// fail-mode verdict (finalizeAgentHook); the agent, a second Copilot
 		// delivery and the AID accounting all get that one.
 		resp = finalization.Response
-		if !panicked {
+		if delivery == nil && finalization.AuditFailedClosed {
+			// Not delivered yet (no receipt channel): the agent gets the
+			// fail-mode verdict its audit row recorded. A delivered answer
+			// (GAP-0286 receipt) already reached the agent; its audit row
+			// and dedupe record carry the fail-mode verdict.
+			wireResp = resp
+		}
+		if !panicked && resp.Action != hookActionUnconfirmed {
 			dedupeTicket.complete(resp)
 		}
 		if err := chainFinalization.attach(persistCtx, resp.EvaluationID); err != nil {
@@ -748,7 +778,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// Code and Codex agent CLIs reject. See
 		// renderAgentHookResponse() for the canonical
 		// connector → field-name mapping.
-		a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, resp))
+		if delivery == nil {
+			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, wireResp))
+		}
 	}
 }
 
@@ -1392,6 +1424,7 @@ var hookReasonLabelAllowlist = map[string]struct{}{
 	"alert":       {},
 	"confirm":     {},
 	"would_block": {},
+	"unconfirmed": {},
 	"panic":       {},
 	"other":       {},
 	"none":        {},

@@ -50,6 +50,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -4322,7 +4323,11 @@ func maxBodyMiddleware(next http.Handler, maxBytes int64) http.Handler {
 func bodyLimitMiddleware(next http.Handler, maxBytes func(*http.Request) int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
-			r.Body = http.MaxBytesReader(w, r.Body, maxBytes(r))
+			limit := maxBytes(r)
+			if r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" {
+				limit += int64(len(hookexec.HookDeliveryReceiptBlock))
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
 	})

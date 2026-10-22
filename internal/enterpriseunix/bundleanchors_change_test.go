@@ -238,11 +238,8 @@ func fillChangeSpool(t *testing.T, dir string, n int) {
 		t.Fatal(err)
 	}
 	for i := 0; i < n; i++ {
-		ev, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall,
+		ev := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall,
 			enterprisestatus.ChangeApplied, "")
-		if err != nil {
-			t.Fatal(err)
-		}
 		if err := os.WriteFile(filepath.Join(dir, ev.EventID+".json"), []byte("{}\n"), 0o640); err != nil {
 			t.Fatal(err)
 		}
@@ -276,11 +273,8 @@ func TestInstallBundleAnchorsRefusedWhileAnotherChangeHoldsTheLastPlace(t *testi
 	if readFile(t, dest) != before {
 		t.Fatal("the anchor file was written with no room left for its change event")
 	}
-	applied, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet,
+	applied := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet,
 		enterprisestatus.ChangeApplied, "")
-	if err != nil {
-		t.Fatal(err)
-	}
 	applied.SecretName = "splunk-hec-token"
 	if err := held.Write(applied); err != nil {
 		t.Fatalf("the change that held the place could not record its event: %v", err)

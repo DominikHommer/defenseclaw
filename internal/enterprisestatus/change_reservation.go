@@ -39,12 +39,16 @@ import (
 // is held only while a command counts and reserves, or writes an event.
 // A reservation is <Dir>/reserved/<event_id>.json, with the access of the
 // spool: the event the change records if its command ends before it
-// writes one (failed, interrupted). Its command holds a lock on it from
-// before the event is in it until the file is emptied. A reservation
-// nobody holds belongs to a command that ended. The gateway reports its
-// event at its next poll, a restart included (EndedChangeReservations),
-// and the next writer moves it into the spool, so the attempt is reported
-// even when no other command runs.
+// writes one (failed, interrupted), flushed with its folder before the
+// change is made. Its command holds a lock on it from before the event is
+// in it until the file is emptied. The outcome the command then writes is
+// another event, with its own id (the hash of its content), that names the
+// reservation (reservation_id); the spool settles a reservation with that
+// event or with the reserved event itself. A reservation nobody holds
+// belongs to a command that ended. Unless the spool settles it, the gateway
+// reports its event at its next poll, a restart included
+// (EndedChangeReservations), and the next writer moves it into the spool,
+// so the attempt is reported even when no other command runs.
 
 const (
 	changeSpoolLockName = "change-events.lock"
@@ -74,6 +78,15 @@ var (
 	syncChangeDir    = configwrite.SyncDir
 	syncChangeFile   = configwrite.SyncFile
 	syncChangeHandle = (*os.File).Sync
+	// flushEndedReservation flushes a reservation the gateway read through
+	// its read-only handle (POSIX fsync needs no write access; Windows
+	// cannot flush a read-only handle and journals the file).
+	flushEndedReservation = func(file *os.File) error {
+		if runtime.GOOS == "windows" {
+			return nil
+		}
+		return file.Sync()
+	}
 )
 
 // ChangeReservation is the room in the spool for the event of one change in
@@ -93,14 +106,17 @@ type ChangeReservation struct {
 // file, its entry in the reserved folder and the folders created for it
 // are flushed, so a power loss after the change cannot lose the event.
 func (s ChangeSpool) Reserve(kind, action, name string) (*ChangeReservation, error) {
-	ev, err := NewChangeEvent(kind, action, ChangeFailed, ChangeInterrupted)
-	if err != nil {
-		return nil, err
-	}
+	ev := NewChangeEvent(kind, action, ChangeFailed, ChangeInterrupted)
 	if kind == ChangeKindSecret && ValidChangeSecretName(name) {
 		ev.SecretName = name
 	}
-	data, err := marshalChangeEvent(ev)
+	return s.reserve(ev)
+}
+
+// reserve holds room for ev under its id (ContentID); ev is what the spool
+// records if its command ends before it writes its outcome.
+func (s ChangeSpool) reserve(ev ChangeEvent) (*ChangeReservation, error) {
+	ev, data, err := marshalChangeEvent(ev)
 	if err != nil {
 		return nil, err
 	}
@@ -172,30 +188,37 @@ func lockNewChangeFile(file *os.File, path string) error {
 
 func (s ChangeSpool) reservedDir() string { return filepath.Join(s.Dir, ChangeReservedDirName) }
 
-// Write records ev, the outcome of the change, in the reserved room; the
-// event takes the id of the reservation. When it cannot, the reservation is
-// left for the next writer, which records the change as interrupted.
+// Write records ev, the outcome of the change, in the reserved room: ev
+// names the reservation (reservation_id) and gets its own id, the hash of
+// its content. When it cannot, the reservation is left for the next writer,
+// which records the change as interrupted.
 func (r *ChangeReservation) Write(ev ChangeEvent) error {
 	if r == nil || r.file == nil {
 		return errChangeReservationUsed
 	}
-	ev.EventID = r.id
-	data, err := marshalChangeEvent(ev)
+	ev.ReservationID = r.id
+	ev, data, err := marshalChangeEvent(ev)
 	if err != nil {
 		r.abandon()
 		return err
 	}
+	return r.commit(ev.EventID, data)
+}
+
+// commit writes the event id (data, which settles the reservation) into the
+// spool, then lets go of the reservation.
+func (r *ChangeReservation) commit(id string, data []byte) error {
 	unlock, err := r.spool.lock()
 	if err != nil {
 		r.abandon()
 		return err
 	}
 	defer unlock()
-	if err := r.spool.writeEvent(r.id, data); err != nil {
+	if err := r.spool.writeEvent(id, data); err != nil {
 		r.abandon()
 		return err
 	}
-	// The event is durable under the reservation's id, so a reservation a
+	// The event that settles the reservation is durable, so a reservation a
 	// power loss brings back is not recorded again (recordInterrupted,
 	// EndedChangeReservations): a release that is not flushed changes
 	// nothing here.
@@ -313,6 +336,7 @@ func (s ChangeSpool) settleReservations() (held int, err error) {
 	if err != nil {
 		return 0, err
 	}
+	settled := lazyChangeSettlements(s.Dir)
 	for _, entry := range entries {
 		id, ok := strings.CutSuffix(entry.Name(), ".json")
 		if !ok || !ValidChangeEventID(id) || !entry.Type().IsRegular() {
@@ -330,7 +354,7 @@ func (s ChangeSpool) settleReservations() (held int, err error) {
 			held++
 			continue
 		}
-		err = s.recordInterrupted(id, file)
+		err = s.recordInterrupted(id, file, settled)
 		unlockChangeFile(file)
 		_ = file.Close()
 		if err != nil {
@@ -342,33 +366,71 @@ func (s ChangeSpool) settleReservations() (held int, err error) {
 }
 
 // recordInterrupted writes the event of a reservation whose command ended,
-// unless the gateway already reported it or that command wrote its own
-// (the same id). The caller removes the reservation only when it returns
-// nil, so an event of the command is kept as the outcome only once it
-// validates and Publish gave it the gateway's access again (an access
-// changed since is restored; a failure keeps the reservation). An event
-// file that does not validate is replaced by the reservation's event. A
-// damaged reservation records nothing.
-func (s ChangeSpool) recordInterrupted(id string, file *os.File) error {
+// unless the gateway already reported it or the spool settles it (settled:
+// the outcome its command wrote, or the reserved event already moved in).
+// The caller removes the reservation only when it returns nil, so an event
+// that settles it is kept only once it validates and Publish gave it the
+// gateway's access again (an access changed since is restored; a failure
+// keeps the reservation). An event file under the reservation's id that
+// does not validate is replaced by the reservation's event. A damaged
+// reservation records nothing.
+func (s ChangeSpool) recordInterrupted(id string, file *os.File, settled func(id string) (string, bool)) error {
 	if s.Reported != nil && s.Reported(id) {
 		return nil
 	}
-	path := filepath.Join(s.Dir, id+".json")
-	if ev, err := ReadChangeEvent(path); err == nil && ev.EventID == id {
-		if s.Publish == nil {
-			return nil
+	if path, ok := settled(id); ok {
+		if s.Publish != nil {
+			if err := s.Publish(path); err != nil {
+				return err
+			}
+			// The access is durable before the reservation goes.
+			if err := syncChangeFile(path); err != nil {
+				return err
+			}
 		}
-		if err := s.Publish(path); err != nil {
-			return err
-		}
-		// The access is durable before the reservation goes.
-		return syncChangeFile(path)
+		// Its command may have stopped after the rename and before it
+		// flushed the spool: the event's entry is durable before the
+		// reservation goes.
+		return syncChangeDir(s.Dir)
 	}
 	raw, _, ok := readReservation(file, id)
 	if !ok {
 		return nil
 	}
 	return s.writeEvent(id, raw)
+}
+
+// changeSettlements maps the id of every reservation the spool dir settles
+// to the event file that settles it: each event that validates settles its
+// own id (a reserved event moved into the spool) and the reservation it
+// names (the outcome its command wrote).
+func changeSettlements(dir string) map[string]string {
+	settled := map[string]string{}
+	for _, id := range ListChangeEventIDs(dir) {
+		path := filepath.Join(dir, id+".json")
+		ev, err := ReadChangeEvent(path)
+		if err != nil || ev.EventID != id {
+			continue
+		}
+		settled[id] = path
+		if ev.ReservationID != "" {
+			settled[ev.ReservationID] = path
+		}
+	}
+	return settled
+}
+
+// lazyChangeSettlements reads changeSettlements(dir) on its first call
+// only: the spool is read only when a reservation's command ended.
+func lazyChangeSettlements(dir string) func(id string) (string, bool) {
+	var settled map[string]string
+	return func(id string) (string, bool) {
+		if settled == nil {
+			settled = changeSettlements(dir)
+		}
+		path, ok := settled[id]
+		return path, ok
+	}
 }
 
 // readReservation reads the event of reservation id from file. An emptied
@@ -388,9 +450,9 @@ func readReservation(file *os.File, id string) ([]byte, ChangeEvent, bool) {
 
 // EndedChangeReservations is for the gateway, which reads the change spool
 // dir and cannot write it. It returns, oldest first, the event of every
-// reservation whose command ended before it wrote its outcome and whose
-// event the spool does not hold in a form the gateway can read and
-// validate: the change it held room for may have been made, so it is
+// reservation whose command ended before it wrote its outcome and that no
+// event the gateway can read and validate settles (changeSettlements):
+// the change it held room for may have been made, so it is
 // reported as failed (interrupted) at the gateway's next poll, even when
 // no later command moves it into the spool. A reservation still held, an
 // emptied one and one that does not validate are skipped.
@@ -406,19 +468,20 @@ func EndedChangeReservations(dir string) []ChangeEvent {
 		return nil
 	}
 	var out []ChangeEvent
+	settled := lazyChangeSettlements(dir)
 	for _, entry := range entries {
 		id, ok := strings.CutSuffix(entry.Name(), ".json")
 		if !ok || !ValidChangeEventID(id) || !entry.Type().IsRegular() {
 			continue
 		}
-		if ev, ok := readEndedReservation(dir, filepath.Join(reserved, entry.Name()), id); ok {
+		if ev, ok := readEndedReservation(filepath.Join(reserved, entry.Name()), id, settled); ok {
 			out = append(out, ev)
 		}
 	}
 	return out
 }
 
-func readEndedReservation(dir, path, id string) (ChangeEvent, bool) {
+func readEndedReservation(path, id string, settled func(id string) (string, bool)) (ChangeEvent, bool) {
 	file, err := openChangeFile(path, os.O_RDONLY)
 	if err != nil {
 		return ChangeEvent{}, false
@@ -428,12 +491,38 @@ func readEndedReservation(dir, path, id string) (ChangeEvent, bool) {
 		return ChangeEvent{}, false
 	}
 	defer unlockChangeFile(file)
-	// Its command writes the event into the spool before it lets go of the
-	// reservation, so an event there that the gateway reads is the outcome.
-	// One it cannot read or validate is not reported, so the reservation is.
-	if ev, err := ReadChangeEvent(filepath.Join(dir, id+".json")); err == nil && ev.EventID == id {
+	// Its command writes the event that settles it into the spool before it
+	// lets go of the reservation, so an event there that the gateway reads
+	// is the outcome. One it cannot read or validate settles nothing, so the
+	// reservation is reported.
+	if _, ok := settled(id); ok {
 		return ChangeEvent{}, false
 	}
 	_, ev, ok := readReservation(file, id)
-	return ev, ok
+	// A command that stopped inside Reserve may not have flushed its
+	// reservation: it is reported only once it is on disk to stay.
+	if !ok || flushEndedReservation(file) != nil || syncChangeDir(filepath.Dir(path)) != nil {
+		return ChangeEvent{}, false
+	}
+	return ev, true
+}
+
+// changeReservationHeld reports whether the reservation at path exists and
+// its command holds it. A reservation the gateway cannot open or lock is
+// counted as held.
+func changeReservationHeld(path string) bool {
+	file, err := openChangeFile(path, os.O_RDONLY)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	defer file.Close()
+	locked, err := tryLockChangeFile(file)
+	if err != nil || !locked {
+		return true
+	}
+	unlockChangeFile(file)
+	return false
 }

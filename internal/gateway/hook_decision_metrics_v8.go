@@ -457,7 +457,7 @@ func hookDecisionV8Outcome(action, result string) observability.Outcome {
 		return observability.OutcomeAllowed
 	case "block":
 		return observability.OutcomeBlocked
-	case "confirm":
+	case "confirm", hookActionUnconfirmed:
 		return observability.OutcomePartial
 	default:
 		return observability.OutcomeCompleted

@@ -118,13 +118,11 @@ func secretChangeEvent(action, name string, changed bool, failureCode string, er
 	if action != enterprisestatus.ChangeActionSet && action != enterprisestatus.ChangeActionRemove {
 		return enterprisestatus.ChangeEvent{}, false
 	}
-	ev, evErr := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, action, outcome, failureCode)
-	if evErr != nil {
-		return enterprisestatus.ChangeEvent{}, false
-	}
+	ev := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, action, outcome, failureCode)
 	if managed.ValidCredentialName(name) {
 		ev.SecretName = name
 	}
+	ev.EventID = ev.ContentID()
 	return ev, true
 }
 
@@ -135,16 +133,14 @@ func anchorsChangeEvent(previous, installed []byte) (enterprisestatus.ChangeEven
 	if previous != nil && bytes.Equal(previous, installed) {
 		return enterprisestatus.ChangeEvent{}, false
 	}
-	ev, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall,
+	ev := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall,
 		enterprisestatus.ChangeApplied, "")
-	if err != nil {
-		return enterprisestatus.ChangeEvent{}, false
-	}
 	ev.SHA256 = anchorsSHA256(installed)
 	if previous != nil {
 		ev.PreviousSHA256 = anchorsSHA256(previous)
 	}
 	ev.KeyIDsAdded, ev.KeyIDsRemoved = enterprisestatus.ChangedKeyIDs(anchorKeyIDs(previous), anchorKeyIDs(installed))
+	ev.EventID = ev.ContentID()
 	return ev, true
 }
 
@@ -155,13 +151,11 @@ func anchorsFailureEvent(code string, failed bool, installed []byte) (enterprise
 	if failed {
 		outcome = enterprisestatus.ChangeFailed
 	}
-	ev, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, outcome, code)
-	if err != nil {
-		return enterprisestatus.ChangeEvent{}, false
-	}
+	ev := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, outcome, code)
 	if installed != nil {
 		ev.SHA256 = anchorsSHA256(installed)
 	}
+	ev.EventID = ev.ContentID()
 	return ev, true
 }
 

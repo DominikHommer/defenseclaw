@@ -1152,12 +1152,21 @@ type ActivityInput struct {
 	// ConfigChange is set only on a trust anchor or credential change
 	// record (LogConfigChange).
 	ConfigChange *ConfigChange
-	// OccurrenceID, when set, is the audit event id. A record already
-	// stored under it is not written again, so a producer that re-offers
-	// the same event after a restart records it once; the offer sends the
-	// stored record again to the remote destinations that do not have it.
-	// The call returns nil only once the record survives a power loss.
+	// OccurrenceID, when set, is the audit event id of an occurrence its
+	// producer keeps in a durable spool and offers until every sink has it.
+	// A record already stored under it is not written again, so a producer
+	// that re-offers the same event after a restart records it once; every
+	// offer sends the record to the remote destinations that do not have it.
+	// The call returns nil only once the row survives a power loss.
 	OccurrenceID string
+	// Pins and PinKey, with OccurrenceID, keep the record of every offer
+	// the same: the first offer pins it (ConfigChangePin) under PinKey, the
+	// producer's spool event id, before any sink gets it.
+	Pins   *ConfigChangePins
+	PinKey string
+	// OccurredAt, with OccurrenceID, is the time of the occurrence, which
+	// its record keeps on every offer.
+	OccurredAt time.Time
 	// RemoteDelivery, with OccurrenceID, follows the record's remote
 	// destinations across offers (observability.RemoteDelivery). Nil
 	// follows this offer only.

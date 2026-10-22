@@ -38,18 +38,31 @@ gateway.
   (actor, `sha256`, `previous_sha256`, key ids added and removed),
   `config.secret.changed` and `config.secret.change_failed` (actor,
   credential name, action, outcome, reason code). A change made while the
-  gateway is stopped is reported when it starts. An event stays in the
-  spool until the gateway has reported it: its audit row is flushed to disk
-  (it survives a power loss) and every OTel destination acknowledged it. A
-  destination that refuses it or cannot be reached gets it again, under the
-  same record id, at a later poll; after a gateway restart an unreported
-  event goes to every destination again, so a destination can receive it
-  twice with the same id. Every copy is the stored record: the same time,
-  run, sidecar, binary and config values, whichever gateway process sends
-  it. A gateway that cannot rebuild the stored record exactly (it was
-  upgraded to a build with another record schema, or collection now keeps
-  only the mandatory floor for it) does not send it, and the event stays in
-  the spool. A command that cannot record
+  gateway is stopped is reported when it starts. The spool is the durable
+  record of each change: the command writes and flushes room for its event
+  (file and folder) before it changes anything, and the gateway reports an
+  event only once it is on disk to stay (its command has flushed it). An
+  event's id is the hash of its content (its outcome, actor, time, hashes,
+  key ids and credential name): a file changed after it was written does
+  not validate and is never reported, so no destination gets another
+  record under an event's id. One sender in the gateway reads the spool
+  and delivers each event to the audit store and to every OTel destination,
+  each on its own: a destination does not wait for the audit row. An event
+  stays in the spool until every one has it: its audit row is flushed to
+  disk (it survives a power loss) and every OTel destination acknowledged
+  it. A destination that refuses it or cannot be reached gets it again,
+  under the same record id, at a later poll, also after a config reload;
+  after a gateway restart an unreported event goes to every destination
+  again, so a destination can receive it twice with the same id. Every
+  copy, the audit row included, is the same record: before any sink gets
+  an event, the gateway pins the run, sidecar, binary and config values of
+  that first offer (a file in its data directory, flushed), and builds
+  every later offer, after a restart or a config reload too, from the event
+  and its pin. An offer that would be another record (the pin or the row
+  was changed, or collection now admits another form) is not sent. A
+  destination still gets the event while the audit store cannot be read
+  or written; the event then stays in the spool until its row is on disk.
+  A command that cannot record
   its change (the spool cannot be written, or holds 4096 events the gateway
   has not reported) refuses it with `state_invalid` before anything is
   changed. The command holds room for its event from that check until the

@@ -79,6 +79,25 @@ func gatewayAnswerWindowShort(opts Options, deadline time.Time) bool {
 // informational response.
 const HookProgressHeader = "X-DefenseClaw-Hook-Progress"
 
+// HookDeliveryReceiptHeader selects the full-duplex managed hook protocol.
+// The hook sends the receipt only after committing the answer to the agent.
+const HookDeliveryReceiptHeader = "X-DefenseClaw-Hook-Delivery-Receipt"
+
+const HookDeliveryPayloadBytesHeader = "X-DefenseClaw-Hook-Payload-Bytes"
+
+const HookDeliveryRequiredHeader = "X-DefenseClaw-Hook-Delivery-Required"
+
+const HookDeliveryReceiptAck = "ack\n"
+
+const HookDeliveryReceiptBlock = "block\n"
+
+// HookDeliveryReleased ends the request body of a hook whose capability wait
+// passed without a 103: the hook takes the ordinary answer and sends no
+// receipt. It is JSON whitespace, so an older gateway's decoder ignores it.
+const HookDeliveryReleased = "\n"
+
+const HookDeliveryConfirmed = "received\n"
+
 // HookProgressStatus is the informational status of that report.
 const HookProgressStatus = http.StatusProcessing
 

@@ -15,18 +15,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package hookexec runs DefenseClaw agent hooks natively in Go instead of via
-// the bundled Bash hook scripts. It is the execution path used on Windows,
-// where agents invoke the DefenseClaw binary directly (no Git Bash, no .cmd
-// wrapper, no jq, and no PATH lockdown — because Go never shells out).
+// the bundled Bash hook scripts. It is used on Windows and by managed native
+// hooks on Unix; Windows agents invoke the binary directly without Git Bash,
+// a .cmd wrapper, or jq.
 //
 // The behavior here mirrors the .sh hooks under internal/gateway/connector/hooks:
 // the same gateway endpoint, per-connector stdout shape and exit code, and the
-// same fail-open-on-outage / fail-closed-on-misconfig policy. Native transport
-// deadlines may follow the agent's registered event budget. Unix keeps using
-// the .sh hooks unchanged; golden tests pin the shared decision contract.
+// same configured outage behavior and closed misconfiguration policy. Native
+// transport deadlines may follow the agent's registered event budget. Golden
+// tests pin the shared decision contract.
 package hookexec
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -607,7 +608,12 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 	}
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, requestTimeout)
-	defer cancel()
+	requestHandedOff := false
+	defer func() {
+		if !requestHandedOff {
+			cancel()
+		}
+	}()
 	if opts.ManagedEnterprise && opts.ManagedStandalone && strings.TrimSpace(opts.ManagedUnixSocket) == "" {
 		// The standalone profile has exactly one hook transport, the
 		// peer-authorized unix socket. Without it there is nothing this
@@ -646,7 +652,7 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 		// The standalone hook socket authenticates this process by its
 		// kernel-verified uid. No bearer is read or sent, so there is no
 		// user-readable credential to steal or replay.
-		return doRequest(ctx, opts, sp, failMode, payload, "")
+		return doRequest(ctx, opts, sp, failMode, payload, "", cancel, &requestHandedOff)
 	}
 	if opts.ManagedEnterprise && opts.AuthenticatedManagedToken != nil {
 		// The resolver authenticated this token as part of one immutable
@@ -696,7 +702,7 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 		}
 	}
 
-	return doRequest(ctx, opts, sp, failMode, payload, token)
+	return doRequest(ctx, opts, sp, failMode, payload, token, cancel, &requestHandedOff)
 }
 
 // RunCodexNotify forwards the JSON payload Codex appends to its configured
@@ -793,7 +799,7 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 // doRequest performs the gateway POST and dispatches the response through the
 // connector-specific decision logic, applying the transport vs response
 // failure split exactly like the .sh hooks.
-func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payload []byte, token string) int {
+func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payload []byte, token string, requestCancel context.CancelFunc, requestHandedOff *bool) int {
 	if pid := perUserForeignListener(opts); pid > 0 {
 		return failUnreachable(opts, sp, failMode, foreignListenerReason(opts.APIAddr, pid))
 	}
@@ -803,18 +809,24 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// resends below (hookAnswerBudget).
 	opts.answerBy = answerDeadline(opts, opts.StartedAt)
 	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch)
-	defer releaseAnswer()
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
-	defer releaseWatch()
 	// The account, its session, the asset facts and the resolved write
 	// paths are computed once, for every try of this call.
 	opts.requestFacts = &hookRequestFacts{}
 	// A try that must have its connection within the restart budget
 	// (connectBy); the response is read under its context.
 	var releases []func()
-	defer func() {
+	cleanup := func() {
 		for _, release := range releases {
 			release()
+		}
+		releaseWatch()
+		releaseAnswer()
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cleanup()
 		}
 	}()
 	// A per-user hook's first try always gets a moment to connect
@@ -868,7 +880,6 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			break
 		}
 	}
-	stopWatch()
 	if errors.Is(err, errInvalidHookRequest) {
 		return failResponse(opts, sp, failMode, err.Error())
 	}
@@ -952,6 +963,18 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
 		noteStatus()
 	}
+	delivery := (*hookDeliveryRequest)(nil)
+	if err == nil && resp != nil {
+		delivery = hookDeliveryResponse(resp.Body)
+	}
+	stopWatch()
+	if delivery != nil && !delivery.capabilityReceived() {
+		// A server that asks for a receipt without advertising full duplex
+		// cannot accept one: its proposal is not an enforceable answer.
+		delivery.close()
+		_ = resp.Body.Close()
+		return failResponse(opts, sp, "closed", "gateway delivery confirmation unavailable")
+	}
 	if err != nil {
 		reason := "gateway unreachable"
 		switch cause := context.Cause(ctx); {
@@ -976,13 +999,36 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if !handedOff {
+			_ = resp.Body.Close()
+		}
+	}()
 	// The decision is in only when its whole body is: the answer budget
 	// holds while it is read. A gateway that sent its headers and part of a
 	// body, then stalled or dropped the connection, has not answered, and
 	// the bytes it sent are never taken as its decision.
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody+1))
-	stopAnswer()
+	var body []byte
+	var readErr error
+	if delivery != nil || resp.Header.Get(HookDeliveryRequiredHeader) == "1" {
+		// A released request's answer is the same one line, ahead of the
+		// gateway's audit write.
+		body, readErr = bufio.NewReader(io.LimitReader(resp.Body, defaultMaxBody+1)).ReadBytes('\n')
+	} else {
+		body, readErr = io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody+1))
+	}
+	if delivery == nil {
+		stopAnswer()
+	}
+	if (readErr != nil || int64(len(body)) > defaultMaxBody) && managedNativeDecision(opts) &&
+		(resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		// The status line already says the gateway refused the call's
+		// credential: an integrity failure, closed on a standalone host in
+		// every fail mode, whatever happens to the body after it. Before,
+		// a truncated or oversized 401/403 body took the no-answer or
+		// unusable-answer path, which an open fail mode allows.
+		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+	}
 	if readErr != nil {
 		// The status line of an error answer already says the gateway is
 		// up: a body cut off after it is no outage on a standalone hook.
@@ -1031,7 +1077,28 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
 
-	return sp.decide(opts, body)
+	code := sp.decide(opts, body)
+	if delivery != nil && resp.StatusCode == http.StatusOK && readErr == nil {
+		opts.answerWatch.setDeliveryReceipt(func(answered, localBlock bool) {
+			if answered {
+				if delivery.acknowledge(localBlock) == nil {
+					// Keep the request alive until HTTP has carried the receipt
+					// to the gateway. A successful Pipe.Write alone only proves
+					// that the transport read it into its own buffer.
+					var confirmed [len(HookDeliveryConfirmed)]byte
+					_, _ = io.ReadFull(resp.Body, confirmed[:])
+				}
+			} else {
+				delivery.close()
+			}
+			_ = resp.Body.Close()
+			cleanup()
+			requestCancel()
+		})
+		handedOff = true
+		*requestHandedOff = true
+	}
+	return code
 }
 
 // failAfterErrorStatus fails a call the gateway answered with the error
@@ -1200,8 +1267,27 @@ func sendHookRequest(
 		req.Header.Set("tracestate", v)
 	}
 	opts.requestFacts.set(req.Header, opts, payload)
-
-	return opts.HTTPClient.Do(req)
+	var delivery *hookDeliveryRequest
+	if wantsHookDeliveryReceipt(opts) {
+		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts))
+	}
+	resp, err := opts.HTTPClient.Do(req)
+	if err != nil {
+		if delivery != nil {
+			delivery.close()
+		}
+		return nil, err
+	}
+	if delivery != nil {
+		// A 103 after the capability wait still asks for a receipt; the
+		// gateway reads the released marker instead and takes none.
+		if resp.Header.Get(HookDeliveryRequiredHeader) == "1" && !delivery.wasReleased() {
+			resp.Body = &hookDeliveryResponseBody{ReadCloser: resp.Body, delivery: delivery}
+		} else {
+			delivery.close()
+		}
+	}
+	return resp, nil
 }
 
 // hookRequestFacts are the headers of a hook call that cost work to

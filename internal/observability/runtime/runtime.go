@@ -480,9 +480,7 @@ func (runtime *Runtime) emitWithLeaseControls(
 		// A failed SQLite write (disk full) still hands back the remote
 		// projections: export this gateway's own records so the decision and
 		// the outage stay visible remotely while the local store is down
-		// (GAP-1536). Imported records, and records marked
-		// observability.WithExportAfterLocalWrite (Process returns no
-		// remote work for them), stay SQLite-first.
+		// (GAP-1536). Imported records stay SQLite-first.
 		if len(outcome.OptionalWork()) > 0 {
 			if inbound {
 				return pipeline.LocalLogOutcome{}, processErr
@@ -516,7 +514,8 @@ func (runtime *Runtime) emitWithLeaseControls(
 
 // leaseRecordBuilder builds one occurrence's record on the pinned generation:
 // it stamps the runtime correlation and checks the record names that
-// generation. Emit and EmitAtomicBatch share it.
+// generation, or the config a spooled occurrence's record was pinned on
+// (observability.WithPinnedProvenance). Emit and EmitAtomicBatch share it.
 func leaseRecordBuilder(
 	ctx context.Context,
 	lease *runtimegraph.Lease,
@@ -555,9 +554,16 @@ func leaseRecordBuilder(
 		if err != nil {
 			return observability.Record{}, &emitBuilderError{}
 		}
+		generation, digest := snapshot.Generation(), snapshot.Digest()
+		if pinned, ok := observability.PinnedProvenanceFrom(ctx); ok && !inbound {
+			// A spooled occurrence's record is pinned on its first offer and
+			// keeps that config on every offer (audit.ConfigChangePin), so a
+			// reload never makes another record under its id.
+			generation, digest = pinned.ConfigGeneration, pinned.ConfigDigest
+		}
 		provenance := record.Provenance()
-		if provenance.ConfigDigest != snapshot.Digest() || provenance.ConfigGeneration < 0 ||
-			uint64(provenance.ConfigGeneration) != snapshot.Generation() {
+		if provenance.ConfigDigest != digest || provenance.ConfigGeneration < 0 ||
+			uint64(provenance.ConfigGeneration) != generation {
 			return observability.Record{}, &emitBuilderError{}
 		}
 		return record, nil
@@ -569,8 +575,7 @@ func leaseRecordBuilder(
 // hands each persisted record's optional work to that generation's
 // dispatchers, as Emit does for one. A dropped item takes Emit's
 // managed-destination fallback. When the commit fails nothing is persisted and
-// the remote projections are dispatched, as Emit does on a failed write,
-// except those of an item marked observability.WithExportAfterLocalWrite.
+// the remote projections are dispatched, as Emit does on a failed write.
 func (runtime *Runtime) EmitAtomicBatch(
 	ctx context.Context,
 	items []LogBatchItem,
@@ -580,10 +585,10 @@ func (runtime *Runtime) EmitAtomicBatch(
 		return nil, &Error{code: ErrorInvalidDependency}
 	}
 	for index := range items {
-		// A stored-record replay goes through Emit, which skips its local
-		// write; a batch always writes every item.
+		// An occurrence marked observability.WithSkipLocalWrite goes through Emit,
+		// which skips its local write; a batch always writes every item.
 		if items[index].Context == nil || items[index].Builder == nil ||
-			observability.StoredReplay(items[index].Context) {
+			observability.SkipLocalWrite(items[index].Context) {
 			return nil, &Error{code: ErrorInvalidDependency}
 		}
 	}
@@ -623,8 +628,7 @@ func (runtime *Runtime) EmitAtomicBatch(
 		}
 		outcome := outcomes[index]
 		if outcome.LocalPersisted() || outcome.ManagedOnly() ||
-			(processErr != nil && len(outcome.OptionalWork()) > 0 &&
-				!observability.ExportAfterLocalWrite(items[index].Context)) {
+			(processErr != nil && len(outcome.OptionalWork()) > 0) {
 			runtime.dispatchOptional(items[index].Context, lease, graph, outcome)
 		}
 	}
@@ -634,7 +638,8 @@ func (runtime *Runtime) EmitAtomicBatch(
 // dispatchOptional enqueues a log outcome's optional-destination work and
 // records its projection failures. The observability.RemoteDelivery of ctx,
 // if any, gets every outcome; a destination that acknowledged an earlier
-// offer of the occurrence is not sent it again.
+// offer of the occurrence, or still has one in flight, is not sent it
+// again.
 func (runtime *Runtime) dispatchOptional(
 	ctx context.Context,
 	lease *runtimegraph.Lease,
@@ -664,7 +669,7 @@ func (runtime *Runtime) dispatchOptional(
 		tracker.Fail(failure.DestinationName())
 	}
 	for _, work := range outcome.OptionalWork() {
-		if tracker.Acknowledged(work.Delivery().DestinationName) {
+		if !tracker.Pending(work.Delivery().DestinationName) {
 			continue
 		}
 		dispatch.Enqueue(work, tracker)
