@@ -67,10 +67,11 @@ Every `defenseclaw setup` path that chooses a connector refreshes agent discover
 - If the agent is not installed on the host, action mode accepts the harness image DefenseClaw built for it. The image must be the one a sandbox would run now: built by this release for this user from the current `openshell.image` settings, hook-fire verified, and with a harness version that resolves to a known contract. Run `defenseclaw sandbox image build <harness>` if it is refused.
 - If the version cannot be read because the binary is outside a trusted install prefix, interactive setup offers to trust the directory. Non-interactive runs print `defenseclaw setup trusted-paths add <dir>`. Trusting a path never bypasses the version gate.
 
-Unless the enterprise hook guardian owns the hooks (a managed enterprise computer) or the drift override is set, the gateway checks the version again when it starts:
+The gateway checks the version again when it starts. `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` skips both checks.
 
-- With one connector, a version with no contract is refused in observe and action mode for every hook connector, and the gateway does not start.
-- With several connectors, a connector in action mode with no contract, or OpenCode with no contract in either mode, is skipped and the other connectors keep running. In observe mode the gateway logs a warning and continues. Claude Code and Codex then fail their setup, because they build their hooks from the contract, and are skipped; other connectors install their hooks.
+- With one connector, a version with no contract is refused in observe and action mode for every hook connector, and the gateway does not start. A version that could not be read is refused in action mode. This check is skipped when the enterprise hook guardian owns the hooks (a managed enterprise computer).
+- With several connectors, a version with no contract is refused in action mode, and OpenCode in both modes. A version that could not be read is refused in action mode. The guardian does not skip this check. In observe mode a version with no contract gets a warning in the gateway log; Claude Code and Codex then fail their setup, because they build their hooks from the contract, and other connectors install their hooks.
+- A refused or failed connector that this gateway did not guard before is skipped, and the other connectors keep running. One it already guarded, as after an upgrade of DefenseClaw or of the agent, stops the start: the gateway restores the earlier connector state and does not start, except on a managed computer. If every connector is refused, the gateway does not start.
 
 Proxy connectors are recorded in the manifest as `not-gated`, because their enforcement surface is the proxy.
 

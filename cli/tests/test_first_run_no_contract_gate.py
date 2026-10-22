@@ -105,8 +105,12 @@ class FirstRunNoContractGateTests(unittest.TestCase):
                 self.assertEqual(summary["status"], "needs_attention", result.output)
                 step = next(s for s in summary["setup"] if s["name"] == "Hook contract")
                 self.assertEqual(step["status"], "fail")
-                self.assertIn("Claude Code 2.1.100 (Claude Code) has no DefenseClaw hook contract", step["detail"])
-                self.assertIn("setup refuses it in observe and action mode", step["detail"])
+                self.assertIn(
+                    "installed version 2.1.100 (Claude Code) is not covered by a known hook contract", step["detail"]
+                )
+                self.assertIn("Setup refuses it in observe and action mode", step["detail"])
+                self.assertIn("Then run: defenseclaw init.", step["detail"])
+                self.assertEqual(summary["next_commands"], ["defenseclaw init"])
                 self.assertIn("Nothing was changed.", step["detail"])
                 self.assertNotIn("connector_mode_warnings", summary)
                 self.assertNotIn("claudecode", self._configured())

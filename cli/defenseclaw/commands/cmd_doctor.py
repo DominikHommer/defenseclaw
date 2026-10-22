@@ -3311,7 +3311,16 @@ def _check_component_connector_compatibility(
                     + "; the host has no installation to check"
                 )
                 remediation = ""
-        if finding.reason_code in {"connector-version-not-observed", "connector-version-unparseable"}:
+        if finding.reason_code == "connector-version-unparseable":
+            # Setup refuses a version it cannot read in both modes (GAP-0554),
+            # so `setup --mode action|observe` exits 1 here.
+            refresh, install = (_health_remediation_text((choice,)) for choice in finding.remediations[:2])
+            slug = "claude-code" if finding.connector == "claudecode" else finding.connector
+            remediation = (
+                f"run '{refresh}'; if the version still cannot be read, {install[:1].lower()}{install[1:]}, "
+                f"then run 'defenseclaw setup {slug}'"
+            )
+        if finding.reason_code == "connector-version-not-observed":
             # A slow or failed version probe leaves the connector in observe.
             # Refreshing discovery and rerunning setup restores the mode.
             steps = [_health_remediation_text((choice,)) for choice in finding.remediations[:2]]

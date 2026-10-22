@@ -108,8 +108,8 @@
     {
       "name": "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
       "category": "security_opt_out",
-      "purpose": "Bypass the action-mode fail-closed checks for agent versions with no hook contract (below the tested floor, on the known-broken list, or an unmatched exact build) and for incompatible hook-contract lock drift during connector setup. Untested newer versions no longer need it.",
-      "default": "unset (fail-closed in action mode)",
+      "purpose": "Bypass the fail-closed checks for agent versions with no hook contract (below the tested floor, on the known-broken list, or an unmatched exact build; refused in observe and action mode by setup, init, quickstart and a single-connector gateway start), for unverified versions in action mode, and for incompatible hook-contract lock drift during connector setup. Untested newer versions no longer need it.",
+      "default": "unset (fail-closed)",
       "accepted_values": [
         "1",
         "unset"
@@ -120,7 +120,7 @@
       "consumers": [
         {
           "location": "internal/gateway/sidecar.go",
-          "description": "Blocks connector setup on an unverified hook contract in action mode unless set"
+          "description": "Blocks connector setup on an agent version with no hook contract (in every mode with one connector, in action mode or for OpenCode with several) and on an unverified version in action mode unless set"
         },
         {
           "location": "internal/gateway/sidecar.go",
@@ -128,7 +128,11 @@
         },
         {
           "location": "cli/defenseclaw/commands/cmd_setup.py",
-          "description": "Python setup path mirrors the gateway drift/contract enforcement"
+          "description": "Python setup refuses an agent version with no hook contract in observe and action mode, and an unverified version in action mode, unless set"
+        },
+        {
+          "location": "cli/defenseclaw/bootstrap.py",
+          "description": "init and quickstart leave out or refuse an agent version with no hook contract in observe and action mode unless set"
         }
       ],
       "since": "0.7.0",

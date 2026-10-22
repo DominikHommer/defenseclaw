@@ -1780,10 +1780,11 @@ def _leave_out_no_contract_connectors(
 ) -> tuple[list[dict], dict[str, str]]:
     """Drop connectors whose agent version setup refuses in every mode.
 
-    The gateway refuses an agent version with no hook contract at start, in
-    observe mode too, and stays down (GAP-0554). When at least one selected
-    connector remains, the refused ones are left out and reported. A lone
-    refused connector is refused by ``run_first_run`` before any change.
+    Setup refuses an agent version with no hook contract in observe mode too,
+    as a gateway started with that connector alone does (GAP-0554). When at
+    least one selected connector remains, the refused ones are left out and
+    reported. A lone refused connector is refused by ``run_first_run`` before
+    any change.
     """
     if len(connector_settings) < 2:
         return connector_settings, {}

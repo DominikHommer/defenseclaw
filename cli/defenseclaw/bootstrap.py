@@ -805,9 +805,9 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     # configured in observe either (GAP-0554).
     refusal = ""
     if connector != "none":
-        refusal = _first_run_setup_refusal(connector, getattr(cfg, "data_dir", ""))
+        refusal = _first_run_setup_refusal(connector, getattr(cfg, "data_dir", ""), options.rerun_command)
     if refusal:
-        setup.append(StepResult("Hook contract", "fail", f"{refusal} Nothing was changed.", "defenseclaw init"))
+        setup.append(StepResult("Hook contract", "fail", f"{refusal} Nothing was changed.", options.rerun_command))
         return FirstRunReport(
             status="needs_attention",
             config_file=str(cfg_mod.config_path()),
@@ -815,7 +815,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             connector=connector,
             profile=profile,
             setup=setup,
-            next_commands=["defenseclaw init"],
+            next_commands=[options.rerun_command],
             connector_mode_warnings=connector_mode_warnings,
         )
 
@@ -1319,18 +1319,23 @@ def _preflight_first_run_agent_selections(
     return verified, ""
 
 
-def _first_run_setup_refusal(connector: str, data_dir) -> str:
+def _first_run_setup_refusal(connector: str, data_dir, rerun: str = "defenseclaw init") -> str:
     """Say why setup refuses *connector* in observe and action mode, or "".
 
     Setup refuses an installed agent version with no hook contract in both
-    modes, because the gateway refuses it at start and stays down (GAP-0554).
-    First run must not write such a connector in either mode, so it is left
-    out instead of downgraded to observe. A version that is only unverified
-    (not probed, or outside a trusted prefix) still gets observe.
+    modes, and a gateway started with that connector alone refuses it too
+    (GAP-0554). First run must not write such a connector in either mode, so
+    it is left out instead of downgraded to observe. A version that is only
+    unverified (not probed, or outside a trusted prefix) still gets observe.
+    *rerun* is the command the refusal names for after the upgrade.
     """
     from defenseclaw import envvars
     from defenseclaw.agent_selection import codex_setup_version_problem
-    from defenseclaw.commands.cmd_setup import _CONNECTOR_META, _connector_contract_upgrade_guidance
+    from defenseclaw.commands.cmd_setup import (
+        _CONNECTOR_META,
+        _connector_contract_upgrade_guidance,
+        _no_hook_contract_detail,
+    )
     from defenseclaw.connector_contracts import STATUS_UNKNOWN, resolve_connector_contract
 
     key = _normalize_connector(connector)
@@ -1343,7 +1348,7 @@ def _first_run_setup_refusal(connector: str, data_dir) -> str:
         discovery = agent_discovery.discover_with_probes(
             [key], use_cache=False, refresh=True, data_dir=data_dir, persist_cache=False
         )
-    except Exception:  # noqa: BLE001 - setup's own gate runs again on the same agent
+    except Exception:  # noqa: BLE001 - setup continues in observe without discovery too
         return ""
     signal = discovery.agents.get(key)
     if signal is None or not signal.installed:
@@ -1351,15 +1356,14 @@ def _first_run_setup_refusal(connector: str, data_dir) -> str:
     raw_version = signal.version or ""
     label = _CONNECTOR_META.get(key, {}).get("label", key)
     if key == "codex" and (problem := codex_setup_version_problem(raw_version)):
-        return problem
+        return f"{problem}. Then run: {rerun}."
     compatibility = resolve_connector_contract(key, raw_version)
     if compatibility.status != STATUS_UNKNOWN:
         return ""
-    version = raw_version.rstrip(".") or "(not probed)"
     return (
-        f"{label} {version} has no DefenseClaw hook contract ({compatibility.reason}), so setup refuses it "
-        "in observe and action mode and the gateway does not start it. "
-        + _connector_contract_upgrade_guidance(key, label, compatibility.normalized_version)
+        _no_hook_contract_detail(label, raw_version.rstrip(".") or "(not probed)", compatibility)
+        + " Setup refuses it in observe and action mode, and a gateway started with it alone refuses it. "
+        + _connector_contract_upgrade_guidance(key, label, compatibility.normalized_version, rerun)
     )
 
 
