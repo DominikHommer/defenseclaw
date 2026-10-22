@@ -1372,7 +1372,7 @@ func closeReleasedCopilotAdapter(path string) (bool, error) {
 		return false, fmt.Errorf("inspect Copilot adapter: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Size() > hookScriptMaxBytes {
-		return false, fmt.Errorf("Copilot adapter is not a bounded regular file; run setup copilot")
+		return false, fmt.Errorf("copilot adapter is not a bounded regular file; run setup copilot")
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
