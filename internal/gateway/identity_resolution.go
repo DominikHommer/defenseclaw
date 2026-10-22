@@ -105,9 +105,9 @@ type identityResolution struct {
 	// agentUnresolved reports the agents entries (lower case) that may be
 	// the request agent's 1.0.3 identity; nil when none may.
 	agentUnresolved func(entry string) bool
-	// agentOwned reports the agents entries (lower case) the agent ledger
+	// agentOwned reports the agents entries (lower case) the 1.0.3 bridge
 	// proves are the request agent's own 1.0.3 identity
-	// (profileAgentLinks.owned): they match as the agent's identity does.
+	// (profileAgentBridge): they match as the agent's identity does.
 	agentOwned func(entry string) bool
 }
 

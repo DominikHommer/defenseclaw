@@ -52,13 +52,14 @@ func legacyBridgeDerives(t *testing.T, accounts ...agentidentity.Inputs) {
 	t.Helper()
 	previous := profileAgentLegacySource
 	t.Cleanup(func() { profileAgentLegacySource = previous })
-	profileAgentLegacySource = func(_ context.Context, agent string) (string, bool) {
+	profileAgentLegacySource = func(_ context.Context, agent string) (profileAgentClaim, bool) {
 		for _, in := range accounts {
 			if agentidentity.AgentID(in) == agent {
-				return agentidentity.LegacyAgentID(in), true
+				// Nothing proves the account incarnation (Bound false).
+				return profileAgentClaim{ID: agentidentity.LegacyAgentID(in), UserID: in.UserID, MachineHash: in.MachineHash, Account: in.Account}, true
 			}
 		}
-		return "", false
+		return profileAgentClaim{}, false
 	}
 }
 

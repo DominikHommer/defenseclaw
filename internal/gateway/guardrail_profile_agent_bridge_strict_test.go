@@ -213,8 +213,9 @@ func TestLegacyAgentAssignmentAcrossAnAccountSpellingIsNeverWeaker(t *testing.T)
 			} {
 				b.ledger(records)
 				got, mode := b.hook(strictBridgeConfig(strictBridgeModes, legacy, "strict", "watch", "watch"), 70001, alice)
-				// Not even the same domain's record proves the account
-				// (GAP-0337).
+				// Nothing proves the account incarnation here (no token
+				// was ever known), so not even the same domain's record
+				// proves the account (GAP-0337).
 				if got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
 					t.Errorf("%d records: profile %+v, mode %q; want strict (action) as default_lookup_failed", len(records), got, mode)
 				}

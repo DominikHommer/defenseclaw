@@ -150,6 +150,13 @@ type managedHookPeerHomeCache struct {
 	// adopted yet (agentIncarnation). It is kept across restarts with the
 	// homes.
 	legacy map[int]bool
+	// legacyNames keeps the name a build before 1.0.4 last gave each uid
+	// (the name its homes file kept), persisted as LegacyName: it names the
+	// account that build derived the uid's 1.0.3 agent identities for, which
+	// the guardrail profile bridge proves an upgraded assignment's owner by
+	// whatever the agent ledger kept (profileAgentBridge). Remove with
+	// agentidentity.LegacyAgentID.
+	legacyNames map[int]string
 	// homesFile persists homes and names in the gateway's data directory,
 	// so a gateway that starts while the directory is away still has the
 	// last home and name of each uid and keeps its agent identity
@@ -238,6 +245,9 @@ type managedHookPeerLast struct {
 	// LegacyHolder marks a uid an older build saw for which no account
 	// token was adopted yet (managedHookPeerHomeCache.legacy).
 	LegacyHolder bool `json:"legacy_holder,omitempty"`
+	// LegacyName is the name a build before 1.0.4 last gave the uid
+	// (managedHookPeerHomeCache.legacyNames).
+	LegacyName string `json:"legacy_name,omitempty"`
 	// Format is set on the managedHookPeerHomesFormatKey entry only.
 	Format int `json:"format,omitempty"`
 }
@@ -269,6 +279,17 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 				c.legacy = make(map[int]bool)
 			}
 			c.legacy[uid] = true
+		}
+		legacyName := last.LegacyName
+		if legacyFile {
+			legacyName = last.Name
+		}
+		if _, known := c.legacyNames[uid]; !known && legacyName != "" &&
+			sanitizeLLMEventUser(legacyName) == legacyName && len(c.legacyNames) < managedHookPeerHomesMax {
+			if c.legacyNames == nil {
+				c.legacyNames = make(map[int]string)
+			}
+			c.legacyNames[uid] = legacyName
 		}
 		if _, known := c.homes[uid]; !known && last.Home != "" &&
 			normalizeManagedHookPeerHome(last.Home) == last.Home && len(c.homes) < managedHookPeerHomesMax {
@@ -317,6 +338,11 @@ func (c *managedHookPeerHomeCache) saveHomesLocked() {
 	for uid := range c.legacy {
 		last := stored[strconv.Itoa(uid)]
 		last.LegacyHolder = true
+		stored[strconv.Itoa(uid)] = last
+	}
+	for uid, name := range c.legacyNames {
+		last := stored[strconv.Itoa(uid)]
+		last.LegacyName = name
 		stored[strconv.Itoa(uid)] = last
 	}
 	stored[managedHookPeerHomesFormatKey] = managedHookPeerLast{Format: 1}
@@ -1163,6 +1189,31 @@ func (c *managedHookPeerHomeCache) holderHistory(uid int) (last string, changed 
 		return "", false
 	}
 	return tokens.last, tokens.base != tokens.last || tokens.base == agentIncarnationUnproven
+}
+
+// legacyProof is what proves the account that holds uid now is the one a
+// build before 1.0.4 derived the uid's 1.0.3 agent identities for: name is
+// the name that build last gave the uid ("" when none), and bound reports
+// that the account incarnation that holds it is that build's: the token of
+// the account that holds it now is the first one this gateway adopted for
+// it, and, for a uid that build saw, that token showed continuity
+// (agentIncarnation, legacyContinuity). A uid no token was ever known for,
+// or none adopted since the upgrade, is not bound: nothing shows which
+// account holds it.
+func (c *managedHookPeerHomeCache) legacyProof(uid int) (name string, bound bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loadHomesLocked()
+	name = c.legacyNames[uid]
+	if c.legacy[uid] {
+		// No token adopted since the upgrade: continuity is not shown.
+		return name, false
+	}
+	tokens, seen := c.incarnations[uid]
+	if !seen {
+		return name, false
+	}
+	return name, tokens.base != agentIncarnationUnproven && tokens.last == tokens.base
 }
 
 // validAccountToken bounds an account token kept or read back.

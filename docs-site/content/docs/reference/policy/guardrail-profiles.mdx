@@ -122,18 +122,23 @@ the request take the strictest profile that may apply
 (`default_lookup_failed`), never a weaker default. When those profiles
 enforce different rules, the request is refused until the provider answers.
 
-After upgrading from 1.0.0–1.0.3, rebind any `agents` assignment to the
-current ID shown by `defenseclaw agent identities`. The older ID did not
-include the account domain, and its inventory row could have been overwritten
-by another account with the same UID. An entry for an account without a
-domain (a local account, or a directory account the host names without its
-domain) keeps applying to that account on its own when the inventory shows
-the entry is its own: the 1.0.3 row names that account, and no account of
-another domain with the same name held the UID on that computer. Until
-rebind, any other agent that may own the entry gets the strictest profile
-that may apply (`default_lookup_failed`): the entry's own, the default, or the
-one it matches otherwise. When those profiles enforce different rules, its
-requests are refused.
+After upgrading from 1.0.0–1.0.3, an `agents` entry with an older ID (one
+without the account's domain) keeps applying to its account on its own when
+DefenseClaw proves the account is the one 1.0.3 saw:
+
+- the account that holds the UID now is the one that held it at the upgrade
+  (a local account, or a directory account whose UID SSSD maps from its SID);
+- 1.0.3 named it the same way, domain included, in the account list it saved
+  or in its inventory row;
+- no account of that name in another domain, or without a domain, held the
+  UID on that computer.
+
+Otherwise (a macOS directory record or an RFC 2307 UID cannot show the
+holder is unchanged) every agent that may own the entry gets the strictest
+profile that may apply (`default_lookup_failed`): the entry's own, the
+default, or the one it matches otherwise. When those profiles enforce
+different rules, its requests are refused. Rebind the entry to the current
+ID shown by `defenseclaw agent identities` to end this.
 
 How the keys combine:
 
@@ -158,13 +163,12 @@ How the keys combine:
   enforces what each of the others does, the request is refused on every
   surface that can block (hook, inspect, ACP, sandbox relay, LLM proxy), and
   the refusal names the `profile explain` command for this host.
-- **Rebind 1.0.3 agent IDs.** After an upgrade from 1.0.0–1.0.3, a bare
-  account gets a distinct agent ID. Its older `agents` entry keeps applying
-  when the inventory's 1.0.3 row names that bare account and no account of
-  another domain with that name held the uid on the computer; an entry that
-  could belong to a previous holder of the uid stays unproven. Read the
-  current ID with `defenseclaw agent identities`, replace the old `agents`
-  entry in `config.yaml`, and run `defenseclaw-gateway restart`.
+- **Rebind 1.0.3 agent IDs.** After an upgrade from 1.0.0–1.0.3, an older
+  `agents` entry keeps applying only to an account proven to be the one
+  1.0.3 saw (above); for any other agent that may own it, it stays
+  unproven. Read the current ID with `defenseclaw agent identities`, replace
+  the old `agents` entry in `config.yaml`, and run
+  `defenseclaw-gateway restart`.
 - **Case and accents' encoding do not matter.** Groups, account names,
   principals and UPNs compare without regard to case, so
   `alice@CORP.EXAMPLE.COM` and `alice@corp.example.com` are the same user. They
@@ -437,9 +441,9 @@ defenseclaw agent identities --user alice --connector codex
 
 Copy the `agt-` ID into an `agents` assignment. The ID names one connector
 install for one user on one machine and stays the same across sessions and
-restarts. On upgrade from 1.0.0–1.0.3 to 1.0.4, a bare account gets a new ID
-to separate it from a qualified account's legacy ID. Its old assignment keeps
-applying while the inventory shows the old ID was that account's; rebind it.
+restarts. On upgrade from 1.0.0–1.0.3 to 1.0.4 the ID changes: it now
+includes the account's domain. The old assignment keeps applying while
+DefenseClaw proves the account is the one 1.0.3 saw; rebind it.
 See [Agent identity](/docs/enterprise/identity/authentication#agent-identity).
 
 The pin applies to every decision the gateway makes for that install: its

@@ -144,7 +144,7 @@ var (
 	// (defenseclaw.agent.identity.id, agt-...).
 	profileAgentSource = requestAgentIdentity
 	// profileAgentLegacySource returns the 1.0.3 identity of the request's
-	// agent agent (requestLegacyAgentIdentity).
+	// agent agent and its proof (requestLegacyAgentIdentity).
 	profileAgentLegacySource = requestLegacyAgentIdentity
 	// profileExplainSubjectLookup resolves the subject an administrator
 	// names to `guardrail profile explain --user`.
@@ -577,22 +577,22 @@ func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
 }
 
 // requestLegacyAgentIdentity is the legacy identity (1.0.0 to 1.0.3,
-// agentidentity.LegacyAgentID) of agent, the agent identity of ctx, and
-// true; "" and true for an account without a domain, whose identity did not
-// change. It derives the identity again for ctx's verified user and
-// connector, as the hook path does, and returns false when that derivation
-// is not agent. Every request derives its own: no state is kept, so none
-// can be dropped.
-func requestLegacyAgentIdentity(ctx context.Context, agent string) (string, bool) {
+// agentidentity.LegacyAgentID) of agent, the agent identity of ctx, with
+// what proves it agent's (profileAgentClaim), and true; an empty claim and
+// true for a SID, whose identity did not change. It derives the identity
+// again for ctx's verified user and connector, as the hook path does, and
+// returns false when that derivation is not agent. Every request derives
+// its own: no state is kept, so none can be dropped.
+func requestLegacyAgentIdentity(ctx context.Context, agent string) (profileAgentClaim, bool) {
 	connectorName := profileRequestConnector(ctx)
 	if connectorName == "" || agent == "" {
-		return "", false
+		return profileAgentClaim{}, false
 	}
 	facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName})
 	if facts.ID == "" || !strings.EqualFold(facts.ID, agent) {
-		return "", false
+		return profileAgentClaim{}, false
 	}
-	return facts.LegacyID, true
+	return facts.LegacyClaim, true
 }
 
 // guardrailProfileInspectMiddleware resolves the profile for the inspect
@@ -644,7 +644,7 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 	if source != "" && subject != nil {
 		if id, ok := profileAgentSource(ctx); ok {
 			agent = strings.TrimSpace(id)
-			legacy = func() (string, bool) { return profileAgentLegacySource(ctx, agent) }
+			legacy = func() (profileAgentClaim, bool) { return profileAgentLegacySource(ctx, agent) }
 		}
 	}
 	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent, legacy)

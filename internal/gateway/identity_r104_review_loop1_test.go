@@ -17,9 +17,10 @@ import (
 // Review loop 1, finding 1. 1.0.4 gives a bare account an agent identity of
 // its own (GAP-0424); 1.0.0 to 1.0.3 gave it the legacy one. Its 1.0.3
 // agents assignment keeps applying after the upgrade when the agent ledger
-// proves the entry is its own: the 1.0.3 record names that bare account and
-// derives its current identity, and no record shows another domain's
-// namesake of the uid. Before, the entry was unproven: the request fell to
+// proves the entry is its own: the account incarnation that holds the uid is
+// the one 1.0.3 saw (stubbed here, review loop 2), the 1.0.3 record names
+// that bare account and derives its current identity, and no record shows
+// another domain's namesake of the uid. Before, the entry was unproven: the request fell to
 // the strictest candidate or was refused where the entry's profile and the
 // default enforce different rules. Anything short of that proof stays
 // unproven.
@@ -28,6 +29,7 @@ func TestBareAccountKeepsItsOwnLegacyAgentAssignmentAfterUpgrade(t *testing.T) {
 	setup := func(t *testing.T) (*strictBridge, string, string) {
 		t.Helper()
 		b := newStrictBridge(t, "alice")
+		stubLegacyProof(t, "", true)
 		in := b.inputs(70001, "alice")
 		legacy, current := agentidentity.LegacyAgentID(in), agentidentity.AgentID(in)
 		if legacy == "" || legacy == current {

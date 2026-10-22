@@ -33,7 +33,7 @@ DefenseClaw reads local accounts, LDAP and SSSD, Active Directory over Kerberos,
 
 ## Agent identity
 
-Each agent gets an identity of its own instead of only inheriting the person's. The identities are digests of facts the gateway already holds, so they need no credential and stay the same across sessions and gateway restarts. In 1.0.4, a bare account gets a distinct ID when upgrading from 1.0.0–1.0.3 so it cannot inherit a qualified account's legacy assignment. Its own old `agents` entry keeps applying while the inventory shows the old ID was that account's; rebind the entry to the current ID shown by `defenseclaw agent identities`.
+Each agent gets an identity of its own instead of only inheriting the person's. The identities are digests of facts the gateway already holds, so they need no credential and stay the same across sessions and gateway restarts. In 1.0.4 the ID includes the account's domain, so an upgrade from 1.0.0–1.0.3 changes it. An old `agents` entry keeps applying to an account DefenseClaw proves is the one 1.0.3 saw ([guardrail profiles](/docs/reference/policy/guardrail-profiles)); rebind the entry to the current ID shown by `defenseclaw agent identities`.
 
 <Flow
   direction="TB"

@@ -118,3 +118,31 @@ func TestDerivationTable(t *testing.T) {
 		t.Errorf("SubagentInstanceID = %q; want stable, distinct from its parent and keyed by parent", sub)
 	}
 }
+
+// Review loop 2, finding 1: the legacy ID is the one 1.0.0 to 1.0.3
+// derived, which named no account incarnation (those builds kept none).
+// An incarnation keys the current ID only; before, it changed the legacy
+// ID too, so an assignment 1.0.3 wrote for the account matched nothing.
+func TestLegacyAgentIDIgnoresTheAccountIncarnation(t *testing.T) {
+	machine := MachineHash("0123456789abcdef0123456789abcdef")
+	for _, account := range []string{"alice", "alice@corp.example", `CORP\alice`} {
+		in := Inputs{MachineHash: machine, UserID: "70001", Connector: "codex", InstallFP: "/home/alice/.codex", Account: account}
+		// The derivation of 1.0.0 to 1.0.3.
+		want := AgentIDPrefix + digest16(agentNamespace, machine, "70001", "codex", "/home/alice/.codex", "alice")
+		if got := LegacyAgentID(in); got != want {
+			t.Errorf("%s: legacy %q; want the 1.0.3 ID %q", account, got, want)
+		}
+		tagged := in
+		tagged.Incarnation = "record:5F1C0A1E-0000-4000-8000-000000000001"
+		if got := LegacyAgentID(tagged); got != want {
+			t.Errorf("%s with an incarnation: legacy %q; want the 1.0.3 ID %q", account, got, want)
+		}
+		if AgentID(tagged) == AgentID(in) || AgentID(tagged) == want {
+			t.Errorf("%s: the incarnation does not key the current ID", account)
+		}
+	}
+	sid := Inputs{MachineHash: machine, UserID: "S-1-5-21-1-2-3-1001", Connector: "codex", InstallFP: "c:/users/alice/.codex", Incarnation: "x"}
+	if got := LegacyAgentID(sid); got != "" {
+		t.Errorf("SID: legacy %q; want none", got)
+	}
+}

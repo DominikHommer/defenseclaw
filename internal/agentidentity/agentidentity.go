@@ -75,11 +75,14 @@ func AgentID(in Inputs) string {
 	return agentID(in, true)
 }
 
-// LegacyAgentID is the ID 1.0.0 to 1.0.3 gave in, whose account key left
-// out the domain and did not distinguish bare accounts, or "" when it is
-// AgentID's. A guardrail profile assignment written for the legacy ID may
-// select an account only when the gateway's agent ledger proves ownership.
-// Remove once upgrades from 1.0.3 are no longer supported.
+// LegacyAgentID is the ID 1.0.0 to 1.0.3 gave in, or "" when it is
+// AgentID's (a SID). Those builds keyed a uid's ID on the bare account only:
+// no domain, no marker of a bare account, and no account incarnation, which
+// they kept none of, so in.Incarnation does not change it. A guardrail
+// profile assignment written for it selects an account only when the
+// gateway proves the account incarnation that holds the uid is the one
+// those builds saw (the gateway's profileAgentBridge). Remove once upgrades
+// from 1.0.3 are no longer supported.
 func LegacyAgentID(in Inputs) string {
 	if legacy := agentID(in, false); legacy != agentID(in, true) {
 		return legacy
@@ -87,7 +90,7 @@ func LegacyAgentID(in Inputs) string {
 	return ""
 }
 
-func agentID(in Inputs, withDomain bool) string {
+func agentID(in Inputs, current bool) string {
 	machine := clean(in.MachineHash)
 	user := NormalizeUserID(in.UserID)
 	connector := strings.ToLower(clean(in.Connector))
@@ -97,7 +100,10 @@ func agentID(in Inputs, withDomain bool) string {
 	parts := []string{machine, user, connector, NormalizeInstallFP(in.InstallFP)}
 	if !IsSID(user) {
 		parts = append(parts, AccountKey(in.Account))
-		if withDomain && AccountKey(in.Account) != "" {
+		if !current {
+			return AgentIDPrefix + digest16(agentNamespace, parts...)
+		}
+		if AccountKey(in.Account) != "" {
 			if domain := AccountDomain(in.Account); domain != "" {
 				parts = append(parts, domain)
 			} else {
