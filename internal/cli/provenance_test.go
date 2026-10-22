@@ -29,12 +29,16 @@ import (
 const provenanceTestToken = "provided by secret store"
 
 // provenanceTestGateway serves the authenticated /status of a gateway whose
-// process is pid() and counts the requests it receives.
+// process is pid() and, when healthAddr is set, the unauthenticated /health
+// of an API listening on healthAddr. It counts the requests it receives and
+// those that carried a credential.
 type provenanceTestGateway struct {
-	live     version.Provenance
-	status   int
-	pid      func() int
-	requests atomic.Int32
+	live         version.Provenance
+	status       int
+	pid          func() int
+	healthAddr   string
+	requests     atomic.Int32
+	credentialed atomic.Int32
 }
 
 func newProvenanceTestGateway() *provenanceTestGateway {
@@ -47,6 +51,13 @@ func newProvenanceTestGateway() *provenanceTestGateway {
 
 func (g *provenanceTestGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.requests.Add(1)
+	if r.Header.Get("Authorization") != "" {
+		g.credentialed.Add(1)
+	}
+	if r.URL.Path == "/health" && g.healthAddr != "" {
+		_ = json.NewEncoder(w).Encode(map[string]any{"api": map[string]any{"state": "running", "details": map[string]any{"addr": g.healthAddr}}})
+		return
+	}
 	if r.URL.Path != "/status" || r.Header.Get("Authorization") != "Bearer "+provenanceTestToken {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -250,9 +261,14 @@ func TestProvenanceShowLocalhostBind(t *testing.T) {
 }
 
 // When the gateway rejected an edit of config.yaml, it keeps running on
-// the config it last applied, and provenance show still reads it. The
-// credential stays the one the gateway uses (the environment and .env).
-// A config that is missing is still an error.
+// the config it last applied, and provenance show still reads it. Any
+// setting of the rejected file may be the rejected edit, so none is used:
+// not the API port or address, not the token or the variable it is read
+// from, not the deployment. The per-user gateway is read on the API
+// listener its own process holds, with the default gateway token of the
+// environment and .env; another listener of the process (here a guardrail
+// proxy) and the edited port get no credential. A config that is missing is
+// still an error.
 func TestProvenanceShowReadsTheRunningGatewayAfterARejectedConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", home)
@@ -261,21 +277,48 @@ func TestProvenanceShowReadsTheRunningGatewayAfterARejectedConfig(t *testing.T) 
 		_ = os.Unsetenv(key)
 	}
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", provenanceTestToken)
+	t.Setenv("R104_EDITED_TOKEN", "token of the rejected token_env")
 	gateway := newProvenanceTestGateway()
 	gateway.live.Generation = 41
 	server := httptest.NewServer(gateway)
 	defer server.Close()
+	gateway.healthAddr = server.Listener.Addr().String()
+	// The port the rejected edit names: a listener that must get nothing.
+	edited := newProvenanceTestGateway()
+	editedServer := httptest.NewServer(edited)
+	defer editedServer.Close()
+	// Another listener of the gateway process: its health is the API's.
+	proxy := newProvenanceTestGateway()
+	proxy.healthAddr = gateway.healthAddr
+	proxyServer := httptest.NewServer(proxy)
+	defer proxyServer.Close()
 	stubProvenanceGateway(t, provenanceGateway{PID: os.Getpid()}, ownProcessHolds)
-	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	listenerOf := func(server *httptest.Server) daemon.TCPListenAddr {
+		addr := server.Listener.Addr().(*net.TCPAddr)
+		return daemon.TCPListenAddr{IP: addr.IP, Port: addr.Port}
+	}
+	held := []daemon.TCPListenAddr{listenerOf(proxyServer), {IP: net.ParseIP("192.0.2.10"), Port: 1}, listenerOf(server)}
+	oldListeners := provenanceGatewayListeners
+	t.Cleanup(func() { provenanceGatewayListeners = oldListeners })
+	provenanceGatewayListeners = func(pid int) ([]daemon.TCPListenAddr, error) {
+		if pid != os.Getpid() {
+			return nil, errors.New("not the gateway process")
+		}
+		return held, nil
+	}
+	_, editedPort, err := net.SplitHostPort(editedServer.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	section := "gateway:\n  api_bind: 127.0.0.1\n  api_port: " + port + "\n  token_env: DEFENSECLAW_GATEWAY_TOKEN\n"
+	section := "gateway:\n  api_bind: 127.0.0.1\n  api_port: " + editedPort + "\n  token: token-of-the-rejected-edit\n  token_env: R104_EDITED_TOKEN\n"
 	path := filepath.Join(home, "config.yaml")
 	for name, body := range map[string]string{
 		"schema-invalid": "config_version: 9\n" + section + "r104_rejected_key: true\n",
 		"not YAML":       "config_version: 9\n" + section + "guardrail:\n  mode: [action\n",
 		"reordered":      "guardrail: {mode: [\n" + section,
+		// A rejected edit that names Secure Client does not stop the
+		// gateway from being read.
+		"secure client": "config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n" + section + "r104_rejected_key: true\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -291,12 +334,26 @@ func TestProvenanceShowReadsTheRunningGatewayAfterARejectedConfig(t *testing.T) 
 			if !strings.Contains(errOut.String(), "keeps the config it last applied") {
 				t.Fatalf("no warning about the rejected config: %q", errOut)
 			}
+			if edited.requests.Load() != 0 || proxy.credentialed.Load() != 0 {
+				t.Fatalf("the edited port got %d requests, the proxy %d with a credential", edited.requests.Load(), proxy.credentialed.Load())
+			}
 		})
+	}
+	// The gateway process holds no API listener: the read fails and no
+	// listener gets the credential.
+	held = []daemon.TCPListenAddr{listenerOf(proxyServer)}
+	before := gateway.requests.Load()
+	cmd, _, _ := provenanceTestCommand()
+	if err := prepareProvenanceShow(cmd, nil); err == nil || !strings.Contains(err.Error(), "defenseclaw-gateway status") {
+		t.Fatalf("no API listener: %v", err)
+	}
+	if proxy.credentialed.Load() != 0 || edited.requests.Load() != 0 || gateway.requests.Load() != before {
+		t.Fatal("a listener got a request without a proven API listener")
 	}
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	cmd, _, _ := provenanceTestCommand()
+	cmd, _, _ = provenanceTestCommand()
 	if err := prepareProvenanceShow(cmd, nil); err == nil || !strings.Contains(err.Error(), "defenseclaw-gateway status") {
 		t.Fatalf("a missing config.yaml: %v", err)
 	}
@@ -321,7 +378,7 @@ func TestProvenanceAppliedConfigOfAStandaloneDeploymentIgnoresTheRejectedFile(t 
 	provenanceCommittedConfig = func() ([]byte, error) {
 		return []byte("config_version: 9\ngateway:\n  api_port: 18970\n  token_env: APPLIED_TOKEN\n"), nil
 	}
-	c, err := provenanceAppliedConfig(errors.New("config gateway.api_port 1 is invalid"))
+	c, err := provenanceAppliedConfig(context.Background(), errors.New("config gateway.api_port 1 is invalid"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,11 +389,11 @@ func TestProvenanceAppliedConfigOfAStandaloneDeploymentIgnoresTheRejectedFile(t 
 	managedStandaloneAdminDeployment = func() (managed.StandaloneLayout, *managed.RuntimeDescriptor, error) {
 		return managed.StandaloneLayout{}, nil, managed.ErrNoRuntimeDescriptor
 	}
-	if _, err := provenanceAppliedConfig(errors.New("rejected")); err == nil {
+	if _, err := provenanceAppliedConfig(context.Background(), errors.New("rejected")); err == nil {
 		t.Fatal("a standalone deployment without its runtime descriptor fell back on the rejected file")
 	}
 	for _, unreadable := range []error{os.ErrNotExist, os.ErrPermission} {
-		if _, err := provenanceAppliedConfig(unreadable); err == nil {
+		if _, err := provenanceAppliedConfig(context.Background(), unreadable); err == nil {
 			t.Fatalf("%v fell back", unreadable)
 		}
 	}

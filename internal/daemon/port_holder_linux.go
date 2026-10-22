@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -22,6 +23,56 @@ func findPortHolder(host string, port int) (PortHolder, error) {
 
 func findPortHolders(host string, port int) ([]PortHolder, error) {
 	return findProcPortHolders("/proc", host, port)
+}
+
+func processTCPListeners(pid int) ([]TCPListenAddr, error) {
+	return procProcessTCPListeners("/proc", pid)
+}
+
+// procProcessTCPListeners lists the LISTEN sockets of process pid: the
+// sockets among its descriptors that its own network namespace's TCP tables
+// list as listening.
+func procProcessTCPListeners(procRoot string, pid int) ([]TCPListenAddr, error) {
+	dir := filepath.Join(procRoot, strconv.Itoa(pid))
+	fds, err := os.ReadDir(filepath.Join(dir, "fd"))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrListenerInspectionUnavailable, err)
+	}
+	inodes := map[string]struct{}{}
+	for _, fd := range fds {
+		target, err := os.Readlink(filepath.Join(dir, "fd", fd.Name()))
+		if err != nil {
+			continue
+		}
+		if inode, ok := strings.CutPrefix(target, "socket:["); ok && strings.HasSuffix(inode, "]") {
+			inodes[strings.TrimSuffix(inode, "]")] = struct{}{}
+		}
+	}
+	var found []TCPListenAddr
+	for _, table := range []string{"tcp", "tcp6"} {
+		file, err := os.Open(filepath.Join(dir, "net", table))
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(file)
+		scanner.Scan() // header
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) < 10 || fields[3] != "0A" {
+				continue
+			}
+			if _, held := inodes[fields[9]]; !held {
+				continue
+			}
+			addrHex, portHex, ok := strings.Cut(fields[1], ":")
+			port, err := strconv.ParseUint(portHex, 16, 16)
+			if ip := procAddrIP(addrHex); ok && err == nil && ip != nil {
+				found = append(found, TCPListenAddr{IP: ip, Port: int(port)})
+			}
+		}
+		_ = file.Close()
+	}
+	return found, nil
 }
 
 // findProcPortHolder reads the kernel's TCP tables for a LISTEN socket on

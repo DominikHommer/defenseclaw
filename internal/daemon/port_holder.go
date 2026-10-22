@@ -47,6 +47,22 @@ func FindPortHolders(host string, port int) ([]PortHolder, error) {
 	return findPortHolders(host, port)
 }
 
+// TCPListenAddr is the local address and port a TCP listener is bound to.
+type TCPListenAddr struct {
+	IP   net.IP
+	Port int
+}
+
+// ProcessTCPListeners lists the TCP sockets process pid listens on, as far
+// as this account may inspect that process. It returns
+// ErrListenerInspectionUnavailable when the platform cannot tell.
+func ProcessTCPListeners(pid int) ([]TCPListenAddr, error) {
+	if pid <= 0 {
+		return nil, fmt.Errorf("%w: invalid PID %d", ErrListenerInspectionUnavailable, pid)
+	}
+	return processTCPListeners(pid)
+}
+
 // listenerServesHost reports whether a listener bound to bound (nil when
 // unknown) serves connections to host.
 func listenerServesHost(host string, bound net.IP) bool {

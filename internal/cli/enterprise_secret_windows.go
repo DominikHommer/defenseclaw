@@ -307,6 +307,8 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	// in the reservation: a command that ends after the change is recorded
 	// applied, not failed (interrupted). A change it cannot mark is not made.
 	target := filepath.Join(layout.SecretsDir, opts.name)
+	// A write whose credential failed the gateway's trust check stored
+	// nothing usable, whatever is at the path now: it is not the change.
 	markedChange := func(apply func() error) error {
 		if reservation != nil {
 			if err := reservation.MarkTarget(target); err != nil {
@@ -315,7 +317,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 			}
 		}
 		err := apply()
-		change.changed = err == nil || reservation.TargetChanged()
+		change.changed = err == nil || (!errors.Is(err, errWindowsSecretNotStored) && reservation.TargetChanged())
 		return err
 	}
 	unchanged := false
@@ -731,32 +733,98 @@ func ensureWindowsSecretsDir(store *windowsSecretStore, reader *windows.SID) err
 	return applyWindowsSDDL(store.dir, windowsSecretDirectorySDDL(reader))
 }
 
-func writeWindowsSecret(store *windowsSecretStore, name string, value []byte) error {
-	gateway, err := managed.WindowsServiceAccountSID(windowsSecretGatewayAccount)
-	if err != nil || gateway == nil {
-		return fmt.Errorf("resolve the gateway service SID (%s): %v", windowsSecretGatewayAccount, err)
-	}
-	final, err := storeWindowsSecret(store, name, value, gateway)
-	if err != nil {
-		return err
-	}
-	// Prove the gateway's reader accepts the stored credential. This runs
-	// with the administrator's token, so it checks the path, owner and ACL
-	// shape; the gateway's own rights come from the reader ACEs above
-	// (pinned by TestWindowsSecretStoreUsesTheGatewayReaderDACL).
+// errWindowsSecretNotStored marks a set whose new credential failed the
+// gateway's trust check: it was taken out again, so the change was not
+// made.
+var errWindowsSecretNotStored = errors.New("the new credential was not stored")
+
+// windowsSecretVerifyStored proves the gateway's reader accepts credential
+// name in dir. It runs with the administrator's token, so it checks the
+// path, owner and ACL shape; the gateway's own rights come from the reader
+// ACEs (pinned by TestWindowsSecretStoreUsesTheGatewayReaderDACL). A seam
+// for tests.
+var windowsSecretVerifyStored = func(name, dir string) error {
 	previous, had := os.LookupEnv(managed.WindowsServiceAccountEnv)
 	_ = os.Setenv(managed.WindowsServiceAccountEnv, windowsSecretGatewayAccount)
-	_, _, verifyErr := managed.ResolveServiceCredential(name, store.dir)
+	_, _, err := managed.ResolveServiceCredential(name, dir)
 	if had {
 		_ = os.Setenv(managed.WindowsServiceAccountEnv, previous)
 	} else {
 		_ = os.Unsetenv(managed.WindowsServiceAccountEnv)
 	}
-	if verifyErr != nil {
-		_ = os.Remove(final)
-		return fmt.Errorf("the stored credential failed the gateway's trust check and was removed: %w", verifyErr)
+	return err
+}
+
+// writeWindowsSecret replaces credential name with value and proves the
+// gateway's reader accepts it. The credential it replaces stays linked
+// under a hidden name until then: a new one that fails the check is taken
+// out and the previous one put back (the same file), so a failed set never
+// leaves the gateway without the credential it had.
+func writeWindowsSecret(store *windowsSecretStore, name string, value []byte) error {
+	gateway, err := managed.WindowsServiceAccountSID(windowsSecretGatewayAccount)
+	if err != nil || gateway == nil {
+		return fmt.Errorf("resolve the gateway service SID (%s): %v", windowsSecretGatewayAccount, err)
 	}
-	return nil
+	final := filepath.Join(store.dir, name)
+	kept, err := keepWindowsSecret(store.dir, name)
+	if err != nil {
+		return fmt.Errorf("cannot keep credential %s while it is replaced, so it was not changed: %w", name, err)
+	}
+	if _, err := storeWindowsSecret(store, name, value, gateway); err != nil {
+		discardKeptWindowsSecret(kept)
+		return err
+	}
+	verifyErr := windowsSecretVerifyStored(name, store.dir)
+	if verifyErr == nil {
+		discardKeptWindowsSecret(kept)
+		return nil
+	}
+	if kept == "" {
+		_ = os.Remove(final)
+		return fmt.Errorf("%w: it failed the gateway's trust check and was removed: %w", errWindowsSecretNotStored, verifyErr)
+	}
+	if err := os.Rename(kept, final); err != nil {
+		_ = os.Remove(final)
+		if err := os.Rename(kept, final); err != nil {
+			discardKeptWindowsSecret(kept)
+			return fmt.Errorf("%w: it failed the gateway's trust check (%w) and was removed, and the previous credential could not be put back: %w", errWindowsSecretNotStored, verifyErr, err)
+		}
+	}
+	return fmt.Errorf("%w: it failed the gateway's trust check, and the previous credential was kept: %w", errWindowsSecretNotStored, verifyErr)
+}
+
+// keepWindowsSecret links the regular file credential name of dir under a
+// new hidden name (not a credential name, so neither the gateway nor status
+// lists it) and returns that path; "" when there is none to keep. A link,
+// not a copy: the kept file is the same file, with its DACL, and putting it
+// back restores the file the change reservation marked.
+func keepWindowsSecret(dir, name string) (string, error) {
+	final := filepath.Join(dir, name)
+	info, err := os.Lstat(final)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", nil
+	}
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", err
+	}
+	kept := filepath.Join(dir, "."+name+".kept-"+hex.EncodeToString(suffix))
+	if err := os.Link(final, kept); err != nil {
+		return "", err
+	}
+	return kept, nil
+}
+
+func discardKeptWindowsSecret(kept string) {
+	if kept != "" {
+		_ = os.Remove(kept)
+	}
 }
 
 // storeWindowsSecret writes value to name in the pinned store atomically,

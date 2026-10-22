@@ -45,6 +45,38 @@ func findPortHolders(host string, port int) ([]PortHolder, error) {
 	return holders, nil
 }
 
+func processTCPListeners(pid int) ([]TCPListenAddr, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(
+		ctx, "/usr/sbin/lsof", "-nP", "-a", "-p", strconv.Itoa(pid), "-iTCP", "-sTCP:LISTEN", "-Fn",
+	).Output()
+	if err != nil && len(output) == 0 {
+		// lsof exits 1 when it lists nothing.
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return nil, nil
+		}
+		return nil, ErrListenerInspectionUnavailable
+	}
+	return parseLsofListenAddrs(string(output)), nil
+}
+
+// parseLsofListenAddrs reads the socket names (n) of lsof -Fn output.
+func parseLsofListenAddrs(output string) []TCPListenAddr {
+	var found []TCPListenAddr
+	for _, line := range strings.Split(output, "\n") {
+		if len(line) < 2 || line[0] != 'n' {
+			continue
+		}
+		_, rawPort, err := net.SplitHostPort(line[1:])
+		port, portErr := strconv.Atoi(rawPort)
+		if ip := lsofListenIP(line[1:]); err == nil && portErr == nil && ip != nil && port > 0 && port <= 65535 {
+			found = append(found, TCPListenAddr{IP: ip, Port: port})
+		}
+	}
+	return found
+}
+
 // parseLsofPortHolder picks, from lsof -Fpcun output, the first process with
 // a listening socket that serves host.
 func parseLsofPortHolder(output, host string) (PortHolder, error) {

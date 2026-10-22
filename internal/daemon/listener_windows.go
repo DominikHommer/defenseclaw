@@ -154,6 +154,28 @@ func collectTCP6Owners(port int, host string, found *[]Listener) error {
 	})
 }
 
+func processTCPListeners(pid int) ([]TCPListenAddr, error) {
+	var found []TCPListenAddr
+	if err := walkExtendedTCPTable(windows.AF_INET, unsafe.Sizeof(tcp4OwnerPIDRow{}), func(row unsafe.Pointer) {
+		r := (*tcp4OwnerPIDRow)(row)
+		if int(r.PID) == pid {
+			addrBytes := *(*[4]byte)(unsafe.Pointer(&r.LocalAddr))
+			found = append(found, TCPListenAddr{IP: net.IP(addrBytes[:]), Port: int(windows.Ntohs(uint16(r.LocalPort)))})
+		}
+	}); err != nil {
+		return nil, err
+	}
+	if err := walkExtendedTCPTable(windows.AF_INET6, unsafe.Sizeof(tcp6OwnerPIDRow{}), func(row unsafe.Pointer) {
+		r := (*tcp6OwnerPIDRow)(row)
+		if int(r.PID) == pid {
+			found = append(found, TCPListenAddr{IP: net.IP(append([]byte(nil), r.LocalAddr[:]...)), Port: int(windows.Ntohs(uint16(r.LocalPort)))})
+		}
+	}); err != nil {
+		return nil, err
+	}
+	return found, nil
+}
+
 func walkExtendedTCPTable(family uint32, rowSize uintptr, visit func(unsafe.Pointer)) error {
 	var size uint32
 	result := callExtendedTCPTable(nil, &size, family)

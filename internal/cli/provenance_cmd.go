@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -72,7 +73,8 @@ func init() {
 // prepareProvenanceShow pins the managed caller and config, then loads the
 // config. When the gateway rejected config.yaml it keeps running on the
 // config it last applied, so a rejected file does not stop the read: the
-// endpoint and credential then come from what was applied
+// deployment, endpoint and credential then come from what was applied and
+// the running gateway, never from the rejected file
 // (provenanceAppliedConfig).
 func prepareProvenanceShow(cmd *cobra.Command, _ []string) error {
 	if err := managedStandardUserGatewayRefusal(); err != nil {
@@ -83,7 +85,9 @@ func prepareProvenanceShow(cmd *cobra.Command, _ []string) error {
 	}
 	applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 	if err := loadGatewayCommandConfigFor(cmd); err != nil {
-		applied, appliedErr := provenanceAppliedConfig(err)
+		ctx, cancel := context.WithTimeout(provenanceContext(cmd), 5*time.Second)
+		defer cancel()
+		applied, appliedErr := provenanceAppliedConfig(ctx, err)
 		if appliedErr != nil {
 			return fmt.Errorf("cannot locate the running gateway: %w; run `defenseclaw-gateway status`", err)
 		}
@@ -91,6 +95,13 @@ func prepareProvenanceShow(cmd *cobra.Command, _ []string) error {
 		cfg = applied
 	}
 	return nil
+}
+
+func provenanceContext(cmd *cobra.Command) context.Context {
+	if ctx := cmd.Context(); ctx != nil {
+		return ctx
+	}
+	return context.Background()
 }
 
 func prepareProvenanceEnvironment() error {
@@ -117,60 +128,48 @@ func runProvenanceShow(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// provenanceConfigFields are the only fields provenanceAppliedConfig reads
-// from a config: the deployment, the API endpoint and the credential.
-type provenanceConfigFields struct {
-	DeploymentMode string `yaml:"deployment_mode"`
-	Enterprise     struct {
-		Profile string `yaml:"profile"`
-	} `yaml:"enterprise"`
+// provenanceCredentialFields are the only fields provenanceAppliedConfig
+// reads from the config a standalone lifecycle last applied.
+type provenanceCredentialFields struct {
 	Gateway struct {
-		APIBind  string `yaml:"api_bind"`
-		APIPort  int    `yaml:"api_port"`
 		Token    string `yaml:"token"`
 		TokenEnv string `yaml:"token_env"`
 	} `yaml:"gateway"`
 }
 
-// provenanceConfigMaxBytes bounds a config read for its endpoint fields.
-const provenanceConfigMaxBytes = 8 << 20
+// provenanceGatewayListeners lists the TCP listeners of the gateway
+// process. A seam for tests.
+var provenanceGatewayListeners = daemon.ProcessTCPListeners
 
 // provenanceAppliedConfig locates the running gateway after the strict load
 // of config.yaml failed with loadErr. The gateway rejected that file and
-// kept the config it last applied, so the endpoint and credential come
-// from what was applied. A standalone deployment's API address is the one
-// its administrator-owned runtime descriptor publishes, and its credential
-// fields come from the root-only copy of the config its lifecycle last
-// applied (Linux, macOS); the rejected file is not read. A per-user gateway
-// keeps no such copy: its credential comes from the environment and its
-// .env (loaded before the strict load), and only the API endpoint fields of
-// its own config are read, as a hint. Either way the credential goes only to
-// a listener proven to belong to the gateway process, and that process must
-// answer as itself. A missing or unreadable config is not a rejected one:
-// there is nothing to fall back on.
-func provenanceAppliedConfig(loadErr error) (*config.Config, error) {
+// kept the config it last applied, and any setting of the rejected file may
+// be the rejected edit, so nothing is read from it: not the deployment, the
+// endpoint or the credential. The deployment comes from the environment
+// (pinned for an administrator of a managed computer); without one this is
+// a per-user gateway, which is always read from the gateway itself. A
+// standalone deployment's API address is the one its administrator-owned
+// runtime descriptor publishes, and its credential fields come from the
+// root-only copy of the config its lifecycle last applied (Linux, macOS). A
+// per-user gateway keeps no copy of what it applied: its endpoint is the API
+// listener the proven gateway process holds (provenancePerUserEndpoint),
+// and its credential the default gateway token of the environment and its
+// .env (loaded before the strict load). Either way the credential goes only
+// to a listener proven to belong to the gateway process, and that process
+// must answer as itself. A missing or unreadable config is not a rejected
+// one: there is nothing to fall back on.
+func provenanceAppliedConfig(ctx context.Context, loadErr error) (*config.Config, error) {
 	if errors.Is(loadErr, fs.ErrNotExist) || errors.Is(loadErr, fs.ErrPermission) {
 		return nil, loadErr
 	}
 	c := config.DefaultConfig()
 	c.DeploymentMode = strings.TrimSpace(os.Getenv(managed.DeploymentModeEnv))
 	c.Enterprise.Profile = strings.TrimSpace(os.Getenv(managed.EnterpriseProfileEnv))
-	var desired provenanceConfigFields
+	c.Gateway.Token = ""
 	if !c.StandaloneEnterprise() {
-		raw, err := readProvenanceConfig(config.ConfigPath())
-		if err != nil {
+		if err := provenancePerUserEndpoint(ctx, c); err != nil {
 			return nil, err
 		}
-		desired = provenanceEndpointFields(raw)
-		if c.DeploymentMode == "" {
-			c.DeploymentMode = strings.TrimSpace(desired.DeploymentMode)
-		}
-		if c.Enterprise.Profile == "" {
-			c.Enterprise.Profile = strings.TrimSpace(desired.Enterprise.Profile)
-		}
-	}
-	if !c.StandaloneEnterprise() {
-		applyProvenanceEndpointFields(c, desired)
 		return c, nil
 	}
 	_, descriptor, err := managedStandaloneAdminDeployment()
@@ -186,88 +185,109 @@ func provenanceAppliedConfig(loadErr error) (*config.Config, error) {
 		return nil, fmt.Errorf("managed runtime descriptor api_addr %q has no valid port", descriptor.APIAddr)
 	}
 	if committed, err := provenanceCommittedConfig(); err == nil {
-		applied := provenanceEndpointFields(committed)
-		c.Gateway.Token = applied.Gateway.Token
-		if tokenEnv := strings.TrimSpace(applied.Gateway.TokenEnv); tokenEnv != "" {
-			c.Gateway.TokenEnv = tokenEnv
+		var applied provenanceCredentialFields
+		if yaml.Unmarshal(committed, &applied) == nil {
+			c.Gateway.Token = applied.Gateway.Token
+			if tokenEnv := strings.TrimSpace(applied.Gateway.TokenEnv); tokenEnv != "" {
+				c.Gateway.TokenEnv = tokenEnv
+			}
 		}
 	}
 	c.Gateway.APIBind, c.Gateway.APIPort = host, port
 	return c, nil
 }
 
-func readProvenanceConfig(path string) ([]byte, error) {
-	file, err := os.Open(path)
+// provenancePerUserEndpoint points c at the API listener of the proven
+// per-user gateway process: of the loopback TCP listeners that process
+// holds, the one whose unauthenticated health document names that listener
+// as the API. No credential is sent while it looks.
+func provenancePerUserEndpoint(ctx context.Context, c *config.Config) error {
+	gateway, err := provenanceGatewayIdentity(ctx)
+	if err != nil || gateway.PID <= 0 {
+		return errors.New("gateway process identity is unavailable")
+	}
+	listeners, err := provenanceGatewayListeners(gateway.PID)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("list the listeners of the gateway process: %w", err)
 	}
-	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, provenanceConfigMaxBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > provenanceConfigMaxBytes {
-		return nil, fmt.Errorf("%s is larger than %d bytes", path, provenanceConfigMaxBytes)
-	}
-	return raw, nil
-}
-
-// provenanceEndpointFields reads the provenanceConfigFields of raw. A file
-// that is not valid YAML still yields the fields of its top-level gateway
-// section when that section parses on its own (the rejected edit is
-// elsewhere); otherwise none.
-func provenanceEndpointFields(raw []byte) provenanceConfigFields {
-	var fields provenanceConfigFields
-	if yaml.Unmarshal(raw, &fields) == nil {
-		return fields
-	}
-	fields = provenanceConfigFields{}
-	if section := topLevelYAMLSection(string(raw), "gateway"); section != "" {
-		var only provenanceConfigFields
-		if yaml.Unmarshal([]byte(section), &only) == nil {
-			fields.Gateway = only.Gateway
+	slices.SortStableFunc(listeners, func(a, b daemon.TCPListenAddr) int { return a.Port - b.Port })
+	for _, listener := range listeners {
+		for _, ip := range provenanceLoopbackOf(listener.IP) {
+			if provenanceListenerServesAPI(ctx, ip, listener.Port, gateway) {
+				c.Gateway.APIBind, c.Gateway.APIPort = ip.String(), listener.Port
+				return nil
+			}
 		}
 	}
-	return fields
+	return errors.New("the gateway process holds no API listener on a loopback address")
 }
 
-// topLevelYAMLSection returns the lines of the top-level key name: its
-// "name:" line and every following line that is indented, blank or a
-// comment.
-func topLevelYAMLSection(doc, name string) string {
-	var section []string
-	in := false
-	for _, line := range strings.Split(strings.ReplaceAll(doc, "\r\n", "\n"), "\n") {
-		trimmed := strings.TrimSpace(line)
-		top := line != "" && line[0] != ' ' && line[0] != '\t' && !strings.HasPrefix(trimmed, "#")
-		switch {
-		case top && (trimmed == name+":" || strings.HasPrefix(trimmed, name+": ") || strings.HasPrefix(trimmed, name+":#")):
-			if in {
-				return "" // a duplicate key: ambiguous
-			}
-			in = true
-			section = append(section, line)
-		case top:
-			if in && len(section) > 0 {
-				return strings.Join(section, "\n")
-			}
-		case in:
-			section = append(section, line)
-		}
+// provenanceLoopbackOf is where a listener bound to ip is reached on this
+// computer: a loopback address itself, the loopback addresses for a
+// wildcard one, none for any other.
+func provenanceLoopbackOf(ip net.IP) []net.IP {
+	switch {
+	case ip == nil:
+		return nil
+	case ip.IsLoopback():
+		return []net.IP{ip}
+	case ip.IsUnspecified() && ip.To4() != nil:
+		return []net.IP{net.IPv4(127, 0, 0, 1)}
+	case ip.IsUnspecified():
+		return []net.IP{net.IPv6loopback, net.IPv4(127, 0, 0, 1)}
 	}
-	return strings.Join(section, "\n")
+	return nil
 }
 
-func applyProvenanceEndpointFields(c *config.Config, fields provenanceConfigFields) {
-	if bind := strings.TrimSpace(fields.Gateway.APIBind); bind != "" {
-		c.Gateway.APIBind = bind
+// provenanceListenerServesAPI reports whether the gateway's listener on
+// ip:port is its API: GET /health, which needs no credential, answers with
+// the health document whose API address is this port. Another listener of
+// the process (the guardrail proxy, a sandbox ingress) does not.
+func provenanceListenerServesAPI(ctx context.Context, ip net.IP, port int, gateway provenanceGateway) bool {
+	client := provenanceHTTPClient([]net.IP{ip}, port, gateway)
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort(ip.String(), strconv.Itoa(port))+"/health", nil)
+	if err != nil {
+		return false
 	}
-	if port := fields.Gateway.APIPort; port > 0 && port <= 65535 {
-		c.Gateway.APIPort = port
+	response, err := client.Do(req)
+	if err != nil {
+		return false
 	}
-	c.Gateway.Token = fields.Gateway.Token
-	if tokenEnv := strings.TrimSpace(fields.Gateway.TokenEnv); tokenEnv != "" {
-		c.Gateway.TokenEnv = tokenEnv
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, gatewayHealthDocumentMaxBytes+1))
+	if err != nil || len(body) > gatewayHealthDocumentMaxBytes {
+		return false
+	}
+	var health struct {
+		API struct {
+			Details map[string]any `json:"details"`
+		} `json:"api"`
+	}
+	if json.Unmarshal(body, &health) != nil {
+		return false
+	}
+	addr, _ := health.API.Details["addr"].(string)
+	_, apiPort, err := net.SplitHostPort(addr)
+	return err == nil && apiPort == strconv.Itoa(port)
+}
+
+// provenanceHTTPClient sends requests only to a listener on one of
+// addresses:port that the gateway holds, proven per connection; it never
+// resolves a name again and never follows a redirect.
+func provenanceHTTPClient(addresses []net.IP, port int, gateway provenanceGateway) *http.Client {
+	return &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			Proxy: nil,
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return dialProvenanceGateway(ctx, addresses, port, gateway)
+			},
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }
 
@@ -367,7 +387,7 @@ func runningGatewayProvenance(cmd *cobra.Command) (version.Provenance, error) {
 	if cfg == nil {
 		return version.Provenance{}, fmt.Errorf("gateway configuration is unavailable")
 	}
-	ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(provenanceContext(cmd), 5*time.Second)
 	defer cancel()
 	addresses, err := provenanceLoopbackAddresses(ctx, gatewayClientHost(cfg))
 	if err != nil {
@@ -384,18 +404,7 @@ func runningGatewayProvenance(cmd *cobra.Command) (version.Provenance, error) {
 	if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	port := cfg.Gateway.APIPort
-	client := &http.Client{
-		Timeout: 2 * time.Second,
-		Transport: &http.Transport{
-			Proxy: nil,
-			// Dial a pinned, proven loopback address, never the name again.
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return dialProvenanceGateway(ctx, addresses, port, gateway)
-			},
-		},
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
+	client := provenanceHTTPClient(addresses, cfg.Gateway.APIPort, gateway)
 	defer client.CloseIdleConnections()
 	response, err := client.Do(req)
 	if err != nil {

@@ -6,8 +6,12 @@
 package daemon
 
 import (
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -93,5 +97,47 @@ func writeFile(t *testing.T, path, body string) {
 	}
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A process's listeners are the LISTEN sockets among its own descriptors,
+// read from the TCP tables of its network namespace: not another
+// process's listener, and not its connected sockets.
+func TestProcProcessTCPListenersListsOnlyTheProcessListeners(t *testing.T) {
+	root := t.TempDir()
+	header := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+	writeFile(t, filepath.Join(root, "10", "net", "tcp"), header+
+		// 127.0.0.1:18970 LISTEN, held by PID 10.
+		"   0: 0100007F:4A1A 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 111 1\n"+
+		// 0.0.0.0:4000 LISTEN, held by PID 10.
+		"   1: 00000000:0FA0 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 112 1\n"+
+		// 127.0.0.1:18971 LISTEN, held by PID 20 only.
+		"   2: 0100007F:4A1B 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 222 1\n"+
+		// An established connection of PID 10.
+		"   3: 0100007F:9C40 0100007F:4A1A 01 00000000:00000000 00:00000000 00000000  1000        0 113 1\n")
+	writeFile(t, filepath.Join(root, "10", "net", "tcp6"), header+
+		// [::1]:18972 LISTEN, held by PID 10.
+		"   0: 00000000000000000000000001000000:4A1C 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 114 1\n")
+	if err := os.MkdirAll(filepath.Join(root, "10", "fd"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for fd, target := range map[string]string{"3": "socket:[111]", "4": "socket:[112]", "5": "socket:[113]", "6": "socket:[114]", "7": "/dev/null"} {
+		if err := os.Symlink(target, filepath.Join(root, "10", "fd", fd)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	found, err := procProcessTCPListeners(root, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, listener := range found {
+		got = append(got, net.JoinHostPort(listener.IP.String(), strconv.Itoa(listener.Port)))
+	}
+	if strings.Join(got, ",") != "127.0.0.1:18970,0.0.0.0:4000,[::1]:18972" {
+		t.Fatalf("listeners of PID 10 = %v", got)
+	}
+	if _, err := procProcessTCPListeners(root, 30); !errors.Is(err, ErrListenerInspectionUnavailable) {
+		t.Fatalf("a process whose descriptors cannot be read: %v", err)
 	}
 }

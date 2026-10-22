@@ -130,3 +130,24 @@ func TestWalkExtendedTCPTableRetriesWhenTheTableGrows(t *testing.T) {
 		t.Fatalf("GetExtendedTcpTable calls = %d, want sizing call plus retry", calls)
 	}
 }
+
+// ProcessTCPListeners names the listeners this process holds, from the
+// owner-PID TCP tables.
+func TestProcessTCPListenersFindsAListenerOfThisProcess(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	found, err := ProcessTCPListeners(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range found {
+		if l.Port == port && l.IP.Equal(net.IPv4(127, 0, 0, 1)) {
+			return
+		}
+	}
+	t.Fatalf("listeners of this process %v do not include 127.0.0.1:%d", found, port)
+}

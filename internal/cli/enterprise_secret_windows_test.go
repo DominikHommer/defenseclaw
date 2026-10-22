@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -848,4 +849,65 @@ func TestWindowsSecretOpenCredentialRefusesLinksAndOversizedFiles(t *testing.T) 
 		t.Fatalf("plain credential: %q, %v", data, err)
 	}
 	_ = windows.CloseHandle(entry)
+}
+
+// A set whose new credential fails the gateway's trust check after it
+// replaced the stored one puts the previous credential back (the same
+// file, so the change reservation sees no change) and is audited as a
+// failed set, not an applied one. A first set that fails the check stores
+// nothing and is audited failed as well. Before, the check removed the
+// replacement, the reservation saw the old file gone and the run was
+// recorded applied with no credential left.
+func TestWindowsSecretSetThatFailsTheTrustCheckKeepsThePreviousCredential(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	spool, state := stubWindowsChangeSpool(t)
+	const name = "ai-defense-api-key"
+	stored := filepath.Join(dir, name)
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true, json: true}, "previous-value"); err != nil {
+		t.Fatalf("first set: %v", err)
+	}
+	before, err := os.Stat(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousVerify := windowsSecretVerifyStored
+	t.Cleanup(func() { windowsSecretVerifyStored = previousVerify })
+	windowsSecretVerifyStored = func(string, string) error { return errors.New("the credential owner is not trusted") }
+
+	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true, json: true}, "rotated-value")
+	windowsSecretFailureDoc(t, out, err, "set", "change_failed")
+	if !strings.Contains(err.Error(), "previous credential was kept") {
+		t.Fatalf("failed set error: %v", err)
+	}
+	after, statErr := os.Stat(stored)
+	data, readErr := os.ReadFile(stored)
+	if statErr != nil || readErr != nil || string(data) != "previous-value" || !os.SameFile(before, after) {
+		t.Fatalf("the previous credential was not kept: %q, %v, %v", data, statErr, readErr)
+	}
+
+	out, err = runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "judge-api-key", fromStdin: true, json: true}, "first-value")
+	windowsSecretFailureDoc(t, out, err, "set", "change_failed")
+	if _, statErr := os.Lstat(filepath.Join(dir, "judge-api-key")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("a first credential that failed the trust check is stored: %v", statErr)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != name {
+		t.Fatalf("secrets folder holds %v (%v), want only %s", entries, err, name)
+	}
+
+	var outcomes []string
+	for _, ev := range windowsChangeEvents(t, spool) {
+		outcomes = append(outcomes, ev.SecretName+":"+ev.Outcome+":"+ev.ReasonCode)
+	}
+	slices.Sort(outcomes)
+	want := []string{
+		name + ":" + enterprisestatus.ChangeApplied + ":",
+		name + ":" + enterprisestatus.ChangeFailed + ":change_failed",
+		"judge-api-key:" + enterprisestatus.ChangeFailed + ":change_failed",
+	}
+	slices.Sort(want)
+	if !slices.Equal(outcomes, want) {
+		t.Fatalf("change events = %v, want %v", outcomes, want)
+	}
+	assertNoWindowsChangeReservations(t, state)
 }
