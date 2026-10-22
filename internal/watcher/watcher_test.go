@@ -1439,11 +1439,11 @@ func TestDeniedSkillWhoseQuarantineFailsSaysSo(t *testing.T) {
 	if _, err := os.Lstat(path); err != nil {
 		t.Fatalf("expected the skill to stay in place: %v", err)
 	}
-	records, err := store.ListQuarantineRecordsForConnector(context.Background(), "skill", "denied-skill", "")
+	records, err := store.ListQuarantineRecordsForConnector(context.Background(), "skill", "denied-skill", "claudecode")
 	if err != nil || len(records) != 0 {
 		t.Fatalf("quarantine records = %+v (err %v), want none for files that never moved", records, err)
 	}
-	entry, err := store.GetAction("skill", "denied-skill")
+	entry, err := store.GetActionForConnector("skill", "denied-skill", "claudecode")
 	if err != nil || entry == nil || entry.Actions.Install != "block" || !strings.HasPrefix(entry.Reason, "quarantine failed: ") {
 		t.Fatalf("journal = %+v (err %v), want install block with quarantine failed", entry, err)
 	}
