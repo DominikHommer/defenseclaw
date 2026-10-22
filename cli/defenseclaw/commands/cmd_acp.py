@@ -240,7 +240,7 @@ def _write_contract_lock(
         "protocol": {"schema_version": _SCHEMA_VERSION, "schema_sha256": _SCHEMA_SHA256},
         "client": {
             "id": client,
-            "config_path": str(client_path),
+            "config_path": str(client_path.resolve()),
             "config_sha256": (
                 _client_entry_digest(client_path, client, agent, adopted_entries)
                 if pin_entries else _sha256_file(str(client_path))
@@ -305,7 +305,7 @@ def _client_contract_snapshots(data_dir: str, client: str, agent: str) -> list[t
 def _refresh_client_contract_digests(
     data_dir: str, client: str, client_path: Path, *, pin_entries: bool = True
 ) -> None:
-    """Atomically re-pin every DefenseClaw entry sharing one editor file."""
+    """Refresh legacy file pins without re-sealing another binding's entry."""
     if not client_path.is_file():
         return
     for pair_client, pair_agent in sorted(_managed_pairs(data_dir)):
@@ -327,11 +327,14 @@ def _refresh_client_contract_digests(
             or lock_agent.get("id") != pair_agent
         ):
             raise click.ClickException(f"managed ACP contract lock identity does not match: {path}")
+        if pin_entries and str(lock_client.get("config_sha256", "")).startswith(_ENTRY_DIGEST_PREFIX):
+            if lock_client.get("config_path") != str(client_path.resolve()):
+                raise click.ClickException("entry-pinned client path changed; run: defenseclaw acp verify")
+            # This setup did not authorize another binding's changed launch
+            # fields. Its own setup/refresh must repair any entry drift.
+            continue
         lock_client["config_path"] = str(client_path.resolve())
-        lock_client["config_sha256"] = (
-            _client_entry_digest(client_path, pair_client, pair_agent, _adopted_entries(document))
-            if pin_entries else _sha256_file(str(client_path))
-        )
+        lock_client["config_sha256"] = _sha256_file(str(client_path))
         atomic_write_private_bytes(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
 
 

@@ -204,6 +204,21 @@ def test_editor_preferences_do_not_drift_guarded_entry_pins(tmp_path, monkeypatc
             settings.write_text(json.dumps(changed))
             refused = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
             assert refused.exit_code != 0, (name, refused.output)
+        # Setting up a different pair in the same editor must not silently
+        # bless the changed environment in this pair's entry.
+        lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+        original_lock = lock_path.read_bytes()
+        other_agent = _binary(tmp_path / "devin")
+        other = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "devin", "--profile", "other",
+             "--guard-binary", guard, "--agent-binary", other_agent],
+            obj=app,
+        )
+        assert other.exit_code == 0, other.output
+        assert lock_path.read_bytes() == original_lock
+        refused = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert refused.exit_code != 0, refused.output
     finally:
         cleanup_app(app, db_path, data_dir)
 
