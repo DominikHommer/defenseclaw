@@ -14310,10 +14310,8 @@ def _check_connector_inventory(
                     f"provenance={fail_mode['provenance']}"
                 )
                 desired = fail_mode.get("desired")
-                # A DEFENSECLAW_FAIL_MODE=closed in doctor's own environment
-                # makes the effective mode closed, but the agent that runs an
-                # open-rendered hook may not have it, so the rendered mode is
-                # checked on its own.
+                # Check the installed render against the desired policy;
+                # neither doctor's nor the agent's environment changes it.
                 rendered_open = desired == "closed" and rendered == "open"
                 # A hook or plugin that records its mode but has none that
                 # can be read (missing, or a value no installer writes) does
