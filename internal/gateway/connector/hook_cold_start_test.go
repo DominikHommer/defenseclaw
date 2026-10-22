@@ -63,6 +63,7 @@ type coldStartHookRun struct {
 	stdout  string
 	stderr  string
 	err     error
+	elapsed time.Duration
 }
 
 func runHookForColdStart(t *testing.T, c Connector, script string, args []string, prepare func(dataDir string), extraEnv ...string) coldStartHookRun {
@@ -114,8 +115,11 @@ func runHookForColdStart(t *testing.T, c Connector, script string, args []string
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// The hook's registered timeout starts with the process, after fixture
+	// directories and script snapshots have been written.
+	started := time.Now()
 	err := cmd.Run()
-	return coldStartHookRun{capDir: capDir, dataDir: dataDir, home: home, stdout: stdout.String(), stderr: stderr.String(), err: err}
+	return coldStartHookRun{capDir: capDir, dataDir: dataDir, home: home, stdout: stdout.String(), stderr: stderr.String(), err: err, elapsed: time.Since(started)}
 }
 
 // waitColdStartCapture waits for the background start to write name.
@@ -458,11 +462,10 @@ func TestShellHookIsAnsweredByTheGatewayThatRestarts(t *testing.T) {
 				if hook.script == "codex-hook.sh" {
 					args = codexBoundShellHookArgsForTest(t, hook.script, "PreToolUse")[1:]
 				}
-				started := time.Now()
 				run := runHookForColdStart(t, hook.c, hook.script, args, nil,
 					"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=3", "DC_COLD_FIRST_RC="+tc.rc)
-				if elapsed := time.Since(started); elapsed > 3*time.Second {
-					t.Fatalf("the call took %s", elapsed)
+				if run.elapsed > 3*time.Second {
+					t.Fatalf("the call took %s", run.elapsed)
 				}
 				if run.err != nil || strings.Contains(run.stdout, "deny") || strings.Contains(run.stderr, "unreachable") {
 					t.Fatalf("err=%v stdout=%q stderr=%q, want the restarted gateway's allow", run.err, run.stdout, run.stderr)
@@ -491,10 +494,9 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 	for _, rc := range []string{"7", "56"} {
 		t.Run("claude-code/"+rc, func(t *testing.T) {
 			t.Parallel()
-			started := time.Now()
 			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, nil,
 				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc)
-			assertBlockedWithinTheRestartBudget(t, started)
+			assertBlockedWithinTheRestartBudget(t, run.elapsed)
 			if rc == "7" && waitColdStartCapture(t, run.capDir, "gateway.log") == "" {
 				t.Fatal("a refused call did not start the gateway")
 			}
@@ -504,11 +506,10 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 		})
 		t.Run("codex/"+rc, func(t *testing.T) {
 			t.Parallel()
-			started := time.Now()
 			run := runHookForColdStart(t, NewCodexConnector(), "codex-hook.sh",
 				codexBoundShellHookArgsForTest(t, "codex-hook.sh", "PreToolUse")[1:], nil,
 				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc)
-			assertBlockedWithinTheRestartBudget(t, started)
+			assertBlockedWithinTheRestartBudget(t, run.elapsed)
 			if rc == "7" && waitColdStartCapture(t, run.capDir, "gateway.log") == "" {
 				t.Fatal("a refused call did not start the gateway")
 			}
@@ -520,11 +521,11 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 	}
 }
 
-func assertBlockedWithinTheRestartBudget(t *testing.T, started time.Time) {
+func assertBlockedWithinTheRestartBudget(t *testing.T, elapsed time.Duration) {
 	t.Helper()
 	// bash 3.2 (macOS) counts whole seconds, so the end can come up to a
 	// second early there.
-	if elapsed := time.Since(started); elapsed < 1500*time.Millisecond || elapsed > 4500*time.Millisecond {
+	if elapsed < 1500*time.Millisecond || elapsed > 4500*time.Millisecond {
 		t.Fatalf("the call was blocked after %s, want about 3 s", elapsed)
 	}
 }
