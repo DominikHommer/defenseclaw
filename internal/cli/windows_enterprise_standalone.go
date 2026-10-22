@@ -2922,13 +2922,6 @@ func readWindowsEnterpriseBoundedFile(path string, limit int64) ([]byte, error) 
 
 // ensure ------------------------------------------------------------------
 
-// windowsEnterpriseEnsurePlan is the action ensure selected and why.
-type windowsEnterpriseEnsurePlan struct {
-	Action string // "", install, upgrade, repair
-	Reason string
-	Detail string // the failed read-only check behind a verify_failed repair
-}
-
 var windowsEnterpriseEnsureTimeout = 12 * time.Minute
 
 // runWindowsEnterpriseStandaloneEnsure converges the host to the supplied
@@ -3176,7 +3169,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, code)
 	}
-	configStateRepaired, stateErr := repairWindowsEnterpriseConfigGeneration(ctx, opts, statusReport)
+	configStateRepaired, stateErr := windowsEnterpriseConfigGenerationRepair(ctx, opts, statusReport)
 	if stateErr != nil {
 		applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 		result.AddError("lifecycle_error", stateErr.Error())
@@ -3185,11 +3178,8 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	if configStateRepaired {
 		result.Changes = append(result.Changes, "recovered config generation from the approved config and proven previous counter")
 	}
-	alreadyAppliedNeedsRepair := configStateRepaired
+	alreadyAppliedNeedsRepair := false
 	verifyFailure := ""
-	if configStateRepaired {
-		verifyFailure = "config generation record required recovery"
-	}
 	if run := opts.bundle; !configStateRepaired && run != nil && run.prepared != nil && run.prepared.AlreadyApplied &&
 		statusReport.Installed && !statusReport.TransactionPending &&
 		compareWindowsEnterpriseVersions(opts.productVersion, statusReport.InstalledVersion) == 0 &&
@@ -3261,7 +3251,12 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	}
 	plan := windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed", Detail: verifyFailure}
 	var planErr error
-	if !alreadyAppliedNeedsRepair {
+	switch {
+	case configStateRepaired:
+		plan, planErr = planWindowsEnterpriseEnsureAfterGenerationRecovery(func() (windowsEnterpriseEnsurePlan, error) {
+			return planWindowsEnterpriseEnsure(statusReport, opts, script)
+		})
+	case !alreadyAppliedNeedsRepair:
 		plan, planErr = planWindowsEnterpriseEnsure(statusReport, opts, script)
 	}
 	if planErr != nil {
@@ -3413,7 +3408,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				actionOpts.configPath = opts.configPath
 			}
 		}
-		if alreadyAppliedNeedsRepair && !configStateRepaired {
+		if alreadyAppliedNeedsRepair {
 			actionOpts.configPath = ""
 		}
 		actionOpts = *windowsEnterpriseRepairRecordingOptions("repair", &actionOpts)

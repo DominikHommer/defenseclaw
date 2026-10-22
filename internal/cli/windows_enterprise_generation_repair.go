@@ -19,6 +19,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
+// windowsEnterpriseConfigGenerationRepair is
+// repairWindowsEnterpriseConfigGeneration; tests replace it.
+var windowsEnterpriseConfigGenerationRepair = repairWindowsEnterpriseConfigGeneration
+
 // Recover a damaged counter only when the administrator supplied the exact
 // installed config. The live gateway provides a counter that must not be
 // lost when the service stops. Both lifecycle and config locks protect the
