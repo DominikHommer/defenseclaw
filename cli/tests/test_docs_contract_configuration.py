@@ -65,3 +65,9 @@ def test_windows_enrollment_wait_starts_after_agent_first_start():
     assert "account is signed in and the agent is installed" in text
     assert "Claude Code must also start once" in text
     assert "five-minute wait starts then" in text
+
+
+def test_windows_setup_result_does_not_promise_a_changes_list():
+    text = flat("enterprise/operate/reference.mdx")
+    assert "On Linux and macOS the result's `changes` list" in text
+    assert "Windows Setup results report `policy` and the installed version but no `changes` list" in text
