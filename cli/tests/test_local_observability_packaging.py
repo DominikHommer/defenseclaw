@@ -134,6 +134,70 @@ def test_make_bundle_data_purges_generated_grafana_credentials(
     assert (staged_bundle / "README.md").read_bytes() == (source_bundle / "README.md").read_bytes()
 
 
+_COUNT_WORDS = (
+    "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|"
+    "sixteen|seventeen|eighteen|nineteen|twenty"
+)
+
+
+def _seeded_dashboard_uids(bundle: Path, data_dir: Path) -> set[str]:
+    from unittest.mock import patch
+
+    from defenseclaw.bundle_refresh import refresh_local_observability_stack
+
+    data_dir.mkdir()
+    with patch("defenseclaw.bundle_refresh.bundled_local_observability_dir", return_value=bundle):
+        result = refresh_local_observability_stack(str(data_dir))
+    assert result.errors == []
+    dashboards = Path(result.seeded_dest) / "grafana" / "dashboards"
+    return {json.loads(path.read_text(encoding="utf-8"))["uid"] for path in dashboards.glob("*.json")}
+
+
+def test_documented_dashboard_counts_match_both_install_paths(tmp_path: Path) -> None:
+    """Docs counts match what a wheel and what a source checkout actually seed.
+
+    A wheel stages ``bundles/`` through ``make _bundle-data``, which drops the
+    optional Fleet templates; an editable install seeds ``bundles/`` as is.
+    """
+    from defenseclaw import paths
+
+    if paths._REPO_ROOT.resolve() == REPO_ROOT.resolve():
+        assert paths.bundled_local_observability_dir().resolve() == BUNDLE.resolve()
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    staged_out = set(re.findall(r'_data/\$\$d/((?:grafana|prometheus)/[^"]+|docker-compose\.fleet\.yml)"', makefile))
+    assert staged_out == FLEET_TEMPLATES
+
+    wheel_bundle = tmp_path / "wheel-bundle"
+    shutil.copytree(
+        BUNDLE,
+        wheel_bundle,
+        ignore=lambda directory, names: [
+            name
+            for name in names
+            if (Path(directory) / name).relative_to(BUNDLE).as_posix() in FLEET_TEMPLATES
+            or _is_generated_grafana_credential(name)
+        ],
+    )
+    wheel = _seeded_dashboard_uids(wheel_bundle, tmp_path / "wheel-home")
+    source = _seeded_dashboard_uids(BUNDLE, tmp_path / "source-home")
+    assert source == wheel | {"defenseclaw-fleet"} and "defenseclaw-fleet" not in wheel
+
+    docs = REPO_ROOT / "docs-site/content/docs"
+    pages = {
+        "run-grafana-locally": (docs / "how-to/observability/run-grafana-locally.mdx").read_text(encoding="utf-8"),
+        "dashboards": (docs / "reference/observability/dashboards.mdx").read_text(encoding="utf-8"),
+        "bundle README": (BUNDLE / "README.md").read_text(encoding="utf-8"),
+    }
+    for name, page in pages.items():
+        flat = " ".join(page.split())
+        core_counts = re.findall(r"\b(\d+) (?:bundled |core )?(?:Grafana |DefenseClaw )?dashboards\b", flat)
+        source_counts = re.findall(r"\b(\d+) from a source checkout\b", flat)
+        assert core_counts and {int(count) for count in core_counts} == {len(wheel)}, name
+        assert source_counts and {int(count) for count in source_counts} == {len(source)}, name
+        spelled = re.finditer(rf"\b(?:{_COUNT_WORDS})\b(?:\s+\S+){{0,3}}\s+dashboards?\b", flat, re.IGNORECASE)
+        assert [match[0] for match in spelled if "splunk" not in match[0].lower()] == [], name
+
+
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required to build wheels")
 def test_wheel_resolves_complete_stack_outside_source_checkout(tmp_path: Path) -> None:
     output = tmp_path / "wheel"
