@@ -160,6 +160,7 @@ func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
 }
 
 func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
+	dataDir := useUserCleanupStateDir(t)
 	previousCfg, previousManifest := cfg, enterpriseHookManifest
 	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
 	t.Cleanup(func() {
@@ -170,6 +171,7 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	})
 	enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
 	cfg = &config.Config{
+		DataDir:        dataDir,
 		DeploymentMode: managed.DeploymentModeManagedEnterprise,
 		Enterprise: config.EnterpriseConfig{
 			Profile: managed.ProfileStandalone,
