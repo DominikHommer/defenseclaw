@@ -77,7 +77,7 @@ How the records stay trustworthy:
 - On Windows the hook refuses a record when anyone but SYSTEM, Administrators or the gateway service can change the record, its folder, `DefenseClaw-HookSessions` or `C:\ProgramData\Cisco`. If other software loosens the permissions on `C:\ProgramData\Cisco`, guarded calls block during an outage. Windows `status` and `verify` use the same rule and warn `hook_session_records_untrusted`.
 - The gateway writes the records only in the folder its data directory names (the standard layout above). A gateway configured with another data directory writes none, so its guarded calls block during an outage.
 
-Known limit: a block ends an account's earlier allows through any one of three changes in different folders: removing the key, adding its revocation mark, or publishing the block record. Only when the operating system refuses all three (a folder that takes no change at all, which no standard user can cause) can an earlier allow of that account pass an outage, for at most 15 minutes, its age limit. The gateway logs it and tries again at every call of that account.
+Known limit: a block ends an account's earlier allows through any one of three changes: removing the key, adding its revocation mark (next to the key on Linux and macOS, in the record folder on Windows), or publishing the block record in the account's folder. Only when the operating system refuses all three (folders that take no change at all, which no standard user can cause) can an earlier allow of that account pass an outage, for at most 15 minutes, its age limit. The gateway logs it and tries again at every call of that account.
 
 ## Approve a hook
 
