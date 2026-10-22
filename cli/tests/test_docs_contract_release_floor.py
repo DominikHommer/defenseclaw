@@ -148,6 +148,7 @@ def test_operator_contract_lowers_the_floor_with_real_commands_and_flags() -> No
     section = _contract_section("### 5.3 Lower the release floor")
     flat = " ".join(section.split())
     assert "`product_floor_refused`" in flat
+    assert "DefenseClaw 1.0.4 and later refuse to install a release below" in flat
     assert "do not lift it" in flat
     assert "Deliver it as in 5.2" in flat
     fences = re.findall(r"```sh\n(.*?)```", section, flags=re.DOTALL)
@@ -164,5 +165,80 @@ def test_operator_contract_lowers_the_floor_with_real_commands_and_flags() -> No
     assert {"version", "min-product-version"} <= {arg[2:] for arg in sign if arg.startswith("--")}
     # The exit codes the contract names are the command's, and older packages are not checked.
     assert "exit `0` allows it, exit `3` refuses it" in flat
-    assert "older packages do not" in flat
+    assert "Older packages do not check the floor in any script and can complete below it" in flat
     assert "const bundleFloorRefusedExit = 3" in _go_source("internal/cli/enterprise_bundle_floor.go")
+
+
+# Package scripts that run the floor check: a gateway without the marker is one
+# from before 1.0.4, which has no check of its own.
+_FLOOR_SCRIPTS = (
+    "packaging/linux/preinstall.sh",
+    "packaging/linux/apt-downgrade-guard.sh",
+    "scripts/build-macos-enterprise-pkg.sh",
+)
+
+
+def _floor_doc_texts() -> dict[str, str]:
+    texts = {
+        page.relative_to(DOCS).as_posix(): _flat(page.relative_to(DOCS).as_posix()) for page in DOCS.rglob("*.mdx")
+    }
+    texts[OPERATOR_CONTRACT] = " ".join((REPO / OPERATOR_CONTRACT).read_text(encoding="utf-8").split())
+    return texts
+
+
+def _sentences(text: str) -> list[str]:
+    return re.split(r"(?<=\.)\s+", text)
+
+
+def _says_older_packages_complete(text: str) -> bool:
+    return any(
+        ("older than 1.0.4" in s or "Older packages" in s) and re.search(r"\bcomplete[s]? below\b", s)
+        for s in _sentences(text)
+    )
+
+
+def test_package_floor_check_is_only_in_1_0_4_and_later_scripts() -> None:
+    """Ground truth for the docs below: the scripts ask only a gateway with the marker."""
+    for script in _FLOOR_SCRIPTS:
+        source = _go_source(script)
+        assert "floor_check_marker=defenseclaw-package-floor-check/1" in source, script
+        assert "# a gateway before 1.0.4: it has no floor check" in source, script
+    assert "defenseclaw-package-floor-check/1" in _go_source("internal/cli/enterprise_bundle_floor.go")
+
+
+def test_postinstall_floor_refusal_is_promised_only_for_packages_with_the_check() -> None:
+    """A package older than 1.0.4 has no floor check in its preinstall, postinstall
+    or ensure, so no page may say a postinstall refuses a release below the floor
+    without naming 1.0.4 or later packages (loop round 3 finding)."""
+    hits = []
+    for page, text in _floor_doc_texts().items():
+        for sentence in _sentences(text):
+            if "postinstall" not in sentence or "refuse" not in sentence:
+                continue
+            if "floor" not in sentence:
+                continue
+            if "1.0.4 or later" not in sentence and "1.0.4 and later" not in sentence:
+                hits.append(f"{page}: {sentence}")
+    assert not hits, hits
+    for page, text in _floor_doc_texts().items():
+        # An unscoped "the device never goes below the floor" is the same promise.
+        assert "oldest release you can install" not in text, page
+        assert "a device does not install a release below" not in text, page
+        assert "only its postinstall `ensure` refuses" not in text, page
+
+
+def test_floor_docs_say_an_older_package_completes_below_the_floor() -> None:
+    pages = {page: text for page, text in _floor_doc_texts().items() if "`floor_checker_not_kept`" in text}
+    assert {REFERENCE, TROUBLESHOOTING, OPERATOR_CONTRACT} <= set(pages), sorted(pages)
+    for page, text in pages.items():
+        assert _says_older_packages_complete(text), page
+    # The roll-back section, where the floor is introduced, says it too.
+    assert _says_older_packages_complete(_section("enterprise/operate/lifecycle.mdx", "## Roll back"))
+    assert _says_older_packages_complete(_section(REFERENCE, "### Release floor limits"))
+    assert _says_older_packages_complete(" ".join(_contract_section("### 5.3 Lower the release floor").split()))
+    [row] = [
+        line
+        for line in (DOCS / TROUBLESHOOTING).read_text(encoding="utf-8").splitlines()
+        if line.startswith("| `floor_checker_not_kept` |")
+    ]
+    assert _says_older_packages_complete(row), row

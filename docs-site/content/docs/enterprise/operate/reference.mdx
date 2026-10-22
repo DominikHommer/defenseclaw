@@ -106,11 +106,12 @@ binaries), they use the retained floor checker: a copy of the gateway that a
 non-purge uninstall keeps in the lifecycle directory. A checker that is there
 but cannot be read, is not a root-owned file only root can change, or does not
 run, refuses the install. If the uninstall could not keep the copy, it warns
-`floor_checker_not_kept`. The next package's preinstall then has nothing to
-check with and installs its files; only its postinstall `ensure` refuses a
-release below the floor, after the files are in place. The apt hook of an
-installed 1.0.4 or later package runs the check for older packages installed
-through `apt` or `apt-get`.
+`floor_checker_not_kept`. The preinstall of a 1.0.4 or later package then has
+nothing to check with and installs its files; its postinstall `ensure` refuses a
+release below the floor, after the files are in place. A package older than
+1.0.4 has no floor check in any of its scripts and completes below the floor.
+The apt hook of an installed 1.0.4 or later package runs the check for older
+packages installed through `apt` or `apt-get`.
 
 Packages older than 1.0.4 installed through `rpm`, `dnf`, `dpkg -i` or the
 macOS Installer run their own older scripts, which do not check the floor.

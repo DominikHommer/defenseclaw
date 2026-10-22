@@ -1273,9 +1273,9 @@ Later bundles go through 5.2.
 
 ### 5.3 Lower the release floor
 
-On Linux and macOS a device does not install a release below the confirmed
-bundle's `min_product_version` (`product_floor_refused`). The rollback marker
-and `--allow-downgrade` do not lift it. To roll devices back below it:
+On Linux and macOS, DefenseClaw 1.0.4 and later refuse to install a release
+below the confirmed bundle's `min_product_version` (`product_floor_refused`).
+The rollback marker and `--allow-downgrade` do not lift it. To roll devices back below it:
 
 1. The control plane signs the next bundle with `enterprise bundle sign`
    (section 7): a `--version` above the confirmed bundle's, and the oldest
@@ -1284,7 +1284,11 @@ and `--allow-downgrade` do not lift it. To roll devices back below it:
 2. Deliver it as in 5.2.
 3. Check the older release as root before you install it: exit `0` allows
    it, exit `3` refuses it and says why. Packages of 1.0.4 and later run the
-   same check before they replace files; older packages do not.
+   same check before they replace files. After an uninstall that warned
+   `floor_checker_not_kept`, a 1.0.4 or later package is refused only by its
+   postinstall `ensure`, after its files are in place. Older packages do not
+   check the floor in any script and can complete below it, so run this check
+   yourself first.
 4. Install the older release.
 
 ```sh

@@ -106,10 +106,11 @@ lost until the agent is restarted.
 
 ## Roll back
 
-On Linux and macOS with bundle trust anchors, the confirmed bundle's
-`min_product_version` is the oldest release you can install
+On Linux and macOS with bundle trust anchors, DefenseClaw 1.0.4 and later
+refuse to install a release below the confirmed bundle's `min_product_version`
 (`product_floor_refused`). The rollback marker, `--allow-downgrade` and
-`uninstall --keep-state` do not lift this floor. Deliver a bundle signed with a
+`uninstall --keep-state` do not lift this floor. A package older than 1.0.4
+does not check the floor itself and can complete below it. Deliver a bundle signed with a
 lower `--min-product-version` first ([Lower the release
 floor](/docs/enterprise/operate/reference#lower-the-release-floor)), or install
 a release that meets the floor. A floor that cannot be read refuses the install
