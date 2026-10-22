@@ -50,7 +50,7 @@ var secureClientHost = func() bool {
 	return classifySecureClientHost(secureClientClassificationChecks{
 		roots:        winpath.TrustedEnterpriseRoots,
 		deployment:   winpath.InspectEnterpriseDeploymentAt,
-		trustedDir:   managed.ValidateTrustedRuntimeDir,
+		trustedDir:   managed.ValidateTrustedInstallMarkerDir,
 		trustedFile:  managed.ValidateTrustedFilePath,
 		serviceImage: windowsServiceImagePath,
 	})

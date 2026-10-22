@@ -96,13 +96,9 @@ hermes_sandbox_block() {
   echo "defenseclaw: hermes hook: $1, blocking (sandbox hooks fail closed)" >&2
   printf '{"action":"block","message":"%s"}\n' "$(defenseclaw_json_escape "DefenseClaw blocked this tool call because its policy check failed: $1")"
   exit 2
-}{{else if and .Managed (not .SecureClientDelivery)}}# Managed hooks outside an authenticated Secure Client deployment use the
-# installer-owned delivery policy; an inherited DEFENSECLAW_FAIL_MODE cannot
-# weaken an explicitly closed managed hook. Secure Client hooks keep the
-# environment override (#1163).
-FAIL_MODE="{{.FailMode}}"{{else if .SecureClientDelivery}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{else}}FAIL_MODE="{{.FailMode}}"
+}{{else}}FAIL_MODE="{{.FailMode}}"
 # The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
-# environment is not read, so status and doctor report what runs (GAP-0315).{{end}}
+# environment is not read, so status and doctor report what runs (GAP-0461).{{end}}
 
 # Bail early on missing token via the shared helper so the bypass is
 # logged to hook-failures.jsonl AND honors strict availability — the

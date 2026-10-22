@@ -29,6 +29,7 @@ import (
 // G3-upg), and a per-user Cursor in observe closes its outages unless the
 // config opens them.
 func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
+	useVerifiedSecureClientDeployment(t)
 	standalone := SetupOpts{ManagedEnterprise: true, ManagedHookSocket: "/run/defenseclaw/hook.sock", HookFailMode: "closed", GuardrailMode: "observe"}
 	secureClient := SetupOpts{ManagedEnterprise: true, HookFailMode: "closed", GuardrailMode: "observe"}
 	perUser := SetupOpts{HookFailMode: "closed", GuardrailMode: "observe"}
