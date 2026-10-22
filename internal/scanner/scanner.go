@@ -18,8 +18,11 @@ package scanner
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"sync/atomic"
+
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 // Scanner defines the interface that all scanner implementations must satisfy.
@@ -31,6 +34,10 @@ type Scanner interface {
 	SupportedTargets() []string
 	Scan(ctx context.Context, target string) (*ScanResult, error)
 }
+
+// Every scanner child must be contained for its entire lifetime, including
+// descendants that leave the original process group or session.
+var runScannerCommand func(*exec.Cmd) error = processutil.RunContained
 
 // keepFullFailureText is set by KeepFullFailureText.
 var keepFullFailureText atomic.Bool

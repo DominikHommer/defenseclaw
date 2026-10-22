@@ -29,6 +29,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestRunContainedDarwinAllowsForkFreeProof(t *testing.T) {
@@ -91,5 +93,87 @@ func TestRunContainedDarwinIgnoresInheritedBashStartup(t *testing.T) {
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 9 || output.String() != "ordinary\n" {
 		t.Fatalf("RunContained = %v, output %q; want registered script exit 9", err, output.String())
+	}
+}
+
+func TestRunContainedDarwinDoesNotExecuteWithoutWatchdog(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a root process cannot be confined by RLIMIT_NPROC")
+	}
+	previous := armContainedDarwinWatchdog
+	armContainedDarwinWatchdog = func(int) (func(), error) {
+		return nil, errors.New("watchdog could not start")
+	}
+	t.Cleanup(func() { armContainedDarwinWatchdog = previous })
+	marker := filepath.Join(t.TempDir(), "scanner-ran")
+	cmd := CommandContext(context.Background(), "/bin/sh", "-c", `printf 'ran' > "$1"`, "sh", marker)
+	if err := RunContained(cmd); !errors.Is(err, ErrNotContained) {
+		t.Fatalf("RunContained = %v, want ErrNotContained", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scanner ran before the watchdog was armed: %v", err)
+	}
+}
+
+// Gateway death while the watchdog is being armed closes the launch gate.
+// The scanner must not execute in that interval or survive as a paused child.
+func TestRunContainedDarwinGatewayDiesBeforeWatchdogArmed(t *testing.T) {
+	if os.Getenv("PROCESSUTIL_DARWIN_GATE_HELPER") == "1" {
+		armContainedDarwinWatchdog = func(pid int) (func(), error) {
+			_ = os.WriteFile(os.Getenv("PROCESSUTIL_DARWIN_GATE_READY"),
+				[]byte(strconv.Itoa(pid)), 0o600)
+			time.Sleep(time.Minute)
+			return nil, errors.New("gateway helper should have died")
+		}
+		_ = RunContained(CommandContext(context.Background(), "/bin/sh", "-c",
+			`printf 'ran' > "$1"; exec sleep 60`, "sh", os.Getenv("PROCESSUTIL_DARWIN_GATE_MARKER")))
+		return
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("a root process cannot be confined by RLIMIT_NPROC")
+	}
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	marker := filepath.Join(dir, "scanner-ran")
+	gateway := exec.Command(os.Args[0], "-test.run=^TestRunContainedDarwinGatewayDiesBeforeWatchdogArmed$")
+	gateway.Env = append(os.Environ(), "PROCESSUTIL_DARWIN_GATE_HELPER=1",
+		"PROCESSUTIL_DARWIN_GATE_READY="+ready, "PROCESSUTIL_DARWIN_GATE_MARKER="+marker)
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = gateway.Process.Kill(); _ = gateway.Wait() })
+	deadline := time.Now().Add(5 * time.Second)
+	pid := 0
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(ready)
+		if err == nil {
+			pid, _ = strconv.Atoi(string(raw))
+			if pid > 0 {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pid == 0 {
+		t.Fatal("launcher did not reach the watchdog arm point")
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	if err := gateway.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	_ = gateway.Wait()
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		info, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+		if err != nil || info.Proc.P_stat == darwinZombie {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if info, err := unix.SysctlKinfoProc("kern.proc.pid", pid); err == nil && info.Proc.P_stat != darwinZombie {
+		t.Fatalf("launcher %d survived gateway death before the watchdog armed", pid)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scanner ran before the watchdog armed: %v", err)
 	}
 }

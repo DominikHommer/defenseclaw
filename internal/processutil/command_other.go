@@ -34,19 +34,10 @@ func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) {
 // ends, not the process, so the runtime must not end that thread while the
 // child still runs (G-small).
 func runTree(cmd *exec.Cmd, _ bool) error {
-	return runTreeAfterStart(cmd, nil)
-}
-
-// runTreeAfterStart is runTree; afterStart, when set, runs once Start has
-// returned, whether or not it succeeded.
-func runTreeAfterStart(cmd *exec.Cmd, afterStart func()) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	exitWithParent(cmd)
 	err := cmd.Start()
-	if afterStart != nil {
-		afterStart()
-	}
 	if err != nil {
 		return err
 	}

@@ -14,46 +14,20 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build linux || darwin
+//go:build darwin
 
 package processutil
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"time"
 )
 
 // lifelineWait bounds the wait for the lifeline to close once the command's
 // group is gone; tests shorten it.
 var lifelineWait = time.Second
-
-// runTreeWithLifeline is RunTree plus a lifeline: the write end of a pipe
-// that the command and every descendant inherit, which only this process
-// reads. After RunTree has killed the command's process group, the lifeline
-// closes only if nothing that inherited it still runs; a descendant that
-// left the group (setsid, setpgid) and kept it fails the run with
-// ErrNotContained. A descendant that also closed its inherited descriptors
-// is not seen.
-func runTreeWithLifeline(cmd *exec.Cmd) error {
-	r, w, err := os.Pipe()
-	if err != nil {
-		return fmt.Errorf("%w: lifeline: %v", ErrNotContained, err)
-	}
-	defer r.Close()
-	defer w.Close()
-	cmd.ExtraFiles = append(cmd.ExtraFiles, w)
-	if err := runTreeAfterStart(cmd, func() { _ = w.Close() }); err != nil {
-		return err
-	}
-	if !lifelineClosed(r, lifelineWait) {
-		return fmt.Errorf("%w: %s left a process outside its group", ErrNotContained, cmd.Path)
-	}
-	return nil
-}
 
 // lifelineClosed reports whether every write end of r is closed within wait.
 func lifelineClosed(r *os.File, wait time.Duration) bool {

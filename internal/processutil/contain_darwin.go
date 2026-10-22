@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -34,11 +35,17 @@ const (
 	containExitNotContained = 125
 )
 
+var armContainedDarwinWatchdog = armGroupWatchdog
+
 func init() {
-	if len(os.Args) < 3 || os.Args[0] != containDarwinArg0 || os.Args[1] != "--" {
+	if len(os.Args) < 4 || os.Args[0] != containDarwinArg0 || os.Args[2] != "--" {
 		return
 	}
-	os.Exit(execForklessDarwin(os.Args[2:]))
+	gateFD, err := strconv.Atoi(os.Args[1])
+	if err != nil || gateFD < 3 {
+		os.Exit(containExitNotContained)
+	}
+	os.Exit(execForklessDarwin(gateFD, os.Args[3:]))
 }
 
 // runContained launches a short-lived copy of this binary. Only that copy
@@ -54,10 +61,18 @@ func runContained(cmd *exec.Cmd) error {
 	if err != nil {
 		return fmt.Errorf("%w: locate forkless launcher: %v", ErrNotContained, err)
 	}
+	gateRead, gateWrite, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("%w: create launch gate: %v", ErrNotContained, err)
+	}
+	defer gateRead.Close()
+	defer gateWrite.Close()
+	gateFD := 3 + len(cmd.ExtraFiles)
+	cmd.ExtraFiles = append(cmd.ExtraFiles, gateRead)
 	target := cmd.Path
 	cmd.Path = self
-	cmd.Args = append([]string{containDarwinArg0, "--", target}, cmd.Args[1:]...)
-	err = runTreeWithLifeline(cmd)
+	cmd.Args = append([]string{containDarwinArg0, strconv.Itoa(gateFD), "--", target}, cmd.Args[1:]...)
+	err = runContainedDarwinArmed(cmd, gateRead, gateWrite)
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == containExitNotContained {
 		return fmt.Errorf("%w: forkless launcher for %s", ErrNotContained, target)
@@ -65,11 +80,64 @@ func runContained(cmd *exec.Cmd) error {
 	return err
 }
 
+// The launcher remains in its own process group and waits for one byte before
+// it may execute the scanner. The gateway arms the watchdog first. If the
+// gateway dies before that point, the gate closes and no scanner runs; after
+// that point, the watchdog owns the group until the scanner has exited.
+func runContainedDarwinArmed(cmd *exec.Cmd, gateRead, gateWrite *os.File) error {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("%w: lifeline: %v", ErrNotContained, err)
+	}
+	defer r.Close()
+	defer w.Close()
+	cmd.ExtraFiles = append(cmd.ExtraFiles, w)
+	exitWithParent(cmd)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	_ = gateRead.Close()
+	_ = w.Close()
+	release, err := armContainedDarwinWatchdog(cmd.Process.Pid)
+	if err != nil {
+		_ = gateWrite.Close()
+		_ = killGroup(cmd.Process.Pid)
+		_ = cmd.Wait()
+		return fmt.Errorf("%w: %v", ErrNotContained, err)
+	}
+	_, gateErr := gateWrite.Write([]byte{1})
+	_ = gateWrite.Close()
+	exited := waitExitedUnreaped(cmd.Process.Pid)
+	_ = killGroup(cmd.Process.Pid)
+	release()
+	waitErr := cmd.Wait()
+	if gateErr != nil || !exited {
+		return fmt.Errorf("%w: scanner launch or exit could not be proven", ErrNotContained)
+	}
+	if waitErr != nil {
+		return waitErr
+	}
+	if !lifelineClosed(r, lifelineWait) {
+		return fmt.Errorf("%w: scanner left an inherited lifeline open", ErrNotContained)
+	}
+	return nil
+}
+
 // execForklessDarwin changes the real UID before applying RLIMIT_NPROC. The
 // managed guardian invokes Verify with a target user's effective UID but
 // retains real UID 0; XNU checks the real UID and exempts root from this
 // limit, so the launcher must irrevocably drop both IDs first.
-func execForklessDarwin(argv []string) int {
+func execForklessDarwin(gateFD int, argv []string) int {
+	gate := os.NewFile(uintptr(gateFD), "scanner launch gate")
+	if gate == nil {
+		return containExitNotContained
+	}
+	var token [1]byte
+	n, err := gate.Read(token[:])
+	_ = gate.Close()
+	if err != nil || n != 1 || token[0] != 1 {
+		return containExitNotContained
+	}
 	uid, euid, egid := os.Getuid(), os.Geteuid(), os.Getegid()
 	if euid <= 0 {
 		return containExitNotContained

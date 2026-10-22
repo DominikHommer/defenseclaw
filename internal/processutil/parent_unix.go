@@ -20,6 +20,7 @@ package processutil
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -66,9 +67,19 @@ func killDescendantsAtExit(cmd *exec.Cmd) {
 // it before the group leader is reaped. Without a pipe or a shell nothing is
 // watched.
 func groupWatchdog(pgid int) (release func()) {
-	r, w, err := os.Pipe()
+	release, err := armGroupWatchdog(pgid)
 	if err != nil {
 		return func() {}
+	}
+	return release
+}
+
+// armGroupWatchdog reports an arming failure to callers that must not start
+// the command until gateway-death cleanup is ready.
+func armGroupWatchdog(pgid int) (release func(), err error) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("create process-group watchdog pipe: %w", err)
 	}
 	watchdog := exec.Command("/bin/sh", "-c", `read -r _; kill -9 "-$1" 2>/dev/null; exit 0`,
 		"defenseclaw-group-watchdog", strconv.Itoa(pgid))
@@ -78,12 +89,12 @@ func groupWatchdog(pgid int) (release func()) {
 	_ = r.Close()
 	if startErr != nil {
 		_ = w.Close()
-		return func() {}
+		return nil, fmt.Errorf("start process-group watchdog: %w", startErr)
 	}
 	return func() {
 		_ = w.Close()
 		_ = watchdog.Wait()
-	}
+	}, nil
 }
 
 func killGroup(pid int) error {
