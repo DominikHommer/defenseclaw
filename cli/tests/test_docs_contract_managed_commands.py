@@ -14,6 +14,11 @@ DOCS = Path(__file__).resolve().parents[2] / "docs-site/content/docs"
     ("page", "facts", "obsolete"),
     [
         (
+            "enterprise/runtime/tetragon-reference.mdx",
+            ("With Plane C off, `ensure` writes an `off` drop-in",),
+            ("produce the same policy digest and no drop-in",),
+        ),
+        (
             "reference/sandboxes/cli.mdx",
             ("per-user feed installer", "standalone managed Linux and macOS"),
             ("a managed host, where sandboxes are not supported",),
