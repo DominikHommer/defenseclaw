@@ -550,6 +550,111 @@ func TestSharedShellReaderFollowsAManagedSidecarsOpen(t *testing.T) {
 	}
 }
 
+// A managed shared inspect script resolves its connector the way the
+// rendered scripts do: several guardian records leave it unselected. Its
+// records combine to the strictest mode, so an administrator's open on every
+// connector stands for the outage and any closed record (a connector or the
+// unscoped legacy entry) closes it. A per-user hook with several records
+// still needs the legacy open. Before, every managed call with several
+// records closed, so the administrator's explicit open was lost (GAP-0362).
+func TestManagedSharedHookCombinesSeveralConnectorRecordsToTheStrictest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hooks are not used on Windows")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is not installed")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const addr = "127.0.0.1:18970"
+	for _, test := range []struct {
+		name    string
+		managed bool
+		modes   []string
+		// legacyFlat replaces the flat legacy record; jsonOnly drops the
+		// flat connector records, so only a parser reads them.
+		legacyFlat string
+		jsonOnly   bool
+		want       string
+	}{
+		{name: "managed open on every connector", managed: true, modes: []string{"codex", "open", "claudecode", "open"}, want: "open"},
+		{name: "managed open on three connectors", managed: true, modes: []string{"codex", "open", "claudecode", "open", "cursor", "open"}, want: "open"},
+		{name: "managed open beside a closed peer", managed: true, modes: []string{"codex", "open", "claudecode", "closed"}, want: "closed"},
+		{name: "managed closed on every connector", managed: true, modes: []string{"codex", "closed", "claudecode", "closed"}, want: "closed"},
+		{name: "managed open with a closed legacy entry", managed: true, modes: []string{"codex", "open", "claudecode", "open", "", "closed"}, want: "closed"},
+		{name: "managed open with an open legacy entry", managed: true, modes: []string{"codex", "open", "claudecode", "open", "", "open"}, want: "open"},
+		{name: "managed open with a legacy record naming a connector", managed: true, modes: []string{"codex", "open", "claudecode", "open"}, legacyFlat: "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n", want: "closed"},
+		{name: "managed open with an unreadable legacy record", managed: true, modes: []string{"codex", "open", "claudecode", "open"}, legacyFlat: "garbage\n", want: "closed"},
+		{name: "managed open in the JSON sidecar only", managed: true, modes: []string{"codex", "open", "claudecode", "open"}, jsonOnly: true, want: "open"},
+		{name: "managed closed peer in the JSON sidecar only", managed: true, modes: []string{"codex", "open", "claudecode", "closed"}, jsonOnly: true, want: "closed"},
+		{name: "per-user hook with the same records", managed: false, modes: []string{"codex", "open", "claudecode", "open"}, want: "closed"},
+	} {
+		for _, tools := range readerToolSets(t) {
+			t.Run(test.name+"/"+tools.name, func(t *testing.T) {
+				want := test.want
+				if test.jsonOnly && !tools.json {
+					want = "closed"
+				}
+				hookDir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), helper, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				for i := 0; i+1 < len(test.modes); i += 2 {
+					if test.managed {
+						err = writeHookConfigSidecar(hookDir, addr, test.modes[i], test.modes[i+1], true)
+					} else {
+						err = writeHookConfigSidecarUsing(hookDir, addr, test.modes[i], test.modes[i+1], HookFailModeSourceConfig, false, atomicWriteFile)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if test.legacyFlat != "" {
+					if err := os.WriteFile(filepath.Join(hookDir, hookConfigSidecarName+".legacy"), []byte(test.legacyFlat), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if test.jsonOnly {
+					for i := 0; i+1 < len(test.modes); i += 2 {
+						if err := os.Remove(filepath.Join(hookDir, hookConfigSidecarName+"."+test.modes[i])); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				run := func(env ...string) (connector, mode string) {
+					t.Helper()
+					cmd := exec.Command(bash, "-c", `. "$1/_hardening.sh"; c="$(defenseclaw_shared_runtime_connector "$1")"; printf '%s|' "$c"; defenseclaw_shared_runtime_fail_mode "$1" "$c"`, "test", hookDir)
+					cmd.Env = append([]string{"PATH=" + tools.path, "HOME=" + t.TempDir()}, env...)
+					out, err := cmd.Output()
+					if err != nil {
+						t.Fatalf("reader: %v", err)
+					}
+					connector, mode, _ = strings.Cut(string(out), "|")
+					return connector, mode
+				}
+				var got string
+				if test.managed {
+					// The environment's connector is not trusted by a managed hook.
+					var connector string
+					connector, got = run("DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_CONNECTOR=codex")
+					if connector != "" {
+						t.Fatalf("managed hook selected connector %q from several records or the environment", connector)
+					}
+				} else {
+					// A per-user selection only tightens, so check it unselected.
+					_, got = run()
+				}
+				if got != want {
+					t.Fatalf("fail mode %q, want %q", got, want)
+				}
+			})
+		}
+	}
+}
+
 // readerToolSets are the PATHs the shared shell reader runs under: the host
 // PATH, one with only python3 (no jq), when the host has python3, and one
 // with neither. json says whether the reader can parse hooks/.hookcfg.
