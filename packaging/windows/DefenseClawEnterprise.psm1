@@ -22719,6 +22719,14 @@ function Assert-DefenseClawEnterpriseDeployment {
         -Metadata $metadata `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
+    if (Test-DefenseClawStandaloneProfile) {
+        # Verify also serves an installed-host ensure that would otherwise
+        # return compliant without opening a transaction. Use the fresh-install
+        # key validator here too; an extra reader must never pass that shortcut.
+        [void](Get-DefenseClawRedactionKeySecuritySnapshot `
+            -Layout $Layout `
+            -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName))
+    }
     $managedHooksActivationProperty = $metadata.PSObject.Properties[
         'managed_hooks_activation'
     ]
