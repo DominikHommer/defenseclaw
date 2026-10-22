@@ -149,6 +149,7 @@ var gitBuildVersionRE = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])v?git[.+-]?[0-9a-
 const gitBuildCompareVersion = "999.999.999"
 
 var versionNumberRE = regexp.MustCompile(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?`)
+var hermesGitReleaseRE = regexp.MustCompile(`^Hermes Agent vunknown \(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})\)$`)
 
 var proxyConnectorsWithoutHookGate = map[string]bool{
 	"openclaw":  true,
@@ -1250,7 +1251,7 @@ func newestContractBelow(contracts []HookContract, normalized string) (HookContr
 func knownBrokenAgentVersion(name, raw, normalized string) (KnownBrokenAgentVersion, bool) {
 	for _, entry := range knownBrokenAgentVersions[name] {
 		if entry.Exact != "" {
-			if exactAgentVersionMatch(raw, []string{entry.Exact}) {
+			if exactAgentVersionMatch(name, raw, []string{entry.Exact}) {
 				return entry, true
 			}
 			continue
@@ -1263,7 +1264,7 @@ func knownBrokenAgentVersion(name, raw, normalized string) (KnownBrokenAgentVers
 }
 
 func contractMatchesAgentVersion(contract HookContract, raw, normalized string) bool {
-	if len(contract.ExactAgentVersions) != 0 && exactAgentVersionMatch(raw, contract.ExactAgentVersions) {
+	if len(contract.ExactAgentVersions) != 0 && exactAgentVersionMatch(contract.Connector, raw, contract.ExactAgentVersions) {
 		return true
 	}
 	// Empty min/max would otherwise accept any normalized version.
@@ -1273,7 +1274,12 @@ func contractMatchesAgentVersion(contract HookContract, raw, normalized string) 
 	return false
 }
 
-func exactAgentVersionMatch(raw string, expected []string) bool {
+func exactAgentVersionMatch(connector, raw string, expected []string) bool {
+	// Hermes git installs print a release date in this exact vendor form.
+	// Accept only a pinned date, never an arbitrary version substring.
+	if match := hermesGitReleaseRE.FindStringSubmatch(strings.TrimSpace(raw)); connector == "hermes" && match != nil {
+		raw = match[1]
+	}
 	fields := strings.Fields(strings.TrimSpace(raw))
 	if len(fields) == 0 || len(fields) > 2 {
 		return false
