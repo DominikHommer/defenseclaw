@@ -596,10 +596,14 @@ func TestMigrateManagedStandaloneConfigRefusesBundleBindingOverUnreadableGenerat
 		name    string
 		version int
 		staged  bool
+		link    bool
 	}{
 		{name: "v9 staged bundle", version: 9, staged: true},
 		{name: "v8 staged bundle", version: 8, staged: true},
 		{name: "v9 without a bundle", version: 9},
+		// W4b loop round 2: a dangling link reads as a missing record.
+		{name: "v9 staged bundle over a dangling link", version: 9, staged: true, link: true},
+		{name: "v8 staged bundle over a dangling link", version: 8, staged: true, link: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -609,7 +613,10 @@ func TestMigrateManagedStandaloneConfigRefusesBundleBindingOverUnreadableGenerat
 				t.Fatal(err)
 			}
 			broken := []byte(`{"generation":4,"config_sha256":`)
-			if err := os.WriteFile(configwrite.GenerationPath(path), broken, 0o600); err != nil {
+			gone := filepath.Join(t.TempDir(), "gone.json")
+			if tc.link {
+				symlinkOrSkip(t, gone, configwrite.GenerationPath(path))
+			} else if err := os.WriteFile(configwrite.GenerationPath(path), broken, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			saved := managedStandaloneBundleGeneration
@@ -635,7 +642,11 @@ func TestMigrateManagedStandaloneConfigRefusesBundleBindingOverUnreadableGenerat
 			if !errors.Is(err, configwrite.ErrUnprovenBundleBinding) || !strings.Contains(err.Error(), "enterprise bundle status --json") {
 				t.Fatalf("bundle binding over unreadable generation: %v", err)
 			}
-			if after, err := os.ReadFile(configwrite.GenerationPath(path)); err != nil || string(after) != string(broken) {
+			if tc.link {
+				if got, err := os.Readlink(configwrite.GenerationPath(path)); err != nil || got != gone {
+					t.Fatalf("the refusal replaced the dangling link: %q, %v", got, err)
+				}
+			} else if after, err := os.ReadFile(configwrite.GenerationPath(path)); err != nil || string(after) != string(broken) {
 				t.Fatalf("the refusal rewrote the generation evidence: %q, %v", after, err)
 			}
 			if after, err := os.ReadFile(path); err != nil || string(after) != string(raw) {

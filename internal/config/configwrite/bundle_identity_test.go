@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -158,6 +160,85 @@ func TestLockedRefusesBundleBindingOverUnreadableGeneration(t *testing.T) {
 			}
 			if tc.damage != nil && (!state.GenerationReset || state.Generation != 8) {
 				t.Fatalf("a reset over a corrupt record must say so and keep counting: %+v", state)
+			}
+		})
+	}
+}
+
+// W4b loop round 2: the refusal looks at the generation path without
+// following links. A dangling link reads as a missing record, and recording
+// the bundle would replace the link and bind the bytes already in place to
+// it. A link to a readable record, or any other path that is not a regular
+// file, is not proof either. Both equal-byte bundle paths (ReplaceDocument
+// and Locked) refuse and leave the link as it was; a missing record still
+// records, as before.
+func TestEqualByteBundleBindingRefusesALinkedGenerationRecord(t *testing.T) {
+	bundle := Options{Actor: "operator:test", Lifecycle: true,
+		Bundle: BundleRef{ID: "b-01J9ZZZZZZZZZZZZZZZZZZZZZZ", Version: 1, SignerKeyID: "k1"}}
+	writers := map[string]func(path string, raw []byte) error{
+		"ReplaceDocument": func(path string, raw []byte) error {
+			opt := bundle
+			opt.ExpectSHA256 = SHA256Hex(raw)
+			_, err := ReplaceDocument(context.Background(), path, raw, opt)
+			return err
+		},
+		"Locked": func(path string, _ []byte) error {
+			_, err := Locked(context.Background(), path, bundle, func() (bool, error) { return true, nil })
+			return err
+		},
+	}
+	links := map[string]func(t *testing.T, dir string) string{
+		"dangling link": func(t *testing.T, dir string) string { return filepath.Join(dir, "gone.json") },
+		"link to a readable record": func(t *testing.T, dir string) string {
+			target := filepath.Join(dir, "elsewhere.json")
+			if err := os.WriteFile(target, []byte(`{"generation":3,"config_sha256":"x"}`+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return target
+		},
+	}
+	for writerName, write := range writers {
+		for linkName, target := range links {
+			t.Run(writerName+"/"+linkName, func(t *testing.T) {
+				path := writeTestConfig(t, "deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nobservability: {}\n")
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				to := target(t, t.TempDir())
+				if err := os.Symlink(to, GenerationPath(path)); err != nil {
+					if runtime.GOOS == "windows" {
+						t.Skipf("symbolic links unavailable: %v", err)
+					}
+					t.Fatal(err)
+				}
+				err = write(path, raw)
+				if !errors.Is(err, ErrUnprovenBundleBinding) || !strings.Contains(err.Error(), "enterprise bundle status --json") {
+					t.Fatalf("equal-byte bundle over a %s: %v", linkName, err)
+				}
+				info, err := os.Lstat(GenerationPath(path))
+				if err != nil || info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("the refusal replaced the link: %v, %v", info, err)
+				}
+				if got, err := os.Readlink(GenerationPath(path)); err != nil || got != to {
+					t.Fatalf("the link now points at %q (%v), want %q", got, err, to)
+				}
+				if after, _ := os.ReadFile(path); string(after) != string(raw) {
+					t.Fatalf("the refusal changed config.yaml: %q", after)
+				}
+			})
+		}
+		t.Run(writerName+"/missing record", func(t *testing.T) {
+			path := writeTestConfig(t, "deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nobservability: {}\n")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := write(path, raw); err != nil {
+				t.Fatal(err)
+			}
+			if state, err := ReadGenerationState(path); err != nil || state.BundleID != bundle.Bundle.ID {
+				t.Fatalf("recorded %+v, %v", state, err)
 			}
 		})
 	}

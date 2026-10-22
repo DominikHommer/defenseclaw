@@ -459,10 +459,15 @@ func managedRefuses(current []byte, opt Options) bool {
 var ErrUnprovenBundleBinding = errors.New("configwrite: cannot bind a bundle to an unreadable generation record")
 
 // RefuseUnprovenBundleBinding returns ErrUnprovenBundleBinding (wrapped,
-// with the next step) when opt binds a bundle and the generation record next
-// to configPath exists but cannot be read. A missing record is no evidence
-// to lose. Callers that bind installed bytes outside this package (the
-// Windows lifecycle's config step) check it before they change anything.
+// with the next step) when opt binds a bundle and something is at the
+// generation record's path next to configPath that is not a readable regular
+// record: a corrupt or unreadable file, a directory, or a link or other
+// reparse point, dangling or not. Only a path that is not there at all is no
+// evidence to lose; the path is inspected without following links, since a
+// read through a dangling link reports it missing and recording the bundle
+// would then replace the link. Callers that bind installed bytes outside
+// this package (the Windows lifecycle's config step) check it before they
+// change anything.
 func RefuseUnprovenBundleBinding(configPath string, opt Options) error {
 	return refuseUnprovenBundleBinding(configPath, opt)
 }
@@ -471,8 +476,20 @@ func refuseUnprovenBundleBinding(configPath string, opt Options) error {
 	if opt.Bundle.ID == "" {
 		return nil
 	}
-	_, err := cfgtxn.ReadGenerationState(configPath)
-	if err == nil || errors.Is(err, os.ErrNotExist) {
+	path := cfgtxn.GenerationPath(configPath)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err == nil && !info.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a regular file (%s)", path, info.Mode().Type())
+	}
+	if err == nil {
+		// Read after the check: a record that vanishes in between is not
+		// proven absent either.
+		_, err = cfgtxn.ReadGenerationState(configPath)
+	}
+	if err == nil {
 		return nil
 	}
 	return fmt.Errorf("%w: %w; it was left as it was. Run `enterprise bundle status --json` and restore the protected generation record before retrying", ErrUnprovenBundleBinding, err)
