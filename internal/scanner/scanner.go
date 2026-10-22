@@ -18,8 +18,13 @@ package scanner
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os/exec"
 	"strings"
 	"sync/atomic"
+
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 // Scanner defines the interface that all scanner implementations must satisfy.
@@ -55,4 +60,27 @@ func scannerFailureText(stderr string) string {
 	}
 	last := text[strings.LastIndex(text, "\n")+1:]
 	return strings.TrimSpace(strings.TrimSpace(head) + " " + strings.TrimSpace(last))
+}
+
+// runScannerCommand runs the skill, plugin and MCP scanner subprocesses in a
+// process tree that ends with the scan and with the gateway (GAP-0418,
+// GAP-0712). It is a test seam.
+var runScannerCommand = processutil.RunTree
+
+// scannerExitCode reads a scanner's exit status from the error that
+// runScannerCommand returned. Only an *exec.ExitError is the scanner's own
+// answer. Any other error means the run did not end as the scanner reported
+// it: a failed start or supervision step, an ended context, or an output
+// stream that a process outside the scanner's group still held open after
+// WaitDelay (exec.ErrWaitDelay). Its stdout is then not a scan result, even
+// when it parses as clean JSON, so the scan fails.
+func scannerExitCode(name string, err error, stderr string) (int, error) {
+	if err == nil {
+		return 0, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode(), nil
+	}
+	return 0, fmt.Errorf("scanner: %s did not finish: %w: %s", name, err, scannerFailureText(stderr))
 }

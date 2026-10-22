@@ -25,7 +25,7 @@ import (
 
 func TestMCPScanRefusesProfilePathBeforeStartingChild(t *testing.T) {
 	refused := errors.New("the managed gateway runs as LocalSystem and does not read inside user profiles; scan the folder as the signed-in user (defenseclaw ... from the user session) or move it outside the profile")
-	previousGuard, previousRun := requireScannerTargetPath, runMCPScannerCommand
+	previousGuard, previousRun := requireScannerTargetPath, runScannerCommand
 	childStarted := false
 	requireScannerTargetPath = func(path string) error {
 		if path != `C:\Users\sample\project\.mcp.json` {
@@ -33,12 +33,12 @@ func TestMCPScanRefusesProfilePathBeforeStartingChild(t *testing.T) {
 		}
 		return refused
 	}
-	runMCPScannerCommand = func(*exec.Cmd) error {
+	runScannerCommand = func(*exec.Cmd) error {
 		childStarted = true
 		return nil
 	}
 	t.Cleanup(func() {
-		requireScannerTargetPath, runMCPScannerCommand = previousGuard, previousRun
+		requireScannerTargetPath, runScannerCommand = previousGuard, previousRun
 	})
 	scan := &MCPScanner{}
 	if _, err := scan.Scan(context.Background(), `C:\Users\sample\project\.mcp.json`); !errors.Is(err, refused) {

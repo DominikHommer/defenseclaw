@@ -445,9 +445,6 @@ func (s *MCPScanner) workDirNote() string {
 	return "the server was not started in its folder " + s.workDirRefused + "; it ran in the scanner folder instead: "
 }
 
-// runMCPScannerCommand owns the runtime process and its Python descendants.
-var runMCPScannerCommand = processutil.RunTree
-
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	// URLs and server names are scanner inputs, not filesystem paths. The
 	// project directory is a separate path handed to the scanner child.
@@ -556,7 +553,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := runMCPScannerCommand(cmd)
+	err := runScannerCommand(cmd)
 	duration := time.Since(start)
 	stderrStr := stderr.String()
 
@@ -569,13 +566,12 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	}
 
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		}
 		if errors.Is(err, exec.ErrNotFound) {
 			scanErr = scannerNotFound(s.Name(), s.Config.Binary, "MCP scanning requires a Python 3.11+ runtime with cisco-ai-mcp-scanner; on 3.11+ repair the managed installation, or run uv sync in a source checkout")
 			return nil, scanErr
+		}
+		if exitCode, scanErr = scannerExitCode(s.Name(), err, stderrStr); scanErr != nil {
+			return nil, fmt.Errorf("%s%w", s.workDirNote(), scanErr)
 		}
 		if stdout.Len() == 0 {
 			scanErr = fmt.Errorf("scanner: %s exited %d: %s%s", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr))

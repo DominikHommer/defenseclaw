@@ -46,11 +46,11 @@ func TestMCPScanner_NonZeroExitFailsClosed(t *testing.T) {
 // GAP-0712: the MCP path must use the process-tree runner that owns the
 // embedded runtime's Python child on Windows.
 func TestMCPScannerUsesTreeRunner(t *testing.T) {
-	prior := runMCPScannerCommand
-	t.Cleanup(func() { runMCPScannerCommand = prior })
+	prior := runScannerCommand
+	t.Cleanup(func() { runScannerCommand = prior })
 	marker := errors.New("tree runner called")
 	called := false
-	runMCPScannerCommand = func(_ *exec.Cmd) error {
+	runScannerCommand = func(_ *exec.Cmd) error {
 		called = true
 		return marker
 	}

@@ -121,7 +121,7 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := processutil.RunTree(cmd)
+	err := runScannerCommand(cmd)
 	duration := time.Since(start)
 	stderrStr := stderr.String()
 
@@ -134,12 +134,11 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 	}
 
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		}
 		if errors.Is(err, exec.ErrNotFound) {
 			scanErr = scannerNotFound(s.Name(), s.BinaryPath, "repair the managed DefenseClaw installation; source checkouts: uv sync")
+			return nil, scanErr
+		}
+		if exitCode, scanErr = scannerExitCode(s.Name(), err, stderrStr); scanErr != nil {
 			return nil, scanErr
 		}
 		if stdout.Len() == 0 {

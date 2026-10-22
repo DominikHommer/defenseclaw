@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,10 +22,26 @@ func configureCapturedCommand(_ *exec.Cmd) {}
 
 func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) { return cmd.CombinedOutput() }
 
+// darwinTreeWaitDelay bounds the wait for a command's output streams once its
+// process group has ended. A process that left the group can hold a stream
+// open; Wait then returns exec.ErrWaitDelay, never a clean exit.
+const darwinTreeWaitDelay = 5 * time.Second
+
+// Test seams.
+var (
+	startDarwinWatchdog    = startDarwinGroupWatchdog
+	releaseDarwinStartGate = func(w *os.File) error { _, err := w.Write([]byte("go\n")); return err }
+	signalDarwinGroup      = func(pgid int) error { return syscall.Kill(-pgid, syscall.SIGKILL) }
+)
+
 // macOS has no Linux parent-death signal. Start the command as a process
 // group leader behind a one-byte start gate. Its gateway-arms watchdog must
 // be running before that gate opens: even a SIGKILL in the narrow interval
 // after Start cannot leave a scanner executing without a supervisor.
+//
+// Every signal to the group, the watchdog's included, is sent while the
+// leader is still unreaped: its PID, and with it the group ID, cannot be
+// reused until Wait reaps it.
 func runTree(cmd *exec.Cmd, _ bool) error {
 	if cmd == nil {
 		return errors.New("processutil: nil command")
@@ -50,59 +67,80 @@ func runTree(cmd *exec.Cmd, _ bool) error {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
-	cmd.Cancel = func() error { return killDarwinGroup(cmd.Process.Pid) }
+	// reaping is set, under signalMu, before Wait may reap the leader. A
+	// cancellation that comes later finds the group already ended and
+	// signals nothing.
+	var signalMu sync.Mutex
+	reaping := false
+	// exec.CommandContext sets Cancel; exec.Command leaves it nil, and Start
+	// refuses a Cancel without a context.
+	if cmd.Cancel != nil {
+		cmd.Cancel = func() error {
+			signalMu.Lock()
+			defer signalMu.Unlock()
+			if reaping {
+				return os.ErrProcessDone
+			}
+			return killDarwinGroup(cmd.Process.Pid)
+		}
+	}
 	if cmd.WaitDelay == 0 {
-		cmd.WaitDelay = 5 * time.Second
+		cmd.WaitDelay = darwinTreeWaitDelay
 	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	_ = startRead.Close()
 	pid := cmd.Process.Pid
-	stopWatchdog, err := startDarwinWatchdog(pid)
-	if err != nil {
+	stopWatchdog := func() {}
+	// finish ends the group, then the watchdog (whose last act is one more
+	// kill of the group), and only then lets Wait reap the leader.
+	finish := func(cause error) error {
+		signalMu.Lock()
+		reaping = true
+		signalMu.Unlock()
 		_ = killDarwinGroup(pid)
-		_ = cmd.Wait()
-		return err
+		stopWatchdog()
+		waitErr := cmd.Wait()
+		if cause != nil {
+			return cause
+		}
+		return waitErr
 	}
-	defer stopWatchdog()
+	stop, err := startDarwinWatchdog(pid)
+	if err != nil {
+		return finish(err)
+	}
+	stopWatchdog = stop
 	kq, err := unix.Kqueue()
 	if err != nil {
-		_ = killDarwinGroup(pid)
-		_ = cmd.Wait()
-		return err
+		return finish(err)
 	}
 	defer unix.Close(kq)
 	change := []unix.Kevent_t{{Ident: uint64(pid), Filter: unix.EVFILT_PROC, Flags: unix.EV_ADD | unix.EV_ONESHOT, Fflags: unix.NOTE_EXIT}}
 	if _, err := unix.Kevent(kq, change, nil, nil); err != nil {
-		_ = killDarwinGroup(pid)
-		_ = cmd.Wait()
-		return err
+		return finish(err)
 	}
-	if _, err := startWrite.Write([]byte("go\n")); err != nil {
-		_ = killDarwinGroup(pid)
-		_ = cmd.Wait()
-		return fmt.Errorf("processutil: release scanner start gate: %w", err)
+	if err := releaseDarwinStartGate(startWrite); err != nil {
+		return finish(fmt.Errorf("processutil: release scanner start gate: %w", err))
 	}
 	_ = startWrite.Close()
 	var event [1]unix.Kevent_t
 	for {
-		if _, err := unix.Kevent(kq, nil, event[:], nil); errors.Is(err, unix.EINTR) {
+		_, err := unix.Kevent(kq, nil, event[:], nil)
+		if errors.Is(err, unix.EINTR) {
 			continue
-		} else if err != nil {
-			_ = killDarwinGroup(pid)
-			_ = cmd.Wait()
-			return err
+		}
+		if err != nil {
+			return finish(err)
 		}
 		break
 	}
-	// NOTE_EXIT arrives while the direct child is still a zombie. Kill its
-	// descendants before Wait reaps the leader and permits PID reuse.
-	_ = killDarwinGroup(pid)
-	return cmd.Wait()
+	// NOTE_EXIT arrives while the direct child is still a zombie.
+	return finish(nil)
 }
 
-func startDarwinWatchdog(pgid int) (func(), error) {
+func startDarwinGroupWatchdog(pgid int) (func(), error) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -121,7 +159,7 @@ func startDarwinWatchdog(pgid int) (func(), error) {
 }
 
 func killDarwinGroup(pid int) error {
-	err := syscall.Kill(-pid, syscall.SIGKILL)
+	err := signalDarwinGroup(pid)
 	if errors.Is(err, syscall.ESRCH) {
 		return os.ErrProcessDone
 	}
