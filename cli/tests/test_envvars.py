@@ -517,4 +517,3 @@ def test_fail_mode_env_reference_names_the_secure_client_hooks_that_read_it() ->
             if "secure client" not in low and "sandbox" not in low:
                 offenders.append(f"{path.relative_to(_REPO_ROOT)}: {unit.strip()[:160]}")
     assert not offenders, "\n".join(offenders)
-
