@@ -39,6 +39,9 @@ from defenseclaw.context import AppContext
 from tests.environment import isolated_home_env
 from tests.helpers import select_pack
 
+# The real writer, before a fixture swaps in a recorder.
+_REAL_APPLY = config_writer.apply
+
 
 def _valid(path, **_kwargs):
     return rulepack_validation.RulePackValidationResult(
@@ -346,53 +349,6 @@ def _confirm_after(edits: list, asked: list):
     return _confirm
 
 
-@pytest.mark.parametrize(
-    ("args", "change", "named", "audit"),
-    [
-        (["--connector", "codex"], {"claudecode": "team"}, "Claude Code", "repin_shared=Claude Code"),
-        ([], {"profile": "engineering"}, "profile engineering", "repin_shared=profile engineering"),
-    ],
-    ids=["connector-peer", "global-profile"],
-)
-def test_repin_rereads_the_scopes_when_config_changes_while_it_waits(on_disk, monkeypatch, args, change, named, audit):
-    """W4 loop 2: another scope selects the stale pin while the re-pin prompt
-    waits. The confirmed preview did not name it, so that write is refused
-    as a conflict; the scopes are read again, named, and asked again."""
-    app, writes, conflicts, edit, _doc, _path = on_disk
-    asked: list = []
-    monkeypatch.setattr(cmd_guardrail, "_confirm_proceed", _confirm_after([lambda: edit(**change)], asked))
-
-    result = CliRunner().invoke(cmd_guardrail.guardrail, ["use-pack", "team", *args, "--repin"], obj=app)
-
-    out = " ".join(result.output.split())
-    assert result.exit_code == 0, result.output
-    assert len(conflicts) == 1 and len(asked) == 2 and len(writes) == 1
-    assert "config.yaml changed while the re-pin waited; nothing was saved" in out
-    first_prompt, second_prompt = out.split("Reading it again.", 1)
-    assert named not in first_prompt
-    assert f"The pin is shared, so the edited pack also applies to {named}" in second_prompt
-    assert audit in app.logger.log_config_change.call_args.args[-1]
-
-
-def test_repin_yes_rereads_the_scopes_changed_during_validation(on_disk, monkeypatch):
-    """--yes has no prompt, but validating the pack still leaves a window."""
-    app, writes, conflicts, edit, _doc, _path = on_disk
-    edits = [lambda: edit(claudecode="team")]
-
-    def _validate(path, **kwargs):
-        if edits:
-            edits.pop(0)()
-        return _valid(path, **kwargs)
-
-    monkeypatch.setattr(rulepack_validation, "validate_rule_pack", _validate)
-    result = _run(app, ["use-pack", "team", "--connector", "codex", "--repin", "--yes", "--json"])
-
-    assert result.exit_code == 0, result.output
-    assert len(conflicts) == 1 and len(writes) == 1
-    assert "also applies to Claude Code" in json.loads(result.output)["message"]
-    assert "repin_shared=Claude Code" in app.logger.log_config_change.call_args.args[-1]
-
-
 def test_repin_reads_the_config_on_disk_not_the_one_loaded_at_start(on_disk):
     """config.yaml changed between the command's start and the re-pin."""
     app, writes, conflicts, edit, _doc, _path = on_disk
@@ -403,67 +359,47 @@ def test_repin_reads_the_config_on_disk_not_the_one_loaded_at_start(on_disk):
     assert "also applies to Claude Code" in json.loads(result.output)["message"]
 
 
-def test_repin_saves_nothing_when_config_keeps_changing(on_disk, monkeypatch):
-    app, writes, conflicts, edit, _doc, _path = on_disk
-    asked: list = []
-    packs = ["team", "strict"] * 4
-    monkeypatch.setattr(
-        cmd_guardrail,
-        "_confirm_proceed",
-        _confirm_after([lambda pack=pack: edit(claudecode=pack) for pack in packs], asked),
-    )
-    result = CliRunner().invoke(
-        cmd_guardrail.guardrail, ["use-pack", "team", "--connector", "codex", "--repin"], obj=app
-    )
-    assert result.exit_code == 1, result.output
-    assert writes == []
-    assert len(conflicts) == cmd_guardrail._REPIN_RECHECKS + 1
-    assert "kept changing while the re-pin waited" in result.output and "Nothing was changed" in result.output
+def _peer_selects_pin(doc, path):
+    doc["guardrail"]["connectors"]["claudecode"] = {"rule_pack": "team"}
+    path.write_text(yaml.safe_dump(doc))
 
 
-def test_repin_does_not_repin_when_the_pin_was_refreshed_meanwhile(on_disk, monkeypatch):
-    """Someone re-pinned team to the pack's digest while the prompt waited: the
-    re-read selects the pack and writes no pin."""
-    app, writes, conflicts, _edit, doc, path = on_disk
-
-    def _refresh():
-        doc["guardrail"]["custom_packs"]["team"]["digest"] = "sha256:" + "a" * 64
-        path.write_text(yaml.safe_dump(doc))
-
-    asked: list = []
-    monkeypatch.setattr(cmd_guardrail, "_confirm_proceed", _confirm_after([_refresh], asked))
-    result = CliRunner().invoke(
-        cmd_guardrail.guardrail, ["use-pack", "team", "--connector", "codex", "--repin"], obj=app
-    )
-    assert result.exit_code == 0, result.output
-    assert len(conflicts) == 1 and len(asked) == 1 and len(writes) == 1
-    assert not any(change.path == "guardrail.custom_packs.team" for change in writes[0])
-    assert "Re-pinned" not in result.output
+def _profile_selects_pin(doc, path):
+    doc["guardrail"]["profiles"] = {"engineering": {"rule_pack": "team"}}
+    path.write_text(yaml.safe_dump(doc))
 
 
-def _gone(path: pathlib.Path) -> None:
+def _pin_refreshed(doc, path):
+    doc["guardrail"]["custom_packs"]["team"]["digest"] = "sha256:" + "a" * 64
+    path.write_text(yaml.safe_dump(doc))
+
+
+def _gone(_doc, path: pathlib.Path) -> None:
     path.unlink()
 
 
-def _emptied(path: pathlib.Path) -> None:
+def _emptied(_doc, path: pathlib.Path) -> None:
     path.write_bytes(b"")
 
 
-@pytest.mark.parametrize("pack", ["team", "path"])
-@pytest.mark.parametrize("remove", [_gone, _emptied], ids=["deleted", "emptied"])
-@pytest.mark.parametrize("window", ["prompt", "validation"])
-def test_repin_refuses_a_config_removed_while_it_waits(on_disk, monkeypatch, pack, remove, window):
-    """W4 loop 3: config.yaml is deleted (or emptied) while the re-pin
-    waits. The conflict retry must not keep the deleted file's config in
-    memory and write a partial config.yaml from it: it refuses, writes
-    nothing and leaves the file as it found it."""
-    app, writes, conflicts, _edit, _doc, path = on_disk
-    target = str(pathlib.Path(app.cfg.guardrail.custom_packs["team"].path)) if pack == "path" else "team"
+def _replaced(doc, path: pathlib.Path) -> None:
+    """Removed, then another config.yaml put in its place."""
+    path.unlink()
+    path.write_text(yaml.safe_dump({**doc, "guardrail": {**doc["guardrail"], "connectors": {}}}))
+
+
+_INTERFERENCE = [_peer_selects_pin, _profile_selects_pin, _pin_refreshed, _gone, _emptied, _replaced]
+_INTERFERENCE_IDS = ["peer-selects-pin", "profile-selects-pin", "pin-refreshed", "deleted", "emptied", "replaced"]
+
+
+def _repin_with_interference(app, monkeypatch, doc, path, interfere, window, args):
+    """Run --repin while *interfere* changes config.yaml: during the prompt
+    (interactive) or while the pack is validated (--yes --json)."""
     asked: list = []
-    actions = [lambda: remove(path)]
+    actions = [lambda: interfere(doc, path)]
     if window == "prompt":
         monkeypatch.setattr(cmd_guardrail, "_confirm_proceed", _confirm_after(actions, asked))
-        args = ["use-pack", target, "--connector", "codex", "--repin"]
+        argv = ["use-pack", "team", *args, "--repin"]
     else:
 
         def _validate(pack_path, **kwargs):
@@ -472,19 +408,102 @@ def test_repin_refuses_a_config_removed_while_it_waits(on_disk, monkeypatch, pac
             return _valid(pack_path, **kwargs)
 
         monkeypatch.setattr(rulepack_validation, "validate_rule_pack", _validate)
-        args = ["use-pack", target, "--connector", "codex", "--repin", "--yes", "--json"]
-
-    result = CliRunner().invoke(cmd_guardrail.guardrail, args, obj=app)
-
+        argv = ["use-pack", "team", *args, "--repin", "--yes", "--json"]
+    result = CliRunner().invoke(cmd_guardrail.guardrail, argv, obj=app)
     out = " ".join(result.output.split())
+    if window == "validation":
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        out = payload["message"]
+    return result, out, asked
+
+
+@pytest.mark.parametrize("args", [["--connector", "codex"], []], ids=["connector", "global"])
+@pytest.mark.parametrize("window", ["prompt", "validation"])
+@pytest.mark.parametrize("interfere", _INTERFERENCE, ids=_INTERFERENCE_IDS)
+def test_repin_writes_nothing_when_config_changed_since_its_read(on_disk, monkeypatch, interfere, window, args):
+    """W4 lead directive (loop 1): --repin reads config.yaml once and writes
+    only by compare-and-swap on that read. Any change since (another scope
+    selecting the pin, a refreshed pin, the file deleted, emptied or
+    replaced) aborts with "config changed, run again": no write, no second
+    prompt, no audit line, and the file stays as the other party left it
+    (a deleted config.yaml is never recreated)."""
+    app, writes, conflicts, _edit, doc, path = on_disk
+    result, out, asked = _repin_with_interference(app, monkeypatch, doc, path, interfere, window, args)
+
     assert result.exit_code == 1, result.output
+    assert "config changed, run again" in out and "Nothing was changed" in out
     assert writes == [] and len(conflicts) == 1
     assert len(asked) == (1 if window == "prompt" else 0)
-    assert "Nothing was changed" in out and "--repin replaces a pin in config.yaml" in out
-    assert path.exists() is (remove is _emptied)
-    if path.exists():
-        assert path.read_bytes() == b""
+    assert "Re-pinned" not in out
+    left = None if interfere is _gone else path.read_bytes()
+    assert path.exists() is (left is not None)
     app.logger.log_config_change.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "interfere", [_peer_selects_pin, _gone, _emptied, _replaced], ids=["peer", "deleted", "emptied", "replaced"]
+)
+def test_repin_with_the_real_writer_never_writes_a_changed_or_deleted_config(on_disk, monkeypatch, interfere):
+    """The same compare-and-swap through config_writer itself: the bytes the
+    other party left stay byte for byte, and a deleted file stays deleted."""
+    app, _writes, _conflicts, _edit, doc, path = on_disk
+    monkeypatch.setattr(config_writer, "apply", _REAL_APPLY)
+    after: list = []
+
+    def _interfere(doc, path):
+        interfere(doc, path)
+        after.append(path.read_bytes() if path.exists() else None)
+
+    result, out, _asked = _repin_with_interference(
+        app, monkeypatch, doc, path, _interfere, "prompt", ["--connector", "codex"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "config changed, run again" in out
+    assert (path.read_bytes() if path.exists() else None) == after[0]
+    app.logger.log_config_change.assert_not_called()
+
+
+def test_repin_preview_lists_every_config_change_it_writes(env, monkeypatch):
+    """W4 lead directive (loop 1): the --repin prompt and the --json refusal
+    show exactly the edits the write makes (the new pin, the pack, cleared
+    connector packs, a dropped pin) and name the automatic-protection scope
+    that also gets the edited pack; application_protection is not written."""
+    app, _root, custom, writes = env
+    old = custom.parent / "old"
+    (old / "rules").mkdir(parents=True)
+    gc = app.cfg.guardrail
+    gc.custom_packs = {
+        "team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64),
+        "old": CustomRulePack(path=str(old), digest="sha256:" + "d" * 64),
+    }
+    gc.connectors = {
+        "codex": PerConnectorGuardrailConfig(rule_pack="team"),
+        "claudecode": PerConnectorGuardrailConfig(rule_pack="old"),
+    }
+    _app_protection(app, {"enabled": True, "guardrail": {"rule_pack": "team"}})
+    _persist(app)
+
+    declined = CliRunner().invoke(cmd_guardrail.guardrail, ["use-pack", "team", "--repin"], obj=app, input="n\n")
+    assert declined.exit_code == 1 and writes == [], declined.output
+    unattended = _run(app, ["use-pack", "team", "--repin", "--json"])
+    assert unattended.exit_code == 2 and writes == [], unattended.output
+    refusal = json.loads(unattended.output)["message"]
+    scripted = _run(app, ["use-pack", "team", "--repin", "--yes", "--json"])
+    assert scripted.exit_code == 0, scripted.output
+
+    planned = cmd_guardrail._planned_change_lines(writes[-1])
+    assert "remove guardrail.connectors.claudecode.rule_pack" in planned
+    assert "remove guardrail.custom_packs.old" in planned
+    assert any(line.startswith("set guardrail.custom_packs.team = ") and "a" * 64 in line for line in planned)
+    assert "set guardrail.rule_pack = team" in planned
+    for line in planned:
+        assert f"    {line}" in declined.output.splitlines(), line
+        assert line in refusal, line
+    assert "application_protection.guardrail" in " ".join(declined.output.split())
+    assert "application_protection.guardrail" in refusal
+    assert not any(c.path.startswith("application_protection") for c in writes[-1])
 
 
 @pytest.mark.parametrize("state", ["missing", "empty", "blank"])

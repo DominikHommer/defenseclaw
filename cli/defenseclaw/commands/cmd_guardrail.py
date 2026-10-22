@@ -3758,21 +3758,20 @@ def _guardrail_write_error(exc: BaseException) -> str:
     return f"Failed to save config: {config_writer.plain_error(exc)}"
 
 
-def _write_guardrail_config(app: AppContext, changes, reason: str, fail, *, expect_sha256: str | None = None) -> object:
+def _write_guardrail_config(
+    app: AppContext, changes, reason: str, fail, *, snapshot: tuple[str, str] | None = None
+) -> object:
     """Apply *changes* through the config writer; *fail(exit_code, message)*
-    reports a refused or failed write and exits. With *expect_sha256* the
-    write lands only on those config.yaml bytes: a file changed since then
-    raises :class:`config_writer.ConfigConflictError` for the caller."""
+    reports a refused or failed write and exits. With *snapshot* (the
+    ``(path, sha256)`` :func:`_read_config_snapshot` returned) the write is a
+    compare-and-swap: it lands only on those config.yaml bytes, and a file
+    changed or removed since then raises
+    :class:`config_writer.ConfigConflictError` for the caller."""
     from defenseclaw import config_writer
 
+    target, expect_sha256 = snapshot or (str(config_path_for_data_dir(app.cfg.data_dir)), None)
     try:
-        return config_writer.apply(
-            changes,
-            _cli_actor(),
-            reason,
-            expect_sha256=expect_sha256,
-            path=str(config_path_for_data_dir(app.cfg.data_dir)),
-        )
+        return config_writer.apply(changes, _cli_actor(), reason, expect_sha256=expect_sha256, path=target)
     except config_writer.ConfigConflictError as exc:
         if expect_sha256 is not None:
             raise
@@ -3790,17 +3789,14 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail, *, expe
     return None
 
 
-def _bind_config_snapshot(app: AppContext, fail) -> str:
-    """Reload ``app.cfg`` from the config.yaml bytes on disk now; return their
-    sha256 for the writer's ``expect_sha256``.
+def _read_config_snapshot(app: AppContext, fail) -> tuple[str, str]:
+    """Read config.yaml once, load ``app.cfg`` from exactly those bytes, and
+    return ``(path, sha256)`` for a compare-and-swap write.
 
-    ``use-pack --repin`` names every scope that shares the pin and asks
-    before it writes, and the writer merges into the file as it is then. Bound
-    to this snapshot, an edit made meanwhile (another scope selecting the
-    pack) is a conflict, never a re-pin of a scope the prompt did not name.
-    A pin lives in config.yaml, so a missing or empty file (also one removed
-    while a re-pin waited) is refused: the config still in memory is not
-    what is on disk, and the writer would build a partial file from it.
+    ``use-pack --repin`` shows every change from this one read and asks;
+    the write then lands only on these bytes. A pin lives in config.yaml, so
+    a missing or empty file is refused: the config still in memory is not
+    what is on disk, and nothing may build a config.yaml from it.
     """
     import hashlib
 
@@ -3828,12 +3824,19 @@ def _bind_config_snapshot(app: AppContext, fail) -> str:
     except Exception as exc:
         fail(1, f"Failed to load config: {exc}. Nothing was changed.")
         raise
-    return hashlib.sha256(raw).hexdigest()
+    return str(path), hashlib.sha256(raw).hexdigest()
 
 
-# How often use-pack --repin reads config.yaml again when it changed while
-# the re-pin waited, before it gives up and saves nothing.
-_REPIN_RECHECKS = 3
+def _planned_change_lines(changes) -> list[str]:
+    """One line per config.yaml edit, exactly as the writer gets it."""
+    lines = []
+    for change in changes:
+        if change.unset:
+            lines.append(f"remove {change.path}")
+        else:
+            value = change.value if isinstance(change.value, str) else json.dumps(change.value, sort_keys=True)
+            lines.append(f"set {change.path} = {value}")
+    return lines
 
 
 @contextmanager
@@ -3965,21 +3968,6 @@ def use_pack_cmd(
     --connector X`` removes X's pack. The running gateway picks it up on its
     next reload; nothing is restarted.
     """
-    _use_pack(app, pack, connector, clear, no_validate, repin, yes, json_out)
-
-
-def _use_pack(
-    app: AppContext,
-    pack: str | None,
-    connector: str | None,
-    clear: bool,
-    no_validate: bool,
-    repin: bool,
-    yes: bool,
-    json_out: bool,
-    *,
-    rechecks: int = _REPIN_RECHECKS,
-) -> None:
     from defenseclaw import config_writer, policy_catalog, rulepack_validation
 
     def _finish(
@@ -4037,8 +4025,8 @@ def _use_pack(
         raise click.UsageError("--repin re-pins a custom pack; it can't be combined with --clear.")
     if not clear and not (pack or "").strip():
         raise click.UsageError("Missing PACK: a preset (default, strict, permissive) or a rule-pack directory.")
-    # A re-pin previews, confirms and writes one config.yaml snapshot.
-    snapshot_sha = _bind_config_snapshot(app, _fail) if repin else None
+    # A re-pin previews, confirms and writes one read of config.yaml.
+    snapshot = _read_config_snapshot(app, _fail) if repin else None
     gc = app.cfg.guardrail
 
     if connector:
@@ -4250,22 +4238,6 @@ def _use_pack(
     shared_note = (
         f" The pin is shared, so the edited pack also applies to {', '.join(shared)}." if shared else ""
     )
-    if repinned is not None:
-        if json_out and not yes:
-            _fail(
-                2,
-                f"Re-pinning {name!r} from {repinned[0] or 'none'} to {repinned[1]} needs your confirmation; "
-                f"pass --yes with --json.{shared_note} Nothing was changed.",
-            )
-        if not json_out:
-            ux.warn(
-                f"Re-pin {name!r} at {path}: pinned {repinned[0] or 'none'}, the pack is now {repinned[1]}. "
-                f"The gateway then enforces the edited pack.{shared_note}",
-                indent="  ",
-            )
-            if not yes and not _confirm_proceed():
-                click.echo(f"  {ux.dim('Cancelled.')} Nothing was changed.")
-                raise SystemExit(1)
     key = _scope_key(connector_key, None)
     changes.append(config_writer.Change(f"{key}.rule_pack", name))
     cleared: list[str] = []
@@ -4282,6 +4254,28 @@ def _use_pack(
     # Rule references the new pack does not ship would fail the whole save (GAP-0258, GAP-0261).
     stale, dropped = _stale_rule_changes(app.cfg, path, connector_key)
     changes.extend(stale)
+    if repinned is not None:
+        # Every edit the write makes, from the one read it is bound to.
+        planned = _planned_change_lines(changes)
+        if json_out and not yes:
+            _fail(
+                2,
+                f"Re-pinning {name!r} from {repinned[0] or 'none'} to {repinned[1]} needs your confirmation; "
+                f"pass --yes with --json.{shared_note} It would change config.yaml: {'; '.join(planned)}. "
+                "Nothing was changed.",
+            )
+        if not json_out:
+            ux.warn(
+                f"Re-pin {name!r} at {path}: pinned {repinned[0] or 'none'}, the pack is now {repinned[1]}. "
+                f"The gateway then enforces the edited pack.{shared_note}",
+                indent="  ",
+            )
+            click.echo("  This changes config.yaml:")
+            for line in planned:
+                click.echo(f"    {line}")
+            if not yes and not _confirm_proceed():
+                click.echo(f"  {ux.dim('Cancelled.')} Nothing was changed.")
+                raise SystemExit(1)
     previous_pack = (
         policy_catalog.pack_name_for_path(
             app.cfg, policy_catalog.configured_pack_dir(app.cfg, _scope_block(app.cfg, connector_key, None))
@@ -4290,20 +4284,14 @@ def _use_pack(
         else policy_catalog.global_pack(app.cfg).pack
     )
     try:
-        result = _write_guardrail_config(app, changes, f"guardrail use-pack {name}", _fail, expect_sha256=snapshot_sha)
+        result = _write_guardrail_config(app, changes, f"guardrail use-pack {name}", _fail, snapshot=snapshot)
     except config_writer.ConfigConflictError:
-        # config.yaml changed after the scopes above were read (and confirmed):
-        # merged into it, the new pin could reach a scope no one was shown.
-        if rechecks <= 0:
-            _fail(
-                1,
-                "config.yaml kept changing while the re-pin waited, so it was not saved. "
-                "Nothing was changed; run it again.",
-            )
-        if not json_out:
-            ux.warn("config.yaml changed while the re-pin waited; nothing was saved. Reading it again.", indent="  ")
-        _use_pack(app, pack, connector, clear, no_validate, repin, yes, json_out, rechecks=rechecks - 1)
-        return
+        # config.yaml changed or went away after the read the preview showed.
+        _fail(
+            1,
+            f"config changed, run again: {snapshot[0] if snapshot else 'config.yaml'} changed or was removed "
+            "after --repin read it. Nothing was changed.",
+        )
     if connector_key is None:
         message = f"All connectors now use the '{pack_name}' rule pack."
         if cleared:
