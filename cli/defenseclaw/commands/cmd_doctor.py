@@ -5959,24 +5959,61 @@ _HERMES_EXECUTION_PROBE_RESPONSE = b"defenseclaw-execution-probe-ok\n"
 # been killed (a descendant can inherit it). Tests shorten both.
 _HERMES_EXECUTION_PROBE_TIMEOUT = 3.0
 _HERMES_EXECUTION_PROBE_PIPE_WAIT = 1.0
+# The wait for a terminated Windows probe job to empty.
+_HERMES_EXECUTION_PROBE_TREE_REAP = 2.0
 
 
 def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
     """Run a registered Hermes command with bounded output and time.
 
     Returns the exit code and stdout, or ``None`` for the exit code when the
-    command could not start, timed out, wrote more than the proof, or left
-    stdout open past the pipe wait. One byte more than the proof closes the
-    pipe, so the hook's output never accumulates in Doctor.
+    command could not start, timed out, wrote more than the proof, left
+    stdout open past the pipe wait, or left descendants that could not be
+    ended. One byte more than the proof closes the pipe, so the hook's output
+    never accumulates in Doctor. Whatever the command started ends with it on
+    exit, overflow and timeout: on Unix its session is killed, on Windows its
+    kill-on-close job is terminated. A launcher that started a long-lived
+    child left it running, one more for each Doctor run (r104 W5b).
     """
     limit = len(_HERMES_EXECUTION_PROBE_RESPONSE)
+    windows = os.name == "nt"
+    creationflags = 0
+    if windows:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) | getattr(
+            subprocess, "CREATE_SUSPENDED", 0x00000004
+        )
     try:
         proc = subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            start_new_session=os.name != "nt",
+            start_new_session=not windows, creationflags=creationflags,
         )
     except (OSError, ValueError):
         return None, b""
+    job = None
+    if windows:
+        from defenseclaw.tui.windows_process import WindowsJob
+
+        try:
+            # The kill-on-close job owns the suspended launcher before its
+            # first instruction runs, so nothing it starts escapes the job's
+            # termination; breakaway is refused. Then it resumes the launcher.
+            job = WindowsJob(proc.pid, allow_breakaway=False)
+        except (OSError, ValueError):
+            # A probe Doctor cannot contain never runs: it is still suspended.
+            with contextlib.suppress(OSError):
+                proc.kill()
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+            proc.stdout.close()
+            return None, b""
+    try:
+        return _collect_hermes_execution_probe(proc, job, limit)
+    finally:
+        if job is not None:
+            job.close()
+
+
+def _collect_hermes_execution_probe(proc: subprocess.Popen, job, limit: int) -> tuple[int | None, bytes]:
     captured = bytearray()
     overflow = threading.Event()
 
@@ -5999,12 +6036,18 @@ def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
     reader = threading.Thread(target=drain, name="hermes-execution-probe", daemon=True)
     reader.start()
 
-    def kill_tree() -> None:
+    def kill_tree() -> bool:
+        """End the probe and everything it started; False when that is unproven."""
+        if job is not None:
+            try:
+                return job.terminate_sync(timeout=_HERMES_EXECUTION_PROBE_TREE_REAP)
+            except OSError:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                return False
         with contextlib.suppress(OSError):
-            if os.name != "nt":
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:
-                proc.kill()
+            os.killpg(proc.pid, signal.SIGKILL)
+        return True
 
     deadline = time.monotonic() + _HERMES_EXECUTION_PROBE_TIMEOUT
     returncode: int | None
@@ -6018,9 +6061,9 @@ def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
                 proc.wait()
                 returncode = None
                 break
-    if returncode is not None and os.name != "nt":
-        # The probe exited: end whatever it left running in its session.
-        kill_tree()
+    # The probe exited or was killed: end whatever it left running.
+    if not kill_tree():
+        returncode = None
     reader.join(_HERMES_EXECUTION_PROBE_PIPE_WAIT)
     if reader.is_alive() or overflow.is_set():
         return None, bytes(captured[:limit])

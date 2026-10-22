@@ -52,9 +52,10 @@ func hermesRegisteredCommandExecutable(opts SetupOpts, hookCommand string) bool 
 }
 
 // runHermesExecutionProbe keeps no more stdout than the proof itself: one
-// byte more fails the write, which closes the pipe and ends the probe. The
-// process tree is killed at the timeout, and stdout left open by a
-// descendant is closed after hermesExecutionProbePipeWait.
+// byte more fails the write, which closes the pipe and ends the probe.
+// RunTree ends the process tree when the probe exits and at the timeout (a
+// Job Object on Windows, the process group on Linux and macOS), and stdout
+// left open by a descendant is closed after hermesExecutionProbePipeWait.
 func runHermesExecutionProbe(target string, args []string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), hermesExecutionProbeTimeout)
 	defer cancel()

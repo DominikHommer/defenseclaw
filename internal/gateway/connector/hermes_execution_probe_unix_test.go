@@ -7,9 +7,13 @@
 package connector
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -137,4 +141,67 @@ func TestHermesExecutionProbeBoundsInheritedStdout(t *testing.T) {
 			}
 		})
 	}
+}
+
+// r104 W5b: a hook that prints the proof and leaves a child running, or
+// hangs, or floods stdout, must not leave what it started running after
+// Verify, one more for each check. On macOS RunTree had no process group.
+func TestHermesExecutionProbeEndsWhatTheHookStarted(t *testing.T) {
+	const proof = "printf 'defenseclaw-execution-probe-ok\\n'\n"
+	for name, tc := range map[string]struct {
+		body    string
+		timeout time.Duration
+	}{
+		"exits, child holds stdout":        {proof + "sleep 60 & echo $! > \"$PIDFILE\"\nexit 0\n", 20 * time.Second},
+		"exits, child detached":            {proof + "sleep 60 >/dev/null 2>&1 & echo $! > \"$PIDFILE\"\nexit 0\n", 20 * time.Second},
+		"exits, grandchild":                {proof + "( sleep 60 & echo $! > \"$PIDFILE\" )\nexit 0\n", 20 * time.Second},
+		"times out":                        {"sleep 60 & echo $! > \"$PIDFILE\"\nwait\n", 300 * time.Millisecond},
+		"overflows":                        {proof + "sleep 60 & echo $! > \"$PIDFILE\"\nexec yes\n", 20 * time.Second},
+		"exits, child ignores hangup/term": {proof + "( trap '' HUP TERM; exec sleep 60 ) & echo $! > \"$PIDFILE\"\nexit 0\n", 20 * time.Second},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setHermesExecutionProbeBounds(t, tc.timeout, 500*time.Millisecond)
+			pidFile := filepath.Join(testenv.PrivateTempDir(t), "descendant.pid")
+			script := writeHermesProbeScript(t, "PIDFILE='"+pidFile+"'\n"+tc.body)
+			runHermesExecutionProbe(script, []string{"--defenseclaw-execution-probe"})
+			pid := readHermesProbePID(t, pidFile)
+			deadline := time.Now().Add(5 * time.Second)
+			for hermesProbeProcessRunning(pid) {
+				if time.Now().After(deadline) {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+					t.Fatalf("Verify's probe left descendant %d running", pid)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		})
+	}
+}
+
+func readHermesProbePID(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		raw, err := os.ReadFile(path)
+		if pid, convErr := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && convErr == nil {
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("probe never wrote %s: %v", path, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// hermesProbeProcessRunning reports a live process; a zombie is not (Linux
+// /proc state Z; elsewhere init reaps the reparented child).
+func hermesProbeProcessRunning(pid int) bool {
+	if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		return false
+	}
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return true
+	}
+	fields := strings.Fields(string(raw[strings.LastIndexByte(string(raw), ')')+1:]))
+	return len(fields) == 0 || fields[0] != "Z"
 }
