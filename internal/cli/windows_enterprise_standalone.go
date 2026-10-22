@@ -163,6 +163,16 @@ type windowsEnterpriseInstallerReport struct {
 	// LifecycleCollectError why that collect could not run (GAP-0211).
 	LifecycleGenerationsCollected int    `json:"lifecycle_generations_collected"`
 	LifecycleCollectError         string `json:"lifecycle_collect_error"`
+	// A self-uninstall by the installed CLI (Add-DefenseClawSelfUninstallResult)
+	// reports the cleanup a finalizer finishes after the CLI exits.
+	// CanonicalInstallRootAbsent is nil when the installer did not report it;
+	// InstallRootRetirementDeferred is set when a program held a file in
+	// InstallRoot past the rename retry, so the folder and the committed
+	// cleanup (with purge, the purge) are still there.
+	SelfUninstallCleanupPending   bool   `json:"self_uninstall_cleanup_pending"`
+	CanonicalInstallRootAbsent    *bool  `json:"canonical_install_root_absent"`
+	InstallRootRetirementDeferred string `json:"install_root_retirement_deferred"`
+	RetiredInstallRoot            string `json:"retired_install_root"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -671,12 +681,25 @@ var windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
 // machine registration. An elevated lifecycle can inherit ProgramFiles from
 // a caller, so the path used for a subprocess must not use that environment.
 func windowsEnterpriseInstalledAdminCLI() (string, error) {
-	programFiles, err := trustedWindowsEnterpriseProgramFiles()
+	programFiles, err := windowsEnterpriseProgramFilesResolver()
 	if err != nil {
 		return "", fmt.Errorf("resolve trusted Program Files for installed CLI: %w", err)
 	}
-	return filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe"), nil
+	installedCLI := filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe")
+	// An elevated lifecycle runs this image with the service pins. Check
+	// that only SYSTEM, Administrators and TrustedInstaller can replace it
+	// or any folder above it (Program Files\Cisco included), and that its
+	// folders are not links, before any process is created (GAP-1493).
+	if err := windowsEnterpriseInstalledCLICustody(installedCLI, "installed DefenseClaw CLI"); err != nil {
+		return "", fmt.Errorf("refuse to run the installed CLI: %w", err)
+	}
+	return installedCLI, nil
 }
+
+// windowsEnterpriseInstalledCLICustody validates the installed CLI file and
+// every folder above it, with no advisory verdict for the installer-owned
+// Cisco folders. A seam for tests.
+var windowsEnterpriseInstalledCLICustody = managed.ValidateTrustedFilePathStrictAncestors
 
 func windowsEnterprisePolicyDigestCommand(ctx context.Context) (*exec.Cmd, error) {
 	layout, err := windowsEnterpriseHotConfigLayout()
@@ -744,15 +767,27 @@ func writeWindowsEnterprisePolicyState(state *enterprisestatus.PolicyState) erro
 
 // writeFileKeepingDACL replaces path with data, giving the new file the
 // DACL of sibling before it is renamed into place, so it is never readable
-// by more than sibling is.
+// by more than sibling is. Each write stages in its own exclusively created
+// file beside path: two lifecycle runs that finish at the same time shared
+// path+".tmp" before, so one could publish the other's bytes or fail on a
+// staging file the other had already renamed (GAP-1404).
 func writeFileKeepingDACL(path string, data []byte, sibling string) error {
 	restore, err := keepConfigDACL(sibling)
 	if err != nil {
 		return err
 	}
-	temporary := path + ".tmp"
-	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+	staging, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
+	}
+	temporary := staging.Name()
+	_, writeErr := staging.Write(data)
+	if closeErr := staging.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		_ = os.Remove(temporary)
+		return writeErr
 	}
 	if err := restore(temporary); err != nil {
 		_ = os.Remove(temporary)
@@ -1292,6 +1327,7 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		result.AddError(code, message)
 	}
+	addWindowsEnterpriseSelfUninstallCleanup(result, report)
 	if !report.OK && len(result.Errors) == 0 {
 		code := "not_ready"
 		if !report.Installed {
@@ -1351,6 +1387,45 @@ func applyWindowsEnterpriseInstallerReport(
 	// complete.
 	if report.Installed || report.TransactionPending {
 		addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
+	}
+}
+
+// windowsEnterpriseSelfUninstallStrandedMessage is the uninstall_in_use error
+// of a self-uninstall whose installer report says InstallRoot is still there
+// but carries no error of its own.
+const windowsEnterpriseSelfUninstallStrandedMessage = "a program still holds a file in the DefenseClaw install folder, so the uninstall " +
+	"could not remove it. DefenseClaw is already uninstalled (its services and hooks are removed); a cleanup that starts when this " +
+	"command exits removes the folder and finishes the uninstall cleanup once that program closes the file. Close the program, then " +
+	"run the uninstall again to confirm that it finished"
+
+// addWindowsEnterpriseSelfUninstallCleanup carries a self-uninstall's pending
+// cleanup into the result. While InstallRoot is still there (a program held a
+// file in it past the rename retry) the uninstall is not finished and nothing
+// this process can wait for confirms that the finalizer finishes it, so the
+// run fails with the retryable uninstall_in_use, whatever ok the installer
+// reported: an ok result let an exit-code-driven manager stop retrying with
+// InstallRoot and the purge left behind (W2B-G-win review, loop round 2). A
+// self-uninstall that retired InstallRoot only waits for this process to exit
+// before the retired copy goes, which a warning says.
+func addWindowsEnterpriseSelfUninstallCleanup(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if report == nil {
+		return
+	}
+	stranded := strings.TrimSpace(report.InstallRootRetirementDeferred) != "" ||
+		(report.CanonicalInstallRootAbsent != nil && !*report.CanonicalInstallRootAbsent)
+	if stranded {
+		if !windowsEnterpriseResultHasError(result, "uninstall_in_use") {
+			message := windowsEnterpriseSelfUninstallStrandedMessage
+			if deferred := strings.TrimSpace(report.InstallRootRetirementDeferred); deferred != "" {
+				message += " (" + windowsEnterpriseBoundedDiagnostic(deferred) + ")"
+			}
+			result.AddError("uninstall_in_use", message)
+		}
+		return
+	}
+	if report.OK && report.SelfUninstallCleanupPending && strings.TrimSpace(report.RetiredInstallRoot) != "" {
+		result.AddWarning("self_uninstall_cleanup_pending", "the retired install folder "+
+			strings.TrimSpace(report.RetiredInstallRoot)+" is removed by a cleanup that runs once this command exits")
 	}
 }
 
@@ -1423,11 +1498,7 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 		))
 	}
 	if len(remaining) > 0 {
-		result.AddError("per_user_state_remaining", fmt.Sprintf(
-			"--purge could not remove all DefenseClaw per-user data and binaries of %d enrolled account(s), which keep per-user hook tokens that nothing accepts any more; remove what stays as LocalSystem: %s",
-			len(remaining),
-			windowsEnterpriseBoundedLabels(remaining),
-		))
+		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(len(remaining), windowsEnterpriseBoundedLabels(remaining)))
 	}
 }
 
@@ -2580,6 +2651,11 @@ func writeWindowsEnterpriseStandaloneRefusal(
 				strings.TrimSpace(opts.profile), managed.ProfileStandalone, managed.ProfileSecureClient)
 		}
 		describeHost(result)
+	default:
+		// Every refusal changed nothing, so it reports the host as it is.
+		// An ensure whose --config did not exist reported a healthy
+		// deployment as installed=false with no services (GAP-0036).
+		describeHost(result)
 	}
 	result.AddError(code, message)
 	failure := windowsEnterpriseFailureCodeFor(result)
@@ -3297,7 +3373,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	// recorded Cursor correction alike); a pending transaction is left to its
 	// recovery, which restores the packs the deployment had.
 	if plan.Action == "repair" && plan.Reason != "transaction_pending" {
-		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(opts.configPath); err != nil {
 			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 			result.Errors = []enterprisestatus.Message{}
 			result.AddError("preflight_failed", err.Error())
@@ -3309,7 +3385,10 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	var startOnlyKeys []string
 	if plan.Action == "upgrade" && (plan.Reason == "drift:config" || plan.Reason == "drift:bundle") {
 		applied, keys := windowsEnterpriseHotConfigApply(ctx, cmd, opts, script, statusReport, result)
-		if applied {
+		if applied || opts.hotConfigRestoreFailed {
+			// A failed apply whose restore could not be proven stops here:
+			// the transaction would snapshot the config it left behind
+			// (GAP-1178).
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
 		// A signed bundle has no transaction fallback after a hot apply that

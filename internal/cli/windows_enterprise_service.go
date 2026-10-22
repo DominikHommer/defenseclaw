@@ -156,6 +156,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// transaction owns Codex's machine policy, so the change, a signed
 	// bundle's included, goes to that transaction (GAP-0033).
 	codexTargetTransaction bool
+	// hotConfigRestoreFailed is set when a failed hot config apply could not
+	// put the previous config or its enrolled targets back; ensure stops
+	// instead of starting the upgrade transaction.
+	hotConfigRestoreFailed bool
 	// ignoredDeploymentRecords lists deployment records profile resolution
 	// found but ignored because an administrator did not write them. Only
 	// the standalone result reports them.
@@ -576,7 +580,7 @@ func runWindowsEnterpriseLifecycle(
 		}
 	}
 	if windowsEnterpriseStandalone(opts) && action == "repair" {
-		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(opts.configPath); err != nil {
 			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
 		}
 	}
@@ -1286,10 +1290,7 @@ func runWindowsEnterprisePowerShellEngineWithRunner(
 						exit.ExitCode(),
 					))
 				} else {
-					failures = append(failures, fmt.Errorf(
-						"Windows enterprise installer exited with code %d",
-						exit.ExitCode(),
-					))
+					failures = append(failures, windowsEnterpriseInstallerExitFailure(exit.ExitCode()))
 				}
 			} else {
 				failures = append(failures, fmt.Errorf("Windows enterprise installer: %w", runErr))

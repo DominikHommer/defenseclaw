@@ -34,29 +34,40 @@ import (
 // a config-only ensure touches outside them.
 type hotConfigHost struct {
 	configPath    string
+	next          string
 	writes        []string
 	adopted       bool
+	recovers      int
 	digestCalls   int
 	adoptAfter    int
 	refreshes     int
+	stops         int
 	bundleID      string
 	bundleVersion uint64
 }
 
 // digest is what the installed CLI's policy digest prints: the policy the
-// installed config computes to, and the one the gateway reports.
+// installed config computes to, and the one the gateway reports. The
+// installed config computes to policy b while it holds the supplied config,
+// and to policy a otherwise (the previous config, or the one an undo put
+// back). A gateway that adopts follows config.yaml; one that does not keeps
+// enforcing policy a, the previous config's.
 func (host *hotConfigHost) digest(context.Context) ([]byte, error) {
 	host.digestCalls++
+	effective := "sha256:" + strings.Repeat("a", 64)
+	if installed, err := os.ReadFile(host.configPath); err == nil && string(installed) == host.next {
+		effective = "sha256:" + strings.Repeat("b", 64)
+	}
 	reported := "sha256:" + strings.Repeat("a", 64)
 	if host.adopted {
-		reported = "sha256:" + strings.Repeat("b", 64)
+		reported = effective
 	}
 	generation := len(host.writes) + 10
 	gatewayGeneration := generation
 	if host.adoptAfter > 0 && host.digestCalls < host.adoptAfter {
 		gatewayGeneration--
 	}
-	return []byte(`{"effective_digest":"sha256:` + strings.Repeat("b", 64) +
+	return []byte(`{"effective_digest":"` + effective +
 		`","config_generation":` + strconv.Itoa(generation) +
 		`,"config_generation_recorded":true,"gateway_reported_digest":"` + reported +
 		`","gateway_reported_config_generation":` + strconv.Itoa(gatewayGeneration) +
@@ -67,7 +78,7 @@ func (host *hotConfigHost) digest(context.Context) ([]byte, error) {
 func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *windowsEnterpriseLifecycleOptions) {
 	t.Helper()
 	dir := t.TempDir()
-	host := &hotConfigHost{configPath: filepath.Join(dir, "etc", "config.yaml")}
+	host := &hotConfigHost{configPath: filepath.Join(dir, "etc", "config.yaml"), next: next}
 	supplied := filepath.Join(dir, "supplied.yaml")
 	for path, body := range map[string]string{host.configPath: previous, supplied: next} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -83,8 +94,11 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	validateSeam, writeSeam := windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite
 	timeoutSeam, restartTimeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll
 	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
-	reloadSeam := windowsEnterpriseHotBundleReload
+	reloadSeam, failClosedSeam := windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigFailClosed
+	restartSeam, recoverSeam := windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover
 	t.Cleanup(func() {
+		windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover = restartSeam, recoverSeam
+		windowsEnterpriseHotConfigFailClosed = failClosedSeam
 		windowsEnterpriseHotConfigRefreshTargets = refreshSeam
 		windowsEnterpriseIsElevated = elevatedSeam
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock = layoutSeam, lockSeam
@@ -105,6 +119,14 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		return nil
 	}
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { return nil }
+	// No test stops or starts a real gateway service: an unproven undo and
+	// a start of a stopped gateway are counted.
+	windowsEnterpriseHotConfigFailClosed = func() error { host.stops++; return nil }
+	windowsEnterpriseHotConfigRecover = func() (bool, error) { host.recovers++; return false, nil }
+	custodySeam := windowsEnterpriseInstalledCLICustody
+	t.Cleanup(func() { windowsEnterpriseInstalledCLICustody = custodySeam })
+	// The installed CLI stands for an administrator-only image.
+	windowsEnterpriseInstalledCLICustody = func(string, string) error { return nil }
 	windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
 		return windowsServiceConfigValidation{}, nil
 	}
