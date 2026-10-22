@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"gopkg.in/yaml.v3"
 )
 
 // The bundle store of a standalone device (spec P1 sections 7 and 8).
@@ -290,6 +291,12 @@ type Receipt struct {
 	// with the committed deployment to tell a finished transaction from one
 	// that was rolled back.
 	ConfigSHA256 string `json:"config_sha256,omitempty"`
+	// BaseConfigSHA256 is the hex SHA-256 of the config the run started
+	// from (NoBaseConfig when there was none), written with ConfigSHA256
+	// before the transaction: settle uses it, not matching bytes, to tell
+	// whether that transaction installed anything (GAP-0484). "" on a
+	// receipt written before it existed.
+	BaseConfigSHA256 string `json:"base_config_sha256,omitempty"`
 }
 
 // SetDigestComparison replaces any digest classification from an earlier
@@ -1236,6 +1243,10 @@ type SettleReport struct {
 	// Unconfirmed are applied receipts the caller must re-check against the
 	// gateway and then confirm or roll back.
 	Unconfirmed []*Receipt
+	// Pending are receipts whose transaction is committed for the
+	// installed config but whose gateway could not be read (an outage):
+	// left open for the next run to confirm, never failed for it.
+	Pending []string
 }
 
 // Settle finishes what an interrupted run left, at the start of every
@@ -1252,6 +1263,13 @@ type SettleReport struct {
 // to return to or a rollback that did not finish, keeps enforcing from its
 // directory, so that directory must stay.
 func (s *Store) Settle(keep ...string) (SettleReport, error) {
+	return s.SettleOpen(nil, keep...)
+}
+
+// SettleOpen is Settle that leaves the receipts open names (by receipt ID)
+// unsettled: committed receipts the caller could not check against the
+// gateway now (SettleReport.Pending).
+func (s *Store) SettleOpen(open map[string]bool, keep ...string) (SettleReport, error) {
 	var report SettleReport
 	st, err := s.LoadState()
 	if err != nil {
@@ -1266,6 +1284,9 @@ func (s *Store) Settle(keep ...string) (SettleReport, error) {
 		kept[name] = true
 	}
 	for _, r := range receipts {
+		if open[r.ReceiptID] {
+			continue
+		}
 		switch r.State {
 		case StateReceived, StateVerified, StateStaged:
 			if err := s.Fail(r, CodeInterrupted, "the run that received this bundle ended before it was applied; the last good bundle kept enforcing"); err != nil {
@@ -1463,6 +1484,36 @@ func VersionDirsNamed(raw []byte, bundlesDir string) []string {
 			names = append(names, name)
 		}
 	}
+	return names
+}
+
+// VersionDirsInValues is VersionDirsNamed over the scalar values of the
+// YAML document raw only: a comment or a key naming a version directory
+// names none. A document that does not parse names none.
+func VersionDirsInValues(raw []byte, bundlesDir string) []string {
+	var root yaml.Node
+	if len(raw) == 0 || yaml.Unmarshal(raw, &root) != nil {
+		return nil
+	}
+	var names []string
+	var walk func(n *yaml.Node, key bool)
+	walk = func(n *yaml.Node, key bool) {
+		if n == nil {
+			return
+		}
+		if n.Kind == yaml.ScalarNode && !key {
+			for _, name := range VersionDirsNamed([]byte(n.Value), bundlesDir) {
+				if !slices.Contains(names, name) {
+					names = append(names, name)
+				}
+			}
+			return
+		}
+		for i, c := range n.Content {
+			walk(c, n.Kind == yaml.MappingNode && i%2 == 0)
+		}
+	}
+	walk(&root, false)
 	return names
 }
 

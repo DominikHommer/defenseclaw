@@ -441,6 +441,11 @@
         "config_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "base_config_sha256": {
+          "description": "SHA-256 of the config the run that staged this bundle started from, or none when there was no config; settle uses it to tell an interrupted run from one whose transaction installed the bundle config.",
+          "type": "string",
+          "pattern": "^([0-9a-f]{64}|none)$"
         }
       },
       "allOf": [

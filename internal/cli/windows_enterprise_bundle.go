@@ -66,8 +66,11 @@ const (
 	// Warnings of a changing run without --bundle that settles the
 	// receipts a killed bundle run left (GAP-1302). The first three are the
 	// codes Linux and macOS use for the same outcomes.
-	windowsBundleInterruptedWarning     = "bundle_interrupted"
-	windowsBundleUnconfirmedWarning     = "bundle_unconfirmed"
+	windowsBundleInterruptedWarning = "bundle_interrupted"
+	windowsBundleUnconfirmedWarning = "bundle_unconfirmed"
+	// windowsBundlePendingMessage is the bundle_pending warning of a settle
+	// that found a committed bundle while the gateway could not be read.
+	windowsBundlePendingMessage         = "%d policy bundle(s) a previous run installed are not confirmed yet because the gateway could not be read (not running or not ready); they stay pending and are never failed for that: run `defenseclaw enterprise windows ensure --profile standalone` again once the gateway runs to confirm them"
 	windowsBundleStateUnreadableWarning = "bundle_state_unreadable"
 	windowsBundleSettleDeferredWarning  = "bundle_settle_deferred"
 	windowsBundleMarkerFailedWarning    = "bundle_marker_failed"
@@ -849,7 +852,12 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	driver.DeliveryID = opts.bundleDeliveryID
 	report, rollback, err := driver.SettleRun(installed, windowsBundlePolicy(ctx))
 	if err != nil {
-		return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot settle the earlier bundle receipts: "+err.Error())
+		return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot settle the earlier bundle receipts: "+err.Error()+
+			"; nothing was failed or rolled back: run the same command again")
+	}
+	if n := len(report.Pending); n > 0 {
+		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: enterprisebundle.WarnBundlePending,
+			Message: fmt.Sprintf(windowsBundlePendingMessage, n)})
 	}
 	if len(report.Interrupted) > 0 {
 		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: string(enterprisebundle.CodeInterrupted),
@@ -971,6 +979,9 @@ func settleWindowsInterruptedBundles(settle *windowsBundleSettle, layout managed
 	if n := len(report.Interrupted); n > 0 {
 		settle.warn(windowsBundleInterruptedWarning, fmt.Sprintf(
 			"%d policy bundle(s) a previous run received were not applied (failed: interrupted); the last good bundle keeps enforcing", n))
+	}
+	if n := len(report.Pending); n > 0 {
+		settle.warn(enterprisebundle.WarnBundlePending, fmt.Sprintf(windowsBundlePendingMessage, n))
 	}
 	if n := len(report.Completed); n > 0 {
 		settle.warn(enterprisebundle.WarnConfirmedAfterInterrupt, fmt.Sprintf(
@@ -1135,7 +1146,13 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 		})
 		if err != nil {
 			code := string(windowsBundleCode(err, enterprisebundle.CodeApplyFailed))
-			if !windowsBundleHasCode(result.Errors, code) {
+			switch {
+			case windowsBundleHasCode(result.Errors, code):
+			case p.Receipt.State == enterprisebundle.StateApplied:
+				// Proven and enforcing; only its confirmation record failed
+				// (GAP-0485). The receipt stays applied for the next run.
+				result.AddError(code, fmt.Sprintf("policy bundle %s version %d: %s", p.Receipt.BundleID, p.Receipt.Version, err.Error()))
+			default:
 				result.AddError(code, windowsBundleNotApplied(p, err.Error(), windowsBundleHasCurrent(run.driver.Store)))
 			}
 		}
