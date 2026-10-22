@@ -116,7 +116,9 @@ func runScanCode(cmd *cobra.Command, args []string) error {
 		if cfg != nil {
 			dataDir = strings.TrimSpace(cfg.DataDir)
 		}
-		if dataDir == "" {
+		if dataDir == "" || (auditLog == nil && managedStandaloneHost()) {
+			// This administrator-only scan has no persistent result. Its local
+			// projection must not open the service account's correlation key.
 			redactor, err = scanoutput.NewEphemeralRedactor()
 		} else {
 			redactor, err = scanoutput.LoadRedactor(dataDir)

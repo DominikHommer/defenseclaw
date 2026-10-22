@@ -31,8 +31,8 @@ ai_discovery:
 ```
 
 `ensure` validates the file before it applies it. A config with an unknown profile
-fails, on Linux and macOS with `config_invalid` and on Windows with Setup exit
-code `1603`, and leaves the installed config in force
+fails, on Linux and macOS with `config_invalid` and on standalone Windows with
+`invalid_arguments` and exit `1639`, and leaves the installed config in force
 ([Deliver it to managed hosts](/docs/how-to/policies/give-a-group-its-own-policy/)).
 A complete starting point is `admin-config.windows.example.yaml` in
 `packaging/identity/entra`.

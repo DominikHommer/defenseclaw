@@ -24,6 +24,13 @@ func TestParseV8YAMLRefusesABadProfileAtTheProfile(t *testing.T) {
 		name, pin, profile, want string
 	}{
 		{"unknown name", "", "w0-invalid-profile", "is not a supported profile"},
+		{"empty string", "", `""`, "is not a supported profile"},
+		{"whitespace string", "", `"  "`, "is not a supported profile"},
+		{"list", "", "[standalone]", "must be a string"},
+		{"mapping", "", "{name: standalone}", "must be a string"},
+		{"integer", "", "123", "must be a string"},
+		{"boolean", "", "true", "must be a string"},
+		{"null", "", "null", "must be a string"},
 		{"unknown name with pin", managed.ProfileStandalone, "nope", "is not a supported profile"},
 		{"other than the pin", managed.ProfileStandalone, managed.ProfileSecureClient, "fixed to standalone on this host"},
 	} {

@@ -187,6 +187,20 @@ var policyTestCmd = &cobra.Command{
 			return err
 		}
 		verbose, _ := cmd.Flags().GetBool("verbose")
+		if cfg != nil && !cfg.SecureClientIntegration() {
+			if _, statErr := os.Stat(regoDir); errors.Is(statErr, fs.ErrNotExist) {
+				// Managed packages compile admission from config.yaml and
+				// ship no Rego directory. A missing policy root still fails.
+				paths, pathErr := resolvePolicyPaths()
+				if pathErr != nil {
+					return pathErr
+				}
+				if info, rootErr := os.Stat(paths.rootDir); rootErr == nil && info.IsDir() {
+					fmt.Fprintln(cmd.OutOrStdout(), noRegoTestsMessage(regoDir))
+					return nil
+				}
+			}
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()

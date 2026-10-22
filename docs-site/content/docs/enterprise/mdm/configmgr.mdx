@@ -197,3 +197,6 @@ Exit codes: `0` success, `1603` failed and rolled back (read `errors[].code`;
 [lifecycle error codes](/docs/troubleshooting/enterprise#lifecycle-error-codes)),
 `1618` Fast Retry, `1639` invalid arguments (fix the content), `3010` reserved
 ([Exit codes](/docs/enterprise/mdm#exit-codes)).
+
+A malformed, non-UTF-8 or invalid candidate config returns `invalid_arguments`
+and exit `1639`. Fix the content before retrying; the installed config stays in force.

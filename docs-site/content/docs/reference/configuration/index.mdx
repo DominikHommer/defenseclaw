@@ -73,6 +73,11 @@ The top-level and `summary` counts keep their health-only meaning; `repair_summa
 
 Every block is optional, and setup commands preserve comments and unrelated hand edits. Do not copy every default into the file.
 
+Before validating this example, make `GALILEO_API_KEY` and `SPLUNK_ACCESS_TOKEN`
+available to the validation process from your credential store. The Galileo and
+Splunk destinations below require them. Omit those destinations if you do not use
+them. Validation is read-only and refuses an unresolved credential reference.
+
 ```yaml
 config_version: 9             # current schema; `defenseclaw migrate` rewrites a v8 file (the old file stays as config.yaml.v8.bak)
 

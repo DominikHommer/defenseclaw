@@ -23,7 +23,11 @@ defenseclaw setup amp --mode action                    # enforce calls and resul
 defenseclaw setup amp --workspace /path/to/repo        # also inventory the repository
 ```
 
-On Windows, run the same commands in PowerShell with a Windows path. The plugin is per user in every case. `--workspace` only adds that repository's `.amp` settings, plugins, skills and agents to inventory.
+On Windows, use a Windows path. The plugin is per user in every case.
+`--workspace` sets the workspace for the whole DefenseClaw install, including
+Amp's project inventory. Use it on a single-Amp install: if it would move peer connectors
+from their current scope, setup refuses and changes nothing. On a multi-connector
+install, run `defenseclaw setup amp` without `--workspace` for global protection.
 
 For headless runs, give Amp time to load plugins:
 

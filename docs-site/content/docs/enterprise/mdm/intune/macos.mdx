@@ -9,7 +9,7 @@ keywords:
   - Apple silicon
 ---
 
-<Callout title="Validation">A test tenant delivered DefenseClaw to an enrolled Mac with this script route in the PR #1304 end-to-end pass: install, an offline period and a one-time uninstall.</Callout>
+<Callout title="Validation">Live script delivery was exercised with test package `9.9.9` (build `f9ed814b1`, PR #1304): install, an offline period and repeated uninstall. A cached install can still reinstall after removal; see [Remove DefenseClaw](#remove-defenseclaw). The earlier removal check used test package `1.0.902`. These test builds do not certify later releases or the PKG app route.</Callout>
 
 You upload one root shell script: your copy of
 `packaging/mdm/macos/defenseclaw-enterprise.sh` with its settings block and config

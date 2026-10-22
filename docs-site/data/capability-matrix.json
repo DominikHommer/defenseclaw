@@ -169,7 +169,8 @@
           "pre_tool_call"
         ],
         "supportsFailClosed": false,
-        "scope": "user"
+        "scope": "user",
+        "blocksDeliveryFailures": true
       },
       "sandbox": {
         "status": "artifacts",
@@ -273,7 +274,8 @@
           "subagentStop"
         ],
         "supportsFailClosed": false,
-        "scope": "user,workspace"
+        "scope": "user,workspace",
+        "blocksDeliveryFailures": true
       },
       "sandbox": {
         "status": "artifacts",
@@ -307,7 +309,8 @@
           "PreToolUse"
         ],
         "supportsFailClosed": false,
-        "scope": "user"
+        "scope": "user",
+        "blocksDeliveryFailures": true
       },
       "sandbox": {
         "status": "artifacts",

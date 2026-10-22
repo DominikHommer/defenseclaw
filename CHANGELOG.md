@@ -10,6 +10,12 @@ for current behavior.
 
 ## [Unreleased] — 1.0.4
 
+- **Managed local scans and policy tests no longer need service-owned state.** JSON code scans use a process-local redaction key without opening the gateway audit database or correlation key; policy tests report no tests when an installed config-only policy has no Rego directory.
+- **Invalid enterprise profiles keep the source version and field in diagnostics.** Non-string values are refused at `enterprise.profile` before profile resolution, and version-9 error JSON keeps `config_version: 9`.
+- **Fleet policy versions always returns an array.** The empty SQLite-backed response now sends `versions: []`, matching the API contract and the in-memory backend.
+- **The complete config example names its required credential inputs.** Supply the Galileo and Splunk variables before native validation, or omit those destinations.
+- **The reference separates managed package commands from the per-user CLI.** It corrects policy export flags, workspace scope, discovery IDs and connector outage limits, and names the builds used for Intune delivery checks.
+
 ### Known limits
 
 - On a managed standalone host with `foreign_hooks: remove`, guarded connectors (GitHub Copilot CLI, Cursor, Devin, OpenCode, Amp, Hermes) still block every tool call during a gateway outage, also under `hook_fail_mode: open`, as in 1.0.3 (GAP-0352).
