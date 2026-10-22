@@ -124,11 +124,12 @@ def test_copilot_bash_hook_command_with_an_unquoted_space_cannot_run(tmp_path, m
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "dc user" / ".defenseclaw"
     script = data_dir / "hooks" / "copilot-hook.sh"
-    good = json.dumps({"version": 1, "hooks": {"preToolUse": [{"type": "command", "bash": f"'{script}' --event 'preToolUse'"}]}})
+    entry = {"type": "command", "bash": f"'{script}' --event 'preToolUse'", "timeoutSec": 30}
+    good = json.dumps({"version": 1, "hooks": {"preToolUse": [entry]}})
     cfg, config = _install(tmp_path, "copilot", good, data_dir=data_dir)
     assert hook_registration_problems(cfg, "copilot") == []
     config.write_text(
-        json.dumps({"version": 1, "hooks": {"preToolUse": [{"type": "command", "bash": f"{script} --event preToolUse"}]}}),
+        json.dumps({"version": 1, "hooks": {"preToolUse": [{**entry, "bash": f"{script} --event preToolUse"}]}}),
         encoding="utf-8",
     )
     problems = hook_command_problems(cfg, "copilot")
@@ -142,9 +143,12 @@ def test_hermes_yaml_hook_command_with_an_unquoted_space_cannot_run(tmp_path, mo
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "dc user" / ".defenseclaw"
     script = data_dir / "hooks" / "hermes-hook.sh"
-    cfg, config = _install(tmp_path, "hermes", f"hooks:\n  pre_tool_call:\n    - command: \"'{script}'\"\n", data_dir=data_dir)
+    fields = "      matcher: .*\n      timeout: 30\n"
+    cfg, config = _install(
+        tmp_path, "hermes", f"hooks:\n  pre_tool_call:\n    - command: \"'{script}'\"\n{fields}", data_dir=data_dir
+    )
     assert hook_registration_problems(cfg, "hermes") == []
-    config.write_text(f"hooks:\n  pre_tool_call:\n    - command: {script}\n", encoding="utf-8")
+    config.write_text(f"hooks:\n  pre_tool_call:\n    - command: {script}\n{fields}", encoding="utf-8")
     problems = hook_command_problems(cfg, "hermes")
     assert problems and "cannot run" in problems[0] and str(config) in problems[0]
 
@@ -153,14 +157,16 @@ def _windows_document(connector: str, command: str) -> str:
     if connector == "codex":
         return (
             "[hooks]\n[[hooks.PreToolUse]]\nmatcher = '*'\n\n[[hooks.PreToolUse.hooks]]\n"
-            f"command = '{command}'\ncommand_windows = '{command}'\ntype = 'command'\n"
+            f"command = '{command}'\ncommand_windows = '{command}'\ntimeout = 30\ntype = 'command'\n"
             "\n[otel.exporter.otlp-http.headers]\nx-defenseclaw-source = 'codex'\n"
         )
     if connector == "copilot":
-        return json.dumps({"version": 1, "hooks": {"preToolUse": [{"type": "command", "powershell": command}]}})
+        entry = {"type": "command", "powershell": command, "timeoutSec": 30}
+        return json.dumps({"version": 1, "hooks": {"preToolUse": [entry]}})
     if connector == "hermes":
-        return f"hooks:\n  pre_tool_call:\n    - command: '{command}'\n"
-    return json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command}]}]}})
+        return f"hooks:\n  pre_tool_call:\n    - command: '{command}'\n      matcher: .*\n      timeout: 30\n"
+    handler = {"type": "command", "command": command, "timeout": 30}
+    return json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [handler]}]}})
 
 
 @pytest.mark.parametrize("connector", ["claudecode", "codex", "copilot", "hermes"])
@@ -192,7 +198,7 @@ def _with_launcher(value, launcher: str):
 
 
 def _claude_windows_settings(handler: dict, launcher: str) -> str:
-    entry = _with_launcher(handler, launcher)
+    entry = {**_with_launcher(handler, launcher), "timeout": 30}
     hooks = {event: [{"matcher": "*", "hooks": [entry]}] for event in ("PreToolUse", "PostToolUse", "UserPromptSubmit")}
     env = {"OTEL_RESOURCE_ATTRIBUTES": "defenseclaw.connector=claudecode"}
     return json.dumps({"env": env, "hooks": hooks})
@@ -255,7 +261,8 @@ def test_windows_copilot_adapter_in_a_data_dir_not_named_defenseclaw_is_register
     command = f"& '{adapter}' -Event 'preToolUse'"
     if "defenseclaw" in command.lower():
         pytest.skip("the temporary folder names DefenseClaw")
-    document = json.dumps({"version": 1, "hooks": {"preToolUse": [{"type": "command", "powershell": command}]}})
+    entry = {"type": "command", "powershell": command, "timeoutSec": 30}
+    document = json.dumps({"version": 1, "hooks": {"preToolUse": [entry]}})
     cfg, config = _install(tmp_path, "copilot", document, data_dir=data_dir)
     assert hook_registration_problems(cfg, "copilot") == []
     config.write_text(json.dumps({"version": 1, "hooks": {}}), encoding="utf-8")

@@ -183,6 +183,19 @@ class ConnectorFailModeState:
         }
 
 
+# Drift for a hook entry edited so the agent runs a tool call without it
+# (hook_integrity.unguarded_tool_call_hooks, rel-1-0-4 GAP-0538).
+REGISTRATION_UNGUARDED = "registration-unguarded"
+
+
+def registration_unguarded(cfg: Any, connector: str) -> bool:
+    """Whether a recorded hook file of *connector* leaves its tool calls unguarded."""
+
+    from defenseclaw.hook_integrity import unguarded_tool_call_hooks
+
+    return bool(unguarded_tool_call_hooks(cfg, normalize(connector)))
+
+
 def resolve_connector_fail_mode(
     cfg: Any,
     connector: str,
@@ -229,6 +242,9 @@ def resolve_connector_fail_mode(
     # trust, and file identities, so the text probe is not used there.
     elif name == "codex" and not _is_windows() and not _codex_registration_current(workspace):
         drift.append("registration-missing")
+
+    if registration_unguarded(cfg, name):
+        drift.append(REGISTRATION_UNGUARDED)
 
     lock_mode, lock_drift = _registration_lock_state(cfg, name)
     sources.append(("registration-lock", lock_mode))
@@ -289,6 +305,17 @@ def connector_fail_mode_report(
     guardrail = cfg.guardrail
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     configured = normalize_fail_mode(resolver(name) if callable(resolver) else getattr(guardrail, "hook_fail_mode", ""))
+    # The upstream fail-open connectors (Antigravity, Copilot, Hermes) have no
+    # runtime record of their own, so they are never in this branch.
+    if name in _EXPECTED_CONTRACTS or name == "opencode":
+        return resolve_connector_fail_mode(
+            cfg,
+            name,
+            inspect_effective_policy=inspect_effective_policy,
+        ).to_report()
+    # An unguarded hook entry is drift whatever the fail mode: the agent does
+    # not run the hook for the call at all.
+    unguarded = [REGISTRATION_UNGUARDED] if registration_unguarded(cfg, name) else []
     if upstream_fail_open(cfg, name):
         return {
             "effective": "open",
@@ -297,19 +324,13 @@ def connector_fail_mode_report(
             "configured": configured,
             "desired": "open",
             "runtime": "open",
-            "current": True,
-            "drift": [],
+            "current": not unguarded,
+            "drift": unguarded,
             "sources": [
                 {"name": "config", "mode": configured},
                 {"name": f"{name}-upstream", "mode": "open"},
             ],
         }
-    if name in _EXPECTED_CONTRACTS or name == "opencode":
-        return resolve_connector_fail_mode(
-            cfg,
-            name,
-            inspect_effective_policy=inspect_effective_policy,
-        ).to_report()
     return {
         "effective": configured,
         "provenance": "config",
@@ -317,8 +338,8 @@ def connector_fail_mode_report(
         "configured": configured,
         "desired": configured,
         "runtime": None,
-        "current": None,
-        "drift": [],
+        "current": False if unguarded else None,
+        "drift": unguarded,
         "sources": [{"name": "config", "mode": configured}],
     }
 

@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from defenseclaw import codex_toml
+from defenseclaw.hook_guard_matrix import TOOL_GUARD_HOOKS, unguarded_tool_events
 
 _LOCK_LIMIT = 4 * 1024 * 1024
 
@@ -308,13 +309,15 @@ def unrunnable_hook_problem(cfg: Any, connector: str) -> str:
 
     A hook the agent cannot start (missing, unreadable, not executable, or
     left at the old home after a move) is a non-blocking error to the agent,
-    so the fail mode never applies (GAP-0403, GAP-0542).
+    so the fail mode never applies (GAP-0403, GAP-0542). A hook entry edited
+    so the agent skips it for a tool call (disabled, narrowed matcher, other
+    type, short timeout) is the same (rel-1-0-4 GAP-0538).
     """
 
     for problem in hook_runtime_problems(cfg, connector):
         if "cannot run it" in problem or "no longer exist" in problem:
             return problem
-    switched_off = agent_hook_switch_problems(cfg, connector)
+    switched_off = agent_hook_switch_problems(cfg, connector) or unguarded_tool_call_hooks(cfg, connector)
     return switched_off[0] if switched_off else ""
 
 
@@ -575,18 +578,8 @@ def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
         return [f"no DefenseClaw hooks are registered in {unregistered[0]}"]
     if registered:
         commands = [] if windows else hook_command_problems(cfg, connector)
-        return commands or missing_tool_inspection_hooks(cfg, connector) or agent_hook_switch_problems(cfg, connector)
+        return commands or unguarded_tool_call_hooks(cfg, connector) or agent_hook_switch_problems(cfg, connector)
     return agent_hook_switch_problems(cfg, connector)
-
-
-# The hook events whose DefenseClaw handler must be registered for an
-# agent's tool calls to be inspected. A Claude Code settings file that kept
-# every other DefenseClaw hook but lost PreToolUse left doctor passing
-# ("28 DefenseClaw hook(s) registered") and status showing the connector
-# running in action mode while no tool call reached DefenseClaw (GAP-0645).
-TOOL_INSPECTION_EVENTS: dict[str, tuple[str, ...]] = {
-    "claudecode": ("PreToolUse",),
-}
 
 
 def _tool_inspection_strict(cfg: Any) -> bool:
@@ -594,50 +587,77 @@ def _tool_inspection_strict(cfg: Any) -> bool:
     return not _is_windows() and not managed and bool(str(getattr(cfg, "data_dir", "") or ""))
 
 
-def _tool_inspection_state(cfg: Any, connector: str, document: Any) -> tuple[bool, list[str]]:
-    """Whether *document* registers DefenseClaw hooks, and the tool-inspection events it registers none for."""
+def _unguarded_tool_events(cfg: Any, connector: str, document: Any, path: Path) -> tuple[bool, list[tuple[str, str]]]:
+    """Whether *document* registers DefenseClaw hooks, and the tool-guard events it leaves unguarded.
 
-    events = TOOL_INSPECTION_EVENTS.get(connector, ())
-    hooks = document.get("hooks") if isinstance(document, dict) else None
-    if not events or not isinstance(hooks, dict):
+    The events and the fields their hook entries need are the shared table
+    (hook_guard_matrix.TOOL_GUARD_HOOKS). A Claude Code settings file that
+    kept every other DefenseClaw hook but lost PreToolUse left doctor passing
+    while no tool call reached DefenseClaw (GAP-0645); an Antigravity or
+    Copilot entry with ``enabled: false``, a narrowed matcher, another type
+    or a short timeout did the same on Linux and macOS (rel-1-0-4 GAP-0538).
+    Managed installs publish their own entry fields (the enterprise policy
+    guard checks them), so there only a missing event is reported.
+    """
+
+    if connector not in TOOL_GUARD_HOOKS:
+        return False, []
+    section = _hook_section(document, path)
+    if section is None:
         return False, []
     strict = _tool_inspection_strict(cfg)
 
-    def registers(value: Any) -> bool:
+    def owns(handler: Any) -> bool:
         return any(
             _defenseclaw_hook_command(cfg, connector, command, strict=strict)
-            for command in _hook_command_lines(value, connector)
+            for command in hook_handler_command_lines(handler, connector)
         )
 
-    if not any(registers(value) for key, value in hooks.items() if key != "state"):
+    if not any(
+        _defenseclaw_hook_command(cfg, connector, command, strict=strict)
+        for command in _hook_command_lines(section, connector)
+    ):
         return False, []
-    return True, [event for event in events if not registers(hooks.get(event))]
+    managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    return True, unguarded_tool_events(connector, document, owns, fields=not managed)
 
 
-def missing_tool_inspection_events(cfg: Any, connector: str, document: Any) -> list[str]:
-    """The tool-inspection events of *connector* the decoded agent config *document* registers no DefenseClaw hook for.
+def _unguarded_problem(connector: str, event: str, why: str, where: str) -> HookProblem:
+    if not why:
+        return tool_inspection_hook_problem(connector, event, where)
+    label = "Claude Code" if connector == "claudecode" else connector
+    return HookProblem(
+        f"the DefenseClaw {event} hook in {where} {why}, so {label} tool calls can run unchecked",
+        f"run `{setup_command(connector)} --yes`; it registers the hook again",
+    )
 
-    A document that registers no DefenseClaw hook at all returns nothing:
-    the unregistered-file check reports it.
+
+def unguarded_tool_call_problem(cfg: Any, connector: str, document: Any, where: str) -> str:
+    """Why the decoded agent config *document* at *where* leaves tool calls unguarded, or "".
+
+    A document that registers no DefenseClaw hook at all returns "": the
+    unregistered-file check reports it.
     """
 
-    return _tool_inspection_state(cfg, connector, document)[1]
+    _registered, unguarded = _unguarded_tool_events(cfg, connector, document, Path(where))
+    return _unguarded_problem(connector, *unguarded[0], where) if unguarded else ""
 
 
-def missing_tool_inspection_hooks(cfg: Any, connector: str) -> list[str]:
-    """Report recorded agent config files that lost a tool-inspection hook (GAP-0645).
+def unguarded_tool_call_hooks(cfg: Any, connector: str) -> list[str]:
+    """Report recorded agent config files whose DefenseClaw hooks leave tool calls unguarded.
 
     Every recorded file that registers DefenseClaw hooks must register the
-    connector's tool-inspection events too; on a managed install, whose
-    hooks may sit in one machine layer, one file is enough. Per-user
-    Windows status runs the same check: doctor failed the Claude Code hooks
-    row there while status kept the connector RUNNING (GAP-0068).
+    connector's tool-guard events with the fields of the shared table; on a
+    managed install, whose hooks may sit in one machine layer, one file with
+    the events is enough. Per-user Windows status runs the same check:
+    doctor failed the Claude Code hooks row there while status kept the
+    connector RUNNING (GAP-0068).
     """
 
-    if not TOOL_INSPECTION_EVENTS.get(connector):
+    if connector not in TOOL_GUARD_HOOKS:
         return []
     managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
-    gaps: list[tuple[Path, str]] = []
+    gaps: list[tuple[Path, str, str]] = []
     covered = False
     for path in _hook_config_paths(cfg, connector):
         try:
@@ -646,13 +666,13 @@ def missing_tool_inspection_hooks(cfg: Any, connector: str) -> list[str]:
             document = _load_agent_document(path)
         except (OSError, ValueError, ImportError):
             continue
-        registered, missing = _tool_inspection_state(cfg, connector, document)
-        gaps.extend((path, event) for event in missing)
-        covered = covered or (registered and not missing)
+        registered, unguarded = _unguarded_tool_events(cfg, connector, document, path)
+        gaps.extend((path, event, why) for event, why in unguarded)
+        covered = covered or (registered and not unguarded)
     if not gaps or (managed and covered):
         return []
-    path, event = gaps[0]
-    return [tool_inspection_hook_problem(connector, event, str(path))]
+    path, event, why = gaps[0]
+    return [_unguarded_problem(connector, event, why, str(path))]
 
 
 def tool_inspection_hook_problem(connector: str, event: str, where: str) -> HookProblem:
