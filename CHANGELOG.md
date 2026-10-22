@@ -49,6 +49,7 @@ for current behavior.
 
 ### Fixed
 
+- **`defenseclaw doctor --passive` no longer fails a valid Windows Hermes registration.** Passive mode does not list processes, so Hermes hosts that may need a reload are a warning there, as on Unix; the full doctor still fails when a Hermes host is running or cannot be ruled out.
 - An interrupted Windows upgrade refuses to continue when gateway recovery fails, including on another retry. Restoring a snapshot now checkpoints and verifies required data and environment moves, retains recovery state on failure, and verifies an external config before reporting recovery (GAP-0444, GAP-0450).
 
 - **A refused proxy-provider setup restores the vendor configuration.** Provider verification now runs before setup is published as ready and rolls back a failed prerequisite. Correcting a ZeptoClaw provider key and retrying no longer reuses a stale blank-key snapshot or leaves an orphaned localhost redirect.

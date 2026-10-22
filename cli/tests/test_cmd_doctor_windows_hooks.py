@@ -2888,6 +2888,26 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertIn(f"agent_executable={executable}", result.checks[-1]["detail"])
         self.assertNotIn("99.0.0", result.checks[-1]["detail"])
 
+    def test_windows_hermes_pending_reload_is_a_passive_warning(self) -> None:
+        # --passive does not list processes, so a Hermes that may be idle is
+        # unverified there, not a failure; the full doctor decides (GAP-0660).
+        runtime = self._runtime()
+        config = self._config("hermes", f'"{runtime}" hook --connector hermes')
+        result = _DoctorResult(passive=True)
+        paths = {
+            "config_path": str(config),
+            "install_root": str(self.install),
+            "search_path": str(self.install),
+            "pathext": ".EXE;.CMD",
+        }
+
+        with patch.object(cmd_doctor, "_hermes_host_running", side_effect=AssertionError("listed processes")):
+            _check_hook_contract_lock(self.cfg, "hermes", result, platform_name="nt", **paths)
+            cmd_doctor._check_windows_native_hooks(self.cfg, "hermes", "Hermes hooks", result, **paths)
+
+        self.assertEqual([row["status"] for row in result.checks], ["warn", "warn"], result.checks)
+        self.assertTrue(all("pending-reload" in row["detail"] for row in result.checks), result.checks)
+
     def test_windows_contract_preserves_access_denied_classification(self) -> None:
         runtime = self._runtime()
         config = self._config("codex", f'"{runtime}" hook --connector codex')
