@@ -174,7 +174,7 @@ const foreignHookRemovalIndent = 64
 // foreignHookRemovalsBytes, and encodes the ledger. The entries cleanup
 // transactions leave have their own budget, so they never displace a
 // removal: when they do not all fit, encoding fails. Pending denials never
-// expire. The gateway denies every
+// expire here; the guardian settles them. The gateway denies every
 // account's calls while the ledger does not parse, so one account's removals
 // (paths the user names) must never make it unreadable.
 func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Time) ([]byte, error) {

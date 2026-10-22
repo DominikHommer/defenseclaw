@@ -174,6 +174,26 @@ func endedFrom(lookup func(int) (Process, error), boot, identity string) bool {
 	return process.Exited || process.identity() != identity
 }
 
+// Decidable reports whether Ended can tell, once the process identity
+// names has ended, that it has: identity parses and names a process of this
+// operating system and of this boot. An identity read while the Linux boot
+// ID was unknown never reads as ended after a reboot, and "" (Self failed)
+// names no process at all.
+func Decidable(identity string) bool {
+	boot, _, ok := currentClock()
+	return ok && decidableFrom(boot, identity)
+}
+
+func decidableFrom(boot, identity string) bool {
+	parts := strings.Split(identity, ":")
+	if len(parts) != 4 || parts[0] != runtime.GOOS || parts[1] != boot {
+		return false
+	}
+	pid, pidErr := strconv.Atoi(parts[2])
+	_, startErr := strconv.ParseInt(parts[3], 10, 64)
+	return pidErr == nil && startErr == nil && pid > 0
+}
+
 // currentBoot is the boot an identity of this boot names ("" when unknown,
 // and always outside Linux).
 func currentBoot() string {

@@ -295,6 +295,18 @@ type enterpriseHookWorkerAccount struct {
 	GID  int
 	User string
 	Home string
+	// launch is what a pool resolved for the worker before its start hook
+	// ran (resolveEnterpriseHookWorkerLaunch); nil: the launch resolves it.
+	launch *enterpriseHookWorkerLaunch
+}
+
+// enterpriseHookWorkerLaunch is what a worker launch looks up before its
+// process starts.
+type enterpriseHookWorkerLaunch struct {
+	exe string
+	// groups are the supplementary groups a root parent gives the worker
+	// (nil: the primary group only).
+	groups []int
 }
 
 var enterpriseHooksApplyTargetCmd = &cobra.Command{
@@ -1178,16 +1190,18 @@ func runEnterpriseHookWorker(
 	if err != nil {
 		return notStarted(err)
 	}
-	exe, err := enterpriseHookWorkerExecutable()
-	if err != nil {
-		return notStarted(err)
-	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	launch := account.launch
+	if launch == nil {
+		if launch, err = resolveEnterpriseHookWorkerLaunch(ctx, account); err != nil {
+			return notStarted(err)
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, workerTimeout(request))
 	defer cancel()
-	cmd := exec.CommandContext(ctx, exe, enterpriseHookWorkerArgs...)
+	cmd := exec.CommandContext(ctx, launch.exe, enterpriseHookWorkerArgs...)
 	cmd.Dir = "/"
 	cmd.Env = enterpriseHookWorkerEnvironment(account)
 	cmd.Stdin = bytes.NewReader(payload)
@@ -1195,11 +1209,7 @@ func runEnterpriseHookWorker(
 	stderr := &workerOutputBuffer{limit: enterpriseHookWorkerStderrLimit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	var supplementary []int
-	if os.Geteuid() == 0 {
-		supplementary = enterpriseHookWorkerGroupIDs(account)
-	}
-	cmd.SysProcAttr = enterpriseHookWorkerSysProcAttr(account, supplementary)
+	cmd.SysProcAttr = enterpriseHookWorkerSysProcAttr(account, launch.groups)
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
@@ -1239,6 +1249,83 @@ func runEnterpriseHookWorker(
 		return response, fmt.Errorf("worker for uid %d failed: %w", account.UID, runErr)
 	}
 	return response, nil
+}
+
+// enterpriseHookWorkerResolvesGroups reports whether a worker launch sets
+// the worker's supplementary groups: a root parent does. Replaceable in
+// tests.
+var enterpriseHookWorkerResolvesGroups = func() bool { return os.Geteuid() == 0 }
+
+// enterpriseHookWorkerGroupLookupTimeout bounds how long a worker launch
+// waits for the account's supplementary groups. os/user, NSS and Directory
+// Services take no context, and an Open Directory lookup on macOS can stall
+// without end; the foreign-hook cleanup pool has published a denial for the
+// account by then that only the worker's end settles. A lookup that does
+// not answer in time counts as one that failed: the worker runs with the
+// primary group only, which can only grant less.
+var enterpriseHookWorkerGroupLookupTimeout = 15 * time.Second
+
+// enterpriseHookWorkerGroupLookup is one running group lookup; groups is
+// set before done is closed.
+type enterpriseHookWorkerGroupLookup struct {
+	done   chan struct{}
+	groups []int
+}
+
+// enterpriseHookWorkerGroupLookups are the group lookups still running, by
+// account, so a stalled directory holds one lookup per account, not one
+// per pass.
+var (
+	enterpriseHookWorkerGroupLookupsMu sync.Mutex
+	enterpriseHookWorkerGroupLookups   = map[string]*enterpriseHookWorkerGroupLookup{}
+)
+
+// resolveEnterpriseHookWorkerLaunch looks up what account's worker launch
+// needs before its process starts: the executable and, for a root parent,
+// the supplementary groups. It returns within
+// enterpriseHookWorkerGroupLookupTimeout, or with ctx's error once ctx
+// ends; on an error no worker may start.
+func resolveEnterpriseHookWorkerLaunch(ctx context.Context, account enterpriseHookWorkerAccount) (*enterpriseHookWorkerLaunch, error) {
+	exe, err := enterpriseHookWorkerExecutable()
+	if err != nil {
+		return nil, err
+	}
+	launch := &enterpriseHookWorkerLaunch{exe: exe}
+	if !enterpriseHookWorkerResolvesGroups() {
+		return launch, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key := fmt.Sprintf("%d\x00%d\x00%s", account.UID, account.GID, account.User)
+	enterpriseHookWorkerGroupLookupsMu.Lock()
+	lookup := enterpriseHookWorkerGroupLookups[key]
+	if lookup == nil {
+		lookup = &enterpriseHookWorkerGroupLookup{done: make(chan struct{})}
+		enterpriseHookWorkerGroupLookups[key] = lookup
+		groupIDs := enterpriseHookWorkerGroupIDs
+		go func() {
+			lookup.groups = groupIDs(account)
+			enterpriseHookWorkerGroupLookupsMu.Lock()
+			delete(enterpriseHookWorkerGroupLookups, key)
+			enterpriseHookWorkerGroupLookupsMu.Unlock()
+			close(lookup.done)
+		}()
+	}
+	enterpriseHookWorkerGroupLookupsMu.Unlock()
+	timer := time.NewTimer(enterpriseHookWorkerGroupLookupTimeout)
+	defer timer.Stop()
+	select {
+	case <-lookup.done:
+		launch.groups = lookup.groups
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		if enterpriseHookWorkerLog != nil {
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] worker uid=%d: supplementary groups did not resolve within %s, using the primary group only\n", account.UID, enterpriseHookWorkerGroupLookupTimeout)
+		}
+	}
+	return launch, nil
 }
 
 // enterpriseHookWorkerGroupIDs resolves the account's primary and
@@ -1364,8 +1451,11 @@ func runEnterpriseHookWorkerPool(ctx context.Context, jobs []enterpriseHookWorke
 }
 
 // runEnterpriseHookWorkerPoolReporting is runEnterpriseHookWorkerPool that
-// also hands each job to start, when set, just before its worker starts
-// (a job start refuses ends with start's error and runs no worker), and
+// also hands each job to start, when set, just before its worker starts,
+// once everything the launch looks up is resolved
+// (resolveEnterpriseHookWorkerLaunch), so what start publishes lasts only
+// while the worker runs (a job start refuses, or whose launch cannot be
+// resolved, ends with that error and runs no worker), and
 // each outcome to done, when set, as soon as its worker ends (concurrently
 // with the other workers).
 func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int, start func(*enterpriseHookWorkerJob) error, done func(enterpriseHookWorkerOutcome)) []enterpriseHookWorkerOutcome {
@@ -1384,7 +1474,13 @@ func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterprise
 			var response enterpriseHookWorkerResponse
 			var err error
 			if start != nil {
-				err = start(&jobs[i])
+				var launch *enterpriseHookWorkerLaunch
+				if launch, err = resolveEnterpriseHookWorkerLaunch(ctx, jobs[i].Account); err != nil {
+					err = fmt.Errorf("%w: %w", errEnterpriseHookWorkerNotStarted, err)
+				} else {
+					jobs[i].Account.launch = launch
+					err = start(&jobs[i])
+				}
 			}
 			if err == nil {
 				response, err = enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)

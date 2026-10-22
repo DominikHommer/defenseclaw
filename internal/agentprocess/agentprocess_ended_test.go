@@ -53,3 +53,31 @@ func TestSelfIsNotEnded(t *testing.T) {
 		t.Fatalf("this process (%s) reads as ended", self)
 	}
 }
+
+// A pending cleanup denial names its guardian by identity; one Ended can
+// never decide (Self failed, or it lacks the boot it ran in) would be kept
+// forever after the guardian died.
+func TestDecidableOnlyForAnIdentityEndedCanSettle(t *testing.T) {
+	goos := runtime.GOOS
+	for identity, want := range map[string]bool{
+		goos + ":b:10:5":     true,
+		"":                   false,
+		goos + "::10:5":      false, // boot unknown when it was read
+		goos + ":other:10:5": false,
+		"plan9:b:10:5":       false,
+		goos + ":b:x:5":      false,
+		goos + ":b:0:5":      false,
+		goos + ":b:10":       false,
+		goos + ":b:10:5:6":   false,
+	} {
+		if got := decidableFrom("b", identity); got != want {
+			t.Errorf("decidableFrom(%q) = %t, want %t", identity, got, want)
+		}
+	}
+	if self := Self(); self != "" && !Decidable(self) {
+		t.Fatalf("this process's identity %q is not decidable", self)
+	}
+	if Decidable("") {
+		t.Fatal("an empty identity is decidable")
+	}
+}

@@ -634,7 +634,7 @@ func TestForeignHookCleanupEndIsRetried(t *testing.T) {
 // The pending denial of a guardian that died mid-cleanup is settled once
 // no worker of it can still run, as an incomplete cleanup: a new account
 // that reuses the uid is not denied forever. A denial whose cleanup may
-// still run stays.
+// still run stays, up to the longest a cleanup can hold it whoever owns it.
 func TestForeignHookAbandonedCleanupDenialIsSettled(t *testing.T) {
 	const deadOwner = "linux:boot:999999:1"
 	for _, tc := range []struct {
@@ -645,9 +645,18 @@ func TestForeignHookAbandonedCleanupDenialIsSettled(t *testing.T) {
 		settled bool
 	}{
 		{name: "dead owner, workers gone", owner: deadOwner, age: 11 * time.Minute, ended: true, settled: true},
-		{name: "owner still running", owner: deadOwner, age: time.Hour, ended: false},
+		{name: "owner still running", owner: deadOwner, age: 30 * time.Minute, ended: false},
 		{name: "a worker may still run", owner: deadOwner, age: 9 * time.Minute, ended: true},
-		{name: "unknown owner", owner: "", age: time.Hour, ended: true},
+		{name: "unknown owner, a cleanup may still run", owner: "", age: 59 * time.Minute, ended: true},
+		// No cleanup holds its denial this long: a denial whose owner
+		// cannot be shown to have ended is settled, never kept forever.
+		{name: "unknown owner, past every cleanup", owner: "", age: 61 * time.Minute, settled: true},
+		{name: "malformed owner, past every cleanup", owner: "linux:boot:x", age: 61 * time.Minute, settled: true},
+		{name: "owner not shown to have ended, past every cleanup", owner: deadOwner, age: 61 * time.Minute, ended: false, settled: true},
+		{name: "this process, no cleanup of it runs, recent", owner: "self", age: 30 * time.Minute},
+		{name: "this process, no cleanup of it runs, past every cleanup", owner: "self", age: 61 * time.Minute, settled: true},
+		{name: "dated past the bound ahead (clock set back)", owner: "", age: -61 * time.Minute, settled: true},
+		{name: "dated a little ahead", owner: "", age: -time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			goos, boot, start := foreignTxClock(t)
@@ -658,7 +667,11 @@ func TestForeignHookAbandonedCleanupDenialIsSettled(t *testing.T) {
 			cfg = standaloneTestConfig(dataDir)
 			enterpriseForeignHookOwnerEnded = func(owner string) bool { return owner == deadOwner && tc.ended }
 			at := time.Now().UTC().Add(-tc.age).Format(time.RFC3339Nano)
-			path := enterprisepolicy.ForeignHookCleanupPendingPath("0123456789abcdef", tc.owner)
+			owner := tc.owner
+			if owner == "self" {
+				owner = enterpriseForeignHookCleanupOwner()
+			}
+			path := enterprisepolicy.ForeignHookCleanupPendingPath("0123456789abcdef", owner)
 			writeForeignTxLedger(t, dataDir, []enterprisepolicy.ForeignHookRemoval{
 				{Identity: "1000", Connector: "cursor", Path: path, At: at, Mark: "m"},
 				{Identity: "1000", Connector: "codex", Path: path, At: at, Mark: "m"},

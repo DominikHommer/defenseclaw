@@ -50,6 +50,16 @@ var enterpriseForeignHookCleanupTxs = map[string]*enterpriseForeignHookCleanupTx
 // five seconds, even on macOS, which has no parent-death signal.
 var enterpriseForeignHookAbandonedAfter = 10 * time.Minute
 
+// enterpriseForeignHookPendingMaxAge is the longest any pending denial no
+// running cleanup of this process holds stays, whoever published it. A
+// cleanup holds its denial from just before its worker starts until the
+// worker ends, and both are bounded (resolveEnterpriseHookWorkerLaunch,
+// enterpriseHookWorkerTimeout), so a denial this old belongs to a cleanup
+// that ended even when its owner cannot be shown to have ended: a denial
+// without an owner (an earlier 1.0.4 build published those), an owner whose
+// process cannot be looked up, or an owner whose settle failed.
+var enterpriseForeignHookPendingMaxAge = time.Hour
+
 // enterpriseForeignHookCleanupOwner names this process in its pending
 // denials, and enterpriseForeignHookOwnerEnded tells whether the process a
 // pending denial names has ended. Replaceable in tests.
@@ -135,7 +145,10 @@ func enterpriseForeignHookDenialConnectors(home string, planned map[string][]str
 // publishes a pending denial for each of connectors, those whose agents may
 // load a file the cleanup will edit (enterpriseForeignHookDenialConnectors).
 // A cleanup with nothing to edit opens none. On an error nothing may be
-// edited. finishEnterpriseForeignHookCleanup ends the transaction.
+// edited. finishEnterpriseForeignHookCleanup ends the transaction. The
+// denial names this process, and none is published when it cannot be
+// named in a way agentprocess.Ended can decide: a later pass could not tell
+// that a guardian that died mid-cleanup had ended.
 func beginEnterpriseForeignHookCleanup(stderr io.Writer, account string, connectors []string) (string, error) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return "", nil
@@ -153,11 +166,15 @@ func beginEnterpriseForeignHookCleanup(stderr io.Writer, account string, connect
 	if len(names) == 0 {
 		return "", errors.New("the cleanup denial names no connector")
 	}
+	owner := enterpriseForeignHookCleanupOwner()
+	if !agentprocess.Decidable(owner) {
+		return "", fmt.Errorf("the guardian cannot name its own process (%q), so the cleanup denial could not be settled if the guardian ended", foreignGuardLogField(owner, 128))
+	}
 	var id [8]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return "", err
 	}
-	token := enterprisepolicy.ForeignHookCleanupPendingPath(hex.EncodeToString(id[:]), enterpriseForeignHookCleanupOwner())
+	token := enterprisepolicy.ForeignHookCleanupPendingPath(hex.EncodeToString(id[:]), owner)
 	enterpriseForeignHookRemovalsMu.Lock()
 	defer enterpriseForeignHookRemovalsMu.Unlock()
 	tx := &enterpriseForeignHookCleanupTx{running: true}
@@ -306,9 +323,10 @@ func updateEnterpriseForeignHookLedger(stderr io.Writer, add func(now time.Time,
 // may still edit files: this process's running cleanup, or another
 // process's until that process ended over
 // enterpriseForeignHookAbandonedAfter after it published the denial. A
-// denial that cannot be tied to a process that ended stays. An ended cleanup
-// that cannot tell what it changed (uncertain, or abandoned) leaves a
-// removal at now for each connector its denial named.
+// denial that cannot be tied to a process that ended stays until
+// enterpriseForeignHookPendingMaxAge, never longer: its cleanup has ended by
+// then. An ended cleanup that cannot tell what it changed (uncertain, or
+// abandoned) leaves a removal at now for each connector its denial named.
 func settleEnterpriseForeignHookPending(existing []enterprisepolicy.ForeignHookRemoval, now time.Time, mark string) (kept, added []enterprisepolicy.ForeignHookRemoval, settled []string) {
 	incomplete := func(pending enterprisepolicy.ForeignHookRemoval) enterprisepolicy.ForeignHookRemoval {
 		return enterprisepolicy.ForeignHookRemoval{
@@ -344,7 +362,12 @@ func settleEnterpriseForeignHookPending(existing []enterprisepolicy.ForeignHookR
 		}
 		owner := enterprisepolicy.ForeignHookCleanupPendingOwner(entry.Path)
 		at, err := time.Parse(time.RFC3339Nano, entry.At)
-		if owner == "" || owner == self || err != nil || now.Sub(at) < enterpriseForeignHookAbandonedAfter || !enterpriseForeignHookOwnerEnded(owner) {
+		age := now.Sub(at)
+		// A date that does not parse, or lies past the bound either way (the
+		// clock was set back), is no proof a cleanup still runs.
+		expired := err != nil || age >= enterpriseForeignHookPendingMaxAge || age <= -enterpriseForeignHookPendingMaxAge
+		abandoned := age >= enterpriseForeignHookAbandonedAfter && owner != "" && owner != self && enterpriseForeignHookOwnerEnded(owner)
+		if !expired && !abandoned {
 			kept = append(kept, entry)
 			continue
 		}
