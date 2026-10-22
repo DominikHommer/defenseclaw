@@ -6,6 +6,7 @@ package hookexec
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
@@ -241,16 +242,36 @@ func noAnswerFailMode(opts Options, failMode string) string {
 
 func failNoAnswer(opts Options, sp spec, failMode string) int {
 	failMode = noAnswerFailMode(opts, failMode)
-	if opts.ManagedEnterprise {
-		// The existing administrator-selected outage exception applies only
-		// to tool gates. Newly bounded prompt/result events retain their
-		// previous fail-closed outcome, including when outage mode is open.
-		if managedNativeDecision(opts) && toolGateEvent(opts.Connector, opts.Event) && !opts.answerSpentLocally {
-			opts = withManagedOutage(opts, errGatewayNoAnswer)
-		}
-		return failUnreachable(opts, sp, failMode, managedGatewayNoAnswerReason)
+	// The existing administrator-selected outage exception applies only to
+	// tool gates. Newly bounded prompt/result events retain their previous
+	// fail-closed outcome, including when outage mode is open.
+	if managedNativeDecision(opts) && toolGateEvent(opts.Connector, opts.Event) && !opts.answerSpentLocally {
+		opts = withManagedOutage(opts, errGatewayNoAnswer)
 	}
-	return failUnreachable(opts, sp, failMode, perUserGatewayNoAnswerReason)
+	return failUnreachable(opts, sp, failMode, noAnswerReason(opts))
+}
+
+// noAnswerReason is the hook-failure reason of a call whose gateway gave no
+// decision in time.
+func noAnswerReason(opts Options) string {
+	if opts.ManagedEnterprise {
+		return managedGatewayNoAnswerReason
+	}
+	return perUserGatewayNoAnswerReason
+}
+
+// gatewayTookCallWithoutAnswer reports a request error that ended a call the
+// gateway had taken: the client's own timeout ran out while it waited for
+// the answer. The gateway was reached and stalled; a dial that timed out
+// never reached it. A stop or session event has no answer budget, so this
+// is how its stall ends (GAP-0527).
+func gatewayTookCallWithoutAnswer(err error) bool {
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		return false
+	}
+	var opErr *net.OpError
+	return !errors.As(err, &opErr) || opErr.Op != "dial"
 }
 
 // retryFitsAnswer reports whether a resend that starts after delay still

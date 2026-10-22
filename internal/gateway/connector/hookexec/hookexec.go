@@ -962,6 +962,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// managedPeerFailMode).
 			return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 		}
+		if reason == "gateway unreachable" && !opts.SecureClient && !secureClientHook(opts) && gatewayTookCallWithoutAnswer(err) {
+			// Same fail mode; the record says the gateway stalled, not that
+			// it could not be reached. Secure Client keeps its reason.
+			reason = noAnswerReason(opts)
+		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
 	defer resp.Body.Close()

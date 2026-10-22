@@ -4,6 +4,8 @@
 package hookexec
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -273,5 +275,40 @@ func TestProcessStartTimeIsTheCreationOfTheProcess(t *testing.T) {
 	}
 	if got := ProcessStartTime(); got.After(time.Now()) {
 		t.Fatalf("ProcessStartTime() = %s is in the future", got)
+	}
+}
+
+// GAP-0527: a managed Codex Stop hook has no answer budget, so a stalled
+// gateway ends it at the client timeout. Stop still may not block, and its
+// row names the event and the stall, not an unreachable gateway.
+func TestManagedCodexStopDuringAGatewayStallNamesTheEventAndTheStall(t *testing.T) {
+	for _, failMode := range []string{"closed", "open"} {
+		t.Run(failMode, func(t *testing.T) {
+			logHome := filepath.Join(t.TempDir(), ".defenseclaw")
+			result, _ := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) {
+				managedCodex(opts)
+				opts.ManagedStandalone = true
+				opts.ManagedUnixSocket = "/not-used-by-the-test-client/hook.sock"
+				opts.FailMode = failMode
+				opts.FailureLogHome = func() string { return logHome }
+				opts.HTTPClient = &http.Client{Timeout: 200 * time.Millisecond}
+				opts.Event = "Stop"
+				opts.Stdin = strings.NewReader(`{"hook_event_name":"Stop"}`)
+			})
+			if blocked(result) {
+				t.Fatalf("code=%d stdout=%q stderr=%q, want the neutral Stop allow", result.code, result.stdout, result.stderr)
+			}
+			data, err := os.ReadFile(filepath.Join(logHome, "logs", "hook-failures.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var row map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(data), &row); err != nil {
+				t.Fatalf("row %q: %v", data, err)
+			}
+			if row["event"] != "Stop" || row["reason"] != managedGatewayNoAnswerReason {
+				t.Fatalf("row %v, want event Stop and reason %s", row, managedGatewayNoAnswerReason)
+			}
+		})
 	}
 }

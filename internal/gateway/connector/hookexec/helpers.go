@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // readCapped reads up to max bytes from r. It returns overflow=true (and the
@@ -165,14 +166,18 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		TS        string `json:"ts"`
 		Connector string `json:"connector"`
 		Hook      string `json:"hook"`
-		Reason    string `json:"reason"`
-		Category  string `json:"category"`
-		FailMode  string `json:"fail_mode"`
-		Outcome   string `json:"outcome"`
+		// Event names the hook event, so a neutral stop event's allow
+		// reads apart from a tool call's fail-open (GAP-0527).
+		Event    string `json:"event,omitempty"`
+		Reason   string `json:"reason"`
+		Category string `json:"category"`
+		FailMode string `json:"fail_mode"`
+		Outcome  string `json:"outcome"`
 	}{
 		TS:        opts.Now().UTC().Format("2006-01-02T15:04:05Z"),
 		Connector: sp.connector,
 		Hook:      sp.hookName,
+		Event:     strings.TrimSpace(opts.Event),
 		Reason:    reason,
 		Category:  category,
 		FailMode:  failMode,
