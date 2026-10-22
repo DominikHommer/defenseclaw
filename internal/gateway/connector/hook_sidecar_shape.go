@@ -231,9 +231,13 @@ func jsonDuplicateKey(data []byte) bool {
 // before 0.8.10 wrote. Every line is blank, a # comment, or [export ]KEY=value
 // with a shell-name key, and every key is given once; ok is false for any
 // other document (JSON, a byte-order mark or a comment in front of other
-// text, a line that is not KEY=value, a key given twice), which is
-// malformed state, never read for a value.
+// text, a line that is not KEY=value, a key given twice, more than
+// HookSidecarMaxBytes, which every reader closes on), which is malformed
+// state, never read for a value.
 func ParseLegacyHookSidecar(data []byte) (values map[string]string, ok bool) {
+	if len(data) > HookSidecarMaxBytes {
+		return nil, false
+	}
 	values = map[string]string{}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)

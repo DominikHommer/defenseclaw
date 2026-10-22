@@ -50,6 +50,10 @@ func TestHookSidecarWritersRefuseStateTheReadersClose(t *testing.T) {
 		"json-version-exponent":            `{"version":2e0,"fail_modes":{"codex":"open"}}`,
 		"json-version-future":              `{"version":3,"fail_modes":{"codex":"open"}}`,
 		"json-nan":                         `{"version":2,"fail_modes":{"codex":"open"},"x":NaN}`,
+		// Loop round 2 after round 4: every reader closes on a sidecar past
+		// 64 KiB, the 0.8.x KEY=value shape included, yet the writers
+		// carried its legacy open into the JSON they wrote.
+		"legacy-larger-than-64KiB": "DEFENSECLAW_FAIL_MODE=open\n#" + strings.Repeat("x", 64<<10) + "\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			hookDir := t.TempDir()
@@ -283,6 +287,8 @@ func TestHookSidecarShapes(t *testing.T) {
 		"{\"A\":1}":                           false,
 		"[\"A=1\"]":                           false,
 		"null":                                false,
+		"A=1\n#" + strings.Repeat("x", 64<<10-6) + "\n": true,
+		"A=1\n#" + strings.Repeat("x", 64<<10-5) + "\n": false,
 	} {
 		if _, ok := ParseLegacyHookSidecar([]byte(body)); ok != want {
 			t.Errorf("ParseLegacyHookSidecar(%q) ok = %v, want %v", body, ok, want)
