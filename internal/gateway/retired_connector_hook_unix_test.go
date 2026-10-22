@@ -116,6 +116,44 @@ func TestRetiredConnectorHookRoutesBlockAcrossAGatewayRestart(t *testing.T) {
 	}
 }
 
+// The real gateway, which sets no read timeout on the TCP API or the hook
+// socket, answers a retired route whose body never comes once the drain
+// deadline passes, on both.
+func TestRetiredConnectorHookRoutesBoundAStalledBodyOnTheGateway(t *testing.T) {
+	shortenRetiredDrain(t, 200*time.Millisecond)
+	addr := freeLoopbackAddr(t)
+	socket := filepath.Join(shortGatewaySocketDir(t), "hook.sock")
+	_, _, _, cancel := runHookSocketTestServerAt(t, true, addr, socket)
+	defer cancel()
+	tcp := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		response, err := tcp.Get("http://" + addr + "/health")
+		if err == nil {
+			_ = response.Body.Close()
+		}
+		if err == nil && hookSocketRoundTrip(socket) == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the gateway never served (tcp: %v)", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	requireRetiredBlockForStalledBodies(t, "TCP API", "tcp", addr)
+	requireRetiredBlockForStalledBodies(t, "hook socket", "unix", socket)
+}
+
+// The sandbox ingress bounds the drain by the same deadline, not by its
+// two-minute read timeout.
+func TestRetiredConnectorHookRoutesBoundAStalledBodyOnTheSandboxIngress(t *testing.T) {
+	shortenRetiredDrain(t, 200*time.Millisecond)
+	f := newSandboxIngressFixture(t)
+	server := httptest.NewServer(f.handler)
+	t.Cleanup(server.Close)
+	requireRetiredBlockForStalledBodies(t, "sandbox ingress", "tcp", server.Listener.Addr().String())
+}
+
 // The sandbox ingress answers the retired routes with the block too, before
 // the binding check: an old OpenShell OpenHands hook gets the removal
 // reason, with its binding, a revoked one or none.

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -46,6 +47,17 @@ import (
 // send at most 1 MiB by default.
 const retiredConnectorDrainLimit = 16 << 20
 
+// retiredConnectorDrainTimeout bounds how long the retired routes wait for
+// that body. The routes answer before any credential check, and the TCP API
+// and the hook socket have no read timeout, so without it a caller that
+// declares a body and never sends it (or trickles it) would hold the
+// connection and its goroutine for as long as it likes. An old hook sends
+// its body at once, on loopback or a local socket, well inside it. The
+// deadline is on the connection, so it also bounds the body net/http itself
+// discards before and after the answer; the server sets the next request's
+// deadline itself. A var so tests can shorten it.
+var retiredConnectorDrainTimeout = 10 * time.Second
+
 // retiredConnectorHookFirst serves a removed connector's hook route before
 // next, so none of next's checks can refuse it.
 func retiredConnectorHookFirst(next http.Handler) http.Handler {
@@ -65,8 +77,13 @@ func serveRetiredConnectorHook(w http.ResponseWriter, r *http.Request) bool {
 	if !ok {
 		return false
 	}
-	if r.Body != nil {
-		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, retiredConnectorDrainLimit))
+	if r.Body != nil && r.Body != http.NoBody {
+		// Drain only under the deadline. Every listener chain can set it (the
+		// tests cover each); were a writer unable to, skip the drain rather
+		// than wait on the body without a bound.
+		if http.NewResponseController(w).SetReadDeadline(time.Now().Add(retiredConnectorDrainTimeout)) == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, retiredConnectorDrainLimit))
+		}
 	}
 	reason, _ := connector.RemovedConnectorDenyReason(name)
 	// action is what the OmniGent module and the OpenHands hook read;
