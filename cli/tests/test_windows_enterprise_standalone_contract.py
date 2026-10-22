@@ -762,6 +762,94 @@ def _run_lifecycle_functions(tmp_path, names, body, replacements=()) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_a_committed_retirement_defers_only_to_a_holder_it_finds(tmp_path) -> None:
+    # W4 review, loop round 1: access denied is what both a program holding
+    # a file in InstallRoot and an access list (a deny on InstallRoot or its
+    # parent) answer to the rename. Every such refusal was deferred to the
+    # finalizer, so a self-uninstall reported ok with InstallRoot in place
+    # and a finalizer that could never finish. Only a holder found after the
+    # refusal (an image run from InstallRoot or a Restart Manager holder,
+    # other than this lifecycle and the calling CLI) defers now; any other
+    # refusal fails the committed uninstall, and other errors are unchanged.
+    source = tmp_path / "DefenseClaw"
+    _run_lifecycle_functions(
+        tmp_path,
+        [
+            "Test-DefenseClawInstallRootInUseException",
+            "Format-DefenseClawProcessInUse",
+            "Get-DefenseClawInstallRootHolders",
+            "Invoke-DefenseClawCommittedInstallRootRetirement",
+        ],
+        r"""
+class FakeNative {
+    static [object[]] GetFileHolders([string[]]$Paths) {
+        if ($global:RmThrows) { throw 'Restart Manager session start failed' }
+        return $global:RmHolders
+    }
+}
+function Initialize-DefenseClawNativeSecurity { return [FakeNative] }
+$script:StateFileInUseCheckLimit = 16384
+$source = '""" + str(source) + r"""'
+$destination = $source + '.retired'
+function Get-DefenseClawProcessImages { return $global:Images }
+function Move-DefenseClawInstallRootForRetirement([string]$Source, [string]$Destination) {
+    switch ($global:Failure) {
+        'denied' { throw [UnauthorizedAccessException]::new("Access to the path '$Source' is denied.") }
+        'sharing' { throw [IO.IOException]::new('The process cannot access the file because it is being used by another process.', -2147024864) }
+        'missing' { throw [IO.DirectoryNotFoundException]::new('Could not find a part of the path.') }
+        default { [IO.Directory]::Move($Source, $Destination) }
+    }
+}
+function Invoke-Case([string]$Name, [string]$Failure, $Images, $RmHolders, [bool]$RmThrows, [string]$Expect, [string]$Text) {
+    if ([IO.Directory]::Exists($destination)) { [IO.Directory]::Delete($destination, $true) }
+    if ([IO.Directory]::Exists($source)) { [IO.Directory]::Delete($source, $true) }
+    [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($source, 'bin'))
+    [IO.File]::WriteAllText([IO.Path]::Combine($source, 'bin', 'defenseclaw-hook.exe'), 'stand-in')
+    $global:Failure = $Failure
+    $global:Images = @($Images)
+    $global:RmHolders = [object[]]@($RmHolders)
+    $global:RmThrows = $RmThrows
+    $outcome = 'retired'
+    $message = ''
+    try {
+        $message = Invoke-DefenseClawCommittedInstallRootRetirement -Source $source -Destination $destination -SelfUninstallCallerPID 777
+        if (-not [string]::IsNullOrEmpty($message)) { $outcome = 'deferred' }
+    }
+    catch {
+        $outcome = 'failed'
+        $message = $_.Exception.Message
+    }
+    if ($outcome -ne $Expect -or ($Text -and $message -notlike "*$Text*")) {
+        throw "${Name}: $outcome, '$message' (want $Expect, *$Text*)"
+    }
+    if ($outcome -ne 'retired' -and (-not [IO.Directory]::Exists($source) -or [IO.Directory]::Exists($destination))) {
+        throw "${Name}: InstallRoot was not left in place"
+    }
+    Write-Host "${Name}: $outcome"
+}
+$hook = [pscustomobject]@{ Id = 4242; Path = ($source + '\bin\defenseclaw-hook.exe'); UserName = 'CORP\alice'; Parent = 'claude' }
+$self = [pscustomobject]@{ Id = $PID; Path = ($source + '\bin\pwsh.exe'); UserName = ''; Parent = '' }
+$caller = [pscustomobject]@{ Id = 777; Path = ($source + '\bin\defenseclaw.exe'); UserName = ''; Parent = '' }
+$elsewhere = [pscustomobject]@{ Id = 31; Path = 'C:\Windows\explorer.exe'; UserName = ''; Parent = '' }
+$scanner = [pscustomobject]@{ ProcessId = 5151; AppName = 'Scanner'; ServiceName = '' }
+$callerHolder = [pscustomobject]@{ ProcessId = 777; AppName = 'defenseclaw'; ServiceName = '' }
+$selfHolder = [pscustomobject]@{ ProcessId = $PID; AppName = 'pwsh'; ServiceName = '' }
+Invoke-Case 'denied with no holder' 'denied' @($elsewhere) @() $false 'failed' 'no program holds a file in it'
+Invoke-Case 'sharing with no holder' 'sharing' @() @() $false 'failed' 'no program holds a file in it'
+Invoke-Case 'only this lifecycle and the caller' 'denied' @($self, $caller) @($callerHolder, $selfHolder) $false 'failed' 'run the uninstall again'
+Invoke-Case 'Restart Manager failed' 'denied' @() @() $true 'failed' 'is denied'
+Invoke-Case 'an image from InstallRoot' 'denied' @($hook, $caller) @() $false 'deferred' 'defenseclaw-hook.exe (pid 4242, account CORP\alice, started by claude)'
+Invoke-Case 'a Restart Manager holder' 'sharing' @($elsewhere) @($scanner, $callerHolder) $false 'deferred' 'Scanner (pid 5151)'
+Invoke-Case 'another error' 'missing' @($hook) @() $false 'failed' 'Could not find a part of the path'
+Invoke-Case 'a free InstallRoot' 'none' @() @() $false 'retired' ''
+""",
+    )
+    module = _text(MODULE)
+    uninstall = _function_body(module, "Invoke-DefenseClawUninstallLifecycle")
+    call = uninstall.index("$retirementDeferred = Invoke-DefenseClawCommittedInstallRootRetirement `")
+    assert "-SelfUninstallCallerPID $SelfUninstallCallerPID" in uninstall[call : call + 300]
+
+
 def test_install_preparation_keeps_existing_service_read_access(tmp_path) -> None:
     _run_lifecycle_functions(tmp_path, ["Initialize-DefenseClawTransactionManagedRoot"], r"""
 function Test-DefenseClawStandaloneProfile { return $true }

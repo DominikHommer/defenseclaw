@@ -29138,29 +29138,130 @@ function Move-DefenseClawInstallRootForRetirement {
     }
 }
 
+# The programs that hold InstallRoot now: a process that runs an image
+# from it, or one Restart Manager reports with a file in it open. This
+# lifecycle and the installed CLI that asked for its own removal do not
+# count: the CLI's own image does not keep the folder from being renamed
+# (the uninstall moved its working folder out of InstallRoot first), and
+# the finalizer waits for it to exit anyway. Restart Manager failing finds
+# no holder. Each holder is one string, "name (pid N, ...)".
+function Get-DefenseClawInstallRootHolders {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [int]$SelfUninstallCallerPID
+    )
+    $root = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\') + '\'
+    $excluded = [Collections.Generic.HashSet[int]]::new()
+    [void]$excluded.Add([int]$PID)
+    if ($SelfUninstallCallerPID -gt 0) {
+        [void]$excluded.Add([int]$SelfUninstallCallerPID)
+    }
+    $named = [ordered]@{}
+    $images = @{}
+    foreach ($process in @(Get-DefenseClawProcessImages)) {
+        $id = [int]$process.Id
+        $images[$id] = $process
+        $path = [string]$process.Path
+        if ([string]::IsNullOrEmpty($path) -or $excluded.Contains($id) -or
+            -not $path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        $named[[string]$id] = Format-DefenseClawProcessInUse `
+            -Name ([IO.Path]::GetFileName($path)) `
+            -Id $id `
+            -UserName ([string]$process.UserName) `
+            -Parent ([string]$process.Parent)
+    }
+    $files = [Collections.Generic.List[string]]::new()
+    $pending = [Collections.Generic.Stack[string]]::new()
+    if ([IO.Directory]::Exists($InstallRoot)) {
+        $pending.Push([IO.Path]::GetFullPath($InstallRoot))
+    }
+    while ($pending.Count -gt 0 -and $files.Count -lt $script:StateFileInUseCheckLimit) {
+        $entries = @(try {
+                [IO.DirectoryInfo]::new($pending.Pop()).GetFileSystemInfos()
+            }
+            catch {
+            })
+        foreach ($entry in $entries) {
+            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                continue
+            }
+            if ($entry -is [IO.DirectoryInfo]) {
+                $pending.Push([string]$entry.FullName)
+            }
+            elseif ($files.Count -lt $script:StateFileInUseCheckLimit) {
+                $files.Add([string]$entry.FullName)
+            }
+        }
+    }
+    if ($files.Count -gt 0) {
+        $found = @(try {
+                $native = Initialize-DefenseClawNativeSecurity
+                $native::GetFileHolders($files.ToArray())
+            }
+            catch {
+                Microsoft.PowerShell.Utility\Write-Verbose "Restart Manager could not list the programs that hold files in ${root}: $($_.Exception.Message)"
+            })
+        foreach ($holder in $found) {
+            $id = [int]$holder.ProcessId
+            if ($excluded.Contains($id) -or $named.Contains([string]$id)) {
+                continue
+            }
+            $process = $images[$id]
+            $name = [string]$holder.AppName
+            if ($null -ne $process -and -not [string]::IsNullOrEmpty([string]$process.Path)) {
+                $name = [IO.Path]::GetFileName([string]$process.Path)
+            }
+            if ([string]::IsNullOrEmpty($name)) {
+                $name = 'a program'
+            }
+            $named[[string]$id] = Format-DefenseClawProcessInUse `
+                -Name $name `
+                -Id $id `
+                -UserName $(if ($null -ne $process) { [string]$process.UserName } else { '' }) `
+                -Parent $(if ($null -ne $process) { [string]$process.Parent } else { '' })
+        }
+    }
+    return [string[]]@($named.Values)
+}
+
 # Renames InstallRoot aside after the uninstall committed. A program can
 # hold a file in InstallRoot past the retry window (an antivirus scan, an
 # administrator's window); that failed the committed uninstall with 1603 and
-# the services already removed. Such a holder now defers the retirement to
-# the detached finalizer (Start-DefenseClawDeferredSelfUninstallRetirement),
+# the services already removed. Such a holder defers the retirement to the
+# detached finalizer (Start-DefenseClawDeferredSelfUninstallRetirement),
 # which finishes it once the program lets go (GAP-0149 review, loop round
-# 1). Returns '' when InstallRoot was retired, or the holder's error when the
-# retirement is deferred; any other failure is thrown.
+# 1). Only a holder found now defers: access denied is also what an access
+# list on InstallRoot or its parent answers, and no program exit ends that,
+# so a refusal with no holder fails the uninstall (W4 review, loop round 1).
+# Returns '' when InstallRoot was retired, or the holders and the error when
+# the retirement is deferred; any other failure is thrown.
 function Invoke-DefenseClawCommittedInstallRootRetirement {
     param(
         [Parameter(Mandatory)][string]$Source,
-        [Parameter(Mandatory)][string]$Destination
+        [Parameter(Mandatory)][string]$Destination,
+        [int]$SelfUninstallCallerPID
     )
     try {
         Move-DefenseClawInstallRootForRetirement -Source $Source -Destination $Destination
     }
     catch {
-        if (-not (Test-DefenseClawInstallRootInUseException -Exception $_.Exception) -or
+        $failure = $_
+        if (-not (Test-DefenseClawInstallRootInUseException -Exception $failure.Exception) -or
             -not [IO.Directory]::Exists($Source) -or
             [IO.Directory]::Exists($Destination)) {
             throw
         }
-        return [string]$_.Exception.Message
+        $holders = @(Get-DefenseClawInstallRootHolders -InstallRoot $Source -SelfUninstallCallerPID $SelfUninstallCallerPID)
+        if ($holders.Count -eq 0) {
+            throw (
+                "Windows refused to rename $Source aside ($($failure.Exception.Message)) and no program holds a file in it, " +
+                'so the refusal does not end when a program exits. Check that administrators can rename that folder and ' +
+                'create folders in its parent (no deny entry, no read-only file system), then run the uninstall again'
+            )
+        }
+        return ('{0}: {1}' -f ($holders -join '; '), $failure.Exception.Message)
     }
     if ([IO.Directory]::Exists($Source) -or -not [IO.Directory]::Exists($Destination)) {
         throw 'atomic self-uninstall InstallRoot retirement did not complete exactly'
@@ -34132,7 +34233,8 @@ function Invoke-DefenseClawUninstallLifecycle {
             $retiredRoot = [string]$selfUninstallReceipt.retired_install_root
             $retirementDeferred = Invoke-DefenseClawCommittedInstallRootRetirement `
                 -Source $Layout.InstallRoot `
-                -Destination $retiredRoot
+                -Destination $retiredRoot `
+                -SelfUninstallCallerPID $SelfUninstallCallerPID
             if ([string]::IsNullOrEmpty($retirementDeferred)) {
                 Set-DefenseClawRetiredInstallTreeAcls `
                     -Layout $Layout `

@@ -163,6 +163,16 @@ type windowsEnterpriseInstallerReport struct {
 	// LifecycleCollectError why that collect could not run (GAP-0211).
 	LifecycleGenerationsCollected int    `json:"lifecycle_generations_collected"`
 	LifecycleCollectError         string `json:"lifecycle_collect_error"`
+	// A self-uninstall (the installed CLI removing its own deployment)
+	// leaves cleanup to a detached finalizer that runs once the CLI exits:
+	// SelfUninstallCleanupPending says so, CanonicalInstallRootAbsent (nil
+	// when not reported) whether InstallRoot is already renamed aside to
+	// RetiredInstallRoot, and InstallRootRetirementDeferred names the program
+	// that still held InstallRoot when the rename was deferred.
+	SelfUninstallCleanupPending   bool   `json:"self_uninstall_cleanup_pending"`
+	CanonicalInstallRootAbsent    *bool  `json:"canonical_install_root_absent"`
+	InstallRootRetirementDeferred string `json:"install_root_retirement_deferred"`
+	RetiredInstallRoot            string `json:"retired_install_root"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -1375,6 +1385,7 @@ func applyWindowsEnterpriseInstallerReport(
 		addWindowsEnterpriseUserStateWarning(result, report)
 	}
 	addWindowsEnterpriseMachineStateWarning(result, report)
+	addWindowsEnterpriseSelfUninstallCleanup(result, report)
 	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
 	// Only when nothing above explains it. A completed uninstall leaves
 	// nothing to secure; only a deployment that is still installed (or a
@@ -1455,6 +1466,38 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 	}
 	if len(remaining) > 0 {
 		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(len(remaining), windowsEnterpriseBoundedLabels(remaining)))
+	}
+}
+
+// addWindowsEnterpriseSelfUninstallCleanup keeps what a self-uninstall left
+// to its finalizer in the result: a retirement deferred to a program that
+// holds InstallRoot is a warning naming it, and a success that reports the
+// canonical InstallRoot still in place with nothing deferred is an error.
+// A plain self-uninstall says that the retired folder goes when the CLI
+// exits.
+func addWindowsEnterpriseSelfUninstallCleanup(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	installRoot := strings.TrimSpace(report.InstallRoot)
+	if installRoot == "" {
+		installRoot = "the install folder"
+	}
+	if deferred := strings.TrimSpace(report.InstallRootRetirementDeferred); deferred != "" {
+		result.AddWarning("uninstall_cleanup_pending", windowsEnterpriseBoundedDiagnostic(deferred)+
+			". The uninstall is committed; if "+installRoot+" is still there after that program exits, run the uninstall again to finish")
+		return
+	}
+	if report.CanonicalInstallRootAbsent != nil && !*report.CanonicalInstallRootAbsent {
+		if report.OK {
+			result.AddError("install_root_remaining", "the uninstall finished, but "+installRoot+
+				" is still there and no cleanup is pending for it; run the uninstall again")
+		}
+		return
+	}
+	if report.SelfUninstallCleanupPending {
+		retired := strings.TrimSpace(report.RetiredInstallRoot)
+		if retired == "" {
+			retired = "the renamed install folder"
+		}
+		result.Changes = append(result.Changes, "the installed CLI's own files ("+retired+") are removed once this command exits")
 	}
 }
 

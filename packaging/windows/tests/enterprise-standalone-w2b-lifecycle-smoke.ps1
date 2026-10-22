@@ -290,6 +290,30 @@ $stream.Dispose()
             catch {
                 $failures.Add("a free InstallRoot failed the committed retirement: $($_.Exception.Message)")
             }
+            # W4 review, loop round 1: access denied with no program holding a
+            # file in InstallRoot is an access list (here a deny of creating
+            # or deleting folders in the parent), which no program exit ends:
+            # the committed retirement fails with InstallRoot in place
+            # instead of deferring to a finalizer that could never finish.
+            $deniedParent = [IO.Path]::Combine($Root, 'denied-parent')
+            $denied = [IO.Path]::Combine($deniedParent, 'DefenseClaw')
+            $deniedRetired = [IO.Path]::Combine($deniedParent, 'DefenseClaw.retired')
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($denied, 'bin'))
+            [IO.File]::WriteAllText([IO.Path]::Combine($denied, 'bin', 'defenseclaw-hook.exe'), 'stand-in')
+            Set-TestFolderSddl $deniedParent 'O:BAG:BAD:P(D;;0x44;;;WD)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+            try {
+                $deferred = Invoke-DefenseClawCommittedInstallRootRetirement -Source $denied -Destination $deniedRetired
+                $failures.Add("an access-list refusal of the InstallRoot rename was deferred as a holder: '$deferred'")
+            }
+            catch {
+                if ($_.Exception.Message -notlike '*no program holds a file in it*' -or
+                    -not [IO.Directory]::Exists($denied) -or [IO.Directory]::Exists($deniedRetired)) {
+                    $failures.Add("an access-list refusal of the InstallRoot rename: $($_.Exception.Message)")
+                }
+            }
+            finally {
+                Set-TestFolderSddl $deniedParent $adminOnly
+            }
             try {
                 [void](Invoke-DefenseClawCommittedInstallRootRetirement -Source ([IO.Path]::Combine($Root, 'absent')) -Destination ([IO.Path]::Combine($Root, 'absent-retired')))
                 $failures.Add('a missing InstallRoot was deferred instead of failing')
