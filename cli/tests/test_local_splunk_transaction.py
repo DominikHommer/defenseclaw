@@ -458,7 +458,13 @@ def test_local_and_remote_splunk_tokens_remain_independent(tmp_path: Path, monke
             )
         assert (tmp_path / "config.yaml").read_bytes() == saved
         # An older Unix local setup saved its generated token under the remote
-        # name. That ambiguous credential must also be refused after upgrade.
+        # name, with no isolated local reference yet. Only the private bridge
+        # contract can establish its local origin after upgrade.
+        local_dotenv = (tmp_path / ".env").read_bytes()
+        monkeypatch.delenv(LOCAL_TOKEN_ENV, raising=False)
+        atomic_write_private_bytes(
+            tmp_path / ".env", f"DEFENSECLAW_SPLUNK_HEC_TOKEN='{local_token}'\n".encode(),
+        )
         monkeypatch.setenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", local_token)
         with pytest.raises(SystemExit) as refused:
             cmd_setup._setup_enterprise(
@@ -473,6 +479,7 @@ def test_local_and_remote_splunk_tokens_remain_independent(tmp_path: Path, monke
                 {"endpoint": "https://splunk.example.test:8088/services/collector/event"},
             )
         assert (tmp_path / "config.yaml").read_bytes() == saved
+        atomic_write_private_bytes(tmp_path / ".env", local_dotenv)
         cmd_setup._apply_v8_observability_preset(
             app,
             "splunk-enterprise",
