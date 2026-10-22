@@ -3798,22 +3798,33 @@ def _bind_config_snapshot(app: AppContext, fail) -> str:
     before it writes, and the writer merges into the file as it is then. Bound
     to this snapshot, an edit made meanwhile (another scope selecting the
     pack) is a conflict, never a re-pin of a scope the prompt did not name.
-    A missing file keeps the loaded defaults; the writer reads it as empty.
+    A pin lives in config.yaml, so a missing or empty file (also one removed
+    while a re-pin waited) is refused: the config still in memory is not
+    what is on disk, and the writer would build a partial file from it.
     """
     import hashlib
 
     from defenseclaw import config as cfg_mod
 
+    path = config_path_for_data_dir(app.cfg.data_dir)
     try:
-        with open(config_path_for_data_dir(app.cfg.data_dir), "rb") as handle:
+        with open(path, "rb") as handle:
             raw = handle.read()
     except FileNotFoundError:
-        return hashlib.sha256(b"").hexdigest()
+        fail(1, f"--repin replaces a pin in config.yaml, and there is no {path}. Nothing was changed.")
+        raise
     except OSError as exc:
         fail(1, f"Failed to read config: {exc}. Nothing was changed.")
         raise
     try:
-        app.cfg = cfg_mod.load(parsed_source=cfg_mod.parse_config_yaml(cfg_mod.decode_config_bytes(raw)) or {})
+        source = cfg_mod.parse_config_yaml(cfg_mod.decode_config_bytes(raw)) or {}
+    except Exception as exc:
+        fail(1, f"Failed to load config: {exc}. Nothing was changed.")
+        raise
+    if not source:
+        fail(1, f"--repin replaces a pin in config.yaml, and {path} is empty. Nothing was changed.")
+    try:
+        app.cfg = cfg_mod.load(parsed_source=source)
     except Exception as exc:
         fail(1, f"Failed to load config: {exc}. Nothing was changed.")
         raise

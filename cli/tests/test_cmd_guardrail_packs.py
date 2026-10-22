@@ -96,6 +96,15 @@ def _run(app, args):
     return CliRunner().invoke(cmd_guardrail.guardrail, args, obj=app, catch_exceptions=False)
 
 
+def _persist(app) -> None:
+    """Save the in-memory config as config.yaml: --repin reads its pins from the file."""
+    path = config_mod.config_path_for_data_dir(app.cfg.data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    saved = config_mod._config_to_dict(app.cfg)
+    keep = ("config_version", "data_dir", "policy_dir", "claw", "guardrail", "application_protection")
+    path.write_text(yaml.safe_dump({key: saved[key] for key in keep if key in saved}))
+
+
 def _multi(app, overrides: dict[str, str]):
     app.cfg.guardrail.connectors = {name: PerConnectorGuardrailConfig() for name in overrides}
     for name, path in overrides.items():
@@ -192,6 +201,7 @@ def test_stale_pin_is_replaced_only_by_a_confirmed_repin(env, monkeypatch, by_na
         assert "sha256:" + "b" * 64 in refused.output and "sha256:" + "a" * 64 in refused.output
         assert f"use-pack {pack} --repin" in refused.output
 
+    _persist(app)
     unattended = _run(app, ["use-pack", pack, "--repin", "--json"])
     assert unattended.exit_code == 2 and writes == [], unattended.output
     assert "--yes" in json.loads(unattended.output)["message"]
@@ -244,6 +254,7 @@ def test_repin_names_every_other_scope_that_shares_the_pin(env, args, setup, nam
         gc.profiles = {
             "engineering": GuardrailProfile(connectors={"codex": PerConnectorGuardrailConfig(rule_pack="team")})
         }
+    _persist(app)
     note = f"The pin is shared, so the edited pack also applies to {named}"
 
     unattended = _run(app, ["use-pack", "team", *args, "--repin", "--json"])
@@ -268,6 +279,7 @@ def test_repin_of_a_pin_no_other_scope_uses_names_no_one_else(env):
         "codex": PerConnectorGuardrailConfig(rule_pack="team"),
         "claudecode": PerConnectorGuardrailConfig(rule_pack="strict"),
     }
+    _persist(app)
     for args in (["--connector", "codex"], []):
         result = _run(app, ["use-pack", "team", *args, "--repin", "--yes", "--json"])
         assert result.exit_code == 0, result.output
@@ -302,7 +314,8 @@ def on_disk(env, monkeypatch):
     conflicts: list[str] = []
 
     def _apply(changes, actor, reason, expect_sha256=None, path=None, **_kwargs):
-        current = hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+        target = pathlib.Path(path)
+        current = hashlib.sha256(target.read_bytes() if target.exists() else b"").hexdigest()
         if expect_sha256 is not None and expect_sha256 != current:
             conflicts.append(reason)
             raise config_writer.ConfigConflictError("config.yaml changed since it was read")
@@ -428,6 +441,90 @@ def test_repin_does_not_repin_when_the_pin_was_refreshed_meanwhile(on_disk, monk
     assert "Re-pinned" not in result.output
 
 
+def _gone(path: pathlib.Path) -> None:
+    path.unlink()
+
+
+def _emptied(path: pathlib.Path) -> None:
+    path.write_bytes(b"")
+
+
+@pytest.mark.parametrize("pack", ["team", "path"])
+@pytest.mark.parametrize("remove", [_gone, _emptied], ids=["deleted", "emptied"])
+@pytest.mark.parametrize("window", ["prompt", "validation"])
+def test_repin_refuses_a_config_removed_while_it_waits(on_disk, monkeypatch, pack, remove, window):
+    """W4 loop 3: config.yaml is deleted (or emptied) while the re-pin
+    waits. The conflict retry must not keep the deleted file's config in
+    memory and write a partial config.yaml from it: it refuses, writes
+    nothing and leaves the file as it found it."""
+    app, writes, conflicts, _edit, _doc, path = on_disk
+    target = str(pathlib.Path(app.cfg.guardrail.custom_packs["team"].path)) if pack == "path" else "team"
+    asked: list = []
+    actions = [lambda: remove(path)]
+    if window == "prompt":
+        monkeypatch.setattr(cmd_guardrail, "_confirm_proceed", _confirm_after(actions, asked))
+        args = ["use-pack", target, "--connector", "codex", "--repin"]
+    else:
+
+        def _validate(pack_path, **kwargs):
+            if actions:
+                actions.pop(0)()
+            return _valid(pack_path, **kwargs)
+
+        monkeypatch.setattr(rulepack_validation, "validate_rule_pack", _validate)
+        args = ["use-pack", target, "--connector", "codex", "--repin", "--yes", "--json"]
+
+    result = CliRunner().invoke(cmd_guardrail.guardrail, args, obj=app)
+
+    out = " ".join(result.output.split())
+    assert result.exit_code == 1, result.output
+    assert writes == [] and len(conflicts) == 1
+    assert len(asked) == (1 if window == "prompt" else 0)
+    assert "Nothing was changed" in out and "--repin replaces a pin in config.yaml" in out
+    assert path.exists() is (remove is _emptied)
+    if path.exists():
+        assert path.read_bytes() == b""
+    app.logger.log_config_change.assert_not_called()
+
+
+@pytest.mark.parametrize("state", ["missing", "empty", "blank"])
+@pytest.mark.parametrize("pack", ["team", "path", "new-path"])
+def test_repin_refuses_without_a_config_on_disk(env, tmp_path, pack, state):
+    """The pins in memory (loaded before config.yaml went away) are not a
+    snapshot of the file: --repin refuses, by name, by path and for a pack
+    with no pin yet, and never creates config.yaml."""
+    app, _root, custom, writes = env
+    app.cfg.guardrail.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)}
+    app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="team")}
+    fresh = tmp_path / "packs" / "fresh"
+    (fresh / "rules").mkdir(parents=True)
+    target = {"team": "team", "path": str(custom), "new-path": str(fresh)}[pack]
+    path = config_mod.config_path_for_data_dir(app.cfg.data_dir)
+    if state != "missing":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("" if state == "empty" else "\n# nothing here\n")
+
+    for args in (["--yes", "--json"], ["--yes"], []):
+        result = CliRunner().invoke(
+            cmd_guardrail.guardrail,
+            ["use-pack", target, "--connector", "codex", "--repin", *args],
+            obj=app,
+            input="y\n",
+        )
+        out = " ".join(result.output.split())
+        assert result.exit_code == 1, result.output
+        if "--json" in args:
+            payload = json.loads(result.output)
+            assert payload["ok"] is False
+            out = payload["message"]
+        assert "--repin replaces a pin in config.yaml" in out and "Nothing was changed" in out
+        assert ("is empty" in out) is (state != "missing")
+        assert "Re-pin" not in out
+    assert writes == []
+    assert path.exists() is (state != "missing")
+    app.logger.log_config_change.assert_not_called()
+
+
 def _app_protection(app, raw: dict) -> None:
     """Load an application_protection block the way the config loader does."""
     app.cfg.application_protection = config_mod._merge_application_protection(raw)
@@ -474,6 +571,7 @@ def test_repin_names_automatic_protection_scopes_that_share_the_pin(env, args, r
     gc.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)}
     gc.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="team")}
     _app_protection(app, raw)
+    _persist(app)
     note = "The pin is shared, so the edited pack also applies to "
 
     unattended = _run(app, ["use-pack", "team", *args, "--repin", "--json"])
@@ -503,6 +601,7 @@ def test_automatic_protection_pack_on_another_pin_is_not_named(env):
     }
     gc.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="team")}
     _app_protection(app, {"enabled": True, "guardrail": {"rule_pack": "other"}})
+    _persist(app)
     result = _run(app, ["use-pack", "team", "--connector", "codex", "--repin", "--yes", "--json"])
     assert result.exit_code == 0, result.output
     assert "shared" not in json.loads(result.output)["message"]
@@ -548,16 +647,19 @@ def test_config_loader_keeps_the_automatic_protection_pack():
 
 def test_repin_of_an_unchanged_or_new_pack_needs_no_confirmation(env):
     app, _root, custom, writes = env
+    _persist(app)
     first = _run(app, ["use-pack", str(custom), "--repin", "--json"])
     assert first.exit_code == 0, first.output
     assert "Re-pinned" not in json.loads(first.output)["message"]
     app.cfg.guardrail.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64)}
+    _persist(app)
     same = _run(app, ["use-pack", str(custom), "--repin", "--json"])
     assert same.exit_code == 0 and not any(c.path.startswith("guardrail.custom_packs") for c in writes[-1])
 
 
 def test_repin_refuses_presets_and_clear(env):
     app, _root, _custom, writes = env
+    _persist(app)
     assert _run(app, ["use-pack", "strict", "--repin"]).exit_code == 2
     assert _run(app, ["use-pack", "--clear", "--connector", "codex", "--repin"]).exit_code == 2
     assert writes == []
