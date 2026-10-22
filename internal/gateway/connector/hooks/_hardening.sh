@@ -354,6 +354,13 @@ defenseclaw_shared_hook_token_file() {
 # resolved open, and an open lowered for a vendor that cannot fail closed is
 # not an operator's choice.
 defenseclaw_shared_runtime_fail_mode() {
+  # A standalone shared hook has no authenticated connector or generation.
+  # Its managed writer never sources an open from per-user runtime records;
+  # retained sourced peers from older installs cannot establish that proof.
+  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ] && [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ]; then
+    printf closed
+    return 0
+  fi
   local hook_dir="$1"
   local connector="${2:-}"
   local config="${hook_dir}/.hookcfg"
