@@ -506,7 +506,8 @@ def _lock_names_entry(
     must be a regular file, complete (the guard can start from it), private,
     bind this editor file and pin the guard the entry starts, and the entry
     must launch exactly the agent command the lock pins, under its profile
-    and mode. The client pin must cover its env and gateway.
+    and mode. An entry pin owns only its named entries; the exact launch
+    digest is checked separately so setup can repair a drifted adopted entry.
     A guard-like filename proves nothing on its own: an operator's wrapper
     may also be called defenseclaw-acp. With no runtime (data_dir None) no
     alias is proven.
@@ -532,35 +533,10 @@ def _lock_names_entry(
             return False
         return (
             Path(lock["client"]["config_path"]).resolve() == _client_path(client).resolve()
-            and _pin_covers_launch(entry, name, options, lock["client"], client, agent)
+            and _pin_names_entry(lock["client"], name, agent)
         )
     except (OSError, ValueError, click.ClickException):
         return False
-
-
-def _pin_covers_launch(
-    entry: dict[str, Any], name: str, options: dict[str, str], lock_client: dict[str, Any], client: str, agent: str
-) -> bool:
-    """Whether the binding's client pin covers the launch fields the lock cannot.
-
-    The lock fixes the guard, agent, profile, mode, token and lock path, but
-    not env or --gateway. An entry pin covers those only for the names it
-    pins (adopted, or the reserved name). A copy under another name launches
-    what the pinned entry launches only with no env and the gateway of a
-    pinned entry the pin still proves. A legacy whole-file pin covers every
-    entry and drifts when one is added.
-    """
-    pinned = _pinned_entry_names(lock_client, agent)
-    if name in pinned or not lock_client["config_sha256"].startswith(_ENTRY_DIGEST_PREFIX):
-        return True
-    if entry.get("env") or not _pin_proves_entry(lock_client, pinned[0], client, agent):
-        return False
-    servers = _read_json_object(_client_path(client)).get(_CLIENT_CAPABILITIES[client].entries_key)
-    return isinstance(servers, dict) and options.get("--gateway") in {
-        _guard_options(servers[pinned_name]).get("--gateway")
-        for pinned_name in pinned
-        if isinstance(servers.get(pinned_name), dict)
-    }
 
 
 def _guarded_pair(entry: dict[str, Any], name: str, data_dir: str | None) -> tuple[str, str] | None:
@@ -841,12 +817,20 @@ def _pinned_entry_names(lock_client: dict[str, Any], agent: str) -> list[str]:
     return list(lock_client.get("adopted_entries") or [_managed_name(agent)])
 
 
+def _pin_names_entry(lock_client: dict[str, Any], name: str, agent: str) -> bool:
+    """An entry pin names only its entries; a legacy whole-file pin names them all."""
+    return (
+        not lock_client["config_sha256"].startswith(_ENTRY_DIGEST_PREFIX)
+        or name in _pinned_entry_names(lock_client, agent)
+    )
+
+
 def _pin_proves_entry(lock_client: dict[str, Any], name: str, client: str, agent: str) -> bool:
     """Whether a binding's own client pin still covers this entry exactly as it is."""
     pinned = lock_client["config_sha256"]
-    if pinned.startswith(_ENTRY_DIGEST_PREFIX) and name not in _pinned_entry_names(lock_client, agent):
-        return False
-    return _client_digest(_client_path(client), client, agent, lock_client) == pinned
+    return _pin_names_entry(lock_client, name, agent) and _client_digest(
+        _client_path(client), client, agent, lock_client
+    ) == pinned
 
 
 def _guard_mediates_entry(
@@ -855,10 +839,9 @@ def _guard_mediates_entry(
 ) -> bool:
     """A different picker entry must use our pinned guard for a different executable.
 
-    Its env (an adopted entry keeps the operator's) is that other binding's
-    launch field, which this binding cannot read. It is accepted while that
-    binding's own pin proves the entry, so a healthy other binding never
-    fails this verify, and one whose pin no longer covers the env is unknown.
+    The other binding's own pin must name this entry and prove its exact
+    launch fields (including an adopted entry's operator env). A healthy
+    other binding then passes, while a copy or drifted launch is unknown.
     """
     if not _entry_launch_shape_known(entry, client):
         return False
@@ -884,7 +867,7 @@ def _guard_mediates_entry(
         options["--token-file"] == str(lock_path.parent / token_name)
         and lock["client"]["config_path"] == str(_client_path(client).resolve())
         and _launches_locked_agent(entry, options, lock, agent)
-        and (not entry.get("env") or _pin_proves_entry(lock["client"], name, client, agent))
+        and _pin_proves_entry(lock["client"], name, client, agent)
     )
 
 
@@ -1053,11 +1036,11 @@ def _verify_binding(
             isinstance(lock_client, dict)
             and isinstance(lock_client.get("config_sha256"), str)
             and isinstance(adopted, list) and all(isinstance(item, str) for item in adopted)
-            and not _pin_covers_launch(entry, name, options, lock_client, client, agent)
+            and not _pin_proves_entry(lock_client, name, client, agent)
         ):
-            # The reserved name makes an entry DefenseClaw's, not its launch
-            # fields: beside an adopted entry the pin does not cover it.
-            problems.append(f"editor entry {name!r} has env or a --gateway its client pin does not cover")
+            # Ownership alone cannot establish a launch: an adopted entry
+            # may have drifted, and a reserved entry may be outside the pin.
+            problems.append(f"editor entry {name!r} is not exactly covered by its client pin")
     if isinstance(servers, dict) and isinstance(lock_agent, dict):
         problems.extend(
             f"editor entry {name!r} can start {agent} without the DefenseClaw guard (launch unverified); "

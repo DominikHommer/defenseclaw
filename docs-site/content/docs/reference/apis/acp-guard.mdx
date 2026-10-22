@@ -130,11 +130,14 @@ re-running setup.
 
 A copy of a guarded entry under another name is outside its binding's pin, and
 so is the reserved `DefenseClaw · <Agent>` entry once you adopt an entry. It
-verifies only with no environment and the same gateway as the pinned entry;
-otherwise verification is unhealthy until you delete it. Re-running setup keeps
-the environment its binding's pin proves (an adopted entry's own). It resets an
-environment added later to empty and prints a warning; to keep one, point the
-entry at the agent and run `defenseclaw acp adopt` again.
+keeps verification unhealthy even if its command, arguments and environment
+exactly match a pinned entry. Every entry the editor can run must have its own
+name and exact launch fields covered by its binding's pin. Delete an extra
+copy, or point it directly at the agent and explicitly adopt it. Re-running
+setup does not add an unpinned copy to the lock. Setup keeps the environment
+its binding's pin proves (an adopted entry's own). It resets an environment
+added later to empty and prints a warning; to keep one, point the entry at the
+agent and run `defenseclaw acp adopt` again.
 
 A lock written by an older release pins the whole settings file, so after an
 upgrade any edit to that file, a theme change included, still fails

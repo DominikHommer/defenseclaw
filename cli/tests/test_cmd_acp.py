@@ -1831,7 +1831,10 @@ def test_only_setup_moves_a_legacy_whole_file_pin_to_entry_pins(tmp_path, monkey
         assert pin["config_sha256"].startswith(cmd_acp_module._ENTRY_DIGEST_PREFIX)
         assert sorted(pin.get("adopted_entries", [])) == sorted(entry_names)
         theme("One Dark")
-        assert verify("kiro").exit_code == 0, verify("kiro").output
+        # Kiro's own entry is pinned, but Cursor is another runnable entry
+        # whose legacy whole-file pin drifted. This verify must see it too.
+        drifted_other = verify("kiro")
+        assert drifted_other.exit_code != 0 and "DefenseClaw · Cursor" in drifted_other.output
 
         # Each binding needs its own setup: the other lock is still a file pin.
         assert not client_pin("cursor")["config_sha256"].startswith(cmd_acp_module._ENTRY_DIGEST_PREFIX)
@@ -2298,6 +2301,13 @@ def test_verify_accepts_another_bindings_adopted_entry_only_under_its_own_pin(tm
         settings.write_text(json.dumps(copied))
         result = verify("kiro")
         assert result.exit_code != 0 and "Cursor copy" in result.output, result.output
+        # Emptying the copy's env used to make both bindings accept it even
+        # though neither entry pin includes this picker name.
+        copied["agent_servers"]["Cursor copy"]["env"] = {}
+        settings.write_text(json.dumps(copied))
+        for agent in ("kiro", "cursor"):
+            result = verify(agent)
+            assert result.exit_code != 0 and "Cursor copy" in result.output, (agent, result.output)
         settings.write_text(json.dumps(document))
         assert verify("kiro").exit_code == 0
     finally:
@@ -2380,33 +2390,32 @@ def test_another_pairs_unproven_lock_does_not_block_this_pairs_write(tmp_path, m
         cleanup_app(app, db_path, data_dir)
 
 
+@pytest.mark.parametrize("client", sorted(ACP_CLIENT_ENTRY_CAPABILITIES))
 @pytest.mark.parametrize("entry_names", [[], ["My Kiro"]], ids=["reserved", "adopted"])
-def test_unpinned_copy_of_a_guarded_entry_verifies_only_without_its_own_launch_fields(
-    tmp_path, monkeypatch, entry_names
-):
-    """A same-pair copy is outside its binding's entry pin, so it cannot carry env or another gateway."""
+def test_verify_requires_an_exact_pin_for_every_editor_entry(tmp_path, monkeypatch, client, entry_names):
+    """The capability table's every runnable entry needs its own exact name and launch pin."""
     _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
-    settings = _zed_settings(tmp_path)
+    settings = _zed_settings(tmp_path) if client == "zed" else tmp_path / ".jetbrains" / "acp.json"
     settings.parent.mkdir(parents=True)
     guard = _binary(tmp_path / "defenseclaw-acp")
     kiro = _binary(tmp_path / "kiro-cli")
     runner = CliRunner()
     if entry_names:
         settings.write_text(json.dumps({"agent_servers": {"My Kiro": {"command": kiro, "args": ["acp"]}}}))
-        args = ["adopt", "--client", "zed", "--guard-binary", guard, "--activate", "--yes"]
+        args = ["adopt", "--client", client, "--guard-binary", guard, "--activate", "--yes"]
         guarded = "My Kiro"
     else:
-        args = ["setup", "--client", "zed", "--agent", "kiro", "--activate",
+        args = ["setup", "--client", client, "--agent", "kiro", "--activate",
                 "--guard-binary", guard, "--agent-binary", kiro]
         guarded = "DefenseClaw · Kiro"
 
     def verify():
-        return runner.invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        return runner.invoke(acp_cmd, ["verify", "--client", client, "--agent", "kiro"], obj=app)
 
     def healthy():
         status = json.loads(runner.invoke(acp_cmd, ["status", "--json"], obj=app).output)
-        return status["bindings"]["zed/kiro"]["healthy"]
+        return status["bindings"][f"{client}/kiro"]["healthy"]
 
     try:
         result = runner.invoke(acp_cmd, args, obj=app)
@@ -2424,6 +2433,7 @@ def test_unpinned_copy_of_a_guarded_entry_verifies_only_without_its_own_launch_f
 
         evil = str(tmp_path / "evil.so")
         variants = {
+            "exact copy": copy_with(),
             "env": copy_with(env={"LD_PRELOAD": evil}),
             "gateway": copy_with(gateway="http://127.0.0.1:1/evil"),
             "env and gateway": copy_with(env={"LD_PRELOAD": evil}, gateway="http://127.0.0.1:1/evil"),
@@ -2440,19 +2450,29 @@ def test_unpinned_copy_of_a_guarded_entry_verifies_only_without_its_own_launch_f
                 assert result.exit_code != 0 and copy_name in result.output, (copy_name, label, result.output)
                 assert not healthy(), (copy_name, label)
 
-        # Control: an exact copy has no launch field of its own; it launches
-        # what the pinned entry launches and still verifies.
-        same = json.loads(json.dumps(document))
-        for copy_name in copy_names:
-            same["agent_servers"][copy_name] = copy_with()
-        settings.write_text(json.dumps(same))
-        assert verify().exit_code == 0, verify().output
-
         # A clean copy cannot borrow a gateway from a pinned entry that drifted.
         drifted = json.loads(json.dumps(document))
         drifted["agent_servers"][guarded] = copy_with(gateway="http://127.0.0.1:1/evil")
         drifted["agent_servers"]["Kiro 2"] = copy_with(gateway="http://127.0.0.1:1/evil")
         settings.write_text(json.dumps(drifted))
+        result = verify()
+        assert result.exit_code != 0 and "Kiro 2" in result.output, result.output
+
+        # Repair cannot silently adopt an extra copy into the lock, even if
+        # that copy has the same command, arguments, and env as a pinned entry.
+        copied = json.loads(json.dumps(document))
+        copied["agent_servers"]["Kiro 2"] = copy_with()
+        settings.write_text(json.dumps(copied))
+        repaired = runner.invoke(acp_cmd, [
+            "setup", "--client", client, "--agent", "kiro", "--activate",
+            "--guard-binary", guard, "--agent-binary", kiro,
+        ], obj=app)
+        assert repaired.exit_code == 0, repaired.output
+        lock = json.loads((Path(data_dir) / "acp" / f"{client}-kiro.contract-lock.json").read_text())
+        if entry_names:
+            assert lock["client"]["adopted_entries"] == ["My Kiro"]
+        else:
+            assert "adopted_entries" not in lock["client"]
         result = verify()
         assert result.exit_code != 0 and "Kiro 2" in result.output, result.output
 
@@ -2462,24 +2482,25 @@ def test_unpinned_copy_of_a_guarded_entry_verifies_only_without_its_own_launch_f
         cleanup_app(app, db_path, data_dir)
 
 
+@pytest.mark.parametrize("client", sorted(ACP_CLIENT_ENTRY_CAPABILITIES))
 @pytest.mark.parametrize("entry_names", [[], ["My Kiro"]], ids=["reserved", "adopted"])
-def test_repair_setup_drops_an_env_its_pin_does_not_prove(tmp_path, monkeypatch, entry_names):
+def test_repair_setup_drops_an_env_its_pin_does_not_prove(tmp_path, monkeypatch, client, entry_names):
     """Plain setup keeps only the env the binding's pin sealed; explicit adoption keeps the operator's."""
     _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
-    settings = _zed_settings(tmp_path)
+    settings = _zed_settings(tmp_path) if client == "zed" else tmp_path / ".jetbrains" / "acp.json"
     settings.parent.mkdir(parents=True)
     guard = _binary(tmp_path / "defenseclaw-acp")
     kiro = _binary(tmp_path / "kiro-cli")
     runner = CliRunner()
-    setup = ["setup", "--client", "zed", "--agent", "kiro", "--activate",
+    setup = ["setup", "--client", client, "--agent", "kiro", "--activate",
              "--guard-binary", guard, "--agent-binary", kiro]
     if entry_names:
         sealed = {"KIRO_LOG": "1"}
         settings.write_text(json.dumps({"agent_servers": {
             "My Kiro": {"command": kiro, "args": ["acp"], "env": sealed},
         }}))
-        first = ["adopt", "--client", "zed", "--guard-binary", guard, "--activate", "--yes"]
+        first = ["adopt", "--client", client, "--guard-binary", guard, "--activate", "--yes"]
         guarded = "My Kiro"
     else:
         sealed = {}
@@ -2487,7 +2508,7 @@ def test_repair_setup_drops_an_env_its_pin_does_not_prove(tmp_path, monkeypatch,
         guarded = "DefenseClaw · Kiro"
 
     def verify():
-        return runner.invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        return runner.invoke(acp_cmd, ["verify", "--client", client, "--agent", "kiro"], obj=app)
 
     def env():
         return json.loads(settings.read_text())["agent_servers"][guarded]["env"]
@@ -2496,6 +2517,9 @@ def test_repair_setup_drops_an_env_its_pin_does_not_prove(tmp_path, monkeypatch,
         result = runner.invoke(acp_cmd, first, obj=app)
         assert result.exit_code == 0, result.output
         assert env() == sealed
+        original_args = json.loads(settings.read_text())["agent_servers"][guarded]["args"]
+        gateway_index = original_args.index("--gateway") + 1
+        original_gateway = original_args[gateway_index]
         # A healthy repeat setup keeps the env the pin proves (the adopted one).
         result = runner.invoke(acp_cmd, setup, obj=app)
         assert result.exit_code == 0, result.output
@@ -2503,14 +2527,16 @@ def test_repair_setup_drops_an_env_its_pin_does_not_prove(tmp_path, monkeypatch,
 
         document = json.loads(settings.read_text())
         document["agent_servers"][guarded]["env"] = {**sealed, "LD_PRELOAD": str(tmp_path / "evil.so")}
+        document["agent_servers"][guarded]["args"][gateway_index] = "http://127.0.0.1:1/evil"
         settings.write_text(json.dumps(document))
         drifted = verify()
         assert drifted.exit_code != 0 and "client configuration digest has drifted" in drifted.output
         result = runner.invoke(acp_cmd, [*_repair_args(drifted.output), "--json-output"], obj=app)
         assert result.exit_code == 0, result.output
-        assert json.loads(result.stdout)["client"] == "zed"
+        assert json.loads(result.stdout)["client"] == client
         assert "Reset the env of editor entry" in result.stderr
         assert env() == {}
+        assert json.loads(settings.read_text())["agent_servers"][guarded]["args"][gateway_index] == original_gateway
         assert verify().exit_code == 0, verify().output
     finally:
         cleanup_app(app, db_path, data_dir)
