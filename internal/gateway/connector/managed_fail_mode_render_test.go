@@ -125,6 +125,13 @@ func runStandaloneHermesHook(t *testing.T, f *hookSocketFixture) (int, string, s
 // DEFENSECLAW_FAIL_MODE=open in the environment.
 func runStandaloneShellHook(t *testing.T, f *hookSocketFixture, conn Connector, script string, args []string, stdin string) (int, string, string) {
 	t.Helper()
+	return runStandaloneShellHookInMode(t, f, conn, script, args, stdin, "closed")
+}
+
+// runStandaloneShellHookInMode is runStandaloneShellHook with the
+// administrator's hook fail mode failMode.
+func runStandaloneShellHookInMode(t *testing.T, f *hookSocketFixture, conn Connector, script string, args []string, stdin, failMode string) (int, string, string) {
+	t.Helper()
 	curlPath, err := exec.LookPath("curl")
 	if err != nil {
 		t.Skip("curl is required to run shell hooks")
@@ -137,7 +144,7 @@ func runStandaloneShellHook(t *testing.T, f *hookSocketFixture, conn Connector, 
 		HookAPIToken:       "connector-scoped-token",
 		HookAPITokenScoped: true,
 		ManagedEnterprise:  true,
-		HookFailMode:       "closed",
+		HookFailMode:       failMode,
 		GuardrailMode:      "observe",
 		ManagedHookSocket:  f.socket,
 		ManagedServiceUID:  os.Getuid(),

@@ -225,7 +225,9 @@ func gatewayNoAnswer(ctx context.Context) bool {
 // closed for a Secure Client hook, the fail mode for a standalone hook (the
 // administrator's, owner decision 2026-10-20) and for a per-user hook. A
 // standalone hook whose own work left its gateway less than
-// hookGatewayAnswerFloor (Options.answerSpentLocally) is closed.
+// hookGatewayAnswerFloor (Options.answerSpentLocally) is closed, and so is
+// one the gateway answered 429 first (Options.gatewayBusy,
+// ManagedOutageFailsOpen).
 func failNoAnswer(opts Options, sp spec, failMode string) int {
 	if opts.ManagedEnterprise {
 		mode := "closed"

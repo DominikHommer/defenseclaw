@@ -245,6 +245,12 @@ type Options struct {
 	// gateway request with less than hookGatewayAnswerFloor of the answer
 	// budget left: a missing answer then fails closed (failNoAnswer).
 	answerSpentLocally bool
+	// gatewayBusy is set on a standalone hook outside Secure Client once the
+	// gateway answered the call with 429 (a rate limit or a full gateway):
+	// the gateway is up, so no failure after it is an outage
+	// (ManagedOutageFailsOpen). The call gets a verdict from a resend or is
+	// closed in every fail mode.
+	gatewayBusy bool
 	// managedOutageOpen is set on a standalone hook outside Secure Client
 	// for a failure that ManagedOutageFailsOpen lets through (the gateway is
 	// not running, was still restarting, or gave no answer). Only such a
@@ -875,6 +881,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// deadline instead of failing the tool call for a burst the gateway
 	// clears in seconds (GAP-0205).
 	for retry := 0; !opts.SecureClient && err == nil && resp.StatusCode == http.StatusTooManyRequests && retry < hookBusyRetries; retry++ {
+		if managedNativeDecision(opts) && !opts.gatewayBusy {
+			// A rate limit is no outage: the administrator's open does
+			// not apply to it, also when the resends run out of time or
+			// the watchdog answers first (r104 W4b2 review P1).
+			opts.gatewayBusy = true
+			opts.answerWatch.closeForBusyGateway(opts, sp)
+		}
 		delay := retryAfterDelay(resp.Header.Get("Retry-After"))
 		_ = resp.Body.Close()
 		if !retryFitsAnswer(opts.answerBy, delay) {
@@ -2661,9 +2674,11 @@ func managedPeerFailMode(opts Options, failMode string, err error) string {
 // meets the same outage and gives the open result, with its notice and its
 // failure log line, as for every other connector. Every other error (a peer
 // DefenseClaw cannot verify, another program on the gateway port, an
-// unusable answer) and every closed or unset mode keep the refusal.
+// unusable answer), any failure of a call the gateway answered 429
+// (Options.gatewayBusy: the gateway is up and rate-limited it) and every
+// closed or unset mode keep the refusal.
 func ManagedOutageFailsOpen(opts Options, err error) bool {
-	if err == nil || !managedNativeDecision(opts) || opts.StrictAvailability ||
+	if err == nil || !managedNativeDecision(opts) || opts.StrictAvailability || opts.gatewayBusy ||
 		strings.TrimSpace(opts.ManagedRuntimeFailure) != "" || normalizeFailMode(opts.FailMode) != "open" {
 		return false
 	}
