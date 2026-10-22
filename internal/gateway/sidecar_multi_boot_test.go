@@ -682,6 +682,13 @@ func TestSetupConnectorsIsolated_FailedRefreshPreservesGuardsAndFails(t *testing
 				s.cfg.DataDir = testenv.PrivateTempDir(t)
 				s.cfg.Guardrail.Enabled = true
 				s.cfg.Guardrail.Mode = "action"
+				if runtime.GOOS == "windows" {
+					launcher := filepath.Join(testenv.PrivateTempDir(t), "defenseclaw-hook.exe")
+					if err := os.WriteFile(launcher, []byte("native hook fixture"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(connector.PinNativeHookExecutableForTest(launcher))
+				}
 				settings := filepath.Join(testenv.PrivateTempDir(t), "settings.json")
 				previousOverride := connector.ClaudeCodeSettingsPathOverride
 				connector.ClaudeCodeSettingsPathOverride = settings
