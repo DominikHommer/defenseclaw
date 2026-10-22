@@ -18464,7 +18464,10 @@ def _disable_splunk(
     managed_assets_path = os.path.join(app.cfg.data_dir, "splunk-bridge")
     native_disable = native_disable_requested and (
         any(_is_owned_native_local_splunk_destination(destination) for destination in dests)
-        or os.path.lexists(managed_assets_path)
+        # Installation seeds the bundle, including .env.example, before a
+        # stack exists. Only the runtime credentials indicate a configured
+        # stack. lexists also sends unsafe links through the strict preflight.
+        or os.path.lexists(os.path.join(managed_assets_path, "env", ".env"))
     )
     if native_disable:
         # Prove Docker, assets, volumes, ports, and exact Compose ownership
