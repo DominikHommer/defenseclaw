@@ -13,12 +13,16 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 var (
@@ -47,6 +51,17 @@ var configValidateCmd = &cobra.Command{
 			path = strings.TrimSpace(args[0])
 		}
 		dataDir := strings.TrimSpace(configValidateDataDir)
+		if layout, ok := configValidateManagedHostLayout(); ok {
+			// The installed config of a standalone managed computer is the
+			// layout's, not the per-user ~/.defenseclaw one root has none of
+			// (GAP-0602); a data_dir left out resolves there as ensure does.
+			if path == "" && os.Getenv(managed.ConfigPathEnv) == "" {
+				path = layout.ConfigPath
+			}
+			if dataDir == "" {
+				dataDir = layout.DataDir
+			}
+		}
 		loaded, err := checkConfigV8Candidate(path, dataDir)
 		var derivationErr error
 		if err == nil {
@@ -87,6 +102,55 @@ var configValidateCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// configValidateLayout is this computer's standalone layout. A seam for
+// tests.
+var configValidateLayout = func() (managed.StandaloneLayout, error) {
+	return enterprisebundle.Layout(runtime.GOOS)
+}
+
+// configValidateManagedHostLayout is this computer's standalone managed
+// layout when its administrator-owned runtime descriptor is present.
+func configValidateManagedHostLayout() (managed.StandaloneLayout, bool) {
+	layout, err := configValidateLayout()
+	if err != nil || layout.DescriptorPath == "" {
+		return managed.StandaloneLayout{}, false
+	}
+	if _, err := os.Stat(layout.DescriptorPath); err != nil {
+		return managed.StandaloneLayout{}, false
+	}
+	return layout, true
+}
+
+// configValidateManagedStandaloneLayout applies the rules ensure, Setup and
+// bundle apply refuse a managed standalone config on, so validate does not
+// call a file valid that the lifecycle then refuses (GAP-0601). The listener
+// rule (gateway.api_bind loopback only, gateway.api_port) is the same on
+// every OS and applies everywhere. The layout rules (data_dir, rule pack
+// folders, jsonl paths) differ by OS, so they apply on a standalone managed
+// computer, to the file decoded as its installed config, as ensure decodes
+// a candidate. Other configs, Secure Client's included, keep their own rules.
+func configValidateManagedStandaloneLayout(loaded *loadedConfigV8File) error {
+	cfg := loaded.runtime
+	if !managed.IsManagedEnterprise(cfg.DeploymentMode) || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	err := config.ValidateManagedStandaloneListener(cfg)
+	if layout, ok := configValidateManagedHostLayout(); ok && err == nil {
+		var installed *config.Config
+		if installed, err = config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, loaded.raw); err == nil {
+			err = config.ValidateManagedStandaloneConfig(loaded.raw, installed, loaded.compiled.Plan, layout)
+		}
+	}
+	if err != nil {
+		return &config.V8SemanticError{
+			Path:    "$",
+			Summary: "the managed standalone lifecycle refuses this file: " + err.Error(),
+			Action:  "set the value the managed layout requires, or leave the key out",
+		}
+	}
+	return nil
 }
 
 func configValidateShownPath(path string) string {

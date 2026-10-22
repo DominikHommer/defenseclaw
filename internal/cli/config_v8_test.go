@@ -342,7 +342,7 @@ func TestConfigV8ValidateNamesTheUnknownProfile(t *testing.T) {
 // GAP-0553: a standalone config whose default OpenShell gateway port collides
 // with gateway.api_port was refused only as "configuration could not be
 // compiled safely" at "$". It names enterprise.openshell.gateway_port and the
-// port it collides with, and the same file with another API port validates.
+// port it collides with, and the same file with the managed API port validates.
 func TestConfigV8ValidateNamesTheOpenShellPortCollision(t *testing.T) {
 	validate := func(apiPort int) (configV8WireFailure, error) {
 		directory := t.TempDir()
@@ -376,8 +376,10 @@ func TestConfigV8ValidateNamesTheOpenShellPortCollision(t *testing.T) {
 		!strings.Contains(failure.Reason, strconv.Itoa(config.DefaultEnterpriseOpenShellGatewayPort)) {
 		t.Fatalf("structured validation failure = %+v", failure)
 	}
-	if _, err := validate(config.DefaultEnterpriseOpenShellGatewayPort + 1); err != nil {
-		t.Fatalf("the control with another API port does not validate: %v", err)
+	// The control is the managed API port, the only one ensure accepts
+	// (GAP-0601).
+	if _, err := validate(18970); err != nil {
+		t.Fatalf("the control with the managed API port does not validate: %v", err)
 	}
 }
 

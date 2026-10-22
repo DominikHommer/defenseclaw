@@ -129,6 +129,9 @@ func checkConfigV8Candidate(path, dataDir string) (*loadedConfigV8File, error) {
 		// path; configV8InstalledAdvisories reports it instead.
 		err = config.ValidateManagedStandaloneLiteralCandidate(loaded.runtime, loaded.raw)
 	}
+	if err == nil {
+		err = configValidateManagedStandaloneLayout(loaded)
+	}
 	if err != nil {
 		return nil, &configV8SourceError{version: loaded.runtime.ConfigVersion, err: err}
 	}
