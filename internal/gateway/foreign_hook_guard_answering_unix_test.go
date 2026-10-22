@@ -79,9 +79,9 @@ func TestForeignHookSessionProofIsRenewedOnlyWhileTheGatewayAnswers(t *testing.T
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := newForeignHookRealPublishTestServer(t)
-			previousWithin := foreignHookAnswerWithin
-			foreignHookAnswerWithin = foreignHookTestAnswerWithin
-			t.Cleanup(func() { foreignHookAnswerWithin = previousWithin })
+			previousWithin, previousHold := foreignHookAnswerWithin, foreignHookExchangeHold
+			foreignHookAnswerWithin, foreignHookExchangeHold = foreignHookTestAnswerWithin, 2*foreignHookTestAnswerWithin
+			t.Cleanup(func() { foreignHookAnswerWithin, foreignHookExchangeHold = previousWithin, previousHold })
 			writes := countForeignHookAllowWrites(t)
 			key := enterprisepolicy.SessionKey{Connector: "claudecode", Session: "s-1", Process: runtime.GOOS + ":b:1:500"}
 			if got := server.call(server.aliceToken, foreignHookTestCall("s-1", key.Process, true)); got.Deny {
@@ -120,7 +120,10 @@ func TestForeignHookSessionProofIsRenewedOnlyWhileTheGatewayAnswers(t *testing.T
 
 // foreignHookTestAnswerWithin is the answer budget of these tests: short
 // enough to wait out, long enough that an ordinary exchange and a /health
-// probe under -race on a loaded host answer within it.
+// probe under -race on a loaded host answer within it. The tests hold an
+// allow open for twice that (foreignHookExchangeHold), so an exchange
+// answered just past the budget, and a renewal on a loaded host, still
+// answer allow rather than revoke the account's key.
 const foreignHookTestAnswerWithin = 3 * time.Second
 
 // foreignHookServeForTest answers on ln as the hook listener does.
@@ -194,9 +197,9 @@ func TestForeignHookSessionProofIsNotRenewedAfterAnExchangeWentUnanswered(t *tes
 		t.Run(tc.name, func(t *testing.T) {
 			server := newForeignHookRealPublishTestServer(t)
 			server.api.hookCallerLimits.running = 1
-			previousWithin := foreignHookAnswerWithin
-			foreignHookAnswerWithin = foreignHookTestAnswerWithin
-			t.Cleanup(func() { foreignHookAnswerWithin = previousWithin })
+			previousWithin, previousHold := foreignHookAnswerWithin, foreignHookExchangeHold
+			foreignHookAnswerWithin, foreignHookExchangeHold = foreignHookTestAnswerWithin, 2*foreignHookTestAnswerWithin
+			t.Cleanup(func() { foreignHookAnswerWithin, foreignHookExchangeHold = previousWithin, previousHold })
 			writes := countForeignHookAllowWrites(t)
 			key := enterprisepolicy.SessionKey{Connector: "claudecode", Session: "s-1", Process: runtime.GOOS + ":b:1:500"}
 			for _, token := range []string{server.aliceToken, server.bobToken} {
