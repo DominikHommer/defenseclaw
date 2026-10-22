@@ -17,10 +17,8 @@ from defenseclaw.connector_contracts import (
     connector_lock_contract_invariant,
     resolve_connector_contract,
 )
-from defenseclaw.cursor_contract import CursorRegistrationValidation
 from defenseclaw.doctor_hooks import WindowsHookCheck
 from defenseclaw.fail_mode import connector_registration_lock_state
-from defenseclaw.file_permissions import atomic_write_private_bytes
 
 TEN_CONNECTORS = (
     "codex",
