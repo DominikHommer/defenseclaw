@@ -54,7 +54,7 @@ var (
 	safePythonPathWrite     = regexp.MustCompile(`^(?:from\s+pathlib\s+import\s+Path;\s*|import\s+pathlib;\s*)?(?:pathlib\.)?Path\(\s*['"]([^'"]+)['"]\s*\)\.write_(?:text|bytes)\s*\(`)
 	literalPathHomeJoinOpen = regexp.MustCompile(`\b(?:pathlib\.)?Path\.home\(\)\.joinpath\(\s*['"]([^'"]+)['"]\s*\)\.open\s*\(`)
 	awkBoundedAssignPrefix  = regexp.MustCompile(`^\s*BEGIN\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"\\]+)"\s*;\s*print\s+"(?:\\.|[^"\\])*"\s*>>\s*$`)
-	safePythonPrint         = regexp.MustCompile(`^print\(("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')\)$`)
+	safePythonPrint         = regexp.MustCompile(`^print\((.+)\)$`)
 	safeRubyRead            = regexp.MustCompile(`^File\.read\(['"][^'"]+['"]\)$`)
 	safeRubyOpenRead        = regexp.MustCompile(`^File\.open\((['"][^'"]+['"]),\s*['"]r['"]\)\s*\{\s*\|f\|\s*puts f\.read\s*\}$`)
 	safePerlLocalCopy       = regexp.MustCompile(`^sub copy \{ return 1 \};\s*copy\(['"][^'"]+['"],\s*['"][^'"]+['"]\)$`)
@@ -422,22 +422,31 @@ func unprovenShellParseWrite(command, cwd, home string) bool {
 	return unknown
 }
 
-// awkCallUnproven reports an awk call whose file or command effects depend on
-// a word the shell computes. The words are read as awk reads them: options,
-// then one program (unless -f or -e supplied it), then operands. A dynamic
-// program keeps the bounded program check below; a dynamic program file, or
-// any dynamic word after an option this proof does not know, is unproved. A
-// dynamic operand or -v value is an input file or a var=value assignment, so
-// it matters only when the program has an unproved output or command effect
-// (or the program text is unknown).
+// awkCallUnproven reports an awk call whose program text has an output this
+// proof cannot name, or whose file or command effects depend on a word the
+// shell computes. The words are read as awk reads them: options, then one
+// program (unless -f or -e supplied it), then operands. Only program text is
+// awk code. A -v or -F value, an operand and a var=value assignment are data,
+// however much they look like code. After an option this proof does not know,
+// any later word can be the program, so each one is checked as a program. A
+// dynamic program keeps the bounded program check below; a dynamic program
+// file, or any dynamic word after an unknown option, is unproved. A dynamic
+// operand or -v value is an input file or a var=value assignment, so it
+// matters only when the program has an unproved output or command effect (or
+// the program text is unknown).
 func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 	var programs []string
 	programKnown, programSupplied, options := true, false, true
 	dynamicOperand, unknownOption := false, false
+	// addProgram records fixed program text and reports an unproved output.
+	addProgram := func(code string) bool {
+		programs = append(programs, code)
+		return awkUnprovenOutput(code, cwd, home)
+	}
 	args := call.Args[1:]
 	for i := 0; i < len(args); i++ {
 		word, fixed := StaticWord(args[i], home)
-		if fixed && awkUnprovenOutput(word, cwd, home) {
+		if unknownOption && fixed && awkUnprovenOutput(word, cwd, home) {
 			return true
 		}
 		if options && !fixed {
@@ -460,9 +469,10 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 					if !ok {
 						return true
 					}
-					word = rendered
+					programs = append(programs, rendered)
+				} else if addProgram(word) {
+					return true
 				}
-				programs = append(programs, word)
 				continue
 			}
 			if options && !fixed {
@@ -490,7 +500,7 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 			i++
 			valueWord = args[i]
 			value, valueFixed = StaticWord(valueWord, home)
-			if valueFixed && awkUnprovenOutput(value, cwd, home) {
+			if unknownOption && valueFixed && awkUnprovenOutput(value, cwd, home) {
 				return true
 			}
 		}
@@ -512,9 +522,10 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 				if !ok {
 					return true
 				}
-				value = rendered
+				programs = append(programs, rendered)
+			} else if addProgram(value) {
+				return true
 			}
-			programs = append(programs, value)
 		case "v":
 			dynamicOperand = dynamicOperand || !valueFixed
 		}
@@ -597,38 +608,20 @@ func awkCommandEffect(code string) bool {
 	previous := byte('{')
 	for i := 0; i < len(code); i++ {
 		c := code[i]
+		if awkBlank(code, &i) {
+			continue
+		}
+		if end, found, ok := awkDataEnd(code, i, previous); found {
+			if !ok {
+				return true
+			}
+			if c != '#' {
+				previous = code[end]
+			}
+			i = end
+			continue
+		}
 		switch {
-		case c == '"':
-			for i++; i < len(code) && code[i] != '"'; i++ {
-				if code[i] == '\\' {
-					i++
-				}
-			}
-			if i >= len(code) {
-				return true
-			}
-		case c == '#':
-			for i < len(code) && code[i] != '\n' {
-				i++
-			}
-			c = '\n'
-		case c == '/' && strings.IndexByte("(,{};!~&|\n?:=", previous) >= 0:
-			bracket := false
-			for i++; i < len(code) && (bracket || code[i] != '/'); i++ {
-				switch code[i] {
-				case '\\':
-					i++
-				case '[':
-					bracket = true
-				case ']':
-					bracket = false
-				case '\n':
-					return true
-				}
-			}
-			if i >= len(code) {
-				return true
-			}
 		case c == '|':
 			if i+1 < len(code) && code[i+1] == '|' {
 				i++
@@ -637,21 +630,111 @@ func awkCommandEffect(code string) bool {
 			}
 		case c == '@':
 			return true
-		case c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_':
+		case awkWordByte(c) && (c < '0' || c > '9'):
 			start := i
-			for i+1 < len(code) && (code[i+1] >= 'a' && code[i+1] <= 'z' || code[i+1] >= 'A' && code[i+1] <= 'Z' ||
-				code[i+1] >= '0' && code[i+1] <= '9' || code[i+1] == '_') {
+			for i+1 < len(code) && awkWordByte(code[i+1]) {
 				i++
 			}
 			if code[start:i+1] == "system" {
 				return true
 			}
 		}
-		if c != ' ' && c != '\t' {
-			previous = c
+		previous = code[i]
+	}
+	return false
+}
+
+func awkWordByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
+}
+
+// awkBlank steps over a blank or a backslash-newline continuation. Awk reads
+// both as a blank: neither ends a statement nor opens a literal.
+func awkBlank(code string, i *int) bool {
+	switch code[*i] {
+	case ' ', '\t', '\r':
+		return true
+	case '\\':
+		next := *i + 1
+		if next < len(code) && code[next] == '\r' {
+			next++
+		}
+		if next < len(code) && code[next] == '\n' {
+			*i = next
+			return true
 		}
 	}
 	return false
+}
+
+// awkDataEnd finds the awk data that starts at code[i]: a string, a regular
+// expression literal (a slash where awk cannot divide, after the previous
+// significant byte) or a comment. It returns the index of the data's last
+// byte; a comment ends before its newline, which still ends the statement.
+// found is false when code[i] starts no data. ok is false when the data has
+// no end awk accepts, so the program does not run as this scan reads it.
+func awkDataEnd(code string, i int, previous byte) (end int, found, ok bool) {
+	switch c := code[i]; {
+	case c == '"':
+		for j := i + 1; j < len(code); j++ {
+			switch code[j] {
+			case '\\':
+				j++
+			case '"':
+				return j, true, true
+			}
+		}
+		return len(code) - 1, true, false
+	case c == '#':
+		if newline := strings.IndexByte(code[i:], '\n'); newline >= 0 {
+			return i + newline - 1, true, true
+		}
+		return len(code) - 1, true, true
+	case c == '/' && strings.IndexByte("(,{};!~&|\n?:=}", previous) >= 0:
+		end, ok := awkRegexEnd(code, i)
+		return end, true, ok
+	}
+	return i, false, true
+}
+
+// awkRegexEnd returns the index of the slash that closes the regular
+// expression literal opening at code[start]. A slash inside a bracket
+// expression belongs to it, as gawk and mawk read it; an awk that ends the
+// literal there rejects its unclosed bracket and runs nothing. [:class:],
+// [.symbol.] and [=equivalent=] close with their own pair, not the first ].
+// ok is false for a literal that does not close on its line.
+func awkRegexEnd(code string, start int) (int, bool) {
+	bracket := false
+	for i := start + 1; i < len(code); i++ {
+		c := code[i]
+		switch {
+		case c == '\n':
+			return i, false
+		case c == '\\':
+			if i+1 < len(code) && code[i+1] == '\n' {
+				return i + 1, false
+			}
+			i++
+		case bracket && c == '[' && i+1 < len(code) && strings.IndexByte(":.=", code[i+1]) >= 0:
+			closer := string(code[i+1]) + "]"
+			if end := strings.Index(code[i+2:], closer); end >= 0 && !strings.Contains(code[i+2:i+2+end], "\n") {
+				i += 2 + end + 1
+			}
+		case bracket && c == ']':
+			bracket = false
+		case c == '[':
+			bracket = true
+			if i+1 < len(code) && code[i+1] == '^' {
+				i++
+			}
+			if i+1 < len(code) && code[i+1] == ']' {
+				i++
+			}
+		case !bracket && c == '/':
+			return i, true
+		}
+	}
+	return len(code) - 1, false
 }
 
 // provedOrdinaryInterpreterPrefix reports wrapper words that end with a
@@ -668,34 +751,43 @@ func provedOrdinaryInterpreterPrefix(words []string, cwd, home string) bool {
 
 // An awk print redirect opens a file. A quoted target is named by the
 // literal operand extractor; an expression after > cannot be named here.
+// Strings, regular expression literals and comments are data, so a > inside
+// one is not a redirect. A print statement continues past a newline after a
+// comma, && or ||, and past a backslash-newline.
 func awkUnprovenOutput(code, cwd, home string) bool {
 	printing := false
-	var quote byte
+	previous := byte('{')
 	for i := 0; i < len(code); i++ {
 		c := code[i]
-		if quote != 0 {
-			switch c {
-			case '\\':
-				i++
-			case quote:
-				quote = 0
-			}
+		if awkBlank(code, &i) {
 			continue
 		}
-		if c == '"' || c == '\'' {
-			quote = c
+		if end, found, ok := awkDataEnd(code, i, previous); found {
+			if !ok {
+				return true
+			}
+			if c != '#' {
+				previous = code[end]
+			}
+			i = end
+			continue
+		}
+		before := previous
+		previous = c
+		if c == '\n' && strings.IndexByte(",&|", before) >= 0 {
+			previous = before
 			continue
 		}
 		if c == ';' || c == '{' || c == '}' || c == '\n' {
 			printing = false
 			continue
 		}
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+		if awkWordByte(c) && (c < '0' || c > '9') {
 			start := i
-			for i+1 < len(code) && ((code[i+1] >= 'a' && code[i+1] <= 'z') ||
-				(code[i+1] >= 'A' && code[i+1] <= 'Z')) {
+			for i+1 < len(code) && awkWordByte(code[i+1]) {
 				i++
 			}
+			previous = code[i]
 			word := code[start : i+1]
 			if word == "print" || word == "printf" {
 				printing = true
@@ -815,7 +907,10 @@ func interpreterProtectedUseSafe(code, language, cwd, home string) bool {
 		if pythonInertTripleStringProgram(code) {
 			return true
 		}
-		if safePythonRead.MatchString(code) || safePythonPrint.MatchString(code) {
+		if match := safePythonPrint.FindStringSubmatch(code); match != nil && pythonLiteralData(match[1]) {
+			return true
+		}
+		if safePythonRead.MatchString(code) {
 			return true
 		}
 		if match := safePythonOSRead.FindStringSubmatch(code); match != nil {
@@ -882,24 +977,47 @@ func interpreterProtectedUseSafe(code, language, cwd, home string) bool {
 	return false
 }
 
+// pythonLiteralData proves one Python string literal is inert data. The
+// prefixes are those Python accepts (u, r, b, f and t, alone or in their
+// legal pairs, in either case). An f- or t-string is data only when it has no
+// replacement field: every brace is doubled. A backslash does not escape a
+// brace, so f"\{x}" still evaluates x and is not data.
 func pythonLiteralData(value string) bool {
 	value = strings.TrimSpace(value)
-	if len(value) > 1 && value[0] == 'b' {
-		value = value[1:]
+	quoteAt := strings.IndexAny(value, `'"`)
+	if quoteAt < 0 {
+		return false
 	}
-	if len(value) < 2 || value[0] != value[len(value)-1] ||
-		value[0] != '\'' && value[0] != '"' {
+	prefix := strings.ToLower(value[:quoteAt])
+	if !slicesContainsString([]string{"", "u", "r", "b", "br", "rb", "f", "fr", "rf", "t", "tr", "rt"}, prefix) {
+		return false
+	}
+	template := strings.ContainsAny(prefix, "ft")
+	value = value[quoteAt:]
+	if len(value) < 2 || value[0] != value[len(value)-1] {
 		return false
 	}
 	quote := value[0]
 	for i := 1; i < len(value)-1; i++ {
 		switch value[i] {
 		case '\\':
+			if template && i+1 < len(value)-1 && (value[i+1] == '{' || value[i+1] == '}') {
+				continue
+			}
 			i++
 			if i >= len(value)-1 {
 				return false
 			}
 		case quote:
+			return false
+		case '{', '}':
+			if !template {
+				continue
+			}
+			if i+1 < len(value)-1 && value[i+1] == value[i] {
+				i++
+				continue
+			}
 			return false
 		}
 	}
