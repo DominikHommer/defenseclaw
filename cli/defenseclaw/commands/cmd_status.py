@@ -611,7 +611,7 @@ def _status_refused_detail(cfg, client, public) -> str:
                 pass
         except PermissionError:
             repair = (
-                "run defenseclaw doctor to repair this account's file access"
+                "run defenseclaw doctor for Windows file-access repair guidance"
                 if sys.platform == "win32"
                 else f"restore read access (chmod 600 {dotenv})"
             )
