@@ -604,6 +604,9 @@ var (
 	// release whose hook-contract lock a target still carries. Tests
 	// replace it.
 	enterpriseHookReconcileTargetRelease = enterprisehooks.WindowsProtectedTargetFromOtherRelease
+	// enterpriseHookReconcileTargetClosedForOpen reports a target whose lock
+	// records fail mode closed while the config asks for open. Tests replace it.
+	enterpriseHookReconcileTargetClosedForOpen = enterprisehooks.WindowsProtectedTargetRenderedClosedForOpen
 	// enterpriseHookReconcileSecureClient reports a Secure Client guardian.
 	// Tests replace it.
 	enterpriseHookReconcileSecureClient = enterprisehooks.WindowsSecureClientProfileProcess
@@ -663,8 +666,9 @@ func enterpriseHookVerifyOrRepairTarget(
 		return enterprisehooks.InstallResult{}, false, err
 	}
 	if !available {
-		// Only a deferred target whose lock another release wrote waits for
-		// the sign-in. One this release protected that no longer verifies
+		// Only a deferred target whose lock another release wrote, or whose
+		// hooks fail closed while the config opens them, waits for the
+		// sign-in. One this release protected that no longer verifies
 		// was changed while its account was signed out, and stays a failure,
 		// unless on Secure Client a committed non-purge uninstall retired it:
 		// a reinstall over the retained StateRoot then found every
@@ -680,6 +684,21 @@ func enterpriseHookVerifyOrRepairTarget(
 						"it at the account's next sign-in (verification: %v)",
 					errEnterpriseHookAwaitingSignIn, written, verifyErr,
 				)
+			}
+			// An administrator-open hook fail mode leaves the account's
+			// hooks fail-closed until its next sign-in when that mode is
+			// the only drift (rel-1-0-4 GAP-0585).
+			if closed, closedErr := enterpriseHookReconcileTargetClosedForOpen(opts); closedErr == nil && closed {
+				rendered := opts
+				rendered.HookFailMode = "closed"
+				if _, renderedErr := enterpriseHookReconcileVerifier(ctx, rendered); renderedErr == nil {
+					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+						"%w: its hooks fail closed, and hook fail mode open installs only in the account's own "+
+							"Windows session; its exact active Windows session is unavailable, so the guardian "+
+							"repairs it at the account's next sign-in (verification: %v)",
+						errEnterpriseHookAwaitingSignIn, verifyErr,
+					)
+				}
 			}
 			if enterpriseHookReconcileSecureClient() {
 				if available, pendingErr := enterpriseHookReconcileDeferredSessionAvailable(target); pendingErr == nil && !available {

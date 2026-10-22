@@ -285,6 +285,49 @@ func TestEnterpriseHookVerifyOrRepairTargetWaitsForSignInOnlyForDeferredEarlierR
 	}
 }
 
+// GAP-0585: an administrator-open hook fail mode with a signed-out (or
+// disconnected) account waits for its sign-in when the account's hooks still
+// verify fail-closed. A change to closed, or any other drift, stays a failure.
+func TestEnterpriseHookVerifyOrRepairTargetWaitsForSignInForFailModeOpen(t *testing.T) {
+	previousVerifier, previousSession, previousRelease := enterpriseHookReconcileVerifier, enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileTargetRelease
+	previousSecureClient, previousClosed := enterpriseHookReconcileSecureClient, enterpriseHookReconcileTargetClosedForOpen
+	t.Cleanup(func() {
+		enterpriseHookReconcileVerifier, enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileTargetRelease = previousVerifier, previousSession, previousRelease
+		enterpriseHookReconcileSecureClient, enterpriseHookReconcileTargetClosedForOpen = previousSecureClient, previousClosed
+	})
+	enterpriseHookReconcileSecureClient = func() bool { return false }
+	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
+	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) { return "", false, nil }
+	locked, otherDrift := "closed", false
+	enterpriseHookReconcileVerifier = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		if opts.HookFailMode == locked && !otherDrift {
+			return enterprisehooks.InstallResult{}, nil
+		}
+		return enterprisehooks.InstallResult{}, errors.New("fail mode drift")
+	}
+	enterpriseHookReconcileTargetClosedForOpen = func(opts enterprisehooks.InstallOptions) (bool, error) {
+		return locked == "closed" && opts.HookFailMode == "open", nil
+	}
+	deferred := enterprisehooks.ManifestTarget{Connector: "claudecode", Deferred: true}
+	open := enterprisehooks.InstallOptions{ConnectorName: "claudecode", HookFailMode: "open"}
+	if _, _, err := enterpriseHookVerifyOrRepairTarget(context.Background(), deferred, open, true); err == nil ||
+		!strings.HasPrefix(err.Error(), enterpriseHookAwaitingSignInPrefix) {
+		t.Fatalf("closed to open: err=%v, want the sign-in wait", err)
+	}
+	closed := open
+	closed.HookFailMode = "closed"
+	locked = "open"
+	if _, _, err := enterpriseHookVerifyOrRepairTarget(context.Background(), deferred, closed, true); err == nil ||
+		strings.HasPrefix(err.Error(), enterpriseHookAwaitingSignInPrefix) {
+		t.Fatalf("open to closed: err=%v, want the signed-out failure", err)
+	}
+	locked, otherDrift = "closed", true
+	if _, _, err := enterpriseHookVerifyOrRepairTarget(context.Background(), deferred, open, true); err == nil ||
+		strings.HasPrefix(err.Error(), enterpriseHookAwaitingSignInPrefix) {
+		t.Fatalf("other drift: err=%v, want the signed-out failure", err)
+	}
+}
+
 // GAP-0644: verify excuses a row the guardian left waiting for a sign-in
 // only while that account is still signed out, and names it pending.
 func TestEnterpriseHookVerifyAwaitingSignInNeedsTheAccountSignedOut(t *testing.T) {

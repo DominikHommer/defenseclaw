@@ -12,6 +12,11 @@ func WindowsProtectedTargetFromOtherRelease(InstallOptions) (string, bool, error
 	return "", false, nil
 }
 
+// WindowsProtectedTargetRenderedClosedForOpen is the native Windows check.
+func WindowsProtectedTargetRenderedClosedForOpen(InstallOptions) (bool, error) {
+	return false, nil
+}
+
 // WindowsSecureClientProfileProcess is the native Windows check.
 func WindowsSecureClientProfileProcess() bool {
 	return false
