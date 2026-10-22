@@ -65,12 +65,14 @@ func TestManagedUnixCopilotOutageBlocksInEveryFailModeAsDocumented(t *testing.T)
 			"running. With the administrator's `hook_fail_mode: open` it lets them run.",
 		}},
 		{filepath.Join(docs, "reference", "fail-modes.mdx"), []string{
-			"The one exception is the managed GitHub Copilot CLI hook on Linux and macOS, which blocks during an outage in every fail mode",
+			"On Linux and macOS three managed hooks are the exception and block during an outage in every fail mode: the Amp and OpenCode plugins",
+			"and the GitHub Copilot CLI hook (see [GitHub Copilot CLI fails open upstream](#github-copilot-cli-fails-open-upstream))",
 			"and for GitHub Copilot CLI only on Windows: on Linux and macOS the managed Copilot hook blocks `preToolUse` and `permissionRequest` during an outage in `open` too.",
 			"No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down; on Linux and macOS in every fail mode,",
 			"On Linux and macOS it blocks them in every fail mode, the administrator's `hook_fail_mode: open` included.",
 		}, []string{
 			"Only the administrator's `hook_fail_mode: open` lets such a call through. ",
+			"The one exception is the managed GitHub Copilot CLI hook on Linux and macOS",
 			"An administrator-managed standalone Copilot hook can block `preToolUse` and `permissionRequest` while the gateway service is not running, but only in the effective mode",
 		}},
 		{filepath.Join(docs, "connectors", "capability-matrix.mdx"), []string{

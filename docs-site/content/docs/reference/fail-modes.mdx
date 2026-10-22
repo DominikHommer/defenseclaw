@@ -31,15 +31,19 @@ managed computer the value comes from the administrator's config (the managed
 `config.yaml`, which only root or SYSTEM can change, delivered by the
 installer, `ensure`, a signed policy bundle or an MDM/Intune payload), so an
 `open` there is the administrator's choice and the managed hooks follow it.
-The one exception is the managed GitHub Copilot CLI hook on Linux and macOS,
-which blocks during an outage in every fail mode (see
+On Linux and macOS three managed hooks are the exception and block during an
+outage in every fail mode: the Amp and OpenCode plugins (see
+[Managed Amp and OpenCode plugins](#managed-amp-and-opencode-plugins)) and the
+GitHub Copilot CLI hook (see
 [GitHub Copilot CLI fails open upstream](#github-copilot-cli-fails-open-upstream)).
 A fail mode that is not set is `closed` everywhere except under Secure
 Client, where it is `open` (see [Secure Client](#secure-client)).
 
 `status --json` and `verify --json` give the resolved fail mode of each
 connector a managed deployment protects as
-`connectors.<id>.effective_hook_fail_mode`.
+`connectors.<id>.effective_hook_fail_mode`. That is the administrator's
+resolved value, so on Linux and macOS it can say `open` for the Amp and
+OpenCode plugins and the GitHub Copilot CLI hook while they block an outage.
 
 Some refusals do not depend on the fail mode, because they are not an outage:
 on a managed computer a hook still blocks when its administrator-owned runtime
@@ -57,7 +61,9 @@ standalone host with `foreign_hooks: remove`): only the gateway holds that
 record, and a session it blocked may still run the hook it loaded.
 
 On a managed standalone host `open` applies only to an outage: the gateway
-service is not running, is still restarting, or gives no answer in time.
+service is not running, is still restarting, or gives no answer in time. On
+Linux and macOS the Amp and OpenCode plugins and the GitHub Copilot CLI hook
+block an outage in `open` too.
 Every other failure blocks in fail mode `open` too, for every connector:
 tool input over the hook's 1 MiB limit, a gateway error status (5xx), an
 answer DefenseClaw cannot use, and any other transport error. Per-user and
@@ -66,7 +72,9 @@ Secure Client hooks are unchanged.
 On a managed standalone host the fail mode is the administrator's installed
 `hook_fail_mode`, and `DEFENSECLAW_FAIL_MODE` in the agent's environment does
 not change it: `closed` there does not close a hook the administrator set to
-`open`, so an outage still lets the call run. To block during an outage, set
+`open`, so an outage still lets the call run (on Linux and macOS not through
+the Amp and OpenCode plugins or the GitHub Copilot CLI hook, which block it in
+every fail mode). To block during an outage, set
 `hook_fail_mode: closed` (the default) in the admin config, or use the
 separate [strict availability](#strict-availability) setting,
 `DEFENSECLAW_STRICT_AVAILABILITY=1`, which a managed hook honors because it
@@ -345,10 +353,10 @@ events below:
 | Devin | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop` | None | Yes |
 | Antigravity | `PreToolUse` | `PreToolUse` | No |
 | Hermes | `pre_tool_call` | None | No (managed standalone: blocks `pre_tool_call` when DefenseClaw cannot check it) |
-| OpenCode | `tool.execute.before` | None | Yes |
+| OpenCode | `tool.execute.before` | None | Yes (managed standalone on Linux and macOS: blocks while the gateway is down in every fail mode, `open` included) |
 | OpenHands | `pre_tool_use`, `user_prompt_submit`, `stop` | None | Yes |
 | Kiro | `UserPromptSubmit`, `PreToolUse` | None | Yes |
-| Amp | `tool.call`, `tool.result` | `tool.call`, `tool.result` (foreground thread) | Yes |
+| Amp | `tool.call`, `tool.result` | `tool.call`, `tool.result` (foreground thread) | Yes (managed standalone on Linux and macOS: blocks while the gateway is down in every fail mode, `open` included) |
 | OmniGent | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `AfterAgentResponse`, `BeforeModel`, `AfterModel` | `UserPromptSubmit`, `PreToolUse`, `BeforeModel` | Yes |
 
 - An already-completed result event cannot undo its original side effect.
@@ -371,7 +379,9 @@ Two hooks do not read it. The per-user GitHub Copilot CLI hook lets a call
 run while the gateway is down whatever is set (see
 [GitHub Copilot CLI fails open upstream](#github-copilot-cli-fails-open-upstream)).
 The Amp plugin uses the fail mode setup wrote into it; to make Amp block
-during an outage, run `defenseclaw guardrail fail-mode closed`.
+during an outage, run `defenseclaw guardrail fail-mode closed` (on a managed
+host the administrator sets `hook_fail_mode: closed`; the managed Amp plugin
+on Linux and macOS blocks an outage in every fail mode).
 
 Because a strict outage can make the agent unavailable, use persisted status,
 gateway monitoring, and a tested restart path before applying it broadly. On
@@ -438,8 +448,9 @@ macOS it blocks them in every fail mode, the administrator's
 `hook_fail_mode: open` included. On Windows it blocks them only in the
 effective mode `closed` (the default) or with
 [strict availability](#strict-availability); with the administrator's
-`hook_fail_mode: open` it lets the call run, as every other connector does in
-fail mode `open`.
+`hook_fail_mode: open` it lets the call run, as the other managed hooks do in
+fail mode `open` (on Linux and macOS the Amp and OpenCode plugins block too;
+see [Managed Amp and OpenCode plugins](#managed-amp-and-opencode-plugins)).
 
 The shared `inspect-*.sh` scripts serve every connector of one data
 directory, and `DEFENSECLAW_CONNECTOR` only picks the connector they report
@@ -453,6 +464,23 @@ read `hooks/.hookcfg` (Secure Client delivery is unchanged).
 
 Environment keys are case-insensitive on Windows. Do not define multiple
 case-variants with different values.
+
+## Managed Amp and OpenCode plugins
+
+On a managed standalone Linux or macOS host the administrator-owned Amp and
+OpenCode plugins are installed fail-closed whatever `hook_fail_mode` says.
+While the gateway service is not running, is restarting, or gives no usable
+answer, they block the call in every fail mode, the administrator's
+`hook_fail_mode: open` included: Amp rejects `tool.call` and withholds the
+`tool.result`, and OpenCode's `tool.execute.before` throws. On a managed
+Windows host they follow the effective mode: `closed` (the default) blocks an
+outage, and the administrator's `hook_fail_mode: open` lets the call run.
+Under Secure Client and on a per-user install they follow the effective mode
+too.
+
+`status --json` and `verify --json` report the administrator's value as
+`effective_hook_fail_mode`, so on Linux and macOS they can show `open` for
+these plugins while the plugins block an outage.
 
 ## Reporting and diagnosis
 

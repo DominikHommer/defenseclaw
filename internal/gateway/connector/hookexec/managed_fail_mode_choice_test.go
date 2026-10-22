@@ -259,7 +259,7 @@ func TestManagedFailModeDocsDoNotPromiseAnEnvironmentOverride(t *testing.T) {
 		forbidden []string
 	}{
 		{filepath.Join(docs, "reference", "fail-modes.mdx"), []string{
-			"`DEFENSECLAW_FAIL_MODE` in the agent's environment does not change it: `closed` there does not close a hook the administrator set to `open`, so an outage still lets the call run.",
+			"`DEFENSECLAW_FAIL_MODE` in the agent's environment does not change it: `closed` there does not close a hook the administrator set to `open`, so an outage still lets the call run (on Linux and macOS not through the Amp and OpenCode plugins or the GitHub Copilot CLI hook, which block it in every fail mode).",
 			"`DEFENSECLAW_STRICT_AVAILABILITY=1`, which a managed hook honors because it can only close.",
 		}, []string{
 			"both variables are *tighten-only*",

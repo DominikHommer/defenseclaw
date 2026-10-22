@@ -147,7 +147,10 @@ For a `confirm` decision, the plugin calls Amp's confirmation UI only when the
 thread is active in the foreground. Denial, a background thread, or unavailable
 plugin UI rejects a pending tool call or withholds a pending tool result rather
 than silently allowing it. Gateway errors honor the configured open/closed
-hook failure mode.
+hook failure mode, except on a managed standalone Linux or macOS host, where
+the administrator-owned plugin blocks in every fail mode, the administrator's
+`hook_fail_mode: open` included (see
+[Fail modes](/docs/reference/fail-modes#managed-amp-and-opencode-plugins)).
 
 ## MCP, skills, checks, plugins, and agents
 

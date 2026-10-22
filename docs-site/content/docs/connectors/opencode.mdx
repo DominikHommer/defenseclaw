@@ -154,7 +154,11 @@ DefenseClaw writes a single managed plugin file. Its `tool.execute.before` resol
 ```
 
 When the gateway is unreachable, the bridge honors the configured fail mode:
-`FAIL_MODE=closed` throws and blocks; `FAIL_MODE=open` allows. This fail-closed
+`FAIL_MODE=closed` throws and blocks; `FAIL_MODE=open` allows. On a managed
+standalone Linux or macOS host the administrator-owned plugin blocks in every
+fail mode, the administrator's `hook_fail_mode: open` included (see
+[Fail modes](/docs/reference/fail-modes#managed-amp-and-opencode-plugins)).
+This fail-closed
 claim applies only to the awaited `tool.execute.before` contract. The bridge
 also awaits `tool.execute.after` so its result is attributed before a later
 call starts, but it ignores that delivery's advisory verdict and transport or
