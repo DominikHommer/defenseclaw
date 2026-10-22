@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from defenseclaw import config as config_module
+from defenseclaw import envvars
 from defenseclaw.connector_contracts import HOOK_CONTRACTS, connector_lock_contract_invariant
 from defenseclaw.connector_paths import (
     amp_policy_plugin_path,
@@ -591,7 +592,10 @@ def _hook_environment_source(
         return False, None
     if connector == "claudecode" and claude_env is not None:
         return True, ("claude-settings-env", claude_env)
-    mode = _hook_environment_mode(os.environ.get("DEFENSECLAW_FAIL_MODE"))
+    # The hook shell reads the raw value on every host: the registry's managed
+    # "ignore" governs DefenseClaw's own processes, not what this installed
+    # script does, so the report reads it raw too (managed=False).
+    mode = _hook_environment_mode(envvars.lookup("DEFENSECLAW_FAIL_MODE", managed=False))
     return True, (("process-env", mode) if mode is not None else None)
 
 

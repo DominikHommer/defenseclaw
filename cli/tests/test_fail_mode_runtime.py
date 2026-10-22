@@ -1207,6 +1207,9 @@ _LEGACY_CLOSED = ['FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"']
 @pytest.mark.parametrize(
     "connector,lines,secure_client",
     [
+        # A managed standalone host left with a render from before 1.0.3:
+        # its script reads the raw value whatever the registry ignores.
+        ("devin", _LEGACY_CLOSED, None),
         # The real authenticated Secure Client renders that keep the override.
         ("devin", _HOOK_FAIL_MODE_LINES["devin-hook.sh/secure-client/closed"], True),
         ("kiro", _HOOK_FAIL_MODE_LINES["kiro-hook.sh/secure-client/closed"], True),
@@ -1225,7 +1228,7 @@ def test_an_env_reading_hook_reports_the_mode_the_environment_gives_it(
     tmp_path: Path,
     connector: str,
     lines: list[str],
-    secure_client: bool,
+    secure_client: bool | None,
     env_value: str | None,
     want: str,
 ) -> None:
@@ -1233,9 +1236,10 @@ def test_an_env_reading_hook_reports_the_mode_the_environment_gives_it(
     # outage when DEFENSECLAW_FAIL_MODE=open: status and doctor report open
     # with process-env-open drift, never closed and current.
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
-    if secure_client:
+    if secure_client is not False:
         cfg.deployment_mode = "managed_enterprise"
-        cfg.managed_outside_secure_client = lambda: False
+        cfg.managed_outside_secure_client = lambda: secure_client is None
+        monkeypatch.setattr("defenseclaw.envvars.managed_standalone", lambda: secure_client is None)
     if connector == "claudecode":
         _write_current_runtime(cfg, home, {"claudecode": "closed"})
         settings = home / ".claude" / "settings.json"
