@@ -18,9 +18,17 @@
 
 package sandboxcli
 
+import "context"
+
 // Sandboxes run on Linux and macOS only (CheckSupported): elsewhere no
 // session attaches to one.
 
-func (a *App) holdSession(string) (release func()) { return func() {} }
+func (a *App) holdSession(context.Context, string) (release func(), err error) { return func() {}, nil }
+
+func (a *App) lockSessionAdmission(context.Context, string, bool) (func(), error) {
+	return func() {}, nil
+}
+
+func (a *App) attachedSessionsChecked(string) (int, error) { return 0, nil }
 
 func (a *App) attachedSessions(string) int { return 0 }

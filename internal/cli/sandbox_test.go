@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,13 +31,55 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
+
+func TestSandboxCommandKeepsLifecycleLockThroughRun(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("OpenShell sandbox commands run on Linux and macOS")
+	}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir, err := openshell.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := sandboxRunE(func(ctx context.Context, _ *sandboxcli.App, _ *cobra.Command, _ []string) error {
+		short, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+		defer cancel()
+		if unlock, err := openshell.LockGatewayLifecycle(short, dir); !errors.Is(err, context.DeadlineExceeded) {
+			if unlock != nil {
+				unlock()
+			}
+			return fmt.Errorf("rollback crossed the admitted list command: %v", err)
+		}
+		return nil
+	})
+	listCmd := &cobra.Command{Use: "list"}
+	listCmd.SetContext(t.Context())
+	if err := list(listCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Setup can take the exclusive lock itself while it changes the gateway.
+	setup := sandboxRunE(func(ctx context.Context, _ *sandboxcli.App, _ *cobra.Command, _ []string) error {
+		unlock, err := openshell.LockGatewayLifecycle(ctx, dir)
+		if err == nil {
+			unlock()
+		}
+		return err
+	})
+	setupCmd := &cobra.Command{Use: "setup"}
+	setupCmd.SetContext(t.Context())
+	if err := setup(setupCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // sandboxManifestCommand describes one sandbox subcommand for the Python
 // stub parity check (track G2) and for this golden test. Long and Example

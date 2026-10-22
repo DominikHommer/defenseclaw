@@ -41,6 +41,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
 
+func holdTestSession(t *testing.T, a *testApp, name string) func() {
+	t.Helper()
+	release, err := a.holdSession(t.Context(), name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return release
+}
+
 // unaccepted stops the test if the changes of name's session were accepted
 // as the next session's base.
 func unaccepted(t *testing.T, ta *testApp, name string) {
@@ -1130,7 +1139,7 @@ func TestConnectLeavesARunningSandboxRunning(t *testing.T) {
 func TestStopAndDeleteNameAnAttachedSession(t *testing.T) {
 	ta := newTestApp(t, "n\nn\n", sampleSandbox("box"))
 	runAnswers(ta, "run=none\n", "")
-	defer ta.holdSession("box")()
+	defer holdTestSession(t, ta, "box")()
 	ta.ok(t, ta.Stop(bg, StopOptions{Name: "box"}))
 	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"box"}}))
 	if ta.calls("POST", "box/stop") != 0 || ta.calls("DELETE", "box") != 0 {
@@ -2037,7 +2046,7 @@ func TestDeleteSaysWhereTheWorkWent(t *testing.T) {
 	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyBranch, Applied: true, Branch: "dc/fix-tests"}
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "fix-tests", Branch: true}))
 	ta.copy.pending = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkNone}
-	release := ta.holdSession("fix-tests")
+	release := holdTestSession(t, ta, "fix-tests")
 	ta.ok(t, ta.Stop(bg, StopOptions{Name: "fix-tests", Yes: true}))
 	release()
 	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"fix-tests"}, Yes: true}))

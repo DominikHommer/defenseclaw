@@ -19,7 +19,6 @@ package openshell_test
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -347,8 +346,8 @@ func TestTheGatewayStopsOnlyOnceOpenShellReportsEveryMicroVMStopped(t *testing.T
 // and a create or a start shares it: one is refused at once while the
 // other holds it, the exclusive one waits for the shared ones up to its
 // bound or its context, and either goes once the other let go. The lock
-// file is the owner's only, in a configuration directory the exclusive
-// one makes; a start where none exists holds nothing.
+// file is the owner's only, and a start creates the lock directory before
+// the first restart so both operations contend on the same inode.
 func TestLifecycleLock(t *testing.T) {
 	skipOnWindows(t)
 	openshell.SetLifecycleLockWait(t, 300*time.Millisecond)
@@ -358,8 +357,8 @@ func TestLifecycleLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	none()
-	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("a start made the configuration directory: %v", err)
+	if info, err := os.Stat(filepath.Join(dir, ".defenseclaw-lifecycle.lock")); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("a start must establish the lifecycle lock before the first restart: %v, %v", info, err)
 	}
 
 	restart, err := openshell.LockGatewayLifecycle(context.Background(), dir)
@@ -405,14 +404,21 @@ func TestLifecycleLock(t *testing.T) {
 	restart()
 }
 
-func TestSandboxCommandWaitsForGatewayRollbackLock(t *testing.T) {
+func TestSandboxCommandHoldsGatewayRollbackLockThroughItsCall(t *testing.T) {
 	dir := t.TempDir()
 	unlock, err := openshell.LockGatewayLifecycle(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	admitted := make(chan func(), 1)
 	done := make(chan error, 1)
-	go func() { done <- openshell.WaitGatewayLifecycle(context.Background(), dir) }()
+	go func() {
+		release, err := openshell.LockSandboxCommand(context.Background(), dir)
+		if err == nil {
+			admitted <- release
+		}
+		done <- err
+	}()
 	select {
 	case err := <-done:
 		t.Fatalf("sandbox command crossed the rollback lock: %v", err)
@@ -426,6 +432,17 @@ func TestSandboxCommandWaitsForGatewayRollbackLock(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("sandbox command did not resume after rollback")
+	}
+	release := <-admitted
+	openshell.SetLifecycleLockWait(t, 200*time.Millisecond)
+	if _, err := openshell.LockGatewayLifecycle(context.Background(), dir); !errors.Is(err, openshell.ErrGatewayBusy) {
+		t.Fatalf("rollback crossed an admitted command: %v", err)
+	}
+	release()
+	if next, err := openshell.LockGatewayLifecycle(context.Background(), dir); err != nil {
+		t.Fatalf("rollback did not resume after command: %v", err)
+	} else {
+		next()
 	}
 }
 

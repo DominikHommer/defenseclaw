@@ -797,6 +797,20 @@ const ExitStopKept = 5
 // running while its copy holds work that was not pulled (fullDiskStop).
 func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	a.defaults()
+	lifecycleUnlock, err := openshell.LockSandboxStart("")
+	if err != nil {
+		return fmt.Errorf("cannot stop %s during a gateway rollback: %w; retry `%s stop %s`", o.Name, err, CommandName, o.Name)
+	}
+	defer lifecycleUnlock()
+	unlock, err := a.lockSessionAdmission(ctx, o.Name, true)
+	if err != nil {
+		return fmt.Errorf("cannot count sessions before stopping %s: %w; retry `%s stop %s`", o.Name, err, CommandName, o.Name)
+	}
+	defer unlock()
+	attached, err := a.attachedSessionsChecked(o.Name)
+	if err != nil {
+		return fmt.Errorf("cannot count sessions before stopping %s: %w; retry `%s stop %s`", o.Name, err, CommandName, o.Name)
+	}
 	api, err := a.api()
 	if err != nil {
 		return err
@@ -819,7 +833,7 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 			}
 			// A detached run or a session still going can change the copy
 			// between the look and the stop.
-			if sb.WorkdirMode == config.OpenShellWorkdirCopy && idle && a.attachedSessions(sb.Name) == 0 {
+			if sb.WorkdirMode == config.OpenShellWorkdirCopy && idle && attached == 0 {
 				copyAt = a.copyAtStop(ctx, cli, sb)
 			}
 			if ok, err := a.fullDiskStop(ctx, cli, sb, copyAt, o.Yes); err != nil || !ok {
@@ -1117,48 +1131,72 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 	}
 	var errs []error
 	for _, name := range o.Names {
-		question := "Delete sandbox " + name + " (its providers, credentials and, unless --keep-snapshot, its undo point)?"
-		if sb, err := api.Get(ctx, name); err == nil {
-			if sb.WorkdirMode == config.OpenShellWorkdirCopy {
-				// A copy has no undo point: the folder was never mounted.
-				question = "Delete sandbox " + name + " (its providers and credentials)?"
-			}
-			if lost := a.unhandedWork(ctx, sb); lost != "" {
-				question = "Sandbox " + name + " " + lost + ". Delete it and discard that work?"
-				if o.Yes {
-					a.warn("sandbox " + name + " " + lost + "; deleting it discards that work (--yes)")
-				}
-			} else if h := a.lastHandover(sb); h != nil {
-				a.note(name + "'s work was last " + a.handoverText(h) + "; nothing newer is left in it")
-			}
-		}
-		if n := a.attachedSessions(name); n > 0 {
-			// Its sessions in other terminals end with it (GAP-0285).
-			what := attachedText(name, n) + "; deleting it ends " + them(n)
-			question = what + ". " + question
-			if o.Yes {
-				a.warn(what + " (--yes)")
-			}
-		}
-		yes, err := a.confirm(question, o.Yes)
+		abort, err := a.deleteOne(ctx, api, o, name)
 		if err != nil {
-			return err
-		}
-		if !yes {
-			continue
-		}
-		res, err := api.Delete(ctx, name, sandboxapi.DeleteRequest{KeepSnapshot: o.KeepSnapshot})
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", name, apiError(err)))
-			continue
-		}
-		a.ok("deleted " + res.Name)
-		a.forgetCLIState(name)
-		for _, w := range res.Warnings {
-			a.warn(w)
+			if abort {
+				return err
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (a *App) deleteOne(ctx context.Context, api API, o DeleteOptions, name string) (abort bool, err error) {
+	lifecycleUnlock, err := openshell.LockSandboxStart("")
+	if err != nil {
+		return false, fmt.Errorf("cannot delete %s during a gateway rollback: %w; retry `%s delete %s`", name, err, CommandName, name)
+	}
+	defer lifecycleUnlock()
+	unlock, err := a.lockSessionAdmission(ctx, name, true)
+	if err != nil {
+		return false, fmt.Errorf("cannot count sessions before deleting %s: %w; retry `%s delete %s`", name, err, CommandName, name)
+	}
+	defer unlock()
+	attached, err := a.attachedSessionsChecked(name)
+	if err != nil {
+		return false, fmt.Errorf("cannot count sessions before deleting %s: %w; retry `%s delete %s`", name, err, CommandName, name)
+	}
+	question := "Delete sandbox " + name + " (its providers, credentials and, unless --keep-snapshot, its undo point)?"
+	if sb, err := api.Get(ctx, name); err == nil {
+		if sb.WorkdirMode == config.OpenShellWorkdirCopy {
+			// A copy has no undo point: the folder was never mounted.
+			question = "Delete sandbox " + name + " (its providers and credentials)?"
+		}
+		if lost := a.unhandedWork(ctx, sb); lost != "" {
+			question = "Sandbox " + name + " " + lost + ". Delete it and discard that work?"
+			if o.Yes {
+				a.warn("sandbox " + name + " " + lost + "; deleting it discards that work (--yes)")
+			}
+		} else if h := a.lastHandover(sb); h != nil {
+			a.note(name + "'s work was last " + a.handoverText(h) + "; nothing newer is left in it")
+		}
+	}
+	if n := attached; n > 0 {
+		// Its sessions in other terminals end with it (GAP-0285).
+		what := attachedText(name, n) + "; deleting it ends " + them(n)
+		question = what + ". " + question
+		if o.Yes {
+			a.warn(what + " (--yes)")
+		}
+	}
+	yes, err := a.confirm(question, o.Yes)
+	if err != nil {
+		return true, err
+	}
+	if !yes {
+		return false, nil
+	}
+	res, err := api.Delete(ctx, name, sandboxapi.DeleteRequest{KeepSnapshot: o.KeepSnapshot})
+	if err != nil {
+		return false, apiError(err)
+	}
+	a.ok("deleted " + res.Name)
+	a.forgetCLIState(name)
+	for _, w := range res.Warnings {
+		a.warn(w)
+	}
+	return false, nil
 }
 
 // unhandedWork says what work a copy-mode sandbox holds that never came

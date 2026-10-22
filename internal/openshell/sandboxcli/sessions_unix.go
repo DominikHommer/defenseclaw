@@ -19,15 +19,21 @@
 package sandboxcli
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 // Attached sessions. Several sessions can attach to one sandbox (a `run`
@@ -48,33 +54,83 @@ func (a *App) sessionsDir(name string) (string, error) {
 	return filepath.Join(dir, "sessions"), nil
 }
 
-// holdSession records that a harness or shell of this process runs in
-// sandbox name until release (best effort: without the lease another
-// session's end may stop the sandbox under this one, as before leases).
-func (a *App) holdSession(name string) (release func()) {
-	noop := func() {}
+// lockSessionAdmission serializes a new lease with a finish decision. The
+// finish holds the exclusive side through Stop or Delete; an attach holds
+// the shared side until its lease is visible. This file is never removed,
+// since replacing an inode would split independent processes' locks.
+func (a *App) lockSessionAdmission(ctx context.Context, name string, exclusive bool) (func(), error) {
+	// The per-sandbox CLI state is removed by Delete. Keep the admission
+	// inode outside that tree so a concurrent attach cannot create a new
+	// lock file and cross the delete decision.
+	dir := filepath.Join(a.dataDir(), "sandbox-session-admission")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256([]byte(name))
+	f, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf("%x.lock", digest[:20])), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	how := syscall.LOCK_SH
+	if exclusive {
+		how = syscall.LOCK_EX
+	}
+	for {
+		err = syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB)
+		if err == nil {
+			return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() }, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = f.Close()
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+// holdSession records a harness or shell until release. Failure refuses
+// attachment: an unrecorded session could be stopped by another terminal.
+func (a *App) holdSession(ctx context.Context, name string) (release func(), err error) {
+	lifecycleUnlock, err := openshell.LockSandboxStart("")
+	if err != nil {
+		return nil, fmt.Errorf("attach to %s after the gateway rollback: %w; retry `%s connect %s`", name, err, CommandName, name)
+	}
+	unlock, err := a.lockSessionAdmission(ctx, name, false)
+	if err != nil {
+		lifecycleUnlock()
+		return nil, fmt.Errorf("record the session with %s: %w; retry `%s connect %s`", name, err, CommandName, name)
+	}
+	defer unlock()
 	dir, err := a.sessionsDir(name)
 	if err != nil {
-		return noop
+		lifecycleUnlock()
+		return nil, err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		a.warnErr("could not record this session with " + name + ": " + err.Error())
-		return noop
+		lifecycleUnlock()
+		return nil, err
 	}
 	var id [6]byte
 	if _, err := rand.Read(id[:]); err != nil {
-		return noop
+		lifecycleUnlock()
+		return nil, err
 	}
 	path := filepath.Join(dir, strconv.Itoa(os.Getpid())+"-"+hex.EncodeToString(id[:])+leaseSuffix)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		a.warnErr("could not record this session with " + name + ": " + err.Error())
-		return noop
+		lifecycleUnlock()
+		return nil, err
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
-		return noop
+		lifecycleUnlock()
+		return nil, err
 	}
 	var once sync.Once
 	return func() {
@@ -83,21 +139,30 @@ func (a *App) holdSession(name string) (release func()) {
 			// held, one after finds nothing.
 			_ = os.Remove(path)
 			_ = f.Close()
+			lifecycleUnlock()
 		})
-	}
+	}, nil
 }
 
 // attachedSessions counts the sessions whose harness or shell runs in
 // sandbox name now (on this machine, with this data dir). A lease whose
 // process is gone is removed.
 func (a *App) attachedSessions(name string) int {
+	n, _ := a.attachedSessionsChecked(name)
+	return n
+}
+
+func (a *App) attachedSessionsChecked(name string) (int, error) {
 	dir, err := a.sessionsDir(name)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 0
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
 	}
 	n := 0
 	for _, e := range entries {
@@ -107,6 +172,9 @@ func (a *App) attachedSessions(name string) int {
 		path := filepath.Join(dir, e.Name())
 		f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return 0, err
+			}
 			continue
 		}
 		switch err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); {
@@ -115,8 +183,11 @@ func (a *App) attachedSessions(name string) int {
 		case err == nil:
 			// Its process is gone.
 			_ = os.Remove(path)
+		case err != nil:
+			_ = f.Close()
+			return 0, err
 		}
 		_ = f.Close()
 	}
-	return n
+	return n, nil
 }

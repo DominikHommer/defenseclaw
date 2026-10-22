@@ -252,7 +252,10 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	}
 	// While the harness runs, other sessions' ends leave the sandbox alone,
 	// and what its copy held as it last stopped is no longer known.
-	release := s.app.holdSession(s.sb.Name)
+	release, err := s.app.holdSession(ctx, s.sb.Name)
+	if err != nil {
+		return -1, err
+	}
 	defer release()
 	s.app.forgetStoppedCopy(s.sb.Name)
 	stop := s.beginSession(ctx)
@@ -361,7 +364,10 @@ var loginShell = []string{"sh", "-c", "if command -v bash >/dev/null 2>&1; then 
 func (s *session) attachShell(ctx context.Context) (int, error) {
 	// While the shell runs, other sessions' ends leave the sandbox alone,
 	// and what its copy held as it last stopped is no longer known.
-	release := s.app.holdSession(s.sb.Name)
+	release, err := s.app.holdSession(ctx, s.sb.Name)
+	if err != nil {
+		return -1, err
+	}
 	defer release()
 	s.app.forgetStoppedCopy(s.sb.Name)
 	stop := s.beginSession(ctx)
@@ -936,6 +942,31 @@ func firstN(list []string, n int) []string {
 	return append(append([]string(nil), list[:n]...), fmt.Sprintf("(+%d more)", len(list)-n))
 }
 
+// stopMountedBeforeReview recounts under the same admission gate that a new
+// session must cross, and keeps the gate until Stop returns. A failed recount
+// or gate acquisition leaves the mounted sandbox running.
+func (s *session) stopMountedBeforeReview(ctx context.Context) (sb *sandboxapi.Sandbox, others int, stopErr, admissionErr error) {
+	lifecycleUnlock, err := openshell.LockSandboxStart("")
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer lifecycleUnlock()
+	unlock, err := s.app.lockSessionAdmission(ctx, s.sb.Name, true)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer unlock()
+	others, err = s.app.attachedSessionsChecked(s.sb.Name)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if others > 0 {
+		return nil, others, nil, nil
+	}
+	sb, stopErr = s.api.Stop(ctx, s.sb.Name)
+	return sb, 0, stopErr, nil
+}
+
 // end runs the end-of-session summary, review and keep/undo decision.
 func (s *session) end(ctx context.Context) error {
 	ctx = context.WithoutCancel(ctx)
@@ -1031,7 +1062,14 @@ func (s *session) end(ctx context.Context) error {
 	case s.lost:
 		a.note(s.sb.Name + " keeps running for a reattach, so what changes after this review is not in it")
 	case s.started && !s.liveRun:
-		if sb, err := s.api.Stop(ctx, s.sb.Name); err != nil {
+		sb, others, stopErr, admissionErr := s.stopMountedBeforeReview(ctx)
+		if admissionErr != nil {
+			return fmt.Errorf("cannot decide whether to stop %s before reviewing its changes: %w; retry `%s review %s` and `%s stop %s` once its sessions are known", s.sb.Name, admissionErr, CommandName, s.sb.Name, CommandName, s.sb.Name)
+		}
+		s.others = others
+		if others > 0 {
+			a.note(s.sb.Name + " keeps running: " + s.othersText() + ", so what changes after this review is not in it")
+		} else if stopErr != nil {
 			if now, gerr := s.api.Get(ctx, s.sb.Name); gerr == nil && now.Phase == "error" {
 				// The runtime stopped as the session ended: the stop
 				// met that, in whatever words; the line says what happened,
@@ -1042,7 +1080,7 @@ func (s *session) end(ctx context.Context) error {
 				}
 			} else {
 				stopFailed = true
-				a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(err).Error() +
+				a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(stopErr).Error() +
 					"); what still runs in it can change the folder after this review")
 			}
 		} else {
@@ -1455,10 +1493,30 @@ func (e *sessionDeleteError) Unwrap() error { return e.err }
 func (s *session) finish(ctx context.Context, stopped bool) error {
 	a := s.app
 	name := s.sb.Name
+	retry := CommandName + " stop " + name
+	if s.rm {
+		retry = CommandName + " delete " + name
+		if s.keepSnapshot {
+			retry += " --keep-snapshot"
+		}
+	}
+	lifecycleUnlock, err := openshell.LockSandboxStart("")
+	if err != nil {
+		return fmt.Errorf("cannot finish %s during a gateway rollback: %w; retry `%s`", name, err, retry)
+	}
+	defer lifecycleUnlock()
+	unlock, err := a.lockSessionAdmission(ctx, name, true)
+	if err != nil {
+		return fmt.Errorf("cannot decide whether to finish %s while session admission is unavailable: %w; retry `%s`", name, err, retry)
+	}
+	defer unlock()
 	// A copy review can wait for an answer while another terminal connects.
 	// The count taken when the harness ended is stale by the time the review
-	// completes; use the current leases before deciding to stop or delete.
-	s.others = a.attachedSessions(name)
+	// completes; hold the admission gate from recount through Stop or Delete.
+	s.others, err = a.attachedSessionsChecked(name)
+	if err != nil {
+		return fmt.Errorf("cannot decide whether to finish %s because its sessions cannot be counted: %w; retry `%s`", name, err, retry)
+	}
 	switch {
 	case s.rm && s.liveRun:
 		s.notDeleted("its detached run is still going", "the run ends")

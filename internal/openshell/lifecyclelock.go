@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -53,11 +52,10 @@ var lifecycleLockWait = 2 * time.Minute
 const lifecycleLockPoll = 100 * time.Millisecond
 
 // lifecycleLockPath is the lock file of the OpenShell configuration
-// directory dir ("" is UserConfigDir). create makes a missing directory
-// (owner only), as a restart or an upgrade does; otherwise a missing one
-// is "": no gateway is registered there, and no restart or upgrade, which
-// makes it first, holds the lock.
-func lifecycleLockPath(dir string, create bool) (string, error) {
+// directory dir ("" is UserConfigDir). It makes a missing directory
+// (owner only), so an arriving sandbox operation and a first rollback
+// always contend on the same inode.
+func lifecycleLockPath(dir string) (string, error) {
 	if dir == "" {
 		var err error
 		if dir, err = UserConfigDir(); err != nil {
@@ -68,12 +66,8 @@ func lifecycleLockPath(dir string, create bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if create {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return "", fmt.Errorf("openshell: create %s for the gateway lifecycle lock: %w", dir, err)
-		}
-	} else if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
-		return "", nil
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("openshell: create %s for the gateway lifecycle lock: %w", dir, err)
 	}
 	return filepath.Join(dir, lifecycleLockFile), nil
 }
@@ -84,7 +78,7 @@ func lifecycleLockPath(dir string, create bool) (string, error) {
 // up to lifecycleLockWait (ErrGatewayBusy after it) or the end of ctx.
 // unlock releases it.
 func LockGatewayLifecycle(ctx context.Context, dir string) (unlock func(), err error) {
-	path, err := lifecycleLockPath(dir, true)
+	path, err := lifecycleLockPath(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -110,15 +104,11 @@ func LockGatewayLifecycle(ctx context.Context, dir string) (unlock func(), err e
 // LockSandboxStart takes the lifecycle lock of the OpenShell configuration
 // directory dir ("" is UserConfigDir) for a create or a start of a sandbox,
 // shared with the others, and refuses with ErrGatewayBusy at once while a
-// restart or an upgrade holds it. unlock releases it. A directory that
-// does not exist holds no lock (lifecycleLockPath).
+// restart or an upgrade holds it. unlock releases it.
 func LockSandboxStart(dir string) (unlock func(), err error) {
-	path, err := lifecycleLockPath(dir, false)
+	path, err := lifecycleLockPath(dir)
 	if err != nil {
 		return nil, err
-	}
-	if path == "" {
-		return func() {}, nil
 	}
 	unlock, err = tryLockFile(path, false)
 	if errors.Is(err, errLockHeld) {
@@ -127,34 +117,32 @@ func LockSandboxStart(dir string) (unlock func(), err error) {
 	return unlock, err
 }
 
-// WaitGatewayLifecycle gates every DefenseClaw sandbox command at entry.
-// A rollback holds the lifecycle lock exclusively through its final
-// stopped check and restart; commands wait for it to finish before reading
-// or changing sandbox state. Create and start also hold their shared lock
-// across the OpenShell call (LockSandboxStart).
-func WaitGatewayLifecycle(ctx context.Context, dir string) error {
-	path, err := lifecycleLockPath(dir, false)
-	if err != nil || path == "" {
-		return err
+// LockSandboxCommand holds the lifecycle lock throughout a DefenseClaw
+// sandbox command. A rollback holds it exclusively through its final
+// stopped check and restart; a command already admitted cannot cross that
+// decision, and a new command waits until the rollback completes.
+func LockSandboxCommand(ctx context.Context, dir string) (func(), error) {
+	path, err := lifecycleLockPath(dir)
+	if err != nil {
+		return nil, err
 	}
 	deadline := time.Now().Add(lifecycleLockWait)
 	for {
 		unlock, lockErr := tryLockFile(path, false)
 		if lockErr == nil {
-			unlock()
-			return nil
+			return unlock, nil
 		}
 		if !errors.Is(lockErr, errLockHeld) {
-			return lockErr
+			return nil, lockErr
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%w: wait for the gateway rollback to finish, then retry the sandbox command", ErrGatewayBusy)
+			return nil, fmt.Errorf("%w: wait for the gateway rollback to finish, then retry the sandbox command", ErrGatewayBusy)
 		}
 		t := time.NewTimer(lifecycleLockPoll)
 		select {
 		case <-ctx.Done():
 			t.Stop()
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-t.C:
 		}
 	}

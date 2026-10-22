@@ -271,7 +271,20 @@ func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Co
 		app := newSandboxApp(cmd)
 		var err error
 		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
-			err = openshell.WaitGatewayLifecycle(cmd.Context(), "")
+			var unlock func()
+			unlock, err = openshell.LockSandboxCommand(cmd.Context(), "")
+			if err == nil {
+				// These commands can take the exclusive lifecycle lock while
+				// applying or restoring gateway configuration. Their entry
+				// waits for an existing rollback, then the configurator owns
+				// the lock at each restart.
+				switch cmd.Name() {
+				case "setup", "doctor", "teardown":
+					unlock()
+				default:
+					defer unlock()
+				}
+			}
 		}
 		if err == nil {
 			err = fn(cmd.Context(), app, cmd, args)
