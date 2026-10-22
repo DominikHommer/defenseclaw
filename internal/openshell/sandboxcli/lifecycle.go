@@ -819,8 +819,14 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 			}
 			// A detached run or a session still going can change the copy
 			// between the look and the stop.
-			if sb.WorkdirMode == config.OpenShellWorkdirCopy && idle && a.attachedSessions(sb.Name) == 0 {
-				copyAt = a.copyAtStop(ctx, cli, sb)
+			if sb.WorkdirMode == config.OpenShellWorkdirCopy && idle {
+				n, err := a.attachedSessions(sb.Name)
+				if err != nil {
+					return attachedUnknown(sb.Name, err)
+				}
+				if n == 0 {
+					copyAt = a.copyAtStop(ctx, cli, sb)
+				}
 			}
 			if ok, err := a.fullDiskStop(ctx, cli, sb, copyAt, o.Yes); err != nil || !ok {
 				if err == nil {
@@ -1132,7 +1138,12 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 				a.note(name + "'s work was last " + a.handoverText(h) + "; nothing newer is left in it")
 			}
 		}
-		if n := a.attachedSessions(name); n > 0 {
+		n, err := a.attachedSessions(name)
+		if err != nil {
+			errs = append(errs, attachedUnknown(name, err))
+			continue
+		}
+		if n > 0 {
 			// Its sessions in other terminals end with it (GAP-0285).
 			what := attachedText(name, n) + "; deleting it ends " + them(n)
 			question = what + ". " + question

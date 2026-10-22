@@ -107,7 +107,11 @@ func (a *App) beforeStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.
 	}
 	// A session attached in another terminal ends with the stop: the stop
 	// asked about a detached run only (GAP-0277, GAP-0285).
-	if n := a.attachedSessions(sb.Name); n > 0 {
+	n, err := a.attachedSessions(sb.Name)
+	if err != nil {
+		return false, false, attachedUnknown(sb.Name, err)
+	}
+	if n > 0 {
 		if ok, err := a.confirmEnding(attachedText(sb.Name, n)+"; stopping the sandbox ends "+them(n), "Stop anyway?", yes); err != nil || !ok {
 			return false, false, err
 		}
@@ -139,6 +143,13 @@ func (a *App) beforeStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.
 // terminals (attachedSessions).
 func attachedText(name string, n int) string {
 	return plural(int64(n), "terminal is", "terminals are") + " attached to " + name + " (a harness session or `" + CommandName + " connect --shell`)"
+}
+
+// attachedUnknown is the error of a stop, delete or session end that could
+// not count the sessions attached to sandbox name: the sandbox is left as
+// it is rather than ended under a session the count could not see.
+func attachedUnknown(name string, err error) error {
+	return fmt.Errorf("cannot confirm whether another session uses %s: %w; run `%s status %s` before retrying", name, err, CommandName, name)
 }
 
 func them(n int) string {

@@ -650,7 +650,8 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		defer func() {
 			// A session that attached meanwhile (its hooks tell one that
 			// has ended already) may have changed the copy since the pull.
-			quiet := a.attachedSessions(o.Name) == 0
+			n, cerr := a.attachedSessions(o.Name)
+			quiet := cerr == nil && n == 0
 			stopped, err := api.Stop(context.WithoutCancel(ctx), o.Name)
 			if err != nil {
 				a.warn("could not stop " + o.Name + " again: " + apiError(err).Error())

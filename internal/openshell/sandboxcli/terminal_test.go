@@ -328,16 +328,16 @@ func TestSessionLeavesASandboxAnotherSessionIsAttachedTo(t *testing.T) {
 // a process that is gone, it no longer counts, and a count removes it.
 func TestSessionLeases(t *testing.T) {
 	ta := newTestApp(t, "")
-	if n := ta.attachedSessions("box"); n != 0 {
+	if n := countSessions(t, ta, "box"); n != 0 {
 		t.Fatalf("attached = %d before any session", n)
 	}
 	one, two := holdTestSession(t, ta, "box"), holdTestSession(t, ta, "box")
-	if n := ta.attachedSessions("box"); n != 2 {
+	if n := countSessions(t, ta, "box"); n != 2 {
 		t.Fatalf("attached = %d, want 2", n)
 	}
 	one()
 	one()
-	if n := ta.attachedSessions("box"); n != 1 {
+	if n := countSessions(t, ta, "box"); n != 1 {
 		t.Fatalf("attached = %d after one release, want 1", n)
 	}
 	two()
@@ -348,7 +348,7 @@ func TestSessionLeases(t *testing.T) {
 	// A lease file nobody holds (its process died).
 	stale := filepath.Join(dir, "4242-0a0b0c0d0e0f"+leaseSuffix)
 	writeFile(t, stale, "")
-	if n := ta.attachedSessions("box"); n != 0 {
+	if n := countSessions(t, ta, "box"); n != 0 {
 		t.Fatalf("attached = %d with only a stale lease", n)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {

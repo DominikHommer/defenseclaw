@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -106,20 +107,28 @@ func (a *App) holdSession(name string) (release func(), err error) {
 	}, nil
 }
 
-// attachedSessions counts the sessions whose harness or shell runs in
-// sandbox name now (on this machine, with this data dir). A lease whose
-// process is gone is removed.
-func (a *App) attachedSessions(name string) int {
-	n, _ := a.attachedSessionsChecked(name)
-	return n
+// openLease opens a lease file to see whether its process still holds it
+// (a variable so tests can race a release against a count).
+var openLease = func(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }
 
-func (a *App) attachedSessionsChecked(name string) (int, error) {
+// attachedSessions counts the sessions whose harness or shell runs in
+// sandbox name now (on this machine, with this data dir). A lease whose
+// process is gone is removed. A lease that is gone between the listing and
+// its open (its session released it, or another count removed it as dead)
+// is a session that ended; every other error is returned, and a caller
+// that would stop or delete the sandbox keeps it (attachedUnknown).
+func (a *App) attachedSessions(name string) (int, error) {
 	dir, err := a.sessionsDir(name)
 	if err != nil {
 		return 0, err
 	}
 	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		// No session has attached yet.
+		return 0, nil
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -129,7 +138,10 @@ func (a *App) attachedSessionsChecked(name string) (int, error) {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
-		f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		f, err := openLease(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return 0, err
 		}
