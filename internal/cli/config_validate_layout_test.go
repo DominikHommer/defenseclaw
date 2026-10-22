@@ -151,7 +151,7 @@ func TestConfigValidateDefaultsToTheManagedInstalledConfig(t *testing.T) {
 // JSON failure carries the same code.
 func TestConfigValidateMissingFileIsNotFound(t *testing.T) {
 	dir := t.TempDir()
-	useConfigValidateLayout(t, dir, false)
+	useConfigValidateLayout(t, dir, "linux", false)
 	missing := filepath.Join(dir, "no", "such.yaml")
 	for _, asJSON := range []bool{false, true} {
 		configValidateJSON = asJSON
