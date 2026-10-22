@@ -482,7 +482,7 @@ func (runtime *Runtime) emitWithLeaseControls(
 		// the outage stay visible remotely while the local store is down
 		// (GAP-1536). Imported records stay SQLite-first.
 		if len(outcome.OptionalWork()) > 0 {
-			if inbound {
+			if inbound || replayableControlPlaneEvent(metadata) {
 				return pipeline.LocalLogOutcome{}, processErr
 			}
 			runtime.dispatchOptional(lease, graph, outcome)
@@ -617,11 +617,24 @@ func (runtime *Runtime) EmitAtomicBatch(
 		}
 		outcome := outcomes[index]
 		if outcome.LocalPersisted() || outcome.ManagedOnly() ||
-			(processErr != nil && len(outcome.OptionalWork()) > 0) {
+			(processErr != nil && len(outcome.OptionalWork()) > 0 && !replayableControlPlaneEvent(items[index].Metadata)) {
 			runtime.dispatchOptional(lease, graph, outcome)
 		}
 	}
 	return outcomes, processErr
+}
+
+// These control-plane events have a durable producer spool. The producer
+// retries until the local append succeeds, so exporting a failed append
+// would send a fresh duplicate on every poll throughout a SQLite outage.
+// Live events without a spool retain their remote outage visibility.
+func replayableControlPlaneEvent(metadata router.Metadata) bool {
+	switch metadata.Action() {
+	case "config.bundle.receipt", "config.trust_anchors.changed", "config.secret.changed", "config.secret.change_failed":
+		return true
+	default:
+		return false
+	}
 }
 
 // dispatchOptional enqueues a log outcome's optional-destination work and

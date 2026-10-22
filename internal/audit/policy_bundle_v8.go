@@ -226,6 +226,7 @@ func (l *Logger) LogPolicyBundleReceipt(principal string, bundle PolicyBundle, r
 		Actor: actor, Principal: strings.TrimSpace(principal), Action: ActionConfigBundleReceipt,
 		TargetType: "policy_bundle", TargetID: receipt.ReceiptID, Reason: reason,
 		After: after, Severity: severity, Bundle: &bundle, BundleReceipt: &receipt,
+		OccurrenceID: stableOccurrenceID("config.bundle.receipt", receipt.ReceiptID+"\x00"+receipt.State),
 	})
 }
 

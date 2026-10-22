@@ -7,6 +7,7 @@
 package audit
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -21,9 +22,9 @@ func TestLogPolicyBundleReceiptCarriesTheDeliveryID(t *testing.T) {
 	logger := newTestLogger(t)
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
 	logger.SetRuntimeV8Emitter(runtime)
-	for _, id := range []string{"acme-agent:d-000913", "", "agent 7"} {
+	for i, id := range []string{"acme-agent:d-000913", "", "agent 7"} {
 		if err := logger.LogPolicyBundleReceipt("operator:root", PolicyBundle{ID: testPolicyBundleID, Version: 5},
-			PolicyBundleReceipt{ReceiptID: testPolicyBundleID, DeliveryID: id, State: PolicyBundleConfirmed, EnforcingVersion: 5}); err != nil {
+			PolicyBundleReceipt{ReceiptID: fmt.Sprintf("r-01JAZ3Y8Q2K7V4N6M5P0R9S8T%d", i), DeliveryID: id, State: PolicyBundleConfirmed, EnforcingVersion: 5}); err != nil {
 			t.Fatalf("LogPolicyBundleReceipt(%q): %v", id, err)
 		}
 	}
@@ -54,9 +55,9 @@ func TestLogPolicyBundleReceiptOmitsPrincipalRefOutsideTheSafeTokenSet(t *testin
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
 	logger.SetRuntimeV8Emitter(runtime)
 	principals := []string{"control-plane:acme/alice", "control-plane:acme/alice@example.com", `operator:CORP\admin`}
-	for _, principal := range principals {
+	for i, principal := range principals {
 		if err := logger.LogPolicyBundleReceipt(principal, PolicyBundle{ID: testPolicyBundleID, Version: 5},
-			PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: PolicyBundleConfirmed, EnforcingVersion: 5}); err != nil {
+			PolicyBundleReceipt{ReceiptID: fmt.Sprintf("r-01JAZ3Y8Q2K7V4N6M5P0R9S8T%d", i), State: PolicyBundleConfirmed, EnforcingVersion: 5}); err != nil {
 			t.Fatalf("LogPolicyBundleReceipt(%q): %v", principal, err)
 		}
 	}

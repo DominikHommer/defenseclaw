@@ -95,6 +95,16 @@ func TestLogPolicyBundleReceiptRecordsReceiptAndMetrics(t *testing.T) {
 		values[observability.EventName(observability.TelemetryInstrumentDefenseClawPolicyBundleVersion)] != "5" {
 		t.Fatalf("hot bundle metrics = %v", values)
 	}
+	if err := logger.LogPolicyBundleReceipt("operator:root",
+		PolicyBundle{ID: testPolicyBundleID, Version: 5},
+		PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: PolicyBundleConfirmed,
+			Restart: true, RestartRequired: true, ConfigGeneration: 3, EnforcingVersion: 5}); err != nil {
+		t.Fatal(err)
+	}
+	_, replayed := runtime.snapshot()
+	if len(replayed) != len(records) {
+		t.Fatalf("receipt replay emitted %d records, want %d", len(replayed), len(records))
+	}
 	if err := logger.LogPolicyBundleReceipt("", PolicyBundle{}, PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: "applied"}); err == nil {
 		t.Fatal("a receipt that is not terminal was recorded")
 	}
