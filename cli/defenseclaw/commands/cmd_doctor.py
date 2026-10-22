@@ -7201,10 +7201,10 @@ def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
     # A fork can briefly expose a second holder of the listening descriptor.
     # Re-prove the entire identity/endpoint binding; ambiguity itself never
     # authorizes the authenticated request. Persistent ambiguity stays closed.
-    for _ in range(2):
+    for delay in (0.05, 0.1, 0.2, 0.4):
         if trust.code != "ambiguous_listener":
             break
-        time.sleep(0.05)
+        time.sleep(delay)
         trust = _trusted_gateway_listener(cfg)
     if not trust.trusted and trust.code == "missing":
         return None, "the gateway is not running", False
