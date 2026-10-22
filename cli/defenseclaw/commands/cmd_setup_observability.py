@@ -678,12 +678,13 @@ def _local_splunk_sink_name(authored: list[dict[str, Any]], preferred: str) -> s
     local setup, so it is remote and is never taken over.
     """
 
+    from defenseclaw.observability.local_splunk import LOCAL_TOKEN_ENV
     from defenseclaw.observability.v8_presets import is_recorded_local_splunk
 
     recorded = [str(item.get("name")) for item in authored if is_recorded_local_splunk(item)]
     if recorded:
-        return recorded[0]
-    if any(item.get("name") == preferred for item in authored):
+        name = recorded[0]
+    elif any(item.get("name") == preferred for item in authored):
         raise ValueError(
             f"Destination {preferred!r} exists, but local Splunk setup did not record it, so DefenseClaw "
             "treats it as a remote destination and does not change it. Nothing was changed. If an older "
@@ -691,7 +692,30 @@ def _local_splunk_sink_name(authored: list[dict[str, Any]], preferred: str) -> s
             "and run local setup again. If it is a remote Splunk, add it again under another name with "
             "defenseclaw setup observability add splunk-enterprise --name <new name>, then remove this one."
         )
-    return preferred
+    else:
+        name = preferred
+    # This is also called before either local runtime starts. The writer's
+    # reference check alone is too late: it runs after the bridge is ready.
+    shared = _splunk_credential_reference_users(authored, name, LOCAL_TOKEN_ENV)
+    if shared:
+        other = shared[0]
+        raise ValueError(
+            f"Destination {other!r} already uses {LOCAL_TOKEN_ENV}, the local Splunk credential reference. "
+            "Nothing was changed. Give it an independent token with defenseclaw setup observability add "
+            f"splunk-enterprise --name {other} --endpoint <HEC_URL> --token <independent_token>, or remove it with "
+            f"defenseclaw setup observability remove {other} --yes before running local setup."
+        )
+    return name
+
+
+def _splunk_credential_reference_users(authored: list[dict[str, Any]], name: str, token_env: str) -> list[str]:
+    """Names of other destinations that already claim this credential reference."""
+
+    return sorted(
+        str(item.get("name"))
+        for item in authored
+        if item.get("name") != name and token_env in (item.get("token_env"), item.get("bearer_env"))
+    )
 
 
 def _splunk_destination_preset(
@@ -733,12 +757,8 @@ def _splunk_destination_preset(
         token_env = str(existing["token_env"])
     else:
         token_env = splunk_sink_token_env(name)
-    if not keeps_reference:
-        shared = sorted(
-            str(item.get("name"))
-            for item in authored
-            if item.get("name") != name and token_env in (item.get("token_env"), item.get("bearer_env"))
-        )
+    if not keeps_reference and local_stack is None:
+        shared = _splunk_credential_reference_users(authored, name, token_env)
         if shared:
             raise ValueError(
                 f"Destination {shared[0]!r} already uses the credential reference {token_env}, and a "

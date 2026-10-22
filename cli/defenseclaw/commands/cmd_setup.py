@@ -18482,6 +18482,7 @@ def _disable_splunk(
     native_was_running = False
     native_s3_export = False
     native_s3_overrides: dict[str, str] = {}
+    failed_hec_disable: list[str] = []
     config_snapshot: tuple[bytes | None, int | None] | None = None
     config_path = str(config_path_for_data_dir(app.cfg.data_dir))
 
@@ -18557,26 +18558,42 @@ def _disable_splunk(
                     else:
                         disabled_enterprise = True
                 except click.ClickException:
+                    failed_hec_disable.append(destination.name)
                     continue
             if (disable_both or logs_only) and manage_local:
-                suffix = "" if disabled_local else " (no active local sinks found)"
-                click.echo(f"    Local Splunk (HEC): disabled{suffix}")
+                if any(name in recorded_local for name in failed_hec_disable):
+                    click.echo("    Local Splunk (HEC): sink could not be disabled")
+                elif disabled_local:
+                    click.echo("    Local Splunk (HEC): sink disabled")
+                else:
+                    click.echo("    Local Splunk (HEC): no active recorded sink found")
                 if keep_local_stack:
                     _echo_local_splunk_kept(unrecorded_enabled)
+                elif failed_hec_disable:
+                    _echo_local_splunk_disable_failed(failed_hec_disable, disable_both=disable_both)
                 elif not disabled_local and logs_only and unrecorded_enabled:
                     click.echo(
                         f"    Local setup did not record {', '.join(unrecorded_enabled)}, so it counts as remote; "
                         "disable one with defenseclaw setup observability disable <name>."
                     )
             if disable_both or enterprise_only:
-                suffix = "" if disabled_enterprise else " (no active Enterprise sinks found)"
-                click.echo(f"    Splunk Enterprise (HEC): disabled{suffix}")
+                if any(name not in recorded_local for name in failed_hec_disable):
+                    click.echo("    Splunk Enterprise (HEC): some sinks could not be disabled")
+                else:
+                    suffix = "" if disabled_enterprise else " (no active Enterprise sinks found)"
+                    click.echo(f"    Splunk Enterprise (HEC): disabled{suffix}")
 
         _reload_cfg_from_data_dir(app)
         if native_disable:
-            if native_controller is not None and native_was_running:
+            if native_controller is not None and native_was_running and not failed_hec_disable:
                 native_controller.down()
-        elif (disable_both or logs_only) and manage_local and not native_windows and not keep_local_stack:
+        elif (
+            (disable_both or logs_only)
+            and manage_local
+            and not native_windows
+            and not keep_local_stack
+            and not failed_hec_disable
+        ):
             _stop_bridge(
                 app.cfg.data_dir,
                 gateway_token_env=gateway_token_env,
@@ -18642,6 +18659,16 @@ def _echo_local_splunk_kept(names: list[str]) -> None:
         "    To keep remote destinations sending, run defenseclaw setup splunk --logs --accept-splunk-license "
         "once so local setup records its own sink, then run defenseclaw setup splunk --disable --logs again."
     )
+
+
+def _echo_local_splunk_disable_failed(names: list[str], *, disable_both: bool) -> None:
+    """Keep a possible local receiver running while any HEC sink remains enabled."""
+
+    click.echo(f"    Local Splunk was not stopped: {', '.join(names)} could not be disabled.")
+    for name in names:
+        click.echo(f"      defenseclaw setup observability disable {name}")
+    command = "defenseclaw setup splunk --disable" + ("" if disable_both else " --logs")
+    click.echo(f"    After resolving those destinations, run {command} again.")
 
 
 def _stop_bridge(data_dir: str, *, gateway_token_env: str = "") -> None:

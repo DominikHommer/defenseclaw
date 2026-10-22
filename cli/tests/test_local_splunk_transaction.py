@@ -694,6 +694,46 @@ def test_local_setup_does_not_start_the_stack_when_it_would_refuse(tmp_path: Pat
     start.assert_not_called()
 
 
+@pytest.mark.parametrize("platform", ["unix", "native"])
+@pytest.mark.parametrize("recorded", [False, True], ids=["new-sink", "existing-record"])
+def test_local_setup_checks_credential_reference_collision_before_start(
+    tmp_path: Path, platform: str, recorded: bool
+) -> None:
+    app = _app(tmp_path)
+    authored = [_hec("remote", _REMOTE_HEC, LOCAL_TOKEN_ENV)]
+    if recorded:
+        authored.insert(0, _hec("owned", _DEFAULT_HEC, LOCAL_TOKEN_ENV, local_stack=dict(_RECORD)))
+    _write_state(tmp_path, authored, {"KEEP_ME": "unchanged", LOCAL_TOKEN_ENV: "older credential"})
+    before = ((tmp_path / "config.yaml").read_bytes(), (tmp_path / ".env").read_bytes())
+    status, validate = _v8_writer_patches()
+    if platform == "unix":
+        with (
+            status, validate,
+            patch.object(cmd_setup, "_native_windows_local_splunk", return_value=False),
+            patch.object(cmd_setup, "_bootstrap_bridge", return_value={"hec_url": _DEFAULT_HEC, "hec_token": "t"}) as start,
+            patch.object(cmd_setup, "_local_splunk_container_id", return_value=_FULL_ID),
+            pytest.raises((ClickException, ValueError)) as refused,
+        ):
+            cmd_setup._apply_logs_config(app, **_LOGS)
+    else:
+        with (
+            status, validate,
+            patch("defenseclaw.observability.local_splunk.start_native_local_splunk",
+                  return_value=FakeTransaction([])) as start,
+            patch.object(cmd_setup, "_is_pid_alive", return_value=False),
+            pytest.raises((ClickException, ValueError)) as refused,
+        ):
+            cmd_setup._apply_native_windows_logs_config(
+                app, **_LOGS, s3_export=False, s3_bucket=None, s3_prefix=None,
+                aws_region=None, refresh_bundle=True, gateway_token_env="",
+            )
+    start.assert_not_called()
+    assert "remote" in str(refused.value)
+    assert LOCAL_TOKEN_ENV in str(refused.value)
+    assert "Nothing was changed" in str(refused.value)
+    assert ((tmp_path / "config.yaml").read_bytes(), (tmp_path / ".env").read_bytes()) == before
+
+
 def _write_bridge_url(data_dir: Path, hec_url: str, *, where: str) -> None:
     # The private bridge env file of an earlier setup, or for a first setup the
     # seeded template the bridge env file is created from.
@@ -963,6 +1003,50 @@ def test_logs_disable_stops_the_recorded_stack_next_to_remote_destinations(tmp_p
     disabled, stopped = _logs_disable(app, host, status)
     assert disabled == ["local-splunk"]
     assert stopped
+
+
+@pytest.mark.parametrize("host", ["linux", "windows"])
+@pytest.mark.parametrize(
+    ("mode", "recorded"),
+    [("logs", True), ("both", True), ("both", False)],
+    ids=["recorded-logs", "recorded-both", "older-both"],
+)
+def test_disable_keeps_stack_when_an_enabled_sink_could_not_be_disabled(
+    tmp_path: Path, capsys, host: str, mode: str, recorded: bool
+) -> None:
+    app = _app(tmp_path)
+    (tmp_path / "splunk-bridge").mkdir()
+    name = "local-splunk" if recorded else "older"
+    sink = _hec(name, _DEFAULT_HEC, LOCAL_TOKEN_ENV)
+    if recorded:
+        sink["local_stack"] = dict(_RECORD)
+    _write_state(tmp_path, [sink], {"KEEP_ME": "unchanged"})
+    status = SimpleNamespace(name=name, kind="splunk_hec", enabled=True, endpoint=_DEFAULT_HEC)
+    stopped: list[str] = []
+    controller = SimpleNamespace(
+        s3_runtime_state=lambda: (False, {}),
+        down=lambda: stopped.append("native"),
+    )
+    with (
+        patch.object(cmd_setup.platform_support, "host_os", return_value=host),
+        patch("defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+              return_value=SimpleNamespace(destinations=(status,))),
+        patch("defenseclaw.commands.cmd_setup_observability._set_v8_destination_enabled",
+              side_effect=ClickException("write refused")),
+        patch("defenseclaw.observability.local_splunk.prepare_native_local_splunk_stop",
+              return_value=(controller, True)),
+        patch.object(cmd_setup, "_stop_bridge", side_effect=lambda *_a, **_k: stopped.append("unix")),
+        patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
+    ):
+        cmd_setup._disable_splunk(app, False, mode == "logs", False, True)
+    assert stopped == []
+    out = capsys.readouterr().out
+    assert f"Local Splunk was not stopped: {name} could not be disabled" in out
+    assert f"defenseclaw setup observability disable {name}" in out
+    if recorded:
+        assert "Local Splunk (HEC): sink could not be disabled" in out
+    else:
+        assert "Splunk Enterprise (HEC): some sinks could not be disabled" in out
 
 
 def test_splunk_status_labels_only_the_recorded_sink_local(tmp_path: Path, capsys) -> None:

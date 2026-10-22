@@ -1410,7 +1410,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
                 signals=None,
                 target=None,
             )
-            # As the local Splunk setup writes it (GAP-0208).
+            # A pre-1.0.4 local setup left this sink without a local_stack record.
             local_destination["network_safety"] = {"allow_private_networks": True}
             destinations.append(local_destination)
         self._write_v8_destinations(destinations)
@@ -2134,7 +2134,9 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("HEC): disabled", result.output)
+        self.assertIn("Local Splunk (HEC): no active recorded sink found", result.output)
+        self.assertIn("Local Splunk was not stopped", result.output)
+        self.assertTrue(self._v8_destinations()[0]["enabled"])
 
     def test_setup_splunk_disable_both(self):
         from defenseclaw.commands.cmd_setup import setup
