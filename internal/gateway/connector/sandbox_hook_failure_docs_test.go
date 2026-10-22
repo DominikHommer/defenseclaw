@@ -76,39 +76,39 @@ func sandboxPluginNames(plugins []sandboxPlugin) string {
 	return strings.Join(names, "")
 }
 
-func failModesPage(t *testing.T) string {
+func outageReferencePage(t *testing.T) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "configuration", "fail-modes.mdx"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "apis", "capability-matrix.mdx"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return strings.Join(strings.Fields(string(raw)), " ")
 }
 
-// The fail-modes page says which sandbox hooks leave a hook-failures.jsonl
+// The capability matrix says which sandbox hooks leave a hook-failures.jsonl
 // record in the guest: the shell hooks do, and it names each plugin that
 // does not. Both halves are read from the rendered overlays, so a shell hook
 // that stops logging, or a plugin that starts, fails here until the page
 // says so.
 func TestFailModesDocNamesTheSandboxHooksThatLogFailures(t *testing.T) {
 	plugins := sandboxPlugins(t)
-	page := failModesPage(t)
-	claim := "In an OpenShell sandbox the shell hooks write the same record inside the guest at `" + SandboxHookLogDir + "/hook-failures.jsonl`"
+	page := outageReferencePage(t)
+	claim := "Sandbox shell hooks record failures at `" + SandboxHookLogDir + "/hook-failures.jsonl`"
 	if !strings.Contains(page, claim) {
-		t.Fatalf("fail-modes.mdx must scope the sandbox log claim to shell hooks: %q", claim)
+		t.Fatalf("capability-matrix.mdx must scope the sandbox log claim to shell hooks: %q", claim)
 	}
 	if strings.Contains(page, "Sandbox hooks write the same record") {
-		t.Fatal("fail-modes.mdx promises a failure record from every sandbox hook")
+		t.Fatal("capability-matrix.mdx promises a failure record from every sandbox hook")
 	}
 	const tail = " sandbox plugins write no record."
 	if len(plugins) == 0 {
 		if strings.Contains(page, tail) {
-			t.Fatal("fail-modes.mdx names sandbox plugins that write no record, but every sandbox hook logs")
+			t.Fatal("capability-matrix.mdx names sandbox plugins that write no record, but every sandbox hook logs")
 		}
 		return
 	}
 	if want := "The " + sandboxPluginNames(plugins) + tail; !strings.Contains(page, want) {
-		t.Fatalf("fail-modes.mdx must name the sandbox plugins that write no failure record: %q", want)
+		t.Fatalf("capability-matrix.mdx must name the sandbox plugins that write no failure record: %q", want)
 	}
 }
 
@@ -194,15 +194,15 @@ func dropJSBlocks(t *testing.T, src, head string) string {
 // fails here until the page says so.
 func TestFailModesDocSaysSandboxPluginsDoNotBlockPrompts(t *testing.T) {
 	plugins := sandboxPlugins(t)
-	page := failModesPage(t)
+	page := outageReferencePage(t)
 	if strings.Contains(page, "sandbox plugins block those calls too") {
-		t.Fatal("fail-modes.mdx says the sandbox plugins block prompts as well as tool calls")
+		t.Fatal("capability-matrix.mdx says the sandbox plugins block prompts as well as tool calls")
 	}
 	if strings.Contains(page, "The next prompt or tool call is blocked as before.") {
-		t.Fatal("fail-modes.mdx says every next prompt is blocked; not every hook can block a prompt")
+		t.Fatal("capability-matrix.mdx says every next prompt is blocked; not every hook can block a prompt")
 	}
 	if want := "The next tool call is blocked as before, and so is the next prompt where the hook can block one."; !strings.Contains(page, want) {
-		t.Fatalf("fail-modes.mdx must qualify the next-prompt sentence: %q", want)
+		t.Fatalf("capability-matrix.mdx must qualify the next-prompt sentence: %q", want)
 	}
 	var blockers []string
 	for _, p := range plugins {
@@ -217,7 +217,7 @@ func TestFailModesDocSaysSandboxPluginsDoNotBlockPrompts(t *testing.T) {
 	const noPrompts = " do not block prompts."
 	if len(blockers) > 0 {
 		if strings.Contains(page, noPrompts) {
-			t.Fatalf("fail-modes.mdx says the sandbox plugins do not block prompts, but: %s", strings.Join(blockers, "; "))
+			t.Fatalf("capability-matrix.mdx says the sandbox plugins do not block prompts, but: %s", strings.Join(blockers, "; "))
 		}
 		return
 	}
@@ -226,6 +226,6 @@ func TestFailModesDocSaysSandboxPluginsDoNotBlockPrompts(t *testing.T) {
 	}
 	want := "The " + sandboxPluginNames(plugins) + " sandbox plugins write no record. They block a tool call they cannot check and" + noPrompts
 	if !strings.Contains(page, want) {
-		t.Fatalf("fail-modes.mdx must say the sandbox plugins block tool calls only: %q", want)
+		t.Fatalf("capability-matrix.mdx must say the sandbox plugins block tool calls only: %q", want)
 	}
 }

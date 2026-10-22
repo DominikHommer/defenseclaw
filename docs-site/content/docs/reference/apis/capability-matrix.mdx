@@ -92,3 +92,7 @@ The default is `closed` everywhere except Secure Client. On a managed standalone
 | Not tested live | A sign-in path no live run exercised. The connector's reference page says which sign-ins `sandbox run` shares. |
 
 `openshell.harnesses` (Claude Code and Codex when empty) decides which images `defenseclaw sandbox setup` and a bare `defenseclaw sandbox image build` build, and which `defenseclaw sandbox doctor` checks. `sandbox setup --harness` (repeatable) replaces that list, so name every harness you want. `sandbox image build <harness>` builds what you name without changing the list, and `sandbox run` builds a missing image on first use. Every sandbox hook fails closed.
+
+## Sandbox failure records
+
+Sandbox shell hooks record failures at `/sandbox/.defenseclaw/logs/hook-failures.jsonl`, including neutral stop responses and closed prompt or tool-call failures. The Amp and OpenCode sandbox plugins write no record. They block a tool call they cannot check and do not block prompts. The next tool call is blocked as before, and so is the next prompt where the hook can block one.
