@@ -213,6 +213,10 @@ func Locked(ctx context.Context, path string, opt Options, install func() (bool,
 		return Result{}, err
 	}
 	defer txn.Close()
+	before, _, beforeExists, err := txn.Read()
+	if err != nil {
+		return Result{}, err
+	}
 	changed, err := install()
 	if err != nil {
 		return Result{}, err
@@ -225,6 +229,13 @@ func Locked(ctx context.Context, path string, opt Options, install func() (bool,
 	if !changed {
 		state, _ := cfgtxn.ReadGenerationState(txn.Path())
 		return Result{Generation: state.Generation, SHA256: sum}, nil
+	}
+	// Recording bytes that were already in place binds them to the bundle
+	// through the record alone, as an equal-byte ReplaceDocument does.
+	if beforeExists && bytes.Equal(before, raw) {
+		if err := refuseUnprovenBundleBinding(txn.Path(), opt); err != nil {
+			return Result{}, err
+		}
 	}
 	state, err := txn.RecordGeneration(sum, opt.writer())
 	if err != nil {
@@ -441,6 +452,32 @@ func managedRefuses(current []byte, opt Options) bool {
 	return config.StandaloneManagedSource(current)
 }
 
+// ErrUnprovenBundleBinding is returned when a bundle would be bound to
+// config bytes already in place while config.generation.json is there but
+// cannot be read: the record is the only proof of what installed those
+// bytes, and recording the bundle would replace it.
+var ErrUnprovenBundleBinding = errors.New("configwrite: cannot bind a bundle to an unreadable generation record")
+
+// RefuseUnprovenBundleBinding returns ErrUnprovenBundleBinding (wrapped,
+// with the next step) when opt binds a bundle and the generation record next
+// to configPath exists but cannot be read. A missing record is no evidence
+// to lose. Callers that bind installed bytes outside this package (the
+// Windows lifecycle's config step) check it before they change anything.
+func RefuseUnprovenBundleBinding(configPath string, opt Options) error {
+	return refuseUnprovenBundleBinding(configPath, opt)
+}
+
+func refuseUnprovenBundleBinding(configPath string, opt Options) error {
+	if opt.Bundle.ID == "" {
+		return nil
+	}
+	_, err := cfgtxn.ReadGenerationState(configPath)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return fmt.Errorf("%w: %w; it was left as it was. Run `enterprise bundle status --json` and restore the protected generation record before retrying", ErrUnprovenBundleBinding, err)
+}
+
 type mutateFunc func(current []byte) (candidate []byte, changed []string, err error)
 
 func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) (Result, error) {
@@ -481,10 +518,10 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 		return Result{}, err
 	}
 	if exists && bytes.Equal(candidate, current) {
-		state, stateErr := cfgtxn.ReadGenerationState(txn.Path())
-		if opt.Bundle.ID != "" && stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
-			return Result{}, fmt.Errorf("configwrite: cannot bind a bundle to an unreadable generation record: %w; run `enterprise bundle status --json` and restore the protected generation record before retrying", stateErr)
+		if err := refuseUnprovenBundleBinding(txn.Path(), opt); err != nil {
+			return Result{}, err
 		}
+		state, stateErr := cfgtxn.ReadGenerationState(txn.Path())
 		// A first bundle (or another bundle with equal config bytes) still
 		// changes the policy's provenance and digest scope. The lifecycle
 		// must also clear that identity when undoing to the equal-byte base.

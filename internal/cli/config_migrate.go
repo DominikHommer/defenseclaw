@@ -284,6 +284,13 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 		opt = bundleOpt
 		opt.ExpectSHA256 = configwrite.SHA256Hex(raw)
 	}
+	// A staged bundle binds the bytes already installed through the
+	// generation record alone. An unreadable record is the only evidence of
+	// what installed them: refuse before the step migrates, records or
+	// re-permissions anything, so the transaction fails and keeps it.
+	if err := configwrite.RefuseUnprovenBundleBinding(path, opt); err != nil {
+		return err
+	}
 	restoreACL, err := keepConfigDACL(path)
 	if err != nil {
 		return fmt.Errorf("read the access control list of %s: %w", path, err)

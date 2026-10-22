@@ -79,3 +79,86 @@ func TestEqualConfigBytesRecordANewBundleIdentity(t *testing.T) {
 		t.Fatalf("refusal rewrote the unproven generation: %q, %v", after, err)
 	}
 }
+
+// W4b loop round 1: the lifecycle's Locked path (the Windows config step a
+// Codex repair or an equal-byte bundle upgrade runs, the Unix bundle record)
+// binds bytes already in place through the record alone. Over a record that
+// is there but cannot be read it refuses and leaves the record as it was; a
+// write of new bytes, a missing record and a write without a bundle still
+// record, as before.
+func TestLockedRefusesBundleBindingOverUnreadableGeneration(t *testing.T) {
+	bundle := Options{Actor: "operator:test", Lifecycle: true,
+		Bundle: BundleRef{ID: "b-01J9ZZZZZZZZZZZZZZZZZZZZZZ", Version: 1, SignerKeyID: "k1"}}
+	lifecycle := Options{Actor: ActorLifecycle, Reason: "enterprise windows ensure"}
+	corrupt := func(t *testing.T, path string) []byte {
+		raw := []byte(`{"generation":7,`)
+		if err := os.WriteFile(GenerationPath(path), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	unreadable := func(t *testing.T, path string) []byte {
+		// A directory where the record belongs: there, but no record can be read.
+		if err := os.Mkdir(GenerationPath(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	for _, tc := range []struct {
+		name    string
+		opt     Options
+		damage  func(*testing.T, string) []byte
+		rewrite bool
+		refuse  bool
+	}{
+		{name: "bundle over corrupt record", opt: bundle, damage: corrupt, refuse: true},
+		{name: "bundle over unreadable record", opt: bundle, damage: unreadable, refuse: true},
+		{name: "bundle writing new bytes over corrupt record", opt: bundle, damage: corrupt, rewrite: true},
+		{name: "bundle without a record", opt: bundle},
+		{name: "lifecycle over corrupt record", opt: lifecycle, damage: corrupt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTestConfig(t, "deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nobservability: {}\n")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var before []byte
+			if tc.damage != nil {
+				before = tc.damage(t, path)
+			}
+			_, err = Locked(context.Background(), path, tc.opt, func() (bool, error) {
+				if tc.rewrite {
+					return true, os.WriteFile(path, append(raw, []byte("# bundle\n")...), 0o600)
+				}
+				return true, nil
+			})
+			if tc.refuse {
+				if !errors.Is(err, ErrUnprovenBundleBinding) || !strings.Contains(err.Error(), "enterprise bundle status --json") {
+					t.Fatalf("Locked over unproven generation: %v", err)
+				}
+				if before != nil {
+					if after, readErr := os.ReadFile(GenerationPath(path)); readErr != nil || string(after) != string(before) {
+						t.Fatalf("refusal rewrote the record: %q, %v", after, readErr)
+					}
+				} else if info, statErr := os.Stat(GenerationPath(path)); statErr != nil || !info.IsDir() {
+					t.Fatalf("refusal replaced the unreadable record: %v", statErr)
+				}
+				if after, _ := os.ReadFile(path); string(after) != string(raw) {
+					t.Fatalf("refusal changed config.yaml: %q", after)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := ReadGenerationState(path)
+			if err != nil || state.BundleID != tc.opt.Bundle.ID || state.Actor != tc.opt.Actor {
+				t.Fatalf("recorded %+v, %v", state, err)
+			}
+			if tc.damage != nil && (!state.GenerationReset || state.Generation != 8) {
+				t.Fatalf("a reset over a corrupt record must say so and keep counting: %+v", state)
+			}
+		})
+	}
+}
