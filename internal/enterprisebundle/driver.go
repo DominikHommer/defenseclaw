@@ -336,7 +336,11 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 // SettleRun finishes what an interrupted run left (Store.Settle) and then
 // each applied but unconfirmed receipt: confirmed when the deployment holds
 // its config and the gateway enforces its digest, failed(not_confirmed)
-// otherwise. rollback lists the receipts failed here whose config is still
+// otherwise. An applied receipt bundle-state.json already names as current
+// (Store.Confirm stopped after its state write) completes from that proof in
+// Store.Settle: its apply was proven before the state write, so a gateway
+// that is down or not ready now neither fails it nor makes it a rollback
+// target while the state still names it. rollback lists the receipts failed here whose config is still
 // the installed one: the caller installs the last good config again.
 //
 // Matching config bytes alone do not prove an apply: different signed bundles
@@ -352,7 +356,7 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 	if err != nil {
 		return report, rollback, err
 	}
-	report, err = d.Store.settle(false, installedDirs...)
+	report, err = d.Store.Settle(installedDirs...)
 	report.Completed = append(completed, report.Completed...)
 	report.Interrupted = append(interrupted, report.Interrupted...)
 	if err != nil {
