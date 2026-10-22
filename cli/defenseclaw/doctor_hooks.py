@@ -3147,6 +3147,14 @@ def _validate_copilot_hook_matrix(
                 "stale",
                 f"Copilot event {event} has {len(owned)} DefenseClaw handlers; expected exactly one",
             )
+        if len(entries) != 1:
+            # defenseclaw.json is DefenseClaw's file; Setup leaves its handler
+            # alone on a bound event (rel-1-0-4 GAP-0600).
+            raise _InspectionError(
+                "foreign",
+                f"Copilot event {event} runs {len(entries) - 1} other handler(s) beside DefenseClaw's "
+                "in DefenseClaw's hook file",
+            )
         entry, command, target = owned[0]
         if entry.get("type") != "command":
             raise _InspectionError("malformed", f"Copilot event {event} handler type is not command")

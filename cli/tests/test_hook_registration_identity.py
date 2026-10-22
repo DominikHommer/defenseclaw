@@ -85,7 +85,7 @@ def _assert_every_check_fails(cfg, connector: str, monkeypatch, drift: str, *, r
     status = cmd_status._hook_runtime_degraded_suffix(cfg, connector)
     assert "DEGRADED" in status, status
     # The setup read-back warns only for what the gateway's restart (its
-    # setup of the connector) puts back: a removed entry, a changed script.
+    # setup of the connector) puts back: a changed script.
     step = bootstrap._connector_runtime_readiness(cfg, connector)
     assert step is not None and step.status == ("warn" if restart_repairs else "fail"), step
     assert "is not guarded" in step.detail
@@ -156,7 +156,8 @@ def test_a_removed_pretooluse_event_fails_every_check(tmp_path, monkeypatch, cas
     cmd_doctor._check_copilot_hooks(cfg, r)
     row = next(row for row in r.checks if row["label"] == "Copilot hooks")
     assert row["status"] == "fail" and "preToolUse" in row["detail"], row
-    _assert_every_check_fails(cfg, "copilot", monkeypatch, fail_mode.REGISTRATION_UNGUARDED, restart_repairs=True)
+    # An unguarded tool-call event blocks the read-back (merged from W15).
+    _assert_every_check_fails(cfg, "copilot", monkeypatch, fail_mode.REGISTRATION_UNGUARDED)
 
 
 def _seal(cfg, connector: str) -> Path:
@@ -206,3 +207,75 @@ def test_a_hook_another_account_can_change_fails_every_check(tmp_path, monkeypat
         _assert_every_check_fails(cfg, "copilot", monkeypatch, "hook-runtime-stale")
     finally:
         script.parent.chmod(0o700)
+
+
+_OWNED = [case for case in _POSIX if case["connector"] in {"copilot", "kiro"}]
+
+
+def _beside(cfg, case: dict[str, Any], config: Path, command: str) -> None:
+    """Add *command* on the tool-guard event of DefenseClaw's own hook file, beside DefenseClaw's entry."""
+
+    document = json.loads(config.read_text(encoding="utf-8"))
+    if case["connector"] == "copilot":
+        document["hooks"]["preToolUse"].append({"type": "command", "bash": command, "timeoutSec": 30})
+    else:
+        document["hooks"].append(
+            {
+                "name": "audit",
+                "trigger": "PreToolUse",
+                "matcher": ".*",
+                "timeout": 30,
+                "enabled": True,
+                "action": {"type": "command", "command": command},
+            }
+        )
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+
+@pytest.mark.parametrize("case", _OWNED, ids=_case_id)
+@pytest.mark.parametrize(
+    "form", ["bash-wrapper", "bare-bash-wrapper", "env-wrapper", "renamed-copy", "marker-stripped"]
+)
+def test_another_entry_in_defenseclaws_own_hook_file_fails_every_check(tmp_path, monkeypatch, case, form):
+    # rel-1-0-4 GAP-0600: Copilot's and Kiro's defenseclaw.json are
+    # DefenseClaw's files; on a bound event any entry but Setup's ran beside it.
+    cfg, paths = _install(tmp_path, monkeypatch, case)
+    config = Path(paths[0])
+    assert config.name == "defenseclaw.json"
+    lane = _lane_copy(tmp_path, case)
+    unmarked = tmp_path / "lane" / ("old.sh" if form == "renamed-copy" else f"stripped/{_script(case)}")
+    unmarked.parent.mkdir(parents=True, exist_ok=True)
+    unmarked.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    command = {
+        "bash-wrapper": f"/bin/bash {lane} --event preToolUse",
+        "bare-bash-wrapper": f"bash {lane}",
+        "env-wrapper": f"/usr/bin/env {lane}",
+        "renamed-copy": f"{unmarked} --event preToolUse",
+        "marker-stripped": str(unmarked),
+    }[form]
+    _beside(cfg, case, config, command)
+
+    problems = hook_integrity.edited_hook_problems(cfg, case["connector"])
+    assert problems and command in problems[0], problems
+    _assert_every_check_fails(cfg, case["connector"], monkeypatch, "registration-foreign")
+
+
+@pytest.mark.parametrize("case", _POSIX, ids=_case_id)
+def test_a_wrapper_around_an_old_copy_fails_every_check(tmp_path, monkeypatch, case):
+    # rel-1-0-4 GAP-0600: "bash <old copy>" in any agent's hook file.
+    connector = case["connector"]
+    cfg, paths = _install(tmp_path, monkeypatch, case)
+    config = Path(paths[0])
+    text = config.read_text(encoding="utf-8")
+    current = f"{_registered(cfg)}/{_script(case)}"
+    lane = _lane_copy(tmp_path, case)
+    # YAML writes the shell-quoted word with doubled quotes, JSON as '<path>'.
+    forms = ((f"'''{current}'''", f"'bash ''{lane}'''"), (f"'{current}'", f"bash '{lane}'"), (current, f"bash {lane}"))
+    for quoted, wrapped in forms:
+        if quoted in text:
+            config.write_text(text.replace(quoted, wrapped, 1), encoding="utf-8")
+            break
+
+    problems = hook_integrity.edited_hook_problems(cfg, connector)
+    assert problems and str(lane) in problems[0], problems
+    _assert_every_check_fails(cfg, connector, monkeypatch, "registration-foreign")

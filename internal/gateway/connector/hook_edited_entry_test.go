@@ -106,6 +106,7 @@ func TestEditedHookEntriesReplacedAndRemoved(t *testing.T) {
 		file     string
 		seed     string
 		foreign  bool
+		owned    bool // DefenseClaw's own file: Setup keeps only its render on a bound event
 		install  func(t *testing.T, root, path string) error
 		teardown func(t *testing.T, root, path string) error
 	}
@@ -142,7 +143,7 @@ func TestEditedHookEntriesReplacedAndRemoved(t *testing.T) {
 				return codex.Teardown(context.Background(), baseOpts(root))
 			},
 		},
-		"copilot": {script: "copilot-hook.sh", file: "defenseclaw.json", foreign: true,
+		"copilot": {script: "copilot-hook.sh", file: "defenseclaw.json", foreign: true, owned: true,
 			install: func(t *testing.T, root, path string) error {
 				return patchCopilotHooks(path, hookScript(root, "copilot-hook.sh"))
 			},
@@ -249,7 +250,7 @@ func TestEditedHookEntriesReplacedAndRemoved(t *testing.T) {
 					t.Errorf("repair left %d references to the hook script, want %d (one hook set):\n%s", got, sets, repaired)
 				}
 				wantKept := 0
-				if variant == "foreign" {
+				if variant == "foreign" && !tc.owned {
 					wantKept = kept
 				}
 				if got := strings.Count(repaired, editedPath); got != wantKept {
@@ -260,6 +261,9 @@ func TestEditedHookEntriesReplacedAndRemoved(t *testing.T) {
 				}
 				if err := tc.teardown(t, root, path); err != nil {
 					t.Fatalf("uninstall: %v", err)
+				}
+				if variant == "foreign" {
+					wantKept = kept // teardown removes only DefenseClaw's entries
 				}
 				left := readHookFileForTest(t, path)
 				if got := strings.Count(left, editedPath); got != wantKept || strings.Contains(left, current) {
@@ -482,10 +486,24 @@ func TestOwnedHooksPresentRejectsSingleEditedEntry(t *testing.T) {
 				if bytes.Contains(repointed, []byte(lane+" --")) || bytes.Contains(repointed, []byte(lane+"' --")) {
 					expectRepaired(t, path, "repointed at a deleted copy", pristine, repointed)
 				}
+				// A shell wrapper in front of an old copy runs it too.
+				writeOldHookCopyForTest(t, lane)
+				wrapped := pristine
+				// The command word as JSON, YAML ('' is a quote) or TOML
+				// writes it, quoted for the shell or not.
+				for _, quote := range [][2]string{{`"'`, `"bash '`}, {`'''`, `'bash ''`}, {`"`, `"bash `}, {`'`, `'bash `}} {
+					if bytes.Contains(pristine, []byte(quote[0]+registered)) {
+						wrapped = replaceNthForTest(pristine, quote[0]+registered, quote[1]+lane, 0)
+						break
+					}
+				}
+				if bytes.Equal(wrapped, pristine) {
+					t.Fatalf("%s: no command word to wrap", path)
+				}
+				expectRepaired(t, path, "wrapped copy", pristine, wrapped)
 				if name != "hermes" && name != "copilot" {
 					continue
 				}
-				// The user's own hook is ignored, then kept by every repair.
 				document := decodeHookFileForTest(t, path)
 				hooks := document["hooks"].(map[string]interface{})
 				event, userHook := "agentStop", map[string]interface{}{"type": "command", "bash": "/usr/local/bin/audit-stop.sh"}
@@ -495,6 +513,13 @@ func TestOwnedHooksPresentRejectsSingleEditedEntry(t *testing.T) {
 				ours := hooks[event].([]interface{})[0]
 				hooks[event] = []interface{}{userHook, ours}
 				withUser := encodeHookFileForTest(t, path, document)
+				if name == "copilot" {
+					// defenseclaw.json is DefenseClaw's file: on an event it
+					// binds, another hook is not kept (rel-1-0-4 GAP-0600).
+					expectRepaired(t, path, "another hook on a bound event", pristine, withUser)
+					continue
+				}
+				// The user's own hook is ignored, then kept by every repair.
 				if err := os.WriteFile(path, withUser, 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -607,4 +632,106 @@ func encodeHookFileForTest(t *testing.T, path string, document map[string]interf
 		t.Fatal(err)
 	}
 	return append(data, '\n')
+}
+
+// rel-1-0-4 GAP-0600: in DefenseClaw's own hook file (Copilot's and Kiro's
+// defenseclaw.json) an entry beside DefenseClaw's on a bound event ran a
+// hook DefenseClaw does not keep current while the presence check passed: a
+// shell or env wrapper around an old copy, a renamed copy, or a copy without
+// the generated-hook marker. Presence fails and Setup leaves its render alone.
+func TestOwnedHookFileHoldsOnlyTheSetupRender(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows registers the native hook launcher, not a hook script")
+	}
+	override := func(t *testing.T, target *string, value string) {
+		previous := *target
+		*target = value
+		t.Cleanup(func() { *target = previous })
+	}
+	cases := map[string]struct {
+		install func(t *testing.T) Connector
+		beside  func(document map[string]interface{}, command string)
+	}{
+		"copilot": {
+			install: func(t *testing.T) Connector {
+				override(t, &CopilotHooksPathOverride, filepath.Join(t.TempDir(), "defenseclaw.json"))
+				return NewCopilotConnector()
+			},
+			beside: func(document map[string]interface{}, command string) {
+				hooks := document["hooks"].(map[string]interface{})
+				hooks["preToolUse"] = append(hooks["preToolUse"].([]interface{}),
+					map[string]interface{}{"type": "command", "bash": command, "timeoutSec": 30})
+			},
+		},
+		"kiro": {
+			install: func(t *testing.T) Connector {
+				override(t, &KiroHomeOverride, t.TempDir())
+				return NewKiroConnector()
+			},
+			beside: func(document map[string]interface{}, command string) {
+				document["hooks"] = append(document["hooks"].([]interface{}), map[string]interface{}{
+					"name": "audit", "trigger": "PreToolUse", "matcher": ".*", "timeout": 30, "enabled": true,
+					"action": map[string]interface{}{"type": "command", "command": command},
+				})
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			conn := tc.install(t)
+			opts := SetupOpts{
+				DataDir:  filepath.Join(testenv.PrivateTempDir(t), ".defenseclaw"),
+				APIAddr:  "127.0.0.1:18970",
+				APIToken: "tok-test",
+			}
+			ctx := context.Background()
+			if err := conn.Setup(ctx, opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			paths := HookConfigPathsForConnector(conn, opts)
+			if len(paths) == 0 || filepath.Base(paths[0]) != "defenseclaw.json" {
+				t.Fatalf("hook config paths = %v", paths)
+			}
+			path := paths[0]
+			pristine, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lane := filepath.Join(testenv.PrivateTempDir(t), "lane")
+			copied := filepath.Join(lane, name+"-hook.sh")
+			writeOldHookCopyForTest(t, copied)
+			renamed := filepath.Join(lane, "old.sh")
+			stripped := filepath.Join(lane, "stripped", name+"-hook.sh")
+			for _, unmarked := range []string{renamed, stripped} {
+				if err := os.MkdirAll(filepath.Dir(unmarked), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(unmarked, []byte("#!/bin/bash\nexit 0\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for label, command := range map[string]string{
+				"bash wrapper":         "/bin/bash " + copied + " --event preToolUse",
+				"bare bash wrapper":    "bash " + copied,
+				"env wrapper":          "/usr/bin/env " + copied,
+				"renamed copy":         renamed + " --event preToolUse",
+				"marker-stripped copy": stripped,
+			} {
+				document := decodeHookFileForTest(t, path)
+				tc.beside(document, command)
+				if err := os.WriteFile(path, encodeHookFileForTest(t, path, document), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if present, err := OwnedHooksPresent(conn, opts); err != nil || present {
+					t.Fatalf("%s: OwnedHooksPresent = %v, %v; want false", label, present, err)
+				}
+				if err := conn.Setup(ctx, opts); err != nil {
+					t.Fatalf("%s: repair: %v", label, err)
+				}
+				if got := readHookFileForTest(t, path); got != string(pristine) {
+					t.Fatalf("%s: repair is not the Setup render:\n%s", label, got)
+				}
+			}
+		})
+	}
 }

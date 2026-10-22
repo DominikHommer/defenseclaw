@@ -1061,14 +1061,16 @@ def copied_hook_script(command: str, script_name: str) -> str:
     any release (whatever follows it: Antigravity passes the event bare,
     Claude Code appends its missing-script guard), or a path with the
     connector's script name followed by DefenseClaw's ``--event`` /
-    ``--hook-surface`` binding (the copy may have been deleted since). An entry repointed at
-    an old copy in another folder kept doctor and ``guardrail fail-mode``
-    green while the running gateway had added its own entry back beside it
-    (rel-1-0-4 GAP-0600). Only DefenseClaw's current hook is a working
-    registration, so Setup replaces such an entry wherever it points.
+    ``--hook-surface`` binding (the copy may have been deleted since). A
+    shell or env wrapper in front of the script (:func:`_split_after_wrapper`)
+    is looked through. An entry repointed at an old copy in another folder
+    kept doctor and ``guardrail fail-mode`` green while the running gateway
+    had added its own entry back beside it (rel-1-0-4 GAP-0600). Only
+    DefenseClaw's current hook is a working registration, so Setup replaces
+    such an entry wherever it points.
     """
 
-    split = _split_hook_command(command.strip())
+    split = _split_after_wrapper(command.strip())
     if split is None:
         return ""
     word, rest = split
@@ -1082,6 +1084,33 @@ def copied_hook_script(command: str, script_name: str) -> str:
     if rest.startswith(_HOOK_BINDINGS) and posixpath.basename(word) == script_name:
         return word
     return word if _is_defenseclaw_hook_file(word) else ""
+
+
+# The programs a hook command can run a script through (hookShellWrappers in
+# internal/gateway/connector/helpers.go).
+_HOOK_SHELL_WRAPPERS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "env"})
+
+
+def _split_after_wrapper(command: str) -> tuple[str, str] | None:
+    """:func:`_split_hook_command` after one shell or env wrapper word and env's NAME=value words.
+
+    Mirrors ``hookScriptWordAfterWrapper``: ``bash /old/copilot-hook.sh
+    --event preToolUse`` ran an old copy the first-word check did not see
+    (rel-1-0-4 GAP-0600).
+    """
+
+    split = _split_hook_command(command)
+    if split is None:
+        return None
+    word, rest = split
+    base = posixpath.basename(word)
+    if base not in _HOOK_SHELL_WRAPPERS or ("/" in word and not word.startswith("/")):
+        return split
+    while True:
+        split = _split_hook_command(rest.lstrip(" \t"))
+        if split is None or base != "env" or "=" not in split[0] or split[0].startswith("/"):
+            return split
+        rest = split[1]
 
 
 def _edited_hook_shape(command: str, script_name: str) -> str:
@@ -1137,6 +1166,73 @@ def _hook_command_strings(value: Any) -> list[str]:
     return found
 
 
+# DefenseClaw's own hook files: Copilot's <hooks>/defenseclaw.json and
+# Kiro's .kiro/hooks/defenseclaw.json. On an event DefenseClaw binds, Setup
+# leaves its own entry alone there (patchCopilotHooksForOS, patchKiroV3Hooks).
+_OWNED_HOOK_FILE = "defenseclaw.json"
+_KIRO_V3_TRIGGERS = ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
+_POSIX_SAFE_WORD = re.compile(r"[A-Za-z0-9/._\-+=:,@%]+")
+
+
+def _shell_quote(word: str) -> str:
+    return "'" + word.replace("'", "'\\''") + "'"
+
+
+def _locked_contract_id(cfg: Any, connector: str) -> str:
+    lock_path = Path(str(getattr(cfg, "data_dir", "") or ""), "hook_contract_lock.json")
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8")) if lock_path.stat().st_size <= _LOCK_LIMIT else {}
+    except (OSError, ValueError):
+        return ""
+    connectors = lock.get("connectors") if isinstance(lock, dict) else None
+    entry = connectors.get(connector) if isinstance(connectors, dict) else None
+    return str(entry.get("contract_id") or "") if isinstance(entry, dict) else ""
+
+
+def _foreign_owned_file_command(cfg: Any, connector: str, path: Path, document: Any, current: str) -> str | None:
+    """The first command in DefenseClaw's own hook file, on an event it binds, that is not Setup's render.
+
+    A wrapper (``bash <copy>``), a renamed copy or a copy without the
+    generated-hook marker beside DefenseClaw's entry was not claimed by the
+    command shape, so the agent ran it while doctor, status and fail-mode
+    passed (rel-1-0-4 GAP-0600).
+    """
+
+    if _is_windows() or path.name != _OWNED_HOOK_FILE or not isinstance(document, dict):
+        return None  # Windows: the native validators check the handlers
+    if connector == "copilot":
+        from defenseclaw.doctor_hooks import _COPILOT_CONTRACT_EVENTS
+
+        hooks = document.get("hooks")
+        events = _COPILOT_CONTRACT_EVENTS.get(_locked_contract_id(cfg, connector)) or tuple(
+            {event for contract in _COPILOT_CONTRACT_EVENTS.values() for event in contract}
+        )
+        for event in events:
+            entries = hooks.get(event) if isinstance(hooks, dict) else None
+            render = f"{_shell_quote(current)} --event {_shell_quote(event)}"
+            for command in _hook_command_strings(entries if isinstance(entries, list) else []):
+                if command != render:
+                    return command
+    elif connector == "kiro":
+        word = current if _POSIX_SAFE_WORD.fullmatch(current) else _shell_quote(current)
+        render = f"{word} --hook-surface v3"
+        hooks = document.get("hooks")
+        for entry in hooks if isinstance(hooks, list) else []:
+            if isinstance(entry, dict) and entry.get("trigger") in _KIRO_V3_TRIGGERS:
+                for command in _hook_command_strings(entry) or [""]:
+                    if command != render:
+                        return command
+    return None
+
+
+def _edited_hook_problem(connector: str, path: Path, runs: str, current: str) -> HookProblem:
+    return HookProblem(
+        f"{_EDITED_HOOK_PREFIX}{connector}: {path} runs {runs}, not the hook script setup "
+        f"registered ({current}), so that entry fails or runs unguarded",
+        f"run `defenseclaw doctor --fix` or `{setup_command(connector)} --yes`; it replaces the edited entries",
+    )
+
+
 def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
     """Report DefenseClaw hook entries whose script path or name was edited.
 
@@ -1144,8 +1240,10 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
     denied every call next to the set setup added again, and Hermes, whose
     hook failures are fail-open, ran unguarded (GAP-0906, GAP-0907). An
     entry repointed at a copy of the script runs a hook DefenseClaw does not
-    keep current, from any folder (rel-1-0-4 GAP-0600). Setup (``doctor
-    --fix`` restarts the gateway, which runs it) replaces them.
+    keep current, from any folder (rel-1-0-4 GAP-0600), and in DefenseClaw's
+    own file any entry on a bound event that is not Setup's render
+    (:func:`_foreign_owned_file_command`). Setup (``doctor --fix`` restarts
+    the gateway, which runs it) replaces them.
     """
 
     script_name = HOOK_SCRIPT_NAMES.get(connector)
@@ -1153,8 +1251,10 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
         return []
     data_dir = os.path.normpath(str(getattr(cfg, "data_dir", "") or ""))
     current = os.path.join(data_dir, "hooks", script_name)
-    # Only an edit of this install's own path is reported; setup also
-    # replaces another data directory's entries, which are not an edit.
+    # Reported: an edited path under this install's home, and a command that
+    # runs any copy of a DefenseClaw hook script (copied_hook_script), even
+    # through a wrapper or from another data directory. An unedited entry of
+    # another data directory is not reported here.
     owner = os.path.dirname(data_dir).rstrip("/") + "/"
     for path in _hook_config_paths(cfg, connector):
         try:
@@ -1163,15 +1263,14 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
             document = _load_agent_document(path)
         except (OSError, ValueError, ImportError):
             continue
+        foreign = _foreign_owned_file_command(cfg, connector, path, document, current)
+        if foreign is not None:
+            return [_edited_hook_problem(connector, path, repr(foreign.strip()), current)]
         for command in _hook_command_strings(document):
             word = edited_hook_script(command, script_name)
-            if word and word != current and (word.startswith(owner) or copied_hook_script(command, script_name)):
+            first = (_split_hook_command(command.strip()) or ("",))[0]
+            if word and first != current and (first.startswith(owner) or copied_hook_script(command, script_name)):
                 return [
-                    HookProblem(
-                        f"{_EDITED_HOOK_PREFIX}{connector}: {path} runs {word}, not the hook script setup "
-                        f"registered ({current}), so that entry fails or runs unguarded",
-                        f"run `defenseclaw doctor --fix` or `{setup_command(connector)} --yes`; "
-                        "it replaces the edited entries",
-                    )
+                    _edited_hook_problem(connector, path, word if first == word else repr(command.strip()), current)
                 ]
     return []

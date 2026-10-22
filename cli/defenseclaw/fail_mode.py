@@ -219,8 +219,14 @@ def registration_integrity_drift(cfg: Any, connector: str) -> list[str]:
     name = normalize(connector)
     drift = [REGISTRATION_UNGUARDED] if registration_unguarded(cfg, name) else []
     if _is_windows():
-        # Windows runs the native launcher; the Windows registration
-        # validators check its path, bytes and ACL.
+        # Windows runs the native launcher. _windows_registration_freshness
+        # checks the connectors in _EXPECTED_CONTRACTS; the others get the
+        # doctor's validator of path, bytes and ACL here, which fail-mode
+        # skipped for Copilot (rel-1-0-4 GAP-0600).
+        if name in _WINDOWS_NATIVE_VALIDATED and name not in _EXPECTED_CONTRACTS:
+            native = _windows_native_integrity_drift(cfg, name)
+            if native:
+                drift.append(native)
         return drift
     if edited_hook_problems(cfg, name):
         drift.append(REGISTRATION_FOREIGN)
@@ -229,6 +235,30 @@ def registration_integrity_drift(cfg: Any, connector: str) -> list[str]:
     if any(not problem.startswith("hook token ") for problem in hook_runtime_problems(cfg, name)):
         drift.append(HOOK_RUNTIME_STALE)
     return drift
+
+
+# Connectors whose Windows hook registration the doctor validates natively
+# (cmd_doctor._windows_native_hook_check).
+_WINDOWS_NATIVE_VALIDATED = frozenset({"antigravity", "copilot", "hermes"})
+# A healthy registration, and one a running Hermes host has not reloaded yet
+# (its file is DefenseClaw's current hook).
+_WINDOWS_NATIVE_CURRENT_STATES = frozenset({"healthy", "pending-reload"})
+
+
+def _windows_native_integrity_drift(cfg: Any, connector: str) -> str | None:
+    """The drift of a Windows registration that is not DefenseClaw's current hook, or None."""
+
+    from defenseclaw.commands.cmd_doctor import _windows_native_hook_check
+
+    try:
+        check = _windows_native_hook_check(cfg, connector)
+    except Exception:  # noqa: BLE001 - an uninspectable registration is not a verified one.
+        return REGISTRATION_FOREIGN
+    if check.state in _WINDOWS_NATIVE_CURRENT_STATES:
+        return None
+    if check.state == "disabled":
+        return REGISTRATION_UNGUARDED  # the agent setting turns the hooks off
+    return HOOK_RUNTIME_STALE if check.state == "stale" else REGISTRATION_FOREIGN
 
 
 def resolve_connector_fail_mode(

@@ -5042,7 +5042,11 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 			return fmt.Errorf("copilot: unsupported hook event %q in resolved contract", event)
 		}
 		selected[event] = true
-		hooks[event] = reconcileCopilotFlatHook(hooks[event], hookScript, copilotHookRegistration(goos, event, hookScript))
+		// defenseclaw.json is DefenseClaw's file: on an event it binds, any
+		// entry but Setup's render (an old copy, a wrapper, a renamed script)
+		// is not DefenseClaw's current hook, and Copilot ran it beside the
+		// re-added entry (rel-1-0-4 GAP-0600). The event holds the render alone.
+		hooks[event] = []interface{}{copilotHookRegistration(goos, event, hookScript)}
 	}
 	// A version downgrade must remove only the now-out-of-contract managed
 	// handler (currently userPromptTransformed), while retaining operator hooks
@@ -5329,27 +5333,6 @@ func ensureJSONObject(obj map[string]interface{}, key string) map[string]interfa
 		obj[key] = child
 	}
 	return child
-}
-
-func reconcileCopilotFlatHook(raw interface{}, hookScript string, entry map[string]interface{}) []interface{} {
-	list, _ := raw.([]interface{})
-	out := make([]interface{}, 0, len(list)+1)
-	replaced := false
-	edited := hookScriptBaseName(hookScript)
-	for _, item := range list {
-		if managedHookCommandEntry(item, hookScript) || editedDefenseClawHookEntry(item, edited) {
-			if !replaced {
-				out = append(out, entry)
-				replaced = true
-			}
-			continue
-		}
-		out = append(out, item)
-	}
-	if !replaced {
-		out = append(out, entry)
-	}
-	return out
 }
 
 func appendUniqueMatcherHookGroup(raw interface{}, hookScript string, group map[string]interface{}) []interface{} {

@@ -3463,9 +3463,11 @@ func TestCopilotHookContractReconciliationIsEventBoundAndVersionExact(t *testing
 		t.Fatal(err)
 	}
 	legacyHooks := legacy["hooks"].(map[string]interface{})
-	transformed := legacyHooks["userPromptTransformed"].([]interface{})
-	if len(transformed) != 1 || transformed[0].(map[string]interface{})["bash"] != "/opt/operator/transform.sh" {
-		t.Fatalf("v2-to-v1 reconciliation did not preserve only foreign transformed handler: %#v", transformed)
+	// defenseclaw.json is DefenseClaw's file: the operator handler on the
+	// bound userPromptTransformed event went with the current contract
+	// (rel-1-0-4 GAP-0600), and the v1 contract drops DefenseClaw's own.
+	if transformed, ok := legacyHooks["userPromptTransformed"]; ok {
+		t.Fatalf("v2-to-v1 reconciliation kept userPromptTransformed: %#v", transformed)
 	}
 	if future := legacyHooks["futureEvent"].([]interface{}); len(future) != 1 {
 		t.Fatalf("unknown future event was changed: %#v", future)

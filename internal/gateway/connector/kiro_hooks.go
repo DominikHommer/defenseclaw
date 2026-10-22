@@ -91,7 +91,7 @@ func patchKiroV3Hooks(path, hookScript string) error {
 	hooks, _ := cfg["hooks"].([]interface{})
 	kept := make([]interface{}, 0, len(hooks)+len(kiroV3HookSpecs))
 	for _, item := range hooks {
-		if kiroOwnedV3Hook(item, hookScript) {
+		if kiroOwnedV3Hook(item, hookScript) || kiroV3BoundTrigger(item) {
 			continue
 		}
 		kept = append(kept, item)
@@ -344,7 +344,8 @@ func kiroV3FileReferencesHook(path, hookScript string) (bool, error) {
 // and the presence check kiroV3FileReferencesHook, which teardown uses,
 // accepts any entry named defenseclaw-*, so a user who turned DefenseClaw's
 // entries off or pointed them at another command still passed verification
-// and the guardian never repaired the file.
+// and the guardian never repaired the file. No other entry may sit on those
+// triggers (kiroV3BoundTrigger).
 func kiroV3HooksCurrent(path, hookCommand string) (bool, error) {
 	cfg, err := readJSONObject(path)
 	if err != nil {
@@ -371,7 +372,28 @@ func kiroV3HooksCurrent(path, hookCommand string) (bool, error) {
 			return false, nil
 		}
 	}
-	return true, nil
+	bound := 0
+	for _, item := range hooks {
+		if kiroV3BoundTrigger(item) {
+			bound++
+		}
+	}
+	return bound == len(kiroV3HookSpecs), nil
+}
+
+// kiroV3BoundTrigger reports whether item is a v3 hook entry on a trigger
+// DefenseClaw binds. defenseclaw.json is DefenseClaw's file, so on those
+// triggers it holds Setup's entries alone: another entry there (an old copy,
+// a wrapper, a renamed script) ran beside DefenseClaw's (rel-1-0-4 GAP-0600).
+func kiroV3BoundTrigger(item interface{}) bool {
+	obj, _ := item.(map[string]interface{})
+	trigger, _ := obj["trigger"].(string)
+	for _, spec := range kiroV3HookSpecs {
+		if trigger == spec.trigger {
+			return true
+		}
+	}
+	return false
 }
 
 // kiroV2AgentReferencesHook reports whether the CLI 2.x agent holds

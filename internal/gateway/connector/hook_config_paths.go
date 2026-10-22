@@ -462,8 +462,9 @@ func (c *hookOnlyConnector) rendersExactHookEntries() bool {
 // functions Setup writes with, and no other entry that Setup's reconcile
 // claims as DefenseClaw's (an edited script path or name, a misplaced or
 // duplicate entry). Entries Setup does not claim, the user's own hooks, are
-// ignored. Every entry that fails the check is one Setup replaces, so a heal
-// always converges.
+// ignored, except in Copilot's defenseclaw.json, DefenseClaw's own file, where
+// an event Setup binds holds nothing else. Every entry that fails the check is
+// one Setup replaces, so a heal always converges.
 func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document map[string]interface{}) bool {
 	if document == nil {
 		return false
@@ -491,7 +492,9 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 		edited := hookScriptBaseName(hookCommand)
 		return hookEventEntriesMatch(hooks, want, func(event string, entry interface{}) bool {
 			if _, registered := want[event]; registered {
-				return managedHookCommandEntry(entry, hookCommand) || editedDefenseClawHookEntry(entry, edited)
+				// defenseclaw.json is DefenseClaw's file; Setup leaves only
+				// its render on a bound event (patchCopilotHooksForOS).
+				return true
 			}
 			return slices.Contains(copilotCurrentHookEvents, event) &&
 				(containsHookScript(entry, hookCommand) || editedDefenseClawHookEntry(entry, edited))
