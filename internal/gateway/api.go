@@ -3829,6 +3829,15 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
+// FlushError preserves a failed socket flush for bounded hook responses.
+func (sw *statusWriter) FlushError() error {
+	return http.NewResponseController(sw.ResponseWriter).Flush()
+}
+
+// Unwrap lets ResponseController set the hook allow write deadline through
+// the metrics writer on every gateway listener.
+func (sw *statusWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
+
 type authenticatedInspectConnectorKey struct{}
 
 func withAuthenticatedInspectConnector(ctx context.Context, connectorName string) context.Context {

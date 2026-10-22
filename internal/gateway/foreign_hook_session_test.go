@@ -27,6 +27,16 @@ type foreignSessionResult struct {
 	Reason string `json:"reason"`
 }
 
+// deadlineRecorder models the deadline-capable connection behind the
+// gateway's metrics writer without opening a network listener in each test.
+type deadlineRecorder struct{ *httptest.ResponseRecorder }
+
+func newDeadlineRecorder() *deadlineRecorder {
+	return &deadlineRecorder{httptest.NewRecorder()}
+}
+
+func (*deadlineRecorder) SetWriteDeadline(time.Time) error { return nil }
+
 func writeTestForeignHookFence(t *testing.T, dir string, identities ...string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -62,12 +72,12 @@ func TestForeignHookExchangeReadsLedgerAfterRemovalAdmission(t *testing.T) {
 		"key":           map[string]any{"connector": "claudecode", "session": "race", "process": "process"},
 		"session_start": true, "decision": map[string]any{"deny": false},
 	})
-	result := make(chan *httptest.ResponseRecorder, 1)
+	result := make(chan *deadlineRecorder, 1)
 	go func() {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(body))
 		ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")
 		ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
-		response := httptest.NewRecorder()
+		response := newDeadlineRecorder()
 		api.handleForeignHookSession(response, req.WithContext(ctx))
 		result <- response
 	}()
@@ -112,6 +122,143 @@ func TestForeignHookExchangeWithoutRemovalFenceFailsClosed(t *testing.T) {
 	api.handleForeignHookSession(response, req.WithContext(ctx))
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("exchange without an admitted removal fence = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestForeignHookAllowWithoutBoundedResponseFailsClosed(t *testing.T) {
+	const identity = "1001"
+	dir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, dir)
+	writeTestForeignHookFence(t, dir, identity)
+	previousTrust := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = previousTrust })
+	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
+	request := func(deny bool) *http.Request {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{
+			"key":           map[string]any{"connector": "claudecode", "session": "bounded", "process": "process"},
+			"session_start": true, "decision": map[string]any{"deny": deny},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(body))
+		ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")
+		return req.WithContext(context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity))
+	}
+	allow := httptest.NewRecorder() // It cannot set a write deadline.
+	api.handleForeignHookSession(allow, request(false))
+	if allow.Code != http.StatusServiceUnavailable || !strings.Contains(allow.Body.String(), "foreign_hook_response_unbounded") {
+		t.Fatalf("unbounded allow response was sent: %d %s", allow.Code, allow.Body.String())
+	}
+	writerUnlock, err := enterprisepolicy.LockForeignHookFence(t.Context(), dir, identity, true)
+	if err != nil {
+		t.Fatalf("refused allow kept the removal fence: %v", err)
+	}
+	writerUnlock()
+	denial := httptest.NewRecorder()
+	api.handleForeignHookSession(denial, request(true))
+	if denial.Code != http.StatusOK {
+		t.Fatalf("a denial needs no bounded allow response: %d %s", denial.Code, denial.Body.String())
+	}
+}
+
+// A stopped reader must not hold the account's removal fence past the
+// bounded allow write. Before the deadline, this writer blocks forever and
+// the guardian cannot admit its removal commit.
+type stalledForeignHookAllowWriter struct {
+	*httptest.ResponseRecorder
+	entered  chan struct{}
+	release  chan struct{}
+	deadline time.Time
+}
+
+type failedForeignHookFlushWriter struct {
+	*deadlineRecorder
+	deadline time.Time
+}
+
+func (*failedForeignHookFlushWriter) FlushError() error { return os.ErrDeadlineExceeded }
+
+func (w *failedForeignHookFlushWriter) SetWriteDeadline(at time.Time) error {
+	w.deadline = at
+	return nil
+}
+
+func TestForeignHookAllowKeepsDeadlineAfterFailedFlush(t *testing.T) {
+	writer := &failedForeignHookFlushWriter{deadlineRecorder: newDeadlineRecorder()}
+	wrapped := &statusWriter{ResponseWriter: writer, status: http.StatusOK}
+	if !writeFencedForeignHookAllow(wrapped, enterprisepolicy.GuardDecision{}) {
+		t.Fatal("allow was refused before the response write")
+	}
+	// A successful flush clears the deadline; an unsuccessful one must not
+	// leave a complete response that the connection may send after removal.
+	if writer.ResponseRecorder.Body.Len() == 0 {
+		t.Fatal("test writer did not buffer the response")
+	}
+	if writer.deadline.IsZero() {
+		t.Fatal("failed flush cleared the allow write deadline")
+	}
+}
+
+func (w *stalledForeignHookAllowWriter) SetWriteDeadline(at time.Time) error {
+	w.deadline = at
+	return nil
+}
+
+func (w *stalledForeignHookAllowWriter) Write(body []byte) (int, error) {
+	close(w.entered)
+	if w.deadline.IsZero() {
+		<-w.release
+		return w.ResponseRecorder.Write(body)
+	}
+	timer := time.NewTimer(time.Until(w.deadline))
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return 0, os.ErrDeadlineExceeded
+	case <-w.release:
+		return w.ResponseRecorder.Write(body)
+	}
+}
+
+func TestForeignHookSlowAllowReleasesRemovalFence(t *testing.T) {
+	const identity = "1001"
+	dir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, dir)
+	writeTestForeignHookFence(t, dir, identity)
+	previousTrust := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = previousTrust })
+	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
+	body := []byte(`{"key":{"connector":"claudecode","session":"slow","process":"process"},"session_start":true,"decision":{"deny":false}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(body))
+	ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")
+	req = req.WithContext(context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity))
+	w := &stalledForeignHookAllowWriter{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(w.release)
+	done := make(chan struct{})
+	go func() {
+		api.handleForeignHookSession(&statusWriter{ResponseWriter: w, status: http.StatusOK}, req)
+		close(done)
+	}()
+	select {
+	case <-w.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the allow did not reach its response write")
+	}
+	lockCtx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	writerUnlock, err := enterprisepolicy.LockForeignHookFence(lockCtx, dir, identity, true)
+	if err != nil {
+		t.Fatalf("slow allow held the removal fence: %v", err)
+	}
+	writerUnlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the slow allow did not end at its write deadline")
+	}
+	if w.Code != http.StatusOK || w.Header().Get("Content-Length") == "" || w.Body.Len() != 0 {
+		t.Fatalf("cut allow did not leave an incomplete response: %d length=%q body=%q", w.Code, w.Header().Get("Content-Length"), w.Body.String())
 	}
 }
 
@@ -210,7 +357,7 @@ func TestForeignHookSessionGatewayPersistsAndBindsTheCaller(t *testing.T) {
 		if claimedID != "" {
 			req.Header.Set(llmEventUserIDHeader, claimedID)
 		}
-		response := httptest.NewRecorder()
+		response := newDeadlineRecorder()
 		h.ServeHTTP(response, req)
 		var decision foreignSessionResult
 		_ = json.Unmarshal(response.Body.Bytes(), &decision)

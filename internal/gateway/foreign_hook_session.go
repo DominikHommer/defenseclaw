@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -82,15 +84,19 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
+	// One identity admits one exchange at a time. Otherwise requests queued
+	// behind a slow response would already hold shared fence locks, delaying
+	// an admitted removal writer for the whole queue.
+	unlock := sync.OnceFunc(a.foreignHookSessionLocks.lock(stateDir))
+	defer unlock()
 	fenceUnlock, err := enterprisepolicy.LockForeignHookFence(r.Context(), guardianDir, identity, false)
 	if err != nil {
+		unlock()
 		writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_removal_fence_unavailable")
 		return
 	}
+	fenceUnlock = sync.OnceFunc(fenceUnlock)
 	defer fenceUnlock()
-	// Each identity has its own store, so only that identity's exchanges
-	// are serialized; another account's exchange never waits on this one.
-	unlock := a.foreignHookSessionLocks.lock(stateDir)
 	removals, removalsErr := a.foreignHookRemovals.forIdentity(guardianDir, identity)
 	decision := enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
 		StateDir:     stateDir,
@@ -101,12 +107,52 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		RemovalsErr:  removalsErr,
 		Now:          time.Now(),
 	})
-	unlock()
 	if decision.Deny {
+		// A denial cannot turn into an allow after a removal. Do not keep
+		// its audit export or response write inside the removal fence.
+		fenceUnlock()
+		unlock()
 		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(decision)
+		return
+	}
+	if !writeFencedForeignHookAllow(w, decision) {
+		fenceUnlock()
+		unlock()
+		writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_response_unbounded")
+	}
+}
+
+// An allow must reach the hook while its exchange still holds the reader
+// fence. A client that stops reading cannot hold that fence indefinitely:
+// an incomplete answer is cut at this deadline and the hook fails closed.
+const foreignHookFencedWriteTimeout = 250 * time.Millisecond
+
+// writeFencedForeignHookAllow reports false only when it has written no
+// response. Once headers are sent, a cut write leaves its Content-Length
+// unsatisfied and its expired deadline in place; the hook cannot accept it.
+func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolicy.GuardDecision) bool {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(decision); err != nil {
+		return false
+	}
+	controller := http.NewResponseController(w)
+	if err := controller.SetWriteDeadline(time.Now().Add(foreignHookFencedWriteTimeout)); err != nil {
+		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(decision)
+	w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
+	w.WriteHeader(http.StatusOK)
+	n, err := w.Write(body.Bytes())
+	if err != nil || n != body.Len() {
+		return true
+	}
+	if err := controller.Flush(); err != nil {
+		return true
+	}
+	_ = controller.SetWriteDeadline(time.Time{})
+	return true
 }
 
 // foreignHookAuditReasonLimit bounds the reason an audit row repeats, and
