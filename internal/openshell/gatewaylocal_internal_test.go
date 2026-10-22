@@ -70,3 +70,13 @@ func TestRegisterLocalUsesTheBundleTheCLIWillImport(t *testing.T) {
 		})
 	}
 }
+
+func TestRegisterLocalWaitsForStandardHomebrewTLS(t *testing.T) {
+	r := &doctorRun{Doctor: &Doctor{GOOS: "darwin", Gateway: &GatewayConfigurator{BrewPrefix: "/opt/homebrew"}}}
+	if got, want := r.localRegistrationTLSDir(), "/opt/homebrew/var/openshell/tls"; got != want {
+		t.Fatalf("standard Homebrew TLS wait = %q, want %q", got, want)
+	}
+	if env := r.registerEnv(); len(env) != 0 {
+		t.Fatalf("the standard prefix needs no CLI TLS override: %v", env)
+	}
+}
