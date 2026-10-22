@@ -53,23 +53,15 @@ func atomicWriteFileWithPublisher(
 	return atomicWriteFileAt(path, writePath, data, perm, publish, false)
 }
 
-// atomicWriteFileNoFollow is atomicWriteFile for a path that must be a regular
-// file or absent: it never writes through a link. A link or other non-regular
-// file there is an error, and the rename replaces the directory entry itself,
-// so a link put there after the check is replaced, not followed.
-func atomicWriteFileNoFollow(path string, data []byte, perm os.FileMode) error {
-	return atomicWriteFileNoFollowAt(path, data, perm, false)
-}
-
-// atomicReplaceFileNoFollow is atomicWriteFileNoFollow that renames a new
-// file over path even when path already holds data and perm: path then names
-// a new file, apart from every other name (hard link) of the old one. until
-// 1.1: only the removed connectors' teardown (removed.go) needs it.
+// atomicReplaceFileNoFollow is atomicWriteFile for a path that must be a
+// regular file or absent: it never writes through a link. A link or other
+// non-regular file there is an error, and the rename replaces the directory
+// entry itself, so a link put there after the check is replaced, not
+// followed. It renames a new file over path even when path already holds
+// data and perm: path then names a new file, apart from every other name
+// (hard link) of the old one. until 1.1: only the removed connectors'
+// teardown (removed.go) uses it.
 func atomicReplaceFileNoFollow(path string, data []byte, perm os.FileMode) error {
-	return atomicWriteFileNoFollowAt(path, data, perm, true)
-}
-
-func atomicWriteFileNoFollowAt(path string, data []byte, perm os.FileMode, always bool) error {
 	info, err := os.Lstat(path)
 	switch {
 	case err == nil && !info.Mode().IsRegular():
@@ -77,7 +69,7 @@ func atomicWriteFileNoFollowAt(path string, data []byte, perm os.FileMode, alway
 	case err != nil && !errors.Is(err, os.ErrNotExist):
 		return fmt.Errorf("lstat %s: %w", path, err)
 	}
-	return atomicWriteFileAt(path, path, data, perm, atomicFilePublish, always)
+	return atomicWriteFileAt(path, path, data, perm, atomicFilePublish, true)
 }
 
 // atomicWriteFileAt writes data to writePath, path or the file a link at path
