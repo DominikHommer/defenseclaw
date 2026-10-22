@@ -762,7 +762,6 @@ def _run_lifecycle_functions(tmp_path, names, body, replacements=()) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-
 def test_install_preparation_keeps_existing_service_read_access(tmp_path) -> None:
     _run_lifecycle_functions(tmp_path, ["Initialize-DefenseClawTransactionManagedRoot"], r"""
 function Test-DefenseClawStandaloneProfile { return $true }
@@ -841,4 +840,3 @@ try {
 """, encoding="utf-8")
     result = subprocess.run([shell, "-NoProfile", "-File", str(script)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-
