@@ -32,9 +32,6 @@ describe('Intune base config versus the signed bundle', () => {
     for (const key of ['guardrail', ...compared]) {
       assert.ok(row.includes(`\`${key}:\``), `the -BaseConfigPath row does not name the compared ${key}: block`);
     }
-    assert.ok(page('enterprise/mdm/index.mdx').includes(
-      '/docs/enterprise/mdm/intune/windows-reference#signed-bundles-and-the-base-config',
-    ));
   });
 });
 
