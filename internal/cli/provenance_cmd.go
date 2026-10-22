@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -48,6 +49,11 @@ func runProvenanceShow(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 		p = live
+	} else if live, present, err := perUserGatewayProvenance(cmd); present {
+		if err != nil {
+			return err
+		}
+		p = live
 	}
 	var out io.Writer = os.Stdout
 	if cmd != nil {
@@ -60,10 +66,97 @@ func runProvenanceShow(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// A per-user /health already exposes provenance to this account. Authenticate
+// the local listener by its OS process identity instead of credentials from
+// config.yaml: the running gateway may have rejected that entire document,
+// including its custom token_env. No bearer is sent on this connection.
+func perUserGatewayProvenance(cmd *cobra.Command) (version.Provenance, bool, error) {
+	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		return version.Provenance{}, false, nil
+	}
+	running, pid := gatewayManagedState()
+	if !running {
+		return version.Provenance{}, false, nil
+	}
+	c, err := loadDaemonConfig(cmd)
+	if err != nil {
+		c = gatewayStatusRelaxedConfig(err)
+	}
+	if c == nil {
+		return version.Provenance{}, true, errors.New("cannot locate the running gateway from config.yaml; run: defenseclaw doctor")
+	}
+	if managed.IsManagedEnterprise(c.DeploymentMode) || c.SecureClientIntegration() {
+		return version.Provenance{}, false, nil
+	}
+	host, loopback := observabilityV8LoopbackDialHost(c.Gateway.APIBind)
+	if !loopback || c.Gateway.APIPort < 1 || c.Gateway.APIPort > 65535 {
+		return version.Provenance{}, true, errors.New("cannot prove a local gateway endpoint; run: defenseclaw-gateway status")
+	}
+	address := net.JoinHostPort(host, strconv.Itoa(c.Gateway.APIPort))
+	checkOwner := func() error {
+		active, currentPID := gatewayManagedState()
+		holder, err := gatewayPortHolder(host, c.Gateway.APIPort)
+		if !active || currentPID != pid || err != nil || holder.PID != pid ||
+			(holder.UID >= 0 && holder.UID != os.Getuid()) {
+			return errors.New("the local listener's gateway identity could not be verified; run: defenseclaw-gateway status")
+		}
+		return nil
+	}
+	transport := &http.Transport{
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			if err := checkOwner(); err != nil {
+				return nil, err
+			}
+			conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkOwner(); err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+			return conn, nil
+		},
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Timeout: 5 * time.Second, Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	ctx := context.Background()
+	if cmd != nil && cmd.Context() != nil {
+		ctx = cmd.Context()
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://defenseclaw-provenance/health", nil)
+	if err != nil {
+		return version.Provenance{}, true, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return version.Provenance{}, true, fmt.Errorf("cannot read the running gateway's provenance: %w; run: defenseclaw-gateway status", err)
+	}
+	defer response.Body.Close()
+	var answer struct {
+		Provenance *version.Provenance `json:"provenance"`
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, gatewayHealthDocumentMaxBytes+1))
+	if response.StatusCode != http.StatusOK || err != nil || len(body) > gatewayHealthDocumentMaxBytes ||
+		json.Unmarshal(body, &answer) != nil || !completeGatewayProvenance(answer.Provenance) {
+		return version.Provenance{}, true, errors.New("the running gateway did not provide complete provenance; run: defenseclaw-gateway status")
+	}
+	return *answer.Provenance, true, nil
+}
+
+func completeGatewayProvenance(p *version.Provenance) bool {
+	if p == nil || p.SchemaVersion <= 0 || p.BinaryVersion == "" {
+		return false
+	}
+	digest, err := hex.DecodeString(p.ContentHash)
+	return err == nil && len(digest) == 32
+}
+
 // A short-lived CLI has no applied managed config or generation. Read the
 // running gateway's administrator view instead, without daemon bootstrap or
-// opening its audit store. Secure Client and per-user commands keep their
-// existing path (r103 GAP-0004/0128).
+// opening its audit store. Secure Client keeps its existing path.
 func managedGatewayProvenance(cmd *cobra.Command) (version.Provenance, bool, error) {
 	layout, descriptor, err := managedStandaloneAdminDeployment()
 	if errors.Is(err, managed.ErrNoRuntimeDescriptor) {
@@ -87,17 +180,14 @@ func managedGatewayProvenance(cmd *cobra.Command) (version.Provenance, bool, err
 		Provenance *version.Provenance `json:"provenance"`
 	}
 	ctx := context.Background()
-	if cmd != nil {
+	if cmd != nil && cmd.Context() != nil {
 		ctx = cmd.Context()
 	}
 	if err := managedProvenanceHealth(ctx, layout, descriptor.ServiceUID, &answer); err != nil {
 		return version.Provenance{}, true, fmt.Errorf("cannot read the managed gateway's provenance: %w; check it with: %s", err, next)
 	}
-	if answer.Provenance == nil || answer.Provenance.ContentHash == "" || answer.Provenance.SchemaVersion <= 0 || answer.Provenance.BinaryVersion == "" {
+	if !completeGatewayProvenance(answer.Provenance) {
 		return version.Provenance{}, true, fmt.Errorf("the managed gateway did not provide complete administrator provenance; check it with: %s", next)
-	}
-	if digest, err := hex.DecodeString(answer.Provenance.ContentHash); err != nil || len(digest) != 32 {
-		return version.Provenance{}, true, fmt.Errorf("the managed gateway returned invalid config provenance; check it with: %s", next)
 	}
 	return *answer.Provenance, true, nil
 }
