@@ -4994,13 +4994,6 @@ def _gateway_listener_trust(
     )
 
 
-# A fork, or the previous gateway closing its listener after a restart, can
-# briefly expose a second holder of the listening socket (GAP-0535). The
-# ambiguity is re-proved over about 3 s before it is reported; it never
-# authorizes anything, and one that persists stays a failure.
-_LISTENER_SETTLE_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.5)
-
-
 def _trusted_gateway_listener(
     cfg,
     *,
@@ -5008,21 +5001,6 @@ def _trusted_gateway_listener(
     platform_name: str | None = None,
 ) -> _GatewayTrust:
     """Prove an exact local API target before sending a master token."""
-    trust = _trusted_gateway_listener_once(cfg, evidence=evidence, platform_name=platform_name)
-    for delay in _LISTENER_SETTLE_DELAYS:
-        if trust.code != "ambiguous_listener":
-            break
-        time.sleep(delay)
-        trust = _trusted_gateway_listener_once(cfg, evidence=evidence, platform_name=platform_name)
-    return trust
-
-
-def _trusted_gateway_listener_once(
-    cfg,
-    *,
-    evidence: GatewayEvidence | None = None,
-    platform_name: str | None = None,
-) -> _GatewayTrust:
     host = _gateway_api_host(cfg)
     api_port = _gateway_api_port(cfg)
     if not api_port:
@@ -5685,7 +5663,7 @@ def _lsof_gateway_listener_evidence(port: int, *, host: str = "") -> ListenerEvi
                 "-a",
                 selector,
                 "-sTCP:LISTEN",
-                "-Fpn",
+                "-FpRcn",
             ],
             capture_output=True,
             text=True,
@@ -5702,6 +5680,7 @@ def _lsof_gateway_listener_evidence(port: int, *, host: str = "") -> ListenerEvi
             return ListenerEvidence("missing", reason="no TCP listener on the configured API endpoint")
         return ListenerEvidence("unavailable", reason="lsof listener inspection failed")
     listener_pids: set[int] = set()
+    images: dict[int, tuple[int, str]] = {}
     current_pid = 0
     for raw_line in proc.stdout.splitlines():
         if raw_line.startswith("p"):
@@ -5709,19 +5688,47 @@ def _lsof_gateway_listener_evidence(port: int, *, host: str = "") -> ListenerEvi
                 current_pid = int(raw_line[1:])
             except ValueError:
                 current_pid = 0
+            images[current_pid] = (0, "")
+        elif raw_line.startswith("R") and current_pid:
+            with contextlib.suppress(ValueError):
+                images[current_pid] = (int(raw_line[1:]), images[current_pid][1])
+        elif raw_line.startswith("c") and current_pid:
+            images[current_pid] = (images[current_pid][0], raw_line[1:])
         elif raw_line.startswith("n") and current_pid and _lsof_listener_address_matches(raw_line[1:], host, port):
             listener_pids.add(current_pid)
+    listener_pids = _without_unexeced_forks(listener_pids, images)
     if len(listener_pids) == 1:
         return ListenerEvidence("ok", pid=next(iter(listener_pids)))
     if len(listener_pids) > 1:
         # Multiple owners can occur with SO_REUSEPORT. Returning an arbitrary
         # first PID could authorize a bearer request to an attacker-controlled
         # listener selected by the kernel, so ambiguity fails closed.
-        return ListenerEvidence(
-            "ambiguous",
-            reason="multiple processes own listeners for the configured API endpoint",
-        )
+        return ListenerEvidence("ambiguous", reason=_multiple_listener_owners_reason(listener_pids))
     return ListenerEvidence("missing", reason="no TCP listener on the configured API endpoint")
+
+
+def _without_unexeced_forks(owners: set[int], images: dict[int, tuple[int, object]]) -> set[int]:
+    """Drop the owners that are another owner's fork that has not exec'd yet.
+
+    Between fork and exec a child holds a copy of every descriptor of its
+    parent, the listening socket included, and runs the parent's image. The
+    gateway forks for its scanners and helpers, so a listener scan can see
+    such a child as a second owner (GAP-0535). ``images`` maps a PID to its
+    parent PID and image; a child whose parent is an owner with the same
+    image is that owner. A child that exec'd another program is not dropped.
+    """
+    forks = set()
+    for pid in owners:
+        parent, image = images.get(pid, (0, None))
+        if image and parent != pid and parent in owners and images.get(parent, (0, None))[1] == image:
+            forks.add(pid)
+    return owners - forks
+
+
+def _multiple_listener_owners_reason(owners: set[int]) -> str:
+    return "multiple processes own listeners for the configured API endpoint: PIDs " + ", ".join(
+        str(pid) for pid in sorted(owners)
+    )
 
 
 def _gateway_listener_pid(port: int, *, host: str = "") -> int:
@@ -5846,35 +5853,60 @@ def _linux_gateway_listener_evidence(
         pid = int(process_entry.name)
         if not 0 < pid <= 2_147_483_647:
             continue
-        try:
-            descriptors = os.scandir(os.path.join(process_entry.path, "fd"))
-        except OSError:
-            continue
-        with descriptors:
-            for descriptor in descriptors:
-                try:
-                    target = os.readlink(descriptor.path)
-                except OSError:
-                    continue
-                if target.startswith("socket:[") and target.endswith("]"):
-                    inode = target[8:-1]
-                    if inode in owners_by_inode:
-                        owners_by_inode[inode].add(pid)
+        for inode in _linux_process_socket_inodes(process_entry.path):
+            if inode in owners_by_inode:
+                owners_by_inode[inode].add(pid)
 
+    if any(len(owners) > 1 for owners in owners_by_inode.values()):
+        holders = set().union(*owners_by_inode.values())
+        images = {pid: image for pid in holders if (image := _linux_process_image(proc_root, pid)) is not None}
+        for inode, owners in owners_by_inode.items():
+            owners = _without_unexeced_forks(owners, images)
+            if len(owners) > 1:
+                # A holder seen mid-scan that has since exited or exec'd
+                # (which closes the gateway's descriptors) no longer owns it.
+                owners = {
+                    pid for pid in owners if inode in _linux_process_socket_inodes(os.path.join(proc_root, str(pid)))
+                }
+            owners_by_inode[inode] = owners
     if any(not owners for owners in owners_by_inode.values()):
         return ListenerEvidence("unavailable", reason="listener owner could not be resolved from Linux descriptors")
-    if any(len(owners) > 1 for owners in owners_by_inode.values()):
-        return ListenerEvidence(
-            "ambiguous",
-            reason="multiple processes own listeners for the configured API endpoint",
-        )
-    owners = {next(iter(inode_owners)) for inode_owners in owners_by_inode.values()}
+    owners = set().union(*owners_by_inode.values())
     if len(owners) != 1:
-        return ListenerEvidence(
-            "ambiguous",
-            reason="multiple processes own listeners for the configured API endpoint",
-        )
+        return ListenerEvidence("ambiguous", reason=_multiple_listener_owners_reason(owners))
     return ListenerEvidence("ok", pid=next(iter(owners)))
+
+
+def _linux_process_socket_inodes(process_path: str) -> set[str]:
+    """Return the socket inodes one ``/proc/<pid>`` entry holds descriptors to."""
+    inodes: set[str] = set()
+    try:
+        descriptors = os.scandir(os.path.join(process_path, "fd"))
+    except OSError:
+        return inodes
+    with descriptors:
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(descriptor.path)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target.endswith("]"):
+                inodes.add(target[8:-1])
+    return inodes
+
+
+def _linux_process_image(proc_root: str, pid: int) -> tuple[int, tuple[int, int, bytes]] | None:
+    """Return a process's parent PID and image: its executable and argv."""
+    process_path = os.path.join(proc_root, str(pid))
+    try:
+        with open(os.path.join(process_path, "stat"), encoding="utf-8", errors="replace") as process_stat:
+            parent = int(process_stat.read().rsplit(")", 1)[1].split()[1])
+        executable = os.stat(os.path.join(process_path, "exe"))
+        with open(os.path.join(process_path, "cmdline"), "rb") as process_cmdline:
+            argv = process_cmdline.read()
+    except (OSError, ValueError, IndexError):
+        return None
+    return parent, (executable.st_dev, executable.st_ino, argv)
 
 
 def _linux_gateway_listener_pid(
