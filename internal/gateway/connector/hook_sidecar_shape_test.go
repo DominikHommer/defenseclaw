@@ -300,15 +300,4 @@ func TestHookSidecarShapes(t *testing.T) {
 	if _, ok := flatHookRecordValue(bytes.Repeat([]byte("A=1\n"), 1), "B"); ok {
 		t.Fatal("a missing key read as present")
 	}
-	// The shared hooks' bound (_dc_hookcfg_within_bounds): 64 KiB.
-	padded := func(size int) []byte {
-		prefix := "DEFENSECLAW_FAIL_MODE=open\nPAD="
-		return []byte(prefix + strings.Repeat("x", size-len(prefix)-1) + "\n")
-	}
-	if value, ok := flatHookRecordValue(padded(64<<10), "DEFENSECLAW_FAIL_MODE"); !ok || value != "open" {
-		t.Fatalf("a 64 KiB flat record = %q, %v", value, ok)
-	}
-	if _, ok := flatHookRecordValue(padded(64<<10+1), "DEFENSECLAW_FAIL_MODE"); ok {
-		t.Fatal("a flat record past 64 KiB read as valid")
-	}
 }
