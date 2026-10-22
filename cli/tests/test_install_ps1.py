@@ -987,7 +987,7 @@ def _lifecycle_record(path: Path, running: bool = True) -> None:
 _TXN_REAL = ("Write-DurableText", "ConvertTo-Map", "Get-BinariesState", "Get-OptionalSha256", "Get-GuardedConnectors",
              "Read-LifecycleManifest", "New-RecoveryManifest", "Remove-LifecycleManifest", "Test-LifecycleProof",
              "Set-RecoveryPending", "Set-RecoverySetupRoot", "Wait-LifecycleProof", "Get-LifecycleNextStep", "Assert-LifecycleRestored",
-             "Close-AllHooks", "Save-LifecycleCloser", "Test-SameBinaries",
+             "Close-AllHooks", "Save-LifecycleCloser", "Test-SameBinaries", "Read-Json", "Get-ConfiguredConnectors",
              "Get-Field", "Get-Sha256")
 
 
@@ -1108,8 +1108,12 @@ Write-Output "STARTS=$script:starts"
         ("config-edited-old-gateway", False, True, True),
         # A guarded connector is gone while the config still names it.
         ("connector-removed", False, True, True),
+        # The config edit (a new port) proves nothing about a connector the
+        # gateway still lists, or the config still names, but does not guard.
+        ("config-edited-connector-error", False, True, True),
+        ("config-edited-connector-still-active", False, True, True),
+        ("config-edited-connector-in-config", False, True, True),
         # Trust and health checks are never waived.
-        ("config-edited-binary-changed", False, False, False),
         ("config-edited-gateway-rejects-config", False, False, False),
         ("config-edited-gateway-down", False, False, False),
         ("config-edited-bin-dir-open", False, False, False),
@@ -1141,9 +1145,15 @@ def test_a_lifecycle_record_that_outlived_its_restore_accepts_later_changes_only
     }
     if "config-edited" in case:
         config.write_text("gateway:\n  port: 18971\n", encoding="utf-8")
-    if "binary-changed" in case:
-        gateway.write_bytes(b"another gateway")
-    connectors = ["claudecode"] if "connector-removed" in case else ["claudecode", "codex"]
+    if "in-config" in case:
+        config.write_text("gateway:\n  port: 18971\nguardrail:\n  connectors:\n    codex: {mode: observe}\n", encoding="utf-8")
+    if "still-active" in case:
+        (data / "active_connector.json").write_text(json.dumps({"names": ["claudecode", "codex"]}), encoding="utf-8")
+    states = {"claudecode": "running", "codex": "running"}
+    if "connector-removed" in case or "still-active" in case or "in-config" in case:
+        del states["codex"]
+    if "connector-error" in case:
+        states["codex"] = "error"
     digest = {"old-gateway": "unsupported", "rejects-config": "the gateway rejected the live config"}
     digest_result = next((v for k, v in digest.items() if k in case), "")
     results = []
@@ -1175,7 +1185,7 @@ function Get-GatewayProcess {{
     return [pscustomobject]@{{ Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }}
 }}
 function Get-GatewayHealthReport {{
-    $entries = @({", ".join(f"[pscustomobject]@{{ name = '{c}'; state = 'running' }}" for c in connectors)})
+    $entries = @({", ".join(f"[pscustomobject]@{{ name = '{c}'; state = '{v}' }}" for c, v in states.items())})
     return [pscustomobject]@{{ running = $true; health = [pscustomobject]@{{ connectors = $entries }} }}
 }}
 function Get-GatewayDigestProblem {{ return '{digest_result}' }}
@@ -1195,10 +1205,171 @@ Write-Output "RECORD=$(Test-Path -LiteralPath $LifecycleManifest)"
         else:
             assert "REFUSED: The previous install is not proven back" in out and "RECORD=True" in out, out
     assert ("-AcceptCurrentInstall" in plain) == hint, plain
+    if hint:
+        # A command that runs as given however the installer ran: the
+        # release's installer, not a deleted temporary copy.
+        assert "& ([scriptblock]::Create((irm '" in plain and "-Yes -AcceptCurrentInstall" in plain, plain
     if accepted:
         assert "its gateway enforces the live config" in plain, plain
     elif override_accepted:
         assert "(-AcceptCurrentInstall)" in overridden, overridden
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("gateway_running", [True, False])
+@pytest.mark.parametrize("replaced", ["gateway", "hook-added", "hook-removed"])
+def test_a_lifecycle_record_whose_programs_an_older_installer_replaced_has_a_way_out_that_never_starts_them(
+    tmp_path: Path, gateway_running: bool, replaced: str
+) -> None:
+    # A restore whose gateway did not start left its record. An older
+    # installer (`defenseclaw upgrade --version 1.0.2`, or its one-liner)
+    # does not read the record: it cleared the stale lock and installed its
+    # own programs. Every later run refused "not proven back", and
+    # -AcceptCurrentInstall could not clear it, so the install stayed blocked
+    # until the record was deleted by hand. The replaced programs are never
+    # started: the switch retires the record and the run installs over them.
+    data = tmp_path / "data"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    data.mkdir()
+    gateway = bin_dir / "defenseclaw-gateway.exe"
+    hook = bin_dir / "defenseclaw-hook.exe"
+    gateway.write_bytes(b"gateway 1.0.3")
+    hook.write_bytes(b"hook 1.0.3")
+    bins = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (gateway, hook)}
+    if replaced == "hook-added":
+        del bins["defenseclaw-hook.exe"]
+    record = {
+        "Schema": 1, "Operation": "upgrade", "From": "1.0.3", "To": "1.0.4", "Slot": "", "SetupRoot": "",
+        "Bins": bins, "GatewayWasRunning": True, "Connectors": ["codex"], "Config": "", "ExternalConfig": "",
+        "ExternalConfigSha256": "", "HookFailModes": "", "BinDirProtected": True, "Committed": False,
+    }
+    if replaced == "gateway":
+        gateway.write_bytes(b"gateway 1.0.2")
+    elif replaced == "hook-removed":
+        hook.unlink()
+    results = {}
+    for name, override, rollback in (("plain", False, False), ("accept", True, False), ("rollback", True, True)):
+        manifest = data / ".lifecycle-txn.json"
+        manifest.write_text(json.dumps(record), encoding="utf-8")
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+$BinDir = '{bin_dir}'
+$Staging = Join-Path $DataDir '.staging'
+$Previous = Join-Path $DataDir 'previous'
+$SetupHookState = Join-Path $DataDir 'hook-runtime-state.json'
+$AcceptCurrentInstall = ${str(override).lower()}
+$Rollback = ${str(rollback).lower()}
+$Ver = '1.0.4'
+$ReleaseBase = 'https://github.com/cisco-ai-defense/defenseclaw'
+$script:starts = 0
+function Write-Warn([string]$Message) {{ Write-Host "WARN: $Message" }}
+function Write-Info([string]$Message) {{ Write-Host $Message }}
+function Find-SetupInstall {{ return $null }}
+function Die([string]$Message) {{ throw $Message }}
+function Move-Path([string]$From, [string]$To) {{ Move-Item -LiteralPath $From -Destination $To }}
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
+function Start-RecoveredGateway {{ $script:starts++ }}
+{_resume_functions("Read-Text", "Resume-InterruptedRun")}
+{_txn_real_functions()}
+{_TXN_PRELUDE}
+function Get-GatewayProcess {{
+    if (-not ${str(gateway_running).lower()}) {{ return $null }}
+    return [pscustomobject]@{{ Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }}
+}}
+function Get-GatewayDigestProblem {{ return '' }}
+try {{ Resume-InterruptedRun; Write-Output 'CONTINUED' }} catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
+Write-Output "RECORD=$(Test-Path -LiteralPath $LifecycleManifest) STARTS=$script:starts PENDING=$($Run.RestorePending)"
+"""
+        completed = _run_powershell(script)
+        out = completed.stdout + completed.stderr
+        assert completed.returncode == 0, out
+        assert "STARTS=0" in out, out
+        results[name] = out
+    plain = results["plain"]
+    assert "REFUSED: The previous install is not proven back" in plain and "RECORD=True" in plain, plain
+    assert "PENDING=True" in plain and "they are not started" in plain, plain
+    assert (
+        "& ([scriptblock]::Create((irm 'https://github.com/cisco-ai-defense/defenseclaw/releases/download/1.0.4/install.ps1')))"
+        " -Version '1.0.4' -Yes -AcceptCurrentInstall"
+    ) in plain, plain
+    accepted = results["accept"]
+    assert "CONTINUED" in accepted and "RECORD=False" in accepted and "REFUSED" not in accepted, accepted
+    assert "its record is retired (-AcceptCurrentInstall)" in accepted, accepted
+    rolled = results["rollback"]
+    assert "REFUSED: The previous install is not proven back" in rolled and "RECORD=True" in rolled, rolled
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("child", ["reads-record", "legacy", "other-value"])
+@pytest.mark.parametrize("record", [True, False])
+def test_a_version_change_is_not_handed_to_an_installer_that_does_not_read_a_pending_lifecycle_record(
+    tmp_path: Path, child: str, record: bool
+) -> None:
+    # `defenseclaw upgrade --version 1.0.2` (or -Version 1.0.2) while a
+    # lifecycle record is pending: 1.0.3 and earlier do not read it, clear
+    # the stale lock and install over the install it still has to prove.
+    marker = {"reads-record": "\n$DcLifecycleRecord = 1", "legacy": "", "other-value": "\n$DcLifecycleRecord = 2"}[child]
+    installer = f'$DcVersion = "1.0.2"\n$DcVersionChangeGuard = 1{marker}'
+    if record:
+        _lifecycle_record(tmp_path / ".lifecycle-txn.json")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{tmp_path}'
+$LifecycleManifest = Join-Path $DataDir '.lifecycle-txn.json'
+$ReleaseBase = 'https://release.invalid'
+$OfficialReleaseBase = $ReleaseBase
+$Ver = '1.0.4'
+$Local = ''
+$script:children = 0
+{_ps1_function("Test-Version")}
+{_ps1_function("Get-LifecycleNextStep")}
+{_ps1_function("Invoke-ReleaseInstaller")}
+function Write-Warn([string]$Message) {{ Write-Host $Message }}
+function Write-Info([string]$Message) {{ Write-Host $Message }}
+function Die([string]$Message) {{ throw $Message }}
+function Invoke-Quietly([scriptblock]$Block) {{ & $Block }}
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
+function Get-InstalledVersion {{ return '1.0.3' }}
+function Assert-NoActiveConnectorRecovery {{ }}
+function Save-Url([string]$Url, [string]$To) {{ [IO.File]::WriteAllText($To.Replace([char]92, [IO.Path]::DirectorySeparatorChar), '{installer.replace("'", "''")}'); return $true }}
+function Get-ListedSha256 {{ return 'verified' }}
+function Get-Sha256 {{ return 'verified' }}
+function Get-Cosign {{ return '' }}
+function Wait-VenvFree {{ }}
+function Get-GatewayProcess {{ return $null }}
+function Stop-Gateway {{ return $true }}
+function Stop-Watchdog {{ }}
+function Assert-GatewayQuiescent {{ }}
+function Start-Gateway {{ return 0 }}
+function ConvertTo-ProcessArgument([string]$Value) {{ return $Value }}
+function Start-Process {{
+    $script:children++
+    $child = [PSCustomObject]@{{ Handle = [IntPtr]::Zero; ExitCode = 0 }}
+    $child | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {{}}
+    return $child
+}}
+try {{ $code = Invoke-ReleaseInstaller '1.0.2' @('-Yes'); Write-Output "HANDED code=$code" }} catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
+Write-Output "CHILDREN=$script:children"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    if record and child != "reads-record":
+        assert "REFUSED: An earlier install step is not finished" in out and "CHILDREN=0" in out, out
+        assert "releases/download/1.0.4/install.ps1" in out, out
+    else:
+        assert "HANDED" in out and "CHILDREN=1" in out, out
+    assert (tmp_path / ".lifecycle-txn.json").exists() == record
+
+
+def test_this_installer_declares_that_it_reads_the_lifecycle_record() -> None:
+    # Invoke-ReleaseInstaller hands a pending record only to an installer
+    # that declares this; the next releases inherit the line.
+    assert re.findall(r"^\s*\$DcLifecycleRecord\b.*$", _text(), re.M) == ["$DcLifecycleRecord = 1"]
 
 
 def _resume_functions(*names: str) -> str:

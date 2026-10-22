@@ -26,7 +26,7 @@ The installer downloads the release's gateway, CLI wheel and a hash-pinned list 
 | `--quickstart-mode MODE` | `-QuickstartMode MODE` | `observe` or `action` for that quickstart (implies quickstart). |
 | | `-NoPersistPath` | Do not change the user `PATH` in the registry. |
 | | `-CosignPath FILE` | The `cosign` to check the release signature with. |
-| | `-AcceptCurrentInstall` | When an earlier run's restore is not proven back only because you changed `config.yaml` or removed a connector since, keep the install as it is now. The binaries, the bin folder and the gateway are still checked. The error says when this applies. |
+| | `-AcceptCurrentInstall` | When an earlier run's restore is not proven back only because you changed `config.yaml` or the connectors since, keep the install as it is now. The binaries, the bin folder and the gateway are still checked. When another installer (an older release's) replaced the programs the run recorded, retire that record and install this release over them; they are not started. The error says when this applies and gives the full command. |
 | `--help`, `-h` | `-Help` | Show the installer's help. |
 
 Options that take a value also accept `--name=value`. `defenseclaw quickstart --help` lists the connector names.

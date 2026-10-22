@@ -77,6 +77,9 @@ try {
 $DcVersion = "__DEFENSECLAW_VERSION__"
 # This installer checks active recovery before snapshots in both version directions.
 $DcVersionChangeGuard = 1
+# This installer reads the lifecycle record (.lifecycle-txn.json) and finishes
+# its step before it changes anything.
+$DcLifecycleRecord = 1
 $DefaultRepo = "cisco-ai-defense/defenseclaw"
 $Repo = if ($env:DEFENSECLAW_REPO) { $env:DEFENSECLAW_REPO } else { $DefaultRepo }
 # DEFENSECLAW_REPO (the deprecated alias of config.yaml update.source) is a
@@ -587,6 +590,17 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
         # Unknown or duplicate declarations take the conservative legacy path.
         $guard = @(Select-String -LiteralPath "$tmp\install.ps1" -Pattern '^\s*\$DcVersionChangeGuard\b')
         $childGuardsVersionChanges = $guard.Count -eq 1 -and $guard[0].Line -ceq '$DcVersionChangeGuard = 1'
+        # An installer that does not read the lifecycle record would install
+        # over the install that record still has to prove (1.0.3 and earlier
+        # clear its lock): the step it records is finished first, here.
+        $pending = [string](Get-Variable -Name LifecycleManifest -ValueOnly -ErrorAction SilentlyContinue)
+        if ($pending -and (Test-Path -LiteralPath $pending)) {
+            $record = @(Select-String -LiteralPath "$tmp\install.ps1" -Pattern '^\s*\$DcLifecycleRecord\b')
+            if (-not ($record.Count -eq 1 -and $record[0].Line -ceq '$DcLifecycleRecord = 1')) {
+                Die ("An earlier install step is not finished: its record $pending is still here, and the installer of DefenseClaw $ReleaseVersion " +
+                    "does not read it, so it was not started. Finish that step first with: $(Get-LifecycleNextStep); then run the version change again")
+            }
+        }
         if ($versionChange -and ($downgrade -or -not $childGuardsVersionChanges)) {
             # A verified newer child with the guard owns stopping and startup
             # rollback. Older/unrecognized installers need this outer check.
@@ -1136,9 +1150,14 @@ function Test-FleetEnabled {
     return ((Invoke-Native $python @("-I", "-c", $code, $path) -Quiet) -eq 0)
 }
 
-function Test-ConnectorConfigured {
+function Get-ConfiguredConnectors {
+    # The connectors the config names (active_connector.json).
     $state = Read-Json (Join-Path $DataDir "active_connector.json")
-    return @(@(Get-Field $state "names") + @(Get-Field $state "name") | Where-Object { $_ -and $_ -ne "none" }).Count -gt 0
+    return @(@(Get-Field $state "names") + @(Get-Field $state "name") | Where-Object { $_ -and $_ -ne "none" } | ForEach-Object { [string]$_ })
+}
+
+function Test-ConnectorConfigured {
+    return @(Get-ConfiguredConnectors).Count -gt 0
 }
 
 # -- Snapshot, swap, restore --------------------------------------------------
@@ -1761,18 +1780,29 @@ function Wait-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors
     }
 }
 
-function Get-LifecycleNextStep {
+function Get-LifecycleNextStep([switch]$Accept) {
     # The command that finishes the step: this installer again, with the
-    # same release and local assets.
-    $retry = "defenseclaw upgrade --yes"
-    if ($PSCommandPath) {
+    # same release and local assets (-Accept: and -AcceptCurrentInstall).
+    # A PowerShell command on every path, so the switch can always be added:
+    # the copy `defenseclaw upgrade` or `rollback` ran is deleted when it
+    # ends, and an older CLI does not carry the switch; those, and a run
+    # from `irm | iex`, get this release's installer from the release.
+    $version = [string](Get-Variable -Name Ver -ValueOnly -ErrorAction SilentlyContinue)
+    $released = $version -match '^\d+\.\d+\.\d+$'
+    $byUpgrade = [bool](Get-Variable -Name RunByUpgrade -ValueOnly -ErrorAction SilentlyContinue)
+    if ($PSCommandPath -and -not $byUpgrade) {
         $retry = "& '$($PSCommandPath.Replace("'", "''"))'"
-        $version = [string](Get-Variable -Name Ver -ValueOnly -ErrorAction SilentlyContinue)
-        if ($version) { $retry += " -Version '$version'" }
-        $retry += " -Yes"
-        $local = [string](Get-Variable -Name Local -ValueOnly -ErrorAction SilentlyContinue)
-        if ($local) { $retry += " -Local '$($local.Replace("'", "''"))'" }
+    } else {
+        $base = [string](Get-Variable -Name ReleaseBase -ValueOnly -ErrorAction SilentlyContinue)
+        if (-not $base) { $base = "https://github.com/cisco-ai-defense/defenseclaw" }
+        $url = if ($released) { "$base/releases/download/$version/install.ps1" } else { "$base/releases/latest/download/install.ps1" }
+        $retry = "& ([scriptblock]::Create((irm '$($url.Replace("'", "''"))')))"
     }
+    if ($released) { $retry += " -Version '$version'" }
+    $retry += " -Yes"
+    $local = [string](Get-Variable -Name Local -ValueOnly -ErrorAction SilentlyContinue)
+    if ($local) { $retry += " -Local '$($local.Replace("'", "''"))'" }
+    if ($Accept) { $retry += " -AcceptCurrentInstall" }
     return $retry
 }
 
@@ -1804,21 +1834,36 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outl
     if ($external -and (Get-OptionalSha256 $external) -ne [string](Get-Field $Manifest "ExternalConfigSha256")) {
         $drift += "$external is not the config the previous install ran with"; $configChanged = $true
     }
+    # Changes only -AcceptCurrentInstall keeps: a recorded connector that is
+    # not guarded although the gateway still lists it or the config still
+    # names it was not removed, and the live config's digest says nothing
+    # about its hooks.
+    $unguarded = @()
     if ($Outlived -and $problems.Count -and
         -not @(Test-LifecycleProof $bins $running @() -RequireProtected $protected -SetupRoot $setupRoot).Count) {
         # Only connectors the record names are not guarded.
-        $drift += $problems
+        $report = if ($setupRoot) { $null } else { Get-GatewayHealthReport (Join-Path $BinDir "defenseclaw-gateway.exe") }
+        $kept = @(@(Get-Field (Get-Field $report "health") "connectors") | ForEach-Object { [string](Get-Field $_ "name") }) +
+            @(Get-ConfiguredConnectors)
+        $configPath = Join-Path $DataDir "config.yaml"
+        $configText = if (Test-Path -LiteralPath $configPath -PathType Leaf) { [IO.File]::ReadAllText($configPath) } else { "" }
+        foreach ($problem in $problems) {
+            $name = if ($problem -match '^connector (\S+) is not guarded again') { $Matches[1] } else { "" }
+            $named = $name -and ($kept -contains $name -or $configText -match "(?<![\w-])$([regex]::Escape($name))(?![\w-])")
+            if ($name -and -not $named) { $drift += $problem } else { $unguarded += $problem }
+        }
         $problems = @()
     }
-    if ($drift.Count) {
+    $changes = @($drift) + @($unguarded)
+    if ($changes.Count) {
         $override = [bool](Get-Variable -Name AcceptCurrentInstall -ValueOnly -ErrorAction SilentlyContinue)
-        $enforced = $configChanged -and $running -and -not $setupRoot -and
+        $enforced = $configChanged -and $running -and -not $setupRoot -and -not $unguarded.Count -and
             (Get-GatewayDigestProblem (Join-Path $BinDir "defenseclaw-gateway.exe")) -eq ""
         if ($Outlived -and -not $problems.Count -and ($enforced -or $override)) {
             $why = if ($enforced) { "its gateway enforces the live config" } else { "-AcceptCurrentInstall" }
-            Write-Warn "The install an earlier run recorded is back with changes made since ($($drift -join '; ')); accepted as it is now ($why)"
+            Write-Warn "The install an earlier run recorded is back with changes made since ($($changes -join '; ')); accepted as it is now ($why)"
         } else {
-            $problems += $drift
+            $problems += $changes
         }
     }
     if ([string](Get-Field $Manifest "HookFailModes") -and -not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) {
@@ -1839,9 +1884,9 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outl
     if ($problems.Count) {
         Set-RecoveryPending
         $accept = ""
-        if ($Outlived -and $drift.Count -and -not @($problems | Where-Object { $drift -notcontains $_ }).Count) {
+        if ($Outlived -and $changes.Count -and -not @($problems | Where-Object { $changes -notcontains $_ }).Count) {
             # Only the changes made since stand in the way.
-            $accept = " If you changed the config or removed a connector on purpose, run it with -AcceptCurrentInstall to keep the install as it is now."
+            $accept = " If you changed the config or the connectors on purpose, keep the install as it is now (-AcceptCurrentInstall): $(Get-LifecycleNextStep -Accept)"
         }
         throw ("The previous install is not proven back: $($problems -join '; '). The record of it stays in $LifecycleManifest and the install stays locked; " +
             "fix the cause, then run: $(Get-LifecycleNextStep)$accept")
@@ -2797,6 +2842,23 @@ function Resume-InterruptedRun {
         Remove-LifecycleManifest
         return
     }
+    if ($manifest -and $recordedBins.Count -and -not (Test-SameBinaries (Get-BinariesState $BinDir) $recordedBins)) {
+        # Another installer (an older release's, which does not read the
+        # record) replaced the recorded programs since: nothing proves them,
+        # so they are never started. -AcceptCurrentInstall retires the record
+        # and this run installs its staged, verified release over them; a
+        # rollback has no proven install to go back from.
+        $replaced = @(Test-LifecycleProof $recordedBins $false -RequireProtected $false)
+        $override = [bool](Get-Variable -Name AcceptCurrentInstall -ValueOnly -ErrorAction SilentlyContinue)
+        if ($override -and -not [bool](Get-Variable -Name Rollback -ValueOnly -ErrorAction SilentlyContinue)) {
+            Write-Warn "The programs an earlier run recorded were replaced since ($($replaced -join '; ')); its record is retired (-AcceptCurrentInstall) and they are not started: this release is installed over them"
+            Remove-LifecycleManifest
+            return
+        }
+        Set-RecoveryPending
+        throw ("The previous install is not proven back: $($replaced -join '; '). Another installer replaced the programs it recorded, so they are not started. " +
+            "The record of it stays in $LifecycleManifest and the install stays locked. To install this release over them, run: $(Get-LifecycleNextStep -Accept)")
+    }
     if ($manifest) { $restart = $restart -or [bool](Get-Field $manifest "GatewayWasRunning") }
     if ($restart -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "recovered" }
     Set-RecoverySetupRoot $manifest
@@ -3003,7 +3065,8 @@ Options:
   -CosignPath FILE      cosign to check the release signature with (default: cosign on PATH)
   -AcceptCurrentInstall Keep the config and connectors changed since an earlier
                         run that is not proven back (its binaries and gateway
-                        are still checked)
+                        are still checked), or, when another installer
+                        replaced its programs, install this release over them
   -Help                 Show this help
 
 Exit codes (run as a file):
