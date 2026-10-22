@@ -37,37 +37,75 @@ const (
 	// sessionFactsDeadline bounds the whole read; the KCM call and klist
 	// finish well inside it.
 	sessionFactsDeadline = kcmCallTimeout + time.Second
+	// fileCCacheDeadline bounds the read of a FILE or DIR cache, a local
+	// file that answers in milliseconds unless its mount stopped answering.
+	fileCCacheDeadline = 500 * time.Millisecond
+	// stalledCCacheKeyPrefix keys the facts cached after a read missed its
+	// deadline (GAP-0582).
+	stalledCCacheKeyPrefix = "ccache-stalled|"
 )
 
-// currentSessionFactsHeader gives up after sessionFactsDeadline and sends the
+// ccacheStat is os.Stat; tests replace it with a stalled mount.
+var ccacheStat = os.Stat
+
+// currentSessionFactsHeader gives up after its deadline and sends the
 // session variables alone. A credential cache, or the home holding the facts
 // cache, on a network or FUSE mount that stopped answering blocks in the
 // kernel, where nothing can interrupt it; that read is left to finish on its
-// own, so the hook still answers inside the agent's deadline.
+// own, so the hook still answers inside the agent's deadline. The session
+// variables alone are then cached for sessionFactsRetryAfter, so the hooks
+// in that time do not touch the credential cache at all.
 func currentSessionFactsHeader(now time.Time) string {
+	ccname, platformDefault := ccacheNameFromEnv(os.Getenv)
+	kind, _ := SplitCCacheName(ccname)
+	cachePath := ""
+	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+		cachePath = filepath.Join(home, ".defenseclaw", SessionFactsCacheFileName)
+	}
+	envKey := SessionFactsEnvKey(os.Getenv)
+	stalledKey := stalledCCacheKeyPrefix + ccname
+	deadline := sessionFactsDeadline
+	if kind == CCacheFile || kind == CCacheDir {
+		deadline = fileCCacheDeadline
+	}
 	done := make(chan string, 1)
-	go func() { done <- readSessionFactsHeader(now) }()
-	timer := time.NewTimer(sessionFactsDeadline)
+	go func() { done <- readSessionFactsHeader(now, ccname, platformDefault, cachePath, stalledKey, envKey) }()
+	timer := time.NewTimer(deadline)
 	defer timer.Stop()
 	select {
 	case header := <-done:
 		return header
 	case <-timer.C:
-		return EncodeSessionFactsHeader(ClaimedSessionHeader{Session: SessionFromSSHEnv(os.Getenv)})
 	}
+	header := EncodeSessionFactsHeader(ClaimedSessionHeader{Session: SessionFromSSHEnv(os.Getenv)})
+	if cachePath != "" {
+		// The facts cache is in the home, not on the credential cache's
+		// mount; the write still gets a bound of its own.
+		written := make(chan struct{})
+		go func() {
+			_ = writeSessionFactsCache(cachePath, stalledKey, envKey, header, now.Add(sessionFactsRetryAfter-SessionFactsCacheTTL))
+			close(written)
+		}()
+		select {
+		case <-written:
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return header
 }
 
-func readSessionFactsHeader(now time.Time) string {
-	ccname, platformDefault := ccacheNameFromEnv(os.Getenv)
+func readSessionFactsHeader(now time.Time, ccname string, platformDefault bool, cachePath, stalledKey, envKey string) string {
+	if cachePath != "" {
+		if header, ok := cachedSessionFactsHeader(cachePath, stalledKey, envKey, now); ok {
+			return header
+		}
+	}
 	kind, residual := SplitCCacheName(ccname)
 	mtime := ccacheModTime(kind, residual)
 	key := strings.Join([]string{
 		ccname, mtime, os.Getenv("XDG_SESSION_ID"), os.Getenv("SSH_CONNECTION"), os.Getenv("SSH_TTY"),
 	}, "|")
-	envKey := SessionFactsEnvKey(os.Getenv)
-	cachePath := ""
-	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
-		cachePath = filepath.Join(home, ".defenseclaw", SessionFactsCacheFileName)
+	if cachePath != "" {
 		if header, ok := cachedSessionFactsHeader(cachePath, key, envKey, now); ok {
 			return header
 		}
@@ -205,7 +243,7 @@ func ccacheModTime(kind, residual string) string {
 	if path == "" {
 		return ""
 	}
-	info, err := os.Stat(path)
+	info, err := ccacheStat(path)
 	if err != nil {
 		return ""
 	}
