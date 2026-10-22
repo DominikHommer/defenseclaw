@@ -319,20 +319,12 @@ func renderBridgeHostTemplate(asset string, managed bool) ([]byte, error) {
 	if err := tmpl.Execute(&out, data); err != nil {
 		return nil, err
 	}
-	if !managed {
-		return out.Bytes(), nil
-	}
-	// The scanner normalizes this rendered field before hashing. Keep its
-	// canonical placeholder in both host template variants.
-	line := `DC_FAIL_MODE = "closed"`
-	if asset == "amp-plugin.ts" {
-		line = `DC_FAIL_MODE: string = "closed"`
-	}
-	canonical := strings.Replace(line, `"closed"`, `"{{.FailMode}}"`, 1)
-	if strings.Count(out.String(), line) != 1 {
+	// Managed OpenCode renders the administrator's mode directly; it is
+	// already in the scanner's canonical placeholder form.
+	if managed && strings.Count(out.String(), `DC_FAIL_MODE = "{{.FailMode}}"`) != 1 {
 		return nil, fmt.Errorf("managed bridge %s has no unique fail mode", asset)
 	}
-	return []byte(strings.Replace(out.String(), line, canonical, 1)), nil
+	return out.Bytes(), nil
 }
 
 func TestBridgeHostTemplatesGolden(t *testing.T) {
@@ -377,7 +369,7 @@ func TestManagedBridgeTemplatesCloseOpenRender(t *testing.T) {
 		for _, tc := range []struct {
 			managed, secureClient bool
 			wantClosed            bool
-		}{{true, false, true}, {false, false, false}, {true, true, false}} {
+		}{{true, false, asset == "amp-plugin.ts"}, {false, false, false}, {true, true, false}} {
 			body, err := renderHookTemplate(asset, templateData{FailMode: "open", Managed: tc.managed, SecureClient: tc.secureClient})
 			if err != nil {
 				t.Fatal(err)

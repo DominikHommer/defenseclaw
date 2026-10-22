@@ -55,7 +55,7 @@ const DC_HOOK_SOCKET = "";
 const DC_FOREIGN_GUARD = "";
 const DC_INSTALL_MARKER = "";
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}";
-const DC_FAIL_MODE = "{{.FailMode}}"; // administrator's explicit open, or closed by default
+const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
 // The process environment can only tighten the installed mode, as in the
 // shell hooks: DEFENSECLAW_FAIL_MODE=closed closes every failure (GAP-0315),
 // and DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035).
