@@ -441,7 +441,7 @@ For a local Docker stack, enable the optional scrape after confirming `host.dock
 
 First create the user stack with `defenseclaw setup local-observability up`. The recipe below uses its default directory, `$HOME/.defenseclaw/observability-stack`; use your configured data directory if it differs. Set `FLEET_ASSETS` to the absolute path of the extracted Fleet archive. The archive supplies the optional overlay, scrape example and dashboard; the installed user stack supplies the core Compose file and Grafana provisioning.
 
-The recipe restarts the stack with the same Grafana sign-in mode that setup chose and saved in `.grafana-access-mode`. In `password` mode it adds the stack's `docker-compose.password.yml` and its saved admin password. It checks the effective Compose config first and starts nothing if Grafana would allow anonymous access that the saved mode does not allow.
+The recipe restarts the stack with the same Grafana sign-in mode that setup chose and saved in `.grafana-access-mode`. In `password` mode it adds the stack's `docker-compose.password.yml` and its saved admin password. It checks the effective Compose config first and starts nothing if Grafana would allow anonymous access that the saved mode does not allow, or anonymous access that is not read-only (`Viewer`).
 
 ```bash
 FLEET_ASSETS="/path/to/extracted-assets"
@@ -469,8 +469,13 @@ case "$(cat .grafana-access-mode)" in
   *) echo 'Grafana sign-in mode unknown: run defenseclaw setup local-observability up first' >&2; exit 1 ;;
 esac
 compose+=(-f "$FLEET_ASSETS/bundles/local_observability_stack/docker-compose.fleet.yml")
-"${compose[@]}" config | grep -E "^ +GF_AUTH_ANONYMOUS_ENABLED: \"?$anonymous\"?\$" >/dev/null ||
+effective="$("${compose[@]}" config)"
+grep -E "^ +GF_AUTH_ANONYMOUS_ENABLED: \"?$anonymous\"?\$" >/dev/null <<<"$effective" ||
   { echo 'Grafana sign-in would not match .grafana-access-mode; nothing was started' >&2; exit 1; }
+if [ "$anonymous" = true ]; then
+  grep -E '^ +GF_AUTH_ANONYMOUS_ORG_ROLE: "?Viewer"?$' >/dev/null <<<"$effective" ||
+    { echo 'Anonymous Grafana access would not be read-only (Viewer); nothing was started' >&2; exit 1; }
+fi
 "${compose[@]}" up -d
 ```
 

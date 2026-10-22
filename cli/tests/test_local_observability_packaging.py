@@ -31,7 +31,7 @@ FLEET_TEMPLATES = {
 
 # A fake docker that records each Compose call and renders the Grafana sign-in
 # mode the given files produce, as real Compose does: the base file alone keeps
-# anonymous Admin access; the password overlay turns it off.
+# anonymous read-only Viewer access; the password overlay turns it off.
 _FAKE_DOCKER = """#!/bin/sh
 set -eu
 test "$1" = compose
@@ -51,7 +51,7 @@ case "$1" in
       *docker-compose.password.yml*) [ -z "${FAKE_OVERLAY_IGNORED:-}" ] && anonymous='"false"' || anonymous='"true"' ;;
       *) anonymous='"true"' ;;
     esac
-    printf 'services:\n  grafana:\n    environment:\n      GF_AUTH_ANONYMOUS_ENABLED: %s\n' "$anonymous" ;;
+    printf 'services:\n  grafana:\n    environment:\n      GF_AUTH_ANONYMOUS_ENABLED: %s\n      GF_AUTH_ANONYMOUS_ORG_ROLE: %s\n' "$anonymous" "${FAKE_ANONYMOUS_ROLE:-Viewer}" ;;
   up)
     test -f grafana/dashboards/defenseclaw-fleet.json
     test -f prometheus/scrape.d/fleet.yml
@@ -130,7 +130,7 @@ def test_fleet_dashboard_recipe_keeps_the_saved_grafana_sign_in(
     calls = log.read_text(encoding="utf-8").splitlines()
     ups = [line for line in calls if line.startswith("up ")]
     # One start, in the managed project, with the saved sign-in overlay and
-    # its password (anonymous Admin only where setup chose no-password).
+    # its password (anonymous Viewer only where setup chose no-password).
     assert ups == [f"up files:{want_files} password:{want_password}"], calls
     assert "--project-name=defenseclaw-observability" in calls, calls
 
@@ -328,3 +328,16 @@ def test_wheel_resolves_complete_stack_outside_source_checkout(tmp_path: Path) -
     )
     assert probe.returncode == 0, probe.stdout + probe.stderr
     assert "_data" in probe.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="documented POSIX shell recipe")
+@pytest.mark.parametrize("role", ["Admin", "Editor"])
+def test_fleet_dashboard_recipe_refuses_anonymous_access_that_is_not_read_only(tmp_path: Path, role: str) -> None:
+    # fix/r104-windows: Grafana recipes never enable anonymous Admin. An
+    # effective config that would make anonymous visitors Admin or Editor
+    # starts nothing.
+    result, _stack, log = _run_fleet_recipe(tmp_path, "no-password", FAKE_ANONYMOUS_ROLE=role)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "would not be read-only (Viewer)" in result.stderr, result.stderr
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    assert not [line for line in calls if line.startswith("up ")], calls
