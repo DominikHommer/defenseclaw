@@ -68,16 +68,15 @@ var enterpriseForeignHookCleanupQueue = make(chan struct{}, 1)
 var enterpriseForeignHookCleanupFenceWait = 5 * time.Second
 
 // enterpriseForeignHookCleanupQueueWait bounds an in-process cleanup's wait
-// for its turn (withEnterpriseForeignHookCleanupFence). Every holder is
-// bounded: a per-user worker by its timeout, an in-process cleanup by one
-// connector's cleanup of one account.
+// for its turn (enterpriseForeignHookInProcessFence). Every holder is
+// bounded: each holds the fence for one removal and its ledger commit.
 const enterpriseForeignHookCleanupQueueWait = 2 * time.Minute
 
 // acquireEnterpriseForeignHookCleanupFence takes the machine's foreign-hook
 // cleanup fence: this guardian's turn within ctx, then the fence file within
 // enterpriseForeignHookCleanupFenceWait. The gateway holds the same file
-// until an allow has been sent; the guardian holds it from a cleanup's first
-// removal through the removal-ledger commit. On error nothing is held and
+// until an allow has been sent; the guardian holds it from each removal
+// through that removal's ledger commit. On error nothing is held and
 // the caller removes nothing: the existing foreign-hook guard stays. The
 // fence belongs to the machine guardian, even when the cleanup target keeps
 // its hook scripts in a different per-user data directory. The returned
@@ -116,16 +115,106 @@ func acquireEnterpriseForeignHookCleanupFence(ctx context.Context) (func(), erro
 	}), nil
 }
 
-// withEnterpriseForeignHookCleanupFence runs one in-process cleanup (a
-// single connector of a single account, with its ledger commit) under the
-// cleanup fence. If the fence cannot be taken, fn does not run.
-func withEnterpriseForeignHookCleanupFence(fn func() error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), enterpriseForeignHookCleanupQueueWait)
-	defer cancel()
-	unlock, err := acquireEnterpriseForeignHookCleanupFence(ctx)
-	if err != nil {
-		return err
+// enterpriseForeignHookCleanupFence is one cleanup's hold on the machine's
+// foreign-hook cleanup fence. lock takes it for one removal; commit records
+// that removal's files in the removal ledger and releases it.
+type enterpriseForeignHookCleanupFence interface {
+	lock(connector string) error
+	commit(connector string, removed []string) error
+}
+
+// enterpriseForeignHookRemovalGuard is the GuardRemoval of one connector's
+// cleanup. Each removal takes the fence, runs, commits its files (none when
+// it failed) and releases the fence before the cleanup reads anything else,
+// so the fence never covers a scan. Once the fence is refused or a commit
+// fails, the cleanup's later removals are refused without waiting again:
+// those hooks stay in place, reported, and the guard keeps denying.
+func enterpriseForeignHookRemovalGuard(connector string, fence enterpriseForeignHookCleanupFence) func([]string, func() error) error {
+	var refused error
+	return func(paths []string, remove func() error) error {
+		if refused != nil {
+			return refused
+		}
+		if err := fence.lock(connector); err != nil {
+			refused = err
+			return err
+		}
+		removeErr := remove()
+		var removed []string
+		if removeErr == nil {
+			removed = paths
+		}
+		if err := fence.commit(connector, removed); err != nil {
+			refused = err
+			return errors.Join(removeErr, err)
+		}
+		return removeErr
 	}
-	defer unlock()
-	return fn()
+}
+
+// enterpriseForeignHookInProcessFence is the fence of a cleanup the guardian
+// runs in process with the user's identity (enterpriseForeignHookRunAsTarget,
+// the Windows reconcile and its machine-policy pass). Its lock and commit
+// act as the guardian (enterpriseForeignHookAsGuardian); commit records the
+// account's removals.
+type enterpriseForeignHookInProcessFence struct {
+	account, home string
+	unlock        func()
+	committed     map[string]bool
+}
+
+func newEnterpriseForeignHookInProcessFence(account, home string) *enterpriseForeignHookInProcessFence {
+	return &enterpriseForeignHookInProcessFence{account: account, home: home, committed: map[string]bool{}}
+}
+
+func (f *enterpriseForeignHookInProcessFence) lock(string) error {
+	if f.unlock != nil {
+		return errors.New("foreign-hook cleanup fence: this cleanup already holds it")
+	}
+	return enterpriseForeignHookAsGuardian(func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), enterpriseForeignHookCleanupQueueWait)
+		defer cancel()
+		unlock, err := acquireEnterpriseForeignHookCleanupFence(ctx)
+		if err == nil {
+			f.unlock = unlock
+		}
+		return err
+	})
+}
+
+// commit records removed and then releases the fence, even when the record
+// could not run (the caller records what no commit did once it is the
+// guardian again: uncommitted).
+func (f *enterpriseForeignHookInProcessFence) commit(connector string, removed []string) error {
+	if f.unlock == nil {
+		return errors.New("foreign-hook cleanup fence: this cleanup does not hold it")
+	}
+	defer f.release()
+	return enterpriseForeignHookAsGuardian(func() error {
+		recordEnterpriseForeignHookRemovals(os.Stderr, f.account, f.home, connector, removed)
+		for _, path := range removed {
+			f.committed[path] = true
+		}
+		return nil
+	})
+}
+
+// release lets go of the fence if this cleanup still holds it. Releasing
+// needs no identity: it only unlocks and closes the open fence file.
+func (f *enterpriseForeignHookInProcessFence) release() {
+	if f.unlock != nil {
+		f.unlock()
+		f.unlock = nil
+	}
+}
+
+// uncommitted lists the files of removed that no commit recorded.
+func (f *enterpriseForeignHookInProcessFence) uncommitted(removed []string) []string {
+	var out []string
+	for _, path := range removed {
+		if !f.committed[path] {
+			out = append(out, path)
+		}
+	}
+	return out
 }

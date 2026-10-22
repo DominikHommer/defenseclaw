@@ -280,9 +280,9 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			request.ForeignCleanup = append(request.ForeignCleanup, cleanup)
 		}
 		if len(request.ForeignCleanup) > 0 && cfg != nil && cfg.StandaloneEnterprise() {
-			// The worker takes the cleanup fence only for each connector's
-			// removals, and this session commits them to the ledger before
-			// the worker goes on.
+			// The worker takes the cleanup fence only for each removal, and
+			// this session commits that removal to the ledger before the
+			// worker reads on.
 			uid, home := strconv.Itoa(account.UID), account.Home
 			request.cleanupFence = newEnterpriseForeignHookFenceSession(request.ForeignCleanup, func(connector string, removed []string) {
 				recordEnterpriseForeignHookRemovals(stderr, uid, home, connector, removed)
@@ -358,13 +358,16 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	recordRemovals := func(outcome enterpriseHookWorkerOutcome) {
 		session := outcome.Job.Request.cleanupFence
 		for _, cleanup := range outcome.Job.Request.ForeignCleanup {
-			if session != nil && session.isCommitted(cleanup.Connector) {
+			report, ok := outcome.Response.Cleanup[cleanup.Connector]
+			if !ok {
 				continue
 			}
-			if report, ok := outcome.Response.Cleanup[cleanup.Connector]; ok {
-				recordEnterpriseForeignHookRemovals(stderr, strconv.Itoa(outcome.Job.Account.UID), outcome.Job.Account.Home,
-					cleanup.Connector, boundedStrings(report.Removed, 32))
+			removed := boundedStrings(report.Removed, 32)
+			if session != nil {
+				removed = session.uncommitted(cleanup.Connector, removed)
 			}
+			recordEnterpriseForeignHookRemovals(stderr, strconv.Itoa(outcome.Job.Account.UID), outcome.Job.Account.Home,
+				cleanup.Connector, removed)
 		}
 		if session != nil {
 			session.release()
@@ -618,6 +621,19 @@ func removeEnterpriseHookCopilotVSCodeAccounts(path, manifestPath string) error 
 	return nil
 }
 
+// enterpriseForeignHookAsGuardian runs fn from inside an in-process cleanup
+// only while the process still has its own identity. A root guardian's
+// in-process cleanup changes the effective uid of the whole process, so
+// there fn is refused: the hook stays and the guard keeps denying. The
+// standalone Unix guardian cleans in its per-user worker, which asks for
+// the fence over its pipes instead.
+func enterpriseForeignHookAsGuardian(fn func() error) error {
+	if os.Geteuid() != os.Getuid() {
+		return errors.New("foreign-hook cleanup fence: an in-process cleanup cannot act as the guardian while it runs as the user")
+	}
+	return fn()
+}
+
 // enterpriseForeignHookUserEnvRedirects adds nothing on Unix: the per-user
 // worker cleans with its own environment and the redirects the user's hooks
 // recorded.
@@ -626,10 +642,10 @@ func enterpriseForeignHookUserEnvRedirects(enterprisehooks.TargetCredentials, en
 }
 
 // runEnterpriseHookWorkerForeignCleanup runs inside the worker as the user.
-// With a fence, each connector asks for it right before its first removal
-// and commits its removals once its cleanup ends, so the fence never covers
-// a scan that removes nothing or another task of the worker.
-func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, now time.Time, fence enterpriseHookWorkerCleanupFence) map[string]enterpriseHookWorkerCleanupReport {
+// With a fence, each removal asks for it right before it changes a file and
+// commits that removal before the cleanup reads on, so the fence never
+// covers a scan or another task of the worker.
+func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, now time.Time, fence enterpriseForeignHookCleanupFence) map[string]enterpriseHookWorkerCleanupReport {
 	out := map[string]enterpriseHookWorkerCleanupReport{}
 	home := filepath.Clean(request.Home)
 	for _, cleanup := range request.ForeignCleanup {
@@ -651,27 +667,14 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 			Getenv:        os.Getenv,
 			OwnedCommands: cleanup.OwnedCommands,
 		}
-		held := false
-		var fenceErr error
 		if fence != nil {
-			// A refusal stands for the rest of this connector's cleanup:
-			// its other removals do not wait for the fence again.
-			guard.BeforeRemove = func() error {
-				if !held && fenceErr == nil {
-					fenceErr = fence.lock(name)
-					held = fenceErr == nil
-				}
-				return fenceErr
-			}
+			guard.GuardRemoval = enterpriseForeignHookRemovalGuard(name, fence)
 		}
 		result, err := enterprisepolicy.CleanUserForeignHooksWithRedirects(guard, redirects, now)
 		err = errors.Join(err, redirectErr)
 		report := enterpriseHookWorkerCleanupReport{BackupDir: result.BackupDir}
 		for _, finding := range result.Removed {
 			report.Removed = append(report.Removed, finding.Path)
-		}
-		if held {
-			err = errors.Join(err, fence.commit(name, boundedStrings(report.Removed, 32)))
 		}
 		for _, finding := range result.Reported {
 			report.Reported = append(report.Reported, finding.Path+" ("+finding.Reason+")")

@@ -116,13 +116,8 @@ func TestGuardianCleanupWaitsForAnAllowBeforeUnlink(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- withEnterpriseForeignHookCleanupFence(func() error {
-			if err := os.Remove(hook); err != nil {
-				return err
-			}
-			recordEnterpriseForeignHookRemovals(&bytes.Buffer{}, "1001", "/home/alice", "claudecode", []string{"/home/alice/.claude/settings.json"})
-			return nil
-		})
+		guard := enterpriseForeignHookRemovalGuard("claudecode", newEnterpriseForeignHookInProcessFence("1001", "/home/alice"))
+		done <- guard([]string{"/home/alice/.claude/settings.json"}, func() error { return os.Remove(hook) })
 	}()
 	select {
 	case err := <-done:

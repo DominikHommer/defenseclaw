@@ -7,6 +7,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -192,16 +193,42 @@ func TestForeignCleanupFenceQueuesAccountsInsteadOfAbandoningThem(t *testing.T) 
 		t.Fatal("the fence stays held after the last commit")
 	}
 
-	// The session takes no fence for a connector the job did not ask for, a
-	// second time for the same connector, or a commit it does not hold.
+	// Each removal takes the fence again: a later removal of the same
+	// connector gets it once the earlier one committed. The session takes no
+	// fence for a connector the job did not ask for, while one of its
+	// removals holds it, or past the per-connector bound, and commits only
+	// for the removal that holds it.
 	if err := alice.lock(context.Background(), "codex"); err == nil {
 		t.Fatal("locked for a connector outside the job")
 	}
-	if err := alice.lock(context.Background(), "cursor"); err == nil {
-		t.Fatal("locked twice for the same connector")
-	}
 	if err := alice.commit("claudecode", []string{"/home/alice/.claude/settings.json"}); err == nil {
 		t.Fatal("committed without the fence")
+	}
+	if err := alice.lock(context.Background(), "cursor"); err != nil {
+		t.Fatalf("a later removal of the same connector must take the fence again: %v", err)
+	}
+	if err := alice.lock(context.Background(), "claudecode"); err == nil {
+		t.Fatal("locked while another removal of the job holds the fence")
+	}
+	if err := alice.commit("claudecode", []string{"/home/alice/.claude/settings.json"}); err == nil {
+		t.Fatal("committed for a connector whose removal does not hold the fence")
+	}
+	if err := alice.commit("cursor", []string{"/home/alice/.cursor/other.json"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.commit("cursor", nil); err == nil {
+		t.Fatal("committed twice for one lock")
+	}
+	if got := alice.uncommitted("cursor", []string{"/home/alice/.cursor/hooks.json", "/home/alice/.cursor/other.json", "/home/alice/.cursor/late.json"}); strings.Join(got, ",") != "/home/alice/.cursor/late.json" {
+		t.Fatalf("uncommitted = %v", got)
+	}
+	alice.locks["claudecode"] = enterpriseHookWorkerFenceLockLimit
+	if err := alice.lock(context.Background(), "claudecode"); err == nil {
+		alice.release()
+		t.Fatal("locked past the per-connector bound")
+	}
+	if !gatewayTakesCleanupFence(t, guardianDir, 50*time.Millisecond) {
+		t.Fatal("the fence stays held after the session's commits")
 	}
 
 	// A gateway exchange that holds the fence file past the budget refuses
@@ -328,5 +355,72 @@ func TestForeignCleanupWorkerTakesTheFenceOnlyToRemove(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second || len(recorded) != 1 || len(enterpriseForeignHookCleanupQueue) != 0 {
 		t.Fatalf("a clean home waited %v for the fence (commits %d)", elapsed, len(recorded))
+	}
+}
+
+// The worker releases the fence after each removal, before it reads on: a
+// cleanup with two foreign plugins takes and commits the fence once per
+// plugin, and the second plugin is untouched when the first one commits. A
+// refused fence leaves every hook in place, asked for once.
+func TestForeignCleanupWorkerReleasesTheFenceAfterEachRemoval(t *testing.T) {
+	setup := func(t *testing.T) (string, []string, []enterpriseHookWorkerForeignCleanup) {
+		home := t.TempDir()
+		dir := filepath.Join(home, ".config", "opencode", "plugins")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		plugins := []string{filepath.Join(dir, "a-mutate.mjs"), filepath.Join(dir, "b-mutate.mjs")}
+		for _, path := range plugins {
+			if err := os.WriteFile(path, []byte("export default {}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return home, plugins, []enterpriseHookWorkerForeignCleanup{{
+			Connector:  "opencode",
+			HookBinary: "/opt/defenseclaw/bin/defenseclaw-hook",
+			Policy:     enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RouteMachinePolicy, ForeignHooks: config.ForeignHooksRemove, Guard: true},
+		}}
+	}
+	present := func(path string) bool { _, err := os.Lstat(path); return err == nil }
+
+	home, plugins, cleanups := setup(t)
+	fence := &recordingCleanupFence{}
+	commits := 0
+	fence.onCommit = func(removed []string) {
+		commits++
+		if commits == 1 && (len(removed) != 1 || present(removed[0]) || !present(plugins[0]) && !present(plugins[1])) {
+			t.Errorf("the first commit must cover one removed plugin while the other is still in place: %v", removed)
+		}
+	}
+	reports := runEnterpriseHookWorkerForeignCleanup(enterpriseHookWorkerRequest{Home: home, ForeignCleanup: cleanups}, time.Now(), fence)
+	report := reports["opencode"]
+	if report.Error != "" || len(report.Removed) != 2 {
+		t.Fatalf("cleanup report %+v", report)
+	}
+	locks := 0
+	for _, event := range fence.events {
+		if strings.HasPrefix(event, "lock ") {
+			locks++
+		}
+	}
+	if locks != 2 || commits != 2 || len(fence.events) != 4 || fence.held {
+		t.Fatalf("each removal must take and release the fence on its own: %v", fence.events)
+	}
+	for _, path := range plugins {
+		if present(path) {
+			t.Fatalf("%s was not removed", path)
+		}
+	}
+
+	home, plugins, cleanups = setup(t)
+	refused := &recordingCleanupFence{lockErr: errors.New("fence busy")}
+	report = runEnterpriseHookWorkerForeignCleanup(enterpriseHookWorkerRequest{Home: home, ForeignCleanup: cleanups}, time.Now(), refused)["opencode"]
+	if report.Error == "" || len(report.Removed) != 0 || len(report.Reported) < 2 || len(refused.events) != 1 {
+		t.Fatalf("a refused fence: report %+v, fence %v", report, refused.events)
+	}
+	for _, path := range plugins {
+		if !present(path) {
+			t.Fatalf("%s was removed without the fence", path)
+		}
 	}
 }

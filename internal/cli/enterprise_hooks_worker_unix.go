@@ -444,7 +444,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 				return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("the foreign cleanup does not take mode %q", target.Mode)}, 3)
 			}
 		}
-		var fence enterpriseHookWorkerCleanupFence
+		var fence enterpriseForeignHookCleanupFence
 		if request.CleanupFence {
 			pipe, err := openEnterpriseHookWorkerFencePipe()
 			if err != nil {
