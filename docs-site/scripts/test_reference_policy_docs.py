@@ -32,6 +32,13 @@ class ReferencePolicyDocsTest(unittest.TestCase):
                       "Gateway returns 4xx", "Hook input over"):
             row = next(line for line in rows if line.startswith("| " + label))
             self.assertIn("Block", row.split("|")[3])
+        # A cut-off error answer and a 429 the gateway cannot answer in time
+        # are error statuses, not outages (W6 review loop 1).
+        for label in ("Gateway 5xx", "Gateway returns 4xx"):
+            row = next(line for line in rows if line.startswith("| " + label))
+            self.assertIn("cut off", row.split("|")[1])
+        row = next(line for line in rows if line.startswith("| Gateway returns 4xx"))
+        self.assertIn("429", row.split("|")[1])
 
 
     def test_amp_is_excluded_from_persisted_fail_open_reporting(self):
