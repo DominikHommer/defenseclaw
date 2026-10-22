@@ -23,9 +23,9 @@ var ErrAccountEnvironmentUnavailable = errors.New("the account's persistent envi
 // loaded registry hive. It fails when that home cannot be resolved, and
 // never substitutes the profile default for a home it could not read: a
 // check of the default proves nothing about the home the account's Hermes
-// reads (GAP-0499). Linux and macOS keep no persistent per-account
-// environment a service can read, so there the result is the account's
-// ~/.hermes, which ConfigPathForUserHome also returns.
+// reads (GAP-0499). On Linux and macOS the result is the account's
+// ~/.hermes, which ConfigPathForUserHome also returns; a check of it proves
+// the account's home only together with VerifyAccountHome.
 func ConfigPathForAccount(userHome string) (string, error) {
 	userHome = strings.TrimSpace(userHome)
 	if userHome == "" {

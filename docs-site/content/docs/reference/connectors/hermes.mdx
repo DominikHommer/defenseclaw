@@ -87,7 +87,17 @@ To check the current hook files on Linux, run `sudo /opt/defenseclaw/bin/defense
 
 `enterprise policy verify` checks machine-policy connectors; Hermes uses per-user hooks, so that command can succeed while its hooks are missing.
 
-The guardian sets up and checks the Hermes home each account configured, not the profile default. On Windows that is the `HERMES_HOME` of the account's persistent environment (its own variable, else the machine's), else `hermes` under the Local AppData of its sign-in, read from the account's loaded registry hive. While the account is signed out the hive is not loaded, so its hooks are not set up or verified until it signs in; the check never falls back to the default folder. On Linux and macOS there is no persistent per-account environment to read, so the guardian uses `~/.hermes`. On every platform a named profile Hermes would run from (`active_profile` naming another profile, or a folder under `profiles/`) fails the check, because the hooks are in the default profile. A `HERMES_HOME` set only in a shell is not seen; see the limits above.
+The guardian sets up and checks the Hermes home each account configured, not the profile default. On Windows that is the `HERMES_HOME` of the account's persistent environment (its own variable, else the machine's), else `hermes` under the Local AppData of its sign-in, read from the account's loaded registry hive. While the account is signed out the hive is not loaded, so its hooks are not set up or verified until it signs in; the check never falls back to the default folder. On Linux and macOS the guardian uses `~/.hermes`, and the check passes only while nothing names another home. Verify reports Hermes not verified (`HERMES_HOME unproven`) when any of these sets `HERMES_HOME` to another home, or to a value a service cannot resolve:
+
+- a `HERMES_HOME` that DefenseClaw hooks recorded in the account's `~/.defenseclaw/foreign-hook-env.json`, on every platform;
+- `~/.config/environment.d/*.conf`, `/etc/environment.d/*.conf`, `/etc/environment`, `~/.pam_environment` or `/etc/security/pam_env.conf`, where `$HOME`, `${HOME}`, `@{HOME}` and a leading `~` are resolved;
+- any uncommented line naming `HERMES_HOME` in a shell startup file (`~/.profile`, `~/.bashrc`, `~/.zshrc`, `~/.zshenv`, the fish config, `/etc/profile`, `/etc/profile.d/*` and the system bash and zsh files), because only the shell can evaluate it;
+- on macOS, the account's launchd environment (`launchctl setenv HERMES_HOME`);
+- on Linux, the environment of any running process of the account.
+
+To make the check pass, remove the setting that names the other home. On every platform a named profile Hermes would run from (`active_profile` naming another profile, or a folder under `profiles/`) fails the check, because the hooks are in the default profile.
+
+When the configured home changes, for example after an upgrade from 1.0.3 on Windows, where the guardian set up `%LOCALAPPDATA%\hermes` even when the account set `HERMES_HOME`, setup first removes DefenseClaw's hooks and approvals from the earlier home and then sets up the configured one. Teardown and `connector prune-orphans` also clean DefenseClaw's entries out of the profile default home, and teardown verification fails while any remain.
 
 ## Hook events
 
