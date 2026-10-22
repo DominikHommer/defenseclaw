@@ -176,6 +176,19 @@ def test_the_agent_prompt_default_picks_no_agent(tmp_path: Path, terminal: str) 
     assert "1=codex" not in result.stderr
 
 
+@pytest.mark.parametrize("script", ["install.sh", "install.ps1"])
+def test_the_not_set_up_next_step_names_no_recorded_connector(script: str) -> None:
+    # GAP-0568: an upgrade over a never-initialized install printed
+    # 'init --connector codex' from the codex an older installer recorded
+    # with no terminal to ask on, an agent the machine may not have.
+    text = (ROOT / "scripts" / script).read_text(encoding="utf-8")
+    start = text.index("An earlier install that was never initialized")
+    block = text[start : text.index("DefenseClaw is not set up yet. Next: ", start) + 200]
+
+    assert "picked_connector" not in block
+    assert "init --connector" in block
+
+
 def test_version_before_1_0_is_refused_without_network(tmp_path: Path) -> None:
     result = _run([str(_stamped(tmp_path)), "--version", "0.8.10"], tmp_path)
 

@@ -2631,6 +2631,10 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                             return_value="windows",
                         ),
                         patch(
+                            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+                            return_value=["opencode"],
+                        ),
+                        patch(
                             "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
                             side_effect=refuse,
                         ) as selected,

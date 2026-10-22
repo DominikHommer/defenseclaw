@@ -36,3 +36,42 @@ def test_non_interactive_guardrail_setup_refuses_without_a_connector() -> None:
         assert app.cfg.cisco_ai_defense.api_key_env != "ASIA_PACIFIC_KEY"
     finally:
         cleanup_app(app, db_path, tmp_dir)
+
+
+def _guardrail_setup_with_picked_hint(installed: list[str]):
+    import os
+    from unittest.mock import patch
+
+    from defenseclaw.commands import cmd_setup
+
+    app, tmp_dir, db_path = make_app_context()
+    app.cfg.claw.mode = ""
+    app.cfg.guardrail.connector = ""
+    app.cfg.guardrail.connectors = {}
+    with open(os.path.join(app.cfg.data_dir, "picked_connector"), "w", encoding="utf-8") as fh:
+        fh.write("codex\n")
+    argv = ["guardrail", "--non-interactive", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"]
+    with patch.object(cmd_setup, "_detect_installed_connectors", return_value=installed):
+        result = CliRunner().invoke(cmd_setup.setup, argv, obj=app)
+    return app, tmp_dir, db_path, result
+
+
+def test_a_picked_hint_for_an_agent_that_is_not_installed_does_not_pass_the_gate() -> None:
+    # GAP-0568: an older installer recorded codex when it had no terminal to
+    # ask on; that hint must not enroll an agent the machine does not have.
+    app, tmp_dir, db_path, result = _guardrail_setup_with_picked_hint([])
+    try:
+        assert result.exit_code == 1, result.output
+        assert "no agent connector is configured" in result.output
+        assert app.cfg.guardrail.connector == ""
+        assert app.cfg.claw.mode == ""
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+def test_a_picked_hint_for_an_installed_agent_still_passes_the_gate() -> None:
+    app, tmp_dir, db_path, result = _guardrail_setup_with_picked_hint(["codex"])
+    try:
+        assert "no agent connector is configured" not in result.output
+    finally:
+        cleanup_app(app, db_path, tmp_dir)

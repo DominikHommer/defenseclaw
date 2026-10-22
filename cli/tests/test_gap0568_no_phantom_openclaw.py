@@ -159,6 +159,29 @@ class OlderConfigWithoutClawBlockTests(_FreshHome):
         self.assertIn("openclaw", self._plan().connectors)
 
 
+    def _overview_model(self):
+        from defenseclaw.config import load
+        from defenseclaw.tui.app import _active_connector, _overview_config
+        from defenseclaw.tui.services.overview_state import OverviewPanelModel
+
+        cfg = load()
+        return _active_connector(cfg), OverviewPanelModel(_overview_config(cfg))
+
+    def test_tui_names_no_agent_without_openclaw(self):
+        active, model = self._overview_model()
+
+        self.assertEqual(active, "")
+        self.assertEqual(model.active_connector_name(), "")
+
+    def test_tui_still_names_an_installed_openclaw(self):
+        self._plant_openclaw()
+
+        active, model = self._overview_model()
+
+        self.assertEqual(active, "openclaw")
+        self.assertEqual(model.active_connector_name(), "openclaw")
+
+
 class OlderInitClawModeTests(OlderConfigWithoutClawBlockTests):
     """The claw.mode openclaw default an init before 1.0.4 saved (upgrade path)."""
 

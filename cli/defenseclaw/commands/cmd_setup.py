@@ -5410,10 +5410,25 @@ def _detect_connector(data_dir: str | None = None) -> str | None:
     codex an older installer recorded when it had no terminal to ask on.
     """
     installed = _detect_installed_connectors()
-    picked = _read_picked_connector(data_dir)
-    if picked and picked in installed:
+    picked = _installed_picked_connector(data_dir, installed)
+    if picked:
         return picked
     return installed[0] if installed else None
+
+
+def _installed_picked_connector(data_dir: str | None, installed: list[str] | None = None) -> str | None:
+    """Return the ``picked_connector`` hint only when that agent is installed.
+
+    An older installer recorded codex when it had no terminal to ask on, so a
+    hint alone never selects an agent the machine does not have (GAP-0568).
+    ``installed`` reuses a discovery the caller already ran.
+    """
+    picked = _read_picked_connector(data_dir)
+    if not picked:
+        return None
+    if installed is None:
+        installed = _detect_installed_connectors()
+    return picked if picked in installed else None
 
 
 def _select_connector_interactive(current: str, data_dir: str | None = None) -> str:
@@ -6720,7 +6735,7 @@ def setup_guardrail(
     elif (
         non_interactive
         and not app.cfg.has_connector_configured()
-        and not _read_picked_connector(getattr(app.cfg, "data_dir", None))
+        and not _installed_picked_connector(getattr(app.cfg, "data_dir", None))
     ):
         # GAP-2609: on a no-connector install (init --connector none) the
         # fallback below enrolled OpenClaw, an agent the operator never chose.
@@ -6852,7 +6867,7 @@ def setup_guardrail(
         #   2. existing gc.connector if already set to a non-default value
         #      (preserves prior `setup guardrail` choice across re-runs)
         #   3. <data_dir>/picked_connector hint written by install.sh
-        #      (operator intent at install time)
+        #      (operator intent at install time), when that agent is installed
         #   4. fallback to "openclaw" (historical default)
         # We deliberately do NOT run filesystem auto-detect (the
         # ``~/.claude`` / ``~/.codex`` heuristic) in non-interactive mode:
@@ -6865,7 +6880,7 @@ def setup_guardrail(
         if explicit_connector:
             target_connector = explicit_connector
         elif not gc.connector or gc.connector == "openclaw":
-            picked = _read_picked_connector(getattr(app.cfg, "data_dir", None))
+            picked = _installed_picked_connector(getattr(app.cfg, "data_dir", None))
             if picked:
                 target_connector = normalize_connector(picked)
             else:

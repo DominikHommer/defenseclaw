@@ -2693,14 +2693,10 @@ function Invoke-Install {
     }
     if ($PrevVersion -and -not $Setup -and -not $Quickstart -and -not $configured) {
         # An earlier install that was never initialized: say how to start, as a
-        # fresh install does, with the connector picked back then.
-        $nextConnector = $Connector
-        $pickedPath = Join-Path $DataDir "picked_connector"
-        if (-not $nextConnector -and (Test-Path -LiteralPath $pickedPath)) {
-            $nextConnector = ([string](Get-Content -LiteralPath $pickedPath -TotalCount 1)) -replace '[^a-z0-9_-]', ''
-        }
-        if ($nextConnector -and $nextConnector -ne "none") {
-            Write-Host "  DefenseClaw is not set up yet. Next: defenseclaw init --connector $nextConnector" -ForegroundColor Cyan
+        # fresh install does. The connector an earlier install recorded is not
+        # named: it may be the codex picked with no console to ask on (GAP-0568).
+        if ($Connector -and $Connector -ne "none") {
+            Write-Host "  DefenseClaw is not set up yet. Next: defenseclaw init --connector $Connector" -ForegroundColor Cyan
         } else {
             Write-Host "  DefenseClaw is not set up yet. Next: defenseclaw init" -ForegroundColor Cyan
         }
