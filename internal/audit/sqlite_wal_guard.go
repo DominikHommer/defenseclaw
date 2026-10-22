@@ -26,7 +26,7 @@ const auditWALJournalSizeLimitBytes = 64 << 20
 // auditBusyTimeoutMillis is the busy_timeout of every audit connection.
 const auditBusyTimeoutMillis = 5000
 
-// walIdleTrimBytes is the WAL file size past which a fully copied log is cut
+// walIdleTrimBytes is the WAL file size at which a fully copied log is cut
 // to zero bytes even though it is below the caller's limit: a log that stops
 // growing is never restarted by a writer, so its file kept its peak size
 // while the gateway was idle. A variable so tests can use a small file.
@@ -43,7 +43,7 @@ const (
 
 // walTrickleFrames is the longest log in use (about 8 MiB) that still counts
 // as a trickle of background writes after a flood: such a log was restarted
-// recently, so a file over walIdleTrimBytes is left from the flood and is
+// recently, so a file at least walIdleTrimBytes is left from the flood and is
 // trimmed in an idle gap. A variable so tests can use a short log.
 var walTrickleFrames = 2048
 
@@ -199,7 +199,7 @@ type WALCheckpoint struct {
 //     that still gives the writer back first, and each pass that fails or
 //     runs out of time while the log is over, doubles the next one's wait and
 //     cap, up to walBoundedAcquireMax and walBoundedCatchUpMax.
-//   - A fully copied log whose file is larger than walIdleTrimBytes (or whose
+//   - A fully copied log whose file is at least walIdleTrimBytes (or whose
 //     log is over the limit) is cut to zero bytes with a TRUNCATE checkpoint
 //     on the writer when the hooks are not flooding the store: nothing was
 //     committed since the previous pass (PRAGMA data_version on the
@@ -257,7 +257,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	}
 	if ckpt.complete {
 		result.Restarted = ckpt.frames > 0
-		oversized := s.walFileBytes() > walIdleTrimBytes || logBytes > limitBytes
+		oversized := s.walFileBytes() >= walIdleTrimBytes || logBytes > limitBytes
 		if !oversized || (!quiet && ckpt.frames > walTrickleFrames) {
 			return result, nil
 		}

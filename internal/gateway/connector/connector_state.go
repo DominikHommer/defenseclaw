@@ -1745,7 +1745,8 @@ func HookScriptDigests(opts SetupOpts, conn Connector) map[string]string {
 	}
 	out := map[string]string{}
 	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
-		data, err := os.ReadFile(path)
+		// On Windows the paths include the installed hook binary.
+		data, err := readNativeFileShared(path)
 		if err != nil {
 			continue
 		}

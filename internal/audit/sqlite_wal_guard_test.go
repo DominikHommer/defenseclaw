@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"runtime"
@@ -214,6 +215,46 @@ func TestCheckpointWALIfLargeTrimsAnOversizedFileUnderATrickleOfWrites(t *testin
 	pass, err := store.CheckpointWALIfLarge(ctx, math.MaxInt64, testWALWriterBudget)
 	if err != nil || !pass.Truncated || pass.FileBytes != 0 {
 		t.Fatalf("oversized file under a trickle: %+v, %v; want it truncated", pass, err)
+	}
+}
+
+// SQLite's journal_size_limit leaves a restarted WAL at exactly the trim
+// threshold. That boundary must be reclaimed after a flood too (GAP-0351).
+func TestCheckpointWALIfLargeTrimsAtTheIdleThreshold(t *testing.T) {
+	for _, trickle := range []bool{false, true} {
+		for _, offset := range []int64{-1, 0, 1} {
+			t.Run(fmt.Sprintf("trickle=%t/threshold-offset=%d", trickle, offset), func(t *testing.T) {
+				store, cleanup := newTestStore(t)
+				defer cleanup()
+				logWALGuardEvents(t, store, 200)
+				grown := walFileSize(t, store)
+				original, originalTrickle := walIdleTrimBytes, walTrickleFrames
+				walIdleTrimBytes, walTrickleFrames = grown+offset, 16
+				t.Cleanup(func() { walIdleTrimBytes, walTrickleFrames = original, originalTrickle })
+				// This regression checks the size boundary, not the writer's
+				// deadline. Allow shared CI to deschedule a completed truncate.
+				const budget = 10 * time.Second
+				if _, err := store.CheckpointWALIfLarge(t.Context(), math.MaxInt64, budget); err != nil {
+					t.Fatal(err)
+				}
+				if trickle {
+					walTrickleFrames = originalTrickle
+					logWALGuardEvents(t, store, 1)
+				}
+				pass, err := store.CheckpointWALIfLarge(t.Context(), math.MaxInt64, budget)
+				wantTrim := offset <= 0
+				if err != nil || pass.Truncated != wantTrim || (wantTrim && pass.FileBytes != 0) || (!wantTrim && pass.FileBytes != grown) {
+					t.Fatalf("pass = %+v, %v; want trimmed=%t", pass, err, wantTrim)
+				}
+				wantEvents := 200
+				if trickle {
+					wantEvents++
+				}
+				if got := countWALGuardEvents(t, store); got != wantEvents {
+					t.Fatalf("events = %d, want %d", got, wantEvents)
+				}
+			})
+		}
 	}
 }
 

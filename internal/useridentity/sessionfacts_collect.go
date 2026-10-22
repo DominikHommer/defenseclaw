@@ -44,6 +44,7 @@ type sessionFactsCacheFile struct {
 	Key       string    `json:"key"`
 	EnvKey    string    `json:"env_key"`
 	WrittenAt time.Time `json:"written_at"`
+	ExpiresAt int64     `json:"expires_at"`
 	Header    string    `json:"header"`
 }
 
@@ -97,7 +98,7 @@ func cachedSessionFactsHeader(path, key, envKey string, now time.Time) (string, 
 // at now: its modification time too, which the shell hooks age it by.
 // Errors are ignored by the caller: the cache is an optimisation.
 func writeSessionFactsCache(path, key, envKey, header string, now time.Time) error {
-	data, err := json.Marshal(sessionFactsCacheFile{Key: key, EnvKey: envKey, WrittenAt: now.UTC(), Header: header})
+	data, err := json.Marshal(sessionFactsCacheFile{Key: key, EnvKey: envKey, WrittenAt: now.UTC(), ExpiresAt: now.Add(SessionFactsCacheTTL).Unix(), Header: header})
 	if err != nil {
 		return err
 	}

@@ -65,6 +65,7 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
 
   it('says an upgrade keeps only an open the config sets', () => {
     assert.ok(page('get-started/upgrade.mdx').includes("An upgrade sets each hook's fail mode from your config before the new hook runs"));
+    assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('Hooks follow an open fail mode only when your config sets it'));
   });
 });

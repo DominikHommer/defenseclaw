@@ -114,7 +114,8 @@ def test_registry_wizard_asks_for_a_file_path_and_hints_sync_only_when_declined(
     assert source.url == os.path.expanduser("~/registry.yaml")
 
 
-def test_status_names_a_gateway_that_answers_health_but_not_this_account(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_status_names_a_gateway_that_answers_health_but_not_this_account(tmp_path, monkeypatch, platform) -> None:
     # GAP-0150: a gateway that answers /health is not hung because this
     # account cannot read its .env.
     import requests
@@ -131,8 +132,13 @@ def test_status_names_a_gateway_that_answers_health_but_not_this_account(tmp_pat
         raise PermissionError(13, "Permission denied", path)
 
     monkeypatch.setattr(cmd_status, "open", refuse, raising=False)
+    monkeypatch.setattr(cmd_status, "sys", SimpleNamespace(platform=platform), raising=False)
     detail = cmd_status._status_refused_detail(cfg, client, public)
-    assert f"cannot read {dotenv}" in detail and "chmod 600" in detail
+    assert f"cannot read {dotenv}" in detail
+    if platform == "win32":
+        assert "defenseclaw doctor" in detail and "chmod" not in detail
+    else:
+        assert "chmod 600" in detail
     client.status.assert_not_called()
     monkeypatch.undo()
 

@@ -1669,7 +1669,7 @@ class TestRemoveConnector(unittest.TestCase):
                 for index, path in enumerate(settings):
                     os.makedirs(os.path.dirname(path), exist_ok=True)
                     with open(path, "w", encoding="utf-8") as stream:
-                        stream.write('{"operator": %d}\n' % index)
+                        stream.write(f'{{"operator": {index}}}\n')
                 self._seed_map("codex", connector)
                 with self._plugin_home(home):
                     if connector == "amp":
@@ -1684,7 +1684,7 @@ class TestRemoveConnector(unittest.TestCase):
                 self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex"})
                 for index, path in enumerate(settings):
                     with open(path, encoding="utf-8") as stream:
-                        self.assertEqual(stream.read(), '{"operator": %d}\n' % index)
+                        self.assertEqual(stream.read(), f'{{"operator": {index}}}\n')
 
     # A receipt bound to anything but the active plugin (a settings file, a
     # stale home) is not proof of teardown: removal refuses before saving.

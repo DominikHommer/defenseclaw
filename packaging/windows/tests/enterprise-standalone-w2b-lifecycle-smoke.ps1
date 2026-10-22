@@ -312,6 +312,43 @@ $stream.Dispose()
             catch {
                 $failures.Add("a free InstallRoot failed the committed retirement: $($_.Exception.Message)")
             }
+            # W4 review, loop round 1: access denied with no program holding a
+            # file in InstallRoot is an access list (here a deny of creating
+            # or deleting folders in the parent), which no program exit ends:
+            # the committed retirement fails with InstallRoot in place
+            # instead of deferring to a finalizer that could never finish.
+            $deniedParent = [IO.Path]::Combine($Root, 'denied-parent')
+            $denied = [IO.Path]::Combine($deniedParent, 'DefenseClaw')
+            $deniedRetired = [IO.Path]::Combine($deniedParent, 'DefenseClaw.retired')
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($denied, 'bin'))
+            [IO.File]::WriteAllText([IO.Path]::Combine($denied, 'bin', 'defenseclaw-hook.exe'), 'stand-in')
+            # Loop round 2: the same deny while a program also holds a file
+            # in InstallRoot fails too; the holder exiting would not end it.
+            Set-TestFolderSddl $deniedParent 'O:BAG:BAD:P(D;;0x44;;;WD)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+            try {
+                foreach ($withHolder in @($false, $true)) {
+                    $holder = $null
+                    if ($withHolder) {
+                        $holder = Start-TestHolder -Path ([IO.Path]::Combine($denied, 'bin', 'defenseclaw-hook.exe')) -Mode Read -HoldMilliseconds 8000
+                    }
+                    try {
+                        $deferred = Invoke-DefenseClawCommittedInstallRootRetirement -Source $denied -Destination $deniedRetired
+                        $failures.Add("an access-list refusal of the InstallRoot rename (holder: $withHolder) was deferred: '$deferred'")
+                    }
+                    catch {
+                        if ($_.Exception.Message -notlike '*may not create a folder in*does not end when a program exits*' -or
+                            -not [IO.Directory]::Exists($denied) -or [IO.Directory]::Exists($deniedRetired)) {
+                            $failures.Add("an access-list refusal of the InstallRoot rename (holder: $withHolder): $($_.Exception.Message)")
+                        }
+                    }
+                    finally {
+                        if ($null -ne $holder) { [void]$holder.WaitForExit(30000) }
+                    }
+                }
+            }
+            finally {
+                Set-TestFolderSddl $deniedParent $adminOnly
+            }
             try {
                 [void](Invoke-DefenseClawCommittedInstallRootRetirement -Source ([IO.Path]::Combine($Root, 'absent')) -Destination ([IO.Path]::Combine($Root, 'absent-retired')))
                 $failures.Add('a missing InstallRoot was deferred instead of failing')

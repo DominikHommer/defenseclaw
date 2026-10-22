@@ -3629,7 +3629,12 @@ def test_restricted_environment_status_uses_trusted_machine_roots() -> None:
     ]
     assert "[switch]$AllowMissingCertificationCodexHome" in volume_identity
     assert "-AllowMissing:$AllowMissingCertificationCodexHome" in volume_identity
-    assert "-AllowMissingCertificationCodexHome:($Action -in @('Status', 'Verify'))" in module
+    assert "-AllowMissingCertificationCodexHome:($Action -in @('Status', 'Verify', 'Recover'))" in module
+    assert "-AllowMissing:($Action -in @('Status', 'Verify', 'Recover'))" in module
+    assert re.search(
+        r"\$allowMissingCertificationHome = \$LifecycleAction -in @\(\s*'Status',\s*'Verify',\s*'Recover'\s*\)",
+        read(INSTALLER),
+    )
 
     assert "Invoke-DefenseClawEnterpriseLifecycle" in smoke
     assert "-Action Status" in smoke
@@ -3637,6 +3642,23 @@ def test_restricted_environment_status_uses_trusted_machine_roots() -> None:
     assert "-AllowUnsigned" in smoke
     assert "restricted_environment_module_status = $true" in smoke
     assert "module Status did not remain a read-only absent deployment" in smoke
+
+
+def test_timeout_recovery_replays_the_pending_journal_under_the_lifecycle_lock() -> None:
+    module = read(MODULE)
+    setup = read(ROOT / "cmd" / "defenseclaw-enterprise-setup" / "platform_windows.go")
+    lifecycle = module[module.index("function Invoke-DefenseClawEnterpriseLifecycle") :]
+    lock = lifecycle.index("$lifecycleLock = Enter-DefenseClawLifecycleLock -Layout $layout")
+    recovery = lifecycle.index("if ($Action -eq 'Recover') {")
+    next_action = lifecycle.index("if ($Action -in @('Install', 'Upgrade', 'Repair')", recovery)
+    replay = lifecycle[recovery:next_action]
+    assert lock < recovery
+    assert "Invoke-DefenseClawTimeoutRecovery" in replay
+    # The replay and its report are executed by
+    # test_timeout_recovery_reports_settled_only_when_no_lifecycle_record_remains
+    # and the Setup kill and recovery by
+    # TestTimeoutKillsTheLifecycleChildThenRecoversBeforeReturning.
+    assert setup.index("lifecycle := runEnterpriseLifecycleChild(") < setup.index("\n\tcleanupErr := cleanup()")
 
 
 def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:

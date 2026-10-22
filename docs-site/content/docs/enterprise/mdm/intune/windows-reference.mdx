@@ -34,6 +34,10 @@ allowed). It also refuses a top-level key that is not plain lowercase (a tag,
 anchor, escape or `?` key) and a quoted value or `{...}` or `[...]` that
 continues on the next line.
 
+With `-BundlePath`, the `-BaseConfigPath` row above lists the blocks the packager
+compares. Copy other enforcement settings, such as `asset_policy:`, into the base
+config too if they must apply before the bundle app runs.
+
 The script verifies the Setup against `-Sha256` (and, for Authenticode, its
 signer); writes `content\` with the Setup, `config.yaml`,
 `Install-DefenseClawIntune.ps1` and `intune-package.json` (the SHA-256 pins

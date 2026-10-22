@@ -85,6 +85,7 @@ type GenerationState struct {
 // Writer is who records a generation and why, and the policy bundle it
 // installs (only the enterprise lifecycle sets the bundle fields).
 type Writer struct {
+	GenerationFloor          uint64
 	Actor                    string
 	LocalActor               string
 	Reason                   string
@@ -334,19 +335,16 @@ func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, 
 		TransactionSummary:       w.TransactionSummary,
 	}
 	previous, err := ReadGenerationState(t.path)
-	switch err {
-	case nil:
-		next.Generation = previous.Generation + 1
-	default:
-		// Missing or corrupt: say so. A corrupt file may still carry a
-		// readable counter (ReadGenerationState salvages it); never go
-		// backwards from it.
-		next.Generation = 1
+	if err != nil {
+		// Preserve a salvageable counter and any live counter the lifecycle
+		// proved before stopping the gateway.
 		next.GenerationReset = true
-		if previous.Generation > 0 {
-			next.Generation = previous.Generation + 1
-		}
 	}
+	previousCounter := max(previous.Generation, w.GenerationFloor)
+	if previousCounter == ^uint64(0) {
+		return GenerationState{}, errors.New("configwrite: generation counter exhausted; restore the last verified generation record before retrying")
+	}
+	next.Generation = previousCounter + 1
 	encoded, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
 		return GenerationState{}, fmt.Errorf("configwrite: encode %s: %w", GenerationFileName, err)

@@ -43,7 +43,17 @@ var windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus
 		StateDir: layout.LifecycleDir,
 		Reported: func(id string) bool { return enterprisestatus.ChangeReported(layout.DataDir, id) },
 		Prepare: func(dir string) error {
-			return createWindowsBundleDirectory(dir, windowsBundleVersionSDDL(service.String(), true))
+			err := prepareChangeSpoolDirectory(dir,
+				func(parent string) error {
+					return createWindowsBundleDirectory(parent, windowsBundleDirectorySDDL(service.String()))
+				},
+				func(path string) error {
+					return createWindowsBundleDirectory(path, windowsBundleVersionSDDL(service.String(), true))
+				})
+			if err != nil {
+				return fmt.Errorf("prepare protected change spool: %w; run `enterprise windows repair --profile standalone --json` from an elevated administrator or SYSTEM session, then retry the credential command", err)
+			}
+			return nil
 		},
 		Publish: func(path string) error {
 			return applyWindowsBundleSDDL(path, windowsBundleVersionSDDL(service.String(), false))

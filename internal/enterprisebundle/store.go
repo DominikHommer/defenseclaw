@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"gopkg.in/yaml.v3"
 )
 
 // The bundle store of a standalone device (spec P1 sections 7 and 8).
@@ -187,6 +188,20 @@ func (s State) Confirmed() Confirmed {
 	return Confirmed{Version: max(s.Floor, s.Current.Version), BundleID: s.Current.BundleID, ManifestSHA256: s.Current.ManifestSHA256}
 }
 
+// names reports whether Current is the ref Store.Confirm wrote for r. Confirm
+// is the only writer of bundle-state.json and runs only after its caller
+// proved r's apply (the committed generation and the gateway's readback), so
+// that ref is the established proof: it carries r's receipt-specific version
+// directory and the effective digest and generation copied from r. A run that
+// stopped between the state write and the receipt write left r applied under
+// it. 1.0.2 and 1.0.3 wrote the same fields.
+func (s State) names(r *Receipt) bool {
+	c := s.Current
+	return c != nil && c.BundleID == r.BundleID && c.Version == r.Version && c.ManifestSHA256 == r.ManifestSHA256 &&
+		c.Dir == r.Dir && c.SignerKeyID == r.SignerKeyID && c.ConfigGeneration == r.ConfigGeneration &&
+		c.EffectivePolicyDigest == r.EffectivePolicyDigest && digestPattern.MatchString(c.EffectivePolicyDigest)
+}
+
 // held reports whether name is the version directory of the current or the
 // last good bundle.
 func (s State) held(name string) bool {
@@ -276,6 +291,12 @@ type Receipt struct {
 	// with the committed deployment to tell a finished transaction from one
 	// that was rolled back.
 	ConfigSHA256 string `json:"config_sha256,omitempty"`
+	// BaseConfigSHA256 is the hex SHA-256 of the config the run started
+	// from (NoBaseConfig when there was none), written with ConfigSHA256
+	// before the transaction: settle uses it, not matching bytes, to tell
+	// whether that transaction installed anything (GAP-0484). "" on a
+	// receipt written before it existed.
+	BaseConfigSHA256 string `json:"base_config_sha256,omitempty"`
 }
 
 // SetDigestComparison replaces any digest classification from an earlier
@@ -1172,13 +1193,7 @@ func (s *Store) Confirm(r *Receipt) (State, error) {
 	if !digestPattern.MatchString(r.EffectivePolicyDigest) {
 		return State{}, fmt.Errorf("bundle receipt %s has no effective policy digest to confirm", r.ReceiptID)
 	}
-	if r.DigestComparable {
-		r.SetDigestUnverifiable(false)
-	}
-	if code := DigestWarningCode(r.ExpectedDigest, r.EffectivePolicyDigest, r.DigestComparable); code != "" && !slices.Contains(r.WarningCodes, code) {
-		r.WarningCodes = append(r.WarningCodes, code)
-	}
-	r.EnforcingDigest = r.EffectivePolicyDigest
+	markConfirmed(r)
 	st, err := s.LoadState()
 	if err != nil {
 		return State{}, err
@@ -1205,16 +1220,33 @@ func (s *Store) Confirm(r *Receipt) (State, error) {
 	return next, s.gc(next, nil)
 }
 
+// markConfirmed records on r what a confirmed receipt reports: the digest
+// comparison outcome and that the gateway enforces its effective digest.
+func markConfirmed(r *Receipt) {
+	if r.DigestComparable {
+		r.SetDigestUnverifiable(false)
+	}
+	if code := DigestWarningCode(r.ExpectedDigest, r.EffectivePolicyDigest, r.DigestComparable); code != "" && !slices.Contains(r.WarningCodes, code) {
+		r.WarningCodes = append(r.WarningCodes, code)
+	}
+	r.EnforcingDigest = r.EffectivePolicyDigest
+}
+
 // SettleReport is what Settle did.
 type SettleReport struct {
 	// Interrupted are the receipts ended as failed(interrupted).
 	Interrupted []string
 	// Completed are applied receipts that bundle-state.json already names
-	// as current (the run stopped between the two writes): now confirmed.
+	// as current (State.names: the run stopped between the two writes of
+	// Confirm): now confirmed from that proof, without a new live check.
 	Completed []string
 	// Unconfirmed are applied receipts the caller must re-check against the
 	// gateway and then confirm or roll back.
 	Unconfirmed []*Receipt
+	// Pending are receipts whose transaction is committed for the
+	// installed config but whose gateway could not be read (an outage):
+	// left open for the next run to confirm, never failed for it.
+	Pending []string
 }
 
 // Settle finishes what an interrupted run left, at the start of every
@@ -1222,13 +1254,22 @@ type SettleReport struct {
 // received, verified and staged receipts fail as interrupted (nothing was
 // installed yet), an applied receipt that bundle-state.json names as
 // current is confirmed, and other applied receipts are returned for the
-// caller. Staging copies, temp files and version directories no state or
+// caller. The current-state ref completes only the receipt it was written
+// for (State.names), so a gateway that is down at recovery cannot fail a
+// bundle whose apply was proven before the crash. Staging copies, temp files and version directories no state or
 // open receipt refers to, and that are not in keep, are removed. keep names
 // the version directories the installed config still uses (VersionDirsNamed):
 // a bundle installed by a run that then failed it, with no last good bundle
 // to return to or a rollback that did not finish, keeps enforcing from its
 // directory, so that directory must stay.
 func (s *Store) Settle(keep ...string) (SettleReport, error) {
+	return s.SettleOpen(nil, keep...)
+}
+
+// SettleOpen is Settle that leaves the receipts open names (by receipt ID)
+// unsettled: committed receipts the caller could not check against the
+// gateway now (SettleReport.Pending).
+func (s *Store) SettleOpen(open map[string]bool, keep ...string) (SettleReport, error) {
 	var report SettleReport
 	st, err := s.LoadState()
 	if err != nil {
@@ -1243,6 +1284,9 @@ func (s *Store) Settle(keep ...string) (SettleReport, error) {
 		kept[name] = true
 	}
 	for _, r := range receipts {
+		if open[r.ReceiptID] {
+			continue
+		}
 		switch r.State {
 		case StateReceived, StateVerified, StateStaged:
 			if err := s.Fail(r, CodeInterrupted, "the run that received this bundle ended before it was applied; the last good bundle kept enforcing"); err != nil {
@@ -1250,8 +1294,9 @@ func (s *Store) Settle(keep ...string) (SettleReport, error) {
 			}
 			report.Interrupted = append(report.Interrupted, r.ReceiptID)
 		case StateApplied:
-			if c := st.Current; c != nil && c.BundleID == r.BundleID && c.ManifestSHA256 == r.ManifestSHA256 {
-				if err := s.Advance(r, StateConfirmed, func(r *Receipt) { r.ConfirmedAt = c.ConfirmedAt }); err != nil {
+			if st.names(r) {
+				markConfirmed(r)
+				if err := s.Advance(r, StateConfirmed, func(r *Receipt) { r.ConfirmedAt = st.Current.ConfirmedAt }); err != nil {
 					return report, err
 				}
 				report.Completed = append(report.Completed, r.ReceiptID)
@@ -1439,6 +1484,36 @@ func VersionDirsNamed(raw []byte, bundlesDir string) []string {
 			names = append(names, name)
 		}
 	}
+	return names
+}
+
+// VersionDirsInValues is VersionDirsNamed over the scalar values of the
+// YAML document raw only: a comment or a key naming a version directory
+// names none. A document that does not parse names none.
+func VersionDirsInValues(raw []byte, bundlesDir string) []string {
+	var root yaml.Node
+	if len(raw) == 0 || yaml.Unmarshal(raw, &root) != nil {
+		return nil
+	}
+	var names []string
+	var walk func(n *yaml.Node, key bool)
+	walk = func(n *yaml.Node, key bool) {
+		if n == nil {
+			return
+		}
+		if n.Kind == yaml.ScalarNode && !key {
+			for _, name := range VersionDirsNamed([]byte(n.Value), bundlesDir) {
+				if !slices.Contains(names, name) {
+					names = append(names, name)
+				}
+			}
+			return
+		}
+		for i, c := range n.Content {
+			walk(c, n.Kind == yaml.MappingNode && i%2 == 0)
+		}
+	}
+	walk(&root, false)
 	return names
 }
 

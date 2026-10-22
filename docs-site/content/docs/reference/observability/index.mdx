@@ -257,7 +257,7 @@ Subcommands: `up`, `down`, `reset`, `status`, `logs`, `url`, `env`. `up` takes:
 | `--signals` | Subset of `traces,metrics,logs`. All three are needed for full dashboard coverage. |
 | `--service-name` | Sets `observability.resource.attributes.service.name`. Default `defenseclaw`. |
 | `--no-config` | Start containers without editing `config.yaml`. |
-| `--password` / `--no-password` | Require the generated Grafana `admin` login, or allow anonymous Admin on the loopback bind. New stacks default to a password; an anonymous stack keeps its mode until you pass `--password`. |
+| `--password` / `--no-password` | Require the generated Grafana `admin` login, or allow anonymous read-only (Viewer) access on the loopback bind: dashboards show, nothing can be edited, and anonymous access is never Admin. New stacks default to a password; an anonymous stack keeps anonymous access, read-only, until you pass `--password`. |
 | `--refresh-bundle` / `--no-refresh-bundle` | Refresh `~/.defenseclaw/observability-stack/` from the bundle before starting. On by default. |
 | `--refresh-config` / `--no-refresh-config` | Also overwrite dashboards, rules and service config. Pass `--no-refresh-config` to keep local edits. |
 | `--no-wait`, `--timeout` | Skip the readiness wait, or set it in seconds (default 180). |

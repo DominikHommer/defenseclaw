@@ -18,6 +18,9 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -576,5 +579,130 @@ func symlinkOrSkip(t *testing.T, target, link string) {
 			t.Skipf("symbolic links unavailable: %v", err)
 		}
 		t.Fatal(err)
+	}
+}
+
+func TestMigrateManagedStandaloneConfigRefusesAnUnrecoverableGeneration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("config_version: 9\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := []byte("broken record")
+	if err := os.WriteFile(configwrite.GenerationPath(path), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := migrateManagedStandaloneConfig(context.Background(), path)
+	after, _ := os.ReadFile(configwrite.GenerationPath(path))
+	if err == nil || !strings.Contains(err.Error(), "restore") || string(after) != string(record) {
+		t.Fatalf("unrecoverable record: error=%v, bytes=%q", err, after)
+	}
+}
+
+func TestManagedStandaloneConfigGenerationRecoveryRequiresProof(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("config_version: 9\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := []byte("broken record")
+	if err := os.WriteFile(configwrite.GenerationPath(path), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := repairManagedStandaloneConfigGeneration(context.Background(), path, raw, 0); err == nil || changed {
+		t.Fatalf("unproven counter accepted: %v, %v", changed, err)
+	}
+	after, _ := os.ReadFile(configwrite.GenerationPath(path))
+	if string(after) != string(record) {
+		t.Fatal("refused repair changed the record")
+	}
+	if changed, err := repairManagedStandaloneConfigGeneration(context.Background(), path, raw, 10); err != nil || !changed {
+		t.Fatalf("proven counter refused: %v, %v", changed, err)
+	}
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || state.Generation != 11 || state.Actor != configwrite.ActorLifecycle {
+		t.Fatalf("recovered record = %+v, %v", state, err)
+	}
+}
+
+// W4b loop round 1: a Codex target repair (or an equal-byte first bundle
+// upgrade) runs this step in the lifecycle child with the staged bundle
+// matching the installed bytes. Over generation evidence that is there but
+// unreadable it refuses before it migrates, records or re-permissions
+// anything, for a config_version 9 and a config_version 8 install alike.
+// Without a staged bundle the step still records the lifecycle as before.
+func TestMigrateManagedStandaloneConfigRefusesBundleBindingOverUnreadableGeneration(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	const id = "b-01JA0000000000000000000360"
+	for _, tc := range []struct {
+		name    string
+		version int
+		staged  bool
+		link    bool
+	}{
+		{name: "v9 staged bundle", version: 9, staged: true},
+		{name: "v8 staged bundle", version: 8, staged: true},
+		{name: "v9 without a bundle", version: 9},
+		// W4b loop round 2: a dangling link reads as a missing record.
+		{name: "v9 staged bundle over a dangling link", version: 9, staged: true, link: true},
+		{name: "v8 staged bundle over a dangling link", version: 8, staged: true, link: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			raw := []byte(fmt.Sprintf("config_version: %d\ndata_dir: %s\nobservability: {}\n", tc.version, dir))
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			broken := []byte(`{"generation":4,"config_sha256":`)
+			gone := filepath.Join(t.TempDir(), "gone.json")
+			if tc.link {
+				symlinkOrSkip(t, gone, configwrite.GenerationPath(path))
+			} else if err := os.WriteFile(configwrite.GenerationPath(path), broken, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			saved := managedStandaloneBundleGeneration
+			t.Cleanup(func() { managedStandaloneBundleGeneration = saved })
+			managedStandaloneBundleGeneration = func(string, []byte) (configwrite.Options, bool, error) {
+				if !tc.staged {
+					return configwrite.Options{}, false, nil
+				}
+				return configwrite.Options{Actor: "control-plane:acme/alice", Lifecycle: true,
+					Reason: configwrite.BundleReason(id, 1, "codex target"),
+					Bundle: configwrite.BundleRef{ID: id, Version: 1, SignerKeyID: "k1"}}, true, nil
+			}
+			err := migrateManagedStandaloneConfig(context.Background(), path)
+			if !tc.staged {
+				// fix/r104-windows: an unreadable record is never reset to a
+				// fresh lifecycle record; the step refuses and names the
+				// backup restore (GAP-0236), bundle or not.
+				if err == nil || !strings.Contains(err.Error(), "restore") {
+					t.Fatalf("unreadable record without a bundle: %v", err)
+				}
+				if after, err := os.ReadFile(configwrite.GenerationPath(path)); err != nil || string(after) != string(broken) {
+					t.Fatalf("the refusal rewrote the generation evidence: %q, %v", after, err)
+				}
+				return
+			}
+			if !errors.Is(err, configwrite.ErrUnprovenBundleBinding) || !strings.Contains(err.Error(), "enterprise bundle status --json") {
+				t.Fatalf("bundle binding over unreadable generation: %v", err)
+			}
+			if tc.link {
+				if got, err := os.Readlink(configwrite.GenerationPath(path)); err != nil || got != gone {
+					t.Fatalf("the refusal replaced the dangling link: %q, %v", got, err)
+				}
+			} else if after, err := os.ReadFile(configwrite.GenerationPath(path)); err != nil || string(after) != string(broken) {
+				t.Fatalf("the refusal rewrote the generation evidence: %q, %v", after, err)
+			}
+			if after, err := os.ReadFile(path); err != nil || string(after) != string(raw) {
+				t.Fatalf("the refusal changed config.yaml: %q, %v", after, err)
+			}
+			for _, leftover := range []string{path + config.ConfigV8BackupSuffix, config.MigrationRecordPath(path)} {
+				if _, err := os.Stat(leftover); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("the refusal wrote %s: %v", leftover, err)
+				}
+			}
+		})
 	}
 }

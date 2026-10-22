@@ -134,6 +134,11 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 	if result == nil {
 		return
 	}
+	if opts != nil && opts.scannerRuntimeRetired != "" {
+		result.AddWarning("scanner_runtime_untrusted_removed", "the scanner runtime "+opts.scannerRuntimeRetired+
+			" failed the trust check, so this run removed it before the services started: the gateway does not start on it (GAP-0490). "+
+			"A run from the DefenseClaw Setup installs it again; otherwise every scan fails closed until DefenseClawSetup-Enterprise-Standalone-x64.exe /repair")
+	}
 	action := result.Action
 	if opts != nil && opts.runningDeploymentLabel {
 		// A refused config installed nothing: report the running
@@ -180,7 +185,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			if err == nil {
 				result.AddWarning("scanner_runtime_not_scoped", windowsScannerRuntimeNotScoped)
 			}
-		case "status", "verify":
+		case "status", "verify", "recover":
 			if result.Installed {
 				result.AddWarning("scanner_runtime_not_scoped", windowsScannerRuntimeNotScoped)
 			}
@@ -245,10 +250,10 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 		case kept != "":
 			result.AddWarning("scanner_runtime_left", "the scanner runtime folder was kept: "+kept)
 		}
-	case "status", "verify":
+	case "status", "verify", "recover":
 		// A request refused before its health checks ran reports only the
 		// recorded deployment; a standard account cannot read the runtime
-		// folder anyway.
+		// folder anyway. Recovery must also prove this shared executable tree.
 		if result.Installed && !windowsEnterpriseResultHasWarning(result, windowsEnterpriseHealthNotChecked) {
 			result.Scanners = windowsScannerRuntimeReader()
 			// Every scan fails closed without a ready runtime, so verify
@@ -262,7 +267,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 				message = windowsScannerRuntimeServiceProblem()
 			}
 			if message != "" {
-				if result.Action == "verify" {
+				if result.Action == "verify" || result.Action == "recover" {
 					result.AddError("scanner_runtime_unavailable", message)
 				} else {
 					result.AddWarning("scanner_runtime_unavailable", message)
@@ -285,6 +290,63 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 
 // windowsScannerRuntimeReader is readWindowsScannerRuntime; a seam for tests.
 var windowsScannerRuntimeReader = readWindowsScannerRuntime
+
+// windowsScannerRuntimeTreeCheck is the trust check the gateway makes on the
+// scanner runtime before it starts and before every scan; a seam for tests.
+var windowsScannerRuntimeTreeCheck = func(root string) error {
+	return managed.ValidateTrustedRuntimeCodeTree(root, "scanner Python runtime")
+}
+
+// retireUntrustedWindowsScannerRuntimeBeforeStart removes a scanner runtime
+// that fails the trust check before a module action that can start the
+// gateway service. The gateway refuses to start on that tree (GAP-0490), so
+// without this step a /repair would fail at the service start and roll back
+// before its scanner step could replace the tree. Removing it loses nothing
+// trusted: the scanner step after the transaction installs the runtime again
+// from the signed payload, and until then every scan fails closed. Nothing
+// untrusted is adopted or re-protected. A certification run leaves the
+// production runtime alone, as it does after its transaction.
+func retireUntrustedWindowsScannerRuntimeBeforeStart(moduleAction string, opts *windowsEnterpriseLifecycleOptions) error {
+	switch moduleAction {
+	case "Install", "Upgrade", "Repair", "Reconcile", "Recover":
+	default:
+		return nil
+	}
+	if opts == nil || windowsScannerRuntimeCertificationRun(opts) || !windowsEnterpriseIsElevated() {
+		return nil
+	}
+	root, err := windowsScannerRuntimeDir()
+	if err != nil {
+		return nil
+	}
+	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("scanner_runtime_untrusted: read the scanner runtime folder %s before the services start: %w", root, err)
+	}
+	if windowsScannerRuntimeTreeCheck(root) == nil {
+		return nil
+	}
+	if err := checkWindowsScannerRuntimeRootForRemoval(root); err != nil {
+		return fmt.Errorf("scanner_runtime_untrusted: the scanner runtime %s fails the trust check and cannot be removed: %w", root, err)
+	}
+	release, err := lockWindowsScannerRuntime(root)
+	if err != nil {
+		return fmt.Errorf("scanner_runtime_untrusted: lock the untrusted scanner runtime %s: %w", root, err)
+	}
+	// Another run's scanner step may have replaced it while this one waited.
+	problem := windowsScannerRuntimeTreeCheck(root)
+	if problem == nil {
+		release()
+		return nil
+	}
+	if err := removeWindowsScannerRuntimeLocked(root, release); err != nil {
+		return fmt.Errorf("scanner_runtime_untrusted: the scanner runtime %s fails the trust check (%v) and could not be removed before the services start: %w",
+			root, problem, err)
+	}
+	opts.scannerRuntimeRetired = fmt.Sprintf("%s (%v)", root, problem)
+	return nil
+}
 
 // windowsScannerRuntimeNotScoped is the warning of a certification-scope run.
 const windowsScannerRuntimeNotScoped = "this certification scope does not install, replace, prepare, remove or report the scanner runtime: " +

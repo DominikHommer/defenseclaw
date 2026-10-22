@@ -24,11 +24,22 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// A change spool lives under the managed bundle directory. Prepare both
+// boundaries before reserving room; creating just the leaf inherits the
+// parent ACL from etc on a never-bundled install (GAP-0374).
+func prepareChangeSpoolDirectory(dir string, prepareParent, prepare func(string) error) error {
+	if err := prepareParent(filepath.Dir(dir)); err != nil {
+		return err
+	}
+	return prepare(dir)
+}
 
 // The root trust anchor and credential commands leave one change event per
 // change in the change spool; the gateway reports each as an audit event

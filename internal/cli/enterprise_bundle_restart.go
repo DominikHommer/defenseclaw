@@ -211,3 +211,9 @@ func bundleRestartDeferral(p *bundleRestartPrediction) string {
 	}
 	return enterprisebundle.RestartDeferralReason(nil, true)
 }
+
+// windowsBundleConfigChange includes a signed delivery that must restore
+// drift in the currently confirmed config.
+func windowsBundleConfigChange(p *enterprisebundle.Prepared) bool {
+	return p != nil && (p.Receipt != nil || p.AlreadyApplied)
+}

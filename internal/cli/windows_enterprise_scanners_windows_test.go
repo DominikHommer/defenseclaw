@@ -75,12 +75,12 @@ func TestWindowsScannerRuntimeMissingIsReported(t *testing.T) {
 	t.Cleanup(func() { windowsScannerRuntimeDir = seam })
 	root := t.TempDir()
 	windowsScannerRuntimeDir = func() (string, error) { return root, nil }
-	for _, action := range []string{"verify", "status", "repair"} {
+	for _, action := range []string{"verify", "status", "repair", "recover"} {
 		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.0")
 		result.Installed = true
 		applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{})
 		messages := result.Warnings
-		if action == "verify" {
+		if action == "verify" || action == "recover" {
 			messages = result.Errors
 		}
 		reported := false
@@ -104,7 +104,7 @@ func TestWindowsScannerRuntimeMissingIsReported(t *testing.T) {
 	windowsScannerRuntimeServiceCheck = func() error {
 		return errors.New("the gateway service account cannot list or read the permissions of the parent folder C:\\ProgramData")
 	}
-	for _, action := range []string{"verify", "ensure"} {
+	for _, action := range []string{"verify", "ensure", "recover"} {
 		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.0")
 		result.Installed = true
 		applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{})

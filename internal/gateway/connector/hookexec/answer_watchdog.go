@@ -334,6 +334,26 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	w.exit(w.fallbackCode)
 }
 
+// gatewayAnsweredError makes the watchdog's answer closed: the gateway
+// answered the call with an error status, so a deadline that passes after it
+// is no outage that an administrator's fail mode open lets through
+// (failAfterErrorStatus). Safe on a nil watchdog.
+func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec) {
+	if w == nil {
+		return
+	}
+	closedOpts := opts
+	closedOpts.FailMode = "closed"
+	out, errb, code, logFailure := renderNoAnswer(closedOpts, sp, "closed")
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired || w.closedKnown {
+		return
+	}
+	w.closedKnown = true
+	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
+}
+
 // answered stands the watchdog down: the gateway's decision is in. Safe on
 // a nil watchdog.
 func (w *answerWatchdog) answered() {

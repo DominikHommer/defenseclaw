@@ -66,8 +66,11 @@ const (
 	// Warnings of a changing run without --bundle that settles the
 	// receipts a killed bundle run left (GAP-1302). The first three are the
 	// codes Linux and macOS use for the same outcomes.
-	windowsBundleInterruptedWarning     = "bundle_interrupted"
-	windowsBundleUnconfirmedWarning     = "bundle_unconfirmed"
+	windowsBundleInterruptedWarning = "bundle_interrupted"
+	windowsBundleUnconfirmedWarning = "bundle_unconfirmed"
+	// windowsBundlePendingMessage is the bundle_pending warning of a settle
+	// that found a committed bundle while the gateway could not be read.
+	windowsBundlePendingMessage         = "%d policy bundle(s) a previous run installed are not confirmed yet because the gateway could not be read (not running or not ready); they stay pending and are never failed for that: run `defenseclaw enterprise windows ensure --profile standalone` again once the gateway runs to confirm them"
 	windowsBundleStateUnreadableWarning = "bundle_state_unreadable"
 	windowsBundleSettleDeferredWarning  = "bundle_settle_deferred"
 	windowsBundleMarkerFailedWarning    = "bundle_marker_failed"
@@ -218,8 +221,8 @@ func settleWindowsAppliedBundle(driver *enterprisebundle.Driver, installed []byt
 	installedSHA := sha256HexBytes(installed)
 	for _, rc := range receipts {
 		if rc.State != enterprisebundle.StateApplied || rc.ConfigSHA256 != installedSHA || policy == nil ||
-			!policy.Applied || policy.ReloadError != "" || policy.EffectiveDigest != rc.EffectivePolicyDigest ||
-			policy.Digest != rc.EffectivePolicyDigest || policy.Generation != rc.ConfigGeneration {
+			!driver.TransactionApplied(rc, installedSHA, policy) || policy.EffectiveDigest != rc.EffectivePolicyDigest ||
+			policy.Digest != rc.EffectivePolicyDigest {
 			continue
 		}
 		if err := enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, policy.EffectiveDigest, policy.Digest, rc.DigestComparable); err == nil {
@@ -237,29 +240,7 @@ func windowsStagedBundleGeneration(path string, raw []byte) (configwrite.Options
 	if err != nil || !strings.EqualFold(filepath.Clean(path), filepath.Clean(layout.ConfigPath)) {
 		return configwrite.Options{}, false, nil
 	}
-	receipts, err := newWindowsBundleDriver(layout).Store.Receipts()
-	if err != nil {
-		return configwrite.Options{}, false, fmt.Errorf("read staged policy bundles: %w", err)
-	}
-	sum := configwrite.SHA256Hex(raw)
-	var matched *enterprisebundle.Receipt
-	for _, receipt := range receipts {
-		if receipt.State != enterprisebundle.StateStaged || !strings.EqualFold(receipt.ConfigSHA256, sum) {
-			continue
-		}
-		if matched != nil {
-			return configwrite.Options{}, false, fmt.Errorf("multiple staged policy bundles match installed config %s", path)
-		}
-		matched = receipt
-	}
-	if matched == nil {
-		return configwrite.Options{}, false, nil
-	}
-	opt, ok := enterprisebundle.GenerationOptions(matched)
-	if !ok {
-		return configwrite.Options{}, false, fmt.Errorf("staged policy bundle %s has no principal", matched.ReceiptID)
-	}
-	return opt, true, nil
+	return newWindowsBundleDriver(layout).ConfigGenerationOptions(raw)
 }
 
 // windowsBundleCurrent reports a current (confirmed) policy bundle in the
@@ -370,7 +351,8 @@ func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.D
 	store.PublishPrivateFile = windowsBundlePublishPrivateFile
 	store.ReceiptEventReported = func(id string) bool { return enterprisestatus.ReceiptEventReported(layout.DataDir, id) }
 	return &enterprisebundle.Driver{
-		Store: store,
+		Store:      store,
+		ConfigPath: layout.ConfigPath,
 		DeviceLayout: func() *enterprisebundle.DeviceLayout {
 			device := enterprisebundle.DeviceLayoutFromManaged(layout)
 			return &device
@@ -697,7 +679,10 @@ func publishWindowsBundleVersion(root string) error {
 // nothing, as Linux and macOS refuse such a device before they record, and
 // so does a caller that is not elevated (recordWindowsChange).
 func recordWindowsEarlyAnchorsRefusal(cmd *cobra.Command, opts *windowsEnterpriseLifecycleOptions, code string) {
-	if opts.trustAnchors == "" || !opts.installedBeforeRun {
+	// Only an elevated caller on an installed computer records into the
+	// administrator-only change spool (r104 W5b: a fresh or unelevated run
+	// creates no installed-host audit).
+	if opts.trustAnchors == "" || !opts.installedBeforeRun || !windowsSecretIsElevated() {
 		return
 	}
 	layout, err := windowsBundleLayout()
@@ -899,7 +884,12 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	driver.DeliveryID = opts.bundleDeliveryID
 	report, rollback, err := driver.SettleRun(installed, windowsBundlePolicy(ctx))
 	if err != nil {
-		return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot settle the earlier bundle receipts: "+err.Error())
+		return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot settle the earlier bundle receipts: "+err.Error()+
+			"; nothing was failed or rolled back: run the same command again")
+	}
+	if n := len(report.Pending); n > 0 {
+		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: enterprisebundle.WarnBundlePending,
+			Message: fmt.Sprintf(windowsBundlePendingMessage, n)})
 	}
 	if len(report.Interrupted) > 0 {
 		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: string(enterprisebundle.CodeInterrupted),
@@ -1021,6 +1011,9 @@ func settleWindowsInterruptedBundles(settle *windowsBundleSettle, layout managed
 	if n := len(report.Interrupted); n > 0 {
 		settle.warn(windowsBundleInterruptedWarning, fmt.Sprintf(
 			"%d policy bundle(s) a previous run received were not applied (failed: interrupted); the last good bundle keeps enforcing", n))
+	}
+	if n := len(report.Pending); n > 0 {
+		settle.warn(enterprisebundle.WarnBundlePending, fmt.Sprintf(windowsBundlePendingMessage, n))
 	}
 	if n := len(report.Completed); n > 0 {
 		settle.warn(enterprisebundle.WarnConfirmedAfterInterrupt, fmt.Sprintf(
@@ -1165,11 +1158,16 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 		for _, e := range result.Errors {
 			failure = append(failure, e.Code)
 		}
-		policy := windowsBundlePolicyFromResult(result)
-		for i := 0; len(failure) == 0 && installed == p.ConfigSHA256 && !windowsBundleEnforces(policy) && i < windowsBundlePolicyWaits; i++ {
-			windowsBundleSleep(5 * time.Second)
+		policy := enterprisebundle.GatewayPolicy{}
+		for i := 0; len(failure) == 0 && installed == p.ConfigSHA256 && i <= windowsBundlePolicyWaits; i++ {
+			if i > 0 {
+				windowsBundleSleep(5 * time.Second)
+			}
 			if next := windowsBundlePolicy(run.ctx); next != nil {
 				policy = *next
+			}
+			if windowsBundleEnforces(policy) && run.driver.TransactionApplied(p.Receipt, installed, &policy) {
+				break
 			}
 		}
 		_, err := run.driver.Finish(p, installed, failure, policy, run.gatewayRestarted, func() (string, bool) {
@@ -1180,7 +1178,13 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 		})
 		if err != nil {
 			code := string(windowsBundleCode(err, enterprisebundle.CodeApplyFailed))
-			if !windowsBundleHasCode(result.Errors, code) {
+			switch {
+			case windowsBundleHasCode(result.Errors, code):
+			case p.Receipt.State == enterprisebundle.StateApplied:
+				// Proven and enforcing; only its confirmation record failed
+				// (GAP-0485). The receipt stays applied for the next run.
+				result.AddError(code, fmt.Sprintf("policy bundle %s version %d: %s", p.Receipt.BundleID, p.Receipt.Version, err.Error()))
+			default:
 				result.AddError(code, windowsBundleNotApplied(p, err.Error(), windowsBundleHasCurrent(run.driver.Store)))
 			}
 		}
@@ -1306,8 +1310,30 @@ type windowsBundleRollbackTarget struct {
 // writeOptions records the rollback write as the confirmed bundle: its
 // principal and bundle fields, so the gateway digests the restored config in
 // the bundle's scope and status, verify and ensure find the bundle enforcing.
-func (t *windowsBundleRollbackTarget) writeOptions(expectSHA string) configwrite.Options {
-	return configwrite.RestoreOptions(t.before, t.restored, windowsBundleRestoreWriteOptions(t.store, t.ref, expectSHA))
+func (t *windowsBundleRollbackTarget) writeOptions(expectSHA string) (configwrite.Options, error) {
+	driver := &enterprisebundle.Driver{Store: t.store}
+	raw, ref, err := driver.CurrentConfig()
+	if err != nil {
+		return configwrite.Options{}, err
+	}
+	if ref == nil || t.ref == nil || ref.BundleID != t.ref.BundleID || ref.Version != t.ref.Version ||
+		ref.ManifestSHA256 != t.ref.ManifestSHA256 || ref.SignerKeyID != t.ref.SignerKeyID ||
+		ref.EffectivePolicyDigest != t.ref.EffectivePolicyDigest || configwrite.SHA256Hex(raw) != t.restored {
+		return configwrite.Options{}, errors.New("confirmed bundle changed before rollback; run defenseclaw.exe enterprise windows ensure --profile standalone")
+	}
+	opt, ok, err := driver.ConfigGenerationOptions(raw)
+	if err != nil {
+		return opt, err
+	}
+	if !ok {
+		return opt, errors.New("cannot prove the confirmed rollback principal; run defenseclaw.exe enterprise windows ensure --profile standalone")
+	}
+	opt.ExpectSHA256 = expectSHA
+	if t.before.BundleID == ref.BundleID && t.before.BundleVersion == ref.Version &&
+		t.before.SignerKeyID == opt.Bundle.SignerKeyID && t.before.Actor == opt.Actor {
+		opt = configwrite.RestoreOptions(t.before, t.restored, opt)
+	}
+	return opt, nil
 }
 
 // rollbackWindowsBundle installs the last good config again (the current
@@ -1341,13 +1367,20 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 	rollback.jsonOutput = true
 	out := cmd.OutOrStdout()
 	cmd.SetOut(io.Discard)
-	_ = runWindowsEnterpriseStandaloneEnsure(run.ctx, cmd, &rollback, opts.resolvedInstaller)
+	rollbackErr := runWindowsEnterpriseStandaloneEnsure(run.ctx, cmd, &rollback, opts.resolvedInstaller)
 	cmd.SetOut(out)
 	enforcing := ""
 	if policy := windowsBundlePolicy(run.ctx); policy != nil {
 		enforcing = policy.Digest
 	}
-	return enforcing, windowsBundleInstalledSHA(run.layout.ConfigPath) == sha256HexBytes(last)
+	restored := rollbackErr == nil && windowsBundleInstalledSHA(run.layout.ConfigPath) == sha256HexBytes(last)
+	if restored && ref != nil {
+		// Even byte-identical bundle configs need identity proof. A no-op
+		// ensure may not enter the hot-apply adoption check at all.
+		identity, err := windowsBundleRollbackIdentity(ref, configwrite.BundleRef{ID: ref.BundleID, Version: ref.Version})
+		restored = err == nil && windowsEnterpriseHotConfigAdopted(run.ctx, windowsEnterpriseHotConfigTimeout, identity)
+	}
+	return enforcing, restored
 }
 
 // attachWindowsBundleSummary sets the result v2 bundle block: the receipt
@@ -1518,25 +1551,23 @@ func platformBundleSessionStatus(parent context.Context) enterprisestatus.Sessio
 	return enterprisestatus.ScanSessions(func() ([]enterprisestatus.SessionProcess, error) { return processes, nil }, changed, true)
 }
 
-func windowsBundlePolicyFromResult(result *enterprisestatus.Result) enterprisebundle.GatewayPolicy {
-	if result.Policy == nil {
-		return enterprisebundle.GatewayPolicy{}
-	}
-	p := result.Policy
-	return enterprisebundle.GatewayPolicy{EffectiveDigest: p.EffectiveDigest, Digest: p.GatewayReportedDigest, Generation: p.ConfigGeneration,
-		ReloadError: p.LastReloadError, Applied: p.Applied}
-}
-
 // readWindowsBundleGatewayPolicy asks the installed CLI for the effective
 // policy of the installed config and the digest the gateway reports; nil
 // when either cannot be read.
 func readWindowsBundleGatewayPolicy(ctx context.Context) *enterprisebundle.GatewayPolicy {
-	state := lifecycleGatewayPolicy(ctx)
+	out, err := windowsEnterprisePolicyDigest(ctx)
+	var report policyDigestReport
+	if (err != nil && len(out) == 0) || json.Unmarshal(out, &report) != nil {
+		return nil
+	}
+	scratch := enterprisestatus.New("status", managed.ProfileStandalone, "windows", appVersion)
+	state := applyEnterprisePolicyReport(scratch, out, false)
 	if state == nil {
 		return nil
 	}
-	return &enterprisebundle.GatewayPolicy{EffectiveDigest: state.EffectiveDigest, Digest: state.GatewayReportedDigest, Generation: state.ConfigGeneration,
-		ReloadError: state.LastReloadError, Applied: state.Applied}
+	return &enterprisebundle.GatewayPolicy{EffectiveDigest: state.EffectiveDigest, Digest: state.GatewayReportedDigest,
+		Generation: report.GatewayReportedConfigGeneration, BundleID: report.GatewayReportedBundleID, BundleVersion: report.GatewayReportedBundleVersion,
+		ReloadError: state.LastReloadError, Applied: state.Applied && !state.ConfigUnrecorded && report.GatewayReportedConfigGeneration == state.ConfigGeneration}
 }
 
 // lifecycleGatewayPolicy is the policy block the Windows lifecycle reports:
