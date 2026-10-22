@@ -5290,9 +5290,10 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	}
 	succeeded := setupTransaction.succeeded
 
-	// Persist the set that actually came up so the next boot's
-	// set-difference teardown is accurate.
+	// Persist the set that actually came up, plus the registrations a
+	// refusal kept, so the next boot's set-difference teardown is accurate.
 	persisted := append(append([]string(nil), succeeded...), failedRemoved...)
+	persisted = append(persisted, setupTransaction.keptRegistrations...)
 	if err := s.publishMultiConnectorReadyState(ctx, setupTransaction, persisted, failedRemoved); err != nil {
 		return err
 	}
@@ -5912,6 +5913,11 @@ type multiConnectorSetupTransaction struct {
 	// agentSettingsRefused maps each connector whose agent's own settings
 	// refused DefenseClaw hooks to the reason, which names the fix.
 	agentSettingsRefused map[string]string
+	// keptRegistrations lists the agentSettingsRefused connectors that still
+	// hold their earlier registration. They stay in the saved active set, so a
+	// later per-connector disable removes them through the non-fatal
+	// set-difference teardown instead of the orphan reconciliation (GAP-0578).
+	keptRegistrations []string
 	// publishSetupProgress reports each connector's setup step in guardrail
 	// health. Only the boot path sets it: a running guardrail stays running.
 	publishSetupProgress bool
@@ -6089,6 +6095,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		transaction.admissionRefused = nil
 		transaction.releaseRefused = false
 		transaction.agentSettingsRefused = nil
+		transaction.keptRegistrations = nil
 	}
 	registrations := make([]connectorRegistration, 0, len(conns))
 	for _, conn := range conns {
@@ -6180,6 +6187,9 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				transaction.agentSettingsRefused = map[string]string{}
 			}
 			transaction.agentSettingsRefused[registration.conn.Name()] = err.Error()
+			if strings.TrimSpace(previousLock.Connector) != "" {
+				transaction.keptRegistrations = append(transaction.keptRegistrations, registration.conn.Name())
+			}
 			continue
 		}
 		if err != nil {

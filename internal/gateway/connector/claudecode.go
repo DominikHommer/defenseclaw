@@ -225,8 +225,12 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
 	var residual []string
 
-	// Check for owned hooks still present in settings.json
+	// Check for owned hooks still present in settings.json. A file that does
+	// not parse cannot show they are gone.
 	settingsPath := claudeCodeSettingsPath()
+	if err := claudeCodeSettingsParseable(settingsPath); err != nil {
+		return fmt.Errorf("verify claudecode cleanup: %w", err)
+	}
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		var settings map[string]interface{}
 		if json.Unmarshal(data, &settings) == nil {

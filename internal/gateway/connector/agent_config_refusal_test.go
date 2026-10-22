@@ -115,3 +115,34 @@ func pointCodexConfig(t *testing.T, path string) {
 	CodexConfigPathOverride = path
 	t.Cleanup(func() { CodexConfigPathOverride = previous })
 }
+
+// A Claude Code settings file that does not parse cannot show that the
+// DefenseClaw hooks are gone. Reporting it clean let a disabled connector's
+// failed teardown drop its lock entry and active-set retry while the hooks
+// stayed in the file, so fixing the file never removed them (GAP-0578).
+func TestClaudeCodeVerifyCleanRefusesSettingsThatDoNotParse(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	prev := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = prev })
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+
+	hook := filepath.Join(dir, "hooks", "claude-code-hook.sh")
+	body := `{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"` + hook + `"}]}]}}{`
+	if err := os.WriteFile(settingsPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewClaudeCodeConnector().VerifyClean(opts); err == nil || !strings.Contains(err.Error(), "is not valid JSON") {
+		t.Fatalf("VerifyClean of settings that do not parse = %v, want a not-valid-JSON error", err)
+	}
+
+	for _, clean := range []string{"", "  \n", `{"env":{"EDITOR":"vi"}}`} {
+		if err := os.WriteFile(settingsPath, []byte(clean), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := NewClaudeCodeConnector().VerifyClean(opts); err != nil {
+			t.Fatalf("VerifyClean of %q = %v, want clean", clean, err)
+		}
+	}
+}
