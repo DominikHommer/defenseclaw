@@ -3128,7 +3128,7 @@ func windowsEnterpriseVerifyFailureDetail(report *windowsEnterpriseInstallerRepo
 
 // windowsEnterpriseCodexTargetTransactionReason is how the ensure result
 // says why a config change ran the upgrade transaction.
-const windowsEnterpriseCodexTargetTransactionReason = "the config turns Codex protection on or off, and only the lifecycle transaction installs and removes Codex's machine policy, so every service was restarted"
+const windowsEnterpriseCodexTargetTransactionReason = "the config turns Codex protection on or off, or its Codex target differs from the protected deployment record, and only the lifecycle transaction installs and removes Codex's machine policy, so every service was restarted"
 
 func runWindowsEnterpriseStandaloneEnsureOnce(
 	ctx context.Context,
@@ -3626,6 +3626,16 @@ func planWindowsEnterpriseEnsure(
 	if err != nil {
 		return windowsEnterpriseEnsurePlan{}, err
 	}
+	if drift == "codex_target" {
+		opts.codexTargetTransaction = true
+		return windowsEnterpriseEnsurePlan{Action: windowsEnterpriseCodexTargetAction(opts), Reason: "drift:codex_target"}, nil
+	}
+	// Equal config bytes still need the new bundle's generation and identity
+	// recorded and adopted; only a confirmed repeat can be a no-op (GAP-0359).
+	if drift == "" && opts.bundle != nil && opts.bundle.prepared != nil &&
+		opts.bundle.prepared.Receipt != nil && !opts.bundle.prepared.AlreadyApplied {
+		drift = "bundle"
+	}
 	if drift == "config" && windowsBundleRollbackWithoutPayload(opts) {
 		// The rollback of a bundle the installed CLI applied puts the last
 		// good config back on the running deployment, as the bundle was
@@ -3811,6 +3821,13 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 		}
 	}
 	if path := strings.TrimSpace(opts.configPath); path != "" {
+		supplied, err := readWindowsEnterpriseBoundedFile(path, windowsEnterpriseHotConfigMaxBytes)
+		if err != nil {
+			return "", err
+		}
+		if windowsConfigCodexTargetNeedsReconcile(supplied, trimWindowsJSONBOM(body)) {
+			return "codex_target", nil
+		}
 		want, err := windowsEnterpriseFileSHA256(path)
 		if err != nil {
 			return "", err

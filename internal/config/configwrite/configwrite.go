@@ -481,8 +481,18 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 		return Result{}, err
 	}
 	if exists && bytes.Equal(candidate, current) {
-		state, _ := cfgtxn.ReadGenerationState(txn.Path())
-		return Result{Generation: state.Generation, SHA256: sum}, nil
+		state, stateErr := cfgtxn.ReadGenerationState(txn.Path())
+		// A first bundle (or another bundle with equal config bytes) still
+		// changes the policy's provenance and digest scope. The lifecycle
+		// must also clear that identity when undoing to the equal-byte base.
+		// Other writers retain the ordinary unchanged-document behavior.
+		bundleTransition := (opt.Lifecycle || opt.Actor == ActorLifecycle) &&
+			(opt.Bundle.ID != "" || state.BundleID != "") &&
+			(stateErr != nil || state.ConfigSHA256 != sum || state.BundleID != opt.Bundle.ID ||
+				state.BundleVersion != opt.Bundle.Version || state.SignerKeyID != opt.Bundle.SignerKeyID)
+		if !bundleTransition {
+			return Result{Generation: state.Generation, SHA256: sum}, nil
+		}
 	}
 	if err := config.ValidateCandidate(txn.Path(), candidate); err != nil {
 		return Result{}, fmt.Errorf("configwrite: the change does not validate: %w", err)
