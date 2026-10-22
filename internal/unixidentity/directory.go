@@ -2115,16 +2115,11 @@ func (r *NSSResolver) passwdOwner(uid int) (string, Account, error) {
 			// module that fails) may hold the uid: glibc passed it by, and
 			// the account a later service answers is not proved to be the
 			// one the uid belongs to. The lookup fails for want of that
-			// proof, so the candidate pass passes the service by as glibc
-			// did, and the gateway refuses a request that candidate gives
-			// another profile instead of applying default_profile.
-			// rel/1.0.4 asked only the directory services and took the
-			// later account's facts (review of r104 W2B, loop round 3).
-			err = fmt.Errorf("unixidentity: NSS service %s did not answer whether it holds uid %d: %w: %w", service, uid, err, errDirectoryUnconfirmed)
-			if err != nil {
-				return "", Account{}, err
-			}
-			continue
+			// proof, and the gateway selects the strictest profile that
+			// could apply instead of applying default_profile. rel/1.0.4
+			// asked only the directory services and took the later
+			// account's facts (review of r104 W2B, loop round 3).
+			return "", Account{}, fmt.Errorf("unixidentity: NSS service %s did not answer whether it holds uid %d: %w: %w", service, uid, err, errDirectoryUnconfirmed)
 		}
 		if err := r.passwdAbsent(service, strconv.Itoa(uid), true); err != nil && !errors.Is(err, errServiceUncheckable) {
 			return "", Account{}, fmt.Errorf("unixidentity: NSS service %s holds no uid %d but cannot show that it answers: %w", service, uid, err)
@@ -2240,8 +2235,8 @@ func localPasswdEntriesForUID(uid int) ([]Account, error) {
 // uid was then taken for the local account (review of GAP-0551, loop 4).
 // While that is unknown the lookup fails (fail closed), and the gateway
 // keeps the facts it cached through the outage as for any failed lookup;
-// without them it refuses the requests whose profile the unknown decides
-// (UnprovenFactsError). A service DefenseClaw has no check for is taken at its word, as passwdOwner
+// without them it selects the strictest profile that could apply, or
+// refuses. A service DefenseClaw has no check for is taken at its word, as passwdOwner
 // takes it. Local sources other than files (systemd's synthesized root and
 // nobody) are not asked, and SSSD's files domain passing a local entry on
 // is that entry (servesLocalEntry).
@@ -2281,11 +2276,7 @@ func (r *NSSResolver) checkUIDNotShared(uid int, owner string, account Account) 
 			}
 			continue
 		default:
-			err = fmt.Errorf("unixidentity: uid %d: NSS service %s did not answer whether it holds another account of the uid: %w: %w", uid, service, err, errDirectoryUnconfirmed)
-			if err != nil {
-				return err
-			}
-			continue
+			return fmt.Errorf("unixidentity: uid %d: NSS service %s did not answer whether it holds another account of the uid: %w: %w", uid, service, err, errDirectoryUnconfirmed)
 		}
 		if hasLocal {
 			if proxied, err := r.servesLocalEntry(service, found, local); err == nil && proxied {
