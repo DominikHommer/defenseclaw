@@ -30,6 +30,7 @@ var unprovenReasonTitles = map[string]string{
 	"shell-parse":          "A shell parse error leaves a protected write unproved",
 	"copy-directory":       "A copy into a directory can select a protected file",
 	"cdpath":               "CDPATH can select a directory containing a protected file link",
+	"nested-shell":         "A nested shell or shell script can write a protected file",
 }
 
 // UnprovenWriteTitle gives the operator the class that prevented a proof.
@@ -87,7 +88,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 		!strings.Contains(command, "python") && !strings.Contains(command, "node") &&
 		!strings.Contains(command, "ruby") && !strings.Contains(command, "perl") &&
 		!strings.Contains(command, "awk") &&
-		!strings.Contains(command, "()") {
+		!strings.Contains(command, "()") && !shellScriptInvocation(command) {
 		return ""
 	}
 	file, ok := parseShell(command)
@@ -243,7 +244,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 			}
 			return true
 		}
-		if program == "sh" || program == "bash" {
+		if posixShellProgram(program) {
 			words := make([]string, 0, len(call.Args))
 			for _, arg := range call.Args {
 				word, fixed := StaticWord(arg, home)
@@ -254,15 +255,35 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 				words = append(words, word)
 			}
 			if body, ok := shellCommandBodyIndex(words); ok {
-				if code, fixed := StaticWord(call.Args[body], home); fixed {
-					if nested := unprovenProtectedWriteDepth(code, cwd, home, depth+1); nested != "" {
-						set(nested, true)
-					}
-				} else {
-					set("dynamic-argument", false)
+				if nested := unprovenProtectedWriteDepth(words[body], cwd, home, depth+1); nested != "" {
+					set(nested, true)
+				} else if shellArgvIncomplete(program) && shellBodyProtectedWrite(words[body], cwd, home) {
+					// Zsh runs its startup files before the -c body, so argv
+					// alone cannot certify the action. A static write to a
+					// protected path in the visible body fails closed.
+					set("nested-shell", true)
 				}
 				return true
 			}
+			// No -c program word: a script file, stdin (-s), or an option
+			// the proof does not know. A small regular script under cwd is
+			// read and inspected like the interpreter branch; otherwise the
+			// shell's visible words fail closed when they reach a protected
+			// path, because the contents it will run are not bounded here.
+			if script, ok := shellScriptOperand(words); ok {
+				if content, read := readIndirectSource(script, cwd); read {
+					if nested := unprovenProtectedWriteDepth(content, cwd, home, depth+1); nested != "" {
+						set(nested, true)
+					} else if shellBodyProtectedWrite(content, cwd, home) {
+						set("nested-shell", true)
+					}
+					return true
+				}
+			}
+			if protectedReachFromText(command, cwd, home) {
+				set("nested-shell", true)
+			}
+			return true
 		}
 		if program == "python" || strings.HasPrefix(program, "python3") ||
 			program == "node" || program == "nodejs" || program == "ruby" || program == "perl" {
@@ -1461,6 +1482,81 @@ func unprovenInterpreterCode(code, language, cwd, home string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// posixShellProgram reports a POSIX-family shell whose -c body or script file
+// the bounded proof inspects. fish is excluded because its grammar differs.
+func posixShellProgram(program string) bool {
+	switch program {
+	case "sh", "bash", "zsh", "dash", "ksh", "mksh":
+		return true
+	}
+	return false
+}
+
+// shellArgvIncomplete reports a shell whose invocation argv cannot, on its own,
+// certify the complete action. Zsh runs its system and user startup files
+// before any -c body, script or stdin, and no flag disables all of them, so a
+// static body write must still fail closed. bash, sh, dash, ksh and mksh are
+// modeled by actionfacts from argv.
+func shellArgvIncomplete(program string) bool {
+	return program == "zsh"
+}
+
+// shellScriptInvocation reports a command that runs a POSIX shell with a
+// script-file operand. It keeps such commands out of the fast-path skip so the
+// shell branch can read and inspect the script, matching the awk -f rule. It
+// only runs after the cheaper substring filters, so the field scan is bounded
+// to otherwise-simple commands.
+func shellScriptInvocation(command string) bool {
+	fields := strings.Fields(command)
+	index := 0
+	for index < len(fields) && !strings.HasPrefix(fields[index], "-") && strings.ContainsRune(fields[index], '=') {
+		index++ // leading NAME=value environment assignments
+	}
+	if index >= len(fields) || !posixShellProgram(programBase(fields[index])) {
+		return false
+	}
+	for _, word := range fields[index+1:] {
+		if word != "--" && !strings.HasPrefix(word, "-") {
+			return true
+		}
+	}
+	return false
+}
+
+// shellScriptOperand returns the first word a shell would run as a script
+// file: the first operand that does not begin with '-'. Option values are
+// conservatively treated as candidate operands, because reading the wrong
+// small local file only adds a bounded, fail-closed inspection.
+func shellScriptOperand(words []string) (string, bool) {
+	for _, word := range words[1:] {
+		if word == "--" {
+			continue
+		}
+		if !strings.HasPrefix(word, "-") {
+			return word, true
+		}
+	}
+	return "", false
+}
+
+// shellBodyProtectedWrite reports a statically resolvable write operand in a
+// shell program whose destination reaches a protected file. It covers shells
+// and shell scripts that actionfacts does not model from argv, so a plain
+// redirect or literal writer to a protected link in the body fails closed.
+// Unresolvable (dynamic) writes are handled by the recursive walk instead.
+func shellBodyProtectedWrite(code, cwd, home string) bool {
+	protected := newProtectedFiles(home)
+	ssh := filepath.Join(home, ".ssh")
+	operands, _, _ := ShellWriteOperands(code, cwd, home)
+	operands = append(operands, LiteralWriteOperands(code, cwd, home)...)
+	for _, operand := range operands {
+		if protectedReachPath(OperandPath(operand, cwd), protected, ssh) {
+			return true
+		}
+	}
+	return false
 }
 
 func protectedReachFromText(command, cwd, home string) bool {

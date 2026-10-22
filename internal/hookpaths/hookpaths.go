@@ -1832,55 +1832,98 @@ func archiveCopyDestination(args []string, static []bool, cwd string) string {
 // link whose name is not available from the shell command. A fixed clone
 // destination narrows the uncertainty; worktree updates can change any name
 // in the repository, even when -C starts Git in a subdirectory.
+//
+// Only a materializing subcommand (clone or a worktree update) installs a
+// link. Global options that redirect the repository or worktree, or that the
+// parser does not know, only matter once such a subcommand is found, so the
+// scan reaches the subcommand before it decides. A read subcommand such as
+// show, diff or log installs no link whatever the global options are; the
+// joined -C<path>, --git-dir=<path> and --bare forms are read the same way as
+// their spaced spellings so they no longer force a global opaque scope.
 func gitMaterializationScope(args []string, static []bool, cwd string) (string, bool) {
 	working := cwd
+	scopeUnknown := false
 	for i := 0; i < len(args); i++ {
 		if !static[i] {
 			return working, true
 		}
-		switch args[i] {
-		case "-C":
+		arg := args[i]
+		switch {
+		case arg == "-C" || arg == "--chdir":
 			i++
 			if i >= len(args) || !static[i] || args[i] == "" {
 				return "", true
 			}
 			working = OperandPath(args[i], working)
 			continue
-		case "-c", "--config-env":
+		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			working = OperandPath(arg[2:], working)
+			continue
+		case arg == "-c" || arg == "--config-env":
 			i++
 			if i >= len(args) || !static[i] {
 				return "", true
 			}
-			option := strings.ToLower(args[i])
-			if strings.HasPrefix(option, "core.worktree=") ||
-				strings.HasPrefix(option, "core.bare=") {
-				return "", true
+			if gitConfigRedirectsTree(args[i]) {
+				scopeUnknown = true
 			}
 			continue
-		case "--git-dir", "--work-tree", "--namespace":
+		case strings.HasPrefix(arg, "-c") && len(arg) > 2:
+			if gitConfigRedirectsTree(arg[len("-c"):]) {
+				scopeUnknown = true
+			}
+			continue
+		case arg == "--git-dir" || arg == "--work-tree" ||
+			arg == "--namespace" || arg == "--super-prefix":
+			i++
+			if i >= len(args) || !static[i] {
+				return "", true
+			}
 			// The repository or worktree can be redirected by these options.
-			return "", true
+			scopeUnknown = true
+			continue
+		case strings.HasPrefix(arg, "--git-dir=") || strings.HasPrefix(arg, "--work-tree=") ||
+			strings.HasPrefix(arg, "--namespace=") || strings.HasPrefix(arg, "--super-prefix="):
+			scopeUnknown = true
+			continue
+		case strings.HasPrefix(arg, "-"):
+			// An unknown global option may redirect the worktree, so the scope
+			// is unknown; only a materializing subcommand installs a link.
+			scopeUnknown = true
+			continue
 		}
-		if strings.HasPrefix(args[i], "-") {
-			return "", true
-		}
-		switch args[i] {
+		switch arg {
 		case "clone":
 			// Clone's final operand is a destination only when both source and
 			// destination are explicit ordinary operands. Otherwise the name
 			// depends on Git's option and URL grammar.
+			if scopeUnknown {
+				return "", true
+			}
 			if len(args)-i == 3 && static[i+1] && static[i+2] &&
 				!strings.HasPrefix(args[i+1], "-") && !strings.HasPrefix(args[i+2], "-") {
 				return OperandPath(args[i+2], working), true
 			}
 			return working, true
 		case "checkout", "switch", "pull", "apply", "restore", "reset", "merge", "rebase", "cherry-pick", "am":
+			if scopeUnknown {
+				return "", true
+			}
 			return gitWorktreeRoot(working), true
 		default:
+			// A read or inspection subcommand (show, diff, log, config, ...)
+			// installs no link, whatever the global options were.
 			return "", false
 		}
 	}
 	return "", false
+}
+
+// gitConfigRedirectsTree reports a -c/--config-env assignment that can move the
+// repository's worktree or make it bare, changing where a later write lands.
+func gitConfigRedirectsTree(assignment string) bool {
+	option := strings.ToLower(assignment)
+	return strings.HasPrefix(option, "core.worktree=") || strings.HasPrefix(option, "core.bare=")
 }
 
 // gitWorktreeRoot uses the nearest .git marker, as Git does for a worktree
