@@ -364,7 +364,9 @@ func TestUnreadableLedgerKeepsExactCurrentAgentAssignment(t *testing.T) {
 	// request gets the strictest profile that may apply, never weaker than
 	// its exact assignment.
 	got, mode := hook(alice)
-	want("exact current identity, nothing derived", got, mode, "strict", profileMatchDefaultLookupFailed, "action")
+	// The exact assignment is the strictest that may apply, so it keeps
+	// its own reason (r104 identity).
+	want("exact current identity, nothing derived", got, mode, "strict", profileMatchAgent, "action")
 	legacyBridgeDerives(t, aliceInputs)
 	got, mode = hook(alice)
 	want("exact current identity, legacy derived but not assigned", got, mode, "strict", profileMatchAgent, "action")
@@ -388,5 +390,5 @@ func TestUnreadableLedgerKeepsExactCurrentAgentAssignment(t *testing.T) {
 		{Profile: "strict", Match: config.ProfileMatch{Agents: []string{alice}}},
 	}
 	got, mode = hook(alice)
-	want("exact identity after its own legacy entry", got, mode, "strict", profileMatchDefaultLookupFailed, "action")
+	want("exact identity after its own legacy entry", got, mode, "strict", profileMatchAgent, "action")
 }
