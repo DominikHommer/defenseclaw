@@ -127,7 +127,11 @@ fail_unreachable() {
 }
 
 fail_response() {
-  defenseclaw_log_hook_delivery_failure inspect inspect-tool "$1" response "$FAIL_MODE"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
+  # outage only (no answer or a 5xx, fail_unreachable). A refusal (4xx,
+  # 429) or an unusable answer blocks: the agent can provoke either.
+  FAIL_MODE="closed"
+{{end}}  defenseclaw_log_hook_delivery_failure inspect inspect-tool "$1" response "$FAIL_MODE"
   echo "defenseclaw: inspect-tool hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
@@ -174,7 +178,7 @@ fi
 # The tool input reaches the JSON encoder on stdin and the gateway on a curl
 # descriptor, never on a command line.
 INSPECT_BODY="$(printf '%s' "$TOOL_INPUT" | defenseclaw_inspect_tool_body "$TOOL_NAME" args)" || {
-  fail_unreachable "failed to build inspect body"
+  {{if and .Managed (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "failed to build inspect body"
 }
 {{if .Sandbox}}RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool" "$INSPECT_BODY" \
   "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
