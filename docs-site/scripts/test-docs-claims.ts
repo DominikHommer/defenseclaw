@@ -25,14 +25,12 @@ describe('Intune base config versus the signed bundle', () => {
     assert.ok(list, 'packager hook-block key list not found');
     const compared = [...list[1].matchAll(/'([a-z_]+)'/g)].map((match) => match[1]);
     assert.ok(compared.length > 0);
-    for (const name of ['enterprise/mdm/signed-bundles.mdx']) {
-      const text = page(name);
-      assert.ok(!text.includes('the packager checks this) so that window does not change what is blocked'), name);
-      assert.ok(text.includes('No other setting is compared'), name);
-      assert.ok(text.includes('such as `asset_policy:`, into the base config too'), name);
-      for (const key of ['guardrail', ...compared]) {
-        assert.ok(text.includes(`\`${key}:\``), `${name} does not name the compared ${key}: block`);
-      }
+    const reference = readFileSync(join(site, 'content/docs/enterprise/mdm/intune/windows-reference.mdx'), 'utf8');
+    const row = reference.split('\n').find((line) => line.startsWith('| `-BaseConfigPath` |'));
+    assert.ok(row, 'windows-reference has no -BaseConfigPath row');
+    assert.ok(row.includes('No other setting is compared'), 'the -BaseConfigPath row does not say nothing else is compared');
+    for (const key of ['guardrail', ...compared]) {
+      assert.ok(row.includes(`\`${key}:\``), `the -BaseConfigPath row does not name the compared ${key}: block`);
     }
   });
 });

@@ -77,8 +77,6 @@ parameters: [Packager parameters](/docs/enterprise/mdm/intune/windows-reference#
 If the config selects a custom rule pack, deliver it first with a rule-pack app and
 make that app a dependency of the install ([Custom rule pack app](/docs/enterprise/mdm/intune/windows-reference#custom-rule-pack-app)).
 
-To deliver the config as a signed policy bundle, add a bundle app after this base app; see [Signed policy bundles](/docs/enterprise/mdm/signed-bundles).
-
 ## 3. Create the Win32 app
 
 Upload the `.intunewin` in **Apps** > **All Apps** > **Create** > **Windows app (Win32)**:
@@ -131,7 +129,7 @@ gateway. `enterprise secret status` never shows the value.
 
 **Change the config.** On a device in bundle mode (bundle trust anchors installed),
 deliver a new signed bundle instead: Setup refuses a config package with
-`bundle_required` ([Signed policy bundles](/docs/enterprise/mdm/signed-bundles)). Otherwise,
+`bundle_required`. Otherwise,
 Setup applies a new config when `/ensure` runs with a config
 that differs from the installed one. The registry rule detects by version only, so
 Intune does not re-run an app for a config-only change. To roll out a new config,
@@ -153,9 +151,10 @@ launcher and `ensure` re-applies the deployment. Do not edit the installed file 
 hand; changes made outside Setup are not validated.
 
 **Upgrade.** Build content for the new release and assign it as a new Win32 app. `/ensure`
-upgrades in place and keeps the config and state. In bundle mode, build the upgrade
-without `-ConfigPath` and keep the base and bundle apps assigned
-([Upgrade the product in bundle mode](/docs/enterprise/mdm/signed-bundles#upgrade-the-product-in-bundle-mode)).
+upgrades in place and keeps the config and state. In bundle mode, keep the base and bundle apps
+assigned and add a separate Setup-only app built without `-ConfigPath` and without
+supersedence: superseding a base app that a bundle app depends on failed with
+Intune error `0x87D300DB`.
 After each upgrade with Claude Code enabled, an administrator must repeat the
 [attestation](/docs/enterprise/install/windows#verify-the-install); until then
 `status` can report `ok=true` with `security_complete=false`.

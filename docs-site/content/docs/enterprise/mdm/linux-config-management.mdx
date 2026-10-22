@@ -45,7 +45,7 @@ Every recipe does the same five idempotent steps, in this order:
    file, permission, service or readiness check fails.
 
 In bundle mode (bundle trust anchors installed), the config comes only from signed
-bundles and `ensure --config` refuses a different one with `bundle_required` ([Signed policy bundles](/docs/enterprise/mdm/signed-bundles)).
+bundles and `ensure --config` refuses a different one with `bundle_required`.
 Otherwise, after the first install, change the config only through `ensure --config`: the
 lifecycle validates the candidate before it replaces `/etc/defenseclaw/config.yaml`
 and rolls back if applying fails. The recipes set only that file's owner and mode,

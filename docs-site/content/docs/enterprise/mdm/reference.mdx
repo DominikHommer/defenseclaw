@@ -409,7 +409,9 @@ deliver the older pkg; the package consumes it. See
 On a device in bundle mode (bundle trust anchors installed), both routes refuse a
 config that is not the current bundle's with `bundle_required`, and on Linux and
 macOS an edit of the installed file is reverted. Deliver a new signed bundle
-instead ([Signed policy bundles](/docs/enterprise/mdm/signed-bundles)).
+instead. On a refusal the config is not applied, but on Linux and macOS the
+wrapper runs its earlier steps first: a deb, rpm or pkg package (`--source`) is
+installed and a credential (`--secret-name`) is stored, and both stay.
 
 An MDM that detects the Windows deployment by version does not re-run it for a
 config-only change.

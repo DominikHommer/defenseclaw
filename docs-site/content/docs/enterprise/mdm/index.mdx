@@ -114,9 +114,9 @@ one gets a default that protects **no** agents.
   `cisco_ai_defense.api_key`.
 - A `config_version: 8` file is migrated to 9 when applied. The Intune Win32
   packager requires 9.
-- **Signed policy bundles.** Once your MDM installs bundle trust anchors, the
-  device takes its config only from signed bundles and refuses a plain config
-  with `bundle_required`. See [Signed policy bundles](/docs/enterprise/mdm/signed-bundles).
+- **Bundle mode.** Once your MDM installs bundle trust anchors, the device takes
+  its config only from signed bundles and refuses a plain config with
+  `bundle_required`.
 
 ## Deliver the AI Defense key
 
@@ -221,8 +221,7 @@ Windows: `%WINDIR%\Logs\DefenseClaw` and the `DefenseClaw` event log. Linux:
 
 Upgrade by delivering the new artifact and pin and running `ensure`; change the
 config by running the wrapper again with the new file. On a device in bundle mode,
-deliver a new signed bundle instead; a plain config is refused with `bundle_required`
-([Signed policy bundles](/docs/enterprise/mdm/signed-bundles)). Every lifecycle refuses an
+deliver a new signed bundle instead; a plain config is refused with `bundle_required`. Every lifecycle refuses an
 older release unless you ask for the rollback
 ([Roll back](/docs/enterprise/operate/lifecycle#roll-back),
 [details](/docs/enterprise/mdm/reference#upgrades-rollback-and-config-changes)).

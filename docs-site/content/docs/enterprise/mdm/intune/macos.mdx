@@ -90,8 +90,6 @@ DEFENSECLAW_CONFIG
 }
 ```
 
-To deliver a signed policy bundle instead of a plain config, see [Signed policy bundles](/docs/enterprise/mdm/signed-bundles).
-
 An inline `data_dir` must be exactly `/opt/cisco/defenseclaw/runtime`. Never put the
 AI Defense key in the script: Intune scripts are not secret storage. For Developer ID
 trust on a signed and notarized pkg, set `DC_TRUST_MODE=signed` and
@@ -151,8 +149,7 @@ Delete the source file afterwards. Storing the key re-runs `ensure`, which appli
   and `ensure` validates and applies it. An invalid config fails the run with
   `config_invalid` and leaves the installed config unchanged.
   In bundle mode (bundle trust anchors installed), a changed config is refused with
-  `bundle_required` and the installed one stays; deliver a new signed bundle instead
-  ([Signed policy bundles](/docs/enterprise/mdm/signed-bundles)).
+  `bundle_required` and the installed one stays; deliver a new signed bundle instead.
 - **Upgrade:** host the new pkg, then update `DC_SOURCE_URL`, `DC_SOURCE_SHA256` and
   `DC_PRODUCT_VERSION`.
 - **Roll back:** [Roll back](/docs/enterprise/operate/lifecycle#roll-back).

@@ -86,7 +86,7 @@ running (usually under a minute), they report `lifecycle_busy`, exit `75` and sa
 configuration change is being applied. That is not a failure and needs no repair: run them
 again when it finishes.
 
-On a device in bundle mode, an edit of the managed config is reverted to the current bundle's config instead ([Signed policy bundles](/docs/enterprise/mdm/signed-bundles)).
+On a device in bundle mode, an edit of the managed config is reverted to the current bundle's config instead.
 
 **A hand edit of the config is applied, not reported as drift.** When you edit the managed
 `config.yaml` in place as root (keeping its mode and owner), the apply trigger picks the

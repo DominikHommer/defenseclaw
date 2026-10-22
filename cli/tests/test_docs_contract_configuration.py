@@ -97,7 +97,7 @@ def test_windows_setup_result_does_not_promise_a_changes_list():
 
 
 ENTERPRISE = DOCS / 'enterprise'
-BUNDLE_LINK = '/docs/enterprise/mdm/signed-bundles'
+CONTENT = DOCS.parent
 # A step, row or heading that tells an administrator how to change the config.
 CONFIG_CHANGE_RECIPE = re.compile(
     r'^#{2,4} [^\n]*[Cc]hange the config'
@@ -107,45 +107,53 @@ CONFIG_CHANGE_RECIPE = re.compile(
     r'|change the config only through',
     re.MULTILINE,
 )
+# Words that name signed policy bundles or their deployment. Public docs keep
+# only the bundle-mode refusal guidance until the sync service ships: no page,
+# navigation entry, heading or link that sends readers to deploy bundles.
+BUNDLE_DEPLOYMENT = re.compile(
+    r'\b(?:signed|policy|trust)[ -](?:policy )?bundles?\b|\bbundle[ -]mode\b'
+    r'|\b(?:a|the|new|next|each) (?:signed )?bundles?\b|dcbundle',
+    re.IGNORECASE,
+)
+LINK = re.compile(r'\[([^\]]*)\]\(([^)\s]*)\)|href=["\']([^"\']*)')
 
 
 def _config_change_pages():
     for page in sorted(ENTERPRISE.rglob('*.mdx')):
         rel = page.relative_to(DOCS).as_posix()
         # Secure Client computers do not take signed bundles.
-        if 'secure-client' in rel or rel == 'enterprise/mdm/signed-bundles.mdx':
+        if 'secure-client' in rel:
             continue
         if CONFIG_CHANGE_RECIPE.search(page.read_text()):
             yield rel
 
 
-def test_signed_bundle_page_covers_the_lifecycle():
-    text = flat('enterprise/mdm/signed-bundles.mdx')
-    for heading in ('## Bundle mode', '## Sign and check a bundle', '## First deployment',
-                    '## Roll out a new bundle', '### Upgrade the product in bundle mode', '## Check it worked'):
-        assert heading in text
-    assert 'bundle-anchors.json' in text and 'bundle_required' in text
-    assert 'enterprise bundle verify' in text and 'enterprise bundle status --json' in text
-    assert '-BundlePath' in text and '-TrustAnchorPath' in text and 'detect-bundle.ps1' in text
-    assert 'dc_inline_bundle' in text and 'dc_inline_trust_anchors' in text
-    assert '`applied` is `true`' in text and 'last_refusal' in text
-    assert 'Secure Client computers do not take bundles' in text
+def test_no_docs_page_or_navigation_entry_for_signed_bundles():
+    files = [p.relative_to(CONTENT).as_posix() for p in CONTENT.rglob('*')
+             if p.is_file() and 'bundle' in p.name.lower()]
+    assert not files
+    for meta in sorted(CONTENT.rglob('meta.json')):
+        entries = json.loads(meta.read_text()).get('pages', [])
+        assert not [e for e in entries if 'bundle' in e.lower()], meta.relative_to(CONTENT)
+    for page in sorted(CONTENT.rglob('*.mdx')):
+        text = page.read_text()
+        front = text.split('\n---', 1)[0] if text.startswith('---') else ''
+        assert not BUNDLE_DEPLOYMENT.search(front), page.relative_to(CONTENT)
 
 
-def test_signed_bundle_page_is_in_the_mdm_navigation():
-    pages = json.loads((ENTERPRISE / 'mdm/meta.json').read_text())['pages']
-    assert 'signed-bundles' in pages
-
-
-@pytest.mark.parametrize('name', [
-    'enterprise/mdm/index.mdx',
-    'enterprise/mdm/intune/windows.mdx',
-    'enterprise/mdm/intune/linux.mdx',
-    'enterprise/mdm/intune/macos.mdx',
-    'enterprise/mdm/intune/windows-reference.mdx',
-])
-def test_mdm_pages_link_the_signed_bundle_page(name):
-    assert BUNDLE_LINK in flat(name)
+def test_no_docs_heading_or_link_sends_readers_to_deploy_bundles():
+    offenders = []
+    for page in sorted(CONTENT.rglob('*.mdx')):
+        rel = page.relative_to(CONTENT).as_posix()
+        text = page.read_text()
+        offenders += [f'{rel}: {line}' for line in text.splitlines()
+                      if re.match(r'#{1,6} ', line) and BUNDLE_DEPLOYMENT.search(line)]
+        for match in LINK.finditer(text):
+            label, target = match.group(1) or '', match.group(2) or match.group(3) or ''
+            internal = not re.match(r'[a-z]+://', target)
+            if BUNDLE_DEPLOYMENT.search(label) or (internal and 'bundle' in target.lower()):
+                offenders.append(f'{rel}: {" ".join(match.group(0).split())}')
+    assert not offenders, '\n'.join(offenders)
 
 
 def test_config_change_recipes_are_found():
@@ -162,9 +170,11 @@ def test_config_change_recipes_are_found():
     'enterprise/operate/reference.mdx',
 }))
 def test_config_change_recipes_are_qualified_for_bundle_mode(name):
+    # Bundle mode refuses a plain config (`bundle_required`) or reverts an edit
+    # of the installed file; every config-change recipe says which.
     text = flat(name)
-    assert "bundle mode" in text.lower(), name
-    assert BUNDLE_LINK in text, name
+    assert 'bundle mode' in text.lower(), name
+    assert '`bundle_required`' in text or 'reverted' in text, name
 
 
 def test_windows_bundle_mode_upgrade_leaves_the_config_out():
@@ -191,8 +201,8 @@ def _doc_blocks(text):
 
 @pytest.mark.parametrize('wrapper', WRAPPERS)
 def test_unix_wrapper_runs_package_and_credential_before_the_bundle_mode_check(wrapper):
-    # The page discloses this order; if the wrapper ever refuses first, the
-    # disclosure must change with it.
+    # The MDM reference discloses this order; if the wrapper ever refuses
+    # first, the disclosure must change with it.
     main = (DOCS.parents[2] / wrapper).read_text().split('\ndc_main() {', 1)[1]
     package = main.index('dc_install_package')
     secret = main.index('dc_store_secret "$gateway"')
@@ -201,8 +211,9 @@ def test_unix_wrapper_runs_package_and_credential_before_the_bundle_mode_check(w
 
 
 def test_bundle_required_refusal_discloses_the_wrapper_steps_that_already_ran():
-    text = (DOCS / 'enterprise/mdm/signed-bundles.mdx').read_text()
-    section = ' '.join(text.split('## Bundle mode', 1)[1].split('\n## ', 1)[0].split())
+    text = (DOCS / 'enterprise/mdm/reference.mdx').read_text()
+    section = ' '.join(text.split('**Change the config.**', 1)[1].split('\n## ', 1)[0].split())
+    assert 'bundle_required' in section
     assert 'the config is not applied' in section
     assert 'deb, rpm or pkg package (`--source`) is installed' in section
     assert 'a credential (`--secret-name`) is stored' in section
