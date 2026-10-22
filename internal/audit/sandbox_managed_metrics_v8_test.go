@@ -148,3 +148,86 @@ func TestSandboxManagedRecordsMoveTheirFleetCounter(t *testing.T) {
 		})
 	}
 }
+
+// A reason or OpenShell setting key is a counter value only when the code
+// defines it. The daemon that reports a drift or an access refusal runs as
+// the user, so any value it posts, such as a user's name, counts as other on
+// every managed counter that has a reason or a setting key, and only the
+// access-controlled record keeps it.
+func TestSandboxManagedCounterCodesComeFromTheCode(t *testing.T) {
+	harness := newSandboxHarness(t)
+	identity, subject := testManagedIdentity(), testManagedSubject()
+	managedOnly := SandboxIdentity{Connector: "claudecode", Driver: SandboxDriverDocker, Managed: identity.Managed}
+	const reasonKey, fieldKey = "defenseclaw.sandbox.managed.reason", "defenseclaw.openshell.settings.field"
+	type counterCase struct {
+		name, instrument, key string
+		event                 any
+	}
+	casesFor := func(value string) []counterCase {
+		return []counterCase{
+			{"settings drift", observability.TelemetryInstrumentDefenseClawSandboxManagedDrift, fieldKey,
+				SandboxSettingsDriftEvent{Sandbox: managedOnly, Subject: subject, Field: value}},
+			{"access refused", observability.TelemetryInstrumentDefenseClawSandboxManagedRefusals, reasonKey,
+				SandboxAccessRefusedEvent{Sandbox: identity, Subject: subject, Host: "blocked.example.com", Port: 443, Reason: value}},
+			{"host run refused", observability.TelemetryInstrumentDefenseClawSandboxManagedRefusals, reasonKey,
+				SandboxHostRunRefusedEvent{Sandbox: managedOnly, Subject: subject, Reason: value}},
+			{"host run unavailable", observability.TelemetryInstrumentDefenseClawSandboxManagedRefusals, reasonKey,
+				SandboxHostRunUnavailableEvent{Sandbox: managedOnly, Subject: subject, Reason: value}},
+			{"ask decided", observability.TelemetryInstrumentDefenseClawSandboxManagedAsks, reasonKey,
+				SandboxAskDecidedEvent{Sandbox: identity, Subject: subject, ApprovalID: "ask-1", Result: SandboxApprovalDenied,
+					Reason: value, Host: "api.example.com", Port: 443}},
+		}
+	}
+	counted := func(t *testing.T, tc counterCase) (string, string) {
+		t.Helper()
+		runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+		if err := recordManagedEvent(context.Background(), recorder, tc.event); err != nil {
+			t.Fatal(err)
+		}
+		points := sandboxMetrics(t, runtime, tc.instrument)
+		if len(points) != 1 {
+			t.Fatalf("%s points=%d, want one", tc.instrument, len(points))
+		}
+		label, _ := metricAttributes(t, points[0])[tc.key].(string)
+		_, record := onlySandboxRecord(t, runtime)
+		encoded, err := record.MarshalJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return label, string(encoded)
+	}
+	// Person-like and varying values: one series (other), whatever was posted.
+	for _, value := range []string{"alice", "bob", "ent_alice", "alice_smith", "u1001", "compute_driver2", "required_for_alice", "other"} {
+		for _, tc := range casesFor(value) {
+			t.Run(tc.name+"/"+value, func(t *testing.T) {
+				label, record := counted(t, tc)
+				if label != SandboxManagedMetricOther {
+					t.Fatalf("%s %s=%q, want %q", tc.instrument, tc.key, label, SandboxManagedMetricOther)
+				}
+				if want := `"` + tc.key + `":"` + value + `"`; !strings.Contains(record, want) {
+					t.Fatalf("the record lost the posted value %s: %s", want, record)
+				}
+			})
+		}
+	}
+	// A dotted key fits the setting key pattern only.
+	for _, value := range []string{"home.alice", "users.alice.profile"} {
+		tc := casesFor(value)[0]
+		if label, _ := counted(t, tc); label != SandboxManagedMetricOther {
+			t.Fatalf("drift field %q counted as %q", value, label)
+		}
+	}
+	// Every code-defined value is its own counter value.
+	for code := range sandboxManagedMetricReasons {
+		for _, tc := range casesFor(code)[1:] {
+			if label, _ := counted(t, tc); label != code {
+				t.Fatalf("%s reason %q counted as %q", tc.name, code, label)
+			}
+		}
+	}
+	for field := range sandboxManagedMetricSettingsFields {
+		if label, _ := counted(t, casesFor(field)[0]); label != field {
+			t.Fatalf("drift field %q counted as %q", field, label)
+		}
+	}
+}
