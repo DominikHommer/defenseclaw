@@ -28,6 +28,7 @@ for current behavior.
 - **Activity metric labels contain categories.** Account-shaped target types become `unknown`, and actor labels use source categories; audit evidence keeps the original values.
 - **Windows fail-mode changes retry transient registration read failures.** A short sharing lock no longer aborts a valid update; an unreadable registration still refuses the change after bounded retries.
 - **Fail-mode documentation follows installed policy.** The environment registry and help no longer advertise a process override outside the existing Secure Client exception. Use `defenseclaw guardrail fail-mode` to change the installed mode.
+- **Status and doctor show when the environment reopens a Secure Client hook.** The Antigravity, Devin, Hermes and Kiro hooks of an authenticated Secure Client deployment, and hooks rendered by 1.0.3 or earlier, still read `DEFENSECLAW_FAIL_MODE`. For those hooks, status reports the mode it gives an agent started from the same shell, with `process-env-<mode>` drift, and the doctor Mode row fails.
 
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
 

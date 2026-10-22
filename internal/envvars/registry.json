@@ -1501,7 +1501,7 @@
     {
       "name": "DEFENSECLAW_FAIL_MODE",
       "category": "hook_internal",
-      "purpose": "Not read by 1.0.4 hooks: a hook's fail mode is the guardrail.hook_fail_mode installed with it (the shell hook, the OpenCode plugin, hooks/.hookcfg for the native Windows hook), and status and doctor report that. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again, and the Antigravity, Devin, Hermes and Kiro shell hooks of an authenticated Secure Client deployment keep it as a full override. Set the mode with defenseclaw guardrail fail-mode.",
+      "purpose": "Read as a full override only by the Antigravity, Devin, Hermes and Kiro shell hooks of an authenticated Secure Client deployment and by hooks rendered by 1.0.3 or earlier (until the upgrade renders them again); every other hook uses the guardrail.hook_fail_mode installed with it (the shell hook, the OpenCode plugin, hooks/.hookcfg for the native Windows hook). For the hooks that read it, status and doctor report the mode it gives an agent started from the same shell. Set the mode with defenseclaw guardrail fail-mode.",
       "default": "unset (installed policy is authoritative)",
       "accepted_values": [
         "open",
@@ -1514,7 +1514,7 @@
       "consumers": [
         {
           "location": "cli/defenseclaw/fail_mode.py",
-          "description": "Reads the installed sidecar and recognizes 1.0.3 and older rendered hooks for upgrade diagnostics; never reads a process override"
+          "description": "Reads the installed hook and sidecar; for a hook that reads the variable (authenticated Secure Client delivery, 1.0.3 and older renders) reports the mode this process's value gives it"
         },
         {
           "location": "internal/gateway/connector/subprocess.go",
