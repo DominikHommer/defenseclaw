@@ -264,6 +264,10 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 		}
 	}
 	aclErr, signersErr, deploymentErr, signed, signers, deployment = nil, nil, nil, false, nil, installed("authenticode")
+	// The last case may have removed the executable.
+	if err := os.WriteFile(runtimeFile, []byte("runtime"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for name := range scopes {
 		for _, action := range []string{"status", "verify"} {
 			record, _ := writeLegacyWindowsScannerRuntimeAdmission(t, root, runtimeFile)
