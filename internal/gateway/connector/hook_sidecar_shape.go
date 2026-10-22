@@ -267,9 +267,9 @@ func legacyHookSidecarKey(key string) bool {
 // flatHookRecordValue reads one key of a hooks/.hookcfg.<connector> record as
 // the shared Unix hooks do (defenseclaw_flat_hookcfg_value): KEY=value lines
 // with an upper-case key, each key once, every line ended by a newline, no
-// NUL byte. ok is false for any other record.
+// NUL byte, at most HookSidecarMaxBytes. ok is false for any other record.
 func flatHookRecordValue(data []byte, wanted string) (value string, ok bool) {
-	if len(data) == 0 || data[len(data)-1] != '\n' || bytes.IndexByte(data, 0) >= 0 {
+	if len(data) == 0 || len(data) > HookSidecarMaxBytes || data[len(data)-1] != '\n' || bytes.IndexByte(data, 0) >= 0 {
 		return "", false
 	}
 	seen := map[string]struct{}{}

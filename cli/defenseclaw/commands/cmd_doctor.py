@@ -14837,7 +14837,24 @@ def _check_connector_inventory(
                     f"provenance={fail_mode['provenance']}"
                 )
                 desired = fail_mode.get("desired")
-                if fail_mode.get("runtime_verified") is False:
+                managed_windows_runtime = any(
+                    isinstance(source, dict) and source.get("name") == "windows-managed-runtime"
+                    for source in fail_mode.get("sources") or ()
+                )
+                if fail_mode.get("runtime_verified") is False and managed_windows_runtime:
+                    # A managed native Windows hook runs the mode of the
+                    # guardian's authenticated runtime generation, which doctor
+                    # cannot read: never a pass. A warning, not a failure,
+                    # because doctor can never verify it; the guardian's
+                    # elevated verify does.
+                    _emit(
+                        "warn",
+                        "Mode",
+                        f"{detail}; runtime fail mode unverified: the guardian's runtime generation sets it",
+                        r=r,
+                        remediation="run `defenseclaw enterprise windows verify` from an elevated prompt",
+                    )
+                elif fail_mode.get("runtime_verified") is False:
                     # The installed hook takes its mode from the agent's
                     # environment, which doctor cannot see, so it can run
                     # open whatever its default says: never a pass. Outside

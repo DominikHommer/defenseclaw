@@ -380,9 +380,10 @@ failures closed rather than trusting a user-controlled process environment.
 A hook's fail mode is the one installed with it: the mode setup baked into
 the shell hook or the OpenCode plugin, or the one in `hooks/.hookcfg` that the
 native Windows hook reads. On a managed computer that is the administrator's
-config, which only root or SYSTEM can change. Nothing in the agent's
-environment changes it: `DEFENSECLAW_FAIL_MODE` is not read, so `open` does
-not open a closed hook and `closed` does not close an open one. A missing,
+config, which only root or SYSTEM can change. Outside the Secure Client
+shell hooks (below), nothing in the agent's environment changes it:
+`DEFENSECLAW_FAIL_MODE` is not read, so `open` does not open a closed hook
+and `closed` does not close an open one. A missing,
 unreadable or malformed installed record is `closed`. To change the mode, run
 `defenseclaw guardrail fail-mode open|closed`, which saves it in the config
 and the installed hooks.
@@ -392,8 +393,10 @@ so what they report is what the hooks do. A variable set in the shell that
 runs them changes nothing. One exception: on a managed Windows computer the
 native hook takes its mode from the runtime generation the guardian
 publishes, which they cannot check. They show the administrator's mode with
-the drift `windows-managed-runtime-unverified`; the guardian's `verify`
-checks the runtime itself.
+the provenance and the drift `windows-managed-runtime-unverified`, never as
+current, and doctor's Mode row warns instead of passing, also right after the
+administrator changes the mode. `defenseclaw enterprise windows verify`, from
+an elevated prompt, checks the runtime itself.
 
 `DEFENSECLAW_STRICT_AVAILABILITY=1` is the one process setting the hooks
 read. It can only close: on a hook that can block, it blocks a call while the

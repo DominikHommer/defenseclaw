@@ -47,6 +47,16 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 	malformedMap := func(value string) string {
 		return `{"version":2,"gateway_addr":"127.0.0.1:1","fail_modes":` + value + `,"legacy_fail_mode":"open"}`
 	}
+	// sizedJSON and sizedFlat pad the writers' open state to exactly size
+	// bytes.
+	sizedJSON := func(connector string, size int) string {
+		prefix := `{"version":2,"fail_modes":{"` + connector + `":"open"},"pad":"`
+		return prefix + strings.Repeat("x", size-len(prefix)-2) + `"}`
+	}
+	sizedFlat := func(connector string, size int) string {
+		prefix := flat(connector, "open") + "PAD="
+		return prefix + strings.Repeat("x", size-len(prefix)-1) + "\n"
+	}
 	type state map[string]string
 	for _, tc := range []struct {
 		name     string
@@ -278,6 +288,34 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 		{"json-nested-unique-keys", state{".hookcfg.claudecode": flat("claudecode", "open"),
 			".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"extra":{"a":{"a":1},"b":[{"a":1},{"a":2}]}}`},
 			"claudecode", [3]string{"open", "open", "closed"}},
+		// 1.0.4 review (loop round 2 after round 4 of G-hooks-upg): the
+		// writers refuse a sidecar larger than 64 KiB (HookSidecarMaxBytes),
+		// so a refresh that would close it is not applied, while the shared
+		// hooks still read the open mode in it. Every record the shared hooks
+		// read (the JSON, a connector's flat record, the legacy record) is
+		// malformed past 64 KiB, and so is JSON holding a NUL byte; exactly
+		// 64 KiB stays readable.
+		{"json-larger-than-64-KiB", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": sizedJSON("codex", 70<<10)},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"json-64-KiB-plus-one", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": sizedJSON("codex", 64<<10+1)},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"json-exactly-64-KiB", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": sizedJSON("codex", 64<<10)},
+			"codex", [3]string{"open", "open", "closed"}},
+		{"json-multibyte-past-64-KiB", state{".hookcfg.codex": flat("codex", "open"),
+			".hookcfg": `{"version":2,"fail_modes":{"codex":"open"},"pad":"` + strings.Repeat("\u00e9", 35<<10) + `"}`},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"json-nul-in-a-string", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"open"},"pad":"a` + "\x00" + `b"}`},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-larger-than-64-KiB", state{".hookcfg.codex": sizedFlat("codex", 70<<10)},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-64-KiB-plus-one", state{".hookcfg.codex": sizedFlat("codex", 64<<10+1)},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-exactly-64-KiB", state{".hookcfg.codex": sizedFlat("codex", 64<<10)},
+			"codex", [3]string{"open", "open", "open"}},
+		{"legacy-flat-larger-than-64-KiB", state{".hookcfg.legacy": sizedFlat("", 70<<10)},
+			"", [3]string{"closed", "closed", "closed"}},
+		{"legacy-flat-larger-than-64-KiB-with-json", state{".hookcfg.legacy": sizedFlat("", 70<<10), ".hookcfg": legacyOpenJSON},
+			"", [3]string{"closed", "closed", "closed"}},
 		// Controls: names the writers use for other files never count as
 		// records, and an install with no JSON state opens from its flat
 		// records on every parser path.
@@ -524,6 +562,55 @@ func TestSharedInspectHooksNeverTakeAPeersOpenMode(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// The 64 KiB bound of the shared hooks' sidecar reads is in bytes in every
+// locale: in a UTF-8 locale bash's read -n counts characters, so 70 KiB of
+// two-byte characters (35 Ki characters) would read as within the bound.
+func TestSharedHookSidecarBoundIsBytesInEveryLocale(t *testing.T) {
+	helper, err := filepath.Abs(filepath.Join("hooks", "_hardening.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pad := strings.Repeat("\u00e9", 35<<10)
+	for _, tc := range []struct {
+		name, file, body string
+	}{
+		{"json", ".hookcfg", `{"version":2,"fail_modes":{"codex":"open"},"pad":"` + pad + `"}`},
+		{"flat-record", ".hookcfg.codex", "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\nPAD=" + pad + "\n"},
+	} {
+		for _, locale := range []string{"C", "C.UTF-8", "en_US.UTF-8"} {
+			t.Run(tc.name+"/"+locale, func(t *testing.T) {
+				hookDir := filepath.Join(t.TempDir(), "hooks")
+				if err := os.MkdirAll(hookDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if tc.file == ".hookcfg" {
+					if err := os.WriteFile(filepath.Join(hookDir, ".hookcfg.codex"), []byte("DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(filepath.Join(hookDir, tc.file), []byte(tc.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command(bash, "-c", `. "$1"; defenseclaw_shared_runtime_fail_mode "$2" codex`, "probe", helper, hookDir)
+				cmd.Env = append(sanitizedTestEnv(), "PATH="+os.Getenv("PATH"), "HOME="+t.TempDir(), "LC_ALL="+locale, "LANG="+locale)
+				// Stdout only: bash warns on stderr for a locale the host
+				// does not have, and then reads bytes anyway.
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("helper failed: %v\n%s", err, out)
+				}
+				if got := strings.TrimSpace(string(out)); got != "closed" {
+					t.Fatalf("fail mode %q for %d bytes in locale %s, want closed", got, len(tc.body), locale)
+				}
+			})
 		}
 	}
 }

@@ -127,10 +127,16 @@ class ConnectorFailModeState:
     runtime: str | None
     sources: tuple[tuple[str, str | None], ...]
     drift: tuple[str, ...]
-    # False when the installed hook takes its mode from the agent's
-    # environment and no verified copy of that environment names one: the
-    # hook can run open whatever ``runtime`` (its default) says.
+    # False when this process cannot read the mode the installed hook runs:
+    # a hook that takes it from the agent's environment when no verified copy
+    # of that environment names one (it can run open whatever ``runtime``,
+    # its default, says), or a managed native Windows hook, which runs the
+    # guardian's authenticated runtime generation.
     runtime_verified: bool = True
+
+    @property
+    def _managed_windows_runtime(self) -> bool:
+        return any(source == "windows-managed-runtime" for source, _mode in self.sources)
 
     @property
     def current(self) -> bool:
@@ -155,6 +161,8 @@ class ConnectorFailModeState:
         """
 
         if not self.runtime_verified:
+            if self._managed_windows_runtime:
+                return "windows-managed-runtime-unverified"
             return "agent-env-unverified"
         if self.runtime is None:
             return "config"
@@ -188,7 +196,13 @@ class ConnectorFailModeState:
                 f"observe mode keeps hooks fail-{self.desired}; "
                 f"guardrail.hook_fail_mode={self.configured} applies in action mode"
             )
-        if not self.runtime_verified:
+        if not self.runtime_verified and self._managed_windows_runtime:
+            notes.append(
+                "the managed native hook runs the mode of the runtime generation the guardian publishes, "
+                "which this command cannot verify: `defenseclaw enterprise windows verify` from an elevated "
+                "prompt checks it"
+            )
+        elif not self.runtime_verified:
             default = f" (default {self.runtime})" if self.runtime else ""
             notes.append(
                 "the installed hook reads DEFENSECLAW_FAIL_MODE from the agent's environment, which this "
@@ -269,7 +283,11 @@ def resolve_connector_fail_mode(
     elif name == "codex" and not _is_windows() and not _codex_registration_current(workspace):
         drift.append("registration-missing")
 
-    runtime_verified = True
+    # A managed native Windows hook runs the mode of the guardian's
+    # authenticated runtime generation, which this process cannot read: no
+    # mode here is verified, so an administrator's change from open to closed
+    # is not reported as applied before the guardian has published it.
+    runtime_verified = runtime_source[0] != "windows-managed-runtime"
     if runtime_source[0] == "hook-script-env":
         # The render takes its mode from the agent's environment (a 0.8.x or
         # 1.0.3 render the upgrade's refresh has not replaced yet, or a Secure

@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -261,24 +263,24 @@ func TestManagedFailModeDocsDoNotPromiseAnEnvironmentOverride(t *testing.T) {
 			"a value that makes hooks stricter is honored",
 		}},
 		{filepath.Join(docs, "enterprise", "troubleshooting.mdx"), []string{
-			"No hook reads `DEFENSECLAW_FAIL_MODE`: the fail mode is the administrator's installed `hook_fail_mode`",
+			"No managed standalone hook reads `DEFENSECLAW_FAIL_MODE` (the Antigravity, Devin, Hermes and Kiro shell hooks of a Secure Client deployment still take it as a full override)",
 		}, []string{
 			"(`DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_HOOK_MAX_BODY` are `tighten_only`: honored only when stricter)",
 		}},
 		{filepath.Join(docs, "enterprise", "index.mdx"), []string{
-			"`DEFENSECLAW_FAIL_MODE` is in this group too, but no hook reads it",
+			"`DEFENSECLAW_FAIL_MODE` is in this group too, but no managed standalone hook reads it",
 		}, []string{
 			"variables (`DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY`) are honored only when they make the setting stricter",
 		}},
 		{filepath.Join(docs, "enterprise", "threat-model.mdx"), []string{
 			"reads no fail mode from the environment: it follows the administrator's installed `hook_fail_mode`",
-			"and no hook reads `DEFENSECLAW_FAIL_MODE`",
+			"and no managed standalone hook reads `DEFENSECLAW_FAIL_MODE`",
 		}, []string{
 			"always fails closed, never open",
 			"Three variables (`DEFENSECLAW_FAIL_MODE`",
 		}},
 		{filepath.Join(docs, "reference", "source-of-truth.mdx"), []string{
-			"`DEFENSECLAW_FAIL_MODE`, which no hook reads",
+			"`DEFENSECLAW_FAIL_MODE`, which no managed standalone hook reads",
 		}, []string{
 			"| `DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY` |",
 		}},
@@ -298,6 +300,112 @@ func TestManagedFailModeDocsDoNotPromiseAnEnvironmentOverride(t *testing.T) {
 				t.Errorf("%s still promises an environment fail-mode override: %q", doc.path, forbidden)
 			}
 		}
+	}
+}
+
+// 1.0.4 review (loop round 2 after round 4 of G-hooks-upg): pages said no
+// hook reads DEFENSECLAW_FAIL_MODE, while the Antigravity, Devin, Hermes and
+// Kiro shell hooks of a Secure Client deployment take it as a full override
+// (FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-...}" in their SecureClientDelivery
+// branch). Every docs paragraph or table row that says the variable is not
+// read names that exception, and so does the registry sentence the env-var
+// reference shows.
+func TestFailModeEnvDocsNameTheSecureClientException(t *testing.T) {
+	repo := filepath.Join("..", "..", "..", "..")
+	for _, script := range []string{"antigravity-hook.sh", "devin-hook.sh", "hermes-hook.sh", "kiro-hook.sh"} {
+		data, err := os.ReadFile(filepath.Join(repo, "internal", "gateway", "connector", "hooks", script))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), `{{else if .SecureClientDelivery}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-`) {
+			t.Fatalf("%s: the Secure Client render no longer reads DEFENSECLAW_FAIL_MODE; update the docs and this test", script)
+		}
+	}
+	claim := regexp.MustCompile("(?i)\\bno (?:[a-z]+ ){0,3}hooks? reads?\\b|\\bnot read by [^|]{0,40}?hooks\\b|`DEFENSECLAW_FAIL_MODE` is not read")
+	unqualified := regexp.MustCompile("(?i)\\bno hooks? reads?\\b")
+	units := func(text string) []string {
+		var out []string
+		var paragraph []string
+		flush := func() {
+			if len(paragraph) > 0 {
+				out = append(out, strings.Join(paragraph, " "))
+				paragraph = nil
+			}
+		}
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			switch {
+			case trimmed == "":
+				flush()
+			case strings.HasPrefix(trimmed, "|"):
+				flush()
+				out = append(out, trimmed)
+			default:
+				paragraph = append(paragraph, trimmed)
+			}
+		}
+		flush()
+		return out
+	}
+	checked := 0
+	err := filepath.WalkDir(filepath.Join(repo, "docs-site", "content"), func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".mdx") {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, unit := range units(string(data)) {
+			unit = strings.Join(strings.Fields(unit), " ")
+			if !strings.Contains(unit, "DEFENSECLAW_FAIL_MODE") || !claim.MatchString(unit) {
+				continue
+			}
+			checked++
+			if !strings.Contains(unit, "Secure Client") {
+				t.Errorf("%s: says DEFENSECLAW_FAIL_MODE is not read without the Secure Client exception: %.200q", path, unit)
+			}
+			if unqualified.MatchString(unit) {
+				t.Errorf("%s: says no hook reads it at all: %.200q", path, unit)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Source of truth, enterprise overview, threat model, troubleshooting,
+	// the env-var reference, and two in the fail-mode reference.
+	if checked < 7 {
+		t.Fatalf("checked %d docs statements, want the seven that make one", checked)
+	}
+	data, err := os.ReadFile(filepath.Join(repo, "internal", "envvars", "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var registry struct {
+		Entries []struct {
+			Name    string `json:"name"`
+			Purpose string `json:"purpose"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(data, &registry); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, variable := range registry.Entries {
+		if variable.Name != "DEFENSECLAW_FAIL_MODE" {
+			continue
+		}
+		found = true
+		// The env-var reference shows the first sentence only.
+		first, _, _ := strings.Cut(variable.Purpose, ". ")
+		if !strings.Contains(first, "Secure Client") {
+			t.Errorf("registry purpose first sentence leaves out the Secure Client exception: %q", first)
+		}
+	}
+	if !found {
+		t.Fatal("DEFENSECLAW_FAIL_MODE is not in the registry")
 	}
 }
 

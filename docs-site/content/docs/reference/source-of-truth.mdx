@@ -355,7 +355,7 @@ the [environment variable reference](/docs/reference/env-vars):
 | --- | --- | --- |
 | `allow` | The value is used | Runtime paths, credentials, values the hook scripts set for themselves |
 | `ignore` | The value is ignored, in the process environment and in `.env` | Security opt-outs, debug switches, test fixtures, `DEFENSECLAW_REPO`, and `DEFENSECLAW_DEPLOYMENT_MODE` and `DEFENSECLAW_ENTERPRISE_PROFILE` |
-| `tighten_only` | The value is used only if it makes things stricter | `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY`, and `DEFENSECLAW_FAIL_MODE`, which no hook reads (the fail mode is the installed `hook_fail_mode`) |
+| `tighten_only` | The value is used only if it makes things stricter | `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY`, and `DEFENSECLAW_FAIL_MODE`, which no managed standalone hook reads (the fail mode is the installed `hook_fail_mode`); the Antigravity, Devin, Hermes and Kiro shell hooks of a Secure Client deployment still take it as a full override (see [Fail modes](/docs/reference/fail-modes#the-environment-does-not-set-the-fail-mode)) |
 
 A forged `DEFENSECLAW_DEPLOYMENT_MODE` or `DEFENSECLAW_ENTERPRISE_PROFILE`
 cannot turn a managed host into an unmanaged one. Doctor

@@ -302,24 +302,36 @@ defenseclaw_shared_runtime_connector() {
   fi
 }
 
+# Succeed only for a readable hooks/.hookcfg* file of at most 64 KiB (the
+# writers' and the native hook's HookSidecarMaxBytes) with no NUL byte, which
+# no writer emits and no reader accepts. A larger file is state the writers
+# refuse to rewrite, so a reader that took a mode from it would keep that
+# mode against a refresh. Pure bash (the hooks run with a minimal PATH):
+# reading stops at the first NUL or after 64 KiB + 1 bytes, and succeeds only
+# at the end of the file.
+_dc_hookcfg_within_bounds() {
+  local LC_ALL=C
+  [ -f "$1" ] && [ -r "$1" ] || return 1
+  if IFS= read -r -d '' -n 65537 _ < "$1"; then
+    return 1
+  fi
+  return 0
+}
+
 # Print the value of one key of a flat KEY=value record (the
 # hooks/.hookcfg.<connector> files the setup writers make: two lines,
 # DEFENSECLAW_CONNECTOR and DEFENSECLAW_FAIL_MODE). A record that is not a
-# regular file, holds a NUL byte, has a line that is not KEY=value with an
-# upper-case key, gives a key twice or ends without a newline (a write cut
-# short) is malformed: nothing is printed and the call fails, so no caller
-# reads an open mode out of it.
+# regular file, is larger than 64 KiB, holds a NUL byte, has a line that is
+# not KEY=value with an upper-case key, gives a key twice or ends without a
+# newline (a write cut short) is malformed: nothing is printed and the call
+# fails, so no caller reads an open mode out of it.
 defenseclaw_flat_hookcfg_value() {
   local config="$1"
   local wanted="$2"
   local line="" key value="" found=0 seen=" "
   [ -f "$config" ] && [ ! -L "$config" ] || return 1
-  # read with a NUL delimiter succeeds only when the file holds a NUL, which
-  # the line reads below would drop without a trace.
-  if IFS= read -r -d '' line < "$config"; then
-    return 1
-  fi
-  line=""
+  # The line reads below would drop a NUL without a trace.
+  _dc_hookcfg_within_bounds "$config" || return 1
   while IFS= read -r line; do
     case "$line" in
       *=*) ;;
@@ -438,7 +450,11 @@ defenseclaw_shared_runtime_fail_mode() {
     case "$first" in
       $'\xef\xbb\xbf'*) printf closed; return 0 ;;
     esac
-    if command -v jq >/dev/null 2>&1; then
+    if ! _dc_hookcfg_within_bounds "$config" && { command -v jq >/dev/null 2>&1 || _dc_python3_usable; }; then
+      # Larger than 64 KiB or holding a NUL: malformed for every reader and
+      # refused by the writers, so a refresh could not replace it.
+      summary="invalid"
+    elif command -v jq >/dev/null 2>&1; then
       # jq reads numbers no other reader takes (nan, Infinity, +1, 01, .5)
       # and reads 2e0 as the integer 2, so a first pass reads the raw text:
       # with no backslash every quote opens or closes a string, so the text

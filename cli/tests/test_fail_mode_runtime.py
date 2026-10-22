@@ -1107,11 +1107,13 @@ def test_no_environment_changes_the_reported_fail_mode(
         # which status cannot verify: the administrator's mode, unverified.
         assert state.runtime is None and state.effective == installed
         assert "windows-managed-runtime-unverified" in state.drift
+        assert not state.runtime_verified and "guardian" in report["note"]
     else:
         assert state.runtime == installed and state.effective == installed
         assert state.provenance == ("windows-sidecar" if windows else "hook-script")
         assert state.current, state.drift
-    assert report["effective"] == installed and report["note"] == ""
+        assert report["note"] == ""
+    assert report["effective"] == installed
     assert "caller_env" not in report
     assert not hasattr(fail_mode_runtime, "_inherited_fail_mode")
 
@@ -1286,11 +1288,78 @@ def test_managed_windows_status_does_not_report_the_sidecar_as_the_hook_mode(
     ):
         report = connector_fail_mode_report(cfg, "codex")
     assert report["effective"] == desired and report["runtime"] is None
-    assert report["provenance"] == "config"
+    assert report["provenance"] == "windows-managed-runtime-unverified"
+    assert report["runtime_verified"] is False
     assert "windows-managed-runtime-unverified" in report["drift"] and not report["current"]
     assert {"name": "windows-managed-runtime", "mode": None} in report["sources"]
     assert not [reason for reason in report["drift"] if reason.startswith("windows-sidecar")]
     assert not [source for source in report["sources"] if source["name"].startswith("windows-sidecar")]
+
+
+@pytest.mark.parametrize("secure_client", [False, True])
+@pytest.mark.parametrize("sidecar", ["missing", "closed", "malformed", "open"])
+@pytest.mark.parametrize(("configured", "deployed"), [("closed", "open"), ("open", "closed"), ("closed", "closed")])
+def test_doctor_never_passes_an_unverified_managed_windows_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    configured: str,
+    deployed: str,
+    sidecar: str,
+    secure_client: bool,
+) -> None:
+    # 1.0.4 review (loop round 2 of G-hooks-upg, post round 4): the
+    # administrator changes the mode (open to closed, say) while the guardian's
+    # authenticated runtime generation still runs the old one. Status cannot
+    # read that generation, yet it reported the configured mode as verified
+    # and doctor's Mode row passed. Every state of the sidecar the managed
+    # hook does not read, every pair of modes: the runtime is unverified, the
+    # report says why, and doctor warns (it can never verify it) instead of
+    # passing.
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": configured})
+    _write_current_runtime(cfg, home, {"codex": configured})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: not secure_client
+    cfg.guardrail.mode = "action"
+    cfg.guardrail._secure_client = secure_client
+    cfg.skill_dirs = lambda connector=None: []
+    cfg.plugin_dirs = lambda connector=None: []
+    cfg.mcp_servers = lambda connector=None, **_: []
+    path = Path(cfg.data_dir) / "hooks" / ".hookcfg"
+    if sidecar == "missing":
+        path.unlink()
+    elif sidecar == "malformed":
+        path.write_text("{not json", encoding="utf-8")
+    else:
+        mode = deployed if sidecar == "open" else sidecar
+        path.write_text(json.dumps({"version": 2, "fail_modes": {"codex": mode}}), encoding="utf-8")
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        state = resolve_connector_fail_mode(cfg, "codex")
+        report = connector_fail_mode_report(cfg, "codex")
+    assert not state.runtime_verified and not state.current
+    assert report["runtime_verified"] is False and report["current"] is False
+    assert report["provenance"] == "windows-managed-runtime-unverified"
+    assert "defenseclaw enterprise windows verify" in report["note"]
+    emitted: list[tuple[str, str, str, str]] = []
+    with (
+        patch("defenseclaw.fail_mode.connector_fail_mode_report", return_value=report),
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(
+            cmd_doctor,
+            "_emit",
+            side_effect=lambda tag, label, detail="", **kw: emitted.append(
+                (tag, label, detail, str(kw.get("remediation") or ""))
+            ),
+        ),
+    ):
+        cmd_doctor._check_connector_inventory(cfg, "codex", cmd_doctor._DoctorResult())
+    rows = [row for row in emitted if row[1] == "Mode"]
+    assert [row[0] for row in rows] == ["warn"], rows
+    assert "unverified" in rows[0][2] and "enterprise windows verify" in rows[0][3]
 
 
 @pytest.mark.parametrize(
