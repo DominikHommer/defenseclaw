@@ -81,6 +81,7 @@ from defenseclaw.connector_paths import (
     devin_user_config_path,
     hermes_config_path,
     hermes_profile_unsupported_reason,
+    managed_plugin_path,
     normalize,
     opencode_writable_plugin_folder,
     rule_paths,
@@ -15242,10 +15243,7 @@ def _check_orphaned_hook_entries(cfg, active: str, r: _DoctorResult) -> None:
                 r=r,
                 remediation=f"defenseclaw setup remove {name}",
             )
-    plugins = {
-        "amp": os.path.join(amp_config_home(), "plugins", "defenseclaw.ts"),
-        "opencode": os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js"),
-    }
+    plugins = {name: managed_plugin_path(name) for name in ("amp", "opencode")}
     for name, path in sorted(plugins.items()):
         token = "" if name in active_set else _managed_plugin_credential(path, hooks_dir)
         if not token:

@@ -1258,6 +1258,22 @@ def amp_policy_plugin_path() -> str:
     return os.path.join(amp_config_home(), "plugins", "defenseclaw.ts")
 
 
+def managed_plugin_path(connector: str | None) -> str:
+    """Return the in-agent plugin DefenseClaw installs for *connector*.
+
+    Only Amp and OpenCode load a DefenseClaw plugin. Their setup receipt
+    (``connector_backups/<connector>/config.json``) records this file and
+    nothing else, so integrity checks compare the receipt only to it, never
+    to the agent's own settings files. Returns "" for other connectors.
+    """
+    name = normalize(connector)
+    if name == "amp":
+        return amp_policy_plugin_path()
+    if name == "opencode":
+        return os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js")
+    return ""
+
+
 def _resolve_amp_managed_settings_path(
     *,
     platform_name: str,
@@ -1632,7 +1648,7 @@ def connector_config_files(
             _workspace_path(workspace_dir, ".amp", "settings.json"),
             _workspace_path(workspace_dir, ".amp", "settings.jsonc"),
             amp_managed_settings_path(),
-            amp_policy_plugin_path(),
+            managed_plugin_path("amp"),
         ]
     elif name == "zeptoclaw":
         zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
@@ -1661,7 +1677,7 @@ def connector_config_files(
         # DefenseClaw owns only this exact bridge. Operator JSON/JSONC remains
         # outside lifecycle snapshots and rollback custody.
         paths = [
-            os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js"),
+            managed_plugin_path("opencode"),
         ]
     elif name == "kiro":
         kiro_root = connector_home("kiro")

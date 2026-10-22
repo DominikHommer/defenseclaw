@@ -1560,7 +1560,7 @@ class TestRemoveConnector(unittest.TestCase):
                 receipt = os.path.join(self.app.cfg.data_dir, "connector_backups", connector, "config.json")
                 atomic_write_private_bytes(receipt, json.dumps(record).encode())
                 with (
-                    patch("defenseclaw.connector_paths.connector_config_files", return_value=[plugin]),
+                    patch("defenseclaw.connector_paths.managed_plugin_path", return_value=plugin),
                     self._no_restart_bounce() as bounce,
                     patch.object(self.app.cfg, "save") as save,
                 ):
@@ -1572,6 +1572,109 @@ class TestRemoveConnector(unittest.TestCase):
                 self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", connector})
                 with open(plugin, "rb") as stream:
                     self.assertEqual(stream.read(), original)
+
+    def _seed_intact_plugin(self, connector, home, *, target=None):
+        """Install a pristine DefenseClaw plugin of *connector* plus its setup receipt."""
+        from defenseclaw.connector_paths import managed_plugin_path
+
+        with self._plugin_home(home):
+            plugin = managed_plugin_path(connector)
+        body = b"// defenseclaw-managed-plugin v1\n"
+        os.makedirs(os.path.dirname(plugin), exist_ok=True)
+        with open(plugin, "wb") as stream:
+            stream.write(body)
+        record = {
+            "version": 1, "connector": connector, "logical_name": "config",
+            "path": target or plugin, "existed": False, "pristine_sha256": "missing",
+            "post_sha256": hashlib.sha256(body).hexdigest(),
+        }
+        receipt = os.path.join(self.app.cfg.data_dir, "connector_backups", connector, "config.json")
+        atomic_write_private_bytes(receipt, json.dumps(record).encode())
+        return plugin
+
+    @contextlib.contextmanager
+    def _plugin_home(self, home):
+        """Resolve Amp's and OpenCode's config homes (and Amp's managed settings) under *home*."""
+        from defenseclaw import connector_paths
+
+        real_home = connector_paths.connector_home
+
+        def connector_home(name, **kwargs):
+            if connector_paths.normalize(name) == "opencode":
+                return os.path.join(home, ".config", "opencode")
+            return real_home(name, **kwargs)
+
+        with (
+            patch("defenseclaw.connector_paths.amp_config_home", return_value=os.path.join(home, ".config", "amp")),
+            patch(
+                "defenseclaw.connector_paths.amp_managed_settings_path",
+                return_value=os.path.join(home, "managed", "amp-settings.json"),
+            ),
+            patch("defenseclaw.connector_paths.connector_home", side_effect=connector_home),
+        ):
+            yield
+
+    # The plugin receipt binds only the plugin. The agent's own settings files
+    # (edited freely by the operator) never block removal of an intact plugin.
+    def test_remove_intact_plugin_succeeds_with_agent_settings_present(self):
+        from defenseclaw.connector_paths import connector_config_files
+
+        for connector in ("amp", "opencode"):
+            with self.subTest(connector=connector):
+                home = os.path.join(self.tmp_dir, f"home-{connector}")
+                workspace = os.path.join(self.tmp_dir, f"ws-{connector}")
+                plugin = self._seed_intact_plugin(connector, home)
+                settings = [
+                    os.path.join(home, ".config", "amp", "settings.json"),
+                    os.path.join(home, ".config", "amp", "settings.jsonc"),
+                    os.path.join(home, "managed", "amp-settings.json"),
+                    os.path.join(workspace, ".amp", "settings.json"),
+                    os.path.join(home, ".config", "opencode", "opencode.json"),
+                    os.path.join(home, ".config", "opencode", "opencode.jsonc"),
+                ]
+                for index, path in enumerate(settings):
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w", encoding="utf-8") as stream:
+                        stream.write('{"operator": %d}\n' % index)
+                self._seed_map("codex", connector)
+                with self._plugin_home(home):
+                    if connector == "amp":
+                        listed = connector_config_files("amp")
+                        self.assertIn(settings[0], listed)
+                        self.assertIn(plugin, listed)
+                    with self._no_restart_bounce() as bounce:
+                        result = _invoke(["remove", connector, "--yes", "--no-restart"], self.app)
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn(f"Removed connector {connector!r}", result.output)
+                bounce.assert_not_called()
+                self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex"})
+                for index, path in enumerate(settings):
+                    with open(path, encoding="utf-8") as stream:
+                        self.assertEqual(stream.read(), '{"operator": %d}\n' % index)
+
+    # A receipt bound to anything but the active plugin (a settings file, a
+    # stale home) is not proof of teardown: removal refuses before saving.
+    def test_remove_refuses_receipt_bound_to_another_file(self):
+        for connector in ("amp", "opencode"):
+            with self.subTest(connector=connector):
+                home = os.path.join(self.tmp_dir, f"foreign-{connector}")
+                foreign = os.path.join(home, "settings.json")
+                os.makedirs(home, exist_ok=True)
+                with open(foreign, "wb") as stream:
+                    stream.write(b"// defenseclaw-managed-plugin v1\n")
+                self._seed_intact_plugin(connector, home, target=foreign)
+                self._seed_map("codex", connector)
+                with (
+                    self._plugin_home(home),
+                    self._no_restart_bounce() as bounce,
+                    patch.object(self.app.cfg, "save") as save,
+                ):
+                    result = _invoke(["remove", connector, "--yes", "--no-restart"], self.app)
+                self.assertNotEqual(result.exit_code, 0, result.output)
+                self.assertIn("does not match the active plugin", result.output)
+                save.assert_not_called()
+                bounce.assert_not_called()
+                self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", connector})
 
     def test_remove_restart_bounces_gateway(self):
         self._seed_map("codex", "cursor")

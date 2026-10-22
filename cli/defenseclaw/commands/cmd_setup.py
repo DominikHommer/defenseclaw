@@ -12323,10 +12323,13 @@ def _remove_connector(
 
     if match in {"opencode", "amp"}:
         from defenseclaw.commands.cmd_doctor import _managed_plugin_drift
-        from defenseclaw.connector_paths import connector_config_files
+        from defenseclaw.connector_paths import managed_plugin_path
 
         try:
-            candidates = connector_config_files(match)
+            # The receipt binds only the DefenseClaw plugin. The agent's own
+            # settings (Amp's settings.json and friends) are not DefenseClaw
+            # artifacts and never prove or disprove the teardown.
+            candidates = [managed_plugin_path(match)]
             receipt = os.path.join(cfg.data_dir, "connector_backups", match, "config.json")
             existed, body, _generation = _capture_protected_setup_file(
                 receipt, _SETUP_CONFIG_MAX_BYTES, "plugin backup", trust_windows_administrators=True,
