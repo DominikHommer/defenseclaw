@@ -266,22 +266,6 @@ func (d *Daemon) HasAuthenticatedMigrationProcessIdentity(pid int) bool {
 	return d.verifyProcessForAuthenticatedMigration(info) || d.verifyReplacedExecutable(info)
 }
 
-// HasHomeBoundProcessIdentity reports whether this data directory's PID
-// record is bound to it and proves pid now: a current record (executable,
-// kernel start identity, this data directory), or that record of a gateway
-// whose file was replaced while it ran. Only this identity may receive a
-// credential before the gateway answers. The strong record of a release
-// before 1.0 names the process but not the home that started it: copied
-// into another home it names that home's gateway, so it never qualifies
-// (the gateway proves its home once a restart writes a current record).
-func (d *Daemon) HasHomeBoundProcessIdentity(pid int) bool {
-	info, err := d.readPIDInfo()
-	if err != nil || info.PID != pid || strings.TrimSpace(info.StartIdentity) == "" {
-		return false
-	}
-	return d.verifyProcessForControl(info) || d.verifyReplacedExecutable(info)
-}
-
 // verifyProcess verifies every identity signal present in a PID record. It
 // deliberately remains usable for legacy liveness detection: accepting a
 // legacy record here prevents Start from launching a duplicate daemon during

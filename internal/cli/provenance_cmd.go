@@ -31,43 +31,80 @@ import (
 // provenanceGateway is the process a provenance read may send the gateway
 // credential to (PID) and, under systemd socket activation, the service
 // manager that holds the gateway's API socket with it (SocketManagerPID).
+// StartIdentity is the kernel start identity of a per-user gateway the
+// operating system proved (provenanceProveGateway); every connection proves
+// that process again before the credential is sent on it.
 type provenanceGateway struct {
 	PID              int
 	SocketManagerPID int
+	StartIdentity    string
 }
 
-// Use the service manager for a standalone deployment, and the per-user
-// gateway's process-identity record otherwise. Never trust a loopback
-// listener merely because it answers on the configured port.
-var provenanceGatewayIdentity = func(ctx context.Context) (provenanceGateway, error) {
+// provenanceGatewayIdentity is the gateway a provenance read at
+// addresses:port may send the credential to, proven now. A standalone
+// deployment's is the gateway its service manager runs. A per-user
+// gateway's is the process the kernel names as the holder of that API
+// listener, and only when the operating system shows it runs as this
+// account from this DefenseClaw binary (provenanceListenerGateway). No PID
+// record is read: a record names a process but not whose it is, and a
+// copied, stale or crafted one named another home's or another account's
+// gateway. A listener is never trusted because it answers on the port.
+var provenanceGatewayIdentity = func(ctx context.Context, addresses []net.IP, port int) (provenanceGateway, error) {
 	if cfg.StandaloneEnterprise() {
 		return provenanceManagedGateway(ctx)
 	}
-	running, pid := gatewayManagedState()
-	if !running || pid <= 0 {
-		return provenanceGateway{}, errors.New("gateway process identity is unavailable")
-	}
-	if !provenanceGatewayProven(pid) {
-		return provenanceGateway{}, fmt.Errorf("the gateway PID record names PID %d without proving its process identity; "+
-			"restart the gateway with `defenseclaw-gateway restart`", pid)
-	}
-	return provenanceGateway{PID: pid}, nil
+	return provenanceListenerGateway(addresses, port)
 }
 
-// provenanceGatewayProven reports whether this home's PID record, bound to
-// this home, proves pid is the gateway it started: a current record
-// (executable, kernel start identity, this data directory), or that record
-// of a gateway whose file was replaced while it ran. The read then sends the
-// credential only to a listener that process holds, and accepts only an
-// answer that names it. A bare PID or an older record without both
-// identities names only a PID, which the OS may since have given to another
-// account's process. The strong record of a release before 1.0 (executable
-// and start identity, no data directory) names the process but not its
-// home: copied into another home it names that home's gateway, which would
-// receive this home's credential. Start and status still use such records to
-// detect a running gateway, and a restart replaces them. A seam for tests.
-var provenanceGatewayProven = func(pid int) bool {
-	return daemon.New(config.DefaultDataPath()).HasHomeBoundProcessIdentity(pid)
+// provenanceProveGateway proves from the operating system that pid runs as
+// this account from this DefenseClaw binary and returns its kernel start
+// identity (daemon.ProveOwnGateway). A seam for tests.
+var provenanceProveGateway = daemon.ProveOwnGateway
+
+// provenanceListenerGateway is the per-user gateway that holds the listener
+// on the first of addresses:port where one is held: the one process the
+// kernel names as its holder, proven to be this account's gateway.
+// Otherwise the gateway is not verified and nothing is sent.
+func provenanceListenerGateway(addresses []net.IP, port int) (provenanceGateway, error) {
+	reason := errors.New("no process holds the gateway API listener")
+	for _, ip := range addresses {
+		holders, err := gatewayPortHolders(ip.String(), port)
+		switch {
+		case errors.Is(err, daemon.ErrNoListener):
+			continue
+		case err != nil:
+			reason = fmt.Errorf("the gateway API listener cannot be inspected: %v", err)
+			continue
+		case len(holders) != 1 || holders[0].PID <= 0:
+			reason = errors.New("the gateway API listener is not held by one process of this account")
+			continue
+		}
+		gateway, err := provenanceProvenProcess(holders[0].PID)
+		if err != nil {
+			reason = err
+			continue
+		}
+		return gateway, nil
+	}
+	return provenanceGateway{}, provenanceNotVerified(reason)
+}
+
+// provenanceProvenProcess is process pid as a proven per-user gateway.
+func provenanceProvenProcess(pid int) (provenanceGateway, error) {
+	startIdentity, err := provenanceProveGateway(pid)
+	if err != nil {
+		return provenanceGateway{}, err
+	}
+	return provenanceGateway{PID: pid, StartIdentity: startIdentity}, nil
+}
+
+// provenanceNotVerified is the error of a read that sent nothing because
+// the gateway was not proven.
+func provenanceNotVerified(reason error) error {
+	if errors.Is(reason, daemon.ErrGatewayNotVerified) {
+		return fmt.Errorf("%w; the gateway token was not sent", reason)
+	}
+	return fmt.Errorf("%w: %v; the gateway token was not sent", daemon.ErrGatewayNotVerified, reason)
 }
 
 // provenanceLookupIP resolves a configured API host name. A seam for tests.
@@ -110,7 +147,7 @@ func prepareProvenanceShow(cmd *cobra.Command, _ []string) error {
 		defer cancel()
 		applied, appliedErr := provenanceAppliedConfig(ctx, err)
 		if appliedErr != nil {
-			return fmt.Errorf("cannot locate the running gateway: %w; run `defenseclaw-gateway status`", err)
+			return fmt.Errorf("cannot locate the running gateway: %w (%v); run `defenseclaw-gateway status`", err, appliedErr)
 		}
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v; the running gateway keeps the config it last applied\n", err)
 		cfg = applied
@@ -218,17 +255,20 @@ func provenanceAppliedConfig(ctx context.Context, loadErr error) (*config.Config
 	return c, nil
 }
 
-// provenancePerUserEndpoint points c at the API listener of the proven
-// per-user gateway process: of the loopback TCP listeners that process
-// holds, the one whose unauthenticated health document names that listener
-// as the API. No credential is sent while it looks.
+// provenancePerUserEndpoint points c at the API listener of the per-user
+// gateway process: of the loopback TCP listeners that process holds, the
+// one whose unauthenticated health document names that listener as the
+// API. The rejected file cannot say where the gateway listens, so this
+// home's PID record says which process to look at, and nothing more: that
+// process must be proven this account's gateway now, every connection is
+// made only to a listener it holds, and the credential is sent later only
+// after runningGatewayProvenance proved the holder of the endpoint found
+// here again. No credential is sent while it looks.
 func provenancePerUserEndpoint(ctx context.Context, c *config.Config) error {
-	gateway, err := provenanceGatewayIdentity(ctx)
+	_, candidate := gatewayManagedState()
+	gateway, err := provenanceProvenProcess(candidate)
 	if err != nil {
-		return err
-	}
-	if gateway.PID <= 0 {
-		return errors.New("gateway process identity is unavailable")
+		return provenanceNotVerified(err)
 	}
 	listeners, err := provenanceGatewayListeners(gateway.PID)
 	if err != nil {
@@ -393,7 +433,9 @@ func provenanceListenerHeldBy(holders []daemon.PortHolder, gateway provenanceGat
 
 // dialProvenanceGateway connects to the first address whose listener the
 // gateway holds. It inspects the listener after connecting, so the one that
-// accepted is the one checked, and before HTTP can send the credential.
+// accepted is the one checked, and before HTTP can send the credential. A
+// per-user gateway is proven again on every connection: the same process,
+// still this account's gateway.
 func dialProvenanceGateway(ctx context.Context, addresses []net.IP, port int, gateway provenanceGateway) (net.Conn, error) {
 	for _, ip := range addresses {
 		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(port)))
@@ -401,12 +443,23 @@ func dialProvenanceGateway(ctx context.Context, addresses []net.IP, port int, ga
 			continue
 		}
 		holders, err := gatewayPortHolders(ip.String(), port)
-		if err == nil && provenanceListenerHeldBy(holders, gateway) {
+		if err == nil && provenanceListenerHeldBy(holders, gateway) && provenanceStillProven(gateway) {
 			return conn, nil
 		}
 		_ = conn.Close()
 	}
-	return nil, errors.New("gateway listener identity is unproven; the gateway token was not sent")
+	return nil, provenanceNotVerified(errors.New("the listener is not held by the proven gateway process"))
+}
+
+// provenanceStillProven reports whether a per-user gateway is still the
+// process proven before: this account's gateway with the same kernel start
+// identity. A standalone gateway is the service manager's, proven by it.
+func provenanceStillProven(gateway provenanceGateway) bool {
+	if gateway.StartIdentity == "" {
+		return true
+	}
+	again, err := provenanceProveGateway(gateway.PID)
+	return err == nil && again == gateway.StartIdentity
 }
 
 // provenanceGatewayToken is the credential the proven gateway applied. A
@@ -435,7 +488,8 @@ func runningGatewayProvenance(cmd *cobra.Command) (version.Provenance, error) {
 	var envelope struct {
 		Provenance *version.Provenance `json:"provenance"`
 		Runtime    struct {
-			PID int `json:"pid"`
+			PID     int    `json:"pid"`
+			DataDir string `json:"data_dir"`
 		} `json:"runtime"`
 	}
 	if cfg == nil {
@@ -447,7 +501,7 @@ func runningGatewayProvenance(cmd *cobra.Command) (version.Provenance, error) {
 	if err != nil {
 		return version.Provenance{}, err
 	}
-	gateway, err := provenanceGatewayIdentity(ctx)
+	gateway, err := provenanceGatewayIdentity(ctx, addresses, cfg.Gateway.APIPort)
 	if err != nil {
 		return version.Provenance{}, err
 	}
@@ -483,6 +537,12 @@ func runningGatewayProvenance(cmd *cobra.Command) (version.Provenance, error) {
 	}
 	if envelope.Runtime.PID != gateway.PID {
 		return version.Provenance{}, fmt.Errorf("the authenticated answer did not come from the gateway process (PID %d)", gateway.PID)
+	}
+	// Another home's gateway of this account runs the same binary as the
+	// same account: its answer is not this home's provenance.
+	if !cfg.StandaloneEnterprise() && !sameGatewayDataDir(envelope.Runtime.DataDir, cfg.DataDir) {
+		return version.Provenance{}, errors.New("the gateway process serves another DefenseClaw home; " +
+			"start this home's gateway with `defenseclaw-gateway start`")
 	}
 	if envelope.Provenance == nil || envelope.Provenance.SchemaVersion == 0 || envelope.Provenance.BinaryVersion == "" {
 		return version.Provenance{}, fmt.Errorf("gateway did not report its provenance")
