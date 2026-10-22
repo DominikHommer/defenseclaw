@@ -26,15 +26,25 @@ func TestChangeSpoolPreparesItsBundleParentBeforeReserving(t *testing.T) {
 				}
 			}
 			parentProtected := false
+			spoolDir := filepath.Join(bundles, enterprisestatus.ChangeEventsDirName)
 			spool := enterprisestatus.ChangeSpool{
-				Dir:      filepath.Join(bundles, enterprisestatus.ChangeEventsDirName),
+				Dir:      spoolDir,
 				StateDir: filepath.Join(root, "lifecycle"),
 				Prepare: func(dir string) error {
 					return prepareChangeSpoolDirectory(dir, func(parent string) error {
-						if parent != bundles {
+						// The spool folder's parent is the bundle folder; a
+						// reserved folder inside the spool (T6) has the spool
+						// as its parent, which the first call protected.
+						switch parent {
+						case bundles:
+							parentProtected = true
+						case spoolDir:
+							if !parentProtected {
+								t.Fatal("a reserved folder was prepared before the bundle parent")
+							}
+						default:
 							t.Fatalf("parent = %q", parent)
 						}
-						parentProtected = true
 						return os.MkdirAll(parent, 0o700)
 					}, func(path string) error {
 						if !parentProtected {
