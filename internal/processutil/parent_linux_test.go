@@ -150,18 +150,49 @@ func TestRunTreeIsolatedKillsDetachedMCPServerAfterGatewaySIGKILL(t *testing.T) 
 		time.Sleep(20 * time.Millisecond)
 		server = sleepWithArg(marker)
 	}
+	contained := processesWithArg(marker)
+	if len(contained) < 3 {
+		t.Fatalf("scanner fixture has %d processes, want scanner, detached launcher and child", len(contained))
+	}
 	if err := gateway.Process.Signal(syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
 	_ = gateway.Wait()
 	deadline = time.Now().Add(5 * time.Second)
-	for helperRunning(server) {
+	for anyProcessRunning(contained) {
 		if time.Now().After(deadline) {
-			_ = syscall.Kill(server, syscall.SIGKILL)
-			t.Fatalf("detached MCP server %d survived gateway SIGKILL", server)
+			for _, pid := range contained {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+			t.Fatalf("MCP launcher, server or child survived gateway SIGKILL: %v", contained)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+func anyProcessRunning(pids []int) bool {
+	for _, pid := range pids {
+		if helperRunning(pid) {
+			return true
+		}
+	}
+	return false
+}
+
+func processesWithArg(arg string) []int {
+	entries, _ := os.ReadDir("/proc")
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err == nil && strings.Contains(string(raw), "\x00"+arg+"\x00") {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
 
 func TestRunTreeIsolatedHelperGateway(t *testing.T) {
