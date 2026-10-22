@@ -172,8 +172,17 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 		if entry.hasPrevious {
 			record = KeepLastKnownUPN(record, entry.previous)
 		}
-		if err := writeIdentitySpoolFile(dir, name, record, setOwnership); err != nil && logf != nil {
-			logf("[hook-enumerator] WARN identity facts for %s: %v", key, err)
+		if err := writeIdentitySpoolFile(dir, name, record, setOwnership); err != nil {
+			// The previous record is no longer proof of current token groups.
+			// Withdrawing it makes the gateway use unknown-group fallback at
+			// its next spool check, instead of trusting it for another hour.
+			if removeErr := os.Remove(filepath.Join(dir, name)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("withdraw previous identity record: %w", removeErr))
+			}
+			stopped = errors.Join(stopped, fmt.Errorf("identity facts for %s: %w", key, err))
+			if logf != nil {
+				logf("[hook-enumerator] WARN identity facts for %s: %v", key, err)
+			}
 		}
 	}
 	if entries, err := os.ReadDir(dir); err == nil {

@@ -165,6 +165,29 @@ func TestWindowsIdentitySpoolPublishesNoRecordForAnExcludedAccount(t *testing.T)
 	}
 }
 
+// A failed replacement must withdraw the preceding token-group record. The
+// gateway otherwise trusts those old groups for an hour after this cycle.
+func TestWindowsIdentitySpoolWriteFailureWithdrawsOldRecord(t *testing.T) {
+	dir := t.TempDir()
+	writeTestIdentityRecord(t, dir, testSpoolUserA, time.Now().UTC())
+	cache := NewWindowsEnrollmentGroupCache()
+	cache.Users[testSpoolUserA] = []string{"S-1-5-32-545"}
+	cache.SignedIn = map[string]bool{testSpoolUserA: true}
+	stubWindowsIdentityLookups(t, nil, nil)
+	protect := func(path string) error {
+		if path == dir {
+			return nil
+		}
+		return os.ErrPermission
+	}
+	if err := WriteWindowsIdentitySpool(context.Background(), dir, cache, nil, nil, protect, nil); err == nil {
+		t.Fatal("failed spool publication was reported as successful")
+	}
+	if _, err := ReadIdentitySpoolRecord(dir, testSpoolUserA, nil); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old group record remained trusted after failed replacement: %v", err)
+	}
+}
+
 // W2B-G-enum review: the pass checked the cycle only between accounts, and
 // an account's directory lookup ran synchronously, so a lookup that stalled
 // held the pass past the cycle's deadline and the other records went
