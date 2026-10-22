@@ -296,6 +296,52 @@ func TestHookConfigSidecarRefusesNullMapWithoutPeerProof(t *testing.T) {
 	}
 }
 
+func TestHookConfigSidecarNullMapDoesNotResurrectUncorroboratedOpenPeer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	for _, name := range []string{"codex", "claudecode"} {
+		if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", name, "open", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(before, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["fail_modes"] = nil
+	broken, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// This extra record has no corroborating source in the shared sidecar.
+	// It may be a stale connector that a previous setup removed.
+	if err := os.WriteFile(filepath.Join(dir, hookConfigSidecarName+".copilot"),
+		hookRuntimeFlatRecord("copilot", "open", HookFailModeSourceConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repaired hookConfigSidecar
+	if err := json.Unmarshal(after, &repaired); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := repaired.FailModes["copilot"]; exists {
+		t.Fatalf("uncorroborated open mode became an allow path: %+v", repaired.FailModes)
+	}
+}
+
 // The hooks directory is writable by the target user by design, so a managed
 // sidecar has to converge on modification and not only on deletion.
 func TestManagedHookConfigSidecarConvergesOnUnreadableState(t *testing.T) {

@@ -1204,6 +1204,12 @@ func recoverFlatHookFailModes(hookDir string, sources map[string]string) (map[st
 		if recorded, ok := sources[name]; ok && recorded != source {
 			return nil, fmt.Errorf("%s fail-mode source disagrees with its flat record", name)
 		}
+		if mode == "open" && sources[name] != HookFailModeSourceConfig {
+			// A leftover flat file alone cannot authorize an open mode in a
+			// shared map that lost its entries. The current connector is set
+			// from config after recovery; peers need both persisted proofs.
+			continue
+		}
 		modes[name] = mode
 	}
 	for name := range sources {
