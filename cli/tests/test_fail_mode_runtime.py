@@ -552,6 +552,30 @@ def test_windows_registration_freshness_surfaces_codex_effective_policy_block(
     assert observed["connector"] == "codex"
 
 
+@pytest.mark.parametrize(
+    ("states", "expected", "attempts"),
+    [
+        (["access-denied", "current"], None, 2),
+        (["access-denied"] * 5, "registration-access-denied", 5),
+        (["policy-blocked"], "registration-policy-blocked", 1),
+    ],
+)
+def test_windows_registration_freshness_retries_access_denied_without_accepting_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, states: list[str], expected: str | None, attempts: int
+) -> None:
+    checks = iter(states)
+    validate = MagicMock(
+        side_effect=lambda **_kwargs: SimpleNamespace(healthy=(state := next(checks)) == "current", state=state)
+    )
+    waits: list[float] = []
+    monkeypatch.setattr("defenseclaw.doctor_hooks.validate_windows_hook_registration", validate)
+    monkeypatch.setattr("time.sleep", waits.append)
+
+    assert _WINDOWS_REGISTRATION_FRESHNESS(SimpleNamespace(data_dir=str(tmp_path)), "claudecode") == expected
+    assert validate.call_count == attempts
+    assert len(waits) == attempts - 1 and sum(waits) <= 2
+
+
 def test_windows_codex_presence_uses_native_registration_validator(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
