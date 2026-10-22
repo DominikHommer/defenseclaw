@@ -145,7 +145,21 @@ func (b *profileAgentBridge) unresolvedLegacy(agent string) func(string) bool {
 		}
 	}
 	if b.ambiguous == nil {
-		// Any entry may be agent's legacy identity.
+		// The ledger has not answered. The legacy identity the hook path
+		// derived for agent is the only entry it can hold: another agent's
+		// current identity is not its. Without that derivation, an exact
+		// current-identity entry still selects agent (an unrelated earlier
+		// entry must not send it to the outage default), and any other
+		// entry may be agent's legacy identity.
+		if legacy := derivedLegacyAgentID(agent); legacy != "" {
+			if !b.entries[legacy] {
+				return nil
+			}
+			return func(entry string) bool { return entry == legacy }
+		}
+		if b.entries[agent] {
+			return nil
+		}
 		return func(entry string) bool { return entry != agent }
 	}
 	if entries := b.ambiguous[agent]; len(entries) > 0 {

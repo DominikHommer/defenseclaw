@@ -134,6 +134,9 @@ func TestLegacyAgentAssignmentWithAnOverwrittenRecordSelectsNeitherAccount(t *te
 // apply in its place. An agent the entry cannot name keeps its own match.
 func TestUnresolvedLegacyAgentAssignmentSelectsTheOutageDefault(t *testing.T) {
 	stubProfileSources(t)
+	previousDerived := derivedLegacyAgentIDs.ids
+	t.Cleanup(func() { derivedLegacyAgentIDs.ids = previousDerived })
+	derivedLegacyAgentIDs.ids = nil
 	legacy := agentidentity.LegacyAgentID(legacyBridgeInputs("alice@corp.example"))
 	corp, lab := agentidentity.AgentID(legacyBridgeInputs("alice@corp.example")), agentidentity.AgentID(legacyBridgeInputs("alice@lab.example"))
 	other := agentidentity.AgentID(agentidentity.Inputs{
@@ -172,7 +175,9 @@ func TestUnresolvedLegacyAgentAssignmentSelectsTheOutageDefault(t *testing.T) {
 		t.Errorf("unreadable ledger: profile %+v, mode %q; want the outage default strict (action)", got, mode)
 	}
 	// A current-ID assignment later in the list cannot skip an earlier
-	// legacy entry whose owner remains unproven.
+	// legacy entry whose owner remains unproven: the hook path derived that
+	// entry for corp's agent, as it does for every request.
+	noteDerivedLegacyAgentID(legacyBridgeInputs("alice@corp.example"))
 	cfg.Guardrail.ProfileAssignments = append(cfg.Guardrail.ProfileAssignments,
 		config.ProfileAssignment{Profile: "watch", Match: config.ProfileMatch{Agents: []string{corp}}})
 	if got, mode := hook(corp); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
@@ -285,4 +290,73 @@ func TestPrunedLegacyAgentAssignmentNeedsRebind(t *testing.T) {
 			t.Errorf("another account's agent: profile %+v, mode %q; want its connector assignment", got, mode)
 		}
 	})
+}
+
+// An agent ledger that cannot be read does not make every agents entry a
+// possible legacy identity. Another account's current identity listed first
+// leaves this account's exact current-identity assignment in force, as it
+// was before the upgrade bridge, instead of sending it to a weaker
+// default_lookup_failed. Only the legacy identity derived for this agent is
+// a real conflict, and then the outage path applies.
+func TestUnreadableLedgerKeepsExactCurrentAgentAssignment(t *testing.T) {
+	stubProfileSources(t)
+	previousLedger, previousDerived := profileAgentLedger, derivedLegacyAgentIDs.ids
+	t.Cleanup(func() { profileAgentLedger, derivedLegacyAgentIDs.ids = previousLedger, previousDerived })
+	profileAgentLedger = func(inventory.AgentIdentityFilter) ([]inventory.AgentIdentityRecord, bool) { return nil, false }
+	derivedLegacyAgentIDs.ids = nil
+	aliceInputs := legacyBridgeInputs("alice@corp.example")
+	alice, legacy := agentidentity.AgentID(aliceInputs), agentidentity.LegacyAgentID(aliceInputs)
+	bob := agentidentity.AgentID(agentidentity.Inputs{
+		MachineHash: aliceInputs.MachineHash, UserID: "70002",
+		Connector: "codex", InstallFP: "/home/bob/.codex", Account: "bob@corp.example",
+	})
+	if legacy == "" || alice == bob || alice == legacy {
+		t.Fatalf("alice %q, legacy %q, bob %q: want three identities", alice, legacy, bob)
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}, "watch": {Mode: "observe"}}
+	cfg.Guardrail.DefaultProfile = "watch"
+	hook := func(agent string) (profileDecision, string) {
+		api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+		profileAgentSource = func(context.Context) (string, bool) { return agent, true }
+		ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "70001", UserName: "alice"})
+		ctx = api.withGuardrailProfileDecision(ctx, "codex")
+		return api.resolveProfile(ctx), api.agentHookMode(ctx, "codex")
+	}
+	want := func(what string, got profileDecision, mode, name, match, wantMode string) {
+		t.Helper()
+		if got.Name != name || got.Match != match || mode != wantMode {
+			t.Errorf("%s: profile %+v, mode %q; want %s (%s, %s)", what, got, mode, name, match, wantMode)
+		}
+	}
+
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "watch", Match: config.ProfileMatch{Agents: []string{bob}}},
+		{Profile: "strict", Match: config.ProfileMatch{Agents: []string{alice}}},
+	}
+	got, mode := hook(alice)
+	want("exact current identity, nothing derived", got, mode, "strict", profileMatchAgent, "action")
+	noteDerivedLegacyAgentID(aliceInputs)
+	got, mode = hook(alice)
+	want("exact current identity, legacy derived but not assigned", got, mode, "strict", profileMatchAgent, "action")
+
+	// Another agent's identity is no conflict for a later connector
+	// assignment either, once the hook path derived this agent's legacy one.
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "watch", Match: config.ProfileMatch{Agents: []string{bob}}},
+		{Profile: "strict", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
+	}
+	got, mode = hook(alice)
+	want("connector assignment after another agent's entry", got, mode, "strict", profileMatchConnector, "action")
+
+	// The legacy identity derived for this agent, listed first, is a real
+	// conflict: the exact assignment after it waits for a rebind.
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "watch", Match: config.ProfileMatch{Agents: []string{bob}}},
+		{Profile: "watch", Match: config.ProfileMatch{Agents: []string{legacy}}},
+		{Profile: "strict", Match: config.ProfileMatch{Agents: []string{alice}}},
+	}
+	got, mode = hook(alice)
+	want("exact identity after its own legacy entry", got, mode, "watch", profileMatchDefaultLookupFailed, "observe")
 }
