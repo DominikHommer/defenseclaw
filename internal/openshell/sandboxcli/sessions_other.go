@@ -25,6 +25,4 @@ func (a *App) holdSession(string) (release func(), err error) { return func() {}
 
 func (a *App) sessionGate(string) (release func(), err error) { return func() {}, nil }
 
-func (a *App) attachedSessionsChecked(string) (int, error) { return 0, nil }
-
-func (a *App) attachedSessions(string) int { return 0 }
+func (a *App) attachedSessions(string) (int, error) { return 0, nil }

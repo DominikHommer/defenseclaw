@@ -1020,7 +1020,11 @@ func (s *session) end(ctx context.Context) error {
 	}
 	// Another session's harness or shell still running in the sandbox keeps
 	// it running (this session's lease went with its harness).
-	s.others = a.attachedSessions(s.sb.Name)
+	others, err := a.attachedSessions(s.sb.Name)
+	if err != nil {
+		return attachedUnknown(s.sb.Name, err)
+	}
+	s.others = others
 	if after.WorkdirMode == config.OpenShellWorkdirCopy {
 		return s.endCopy(ctx, after, elsewhere != "")
 	}
@@ -1463,15 +1467,15 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	name := s.sb.Name
 	unlock, err := a.sessionGate(name)
 	if err != nil {
-		return fmt.Errorf("cannot confirm whether another session uses %s: %w; run `%s status %s` before retrying", name, err, CommandName, name)
+		return attachedUnknown(name, err)
 	}
 	defer unlock()
 	// A reconnect may have acquired its lease while the copy's final
 	// apply/branch/patch question was open. The gate closes the race between
 	// this count and Stop or Delete.
-	s.others, err = a.attachedSessionsChecked(name)
+	s.others, err = a.attachedSessions(name)
 	if err != nil {
-		return fmt.Errorf("cannot confirm whether another session uses %s: %w; run `%s status %s` before retrying", name, err, CommandName, name)
+		return attachedUnknown(name, err)
 	}
 	switch {
 	case s.rm && s.liveRun:
