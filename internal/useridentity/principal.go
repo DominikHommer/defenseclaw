@@ -226,6 +226,11 @@ func (f AccountFilter) MatchesIn(id, name, domains string) bool {
 		return strings.EqualFold(resolved, id)
 	}):
 		return true
+	case f.domain != "" && len(f.ids) > 0:
+		// A resolved qualified name belongs to its live UID/SID. A prior
+		// holder's row can retain the exact spelling without an account
+		// token, but that spelling cannot overrule the resolved identity.
+		return false
 	case name == "":
 		return false
 	case EqualFold(f.raw, name):
