@@ -880,14 +880,14 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		if !retryFitsAnswer(opts.answerBy, delay) {
 			// A resend could not be answered within the tool call's
 			// answer budget: the gateway is too busy for it now.
-			return failNoAnswer(opts, sp, failMode)
+			return failBusyNoAnswer(opts, sp, failMode)
 		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			if gatewayNoAnswer(ctx) {
-				return failNoAnswer(opts, sp, failMode)
+				return failBusyNoAnswer(opts, sp, failMode)
 			}
 			return failUnreachable(opts, sp, failMode, "gateway busy")
 		case <-timer.C:
@@ -948,13 +948,19 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody+1))
 	stopAnswer()
 	if (readErr != nil || int64(len(body)) > defaultMaxBody) && managedNativeDecision(opts) &&
-		(resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
-		// The status line already says the gateway refused the call's
-		// credential: an integrity failure, closed on a standalone host in
-		// every fail mode, whatever happens to the body after it. Before,
-		// a truncated or oversized 401/403 body took the no-answer or
-		// unusable-answer path, which an open fail mode allows.
-		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+		(resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		// The status line already says the gateway answered with an error:
+		// a 5xx, a refused credential or another 4xx is not an outage, so it
+		// is closed on a standalone host in every fail mode, whatever happens
+		// to the body after it. Before, a truncated or oversized error body
+		// took the no-answer or unusable-answer path, which an open fail
+		// mode allows (r104 W6 review). A 2xx whose body is cut off is still
+		// a gateway that gave no decision (failNoAnswer below).
+		reason := fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode)
+		if resp.StatusCode >= 500 && resp.StatusCode < 600 {
+			return failUnreachable(opts, sp, "closed", reason)
+		}
+		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), reason)
 	}
 	if readErr != nil {
 		return failNoAnswer(opts, sp, failMode)
