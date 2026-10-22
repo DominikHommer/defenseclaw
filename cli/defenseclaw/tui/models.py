@@ -215,3 +215,5 @@ class HintState:
     # alerts that the filter hides (GAP-1253).
     connector_filter: str = ""
     hidden_critical_alerts: int = 0
+    # The command palette is open: keys go to it, not to the panel.
+    palette_open: bool = False

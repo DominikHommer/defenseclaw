@@ -1100,8 +1100,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         display: block;
     }
 
+    /* Up to 14 rows, but it gives way when a toast or a short terminal
+       leaves less, so the hint and status lines stay on screen (GAP-0524).
+       14fr against the body's 1fr keeps the body to about a row while open. */
     #command-palette {
-        height: 14;
+        height: 14fr;
+        max-height: 14;
         margin: 0 1 1 1;
         border: round TOKEN_BORDER_ACTIVE;
         background: TOKEN_SURFACE_PANEL;
@@ -3752,7 +3756,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Don't carry stale finish/rejection state into a fresh command
         # entry. Idle = strip is hidden, exactly what we want here.
         self._strip_clear()
-        self._set_status("Command palette open. Type, use Up/Down, Tab complete, or click a row.")
+        # The keys go to the hint bar: after the health strip an 80-column
+        # status line had room for "Command p…" only (GAP-0524).
+        self._set_status(self._status_text())
+        self._refresh_hint()
 
     def action_open_panel_jumper(self) -> None:
         """Open the Ctrl+P fuzzy panel jumper modal.
@@ -3977,11 +3984,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         palette.clear(columns=True)
         self._command_palette_values = []
         self.set_focus(None)
-        # Closing the palette by running a row left "Command palette open."
-        # in the status bar (GAP-1213). Callers that report something else
-        # set their own status after this.
-        if self.status_text.startswith("Command palette open"):
-            self._set_status(self._status_text())
+        self._refresh_hint()
 
     def _handle_command_palette_key(self, event: events.Key) -> bool:
         palette = self.query_one("#command-palette", DataTable)
@@ -10936,6 +10939,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             not_configured=self.config is None,
             connector_filter=friendly_connector_name(connector_filter) if connector_filter else "",
             hidden_critical_alerts=hidden_critical,
+            palette_open=self.query_one("#command-input", Input).has_class("open"),
         )
         hint.refresh_hint(hint_state, self._hint_status_model())
         self.hint_text = str(getattr(hint, "content", ""))
