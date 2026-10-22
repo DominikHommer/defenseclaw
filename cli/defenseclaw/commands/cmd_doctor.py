@@ -14447,7 +14447,46 @@ def _check_connector_inventory(
                 # not run the configured mode for certain.
                 rendered_missing = renders and rendered is None
                 runtime_mismatch = fail_mode.get("runtime") is not None and fail_mode.get("effective") != desired
-                if desired in {"open", "closed"} and (runtime_mismatch or rendered_open or rendered_missing):
+                managed_windows_runtime = any(
+                    isinstance(source, dict) and source.get("name") == "windows-managed-runtime"
+                    for source in fail_mode.get("sources") or ()
+                )
+                if fail_mode.get("runtime_verified") is False and managed_windows_runtime:
+                    # A managed native Windows hook runs the mode of the
+                    # guardian's authenticated runtime generation, which doctor
+                    # cannot read: never a pass. A warning, not a failure,
+                    # because doctor can never verify it; the guardian's
+                    # elevated verify does.
+                    _emit(
+                        "warn",
+                        "Mode",
+                        f"{detail}; runtime fail mode unverified: the guardian's runtime generation sets it",
+                        r=r,
+                        remediation="run `defenseclaw enterprise windows verify` from an elevated prompt",
+                    )
+                elif fail_mode.get("runtime_verified") is False:
+                    # The installed hook takes its mode from the agent's
+                    # environment, which doctor cannot see, so it can run
+                    # open whatever its default says: never a pass. Outside
+                    # Secure Client (#1163) that render is a stale one a
+                    # closed policy must not keep.
+                    from defenseclaw.hook_integrity import setup_command
+
+                    secure_client_check = getattr(gc, "secure_client_hook_fail_modes", None)
+                    secure_client = callable(secure_client_check) and bool(secure_client_check())
+                    _emit(
+                        "fail" if desired == "closed" and not secure_client else "warn",
+                        "Mode",
+                        f"{detail}; runtime fail mode unverified",
+                        r=r,
+                        remediation=(
+                            "check DEFENSECLAW_FAIL_MODE in the environment the agent starts in"
+                            if secure_client
+                            else "re-render the hooks: defenseclaw-gateway start (or restart), or "
+                            f"`{setup_command(connector)}`"
+                        ),
+                    )
+                elif desired in {"open", "closed"} and (runtime_mismatch or rendered_open or rendered_missing):
                     # The hooks run another fail mode than config.yaml asks
                     # for (GAP-0009): an open hook while config says closed
                     # lets calls through with the gateway down.

@@ -24,6 +24,10 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hooks")
 	}
+	outage := ConnectorHookOutage(NewCopilotConnector())
+	if outage.PerUserClosed != OutageBlocks || outage.StrictAvailability != StrictAvailabilityRead {
+		t.Fatalf("HookOutage does not say what the per-user Copilot hook does (closed denies, strict availability read): %+v", outage)
+	}
 	for _, tc := range []struct {
 		installed, env, strict string
 		deny                   bool
@@ -56,7 +60,6 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 	}{
 		{filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "configuration", "fail-modes.mdx"), []string{
 			"`DEFENSECLAW_FAIL_MODE` is not read",
-			"`closed` blocks `preToolUse` and `permissionRequest`",
 		}},
 		{filepath.Join("..", "..", "envvars", "registry.json"), []string{
 			"Not read by 1.0.4 hooks",

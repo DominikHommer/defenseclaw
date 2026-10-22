@@ -303,18 +303,57 @@ defenseclaw_shared_runtime_connector() {
   fi
 }
 
+# Succeed only for a readable hooks/.hookcfg* file of at most 64 KiB (the
+# writers' and the native hook's HookSidecarMaxBytes) with no NUL byte, which
+# no writer emits and no reader accepts. A larger file is state the writers
+# refuse to rewrite, so a reader that took a mode from it would keep that
+# mode against a refresh. Pure bash (the hooks run with a minimal PATH):
+# reading stops at the first NUL or after 64 KiB + 1 bytes, and succeeds only
+# at the end of the file.
+_dc_hookcfg_within_bounds() {
+  local LC_ALL=C
+  [ -f "$1" ] && [ -r "$1" ] || return 1
+  if IFS= read -r -d '' -n 65537 _ < "$1"; then
+    return 1
+  fi
+  return 0
+}
+
+# Print the value of one key of a flat KEY=value record (the
+# hooks/.hookcfg.<connector> files the setup writers make: two lines,
+# DEFENSECLAW_CONNECTOR and DEFENSECLAW_FAIL_MODE). A record that is not a
+# regular file, is larger than 64 KiB, holds a NUL byte, has a line that is
+# not KEY=value with an upper-case key, gives a key twice or ends without a
+# newline (a write cut short) is malformed: nothing is printed and the call
+# fails, so no caller reads an open mode out of it.
 defenseclaw_flat_hookcfg_value() {
   local config="$1"
   local wanted="$2"
-  local key value
+  local line="" key value="" found=0 seen=" "
   [ -f "$config" ] && [ ! -L "$config" ] || return 1
-  while IFS='=' read -r key value; do
+  # The line reads below would drop a NUL without a trace.
+  _dc_hookcfg_within_bounds "$config" || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      *=*) ;;
+      *) return 1 ;;
+    esac
+    key="${line%%=*}"
+    case "$key" in
+      ""|[0123456789]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*) return 1 ;;
+    esac
+    case "$seen" in
+      *" $key "*) return 1 ;;
+    esac
+    seen="${seen}${key} "
     if [ "$key" = "$wanted" ]; then
-      printf '%s' "$value"
-      return 0
+      found=1
+      value="${line#*=}"
     fi
   done < "$config"
-  return 1
+  # read leaves an unterminated last line in $line.
+  [ -z "$line" ] && [ "$found" = 1 ] || return 1
+  printf '%s' "$value"
 }
 
 # Return the shared legacy token path or the connector-scoped token path named
@@ -346,40 +385,66 @@ defenseclaw_shared_hook_token_file() {
 # when its flat record (.hookcfg.legacy, which names no connector) and the
 # JSON legacy_fail_mode both say open: every writer since 0.8.10 writes the two
 # together. After an upgrade, a kept legacy open therefore never reopens a
-# connector recorded closed. A v2 JSON whose fail_modes is present but not an
-# object (null included) is malformed; a missing fail_modes is the shape every
-# release writes for an install with no connector entry yet. The sidecars are
-# the only input: DEFENSECLAW_FAIL_MODE in the agent's environment is not read
-# (GAP-0315); guardian-managed hooks trust only installer-owned state.
-# Malformed, ambiguous or missing state fails closed. A record counts as open
-# only with its config source (FAIL_MODE_SOURCE=config, fail_mode_sources,
-# legacy_fail_mode_source): an earlier release's open may be an unset mode it
-# resolved open, and an open lowered for a vendor that cannot fail closed is
-# not an operator's choice. A managed hook's guardian-written records carry no
-# source (the managed readers decode them canonically); their open is the
-# administrator's explicit choice, so it counts when the hook is managed and
-# hooks/.hookcfg says managed_enterprise (defenseclaw_managed_runtime_sidecar).
+# connector recorded closed. The JSON is the one document the writers make:
+# a regular file (not a link) holding exactly one JSON object, no key given
+# twice in any object (readers take the last, so it reads differently to
+# each), no top-level key naming a field in another case, a version written
+# as an integer from 2 to 2^63-1, gateway_addr, legacy_fail_mode and
+# legacy_fail_mode_source strings or null, and fail_modes and
+# fail_mode_sources, when present, objects of strings or null. It has
+# no backslash (no writer emits one), nests at most 32 levels, and writes
+# every number as JSON does. Anything else (empty or blank text, a byte-order
+# mark, two documents, a version of 2.5, 2e0 or 02, a field of another type,
+# fail_modes null, a value jq alone reads such as nan, +1 or .5) is
+# malformed, on both parser paths alike; a missing fail_modes is the shape
+# every release writes for an install with no connector entry yet. A
+# connector record that is not a regular file, does not name its own
+# connector, or is not the writers' KEY=value lines (see
+# defenseclaw_flat_hookcfg_value) is malformed too. The JSON can name a
+# connector no flat record does (a write cut short between the two, or a peer
+# an older release recorded), so JSON that no parser can read (no jq or
+# python3) is closed: only an install with no JSON state at all opens from the
+# flat records alone. Secure Client
+# delivery keeps its flat-record reading (unchanged in 1.0.4). The sidecars
+# are the only input: DEFENSECLAW_FAIL_MODE in the agent's environment is not
+# read (GAP-0315); guardian-managed hooks trust only installer-owned state.
+# Malformed, ambiguous, unverifiable or missing state fails closed. A record
+# counts as open only with its config source (FAIL_MODE_SOURCE=config,
+# fail_mode_sources, legacy_fail_mode_source): an earlier release's open may
+# be an unset mode it resolved open, and an open lowered for a vendor that
+# cannot fail closed is not an operator's choice. A managed hook's
+# guardian-written records carry no source (the managed readers decode them
+# canonically); their open is the administrator's explicit choice, so it
+# counts when the hook is managed and hooks/.hookcfg says managed_enterprise
+# (defenseclaw_managed_runtime_sidecar).
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
   local config="${hook_dir}/.hookcfg"
-  local candidate suffix recorded mode source selected="" summary="" managed_open=0 records=0
+  local candidate suffix recorded mode source selected="" summary="" raw="" managed_open=0 records=0
   if defenseclaw_managed_runtime_sidecar "$config"; then
     managed_open=1
   fi
   for candidate in "${hook_dir}"/.hookcfg.*; do
-    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
     suffix="${candidate##*.hookcfg.}"
     [ "$suffix" != "legacy" ] && [ "$suffix" != "lock" ] || continue
     case "$suffix" in
       ""|*[!a-z0-9_-]*) continue ;;
     esac
-    # A record names itself; lock files and interrupted-write debris do not.
+    # A file named for a connector is that connector's record. The writers'
+    # lock (.hookcfg.lock) and atomic-write temporaries (.tmp-*) never take a
+    # connector name, so a link, a directory, a record that names another
+    # connector or none, or one that says anything but open, closes the hook.
+    if [ -L "$candidate" ] || [ ! -f "$candidate" ]; then
+      printf closed
+      return 0
+    fi
     recorded="$(defenseclaw_flat_hookcfg_value "$candidate" DEFENSECLAW_CONNECTOR 2>/dev/null || true)"
-    [ "$recorded" = "$suffix" ] || continue
     mode="$(defenseclaw_flat_hookcfg_value "$candidate" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
     source="$(defenseclaw_flat_hookcfg_value "$candidate" FAIL_MODE_SOURCE 2>/dev/null || true)"
-    if [ "$mode" != "open" ] || { [ "$source" != "config" ] && [ "$managed_open" != 1 ]; }; then
+    if [ "$recorded" != "$suffix" ] || [ "$mode" != "open" ] \
+      || { [ "$source" != "config" ] && [ "$managed_open" != 1 ]; }; then
       printf closed
       return 0
     fi
@@ -389,32 +454,143 @@ defenseclaw_shared_runtime_fail_mode() {
     fi
   done
   # The JSON state, as four words: connector entries, whether all of them
-  # are open with a config source, the selected connector's entry, and the
-  # legacy mode. A parser that runs and fails means malformed state; no
-  # parser leaves only the flat records.
-  if [ -f "$config" ]; then
-    if command -v jq >/dev/null 2>&1; then
-      summary="$(jq -r --arg connector "$connector" --arg managed "$managed_open" '
+  # are open, the selected connector's entry, and the legacy mode. A parser
+  # that runs and fails means malformed state. JSON no parser can read is
+  # closed: it may record a connector no flat record names.
+  if [ -e "$config" ] || [ -L "$config" ]; then
+    local first=""
+    if [ -L "$config" ] || [ ! -f "$config" ]; then
+      printf closed
+      return 0
+    fi
+    # jq skips a leading byte-order mark that no writer emits and the other
+    # readers reject.
+    IFS= read -r first < "$config" || true
+    case "$first" in
+      $'\xef\xbb\xbf'*) printf closed; return 0 ;;
+    esac
+    if ! _dc_hookcfg_within_bounds "$config" && { command -v jq >/dev/null 2>&1 || _dc_python3_usable; }; then
+      # Larger than 64 KiB or holding a NUL: malformed for every reader and
+      # refused by the writers, so a refresh could not replace it.
+      summary="invalid"
+    elif command -v jq >/dev/null 2>&1; then
+      # jq reads numbers no other reader takes (nan, Infinity, +1, 01, .5)
+      # and reads 2e0 as the integer 2, so a first pass reads the raw text:
+      # with no backslash every quote opens or closes a string, so the text
+      # outside strings holds every number and literal as written, the
+      # nesting, and the top-level version token.
+      raw="$(jq -R -s -r '
+        def ws: . == 32 or . == 9 or . == 10 or . == 13;
+        def number: reduce explode[] as $c (0;
+          ($c >= 48 and $c <= 57) as $digit
+          | if . == 0 then (if $c == 45 then 1 elif $c == 48 then 2 elif $digit then 3 else -1 end)
+            elif . == 1 then (if $c == 48 then 2 elif $digit then 3 else -1 end)
+            elif . == 2 then (if $c == 46 then 4 elif $c == 101 or $c == 69 then 6 else -1 end)
+            elif . == 3 then (if $digit then 3 elif $c == 46 then 4 elif $c == 101 or $c == 69 then 6 else -1 end)
+            elif . == 4 then (if $digit then 5 else -1 end)
+            elif . == 5 then (if $digit then 5 elif $c == 101 or $c == 69 then 6 else -1 end)
+            elif . == 6 then (if $c == 43 or $c == 45 then 7 elif $digit then 8 else -1 end)
+            elif . == 7 or . == 8 then (if $digit then 8 else -1 end)
+            else -1 end)
+          | . == 2 or . == 3 or . == 5 or . == 8;
+        def tokens: explode | map(if ws or . == 123 or . == 125 or . == 91 or . == 93 or . == 44 or . == 58 then 32 else . end)
+          | implode | split(" ") | map(select(length > 0));
+        def integer: explode | length > 0 and length <= 19 and .[0] >= 49 and .[0] <= 57 and all(.[]; . >= 48 and . <= 57);
+        if index("\\") != null then "invalid" else
+          split("\"") as $parts
+          | reduce range(0; $parts | length; 2) as $i ({depth: 0, deepest: 0, ok: (($parts | length) % 2 == 1), versions: 0, version: ""};
+              $parts[$i] as $outside
+              | (if $i > 0 and .depth == 1 and $parts[$i - 1] == "version" and ([$outside | explode[] | select(ws | not)][0] == 58)
+                 then .versions += 1 | .version = (($outside | tokens)[0] // "") else . end)
+              | .ok = (.ok and ($outside | tokens | all(.[]; . == "true" or . == "false" or . == "null" or number)))
+              | reduce ($outside | explode[]) as $c (.;
+                  if $c == 123 or $c == 91 then .depth += 1 | .deepest = ([.deepest, .depth] | max)
+                  elif $c == 125 or $c == 93 then .depth -= 1 else . end))
+          | if .ok and .deepest <= 32 and .versions == 1 and (.version | integer)
+              and ((.version | length) < 19 or .version <= "9223372036854775807") and (.version | tonumber) >= 2
+            then "ok" else "invalid" end
+        end' "$config" 2>/dev/null)" || raw="invalid"
+      if [ "$raw" != "ok" ]; then
+        summary="invalid"
+      # --stream sees every key as written: a path met again after its value
+      # ended is a key given twice, or a second document.
+      elif ! summary="$(jq -n -r --stream --arg connector "$connector" --arg managed "$managed_open" '
         def word($source): if . == null or . == "" then "none" elif . == "open" and ($source == "config" or $managed == "1") then "open" else "closed" end;
-        if type == "object" and (.version | type) == "number" and .version >= 2
-          and ((has("fail_modes") | not) or (.fail_modes | type) == "object")
-          and ((has("fail_mode_sources") | not) or (.fail_mode_sources | type) == "object") then
-          (if has("fail_modes") then .fail_modes else {} end) as $modes
-          | (if has("fail_mode_sources") then .fail_mode_sources else {} end) as $sources
-          | .legacy_fail_mode_source as $legacy_source
-          | "\($modes | length) \(if [$modes | to_entries[] | .value == "open" and ($sources[.key] == "config" or $managed == "1")] | all then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word($sources[$connector])) end) \(.legacy_fail_mode | word($legacy_source))"
-        else "invalid" end' "$config" 2>/dev/null)" || summary="invalid"
+        def text: . == null or type == "string";
+        def fold: explode | map(if . == 383 then 115 elif . == 8490 then 107 else . end) | implode | ascii_downcase;
+        [inputs] as $events
+        | if (reduce $events[] as $event ({seen: {}, duplicate: false};
+              if ($event | length) == 2 then
+                . as $state
+                | .duplicate = (.duplicate or any(range(0; ($event[0] | length) + 1) as $n | $event[0][:$n] | tojson; in($state.seen)))
+                | .seen[$event[0] | tojson] = true
+              else .seen[$event[0][:-1] | tojson] = true end) | .duplicate)
+          then "invalid"
+          else [fromstream($events[])] as $docs
+          | if ($docs | length) != 1 then "invalid" else $docs[0]
+          | if type == "object"
+              and (.version | type) == "number" and .version >= 2
+              and (.version | tojson | explode | all(. >= 48 and . <= 57))
+              and (.gateway_addr | text) and (.legacy_fail_mode | text) and (.legacy_fail_mode_source | text)
+              and ((has("fail_mode_sources") | not) or ((.fail_mode_sources | type) == "object" and all(.fail_mode_sources[]; text)))
+              and ((has("fail_modes") | not) or ((.fail_modes | type) == "object" and all(.fail_modes[]; text)))
+              and all(keys[]; . as $key | all("version", "gateway_addr", "fail_modes", "legacy_fail_mode", "fail_mode_sources", "legacy_fail_mode_source"; . == $key or ($key | fold) != .))
+            then
+              (if has("fail_modes") then .fail_modes else {} end) as $modes
+              | (if has("fail_mode_sources") then .fail_mode_sources else {} end) as $sources
+              | .legacy_fail_mode_source as $legacy_source
+              | "\($modes | length) \(if [$modes | to_entries[] | .value == "open" and ($sources[.key] == "config" or $managed == "1")] | all then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word($sources[$connector])) end) \(.legacy_fail_mode | word($legacy_source))"
+            else "invalid" end end end' "$config" 2>/dev/null)"; then
+        summary="invalid"
+      fi
     elif _dc_python3_usable; then
-      summary="$(python3 -c 'import json,sys
-d=json.load(open(sys.argv[1],encoding="utf-8"))
-assert isinstance(d,dict) and type(d.get("version")) is int and d["version"]>=2
+      # -I: no PYTHON* variable (PYTHONOPTIMIZE, PYTHONPATH) of the agent's
+      # environment changes this check.
+      summary="$(python3 -I -c 'import json,sys
+def need(ok):
+  if not ok: sys.exit(1)
+def unique(pairs):
+  d={}
+  for k,v in pairs:
+    need(k not in d)
+    d[k]=v
+  return d
+def constant(name):
+  raise ValueError(name)
+raw=open(sys.argv[1],encoding="utf-8",errors="replace").read()
+need("\\" not in raw)
+depth=deepest=0
+quoted=False
+for ch in raw:
+  if ch=="\"":
+    quoted=not quoted
+  elif not quoted and ch in "{[":
+    depth+=1
+    deepest=max(deepest,depth)
+  elif not quoted and ch in "}]":
+    depth-=1
+need(deepest<=32)
+d=json.loads(raw,object_pairs_hook=unique,parse_constant=constant)
+t=lambda v:v is None or isinstance(v,str)
+fold=lambda k:k.replace("\u017f","s").replace("\u212a","k").encode("utf-8","surrogatepass").lower().decode("utf-8","surrogatepass")
+need(isinstance(d,dict) and type(d.get("version")) is int and 2<=d["version"]<=9223372036854775807)
+need(t(d.get("gateway_addr")) and t(d.get("legacy_fail_mode")) and t(d.get("legacy_fail_mode_source")))
+need(all(k==f or fold(k)!=f for k in d for f in ("version","gateway_addr","fail_modes","legacy_fail_mode","fail_mode_sources","legacy_fail_mode_source")))
 m=d.get("fail_modes",{})
 s=d.get("fail_mode_sources",{})
-assert isinstance(m,dict) and isinstance(s,dict)
+need(isinstance(m,dict) and all(t(v) for v in m.values()))
+need(isinstance(s,dict) and all(t(v) for v in s.values()))
 g=sys.argv[3]=="1"
 w=lambda v,src:"none" if v in (None,"") else ("open" if v=="open" and (src=="config" or g) else "closed")
 c=sys.argv[2]
 print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.items()) else "closed",w(m.get(c),s.get(c)) if c else "none",w(d.get("legacy_fail_mode"),d.get("legacy_fail_mode_source")))' "$config" "$connector" "$managed_open" 2>/dev/null)" || summary="invalid"
+    elif [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != "1" ] || [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ]; then
+      printf closed
+      return 0
+    fi
+    if [ -z "$summary" ] && { command -v jq >/dev/null 2>&1 || _dc_python3_usable; }; then
+      # A parser that ran and printed nothing read no state: malformed.
+      summary="invalid"
     fi
   fi
   local json_count=0 json_all=open json_selected=none json_legacy=none
@@ -428,6 +604,11 @@ print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.
     case "$json_count" in
       ""|*[!0-9]*) printf closed; return 0 ;;
     esac
+    # Exactly the four words the parsers print, nothing more.
+    if [ "$#" -ne 4 ]; then
+      printf closed
+      return 0
+    fi
   fi
   if [ "$json_all" != "open" ]; then
     printf closed

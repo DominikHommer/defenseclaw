@@ -228,8 +228,8 @@ func TestRefreshHookFailModesRendersAnEarlierReleasesSidecar(t *testing.T) {
 	}
 	for name, want := range modes {
 		flat := readFlatHookRecordForTest(t, hookDir, name)
-		if legacyHookConfigValue([]byte(flat), "DEFENSECLAW_FAIL_MODE") != want ||
-			legacyHookConfigValue([]byte(flat), "FAIL_MODE_SOURCE") != HookFailModeSourceConfig {
+		if flatRecordValueForTest([]byte(flat), "DEFENSECLAW_FAIL_MODE") != want ||
+			flatRecordValueForTest([]byte(flat), "FAIL_MODE_SOURCE") != HookFailModeSourceConfig {
 			t.Fatalf("%s flat record %q, want %s from the config", name, flat, want)
 		}
 	}
@@ -329,10 +329,10 @@ func TestRefreshHookFailModesClosesAnEarlierReleasesHooks(t *testing.T) {
 		state.LegacySource != HookFailModeSourceConfig || state.FailModes["kiro"] != "closed" {
 		t.Fatalf("sidecar after refresh: %+v", state)
 	}
-	if got := readFlatHookRecordForTest(t, hookDir, "kiro"); legacyHookConfigValue([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
+	if got := readFlatHookRecordForTest(t, hookDir, "kiro"); flatRecordValueForTest([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
 		t.Fatalf("kiro flat record %q", got)
 	}
-	if got := readFlatHookRecordForTest(t, hookDir, "legacy"); legacyHookConfigValue([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
+	if got := readFlatHookRecordForTest(t, hookDir, "legacy"); flatRecordValueForTest([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
 		t.Fatalf("legacy flat record %q", got)
 	}
 	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "cursor-hook.sh"} {
@@ -804,4 +804,11 @@ func readerToolSets(t *testing.T) []struct {
 		}{name: "python3 only", path: bin, json: true})
 	}
 	return sets
+}
+
+// flatRecordValueForTest is one key of a well-formed connector record
+// (flatHookRecordValue), or "".
+func flatRecordValueForTest(data []byte, key string) string {
+	value, _ := flatHookRecordValue(data, key)
+	return value
 }

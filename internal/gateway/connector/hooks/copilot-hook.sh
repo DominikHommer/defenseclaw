@@ -156,7 +156,7 @@ fi
 {{if .Managed}}# A standalone hook denies every call it cannot check. A Secure Client hook
 # keeps Copilot's upstream fail-open and ignores inherited strict or closed
 # settings: only a valid event-native gateway response may enforce.
-FAIL_MODE="{{if .SecureClient}}open{{else}}closed{{end}}"
+FAIL_MODE="{{if .ManagedOutageClosed}}closed{{else}}open{{end}}"
 {{else}}# Every failure below goes through copilot_hook_failure, which follows
 # FAIL_MODE. An unexpected error status (set -e, set -u) does too.
 trap '_dc_copilot_rc=$?; _defenseclaw_hook_cleanup; if [ "$_dc_copilot_rc" -ne 0 ]; then copilot_hook_failure; fi' EXIT

@@ -59,7 +59,7 @@ Under the Secure Client integration only, hooks fail open: an unset `guardrail.h
 
 | Connector | Behavior |
 | --- | --- |
-| GitHub Copilot CLI, Antigravity | The hooks follow the effective mode on Linux, macOS and Windows: `closed` blocks `preToolUse` and `permissionRequest` (Antigravity: `PreToolUse`) while the gateway is down or answers unusably, and says why. Copilot and Antigravity still run a call when the hook times out or cannot start. Under Secure Client they stay open. |
+| GitHub Copilot CLI, Antigravity | The hooks follow the effective mode on Linux, macOS and Windows; the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) gives the result per install. Copilot and Antigravity still run a call when the hook times out or cannot start. |
 | Hermes | Its own hook has no fail-closed surface, but the DefenseClaw hook follows the effective mode on Linux, macOS and Windows: `closed` blocks a tool call while the gateway is down or answers unusably. Hermes itself still runs a call when the hook times out or cannot start. |
 | OpenClaw, ZeptoClaw | Proxy-backed, no hooks. Requests are blocked while the gateway is down, whatever `guardrail.hook_fail_mode` says. `guardrail fail-mode` lists them as `closed (proxy-backed, no hooks ...)`. |
 
@@ -209,7 +209,7 @@ The shell hook scripts, native hook and OpenCode plugin record hook delivery and
 
 For those connectors, a per-user gateway reads the lines added since its last start and records one `guardrail-degraded` alert (severity HIGH) per connector, for example `2 hermes hook calls ran without a DefenseClaw check (fail-open) while the gateway was unreachable or did not answer (first ..., last ...; last reason: gateway unreachable)`. `defenseclaw alerts` lists it. Fail-closed calls and lines older than 7 days are not reported.
 
-The Amp plugin does not write `hook-failures.jsonl`. On a per-user Amp install with fail mode `open`, a gateway outage can allow a tool call without a persisted failure record or a later `guardrail-degraded` alert. Keep Amp in fail mode `closed` when unchecked calls are unacceptable, and monitor gateway health directly; the failure-file alert does not cover Amp.
+The Amp plugin does not write `hook-failures.jsonl`, so an Amp call the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) marks as running leaves no failure record and no later `guardrail-degraded` alert. Keep Amp in fail mode `closed` when unchecked calls are unacceptable, and monitor gateway health directly; the failure-file alert does not cover Amp.
 
 For token, audit database, device key and observability repairs, see [Doctor](/docs/troubleshooting/doctor).
 

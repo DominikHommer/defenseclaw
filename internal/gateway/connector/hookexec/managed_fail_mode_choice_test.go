@@ -137,6 +137,70 @@ func TestStandaloneManagedCopilotFollowsTheAdministratorsFailMode(t *testing.T) 
 	}
 }
 
+// The managed Copilot hook a standalone install publishes through machine
+// policy (defenseclaw-hook --enterprise-managed, on Linux, macOS and Windows)
+// follows the administrator's fail mode during an outage: closed and strict
+// availability deny, open lets the call run. The gateway outage table says so
+// (enterprisepolicy TestDocsCapabilityMatrixOutageMatchesTheHooks); the
+// per-user-route shell hook is checked in the connector package.
+func TestManagedCopilotOutageFollowsTheFailMode(t *testing.T) {
+	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+	for _, tc := range []struct {
+		mode    string
+		strict  bool
+		blocked bool
+	}{
+		{mode: "closed", blocked: true},
+		{mode: "open", strict: true, blocked: true},
+		{mode: "open"},
+	} {
+		result := run(t, "copilot", &stubRT{err: notRunning}, func(o *Options) {
+			managedCodex(o)
+			o.ExplainUnenrolledAccount = true
+			o.Event = "preToolUse"
+			o.FailMode = tc.mode
+			o.StrictAvailability = tc.strict
+			o.Stdin = strings.NewReader(`{"toolName":"bash","toolArgs":"{\"command\":\"echo ok\"}"}`)
+		})
+		if got := blocked(result); got != tc.blocked {
+			t.Fatalf("fail mode %q, strict %v: blocked = %v, want %v: stdout=%q", tc.mode, tc.strict, got, tc.blocked, result.stdout)
+		}
+	}
+}
+
+// 1.0.4 review (loop round 4 of G-hooks-upg): no managed hook reads
+// DEFENSECLAW_FAIL_MODE (the native hook resolves the administrator's mode
+// before hookexec runs; TestManagedWindowsHookIgnoresTheEnvironmentFailMode
+// pins that on Windows), so an open managed Copilot hook still lets a call
+// run during an outage whatever the environment says. Only the installed
+// mode and strict availability decide.
+func TestManagedHookIgnoresTheEnvironmentFailMode(t *testing.T) {
+	t.Setenv("DEFENSECLAW_FAIL_MODE", "closed")
+	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+	for _, tc := range []struct {
+		mode    string
+		strict  bool
+		blocked bool
+	}{
+		{mode: "open"},
+		{mode: "open", strict: true, blocked: true},
+		{mode: "closed", blocked: true},
+	} {
+		result := run(t, "copilot", &stubRT{err: notRunning}, func(o *Options) {
+			managedCodex(o)
+			o.ExplainUnenrolledAccount = true
+			o.Event = "preToolUse"
+			o.FailMode = tc.mode
+			o.StrictAvailability = tc.strict
+			o.Stdin = strings.NewReader(`{"toolName":"bash","toolArgs":"{\"command\":\"echo ok\"}"}`)
+		})
+		if got := blocked(result); got != tc.blocked {
+			t.Fatalf("installed mode %q, strict %v, DEFENSECLAW_FAIL_MODE=closed: blocked = %v, want %v: stdout=%q",
+				tc.mode, tc.strict, got, tc.blocked, result.stdout)
+		}
+	}
+}
+
 // GAP-0346: only an outage of a standalone hook in fail mode open lets the
 // call through when the foreign-hook guard cannot reach the gateway.
 func TestManagedOutageFailsOpenOnlyForAnOpenStandaloneOutage(t *testing.T) {
