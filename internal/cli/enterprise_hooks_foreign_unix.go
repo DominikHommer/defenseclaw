@@ -369,7 +369,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			if report, ok := outcome.Response.Cleanup[cleanup.Connector]; ok {
 				account := strconv.Itoa(outcome.Job.Account.UID)
 				err := recordEnterpriseForeignHookRemovals(stderr, account, outcome.Job.Account.Home,
-					cleanup.Connector, boundedStrings(report.Removed, 32))
+					cleanup.Connector, report.Removed)
 				if err == nil && report.Error == "" && outcome.Err == nil {
 					if err := finishEnterpriseForeignHookCleanup(account, pending[outcome.Job.Account.UID][cleanup.Connector]); err != nil {
 						fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: keep the pending denial for %s %s: %v\n", account, cleanup.Connector, err)
