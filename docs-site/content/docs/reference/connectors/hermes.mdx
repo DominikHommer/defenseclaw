@@ -40,6 +40,11 @@ helper, or a disabled Windows launcher fails the check. The probe sends no tool
 event to the gateway; a real Hermes call after restarting its host is still
 the live confirmation that the callback is loaded.
 
+On Linux the probe runs in a PID namespace of its own, inside a user namespace
+unless the checking process has `CAP_SYS_ADMIN`, so nothing the hook starts
+outlives the probe. Where user namespaces are disabled (for example
+`user.max_user_namespaces=0`), the check fails closed.
+
 ### Files
 
 | What | Path |

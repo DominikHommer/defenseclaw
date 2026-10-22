@@ -19,8 +19,10 @@
 package processutil
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -33,16 +35,30 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// On Linux, RunContained runs cmd below a child subreaper custodian and a
-// separate runner. A command that kills its immediate parent kills the runner;
-// its descendants are then reparented to the custodian, which kills and reaps
+// On Linux, RunContained runs cmd below a runner that is PID 1 of a new PID
+// namespace. Nothing the command starts can address a process outside the
+// namespace, and the runner is its init, which it cannot SIGKILL. When the
+// runner exits or is killed, however it dies, the kernel kills every process
+// in the namespace, also one in a session or group of its own, before the
+// runner's exit is reported. A hook that SIGKILLed the subreaper custodian
+// RunContained used before took its runner and itself down, and the kernel
+// handed its setsid child to init, which kept running (r104 W5b review).
+//
+// RunTracked runs cmd below a child subreaper custodian and a separate
+// runner. A command that kills its immediate parent kills the runner; its
+// descendants are then reparented to the custodian, which kills and reaps
 // them. The custodian is a separate process so gateway children are never
-// included in its sweep.
+// included in its sweep. Scanners keep it: without privilege the PID
+// namespace needs a user namespace mapping only this process's IDs, where
+// root-owned files read as owned by the overflow user, and DefenseClaw's own
+// plugin-scanner then refuses its root-owned runtime.
 const (
 	containSupervisorArg0 = "defenseclaw-contained-run"
 	containSupervisorEnv  = "DEFENSECLAW_CONTAINED_RUN_SUPERVISOR"
 	containCustodianMode  = "custodian"
 	containRunnerMode     = "runner"
+	containInitMode       = "init"
+	containLauncherMode   = "launcher"
 )
 
 // Supervisor exit codes. Any other code is the command's own (128+signal
@@ -52,7 +68,8 @@ const (
 	// or the death of its parent) and ended everything.
 	containExitTerminated = 124
 	// containExitNotContained: the supervisor could not prove that nothing
-	// the command started still runs.
+	// the command started still runs, or the runner is not the init of a PID
+	// namespace of its own.
 	containExitNotContained = 125
 	// containExitNotStarted: the command could not start.
 	containExitNotStarted = 127
@@ -61,6 +78,12 @@ const (
 // containSweepBudget bounds the supervisor's sweep of what the command left;
 // tests set it to zero to reach the fail-closed result.
 var containSweepBudget = 2 * time.Second
+
+// containIDMap maps this process's IDs into the runner's user namespace;
+// tests map an ID this process does not have to reach the fail-closed result.
+var containIDMap = func(id int) []syscall.SysProcIDMap {
+	return []syscall.SysProcIDMap{{ContainerID: id, HostID: id, Size: 1}}
+}
 
 func init() {
 	if len(os.Args) < 5 || os.Args[0] != containSupervisorArg0 || os.Args[3] != "--" ||
@@ -75,7 +98,11 @@ func init() {
 	case containCustodianMode:
 		os.Exit(superviseContained(os.Args[4:], budget))
 	case containRunnerMode:
-		os.Exit(runContainedCommand(os.Args[4:]))
+		os.Exit(runContainedCommand(os.Args[4:], false))
+	case containInitMode:
+		os.Exit(runContainedCommand(os.Args[4:], true))
+	case containLauncherMode:
+		os.Exit(launchContained(os.Args[4:]))
 	default:
 		os.Exit(containExitNotContained)
 	}
@@ -84,6 +111,134 @@ func init() {
 func runContained(cmd *exec.Cmd) error {
 	if cmd.Process != nil {
 		return errors.New("processutil: RunContained: already started")
+	}
+	mode := containInitMode
+	if mixedCredentials() {
+		mode = containLauncherMode
+	}
+	target := cmd.Path
+	cmd.Path = "/proc/self/exe"
+	cmd.Args = append([]string{containSupervisorArg0, mode, "0s", "--", target}, cmd.Args[1:]...)
+	env := cmd.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	cmd.Env = append(withoutEnv(env, containSupervisorEnv), containSupervisorEnv+"=1")
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	attr := cmd.SysProcAttr
+	attr.Setpgid = true
+	// The runner, or the launcher that starts it, ends with this thread.
+	attr.Pdeathsig = syscall.SIGKILL
+	if mode == containLauncherMode {
+		// The launcher ends the namespace and waits for it.
+		if cmd.Cancel != nil {
+			cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+		}
+	} else {
+		attr.Cloneflags |= syscall.CLONE_NEWPID
+		switch caps := effectiveCapabilities(); {
+		case caps&(1<<unix.CAP_SYS_ADMIN) != 0:
+			// A PID namespace alone: every file keeps its owner and access.
+		case caps&(1<<unix.CAP_SETUID) != 0 && caps&(1<<unix.CAP_SETGID) != 0:
+			// The identity map of every ID, so every file keeps its owner.
+			// Ubuntu's AppArmor restriction of unprivileged user namespaces
+			// drops the capabilities of one created without CAP_SYS_ADMIN.
+			attr.Cloneflags |= syscall.CLONE_NEWUSER
+			attr.UidMappings = []syscall.SysProcIDMap{{ContainerID: 0, HostID: 0, Size: math.MaxInt32}}
+			attr.GidMappings = attr.UidMappings
+			attr.GidMappingsEnableSetgroups = true
+		default:
+			attr.Cloneflags |= syscall.CLONE_NEWUSER
+			attr.UidMappings = containIDMap(os.Geteuid())
+			attr.GidMappings = containIDMap(os.Getegid())
+			attr.GidMappingsEnableSetgroups = false
+		}
+		// Killing the runner ends the namespace.
+		if cmd.Cancel != nil {
+			cmd.Cancel = func() error { return cmd.Process.Kill() }
+		}
+	}
+	// The parent-death signal follows the thread that started the child.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := cmd.Start(); err != nil {
+		// No namespace (user namespaces disabled, a sandbox that refuses
+		// them): the command never runs.
+		return fmt.Errorf("%w: %s: %v", ErrNotContained, target, err)
+	}
+	err := cmd.Wait()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == containExitNotContained {
+		return fmt.Errorf("%w: %s", ErrNotContained, target)
+	}
+	return err
+}
+
+// mixedCredentials reports whether this process's real, effective and saved
+// IDs differ, as in the root hook guardian while it acts as a user. Such a
+// process is not dumpable, so its child's ID maps are owned by root and it
+// cannot write them.
+func mixedCredentials() bool {
+	ruid, euid, suid := unix.Getresuid()
+	rgid, egid, sgid := unix.Getresgid()
+	return ruid != euid || suid != euid || rgid != egid || sgid != egid
+}
+
+// launchContained becomes the effective user and group alone, which needs no
+// privilege, and runs argv in a PID namespace of its own from there. The hook
+// guardian's probe ran the user's hook with the guardian's real root UID,
+// which bash restores as its effective UID.
+func launchContained(argv []string) int {
+	runtime.LockOSThread()
+	terms := make(chan os.Signal, 1)
+	signal.Notify(terms, syscall.SIGTERM)
+	uid, gid := os.Geteuid(), os.Getegid()
+	if syscall.Setresgid(gid, gid, gid) != nil || syscall.Setresuid(uid, uid, uid) != nil || mixedCredentials() {
+		return containExitNotContained
+	}
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 1, 0, 0, 0); err != nil {
+		return containExitNotContained
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-terms
+		cancel()
+	}()
+	child := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	child.Env = withoutEnv(os.Environ(), containSupervisorEnv)
+	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
+	err := runContained(child)
+	var exitErr *exec.ExitError
+	switch {
+	case ctx.Err() != nil:
+		return containExitTerminated
+	case err == nil:
+		return 0
+	case errors.As(err, &exitErr) && exitErr.ExitCode() >= 0:
+		return exitErr.ExitCode()
+	default:
+		return containExitNotContained
+	}
+}
+
+// effectiveCapabilities returns this process's effective capability set.
+func effectiveCapabilities() uint64 {
+	header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	var data [2]unix.CapUserData
+	if err := unix.Capget(&header, &data[0]); err != nil {
+		return 0
+	}
+	return uint64(data[1].Effective)<<32 | uint64(data[0].Effective)
+}
+
+// runTracked runs cmd below the subreaper custodian, which owns every orphan
+// of the tree.
+func runTracked(cmd *exec.Cmd) error {
+	if cmd.Process != nil {
+		return errors.New("processutil: RunTracked: already started")
 	}
 	target := cmd.Path
 	cmd.Path = "/proc/self/exe"
@@ -177,11 +332,13 @@ func superviseContained(argv []string, budget time.Duration) int {
 	}
 }
 
-// runContainedCommand is the hook's immediate parent. It is deliberately not
-// a subreaper: if the hook kills it, every orphan moves to the custodian.
-func runContainedCommand(argv []string) int {
+// runContainedCommand is the command's immediate parent. Below the custodian
+// it is deliberately not a subreaper: if the command kills it, every orphan
+// moves to the custodian. As the init of a PID namespace (asInit), its exit
+// ends everything else in the namespace.
+func runContainedCommand(argv []string, asInit bool) int {
 	runtime.LockOSThread()
-	if os.Getppid() == 1 {
+	if asInit != (os.Getpid() == 1) || os.Getppid() == 1 {
 		return containExitNotContained
 	}
 	child := exec.Command(argv[0], argv[1:]...)
@@ -277,10 +434,4 @@ func releaseStdio() {
 		_ = unix.Dup3(null, fd, 0)
 	}
 	_ = unix.Close(null)
-}
-
-// runTracked is runContained: the custodian is a child subreaper, so the
-// kernel hands it every orphan of the tree.
-func runTracked(cmd *exec.Cmd) error {
-	return runContained(cmd)
 }

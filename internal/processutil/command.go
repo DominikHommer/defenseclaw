@@ -69,9 +69,14 @@ var ErrNotContained = errors.New("processutil: could not establish that the comm
 // start a child in a session of its own (setsid), out of the process group
 // RunTree kills, and Verify passed while the child kept running (r104 W5b).
 //
-// On Linux a child-subreaper custodian follows every descendant, also one
-// that left the group or session or killed its immediate parent, and kills
-// and reaps them all; when it cannot, RunContained returns ErrNotContained.
+// On Linux the command runs below a runner that is PID 1 of a new PID
+// namespace, owned by a user namespace of its own unless this process may
+// create one without (CAP_SYS_ADMIN). The command cannot address any process
+// outside the namespace, and when the runner ends, however it ends, the
+// kernel kills every process in it, also one that left the group or session.
+// A hook that SIGKILLed the child-subreaper custodian used before left its
+// setsid child running (r104 W5b review). Where the namespaces cannot be
+// created, RunContained never runs cmd and returns ErrNotContained.
 // On macOS a short-lived launcher waits for the gateway's process-group
 // watchdog before it irreversibly drops real root credentials (if any),
 // checks that RLIMIT_NPROC prevents forks, and executes the command with
@@ -80,8 +85,8 @@ var ErrNotContained = errors.New("processutil: could not establish that the comm
 // Object refuses breakaway. Other
 // platforms never run cmd and return ErrNotContained.
 //
-// cmd must not have been started. On Linux, cmd.Cancel asks the supervisor
-// to end the tree; set cmd.WaitDelay to bound the wait for it.
+// cmd must not have been started. On Linux, cmd.Cancel kills the runner and
+// with it the tree.
 func RunContained(cmd *exec.Cmd) error {
 	return runContained(cmd)
 }
@@ -93,9 +98,11 @@ func RunContained(cmd *exec.Cmd) error {
 // killed when the command exits, when cmd is canceled and when this process
 // dies, however it dies.
 //
-// On Linux it is RunContained: the kernel reparents every orphan of the
-// tree to a child-subreaper custodian, also one that left the group or
-// session. On macOS a supervisor, a short-lived copy of this binary in a
+// On Linux the kernel reparents every orphan of the tree to a
+// child-subreaper custodian, also one that left the group or session, and the
+// custodian kills and reaps them all; when it cannot, RunTracked returns
+// ErrNotContained. A user namespace like RunContained's would show
+// root-owned files as owned by the overflow user to the scanner. On macOS a supervisor, a short-lived copy of this binary in a
 // process group of its own, runs the command in a session of its own. It
 // follows every descendant with kqueue NOTE_FORK and NOTE_EXIT and the
 // process table, by parent, group and session, also once it starts a

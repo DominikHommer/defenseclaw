@@ -5969,18 +5969,25 @@ _HERMES_EXECUTION_PROBE_SWEEP = 2.0
 # How Doctor ends what a Unix probe started. A hook could start a child in a
 # session of its own (setsid) or another process group, out of the session
 # Doctor killed, and Doctor passed while the child kept running (r104 W5b).
-# "subreaper" (Linux): a custodian child subreaper owns a separate runner,
-# so killing the hook's immediate parent still leaves cleanup in the
-# custodian. "forkless" (macOS): the probe drops any inherited real root UID
-# and fixes RLIMIT_NPROC at zero before it executes the registered command.
+# "pidns" (Linux): the probe runs below PID 1 of a PID namespace of its own,
+# owned by a user namespace unless Doctor holds CAP_SYS_ADMIN. The hook cannot
+# address the supervisor outside it, and the kernel kills everything in the
+# namespace when its init ends: a hook that SIGKILLed the subreaper custodian
+# used before left its setsid child running (r104 W5b review). "forkless"
+# (macOS): the probe drops any inherited real root UID and fixes RLIMIT_NPROC
+# at zero before it executes the registered command.
 _HERMES_PROBE_UNIX_CONTAINMENT = (
-    "subreaper" if sys.platform.startswith("linux") else "forkless" if sys.platform == "darwin" else "unsupported"
+    "pidns" if sys.platform.startswith("linux") else "forkless" if sys.platform == "darwin" else "unsupported"
 )
 # The supervisor's exit code when it cannot establish that nothing is left;
 # any other code is the probe's own (124 when Doctor ended it).
 _HERMES_PROBE_NOT_CONTAINED = 125
 _HERMES_PROBE_SUPERVISOR = r"""
-import ctypes, os, signal, subprocess, sys, time
+import ctypes, os, select, signal, subprocess, sys, time
+
+CLONE_NEWUSER, CLONE_NEWPID = 0x10000000, 0x20000000
+CAP_SETGID, CAP_SETUID, CAP_SYS_ADMIN = 6, 7, 21
+PR_SET_PDEATHSIG, PR_SET_CHILD_SUBREAPER = 1, 36
 
 
 def children(me):
@@ -6019,61 +6026,137 @@ def reap_all(budget):
         time.sleep(0.005)
 
 
+def effective_caps():
+    with open("/proc/self/status") as status:
+        for line in status:
+            if line.startswith("CapEff:"):
+                return int(line.split()[1], 16)
+    return 0
+
+
+def release_stdout():
+    null = os.open(os.devnull, os.O_RDWR)
+    os.dup2(null, 1)
+    os.close(null)
+
+
+def status(code):
+    if os.WIFEXITED(code):
+        return os.WEXITSTATUS(code)
+    return 128 + os.WTERMSIG(code) if os.WIFSIGNALED(code) else 125
+
+
+def init(libc, lifeline, argv):
+    # PID 1 of the namespace: when it ends, the kernel kills the rest. It
+    # ends with the process that created the namespace, also one that died
+    # before the parent-death signal was armed (the lifeline then reads EOF).
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0 or os.getpid() != 1:
+        return 125
+    if select.select([lifeline], [], [], 0)[0]:
+        return 125
+    try:
+        proc = subprocess.Popen(argv, start_new_session=True)
+    except (OSError, ValueError):
+        return 127
+    release_stdout()
+    code = proc.wait()
+    return code if code >= 0 else 128 - code
+
+
+def namespace(libc, flags, ready, mapped, argv):
+    # Below the supervisor: unshare, wait for the supervisor to write the ID
+    # maps from outside, then start the namespace's init.
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+        return 125
+    if libc.unshare(flags) != 0:
+        return 125
+    os.write(ready, b"u")
+    if os.read(mapped, 1) != b"m":
+        return 125
+    lifeline, keep = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(keep)
+        os._exit(init(libc, lifeline, argv))
+    os.close(lifeline)
+    release_stdout()
+    return status(os.waitpid(pid, 0)[1])
+
+
+def write_maps(pid, caps):
+    uid, gid = os.geteuid(), os.getegid()
+    if caps & (1 << CAP_SETUID) and caps & (1 << CAP_SETGID):
+        # The identity map of every ID, so every file keeps its owner.
+        maps = (("uid_map", "0 0 2147483647\n"), ("gid_map", "0 0 2147483647\n"))
+    else:
+        maps = (("setgroups", "deny"), ("uid_map", f"{uid} {uid} 1\n"), ("gid_map", f"{gid} {gid} 1\n"))
+    for name, value in maps:
+        with open(f"/proc/{pid}/{name}", "w") as handle:
+            handle.write(value)
+
+
 def main():
-    mode, budget = sys.argv[1], float(sys.argv[2])
+    budget = float(sys.argv[1])
+    argv = sys.argv[3:]
     parent = os.getppid()
     libc = ctypes.CDLL(None, use_errno=True)
-    if mode == "runner":
-        # A killed runner's children move to the separate custodian, never
-        # to Doctor (which may have unrelated gateway children).
-        if parent == 1 or libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != parent:
-            return 125
-        try:
-            proc = subprocess.Popen(sys.argv[5:], start_new_session=True)
-        except (OSError, ValueError):
-            return 127
-        null = os.open(os.devnull, os.O_RDWR)
-        os.dup2(null, 1)
-        os.close(null)
-        code = proc.wait()
-        return code if code >= 0 else 128 - code
-    if mode != "custodian":
-        return 125
-    # PR_SET_CHILD_SUBREAPER, then PR_SET_PDEATHSIG: the custodian alone owns
-    # all orphans. The hook's immediate parent never owns cleanup.
-    if libc.prctl(36, 1, 0, 0, 0) != 0 or libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
+    # PR_SET_CHILD_SUBREAPER, then PR_SET_PDEATHSIG: the supervisor reaps the
+    # namespace's init however the process between them ends.
+    if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 or libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
         return 125
     if parent == 1 or os.getppid() != parent:
         return 124
-    state = {"proc": None, "ended": False}
+    ruid, euid, suid = os.getresuid()
+    rgid, egid, sgid = os.getresgid()
+    if len({ruid, euid, suid}) != 1 or len({rgid, egid, sgid}) != 1:
+        return 125
+    caps = effective_caps()
+    flags = CLONE_NEWPID if caps & (1 << CAP_SYS_ADMIN) else CLONE_NEWUSER | CLONE_NEWPID
+    state = {"pid": None, "ended": False}
 
     def end(_signum, _frame):
         state["ended"] = True
-        if state["proc"] is not None:
+        if state["pid"] is not None:
             try:
-                os.killpg(state["proc"].pid, signal.SIGKILL)
+                os.kill(state["pid"], signal.SIGKILL)
             except OSError:
                 pass
 
     signal.signal(signal.SIGTERM, end)
-    try:
-        state["proc"] = subprocess.Popen([
-            sys.executable, "-I", "-S", "-c", sys.argv[3], "runner", sys.argv[2], sys.argv[3], "--", *sys.argv[5:],
-        ], start_new_session=True)
-    except (OSError, ValueError):
-        return 127
+    ready_r, ready_w = os.pipe()
+    mapped_r, mapped_w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.close(ready_r)
+        os.close(mapped_w)
+        os._exit(namespace(libc, flags, ready_w, mapped_r, argv))
+    state["pid"] = pid
+    os.close(ready_w)
+    os.close(mapped_r)
     if state["ended"]:
         end(None, None)
-    # Only the probe and what it started hold Doctor's pipe now.
-    null = os.open(os.devnull, os.O_RDWR)
-    os.dup2(null, 1)
-    os.close(null)
-    code = state["proc"].wait()
-    if not reap_all(budget):
+    release_stdout()
+    contained = os.read(ready_r, 1) == b"u"
+    if contained and flags & CLONE_NEWUSER:
+        try:
+            write_maps(pid, caps)
+        except OSError:
+            contained = False
+    if contained:
+        os.write(mapped_w, b"m")
+    else:
+        end(None, None)
+    os.close(mapped_w)
+    try:
+        code = status(os.waitpid(pid, 0)[1])
+    except ChildProcessError:
+        code = 125
+    if not reap_all(budget) or not contained:
         return 125
     if state["ended"]:
         return 124
-    return code if code >= 0 else 125
+    return code
 
 
 sys.exit(main())
@@ -6138,8 +6221,8 @@ def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
     stdout open past the pipe wait, or left descendants that could not be
     ended. One byte more than the proof closes the pipe, so the hook's output
     never accumulates in Doctor. Whatever the command started ends with it on
-    exit, overflow and timeout: on Linux a subreaper supervisor ends every
-    descendant, also one in a session of its own; on macOS the probe's
+    exit, overflow and timeout: on Linux the kernel ends every descendant
+    with the probe's PID namespace, also one in a session of its own; on macOS the probe's
     session is killed after a forkless launcher has refused descendant
     creation; on Windows its
     kill-on-close job is terminated. A launcher that started a long-lived
@@ -6155,12 +6238,12 @@ def _run_hermes_execution_probe(argv: list[str]) -> tuple[int | None, bytes]:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) | getattr(
             subprocess, "CREATE_SUSPENDED", 0x00000004
         )
-    elif _HERMES_PROBE_UNIX_CONTAINMENT == "subreaper":
+    elif _HERMES_PROBE_UNIX_CONTAINMENT == "pidns":
         if not sys.executable:
             return None, b""
         command = [
-            sys.executable, "-I", "-S", "-c", _HERMES_PROBE_SUPERVISOR, "custodian",
-            str(_HERMES_EXECUTION_PROBE_SWEEP), _HERMES_PROBE_SUPERVISOR, "--", *argv,
+            sys.executable, "-I", "-S", "-c", _HERMES_PROBE_SUPERVISOR,
+            str(_HERMES_EXECUTION_PROBE_SWEEP), "--", *argv,
         ]
         supervised = True
     elif _HERMES_PROBE_UNIX_CONTAINMENT == "forkless":
@@ -6261,8 +6344,8 @@ def _collect_hermes_execution_probe(
                     proc.kill()
                 return False
         if supervised:
-            # The supervisor ends and reaps the tree. Killing it instead would
-            # hand what left the probe's session to init.
+            # The supervisor ends the probe's namespace and reaps its init, so
+            # its exit means nothing is left.
             if proc.poll() is None:
                 with contextlib.suppress(OSError):
                     proc.send_signal(signal.SIGTERM)

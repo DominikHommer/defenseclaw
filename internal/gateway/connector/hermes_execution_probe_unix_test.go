@@ -152,17 +152,24 @@ func TestHermesExecutionProbeBoundsInheritedStdout(t *testing.T) {
 // hangs, or floods stdout, must not leave what it started running after
 // Verify, one more for each check. On macOS RunTree had no process group.
 func TestHermesExecutionProbeEndsWhatTheHookStarted(t *testing.T) {
-	const proof = "printf 'defenseclaw-execution-probe-ok\\n'\n"
+	const (
+		proof = "printf 'defenseclaw-execution-probe-ok\\n'\n"
+		// The child writes its pid as this test sees it ($! counts in the
+		// probe's PID namespace on Linux), then runs as sleep.
+		writePID = `read -r p _ < /proc/self/stat; echo $p > "$PIDFILE"; `
+		child    = "( " + writePID + "exec sleep 60 )"
+		waitPID  = "while [ ! -s \"$PIDFILE\" ]; do sleep 0.01; done\n"
+	)
 	for name, tc := range map[string]struct {
 		body    string
 		timeout time.Duration
 	}{
-		"exits, child holds stdout":        {proof + "sleep 60 & echo $! > \"$PIDFILE\"\nexit 0\n", 20 * time.Second},
-		"exits, child detached":            {proof + "sleep 60 >/dev/null 2>&1 & echo $! > \"$PIDFILE\"\nexit 0\n", 20 * time.Second},
-		"exits, grandchild":                {proof + "( sleep 60 & echo $! > \"$PIDFILE\" )\nexit 0\n", 20 * time.Second},
-		"times out":                        {"sleep 60 & echo $! > \"$PIDFILE\"\nwait\n", 300 * time.Millisecond},
-		"overflows":                        {proof + "sleep 60 & echo $! > \"$PIDFILE\"\nexec yes\n", 20 * time.Second},
-		"exits, child ignores hangup/term": {proof + "( trap '' HUP TERM; exec sleep 60 ) & echo $! > \"$PIDFILE\"\nexit 0\n", 20 * time.Second},
+		"exits, child holds stdout":        {proof + child + " &\n" + waitPID + "exit 0\n", 20 * time.Second},
+		"exits, child detached":            {proof + child + " >/dev/null 2>&1 &\n" + waitPID + "exit 0\n", 20 * time.Second},
+		"exits, grandchild":                {proof + "( " + child + " & )\n" + waitPID + "exit 0\n", 20 * time.Second},
+		"times out":                        {child + " &\nwait\n", 300 * time.Millisecond},
+		"overflows":                        {proof + child + " &\n" + waitPID + "exec yes\n", 20 * time.Second},
+		"exits, child ignores hangup/term": {proof + "( trap '' HUP TERM; " + writePID + "exec sleep 60 ) &\n" + waitPID + "exit 0\n", 20 * time.Second},
 	} {
 		t.Run(name, func(t *testing.T) {
 			timeout := tc.timeout
@@ -241,11 +248,26 @@ func TestHermesExecutionProbeEndsDescendantsThatLeaveTheGroup(t *testing.T) {
 		t.Skip("perl not installed")
 	}
 	const (
-		proof    = "printf 'defenseclaw-execution-probe-ok\\n'\n"
-		session  = `perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die' `
-		group    = `perl -e 'setpgrp(0, 0) or die; exec @ARGV or die' `
-		child    = `sh -c 'echo $$ > "$0"; exec sleep 60' "$PIDFILE" </dev/null >/dev/null 2>&1`
-		closed   = `sh -c 'echo $$ > "$0"; exec sleep 60 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-' "$PIDFILE" </dev/null >/dev/null 2>&1`
+		proof   = "printf 'defenseclaw-execution-probe-ok\\n'\n"
+		session = `perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die' `
+		group   = `perl -e 'setpgrp(0, 0) or die; exec @ARGV or die' `
+		// The pid as this test sees it: $$ counts in the probe's PID
+		// namespace on Linux.
+		child  = `sh -c 'read -r p _ < /proc/self/stat; echo $p > "$0"; exec sleep 60' "$PIDFILE" </dev/null >/dev/null 2>&1`
+		closed = `sh -c 'read -r p _ < /proc/self/stat; echo $p > "$0"; exec sleep 60 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-' "$PIDFILE" </dev/null >/dev/null 2>&1`
+		// Every supervisor ancestor by the pids this test sees, outermost
+		// first, SIGKILLed together: a hook that killed the subreaper
+		// custodian, its grandparent, left its setsid child running (r104
+		// W5b review).
+		killSupervisors = `read -r _ _ _ a _ < /proc/self/stat; list=""
+while [ "${a:-0}" -gt 1 ]; do
+  case "$(tr '\0' ' ' < /proc/$a/cmdline)" in defenseclaw-contained-run*) list="$a $list" ;; esac
+  read -r _ _ _ a _ < /proc/$a/stat || break
+done
+[ -n "$list" ] || exit 7
+kill -9 $list
+sleep 1
+`
 		waitPID  = "while [ ! -s \"$PIDFILE\" ]; do sleep 0.01; done\n"
 		exitZero = "exit 0\n"
 	)
@@ -263,6 +285,9 @@ func TestHermesExecutionProbeEndsDescendantsThatLeaveTheGroup(t *testing.T) {
 		"new session, then times out":  {session + child + " &\n" + waitPID + "sleep 60\n", 500 * time.Millisecond, false},
 		"new session, then overflows":  {proof + session + child + " &\n" + waitPID + "exec yes\n", 20 * time.Second, false},
 		"new session, then hook fails": {proof + session + child + " &\n" + waitPID + "exit 1\n", 20 * time.Second, false},
+		"new session, then kills every supervisor": {
+			proof + session + child + " &\n" + waitPID + killSupervisors + exitZero, 20 * time.Second, true,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			timeout := tc.timeout

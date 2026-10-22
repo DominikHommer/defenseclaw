@@ -356,13 +356,17 @@ def _read_pid(path) -> int:
     raise AssertionError(f"probe never wrote {path}")
 
 
+# The child writes its pid as the test sees it ($! counts in the probe's PID
+# namespace on Linux), then runs as sleep.
+_CHILD = '( read -r p _ < /proc/self/stat; echo $p > "$PIDFILE"; exec sleep 60 )'
+_WAIT_CHILD = 'while [ ! -s "$PIDFILE" ]; do sleep 0.01; done\n'
 _DESCENDANT_CASES = {
     # body, timeout: what the hook leaves behind and how the probe ends
-    "exits-child-holds-stdout": (_PROOF + 'sleep 60 & echo $! > "$PIDFILE"\nexit 0\n', 20.0),
-    "exits-child-detached-from-stdout": (_PROOF + 'sleep 60 >/dev/null 2>&1 & echo $! > "$PIDFILE"\nexit 0\n', 20.0),
-    "exits-grandchild": (_PROOF + '( sleep 60 & echo $! > "$PIDFILE" )\nexit 0\n', 20.0),
-    "times-out": ('sleep 60 & echo $! > "$PIDFILE"\nwait\n', 0.5),
-    "overflows": (_PROOF + 'sleep 60 & echo $! > "$PIDFILE"\nexec yes\n', 20.0),
+    "exits-child-holds-stdout": (_PROOF + _CHILD + " &\n" + _WAIT_CHILD + "exit 0\n", 20.0),
+    "exits-child-detached-from-stdout": (_PROOF + _CHILD + " >/dev/null 2>&1 &\n" + _WAIT_CHILD + "exit 0\n", 20.0),
+    "exits-grandchild": (_PROOF + "( " + _CHILD + " & )\n" + _WAIT_CHILD + "exit 0\n", 20.0),
+    "times-out": (_CHILD + " &\nwait\n", 0.5),
+    "overflows": (_PROOF + _CHILD + " &\n" + _WAIT_CHILD + "exec yes\n", 20.0),
 }
 
 
@@ -543,9 +547,12 @@ def test_windows_hermes_doctor_probe_ends_child_of_exited_launcher(tmp_path):
 # child kept running.
 _ESCAPE_SESSION = "perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die' "
 _ESCAPE_GROUP = "perl -e 'setpgrp(0, 0) or die; exec @ARGV or die' "
-_ESCAPED_CHILD = "sh -c 'echo $$ > \"$0\"; exec sleep 60' \"$PIDFILE\" </dev/null >/dev/null 2>&1"
+# The child writes its pid as the test sees it: $$ counts in the probe's PID
+# namespace on Linux.
+_ESCAPED_CHILD = "sh -c 'read -r p _ < /proc/self/stat; echo $p > \"$0\"; exec sleep 60' \"$PIDFILE\" </dev/null >/dev/null 2>&1"
 _ESCAPED_CHILD_FDS_CLOSED = (
-    "sh -c 'echo $$ > \"$0\"; exec sleep 60 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-' \"$PIDFILE\" </dev/null >/dev/null 2>&1"
+    "sh -c 'read -r p _ < /proc/self/stat; echo $p > \"$0\"; exec sleep 60 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-' "
+    "\"$PIDFILE\" </dev/null >/dev/null 2>&1"
 )
 _WAIT_PID = 'while [ ! -s "$PIDFILE" ]; do sleep 0.01; done\n'
 _ESCAPE_CASES = {
@@ -684,28 +691,89 @@ def test_hermes_forkless_probe_cannot_leave_a_closed_fd_child(tmp_path, monkeypa
             _kill_quietly(_read_pid(pid_file))
 
 
-@pytest.mark.skipif(not _LINUX or not shutil.which("perl"), reason="Linux subreaper supervisor")
-@pytest.mark.parametrize("fail", ["sweep-exhausted", "supervisor-killed"])
-def test_hermes_probe_supervisor_fails_closed_when_cleanup_is_unproven(tmp_path, monkeypatch, fail):
-    body = _ESCAPE_CASES["new-session"][0]
-    if fail == "sweep-exhausted":
-        monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_SWEEP", 0.0)
-    else:
-        # Only ever the supervisor: never the test runner.
-        body = body.replace("exit 0\n", (
-            "case \"$(tr '\\0' ' ' < /proc/$PPID/cmdline)\" in *PR_SET_CHILD_SUBREAPER*) kill -9 $PPID ;; esac\n"
-            "exit 0\n"
-        ))
-    returncode, _stdout, descendant = _probe_escape(tmp_path, monkeypatch, body)
+@pytest.mark.skipif(not _LINUX, reason="Linux probe supervisor")
+def test_hermes_probe_supervisor_fails_closed_without_a_namespace(tmp_path, monkeypatch):
+    # A kernel or sandbox that refuses the namespaces (here: an unshare flag
+    # it rejects) never runs the hook.
+    supervisor = cmd_doctor._HERMES_PROBE_SUPERVISOR
+    assert "CLONE_NEWUSER, CLONE_NEWPID = 0x10000000, 0x20000000" in supervisor
+    monkeypatch.setattr(cmd_doctor, "_HERMES_PROBE_SUPERVISOR", supervisor.replace(
+        "CLONE_NEWUSER, CLONE_NEWPID = 0x10000000, 0x20000000", "CLONE_NEWUSER, CLONE_NEWPID = 0x10000000, 0x1",
+    ))
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)
+    ran = tmp_path / "ran"
+    returncode, _stdout = cmd_doctor._run_hermes_execution_probe(
+        [str(_probe_stub(tmp_path, f": > '{ran}'\n" + _PROOF))],
+    )
+    assert returncode is None
+    assert not ran.exists(), "the hook ran outside a namespace of its own"
+
+
+@pytest.mark.skipif(not _LINUX or not shutil.which("perl"), reason="Linux probe supervisor")
+def test_hermes_probe_ends_the_tree_when_its_supervisor_is_killed(tmp_path, monkeypatch):
+    # Killed from outside, however it dies, the supervisor takes the
+    # namespace with it, and the probe cannot pass.
+    import signal
+    import threading
+
+    chain = tmp_path / "supervisors"
+    body = _ESCAPE_CASES["new-session"][0].replace("exit 0\n", (
+        'read -r _ _ _ a _ < /proc/self/stat; list=""\n'
+        'while [ "${a:-0}" -gt 1 ]; do\n'
+        '  case "$(tr \'\\0\' \' \' < /proc/$a/cmdline)" in *"def reap_all"*) list="$list $a" ;; esac\n'
+        '  read -r _ _ _ a _ < /proc/$a/stat || break\n'
+        "done\n"
+        f"echo $list > '{chain}.tmp' && mv '{chain}.tmp' '{chain}'\n"
+        "sleep 60\n"
+    ))
+    result = {}
+    probe = threading.Thread(target=lambda: result.update(zip(
+        ("returncode", "stdout", "descendant"), _probe_escape(tmp_path, monkeypatch, body),
+    )))
+    probe.start()
+    deadline = time.monotonic() + 10
+    while not chain.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    supervisors = chain.read_text(encoding="utf-8").split()
+    assert supervisors, "the hook found no supervisor ancestor"
+    os.kill(int(supervisors[-1]), signal.SIGKILL)
+    probe.join(15)
+    assert not probe.is_alive(), "Doctor still waits after its probe supervisor died"
     try:
-        assert returncode is None, "a probe whose descendants could not be proven ended must not pass"
-        if fail == "supervisor-killed":
-            assert _process_gone(descendant, wait=0.2), f"Doctor left descendant {descendant} after supervisor death"
+        assert result["returncode"] is None, "a probe whose supervisor died must not pass"
+        assert _process_gone(result["descendant"]), f"Doctor left descendant {result['descendant']} after supervisor death"
+    finally:
+        _kill_quietly(result["descendant"])
+
+
+# r104 W5b review: a hook that SIGKILLed the subreaper custodian, its
+# grandparent, took the runner and itself down, and the kernel handed its
+# setsid child to init, which kept running while Doctor returned. Every
+# supervisor ancestor, by the pids the test sees, outermost first, killed
+# together; only ever the probe's supervisors, never the test runner.
+_KILL_SUPERVISORS = """read -r _ _ _ a _ < /proc/self/stat; list=""
+while [ "${a:-0}" -gt 1 ]; do
+  case "$(tr '\\0' ' ' < /proc/$a/cmdline)" in *"def reap_all"*) list="$a $list" ;; esac
+  read -r _ _ _ a _ < /proc/$a/stat || break
+done
+[ -n "$list" ] || exit 7
+kill -9 $list
+sleep 1
+"""
+
+
+@pytest.mark.skipif(not _LINUX or not shutil.which("perl"), reason="Linux probe supervisor")
+def test_hermes_probe_hook_cannot_end_its_supervisors(tmp_path, monkeypatch):
+    body = _ESCAPE_CASES["new-session"][0].replace("exit 0\n", _KILL_SUPERVISORS + "exit 0\n")
+    returncode, stdout, descendant = _probe_escape(tmp_path, monkeypatch, body)
+    try:
+        assert returncode != 7, "the hook found no supervisor ancestor"
+        assert _process_gone(descendant, wait=0.2), f"Doctor left descendant {descendant} after the hook killed its supervisors"
     finally:
         _kill_quietly(descendant)
 
 
-@pytest.mark.skipif(not _LINUX, reason="Linux subreaper supervisor")
+@pytest.mark.skipif(not _LINUX, reason="Linux probe supervisor")
 @pytest.mark.parametrize(("body", "want"), [("exit 0\n", 0), ("exit 3\n", 3), ("kill -TERM $$\n", 143)])
 def test_hermes_probe_supervisor_keeps_the_hook_exit_status(tmp_path, monkeypatch, body, want):
     monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)

@@ -59,7 +59,7 @@ func hermesRegisteredCommandExecutable(opts SetupOpts, hookCommand string) bool 
 // runHermesExecutionProbe keeps no more stdout than the proof itself: one
 // byte more fails the write, which closes the pipe and ends the probe.
 // RunContained ends the process tree when the probe exits and at the
-// timeout (a Job Object on Windows, a subreaper custodian on Linux, a
+// timeout (a Job Object on Windows, a PID namespace on Linux, a
 // forkless launcher plus process group and lifeline on macOS) and fails the
 // proof when it cannot
 // establish that nothing the hook started still runs: a hook that started a
