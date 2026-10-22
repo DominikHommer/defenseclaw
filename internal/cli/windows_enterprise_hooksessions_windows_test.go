@@ -209,6 +209,24 @@ func setWindowsDACLThroughHandle(t *testing.T, handle windows.Handle, sddl strin
 	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
 }
 
+// windowsHookSessionTestOwner is the owner of path.
+func windowsHookSessionTestOwner(t *testing.T, path string) *windows.SID {
+	t.Helper()
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return owner
+}
+
 func windowsFileIndex(t *testing.T, handle windows.Handle) uint64 {
 	t.Helper()
 	var info windows.ByHandleFileInformation
@@ -473,15 +491,20 @@ func TestWindowsHookSessionRepairWithARecordHeldOpen(t *testing.T) {
 }
 
 // Review P2 (GAP-0352, 1.0.4 loop round 4): a lifecycle without
-// SeRestorePrivilege cannot give the record root the retired owner and
-// closes it with an Administrators owner instead. A retained handle with
-// WRITE_DAC that does not share delete access refuses the move, so the
-// step fails and the old root stays, with its generation file and allow.
-// The handle then writes the trusted DACL back: the root looks trusted to
-// the hook again. The step now leaves the records held, and the hook allows
-// nothing during an outage until a repair replaces the root; status names
-// the hold. Once the handle is gone, the next repair replaces the root and
-// removes the hold, and the old allow proves nothing.
+// SeRestorePrivilege cannot give the record root the retired owner. A
+// retained handle with WRITE_DAC that does not share delete access refuses
+// the move, so the step fails and the old root stays, with its generation
+// file and allow. The handle then writes the trusted DACL back. The step
+// leaves the records held, and status names the hold.
+//
+// Review P2 (GAP-0352, 1.0.4 guard loop round 2): the root then kept an
+// Administrators owner, so the hold was all that kept the hook from the old
+// allow, and an account that had also kept a handle on the hook runtime
+// folder could delete it. The root now gets the lifecycle's own account as
+// its owner, which the hook refuses and no WRITE_DAC handle can change:
+// with the hold deleted and the trusted DACL written back, the root is
+// still refused. Once the handle is gone, the next repair replaces the root
+// and removes the hold, and the old allow proves nothing.
 func TestWindowsHookSessionRepairWithoutTheRestorePrivilegeHoldsTheRecords(t *testing.T) {
 	for name, drift := range map[string]bool{"drifted": true, "looks trusted": false} {
 		t.Run(name, func(t *testing.T) {
@@ -524,6 +547,20 @@ func TestWindowsHookSessionRepairWithoutTheRestorePrivilegeHoldsTheRecords(t *te
 			if problem := windowsHookSessionRootProblem(); !strings.Contains(problem, "is held") {
 				t.Fatalf("status must name the hold: %q", problem)
 			}
+			// The account deletes the hold through a handle it kept on the
+			// hook runtime folder.
+			if err := enterprisepolicy.RemovePublishedSessionHolds(root); err != nil {
+				t.Fatal(err)
+			}
+			if trusted, err := windowsPathOwnedByAdministrators(root); err != nil || trusted {
+				t.Fatalf("a root the repair could not replace must keep an owner the hook refuses, hold or not: %v %v", trusted, err)
+			}
+			if owner := windowsHookSessionTestOwner(t, root); !windowsHookSessionOwnerRefused(owner) {
+				t.Fatalf("the hook must refuse the owner %s of a root the repair could not replace", owner)
+			}
+			if problem := windowsHookSessionRootProblem(); !strings.Contains(problem, "not owned by Administrators or SYSTEM") {
+				t.Fatalf("status must report the refused root: %q", problem)
+			}
 			closeHandle()
 			windowsHookSessionOwnerRestorePrivilege = previous
 			if err := ensureWindowsHookSessionRoot(root, self); err != nil {
@@ -545,10 +582,10 @@ func TestWindowsHookSessionRepairWithoutTheRestorePrivilegeHoldsTheRecords(t *te
 	}
 }
 
-// The lifecycle holds the records from its start (with its first bump),
-// so a run that stops before the record step leaves them held, and the
-// record step that replaced the folder removes the hold. Uninstall removes
-// it too.
+// The lifecycle holds the records and refuses the root from its start
+// (with its first bump), so a run that stops before the record step leaves
+// them held and refused, and the record step that replaced the folder
+// removes the hold. Uninstall removes it too.
 func TestWindowsLifecycleHoldsTheRecordsFromItsStart(t *testing.T) {
 	if !windowsEnterpriseIsElevated() {
 		t.Skip("the lifecycle holds the records only when it runs elevated")
@@ -564,6 +601,12 @@ func TestWindowsLifecycleHoldsTheRecordsFromItsStart(t *testing.T) {
 	}
 	if err := check(); !errors.Is(err, enterprisepolicy.ErrPublishedSessionUnavailable) {
 		t.Fatalf("while the records are held the allow must prove nothing: %v", err)
+	}
+	// 1.0.4 guard loop round 2: the root also gets an owner the hook
+	// refuses from the start, so a run that stops before the record step
+	// does not leave the hold as the only guard.
+	if trusted, err := windowsPathOwnedByAdministrators(root); err != nil || trusted {
+		t.Fatalf("a repair must give the root an owner the hook refuses from its start: %v %v", trusted, err)
 	}
 	if err := ensureWindowsHookSessionRoot(root, self); err != nil {
 		t.Fatal(err)

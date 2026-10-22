@@ -159,6 +159,14 @@ type SessionUpdate struct {
 	Removals    []ForeignHookRemoval
 	RemovalsErr error
 	Now         time.Time
+	// BeforeBlock (gateway only) runs once, right before the first write
+	// that records a block in StateDir: the gateway takes the protected
+	// session records of Key out of use there
+	// (WithdrawPublishedForeignHookSession), so that a gateway that stops
+	// between that write and the publication of the block leaves no allow
+	// behind that the hook would honor during the outage (GAP-0352, 1.0.4
+	// guard loop round 2).
+	BeforeBlock func()
 }
 
 // SessionPath is the record for one key kind and ID under accountHome.
@@ -267,7 +275,12 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 			return sessionUnavailableDecision(decision)
 		}
 	}
+	beforeBlock := update.BeforeBlock
 	write := func(path string, record SessionRecord) bool {
+		if record.Blocked && beforeBlock != nil {
+			beforeBlock()
+			beforeBlock = nil
+		}
 		if err := writeSessionRecord(path, record); err != nil {
 			return !strict
 		}

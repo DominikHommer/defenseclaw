@@ -93,6 +93,12 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		Removals:     removals,
 		RemovalsErr:  removalsErr,
 		Now:          time.Now(),
+		// A block is recorded in the private store only after the
+		// protected records it overrules are out of use: the block is
+		// published only after that write, and a gateway that stops in
+		// between must not leave an allow the hook honors during the
+		// outage (GAP-0352, 1.0.4 guard loop round 2).
+		BeforeBlock: func() { withdrawForeignHookSessionDecision(places.recordRoot, identity, exchange.Key) },
 	})
 	// Under the same lock, so the protected record follows the store's
 	// order: the hook reads it when the gateway is down.
@@ -134,14 +140,16 @@ func (a *APIServer) recheckForeignHookSessionAllow(places foreignHookSessionPlac
 // foreignHookSessionPublishRoot is the folder of the protected session
 // records on a standalone host (managed.StandaloneLayout.HookSessionDir),
 // foreignHookSessionGeneration reads its generation
-// (enterprisepolicy.PublishedSessionGeneration) and
-// foreignHookSessionPublish writes the protected record (replaceable in
+// (enterprisepolicy.PublishedSessionGeneration),
+// foreignHookSessionPublish writes the protected record and
+// foreignHookSessionWithdraw takes it out of use (replaceable in
 // tests, whose folders cannot carry the per-account access list or a
 // root-owned generation file).
 var (
 	foreignHookSessionPublishRoot = standaloneHookSessionDir
 	foreignHookSessionGeneration  = enterprisepolicy.PublishedSessionGeneration
 	foreignHookSessionPublish     = enterprisepolicy.PublishForeignHookSessionDecision
+	foreignHookSessionWithdraw    = enterprisepolicy.WithdrawPublishedForeignHookSession
 )
 
 // foreignHookSessionPlaces are where one exchange reads the guardian's
@@ -224,6 +232,21 @@ func publishForeignHookSessionDecision(root, identity string, key enterprisepoli
 	}
 	if err := foreignHookSessionPublish(root, identity, key, decision, generation, time.Now()); err != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record for %s was not written (the hook blocks during a gateway outage): %v\n",
+			clipForeignHookAuditField(key.Connector, 64), err)
+	}
+}
+
+// withdrawForeignHookSessionDecision takes the caller's protected session
+// records under root out of use before the exchange records a block
+// (enterprisepolicy.WithdrawPublishedForeignHookSession). A failure is
+// logged: the block is still recorded and published, and the publication
+// revokes the records again when it cannot write the block.
+func withdrawForeignHookSessionDecision(root, identity string, key enterprisepolicy.SessionKey) {
+	if root == "" {
+		return
+	}
+	if err := foreignHookSessionWithdraw(root, identity, key); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record for %s could not be withdrawn before a block: %v\n",
 			clipForeignHookAuditField(key.Connector, 64), err)
 	}
 }

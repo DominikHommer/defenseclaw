@@ -508,3 +508,65 @@ func TestForeignHookSessionGatewayRechecksTheRemovalsBeforeItAnswers(t *testing.
 		})
 	}
 }
+
+// Review P1 (GAP-0352, 1.0.4 guard loop round 2): the exchange that records
+// a block in the gateway's private store withdraws the caller's protected
+// records first, under the account's lock. A gateway that stops after the
+// store write and before it publishes the block (here: the publication is
+// lost) leaves no allow the hook would honor during the outage. An exchange
+// that records no block withdraws nothing, and the gateway, back, denies
+// from its store and publishes the block.
+func TestForeignHookSessionGatewayWithdrawsTheProtectedAllowBeforeItRecordsABlock(t *testing.T) {
+	type state struct {
+		deny       bool
+		generation string
+	}
+	published := map[string]state{}
+	stopped := false
+	root := t.TempDir()
+	recordKey := func(identity string, key enterprisepolicy.SessionKey) string {
+		return identity + "\x00" + key.Connector + "\x00" + key.Process
+	}
+	server := newForeignHookPublishTestServer(t, root, func(_ string, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, generation string, _ time.Time) error {
+		if !stopped {
+			published[recordKey(identity, key)] = state{decision.Deny, generation}
+		}
+		return nil
+	})
+	var withdrawn []string
+	previousWithdraw := foreignHookSessionWithdraw
+	t.Cleanup(func() { foreignHookSessionWithdraw = previousWithdraw })
+	foreignHookSessionWithdraw = func(r, identity string, key enterprisepolicy.SessionKey) error {
+		if r != root {
+			t.Errorf("withdrew under %s, want %s", r, root)
+		}
+		withdrawn = append(withdrawn, recordKey(identity, key))
+		delete(published, recordKey(identity, key))
+		return nil
+	}
+	process := map[string]any{"connector": "claudecode", "session": "s-1", "process": "process-1"}
+	key := enterprisepolicy.SessionKey{Connector: "claudecode", Session: "s-1", Process: "process-1"}
+	if got := server.call(server.aliceToken, map[string]any{"key": process, "session_start": true, "decision": map[string]any{"deny": false}}); got.Deny {
+		t.Fatalf("a clean session start is allowed: %+v", got)
+	}
+	if len(withdrawn) != 0 || published[recordKey(server.alice, key)] != (state{false, server.generation()}) {
+		t.Fatalf("a clean exchange publishes its allow and withdraws nothing: %v %+v", withdrawn, published)
+	}
+	stopped = true
+	blocked := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-2", "process": "process-1"}, "session_start": true,
+		"decision": map[string]any{"deny": true, "reason": "enterprise_foreign_hook_blocked: project hook",
+			"findings": []map[string]any{{"connector": "claudecode", "scope": "project", "path": "/repo/.claude/settings.json", "digest": "abcd"}}}}
+	if got := server.call(server.aliceToken, blocked); !got.Deny {
+		t.Fatalf("the session start that found the hook is blocked: %+v", got)
+	}
+	if _, ok := published[recordKey(server.alice, key)]; ok || len(withdrawn) != 1 || withdrawn[0] != recordKey(server.alice, key) {
+		t.Fatalf("the allow the unpublished block overrules must be withdrawn: %v %+v", withdrawn, published)
+	}
+	stopped = false
+	if got := server.call(server.aliceToken, map[string]any{"key": process, "decision": map[string]any{"deny": false}}); !got.Deny {
+		t.Fatalf("the gateway, back, denies from its store: %+v", got)
+	}
+	if got := published[recordKey(server.alice, key)]; !got.deny {
+		t.Fatalf("the block is published: %+v", published)
+	}
+}

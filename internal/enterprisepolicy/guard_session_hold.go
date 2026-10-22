@@ -60,8 +60,10 @@ import (
 //     hold until a later run succeeds.
 //   - The guardian's, one per account (<name>.hold-removal-<digest>,
 //     HoldPublishedSessionRemoval). The guardian puts it in place before it
-//     publishes a removal and releases it only after a generation bump that
-//     followed the removal succeeded. A pass that stops, or cannot bump, in
+//     publishes a removal (and withdraws the generation then too,
+//     WithdrawPublishedSessionGeneration, so a hold it could not make, or
+//     one another account removed, is not its only guard) and releases it
+//     only after a generation bump that followed the removal succeeded. A pass that stops, or cannot bump, in
 //     between leaves it: the gateway already denies from the new removal
 //     ledger, so an allow of the generation the bump would have ended must
 //     not prove anything during an outage either (1.0.4 guard loop round

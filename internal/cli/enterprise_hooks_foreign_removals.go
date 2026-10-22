@@ -56,14 +56,24 @@ func enterpriseForeignHookAccountID(sid string, uid int) string {
 // ledger that drops another account's removals cannot revive that
 // account's allows.
 //
-// Before it publishes anything it holds the records for the account
+// Before it publishes anything (the ledger, or any account's pending mark)
+// it closes the records where the hook looks (GAP-0352, 1.0.4 guard loop
+// rounds 1 and 2): it holds them for the account
 // (enterprisepolicy.HoldPublishedSessionRemoval: a hold the hook sees, in a
-// folder no standard user can change), and it releases that hold only
-// after the bump succeeded (GAP-0352, 1.0.4 guard loop round 1). Between
-// the ledger write and the bump the gateway already denies from the new
-// ledger, while an allow it wrote earlier still carries the generation the
-// bump ends; a pass that stops or cannot bump there leaves the hold, so the
-// hook allows nothing during an outage until a later pass bumps. A later
+// folder no standard user can change), and then withdraws the generation
+// (enterprisepolicy.WithdrawPublishedSessionGeneration: the generation file
+// is removed, so no allow proves anything and every answer the gateway
+// stamps until the bump carries none). Either one keeps the hook from
+// honoring an allow while the gateway already denies from the new ledger,
+// and both stay when the pass stops before its bump; the withdrawal also
+// fails the last generation read of a hook check that found no hold just
+// before the hold was made. The bump after the ledger creates the
+// generation again past the one withdrawn, and the hold is released only
+// after it succeeded. When neither can be put in place (no hold, and a
+// generation file that can be neither removed nor bumped) the removal is
+// still published, and the failure logged: the gateway's denial is the
+// stricter answer, and withholding it would only make the gateway allow
+// what the hook allows during an outage. A later
 // pass for the account treats its own hold like a pending mark (the files
 // may not have reached the ledger); a later pass for another account first
 // holds the account the hold names closed in the gateway
@@ -139,11 +149,40 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 			every = append(every, name)
 		}
 	}
-	// The hold comes first: from here until the bump below, the ledger may
-	// deny what an allow of the current generation still proves.
+	var err error
+	closed := pending || pendingErr != nil
+	hold := func(why string) {
+		if closed {
+			return
+		}
+		if markErr := enterpriseForeignHookMarkRemovalPending(identity); markErr != nil {
+			err = errors.Join(err, fmt.Errorf("hold the account's guarded calls closed: %w", markErr))
+			return
+		}
+		closed = true
+		err = errors.Join(err, errors.New("the account's guarded calls are denied until a later pass "+why))
+	}
+	// The records are closed where the hook looks before anything is
+	// published: from here until the bump below, the ledger or a mark may
+	// deny what an allow of the current generation would still prove.
+	var floor time.Time
 	if rootErr == nil {
-		if holdErr := enterprisepolicy.HoldPublishedSessionRemoval(root, identity); holdErr != nil {
-			warn = errors.Join(warn, fmt.Errorf("hold the protected session records during a gateway outage: %w", holdErr))
+		holdErr := enterpriseForeignHookHoldSessionRecords(root, identity)
+		if holdErr != nil {
+			holdErr = fmt.Errorf("hold the protected session records during a gateway outage: %w", holdErr)
+		}
+		var withdrawErr error
+		floor, withdrawErr = enterpriseForeignHookWithdrawSessionGeneration(root)
+		if holdErr != nil && withdrawErr != nil {
+			// Nothing the hook sees stays closed if this pass stops before
+			// its bump. The account is held closed in the gateway before
+			// the ledger is written, so an exchange that reads the
+			// generation the withdrawal may have bumped instead is denied;
+			// the removal is still published.
+			err = errors.Join(err, holdErr, withdrawErr)
+			hold("can close the protected session records where the hook looks; the removal is published anyway")
+		} else if holdErr != nil {
+			warn = errors.Join(warn, holdErr)
 		}
 	}
 	// A held account, or one an earlier pass left held, is recorded only in
@@ -178,21 +217,8 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 		}
 		return writeEnterpriseForeignHookRemovalLedger(stderr, added, now)
 	}()
-	var err error
-	closed := pending || pendingErr != nil
-	hold := func(why string) {
-		if closed {
-			return
-		}
-		if markErr := enterpriseForeignHookMarkRemovalPending(identity); markErr != nil {
-			err = errors.Join(err, fmt.Errorf("hold the account's guarded calls closed: %w", markErr))
-			return
-		}
-		closed = true
-		err = errors.Join(err, errors.New("the account's guarded calls are denied until a later pass "+why))
-	}
 	if ledgerErr != nil {
-		err = ledgerErr
+		err = errors.Join(err, ledgerErr)
 		hold("records the removal")
 	}
 	// Every other account a hold names is held closed in the gateway before
@@ -209,7 +235,7 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 	// ledger, or before the mark, carries the generation this bump ends.
 	bumpErr := rootErr
 	if bumpErr == nil {
-		bumpErr = enterpriseForeignHookBumpSessionGeneration(root)
+		bumpErr = enterpriseForeignHookBumpSessionGeneration(root, floor)
 	}
 	if bumpErr != nil {
 		err = errors.Join(err, fmt.Errorf("invalidate the protected session records: %w", bumpErr))
@@ -322,9 +348,17 @@ var enterpriseForeignHookSessionRootForDataDir = func(dataDir string) (string, b
 	return managed.StandaloneHookSessionDirForDataDir(runtime.GOOS, dataDir)
 }
 
-// enterpriseForeignHookBumpSessionGeneration bumps the generation of the
-// protected session records under root (replaceable in tests).
-var enterpriseForeignHookBumpSessionGeneration = enterprisepolicy.BumpPublishedSessionGeneration
+// enterpriseForeignHookHoldSessionRecords holds the protected session
+// records under root for an account and
+// enterpriseForeignHookWithdrawSessionGeneration withdraws their generation,
+// both before a pass publishes anything, and
+// enterpriseForeignHookBumpSessionGeneration starts the next generation past
+// floor after it published (replaceable in tests).
+var (
+	enterpriseForeignHookHoldSessionRecords        = enterprisepolicy.HoldPublishedSessionRemoval
+	enterpriseForeignHookWithdrawSessionGeneration = enterprisepolicy.WithdrawPublishedSessionGeneration
+	enterpriseForeignHookBumpSessionGeneration     = enterprisepolicy.BumpPublishedSessionGenerationPast
+)
 
 // enterpriseForeignHookRemovalPending, enterpriseForeignHookMarkRemovalPending
 // and enterpriseForeignHookClearRemovalPending read, set and clear an

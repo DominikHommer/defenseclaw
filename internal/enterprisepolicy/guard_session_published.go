@@ -55,7 +55,9 @@ import (
 // <HookSessionDir>/generation, a file that only root or SYSTEM writes
 // (BumpPublishedSessionGeneration). The lifecycle (install, upgrade, repair,
 // ensure) bumps it before it changes anything and again once it put the
-// folder back, and the guardian bumps it after every removal it recorded.
+// folder back, and the guardian withdraws it before it publishes a removal
+// (WithdrawPublishedSessionGeneration: the file is deleted, so no answer
+// counts) and bumps it after the removal is recorded.
 // A bump makes every allow written before it prove nothing. So no repair,
 // upgrade or revocation has to find the records it invalidates, and no
 // interleaving with an exchange can leave an allow behind: an exchange that
@@ -89,7 +91,12 @@ import (
 //     the hook checked the holds.
 //
 // A block the gateway decides on its own (a session start that found an
-// unapproved hook) bumps no generation: it replaces the record. When the
+// unapproved hook) bumps no generation: it replaces the record. Before it
+// records that block in its private store, the gateway takes the records of
+// the agent process and the session out of use
+// (WithdrawPublishedForeignHookSession), so a gateway that stops before it
+// published the block leaves no allow the block overrules (1.0.4 guard
+// loop round 2). When the
 // record can be neither replaced nor deleted (on Windows the account may
 // hold it open for reading without delete sharing), revokePublishedSessionRecord
 // overrides it twice, so that no single write decides: it expires the
@@ -437,6 +444,77 @@ func readPublishedSessionGeneration(root string, trust func(string) error) (stri
 		return "", err
 	}
 	return publishedSessionGenerationValue(path, info)
+}
+
+// WithdrawPublishedForeignHookSession takes the protected records of the
+// agent process and the session of key for identity under root out of use
+// (revokePublishedSessionRecord: deleted, or else expired and marked
+// denied). The gateway calls it under the account's store lock right
+// before it records a block in its private store, and publishes the block
+// after that write: a gateway that stops in between leaves no record, so
+// the hook blocks during the outage, as the gateway would (GAP-0352, 1.0.4
+// guard loop round 2). root missing, or an account with no record folder,
+// has nothing to withdraw.
+func WithdrawPublishedForeignHookSession(root, identity string, key SessionKey) error {
+	if strings.TrimSpace(root) == "" {
+		return nil
+	}
+	name := strings.TrimSpace(key.Connector)
+	if !key.valid() || !publishedSessionConnector(name) {
+		return fmt.Errorf("invalid session key")
+	}
+	dir, ok := PublishedSessionIdentityDir(root, identity)
+	if !ok {
+		return fmt.Errorf("invalid caller identity")
+	}
+	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	record := PublishedSessionRecord{Version: publishedSessionVersion, Connector: name, Blocked: true, At: time.Now().UTC().Format(time.RFC3339)}
+	var errs []error
+	for _, entry := range []struct{ kind, id string }{{sessionKindProcess, key.Process}, {sessionKindSession, key.Session}} {
+		if entry.id == "" {
+			continue
+		}
+		record.Kind, record.ID = entry.kind, entry.id
+		if err := revokePublishedSessionRecord(publishedSessionPath(dir, name, entry.kind, entry.id), record); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// WithdrawPublishedSessionGeneration ends the current generation of the
+// record folder root without starting the next one: it removes the
+// generation file, so that no allow proves anything during an outage, and
+// every answer the gateway stamps meanwhile carries no generation, until
+// the caller's BumpPublishedSessionGenerationPast(root, floor) creates the
+// file again past floor, the generation it removed (zero when the gateway
+// would not have trusted it). The guardian calls it before it publishes a
+// removal (GAP-0352, 1.0.4 guard loop round 2). Unlike a bump, the state it
+// leaves stays closed when the pass stops before its bump, and a hook check
+// that read the generation before it fails its last read of the
+// generation. A file it cannot remove (on Windows a reader may hold it open
+// without delete sharing) is bumped instead, which still ends every allow
+// written before it: the error then says that the generation was only
+// bumped, or that it was neither withdrawn nor bumped.
+func WithdrawPublishedSessionGeneration(root string) (time.Time, error) {
+	path, ok := PublishedSessionGenerationPath(root)
+	if !ok {
+		return time.Time{}, fmt.Errorf("no protected session record folder %q", root)
+	}
+	floor := PublishedSessionGenerationFloor(root)
+	err := publishedSessionRemove(path)
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		if _, statErr := os.Lstat(path); errors.Is(statErr, fs.ErrNotExist) {
+			return floor, nil
+		}
+		err = fmt.Errorf("%s is still there", path)
+	}
+	if bumpErr := BumpPublishedSessionGenerationPast(root, floor); bumpErr != nil {
+		return floor, fmt.Errorf("withdraw the generation: %w; bump it: %v", err, bumpErr)
+	}
+	return floor, fmt.Errorf("withdraw the generation: %w; it was bumped instead", err)
 }
 
 // BumpPublishedSessionGeneration starts a new generation of the record

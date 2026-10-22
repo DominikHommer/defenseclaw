@@ -43,19 +43,22 @@ import (
 // of an earlier generation. Install, upgrade, repair and ensure bump the
 // generation when they start too (bumpWindowsHookSessionGeneration).
 //
-// They also hold the records from their start until the folder has been
-// replaced and bumped (enterprisepolicy.HoldPublishedSessionRecords: the
-// file DefenseClaw-HookSessions.hold in the hook runtime folder, to which
-// no standard user can add a file; not the Cisco folder, where a stock
-// ProgramData access list lets them). While the hold is there the hook allows
-// nothing during an outage. An account that kept a handle with WRITE_DAC on
-// the folder can make it look trusted again and put an older generation
-// file and its allows back, and a run that cannot replace the folder (the
-// handle refuses the move) or cannot give it an owner the hook refuses (no
-// SeRestorePrivilege) has nothing in the folder to stop that; so a run that
-// fails before the folder was replaced leaves the hold, and status and
-// verify report it, until a later run replaces the folder (GAP-0352, 1.0.4
-// review loop round 4).
+// From their start until the folder has been replaced and bumped they also
+// keep the folder refused and held. An account that kept a handle with
+// WRITE_DAC on the folder can make its access list look trusted again and
+// put an older generation file and its allows back, so the folder is given
+// an owner the hook refuses, which no such handle can change
+// (refuseWindowsHookSessionRoot: LOCAL SERVICE, or without
+// SeRestorePrivilege the lifecycle's own account), and a run that fails
+// before the folder was replaced leaves it refused. The hold
+// (enterprisepolicy.HoldPublishedSessionRecords: the file
+// DefenseClaw-HookSessions.hold in the hook runtime folder, to which no
+// standard user can add a file) is kept as well, and status and verify
+// report it, but the hook no longer depends on it alone: an account that
+// also kept a handle on the hook runtime folder could delete it (GAP-0352,
+// 1.0.4 review loop round 4, guard loop round 2). Only a lifecycle that
+// can give the folder neither owner (SYSTEM without SeRestorePrivilege)
+// falls back to the hold alone.
 
 var (
 	windowsHookSessionDir = func() (string, error) {
@@ -83,12 +86,14 @@ func windowsHookSessionSDDL(gateway *windows.SID) string {
 }
 
 // windowsHookSessionClosedSDDL closes a folder the lifecycle retires when it
-// cannot give it windowsHookSessionRetiredSDDL: no entry for standard users,
-// so the hook cannot read the folder's access list and refuses every record
-// in it. Its owner is Administrators, so an account whose retained handle
-// writes a trusted DACL back makes the folder look trusted again: only the
-// hold, which stays when the folder cannot then be moved aside, keeps the
-// hook from trusting what the account puts back.
+// can give it no owner the hook refuses (refuseWindowsHookSessionRoot): no
+// entry for standard users, so the hook cannot read the folder's access
+// list and refuses every record in it. Its owner is Administrators, so an
+// account whose retained handle writes a trusted DACL back makes the
+// folder look trusted again: only the hold, which stays when the folder
+// cannot then be moved aside, keeps the hook from trusting what the account
+// puts back. Only a lifecycle that runs as SYSTEM without
+// SeRestorePrivilege gets here.
 func windowsHookSessionClosedSDDL(gateway *windows.SID) string {
 	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;" + gateway.String() + ")"
 }
@@ -100,6 +105,70 @@ func windowsHookSessionClosedSDDL(gateway *windows.SID) string {
 // account that holds a handle with WRITE_DAC on the folder cannot make the
 // hook trust it again; no entry for standard users or the gateway.
 const windowsHookSessionRetiredSDDL = "O:LSG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+
+// windowsHookSessionSelfOwnedSDDL is windowsHookSessionRetiredSDDL for a
+// lifecycle without SeRestorePrivilege: owned by the account the lifecycle
+// runs as (an elevated administrator's own account, which a caller may
+// always make the owner without a privilege, and which the hook refuses as
+// an owner), with the same entries.
+func windowsHookSessionSelfOwnedSDDL(self *windows.SID) string {
+	return "O:" + self.String() + "G:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+}
+
+// windowsHookSessionLifecycleAccount is the account this lifecycle runs as
+// (replaceable in tests).
+var windowsHookSessionLifecycleAccount = func() (*windows.SID, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return nil, err
+	}
+	return user.User.Sid, nil
+}
+
+// windowsHookSessionOwnerRefused reports an owner the hook refuses for the
+// record root and the folders above a record, and the lifecycle does not
+// trust either (windowsPathOwnedByAdministrators): not SYSTEM,
+// Administrators or TrustedInstaller (managed.IsWindowsTrustedAdminOwner),
+// and not the gateway service, which the hook accepts as an owner.
+func windowsHookSessionOwnerRefused(sid *windows.SID) bool {
+	if sid == nil || managed.IsWindowsTrustedAdminOwner(sid) {
+		return false
+	}
+	gateway, err := managed.WindowsServiceAccountSID(windowsHookSessionGatewayAccount)
+	return err == nil && gateway != nil && !sid.Equals(gateway)
+}
+
+// refuseWindowsHookSessionRoot gives the record root at root an owner the
+// hook refuses and that no handle an account kept can change (an owner
+// change needs WRITE_OWNER, and naming another account needs
+// SeRestorePrivilege), with no entry for standard users or the gateway:
+// LOCAL SERVICE (windowsHookSessionRetiredSDDL, with SeRestorePrivilege),
+// or else the account this lifecycle runs as when the hook refuses it as
+// an owner (windowsHookSessionSelfOwnedSDDL: an elevated administrator
+// whose token lacks the privilege). Whatever DACL a handle that kept
+// WRITE_DAC writes back afterwards, the hook refuses the folder until a
+// later run replaces it (GAP-0352, 1.0.4 guard loop round 2: without the
+// privilege the folder used to keep an Administrators owner, so a handle
+// that also reached the hook runtime folder could delete the hold, write a
+// trusted DACL back and put the old tree back). An error means neither
+// owner took.
+func refuseWindowsHookSessionRoot(root string) error {
+	retireErr := windowsHookSessionOwnerRestorePrivilege(func() error { return applyWindowsSDDL(root, windowsHookSessionRetiredSDDL) })
+	if retireErr == nil {
+		return nil
+	}
+	self, err := windowsHookSessionLifecycleAccount()
+	if err != nil {
+		return fmt.Errorf("give it the LOCAL SERVICE owner: %v; read this lifecycle's account: %w", retireErr, err)
+	}
+	if !windowsHookSessionOwnerRefused(self) {
+		return fmt.Errorf("give it the LOCAL SERVICE owner: %v; this lifecycle runs as %s, an owner the hook trusts", retireErr, self.String())
+	}
+	if err := applyWindowsSDDL(root, windowsHookSessionSelfOwnedSDDL(self)); err != nil {
+		return fmt.Errorf("give it the LOCAL SERVICE owner: %v; give it this lifecycle's own account as its owner: %w", retireErr, err)
+	}
+	return nil
+}
 
 // windowsHookSessionRetiredInfix names a retired record root next to the
 // root: <root>.retired-<nanoseconds>. The hook never reads it.
@@ -116,12 +185,16 @@ var windowsHookSessionRootTrustProblem = func(root string) error {
 	return enterprisepolicy.ValidatePublishedSessionRoot(root, enterprisepolicy.PublishedSessionTrust{ServiceAccount: windowsHookSessionGatewayAccount})
 }
 
-// bumpWindowsHookSessionGeneration holds the records and bumps the record
-// generation of an existing record folder before an install, upgrade,
-// repair or ensure changes anything (GAP-0352): no record written before
-// the action proves anything once it started, and the hook allows nothing
-// during an outage until ensureWindowsHookSessionRoot has replaced the
-// folder, bumped it again and removed the hold. Best effort.
+// bumpWindowsHookSessionGeneration holds the records, gives an existing
+// record folder an owner the hook refuses (refuseWindowsHookSessionRoot)
+// and bumps its record generation before an install, upgrade, repair or
+// ensure changes anything (GAP-0352): no record written before the action
+// proves anything once it started, and the hook allows nothing during an
+// outage until ensureWindowsHookSessionRoot has replaced the folder, bumped
+// the new one and removed the hold. The refused owner keeps that so while
+// the action runs, and after an action that stopped, also against an
+// account that kept handles on the folder and on the hook runtime folder
+// with the hold (1.0.4 guard loop round 2). Best effort.
 func bumpWindowsHookSessionGeneration(action string) {
 	switch action {
 	case "install", "upgrade", "repair", "ensure":
@@ -136,9 +209,11 @@ func bumpWindowsHookSessionGeneration(action string) {
 		return
 	}
 	_ = enterprisepolicy.HoldPublishedSessionRecords(root)
-	if _, err := os.Lstat(root); err != nil {
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || winpath.RejectReparseChain(root) != nil {
 		return
 	}
+	_ = refuseWindowsHookSessionRoot(root)
 	_ = enterprisepolicy.BumpPublishedSessionGeneration(root)
 }
 
@@ -156,19 +231,18 @@ func bumpWindowsHookSessionGeneration(action string) {
 // put back, and could grant itself write access again after this repair and
 // put a fresh allow of the new generation there. So the root folder object
 // is retired with everything in it (retireWindowsHookSessionRoot, or moved
-// aside when an account other than Administrators or SYSTEM owns it: its
-// owner keeps WRITE_DAC over it) and a new, empty one is created; the
-// gateway creates new record folders in it. When the folder cannot be moved
-// (a handle that does not share delete access), it keeps the retired owner,
-// which the hook refuses, and the step fails, so the next repair or ensure
-// tries again.
+// aside when an account other than Administrators or SYSTEM owns it: the
+// start of the run gave it a refused owner, or its owner keeps WRITE_DAC
+// over it) and a new, empty one is created; the gateway creates new record
+// folders in it. When the folder cannot be moved (a handle that does not
+// share delete access), it keeps an owner the hook refuses
+// (refuseWindowsHookSessionRoot), and the step fails, so the next repair or
+// ensure tries again.
 //
 // The records are held from the start of the step
 // (enterprisepolicy.HoldPublishedSessionRecords), and the hold is removed
-// only once the new folder was bumped: a step that fails leaves it, so the
-// hook allows nothing during an outage even when the folder could get no
-// owner the hook refuses (a lifecycle without SeRestorePrivilege) and a
-// retained handle then wrote a trusted DACL back.
+// only once the new folder was bumped: a step that fails leaves it, as the
+// last guard of a lifecycle that could give the folder no refused owner.
 func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 	holdErr := enterprisepolicy.HoldPublishedSessionRecords(root)
 	if err := replaceWindowsHookSessionRoot(root, gateway); err != nil {
@@ -200,8 +274,10 @@ func replaceWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 			return fmt.Errorf("read the owner of %s: %w", root, ownerErr)
 		}
 		if !trusted {
+			// Refused at the start of the run, or owned by another
+			// account, which keeps WRITE_DAC over it.
 			if err := moveWindowsHookSessionRootAside(root); err != nil {
-				return fmt.Errorf("replace %s, which an account other than Administrators or SYSTEM owns: %w", root, err)
+				return fmt.Errorf("replace %s, which is not owned by Administrators or SYSTEM, so the hook refuses it until it is replaced: %w", root, err)
 			}
 		} else if err := retireWindowsHookSessionRoot(root, gateway); err != nil {
 			if problem := windowsHookSessionRootTrustProblem(root); problem != nil {
@@ -240,13 +316,14 @@ func replaceWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 }
 
 // retireWindowsHookSessionRoot takes the record root folder object out of
-// use for good. It first gets windowsHookSessionRetiredSDDL, so the hook
-// refuses it whatever a handle that kept WRITE_DAC does to its DACL (without
-// SeRestorePrivilege it is closed to standard users instead), then it is
-// moved aside, where the hook never reads it, and removed. The caller
-// creates a new root.
+// use for good. It first gets an owner the hook refuses
+// (refuseWindowsHookSessionRoot), so the hook refuses it whatever a handle
+// that kept WRITE_DAC does to its DACL (a lifecycle that can give it no
+// such owner closes it to standard users instead), then it is moved aside,
+// where the hook never reads it, and removed. The caller creates a new
+// root.
 func retireWindowsHookSessionRoot(root string, gateway *windows.SID) error {
-	retireErr := windowsHookSessionOwnerRestorePrivilege(func() error { return applyWindowsSDDL(root, windowsHookSessionRetiredSDDL) })
+	retireErr := refuseWindowsHookSessionRoot(root)
 	if retireErr != nil {
 		if err := applyWindowsSDDL(root, windowsHookSessionClosedSDDL(gateway)); err != nil {
 			return fmt.Errorf("give it an owner the hook refuses: %v; close it: %w", retireErr, err)
