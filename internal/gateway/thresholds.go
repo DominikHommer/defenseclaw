@@ -401,7 +401,7 @@ func ResolveThresholds(g *Generation, connector, profile string) ResolvedThresho
 	}
 	cfg := g.Config
 	if profile != "" && g.Profiles != nil {
-		if derived, ok := g.Profiles.profiles[profile]; ok {
+		if derived, ok := g.Profiles.derivedProfile(profile); ok {
 			cfg = derived.Config
 		}
 	}

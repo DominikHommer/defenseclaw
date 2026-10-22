@@ -181,27 +181,13 @@ type profileDecision struct {
 	// Assignment is the 1-based index of the assignment that matched, 0 for
 	// the default.
 	Assignment int
-	// Refused, when set, says why the request is refused: no single profile
-	// is safe for it, because a fact that decides its profile is unproven
-	// and the profiles that may apply do not cover each other
-	// (resolveProfileUnproven). The request is refused wherever its surface
-	// can block it (guardrail_profile_refusal.go); Name is the strictest of
-	// those profiles by hook mode and block_at, for the rest.
-	Refused string
 	// Unproven names the identity facts this pass did not prove, and
-	// Candidates the profiles the decision chose among (selectProfile);
-	// both empty for a fully proven decision.
+	// Candidates the profiles the decision chose among (selectProfile):
+	// Name is the one that covers the others, or their meet. Both are empty
+	// for a decision of one proven profile. Explain (an administrator view)
+	// alone shows Candidates.
 	Unproven   []string
 	Candidates []string
-}
-
-// profileRefusal is why the request on ctx is refused (profileDecision.Refused),
-// or "".
-func profileRefusal(ctx context.Context) string {
-	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil {
-		return resolved.decision.Refused
-	}
-	return ""
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
@@ -234,6 +220,9 @@ type guardrailProfileSet struct {
 	// provenProfiles holds the last fully proven profile of each account
 	// incarnation (selectProfile).
 	provenProfiles *provenProfileStore
+	// meets holds the meets of profiles requests resolved to
+	// (*profileMeet by name, guardrail_profile_meet_gw.go).
+	meets sync.Map
 }
 
 // newGuardrailProfileSet derives every profile of cfg and preloads their rule
@@ -600,9 +589,6 @@ func requestLegacyAgentIdentity(ctx context.Context, agent string) (profileAgent
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// A refused decision is answered by each inspect handler
-		// (refuseProfileInspect), so a sandbox relay of the request is
-		// refused the same way.
 		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(r.Context(), "")))
 	})
 }
@@ -651,7 +637,7 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent, legacy)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
-		if derived, ok := set.profiles[decision.Name]; ok {
+		if derived, ok := set.derivedProfile(decision.Name); ok {
 			resolved.derived = derived.Config
 		}
 	}
@@ -982,7 +968,7 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 
 func (set *guardrailProfileSet) decision(name, reason, group, source string) profileDecision {
 	decision := profileDecision{Name: name, Match: reason, MatchedGroup: group, SubjectSource: source}
-	if derived, ok := set.profiles[name]; ok {
+	if derived, ok := set.derivedProfile(name); ok {
 		decision.Digest = derived.Digest
 	} else {
 		decision.Name = ""
@@ -1265,7 +1251,7 @@ func snapshotRulePackGenerationFor(ctx context.Context, connectorName string) *c
 		resolved = resolveGuardrailProfileFor(ctx, set)
 	}
 	if resolved != nil && resolved.derived != nil {
-		if generation := resolved.ruleGeneration(connectorName); generation != nil {
+		if generation := resolved.ruleGenerationFor(ctx, connectorName); generation != nil {
 			return generation
 		}
 	}
@@ -1295,6 +1281,19 @@ func scanContentRulesForConnectorFor(ctx context.Context, connectorName, text, t
 	return scanContentRuleCategoryWithGeneration(snapshotRulePackGenerationFor(ctx, connectorName), text, toolName, scope, "")
 }
 
+// ruleGenerationFor is ruleGeneration for a request on ctx: a meet scans
+// with every rule of its members' packs, the base generation's included.
+func (r *resolvedGuardrailProfile) ruleGenerationFor(ctx context.Context, connectorName string) *compiledRulePackCategories {
+	if r != nil && r.set != nil {
+		if meet := r.set.meet(r.decision.Name); meet != nil {
+			return meet.ruleGeneration(ctx, r.set, connectorName)
+		}
+	}
+	return r.ruleGeneration(connectorName)
+}
+
+// ruleGeneration is the compiled rule pack of the resolved profile for
+// connectorName, nil when it is the base configuration's.
 func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compiledRulePackCategories {
 	if r == nil || r.set == nil || r.derived == nil || r.set.base == nil {
 		return nil
@@ -1394,7 +1393,7 @@ func profileProxyOverride(ctx context.Context, connectorName string) (mode, bloc
 func proxyRuleGeneration(ctx context.Context) *compiledRulePackCategories {
 	connectorName := profileRequestConnector(ctx)
 	if resolved := proxyProfileFor(ctx); resolved != nil {
-		if generation := resolved.ruleGeneration(connectorName); generation != nil {
+		if generation := resolved.ruleGenerationFor(ctx, connectorName); generation != nil {
 			return generation
 		}
 	}
@@ -1634,6 +1633,13 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	refreshedFacts := false
 	if user != "" {
 		found, err := profileExplainSubjectLookup(user)
+		if caller, ok := profileExplainCallerSubject(query.Get("caller_facts"), user); ok {
+			// The administrator's own NSS lookup as root resolved the account
+			// (GAP-0500); the gateway's lookup above still refreshed what the
+			// hooks read, and the cache block says what they use.
+			found, err = caller, nil
+			out["facts_source"] = "caller"
+		}
 		var ambiguous *useridentity.AmbiguousAccountError
 		if errors.As(err, &ambiguous) {
 			// A bare name two accounts share is explained as neither: the
@@ -1710,12 +1716,15 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	warnings := profileExplainWarnings(set, decision, subject)
 	if len(decision.Unproven) > 0 {
 		out["unproven_facts"] = decision.Unproven
-		out["candidate_profiles"] = decision.Candidates
 	}
-	if decision.Refused != "" {
-		out["refused"] = true
-		out["refused_reason"] = decision.Refused
-		warnings = append(warnings, unprovenRefusalNote(decision))
+	if len(decision.Candidates) > 0 {
+		// An administrator view: the profiles that may apply, and the
+		// strictest combination of them that does.
+		out["candidate_profiles"] = decision.Candidates
+		if config.IsProfileMeet(decision.Name) {
+			warnings = append(warnings, fmt.Sprintf("more than one profile may apply (%s): their strictest combination applies, "+
+				"with every block, rule pack and sandbox limit of each and only the allows they share", strings.Join(decision.Candidates, ", ")))
+		}
 	}
 	if agent != "" {
 		warnings = append(warnings, fmt.Sprintf("agent %q is not verified against a host identity record by profile-explain; confirm it with agent identities before relying on this answer", agent))
@@ -1741,7 +1750,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		warnings = append(warnings, warning)
 	}
 	effective := set.base
-	if derived, ok := set.profiles[decision.Name]; ok {
+	if derived, ok := set.derivedProfile(decision.Name); ok {
 		effective = derived.Config
 	}
 	if note := set.pendingRulePackNote(decision.Name, effective, connectorName); note != "" {

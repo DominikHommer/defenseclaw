@@ -126,6 +126,46 @@ func LocalAccountRecords(ctx context.Context) (map[string]LocalAccountRecord, er
 	return platformLocalAccountRecords(ctx)
 }
 
+// LocalAccountRecordByName returns the record of the local account name as
+// LocalAccountRecords lists it, read for that account alone (macOS), and
+// false when the local node holds no such account. Other platforms have
+// none.
+func LocalAccountRecordByName(ctx context.Context, name string) (LocalAccountRecord, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validName(name); err != nil {
+		return LocalAccountRecord{}, false, err
+	}
+	return platformLocalAccountRecord(ctx, name)
+}
+
+// parseDSCLRead parses `dscl . -read /Users/<name> <attributes>` output
+// ("Attribute: value", or "Attribute:" with the value on the next,
+// indented line) into attribute -> value.
+func parseDSCLRead(output string) map[string]string {
+	out := map[string]string{}
+	pending := ""
+	for _, line := range strings.Split(output, "\n") {
+		if pending != "" && strings.HasPrefix(line, " ") {
+			out[pending] = strings.TrimSpace(line)
+			pending = ""
+			continue
+		}
+		pending = ""
+		key, value, ok := strings.Cut(line, ":")
+		if !ok || key == "" || strings.ContainsAny(key, " \t") {
+			continue
+		}
+		if value = strings.TrimSpace(value); value == "" {
+			pending = key
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
 // parseDSCLAttribute parses `dscl . -list /Users <attribute>` rows ("name
 // value"; a home may hold spaces, and a record without the attribute is
 // listed with no value) into name -> value.

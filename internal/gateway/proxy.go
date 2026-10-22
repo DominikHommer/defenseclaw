@@ -1083,9 +1083,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	r = p.withProxyAgent(r)
-	if refuseProfileProxy(w, r) {
-		return
-	}
 	// A hop the interceptor rewrote is agent traffic here too, so doctor does
 	// not report the OpenClaw Responses calls the proxy handled as a bypass
 	// (GAP-0245). Secure Client keeps the health record of main (issue #1092).
@@ -2787,9 +2784,6 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 	r = p.withProxyAgent(r)
-	if refuseProfileProxy(w, r) {
-		return
-	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {

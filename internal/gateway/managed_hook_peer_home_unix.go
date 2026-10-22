@@ -150,13 +150,6 @@ type managedHookPeerHomeCache struct {
 	// adopted yet (agentIncarnation). It is kept across restarts with the
 	// homes.
 	legacy map[int]bool
-	// legacyNames keeps the name a build before 1.0.4 last gave each uid
-	// (the name its homes file kept), persisted as LegacyName: it names the
-	// account that build derived the uid's 1.0.3 agent identities for, which
-	// the guardrail profile bridge proves an upgraded assignment's owner by
-	// whatever the agent ledger kept (profileAgentBridge). Remove with
-	// agentidentity.LegacyAgentID.
-	legacyNames map[int]string
 	// homesFile persists homes and names in the gateway's data directory,
 	// so a gateway that starts while the directory is away still has the
 	// last home and name of each uid and keeps its agent identity
@@ -173,11 +166,9 @@ type managedHookPeerHomeCache struct {
 // managedHookPeerIncarnations are the first and the last account token a
 // uid resolved to. base is agentIncarnationUnproven when the first account
 // this gateway saw hold the uid cannot be shown to be the one older builds
-// saw (agentIncarnation); upgrade is then the token of that first account,
-// the account the upgrade binds the uid's 1.0.3 agents entries to
-// (legacyProof).
+// saw (agentIncarnation).
 type managedHookPeerIncarnations struct {
-	base, last, upgrade string
+	base, last string
 }
 
 // agentIncarnationUnproven is the base token of a uid whose first account
@@ -244,16 +235,9 @@ type managedHookPeerLast struct {
 	// 1.0.4 ignore them.
 	BaseIncarnation string `json:"base_incarnation,omitempty"`
 	Incarnation     string `json:"incarnation,omitempty"`
-	// UpgradeIncarnation is the token of the first account seen hold a uid
-	// an older build saw, when that token showed no continuity
-	// (managedHookPeerIncarnations.upgrade).
-	UpgradeIncarnation string `json:"upgrade_incarnation,omitempty"`
 	// LegacyHolder marks a uid an older build saw for which no account
 	// token was adopted yet (managedHookPeerHomeCache.legacy).
 	LegacyHolder bool `json:"legacy_holder,omitempty"`
-	// LegacyName is the name a build before 1.0.4 last gave the uid
-	// (managedHookPeerHomeCache.legacyNames).
-	LegacyName string `json:"legacy_name,omitempty"`
 	// Format is set on the managedHookPeerHomesFormatKey entry only.
 	Format int `json:"format,omitempty"`
 }
@@ -286,17 +270,6 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 			}
 			c.legacy[uid] = true
 		}
-		legacyName := last.LegacyName
-		if legacyFile {
-			legacyName = last.Name
-		}
-		if _, known := c.legacyNames[uid]; !known && legacyName != "" &&
-			sanitizeLLMEventUser(legacyName) == legacyName && len(c.legacyNames) < managedHookPeerHomesMax {
-			if c.legacyNames == nil {
-				c.legacyNames = make(map[int]string)
-			}
-			c.legacyNames[uid] = legacyName
-		}
 		if _, known := c.homes[uid]; !known && last.Home != "" &&
 			normalizeManagedHookPeerHome(last.Home) == last.Home && len(c.homes) < managedHookPeerHomesMax {
 			if c.homes == nil {
@@ -316,11 +289,7 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 			if c.incarnations == nil {
 				c.incarnations = make(map[int]managedHookPeerIncarnations)
 			}
-			tokens := managedHookPeerIncarnations{base: last.BaseIncarnation, last: firstNonEmpty(last.Incarnation, last.BaseIncarnation)}
-			if tokens.base == agentIncarnationUnproven && validAccountToken(last.UpgradeIncarnation) {
-				tokens.upgrade = last.UpgradeIncarnation
-			}
-			c.incarnations[uid] = tokens
+			c.incarnations[uid] = managedHookPeerIncarnations{base: last.BaseIncarnation, last: firstNonEmpty(last.Incarnation, last.BaseIncarnation)}
 		}
 	}
 }
@@ -342,17 +311,12 @@ func (c *managedHookPeerHomeCache) saveHomesLocked() {
 	}
 	for uid, tokens := range c.incarnations {
 		last := stored[strconv.Itoa(uid)]
-		last.BaseIncarnation, last.Incarnation, last.UpgradeIncarnation = tokens.base, tokens.last, tokens.upgrade
+		last.BaseIncarnation, last.Incarnation = tokens.base, tokens.last
 		stored[strconv.Itoa(uid)] = last
 	}
 	for uid := range c.legacy {
 		last := stored[strconv.Itoa(uid)]
 		last.LegacyHolder = true
-		stored[strconv.Itoa(uid)] = last
-	}
-	for uid, name := range c.legacyNames {
-		last := stored[strconv.Itoa(uid)]
-		last.LegacyName = name
 		stored[strconv.Itoa(uid)] = last
 	}
 	stored[managedHookPeerHomesFormatKey] = managedHookPeerLast{Format: 1}
@@ -407,6 +371,11 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	}
 	stamp := managedHookPeerStamp()
 	c.mu.Lock()
+	if stamp == "" && !managedHookPeerAccountsConfirmed() {
+		// A listing that has not confirmed the accounts yet changes nothing
+		// here; directory serves no facts until it does.
+		stamp = c.stamp
+	}
 	now := c.now()
 	if c.resolver == nil || now.Sub(c.resolvedAt) > managedHookPeerHomeTTL || stamp != c.stamp {
 		c.resolver = c.newResolver()
@@ -510,6 +479,12 @@ func (c *managedHookPeerHomeCache) recheckAccount(uid int, entry *managedHookPee
 	incarnation, incarnationKnown := "", false
 	if ok {
 		incarnation, incarnationKnown = managedHookPeerAccountIncarnation(account)
+		if managedHookPeerRecordChanged(account) {
+			// The account's own record is newer than the listing (deleted
+			// and created again, or another primary group): the listing
+			// confirms nothing until the next one (GAP-0494, GAP-0392).
+			managedHookPeerAccountsInvalidate()
+		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -561,6 +536,14 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	}
 	key := strconv.Itoa(uid)
 	c.noteHolder(uid, key)
+	if !managedHookPeerAccountsConfirmed() {
+		// A group fact newer than the last macOS account listing is not
+		// proven: the listing that would tie the cached facts to the
+		// account holding the uid now has not ended (GAP-0392, GAP-0494).
+		// The request is decided as one of an unproven account, by the
+		// strictest combination of the profiles that may apply.
+		return useridentity.DirectoryFacts{}, false
+	}
 	cache := c.directoryCache()
 	forgetOnSpoolAccountChange(cache, key, time.Now())
 	return cache.get(key, block)
@@ -1047,9 +1030,8 @@ func (c *managedHookPeerHomeCache) accountToken(uid int) (string, bool) {
 // (review of GAP-0947, loop 3). It keeps the IDs of before only when its
 // token shows continuity (legacyContinuity); otherwise the base is
 // agentIncarnationUnproven, every account derives its own IDs, and the rows
-// of before are retired. That first account is still the one the upgrade
-// binds the uid's 1.0.3 agents entries to (upgrade, legacyProof), so an
-// existing assignment keeps working for it.
+// of before are retired. A uid's 1.0.3 agents entries are bound by the
+// upgrade's migration map instead (legacyAgentOwnerBound).
 func (c *managedHookPeerHomeCache) agentIncarnation(uid int) string {
 	token, known := c.accountToken(uid)
 	c.mu.Lock()
@@ -1064,7 +1046,7 @@ func (c *managedHookPeerHomeCache) agentIncarnation(uid int) string {
 			}
 			tokens.base = token
 			if c.legacy[uid] && !legacyContinuity(uid, token) {
-				tokens.base, tokens.upgrade = agentIncarnationUnproven, token
+				tokens.base = agentIncarnationUnproven
 			}
 			delete(c.legacy, uid)
 		}
@@ -1201,43 +1183,6 @@ func (c *managedHookPeerHomeCache) holderHistory(uid int) (last string, changed 
 		return "", false
 	}
 	return tokens.last, tokens.base != tokens.last || tokens.base == agentIncarnationUnproven
-}
-
-// legacyProof is what binds the account that holds uid now to the 1.0.3
-// agent identities a build before 1.0.4 derived for the uid: name is the
-// name that build last gave the uid ("" when none), and bound reports that
-// the account that holds the uid now is the one the upgrade bound them to,
-// whose current agent identities are derived with incarnation
-// (agentIncarnation). The upgrade binds them to the first account this
-// gateway sees hold the uid after the upgrade, whatever its token: its
-// token shows continuity (a local account, an SSSD id-mapped SID), or it is
-// the first token this build adopted for the uid (a macOS listed record, an
-// RFC 2307 or winbind SID; upgrade), so an existing assignment keeps working
-// automatically (review loop 3). While no token was ever known since the
-// upgrade, nothing this build sees tells one holder of the uid from another
-// (it derives the same agent identities for all of them, as 1.0.3 did), and
-// the account is bound as 1.0.3 bound it. Any later account that holds the
-// uid (another token) is not bound; the bridge also needs the account's name
-// to be the one 1.0.3 gave the uid (profileAgentBridge.provesLocked). A uid
-// no build before 1.0.4 saw is never bound here.
-func (c *managedHookPeerHomeCache) legacyProof(uid int) (name, incarnation string, bound bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.loadHomesLocked()
-	name = c.legacyNames[uid]
-	if c.legacy[uid] {
-		// No token adopted since the upgrade: holders cannot differ here.
-		return name, "", true
-	}
-	tokens, seen := c.incarnations[uid]
-	switch {
-	case !seen:
-		return name, "", false
-	case tokens.base == agentIncarnationUnproven:
-		return name, tokens.upgrade, tokens.upgrade != "" && tokens.last == tokens.upgrade
-	default:
-		return name, "", tokens.last == tokens.base
-	}
 }
 
 // validAccountToken bounds an account token kept or read back.

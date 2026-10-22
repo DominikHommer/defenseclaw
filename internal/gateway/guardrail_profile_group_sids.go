@@ -414,6 +414,31 @@ func (s *profileGroupSIDs) sid(name string) (string, bool) {
 	return entry.sid, true
 }
 
+// unresolvedAny reports whether a group name of entries that matches by its
+// SID has none yet for a reason other than that no such group exists: its
+// lookup is in flight or failed. Such a name may name one of the token's
+// groups (GAP-0487). false for a set that keeps no SIDs.
+func (s *profileGroupSIDs) unresolvedAny(entries []string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inflight.Load() > 0 {
+		s.absorbLocked(time.Now())
+	}
+	for _, name := range entries {
+		if !profileGroupNeedsSID(name) {
+			continue
+		}
+		entry, ok := s.entries[foldKey(norm.NFC.String(strings.TrimSpace(name)))]
+		if ok && entry.sid == "" && !errors.Is(entry.err, errProfileGroupUnknown) {
+			return true
+		}
+	}
+	return false
+}
+
 // matchKey keys a memoised decision by the SIDs known when it was made.
 func (s *profileGroupSIDs) matchKey(key [sha256.Size]byte) [sha256.Size]byte {
 	var generation [8]byte

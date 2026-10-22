@@ -192,7 +192,7 @@ decides the domain of an SSSD account from its uid, not from its name:
   not answer in time, the lookup fails as a whole. The gateway keeps the
   account's last facts for up to an hour and retries every 15 seconds, instead
   of keeping facts without the realm, principal or groups. With no earlier
-  facts, requests get the default profile with `default_lookup_failed`. A
+  facts, requests get the default profile, or the strictest combination of it and the other candidates (`default_lookup_failed`). A
   verified uid, SID or agent assignment applies only when no earlier assignment
   could depend on the missing names or groups (see
   [Only verified facts select a profile](/docs/reference/policy/guardrail-profiles#only-verified-facts-select-a-profile)).

@@ -113,6 +113,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		}
 	}
 	keep, left := map[string]bool{}, map[string]bool{}
+	owners := map[int]LegacyAgentOwner{}
 	var passErr error
 	answeredDirectories := map[string]bool{}
 	for _, account := range accounts {
@@ -174,6 +175,11 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 				}
 			}
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
+			if err == nil && record.User != "" {
+				if token := LegacyAgentOwnerToken(record.AccountIncarnation, identitySpoolAccountHome(account.UID)); token != "" {
+					owners[account.UID] = LegacyAgentOwner{User: record.User, Token: token}
+				}
+			}
 			if err == nil && identitySpoolDirectoryRecord(record) {
 				if key := identitySpoolDirectoryKey(record); key != "" {
 					answeredDirectories[key] = true
@@ -206,6 +212,9 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			}
 		}
 	}
+	if err := writeLegacyAgentOwnersOnce(dir, owners, passErr == nil, setOwnership); err != nil {
+		passErr = errors.Join(passErr, err)
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return errors.Join(passErr, fmt.Errorf("read identity spool: %w", err))
@@ -218,7 +227,8 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	unresolved := map[string]bool{}
 	var withdrawErr error
 	for _, entry := range entries {
-		if keep[entry.Name()] {
+		// The migration map is written once and kept for good.
+		if keep[entry.Name()] || entry.Name() == LegacyAgentOwnersFile {
 			continue
 		}
 		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge && !left[entry.Name()] &&
@@ -311,6 +321,48 @@ func identitySpoolWithdrawn(dir string, entry os.DirEntry, withdraw IdentitySpoo
 	}
 	record, err := ReadIdentitySpoolRecord(dir, key, nil)
 	return err == nil && withdraw(uid, record)
+}
+
+// identitySpoolAccountHome is the home directory the account database gives
+// uid, "" when it gives none; tests replace it.
+var identitySpoolAccountHome = func(uid int) string {
+	account, err := StandaloneResolver().LookupUID(uid)
+	if err != nil || account.UID != uid {
+		return ""
+	}
+	return account.Home
+}
+
+// legacyAgentOwnersPasses counts, per spool directory, the passes that did
+// not collect every account before the migration map was written.
+var legacyAgentOwnersPasses = struct {
+	sync.Mutex
+	byDir map[string]int
+}{byDir: map[string]int{}}
+
+// legacyAgentOwnersPassLimit is how many passes with a failed account the
+// guardian waits before it records the migration map without that account.
+const legacyAgentOwnersPassLimit = 3
+
+// writeLegacyAgentOwnersOnce records the migration map of the upgrade at
+// the guardian's first pass that collected every account (complete), or at
+// the legacyAgentOwnersPassLimit-th pass with what it collected, and never
+// again (LegacyAgentOwnersFile).
+func writeLegacyAgentOwnersOnce(dir string, owners map[int]LegacyAgentOwner, complete bool, setOwnership func(string) error) error {
+	if LegacyAgentOwnersRecorded(dir) || len(owners) == 0 {
+		return nil
+	}
+	legacyAgentOwnersPasses.Lock()
+	legacyAgentOwnersPasses.byDir[dir]++
+	passes := legacyAgentOwnersPasses.byDir[dir]
+	legacyAgentOwnersPasses.Unlock()
+	if !complete && passes < legacyAgentOwnersPassLimit {
+		return nil
+	}
+	if _, err := WriteLegacyAgentOwners(dir, owners, time.Now(), setOwnership); err != nil {
+		return fmt.Errorf("record the agent identity migration map: %w", err)
+	}
+	return nil
 }
 
 // identitySpoolCollect is collectIdentitySpoolRecord; tests replace it.

@@ -33,7 +33,7 @@ DefenseClaw reads local accounts, LDAP and SSSD, Active Directory over Kerberos,
 
 ## Agent identity
 
-Each agent gets an identity of its own instead of only inheriting the person's. The identities are digests of facts the gateway already holds, so they need no credential and stay the same across sessions and gateway restarts. In 1.0.4 the ID includes the account's domain, so an upgrade from 1.0.0–1.0.3 changes it. An old `agents` entry keeps applying to the account the upgrade binds it to, the account that holds the UID when the gateway first sees it after the upgrade under the name 1.0.3 gave it ([guardrail profiles](/docs/reference/policy/guardrail-profiles)); rebind the entry to the current ID shown by `defenseclaw agent identities`.
+Each agent gets an identity of its own instead of only inheriting the person's. The identities are digests of facts the gateway already holds, so they need no credential and stay the same across sessions and gateway restarts. On Linux and macOS the 1.0.4 ID includes the account's domain, so an upgrade from 1.0.0–1.0.3 changes it. An old `agents` entry keeps applying, with no rebind step, to the account a one-time migration map recorded for the UID ([guardrail profiles](/docs/reference/policy/guardrail-profiles)). Windows IDs of a SID are unchanged.
 
 <Flow
   direction="TB"

@@ -6,117 +6,21 @@ package gateway
 import (
 	"slices"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// stubLegacyProofFor makes every uid's agentIdentityLegacyProof bind its
-// 1.0.3 identities to the account named name whose current identities are
-// derived with incarnation (the first holder an upgrade saw).
-func stubLegacyProofFor(t *testing.T, name, incarnation string, bound bool) {
-	t.Helper()
-	previous := agentIdentityLegacyProof
-	t.Cleanup(func() { agentIdentityLegacyProof = previous })
-	agentIdentityLegacyProof = func(string) (string, string, bool) { return name, incarnation, bound }
-}
+// Decision 3 of the 1.0.4 identity design (GAP-0503): the last proven
+// profile is keyed by the whole account incarnation, so it never crosses
+// incarnations: no macOS account deleted and created again, and no uid or
+// name handed to another account, gets the former holder's profile.
 
-// Review loop 3, finding 1. An upgrade binds a uid's 1.0.3 agents entries to
-// the first account the gateway sees hold the uid, whatever its token: a
-// macOS listed record or an RFC 2307 SID shows no continuity, and the entry
-// stayed a maybe, so incomparable profiles refused hooks the exact agent ID
-// matched in 1.0.3. The claim is bound only for the incarnation the upgrade
-// bound: any other account's identity stays unproven.
-func TestLegacyAgentClaimIsBoundToTheIncarnationTheUpgradeBound(t *testing.T) {
-	const upgraded = "record:5f1c0a1e00004000"
-	stubLegacyProofFor(t, "alice", upgraded, true)
-	if got := legacyAgentClaim("agt-1", "70001", "m", "alice", upgraded, false); !got.Bound || got.Name != "alice" {
-		t.Errorf("the incarnation the upgrade bound: %+v; want bound with the homes name", got)
-	}
-	for _, other := range []string{"", "record:0000000000000000", "sid:S-1-5-21-1-2-3-4"} {
-		if got := legacyAgentClaim("agt-1", "70001", "m", "alice", other, false); got.Bound {
-			t.Errorf("incarnation %q: %+v; want unbound", other, got)
-		}
-	}
-	stubLegacyProofFor(t, "alice", upgraded, false)
-	if got := legacyAgentClaim("agt-1", "70001", "m", "alice", upgraded, false); got.Bound {
-		t.Errorf("another account holds the uid now: %+v; want unbound", got)
-	}
-}
-
-// Review loop 3, finding 1, through the hook and explain: the 1.0.3 entry
-// of the incarnation the upgrade bound keeps applying as the agent's own
-// assignment (incomparable profiles included), and explain says the same
-// from the ledger record that names the incarnation. A later holder of the
-// uid, another domain's spelling or a namesake recorded since stay
-// unproven: the strictest profile or a refusal, never a weaker default.
-func TestUpgradeBoundIncarnationKeepsItsLegacyAssignment(t *testing.T) {
-	const upgraded = "record:5f1c0a1e00004000"
-	alice := profileSubject{UserID: "70001", UserName: "alice"}
-	for _, account := range []string{"alice", "alice@corp.example"} {
-		t.Run(account, func(t *testing.T) {
-			b := newStrictBridge(t, account)
-			in := b.inputs(70001, account)
-			legacy := agentidentity.LegacyAgentID(in)
-			incarnation := upgraded
-			previous := agentIdentityIncarnation
-			t.Cleanup(func() { agentIdentityIncarnation = previous })
-			agentIdentityIncarnation = func(string) string { return incarnation }
-			stubLegacyProofFor(t, account, upgraded, true)
-			b.ledger(nil)
-			facts := resolveHookAgentIdentity(b.peer(70001), agentHookRequest{ConnectorName: "codex"})
-			if !strings.EqualFold(facts.LegacyID, legacy) || facts.ID == agentidentity.AgentID(in) {
-				t.Fatalf("identity %q, 1.0.3 identity %q; want an incarnation-keyed identity and %q", facts.ID, facts.LegacyID, legacy)
-			}
-			got, mode := b.hook(loop2Only(legacy, "relaxed", "strict", loop2Incomparable), 70001, alice)
-			loop2Kept(t, "hook, ledger unreadable", got, mode)
-			tight := map[string]config.GuardrailProfile{"tight": {Mode: "action", BlockAt: "low"}, "watch": {Mode: "observe"}}
-			if got, mode := b.hook(loop2Only(legacy, "tight", "watch", tight), 70001, alice); got.Name != "tight" || got.Match != profileMatchAgent || mode != "action" {
-				t.Errorf("hook: %+v, mode %q; want the entry's tight as agent", got, mode)
-			}
-			// A stricter later assignment still wins over the kept entry.
-			cfg := loop2Only(legacy, "watch", "watch", tight)
-			cfg.Guardrail.ProfileAssignments = append(cfg.Guardrail.ProfileAssignments,
-				config.ProfileAssignment{Profile: "tight", Match: config.ProfileMatch{Connectors: []string{"codex"}}})
-			if got, _ := b.hook(cfg, 70001, alice); got.Name != "tight" {
-				t.Errorf("stricter connector assignment: %+v; want tight", got)
-			}
-
-			rec := b.record(70001, facts.ID, account)
-			rec.UserIncarnation = upgraded
-			b.ledger([]inventory.AgentIdentityRecord{b.record(70001, legacy, account), rec})
-			set := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, loop2Only(legacy, "relaxed", "strict", loop2Incomparable)).guardrailProfileSet()
-			if got := set.matchAgent(&alice, profileSubjectLookup, "codex", facts.ID, nil); got.Name != "relaxed" || got.Match != profileMatchAgent || got.Refused != "" {
-				t.Errorf("explain: %+v; want relaxed as agent", got)
-			}
-
-			// Another domain's namesake recorded under the uid withdraws it.
-			namesake := b.record(70001, "agt-00000000000000aa", "alice@lab.example")
-			b.ledger([]inventory.AgentIdentityRecord{b.record(70001, legacy, account), rec, namesake})
-			got, _ = b.hook(loop2Only(legacy, "relaxed", "strict", loop2Incomparable), 70001, alice)
-			loop2Unproven(t, "a namesake of another domain recorded since", got)
-
-			// A later holder of the uid (another record) is not bound.
-			b.ledger(nil)
-			incarnation = "record:0000000000000000"
-			stubLegacyProofFor(t, account, upgraded, false)
-			got, _ = b.hook(loop2Only(legacy, "relaxed", "strict", loop2Incomparable), 70001, alice)
-			loop2Unproven(t, "a later holder of the uid", got)
-			if got, mode := b.hook(loop2Only(legacy, "tight", "watch", tight), 70001, alice); got.Name != "tight" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
-				t.Errorf("a later holder: %+v, mode %q; want tight as default_lookup_failed, never the observe default", got, mode)
-			}
-		})
-	}
-}
-
-// loop3Subject is a verified subject of uid 501 with facts: a fully proven
+// incarnationSubject is a verified subject of uid 501 with facts: a fully proven
 // pass, or (upnPending) one whose UPN the guardian has not given yet.
-func loop3Subject(facts useridentity.DirectoryFacts, upnPending bool) profileSubject {
+func incarnationSubject(facts useridentity.DirectoryFacts, upnPending bool) profileSubject {
 	facts.Assurance, facts.ResolvedAt = useridentity.AssuranceVerified, time.Now()
 	subject := profileSubjectFromVerified(VerifiedSubject{UserID: "501", IDKind: useridentity.KindPOSIXUID, UserName: "alice",
 		Directory: facts, Source: subjectSourcePeerCredentials}, true)
@@ -187,13 +91,13 @@ func TestLastProvenProfileNeverCrossesAccountIncarnations(t *testing.T) {
 			}
 			former := tc.former
 			former.Groups = []string{"former-team", "everyone"}
-			before := loop3Subject(former, false)
+			before := incarnationSubject(former, false)
 			if got := set.match(&before, profileSubjectVerified, "codex", ""); got.Name != "former-team" || got.Match != profileMatchGroup {
 				t.Fatalf("former account: %+v; want former-team by group", got)
 			}
 			recreated := tc.recreated
 			recreated.Groups = []string{"everyone"}
-			after := loop3Subject(recreated, true)
+			after := incarnationSubject(recreated, true)
 			got := set.match(&after, profileSubjectVerified, "codex", "")
 			if tc.sameIncarnation {
 				if got.Name != "former-team" || !slices.Contains(got.Candidates, "former-team") {
@@ -201,7 +105,7 @@ func TestLastProvenProfileNeverCrossesAccountIncarnations(t *testing.T) {
 				}
 				return
 			}
-			if got.Name != "tooling" || got.Match != profileMatchDefaultLookupFailed || slices.Contains(got.Candidates, "former-team") || got.Refused != "" {
+			if got.Name != "tooling" || got.Match != profileMatchDefaultLookupFailed || slices.Contains(got.Candidates, "former-team") {
 				t.Fatalf("recreated account: %+v; want tooling (the UPN entry that may apply) as default_lookup_failed, never the former account's profile", got)
 			}
 		})

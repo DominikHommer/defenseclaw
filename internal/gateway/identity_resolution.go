@@ -4,9 +4,7 @@
 package gateway
 
 import (
-	"fmt"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -26,24 +24,24 @@ import (
 //
 //   - Every assignment is evaluated against the facts as yes, no or maybe:
 //     maybe when a fact it needs is not proven in this pass.
-//   - When every fact is proven, the profiles of the assignments that match
-//     are the candidates, or default_profile when none does, and the
-//     strictest of them applies, whatever their order; of profiles that
-//     enforce different rules, the first listed (provenProfileOf).
-//   - When any fact is not proven (absent, incomplete, timed out, a provider
-//     error anywhere in the NSS, SSSD, LDAP, winbind or Windows token chain,
-//     an ambiguous name or uid, an unproven 1.0.3 agents entry), the
-//     candidates are the profile the proven matches decide, every profile
-//     that could match the account (maybe), default_profile and the last
-//     profile proven for this exact incarnation. A profile that enforces at
-//     least what each of them enforces applies (profileCovers); when none
-//     does, the request is refused wherever its surface can block it, and
-//     Name is the strictest of them by hook mode and block_at for the rest.
-//     It never resolves to a weaker default.
+//   - The candidates are the profiles of the assignments that match (yes)
+//     when every fact is proven, or default_profile when none does. When any
+//     fact is not proven (absent, incomplete, timed out, a provider error
+//     anywhere in the NSS, SSSD, LDAP, winbind or Windows token chain, an
+//     ambiguous name or uid, a pre-1.0.4 agents entry the upgrade did not
+//     bind, a group fact newer than the last macOS account listing), they
+//     are default_profile, every profile that matches or could match
+//     (maybe) and the last profile proven for this exact incarnation.
+//   - A candidate that enforces at least what each of the others does
+//     applies under its own name (profileCovers); otherwise their meet, the
+//     strictest combination field by field (guardrail_profile_meet_gw.go).
+//     Profiles that differ never refuse a request, and a request never
+//     resolves to a weaker default.
 //
 // This replaces the earlier special cases (matchWithFailedLookup,
-// matchWithUnknownGroups, matchWithUnconfirmedGroups, the unproven-candidate
-// and shared-uid refusals, and the legacy agent layering of matchAgent).
+// matchWithUnknownGroups, matchWithUnconfirmedGroups, the refusals of
+// profiles that did not cover each other, and the legacy agent layering of
+// matchAgent).
 
 // proofStatus is how one identity fact is known in this pass.
 type proofStatus string
@@ -55,8 +53,8 @@ const (
 	proofProven proofStatus = "proven"
 	// proofStale: the fact is a proof of an earlier pass that this pass
 	// could not repeat, past the TTL the cache trusts it for. The cache
-	// drops such facts, so a request sees them as unknown; explain and the
-	// refusal text name the state.
+	// drops such facts, so a request sees them as unknown; explain names
+	// the state.
 	proofStale proofStatus = "stale"
 	// proofUnknown: the fact is not known (a lookup that has not answered,
 	// timed out, or left the fact out).
@@ -302,6 +300,12 @@ func (set *guardrailProfileSet) groupsState(entries []string, subject *profileSu
 			}
 		}
 		if res.Groups == proofProven {
+			// A group name whose SID a Windows lookup has not given yet (in
+			// flight, or failed for a reason other than "no such group")
+			// may be one of the token's groups (GAP-0487).
+			if set.groupSIDs.unresolvedAny(entries) {
+				return matchMaybe, ""
+			}
 			return matchNo, ""
 		}
 	}
@@ -357,22 +361,11 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		}
 		return profileDecision{}, false
 	}
-	var matched []string
-	for _, h := range yes {
-		matched = append(matched, h.profile)
-	}
-	// The proven matches decide one profile: the strictest of them, or of
-	// profiles that enforce different rules the first one listed.
-	candidates := []string{set.defaultProfile}
-	if len(matched) > 0 {
-		candidates = []string{set.provenProfileOf(matched, connectorName)}
-	}
 	if !verified || len(maybe) == 0 {
-		// No assignment depends on a fact that is not proven: the facts
-		// decide (provenProfileOf).
-		name := candidates[0]
-		decision, ok := definite(name)
-		if !ok {
+		// No assignment depends on a fact that is not proven: the profiles
+		// of the matching assignments, or the default.
+		var decision profileDecision
+		if len(yes) == 0 {
 			reason := profileMatchDefault
 			switch {
 			case !verified:
@@ -383,58 +376,51 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 				reason = profileMatchDefaultLookupFailed
 			}
 			decision = set.decision(set.defaultProfile, reason, "", source)
+		} else {
+			var matched []string
+			for _, h := range yes {
+				matched = append(matched, h.profile)
+			}
+			matched = compactProfiles(matched)
+			name, single := set.meetOf(matched, connectorName)
+			var ok bool
+			if decision, ok = definite(name); !ok || !single {
+				// Overlapping assignments whose profiles enforce different
+				// rules: their meet, reported as the first one matched.
+				decision = set.decision(name, yes[0].reason, yes[0].group, source)
+				decision.Assignment = yes[0].index
+				decision.Candidates = matched
+			}
 		}
 		if verified && res.proven() {
 			set.provenProfiles.note(res.Incarnation, decision.Name)
 		}
 		return decision
 	}
-	// An assignment may or may not apply: the strictest of every profile
-	// that could match, default_profile (the configured fallback) and the
-	// last profile proven for this incarnation.
-	// default_profile is tried first, so an outage reports the configured
-	// fallback when it is as strict as any other.
-	candidates = append(append([]string{set.defaultProfile}, candidates...), maybe...)
+	// An assignment may or may not apply: default_profile (the configured
+	// fallback, tried first, so an outage reports it when it is as strict as
+	// any other), every profile that matches or could match, and the last
+	// profile proven for this incarnation; the one that covers the others,
+	// else their meet.
+	candidates := []string{set.defaultProfile}
+	for _, h := range yes {
+		candidates = append(candidates, h.profile)
+	}
+	candidates = append(candidates, maybe...)
 	if last, ok := set.provenProfiles.get(res.Incarnation, res.Account == proofProven); ok {
 		candidates = append(candidates, last)
 	}
-	candidates = compactProfiles(candidates)
-	name, covers := set.strictestOf(candidates, connectorName)
+	candidates = meetMembers(candidates)
+	name, single := set.meetOf(candidates, connectorName)
 	decision, ok := definite(name)
-	if !ok || !covers {
-		// A profile the proven facts select keeps its reason when it is
-		// the strictest; any other is the unproven fallback.
+	if !ok || !single {
+		// A profile the proven facts select keeps its reason when it covers
+		// the others; any other is the unproven fallback.
 		decision = set.decision(name, profileMatchDefaultLookupFailed, "", source)
 	}
 	decision.Unproven = res.unprovenFacts()
 	decision.Candidates = candidates
-	if !covers {
-		decision.Refused = set.unprovenRefusalReason(subject, res, connectorName)
-	}
 	return decision
-}
-
-// provenProfileOf is the profile of the assignments that match on proven
-// facts (matched, in assignment order): the strictest, whatever their order,
-// when one enforces at least what each of the others does (strictestOf).
-// Profiles that enforce different rules (a rule pack, a sandbox section, a
-// HILT) have no strictest one, and a choice by hook mode and block_at would
-// drop what the other enforces: the first listed of those no other one
-// covers applies, as every release before 1.0.4 chose (first match). A
-// profile another one covers never applies in its place.
-func (set *guardrailProfileSet) provenProfileOf(matched []string, connectorName string) string {
-	if name, covers := set.strictestOf(matched, connectorName); covers {
-		return name
-	}
-	connectors := profileCoverConnectors(connectorName)
-	for _, candidate := range matched {
-		if !slices.ContainsFunc(matched, func(other string) bool {
-			return set.profileCovers(other, candidate, connectors) && !set.profileCovers(candidate, other, connectors)
-		}) {
-			return candidate
-		}
-	}
-	return matched[0]
 }
 
 // compactProfiles drops repeated names, keeping the first.
@@ -452,7 +438,7 @@ func compactProfiles(names []string) []string {
 // first that enforces at least what each of the others does
 // (profileCovers), with covers true; when none does, the strictest by hook
 // mode and block_at (profileStricter, the first of equals), with covers
-// false.
+// false, which meetOf replaces with the candidates' meet.
 func (set *guardrailProfileSet) strictestOf(candidates []string, connectorName string) (name string, covers bool) {
 	if len(candidates) == 0 {
 		return set.defaultProfile, true
@@ -470,94 +456,6 @@ func (set *guardrailProfileSet) strictestOf(candidates []string, connectorName s
 		}
 	}
 	return strictest, false
-}
-
-// unprovenRefusalReason is what a refused request tells the agent and its
-// user: which fact is not proven, and the command that explains the
-// decision on this host.
-func (set *guardrailProfileSet) unprovenRefusalReason(subject *profileSubject, res identityResolution, connectorName string) string {
-	var why, then []string
-	step := func(text string) {
-		if !slices.Contains(then, text) {
-			then = append(then, text)
-		}
-	}
-	switch res.Account {
-	case proofFailed:
-		why = append(why, "more than one account holds this account's uid")
-		step("ask your administrator to give each account its own uid")
-	case proofUnknown:
-		why = append(why, "the directory has not confirmed which account this is")
-		step("try again after the directory recovers")
-	case proofStale:
-		why = append(why, "the directory cannot confirm this account now")
-		step("try again after the directory recovers")
-	}
-	if res.Account == proofProven {
-		// The account's own facts this pass did not prove; an unproven
-		// account leaves them unproven too, and its reason covers them.
-		if res.Groups != proofProven {
-			why = append(why, "directory group membership is unconfirmed")
-			step("try again after the directory recovers")
-		}
-		if res.UPN != proofProven {
-			why = append(why, "the DefenseClaw guardian has not recorded this account's UPN yet")
-			step("try again after the guardian writes this account's identity record")
-		}
-	}
-	if res.Agent != proofProven {
-		why = append(why, "a guardrail profile assignment names an agent identity from before the upgrade that cannot be matched to this account")
-		step("ask your administrator to replace the entry with the agent identity `defenseclaw agent identities` shows now")
-	}
-	if len(why) == 0 {
-		// Not reached: a refusal needs an unproven fact. Never an empty
-		// reason.
-		why = append(why, "an identity fact the guardrail profile depends on is not confirmed")
-	}
-	text := "DefenseClaw refused this request: " + strings.Join(why, "; ") +
-		", and the guardrail profiles that may apply enforce different rules"
-	if len(then) > 0 {
-		text += "; " + strings.Join(then, "; ")
-	}
-	return text + "; run `" + set.profileExplainCommand(subject, connectorName) + "` to see the decision"
-}
-
-// profileExplainCommand is the installed command that explains the profile
-// of subject on this host.
-func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName string) string {
-	if subject == nil || subject.UserID != strings.TrimSpace(subject.UserID) || useridentity.KindForID(subject.UserID) == "" {
-		return "defenseclaw guardrail profile list"
-	}
-	command := "defenseclaw guardrail profile explain --user " + subject.UserID
-	if set.base != nil && set.base.StandaloneEnterprise() {
-		switch runtime.GOOS {
-		case "linux":
-			command = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user " + subject.UserID
-		case "darwin":
-			command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + subject.UserID
-		case "windows":
-			command = `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user ` + subject.UserID
-		}
-	}
-	if profileCommandToken(connectorName) {
-		command += " --connector " + connectorName
-	}
-	return command
-}
-
-// profileCommandToken is a shell-safe connector argument in a diagnostic
-// command. The subject ID is validated as a numeric uid or a SID.
-func profileCommandToken(value string) bool {
-	if value == "" || len(value) > 64 {
-		return false
-	}
-	for _, r := range value {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 // provenProfileStore holds the last profile a fully proven decision gave
@@ -743,7 +641,7 @@ func (set *guardrailProfileSet) profileStricter(a, b, connectorName string) bool
 
 // profileConfig is the configuration a decision for profile name applies.
 func (set *guardrailProfileSet) profileConfig(name string) *config.Config {
-	if derived, ok := set.profiles[strings.TrimSpace(name)]; ok && derived.Config != nil {
+	if derived, ok := set.derivedProfile(name); ok && derived.Config != nil {
 		return derived.Config
 	}
 	return set.base
@@ -766,10 +664,4 @@ func blockAtRank(cfg *config.Config, connectorName string) int {
 		return 1
 	}
 	return 0
-}
-
-// unprovenRefusalNote is explain's account of a refused decision.
-func unprovenRefusalNote(decision profileDecision) string {
-	return fmt.Sprintf("requests from this account are refused where they can be blocked: %s are not proven, and none of the profiles "+
-		"that may apply (%s) enforces what each of the others does", strings.Join(decision.Unproven, ", "), strings.Join(decision.Candidates, ", "))
 }

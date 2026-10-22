@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,14 +19,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// Review loop 1, finding 3. A caller whose profile decision is refused has
-// no profile of its own, and the decision's Name is only the strictest
-// candidate, which may be another account's (an assignment that may name
-// the caller while its facts are unproven). Settings, policy/explain,
-// policy/test and policy/packs answered with that profile: its
-// description, egress policy and decisions. Each now answers the refusal
-// alone; a live registration keeps its own profile through a re-match.
-func TestSandboxPolicyViewsOfARefusedDecisionNameNoProfile(t *testing.T) {
+// Privacy (decision 4 of the 1.0.4 identity design). A caller whose facts
+// are unproven gets the strictest combination of the profiles that may
+// apply, and one of them may be another account's (an assignment that may
+// name the caller while its facts are unproven). Settings, policy/explain,
+// policy/test and policy/packs must not show that profile: its name, its
+// description or its egress policy. The combination is enforced; a live
+// registration takes it through a re-match, and stays live.
+func TestSandboxPolicyViewsOfAnUnprovenDecisionNameNoOtherProfile(t *testing.T) {
 	const secret = "bob-internal.example"
 	setup := func(t *testing.T) *sandboxFixture {
 		t.Helper()
@@ -62,8 +63,8 @@ func TestSandboxPolicyViewsOfARefusedDecisionNameNoProfile(t *testing.T) {
 			{"packs", http.MethodGet, sandboxrelay.PathPolicyPacks, nil},
 		} {
 			rec := f.do(sbxAlice, call.method, call.path, call.body, header)
-			if registration == "" && rec.Code == http.StatusOK {
-				t.Errorf("%s: %d %s; want the refusal", call.name, rec.Code, rec.Body.String())
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s: %d %s; want the view (no refusal)", call.name, rec.Code, rec.Body.String())
 			}
 			if leaks(rec.Body.String()) {
 				t.Errorf("%s: %d %s names another account's profile", call.name, rec.Code, rec.Body.String())
@@ -81,7 +82,7 @@ func TestSandboxPolicyViewsOfARefusedDecisionNameNoProfile(t *testing.T) {
 		groupsUnknown(f, sbxAlice)
 		views(t, f, map[string]string{sandboxrelay.ConnectorHeader: "claudecode"}, "")
 	})
-	t.Run("a live registration re-matched while refused", func(t *testing.T) {
+	t.Run("a live registration re-matched while its facts are unproven", func(t *testing.T) {
 		f := setup(t)
 		f.setGroups(sbxAlice, "dc-sbx-contractors")
 		resp := f.live(sbxAlice, 1)
@@ -92,8 +93,9 @@ func TestSandboxPolicyViewsOfARefusedDecisionNameNoProfile(t *testing.T) {
 		views(t, f, map[string]string{sandboxrelay.ConnectorHeader: "claudecode", sandboxrelay.RegistrationHeader: resp.Registration.ID}, resp.Registration.ID)
 		auth, _ := f.api.sandboxAuth()
 		reg, ok, err := auth.store.Get(sbxAlice.UID, resp.Registration.ID)
-		if err != nil || !ok || reg.Profile != "contractors" || reg.State != sandboxreg.StateLive {
-			t.Errorf("registration after the refused re-match: %+v (%v); want contractors, live", reg, err)
+		members, _ := config.ProfileMeetMembers(reg.Profile)
+		if err != nil || !ok || (reg.Profile != "contractors" && !slices.Contains(members, "contractors")) || reg.State != sandboxreg.StateLive {
+			t.Errorf("registration after the unproven re-match: %+v (%v); want contractors or a combination with it, live", reg, err)
 		}
 	})
 }

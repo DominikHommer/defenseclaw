@@ -8,7 +8,7 @@ keywords:
   - guardrail profile explain
 ---
 
-A guardrail profile is a named set of guardrail settings. You assign profiles to directory groups, users, agents or connectors. The first matching assignment wins; `default_profile` catches everyone else. Only identities the operating system vouches for can select a profile ([how DefenseClaw knows who a user is](/docs/enterprise/identity/sources)).
+A guardrail profile is a named set of guardrail settings. You assign profiles to directory groups, users, agents or connectors. When several profiles may apply, the one that covers the others, or their strictest combination, applies; `default_profile` catches everyone else. Only identities the operating system vouches for can select a profile ([how DefenseClaw knows who a user is](/docs/enterprise/identity/sources)).
 
 ## Before you start
 
@@ -39,7 +39,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
      default_profile: ml-team
    ```
 
-   A person in both groups gets `contractors`, because that assignment is first. Put the narrowest assignment first.
+   A person in both groups gets `contractors`: it enforces at least what `ml-team` does. Order does not matter.
 
 2. Validate the file and list what the gateway sees.
 
@@ -54,7 +54,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
      * contractors  Contractors are enforced from day one (mode=action, block_at=MEDIUM, alert_at=LOW)
      * ml-team  The ML team stays in observe mode (mode=observe)
 
-     * assignments (strictest match wins):
+     * assignments (strictest applies):
          1. contractors <- groups=contractors@corp.example.com
          2. ml-team <- groups=ml-team@corp.example.com
      * default: ml-team
@@ -87,7 +87,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 
 ## Good to know
 
-- Set a strict `default_profile`. A failed directory lookup falls through to it.
+- Set a strict `default_profile`. A failed directory lookup makes it one of the candidates.
 - On a per-user install the user owns `config.yaml` and can change their own profile. On a managed host the profile lives in the machine config.
 
 ## Undo

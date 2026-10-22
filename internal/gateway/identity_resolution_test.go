@@ -173,7 +173,7 @@ func TestResolveIdentityProofStatesAcrossProvidersAndPlatforms(t *testing.T) {
 					set := identityTestSet(t, p, "watch",
 						config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{p.group}}})
 					got := set.selectProfile(&subject, res, profileSubjectVerified, "codex", "")
-					if got.Name != tc.want.profile || got.Match != tc.want.match || got.Refused != "" {
+					if got.Name != tc.want.profile || got.Match != tc.want.match {
 						t.Fatalf("decision %+v; want %s (%s)", got, tc.want.profile, tc.want.match)
 					}
 					if tc.want.account != proofProven || tc.want.groups != proofProven {
@@ -187,9 +187,9 @@ func TestResolveIdentityProofStatesAcrossProvidersAndPlatforms(t *testing.T) {
 	}
 }
 
-// When the profiles that may apply do not cover each other, the request is
-// refused, with the strictest of them by mode and block_at as its Name.
-func TestUnprovenFactsWithIncomparableProfilesRefuse(t *testing.T) {
+// When the profiles that may apply do not cover each other, their meet
+// applies: never a refusal, and never the weaker of them.
+func TestUnprovenFactsWithIncomparableProfilesApplyTheirMeet(t *testing.T) {
 	p := identityTestPlatforms[0]
 	cfg := &config.Config{}
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
@@ -204,11 +204,13 @@ func TestUnprovenFactsWithIncomparableProfilesRefuse(t *testing.T) {
 	}
 	subject := identityTestSubject(p, p.providers[1], stateUnknown, true)
 	got := set.match(&subject, profileSubjectVerified, "codex", "")
-	if got.Refused == "" || got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed {
-		t.Fatalf("decision %+v; want a refusal named strict", got)
+	if got.Name != config.ProfileMeetName([]string{"default", "strict"}) || got.Match != profileMatchDefaultLookupFailed {
+		t.Fatalf("decision %+v; want the meet of default and strict", got)
 	}
-	if !strings.Contains(got.Refused, "profile-explain --user 70001") && !strings.Contains(got.Refused, "explain --user 70001") {
-		t.Fatalf("refusal %q names no explain command", got.Refused)
+	derived, ok := set.derivedProfile(got.Name)
+	if !ok || hookModeForConfig(derived.Config, "codex") != "action" || resolveThresholds(derived.Config, "codex").Block != "LOW" ||
+		!slices.Contains(derived.Sandbox.RequiredFor, "codex") {
+		t.Fatalf("meet %+v; want action, block_at LOW and codex required in a sandbox", derived)
 	}
 }
 
@@ -252,7 +254,7 @@ func TestGAP0402UnknownMembershipIsNotHiddenByEarlierAssignments(t *testing.T) {
 	}
 	set := identityTestSet(t, p, "watch",
 		config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"ldap-privileged"}, Connectors: []string{"cursor"}}})
-	if got := set.match(&unknownGroups, profileSubjectVerified, "codex", ""); got.Name != "watch" || got.Refused != "" {
+	if got := set.match(&unknownGroups, profileSubjectVerified, "codex", ""); got.Name != "watch" {
 		t.Fatalf("a group assignment of another connector made %+v; want the default", got)
 	}
 	set = identityTestSet(t, p, "watch",
@@ -274,7 +276,7 @@ func TestSeveralMatchingAssignmentsTheStrictestWins(t *testing.T) {
 	} {
 		set := identityTestSet(t, p, "watch", order...)
 		got := set.match(&subject, profileSubjectVerified, "codex", "")
-		if got.Name != "strict" || got.Match != profileMatchGroup || got.Refused != "" {
+		if got.Name != "strict" || got.Match != profileMatchGroup {
 			t.Fatalf("assignments %+v: %+v; want strict as group", order, got)
 		}
 	}
@@ -334,8 +336,10 @@ func TestUnresolvedLegacyAgentEntryIsStrictestInEitherOrder(t *testing.T) {
 	}
 }
 
-// Privacy: the refusal names only the requesting account's own uid.
-func TestUnprovenRefusalNamesOnlyTheRequestingAccount(t *testing.T) {
+// Privacy: the account a meet applies to sees it as the strictest
+// combination, never the names of its members (one may be the profile of a
+// group it is not proven to be in, or another account's).
+func TestMeetNamesNoMemberToTheAccount(t *testing.T) {
 	p := identityTestPlatforms[0]
 	cfg := &config.Config{}
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
@@ -352,7 +356,12 @@ func TestUnprovenRefusalNamesOnlyTheRequestingAccount(t *testing.T) {
 	}
 	subject := identityTestSubject(p, p.providers[1], stateUnknown, true)
 	got := set.match(&subject, profileSubjectVerified, "codex", "")
-	if got.Refused == "" || strings.Contains(got.Refused, "bob") || strings.Contains(got.Refused, p.group) {
-		t.Fatalf("refusal %q leaks another account or a group name", got.Refused)
+	label := profileUserLabel(got.Name)
+	if !config.IsProfileMeet(got.Name) || label != profileMeetLabel || strings.Contains(label, "default") || strings.Contains(label, "bob") ||
+		strings.Contains(label, p.group) || strings.Contains(label, got.Name) {
+		t.Fatalf("decision %+v shown as %q; want the strictest combination, naming no member", got, label)
+	}
+	if profileUserLabel("strict") != "strict" {
+		t.Fatal("a single profile keeps its own name")
 	}
 }

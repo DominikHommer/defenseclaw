@@ -294,10 +294,6 @@ func (a *APIServer) handleSandboxSettings(w http.ResponseWriter, r *http.Request
 	}
 	cfg := a.liveBaseConfig(r.Context())
 	match := a.sandboxMatchPeer(r.Context(), peer, connectorName, 0)
-	if match.decision.Refused != "" {
-		sandboxRefuseView(w, match.decision)
-		return
-	}
 	floor, floorDigest, err := sandboxFloorFor(cfg, match.decision.Name)
 	if err != nil {
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
@@ -374,7 +370,7 @@ var sandboxResolveEffective = func(cfg *config.Config, floor config.OpenShellAdm
 		// Managed hosts are copy-only (D2).
 		Copy: true, Safe: f.Safe, Yolo: f.Yolo, Unmask: slices.Clone(f.Unmask), HostPorts: slices.Clone(f.HostPorts),
 		NoMCP: f.NoMCP, Learn: f.Learn, ProcessTree: f.ProcessTree, CPU: f.CPU, Memory: f.Memory,
-		RepoPolicy: in.Repo, FloorProfile: in.Profile,
+		RepoPolicy: in.Repo, FloorProfile: profileUserLabel(in.Profile),
 		Subject: &subject, Floor: &floor, UserPack: in.Req.UserPack, ProjectReal: in.Req.ProjectReal,
 	})
 }
@@ -547,10 +543,6 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	match := a.sandboxMatchPeer(r.Context(), peer, req.Connector, sandboxResolveWait)
-	if match.decision.Refused != "" {
-		refuse(sandboxrelay.ReasonUnavailable, match.decision.Refused, baseAccess)
-		return
-	}
 	attempt.Profile, attempt.ProfileMatch, attempt.MatchedGroup = match.decision.Name, match.decision.Match, match.decision.MatchedGroup
 	attempt.ProfileDigest, attempt.Provisional = match.decision.Digest, match.provisional
 	floor, floorDigest, err := sandboxFloorFor(cfg, match.decision.Name)
@@ -660,6 +652,7 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 	}
 	stored, _, _ := auth.store.Get(peer.UID, id)
 	sandboxRecordResolved(a, stored)
+	bannerProfile, bannerDescription := sandboxProfileLabel(cfg, stored.Profile, stored.ProfileMatch)
 	a.writeJSON(w, http.StatusOK, sandboxrelay.ResolveResponse{
 		V: sandboxrelay.WireVersion,
 		Registration: sandboxrelay.RegistrationView{
@@ -668,7 +661,7 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		},
 		Effective: effective, RequiredPack: requiredPack, Operational: sandboxOperational(cfg, floor), MCPKept: kept, MCPSkipped: skipped,
 		Banner: sandboxrelay.BannerView{
-			Profile: stored.Profile, Description: sandboxProfileDescription(cfg, stored.Profile),
+			Profile: bannerProfile, Description: bannerDescription,
 			Provisional: stored.Provisional, PolicyDigest: stored.EffectiveDigest,
 		},
 		Generation: a.sandboxViewGeneration(cfg, stored),
@@ -876,7 +869,7 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 	provisional := reg.Provisional
 	current := sandboxrelay.CurrentPolicy{
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
-		Floor: &floor, RequiredPack: requiredPack, Digest: reg.EffectiveDigest, Profile: reg.Profile, Provisional: &provisional,
+		Floor: &floor, RequiredPack: requiredPack, Digest: reg.EffectiveDigest, Profile: sandboxUserProfile(cfg, reg), Provisional: &provisional,
 		UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
 	minProfile := floor.MinProfile
@@ -948,21 +941,7 @@ func (a *APIServer) sandboxScope(w http.ResponseWriter, r *http.Request, auth *s
 		return sandboxOwnScope{}, false
 	}
 	match := a.sandboxMatchPeer(r.Context(), peer, connectorName, sandboxExplainLookupIn)
-	if match.decision.Refused != "" {
-		sandboxRefuseView(w, match.decision)
-		return sandboxOwnScope{}, false
-	}
 	return sandboxOwnScope{connector: connectorName, match: match}, true
-}
-
-// sandboxRefuseView answers a policy view (settings, explain, test, packs)
-// of a caller whose profile decision is refused: no profile is the
-// caller's, and its Name is only the strictest candidate, which may be
-// another account's (an assignment that may name this account while its
-// facts are unproven). The answer is the refusal alone, which names no
-// profile; policy/resolve refuses the run the same way.
-func sandboxRefuseView(w http.ResponseWriter, decision profileDecision) {
-	writeSandboxReason(w, sandboxrelay.ReasonUnavailable, decision.Refused)
 }
 
 // sandboxScopeFloor is the floor of scope: its sandbox's registration floor
@@ -975,23 +954,59 @@ func sandboxScopeFloor(cfg *config.Config, scope sandboxOwnScope) (config.OpenSh
 	return sandboxFloorFor(cfg, scope.match.decision.Name)
 }
 
+// sandboxTextProfileWithheld is the explain description of a decision whose
+// profiles are withheld (sandboxProfileWithheld).
+const sandboxTextProfileWithheld = "More than one guardrail profile may apply until your identity is confirmed: the strictest " +
+	"combination of them is enforced, which can be stricter than the policy shown here."
+
+// sandboxProfileWithheld reports whether the caller's profile decision was
+// taken on identity facts that are not proven (default_lookup_failed) and
+// is not the default profile: its profile, or a member of its combination,
+// may be another account's, so the caller's views name and show none of it.
+func sandboxProfileWithheld(cfg *config.Config, profile, match string) bool {
+	return cfg != nil && match == profileMatchDefaultLookupFailed && strings.TrimSpace(profile) != strings.TrimSpace(cfg.Guardrail.DefaultProfile)
+}
+
+// sandboxProfileLabel is how the caller's own views name profile, matched
+// by match: profileUserLabel, and profileMeetLabel with no description when
+// its details are withheld (sandboxProfileWithheld).
+func sandboxProfileLabel(cfg *config.Config, profile, match string) (label, description string) {
+	if sandboxProfileWithheld(cfg, profile, match) {
+		return profileMeetLabel, ""
+	}
+	return profileUserLabel(profile), sandboxProfileDescription(cfg, profile)
+}
+
+// sandboxUserProfile is the name of reg's profile in its owner's views.
+func sandboxUserProfile(cfg *config.Config, reg sandboxreg.Registration) string {
+	label, _ := sandboxProfileLabel(cfg, reg.Profile, reg.ProfileMatch)
+	return label
+}
+
 // sandboxOverlayKeys are the floor keys a profile's sandbox section sets
 // (by their config names).
+// A meet's are the keys any of its members' sections sets.
 func sandboxOverlayKeys(cfg *config.Config, profile string) map[string]bool {
 	keys := map[string]bool{}
 	if cfg == nil || profile == "" {
 		return keys
 	}
-	p, ok := cfg.Guardrail.Profiles[profile]
-	if !ok || p.Sandbox == nil {
-		return keys
+	members := []string{profile}
+	if meet, ok := config.ProfileMeetMembers(profile); ok {
+		members = meet
 	}
-	v := reflect.ValueOf(*p.Sandbox)
-	t := v.Type()
-	for i := range t.NumField() {
-		name, _, _ := strings.Cut(t.Field(i).Tag.Get("mapstructure"), ",")
-		if name != "" && !v.Field(i).IsZero() {
-			keys[name] = true
+	for _, member := range members {
+		p, ok := cfg.Guardrail.Profiles[member]
+		if !ok || p.Sandbox == nil {
+			continue
+		}
+		v := reflect.ValueOf(*p.Sandbox)
+		t := v.Type()
+		for i := range t.NumField() {
+			name, _, _ := strings.Cut(t.Field(i).Tag.Get("mapstructure"), ",")
+			if name != "" && !v.Field(i).IsZero() {
+				keys[name] = true
+			}
 		}
 	}
 	return keys
@@ -1024,8 +1039,21 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 		return
 	}
+	label, description := profileUserLabel(profile), sandboxProfileDescription(cfg, profile)
+	if sandboxProfileWithheld(cfg, profile, scope.match.decision.Match) {
+		// The profiles that may apply include ones not proven to be the
+		// caller's, possibly another account's: the floor enforced stays
+		// theirs combined, but the caller is shown only the organization's
+		// floor and its default profile's (privacy: users see only their own
+		// effective policy).
+		if floor, _, err = sandboxFloorFor(cfg, strings.TrimSpace(cfg.Guardrail.DefaultProfile)); err != nil {
+			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
+			return
+		}
+		profile, label, description = strings.TrimSpace(cfg.Guardrail.DefaultProfile), profileMeetLabel, sandboxTextProfileWithheld
+	}
 	out := sandboxapi.ManagedExplain{
-		Profile: profile, Description: sandboxProfileDescription(cfg, profile),
+		Profile: label, Description: description,
 		Match: scope.match.decision.Match, MatchedGroup: scope.match.decision.MatchedGroup,
 		Provisional: scope.match.provisional, Allowed: floor.Allowed == nil || *floor.Allowed,
 		RequiredFor: slices.Clone(floor.RequiredFor), WhenUnavailable: floor.WhenUnavailable,
@@ -1418,7 +1446,7 @@ func (a *APIServer) handleSandboxDecide(w http.ResponseWriter, r *http.Request) 
 			// (GAP-0632).
 			sandboxRecordAskDecided(r.Context(), a, reg, req, sandboxAskOutcome{Refused: true})
 			writeSandboxRefusal(w, http.StatusForbidden, sandboxrelay.ReasonDecisionRefused,
-				sandboxapi.AccessRefusedWhy(refused.Message, refused.Rule, req.Host, reg.Profile, reg.SandboxName, floor.RequestAccess))
+				sandboxapi.AccessRefusedWhy(refused.Message, refused.Rule, req.Host, sandboxUserProfile(cfg, reg), reg.SandboxName, floor.RequestAccess))
 			return
 		}
 		fmt.Fprintf(os.Stderr, "[sandbox-authority] decision check uid=%d: %v\n", peer.UID, err)

@@ -200,19 +200,11 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	// lazily, the request had no connector, so a connectors assignment never
 	// selected ACP traffic (GAP-0311).
 	ctx = a.withGuardrailProfileDecision(ctx, agent.ConnectorID)
-	// A method the ACP profile denies, and a request no guardrail profile
-	// is safe for (profileDecision.Refused), block before any scan. A
-	// refusal blocks in every ACP mode: it is not a finding to observe.
-	blockReason, refused := "", profileRefusal(ctx)
+	// A method the ACP profile denies blocks before any scan.
 	if slices.Contains(profile.DeniedMethods, req.Method) {
-		blockReason = "method denied by ACP profile"
-	} else if refused != "" {
-		blockReason = refused
-	}
-	if blockReason != "" {
-		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: blockReason,
+		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: "method denied by ACP profile",
 			FailMode: acpProfileFailMode(profile, mode)}
-		if mode != string(acp.ModeAction) && refused == "" {
+		if mode != string(acp.ModeAction) {
 			verdict.Action, verdict.WouldBlock = "allow", true
 		}
 		a.traceACPDecisionV8(ctx, agent.ConnectorID, req, &ToolInspectVerdict{

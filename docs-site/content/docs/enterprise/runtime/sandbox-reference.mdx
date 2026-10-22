@@ -494,7 +494,7 @@ $ defenseclaw sandbox policy test --pack balanced --host registry.npmjs.org --po
 
 Do not combine `--sandbox` with `--pack`, `--profile` or `--harness`: a named sandbox already has its own policy ("--sandbox tests that sandbox's own policy; leave out --pack, --profile and --harness").
 
-**Privacy.** Each person sees only their own policy. Policy routes, `pack list` and `pack show` show the caller's own policy, profile, matched group and `request_access`; another person's registration is "not found". Another account on the sandbox ports is "another account", with no name or PID. Files stay behind the admin modes: `config.yaml` is 0640, packs 0750, the stores are service-owned and 0600, and daemon state is 0700.
+**Privacy.** Each person sees only their own policy; sandbox explain, status and banners name a combination of profiles as "strictest combination". Policy routes, `pack list` and `pack show` show the caller's own policy, profile, matched group and `request_access`; another person's registration is "not found". Another account on the sandbox ports is "another account", with no name or PID. Files stay behind the admin modes: `config.yaml` is 0640, packs 0750, the stores are service-owned and 0600, and daemon state is 0700.
 
 ![defenseclaw sandbox policy explain for an engineering user followed by a pack show for a pack that is not in their chain, which answers No pack of that name is part of your sandbox policy, and permission denied reading the organization config.yaml and the sandbox policy folder](/images/sandboxes/managed/privacy-own-policy-only.png)
 
