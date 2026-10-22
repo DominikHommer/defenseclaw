@@ -20,12 +20,15 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 )
@@ -119,7 +122,7 @@ func runScanCode(cmd *cobra.Command, args []string) error {
 		if dataDir == "" {
 			redactor, err = scanoutput.NewEphemeralRedactor()
 		} else {
-			redactor, err = scanoutput.LoadRedactor(dataDir)
+			redactor, err = loadCodeScanRedactor(dataDir)
 		}
 		if err != nil {
 			return fmt.Errorf("initialize scan output redaction: %w", err)
@@ -156,6 +159,27 @@ func runScanCode(cmd *cobra.Command, args []string) error {
 
 	printCodeScanResults(result)
 	return nil
+}
+
+func loadCodeScanRedactor(dataDir string) (*scanoutput.Redactor, error) {
+	// An administrator's in-process scan uses the service's existing key.
+	// Its owner is trusted only through the installed runtime descriptor and
+	// its fixed data directory; a per-user scan keeps the ordinary trust rule.
+	if managedHostCallerUID() == 0 {
+		layout, descriptor, err := managedStandaloneAdminDeployment()
+		if err == nil && descriptor != nil &&
+			filepath.Clean(dataDir) == filepath.Clean(layout.DataDir) {
+			if descriptor.ServiceUID < 0 || uint64(descriptor.ServiceUID) > math.MaxUint32 {
+				return nil, fmt.Errorf("managed redaction key owner is unproven; run sudo defenseclaw-gateway enterprise %s repair", runtime.GOOS)
+			}
+			key, err := observabilityredaction.LoadExistingCorrelationKeyForOwner(dataDir, uint32(descriptor.ServiceUID))
+			if err != nil {
+				return nil, fmt.Errorf("%w; run sudo defenseclaw-gateway enterprise %s repair", err, runtime.GOOS)
+			}
+			return scanoutput.NewRedactor(key), nil
+		}
+	}
+	return scanoutput.LoadRedactor(dataDir)
 }
 
 func scanNeedsRedactor(persistProtectedCopy bool) bool {
