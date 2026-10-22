@@ -69,6 +69,7 @@ from defenseclaw import legacy_connector, ux
 from defenseclaw.bootstrap import remove_own_api_port_claims
 from defenseclaw.commands import windows_native_uninstall, windows_uninstall_helper
 from defenseclaw.file_lock import tui_lock_held
+from defenseclaw.openclaw_presence import openclaw_installed, openclaw_only_implied
 
 # Connectors whose teardown the Python CLI knows how to perform locally
 # without going through ``defenseclaw-gateway connector teardown``. This
@@ -664,6 +665,12 @@ def _resolve_active_connectors(cfg) -> list[str]:
         try:
             names = [(n or "").strip().lower() for n in cfg.active_connectors()]
             names = [n for n in names if n]
+            # A config an older init wrote without a connector still names
+            # OpenClaw through the claw.mode default. With no OpenClaw on the
+            # machine there is nothing to tear down; a durable OpenClaw backup
+            # marker still adds it (_teardown_connectors, GAP-0568).
+            if names == ["openclaw"] and openclaw_only_implied(cfg) and not openclaw_installed(cfg):
+                return []
             # An authoritative empty plural set means unconfigured. Falling
             # through to active_connector() here resurrects its historical
             # OpenClaw default after reset.

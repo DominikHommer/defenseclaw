@@ -1847,12 +1847,15 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
+    @patch("defenseclaw.commands.cmd_init.openclaw_installed", return_value=False)
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_guardrail")
     @patch("defenseclaw.commands.cmd_init._install_scanners")
     @patch("defenseclaw.config.detect_environment", return_value="macos")
     @patch("defenseclaw.config.default_data_path")
-    def test_init_displays_gateway_section(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which):
+    def test_init_displays_gateway_section(
+        self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which, _mock_openclaw
+    ):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
 
@@ -1860,7 +1863,8 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Gateway", result.output)
-        self.assertIn("connector: openclaw", result.output)
+        # No OpenClaw on the machine: no connector is selected (GAP-0568).
+        self.assertIn("connector: none", result.output)
         self.assertIn("127.0.0.1:18789", result.output)
         self.assertIn("API port:", result.output)
         self.assertIn("18970", result.output)
@@ -3778,6 +3782,24 @@ class TestMultiConnectorInit(unittest.TestCase):
 
         self.assertEqual(got, ["none"])
         self.assertIn("none", prompt_types[0].choices)
+
+    def test_connector_prompt_defaults_to_none_without_detected_connectors(self):
+        # GAP-0568: Enter at the prompt picked codex on a machine without it.
+        from defenseclaw.commands import cmd_init
+
+        defaults = []
+
+        def prompt(_text, **kwargs):
+            defaults.append(kwargs["default"])
+            return kwargs["default"]
+
+        with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=self._disc(set())), \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(cmd_init.click, "prompt", side_effect=prompt):
+            got = cmd_init._prompt_connector_selection(None, False)
+
+        self.assertEqual(defaults, ["none"])
+        self.assertEqual(got, ["none"])
 
     def test_prompt_first_run_connector_none_skips_action_enforcement(self):
         """``--connector none`` must not offer "none" for action mode or the judge."""
