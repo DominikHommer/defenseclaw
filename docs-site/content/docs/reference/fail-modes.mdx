@@ -31,6 +31,9 @@ managed computer the value comes from the administrator's config (the managed
 `config.yaml`, which only root or SYSTEM can change, delivered by the
 installer, `ensure`, a signed policy bundle or an MDM/Intune payload), so an
 `open` there is the administrator's choice and the managed hooks follow it.
+The one exception is the managed GitHub Copilot CLI hook on Linux and macOS,
+which blocks during an outage in every fail mode (see
+[GitHub Copilot CLI fails open upstream](#github-copilot-cli-fails-open-upstream)).
 A fail mode that is not set is `closed` everywhere except under Secure
 Client, where it is `open` (see [Secure Client](#secure-client)).
 
@@ -149,7 +152,10 @@ when no value is set) blocks a tool call DefenseClaw cannot check (the gateway
 service is not running, its answer cannot be used, or the call is too large to
 inspect), on Linux, macOS and Windows alike, and the agent shows why, for
 example that the DefenseClaw gateway service is not running on this computer.
-Only the administrator's `hook_fail_mode: open` lets such a call through.
+Only the administrator's `hook_fail_mode: open` lets such a call through,
+and for GitHub Copilot CLI only on Windows: on Linux and macOS the managed
+Copilot hook blocks `preToolUse` and `permissionRequest` during an outage in
+`open` too.
 
 A managed GitHub Copilot hook whose registered command names no Copilot event
 DefenseClaw reviewed (a registration DefenseClaw did not write) is refused in
@@ -335,7 +341,7 @@ events below:
 | Claude Code | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` | Yes |
 | Codex | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStop`, `PreCompact`, `PostCompact`, `Stop` | None | Yes |
 | Cursor | `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt` | None | Yes |
-| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down in the effective mode `closed`, the default, or with strict availability) |
+| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down; on Linux and macOS in every fail mode, on Windows in the effective mode `closed`, the default, or with strict availability) |
 | Devin | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop` | None | Yes |
 | Antigravity | `PreToolUse` | `PreToolUse` | No |
 | Hermes | `pre_tool_call` | None | No (managed standalone: blocks `pre_tool_call` when DefenseClaw cannot check it) |
@@ -426,12 +432,14 @@ closed, so DefenseClaw lets that call run. It records the call in
 Copilot as upstream fail-open, and the gateway raises a `guardrail-degraded`
 alert when it starts again. No setting changes this for a per-user install,
 `DEFENSECLAW_STRICT_AVAILABILITY=1` included.
-An administrator-managed standalone Copilot hook can block `preToolUse` and
-`permissionRequest` while the gateway service is not running, but only in the
+An administrator-managed standalone Copilot hook blocks `preToolUse` and
+`permissionRequest` while the gateway service is not running. On Linux and
+macOS it blocks them in every fail mode, the administrator's
+`hook_fail_mode: open` included. On Windows it blocks them only in the
 effective mode `closed` (the default) or with
-[strict availability](#strict-availability). With the administrator's
-`hook_fail_mode: open` it lets the call run, as every connector does in fail
-mode `open`.
+[strict availability](#strict-availability); with the administrator's
+`hook_fail_mode: open` it lets the call run, as every other connector does in
+fail mode `open`.
 
 The shared `inspect-*.sh` scripts serve every connector of one data
 directory, and `DEFENSECLAW_CONNECTOR` only picks the connector they report

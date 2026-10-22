@@ -190,11 +190,13 @@ closed`, inherited strict availability, missing auth, timeouts, and malformed
 responses cannot make an unavailable hook block the agent. Such a call is
 recorded in `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports
 it as a `guardrail-degraded` alert when it starts again. On a managed
-standalone host the administrator-owned hook is stricter: in the effective
-mode `closed` (the default) or with
-[strict availability](/docs/reference/fail-modes#strict-availability) it
-denies `preToolUse` and `permissionRequest` while the gateway service is not
-running. With the administrator's `hook_fail_mode: open` it lets them run.
+standalone host the administrator-owned hook is stricter. On Linux and macOS
+it denies `preToolUse` and `permissionRequest` while the gateway service is
+not running in every fail mode, the administrator's `hook_fail_mode: open`
+included. On Windows it denies them in the effective mode `closed` (the
+default) or with
+[strict availability](/docs/reference/fail-modes#strict-availability), and
+the administrator's `hook_fail_mode: open` lets them run.
 The gateway also
 requires the exact trusted event-specific registration header and never
 infers Copilot event identity from stdin fields.

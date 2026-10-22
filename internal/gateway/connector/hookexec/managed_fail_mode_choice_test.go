@@ -145,7 +145,10 @@ func TestStandaloneManagedCopilotFollowsTheAdministratorsFailMode(t *testing.T) 
 // managed standalone Copilot hook blocks during a gateway outage, but one
 // whose administrator chose open lets the call run (managedCopilotOpen).
 // The outage blocks only in the effective mode closed or with strict
-// availability; this pins the behavior and that the docs say so.
+// availability; this pins the behavior and that the docs say so. hookexec
+// runs the managed Copilot hook on Windows only: the Linux and macOS
+// managed hook is copilot-hook.sh, which blocks in every fail mode
+// (connector.TestManagedUnixCopilotOutageBlocksInEveryFailModeAsDocumented).
 func TestManagedCopilotOutageBlockingDocsFollowTheFailMode(t *testing.T) {
 	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 	for _, tc := range []struct {
@@ -176,14 +179,14 @@ func TestManagedCopilotOutageBlockingDocsFollowTheFailMode(t *testing.T) {
 		forbidden []string
 	}{
 		{filepath.Join(docs, "reference", "fail-modes.mdx"), []string{
-			"No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down in the effective mode `closed`, the default, or with strict availability)",
-			"but only in the effective mode `closed` (the default) or with [strict availability](#strict-availability). With the administrator's `hook_fail_mode: open` it lets the call run",
+			"on Windows in the effective mode `closed`, the default, or with strict availability) |",
+			"On Windows it blocks them only in the effective mode `closed` (the default) or with [strict availability](#strict-availability); with the administrator's `hook_fail_mode: open` it lets the call run",
 		}, []string{
 			"No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down) |",
 			"Only an administrator-managed standalone Copilot hook blocks",
 		}},
 		{filepath.Join(docs, "connectors", "copilot.mdx"), []string{
-			"With the administrator's `hook_fail_mode: open` it lets them run.",
+			"On Windows it denies them in the effective mode `closed` (the default) or with [strict availability](/docs/reference/fail-modes#strict-availability), and the administrator's `hook_fail_mode: open` lets them run.",
 		}, []string{
 			"the administrator-owned hook is stricter: it denies",
 		}},
