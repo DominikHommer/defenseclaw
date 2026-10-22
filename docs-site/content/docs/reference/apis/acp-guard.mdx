@@ -105,6 +105,12 @@ A request that names a profile the configuration does not assign to that pair is
 
 Each binding pins its own lock at `<data-dir>/acp/<client>-<agent>.contract-lock.json`. The lock records the guard and agent executable paths and SHA-256 digests, the client configuration path and digest, and the ACP schema version. Agents share one scoped token, a private file named on the guard's command line. Setup uses only the catalog that ships with DefenseClaw and never downloads from the online ACP registry.
 
+Per-user and standalone setup pin the guarded editor entries, including adopted
+and numbered entries. Changing unrelated settings, or Zed's mode and model
+preferences, keeps those pins valid. Changing a guarded command, arguments,
+environment or another launch field requires setup again. Locks from older
+releases still pin the whole settings file until you run `defenseclaw acp refresh`.
+
 ## Telemetry
 
 Every guarded decision is a `guardrail.evaluation.completed` event with these attributes.

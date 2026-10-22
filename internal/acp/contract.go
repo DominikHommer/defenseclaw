@@ -26,8 +26,9 @@ const MaxContractLockBytes = 64 << 10
 // EntryDigestPrefix marks a contract lock that pins the guarded editor
 // entry rather than the whole editor settings file. An editor that rewrote
 // its settings (Zed on a theme change) stopped every guarded entry until
-// setup ran again (GAP-0708). enterprise acp setup writes it; an older
-// guard reads such a lock as a changed settings file and asks for setup.
+// setup ran again (GAP-0708). Both setup paths write it; an older guard
+// reads such a lock as changed settings and asks for setup. With adopted
+// entries, the digest covers the named entries together.
 const EntryDigestPrefix = "entry-sha256:"
 
 // maxClientConfigBytes bounds an editor settings file the guard reads.
@@ -61,6 +62,12 @@ var editorOwnedEntryKeys = map[string]map[string]bool{
 // rewriting the file around it, or reformatting it, leaves it unchanged. The
 // keys the editor owns for client are left out.
 func ClientEntrySHA256(path, clientID, agentID string) (string, error) {
+	return ClientEntriesSHA256(path, clientID, agentID, nil)
+}
+
+// ClientEntriesSHA256 also pins the names and contents of adopted or
+// numbered entries sharing one binding. No alias may escape the lock.
+func ClientEntriesSHA256(path, clientID, agentID string, adopted []string) (string, error) {
 	body, err := safefile.ReadRegularFileBounded(path, maxClientConfigBytes)
 	if err != nil {
 		return "", err
@@ -71,19 +78,31 @@ func ClientEntrySHA256(path, clientID, agentID string) (string, error) {
 	if err := decoder.Decode(&document); err != nil {
 		return "", err
 	}
-	servers, _ := document["agent_servers"].(map[string]any)
-	entry, ok := servers[ManagedEntryName(agentID)]
-	if !ok {
-		return "", fmt.Errorf("%s has no %s entry", path, ManagedEntryName(agentID))
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return "", errors.New("editor settings have trailing content")
 	}
-	if fields, isObject := entry.(map[string]any); isObject && len(editorOwnedEntryKeys[clientID]) > 0 {
+	servers, _ := document["agent_servers"].(map[string]any)
+	names := adopted
+	if len(names) == 0 {
+		names = []string{ManagedEntryName(agentID)}
+	}
+	entries := make(map[string]any, len(names))
+	for _, name := range names {
+		fields, ok := servers[name].(map[string]any)
+		if !ok || strings.TrimSpace(name) == "" {
+			return "", fmt.Errorf("%s has no valid %s entry", path, name)
+		}
 		pinned := make(map[string]any, len(fields))
 		for key, value := range fields {
 			if !editorOwnedEntryKeys[clientID][key] {
 				pinned[key] = value
 			}
 		}
-		entry = pinned
+		entries[name] = pinned
+	}
+	var entry any = entries
+	if len(adopted) == 0 {
+		entry = entries[ManagedEntryName(agentID)]
 	}
 	canonical, err := json.Marshal(entry)
 	if err != nil {
@@ -110,8 +129,8 @@ type RuntimeContractLock struct {
 		ConfigPath   string `json:"config_path"`
 		ConfigSHA256 string `json:"config_sha256"`
 		// AdoptedEntries names the operator's own editor entries that setup
-		// routed through the guard, so verify can report one pointed back at
-		// the agent. Python setup writes it; the guard does not use it.
+		// routed through the guard. Entry-scoped locks pin every named alias;
+		// older whole-file locks retain their original verification.
 		AdoptedEntries []string `json:"adopted_entries,omitempty"`
 	} `json:"client"`
 	Agent struct {
@@ -187,7 +206,7 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 		{agentPath, lock.Agent.SHA256, "agent"},
 	} {
 		if pinned, entry := strings.CutPrefix(item.expected, EntryDigestPrefix); entry && item.label == "client configuration" && !secureClientHost() {
-			observed, digestErr := ClientEntrySHA256(item.path, clientID, agentID)
+			observed, digestErr := ClientEntriesSHA256(item.path, clientID, agentID, lock.Client.AdoptedEntries)
 			if digestErr != nil || !strings.EqualFold(observed, pinned) {
 				return fmt.Errorf("the %s entry in the editor settings file %s changed after setup (the contract lock pins it), "+
 					"so it must be set up again", ManagedEntryName(agentID), clientConfigPath)

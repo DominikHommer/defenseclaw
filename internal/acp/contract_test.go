@@ -4,6 +4,8 @@
 package acp
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -167,6 +169,42 @@ func TestValidateRuntimeContractAcceptsAdoptedEntries(t *testing.T) {
 	}
 	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err != nil {
 		t.Fatalf("lock with adopted entries rejected: %v", err)
+	}
+	entries := map[string]any{
+		"My Kiro":  map[string]any{"command": "guard", "env": map[string]any{"KEEP": "<&>"}},
+		"Kiro (2)": map[string]any{"command": "guard", "args": []string{"--agent", "kiro"}},
+	}
+	canonical, _ := json.Marshal(entries)
+	digest := sha256.Sum256(canonical)
+	lock["client"] = map[string]any{
+		"id": "zed", "config_path": clientConfig,
+		"config_sha256":   EntryDigestPrefix + hex.EncodeToString(digest[:]),
+		"adopted_entries": []string{"My Kiro", "Kiro (2)"},
+	}
+	body, _ = json.Marshal(lock)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries["My Kiro"].(map[string]any)["default_mode"] = "ask"
+	settings := map[string]any{"theme": "Ayu", "agent_servers": entries}
+	body, _ = json.Marshal(settings)
+	if err := os.WriteFile(clientConfig, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err != nil {
+		t.Fatalf("entry pins rejected harmless editor choices: %v", err)
+	}
+	for _, name := range []string{"My Kiro", "Kiro (2)"} {
+		entry := entries[name].(map[string]any)
+		entry["command"] = "other"
+		body, _ = json.Marshal(settings)
+		if err := os.WriteFile(clientConfig, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil {
+			t.Fatalf("changed adopted entry %q was accepted", name)
+		}
+		entry["command"] = "guard"
 	}
 	lock["client"].(map[string]any)["unknown"] = true
 	body, _ = json.Marshal(lock)

@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import defenseclaw.commands.cmd_acp as cmd_acp_module
+import pytest
 from click.testing import CliRunner
 from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS
 from defenseclaw.commands.cmd_acp import _write_token, acp_cmd
@@ -171,6 +172,42 @@ def test_setup_activate_and_remove_are_surgical(tmp_path, monkeypatch):
         cleanup_app(app, db_path, data_dir)
 
 
+@pytest.mark.parametrize("entry_names", [[], ["My Kiro", "Kiro (2)"]], ids=["reserved", "adopted-and-numbered"])
+def test_editor_preferences_do_not_drift_guarded_entry_pins(tmp_path, monkeypatch, entry_names):
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent = _binary(tmp_path / "kiro-cli")
+    settings = _zed_settings(tmp_path)
+    try:
+        if entry_names:
+            settings.parent.mkdir(parents=True)
+            settings.write_text(json.dumps({"agent_servers": {
+                name: {"command": agent, "args": ["acp"]} for name in entry_names
+            }}))
+            args = ["adopt", "--client", "zed", "--guard-binary", guard, "--yes", "--json-output"]
+        else:
+            args = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
+        result = CliRunner().invoke(acp_cmd, args, obj=app)
+        assert result.exit_code == 0, result.output
+        document = json.loads(settings.read_text())
+        document.update(default_mode="ask", theme="Ayu")
+        names = entry_names or ["DefenseClaw · Kiro"]
+        for name in names:
+            document["agent_servers"][name]["default_mode"] = "ask"
+        settings.write_text(json.dumps(document))
+        verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert verified.exit_code == 0, verified.output
+        for name in names:
+            changed = json.loads(json.dumps(document))
+            changed["agent_servers"][name]["env"]["CHANGED_LAUNCH"] = "yes"
+            settings.write_text(json.dumps(changed))
+            refused = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert refused.exit_code != 0, (name, refused.output)
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def test_setup_rolls_back_client_token_and_lock_when_config_save_fails(tmp_path, monkeypatch):
     _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
@@ -287,7 +324,7 @@ def test_verify_detects_client_configuration_drift(tmp_path, monkeypatch):
         assert result.exit_code == 0, result.output
         settings = _zed_settings(tmp_path)
         document = json.loads(settings.read_text())
-        document["theme"] = "drifted"
+        document["agent_servers"]["DefenseClaw · Kiro"]["env"]["CHANGED_LAUNCH"] = "yes"
         settings.write_text(json.dumps(document))
 
         result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
@@ -1180,7 +1217,7 @@ def test_alias_with_another_runtimes_lock_is_not_this_runtimes(tmp_path, monkeyp
         settings.write_text("{}")
         return str(cmd_acp_module._write_contract_lock(
             data_dir=runtime, client="zed", agent="kiro", profile="default", mode="observe",
-            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False,
+            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False, pin_entries=False,
         ))
 
     def alias(lock: str, token: str) -> dict:
@@ -1272,7 +1309,7 @@ def test_alias_backed_by_an_unusable_lock_is_not_owned(tmp_path, monkeypatch):
         settings.write_text("{}")
         cmd_acp_module._write_contract_lock(
             data_dir=data_dir, client="zed", agent="kiro", profile="default", mode="observe",
-            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False,
+            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False, pin_entries=False,
         )
         if mutate:
             document = json.loads(lock.read_text())
@@ -1371,7 +1408,7 @@ def test_setup_reroutes_only_entries_a_proven_lock_names(tmp_path, monkeypatch):
         settings.write_text("{}")
         cmd_acp_module._write_contract_lock(
             data_dir=data_dir, client="zed", agent="kiro", profile="default", mode="observe",
-            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False,
+            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False, pin_entries=False,
             adopted_entries=["My Kiro"],
         )
         document = json.loads(lock.read_text())
@@ -1443,7 +1480,7 @@ def test_lock_with_a_field_the_guard_refuses_proves_nothing(tmp_path, monkeypatc
         settings.write_text("{}")
         cmd_acp_module._write_contract_lock(
             data_dir=data_dir, client="zed", agent="kiro", profile="default", mode="observe",
-            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False,
+            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False, pin_entries=False,
             adopted_entries=["My Kiro", "Other Kiro"],
         )
         if keys:
@@ -1536,7 +1573,7 @@ def test_alias_launching_other_than_the_locked_agent_is_not_owned(tmp_path, monk
         settings.write_text("{}")
         cmd_acp_module._write_contract_lock(
             data_dir=data_dir, client="zed", agent="kiro", profile="default", mode="observe",
-            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False,
+            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False, pin_entries=False,
         )
 
     try:

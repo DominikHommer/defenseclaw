@@ -27,6 +27,7 @@ from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS, ACP_CLIENT_IDS, ACP_
 from defenseclaw.config import ACPBinding, ACPProfile
 from defenseclaw.connector_paths import _normalize_jsonc
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.enforce.asset_lists import is_secure_client
 from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
     atomic_write_text_secure,
@@ -39,6 +40,13 @@ _SCHEMA_SHA256 = "caf62ff962ada396878372ced11efb2c6764e59d90919a38583c319948931a
 _REGISTRY = ACP_REGISTRY
 _CLIENTS = set(ACP_CLIENT_IDS)
 _AGENTS = {agent_id: (command, list(args)) for agent_id, (command, args) in ACP_AGENT_ENTRY_POINTS.items()}
+_ENTRY_DIGEST_PREFIX = "entry-sha256:"
+# Keep aligned with editorOwnedEntryKeys in internal/acp/contract.go.
+_EDITOR_OWNED_ENTRY_KEYS = {
+    "zed": {
+        "default_mode", "default_model", "favorite_models", "default_config_options", "favorite_config_option_values",
+    },
+}
 
 
 def _client_path(client: str) -> Path:
@@ -156,12 +164,40 @@ def _restore(path: Path, snapshot: tuple[bool, bytes]) -> None:
         path.unlink()
 
 
-def _client_digest(path: Path) -> str:
-    """The editor file's digest, or "" when it cannot be read (never matches a pin)."""
+def _client_digest(path: Path, client: str, agent: str, lock_client: dict[str, Any]) -> str:
+    """Read the pin's entry or legacy file digest; unreadable state never matches."""
     try:
+        if str(lock_client.get("config_sha256", "")).startswith(_ENTRY_DIGEST_PREFIX):
+            return _client_entry_digest(path, client, agent, lock_client.get("adopted_entries", []))
         return _sha256_file(str(path))
-    except OSError:
+    except (OSError, ValueError, TypeError, click.ClickException):
         return ""
+
+
+def _client_entry_digest(path: Path, client: str, agent: str, adopted_entries: list[str] | None = None) -> str:
+    """Mirror ClientEntriesSHA256: pin every guarded entry and its picker name."""
+    document = _read_json_object(path)
+    servers = document.get("agent_servers")
+    names = adopted_entries or [_managed_name(agent)]
+    if not isinstance(servers, dict) or not names:
+        raise click.ClickException(f"guarded editor entries are missing: {path}")
+    entries = {}
+    for name in names:
+        entry = servers.get(name)
+        if not isinstance(entry, dict):
+            raise click.ClickException(f"guarded editor entry {name!r} is missing or invalid: {path}")
+        entries[name] = {
+            key: value for key, value in entry.items() if key not in _EDITOR_OWNED_ENTRY_KEYS.get(client, ())
+        }
+    # A reserved entry keeps the existing Go entry digest format. Adopted
+    # entries hash the name-to-entry map, so a rename or missing alias drifts.
+    pinned = entries if adopted_entries else entries[_managed_name(agent)]
+    canonical = json.dumps(pinned, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    # encoding/json's escaping rules (the guard computes the same digest).
+    for character, escaped in (("&", "\\u0026"), ("<", "\\u003c"), (">", "\\u003e"),
+                               ("\u2028", "\\u2028"), ("\u2029", "\\u2029")):
+        canonical = canonical.replace(character, escaped)
+    return _ENTRY_DIGEST_PREFIX + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _sha256_file(path: str) -> str:
@@ -195,13 +231,21 @@ def _write_contract_lock(
     client_path: Path,
     managed: bool,
     adopted_entries: list[str] | None = None,
+    pin_entries: bool = True,
 ) -> Path:
     path = _contract_lock_path(data_dir, client, agent)
     document: dict[str, Any] = {
         "version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "protocol": {"schema_version": _SCHEMA_VERSION, "schema_sha256": _SCHEMA_SHA256},
-        "client": {"id": client, "config_path": str(client_path), "config_sha256": _sha256_file(str(client_path))},
+        "client": {
+            "id": client,
+            "config_path": str(client_path),
+            "config_sha256": (
+                _client_entry_digest(client_path, client, agent, adopted_entries)
+                if pin_entries else _sha256_file(str(client_path))
+            ),
+        },
         "agent": {
             "id": agent,
             "path": agent_executable,
@@ -258,11 +302,12 @@ def _client_contract_snapshots(data_dir: str, client: str, agent: str) -> list[t
     return [(path, _snapshot(path)) for path in sorted(paths)]
 
 
-def _refresh_client_contract_digests(data_dir: str, client: str, client_path: Path) -> None:
+def _refresh_client_contract_digests(
+    data_dir: str, client: str, client_path: Path, *, pin_entries: bool = True
+) -> None:
     """Atomically re-pin every DefenseClaw entry sharing one editor file."""
     if not client_path.is_file():
         return
-    digest = _sha256_file(str(client_path))
     for pair_client, pair_agent in sorted(_managed_pairs(data_dir)):
         if pair_client != client:
             continue
@@ -283,7 +328,10 @@ def _refresh_client_contract_digests(data_dir: str, client: str, client_path: Pa
         ):
             raise click.ClickException(f"managed ACP contract lock identity does not match: {path}")
         lock_client["config_path"] = str(client_path.resolve())
-        lock_client["config_sha256"] = digest
+        lock_client["config_sha256"] = (
+            _client_entry_digest(client_path, pair_client, pair_agent, _adopted_entries(document))
+            if pin_entries else _sha256_file(str(client_path))
+        )
         atomic_write_private_bytes(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
 
 
@@ -775,7 +823,10 @@ def _verify_binding(
         client_digest = lock_client.get("config_sha256")
         if not isinstance(locked_client_path, str) or Path(locked_client_path).resolve() != client_path.resolve():
             problems.append("client configuration path does not match")
-        elif settings_usable and (not isinstance(client_digest, str) or client_digest != _client_digest(client_path)):
+        elif settings_usable and (
+            not isinstance(client_digest, str)
+            or client_digest != _client_digest(client_path, client, agent, lock_client)
+        ):
             problems.append("client configuration digest has drifted")
     for key in ("agent", "guard"):
         item = lock.get(key)
@@ -1020,8 +1071,9 @@ def setup_cmd(
             client_path=path,
             managed=managed,
             adopted_entries=[name for name in written if name != _managed_name(agent)],
+            pin_entries=not is_secure_client(app.cfg),
         )
-        _refresh_client_contract_digests(data_dir, client, path)
+        _refresh_client_contract_digests(data_dir, client, path, pin_entries=not is_secure_client(app.cfg))
         if not managed:
             app.cfg.acp.enabled = True
             # These two are global fallbacks, not this pair's policy. Writing
@@ -1209,7 +1261,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
                 app.cfg.acp.agents.pop(agent, None)
         if lock_path.exists():
             lock_path.unlink()
-        _refresh_client_contract_digests(data_dir, client, path)
+        _refresh_client_contract_digests(data_dir, client, path, pin_entries=not is_secure_client(app.cfg))
         if not managed:
             active_clients = set(app.cfg.acp.clients)
             active_agents = set(app.cfg.acp.agents)
