@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 )
 
@@ -49,6 +50,19 @@ func TestPolicyBundleReceiptReplayKeepsOneLocalRowUntilDeliveryIsConfirmed(t *te
 	if err := l.LogPolicyBundleReceipt("operator:sample", bundle, receipt); err == nil {
 		t.Fatal("unacknowledged delivery succeeded")
 	}
+	assertOneApplyMetric := func() {
+		t.Helper()
+		count := 0
+		for _, metric := range e.metricSnapshot() {
+			if metric.EventName() == observability.EventName(observability.TelemetryInstrumentDefenseClawPolicyBundleApplies) {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("receipt apply metrics=%d, want one independently of destination acknowledgement", count)
+		}
+	}
+	assertOneApplyMetric()
 	e.refuse = false
 	// A reader pinned before a later WAL write prevents a complete durability
 	// checkpoint. Remote acknowledgement alone must not retire the receipt.
@@ -84,4 +98,5 @@ func TestPolicyBundleReceiptReplayKeepsOneLocalRowUntilDeliveryIsConfirmed(t *te
 	if e.attempts != 3 {
 		t.Fatalf("delivery attempts=%d, want 3", e.attempts)
 	}
+	assertOneApplyMetric()
 }

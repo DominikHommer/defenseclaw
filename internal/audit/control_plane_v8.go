@@ -237,7 +237,7 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 	} else {
 		result, err = binding.emitter.EmitRuntimeV8(emitCtx, metadata, build)
 	}
-	if err != nil {
+	if err != nil && (family != controlPlaneV8FamilyBundleReceipt || !result.LocalPersisted) {
 		return auditV8Persisted, fmt.Errorf("audit: emit v8 control-plane action %q: %w", event.Action, err)
 	}
 	disposition, outcomeErr := runtimeV8Disposition(result, true)
@@ -253,8 +253,20 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 			// Metrics are an independent best-effort signal. Once the canonical
 			// log is durably persisted, a metric-path failure must not report the
 			// operator mutation as failed or invite a retry that duplicates it.
-			_ = l.recordRuntimeV8GeneratedMetricBatch(ctx, binding, metrics)
+			metricCtx := ctx
+			cancel := func() {}
+			if family == controlPlaneV8FamilyBundleReceipt {
+				// Remote acknowledgement may have exhausted the receipt's
+				// deadline after local persistence. Count that first local
+				// occurrence independently; replay suppresses a second count.
+				metricCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+			}
+			_ = l.recordRuntimeV8GeneratedMetricBatch(metricCtx, binding, metrics)
+			cancel()
 		}
+	}
+	if err != nil {
+		return auditV8Persisted, fmt.Errorf("audit: emit v8 control-plane action %q: %w", event.Action, err)
 	}
 	return disposition, nil
 }
