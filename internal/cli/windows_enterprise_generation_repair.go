@@ -48,8 +48,11 @@ func repairWindowsEnterpriseConfigGeneration(ctx context.Context, opts *windowsE
 	if stateErr == nil && managedStandaloneGenerationMatches(state, installed, attribution) {
 		return false, nil
 	}
-	// Releases before generation tracking may legitimately have no record.
-	if errors.Is(stateErr, os.ErrNotExist) && compareWindowsEnterpriseVersions(opts.productVersion, status.InstalledVersion) > 0 {
+	// 0.8.10 and 1.0.0 predate generation tracking. Keep their supported
+	// bootstrap, but never infer legacy state from an unknown version or
+	// merely because this package is newer than the installed one.
+	_, _, knownVersion := parseWindowsEnterpriseVersion(status.InstalledVersion)
+	if errors.Is(stateErr, os.ErrNotExist) && knownVersion && compareWindowsEnterpriseVersions(status.InstalledVersion, "1.0.1") < 0 {
 		return false, nil
 	}
 	if err := windowsEnterpriseStandaloneConfigSource(opts.configPath); err != nil {
