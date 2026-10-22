@@ -681,6 +681,36 @@ def test_stale_closed_never_reports_already_closed(monkeypatch: pytest.MonkeyPat
     reconcile.assert_called_once()
 
 
+@pytest.mark.parametrize("windows", [False, True])
+def test_same_mode_command_repairs_malformed_shared_fail_map(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool
+) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "open", "codex": "open"})
+    _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
+    sidecar = Path(cfg.data_dir) / "hooks" / ".hookcfg"
+    body = json.loads(sidecar.read_text(encoding="utf-8"))
+    body["fail_modes"] = None
+    sidecar.write_text(json.dumps(body), encoding="utf-8")
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=windows),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+        patch("defenseclaw.fail_mode._codex_registration_current", return_value=True),
+        patch("defenseclaw.fail_mode._unix_registration_freshness", return_value=None),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+    ):
+        state = resolve_connector_fail_mode(cfg, "codex")
+        result = CliRunner().invoke(
+            cmd_guardrail.fail_mode_cmd, ["open", "--connector", "codex", "--yes"], obj=app
+        )
+    assert "shared-sidecar-malformed" in state.drift
+    assert "nothing to do" not in result.output
+    assert result.exit_code == 0, result.output
+    reconcile.assert_called_once_with(cfg, "codex")
+
+
 def test_secure_client_unset_global_runtime_open_creates_scoped_override(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

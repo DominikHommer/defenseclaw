@@ -215,6 +215,87 @@ func TestHookConfigSidecarWriteRejectsMalformedPeerState(t *testing.T) {
 	}
 }
 
+func TestHookConfigSidecarWriteRepairsNullMapFromPeerRecords(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	for _, name := range []string{"codex", "claudecode"} {
+		if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", name, "open", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(before, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["fail_modes"] = nil
+	broken, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatalf("same-mode recovery: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repaired hookConfigSidecar
+	if err := json.Unmarshal(after, &repaired); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"codex", "claudecode"} {
+		if repaired.FailModes[name] != "open" || repaired.FailModeSources[name] != HookFailModeSourceConfig {
+			t.Fatalf("repaired sidecar lost %s: %+v", name, repaired)
+		}
+	}
+}
+
+func TestHookConfigSidecarRefusesNullMapWithoutPeerProof(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	for _, name := range []string{"codex", "claudecode"} {
+		if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", name, "open", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(before, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["fail_modes"] = nil
+	broken, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, hookConfigSidecarName+".claudecode")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err == nil {
+		t.Fatal("unproven peer mode was silently discarded")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(broken, after) {
+		t.Fatalf("failed recovery changed shared state: %s", after)
+	}
+}
+
 // The hooks directory is writable by the target user by design, so a managed
 // sidecar has to converge on modification and not only on deletion.
 func TestManagedHookConfigSidecarConvergesOnUnreadableState(t *testing.T) {
