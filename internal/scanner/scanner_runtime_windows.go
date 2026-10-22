@@ -83,6 +83,9 @@ func installedScannerRuntime() (string, error) {
 	if err := managed.ValidateTrustedRuntimeImage(root, path, "scanner runtime"); err != nil {
 		return "", err
 	}
+	if err := managed.ValidateTrustedRuntimeCodeTree(root, "scanner Python runtime"); err != nil {
+		return "", err
+	}
 	// And only the executable the lifecycle admitted by the payload trust
 	// policy: one replaced in place by an administrator, or by a process
 	// running as one, fails every scan closed (GAP-0311).

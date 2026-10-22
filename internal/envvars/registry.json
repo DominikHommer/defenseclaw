@@ -1501,7 +1501,7 @@
     {
       "name": "DEFENSECLAW_FAIL_MODE",
       "category": "security_opt_out",
-      "purpose": "Not read by 1.0.4 hooks: a hook's fail mode is the guardrail.hook_fail_mode installed with it (the shell hook, the OpenCode plugin, hooks/.hookcfg for the native Windows hook), and status and doctor report that. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again, and the Antigravity, Devin, Hermes and Kiro shell hooks of an authenticated Secure Client deployment keep it as a full override. Set the mode with defenseclaw guardrail fail-mode.",
+      "purpose": "Not read by 1.0.4 hooks in any profile: a hook's fail mode is the guardrail.hook_fail_mode installed with it (the shell hook, the OpenCode plugin, hooks/.hookcfg for the native Windows hook), and status and doctor report that. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again. Set the mode with defenseclaw guardrail fail-mode.",
       "default": "(value from guardrail.hook_fail_mode in config.yaml)",
       "accepted_values": [
         "open",
@@ -1513,8 +1513,8 @@
       "managed": "tighten_only",
       "consumers": [
         {
-          "location": "internal/gateway/connector/hooks/inspect-tool.sh",
-          "description": "Representative shared template; every generated hook reads the same override"
+          "location": "cli/defenseclaw/fail_mode.py",
+          "description": "Recognizes the old hook rendering while upgrading it; 1.0.4 hooks do not read this value"
         }
       ],
       "since": "0.4.0"

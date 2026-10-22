@@ -71,11 +71,8 @@ type templateData struct {
 	FailMode        string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
 	Managed         bool
 	SecureClient    bool // render-time profile marker for Unix shell identity headers
-	// SecureClientDelivery marks a Secure Client render on an authenticated
-	// Secure Client deployment (shellHookSecureClientDelivery): only it keeps
-	// the DEFENSECLAW_FAIL_MODE environment override and follows its fail
-	// mode on an unreachable gateway or a missing token (#1163). Every other
-	// managed render bakes its mode and fails those closed.
+	// SecureClientDelivery marks a Secure Client render on a verified install.
+	// Every shell hook uses the installed mode, never the agent environment.
 	SecureClientDelivery bool
 	TokenFile            string
 	ScopedToken          bool
@@ -129,8 +126,8 @@ type templateData struct {
 // rather than forwarding an uninspected action. Operators who would rather
 // accept an observability gap than a hard block during a DefenseClaw
 // outage choose "open" with guardrail fail-mode or the per-connector setup
-// flow (both persist guardrail.hook_fail_mode in config.yaml). No hook outside
-// Secure Client delivery reads DEFENSECLAW_FAIL_MODE (GAP-0315).
+// flow (both persist guardrail.hook_fail_mode in config.yaml). Shell hooks
+// read only the installed fail mode (GAP-0461).
 // Secure Client is the one profile whose unset mode renders open (secureClientHookFailMode, #1163).
 const defaultHookFailMode = "closed"
 
@@ -148,8 +145,8 @@ const secureClientHookFailMode = "open"
 // fail-open render defaults (setupHookFailMode, shellHookSecureClientDelivery)
 // need it as well as the profile the caller resolved, so a process-level
 // profile alone never opens a hook (main-sync review finding 5). The
-// default, for tests of this package, trusts the caller's profile.
-var SecureClientDeploymentVerified = func() bool { return true }
+// package default fails closed until the host classifier is linked.
+var SecureClientDeploymentVerified = func() bool { return false }
 
 // windowsHookAdapterTimeoutMS matches the existing 10-second connector request
 // budget for adapters that do not have a larger documented host contract.
@@ -1961,22 +1958,21 @@ type connectorHookRender struct {
 	foreignGuard    string
 }
 
-// Secure Client renders managed hooks into each users home. The deployment
-// profile, not that path, decides which identity headers they send.
+// Secure Client renders managed hooks into each user's home. The trusted
+// install marker, not the process environment or hook path, selects it.
 func shellHookSecureClientProfile(opts SetupOpts) bool {
 	return opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedHookSocket) == "" &&
-		strings.TrimSpace(opts.ManagedHookBinary) == ""
+		strings.TrimSpace(opts.ManagedHookBinary) == "" && SecureClientDeploymentVerified()
 }
 
 // shellHookSecureClientDelivery reports a Secure Client shell render whose
 // hooks follow the Secure Client delivery contract (#1163): the profile the
 // caller resolved is Secure Client (opts.SecureClientHookDelivery) and the
 // host is an authenticated Secure Client deployment
-// (SecureClientDeploymentVerified). Only such a hook keeps the
-// DEFENSECLAW_FAIL_MODE override and follows its fail mode on an unreachable
-// gateway or a missing token; every other managed hook fails those closed.
+// (SecureClientDeploymentVerified). Only such a hook follows the installed
+// Secure Client mode on an unreachable gateway or a missing token.
 func shellHookSecureClientDelivery(opts SetupOpts) bool {
-	return shellHookSecureClientProfile(opts) && opts.SecureClientHookDelivery && SecureClientDeploymentVerified()
+	return shellHookSecureClientProfile(opts) && opts.SecureClientHookDelivery
 }
 
 func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender {

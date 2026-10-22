@@ -1467,7 +1467,7 @@ func standaloneAcceptsAgentVersionChange(resolution connector.HookContractResolu
 // the standalone profile; standalone keeps fail-closed delivery, its version
 // gates and its refusals.
 func secureClientHookDelivery() bool {
-	return secureClientHookDeliveryHost && !standaloneProfileProcess()
+	return secureClientHookDeliveryHost && !standaloneProfileProcess() && connector.SecureClientDeploymentVerified()
 }
 
 // secureClientHookDeliveryHost reports whether this OS has a Secure Client

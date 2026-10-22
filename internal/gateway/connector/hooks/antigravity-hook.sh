@@ -14,7 +14,6 @@ HOOK_EVENT="${1:-}"
 # (the environment's DEFENSECLAW_FAIL_MODE is not read, GAP-0315); strict
 # availability closes it, as it closes every later failure.
 {{if or .Sandbox (and .Managed (not .SecureClient) (not .SecureClientDelivery))}}_DC_BOOT_FAIL_MODE="closed"
-{{else if .Managed}}_DC_BOOT_FAIL_MODE="open"
 {{else}}_DC_BOOT_FAIL_MODE="{{.FailMode}}"
 case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_BOOT_FAIL_MODE="closed" ;; esac
 {{end}}antigravity_bootstrap_failure() {
@@ -132,13 +131,9 @@ trap '_dc_boot_rc=$?; _defenseclaw_hook_cleanup; if [ "$_dc_boot_rc" -ne 0 ]; th
 # Antigravity enforces only a synchronous PreToolUse {"decision":"deny"} on
 # stdout, which every failure below prints for that event.
 FAIL_MODE="closed"
-readonly FAIL_MODE{{else if and .Managed (not .SecureClientDelivery)}}# Managed hooks outside an authenticated Secure Client deployment use the
-# installer-owned delivery policy; an inherited DEFENSECLAW_FAIL_MODE cannot
-# weaken an explicitly closed managed hook. Secure Client hooks keep the
-# environment override (#1163).
-FAIL_MODE="{{.FailMode}}"{{else if .SecureClientDelivery}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{else}}FAIL_MODE="{{.FailMode}}"
+readonly FAIL_MODE{{else}}FAIL_MODE="{{.FailMode}}"
 # The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
-# environment is not read, so status and doctor report what runs (GAP-0315).{{end}}
+# environment is not read, so status and doctor report what runs (GAP-0461).{{end}}
 
 {{if .Sandbox}}# A closed PreToolUse fallback's deny reason says why (the second argument):
 # an unreachable DefenseClaw, a request it refused, a reply that is no

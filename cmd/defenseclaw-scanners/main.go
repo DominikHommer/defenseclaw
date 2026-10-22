@@ -238,6 +238,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer release()
+	if err := validateRuntimeCodeTree(); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw-scanners: runtime code is not trusted: %v; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem\n", err)
+		return 1
+	}
 	pythonDir := filepath.Join(dir, "python")
 	// -B: the gateway runs the runtime read-only; prepare compiled it.
 	cmd := exec.Command(filepath.Join(pythonDir, "python.exe"), append([]string{"-I", "-B", "-c", script}, scriptArgs...)...)
@@ -432,7 +436,7 @@ func claimInterruptedUnpack(root, sha, staging string) bool {
 // embedded archive. The completion marker names a public SHA-256, so a folder
 // somebody else created could carry it: prepare, which runs elevated and
 // executes the folder's python.exe, never trusts the marker alone. A tree that
-// differs is removed and unpacked again.
+// differs or contains untrusted code paths is removed and unpacked again.
 func prepareRuntime(manifest runtimeManifest) (string, error) {
 	dir, err := ensureRuntime(manifest)
 	if err != nil {
@@ -444,17 +448,23 @@ func prepareRuntime(manifest runtimeManifest) (string, error) {
 	}
 	verifyErr := verifyRuntime(dir, bytes.NewReader(archive), int64(len(archive)), true)
 	if verifyErr == nil {
+		verifyErr = validateRuntimeCodeTree()
+	}
+	if verifyErr == nil {
 		return dir, nil
 	}
-	fmt.Fprintf(os.Stderr, "defenseclaw-scanners: the scanner runtime at %s does not match this build (%v); unpacking it again\n", dir, verifyErr)
+	fmt.Fprintf(os.Stderr, "defenseclaw-scanners: the scanner runtime at %s is changed or untrusted (%v); unpacking it again\n", dir, verifyErr)
 	if err := clearRuntimeDir(dir); err != nil {
-		return "", fmt.Errorf("remove the scanner runtime that does not match this build: %w", err)
+		return "", fmt.Errorf("remove the changed or untrusted scanner runtime: %w", err)
 	}
 	if dir, err = ensureRuntime(manifest); err != nil {
 		return "", err
 	}
 	if err := verifyRuntime(dir, bytes.NewReader(archive), int64(len(archive)), true); err != nil {
 		return "", fmt.Errorf("the unpacked scanner runtime does not match this build: %w", err)
+	}
+	if err := validateRuntimeCodeTree(); err != nil {
+		return "", fmt.Errorf("the unpacked scanner runtime code is not trusted: %w; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem", err)
 	}
 	return dir, nil
 }
