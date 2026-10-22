@@ -346,32 +346,3 @@ func TestRuntimeManagedFallbackReloadKeepsGenerationIsolation(t *testing.T) {
 		t.Fatalf("managed-only reload SQLite count=%d", got)
 	}
 }
-
-// A change event that collection drops has no local row, so the managed
-// destination does not get it either: its producer offers it again until
-// it is stored, and each offer would send another record under its id.
-// Before, the managed fallback sent it with no row at all.
-func TestRuntimeManagedFallbackDoesNotSendAChangeWithoutALocalRow(t *testing.T) {
-	dependencies := newRuntimeTestDependencies(t)
-	plan := managedFallbackRuntimePlan(
-		t, dependencies, false, "https://managed-change.example.test", false,
-	)
-	adapters := newManagedFallbackAdapters()
-	runtime := newManagedFallbackRuntime(t, dependencies, plan, adapters)
-	managed := adapters.named(t, config.ObservabilityV8ManagedAIDDestinationName)
-	const recordID = "managed-fallback-change"
-	steps := 0
-	ctx := observability.WithExportAfterLocalWrite(t.Context(), func(context.Context) error {
-		steps++
-		return nil
-	})
-	outcome, err := runtime.Emit(ctx, diagnosticMetadata(t), runtimeContentRecordBuilder(recordID, "change"))
-	requireRuntimeErrorCode(t, err, ErrorLocalNotDurable)
-	if !outcome.ManagedOnly() || outcome.LocalPersisted() || steps != 0 {
-		t.Fatalf("managed=%t persisted=%t steps=%d", outcome.ManagedOnly(), outcome.LocalPersisted(), steps)
-	}
-	assertNoRuntimeDelivery(t, managed)
-	if got := countRuntimeRecord(t, dependencies, recordID); got != 0 {
-		t.Fatalf("SQLite count=%d, want zero", got)
-	}
-}

@@ -7,7 +7,6 @@ package audit
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,8 +14,6 @@ import (
 	"runtime"
 	"strings"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 // auditDurablePragmas are the audit pragmas with synchronous=FULL and
@@ -115,107 +112,20 @@ func syncAuditDBDir(dir string) error {
 	return d.Sync()
 }
 
-// storedOccurrence is what the audit_events row of an occurrence keeps of
-// the process that built its record: the time, run id, sidecar id, binary
-// version and config generation and digest, and the stored projected
-// record. A stored replay rebuilds the record from the producer's durable
-// event and these values, so a remote destination gets, under the stored
-// id, the record the row holds and not one stamped by the process that
-// replays it (after a restart: another run and sidecar id, maybe another
-// binary or config). The pipeline sends the rebuilt record only when it is
-// the stored one (redaction.MatchStoredProjection with record): a record
-// this build cannot rebuild exactly, or another event under the stored id,
-// is not sent.
-type storedOccurrence struct {
-	timestamp         time.Time
-	runID             string
-	sidecarInstanceID string
-	binaryVersion     string
-	configGeneration  int64
-	configDigest      string
-	floorOnly         bool
-	// record is the row's projected_record_json.
-	record []byte
-}
-
-// storedOccurrence reads the stored values of the audit_events row with
-// id, and whether there is one. A store without a database holds none. A
-// row whose time does not parse is an error: its record cannot be rebuilt.
-func (s *Store) storedOccurrence(ctx context.Context, id string) (storedOccurrence, bool, error) {
+// hasOccurrence reports whether the audit store holds the row with id. A
+// store without a database holds none.
+func (s *Store) hasOccurrence(ctx context.Context, id string) (bool, error) {
 	if s == nil || s.db == nil {
-		return storedOccurrence{}, false, nil
+		return false, nil
 	}
-	var (
-		stamp                                        string
-		runID, sidecar, binary, digest, body, record sql.NullString
-		generation                                   sql.NullInt64
-	)
+	var one int
 	err := s.scanRow(ctx, "audit_event_exists",
-		s.db.QueryRowContext(ctx, `
-			SELECT timestamp, run_id, sidecar_instance_id, binary_version, generation, content_hash,
-				payload_json, projected_record_json
-			FROM audit_events WHERE id = ? LIMIT 1`, id),
-		&stamp, &runID, &sidecar, &binary, &generation, &digest, &body, &record)
+		s.db.QueryRowContext(ctx, `SELECT 1 FROM audit_events WHERE id = ? LIMIT 1`, id), &one)
 	if errors.Is(err, sql.ErrNoRows) {
-		return storedOccurrence{}, false, nil
+		return false, nil
 	}
 	if err != nil {
-		return storedOccurrence{}, false, fmt.Errorf("audit: look up audit event %s: %w", id, err)
+		return false, fmt.Errorf("audit: look up audit event %s: %w", id, err)
 	}
-	at, err := time.Parse(time.RFC3339Nano, stamp)
-	if err != nil {
-		return storedOccurrence{}, false, fmt.Errorf("audit: audit event %s has no valid time: %w", id, err)
-	}
-	var payload struct {
-		FloorOnly bool `json:"floor_only"`
-	}
-	_ = json.Unmarshal([]byte(body.String), &payload)
-	return storedOccurrence{
-		timestamp: at.UTC(), runID: runID.String, sidecarInstanceID: sidecar.String,
-		binaryVersion: binary.String, configGeneration: generation.Int64, configDigest: digest.String,
-		floorOnly: payload.FloorOnly, record: []byte(record.String),
-	}, true, nil
-}
-
-// pin gives a replayed event the stored process values.
-func (o storedOccurrence) pin(event *Event) {
-	event.Timestamp = o.timestamp
-	event.RunID = o.runID
-	event.SidecarInstanceID = o.sidecarInstanceID
-	event.BinaryVersion = o.binaryVersion
-}
-
-// buildContext is the config generation and digest the stored record was
-// built with.
-func (o storedOccurrence) buildContext() (RuntimeV8BuildContext, error) {
-	if o.configGeneration < 0 {
-		return RuntimeV8BuildContext{}, fmt.Errorf("audit: the stored record has an invalid config generation")
-	}
-	return RuntimeV8BuildContext{ConfigGeneration: uint64(o.configGeneration), ConfigDigest: o.configDigest}, nil
-}
-
-// matches checks the form of a record rebuilt for a replay, which its
-// serialization does not carry: a config that now collects only the
-// mandatory floor builds another record. The pipeline compares the rest.
-func (o storedOccurrence) matches(record observability.Record) error {
-	if record.IsFloorOnly() != o.floorOnly {
-		return fmt.Errorf("audit: the stored record %s cannot be rebuilt exactly (its floor form differs), so it is not sent again", record.RecordID())
-	}
-	return nil
-}
-
-type storedOccurrenceKey struct{}
-
-// withStoredOccurrence carries the stored row of a replayed occurrence to
-// the record builder.
-func withStoredOccurrence(ctx context.Context, row storedOccurrence) context.Context {
-	return context.WithValue(ctx, storedOccurrenceKey{}, row)
-}
-
-func storedOccurrenceFrom(ctx context.Context) (storedOccurrence, bool) {
-	if ctx == nil {
-		return storedOccurrence{}, false
-	}
-	row, ok := ctx.Value(storedOccurrenceKey{}).(storedOccurrence)
-	return row, ok
+	return true, nil
 }

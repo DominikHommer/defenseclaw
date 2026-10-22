@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -84,9 +85,14 @@ func newChangeExportFixture(t *testing.T) *changeExportFixture {
 	t.Cleanup(func() { _ = database.Close() })
 	f.database = database
 	f.dir = t.TempDir()
+	// The change was made an hour before the gateway reports it (it was
+	// stopped): its record keeps the change's time.
 	f.ev = writeTestChangeEvent(t, enterprisestatus.ChangeEventsDir(f.dir), enterprisestatus.ChangeKindSecret,
 		enterprisestatus.ChangeActionSet, enterprisestatus.ChangeApplied, "",
-		func(ev *enterprisestatus.ChangeEvent) { ev.SecretName = "splunk-hec-token" })
+		func(ev *enterprisestatus.ChangeEvent) {
+			ev.SecretName = "splunk-hec-token"
+			ev.Time = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+		})
 	return f
 }
 
@@ -99,14 +105,17 @@ func (f *changeExportFixture) reporter() *bundleReceiptReporter {
 }
 
 // exported counts the change's records the destination accepted.
-func (f *changeExportFixture) exported() int {
-	count := 0
+func (f *changeExportFixture) exported() int { return len(f.exportedRecords()) }
+
+// exportedRecords are the change's records the destination accepted.
+func (f *changeExportFixture) exportedRecords() []*logspb.LogRecord {
+	var out []*logspb.LogRecord
 	for _, record := range hookModelV8CapturedLogs(f.capture.logSnapshot()) {
 		if encoded, err := protojson.Marshal(record); err == nil && strings.Contains(string(encoded), f.ev.EventID) {
-			count++
+			out = append(out, record)
 		}
 	}
-	return count
+	return out
 }
 
 func (f *changeExportFixture) storedRows(t *testing.T) int {
@@ -135,27 +144,40 @@ func pollUntil(t *testing.T, reporter *bundleReceiptReporter, cond func() bool) 
 	}
 }
 
-// A change event the audit store cannot insert (the disk is full, the
-// store still reads) stays in the spool and is offered at every poll. It
-// reaches the remote destination only once it is stored, and only once.
-// Before, every failed offer exported it again, every 5 seconds while the
-// store stayed full.
-func TestBundleReceiptReporterExportsAChangeOnlyOnceItIsStored(t *testing.T) {
+// The change spool is the durable record of a change (its command flushed
+// the event before it made the change), and the reporter its one sender:
+// the audit store and the remote destination are separate sinks of it.
+// While the audit store cannot insert (the disk is full, the store still
+// reads), the destination still gets the change, once however often it is
+// offered, with the change's id and time, and the change stays unmarked;
+// once the store takes it, it is marked reported, stored once and not sent
+// again. Before, a change reached a destination only after its audit row
+// was written and flushed, so the remote sink waited on the local store,
+// and its record had the time of that write.
+func TestBundleReceiptReporterSendsAChangeToEachSinkOnItsOwn(t *testing.T) {
 	f := newChangeExportFixture(t)
 	reporter := f.reporter()
 	if _, err := f.database.Exec(`CREATE TRIGGER audit_store_full BEFORE INSERT ON audit_events
 		BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
 		t.Fatal(err)
 	}
+	pollUntil(t, reporter, func() bool { return f.exported() > 0 })
 	for range 3 {
 		reporter.poll(t.Context())
 	}
+	time.Sleep(300 * time.Millisecond) // the destination exports every 10 ms
 	if reporter.hasSeen(f.ev.EventID) {
 		t.Fatal("a change the audit store refused was marked reported")
 	}
-	time.Sleep(500 * time.Millisecond) // the destination exports every 10 ms
-	if n := f.exported(); n != 0 {
-		t.Fatalf("a change the audit store refused was exported %d times", n)
+	if n, rows := f.exported(), f.storedRows(t); n != 1 || rows != 0 {
+		t.Fatalf("while the store refused: exported %d, stored %d; want 1 and 0", n, rows)
+	}
+	at, err := time.Parse(time.RFC3339Nano, f.ev.Time)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := time.Unix(0, int64(f.exportedRecords()[0].GetTimeUnixNano())); got.Sub(at).Abs() > time.Millisecond {
+		t.Fatalf("the exported record has the time %s, want the change's %s", got, at)
 	}
 	if _, err := f.database.Exec(`DROP TRIGGER audit_store_full`); err != nil {
 		t.Fatal(err)
@@ -165,8 +187,8 @@ func TestBundleReceiptReporterExportsAChangeOnlyOnceItIsStored(t *testing.T) {
 		reporter.poll(t.Context())
 	}
 	time.Sleep(300 * time.Millisecond)
-	if n := f.exported(); n != 1 {
-		t.Fatalf("the stored change was exported %d times, want once", n)
+	if n, rows := f.exported(), f.storedRows(t); n != 1 || rows != 1 {
+		t.Fatalf("after the report: exported %d, stored %d; want 1 and 1", n, rows)
 	}
 }
 

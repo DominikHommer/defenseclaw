@@ -281,25 +281,22 @@ func (r *bundleReceiptReporter) reportSpool() {
 	}
 }
 
-// reportChanges emits one audit event per change event not reported yet,
-// oldest first, once the event is on disk to stay (its writer flushed it;
-// enterprisestatus.ReportableChangeEventIDs), then one per reservation
-// whose command ended before it wrote its event (failed, interrupted),
-// also once it is flushed: a change interrupted after it was
-// made is reported at the next poll, a gateway restart included, even when
-// no later command writes the spool. A file that does not validate is
-// skipped. A reservation the next command moves into the spool keeps its
-// id, so it is not reported again. The spool event is the change's durable
-// outbox: reportChange marks it reported, which lets the change commands
-// remove it, only once its audit row survives a power loss and every
-// remote destination acknowledged it.
+// reportChanges is the one sender of the change spool, the durable record
+// of every change (its command flushed the event before it made the
+// change). It offers each change event not reported yet, oldest first,
+// once the event is on disk to stay (enterprisestatus.ReportableChangeEvents),
+// then the event of each reservation whose command ended before it wrote
+// its outcome (failed, interrupted), also once it is flushed: a change
+// interrupted after it was made is reported at the next poll, a gateway
+// restart included, even when no later command writes the spool. A file
+// that does not validate (its id is not the hash of its content, for one)
+// is skipped. A reservation the next command moves into the spool keeps
+// its id, and an outcome that settles it names it, so it is not reported
+// twice. reportChange marks an event reported, which lets the change
+// commands remove it, only once every sink confirmed it.
 func (r *bundleReceiptReporter) reportChanges() {
 	dir := r.changeDir()
-	for _, id := range enterprisestatus.ReportableChangeEventIDs(dir, r.hasSeen) {
-		ev, err := enterprisestatus.ReadChangeEvent(filepath.Join(dir, id+".json"))
-		if err != nil || ev.EventID != id {
-			continue
-		}
+	for _, ev := range enterprisestatus.ReportableChangeEvents(dir, r.hasSeen) {
 		r.reportChange(ev)
 	}
 	for _, ev := range enterprisestatus.EndedChangeReservations(dir) {
@@ -309,17 +306,21 @@ func (r *bundleReceiptReporter) reportChanges() {
 	}
 }
 
-// reportChange offers ev to the audit logger until it is reported. The
-// logger stores each change event id once and returns nil only once the
-// row survives a power loss; an offer it refuses is made again at the next
-// poll, and one whose store write failed exported nothing. The change's
-// RemoteDelivery, kept across offers, says when every remote destination
-// acknowledged it. While its deliveries are in flight the change is not
-// offered again; once one failed (refused, dropped, abandoned at shutdown)
-// the next poll offers it again, and the logger sends the stored record to
-// the destinations that do not have it. After a restart the delivery state
-// is gone and an unreported change goes to every destination again, under
-// the same record id.
+// reportChange offers ev to its sinks, the audit store and every remote
+// destination, until each confirmed it. The record is built from the event
+// alone (its id, time and content), so every offer sends the same record,
+// and each sink gets it on its own: a destination does not wait for the
+// audit row, nor the row for a destination. The audit logger stores each
+// change event id once and returns nil only once the row survives a power
+// loss; an offer it refuses is made again at the next poll. The change's
+// RemoteDelivery, kept across offers (and across config reloads: the
+// reporter lives as long as the gateway), says which destinations
+// acknowledged it: a later offer goes only to the destinations that do not
+// have it and have nothing of it in flight. While its deliveries are in
+// flight the change is not offered again; once one failed (refused,
+// dropped, abandoned at shutdown or by a reload) the next poll offers it
+// again. After a restart the delivery state is gone and an unreported
+// change goes to every destination again, under the same record id.
 func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 	state := r.changes[ev.EventID]
 	if state == nil {

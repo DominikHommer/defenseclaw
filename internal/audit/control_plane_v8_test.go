@@ -39,15 +39,8 @@ type testRuntimeV8Emitter struct {
 	metadata []router.Metadata
 	records  []observability.Record
 	metrics  []observability.Record
-	// exportAfterWrite is observability.ExportAfterLocalWrite of each emit.
-	exportAfterWrite []bool
-	// replays is observability.StoredReplay of each emitted record.
-	replays []bool
-	// durableAtExport is, for each change, whether its row was power-loss
-	// durable when a destination could get it.
-	durableAtExport []bool
-	// build is the config of this process (nil: generation 23).
-	build *RuntimeV8BuildContext
+	// storedLocally is observability.StoredLocally of each emitted record.
+	storedLocally []bool
 }
 
 type rejectingRuntimeV8Emitter struct {
@@ -112,20 +105,16 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 	if emitter == nil || emitter.writer == nil || builder == nil {
 		return RuntimeV8EmitOutcome{}, fmt.Errorf("test runtime emitter is unavailable")
 	}
-	emitter.mu.Lock()
-	emitter.exportAfterWrite = append(emitter.exportAfterWrite, observability.ExportAfterLocalWrite(ctx))
-	emitter.mu.Unlock()
 	if emitter.admission == router.AdmissionDrop {
 		emitter.mu.Lock()
 		emitter.metadata = append(emitter.metadata, metadata)
 		emitter.mu.Unlock()
 		return RuntimeV8EmitOutcome{Admission: router.AdmissionDrop}, nil
 	}
-	build := RuntimeV8BuildContext{ConfigGeneration: 23, ConfigDigest: testEventHistoryGraphDigest}
-	if emitter.build != nil {
-		build = *emitter.build
-	}
-	record, err := builder(build, emitter.admission)
+	record, err := builder(RuntimeV8BuildContext{
+		ConfigGeneration: 23,
+		ConfigDigest:     testEventHistoryGraphDigest,
+	}, emitter.admission)
 	if err != nil {
 		return RuntimeV8EmitOutcome{}, err
 	}
@@ -133,34 +122,19 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 	if err != nil {
 		return RuntimeV8EmitOutcome{}, err
 	}
-	// A stored replay is not written again (the runtime's pipeline skips
-	// its local append), and is sent only when it is the stored record.
-	if stored, replay := observability.StoredReplayRecord(ctx); replay {
-		if err := observabilityredaction.MatchStoredProjection(record, stored); err != nil {
+	// An occurrence the store already holds is not written again (the
+	// runtime's pipeline skips its local append).
+	storedLocally := observability.StoredLocally(ctx)
+	if !storedLocally {
+		if err := emitter.writer.AppendContext(ctx, record, projection); err != nil {
 			return RuntimeV8EmitOutcome{}, err
 		}
-	} else if err := emitter.writer.AppendContext(ctx, record, projection); err != nil {
-		return RuntimeV8EmitOutcome{}, err
 	}
 	emitter.mu.Lock()
 	emitter.metadata = append(emitter.metadata, metadata)
 	emitter.records = append(emitter.records, record.Clone())
-	emitter.replays = append(emitter.replays, observability.StoredReplay(ctx))
+	emitter.storedLocally = append(emitter.storedLocally, storedLocally)
 	emitter.mu.Unlock()
-	// Like the runtime, make a change's row durable before a destination
-	// could get it.
-	if observability.ExportAfterLocalWrite(ctx) {
-		makeDurable := observability.LocalDurabilityStep(ctx)
-		if makeDurable == nil {
-			return RuntimeV8EmitOutcome{}, fmt.Errorf("test runtime emitter: a change has no durability step")
-		}
-		if err := makeDurable(ctx); err != nil {
-			return RuntimeV8EmitOutcome{}, err
-		}
-		emitter.mu.Lock()
-		emitter.durableAtExport = append(emitter.durableAtExport, observability.RemoteDeliveryFrom(ctx).LocalDurable())
-		emitter.mu.Unlock()
-	}
 	return RuntimeV8EmitOutcome{Admission: emitter.admission, LocalPersisted: true}, nil
 }
 

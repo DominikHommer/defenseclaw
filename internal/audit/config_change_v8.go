@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -38,7 +39,7 @@ type ConfigChange struct {
 	// ConfigChangeRefused or ConfigChangeFailed with ReasonCode.
 	Kind, Action, Outcome, ReasonCode string
 	// Actor is the local OS account that ran the command; ChangedAt the
-	// time of the change (RFC 3339).
+	// time of the change (RFC 3339), which is the time of its record.
 	Actor, ChangedAt string
 	// SHA256 and PreviousSHA256 are the installed and the replaced anchor
 	// file; KeyIDsAdded and KeyIDsRemoved the signing keys that changed.
@@ -165,9 +166,12 @@ func configChangeKeyIDs(ids []string) observability.Optional[[]string] {
 
 // LogConfigChange records one trust anchor or protected credential change:
 // config.trust_anchors.changed, config.secret.changed or
-// config.secret.change_failed. It reports only. It returns nil once the
-// record survives a power loss; delivery, kept by the caller across offers
-// of the same change, then tells when every remote destination has it.
+// config.secret.change_failed. It reports only. The record is built from
+// the change alone (its id, time and content), so every offer of the same
+// change is the same record. It returns nil once the audit row survives a
+// power loss; delivery, kept by the caller across offers of the same
+// change, tells when every remote destination has it. The two are separate
+// sinks of the change.
 func (l *Logger) LogConfigChange(change ConfigChange, delivery *observability.RemoteDelivery) error {
 	if l == nil {
 		return nil
@@ -179,10 +183,12 @@ func (l *Logger) LogConfigChange(change ConfigChange, delivery *observability.Re
 	if _, err := configChangeV8FieldsFor(&change); err != nil {
 		return err
 	}
-	after := map[string]any{"event_id": change.EventID, "kind": change.Kind, "action": change.Action, "outcome": change.Outcome}
-	if change.ChangedAt != "" {
-		after["changed_at"] = change.ChangedAt
+	changedAt, err := time.Parse(time.RFC3339Nano, change.ChangedAt)
+	if err != nil {
+		return fmt.Errorf("audit: config change time is not RFC 3339")
 	}
+	after := map[string]any{"event_id": change.EventID, "kind": change.Kind, "action": change.Action,
+		"outcome": change.Outcome, "changed_at": change.ChangedAt}
 	if change.ReasonCode != "" {
 		after["reason_code"] = change.ReasonCode
 	}
@@ -222,6 +228,7 @@ func (l *Logger) LogConfigChange(change ConfigChange, delivery *observability.Re
 		Actor: actor, Action: action, TargetType: targetType, TargetID: targetID, Reason: reason,
 		After: after, Severity: severity, ConfigChange: &change,
 		OccurrenceID:   stableOccurrenceID("config.change", change.EventID),
+		OccurredAt:     changedAt,
 		RemoteDelivery: delivery,
 	})
 }

@@ -18,13 +18,134 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
-// A change event stays queued until every remote destination has it. The
-// runtime tells the occurrence's RemoteDelivery the outcome of each
-// destination; a replay of the stored record (WithStoredReplay) writes
-// nothing locally and goes only to the destinations that did not
-// acknowledge an earlier offer. After a restart (a new RemoteDelivery) the
-// replay goes to every destination again. Before, an offer of a stored
-// change exported nothing, so a delivery lost in memory was never redone.
+// offerChange emits one offer of a spooled change, as its sender does: one
+// attempt of tracker, the store already holding it when storedLocally.
+func offerChange(
+	t *testing.T, runtime *Runtime, tracker *observability.RemoteDelivery, storedLocally bool, builder EmitBuilder,
+) error {
+	t.Helper()
+	ctx := t.Context()
+	if storedLocally {
+		ctx = observability.WithStoredLocally(ctx)
+	}
+	tracker.BeginAttempt()
+	defer tracker.EndAttempt()
+	_, err := runtime.Emit(observability.WithRemoteDelivery(ctx, tracker), diagnosticMetadata(t), builder)
+	return err
+}
+
+// settleChange waits until tracker's last attempt has nothing in flight and
+// returns whether every destination has the change.
+func settleChange(t *testing.T, tracker *observability.RemoteDelivery) bool {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if settled, delivered := tracker.Settled(); settled {
+			return delivered
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the deliveries of the offer did not settle")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A change event is a spooled occurrence its one sender offers until every
+// sink has it: the local store and each destination, each on its own.
+// While SQLite reads but cannot insert, the destination still gets the
+// change, and only once however often it is offered: a later offer skips a
+// destination that has it in flight or acknowledged it. Once the store
+// takes it the change is stored once, and no destination gets it again
+// until a new sender (a restart) offers it. Before, a change was exported
+// only after its local row was written and flushed, so a remote sink
+// waited on the local store, and an offer made while a delivery was in
+// flight sent the destination a second copy.
+func TestRuntimeSendsAChangeToEachSinkOnItsOwn(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	plan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
+		func(source *config.ObservabilityV8Source) {
+			source.Destinations = []config.ObservabilityV8DestinationSource{
+				runtimeConsoleDestination("sink", "none", 8),
+			}
+		},
+	)
+	sink := newRuntimeRecordingAdapter(16)
+	release := make(chan struct{})
+	sink.release = release
+	factory := runtimeAdapterFactoryFunc(func(
+		context.Context, config.ObservabilityV8EffectiveDestination, telemetry.V8ResourceContext,
+	) (delivery.Adapter, DestinationAdapterCleanup, error) {
+		return sink, func(context.Context) error { return nil }, nil
+	})
+	runtime := runtimeWithAdapterFactory(t, dependencies, plan, factory, nil)
+	database, err := sql.Open("sqlite", dependencies.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close() //nolint:errcheck
+	if _, err := database.Exec(`CREATE TRIGGER local_history_full BEFORE INSERT ON audit_events
+		BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
+		t.Fatal(err)
+	}
+	const recordID = "runtime-change-sinks"
+	build := runtimeContentRecordBuilder(recordID, "change")
+	tracker := observability.NewRemoteDelivery()
+	if err := offerChange(t, runtime, tracker, false, build); err == nil {
+		t.Fatal("the offer stored the change under a failing SQLite writer")
+	}
+	if item := receiveRuntimeDelivery(t, sink); item.identity.RecordID != recordID {
+		t.Fatalf("the destination received %q, want the change while the store is down", item.identity.RecordID)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := offerChange(t, runtime, tracker, false, build); err == nil {
+			t.Fatalf("offer %d stored the change under a failing SQLite writer", attempt)
+		}
+	}
+	assertNoRuntimeDelivery(t, sink)
+	if settled, _ := tracker.Settled(); settled {
+		t.Fatal("an offer with a delivery in flight settled")
+	}
+	close(release)
+	if !settleChange(t, tracker) || !tracker.Acknowledged("sink") {
+		t.Fatal("the acknowledged delivery did not settle as delivered")
+	}
+	// No second copy was queued behind the one in flight.
+	assertNoRuntimeDelivery(t, sink)
+	if _, err := database.Exec(`DROP TRIGGER local_history_full`); err != nil {
+		t.Fatal(err)
+	}
+	if err := offerChange(t, runtime, tracker, false, build); err != nil {
+		t.Fatalf("offer after the store recovered: %v", err)
+	}
+	if err := offerChange(t, runtime, tracker, true, build); err != nil {
+		t.Fatalf("offer of the stored change: %v", err)
+	}
+	assertNoRuntimeDelivery(t, sink)
+	if n := countRuntimeRecord(t, dependencies, recordID); n != 1 {
+		t.Fatalf("the offers left %d stored rows, want 1", n)
+	}
+	restarted := observability.NewRemoteDelivery()
+	if err := offerChange(t, runtime, restarted, true, build); err != nil {
+		t.Fatal(err)
+	}
+	if item := receiveRuntimeDelivery(t, sink); item.identity.RecordID != recordID {
+		t.Fatalf("the destination received %q after a restart", item.identity.RecordID)
+	}
+	if !settleChange(t, restarted) {
+		t.Fatal("the offer after a restart did not settle as delivered")
+	}
+	if n := countRuntimeRecord(t, dependencies, recordID); n != 1 {
+		t.Fatalf("the offer after a restart left %d stored rows, want 1", n)
+	}
+}
+
+// A change event stays in its spool until every remote destination has it.
+// The runtime tells the change's RemoteDelivery the outcome of each
+// destination; an offer of a change the store holds (WithStoredLocally)
+// writes nothing locally and goes only to the destinations that did not
+// acknowledge an earlier offer. After a restart (a new RemoteDelivery) it
+// goes to every destination again. An atomic batch, which writes every
+// item, refuses it.
 func TestRuntimeReplaysAStoredChangeOnlyToDestinationsThatLackIt(t *testing.T) {
 	dependencies := newRuntimeTestDependencies(t)
 	plan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
@@ -46,31 +167,11 @@ func TestRuntimeReplaysAStoredChangeOnlyToDestinationsThatLackIt(t *testing.T) {
 	})
 	runtime := runtimeWithAdapterFactory(t, dependencies, plan, factory, nil)
 	const recordID = "runtime-change-replay"
-	offer := func(tracker *observability.RemoteDelivery, replay bool) {
+	build := runtimeContentRecordBuilder(recordID, "change")
+	offer := func(tracker *observability.RemoteDelivery, stored bool) {
 		t.Helper()
-		ctx := observability.WithExportAfterLocalWrite(t.Context(), runtimeRowDurable)
-		if replay {
-			ctx = observability.WithStoredReplay(t.Context(), storedRuntimeRecord(t, dependencies, recordID), runtimeRowDurable)
-		}
-		tracker.BeginAttempt()
-		_, err := runtime.Emit(observability.WithRemoteDelivery(ctx, tracker), diagnosticMetadata(t),
-			runtimeContentRecordBuilder(recordID, "change"))
-		tracker.EndAttempt()
-		if err != nil {
-			t.Fatalf("offer (replay %t): %v", replay, err)
-		}
-	}
-	settle := func(tracker *observability.RemoteDelivery) bool {
-		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			if settled, delivered := tracker.Settled(); settled {
-				return delivered
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("the deliveries of the offer did not settle")
-			}
-			time.Sleep(5 * time.Millisecond)
+		if err := offerChange(t, runtime, tracker, stored, build); err != nil {
+			t.Fatalf("offer (stored %t): %v", stored, err)
 		}
 	}
 	received := func(name string) {
@@ -84,7 +185,7 @@ func TestRuntimeReplaysAStoredChangeOnlyToDestinationsThatLackIt(t *testing.T) {
 	offer(tracker, false)
 	received("acks")
 	received("refuses")
-	if settle(tracker) {
+	if settleChange(t, tracker) {
 		t.Fatal("an offer a destination refused settled as delivered")
 	}
 	if !tracker.Acknowledged("acks") || tracker.Acknowledged("refuses") {
@@ -93,65 +194,44 @@ func TestRuntimeReplaysAStoredChangeOnlyToDestinationsThatLackIt(t *testing.T) {
 	offer(tracker, true)
 	received("refuses")
 	assertNoRuntimeDelivery(t, adapters["acks"])
-	if settle(tracker) {
-		t.Fatal("a replay the destination refused again settled as delivered")
+	if settleChange(t, tracker) {
+		t.Fatal("an offer the destination refused again settled as delivered")
 	}
 	if n := countRuntimeRecord(t, dependencies, recordID); n != 1 {
-		t.Fatalf("the replays left %d stored rows, want 1", n)
+		t.Fatalf("the offers left %d stored rows, want 1", n)
 	}
 
 	restarted := observability.NewRemoteDelivery()
 	offer(restarted, true)
 	received("acks")
 	received("refuses")
-	settle(restarted)
+	settleChange(t, restarted)
 	if n := countRuntimeRecord(t, dependencies, recordID); n != 1 {
-		t.Fatalf("the replay after a restart left %d stored rows, want 1", n)
+		t.Fatalf("the offer after a restart left %d stored rows, want 1", n)
 	}
 
-	// A replay writes nothing, so it cannot be one item of an atomic batch,
-	// which writes every item.
 	if _, err := runtime.EmitAtomicBatch(t.Context(), []LogBatchItem{{
-		Context: observability.WithStoredReplay(t.Context(), storedRuntimeRecord(t, dependencies, recordID), runtimeRowDurable), Metadata: diagnosticMetadata(t),
-		Builder: runtimeContentRecordBuilder("runtime-change-batch-replay", "change"),
+		Context: observability.WithStoredLocally(t.Context()), Metadata: diagnosticMetadata(t),
+		Builder: runtimeContentRecordBuilder("runtime-change-batch-stored", "change"),
 	}}); err == nil {
-		t.Fatal("an atomic batch took a stored replay")
+		t.Fatal("an atomic batch took an occurrence the store already holds")
 	}
 	assertNoRuntimeDelivery(t, adapters["acks"])
 }
 
-// storedRuntimeRecord is the projected record of the local row recordID.
-func storedRuntimeRecord(t *testing.T, dependencies runtimeTestDependencies, recordID string) []byte {
-	t.Helper()
-	reader, err := sql.Open("sqlite", dependencies.storePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reader.Close() //nolint:errcheck
-	var record string
-	if err := reader.QueryRowContext(t.Context(),
-		`SELECT projected_record_json FROM audit_events WHERE id = ?`, recordID).Scan(&record); err != nil {
-		t.Fatal(err)
-	}
-	return []byte(record)
-}
-
-// A stored change keeps the config generation and digest of the process
-// that stored it. Before, a replay had to name the generation of the
-// current graph, so once a reload (or a restart) replaced it, every replay
-// of a change a destination had refused failed and the change stayed
-// queued, filling the change spool. Now a replay keeps the stored
-// provenance and is sent only when it is the stored record; another record
-// under the stored id (this generation, another body) is refused, and a
-// new record must still name this generation.
-func TestRuntimeReplaysAStoredChangeAfterAReload(t *testing.T) {
+// A config reload keeps a pending change deliverable: the sender keeps the
+// change and its RemoteDelivery, and its next offer is built on the
+// generation the reload made and goes to that generation's destinations.
+// The store still holds it once. A new record must still name the current
+// generation.
+func TestRuntimeSendsAPendingChangeAfterAReload(t *testing.T) {
 	dependencies := newRuntimeTestDependencies(t)
 	makePlan := func(generation string) *config.ObservabilityV8Plan {
 		return runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
 			func(source *config.ObservabilityV8Source) {
 				source.Resource.Attributes = map[string]string{"team.generation": generation}
 				source.Destinations = []config.ObservabilityV8DestinationSource{
-					runtimeConsoleDestination("refuses", "none", 8),
+					runtimeConsoleDestination("sink", "none", 8),
 				}
 			},
 		)
@@ -170,10 +250,14 @@ func TestRuntimeReplaysAStoredChangeAfterAReload(t *testing.T) {
 		first = snapshot
 		return runtimeContentRecordBuilder(recordID, "change")(snapshot, admission)
 	}
-	if _, err := runtime.Emit(observability.WithExportAfterLocalWrite(t.Context(), runtimeRowDurable), diagnosticMetadata(t), storing); err != nil {
+	tracker := observability.NewRemoteDelivery()
+	if err := offerChange(t, runtime, tracker, false, storing); err != nil {
 		t.Fatal(err)
 	}
 	_ = receiveRuntimeDelivery(t, adapter)
+	if settleChange(t, tracker) {
+		t.Fatal("a refused offer settled as delivered")
+	}
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -181,36 +265,23 @@ func TestRuntimeReplaysAStoredChangeAfterAReload(t *testing.T) {
 	if graphErr != nil || result.Status() != runtimegraph.ReloadApplied {
 		t.Fatalf("reload status=%v err=%v", result.Status(), graphErr)
 	}
-	if active := runtime.Active(); active.Generation() == first.Generation() || active.Digest() == first.Digest() {
+	active := runtime.Active()
+	if active.Generation() == first.Generation() || active.Digest() == first.Digest() {
 		t.Fatal("the reload kept the generation and digest")
 	}
-	stored := storedRuntimeRecord(t, dependencies, recordID)
-	replay := func(builder EmitBuilder) error {
-		t.Helper()
-		_, err := runtime.Emit(observability.WithStoredReplay(t.Context(), stored, runtimeRowDurable), diagnosticMetadata(t), builder)
-		return err
-	}
-	asStored := func(content string) EmitBuilder {
-		return func(_ EmitContext, admission router.Admission) (observability.Record, error) {
-			return runtimeContentRecordBuilder(recordID, content)(first, admission)
-		}
-	}
-
-	if err := replay(asStored("change")); err != nil {
-		t.Fatalf("a replay of the stored change after a reload: %v", err)
+	adapter.outcome = delivery.OutcomeDelivered
+	if err := offerChange(t, runtime, tracker, true, runtimeContentRecordBuilder(recordID, "change")); err != nil {
+		t.Fatalf("an offer of the pending change after a reload: %v", err)
 	}
 	item := receiveRuntimeDelivery(t, adapter)
-	if item.identity.RecordID != recordID || !strings.Contains(string(item.bytes), first.Digest()) {
-		t.Fatalf("the replay is not the stored record: %s", item.bytes)
+	if item.identity.RecordID != recordID || !strings.Contains(string(item.bytes), active.Digest()) {
+		t.Fatalf("the offer after the reload is not on the new generation: %s", item.bytes)
 	}
-	for name, builder := range map[string]EmitBuilder{
-		"this generation": runtimeContentRecordBuilder(recordID, "change"),
-		"another body":    asStored("another change"),
-	} {
-		if err := replay(builder); err == nil {
-			t.Fatalf("a replay with %s was accepted", name)
-		}
-		assertNoRuntimeDelivery(t, adapter)
+	if !settleChange(t, tracker) {
+		t.Fatal("the offer after the reload did not settle as delivered")
+	}
+	if n := countRuntimeRecord(t, dependencies, recordID); n != 1 {
+		t.Fatalf("the reload and the offers left %d stored rows, want 1", n)
 	}
 	stale := func(_ EmitContext, admission router.Admission) (observability.Record, error) {
 		return runtimeContentRecordBuilder("runtime-change-stale", "stale")(first, admission)

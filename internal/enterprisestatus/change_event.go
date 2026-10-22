@@ -17,7 +17,7 @@
 package enterprisestatus
 
 import (
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,6 +47,13 @@ import (
 // event is never lost before it is reported. A change event carries
 // hashes, key ids, a credential name and closed codes; it never carries a
 // credential value or a hash of one.
+//
+// The spool is the one durable record of a change: the command writes the
+// event and flushes it (file and folder) before it makes the change
+// (Reserve), and the gateway's one sender reads every audit and remote
+// delivery from it. An event's id is the hash of its content (ContentID),
+// so a file changed after it was written does not validate, and no replay
+// can send another record under an id.
 
 const (
 	// ChangeEventsDirName is the change spool under <etc>/bundles.
@@ -113,8 +120,14 @@ func ChangeReported(dataDir, id string) bool {
 
 // ChangeEvent is one change-events/<event_id>.json.
 type ChangeEvent struct {
-	SchemaVersion int    `json:"schema_version"`
-	EventID       string `json:"event_id"`
+	SchemaVersion int `json:"schema_version"`
+	// EventID is the ContentID of the event.
+	EventID string `json:"event_id"`
+	// ReservationID is the id of the reservation whose change this event
+	// records (ChangeSpool.Reserve): the event its command held, as failed
+	// and interrupted, before it made the change. It is empty on the
+	// reserved event itself.
+	ReservationID string `json:"reservation_id,omitempty"`
 	Kind          string `json:"kind"`
 	Action        string `json:"action"`
 	Outcome       string `json:"outcome"`
@@ -203,19 +216,53 @@ func (ev ChangeEvent) Validate() error {
 	default:
 		return fmt.Errorf("change event kind %q is not registered", ev.Kind)
 	}
+	if ev.ReservationID != "" && (!ValidChangeEventID(ev.ReservationID) || ev.ReservationID == ev.EventID) {
+		return errors.New("change event reservation id is not the id of another change event")
+	}
+	if ev.EventID != ev.ContentID() {
+		return errors.New("change event id is not the hash of its content")
+	}
 	return nil
 }
 
-// NewChangeEvent fills the schema version, a new event id, the time and the
-// actor of a change made now by this process.
-func NewChangeEvent(kind, action, outcome, reasonCode string) (ChangeEvent, error) {
-	at := time.Now().UTC()
-	id, err := newChangeEventID(at, rand.Reader)
+// changeEventIDDomain prefixes the hashed content of a change event.
+const changeEventIDDomain = "defenseclaw.change-event.id.v1\x00"
+
+// ContentID is the id the content of ev gives it: c-<ULID> whose 48-bit
+// time is ev.Time in milliseconds (ids sort by time) and whose 80 other
+// bits are the start of the SHA-256 of every field but event_id. Another
+// outcome, hash, key id, name, actor, time or reservation is another id,
+// and an event whose id is not its ContentID does not validate. It is ""
+// for a time that is not RFC 3339 or is outside the ULID range.
+func (ev ChangeEvent) ContentID() string {
+	at, err := time.Parse(time.RFC3339Nano, ev.Time)
 	if err != nil {
-		return ChangeEvent{}, err
+		return ""
 	}
-	ev := ChangeEvent{SchemaVersion: ChangeEventSchemaVersion, EventID: id, Kind: kind, Action: action,
-		Outcome: outcome, Time: at.Format(time.RFC3339Nano)}
+	ev.EventID = ""
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(append([]byte(changeEventIDDomain), data...))
+	return encodeChangeEventID(at.UnixMilli(), sum[:10])
+}
+
+// reservationSettled is the id of the reservation ev settles: the one it
+// names, or its own (a reserved event moved into the spool).
+func (ev ChangeEvent) reservationSettled() string {
+	if ev.ReservationID != "" {
+		return ev.ReservationID
+	}
+	return ev.EventID
+}
+
+// NewChangeEvent fills the schema version, the time and the actor of a
+// change made now by this process, and its id (ContentID). A writer gives
+// the event its id again once its caller has filled in the rest.
+func NewChangeEvent(kind, action, outcome, reasonCode string) ChangeEvent {
+	ev := ChangeEvent{SchemaVersion: ChangeEventSchemaVersion, Kind: kind, Action: action,
+		Outcome: outcome, Time: time.Now().UTC().Format(time.RFC3339Nano)}
 	if outcome != ChangeApplied {
 		ev.ReasonCode = reasonCode
 		if !changeCodePattern.MatchString(ev.ReasonCode) {
@@ -225,7 +272,8 @@ func NewChangeEvent(kind, action, outcome, reasonCode string) (ChangeEvent, erro
 	if actor := configwrite.CurrentOSActor(); changeActorPattern.MatchString(actor) {
 		ev.Actor = actor
 	}
-	return ev, nil
+	ev.EventID = ev.ContentID()
+	return ev
 }
 
 // ChangedKeyIDs returns the key ids next adds to and removes from previous,
@@ -269,34 +317,39 @@ type ChangeSpool struct {
 	Publish  func(path string) error
 }
 
-// Write validates ev and writes it as <Dir>/<event_id>.json when the spool
-// has room for one more event beside the reservations held. It is for an
-// event no reservation holds room for: a refusal, which changed nothing. A
-// change reserves its room before it is made (Reserve). The event is
-// written as every event is, under a reservation held until its entry in
-// the spool is flushed (the reservation holds ev itself, so a command that
-// stops in between still records the refusal): the gateway reports an
-// event only once its reservation is gone (ReportableChangeEventIDs).
+// Write gives ev its id (ContentID), validates it and writes it as
+// <Dir>/<event_id>.json when the spool has room for one more event beside
+// the reservations held. It is for an event no reservation holds room for:
+// a refusal, which changed nothing. A change reserves its room before it is
+// made (Reserve). The event is written as every event is, under a
+// reservation held until its entry in the spool is flushed (the
+// reservation holds ev itself, under its id, so a command that stops in
+// between still records the refusal): the gateway reports an event only
+// once its reservation is gone (ReportableChangeEvents).
 func (s ChangeSpool) Write(ev ChangeEvent) error {
-	if _, err := marshalChangeEvent(ev); err != nil {
+	ev, data, err := marshalChangeEvent(ev)
+	if err != nil {
 		return err
 	}
 	reservation, err := s.reserve(ev)
 	if err != nil {
 		return err
 	}
-	return reservation.Write(ev)
+	return reservation.commit(ev.EventID, data)
 }
 
-func marshalChangeEvent(ev ChangeEvent) ([]byte, error) {
+// marshalChangeEvent gives ev its id (ContentID), validates it and encodes
+// it as the spool stores it.
+func marshalChangeEvent(ev ChangeEvent) (ChangeEvent, []byte, error) {
+	ev.EventID = ev.ContentID()
 	if err := ev.Validate(); err != nil {
-		return nil, err
+		return ChangeEvent{}, nil, err
 	}
 	data, err := json.MarshalIndent(ev, "", "  ")
 	if err != nil {
-		return nil, err
+		return ChangeEvent{}, nil, err
 	}
-	return append(data, '\n'), nil
+	return ev, append(data, '\n'), nil
 }
 
 // writeEvent writes one validated event durably with the gateway's access:
@@ -409,29 +462,35 @@ func (s ChangeSpool) prune(held int) error {
 	return nil
 }
 
-// ReportableChangeEventIDs is for the gateway, which reads the change spool
-// dir and cannot write it: the ids of the events it has not reported
-// (reported, nil for none) and may report now, oldest first. An event is
-// reportable once it is on disk to stay. Its writer
-// holds its reservation from before the event is in the spool until the
+// ReportableChangeEvents is for the gateway, which reads the change spool
+// dir and cannot write it: the events it has not reported (reported, nil
+// for none) and may report now, oldest first. A file that does not
+// validate (its id is not the hash of its content, for one) is skipped. An
+// event is reportable once it is on disk to stay. Its writer holds the
+// reservation it settles from before the event is in the spool until the
 // spool's entry for it is flushed, so an event whose reservation is held
 // is skipped until the next poll. The spool folder is then flushed here
 // (POSIX), for an event whose writer stopped after the rename and before
 // its flush; when that fails no event is reportable, so none is reported
 // that a power loss could take back. On Windows the rename is written
 // through (configwrite), and the folder cannot be flushed.
-func ReportableChangeEventIDs(dir string, reported func(id string) bool) []string {
-	var ids []string
+func ReportableChangeEvents(dir string, reported func(id string) bool) []ChangeEvent {
+	var events []ChangeEvent
 	for _, id := range ListChangeEventIDs(dir) {
-		if (reported == nil || !reported(id)) &&
-			!changeReservationHeld(filepath.Join(dir, ChangeReservedDirName, id+".json")) {
-			ids = append(ids, id)
+		if reported != nil && reported(id) {
+			continue
 		}
+		ev, err := ReadChangeEvent(filepath.Join(dir, id+".json"))
+		if err != nil || ev.EventID != id ||
+			changeReservationHeld(filepath.Join(dir, ChangeReservedDirName, ev.reservationSettled()+".json")) {
+			continue
+		}
+		events = append(events, ev)
 	}
-	if len(ids) == 0 || syncChangeDir(dir) != nil {
+	if len(events) == 0 || syncChangeDir(dir) != nil {
 		return nil
 	}
-	return ids
+	return events
 }
 
 // ListChangeEventIDs lists the change event ids in dir, oldest first. A
@@ -457,7 +516,8 @@ func ListChangeEventIDs(dir string) []string {
 }
 
 // ReadChangeEvent reads one change event. It refuses a link, a file over 16
-// KiB and an event that does not validate.
+// KiB and an event that does not validate, an event whose id is not the
+// hash of its content included.
 func ReadChangeEvent(path string) (ChangeEvent, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -490,19 +550,17 @@ func ReadChangeEvent(path string) (ChangeEvent, error) {
 
 const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
-// newChangeEventID returns c-<ULID> for t with 80 random bits from r.
-func newChangeEventID(t time.Time, r io.Reader) (string, error) {
-	ms := t.UnixMilli()
-	if ms < 0 || ms >= 1<<48 {
-		return "", errors.New("time outside the ULID range")
+// encodeChangeEventID returns c-<ULID> for the time ms (milliseconds) and
+// the 80 bits of entropy, or "" outside the ULID range.
+func encodeChangeEventID(ms int64, entropy []byte) string {
+	if ms < 0 || ms >= 1<<48 || len(entropy) != 10 {
+		return ""
 	}
 	var id [16]byte
 	for i := 0; i < 6; i++ {
 		id[i] = byte(ms >> (8 * (5 - i)))
 	}
-	if _, err := io.ReadFull(r, id[6:]); err != nil {
-		return "", err
-	}
+	copy(id[6:], entropy)
 	// 128 bits as 26 base-32 digits, most significant first (the first
 	// digit holds 3 bits, so it is 0-7).
 	out := make([]byte, 26)
@@ -521,5 +579,5 @@ func newChangeEventID(t time.Time, r io.Reader) (string, error) {
 	if pos >= 0 {
 		out[pos] = crockford[acc&31]
 	}
-	return "c-" + string(out), nil
+	return "c-" + string(out)
 }

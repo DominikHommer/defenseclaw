@@ -24,31 +24,31 @@ import (
 type remoteDeliveryKey struct{}
 
 // RemoteDelivery follows the optional-destination deliveries of one
-// occurrence that its producer keeps durably queued under a stable id (a
-// trust anchor or credential change event) and offers until every
-// destination has it. The producer keeps one RemoteDelivery per occurrence
-// across offers: each offer is an attempt, a destination that acknowledged
-// an earlier attempt is not sent the occurrence again, and the occurrence
-// is delivered once an attempt ends with no destination left to fail. The
-// state is in memory only: after a restart the queued occurrence is offered
-// to every destination again under the same record id.
+// occurrence that its producer keeps in a durable spool under a stable id
+// (a trust anchor or credential change event) and offers, through one
+// sender, until every destination has it. The sender keeps one
+// RemoteDelivery per occurrence across offers: each offer is an attempt, a
+// destination that acknowledged an earlier attempt or still has one in
+// flight is not sent the occurrence again, and the occurrence is delivered
+// once an attempt ends with nothing in flight and no destination left that
+// failed. The state is in memory only: after a restart the spooled
+// occurrence is offered to every destination again under the same record
+// id.
 type RemoteDelivery struct {
-	mu       sync.Mutex
-	attempt  uint64
-	open     bool
-	inFlight int
-	// failed is set when a destination of the current attempt did not
-	// get the occurrence.
+	mu   sync.Mutex
+	open bool
+	// inFlight counts, per destination, the deliveries handed to its queue
+	// that have not ended.
+	inFlight map[string]int
+	// failed is set when a destination did not get the occurrence since the
+	// current attempt began.
 	failed    bool
 	delivered map[string]bool
-	// localDurable records that the local store made the occurrence
-	// power-loss durable, so a later offer need not flush it again.
-	localDurable bool
 }
 
 // NewRemoteDelivery returns the delivery state of one occurrence.
 func NewRemoteDelivery() *RemoteDelivery {
-	return &RemoteDelivery{delivered: make(map[string]bool)}
+	return &RemoteDelivery{inFlight: make(map[string]int), delivered: make(map[string]bool)}
 }
 
 // WithRemoteDelivery attaches delivery to ctx, so the runtime reports every
@@ -80,7 +80,6 @@ func (delivery *RemoteDelivery) BeginAttempt() {
 	}
 	delivery.mu.Lock()
 	defer delivery.mu.Unlock()
-	delivery.attempt++
 	delivery.open, delivery.failed = true, false
 }
 
@@ -93,6 +92,18 @@ func (delivery *RemoteDelivery) EndAttempt() {
 	delivery.mu.Lock()
 	delivery.open = false
 	delivery.mu.Unlock()
+}
+
+// Pending reports whether destination needs the occurrence: it has not
+// acknowledged it and has no delivery of it in flight. A nil RemoteDelivery
+// follows nothing, so every destination needs it.
+func (delivery *RemoteDelivery) Pending(destination string) bool {
+	if delivery == nil {
+		return true
+	}
+	delivery.mu.Lock()
+	defer delivery.mu.Unlock()
+	return !delivery.delivered[destination] && delivery.inFlight[destination] == 0
 }
 
 // Acknowledged reports whether destination acknowledged an earlier attempt.
@@ -121,24 +132,27 @@ func (delivery *RemoteDelivery) Fail(destination string) {
 // Track records one delivery handed to destination and returns the function
 // its queue calls once with the terminal outcome: delivered when the
 // destination acknowledged it, false when it was refused, dropped or
-// abandoned. Later calls are ignored.
+// abandoned. A failure fails the current attempt even when an earlier one
+// handed the delivery over: no later attempt sends the destination another
+// copy while it is in flight. Later calls are ignored.
 func (delivery *RemoteDelivery) Track(destination string) func(delivered bool) {
 	if delivery == nil {
 		return func(bool) {}
 	}
 	delivery.mu.Lock()
-	delivery.inFlight++
-	attempt := delivery.attempt
+	delivery.inFlight[destination]++
 	delivery.mu.Unlock()
 	var once sync.Once
 	return func(delivered bool) {
 		once.Do(func() {
 			delivery.mu.Lock()
 			defer delivery.mu.Unlock()
-			delivery.inFlight--
+			if delivery.inFlight[destination]--; delivery.inFlight[destination] <= 0 {
+				delete(delivery.inFlight, destination)
+			}
 			if delivered {
 				delivery.delivered[destination] = true
-			} else if attempt == delivery.attempt && !delivery.delivered[destination] {
+			} else if !delivery.delivered[destination] {
 				delivery.failed = true
 			}
 		})
@@ -155,29 +169,8 @@ func (delivery *RemoteDelivery) Settled() (settled, delivered bool) {
 	}
 	delivery.mu.Lock()
 	defer delivery.mu.Unlock()
-	if delivery.open || delivery.inFlight > 0 {
+	if delivery.open || len(delivery.inFlight) > 0 {
 		return false, false
 	}
 	return true, !delivery.failed
-}
-
-// MarkLocalDurable records that the local store holds the occurrence in a
-// form that survives a power loss.
-func (delivery *RemoteDelivery) MarkLocalDurable() {
-	if delivery == nil {
-		return
-	}
-	delivery.mu.Lock()
-	delivery.localDurable = true
-	delivery.mu.Unlock()
-}
-
-// LocalDurable reports whether MarkLocalDurable was called.
-func (delivery *RemoteDelivery) LocalDurable() bool {
-	if delivery == nil {
-		return false
-	}
-	delivery.mu.Lock()
-	defer delivery.mu.Unlock()
-	return delivery.localDurable
 }

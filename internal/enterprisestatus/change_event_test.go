@@ -27,15 +27,12 @@ func writeSpoolEvents(t *testing.T, spool ChangeSpool, n int) []string {
 	t.Helper()
 	var ids []string
 	for i := 0; i < n; i++ {
-		ev, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeApplied, "")
-		if err != nil {
-			t.Fatal(err)
-		}
+		ev := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeApplied, "")
 		ev.SecretName = "splunk-hec-token"
 		if err := spool.Write(ev); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
-		ids = append(ids, ev.EventID)
+		ids = append(ids, ev.ContentID())
 	}
 	return ids
 }
@@ -89,10 +86,7 @@ func TestChangeSpoolRefusesWhenFullOfUnreportedEvents(t *testing.T) {
 	if _, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "otlp-token"); !errors.Is(err, ErrChangeSpoolFull) {
 		t.Fatalf("Reserve on a full spool: %v", err)
 	}
-	ev, err := NewChangeEvent(ChangeKindSecret, ChangeActionRemove, ChangeApplied, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ev := NewChangeEvent(ChangeKindSecret, ChangeActionRemove, ChangeApplied, "")
 	ev.SecretName = "otlp-token"
 	if err := spool.Write(ev); !errors.Is(err, ErrChangeSpoolFull) {
 		t.Fatalf("Write on a full spool: %v", err)

@@ -49,38 +49,30 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	timestamp := time.Now().UTC()
 	ctx := context.Background()
 	stored := false
-	var row storedOccurrence
-	delivery := in.RemoteDelivery
 	if in.OccurrenceID != "" {
-		// The producer keeps this occurrence queued under its stable id and
-		// offers it until it is stored durably and every remote destination
-		// has it. The first offer stores it and exports it only once its row
-		// survives a power loss (a failed write or flush exports nothing):
-		// the runtime runs makeDurable between the two. A later offer finds
-		// it stored and sends the stored record, with its stable ids, time
-		// and the run, sidecar, binary and config of the process that stored
-		// it, to the destinations that do not have it yet.
+		// The producer keeps this occurrence in its durable spool under a
+		// stable id (the hash of its content) and its one sender offers it
+		// until every sink has it: the audit store, and each remote
+		// destination (observability.RemoteDelivery). Each sink gets it on
+		// its own, and every offer sends the same record: it is built from
+		// the occurrence alone (its id, time and content). An offer writes
+		// the row unless the store holds it already, and goes only to the
+		// destinations that do not have it yet.
 		auditID = in.OccurrenceID
 		activityID = uuid.NewSHA1(stableOccurrenceNamespace, []byte("activity\x00"+auditID)).String()
+		if !in.OccurredAt.IsZero() {
+			timestamp = in.OccurredAt.UTC()
+		}
+		delivery := in.RemoteDelivery
 		if delivery == nil {
 			delivery = observability.NewRemoteDelivery()
 		}
-		makeDurable := func(ctx context.Context) error { return l.syncOccurrence(ctx, delivery) }
-		found := false
 		var err error
-		row, found, err = l.store.storedOccurrence(ctx, auditID)
-		if err != nil {
+		if stored, err = l.store.hasOccurrence(ctx, auditID); err != nil {
 			return err
 		}
-		if found {
-			stored, timestamp = true, row.timestamp
-			// A row a stopped process committed may not be on disk yet.
-			if err := l.syncOccurrence(ctx, delivery); err != nil {
-				return err
-			}
-			ctx = withStoredOccurrence(observability.WithStoredReplay(ctx, row.record, makeDurable), row)
-		} else {
-			ctx = observability.WithExportAfterLocalWrite(ctx, makeDurable)
+		if stored {
+			ctx = observability.WithStoredLocally(ctx)
 		}
 		ctx = observability.WithRemoteDelivery(ctx, delivery)
 		delivery.BeginAttempt()
@@ -123,12 +115,6 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
 	stampAuditEventEnvelope(&auditEv)
-	if stored {
-		// A replay is the stored record: after a restart this process has
-		// another run id, sidecar id, maybe binary, and the stamp fills an
-		// empty value from this process.
-		row.pin(&auditEv)
-	}
 	metricActor := actor
 	if in.ConfigChange != nil {
 		// The audit record keeps the OS account of a change; its counters
@@ -158,7 +144,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	// metrics are emitted in one generated batch on the same runtime binding as
 	// the canonical occurrence and remain exactly once for dashboard continuity.
 	if disposition != auditV8Unhandled {
-		return l.occurrenceStored(ctx, in.OccurrenceID != "" && !stored, delivery)
+		return l.occurrenceDurable(ctx, in.OccurrenceID)
 	}
 	if stored {
 		return fmt.Errorf("audit: no generated v8 family replays activity action %q", action)
@@ -177,30 +163,19 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		return emitErr
 	}
 	if disposition != auditV8Unhandled {
-		return l.occurrenceStored(ctx, in.OccurrenceID != "", delivery)
+		return l.occurrenceDurable(ctx, in.OccurrenceID)
 	}
 	return fmt.Errorf("audit: no generated v8 family handled activity action %q", action)
 }
 
-// occurrenceStored makes a newly stored occurrence power-loss durable
-// before its producer may mark it reported. When a remote destination takes
-// it, the runtime already did (makeDurable), and this is a no-op.
-func (l *Logger) occurrenceStored(ctx context.Context, newlyStored bool, delivery *observability.RemoteDelivery) error {
-	if !newlyStored {
+// occurrenceDurable is the audit store's confirmation of an occurrence with
+// a stable id (occurrenceID; none for any other): its row, just written or
+// found stored by an earlier process, survives a power loss. The pool
+// commits with synchronous=NORMAL, which a power loss can take back, so the
+// store is flushed before its producer may count the row as stored.
+func (l *Logger) occurrenceDurable(ctx context.Context, occurrenceID string) error {
+	if occurrenceID == "" {
 		return nil
 	}
-	return l.syncOccurrence(ctx, delivery)
-}
-
-// syncOccurrence flushes the audit store once per delivery: the pool
-// commits with synchronous=NORMAL, which a power loss can take back.
-func (l *Logger) syncOccurrence(ctx context.Context, delivery *observability.RemoteDelivery) error {
-	if delivery.LocalDurable() {
-		return nil
-	}
-	if err := l.store.syncCommittedWrites(ctx); err != nil {
-		return err
-	}
-	delivery.MarkLocalDurable()
-	return nil
+	return l.store.syncCommittedWrites(ctx)
 }

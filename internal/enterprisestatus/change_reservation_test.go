@@ -33,12 +33,22 @@ func newTestSpool(t *testing.T) ChangeSpool {
 
 func appliedSecretChange(t *testing.T, name string) ChangeEvent {
 	t.Helper()
-	ev, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeApplied, "")
+	ev := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeApplied, "")
+	ev.SecretName = name
+	return ev
+}
+
+// outcomeFor is the outcome event a command writes for the reservation id
+// (as ChangeReservation.Write does: it names the reservation and has its own
+// id) and its encoding.
+func outcomeFor(t *testing.T, id string, ev ChangeEvent) (ChangeEvent, []byte) {
+	t.Helper()
+	ev.ReservationID = id
+	ev, data, err := marshalChangeEvent(ev)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev.SecretName = name
-	return ev
+	return ev, data
 }
 
 func readSpool(t *testing.T, spool ChangeSpool) []ChangeEvent {
@@ -123,20 +133,14 @@ func TestChangeReservationKeepsItsPlace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
-	if err != nil {
-		t.Fatal(err)
-	}
+	refusal := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
 	if err := spool.Write(refusal); !errors.Is(err, ErrChangeSpoolFull) {
 		t.Fatalf("a refusal took the reserved place: %v", err)
 	}
 	if _, err := spool.Reserve(ChangeKindSecret, ChangeActionRemove, "otlp-token"); !errors.Is(err, ErrChangeSpoolFull) {
 		t.Fatalf("a second change reserved the same place: %v", err)
 	}
-	applied, err := NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeApplied, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	applied := NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeApplied, "")
 	if err := r.Write(applied); err != nil {
 		t.Fatalf("write into the reserved place: %v", err)
 	}
@@ -145,8 +149,9 @@ func TestChangeReservationKeepsItsPlace(t *testing.T) {
 	}
 	r.Release()
 	events := readSpool(t, spool)
-	if len(events) != 3 || events[2].EventID != r.id || events[2].Outcome != ChangeApplied {
-		t.Fatalf("spool = %+v, want the applied install under the reservation id", events)
+	if len(events) != 3 || events[2].ReservationID != r.id || events[2].EventID == r.id ||
+		events[2].Outcome != ChangeApplied {
+		t.Fatalf("spool = %+v, want the applied install naming the reservation", events)
 	}
 	if entries, _ := os.ReadDir(spool.reservedDir()); len(entries) != 0 {
 		t.Fatalf("reservations left: %v", entries)
@@ -188,16 +193,8 @@ func TestChangeSpoolRecordsTheReservationOfACommandThatEnded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	applied, err := NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeApplied, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	applied.EventID = written.id
-	data, err := marshalChangeEvent(applied)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := spool.writeEvent(written.id, data); err != nil {
+	applied, data := outcomeFor(t, written.id, NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeApplied, ""))
+	if err := spool.writeEvent(applied.EventID, data); err != nil {
 		t.Fatal(err)
 	}
 	written.abandon() // The process stopped after the event, before the cleanup.
@@ -215,7 +212,7 @@ func TestChangeSpoolRecordsTheReservationOfACommandThatEnded(t *testing.T) {
 		interrupted.ReasonCode != ChangeInterrupted || interrupted.SecretName != "splunk-hec-token" {
 		t.Fatalf("interrupted change = %+v", interrupted)
 	}
-	if events[1].EventID != written.id || events[1].Outcome != ChangeApplied {
+	if events[1].ReservationID != written.id || events[1].Outcome != ChangeApplied {
 		t.Fatalf("applied install = %+v", events[1])
 	}
 	entries, err := os.ReadDir(spool.reservedDir())
@@ -242,10 +239,7 @@ func TestEndedChangeReservationsAreTheCommandsThatEndedAfterTheirChange(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	applied, err := NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeApplied, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	applied := NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeApplied, "")
 	if err := written.Write(applied); err != nil {
 		t.Fatal(err)
 	}
@@ -263,24 +257,17 @@ func TestEndedChangeReservationsAreTheCommandsThatEndedAfterTheirChange(t *testi
 	ended.abandon() // The process stopped after the change.
 	// A command that stopped after its event, before the cleanup; one that
 	// stopped before its reservation held its event; a damaged reservation.
-	beforeCleanup, err := NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeFailed, ChangeInterrupted)
+	beforeCleanup, provisional, err := marshalChangeEvent(
+		NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeFailed, ChangeInterrupted))
 	if err != nil {
 		t.Fatal(err)
 	}
-	provisional, err := marshalChangeEvent(beforeCleanup)
-	if err != nil {
+	settling, data := outcomeFor(t, beforeCleanup.EventID, applied)
+	if err := spool.writeEvent(settling.EventID, data); err != nil {
 		t.Fatal(err)
 	}
-	applied.EventID = beforeCleanup.EventID
-	data, err := marshalChangeEvent(applied)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := spool.writeEvent(beforeCleanup.EventID, data); err != nil {
-		t.Fatal(err)
-	}
-	empty, _ := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeFailed, ChangeInterrupted)
-	damaged, _ := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeFailed, ChangeInterrupted)
+	empty := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeFailed, ChangeInterrupted)
+	damaged := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeFailed, ChangeInterrupted)
 	for id, body := range map[string]string{beforeCleanup.EventID: string(provisional), empty.EventID: "",
 		damaged.EventID: `{"event_id":"` + damaged.EventID + `"}`} {
 		if err := os.WriteFile(filepath.Join(spool.reservedDir(), id+".json"), []byte(body), 0o600); err != nil {
@@ -297,10 +284,7 @@ func TestEndedChangeReservationsAreTheCommandsThatEndedAfterTheirChange(t *testi
 	if err := held.Write(applied); err != nil {
 		t.Fatalf("the held reservation lost its place: %v", err)
 	}
-	refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
-	if err != nil {
-		t.Fatal(err)
-	}
+	refusal := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
 	if err := spool.Write(refusal); err != nil {
 		t.Fatal(err)
 	}
@@ -373,10 +357,7 @@ func TestChangeEventIsPublishedBeforeItIsInTheSpool(t *testing.T) {
 	log := &publishLog{}
 	spool := newTestSpool(t)
 	spool.Publish = log.publish
-	refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
-	if err != nil {
-		t.Fatal(err)
-	}
+	refusal := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
 	if err := spool.Write(refusal); err != nil {
 		t.Fatal(err)
 	}
@@ -384,10 +365,12 @@ func TestChangeEventIsPublishedBeforeItIsInTheSpool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Write(appliedSecretChange(t, "splunk-hec-token")); err != nil {
+	applied := appliedSecretChange(t, "splunk-hec-token")
+	if err := r.Write(applied); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{refusal.EventID, r.id} {
+	written, _ := outcomeFor(t, r.id, applied)
+	for _, id := range []string{refusal.EventID, written.EventID} {
 		final := filepath.Join(spool.Dir, id+".json")
 		published := false
 		for _, path := range log.paths {
@@ -425,10 +408,7 @@ func TestChangeSpoolKeepsTheReservationOfACommandThatStoppedWhilePublishing(t *t
 			if err != nil {
 				t.Fatal(err)
 			}
-			applied, err := NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeApplied, "")
-			if err != nil {
-				t.Fatal(err)
-			}
+			applied := NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeApplied, "")
 			log.mu.Lock()
 			if stop == "process stopped" {
 				log.onCall = func(string) { runtime.Goexit() } // Goexit runs the deferred unlock
@@ -451,17 +431,14 @@ func TestChangeSpoolKeepsTheReservationOfACommandThatStoppedWhilePublishing(t *t
 			log.mu.Lock()
 			log.onCall, log.fail = nil, nil
 			log.mu.Unlock()
-			if _, err := os.Lstat(filepath.Join(spool.Dir, r.id+".json")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("the event is in the spool without the gateway's access: %v", err)
+			if ids := ListChangeEventIDs(spool.Dir); len(ids) != 0 {
+				t.Fatalf("the event is in the spool without the gateway's access: %v", ids)
 			}
 			got := EndedChangeReservations(spool.Dir)
 			if len(got) != 1 || got[0].EventID != r.id || got[0].ReasonCode != ChangeInterrupted {
 				t.Fatalf("the gateway sees %+v, want the interrupted install %s", got, r.id)
 			}
-			refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
-			if err != nil {
-				t.Fatal(err)
-			}
+			refusal := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
 			if err := spool.Write(refusal); err != nil {
 				t.Fatal(err)
 			}
@@ -503,11 +480,9 @@ func TestChangeSpoolKeepsAReservationUntilItsEventIsReadable(t *testing.T) {
 			body := []byte("{\"event_id\":\"" + r.id + "\"}\n")
 			want := ChangeInterrupted
 			if stored == "valid event, access lost" {
-				applied := appliedSecretChange(t, "splunk-hec-token")
-				applied.EventID = r.id
-				if body, err = marshalChangeEvent(applied); err != nil {
-					t.Fatal(err)
-				}
+				var applied ChangeEvent
+				applied, body = outcomeFor(t, r.id, appliedSecretChange(t, "splunk-hec-token"))
+				final = filepath.Join(spool.Dir, applied.EventID+".json")
 				want = ""
 			}
 			if err := os.WriteFile(final, body, 0o600); err != nil {
@@ -524,10 +499,7 @@ func TestChangeSpoolKeepsAReservationUntilItsEventIsReadable(t *testing.T) {
 			log.mu.Lock()
 			log.fail = errors.New("chown refused")
 			log.mu.Unlock()
-			refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
-			if err != nil {
-				t.Fatal(err)
-			}
+			refusal := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
 			if err := spool.Write(refusal); err == nil {
 				t.Fatal("the writer settled the reservation without the gateway's access")
 			}
@@ -570,13 +542,8 @@ func TestEndedChangeReservationsReportsAReservationWhoseEventTheGatewayCannotRea
 	if err != nil {
 		t.Fatal(err)
 	}
-	applied := appliedSecretChange(t, "splunk-hec-token")
-	applied.EventID = r.id
-	data, err := marshalChangeEvent(applied)
-	if err != nil {
-		t.Fatal(err)
-	}
-	final := filepath.Join(spool.Dir, r.id+".json")
+	applied, data := outcomeFor(t, r.id, appliedSecretChange(t, "splunk-hec-token"))
+	final := filepath.Join(spool.Dir, applied.EventID+".json")
 	if err := os.WriteFile(final, data, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -594,10 +561,7 @@ func TestChangeSpoolRemovesTheTempFileOfAStoppedEventWrite(t *testing.T) {
 	if err := spool.Write(appliedSecretChange(t, "splunk-hec-token")); err != nil {
 		t.Fatal(err)
 	}
-	stopped, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
-	if err != nil {
-		t.Fatal(err)
-	}
+	stopped := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
 	leftover := filepath.Join(spool.Dir, "."+stopped.EventID+".json.1234567.tmp")
 	other := filepath.Join(spool.Dir, ".notes.tmp")
 	for _, path := range []string{leftover, other} {
@@ -742,17 +706,12 @@ func TestChangeSpoolFlushesARepublishedEventBeforeItRemovesTheReservation(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			ev := appliedSecretChange(t, "splunk-hec-token")
-			ev.EventID = r.id
-			data, err := marshalChangeEvent(ev)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := spool.writeEvent(r.id, data); err != nil {
+			ev, data := outcomeFor(t, r.id, appliedSecretChange(t, "splunk-hec-token"))
+			if err := spool.writeEvent(ev.EventID, data); err != nil {
 				t.Fatal(err)
 			}
 			r.abandon() // The command stopped after its event, before it let go of the reservation.
-			final := filepath.Join(spool.Dir, r.id+".json")
+			final := filepath.Join(spool.Dir, ev.EventID+".json")
 			reservation := filepath.Join(spool.reservedDir(), r.id+".json")
 			flushErr := errors.New("flush failed")
 			log := recordChangeSyncs(t, func(entry string) error {
@@ -772,10 +731,7 @@ func TestChangeSpoolFlushesARepublishedEventBeforeItRemovesTheReservation(t *tes
 				}
 				return nil
 			})
-			refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
-			if err != nil {
-				t.Fatal(err)
-			}
+			refusal := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
 			err = spool.Write(refusal)
 			if !strings.Contains(strings.Join(*log, "|"), "file "+final) {
 				t.Fatalf("the republished event was never flushed: %v", *log)
@@ -917,10 +873,7 @@ func reservationFiles(t *testing.T, spool ChangeSpool) []string {
 // to record it again.
 func TestChangeSpoolWritesARefusalUnderItsReservation(t *testing.T) {
 	spool := newTestSpool(t)
-	refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
-	if err != nil {
-		t.Fatal(err)
-	}
+	refusal := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
 	reservation := filepath.Join(spool.reservedDir(), refusal.EventID+".json")
 	held := false
 	pub := &publishLog{onCall: func(path string) {
@@ -959,23 +912,18 @@ func TestChangeSpoolWritesARefusalUnderItsReservation(t *testing.T) {
 // and only after the spool folder is flushed, for a writer that stopped
 // between its rename and its flush. A reported event is skipped without a
 // flush. Before, the gateway reported every event it could read.
-func TestReportableChangeEventIDsAreOnDiskToStay(t *testing.T) {
+func TestReportableChangeEventsAreOnDiskToStay(t *testing.T) {
 	spool := newTestSpool(t)
 	r, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "splunk-hec-token")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev := appliedSecretChange(t, "splunk-hec-token")
-	ev.EventID = r.id
-	data, err := marshalChangeEvent(ev)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ev, data := outcomeFor(t, r.id, appliedSecretChange(t, "splunk-hec-token"))
 	// Renamed into the spool; the writer has not flushed it nor let go.
-	if err := os.WriteFile(filepath.Join(spool.Dir, r.id+".json"), data, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(spool.Dir, ev.EventID+".json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if ids := ReportableChangeEventIDs(spool.Dir, nil); len(ids) != 0 {
+	if ids := ReportableChangeEvents(spool.Dir, nil); len(ids) != 0 {
 		t.Fatalf("an event its writer still holds is reportable: %v", ids)
 	}
 	r.abandon() // The writer stopped after the rename.
@@ -987,18 +935,18 @@ func TestReportableChangeEventIDsAreOnDiskToStay(t *testing.T) {
 		}
 		return nil
 	})
-	if ids := ReportableChangeEventIDs(spool.Dir, nil); len(ids) != 0 {
+	if ids := ReportableChangeEvents(spool.Dir, nil); len(ids) != 0 {
 		t.Fatalf("an event whose folder cannot be flushed is reportable: %v", ids)
 	}
 	failing = false
-	if ids := ReportableChangeEventIDs(spool.Dir, nil); len(ids) != 1 || ids[0] != r.id {
-		t.Fatalf("reportable = %v, want %s", ids, r.id)
+	if ids := ReportableChangeEvents(spool.Dir, nil); len(ids) != 1 || ids[0].EventID != ev.EventID {
+		t.Fatalf("reportable = %v, want %s", ids, ev.EventID)
 	}
 	if strings.Join(*log, "|") != "dir "+spool.Dir+"|dir "+spool.Dir {
 		t.Fatalf("flushed %v, want the spool folder", *log)
 	}
 	*log = nil
-	if ids := ReportableChangeEventIDs(spool.Dir, func(string) bool { return true }); len(ids) != 0 || len(*log) != 0 {
+	if ids := ReportableChangeEvents(spool.Dir, func(string) bool { return true }); len(ids) != 0 || len(*log) != 0 {
 		t.Fatalf("reported events are reportable %v, flushed %v", ids, *log)
 	}
 }
@@ -1059,13 +1007,8 @@ func TestChangeSpoolFlushesAKeptEventBeforeItRemovesTheReservation(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev := appliedSecretChange(t, "splunk-hec-token")
-	ev.EventID = r.id
-	data, err := marshalChangeEvent(ev)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(spool.Dir, r.id+".json"), data, 0o600); err != nil {
+	ev, data := outcomeFor(t, r.id, appliedSecretChange(t, "splunk-hec-token"))
+	if err := os.WriteFile(filepath.Join(spool.Dir, ev.EventID+".json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	r.abandon() // The command stopped after its rename, before its flush.

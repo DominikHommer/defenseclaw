@@ -26,7 +26,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 )
 
-const testConfigChangeID = "c-01JB8Z4X6T2Q9V3M5N7P1R0S4W"
+const (
+	testConfigChangeID = "c-01JB8Z4X6T2Q9V3M5N7P1R0S4W"
+	// testChangedAt is the time of every test change.
+	testChangedAt = "2026-10-21T10:00:00Z"
+)
 
 func TestLogConfigChangeRecordsEachFamily(t *testing.T) {
 	sum, previous := strings.Repeat("a", 64), strings.Repeat("b", 64)
@@ -38,7 +42,7 @@ func TestLogConfigChangeRecordsEachFamily(t *testing.T) {
 		want    []string
 		absent  []string
 	}{
-		{"anchors replaced", ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeTrustAnchors, Action: "install",
+		{"anchors replaced", ConfigChange{ChangedAt: testChangedAt, EventID: testConfigChangeID, Kind: ConfigChangeTrustAnchors, Action: "install",
 			Outcome: ConfigChangeApplied, Actor: "os:uid:0:root", SHA256: sum, PreviousSHA256: previous,
 			KeyIDsAdded: []string{"fleet-2026-11"}, KeyIDsRemoved: []string{"fleet-2026-10"}},
 			observability.TelemetryEventConfigTrustAnchorsChanged, observability.OutcomeApplied,
@@ -46,19 +50,19 @@ func TestLogConfigChangeRecordsEachFamily(t *testing.T) {
 				`"defenseclaw.trust_anchors.key_ids.added":["fleet-2026-11"]`, `"defenseclaw.trust_anchors.key_ids.removed":["fleet-2026-10"]`,
 				`"defenseclaw.config.change.id":"` + testConfigChangeID + `"`, `"defenseclaw.admin.actor_ref":"os:uid:0:root"`},
 			[]string{"defenseclaw.config.change.reason_code"}},
-		{"anchors refused", ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeTrustAnchors, Action: "install",
+		{"anchors refused", ConfigChange{ChangedAt: testChangedAt, EventID: testConfigChangeID, Kind: ConfigChangeTrustAnchors, Action: "install",
 			Outcome: ConfigChangeRefused, ReasonCode: "anchor_invalid", Actor: "os:uid:0:root", SHA256: previous},
 			observability.TelemetryEventConfigTrustAnchorsChanged, observability.OutcomeRejected,
 			[]string{`"defenseclaw.config.change.reason_code":"anchor_invalid"`}, nil},
-		{"credential set", ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set",
+		{"credential set", ConfigChange{ChangedAt: testChangedAt, EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set",
 			Outcome: ConfigChangeApplied, Actor: "os:uid:0:root", SecretName: "splunk-hec-token"},
 			observability.TelemetryEventConfigSecretChanged, observability.OutcomeApplied,
 			[]string{`"defenseclaw.secret.name":"splunk-hec-token"`, `"defenseclaw.secret.action":"set"`}, nil},
-		{"credential removal failed", ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "remove",
+		{"credential removal failed", ConfigChange{ChangedAt: testChangedAt, EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "remove",
 			Outcome: ConfigChangeFailed, ReasonCode: "change_failed", Actor: "os:uid:0:root", SecretName: "splunk-hec-token"},
 			observability.TelemetryEventConfigSecretChangeFailed, observability.OutcomeFailed,
 			[]string{`"defenseclaw.secret.action":"remove"`, `"defenseclaw.config.change.reason_code":"change_failed"`}, nil},
-		{"credential name refused", ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set",
+		{"credential name refused", ConfigChange{ChangedAt: testChangedAt, EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set",
 			Outcome: ConfigChangeRefused, ReasonCode: "invalid_arguments", Actor: "os:uid:0:root"},
 			observability.TelemetryEventConfigSecretChangeFailed, observability.OutcomeRejected,
 			[]string{`"defenseclaw.config.change.reason_code":"invalid_arguments"`}, []string{"defenseclaw.secret.name"}},
@@ -111,18 +115,15 @@ func TestLogConfigChangeRefusesMalformedChanges(t *testing.T) {
 	}
 }
 
-// The gateway marks a change event reported only once every remote
-// destination has it; until then, and after a restart, it offers it again.
-// The store keeps each change event id once: a later offer (in the same
-// process or after the restart) writes nothing, records no metric again and
-// sends the stored record, with its ids and time, to the remote
-// destinations again (a stored replay). Before, a later offer returned
-// before any export, so a delivery lost in memory was never redone.
+// The gateway marks a change event reported only once the audit store and
+// every remote destination have it; until then, and after a restart, it
+// offers it again. The store keeps each change event id once: a later offer
+// (in the same process or after the restart) writes nothing, records no
+// metric again and sends the record to the remote destinations again.
 func TestLogConfigChangeRecordsEachChangeOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
-	change := ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set",
+	change := ConfigChange{ChangedAt: testChangedAt, EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set",
 		Outcome: ConfigChangeApplied, Actor: "os:uid:0:root", SecretName: "splunk-hec-token"}
-	var first []byte
 	for run, want := range [][]bool{{false, true}, {true, true}} {
 		store, err := NewStore(path)
 		if err != nil {
@@ -140,27 +141,18 @@ func TestLogConfigChangeRecordsEachChangeOnce(t *testing.T) {
 				t.Fatalf("run %d offer %d: %v", run, offer, err)
 			}
 			if metrics >= 0 && len(runtime.metricSnapshot()) != metrics {
-				t.Fatalf("run %d: the replay recorded metrics again", run)
+				t.Fatalf("run %d: an offer of a stored change recorded metrics again", run)
 			}
 			metrics = len(runtime.metricSnapshot())
 		}
-		runtime.mu.Lock()
-		replays := append([]bool(nil), runtime.replays...)
-		runtime.mu.Unlock()
-		if fmt.Sprint(replays) != fmt.Sprint(want) {
-			t.Fatalf("run %d stored replays = %v, want %v", run, replays, want)
+		if run > 0 && metrics != 0 {
+			t.Fatalf("run %d: a restart recorded the metrics of a stored change again", run)
 		}
-		_, records := runtime.snapshot()
-		for _, record := range records {
-			encoded, err := record.Bytes()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if first == nil {
-				first = encoded
-			} else if string(encoded) != string(first) {
-				t.Fatalf("run %d: a replay differs from the stored record:\n%s\n%s", run, encoded, first)
-			}
+		runtime.mu.Lock()
+		stored := append([]bool(nil), runtime.storedLocally...)
+		runtime.mu.Unlock()
+		if fmt.Sprint(stored) != fmt.Sprint(want) {
+			t.Fatalf("run %d stored-locally offers = %v, want %v", run, stored, want)
 		}
 		var rows int
 		if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action = ?`,
@@ -181,42 +173,10 @@ func TestLogConfigChangeFailsWhileTheStoreIsClosed(t *testing.T) {
 	if err := logger.store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	change := ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeTrustAnchors, Action: "install",
+	change := ConfigChange{ChangedAt: testChangedAt, EventID: testConfigChangeID, Kind: ConfigChangeTrustAnchors, Action: "install",
 		Outcome: ConfigChangeRefused, ReasonCode: "lifecycle_busy", Actor: "os:uid:0:root"}
 	if err := logger.LogConfigChange(change, nil); err == nil {
 		t.Fatal("LogConfigChange succeeded with the audit store closed")
-	}
-}
-
-// A change is offered again until the audit store records it, so the
-// runtime must export it only after its local write: LogConfigChange marks
-// its occurrence for every kind and outcome, an ordinary activity is not
-// marked and is still exported while the store is down (GAP-1536).
-func TestLogConfigChangeIsExportedOnlyAfterTheLocalWrite(t *testing.T) {
-	logger := newTestLogger(t)
-	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
-	logger.SetRuntimeV8Emitter(runtime)
-	ids := []string{testConfigChangeID, "c-01JB8Z4X6T2Q9V3M5N7P1R0S4X", "c-01JB8Z4X6T2Q9V3M5N7P1R0S4Y"}
-	for index, change := range []ConfigChange{
-		{Kind: ConfigChangeTrustAnchors, Action: "install", Outcome: ConfigChangeApplied, SHA256: strings.Repeat("a", 64)},
-		{Kind: ConfigChangeSecret, Action: "set", Outcome: ConfigChangeApplied, SecretName: "splunk-hec-token"},
-		{Kind: ConfigChangeSecret, Action: "remove", Outcome: ConfigChangeFailed, ReasonCode: "interrupted", SecretName: "otlp-token"},
-	} {
-		change.EventID, change.Actor = ids[index], "os:uid:0:root"
-		if err := logger.LogConfigChange(change, nil); err != nil {
-			t.Fatalf("LogConfigChange %d: %v", index, err)
-		}
-	}
-	if err := logger.LogActivity(ActivityInput{
-		Actor: "watcher", Action: ActionPolicyReload, TargetType: "policy", TargetID: "default",
-	}); err != nil {
-		t.Fatalf("LogActivity: %v", err)
-	}
-	runtime.mu.Lock()
-	marks := append([]bool(nil), runtime.exportAfterWrite...)
-	runtime.mu.Unlock()
-	if want := []bool{true, true, true, false}; fmt.Sprint(marks) != fmt.Sprint(want) {
-		t.Fatalf("export-after-local-write marks = %v, want %v", marks, want)
 	}
 }
 
@@ -241,7 +201,7 @@ func TestLogConfigChangeKeepsTheAccountOffTheCounters(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			for _, actor := range []string{"os:sid:" + sid + ":" + account, "os:uid:0:root"} {
-				change.EventID, change.Actor = testConfigChangeID, actor
+				change.EventID, change.Actor, change.ChangedAt = testConfigChangeID, actor, testChangedAt
 				logger := newTestLogger(t)
 				runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
 				logger.SetRuntimeV8Emitter(runtime)
@@ -286,13 +246,14 @@ func TestLogConfigChangeKeepsTheAccountOffTheCounters(t *testing.T) {
 
 // LogConfigChange returns nil only once the change's row survives a power
 // loss: the pool commits with synchronous=NORMAL, so after the row is
-// stored it commits once on the durable connection (synchronous=FULL,
-// fullfsync), which flushes the whole log. A failed flush is an error, for
-// a new row and for a row found stored (a stopped process may have left it
-// in the page cache), and the stored row is not sent again until the flush
-// succeeds. The flush runs once per delivery. Before, LogConfigChange
-// returned after the NORMAL commit and the gateway wrote its durable
-// marker for a row a power loss could still take back.
+// stored, or found stored (a stopped process may have left it in the page
+// cache), it commits once on the durable connection (synchronous=FULL,
+// fullfsync), which flushes the whole log. A failed flush is an error, so
+// the gateway does not count the store as having the change; it offers the
+// change again, and the destinations are sinks of their own that do not
+// wait on the flush. Before, LogConfigChange returned after the NORMAL
+// commit and the gateway wrote its durable marker for a row a power loss
+// could still take back.
 func TestLogConfigChangeSucceedsOnlyOnceTheRowIsPowerLossDurable(t *testing.T) {
 	logger := newTestLogger(t)
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
@@ -306,7 +267,7 @@ func TestLogConfigChangeSucceedsOnlyOnceTheRowIsPowerLossDurable(t *testing.T) {
 		}
 		return value
 	}
-	change := ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set",
+	change := ConfigChange{ChangedAt: testChangedAt, EventID: testConfigChangeID, Kind: ConfigChangeSecret, Action: "set",
 		Outcome: ConfigChangeApplied, Actor: "os:uid:0:root", SecretName: "splunk-hec-token"}
 	if _, err := logger.store.db.Exec(`CREATE TRIGGER audit_flush_fails BEFORE UPDATE ON observability_store_readiness
 		BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`); err != nil {
@@ -318,35 +279,23 @@ func TestLogConfigChangeSucceedsOnlyOnceTheRowIsPowerLossDurable(t *testing.T) {
 			t.Fatalf("offer %d succeeded although its row could not be flushed", offer)
 		}
 	}
-	if _, records := runtime.snapshot(); len(records) != 1 {
-		t.Fatalf("emitted %d records, want the first offer's only", len(records))
-	}
-	if delivery.LocalDurable() {
-		t.Fatal("a failed flush marked the row durable")
+	runtime.mu.Lock()
+	stored := append([]bool(nil), runtime.storedLocally...)
+	runtime.mu.Unlock()
+	if fmt.Sprint(stored) != "[false true]" {
+		t.Fatalf("stored-locally offers = %v, want the row written once and found once", stored)
 	}
 	if _, err := logger.store.db.Exec(`DROP TRIGGER audit_flush_fails`); err != nil {
 		t.Fatal(err)
 	}
 	before := generation()
-	if err := logger.LogConfigChange(change, delivery); err != nil {
-		t.Fatalf("offer after the flush recovered: %v", err)
-	}
-	if got := generation(); got != before+1 || !delivery.LocalDurable() {
-		t.Fatalf("durable commits = %d, durable = %t; want 1 and true", got-before, delivery.LocalDurable())
-	}
-	if err := logger.LogConfigChange(change, delivery); err != nil {
-		t.Fatal(err)
-	}
-	if got := generation(); got != before+1 {
-		t.Fatalf("a second offer of the same delivery flushed again (%d commits)", got-before)
-	}
-	// A new delivery (a gateway restart) flushes once more: the row it
-	// finds may be one a stopped process left unflushed.
-	if err := logger.LogConfigChange(change, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := generation(); got != before+2 {
-		t.Fatalf("a restart's offer made %d durable commits, want 2 in all", got-before)
+	for offer := 0; offer < 2; offer++ {
+		if err := logger.LogConfigChange(change, delivery); err != nil {
+			t.Fatalf("offer %d after the flush recovered: %v", offer, err)
+		}
+		if got := generation(); got != before+int64(offer)+1 {
+			t.Fatalf("offer %d: %d durable commits in all, want one per offer", offer, got-before)
+		}
 	}
 }
 
@@ -380,48 +329,5 @@ func TestAuditDurableConnectionFlushesEveryCommit(t *testing.T) {
 	}
 	if logger.store.durableDB != nil {
 		t.Fatal("Close kept the durable connection")
-	}
-}
-
-// A change's row survives a power loss before any remote destination can
-// get it, for every kind and outcome: the runtime runs the change's
-// durability step after the local write and before it hands the record to
-// a destination, and the step flushes the store once. Before, the first
-// offer flushed the row only after the emit returned, so a sink could
-// acknowledge a record a power loss then took back, and the next offer
-// sent another record (another time, run and sidecar) under the same id.
-func TestLogConfigChangeRowIsDurableBeforeAnyDestinationGetsIt(t *testing.T) {
-	logger := newTestLogger(t)
-	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
-	logger.SetRuntimeV8Emitter(runtime)
-	generation := func() int64 {
-		t.Helper()
-		var value int64
-		if err := logger.store.db.QueryRow(`SELECT verification_generation
-			FROM observability_store_readiness WHERE id = 1`).Scan(&value); err != nil {
-			t.Fatal(err)
-		}
-		return value
-	}
-	ids := []string{testConfigChangeID, "c-01JB8Z4X6T2Q9V3M5N7P1R0S4X", "c-01JB8Z4X6T2Q9V3M5N7P1R0S4Y"}
-	for index, change := range []ConfigChange{
-		{Kind: ConfigChangeTrustAnchors, Action: "install", Outcome: ConfigChangeApplied, SHA256: strings.Repeat("a", 64)},
-		{Kind: ConfigChangeSecret, Action: "set", Outcome: ConfigChangeApplied, SecretName: "splunk-hec-token"},
-		{Kind: ConfigChangeSecret, Action: "remove", Outcome: ConfigChangeFailed, ReasonCode: "interrupted", SecretName: "otlp-token"},
-	} {
-		change.EventID, change.Actor = ids[index], "os:uid:0:root"
-		before := generation()
-		if err := logger.LogConfigChange(change, observability.NewRemoteDelivery()); err != nil {
-			t.Fatalf("LogConfigChange %d: %v", index, err)
-		}
-		if got := generation(); got != before+1 {
-			t.Fatalf("change %d made %d durable commits, want 1", index, got-before)
-		}
-	}
-	runtime.mu.Lock()
-	durable := append([]bool(nil), runtime.durableAtExport...)
-	runtime.mu.Unlock()
-	if want := []bool{true, true, true}; fmt.Sprint(durable) != fmt.Sprint(want) {
-		t.Fatalf("durable when a destination could get it = %v, want %v", durable, want)
 	}
 }

@@ -126,10 +126,7 @@ func (e *Env) recordAnchorsChange(reservation *enterprisestatus.ChangeReservatio
 	case out.Result == AnchorsUnchanged:
 		return nil
 	}
-	ev, evErr := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, outcome, code)
-	if evErr != nil {
-		return evErr
-	}
+	ev := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, outcome, code)
 	ev.SHA256 = out.SHA256
 	if err == nil {
 		ev.PreviousSHA256 = out.PreviousSHA256

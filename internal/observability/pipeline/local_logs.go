@@ -285,15 +285,15 @@ func (*recordBuildFailure) Error() string { return "canonical log record build f
 // Process evaluates collection exactly once through the router, persists the
 // required local projection, and only then creates optional destination work.
 // Optional projection failures are isolated and returned as bounded identities.
-// A failed local write still returns the remote projections (GAP-1536),
-// except for an occurrence marked observability.WithExportAfterLocalWrite,
-// whose producer offers it again until it is stored.
+// A failed local write still returns the remote projections (GAP-1536). An
+// occurrence marked observability.WithStoredLocally is not written again:
+// only its remote projections are returned.
 func (pipeline *LocalLogPipeline) Process(
 	ctx context.Context,
 	metadata router.Metadata,
 	builder router.RecordBuilder,
 ) (LocalLogOutcome, error) {
-	return pipeline.process(ctx, metadata, builder, false, "", !observability.ExportAfterLocalWrite(ctx))
+	return pipeline.process(ctx, metadata, builder, false, "", true)
 }
 
 // ProcessLocalOnly applies the same collection, mandatory-floor, generated
@@ -372,9 +372,6 @@ func (pipeline *LocalLogPipeline) ProcessManagedLogFallback(
 	if !ok {
 		return outcome, nil
 	}
-	if err := matchStoredReplay(ctx, record); err != nil {
-		return LocalLogOutcome{}, err
-	}
 	delivery, ok := result.Delivery()
 	if !ok || delivery.DestinationName != config.ObservabilityV8ManagedAIDDestinationName ||
 		delivery.DestinationKind != config.ObservabilityV8DestinationOTLP ||
@@ -416,8 +413,8 @@ func (pipeline *LocalLogPipeline) process(
 	originDestination string,
 	exportOnWriteFailure bool,
 ) (LocalLogOutcome, error) {
-	replay := observability.StoredReplay(ctx)
-	if replay && (localOnly || originDestination != "") {
+	storedLocally := observability.StoredLocally(ctx)
+	if storedLocally && (localOnly || originDestination != "") {
 		return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
 	}
 	prepared, outcome, admitted, err := pipeline.prepare(ctx, metadata, builder)
@@ -425,13 +422,9 @@ func (pipeline *LocalLogPipeline) process(
 		return outcome, err
 	}
 	sinkPolicy := legacyredaction.SinkPolicyFromContext(ctx)
-	if replay {
+	if storedLocally {
 		// The store already holds this occurrence under its stable id
-		// (observability.WithStoredReplay): hand back its remote work only,
-		// and only when the rebuilt record is the stored one.
-		if err := matchStoredReplay(ctx, prepared.record); err != nil {
-			return LocalLogOutcome{}, err
-		}
+		// (observability.WithStoredLocally): hand back its remote work only.
 		outcome.localPersisted = true
 		pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, "")
 		return outcome, nil
@@ -461,21 +454,6 @@ func (pipeline *LocalLogPipeline) process(
 	}
 	pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, originDestination)
 	return outcome, nil
-}
-
-// matchStoredReplay refuses a stored replay whose rebuilt record is not the
-// record the local store holds under its id (v8redaction.MatchStoredProjection):
-// every path that exports a replay checks it, so no other record goes out
-// under the stored id. Another offer is not a replay and passes.
-func matchStoredReplay(ctx context.Context, record observability.Record) error {
-	stored, replay := observability.StoredReplayRecord(ctx)
-	if !replay {
-		return nil
-	}
-	if v8redaction.MatchStoredProjection(record, stored) != nil {
-		return &Error{code: ErrorRecordBuild}
-	}
-	return nil
 }
 
 // preparedLocalLog is an admitted occurrence ready for the local append.
@@ -583,8 +561,9 @@ func (pipeline *LocalLogPipeline) ProcessAtomicBatch(
 	if pipeline == nil {
 		return nil, &Error{code: ErrorInvalidDependency}
 	}
-	if observability.StoredReplay(ctx) {
-		// A batch writes every item; a stored replay goes through Process.
+	if observability.StoredLocally(ctx) {
+		// A batch writes every item; an occurrence the store already holds
+		// goes through Process.
 		return nil, &Error{code: ErrorInvalidInput}
 	}
 	outcomes := make([]LocalLogOutcome, 0, len(items))
@@ -625,7 +604,7 @@ func (pipeline *LocalLogPipeline) ProcessAtomicBatch(
 	sinkPolicy := legacyredaction.SinkPolicyFromContext(ctx)
 	if err := batcher.AppendBatchContext(ctx, records, projections); err != nil {
 		writeErr := boundedPipelineError(ErrorLocalWrite, err)
-		if writeErr.contextCause == nil && !observability.ExportAfterLocalWrite(ctx) {
+		if writeErr.contextCause == nil {
 			for index, ready := range prepared {
 				pipeline.projectOptional(&outcomes[at[index]], ready.record, ready.optional, sinkPolicy, "")
 			}

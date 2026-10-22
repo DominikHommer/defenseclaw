@@ -217,11 +217,8 @@ func TestUnixSecretSetRefusedWhileAnotherChangeHoldsTheLastPlace(t *testing.T) {
 	// enterprisestatus.maxPendingChangeEvents unreported events, less the
 	// held place.
 	for i := 0; i < 4096-1; i++ {
-		ev, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionRemove,
+		ev := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionRemove,
 			enterprisestatus.ChangeApplied, "")
-		if err != nil {
-			t.Fatal(err)
-		}
 		if err := os.WriteFile(filepath.Join(dir, ev.EventID+".json"), []byte("{}\n"), 0o640); err != nil {
 			t.Fatal(err)
 		}
