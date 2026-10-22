@@ -2379,7 +2379,9 @@ func committedAgentHookChainPanicBlock(
 	switch strings.ToLower(strings.TrimSpace(req.ConnectorName)) {
 	case "claudecode":
 		next.HookOutput = claudeCodeOutput(
-			claudeCodeHookRequest{HookEventName: req.HookEventName},
+			// Recovery has no verified caller home. Never send the gateway
+			// service account's watch paths to a managed agent.
+			claudeCodeHookRequest{HookEventName: req.HookEventName, managedWatch: true, watchHome: unresolvedCallerHome},
 			next.Action,
 			next.RawAction,
 			next.Reason,

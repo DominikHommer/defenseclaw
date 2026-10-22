@@ -1021,6 +1021,58 @@ func TestClaudeCodeOutput_LegacyMirrorReturnsDynamicWatchPaths(t *testing.T) {
 	}
 }
 
+func TestManagedClaudeCodeWatchPathsUseVerifiedCallerHome(t *testing.T) {
+	callerHome := t.TempDir()
+	project := filepath.Join(callerHome, "project")
+	serviceHome := t.TempDir()
+	t.Setenv("HOME", serviceHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(serviceHome, ".claude"))
+	for _, tc := range []struct {
+		name     string
+		home     string
+		wantHome bool
+	}{
+		{"known caller", callerHome, true},
+		{"unresolved caller", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := withManagedHookPeer(withServiceAccountGateway(t.Context()), managedHookPeer{UID: 1001, Home: tc.home})
+			req := (claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project}).withWatchHome(ctx)
+			out := claudeCodeOutput(req, "allow", "allow", "", "")
+			paths := out["hookSpecificOutput"].(map[string]interface{})["watchPaths"].([]string)
+			if containsString(paths, filepath.Join(serviceHome, ".claude", "settings.json")) {
+				t.Fatalf("service account watch path leaked: %v", paths)
+			}
+			if got := containsString(paths, filepath.Join(callerHome, ".claude", "settings.json")); got != tc.wantHome {
+				t.Fatalf("caller home watch path present=%v, want %v: %v", got, tc.wantHome, paths)
+			}
+			if tc.wantHome && !containsString(paths, filepath.Join(project, ".mcp.json")) {
+				t.Fatalf("caller project watch path missing: %v", paths)
+			}
+		})
+	}
+}
+
+func TestManagedClaudeCodeSessionStartWatchesTheAuthenticatedCaller(t *testing.T) {
+	callerHome := t.TempDir()
+	serviceHome := t.TempDir()
+	project := filepath.Join(callerHome, "work")
+	t.Setenv("HOME", serviceHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(serviceHome, ".claude"))
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(withServiceAccountGateway(t.Context()), managedHookPeer{UID: 1001, Home: callerHome})
+	response := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project})
+	paths := response.ClaudeCodeOutput["hookSpecificOutput"].(map[string]interface{})["watchPaths"].([]string)
+	if !containsString(paths, filepath.Join(callerHome, ".claude", "settings.json")) ||
+		!containsString(paths, filepath.Join(project, ".mcp.json")) ||
+		containsString(paths, filepath.Join(serviceHome, ".claude", "settings.json")) {
+		t.Fatalf("managed SessionStart watch paths = %v", paths)
+	}
+}
+
 func TestClaudeCodeOutput_UnsupportedAdditionalContextUsesSystemMessage(t *testing.T) {
 	for _, event := range []string{"Notification"} {
 		t.Run(event, func(t *testing.T) {
