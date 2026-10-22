@@ -35,6 +35,11 @@ const CWDKey = "\x00cwd"
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
+// PatchCompleteKey is positive hook-side proof that every apply_patch
+// directive was parsed and each target was resolved in the user's filesystem
+// view. The gateway may be unable to repeat that walk under ProtectHome.
+const PatchCompleteKey = "\x00patch-complete"
+
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
 const SourceLinkFactPrefix = "\x00source-link:"
 
@@ -692,7 +697,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			var command string
 			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
-					unprovenReason = UnprovenProtectedWrite(command, cwd, home)
+					unprovenReason = ActionCommandDecision(command, cwd, home)
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
@@ -809,8 +814,20 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// redirect. Unknown targets make the map incomplete.
 	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
 	truncated = truncated || !patchKnown
+	patchListed := patchKnown && len(patchTargets) > 0
 	for _, target := range patchTargets {
 		add(target, true, false)
+		if targets[OperandPath(target, cwd)] == "" {
+			patchListed = false
+		}
+	}
+	if isApplyPatchToolName(tool) && patchListed {
+		entry := len(jsonString(PatchCompleteKey)) + 1 + len(jsonString("1")) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
+			return incompleteEvidence(cwd)
+		}
+		targets[PatchCompleteKey] = "1"
+		size += entry
 	}
 	for key, value := range sourceFacts {
 		entry := len(jsonString(key)) + 1 + len(jsonString(value)) + 1
@@ -980,8 +997,9 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	var targets map[string]string
-	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+3 ||
+	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+4 ||
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
+		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}

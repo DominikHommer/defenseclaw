@@ -52,12 +52,10 @@ func simpleShellParameter(word *syntax.Word) string {
 // literalProgramOperands descends only through launchers with known argument
 // positions. An unknown option does not turn an option value into a program.
 func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string, depth int, allowFileRead bool) []string {
-	wrapped := depth > 0
 	for wrapper := 0; wrapper < 8 && len(words) > 0; wrapper++ {
 		program := programBase(words[0])
 		switch program {
 		case "env":
-			wrapped = true
 			index := 1
 			for index < len(words) {
 				word := words[index]
@@ -97,7 +95,6 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 			}
 			words = words[index:]
 		case "command":
-			wrapped = true
 			index := 1
 			for index < len(words) && strings.HasPrefix(words[index], "-") {
 				if words[index] == "--" {
@@ -110,8 +107,7 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 				index++
 			}
 			words = words[index:]
-		case "builtin", "nohup":
-			wrapped = true
+		case "builtin", "nohup", "busybox", "time":
 			if len(words) < 2 || words[1] == "--help" || words[1] == "--version" {
 				return nil
 			}
@@ -123,7 +119,6 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 				words = words[1:]
 			}
 		case "exec":
-			wrapped = true
 			index := 1
 			for index < len(words) && strings.HasPrefix(words[index], "-") {
 				switch words[index] {
@@ -141,7 +136,6 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 		execDone:
 			words = words[index:]
 		case "nice":
-			wrapped = true
 			index := 1
 			if index < len(words) && words[index] == "-n" {
 				index++
@@ -157,7 +151,6 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 			}
 			words = words[index:]
 		case "timeout":
-			wrapped = true
 			index := 1
 			for index < len(words) && strings.HasPrefix(words[index], "-") {
 				if words[index] == "--" {
@@ -206,7 +199,7 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 		case "xargs":
 			return nil // A producer must prove the replacement text first.
 		default:
-			return directLiteralProgramOperands(words, stmt, cwd, home, wrapped)
+			return directLiteralProgramOperands(words, stmt, cwd, home)
 		}
 	}
 	return nil
@@ -226,7 +219,7 @@ func literalDuration(value string) bool {
 	return err == nil
 }
 
-func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string, wrapped bool) []string {
+func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string) []string {
 	if len(words) == 0 {
 		return nil
 	}
@@ -276,8 +269,66 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		}
 		return add(names)
 	case program == "cp" || program == "gcp":
-		if dest := cpDestination(words[1:], makeStatic(len(words)-1), cwd); wrapped && dest != "" {
+		for _, option := range words[1:] {
+			if option == "--recursive" || strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "--") &&
+				(strings.ContainsAny(option, "rR")) {
+				return nil // A recursive copy is judged by its directory scope.
+			}
+		}
+		for _, source := range words[1 : len(words)-1] {
+			if strings.HasPrefix(source, "-") {
+				continue
+			}
+			if info, err := os.Stat(OperandPath(source, cwd)); err == nil && info.IsDir() {
+				return nil // A recursive directory copy has its own scope proof.
+			}
+			break
+		}
+		if dest := cpDestination(words[1:], makeStatic(len(words)-1), cwd); dest != "" {
 			return []string{dest}
+		}
+	case program == "tee":
+		var names []string
+		for _, word := range words[1:] {
+			if word == "--" {
+				continue
+			}
+			if strings.HasPrefix(word, "-") {
+				continue
+			}
+			names = append(names, word)
+		}
+		return add(names)
+	case program == "ln":
+		if len(words) >= 3 && !strings.HasPrefix(words[len(words)-1], "-") {
+			return add([]string{words[len(words)-1]})
+		}
+	case program == "tar":
+		var directory string
+		var member string
+		for i := 1; i < len(words); i++ {
+			switch word := words[i]; {
+			case word == "-C" || word == "--directory":
+				if i+1 >= len(words) {
+					return nil
+				}
+				directory = words[i+1]
+				i++
+			case strings.HasPrefix(word, "--directory="):
+				directory = strings.TrimPrefix(word, "--directory=")
+			case word == "-f" || word == "--file":
+				i++
+			case strings.HasPrefix(word, "-"):
+				continue
+			default:
+				member = word
+			}
+		}
+		if directory != "" && member != "" && !strings.ContainsAny(member, "*?[") {
+			target := OperandPath(member, OperandPath(directory, cwd))
+			if protectedReachPath(target, newProtectedFiles(home), filepath.Join(home, ".ssh")) {
+				return []string{target}
+			}
 		}
 	}
 	return nil

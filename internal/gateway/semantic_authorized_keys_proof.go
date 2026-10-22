@@ -1214,7 +1214,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
-	if hookpaths.UnprovenProtectedWrite(input.Command, input.CWD, facts.ActiveHome) != "" {
+	if hookpaths.ActionCommandDecision(input.Command, input.CWD, facts.ActiveHome) != "" {
 		return true
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {

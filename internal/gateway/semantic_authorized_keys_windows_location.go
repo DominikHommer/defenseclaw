@@ -22,6 +22,9 @@ func trustedWindowsLocationAuthorizedKeysWrite(input actionfacts.Input) bool {
 		!windowsLocationAbsolute(input.ActiveHome) || !windowsLocationAbsolute(input.CWD) {
 		return false
 	}
+	if hookpaths.ActionCommandDecision(input.Command, input.CWD, input.ActiveHome) != "" {
+		return true
+	}
 	return trustedWindowsPOSIXLocationWrite(input) ||
 		trustedWindowsNativeLocationWrite(input, actionfacts.DialectPowerShell) ||
 		trustedWindowsNativeLocationWrite(input, actionfacts.DialectCMD) ||
