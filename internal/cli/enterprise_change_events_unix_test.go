@@ -20,6 +20,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -256,6 +257,11 @@ func TestUnixSecretSetRefusedWhileAnotherChangeHoldsTheLastPlace(t *testing.T) {
 	}
 }
 
+type secretLockWaitServices struct{ enterpriseunix.ServiceManager }
+
+func (secretLockWaitServices) Check(context.Context) error { return nil }
+func (secretLockWaitServices) Version(context.Context) int { return 0 }
+
 // The reservation must already exist while set waits for the lifecycle
 // lock. A killed writer is reported exactly once without storing a value.
 func TestUnixSecretSetInterruptedDuringLockWait(t *testing.T) {
@@ -265,17 +271,32 @@ func TestUnixSecretSetInterruptedDuringLockWait(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		nowCalls := 0
 		newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
 			return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout,
-				Geteuid: func() int { return 0 }, Lchown: func(string, int, int) error { return nil }}, nil
+				Services: secretLockWaitServices{},
+				Geteuid:  func() int { return 0 }, Lchown: func(string, int, int) error { return nil },
+				Now: func() time.Time {
+					nowCalls++
+					// acquireLock reads its deadline first; flockUntil reads
+					// the clock again only after flock reports the lock busy.
+					if nowCalls == 2 {
+						if err := os.WriteFile(filepath.Join(root, "lock-wait-entered"), nil, 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return time.Now()
+				}}, nil
 		}
 		cmd := newEnterpriseSecretCommand("set", "")
-		cmd.SetOut(&bytes.Buffer{})
-		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetContext(context.Background())
+		var diagnostics bytes.Buffer
+		cmd.SetOut(&diagnostics)
+		cmd.SetErr(&diagnostics)
 		cmd.SetIn(strings.NewReader("provided by secret store\n"))
 		opts := enterpriseSecretOptions{name: "interrupted-token", fromStdin: true, lockWait: time.Minute}
 		if err := runEnterpriseSecret(cmd, "set", &opts); err != nil {
-			t.Fatal(err)
+			t.Fatalf("%v: %s", err, &diagnostics)
 		}
 		t.Fatal("secret set finished while another process held the lifecycle lock")
 	}
@@ -314,7 +335,8 @@ func TestUnixSecretSetInterruptedDuringLockWait(t *testing.T) {
 	defer tick.Stop()
 	for {
 		entries, _ := os.ReadDir(reservations)
-		if len(entries) == 1 {
+		_, waiting := os.Stat(filepath.Join(root, "lock-wait-entered"))
+		if len(entries) == 1 && waiting == nil {
 			break
 		}
 		select {
