@@ -17712,13 +17712,8 @@ def _apply_logs_config(
 def _local_splunk_sink_name_or_exit(app: AppContext, preferred: str) -> str:
     """The destination local setup writes; refuse one it did not record."""
 
-    from defenseclaw.commands.cmd_setup_observability import (
-        _local_splunk_sink_name,
-        _require_v8_operator_status,
-        _v8_authored_destinations,
-    )
+    from defenseclaw.commands.cmd_setup_observability import _local_splunk_sink_name, _v8_authored_destinations
 
-    _require_v8_operator_status(app.cfg.data_dir)
     try:
         return _local_splunk_sink_name(_v8_authored_destinations(app.cfg.data_dir), preferred)
     except ValueError as exc:
