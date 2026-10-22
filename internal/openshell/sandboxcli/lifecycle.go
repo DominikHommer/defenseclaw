@@ -573,7 +573,7 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	// began: the probe, the refresh or the harness's start failed.
 	fail := func(err error) error {
 		if started {
-			switch _, keep, serr := a.stopIfAlone(context.WithoutCancel(ctx), api, sb.Name); {
+			switch keep, serr := a.stopIfAlone(context.WithoutCancel(ctx), api, sb.Name, nil); {
 			case keep != "":
 				a.warn(sb.Name + " keeps running after the failure: " + keep)
 			case serr != nil:
@@ -723,8 +723,10 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 		return err
 	}
 	// The command can change a copy: what it held as the sandbox last
-	// stopped is no longer known.
+	// stopped is no longer known, and a look at it made before is not
+	// recorded at its stop (copyBase; best effort: exec holds no lease).
 	a.forgetStoppedCopy(sb.Name)
+	_ = a.bumpAttachStamp(sb.Name)
 	// The command outlives a client that is ended (execreap.go): one told
 	// to end stops what the command left running before it exits.
 	runCtx, stop := untilTerminated(ctx, tty)
@@ -810,6 +812,7 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 		return apiError(err)
 	}
 	var copyAt *workspace.CopyStatus
+	var base copyBase
 	asked := 0
 	if sb.Phase == "ready" {
 		if gateway, err := a.gatewayName(ctx); err == nil {
@@ -826,6 +829,7 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 			// A detached run or a session still going can change the copy
 			// between the look and the stop.
 			if sb.WorkdirMode == config.OpenShellWorkdirCopy && idle {
+				base = a.copyBaseOf(sb)
 				n, err := a.attachedSessions(sb.Name)
 				if err != nil {
 					return attachedUnknown(sb.Name, err)
@@ -845,13 +849,21 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	// The stop is decided under the sandbox's exclusive gate: a session that
 	// attached since the question above is named and asked about again
 	// (with no lock held while the question is open), and none attaches
-	// between the last count and OpenShell's stop.
+	// between the last count and OpenShell's stop. What the look found is
+	// recorded under the gate too, unless something ran in the copy after
+	// it: a session that attached since (also one that has ended) or a hook
+	// request (copyBase).
 	var stopped *sandboxapi.Sandbox
 	var stopErr error
 	err = a.endAsked(ctx, o.Name, asked, func(others int) (bool, error) {
 		copyAt = nil
 		return a.confirmEnding(attachedText(o.Name, others)+" now; stopping the sandbox ends "+them(others), "Stop anyway?", o.Yes)
-	}, func() { stopped, stopErr = api.Stop(ctx, o.Name) })
+	}, func() {
+		stopped, stopErr = api.Stop(ctx, o.Name)
+		if stopErr == nil && copyAt != nil && base.unchanged(a, o.Name, stopped) {
+			a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
+		}
+	})
 	switch {
 	case errors.Is(err, errKept):
 		a.note(o.Name + " keeps running")
@@ -860,10 +872,6 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 		return err
 	case stopErr != nil:
 		return apiError(stopErr)
-	}
-	// A hook request since the look is something that ran in it after all.
-	if copyAt != nil && !stopped.Hooks.LastHookAt.After(sb.Hooks.LastHookAt) {
-		a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
 	}
 	if note := notStoppedNote(ctx, api, stopped); note != "" {
 		a.warn(note)
@@ -1273,17 +1281,21 @@ func (a *App) deleteIfAlone(ctx context.Context, api API, name string) (keep str
 // session is attached to it, deciding under the sandbox's exclusive gate
 // (lockForStop): keep says why it was left running (sessions attached, or
 // a count that could not be made), "" when OpenShell was asked to stop it.
-func (a *App) stopIfAlone(ctx context.Context, api API, name string) (stopped *sandboxapi.Sandbox, keep string, err error) {
+// then, when set, runs under the gate once the stop succeeded.
+func (a *App) stopIfAlone(ctx context.Context, api API, name string, then func(stopped *sandboxapi.Sandbox)) (keep string, err error) {
 	others, release, err := a.lockForStop(ctx, name)
 	if err != nil {
-		return nil, attachedUnknown(name, err).Error(), nil
+		return attachedUnknown(name, err).Error(), nil
 	}
 	defer release()
 	if others > 0 {
-		return nil, attachedText(name, others) + " → stop it once " + map[bool]string{true: "it ends", false: "they end"}[others == 1] + ": " + CommandName + " stop " + name, nil
+		return attachedText(name, others) + " → stop it once " + map[bool]string{true: "it ends", false: "they end"}[others == 1] + ": " + CommandName + " stop " + name, nil
 	}
-	stopped, err = api.Stop(ctx, name)
-	return stopped, "", err
+	stopped, err := api.Stop(ctx, name)
+	if err == nil && then != nil {
+		then(stopped)
+	}
+	return "", err
 }
 
 // unhandedWork says what work a copy-mode sandbox holds that never came

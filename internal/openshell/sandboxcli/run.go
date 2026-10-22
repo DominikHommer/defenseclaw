@@ -1502,7 +1502,6 @@ func settingOf(settings []sandboxapi.Setting, key string) (sandboxapi.Setting, b
 	return sandboxapi.Setting{}, false
 }
 
-// createRequest turns the flags into the daemon's create request.
 // managedRefusal is a run on a managed computer that the preflight would
 // refuse. The managed gateway judges it: the create asks it before anything
 // is staged or created, and its refusal names the caller's profile and rule
@@ -1517,10 +1516,14 @@ func (a *App) managedRefusal(ctx context.Context, api API, spec *harness.Spec, p
 	if err != nil {
 		return apiError(err)
 	}
-	if keep, err := a.deleteIfAlone(context.WithoutCancel(ctx), api, sb.Name); keep != "" {
+	switch keep, err := a.deleteIfAlone(context.WithoutCancel(ctx), api, sb.Name); {
+	case keep != "":
 		a.warn("keeping sandbox " + sb.Name + ": " + keep)
-	} else if err != nil {
+	case err != nil:
 		a.warn("could not delete " + sb.Name + ": " + err.Error())
+	default:
+		// The gate the delete took is CLI state too.
+		a.forgetCLIState(sb.Name)
 	}
 	return errors.New(strings.Join(fatal, "\n"))
 }
@@ -1542,6 +1545,7 @@ func (a *App) removeFailedSandbox(ctx context.Context, api API, name string) {
 	}
 }
 
+// createRequest turns the flags into the daemon's create request.
 func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, copyMode bool, env map[string]string) (sandboxapi.CreateRequest, llmChoice, error) {
 	req := sandboxapi.CreateRequest{
 		Name: strings.TrimSpace(o.Name), Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile,

@@ -95,9 +95,9 @@ type APIServer struct {
 	// foreignHookOwed are the revocations of protected session records the
 	// operating system refused, tried again until they take.
 	foreignHookOwed foreignHookRevocationsOwed
-	// foreignHookRun is this gateway's run mark, which the hook reads
-	// during an outage (foreign_hook_gateway_run.go).
-	foreignHookRun foreignHookGatewayRun
+	// foreignHookProofs are the sessions whose outage proof this gateway
+	// renews (foreign_hook_session_proof.go).
+	foreignHookProofs foreignHookSessionProofs
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
@@ -1381,25 +1381,30 @@ func (a *APIServer) Run(ctx context.Context) error {
 
 	// A revocation of an account's protected session records that the
 	// operating system refused is tried again until it takes, and once more
-	// as this run stops (foreign_hook_revocation_owed.go); a no-op where the
-	// gateway publishes no records. The run mark goes up before anything is
-	// answered, and comes down as the very last step of a run that owes
-	// nothing (foreign_hook_gateway_run.go).
-	a.beginForeignHookGatewayRun()
+	// as this run stops (foreign_hook_revocation_owed.go), and the outage
+	// proof of every session this gateway still allows is renewed while it
+	// runs (foreign_hook_session_proof.go); both are no-ops where the
+	// gateway publishes no records. Once this run stops nothing renews a
+	// proof, so every allow ends by itself within its lifetime.
 	revocationsCtx, stopRevocations := context.WithCancel(ctx)
 	revocationsDone := make(chan struct{})
 	defer func() {
 		stopRevocations()
 		select {
 		case <-revocationsDone:
-			a.endForeignHookGatewayRun()
 		case <-time.After(foreignHookRevocationStopTimeout):
-			// Still trying: the run mark stays, so the hook blocks the outage.
 		}
 	}()
 	go func() {
 		defer close(revocationsDone)
+		var renewals sync.WaitGroup
+		renewals.Add(1)
+		go func() {
+			defer renewals.Done()
+			a.renewForeignHookSessionProofs(revocationsCtx, foreignHookSessionRenewEvery)
+		}()
 		a.retryOwedForeignHookRevocations(revocationsCtx, foreignHookRevocationRetryEvery)
+		renewals.Wait()
 	}()
 
 	errCh := make(chan error, 2)

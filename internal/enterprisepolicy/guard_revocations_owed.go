@@ -22,12 +22,10 @@ import (
 // account's protected session record key, the gateway owes the revocation
 // and saves it in its data directory (internal/gateway
 // foreign_hook_revocation_owed.go): one file per account, named like the
-// account's private session store and holding its identity, and
-// ForeignHookRevocationOwedAllName when every account's key is owed (an
-// earlier gateway run did not end cleanly, or the run could not add its run
-// mark). The gateway settles a revocation once its own revocation took. The
-// hook guardian, which runs as root or SYSTEM and so is not refused what
-// the gateway was, ends the key of every account named there at every pass
+// account's private session store and holding its identity. The gateway
+// settles a revocation once its own revocation took. The hook guardian,
+// which runs as root or SYSTEM and so is not refused what the gateway was,
+// ends the key of every account named there at every pass
 // (ForeignHookRevocationsOwed), and of every account when it cannot tell
 // whom a saved one names.
 
@@ -35,9 +33,6 @@ const (
 	// ForeignHookRevocationsOwedDirName is the folder of the owed
 	// revocations in the gateway's data directory.
 	ForeignHookRevocationsOwedDirName = "foreign-hook-revocations-owed"
-	// ForeignHookRevocationOwedAllName is the saved owed revocation of every
-	// account's key.
-	ForeignHookRevocationOwedAllName = "all-accounts"
 	// foreignHookRevocationOwedLimit bounds one saved revocation (an
 	// account identity).
 	foreignHookRevocationOwedLimit = 512
@@ -76,8 +71,8 @@ func ReadForeignHookRevocationOwed(path string) (string, bool) {
 
 // ForeignHookRevocationsOwed lists the owed revocations saved under the
 // gateway data directory dataDir: the accounts they name, and all when
-// every account's key is owed. Any doubt is all: a folder that cannot be
-// read (the error says why), and an entry that names no account (a save
+// every account's key must be ended. Any doubt is all: a folder that cannot
+// be read (the error says why), and an entry that names no account (a save
 // cut short, a name that does not match its identity, a file that cannot
 // be read).
 func ForeignHookRevocationsOwed(dataDir string) (identities []string, all bool, err error) {
@@ -91,10 +86,6 @@ func ForeignHookRevocationsOwed(dataDir string) (identities []string, all bool, 
 	}
 	seen := map[string]bool{}
 	for _, entry := range entries {
-		if entry.Name() == ForeignHookRevocationOwedAllName {
-			all = true
-			continue
-		}
 		path := filepath.Join(dir, entry.Name())
 		identity, ok := ReadForeignHookRevocationOwed(path)
 		if !ok || ForeignHookRevocationOwedPath(dataDir, identity) != path {

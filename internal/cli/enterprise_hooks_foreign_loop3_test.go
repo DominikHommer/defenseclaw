@@ -70,9 +70,9 @@ func TestForeignHookGuardianEndsTheKeysTheGatewayOwes(t *testing.T) {
 	}
 
 	for name, entry := range map[string][2]string{
-		"every account owed":         {enterprisepolicy.ForeignHookRevocationOwedAllName, "all-accounts\n"},
-		"a save cut short":           {filepath.Base(enterprisepolicy.ForeignHookRevocationOwedPath(cfg.DataDir, "1001")) + ".tmp", "10"},
-		"a name that is not its own": {filepath.Base(enterprisepolicy.ForeignHookRevocationOwedPath(cfg.DataDir, "1002")), "1001\n"},
+		"an entry that names no account": {"all-accounts", "all-accounts\n"},
+		"a save cut short":               {filepath.Base(enterprisepolicy.ForeignHookRevocationOwedPath(cfg.DataDir, "1001")) + ".tmp", "10"},
+		"a name that is not its own":     {filepath.Base(enterprisepolicy.ForeignHookRevocationOwedPath(cfg.DataDir, "1002")), "1001\n"},
 	} {
 		clearOwed()
 		g.allow(t, "1001", process)
