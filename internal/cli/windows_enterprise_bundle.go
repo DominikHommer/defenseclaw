@@ -1183,15 +1183,16 @@ func (t *windowsBundleRollbackTarget) writeOptions(expectSHA string) (configwrit
 		return configwrite.Options{}, err
 	}
 	if ref == nil || t.ref == nil || ref.BundleID != t.ref.BundleID || ref.Version != t.ref.Version ||
-		ref.ManifestSHA256 != t.ref.ManifestSHA256 || configwrite.SHA256Hex(raw) != t.restored {
-		return configwrite.Options{}, errors.New("confirmed bundle changed before rollback; run enterprise windows ensure --profile standalone")
+		ref.ManifestSHA256 != t.ref.ManifestSHA256 || ref.SignerKeyID != t.ref.SignerKeyID ||
+		ref.EffectivePolicyDigest != t.ref.EffectivePolicyDigest || configwrite.SHA256Hex(raw) != t.restored {
+		return configwrite.Options{}, errors.New("confirmed bundle changed before rollback; run defenseclaw.exe enterprise windows ensure --profile standalone")
 	}
 	opt, ok, err := driver.ConfigGenerationOptions(raw)
 	if err != nil {
 		return opt, err
 	}
 	if !ok {
-		return opt, errors.New("cannot prove the confirmed rollback principal; run enterprise windows ensure --profile standalone")
+		return opt, errors.New("cannot prove the confirmed rollback principal; run defenseclaw.exe enterprise windows ensure --profile standalone")
 	}
 	opt.ExpectSHA256 = expectSHA
 	if t.before.BundleID == ref.BundleID && t.before.BundleVersion == ref.Version &&
