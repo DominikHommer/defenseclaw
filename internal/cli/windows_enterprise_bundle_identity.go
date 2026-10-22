@@ -5,6 +5,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -62,4 +63,18 @@ func windowsHotConfigReportAdopted(report policyDigestReport, bundle configwrite
 	return report.Digest != "" && report.Digest == report.GatewayReportedDigest &&
 		report.GatewayLastReloadError == "" && report.ConfigGeneration > 0 && report.ConfigGenerationRecorded &&
 		report.GatewayReportedConfigGeneration == report.ConfigGeneration
+}
+
+// windowsBundleRollbackIdentity is the bundle a rollback to the confirmed
+// bundle must see the gateway name: the confirmed reference, which the
+// config record names too.
+func windowsBundleRollbackIdentity(ref *enterprisebundle.Ref, written configwrite.BundleRef) (configwrite.BundleRef, error) {
+	if ref == nil || !enterprisebundle.ValidBundleID(ref.BundleID) || ref.Version == 0 {
+		return configwrite.BundleRef{}, errors.New("the confirmed rollback bundle has no bundle ID and version")
+	}
+	if written.ID != ref.BundleID || written.Version != ref.Version {
+		return configwrite.BundleRef{}, fmt.Errorf("the config record would name bundle %q version %d, not the confirmed bundle %s version %d",
+			written.ID, written.Version, ref.BundleID, ref.Version)
+	}
+	return configwrite.BundleRef{ID: ref.BundleID, Version: ref.Version}, nil
 }

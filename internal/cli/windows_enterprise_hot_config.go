@@ -849,20 +849,6 @@ func windowsHotConfigWriteOptions(opts *windowsEnterpriseLifecycleOptions, expec
 	return opt, bundle, nil
 }
 
-// windowsBundleRollbackIdentity is the bundle a rollback to the confirmed
-// bundle must see the gateway name: the confirmed reference, which the
-// config record names too.
-func windowsBundleRollbackIdentity(ref *enterprisebundle.Ref, written configwrite.BundleRef) (configwrite.BundleRef, error) {
-	if ref == nil || !enterprisebundle.ValidBundleID(ref.BundleID) || ref.Version == 0 {
-		return configwrite.BundleRef{}, errors.New("the confirmed rollback bundle has no bundle ID and version")
-	}
-	if written.ID != ref.BundleID || written.Version != ref.Version {
-		return configwrite.BundleRef{}, fmt.Errorf("the config record would name bundle %q version %d, not the confirmed bundle %s version %d",
-			written.ID, written.Version, ref.BundleID, ref.Version)
-	}
-	return configwrite.BundleRef{ID: ref.BundleID, Version: ref.Version}, nil
-}
-
 // windowsHotConfirmedBundle reads, for a repeated delivery of the confirmed
 // bundle, the options that record config as that bundle's principal, and the
 // confirmed current bundle's rendered config and reference. A seam for tests.
