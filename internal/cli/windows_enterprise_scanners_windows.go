@@ -298,8 +298,9 @@ const windowsScannerRuntimeAdmissionQuarantined = "the shared scanner runtime ha
 // scanner runtime lock, so every gateway, a 1.0.3 one included, refuses the
 // executable it named, and the reason is returned: one they refuse, and one
 // they cannot prove (an unsigned scanner under a hash-pinned deployment,
-// whose pins only the production Setup's payload manifest has, or trust
-// settings that cannot be read). A 1.0.3 gateway runs any executable whose
+// whose pins only the production Setup's payload manifest has, a signed one
+// whose production signer pins nothing durable records, or trust settings
+// that cannot be read). A 1.0.3 gateway runs any executable whose
 // digest a schema 1 record names, so a record nothing proves was kept for it
 // to run, a certification run's unsigned scanner included (W2B-G-win review
 // loop round 3); the production Setup's /repair or upgrade admits the payload
@@ -342,10 +343,13 @@ func quarantineUnprovenWindowsScannerRuntimeAdmission() (string, error) {
 }
 
 // windowsScannerRuntimeProductionSigners is enterprise.trust.allowed_signers
-// of the production deployment's installed config, the signer pin every
-// production run applies when it brings no --config (an absent config pins
-// none). The config must pass the managed config trust check first; a seam
-// for tests.
+// of the production deployment's installed config. When it pins any signer,
+// every production run applies exactly those pins: one without
+// --allowed-signer takes them, and one with other thumbprints is refused
+// (applyWindowsEnterpriseConfiguredTrust, alike since 1.0.2). An absent
+// config or one that pins none is no evidence: the production run may have
+// pinned signers with --allowed-signer alone, which nothing records. The
+// config must pass the managed config trust check first; a seam for tests.
 var windowsScannerRuntimeProductionSigners = func() ([]string, error) {
 	path, err := windowsEnterpriseInstalledConfigPath()
 	if err != nil {
@@ -379,8 +383,11 @@ var windowsScannerRuntimeProductionSigners = func() ([]string, error) {
 // trust check every run makes and the executable still has the recorded
 // digest; the production deployment record is installed (an absent,
 // untrusted or tombstoned one admitted nothing); and the executable carries
-// a valid Authenticode signature from a signer the production config pins,
-// when it pins any. An unsigned executable is never proven here: an
+// a valid Authenticode signature from a signer the production config pins.
+// A config that pins no signer proves no signed executable: a production
+// run's --allowed-signer pins are recorded nowhere, so a scanner from a
+// signer they leave out would be kept (W2B-G-win third review loop, round 1). An unsigned
+// executable is never proven here: an
 // Authenticode-only deployment refuses it, and a hash-pinned one pins it only
 // in its Setup's payload manifest, which only a production run has. Anything
 // that cannot be read proves nothing.
@@ -411,6 +418,10 @@ func windowsScannerRuntimeProductionProves(root, recorded string) string {
 		signers, err := windowsScannerRuntimeProductionSigners()
 		if err != nil {
 			return "read the production signer pins: " + err.Error()
+		}
+		if len(signers) == 0 {
+			return target + " is signed, but the production config's enterprise.trust.allowed_signers pins no signer, and a production run's " +
+				"--allowed-signer pins are recorded nowhere, so this certification run cannot prove the signer"
 		}
 		if windowsScannerRuntimeSignerPinned(certificate, signers) {
 			return ""

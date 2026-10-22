@@ -156,9 +156,23 @@ func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *
 		want             int
 		reason           string
 	}{
-		{name: "signed, production pins no signer", setup: func() { signed, deployment = true, installed("authenticode") }, want: kept},
 		{name: "signed by the signer production pins", setup: func() { signed, signers, deployment = true, []string{pin}, installed("authenticode") }, want: kept},
-		{name: "signed, hash-pinned production", setup: func() { signed, deployment = true, installed("hash_pinned") }, want: kept},
+		{name: "signed by a pinned signer, hash-pinned production", want: kept,
+			setup: func() { signed, signers, deployment = true, []string{pin, strings.Repeat("0", 64)}, installed("hash_pinned") }},
+		{name: "signed by a pinned signer, production trust not recorded", want: kept,
+			setup: func() { signed, signers, deployment = true, []string{pin}, installed("") }},
+		// Third review loop, round 1: production pinned its signer with --allowed-signer
+		// alone, which nothing records, so a config that pins none (or no
+		// config) proves no signed scanner: it may be a certification
+		// install's, from a signer production does not pin.
+		{name: "signed, production config pins no signer", want: quarantined, reason: "cannot prove the signer",
+			setup: func() { signed, signers, deployment = true, []string{}, installed("authenticode") }},
+		{name: "signed, no production config", want: quarantined, reason: "cannot prove the signer",
+			setup: func() { signed, deployment = true, installed("authenticode") }},
+		{name: "signed, hash-pinned production, config pins no signer", want: quarantined, reason: "cannot prove the signer",
+			setup: func() { signed, deployment = true, installed("hash_pinned") }},
+		{name: "signed, production trust not recorded, config pins no signer", want: quarantined, reason: "cannot prove the signer",
+			setup: func() { signed, deployment = true, installed("") }},
 		{name: "signed by a signer production does not pin", want: quarantined, reason: "does not pin",
 			setup: func() {
 				signed, signers, deployment = true, []string{strings.Repeat("0", 64)}, installed("authenticode")
