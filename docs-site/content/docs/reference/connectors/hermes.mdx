@@ -34,6 +34,12 @@ The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-m
 
 Hermes registers shell callbacks in each running process, and DefenseClaw has no vendor-proven command that reloads every Hermes CLI, gateway, desktop and service host. So setup and doctor report `pending_reload` and `live: false`, and doctor shows the staged state as unhealthy. Reload every host after setup and after disable. Restarting `defenseclaw-gateway` does not reload Hermes. On Windows, disable first writes a direct-native disabled tombstone (`hermes-direct-native-state.json`) so stale cached callbacks no-op while revocation is pending.
 
+`verify` and `doctor` check the exact command in Hermes's active registration and
+run a bounded local execution probe. A missing executable bit, a broken hook
+helper, or a disabled Windows launcher fails the check. The probe sends no tool
+event to the gateway; a real Hermes call after restarting its host is still
+the live confirmation that the callback is loaded.
+
 ### Files
 
 | What | Path |

@@ -1236,6 +1236,29 @@ func TestHermesSetup_WritesFullLifecycleAndScopedAllowlist(t *testing.T) {
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
+	if runtime.GOOS != "windows" {
+		if present, err := conn.ownedHookContractPresent(opts); err != nil || !present {
+			t.Fatalf("newly rendered Hermes hook cannot complete its execution probe: present=%v err=%v", present, err)
+		}
+		helper := filepath.Join(opts.DataDir, "hooks", "_hardening.sh")
+		data, err := os.ReadFile(helper)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(helper)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(helper); err != nil {
+			t.Fatal(err)
+		}
+		if present, err := conn.ownedHookContractPresent(opts); err != nil || present {
+			t.Fatalf("broken Hermes helper still completed execution probe: present=%v err=%v", present, err)
+		}
+		if err := os.WriteFile(helper, data, info.Mode().Perm()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := os.Stat(managedFileBackupPath(opts.DataDir, "hermes", "config.yaml")); err != nil {
 		t.Fatalf("canonical Hermes config.yaml backup was not captured: %v", err)
 	}

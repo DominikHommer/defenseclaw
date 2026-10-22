@@ -1174,8 +1174,14 @@ func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label st
 func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	if !c.pluginArtifact {
 		present, err := ownedHooksPresentInConfig(c, opts)
-		if err != nil || !present || c.name != "hermes" || !opts.ManagedEnterprise {
+		if err != nil || !present || c.name != "hermes" {
 			return present, err
+		}
+		if !hermesRegisteredCommandExecutable(opts, c.hookCommand(opts)) {
+			return false, nil
+		}
+		if !opts.ManagedEnterprise {
+			return true, nil
 		}
 		// Hermes runs a shell hook only once it is approved, so a managed
 		// registration includes DefenseClaw's approvals: a user who empties

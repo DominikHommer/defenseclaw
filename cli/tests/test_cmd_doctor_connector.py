@@ -1971,7 +1971,7 @@ class TestCheckHookHealth(unittest.TestCase):
         )
 
 
-    def test_lock_path_with_marker_requires_hermes_reload(self) -> None:
+    def test_marker_only_never_proves_hermes_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hook = os.path.join(tmp, "config.yaml")
             with open(hook, "w", encoding="utf-8") as fh:
@@ -1984,10 +1984,9 @@ class TestCheckHookHealth(unittest.TestCase):
                 results[running] = r.checks[-1]
         self.assertEqual(results[True]["status"], "fail")
         self.assertEqual(results[True]["label"], _HERMES_HOOKS_LABEL)
-        self.assertIn(hook, results[True]["detail"])
-        self.assertIn("live=false", results[True]["detail"])
-        # With no Hermes host running there is nothing to reload.
-        self.assertEqual(results[False]["status"], "pass", results[False])
+        self.assertIn("sealed hook script", results[True]["detail"])
+        # An idle host cannot make an unproven on-disk registration healthy.
+        self.assertEqual(results[False]["status"], "fail", results[False])
 
     def test_hermes_host_running_treats_wrapped_hosts_as_unknown(self) -> None:
         from defenseclaw.commands import cmd_doctor

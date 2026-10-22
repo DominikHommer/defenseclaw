@@ -62,6 +62,7 @@ func newHookCmd() *cobra.Command {
 		inputFile         string
 		enterpriseManaged bool
 		foreignHookCheck  bool
+		executionProbe    bool
 	)
 
 	cmd := &cobra.Command{
@@ -80,6 +81,16 @@ func newHookCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateHookSurface(connector, hookSurface); err != nil {
 				return hookFailure(hookFailureContext{connector, failMode, enterpriseManaged}, err)
+			}
+			if executionProbe {
+				if connector != "hermes" || event != "" || hookContractID != "" || hookSurface != "" ||
+					apiAddr != "" || failMode != "" || inputFile != "" || enterpriseManaged || foreignHookCheck {
+					return fmt.Errorf("Hermes execution probe requires the exact registered command")
+				}
+				// cmd/defenseclaw-hook reaches this only after the protected
+				// runtime is active. A disabled stable launcher returns no proof.
+				_, err := io.WriteString(cmd.OutOrStdout(), "defenseclaw-execution-probe-ok\n")
+				return err
 			}
 			if foreignHookCheck {
 				// The standalone Amp and OpenCode plugins ask for the
@@ -162,8 +173,10 @@ func newHookCmd() *cobra.Command {
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "Cursor Windows adapter payload file")
 	cmd.Flags().BoolVar(&enterpriseManaged, "enterprise-managed", false, "resolve the current SID's administrator-managed hook runtime")
 	cmd.Flags().BoolVar(&foreignHookCheck, "foreign-hook-check", false, "print the standalone foreign-hook guard decision as JSON (in-agent plugins)")
+	cmd.Flags().BoolVar(&executionProbe, "defenseclaw-execution-probe", false, "prove the registered Hermes command reaches the active hook runtime")
 	_ = cmd.Flags().MarkHidden("input-file")
 	_ = cmd.Flags().MarkHidden("foreign-hook-check")
+	_ = cmd.Flags().MarkHidden("defenseclaw-execution-probe")
 	_ = cmd.Flags().MarkHidden("hook-contract")
 	_ = cmd.Flags().MarkHidden("hook-surface")
 	_ = cmd.Flags().MarkHidden("enterprise-managed")

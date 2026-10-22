@@ -5944,11 +5944,34 @@ def _check_windows_native_hooks(
     )
     if connector == "hermes":
         check = _hermes_idle_native_check(check, r)
+        if os.name == "nt":
+            check = _hermes_windows_execution_probe(check)
     if check.state == CODEX_PROBE_TIMEOUT_STATE:
         _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
         return
     status = "pass" if check.healthy else "fail"
     _emit(status, label, f"{check.state}: {check.detail}", r=r, remediation=check.repair)
+
+
+def _hermes_windows_execution_probe(check: WindowsHookCheck) -> WindowsHookCheck:
+    """Execute the exact active Windows target after the registration validator read it."""
+    if not check.healthy:
+        return check
+    try:
+        probe = subprocess.run(
+            [check.target, "hook", "--connector", "hermes", "--defenseclaw-execution-probe"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=3, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        probe = None
+    if probe is not None and probe.returncode == 0 and probe.stdout == b"defenseclaw-execution-probe-ok\n":
+        return check
+    return WindowsHookCheck(
+        "unexecutable", "registered Hermes command did not complete its active runtime execution probe",
+        check.command, check.target, check.raw_target,
+        "run 'defenseclaw setup hermes --yes --restart', then rerun 'defenseclaw doctor'",
+    )
 
 
 _CODEX_PROBE_TIMEOUT_STEP = "rerun defenseclaw doctor in a minute; Codex answers faster once the host is less busy"
@@ -8371,6 +8394,11 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         )
                 _check_opencode_later_plugins(cfg, path, r)
             elif connector == "hermes":
+                problem = _hermes_registered_execution_problem(cfg, path)
+                if problem:
+                    _emit("fail", label, problem, r=r,
+                          remediation="run 'defenseclaw setup hermes --yes --restart', then rerun 'defenseclaw doctor'")
+                    return
                 if r.list_processes and _hermes_host_running() is False:
                     _emit(
                         "pass",
@@ -8421,6 +8449,77 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         "hook file exists but does not reference DefenseClaw: " + ", ".join(present),
         r=r,
     )
+
+
+def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
+    """Read Hermes' active matrix and execute its sealed command as a bounded probe."""
+    import yaml
+
+    from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS
+    from defenseclaw.hook_integrity import _locked_hook_scripts
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    expected = os.path.join(data_dir, "hooks", "hermes-hook.sh")
+    scripts, digests = _locked_hook_scripts(cfg, "hermes")
+    if not data_dir or [os.fspath(script) for script in scripts] != [expected]:
+        return "Hermes execution probe has no exact sealed hook script; run setup"
+    digest = digests.get("hermes-hook.sh", "")
+    try:
+        config_stat = os.lstat(config_path)
+        script_stat = os.lstat(expected)
+        if not stat.S_ISREG(config_stat.st_mode) or config_stat.st_size > 2 * 1024 * 1024:
+            return "Hermes active registration is not a bounded regular file"
+        if not stat.S_ISREG(script_stat.st_mode) or not script_stat.st_mode & 0o111:
+            return "Hermes registered hook is not a regular executable file"
+        if script_stat.st_size > 4 * 1024 * 1024:
+            return "Hermes registered hook exceeds the bounded script size"
+        if len(digest) != 64 or hashlib.sha256(Path(expected).read_bytes()).hexdigest() != digest:
+            return "Hermes registered hook has no matching sealed digest"
+        document = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return f"Hermes active registration or hook cannot be read: {type(exc).__name__}"
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        return "Hermes active registration has no hooks table"
+    for event, matcher in _HERMES_REQUIRED_HOOKS.items():
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            return f"Hermes active registration is missing {event}"
+        owned = []
+        for entry in entries:
+            command = entry.get("command") if isinstance(entry, dict) else None
+            if not isinstance(command, str) or "hermes-hook.sh" not in command:
+                continue
+            try:
+                argv = shlex.split(command)
+            except ValueError:
+                argv = []
+            if argv != [expected]:
+                return f"Hermes {event} does not run the sealed hook command"
+            owned.append(entry)
+        if len(owned) != 1:
+            return f"Hermes {event} has {len(owned)} registered DefenseClaw commands; expected one"
+        entry = owned[0]
+        if type(entry.get("timeout")) is not int or entry["timeout"] != 30:
+            return f"Hermes {event} timeout differs from the registered contract"
+        if entry.get("matcher") != matcher:
+            return f"Hermes {event} matcher differs from the registered contract"
+    for event, entries in hooks.items():
+        if event not in _HERMES_REQUIRED_HOOKS and isinstance(entries, list) and any(
+            isinstance(entry, dict) and "hermes-hook.sh" in str(entry.get("command", ""))
+            for entry in entries
+        ):
+            return f"unexpected Hermes event {event} registers a DefenseClaw hook"
+    try:
+        probe = subprocess.run(
+            [expected, "--defenseclaw-execution-probe"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "Hermes registered hook execution probe could not run"
+    if probe.returncode != 0 or probe.stdout != b"defenseclaw-execution-probe-ok\n":
+        return f"Hermes registered hook execution probe failed (exit {probe.returncode})"
+    return ""
 
 
 def _check_amp_native_policy_surfaces(cfg, r: _DoctorResult) -> None:
@@ -14665,6 +14764,8 @@ def _check_hook_contract_lock(
         )
         if connector == "hermes":
             native_runtime = _hermes_idle_native_check(native_runtime, r)
+            if os.name == "nt":
+                native_runtime = _hermes_windows_execution_probe(native_runtime)
     if isinstance(locations, dict):
         workspace_dir = str(locations.get("workspace_dir") or "").strip()
         hook_paths = [str(v) for v in locations.get("hook_config_paths", []) if v]

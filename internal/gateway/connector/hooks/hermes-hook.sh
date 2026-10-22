@@ -77,6 +77,12 @@ fi
 . "${HOOK_DIR}/_sandbox.sh"
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
+# Doctor and Verify execute the exact command Hermes has registered. The
+# bounded probe checks the shell and local helper without sending a tool event.
+if [ "${1:-}" = "--defenseclaw-execution-probe" ]; then
+  printf '%s\n' 'defenseclaw-execution-probe-ok'
+  exit 0
+fi
 
 # FAIL_MODE set BEFORE the missing-token check so the helper has a
 # stable FAIL_MODE to log against. Response-layer and transport-layer
