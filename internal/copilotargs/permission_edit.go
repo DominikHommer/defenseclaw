@@ -10,6 +10,21 @@ import (
 	"strings"
 )
 
+// PermissionToolArgs projects the toolInput of Copilot CLI's native
+// PermissionRequest hook onto the arguments PreToolUse judges for the same
+// call. An edit carries a single-file diff instead of its call arguments
+// (PermissionEditArgs). Every other tool carries its call arguments as
+// PreToolUse's toolArgs does, the bash and powershell shells
+// {"command": ...} included, so it takes the CLI projection (CLIToolArgs).
+// A value neither reads has no arguments (nil), and the gateway refuses the
+// call as unverified (TOOL-ARGS-UNVERIFIED for a shell, an unproven write).
+func PermissionToolArgs(toolName string, value any) json.RawMessage {
+	if toolName == "edit" {
+		return PermissionEditArgs(toolName, value)
+	}
+	return CLIToolArgs(toolName, value)
+}
+
 var permissionEditHunk = regexp.MustCompile(`^@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@(?: .*)?$`)
 
 // PermissionEditArgs projects Copilot CLI's native PermissionRequest edit

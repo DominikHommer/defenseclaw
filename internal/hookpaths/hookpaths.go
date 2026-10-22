@@ -821,9 +821,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 // hook body as the gateway's profile for its dialect reads them
 // (copilotargs.LocalDialect), and whether another spelling of the tool name
 // or of the arguments carries a different value. A native PermissionRequest
-// edit reads toolInput only when toolArgs is absent and its diff proves the
-// declared target. The other dialect's fields and generic aliases are
-// spellings the gateway ignores.
+// reads toolInput only when toolArgs is absent, through the projection the
+// gateway's profile uses (copilotargs.PermissionToolArgs): an edit whose
+// diff does not prove the declared target is incomplete. The other
+// dialect's fields and generic aliases are spellings the gateway ignores.
 func copilotCall(envelope map[string]json.RawMessage, surface, event string) (json.RawMessage, json.RawMessage, bool, bool) {
 	var hookEvent string
 	_ = json.Unmarshal(envelope["hook_event_name"], &hookEvent)
@@ -860,8 +861,8 @@ func copilotCall(envelope map[string]json.RawMessage, surface, event string) (js
 		return toolRaw, copilotargs.LocalToolArgs(tool, value), toolConflict, argsConflict
 	}
 	if nativePermission {
-		projected := copilotargs.PermissionEditArgs(tool, value)
-		return toolRaw, projected, toolConflict, argsConflict || len(projected) == 0
+		projected := copilotargs.PermissionToolArgs(tool, value)
+		return toolRaw, projected, toolConflict, argsConflict || (tool == "edit" && len(projected) == 0)
 	}
 	return toolRaw, copilotargs.CLIToolArgs(tool, value), toolConflict, argsConflict
 }
