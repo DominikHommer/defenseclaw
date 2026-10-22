@@ -33,9 +33,9 @@ from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.observability.local_stack import (
     CONTRACT,
     GRAFANA_ACCESS_NO_PASSWORD,
-    GRAFANA_ANONYMOUS_ROLE,
     GRAFANA_ACCESS_PASSWORD,
     GRAFANA_ADMIN_USER,
+    GRAFANA_ANONYMOUS_ROLE,
     GRAFANA_PASSWORD_FILE_NAME,
     LocalStackController,
     LocalStackError,
