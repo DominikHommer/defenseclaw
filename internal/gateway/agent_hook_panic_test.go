@@ -741,7 +741,15 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 			continue
 		}
 		var blocking []string
+		// A failed batch check must stop continuation even without a cached
+		// agent version. Returned tool bytes remain advisory on successful checks.
+		if connectorName == "claudecode" {
+			blocking = append(blocking, "PostToolBatch")
+		}
 		for _, event := range profile.Capabilities.BlockEvents {
+			if connectorName == "claudecode" && event == "PostToolBatch" {
+				continue
+			}
 			action, _ := mapHookActionForProfile("block", "action", event, profile.Capabilities, profile, nil)
 			if action == "block" && !hookexec.NeutralLifecycleEvent(connectorName, event) {
 				blocking = append(blocking, event)
@@ -775,7 +783,7 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 						switch {
 						case isLifecycle:
 						case open:
-						case capable == "block":
+						case capable == "block" || connectorName == "claudecode" && event == "PostToolBatch":
 							wantAction, wantMode = "block", "action"
 						}
 						if resp.Action != wantAction || resp.Mode != wantMode || resp.WouldBlock != (wantAction != "block") {

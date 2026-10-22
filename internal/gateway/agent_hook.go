@@ -1652,6 +1652,12 @@ func (a *APIServer) hookFailedCheckResponse(
 	profile := a.hookProfileForRequest(ctx, connectorName)
 	mode := a.agentHookMode(ctx, connectorName)
 	action, wouldBlock := mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, req.Payload)
+	if connectorName == "claudecode" && req.HookEventName == "PostToolBatch" {
+		// Successful result inspection is advisory. A failed check has no
+		// result to trust and must stop the next model continuation, including
+		// when the agent-version cache (and hence its contract) is absent.
+		action, wouldBlock = "block", false
+	}
 	if sandboxHookForConnector(ctx, connectorName) && action == "block" {
 		resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: "action", WouldBlock: wouldBlock, Reason: base.Reason, AdditionalContext: base.AdditionalContext}
 		return a.failSandboxHookClosed(ctx, profile, connectorName, req, rawBody, payload, resp)
