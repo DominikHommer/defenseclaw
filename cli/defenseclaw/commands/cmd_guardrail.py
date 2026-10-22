@@ -3758,9 +3758,7 @@ def _guardrail_write_error(exc: BaseException) -> str:
     return f"Failed to save config: {config_writer.plain_error(exc)}"
 
 
-def _write_guardrail_config(
-    app: AppContext, changes, reason: str, fail, *, expect_sha256: str | None = None
-) -> object:
+def _write_guardrail_config(app: AppContext, changes, reason: str, fail, *, expect_sha256: str | None = None) -> object:
     """Apply *changes* through the config writer; *fail(exit_code, message)*
     reports a refused or failed write and exits. With *expect_sha256* the
     write lands only on those config.yaml bytes: a file changed since then
@@ -4281,9 +4279,7 @@ def _use_pack(
         else policy_catalog.global_pack(app.cfg).pack
     )
     try:
-        result = _write_guardrail_config(
-            app, changes, f"guardrail use-pack {name}", _fail, expect_sha256=snapshot_sha
-        )
+        result = _write_guardrail_config(app, changes, f"guardrail use-pack {name}", _fail, expect_sha256=snapshot_sha)
     except config_writer.ConfigConflictError:
         # config.yaml changed after the scopes above were read (and confirmed):
         # merged into it, the new pin could reach a scope no one was shown.

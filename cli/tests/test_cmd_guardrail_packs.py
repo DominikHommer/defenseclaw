@@ -399,7 +399,9 @@ def test_repin_saves_nothing_when_config_keeps_changing(on_disk, monkeypatch):
         "_confirm_proceed",
         _confirm_after([lambda pack=pack: edit(claudecode=pack) for pack in packs], asked),
     )
-    result = CliRunner().invoke(cmd_guardrail.guardrail, ["use-pack", "team", "--connector", "codex", "--repin"], obj=app)
+    result = CliRunner().invoke(
+        cmd_guardrail.guardrail, ["use-pack", "team", "--connector", "codex", "--repin"], obj=app
+    )
     assert result.exit_code == 1, result.output
     assert writes == []
     assert len(conflicts) == cmd_guardrail._REPIN_RECHECKS + 1
@@ -417,7 +419,9 @@ def test_repin_does_not_repin_when_the_pin_was_refreshed_meanwhile(on_disk, monk
 
     asked: list = []
     monkeypatch.setattr(cmd_guardrail, "_confirm_proceed", _confirm_after([_refresh], asked))
-    result = CliRunner().invoke(cmd_guardrail.guardrail, ["use-pack", "team", "--connector", "codex", "--repin"], obj=app)
+    result = CliRunner().invoke(
+        cmd_guardrail.guardrail, ["use-pack", "team", "--connector", "codex", "--repin"], obj=app
+    )
     assert result.exit_code == 0, result.output
     assert len(conflicts) == 1 and len(asked) == 1 and len(writes) == 1
     assert not any(change.path == "guardrail.custom_packs.team" for change in writes[0])
