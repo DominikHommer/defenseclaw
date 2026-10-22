@@ -62,11 +62,16 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 		if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
 			return err
 		}
-		fence := filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFenceFile)
-		if err := enterpriseHookAuthorizationFileTrustCheck(fence); err != nil {
-			return err
+		for _, name := range enterprisepolicy.ForeignHookRemovalFenceFiles() {
+			if err := enterpriseHookAuthorizationFileTrustCheck(filepath.Join(guardianDir, name)); err != nil {
+				return err
+			}
 		}
-		unlock, err := enterprisepolicy.LockForeignHookRemovals(context.Background(), fence)
+		// The commit takes the fence ahead of exchanges that arrive after
+		// it, so sustained gateway traffic cannot hold it off; it waits only
+		// for the exchanges already answering, each bounded by its response
+		// write deadline.
+		unlock, err := enterprisepolicy.LockForeignHookRemovalsCommit(context.Background(), guardianDir)
 		if err != nil {
 			return err
 		}

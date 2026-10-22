@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -17,7 +16,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -319,9 +317,7 @@ func TestForeignHookSessionExchangesDoNotWaitOnOtherIdentities(t *testing.T) {
 	}
 	guardianDir := t.TempDir()
 	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
-	if err := os.WriteFile(filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFenceFile), nil, 0o640); err != nil {
-		t.Fatal(err)
-	}
+	writeForeignHookRemovalFenceFiles(t, guardianDir)
 	previous := validateManagedGuardianAuthorization
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })

@@ -13,9 +13,16 @@ import (
 	"time"
 )
 
-func lockForeignHookRemovalFile(ctx context.Context, file *os.File) error {
+// lockForeignHookRemovalFile takes a shared or exclusive flock. A guardian
+// commit (exclusive) polls more often than an exchange, so it takes the
+// turnstile between two exchanges' brief shared holds.
+func lockForeignHookRemovalFile(ctx context.Context, file *os.File, exclusive bool) error {
+	how, poll := syscall.LOCK_SH, foreignHookRemovalExchangePoll
+	if exclusive {
+		how, poll = syscall.LOCK_EX, foreignHookRemovalCommitPoll
+	}
 	for {
-		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := syscall.Flock(int(file.Fd()), how|syscall.LOCK_NB)
 		if err == nil {
 			return nil
 		}
@@ -25,7 +32,7 @@ func lockForeignHookRemovalFile(ctx context.Context, file *os.File) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(5 * time.Millisecond):
+		case <-time.After(poll):
 		}
 	}
 }

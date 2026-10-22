@@ -79,19 +79,23 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	// Each identity has its own store, so only that identity's exchanges
 	// are serialized; another account's exchange never waits on this one.
 	// An allow holds the lock through its fenced response write, so one
-	// identity holds the shared removal fence for at most one exchange at a
-	// time, however many requests it sends.
+	// identity has at most one exchange holding the removal fence, however
+	// many requests it sends.
 	unlock := sync.OnceFunc(a.foreignHookSessionLocks.lock(stateDir))
 	defer unlock()
 	guardianDir := managed.HookGuardianAuthorizationDir(dataDir)
-	fence := filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFenceFile)
-	if err := validateManagedGuardianAuthorization(fence, "hook guardian foreign-hook removal fence"); err != nil {
-		unlock()
-		writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_removal_fence_unavailable")
-		return
+	for _, name := range enterprisepolicy.ForeignHookRemovalFenceFiles() {
+		if err := validateManagedGuardianAuthorization(filepath.Join(guardianDir, name), "hook guardian foreign-hook removal fence"); err != nil {
+			unlock()
+			writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_removal_fence_unavailable")
+			return
+		}
 	}
+	// Exchanges hold the fence shared, so exchanges of other identities,
+	// slow or not, never refuse this one; only a guardian removal commit,
+	// pending or in progress, makes it wait.
 	lockCtx, cancel := context.WithTimeout(r.Context(), foreignHookFenceWait)
-	fenceUnlock, err := a.foreignHookFence.lock(lockCtx, fence)
+	fenceUnlock, err := enterprisepolicy.LockForeignHookRemovalsExchange(lockCtx, guardianDir)
 	cancel()
 	if err != nil {
 		unlock()
@@ -131,10 +135,11 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 // fence before it is refused. foreignHookFencedWriteTimeout bounds an
 // allow's response write while the exchange holds the fence, and stays
 // under foreignHookFenceWait: a client that stops reading its response must
-// not keep another identity's exchange or the guardian's removal commit
-// from the fence. A response that fits the socket buffer is written without
-// the client reading; one the client does not take in time is cut, and the
-// client's hook fails closed on the incomplete response.
+// not keep the guardian's removal commit from the fence, nor, while that
+// commit is pending, the exchanges queued behind it. A response that fits
+// the socket buffer is written without the client reading; one the client
+// does not take in time is cut, and the client's hook fails closed on the
+// incomplete response.
 const (
 	foreignHookFenceWait          = 500 * time.Millisecond
 	foreignHookFencedWriteTimeout = 250 * time.Millisecond
@@ -168,36 +173,6 @@ func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolic
 	// deadline only after the whole allow has reached it.
 	_ = controller.SetWriteDeadline(time.Time{})
 	return true
-}
-
-// foreignHookFenceQueue admits this gateway's exchanges to the
-// interprocess removal fence one at a time and in arrival order. Polling
-// the file lock alone lets an identity whose exchanges arrive back to back
-// win it every time, so an exchange of another identity that was already
-// waiting would run out of foreignHookFenceWait.
-type foreignHookFenceQueue struct {
-	once sync.Once
-	slot chan struct{}
-}
-
-// lock takes the queue's slot, then the fence file lock, both within ctx.
-// The returned function releases both and may be called more than once.
-func (q *foreignHookFenceQueue) lock(ctx context.Context, fence string) (func(), error) {
-	q.once.Do(func() { q.slot = make(chan struct{}, 1) })
-	select {
-	case q.slot <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	unlock, err := enterprisepolicy.LockForeignHookRemovals(ctx, fence)
-	if err != nil {
-		<-q.slot
-		return nil, err
-	}
-	return sync.OnceFunc(func() {
-		unlock()
-		<-q.slot
-	}), nil
 }
 
 // foreignHookAuditReasonLimit bounds the reason an audit row repeats, and

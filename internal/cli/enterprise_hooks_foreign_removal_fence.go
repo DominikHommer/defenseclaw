@@ -12,12 +12,21 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
 
-// ensureEnterpriseForeignHookRemovalFence prepares the stable lock inode
-// before the guardian can publish a removal. The gateway gets read access
-// through the same narrow ownership rule as the removal ledger. Reconcile
-// never replaces this file, including on an upgrade.
+// ensureEnterpriseForeignHookRemovalFence prepares the stable lock inodes
+// (the fence and its turnstile) before the guardian can publish a removal.
+// The gateway gets read access through the same narrow ownership rule as
+// the removal ledger. Reconcile creates a missing one, including on an
+// upgrade, and never replaces one.
 func ensureEnterpriseForeignHookRemovalFence(dir string) error {
-	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFenceFile)
+	for _, name := range enterprisepolicy.ForeignHookRemovalFenceFiles() {
+		if err := ensureEnterpriseForeignHookRemovalLockFile(filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureEnterpriseForeignHookRemovalLockFile(path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		file, createErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
