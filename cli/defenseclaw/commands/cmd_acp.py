@@ -156,6 +156,14 @@ def _restore(path: Path, snapshot: tuple[bool, bytes]) -> None:
         path.unlink()
 
 
+def _client_digest(path: Path) -> str:
+    """The editor file's digest, or "" when it cannot be read (never matches a pin)."""
+    try:
+        return _sha256_file(str(path))
+    except OSError:
+        return ""
+
+
 def _sha256_file(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
@@ -298,7 +306,8 @@ def _lock_is_private(path: Path) -> bool:
     """Whether a contract lock is still in this account's custody.
 
     Setup writes locks owner-only. On POSIX a lock another account owns, or
-    one that others can rewrite, proves nothing about who wrote the entry.
+    one others can read or rewrite, proves nothing about who wrote the entry,
+    and the guard refuses a lock with any group or other permission bit.
     (Root may own one: enterprise re-pinning rewrites managed locks.) Windows
     locks sit in the account's own profile with an owner-only ACL.
     """
@@ -308,7 +317,63 @@ def _lock_is_private(path: Path) -> bool:
         info = path.lstat()
     except OSError:
         return False
-    return info.st_uid in {os.geteuid(), 0} and not stat.S_IMODE(info.st_mode) & 0o022
+    return info.st_uid in {os.geteuid(), 0} and not stat.S_IMODE(info.st_mode) & 0o077
+
+
+def _lock_is_complete(document: dict[str, Any]) -> bool:
+    """Whether a lock has every field the guard needs to start (version 1).
+
+    The guard refuses a lock that lacks its protocol pin, the editor file
+    digest, or the guard and agent pins, so such a lock proves nothing about
+    an entry. Values are not compared with the current schema here: after a
+    DefenseClaw upgrade a lock keeps its old protocol pin until acp refresh,
+    and it is still this runtime's lock.
+    """
+
+    def strings(item: Any, *keys: str) -> bool:
+        return isinstance(item, dict) and all(isinstance(item.get(key), str) and item[key].strip() for key in keys)
+
+    def optional_string(item: Any, key: str) -> bool:
+        return key not in item or isinstance(item[key], str)
+
+    client, agent, guard = document.get("client"), document.get("agent"), document.get("guard")
+    adopted = client.get("adopted_entries", []) if isinstance(client, dict) else None
+    return (
+        type(document.get("version")) is int
+        and document["version"] == 1
+        and optional_string(document, "generated_at")
+        and strings(document.get("protocol"), "schema_version", "schema_sha256")
+        and strings(client, "id", "config_path", "config_sha256")
+        and isinstance(adopted, list)
+        and all(isinstance(name, str) for name in adopted)
+        and strings(agent, "id", "path", "sha256")
+        and optional_string(agent, "version")
+        and strings(guard, "path", "sha256")
+        and isinstance(guard.get("managed_custody", False), bool)
+        and strings(document, "profile", "mode")
+    )
+
+
+def _proven_lock(path: Path, client: str, agent: str) -> dict[str, Any] | None:
+    """The pair's lock when it can prove ownership: safe, complete and private."""
+    document = _lock_document(path, client, agent)
+    if document is None or not _lock_is_complete(document) or not _lock_is_private(path):
+        return None
+    return document
+
+
+def _is_exact_path(value: str, expected: Path) -> bool:
+    """Whether an argv path is exactly the canonical path setup writes.
+
+    Setup writes resolved paths, and verify compares them as strings. A path
+    that only resolves to the same file (a symlink in another directory, or
+    one with .. in it) is not what setup wrote.
+    """
+    if not value or not Path(value).is_absolute():
+        return False
+    if os.name == "nt":
+        return os.path.normcase(value) == os.path.normcase(str(expected))
+    return value == str(expected)
 
 
 def _lock_names_entry(
@@ -319,35 +384,31 @@ def _lock_names_entry(
     Only setup writes the lock, in the private ACP runtime directory. The
     entry must name this runtime's lock for the pair (a valid lock in another
     runtime directory belongs to that runtime, not this one) and this
-    runtime's token for the lock's custody. The lock must be private, bind
-    this editor file and pin exactly the executable the entry launches. A
-    guard-like filename proves nothing on its own: an operator's wrapper may
-    also be called defenseclaw-acp. With no runtime (data_dir None) no
+    runtime's token for the lock's custody, both by the exact canonical path
+    setup writes: a symlink elsewhere that resolves to this lock is another
+    runtime's entry, and the guard will not open a symlinked lock. The lock
+    must be a regular file, complete (the guard can start from it), private,
+    bind this editor file and pin exactly the executable the entry launches.
+    A guard-like filename proves nothing on its own: an operator's wrapper
+    may also be called defenseclaw-acp. With no runtime (data_dir None) no
     alias is proven.
     """
     if not data_dir:
         return False
-    expected_lock = _contract_lock_path(data_dir, client, agent)
     lock_value, token_value = options.get("--contract-lock", ""), options.get("--token-file", "")
     try:
-        if (
-            not lock_value
-            or not Path(lock_value).is_absolute()
-            or Path(lock_value).resolve() != expected_lock.resolve()
-        ):
+        runtime_lock = _contract_lock_path(str(Path(data_dir).expanduser()), client, agent)
+        runtime = runtime_lock.parent.resolve()
+        expected_lock = runtime / runtime_lock.name
+        if not _is_exact_path(lock_value, expected_lock):
             return False
-        lock = _lock_document(expected_lock, client, agent)
-        guard = lock.get("guard") if lock else None
-        if not isinstance(guard, dict) or guard.get("path") != entry.get("command"):
+        lock = _proven_lock(expected_lock, client, agent)
+        if lock is None or lock["guard"]["path"] != entry.get("command"):
             return False
-        if not _lock_is_private(expected_lock):
+        token_name = f"{client}-{agent}.token" if lock["guard"].get("managed_custody") else ".token"
+        if not _is_exact_path(token_value, runtime / token_name):
             return False
-        token_name = f"{client}-{agent}.token" if guard.get("managed_custody") else ".token"
-        expected_token = Path(data_dir) / "acp" / token_name
-        if not token_value or Path(token_value).resolve() != expected_token.resolve():
-            return False
-        config_path = lock["client"].get("config_path")
-        return isinstance(config_path, str) and Path(config_path).resolve() == _client_path(client).resolve()
+        return Path(lock["client"]["config_path"]).resolve() == _client_path(client).resolve()
     except (OSError, ValueError, click.ClickException):
         return False
 
@@ -457,6 +518,33 @@ def _set_client_entry(
 def _has_client_entry(client: str, agent: str, data_dir: str) -> bool:
     servers = _read_json_object(_client_path(client)).get("agent_servers")
     return isinstance(servers, dict) and bool(_pair_entry_names(servers, client, agent, data_dir))
+
+
+def _unproven_pair_entries(client: str, agent: str, data_dir: str) -> list[str]:
+    """Entries that start a guard for this pair but that this runtime cannot prove it wrote.
+
+    Removal leaves them (the operator's, or another runtime's) and warns.
+    """
+    servers = _read_json_object(_client_path(client)).get("agent_servers")
+    if not isinstance(servers, dict):
+        return []
+    proven = set(_pair_entry_names(servers, client, agent, data_dir))
+    return sorted(
+        name for name, entry in servers.items()
+        if name not in proven
+        and isinstance(entry, dict)
+        and (options := _guard_options(entry)).get("--client") == client
+        and options.get("--agent") == agent
+    )
+
+
+def _warn_unproven_entries(names: list[str], path: Path, client: str, agent: str) -> None:
+    for name in names:
+        ux.warn(
+            f"Left editor entry {name!r} in {path}: it starts a guard for {client}/{agent}, but this "
+            "runtime cannot prove DefenseClaw wrote it. Delete it there if you no longer use it.",
+            indent="",
+        )
 
 
 def _remove_client_entry(client: str, agent: str, data_dir: str) -> Path:
@@ -580,7 +668,18 @@ def _verify_binding(
 
     problems: list[str] = []
     client_path = _client_path(client)
-    document = _read_json_object(client_path)
+    # The lock and the configured binding keep a pair listed after its
+    # editor file is gone, so report the file instead of hashing it.
+    settings_usable = False
+    document: dict[str, Any] = {}
+    if not client_path.is_symlink() and not client_path.exists():
+        problems.append(f"editor settings file is missing: {client_path}")
+    else:
+        try:
+            document = _read_json_object(client_path)
+            settings_usable = True
+        except click.ClickException as exc:
+            problems.append(f"editor settings file cannot be used: {exc.message}")
     servers = document.get("agent_servers")
     names = _pair_entry_names(servers, client, agent, data_dir) if isinstance(servers, dict) else []
     if not names:
@@ -621,7 +720,7 @@ def _verify_binding(
         client_digest = lock_client.get("config_sha256")
         if not isinstance(locked_client_path, str) or Path(locked_client_path).resolve() != client_path.resolve():
             problems.append("client configuration path does not match")
-        elif not isinstance(client_digest, str) or client_digest != _sha256_file(str(client_path)):
+        elif settings_usable and (not isinstance(client_digest, str) or client_digest != _client_digest(client_path)):
             problems.append("client configuration digest has drifted")
     for key in ("agent", "guard"):
         item = lock.get(key)
@@ -827,7 +926,7 @@ def setup_cmd(
         Path(data_dir) / "acp" / f"{client}-{agent}.token" if managed else Path(data_dir) / "acp" / ".token"
     )
     lock_candidate = _contract_lock_path(data_dir, client, agent)
-    retained = _adopted_entries(_lock_document(lock_candidate, client, agent))
+    retained = _adopted_entries(_proven_lock(lock_candidate, client, agent))
     client_snapshot = _snapshot(client_path)
     token_snapshot = _snapshot(token_candidate)
     lock_snapshots = _client_contract_snapshots(data_dir, client, agent)
@@ -1027,6 +1126,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
     path = _client_path(client)
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
     _check_reserved_entry(client, agent, data_dir)
+    unproven = _unproven_pair_entries(client, agent, data_dir)
     path_snapshot = _snapshot(path)
     if managed and app.cfg.deployment_mode != "managed_enterprise":
         raise click.ClickException("--managed requires deployment_mode: managed_enterprise")
@@ -1038,6 +1138,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
     had_policy = not managed and app.cfg.acp.binding_key(client, agent) in app.cfg.acp.bindings
     if not (had_entry or had_policy or lock_path.exists()):
         click.echo(f"Nothing to remove: no DefenseClaw {agent} entry is configured for {client} ({path})")
+        _warn_unproven_entries(unproven, path, client, agent)
         return
     acp_snapshot = copy.deepcopy(app.cfg.acp)
     try:
@@ -1080,6 +1181,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
         raise click.ClickException(f"ACP removal was rolled back: {exc}{suffix}") from exc
     _progress(True, "Recording the change with the gateway...")
     _log_acp_change(app, "acp-remove", f"scope={client}/{agent} entry=removed previous=configured")
+    _warn_unproven_entries(unproven, path, client, agent)
     if had_entry:
         click.echo(f"Removed the DefenseClaw {agent} entry from {path}")
     else:
