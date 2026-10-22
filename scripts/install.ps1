@@ -2556,14 +2556,21 @@ function Resume-InterruptedRun {
     }
     foreach ($slot in @((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"))) {
         if (-not (Test-Path -LiteralPath $slot)) { continue }
+        # This installer records the running state before it changes
+        # anything (the lifecycle record, and GATEWAY_WAS_RUNNING first in
+        # the snapshot); a 1.0.3 or earlier snapshot cut off before COMPLETE
+        # may have neither. An installed binary does not prove its gateway
+        # ran, so a gateway stopped on purpose stays stopped.
         $runningState = Read-Text (Join-Path $slot "GATEWAY_WAS_RUNNING")
-        # Older installers wrote this marker last. An incomplete snapshot
-        # without it cannot prove that an installed gateway was stopped on
-        # purpose: require recovery health instead of skipping the gate.
-        $wasRunning = $runningState -eq "true" -or ($runningState -ne "false" -and
-            ((Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe") -PathType Leaf) -or (Find-SetupInstall)))
-        if ($manifest) { $wasRunning = [bool](Get-Field $manifest "GatewayWasRunning") }
-        else { $manifest = New-RecoveryManifest $slot $wasRunning }
+        $wasRunning = $runningState -eq "true"
+        if ($manifest) {
+            $wasRunning = [bool](Get-Field $manifest "GatewayWasRunning")
+        } else {
+            if (-not $runningState) {
+                Write-Warn "The interrupted installer did not record whether the gateway was running, so it is not started; if it should run, start it with 'defenseclaw-gateway start' once this install finishes"
+            }
+            $manifest = New-RecoveryManifest $slot $wasRunning
+        }
         $state = Join-Path $Staging "hook-runtime-state.json"
         if ((Test-Path -LiteralPath $state) -and -not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
         if (Test-Path -LiteralPath (Join-Path $slot "COMPLETE")) {
@@ -2589,12 +2596,8 @@ function Resume-InterruptedRun {
                 $Run.OldGatewayDown = $wasRunning
                 Write-Warn "The previous install is restored with its gateway kept stopped to preserve its hook registration"
                 Write-Info "Resolve the earlier startup error (close the agent if its settings are in use), then run: $gatewayCommand"
-            } elseif ($wasRunning -and $setupBack) {
-                Start-SetupGateway $setupInstall.Root
             } elseif ($wasRunning) {
-                if ((Start-Gateway) -notin @(0, 3)) {
-                    Die "The restored gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again"
-                }
+                Start-RecoveredGateway "restored"
             }
             if ($setupBack -and $manifest) { $manifest.SetupRoot = [string]$setupInstall.Root }
             Assert-LifecycleRestored $manifest -KeepStopped:$keepStopped
@@ -2607,9 +2610,8 @@ function Resume-InterruptedRun {
         } else {
             # The snapshot never finished, so live data was only copied, not changed.
             try { Undo-Snapshot $slot } catch { Set-RecoveryPending "UndoPending"; throw }
-            if ($wasRunning -and -not (Get-GatewayProcess) -and (Start-Gateway) -notin @(0, 3)) {
-                Die "The recovered gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again"
-            }
+            if ($wasRunning -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "recovered" }
+            Set-RecoverySetupRoot $manifest
             Assert-LifecycleRestored $manifest
             $manifest = $null
         }
@@ -2635,10 +2637,7 @@ function Resume-InterruptedRun {
         Move-Path $hold $Previous
         # The rollback's record proves its target, not the install it left.
         if ($manifest -and (Get-Field $manifest "Operation") -eq "rollback") {
-            if ($restart -and -not (Get-GatewayProcess) -and (Start-Gateway) -notin @(0, 3)) {
-                Set-RecoveryPending
-                Die "The rolled-back gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again"
-            }
+            if ($restart -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "rolled-back" }
             $problems = @(Test-LifecycleProof (Get-Field $manifest "TargetBins") $restart)
             if ($problems.Count) {
                 Set-RecoveryPending
@@ -2670,10 +2669,43 @@ function Resume-InterruptedRun {
     # A record with no snapshot left: the run stopped after its record and
     # before its first change, or after its restore and before the proof.
     if ($manifest) { $restart = $restart -or [bool](Get-Field $manifest "GatewayWasRunning") }
-    if ($restart -and -not (Get-GatewayProcess) -and (Start-Gateway) -notin @(0, 3)) {
-        Die "The recovered gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again"
-    }
+    if ($restart -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "recovered" }
+    Set-RecoverySetupRoot $manifest
     Assert-LifecycleRestored $manifest
+}
+
+function Set-RecoverySetupRoot($Manifest) {
+    # A restored DefenseClaw Setup install runs its own gateway (GAP-1839):
+    # the proof of the restore checks that one.
+    if (-not $Manifest -or [string](Get-Field $Manifest "SetupRoot")) { return }
+    $setupInstall = Find-SetupInstall
+    if ($setupInstall -and -not (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe") -PathType Leaf)) {
+        $Manifest.SetupRoot = [string]$setupInstall.Root
+    }
+}
+
+function Start-RecoveredGateway([string]$What) {
+    # Recovery goes on only once the gateway it put back answers; until then
+    # the lifecycle record stays, so every retry starts the same gateway again.
+    # A DefenseClaw Setup install has no ~\.local\bin gateway: it runs its own
+    # (GAP-1839), with its hooks' state back in place.
+    $setupInstall = Find-SetupInstall
+    if ($setupInstall -and -not (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe") -PathType Leaf)) {
+        $state = Join-Path $Staging "hook-runtime-state.json"
+        if ((Test-Path -LiteralPath $state) -and -not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
+        Write-Info "Starting DefenseClaw Setup's gateway"
+        Start-SetupGateway $setupInstall.Root
+        $gateway = Join-Path $setupInstall.Root "bin\defenseclaw-gateway.exe"
+        for ($try = 0; $try -lt 10; $try++) {
+            if ((Get-GatewayProcess) -and (Invoke-Native $gateway @("status") -Quiet) -eq 0) { return }
+            Start-Sleep -Seconds 3
+        }
+        $startup = Join-Path $setupInstall.Root "bin\defenseclaw-startup.exe"
+        $command = if (Test-Path -LiteralPath $startup) { "& '$startup'" } else { "& '$gateway' start" }
+        Die "The $What gateway of DefenseClaw Setup did not become healthy; start it with $command, then run the installer again"
+    }
+    if ((Start-Gateway) -in @(0, 3)) { return }
+    Die "The $What gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again"
 }
 
 function Remove-Hold([string]$Hold) {

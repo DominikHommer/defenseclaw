@@ -1499,6 +1499,8 @@ def test_every_automatic_failed_tree_removal_preserves_receipts_first() -> None:
     assert slot.count("-not (Test-ConnectorRecoveryArtifactName $_.Name)") == 2
     plan = slot[slot.index("$moves = New-Object") : slot.index("Restore-ExternalConfig $Slot")]
     assert "Remove-Tree" not in plan
+    # The marked snapshot is retired only after every proof (W6).
+    assert slot.index('Remove-Item -LiteralPath (Join-Path $Slot "COMPLETE")') < slot.index("Remove-Tree $Slot")
 
 
 def _restore_stubs(data: Path, slot: Path) -> str:

@@ -45,7 +45,7 @@ These are not an outage, so they block in every fail mode on a managed computer:
 - The account is not enrolled.
 - A foreign hook the guard finds, and a call the guard cannot check against the session's hook record because the gateway cannot answer (GitHub Copilot CLI, Cursor, Devin, OpenCode, Amp and Hermes on a standalone host with `foreign_hooks: remove`). This holds under `open` too: see [Foreign hook guard](/docs/enterprise/configure/foreign-hook-guard#gateway-outages).
 
-On a managed standalone host `open` applies only to an outage: the gateway service is not running, is restarting, or gives no answer in time. Every other failure blocks in `open` too: input over the hook's 1 MiB limit, a gateway 5xx, an unusable answer and any other transport error. Per-user and Secure Client hooks are unchanged.
+On a managed standalone host `open` applies only to an outage: the gateway service is not running, is restarting, or gives no answer in time. Every other failure blocks in `open` too: input over the hook's 1 MiB limit, a gateway error status (4xx or 5xx, also when the body after it is cut off, and a 429 the gateway is still too busy to answer within the hook's answer budget), an unusable answer and any other transport error. Per-user and Secure Client hooks are unchanged.
 
 ### Secure Client
 
@@ -70,9 +70,9 @@ These outcomes apply to supported blocking events. Stop and session-end exceptio
 | Failure | Per-user / Secure Client `open` | Managed standalone `open` | Effective `closed` |
 | --- | --- | --- | --- |
 | Gateway service not running, restarting or giving no answer in time | Allow. | Allow only when the hook proves an eligible service outage; an unverified peer, a port held by another process or another transport error blocks. The foreign-hook guard can also block. | Block. |
-| Gateway 5xx | Allow. | Block. | Block. |
+| Gateway 5xx, also when the body after it is cut off | Allow. | Block. | Block. |
 | Connector authentication missing | Allow where the connector supports fail-open; Amp's actionable boundaries always block a missing credential. | Block. | Block. |
-| Gateway returns 4xx, malformed JSON or no action | Allow where the connector supports fail-open. | Block. | Block. |
+| Gateway returns 4xx (also when the body after it is cut off, and a 429 whose resend cannot be answered within the answer budget), malformed JSON or no action | Allow where the connector supports fail-open. | Block. | Block. |
 | Hook input over its bounded payload | Refuse to process it, allow. | Block. | Refuse to process it, block where the connector supports a block response. |
 | Valid gateway verdict | Honor the connector and event mapping. | Same. | Same. Fail mode does not make an observation-only event blocking. |
 | Internal evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic` and telemetry. | Block supported events, in observe mode too; allow stop and session-end events. | Block supported events, otherwise allow with `would_block`; audit row and telemetry either way. Secure Client allows and audits. |

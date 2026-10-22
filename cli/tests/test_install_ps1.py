@@ -17,6 +17,7 @@ scripts/test-install-lifecycle.ps1. These checks pin what other code relies on.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -355,6 +356,9 @@ _NO_TXN = (
     "function Get-BinariesState { return @{} }\n"
     "function Start-HookFailModeHold { return $true }\n"
     "function Stop-HookFailModeHold { }\n"
+    "function Set-RecoverySetupRoot { param($Manifest) }\n"
+    "function Set-RecoveryPending { param([string]$Flag = 'RestorePending') if (Get-Variable -Name Run -ErrorAction SilentlyContinue) { $Run.$Flag = $true } }\n"
+    "function Start-RecoveredGateway { param([string]$What) if ((Start-Gateway) -notin @(0, 3)) { throw \"The $What gateway did not become healthy; run 'defenseclaw-gateway start', then run the installer again\" } }\n"
 )
 
 
@@ -385,6 +389,8 @@ function Restore-Slot { param($Slot) $script:restores++; [IO.Directory]::Delete(
 function Read-LifecycleManifest { return $null }
 function New-RecoveryManifest { return $null }
 function Assert-LifecycleRestored { param($Manifest, [switch]$KeepStopped) }
+function Set-RecoverySetupRoot { param($Manifest) }
+function Start-RecoveredGateway { param([string]$What) if ((Start-Gateway) -notin @(0, 3)) { throw "The $What gateway did not become healthy" } }
 function Clear-SetupDataDir { param($Failed) }
 function Remove-Tree { param($Path) }
 function Find-SetupInstall { return $Setup }
@@ -755,7 +761,8 @@ def test_an_interrupted_setup_upgrade_restarts_the_setup_gateway() -> None:
     assert "if (-not (Test-Path -LiteralPath $gateway -PathType Leaf))" in start
     assert start.index("Test-Path -LiteralPath $gateway") < start.index('Invoke-Native $gateway @("start")')
     resume = _ps1_function("Resume-InterruptedRun")
-    assert "Start-SetupGateway $setupInstall.Root" in resume
+    assert 'Start-RecoveredGateway "restored"' in resume and "Start-Gateway)" not in resume
+    assert "Start-SetupGateway $setupInstall.Root" in _ps1_function("Start-RecoveredGateway")
     assert "Start-SetupGateway $Setup.Root" in _ps1_function("Restore-SetupInstall")
 
 
@@ -769,7 +776,7 @@ def test_a_restored_setup_install_keeps_no_failed_copy_or_uv_cache_in_its_data_d
     restore = _ps1_function("Restore-Snapshot")
     assert restore.index("Restore-Slot $Snap") < restore.index("Clear-SetupDataDir $failed") < restore.index("Restart-Old")
     resume = _ps1_function("Resume-InterruptedRun")
-    assert resume.index("Clear-SetupDataDir $failed") < resume.index("Start-SetupGateway $setupInstall.Root")
+    assert resume.index("Clear-SetupDataDir $failed") < resume.index('Start-RecoveredGateway "restored"')
     assert '} elseif (-not $setupBack) {\n                Write-Warn "The interrupted install was kept in $failed"' in resume
 
 
@@ -964,6 +971,37 @@ def test_an_interrupted_first_install_leaves_no_new_files_or_failed_copy() -> No
 # ── 1.0.2 (FG-01) ───────────────────────────────────────────────────────────
 
 
+def _lifecycle_record(path: Path, running: bool = True) -> None:
+    # The lifecycle record (Write-LifecycleManifest) a run writes before its
+    # first change, here with no binaries recorded.
+    path.write_text(json.dumps({
+        "Schema": 1, "Operation": "upgrade", "From": "1.0.3", "To": "1.0.4", "Slot": "", "SetupRoot": "",
+        "Bins": {}, "GatewayWasRunning": running, "Connectors": [], "Config": "", "ExternalConfig": "",
+        "ExternalConfigSha256": "", "HookFailModes": "", "BinDirProtected": False, "Committed": False,
+    }), encoding="utf-8")
+
+
+_TXN_REAL = ("Write-DurableText", "ConvertTo-Map", "Get-BinariesState", "Get-OptionalSha256", "Get-GuardedConnectors",
+             "Read-LifecycleManifest", "New-RecoveryManifest", "Remove-LifecycleManifest", "Test-LifecycleProof",
+             "Set-RecoveryPending", "Set-RecoverySetupRoot", "Get-LifecycleNextStep", "Assert-LifecycleRestored",
+             "Get-Field", "Get-Sha256")
+
+
+def _txn_real_functions() -> str:
+    return "\n".join(_ps1_function(name) for name in _TXN_REAL)
+
+
+_TXN_PRELUDE = (
+    "$ManagedBinaries = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')\n"
+    "$LifecycleManifest = Join-Path $DataDir '.lifecycle-txn.json'\n"
+    "if (-not (Get-Variable -Name Run -ErrorAction SilentlyContinue)) { $Run = @{ RestorePending = $false; UndoPending = $false } }\n"
+    "$Local = ''\n"
+    "function Get-GatewayHealthReport { if (Get-GatewayProcess) { return [pscustomobject]@{ running = $true; health = $null } }; return $null }\n"
+    "function Get-GatewayDigestProblem { return 'unsupported' }\n"
+    "function Test-BinDirProtected { return $true }\n"
+)
+
+
 def _run_powershell(script: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
@@ -977,22 +1015,23 @@ def _run_powershell(script: str) -> subprocess.CompletedProcess[str]:
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("snapshot", ["complete", "incomplete", "incomplete-legacy", "rollback"])
+@pytest.mark.parametrize("snapshot", ["complete", "incomplete", "no-snapshot", "rollback"])
 def test_interrupted_recovery_refuses_to_continue_when_the_gateway_cannot_start(
     tmp_path: Path, snapshot: str
 ) -> None:
     # GAP-0444: losing the saved running state let the resumed install skip
     # its health gate and report success with the gateway still down.
-    slot = tmp_path / (".rollback-hold" if snapshot == "rollback" else "previous.new")
-    slot.mkdir()
-    if snapshot == "incomplete-legacy":
-        (tmp_path / "bin").mkdir()
-        (tmp_path / "bin" / "defenseclaw-gateway.exe").touch()
+    # "no-snapshot": the run was cut off after it wrote its lifecycle record
+    # and stopped the gateway, but before its snapshot began.
+    if snapshot == "no-snapshot":
+        _lifecycle_record(tmp_path / ".lifecycle-txn.json")
     else:
+        slot = tmp_path / (".rollback-hold" if snapshot == "rollback" else "previous.new")
+        slot.mkdir()
         (slot / "GATEWAY_WAS_RUNNING").write_text("true", encoding="ascii")
-    (slot / "VERSION").write_text("1.0.3", encoding="ascii")
-    if snapshot == "complete":
-        (slot / "COMPLETE").touch()
+        (slot / "VERSION").write_text("1.0.3", encoding="ascii")
+        if snapshot == "complete":
+            (slot / "COMPLETE").touch()
     script = f"""
 $ErrorActionPreference = 'Stop'
 $DataDir = '{tmp_path}'
@@ -1024,7 +1063,7 @@ function Get-GatewayDigestProblem {{ return 'unsupported' }}
 function Test-BinDirProtected {{ return $true }}
 {chr(10).join(_ps1_function(name) for name in ('Write-DurableText', 'ConvertTo-Map', 'Get-BinariesState', 'Get-OptionalSha256',
     'Get-GuardedConnectors', 'Read-LifecycleManifest', 'New-RecoveryManifest', 'Remove-LifecycleManifest', 'Test-LifecycleProof',
-    'Set-RecoveryPending', 'Get-LifecycleNextStep', 'Assert-LifecycleRestored', 'Get-Field', 'Get-Sha256'))}
+    'Set-RecoveryPending', 'Set-RecoverySetupRoot', 'Get-LifecycleNextStep', 'Assert-LifecycleRestored', 'Get-Field', 'Get-Sha256'))}
 function Find-SetupInstall {{ return $null }}
 function Die([string]$Message) {{ throw $Message }}
 function Undo-HookFirst {{ }}
@@ -1032,7 +1071,7 @@ function Restore-LiveTree {{ }}
 function Move-Path([string]$From, [string]$To) {{ Move-Item -LiteralPath $From -Destination $To }}
 function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
 function Restore-Slot([string]$Slot) {{ Remove-Tree $Slot; return (Join-Path $DataDir '.failed-test') }}
-{_ps_functions("Read-Text", "Undo-Snapshot", "Remove-Hold")}
+{_ps_functions("Read-Text", "Undo-Snapshot", "Remove-Hold", "Start-RecoveredGateway")}
 {_ps1_function("Resume-InterruptedRun")}
 foreach ($attempt in 1..2) {{
     try {{ Resume-InterruptedRun; Write-Output 'CONTINUED' }} catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
@@ -1049,6 +1088,205 @@ Write-Output "STARTS=$script:starts"
     assert out.count("REFUSED:") == 2 and "defenseclaw-gateway start" in out, out
     assert "STARTS=3" in out and "RECOVERED" in out, out
     assert "FAILED_LAUNCH=0 " not in out and "SUCCESSFUL_LAUNCH=0" in out, out
+
+
+def _resume_functions(*names: str) -> str:
+    # The listed install.ps1 functions this file has, in file order.
+    return "\n".join(
+        _ps1_function(name) for name in re.findall(r"^function ([\w-]+)[ (]", _text(), re.M) if name in names
+    )
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("snapshot", ["complete", "incomplete", "no-snapshot"])
+def test_interrupted_setup_upgrade_recovery_starts_the_setup_gateway_on_every_retry(
+    tmp_path: Path, snapshot: str
+) -> None:
+    # A DefenseClaw Setup install has no ~\.local\bin gateway. Recovery ran
+    # that missing binary and kept its record, so every retry failed at the
+    # same check before staging; a restored Setup snapshot started Setup's
+    # gateway without checking it answered. Each retry must start Setup's own
+    # gateway, prove it answers, and keep the lifecycle record until it does.
+    data = tmp_path / "data"
+    setup_root = tmp_path / "Setup"
+    (setup_root / "bin").mkdir(parents=True)
+    (setup_root / "bin" / "defenseclaw-startup.exe").touch()
+    (setup_root / "bin" / "defenseclaw-gateway.exe").touch()
+    staged_state = data / ".staging" / "hook-runtime-state.json"
+    staged_state.parent.mkdir(parents=True)
+    staged_state.write_text("{}", encoding="ascii")
+    hook_state = tmp_path / "HookRuntime" / "hook-runtime-state.json"
+    hook_state.parent.mkdir()
+    if snapshot == "no-snapshot":
+        _lifecycle_record(data / ".lifecycle-txn.json")
+    else:
+        slot = data / "previous.new"
+        slot.mkdir()
+        (slot / "GATEWAY_WAS_RUNNING").write_text("true", encoding="ascii")
+        (slot / "VERSION").write_text("0.8.10", encoding="ascii")
+        if snapshot == "complete":
+            (slot / "COMPLETE").touch()
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+$BinDir = Join-Path $DataDir 'bin'
+$Staging = Join-Path $DataDir '.staging'
+$Previous = Join-Path $DataDir 'previous'
+$SetupHookState = '{hook_state}'
+$setupGateway = Join-Path '{setup_root}' 'bin\\defenseclaw-gateway.exe'
+$script:setupStarts = 0
+$script:setupWorks = $false
+$script:up = $false
+function Write-Warn([string]$Message) {{ Write-Host $Message }}
+function Write-Info([string]$Message) {{ Write-Host $Message }}
+function Write-Ok([string]$Message) {{ Write-Host $Message }}
+function Get-UtcClock {{ return 'now' }}
+function Start-Sleep {{ param([int]$Seconds) }}
+function Stop-Gateway {{ $script:up = $false; return $true }}
+function Get-GatewayProcess {{ if ($script:up) {{ return [pscustomobject]@{{ Id = 1 }} }}; return $null }}
+function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Quiet) {{
+    if ($script:up -and $FilePath -eq $setupGateway -and $Arguments[0] -eq 'status') {{ return 0 }}
+    return 1
+}}
+function Find-SetupInstall {{ return [pscustomobject]@{{ Root = '{setup_root}' }} }}
+function Start-SetupGateway([string]$Root) {{ $script:setupStarts++; $script:up = $script:setupWorks }}
+function Clear-SetupDataDir {{ }}
+function Remove-FailedInstall {{ }}
+function Invoke-Quietly([scriptblock]$Action) {{ & $Action }}
+function Die([string]$Message) {{ throw $Message }}
+function Undo-HookFirst {{ }}
+function Move-Path([string]$From, [string]$To) {{ Move-Item -LiteralPath $From -Destination $To }}
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
+function Restore-Slot([string]$Slot) {{ Remove-Tree $Slot; return (Join-Path $DataDir '.failed-test') }}
+{_resume_functions("Read-Text", "Undo-Snapshot", "Remove-Hold", "Start-Gateway", "Start-RecoveredGateway", "Resume-InterruptedRun")}
+{_txn_real_functions()}
+{_TXN_PRELUDE}
+foreach ($attempt in 1..2) {{
+    try {{ Resume-InterruptedRun; Write-Output 'CONTINUED' }} catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
+    Write-Output "MARKER=$(Test-Path -LiteralPath $LifecycleManifest)"
+}}
+$script:setupWorks = $true
+try {{ Resume-InterruptedRun; Write-Output 'RECOVERED' }} catch {{ Write-Output "STILL-REFUSED: $($_.Exception.Message)" }}
+Write-Output "FINAL-MARKER=$(Test-Path -LiteralPath $LifecycleManifest)"
+Write-Output "SETUP_STARTS=$script:setupStarts"
+Write-Output "HOOK_STATE=$(Test-Path -LiteralPath $SetupHookState)"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "CONTINUED" not in out and out.count("REFUSED: ") == 2, out
+    assert out.count("MARKER=True") == 2, out
+    assert "gateway of DefenseClaw Setup did not become healthy" in out and "defenseclaw-startup.exe" in out, out
+    assert "is missing, so the gateway was not started" not in out, out
+    assert "RECOVERED" in out and "STILL-REFUSED" not in out and "FINAL-MARKER=False" in out, out
+    assert "SETUP_STARTS=3" in out, out
+    assert "HOOK_STATE=True" in out, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    "case",
+    [
+        "legacy-incomplete",
+        "legacy-complete",
+        "legacy-incomplete-setup",
+        "stopped-incomplete",
+        "stopped-complete",
+        "restarted-after-failure",
+    ],
+)
+def test_interrupted_recovery_never_starts_a_gateway_nothing_proves_was_running(tmp_path: Path, case: str) -> None:
+    # A 1.0.3 or earlier installer wrote GATEWAY_WAS_RUNNING last, so its cut
+    # off snapshot has none. Recovery read an installed gateway binary (or a
+    # Setup install) as "it was running" and started a gateway the user had
+    # stopped on purpose. Neither a recorded "false", nor the lifecycle record
+    # of a failed run that started its old gateway again, may start one.
+    setup = case.endswith("-setup")
+    if not setup:
+        (tmp_path / "bin").mkdir()
+        (tmp_path / "bin" / "defenseclaw-gateway.exe").touch()
+    if case != "restarted-after-failure":
+        slot = tmp_path / "previous.new"
+        slot.mkdir()
+        (slot / "VERSION").write_text("1.0.3", encoding="ascii")
+        if case.startswith("stopped-"):
+            (slot / "GATEWAY_WAS_RUNNING").write_text("false", encoding="ascii")
+        if case.endswith("-complete"):
+            (slot / "COMPLETE").touch()
+    find_setup = f"[pscustomobject]@{{ Root = '{tmp_path / 'Setup'}' }}" if setup else "$null"
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{tmp_path}'
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+$BinDir = Join-Path $DataDir 'bin'
+$Staging = Join-Path $DataDir '.staging'
+$Previous = Join-Path $DataDir 'previous'
+$SetupHookState = Join-Path $DataDir 'hook-runtime-state.json'
+$script:starts = 0
+$script:up = $false
+function Write-Warn([string]$Message) {{ Write-Host $Message }}
+function Write-Info([string]$Message) {{ Write-Host $Message }}
+function Start-Sleep {{ param([int]$Seconds) }}
+function Stop-Gateway {{ $script:up = $false; return $true }}
+function Get-GatewayProcess {{ if ($script:up) {{ return [pscustomobject]@{{ Id = 1; Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }} }}; return $null }}
+function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Quiet) {{ if ($script:up) {{ return 0 }}; return 1 }}
+function Start-Gateway {{ $script:starts++; $script:up = $true; return 0 }}
+function Start-SetupGateway([string]$Root) {{ $script:starts++; $script:up = $true }}
+function Find-SetupInstall {{ return {find_setup} }}
+function Clear-SetupDataDir {{ }}
+function Remove-FailedInstall {{ }}
+function Invoke-Quietly([scriptblock]$Action) {{ & $Action }}
+function Die([string]$Message) {{ throw $Message }}
+function Undo-HookFirst {{ }}
+function Move-Path([string]$From, [string]$To) {{ Move-Item -LiteralPath $From -Destination $To }}
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
+function Restore-Slot([string]$Slot) {{ Remove-Tree $Slot; return (Join-Path $DataDir '.failed-test') }}
+{_resume_functions("Read-Text", "Undo-Snapshot", "Remove-Hold", "Restart-Old", "Start-RecoveredGateway", "Resume-InterruptedRun")}
+{_txn_real_functions()}
+{_TXN_PRELUDE}
+if ('{case}' -eq 'restarted-after-failure') {{
+    # The failed run wrote its record, stopped its gateway, then put it back
+    # and proved it (Assert-LifecycleRestored), which drops the record.
+    Set-Content -LiteralPath $LifecycleManifest -Value '{{"Schema": 1, "Bins": {{}}, "GatewayWasRunning": true, "Connectors": [], "Config": "", "HookFailModes": "", "ExternalConfig": "", "BinDirProtected": false, "SetupRoot": "", "Committed": false}}' -Encoding Ascii
+    $WasRunning = $true
+    $Setup = $null
+    $Run = @{{ RestorePending = $false; UndoPending = $false }}
+    $record = Read-LifecycleManifest
+    $record.Bins = Get-BinariesState $BinDir
+    Restart-Old
+    Assert-LifecycleRestored $record
+    # The user then stops it on purpose before running the installer again.
+    $script:up = $false
+    $script:starts = 0
+}}
+Resume-InterruptedRun
+Write-Output "STARTS=$script:starts"
+Write-Output "MARKER=$(Test-Path -LiteralPath $LifecycleManifest)"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "STARTS=0" in out and "MARKER=False" in out, out
+    unknown = "did not record whether the gateway was running, so it is not started"
+    if case.startswith("legacy-"):
+        assert unknown in out and "defenseclaw-gateway start" in out, out
+    else:
+        assert unknown not in out, out
+
+
+def test_a_failed_stop_whose_old_gateway_still_runs_owes_the_next_run_no_start() -> None:
+    # The lifecycle record is written before the stop. If the stop fails and
+    # the old gateway still runs, the run proves that install back, which
+    # drops the record, so a later run does not start the gateway after the
+    # user stops it on purpose.
+    install = _ps1_function("Invoke-Install")
+    refused = install[install.index("        if ($stopRefused) {") :]
+    refused = refused[: refused.index('Die "${reason}; $(Get-UnchangedNote)"')]
+    assert "if (-not (Test-RecoveryPending)) { Assert-LifecycleRestored $Manifest }" in refused
+    assert "Remove-LifecycleManifest" in _ps1_function("Assert-LifecycleRestored")
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -2663,6 +2901,7 @@ _TXN_FUNCTIONS = (
     "Get-GuardedConnectors", "Get-GatewayDigestProblem", "Get-LifecycleState", "Write-LifecycleManifest",
     "Read-LifecycleManifest", "Complete-LifecycleManifest", "Remove-LifecycleManifest", "Test-LifecycleProof",
     "Set-RecoveryPending", "Get-LifecycleNextStep", "Assert-LifecycleRestored", "Get-Field", "Get-Sha256", "New-RecoveryManifest",
+    "Set-RecoverySetupRoot", "Start-RecoveredGateway",
 )
 
 

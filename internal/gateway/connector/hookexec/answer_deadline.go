@@ -238,19 +238,6 @@ func failNoAnswer(opts Options, sp spec, failMode string) int {
 	return failUnreachable(opts, sp, failMode, perUserGatewayNoAnswerReason)
 }
 
-// failBusyNoAnswer fails a tool call whose gateway answered 429 (busy) and
-// whose resend could not be answered in time. The gateway is up and refused
-// to evaluate the call: for a standalone hook outside Secure Client that is
-// an error answer, never the outage the administrator's open fail mode lets
-// through, so it is closed (the docs' "Gateway returns 4xx" row). Per-user
-// and Secure Client hooks keep failNoAnswer.
-func failBusyNoAnswer(opts Options, sp spec, failMode string) int {
-	if managedNativeDecision(opts) {
-		return failUnreachable(opts, sp, "closed", managedGatewayNoAnswerReason)
-	}
-	return failNoAnswer(opts, sp, failMode)
-}
-
 // retryFitsAnswer reports whether a resend that starts after delay still
 // starts before the answer deadline (always, without one).
 func retryFitsAnswer(deadline time.Time, delay time.Duration) bool {

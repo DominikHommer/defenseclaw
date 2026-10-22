@@ -869,6 +869,20 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			return failUnreachable(opts, sp, failMode, coldStartFailedReason)
 		}
 	}
+	// knownStatus is the last error status the gateway answered this call
+	// with, on a standalone hook: the gateway is up, so a call it then
+	// leaves without a decision (a 429 whose resend does not fit the answer
+	// budget or gets no answer, an error answer whose body is cut off) is no
+	// outage, and fail mode open does not let it through
+	// (failAfterErrorStatus). The watchdog's answer is closed from then on.
+	knownStatus := 0
+	noteStatus := func() {
+		if err == nil && managedNativeDecision(opts) && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+			knownStatus = resp.StatusCode
+			opts.answerWatch.gatewayAnsweredError(opts, sp)
+		}
+	}
+	noteStatus()
 	// A gateway that has taken all it can answer in time (or an account over
 	// its own budget) answers 429 with Retry-After at once. The call has not
 	// been evaluated, so it is sent again a few times within the hook's own
@@ -880,19 +894,20 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		if !retryFitsAnswer(opts.answerBy, delay) {
 			// A resend could not be answered within the tool call's
 			// answer budget: the gateway is too busy for it now.
-			return failBusyNoAnswer(opts, sp, failMode)
+			return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			if gatewayNoAnswer(ctx) {
-				return failBusyNoAnswer(opts, sp, failMode)
+				return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 			}
 			return failUnreachable(opts, sp, failMode, "gateway busy")
 		case <-timer.C:
 		}
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
+		noteStatus()
 	}
 	// A newly enrolled Windows standalone account holds its runtime (and the
 	// credential in it) a moment before the guardian's authorization ledger,
@@ -911,13 +926,15 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		case <-timer.C:
 		}
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
+		noteStatus()
 	}
 	if err != nil {
 		reason := "gateway unreachable"
 		switch cause := context.Cause(ctx); {
 		case errors.Is(cause, errGatewayNoAnswer):
-			// No decision in time: the hook's fail mode decides.
-			return failNoAnswer(opts, sp, failMode)
+			// No decision in time: the hook's fail mode decides, unless
+			// the gateway already answered with an error status.
+			return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 		case errors.Is(cause, errGatewayStartFailing):
 			reason = errGatewayStartFailing.Error()
 		case errors.Is(cause, errGatewayRestarting):
@@ -947,25 +964,14 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// the bytes it sent are never taken as its decision.
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody+1))
 	stopAnswer()
-	if (readErr != nil || int64(len(body)) > defaultMaxBody) && managedNativeDecision(opts) &&
-		(resp.StatusCode < 200 || resp.StatusCode >= 300) {
-		// The status line already says the gateway answered with an error:
-		// a 5xx, a refused credential or another 4xx is not an outage, so it
-		// is closed on a standalone host in every fail mode, whatever happens
-		// to the body after it. Before, a truncated or oversized error body
-		// took the no-answer or unusable-answer path, which an open fail
-		// mode allows (r104 W6 review). A 2xx whose body is cut off is still
-		// a gateway that gave no decision (failNoAnswer below).
-		reason := fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode)
-		if resp.StatusCode >= 500 && resp.StatusCode < 600 {
-			return failUnreachable(opts, sp, "closed", reason)
-		}
-		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), reason)
-	}
 	if readErr != nil {
-		return failNoAnswer(opts, sp, failMode)
+		// The status line of an error answer already says the gateway is
+		// up: a body cut off after it is no outage on a standalone hook.
+		return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 	}
 	if int64(len(body)) > defaultMaxBody {
+		// Closed on a standalone hook in every fail mode, whatever the
+		// status (managedNonOutageMode).
 		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "gateway response too large")
 	}
 
@@ -999,6 +1005,26 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 
 	return sp.decide(opts, body)
+}
+
+// failAfterErrorStatus fails a call the gateway answered with the error
+// status status (0: none) and then left without a decision. On a standalone
+// hook that is no outage, so it is blocked in every fail mode: a busy gateway
+// (429) with the no-answer reason a closed hook gives it, any other status
+// with that status, as when its whole body is in. Per-user and Secure Client
+// hooks, and a call with no error status, keep failNoAnswer.
+func failAfterErrorStatus(opts Options, sp spec, failMode string, status int) int {
+	if status == 0 || !managedNativeDecision(opts) {
+		return failNoAnswer(opts, sp, failMode)
+	}
+	if status == http.StatusTooManyRequests {
+		return failUnreachable(opts, sp, "closed", managedGatewayNoAnswerReason)
+	}
+	reason := fmt.Sprintf("gateway returned HTTP %d", status)
+	if status >= 500 && status < 600 {
+		return failUnreachable(opts, sp, "closed", reason)
+	}
+	return failResponse(opts, sp, "closed", reason)
 }
 
 // perUserRefusalText is what a per-user hook shows in the agent when the
