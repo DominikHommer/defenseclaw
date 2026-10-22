@@ -33,8 +33,8 @@ func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd 
 
 // CombinedOutputTree captures cmd's combined output. On Windows, cancellation
 // and command completion terminate every non-breakaway descendant through a
-// kill-on-close Job Object. Linux and macOS supervise the child's process
-// group. On other platforms, it is equivalent to cmd.CombinedOutput.
+// kill-on-close Job Object. On other platforms, it is equivalent to
+// cmd.CombinedOutput.
 //
 // allowManagedBreakaway is reserved for trusted launchers whose separately
 // identity-checked daemon must intentionally survive the short-lived command.

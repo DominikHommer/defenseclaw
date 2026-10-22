@@ -6,7 +6,6 @@
 package processutil
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -20,15 +19,7 @@ import (
 
 func configureCapturedCommand(_ *exec.Cmd) {}
 
-func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) {
-	if cmd.Stdout != nil || cmd.Stderr != nil {
-		return nil, errors.New("processutil: CombinedOutputTree requires unset stdout and stderr")
-	}
-	var output bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &output, &output
-	err := runTree(cmd, false)
-	return output.Bytes(), err
-}
+func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) { return cmd.CombinedOutput() }
 
 // macOS has no Linux parent-death signal. Start the command as a process
 // group leader behind a one-byte start gate. Its gateway-arms watchdog must
