@@ -740,13 +740,31 @@ function Set-WrapperSecret {
     Write-WrapperLog -Message "stored credential $SecretName"
 }
 
+function Test-WrapperSecretSetBundle {
+    # True when the installed CLI's secret set takes --bundle: --version-json
+    # reports secret_set_bundle (from 1.0.4). An older CLI binds no
+    # credential value and refuses the flag.
+    param([Parameter(Mandatory = $true)][string]$Cli)
+    try {
+        $run = Invoke-DefenseClawNative -FilePath $Cli -ArgumentList @('--version-json') -TimeoutSeconds 120
+        if ($run.ExitCode -ne 0) { return $false }
+        $document = ([string]$run.StdOut).Trim() | ConvertFrom-Json -ErrorAction Stop
+        return ($document.secret_set_bundle -eq $true)
+    } catch {
+        return $false
+    }
+}
+
 # A credential delivered with a bundle to an installed deployment is stored
 # first, with the bundle: the apply refuses a stored value the bundle does
 # not sign, and a credential the confirmed bundle signs changes only to a
-# value a newer signed bundle signs (secret set --bundle). With -SetupPath the
-# installed CLI can predate --bundle, so the credential is stored after Setup.
+# value a newer signed bundle signs (secret set --bundle). With -SetupPath,
+# or an installed CLI before 1.0.4, which takes no --bundle, the credential
+# is stored after the lifecycle as before.
 $secretStored = $false
-if ($secret -and $bundle -and -not $SetupPath -and $null -ne (Get-DefenseClawInstalledDeployment)) {
+$installedDeployment = $null
+if ($secret -and $bundle -and -not $SetupPath) { $installedDeployment = Get-DefenseClawInstalledDeployment }
+if ($null -ne $installedDeployment -and (Test-WrapperSecretSetBundle -Cli $installedDeployment.Cli)) {
     Set-WrapperSecret -Extra @('--bundle', $bundle)
     $secretStored = $true
 }

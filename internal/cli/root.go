@@ -85,6 +85,11 @@ type machineVersionReport struct {
 	Commit             string `json:"commit,omitempty"`
 	Built              string `json:"built,omitempty"`
 	ManagementContract int    `json:"management_contract"`
+	// SecretSetBundle reports that `enterprise secret set` takes --bundle
+	// (from 1.0.4, when signed bundles bind credential values). An optional
+	// member: an older build refuses the flag, and the MDM wrappers store a
+	// credential without it there.
+	SecretSetBundle bool `json:"secret_set_bundle,omitempty"`
 }
 
 func writeMachineVersion(w io.Writer) error {
@@ -95,6 +100,7 @@ func writeMachineVersion(w io.Writer) error {
 		Commit:             appCommit,
 		Built:              appBuildDate,
 		ManagementContract: managementContract,
+		SecretSetBundle:    true,
 	})
 }
 

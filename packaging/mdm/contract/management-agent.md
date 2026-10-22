@@ -377,6 +377,7 @@ member; use these fallbacks on it:
 | Windows secret locks and JSON | Windows `secret set` / `remove` take `--lock-wait`, `bundle.lock` then `lifecycle.lock`, and print a JSON document on every outcome | do **not** pass `--lock-wait` (exit 1); the set takes no lock and can collide with an apply's confirm step or an installer run; failures print no JSON |
 | Linux and macOS secret failure JSON | `secret set` / `remove` / `status` print the schema-1 failure document for an argument, flag, privilege, value or stdin read error | those failures print one line on stderr and no JSON: classify them by the exit code (2 fix the call, 1 failed) |
 | Anchors command (Linux, macOS) | `enterprise bundle anchors install` | install the file as the MDM kit does (section 4.8) |
+| `secret_set_bundle` (from 1.0.4) | `secret set --bundle` stores a credential a newer signed bundle signs (4.7) | an unknown flag: leave it out; the build binds no credential value, so store the credential without it |
 | Optional status v2 members (from 1.0.3) | `bundle verify` `secret_refs_missing` and `restart_prediction` (4.2); `status` / `verify` `connectors`, `openshell` and `identity` (4.4.1); each only when present | absent: preflight by verifying and reading the refusal, and treat every apply as one that can restart the gateway |
 
 On Windows the anchors call is the same on every build:
@@ -956,12 +957,29 @@ off the device. The agent does not read `/health` itself (section 7); the
   written and the exit is 1 / 1603. To change the value, pass the newer
   bundle that signs it with `--bundle <B>`: `set` verifies B as an apply
   would (anchors, signature, version floor, files and digest, apart from the
-  stored credentials) and stores the value when B signs it; B's own refusal
-  code is reported otherwise. Then apply B. An identical value, a credential
-  no confirmed bundle lists and a device with no confirmed bundle are not
-  checked. The MDM shell kit and `Invoke-DefenseClawEnterprise.ps1` pass the
-  bundle they deliver (Windows: not with `-SetupPath`, which stores the
+  stored credentials) and stores the value when B signs it. Otherwise the
+  refusal is `secret_ref_mismatch`, also when B does not verify or does not
+  bind the value, and its message carries B's own refusal. Then apply B. An
+  identical value, a credential no confirmed bundle lists and a device with
+  no confirmed bundle are not checked. B is checked against the anchors
+  installed now: when a delivery also changes the signing key, install the
+  new anchors and apply a bundle the new key signs with the current value
+  first, then rotate the credential (5.2). Pass `--bundle` only to a build
+  whose `--version-json` reports `secret_set_bundle` (section 3). The MDM
+  shell kit and `Invoke-DefenseClawEnterprise.ps1` pass the bundle they
+  deliver to such a build (Windows: not with `-SetupPath`, which stores the
   credential after Setup as before).
+- Upgrade from 1.0.2 or 1.0.3: a bundle signed before 1.0.4 has no
+  `value_sha256`, so on 1.0.4 `bundle verify`, `bundle apply` (also a repeat
+  delivery of the confirmed bundle, which an older build answered
+  `already_applied`) and `secret set` for its credentials refuse
+  `secret_ref_unbound`, exit 1 / 1603, until a re-signed bundle is applied.
+  The confirmed config keeps enforcing; `ensure` and repair do not verify
+  the bundle. 1.0.2 and 1.0.3 refuse a bundle signed by 1.0.4 with
+  `value_sha256` (`manifest_invalid`), so one bundle cannot serve both:
+  sign it again with `bundle sign --secret-file` and `--min-product-version
+  1.0.4` and deliver it with the 1.0.4 package, which installs before the
+  credential and the apply.
 - Lock: Linux and macOS write and apply under one `lifecycle.lock` and wait
   `--lock-wait` (default 5 s). Windows takes the two locks in the order a
   bundle apply takes them: `bundle.lock` (waiting up to `--lock-wait`,
@@ -1304,7 +1322,11 @@ Later bundles go through 5.2.
    `--bundle` and this bundle), only when `sha256_prefix` differs or the last
    call for that name did not end with exit 0 (2.5).
 2. If the anchors must change and the agent owns them (4.8), install them
-   first.
+   first. Step 1 checks a rotated credential against the anchors installed
+   then, so a delivery that changes both the signing key and a signed
+   credential runs twice: first the new anchors with a bundle the new key
+   signs for the current value, then the new credential with a newer bundle
+   that signs it.
 3. Run 4.2 verify. `already_applied`: done, unless `config_drift` is
    `true` (4.2 preflight, step 1). `refused`: report
    `errors[0].code` and stop (final).
