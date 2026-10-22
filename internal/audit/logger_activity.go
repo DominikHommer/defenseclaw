@@ -92,7 +92,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	}
 	stampAuditEventEnvelope(&auditEv)
 	activityMetrics, metricErr := newActivityRuntimeV8GeneratedMetrics(
-		auditEv, action, targetType, actor, len(in.Diff),
+		auditEv, action, targetType, len(in.Diff),
 	)
 	if metricErr != nil {
 		return metricErr

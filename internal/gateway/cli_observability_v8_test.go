@@ -331,6 +331,66 @@ func TestCLIObservabilityV8EmitsCanonicalFamiliesWithRawSourceFacts(t *testing.T
 	}
 }
 
+func TestCLIActivityMetricTargetTypesExcludeAccountIdentities(t *testing.T) {
+	runtime, capture := newProxyGeneratedMetricRuntime(t)
+	logger := audit.NewLogger(capture.store)
+	t.Cleanup(logger.Close)
+	owner := &sidecarOwnedObservabilityV8Runtime{runtime: runtime}
+	logger.SetRuntimeV8Emitter(owner)
+	api := &APIServer{store: capture.store, logger: logger}
+	api.bindObservabilityV8Runtimes(owner, owner, nil, owner)
+	for _, test := range []struct{ target, label string }{
+		{"policy", "policy"},
+		{"alice@example.com", "unknown"},
+		{"account_alice", "unknown"},
+	} {
+		t.Run(test.target, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"kind": "activity", "activity": map[string]any{
+					"actor": "cli:alice", "action": "policy-reload",
+					"target_type": test.target, "target_id": "default",
+					"diff": []map[string]any{{"path": "mode", "op": "replace", "before": "warn", "after": "block"}},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := len(capture.metricSnapshot())
+			response := httptest.NewRecorder()
+			api.handleCLIObservabilityV8(response, httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, bytes.NewReader(payload)))
+			if response.Code != http.StatusNoContent {
+				t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+			}
+			for _, family := range []string{
+				observability.TelemetryInstrumentDefenseClawActivityTotal,
+				observability.TelemetryInstrumentDefenseClawActivityDiffEntries,
+			} {
+				metrics := generatedMetricByName(capture.metricSnapshot()[before:], family)
+				if len(metrics) != 1 {
+					t.Fatalf("%s metrics=%d, want 1", family, len(metrics))
+				}
+				attrs := metrics[0].Attributes()
+				if attrs["defenseclaw.metric.target_type"] != test.label || attrs["defenseclaw.metric.actor"] != "cli" {
+					t.Fatalf("%s target %q labels=%v", family, test.target, attrs)
+				}
+			}
+			rows, err := capture.store.ListEvents(10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, row := range rows {
+				if row.Structured["defenseclaw.admin.target_ref"] == test.target+":default" && row.Actor == "cli:alice" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("audit evidence lost target %q", test.target)
+			}
+		})
+	}
+}
+
 func TestCLIObservabilityV8GeneratesModelAndWebhookSignalsWithoutPythonSDKOwnership(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"traces", "metrics"})
 	requests := []string{
