@@ -224,6 +224,9 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 			)
 		}
 	case errors.As(err, &yamlError):
+		if sourceError == nil && yamlError.ConfigVersion >= config.ObservabilityV8ConfigVersion {
+			result.ConfigVersion = yamlError.ConfigVersion
+		}
 		result.Path = configV8DiagnosticPath(yamlError.Path)
 		result.Reason = configV8DiagnosticReason(string(yamlError.Code), yamlError.Summary, "", yamlError.Action)
 	case errors.As(err, &schemaError):
