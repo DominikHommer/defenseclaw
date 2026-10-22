@@ -73,6 +73,78 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 	}
 }
 
+func TestCopilotReconcileReplacesRegisteredOldOpenCopy(t *testing.T) {
+	root := t.TempDir()
+	old := filepath.Join(root, "project", "old-open", "copilot-hook.sh")
+	current := filepath.Join(root, ".defenseclaw", "hooks", "copilot-hook.sh")
+	if err := os.MkdirAll(filepath.Dir(old), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(old, []byte("#!/bin/bash\n# defenseclaw-managed-hook v6\n# DefenseClaw Copilot CLI hook\nFAIL_MODE=\"open\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "defenseclaw.json")
+	oldCommand := copilotHookInvocationCommandForEvent("linux", "preToolUse", old)
+	operatorCommand := "/usr/local/bin/operator-hook"
+	data, err := json.Marshal(map[string]interface{}{"hooks": map[string]interface{}{
+		"preToolUse": []interface{}{
+			map[string]interface{}{"type": "command", "bash": oldCommand, "timeoutSec": 30},
+			map[string]interface{}{"type": "command", "bash": operatorCommand, "timeoutSec": 30},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchCopilotHooksForOS(path, current, []string{"preToolUse"}, "linux"); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(repaired, []byte(oldCommand)) {
+		t.Fatal("the old open hook still runs beside the closed registration")
+	}
+	if !bytes.Contains(repaired, []byte(copilotHookInvocationCommandForEvent("linux", "preToolUse", current))) ||
+		!bytes.Contains(repaired, []byte(operatorCommand)) {
+		t.Fatalf("repair lost the canonical or operator hook: %s", repaired)
+	}
+	// A copied launcher is still DefenseClaw-owned when the user renamed it.
+	// The registered command, rather than its basename, determines exposure.
+	renamed := filepath.Join(root, "project", "old-open", "retired-open.sh")
+	if err := os.Rename(old, renamed); err != nil {
+		t.Fatal(err)
+	}
+	renamedCommand := copilotHookInvocationCommandForEvent("linux", "preToolUse", renamed)
+	data, err = json.Marshal(map[string]interface{}{"hooks": map[string]interface{}{
+		"preToolUse": []interface{}{
+			map[string]interface{}{"type": "command", "bash": renamedCommand, "timeoutSec": 30},
+			map[string]interface{}{"type": "command", "bash": operatorCommand, "timeoutSec": 30},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchCopilotHooksForOS(path, current, []string{"preToolUse"}, "linux"); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(repaired, []byte(renamedCommand)) ||
+		!bytes.Contains(repaired, []byte(copilotHookInvocationCommandForEvent("linux", "preToolUse", current))) ||
+		!bytes.Contains(repaired, []byte(operatorCommand)) {
+		t.Fatalf("renamed managed copy survived repair or operator hook was lost: %s", repaired)
+	}
+}
+
 func TestHardeningJQFallbackRejectsStructuredOutputWithoutParser(t *testing.T) {
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("bash is required")
