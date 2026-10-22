@@ -171,8 +171,11 @@ transaction does the same: it migrates a version 8 config, keeps the same two fi
 the generation with the actor `lifecycle` and reports `policy`. On Linux and macOS the
 result's `changes` list says what was written, for example
 `migrated /etc/defenseclaw/config.yaml to config_version 9 (N values moved, 0 conflicts; the v8 file is kept as /etc/defenseclaw/config.yaml.v8.bak, the --config a rollback to a config_version 8 release needs)`.
-Windows Setup results report `policy` and the installed version but no `changes` list, and
-conflicts add a `config_migration_conflicts` warning.
+Windows Setup results report `policy` and the installed version, and a `changes` list when
+the run wrote something: the same migration line, a config applied to the running gateway
+without a restart, a replaced unparseable config, repaired hook runtime access or restored
+bundle files. A run that wrote nothing has no `changes` key. Conflicts add a
+`config_migration_conflicts` warning.
 
 ### Repair notes
 
