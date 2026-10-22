@@ -162,7 +162,7 @@ type attachAtCopyQuestion struct {
 
 func holdTestSession(t *testing.T, ta *testApp, name string) func() {
 	t.Helper()
-	release, err := ta.holdSession(name)
+	release, err := ta.holdSession(bg, name, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

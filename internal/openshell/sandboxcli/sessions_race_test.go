@@ -179,10 +179,10 @@ func TestW4B2UnreadableLeasesKeepTheSandbox(t *testing.T) {
 	}
 }
 
-// A pull that started a stopped copy stops it again; without a session
-// count it does not record the copy as it stopped (a session may have
-// changed it since the pull).
-func TestW4B2PullWithoutASessionCountDoesNotMarkTheCopy(t *testing.T) {
+// A pull that started a stopped copy stops it again and records the copy
+// as it stopped; without a session count it leaves the sandbox running
+// (GAP-0466: an uncertain count is not zero sessions) and records nothing.
+func TestW4B2PullWithoutASessionCountKeepsTheCopyRunning(t *testing.T) {
 	marked := func(t *testing.T, fail bool) bool {
 		t.Helper()
 		ta := newTestApp(t, "", copySandbox("copybox"))
@@ -191,7 +191,12 @@ func TestW4B2PullWithoutASessionCountDoesNotMarkTheCopy(t *testing.T) {
 			failLeaseOpens(t, syscall.EIO)
 		}
 		ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
-		has(t, ta.output(), "stopped copybox again")
+		if fail {
+			has(t, ta.output(), "copybox keeps running: cannot confirm whether another session uses copybox")
+			ta.wantCalls(t, 0, "POST", "copybox/stop")
+		} else {
+			has(t, ta.output(), "stopped copybox again")
+		}
 		sb := copySandbox("copybox")
 		rec := ta.copyHandoverOf(&sb)
 		return rec != nil && rec.Stopped != nil

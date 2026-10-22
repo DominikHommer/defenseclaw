@@ -101,42 +101,44 @@ func (a *App) detachedRun(ctx context.Context, cli openshell.CLI, sb *sandboxapi
 // yes) and said otherwise. The daemon's stop marks it interrupted and keeps
 // its log. It returns false when the user keeps the run going, and whether
 // no detached run is known to be going (idle).
-func (a *App) beforeStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.Sandbox, yes bool) (ok, idle bool, err error) {
+func (a *App) beforeStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.Sandbox, yes bool) (ok, idle bool, attached int, err error) {
 	if sb.Phase != "ready" {
-		return true, true, nil
+		return true, true, 0, nil
 	}
 	// A session attached in another terminal ends with the stop: the stop
-	// asked about a detached run only (GAP-0277, GAP-0285).
+	// asked about a detached run only (GAP-0277, GAP-0285). attached is
+	// how many the user was asked about (the stop counts again under the
+	// sandbox's gate, lockForStop).
 	n, err := a.attachedSessions(sb.Name)
 	if err != nil {
-		return false, false, attachedUnknown(sb.Name, err)
+		return false, false, 0, attachedUnknown(sb.Name, err)
 	}
 	if n > 0 {
 		if ok, err := a.confirmEnding(attachedText(sb.Name, n)+"; stopping the sandbox ends "+them(n), "Stop anyway?", yes); err != nil || !ok {
-			return false, false, err
+			return false, false, n, err
 		}
 	}
 	run, err := a.detachedRun(ctx, cli, sb)
 	if err != nil {
 		// Without an answer the stop goes ahead, as it did before runs
 		// were checked.
-		return true, false, nil
+		return true, false, n, nil
 	}
 	if run.State == sandboxapi.RunNone {
-		return true, true, nil
+		return true, true, n, nil
 	}
 	if run.State == sandboxapi.RunRunning {
 		what := sb.Name + "'s detached run" + a.startedText(run.Started) + " is still going; stopping the sandbox ends it"
 		if a.IO.TTY && !yes {
 			ok, err := a.ask(what+". Stop anyway?", false, false)
 			if err != nil || !ok {
-				return false, false, err
+				return false, false, n, err
 			}
 		} else {
 			a.warn(what)
 		}
 	}
-	return true, run.State != sandboxapi.RunRunning, nil
+	return true, run.State != sandboxapi.RunRunning, n, nil
 }
 
 // attachedText names the sessions attached to sandbox name in other
