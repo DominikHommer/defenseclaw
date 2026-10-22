@@ -164,28 +164,8 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 		}
 		program = programBase(program)
 		if slicesContainsString([]string{"awk", "gawk", "mawk", "nawk"}, program) {
-			for _, arg := range call.Args[1:] {
-				code, fixed := StaticWord(arg, home)
-				if !fixed {
-					var rendered strings.Builder
-					if syntax.NewPrinter().Print(&rendered, arg) == nil &&
-						strings.Contains(rendered.String(), "{") && strings.Contains(rendered.String(), "}") &&
-						!awkUnprovenOutput(rendered.String(), cwd, home) {
-						for _, target := range literalAwkRedirect.FindAllStringSubmatch(rendered.String(), -1) {
-							if protectedReachPath(OperandPath(target[1], cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
-								set("dynamic-argument", true)
-								break
-							}
-						}
-						continue
-					}
-					set("dynamic-argument", true)
-					return true
-				}
-				if awkUnprovenOutput(code, cwd, home) {
-					set("dynamic-argument", true)
-					return true
-				}
+			if awkCallUnproven(call, cwd, home) {
+				set("dynamic-argument", true)
 			}
 			return true
 		}
@@ -218,16 +198,18 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 			return true
 		}
 		if slicesContainsString([]string{"nice", "timeout", "nohup", "env", "command", "exec", "xargs"}, program) {
-			words := make([]string, len(call.Args))
-			allFixed := true
-			for i, arg := range call.Args {
-				words[i], allFixed = StaticWord(arg, home)
-				if !allFixed {
+			words := make([]string, 0, len(call.Args))
+			for _, arg := range call.Args {
+				word, fixed := StaticWord(arg, home)
+				if !fixed {
 					break
 				}
+				words = append(words, word)
 			}
-			if !allFixed {
-				if unprovenWriter.MatchString(command) {
+			if len(words) < len(call.Args) {
+				// Dynamic words after a complete interpreter program are
+				// its argv; they cannot move a proved ordinary destination.
+				if unprovenWriter.MatchString(command) && !provedOrdinaryInterpreterPrefix(words, cwd, home) {
 					set("dynamic-argument", true)
 				}
 				return true
@@ -304,10 +286,15 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 				if class, dynamic := unprovenInterpreterCode(code, language, cwd, home); class != "" {
 					set(class, dynamic)
 				}
-				for _, argument := range call.Args[codeIndex+1:] {
-					if _, ok := StaticWord(argument, home); !ok {
-						set("interpreter-argument", false)
-						break
+				// A dynamic argument can steer code through argv, unless
+				// the whole program is a proved write to a fixed ordinary
+				// destination; a protected name in its data is not a path.
+				if !interpreterProtectedUseSafe(code, language, cwd, home) {
+					for _, argument := range call.Args[codeIndex+1:] {
+						if _, ok := StaticWord(argument, home); !ok {
+							set("interpreter-argument", false)
+							break
+						}
 					}
 				}
 			}
@@ -433,6 +420,224 @@ func unprovenShellParseWrite(command, cwd, home string) bool {
 		return !unknown
 	})
 	return unknown
+}
+
+// awkCallUnproven reports an awk call whose file or command effects depend on
+// a word the shell computes. The words are read as awk reads them: options,
+// then one program (unless -f or -e supplied it), then operands. A dynamic
+// program keeps the bounded program check below; a dynamic program file, or
+// any dynamic word after an option this proof does not know, is unproved. A
+// dynamic operand or -v value is an input file or a var=value assignment, so
+// it matters only when the program has an unproved output or command effect
+// (or the program text is unknown).
+func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
+	var programs []string
+	programKnown, programSupplied, options := true, false, true
+	dynamicOperand, unknownOption := false, false
+	args := call.Args[1:]
+	for i := 0; i < len(args); i++ {
+		word, fixed := StaticWord(args[i], home)
+		if fixed && awkUnprovenOutput(word, cwd, home) {
+			return true
+		}
+		if !options || !fixed || word == "-" || !strings.HasPrefix(word, "-") {
+			if !programSupplied {
+				programSupplied, options = true, false
+				if !fixed {
+					rendered, ok := awkDynamicProgram(args[i], cwd, home)
+					if !ok {
+						return true
+					}
+					word = rendered
+				}
+				programs = append(programs, word)
+				continue
+			}
+			if options && !fixed {
+				return true // A computed word where an option can stand may be any option.
+			}
+			options = false
+			dynamicOperand = dynamicOperand || !fixed
+			continue
+		}
+		if word == "--" {
+			options = false
+			continue
+		}
+		name, value, attached := awkOptionValue(word)
+		if name == "" {
+			unknownOption = unknownOption || !slicesContainsString(awkHarmlessFlags, word)
+			continue
+		}
+		valueFixed := true
+		var valueWord *syntax.Word
+		if !attached {
+			if i+1 >= len(args) {
+				return true
+			}
+			i++
+			valueWord = args[i]
+			value, valueFixed = StaticWord(valueWord, home)
+			if valueFixed && awkUnprovenOutput(value, cwd, home) {
+				return true
+			}
+		}
+		switch name {
+		case "f":
+			if !valueFixed {
+				return true
+			}
+			programSupplied = true
+			if content, ok := readIndirectSource(value, cwd); ok {
+				programs = append(programs, content)
+			} else {
+				programKnown = false
+			}
+		case "e":
+			programSupplied = true
+			if !valueFixed {
+				rendered, ok := awkDynamicProgram(valueWord, cwd, home)
+				if !ok {
+					return true
+				}
+				value = rendered
+			}
+			programs = append(programs, value)
+		case "v":
+			dynamicOperand = dynamicOperand || !valueFixed
+		}
+	}
+	if !dynamicOperand {
+		return false
+	}
+	if unknownOption || !programKnown {
+		return true
+	}
+	for _, program := range programs {
+		if awkUnprovenOutput(program, cwd, home) || awkCommandEffect(program) {
+			return true
+		}
+	}
+	return false
+}
+
+// Flags that take no value and add no file or command effect. Every other
+// option (gawk -o, -p, -d, -D, -i, -l, ...) leaves the program unknown.
+var awkHarmlessFlags = []string{"--posix", "-P", "--traditional", "--compat", "--sandbox", "-S",
+	"-b", "--characters-as-bytes", "-n", "--non-decimal-data", "-N", "--use-lc-numeric",
+	"-M", "--bignum", "-O", "--optimize", "-s", "--no-optimize", "-r", "--re-interval"}
+
+// awkOptionValue names a value option (f, e, v or F) and its attached value.
+func awkOptionValue(word string) (name, value string, attached bool) {
+	for _, option := range []struct{ short, long, name string }{
+		{"-f", "--file", "f"}, {"-e", "--source", "e"}, {"-v", "--assign", "v"}, {"-F", "--field-separator", "F"},
+	} {
+		switch {
+		case word == option.short || word == option.long:
+			return option.name, "", false
+		case strings.HasPrefix(word, option.long+"="):
+			return option.name, word[len(option.long)+1:], true
+		case strings.HasPrefix(word, option.short) && !strings.HasPrefix(word, "--"):
+			return option.name, word[len(option.short):], true
+		}
+	}
+	return "", "", false
+}
+
+// awkDynamicProgram keeps the bounded check for program text with a shell
+// expansion: a braced program with no unproved output and no literal output
+// to a protected file is judged by its rendered text.
+func awkDynamicProgram(word *syntax.Word, cwd, home string) (string, bool) {
+	var rendered strings.Builder
+	if word == nil || syntax.NewPrinter().Print(&rendered, word) != nil {
+		return "", false
+	}
+	text := rendered.String()
+	if !strings.Contains(text, "{") || !strings.Contains(text, "}") || awkUnprovenOutput(text, cwd, home) {
+		return "", false
+	}
+	for _, target := range literalAwkRedirect.FindAllStringSubmatch(text, -1) {
+		if protectedReachPath(OperandPath(target[1], cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
+			return "", false
+		}
+	}
+	return text, true
+}
+
+// awkCommandEffect reports awk code that runs a command (a pipe, system(),
+// or a gawk @ directive that loads more code). Strings, regular expression
+// literals and comments are data; || is a logical operator.
+func awkCommandEffect(code string) bool {
+	previous := byte('{')
+	for i := 0; i < len(code); i++ {
+		c := code[i]
+		switch {
+		case c == '"':
+			for i++; i < len(code) && code[i] != '"'; i++ {
+				if code[i] == '\\' {
+					i++
+				}
+			}
+			if i >= len(code) {
+				return true
+			}
+		case c == '#':
+			for i < len(code) && code[i] != '\n' {
+				i++
+			}
+			c = '\n'
+		case c == '/' && strings.IndexByte("(,{};!~&|\n?:=", previous) >= 0:
+			bracket := false
+			for i++; i < len(code) && (bracket || code[i] != '/'); i++ {
+				switch code[i] {
+				case '\\':
+					i++
+				case '[':
+					bracket = true
+				case ']':
+					bracket = false
+				case '\n':
+					return true
+				}
+			}
+			if i >= len(code) {
+				return true
+			}
+		case c == '|':
+			if i+1 < len(code) && code[i+1] == '|' {
+				i++
+			} else {
+				return true
+			}
+		case c == '@':
+			return true
+		case c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_':
+			start := i
+			for i+1 < len(code) && (code[i+1] >= 'a' && code[i+1] <= 'z' || code[i+1] >= 'A' && code[i+1] <= 'Z' ||
+				code[i+1] >= '0' && code[i+1] <= '9' || code[i+1] == '_') {
+				i++
+			}
+			if code[start:i+1] == "system" {
+				return true
+			}
+		}
+		if c != ' ' && c != '\t' {
+			previous = c
+		}
+	}
+	return false
+}
+
+// provedOrdinaryInterpreterPrefix reports wrapper words that end with a
+// complete inline interpreter program which is a proved write to a fixed
+// ordinary destination; later dynamic words can only be its argv.
+func provedOrdinaryInterpreterPrefix(words []string, cwd, home string) bool {
+	code, language, found := wrappedInterpreterCode(words)
+	if !found {
+		return false
+	}
+	class, _ := unprovenInterpreterCode(code, language, cwd, home)
+	return class == "" && interpreterProtectedUseSafe(code, language, cwd, home)
 }
 
 // An awk print redirect opens a file. A quoted target is named by the

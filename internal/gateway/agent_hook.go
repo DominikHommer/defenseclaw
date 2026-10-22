@@ -2478,8 +2478,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 // native program such as curl incomplete, because Windows PowerShell aliases
 // it; such a command keeps its inferred grammar, as before GAP-1134, so its
 // POSIX reading can still enforce instead of every finding turning into
-// detection-only. An explicit cmd /c wrapper uses CMD grammar, including
-// cmd.exe and the optional /d switch.
+// detection-only. CMD grammar decides only a command line that is one whole
+// cmd /c call with one literal quoted body (soleCMDInvocation): a later
+// PowerShell statement, pipeline, redirect or expansion is PowerShell code,
+// and reading the whole line as CMD would hide its write. An exact
+// cmd /d /c wrapper that PowerShell cannot read may still use CMD grammar.
 func selectWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
 	tool = strings.ToLower(strings.TrimSpace(tool))
 	switch tool {
@@ -2491,13 +2494,19 @@ func selectWindowsShellDialect(tool, command string, input actionfacts.Input) ac
 	if command == "" {
 		return ""
 	}
-	if trustedCMDInvoke.MatchString(strings.TrimSpace(command)) {
+	if soleCMDInvocation(command) {
 		return actionfacts.DialectCMD
 	}
 	input.DialectHint = actionfacts.DialectPowerShell
 	if actionfacts.Analyze(input).Authoritative() ||
 		actionfacts.InferredRawCommandDialect(command) == actionfacts.DialectPowerShell {
 		return actionfacts.DialectPowerShell
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(command)), "cmd /d /c ") {
+		input.DialectHint = actionfacts.DialectCMD
+		if actionfacts.Analyze(input).Authoritative() {
+			return actionfacts.DialectCMD
+		}
 	}
 	return ""
 }

@@ -33,12 +33,29 @@ var (
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+(?:/d\s+)?/c\s+(.+)$`)
+	trustedSoleCMDInvoke                 = regexp.MustCompile("^(?i:cmd(?:\\.exe)?)[ \t]+(?i:/d[ \t]+)?(?i:/c)[ \t]+\"[^\"$`\r\n]*\"[ \t]*$")
 	trustedOutFileAppend                 = regexp.MustCompile(`(?is)^\s*(?:"[^"\r\n]*"|'[^'\r\n]*')\s*\|\s*out-file\s+-append\s+-filepath\s+(.+?)\s*$`)
 	trustedInterpreterKeysPath           = regexp.MustCompile(`(?:~|\$HOME|\$ENV\{HOME\}|/[A-Za-z0-9_./ -]+)/\.ssh/authorized_keys(?:2)?`)
 	trustedInterpreterOpenCall           = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync)\s*\(`)
 	trustedInterpreterWriteMode          = regexp.MustCompile(`['"](?:[awx](?:[bt]?\+?|\+[bt]?)|r(?:[bt]?\+|\+[bt]?)|>>|>)['"]`)
 	trustedInterpreterWriteCall          = regexp.MustCompile(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
 )
+
+// soleCMDInvocation reports a PowerShell command line that is nothing but one
+// cmd /c call with one double-quoted body. PowerShell hands that body to
+// cmd.exe unchanged only when it holds no $ or backtick expansion; anything
+// after the closing quote (a statement, pipeline or redirect) is PowerShell
+// code. PowerShell also closes a double-quoted string at a typographic
+// quote, so a non-ASCII rune keeps PowerShell grammar.
+func soleCMDInvocation(command string) bool {
+	command = strings.TrimSpace(command)
+	for i := 0; i < len(command); i++ {
+		if command[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return trustedSoleCMDInvoke.MatchString(command)
+}
 
 func trustedCMDBody(input actionfacts.Input) (string, bool) {
 	if len(input.Command) > 64<<10 || input.Command == "" ||
