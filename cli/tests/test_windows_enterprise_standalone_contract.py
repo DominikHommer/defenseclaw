@@ -663,6 +663,69 @@ def _portable_pwsh() -> str | None:
     return os.environ.get("DEFENSECLAW_TEST_PWSH") or shutil.which("pwsh") or shutil.which("pwsh.exe")
 
 
+def test_installed_verifier_refuses_untrusted_redaction_key_before_compliance(tmp_path: Path) -> None:
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    harness = tmp_path / "verify-redaction-key.ps1"
+    harness.write_text(
+        r"""
+param([string]$ModulePath)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$null, [ref]$errors)
+if ($errors.Count -gt 0) { throw $errors[0].Message }
+$definition = $ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Assert-DefenseClawEnterpriseDeployment'
+}, $true)
+. ([ScriptBlock]::Create($definition.Extent.Text))
+$script:Standalone = $true
+$script:KeyChecks = 0
+function Test-DefenseClawStandaloneProfile { return $script:Standalone }
+function Get-DefenseClawAcceptedGatewayServiceAccounts { return @('gateway') }
+function Get-DefenseClawServiceSID { return 'service sid from OS' }
+function Get-DefenseClawDeploymentMetadata { return [pscustomobject]@{} }
+function Test-DefenseClawMetadataInstalled { return $true }
+function Assert-DefenseClawMetadataIdentity {}
+# Native capture/classification has a separate Windows ACL smoke. Model its
+# refusal here and require the installed-host verifier to propagate it.
+function Get-DefenseClawRedactionKeySecuritySnapshot {
+    $script:KeyChecks++
+    throw 'untrusted_key_reader'
+}
+try {
+    Assert-DefenseClawEnterpriseDeployment -Layout @{} -GatewayServiceName gateway -GuardianServiceName guardian
+    throw 'verifier accepted the untrusted key'
+}
+catch {
+    if ($_.Exception.Message -cne 'untrusted_key_reader') { throw }
+}
+$script:Standalone = $false
+try {
+    Assert-DefenseClawEnterpriseDeployment -Layout @{} -GatewayServiceName gateway -GuardianServiceName guardian
+}
+catch {
+    # The empty fixture has no activation metadata. Secure Client must reach
+    # its existing validation without adding the standalone key check.
+    if ($_.Exception.Message -ceq 'untrusted_key_reader') { throw }
+}
+if ($script:KeyChecks -ne 1) { throw 'standalone-only key validation was skipped or reached Secure Client' }
+""",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness), "-ModulePath", str(MODULE)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 @pytest.mark.parametrize("case", ["full", "compiler-residue", "unexpected"])
 def test_standalone_retired_tree_cleanup_removes_empty_compiler_directories(
     tmp_path: Path, case: str

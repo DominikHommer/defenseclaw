@@ -84,6 +84,7 @@ func newWindowsBundleRestoreHost(t *testing.T) *windowsBundleRestoreHost {
 	if err := os.WriteFile(layout.ConfigPath, rendered, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	recordWindowsBundleTestCommit(t, layout, opts.bundle.prepared.Receipt, rendered)
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 	expected := opts.bundle.prepared.Receipt.ExpectedDigest
 	result.Policy = &enterprisestatus.PolicyState{EffectiveDigest: expected, GatewayReportedDigest: expected, ConfigGeneration: 3, Applied: true}

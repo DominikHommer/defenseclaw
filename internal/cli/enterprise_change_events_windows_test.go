@@ -73,6 +73,27 @@ func assertOneRefusedAnchorInstall(t *testing.T, spool, code string) {
 	}
 }
 
+func TestWindowsAnchorPreflightRefusalRecordsOneChangeEvent(t *testing.T) {
+	stubWindowsBundleHost(t)
+	spool, state := stubWindowsChangeSpool(t)
+	cmd, out := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{trustAnchors: "anchors.json", configPath: "config.yaml",
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts)
+	if !done || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+		t.Fatalf("incompatible arguments: done=%v, err=%v, output=%s", done, err, out)
+	}
+	assertOneRefusedAnchorInstall(t, spool, "bundle_required")
+	assertNoWindowsChangeReservations(t, state)
+	// Fresh and unelevated callers cannot create an installed-host audit.
+	opts.installedBeforeRun = false
+	_, _ = prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts)
+	opts.installedBeforeRun = true
+	windowsSecretIsElevated = func() bool { return false }
+	_, _ = prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts)
+	assertOneRefusedAnchorInstall(t, spool, "bundle_required")
+}
+
 // An ensure with TRUSTANCHORS= whose BUNDLE= is rejected after the anchors
 // were staged installs no anchors and records one refused anchor install
 // with the bundle's refusal code. Before, the run staged the anchors and

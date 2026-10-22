@@ -26,7 +26,7 @@ func TestDriverRepeatedBundleDefersARestartForDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.Finish(p, p.ConfigSHA256, nil, enforcing(p.Receipt.ExpectedDigest), false, nil); err != nil {
+	if _, err := d.Finish(p, p.ConfigSHA256, nil, installPreparedBundle(t, d, p), false, nil); err != nil {
 		t.Fatal(err)
 	}
 	d.RefuseRestart = func(enforced, rendered []byte) string {
