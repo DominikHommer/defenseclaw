@@ -6033,7 +6033,29 @@ function Install-DefenseClawFileAtomic {
                 throw "atomic replacement backup path unexpectedly exists: $backup"
             }
             try {
-                [IO.File]::Replace($temporary, $Destination, $backup, $true)
+                $replacementClock = [Diagnostics.Stopwatch]::StartNew()
+                while ($true) {
+                    try {
+                        [IO.File]::Replace($temporary, $Destination, $backup, $true)
+                        break
+                    }
+                    catch {
+                        $failure = $_.Exception
+                        while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+                        $transient = [int]$failure.HResult -in @(-2147024891, -2147024864, -2147024863, -2147023721)
+                        if (-not (Test-DefenseClawStandaloneProfile) -or -not $transient -or
+                            $replacementClock.Elapsed.TotalSeconds -ge 30 -or
+                            -not [IO.File]::Exists($temporary) -or -not [IO.File]::Exists($Destination) -or
+                            [IO.File]::Exists($backup)) {
+                            throw
+                        }
+                        # Active hook readers briefly deny delete sharing.
+                        # Retry the atomic operation only while both original
+                        # names remain intact. Never rename the launcher away:
+                        # agents can treat a missing hook as a non-blocking error.
+                        Start-Sleep -Milliseconds 10
+                    }
+                }
             }
             catch {
                 # GAP-0852: a program that holds the file open without delete

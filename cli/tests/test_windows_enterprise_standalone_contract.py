@@ -778,3 +778,33 @@ Initialize-DefenseClawTransactionManagedRoot -Layout @{} -GatewayServiceName Gat
     -GuardianServiceName Guardian -Root install_root -Path existing -Label InstallRoot -RequiredBase base
 """)
 
+
+
+def test_standalone_replacement_retries_transient_hook_readers(tmp_path) -> None:
+    # Holders come and go under registered hook traffic. Retry the atomic
+    # operation while keeping the launcher present on every attempt.
+    _run_lifecycle_functions(tmp_path, ["Install-DefenseClawFileAtomic"], r"""
+function Test-DefenseClawStandaloneProfile { return $true }
+function Assert-DefenseClawNoReparsePath {}
+function New-DefenseClawDirectory { param($Path) [void][IO.Directory]::CreateDirectory($Path) }
+function Remove-DefenseClawStaleReplacementBackups {}
+function Remove-DefenseClawReplacementBackup { param($Path) [IO.File]::Delete($Path); return $true }
+function ConvertTo-DefenseClawBoundedDiagnostic { param($Value, $MaxLength) return $Value }
+$script:attempts = 0
+function Invoke-TestMappedImageReplace {
+    $script:attempts++
+    if (-not [IO.File]::Exists($Destination)) { throw 'launcher missing during replacement' }
+    if ($script:attempts -lt 3) { throw [IO.IOException]::new('transient hook reader', -2147024864) }
+    [IO.File]::Replace($temporary, $Destination, $backup, $true)
+}
+$root = Split-Path -Parent $PSCommandPath
+$source = Join-Path $root 'new.exe'
+$destination = Join-Path $root 'hook.exe'
+[IO.File]::WriteAllText($source, 'new verified executable')
+[IO.File]::WriteAllText($destination, 'old mapped executable')
+Install-DefenseClawFileAtomic -Source $source -Destination $destination
+if ($script:attempts -ne 3) { throw 'hook reader was not retried' }
+if ([IO.File]::ReadAllText($destination) -cne 'new verified executable') { throw 'replacement failed' }
+if (@(Get-ChildItem $root -Filter 'hook.exe.backup.*').Count) { throw 'replacement left a backup' }
+""", replacements=[("[IO.File]::Replace($temporary, $Destination, $backup, $true)", "Invoke-TestMappedImageReplace")])
+
