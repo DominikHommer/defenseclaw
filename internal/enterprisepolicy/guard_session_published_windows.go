@@ -13,11 +13,14 @@
 package enterprisepolicy
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -258,7 +261,111 @@ func publishedSessionHoldTrusted(path string) bool {
 // createPublishedSessionHold creates the hold file at path with text and
 // publishedSessionHoldSDDL.
 func createPublishedSessionHold(path, text string) error {
-	descriptor, err := windows.SecurityDescriptorFromString(publishedSessionHoldSDDL)
+	return createPublishedSessionMarker(path, publishedSessionHoldSDDL, text)
+}
+
+// publishedSessionRefusalInfix follows the record folder's name in the name
+// of a refusal (RefusePublishedSessionRoot): <name>.refused-<random>.
+const publishedSessionRefusalInfix = ".refused-"
+
+// publishedSessionRefusalSDDL is the protected DACL of a refusal: SYSTEM and
+// Administrators full control, standard users its attributes and security
+// descriptor only (FILE_READ_ATTRIBUTES, READ_CONTROL, SYNCHRONIZE), so the
+// hook can check who made it (publishedSessionHoldTrusted) while no standard
+// user can open it with an access that a sharing mode applies to, and none
+// can keep the lifecycle from removing it.
+const publishedSessionRefusalSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x120080;;;BU)"
+
+// publishedSessionRefusalPlace is the folder of the refusals of the record
+// folder root (the folder above it, %ProgramData%\Cisco) and the prefix of
+// their names.
+func publishedSessionRefusalPlace(root string) (dir, prefix string, ok bool) {
+	root = strings.TrimRight(strings.TrimSpace(root), `\/`)
+	if root == "" || !filepath.IsAbs(root) {
+		return "", "", false
+	}
+	root = filepath.Clean(root)
+	if root == filepath.Dir(root) {
+		return "", "", false
+	}
+	return filepath.Dir(root), filepath.Base(root) + publishedSessionRefusalInfix, true
+}
+
+// RefusePublishedSessionRoot makes the hook refuse the record folder root
+// until a lifecycle run replaced it (ReleasePublishedSessionRecords), with
+// a file next to the folder, in %ProgramData%\Cisco, that SYSTEM or
+// Administrators own (GAP-0352, 1.0.4 guard loop round 3). It is for a
+// lifecycle that can give a folder it cannot replace no owner the hook
+// refuses: SYSTEM without SeRestorePrivilege may name only itself or
+// Administrators as an owner, and the hook trusts both, so an account that
+// kept a handle with WRITE_DAC on the folder could make it look trusted
+// again, and one that also kept a handle on the hook runtime folder could
+// delete the hold there. No handle on either folder reaches this file, and
+// no standard user may delete a file another account made in
+// %ProgramData%\Cisco. Its name ends in random characters, so no account
+// can put its own file at the path first and keep the lifecycle from
+// making it; a file a standard user made with the prefix is ignored. A
+// trusted refusal already in place is kept.
+func RefusePublishedSessionRoot(root string) error {
+	dir, prefix, ok := publishedSessionRefusalPlace(root)
+	if !ok {
+		return fmt.Errorf("no protected session record folder %q", root)
+	}
+	if refusals, err := publishedSessionRootRefusals(root); err == nil && len(refusals) != 0 {
+		return nil
+	}
+	var nonce [12]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	return createPublishedSessionMarker(filepath.Join(dir, prefix+hex.EncodeToString(nonce[:])), publishedSessionRefusalSDDL, publishedSessionHoldText)
+}
+
+// publishedSessionRootRefusals lists the refusals of the record folder root
+// in place: files with the refusal prefix next to the folder that SYSTEM,
+// Administrators or this process's account made, and that no one else may
+// change (publishedSessionHoldTrusted). A folder above root that cannot be
+// listed is an error, which holds the records.
+func publishedSessionRootRefusals(root string) ([]string, error) {
+	dir, prefix, ok := publishedSessionRefusalPlace(root)
+	if !ok {
+		return nil, fmt.Errorf("no protected session record folder %q", root)
+	}
+	names, err := publishedSessionHoldList(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var refusals []string
+	for _, name := range names {
+		if path := filepath.Join(dir, name); hasPrefixFold(name, prefix) && publishedSessionHoldTrusted(path) {
+			refusals = append(refusals, path)
+		}
+	}
+	return refusals, nil
+}
+
+// releasePublishedSessionRootRefusals removes the refusals of the record
+// folder root, once a lifecycle run replaced the folder and bumped it.
+func releasePublishedSessionRootRefusals(root string) error {
+	refusals, err := publishedSessionRootRefusals(root)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, path := range refusals {
+		errs = append(errs, releasePublishedSessionAt(path))
+	}
+	return errors.Join(errs...)
+}
+
+// createPublishedSessionMarker creates the file at path, which must not
+// exist, with text and the protected DACL sddl, owned by this process's
+// account (SYSTEM or an administrator).
+func createPublishedSessionMarker(path, sddl, text string) error {
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		return err
 	}

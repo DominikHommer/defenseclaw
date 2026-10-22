@@ -56,9 +56,10 @@ import (
 // standard user can add a file) is kept as well, and status and verify
 // report it, but the hook no longer depends on it alone: an account that
 // also kept a handle on the hook runtime folder could delete it (GAP-0352,
-// 1.0.4 review loop round 4, guard loop round 2). Only a lifecycle that
-// can give the folder neither owner (SYSTEM without SeRestorePrivilege)
-// falls back to the hold alone.
+// 1.0.4 review loop round 4, guard loop round 2). A lifecycle that can
+// give the folder neither owner (SYSTEM without SeRestorePrivilege) refuses
+// it with a file next to it in %ProgramData%\Cisco instead, which no such
+// handle reaches (guard loop round 3).
 
 var (
 	windowsHookSessionDir = func() (string, error) {
@@ -150,25 +151,45 @@ func windowsHookSessionOwnerRefused(sid *windows.SID) bool {
 // later run replaces it (GAP-0352, 1.0.4 guard loop round 2: without the
 // privilege the folder used to keep an Administrators owner, so a handle
 // that also reached the hook runtime folder could delete the hold, write a
-// trusted DACL back and put the old tree back). An error means neither
-// owner took.
+// trusted DACL back and put the old tree back).
+//
+// A lifecycle that can give it neither owner (SYSTEM without
+// SeRestorePrivilege may name only itself or Administrators, and the hook
+// trusts both) refuses it next to the folder instead
+// (enterprisepolicy.RefusePublishedSessionRoot: a file in
+// %ProgramData%\Cisco that no handle on the record folder or on the hook
+// runtime folder reaches), which the hook honors until a run replaced the
+// folder (1.0.4 guard loop round 3: the folder used to keep its
+// Administrators owner with only the hold as its guard). An error means
+// none of the three took.
 func refuseWindowsHookSessionRoot(root string) error {
 	retireErr := windowsHookSessionOwnerRestorePrivilege(func() error { return applyWindowsSDDL(root, windowsHookSessionRetiredSDDL) })
 	if retireErr == nil {
 		return nil
 	}
+	ownerErr := fmt.Errorf("give it the LOCAL SERVICE owner: %v", retireErr)
 	self, err := windowsHookSessionLifecycleAccount()
-	if err != nil {
-		return fmt.Errorf("give it the LOCAL SERVICE owner: %v; read this lifecycle's account: %w", retireErr, err)
+	switch {
+	case err != nil:
+		ownerErr = fmt.Errorf("%w; read this lifecycle's account: %v", ownerErr, err)
+	case !windowsHookSessionOwnerRefused(self):
+		ownerErr = fmt.Errorf("%w; this lifecycle runs as %s, an owner the hook trusts", ownerErr, self.String())
+	default:
+		err = applyWindowsSDDL(root, windowsHookSessionSelfOwnedSDDL(self))
+		if err == nil {
+			return nil
+		}
+		ownerErr = fmt.Errorf("%w; give it this lifecycle's own account as its owner: %v", ownerErr, err)
 	}
-	if !windowsHookSessionOwnerRefused(self) {
-		return fmt.Errorf("give it the LOCAL SERVICE owner: %v; this lifecycle runs as %s, an owner the hook trusts", retireErr, self.String())
-	}
-	if err := applyWindowsSDDL(root, windowsHookSessionSelfOwnedSDDL(self)); err != nil {
-		return fmt.Errorf("give it the LOCAL SERVICE owner: %v; give it this lifecycle's own account as its owner: %w", retireErr, err)
+	if err := windowsHookSessionRefuseRoot(root); err != nil {
+		return fmt.Errorf("%w; refuse it next to the folder: %v", ownerErr, err)
 	}
 	return nil
 }
+
+// windowsHookSessionRefuseRoot refuses a record root next to it
+// (replaceable in tests).
+var windowsHookSessionRefuseRoot = enterprisepolicy.RefusePublishedSessionRoot
 
 // windowsHookSessionRetiredInfix names a retired record root next to the
 // root: <root>.retired-<nanoseconds>. The hook never reads it.
@@ -242,7 +263,7 @@ func bumpWindowsHookSessionGeneration(action string) {
 // The records are held from the start of the step
 // (enterprisepolicy.HoldPublishedSessionRecords), and the hold is removed
 // only once the new folder was bumped: a step that fails leaves it, as the
-// last guard of a lifecycle that could give the folder no refused owner.
+// last guard of a lifecycle that could not refuse the folder.
 func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 	holdErr := enterprisepolicy.HoldPublishedSessionRecords(root)
 	if err := replaceWindowsHookSessionRoot(root, gateway); err != nil {
@@ -316,12 +337,12 @@ func replaceWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 }
 
 // retireWindowsHookSessionRoot takes the record root folder object out of
-// use for good. It first gets an owner the hook refuses
-// (refuseWindowsHookSessionRoot), so the hook refuses it whatever a handle
-// that kept WRITE_DAC does to its DACL (a lifecycle that can give it no
-// such owner closes it to standard users instead), then it is moved aside,
-// where the hook never reads it, and removed. The caller creates a new
-// root.
+// use for good. It is first refused (refuseWindowsHookSessionRoot: an owner
+// the hook refuses, or a refusal next to it), so the hook refuses it
+// whatever a handle that kept WRITE_DAC does to its DACL (a lifecycle that
+// can do neither closes it to standard users instead), then it is moved
+// aside, where the hook never reads it, and removed. The caller creates a
+// new root.
 func retireWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 	retireErr := refuseWindowsHookSessionRoot(root)
 	if retireErr != nil {
@@ -333,7 +354,7 @@ func retireWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 		if retireErr != nil {
 			return fmt.Errorf("%w; it is closed to standard users, but it could not get an owner the hook refuses either (%v)", err, retireErr)
 		}
-		return fmt.Errorf("%w; it keeps an owner the hook refuses", err)
+		return fmt.Errorf("%w; the hook refuses it until it is replaced", err)
 	}
 	return nil
 }

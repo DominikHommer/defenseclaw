@@ -282,11 +282,15 @@ and only then deletes the hold. A guardian that stops, or cannot start the
 generation, in between leaves the hold or the missing file, so guarded
 calls block during an outage until a later pass starts it. If the guardian
 can neither make the hold nor delete the file, it blocks the account in the
-gateway before it writes the ledger, and logs it. The next pass finishes the work: for
+gateway, then deletes the account's own records (or sets them to 1970 and
+adds a `.deny` file), and only then writes the ledger. Only when that fails
+too does it publish the removal with nothing the hook sees, and it logs
+that. The next pass finishes the work: for
 that account it records the removal for every connector, and for another
 account it first blocks that account in the gateway. When the guardian
 cannot resolve the standalone layout (on Windows, the protected ProgramData
-registration), it finds the record folder from its own data directory.
+registration), it uses the record folder it found last, or else finds the
+folder from its own data directory.
 
 On macOS, a macOS ACL entry grants access that the folder's mode does not.
 When such an entry lets another account change the record folder, or
@@ -297,7 +301,14 @@ Before the gateway records a block in its own session store (a session
 start that found an unapproved hook, or a block carried to another agent
 process or session), it takes the session's records out of use, and it
 writes the block to them after. A gateway that stops in between leaves no
-allow, so guarded calls block during the outage, as the gateway would.
+allow, so guarded calls block during the outage, as the gateway would. If
+it cannot take the records out of use (for example, the volume is
+read-only), it deletes the `generation` file instead, so no allow of any
+account counts until the next `repair` or guardian removal starts a new
+generation. The hook also refuses every record on a read-only volume. The
+gateway records the block even while it cannot read the guardian's
+removals. When it cannot resolve the standalone layout, it uses the record
+folder it found last, or the one its data directory names.
 
 A block that cannot replace or delete a record (on Windows the account can
 hold its record open) sets the record's modification time to 1970, which the
@@ -315,7 +326,8 @@ blocks every guarded call of that account. The next guardian pass for the
 account that can write the ledger and start a new generation records the
 removal for every connector and then clears the mark. Agents that were
 running then stay blocked until they restart. A Windows gateway that cannot
-find the record folder's protected registration blocks every guarded call.
+find the record folder at all (not from the protected registration, not
+earlier, and not from its data directory) blocks every guarded call.
 A check that was running when the guardian recorded a removal reads the
 removals again before it answers, so that call is blocked too.
 
@@ -330,9 +342,13 @@ allowed changing its permissions keeps that access through the open handle.
 If the folder cannot be moved aside (a program holds it open), the step
 fails. The folder then keeps an owner the hook refuses and that no open
 handle can change: LOCAL SERVICE, or the administrator account that ran the
-step when that account lacks the "Restore files and directories" right. The
+step when that account lacks the "Restore files and directories" right.
+SYSTEM without that right can name no such owner, so the step puts a
+`DefenseClaw-HookSessions.refused-<random>` file in `C:\ProgramData\Cisco`
+instead. No handle on the record folder or the hook runtime folder reaches
+it, and the hook refuses the folder while it is there. The
 records also stay held, so guarded calls block during an outage until a
-later `repair` replaces the folder. Windows `status` and `verify` warn
+later `repair` replaces the folder and deletes the file. Windows `status` and `verify` warn
 `hook_session_records_untrusted` while the records are held, and when the
 hook would refuse the folder, a folder above it, or its generation file. If
 you fix the folder's permissions by hand, run `repair` afterwards, which

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -139,17 +140,24 @@ func (a *APIServer) recheckForeignHookSessionAllow(places foreignHookSessionPlac
 
 // foreignHookSessionPublishRoot is the folder of the protected session
 // records on a standalone host (managed.StandaloneLayout.HookSessionDir),
+// foreignHookSessionRootForDataDir the same folder named by the gateway's
+// data directory (managed.StandaloneHookSessionDirForDataDir),
 // foreignHookSessionGeneration reads its generation
 // (enterprisepolicy.PublishedSessionGeneration),
-// foreignHookSessionPublish writes the protected record and
-// foreignHookSessionWithdraw takes it out of use (replaceable in
-// tests, whose folders cannot carry the per-account access list or a
-// root-owned generation file).
+// foreignHookSessionPublish writes the protected record,
+// foreignHookSessionWithdraw takes it out of use and
+// foreignHookSessionCloseGeneration removes the generation file when that
+// fails (replaceable in tests, whose folders cannot carry the per-account
+// access list or a root-owned generation file).
 var (
-	foreignHookSessionPublishRoot = standaloneHookSessionDir
-	foreignHookSessionGeneration  = enterprisepolicy.PublishedSessionGeneration
-	foreignHookSessionPublish     = enterprisepolicy.PublishForeignHookSessionDecision
-	foreignHookSessionWithdraw    = enterprisepolicy.WithdrawPublishedForeignHookSession
+	foreignHookSessionPublishRoot    = standaloneHookSessionDir
+	foreignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
+		return managed.StandaloneHookSessionDirForDataDir(runtime.GOOS, dataDir)
+	}
+	foreignHookSessionGeneration      = enterprisepolicy.PublishedSessionGeneration
+	foreignHookSessionPublish         = enterprisepolicy.PublishForeignHookSessionDecision
+	foreignHookSessionWithdraw        = enterprisepolicy.WithdrawPublishedForeignHookSession
+	foreignHookSessionCloseGeneration = enterprisepolicy.ClosePublishedSessionGeneration
 )
 
 // foreignHookSessionPlaces are where one exchange reads the guardian's
@@ -158,9 +166,9 @@ var (
 // directory, which holds each account's private session store and so its
 // pending mark (enterprisepolicy.ForeignHookRemovalPending), and the
 // protected session record root ("" where this gateway publishes none).
-// rootErr is a record root a standalone gateway could not locate: the
-// exchange is denied, because the gateway can then not publish its answer
-// (GAP-0352 review).
+// rootErr is a record root a standalone gateway could not locate at all
+// (foreignHookSessionRecordRoot): the exchange is denied, because the
+// gateway can then not publish its answer (GAP-0352 review).
 type foreignHookSessionPlaces struct {
 	removalsDir string
 	dataDir     string
@@ -170,7 +178,7 @@ type foreignHookSessionPlaces struct {
 
 func (a *APIServer) foreignHookSessionPlaces(dataDir string) foreignHookSessionPlaces {
 	places := foreignHookSessionPlaces{removalsDir: managed.HookGuardianAuthorizationDir(dataDir), dataDir: dataDir}
-	root, err := a.foreignHookSessionRecordRoot()
+	root, err := a.foreignHookSessionRecordRoot(dataDir)
 	if err != nil {
 		places.rootErr = fmt.Errorf("the protected foreign-hook session record folder cannot be located: %w", err)
 	} else {
@@ -212,13 +220,31 @@ func (a *APIServer) readForeignHookRemovals(places foreignHookSessionPlaces, ide
 
 // foreignHookSessionRecordRoot is the protected session record folder of a
 // standalone gateway, or "" for Secure Client and per-user gateways, which
-// have none.
-func (a *APIServer) foreignHookSessionRecordRoot() (string, error) {
+// have none. A lookup of the layout that fails (on Windows, the protected
+// ProgramData registration cannot be read for a moment) falls back to the
+// folder this gateway located last, and else to the one its data directory
+// names (dataDir), so that an exchange still takes the records a block
+// overrules out of use where the hook reads them (GAP-0352, 1.0.4 guard
+// loop round 3). Only when none names a folder is it an error.
+func (a *APIServer) foreignHookSessionRecordRoot(dataDir string) (string, error) {
 	cfg := a.scannerCfg
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
 		return "", nil
 	}
-	return foreignHookSessionPublishRoot()
+	root, err := foreignHookSessionPublishRoot()
+	if err == nil {
+		if root = strings.TrimSpace(root); root != "" {
+			a.foreignHookSessionRoot.Store(&root)
+		}
+		return root, nil
+	}
+	if last := a.foreignHookSessionRoot.Load(); last != nil {
+		return *last, nil
+	}
+	if fallback, ok := foreignHookSessionRootForDataDir(dataDir); ok {
+		return fallback, nil
+	}
+	return "", err
 }
 
 // publishForeignHookSessionDecision writes the answer of one session
@@ -233,22 +259,41 @@ func publishForeignHookSessionDecision(root, identity string, key enterprisepoli
 	if err := foreignHookSessionPublish(root, identity, key, decision, generation, time.Now()); err != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record for %s was not written (the hook blocks during a gateway outage): %v\n",
 			clipForeignHookAuditField(key.Connector, 64), err)
+		if decision.Deny {
+			// The publication revoked the record it could not replace; when
+			// that failed too, the earlier allow must still not count.
+			withdrawForeignHookSessionDecision(root, identity, key)
+		}
 	}
 }
 
 // withdrawForeignHookSessionDecision takes the caller's protected session
-// records under root out of use before the exchange records a block
-// (enterprisepolicy.WithdrawPublishedForeignHookSession). A failure is
-// logged: the block is still recorded and published, and the publication
-// revokes the records again when it cannot write the block.
+// records under root out of use before the exchange records a block, and
+// after a block that could not be published
+// (enterprisepolicy.WithdrawPublishedForeignHookSession). A withdrawal that
+// fails does not count as one: the gateway then removes the record
+// folder's generation file (enterprisepolicy.ClosePublishedSessionGeneration),
+// which ends every allow there, of every account, until the next lifecycle
+// run or guardian pass starts a new generation (GAP-0352, 1.0.4 guard loop
+// round 3). When that fails too (a read-only volume, which the hook
+// refuses as well, or Windows, where the gateway may not remove the file),
+// it is logged. The block is recorded either way.
 func withdrawForeignHookSessionDecision(root, identity string, key enterprisepolicy.SessionKey) {
 	if root == "" {
 		return
 	}
-	if err := foreignHookSessionWithdraw(root, identity, key); err != nil {
-		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record for %s could not be withdrawn before a block: %v\n",
-			clipForeignHookAuditField(key.Connector, 64), err)
+	err := foreignHookSessionWithdraw(root, identity, key)
+	if err == nil {
+		return
 	}
+	connectorName := clipForeignHookAuditField(key.Connector, 64)
+	if closeErr := foreignHookSessionCloseGeneration(root); closeErr != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record for %s could not be withdrawn before a block (%v), and the record generation could not be closed either: %v\n",
+			connectorName, err, closeErr)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record for %s could not be withdrawn before a block (%v), so the record generation was closed: guarded calls of every account block during a gateway outage until the next DefenseClaw repair or hook guardian removal\n",
+		connectorName, err)
 }
 
 // foreignHookAuditReasonLimit bounds the reason an audit row repeats, and

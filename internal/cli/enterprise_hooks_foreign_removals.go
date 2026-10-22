@@ -80,11 +80,15 @@ func enterpriseForeignHookAccountID(sid string, uid int) string {
 // (MarkForeignHookRemovalPending), then bumps, then releases the hold, so a
 // removed account that gets no more passes does not hold every account.
 //
+// When neither can be put in place, the account is held closed in the
+// gateway and then its records are revoked
+// (enterprisepolicy.RevokePublishedSessionAccount) before the ledger.
+//
 // The record folder is located from the standalone layout, or else from
-// the data directory the guardian runs with
-// (managed.StandaloneHookSessionDirForDataDir), so a failed lookup of the
-// layout (on Windows, of the protected ProgramData registration) still
-// holds and bumps the folder the hook reads.
+// the folder this guardian located last, or else from the data directory
+// the guardian runs with (managed.StandaloneHookSessionDirForDataDir), so a
+// failed lookup of the layout (on Windows, of the protected ProgramData
+// registration) still holds and bumps the folder the hook reads.
 //
 // The account is held closed (enterprisepolicy.MarkForeignHookRemovalPending:
 // the gateway denies every guarded call of the account) when the ledger
@@ -174,13 +178,21 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 		var withdrawErr error
 		floor, withdrawErr = enterpriseForeignHookWithdrawSessionGeneration(root)
 		if holdErr != nil && withdrawErr != nil {
-			// Nothing the hook sees stays closed if this pass stops before
-			// its bump. The account is held closed in the gateway before
-			// the ledger is written, so an exchange that reads the
-			// generation the withdrawal may have bumped instead is denied;
-			// the removal is still published.
+			// Neither stays closed if this pass stops before its bump. The
+			// account is held closed in the gateway first, so an exchange
+			// that reads the generation the withdrawal may have bumped
+			// instead is denied, and an allow the gateway publishes after
+			// the revocation below is denied again by its recheck. Then
+			// the account's own records are revoked where the hook reads
+			// them (1.0.4 guard loop round 3). Only when that fails too is
+			// the removal published with nothing the hook sees; the pass
+			// says so.
 			err = errors.Join(err, holdErr, withdrawErr)
-			hold("can close the protected session records where the hook looks; the removal is published anyway")
+			hold("can hold the protected session records or withdraw their generation")
+			if revokeErr := enterpriseForeignHookRevokeSessionRecords(root, identity); revokeErr != nil {
+				err = errors.Join(err, fmt.Errorf("revoke the account's protected session records: %w; the removal is published anyway, "+
+					"and an allow written before this pass may pass during a gateway outage until a later pass closes the records", revokeErr))
+			}
 		} else if holdErr != nil {
 			warn = errors.Join(warn, holdErr)
 		}
@@ -310,15 +322,24 @@ func writeEnterpriseForeignHookRemovalLedger(stderr io.Writer, added []enterpris
 
 // enterpriseForeignHookSessionRoot is the folder of the protected session
 // records (managed.StandaloneLayout.HookSessionDir): from the standalone
-// layout, or else from the guardian's data directory
+// layout, or else the folder the layout named last in this process (the
+// Windows guardian is a service, so a lookup that fails for a moment does
+// not leave a removal it cannot close where the hook looks, 1.0.4 guard
+// loop round 3), or else from the guardian's data directory
 // (managed.StandaloneHookSessionDirForDataDir), which names the same folder
-// on a standalone host. Only when neither names it is it an error: the
+// on a standalone host. Only when none names it is it an error: the
 // guardian then cannot hold the records or bump their generation, so it
 // holds the account closed in the gateway (replaceable in tests).
 var enterpriseForeignHookSessionRoot = func() (string, error) {
 	root, err := enterpriseForeignHookSessionLayoutRoot()
+	enterpriseForeignHookSessionRootSeen.Lock()
+	defer enterpriseForeignHookSessionRootSeen.Unlock()
 	if err == nil {
+		enterpriseForeignHookSessionRootSeen.root = root
 		return root, nil
+	}
+	if seen := enterpriseForeignHookSessionRootSeen.root; seen != "" {
+		return seen, nil
 	}
 	if cfg != nil {
 		if fallback, ok := enterpriseForeignHookSessionRootForDataDir(cfg.DataDir); ok {
@@ -326,6 +347,13 @@ var enterpriseForeignHookSessionRoot = func() (string, error) {
 		}
 	}
 	return "", err
+}
+
+// enterpriseForeignHookSessionRootSeen is the record folder the standalone
+// layout named last in this process (enterpriseForeignHookSessionRoot).
+var enterpriseForeignHookSessionRootSeen struct {
+	sync.Mutex
+	root string
 }
 
 // enterpriseForeignHookSessionLayoutRoot is the record folder of the
@@ -351,12 +379,15 @@ var enterpriseForeignHookSessionRootForDataDir = func(dataDir string) (string, b
 // enterpriseForeignHookHoldSessionRecords holds the protected session
 // records under root for an account and
 // enterpriseForeignHookWithdrawSessionGeneration withdraws their generation,
-// both before a pass publishes anything, and
-// enterpriseForeignHookBumpSessionGeneration starts the next generation past
-// floor after it published (replaceable in tests).
+// both before a pass publishes anything,
+// enterpriseForeignHookRevokeSessionRecords revokes the account's records
+// when neither took, and enterpriseForeignHookBumpSessionGeneration starts
+// the next generation past floor after it published (replaceable in
+// tests).
 var (
 	enterpriseForeignHookHoldSessionRecords        = enterprisepolicy.HoldPublishedSessionRemoval
 	enterpriseForeignHookWithdrawSessionGeneration = enterprisepolicy.WithdrawPublishedSessionGeneration
+	enterpriseForeignHookRevokeSessionRecords      = enterprisepolicy.RevokePublishedSessionAccount
 	enterpriseForeignHookBumpSessionGeneration     = enterprisepolicy.BumpPublishedSessionGenerationPast
 )
 

@@ -18,8 +18,32 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
+
+// removeWindowsHookSessionHoldFolderHolds deletes every hold of root in the
+// hold folder, as an account that kept a handle on the hook runtime folder
+// could: a refusal next to the record folder is out of its reach.
+func removeWindowsHookSessionHoldFolderHolds(t *testing.T, root string) {
+	t.Helper()
+	dir, ok := enterprisepolicy.PublishedSessionHoldDir(root)
+	if !ok {
+		t.Fatalf("no hold folder for %s", root)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := strings.ToLower(managed.HookSessionHoldPrefix(root))
+	for _, entry := range entries {
+		if strings.HasPrefix(strings.ToLower(entry.Name()), prefix) {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
 
 // GAP-0352: the protected session record folder is owned by Administrators;
 // SYSTEM and Administrators have full control, the gateway service modify,
@@ -505,15 +529,32 @@ func TestWindowsHookSessionRepairWithARecordHeldOpen(t *testing.T) {
 // with the hold deleted and the trusted DACL written back, the root is
 // still refused. Once the handle is gone, the next repair replaces the root
 // and removes the hold, and the old allow proves nothing.
+//
+// 1.0.4 guard loop round 3: SYSTEM without the privilege can name only
+// itself or Administrators as an owner, both of which the hook trusts, so
+// the root kept its Administrators owner and the hold was its only guard.
+// It is now refused by a file next to it, which the account's handles do
+// not reach: with the hold gone and a trusted DACL written back, the old
+// allow still proves nothing until a repair replaced the root.
 func TestWindowsHookSessionRepairWithoutTheRestorePrivilegeHoldsTheRecords(t *testing.T) {
-	for name, drift := range map[string]bool{"drifted": true, "looks trusted": false} {
-		t.Run(name, func(t *testing.T) {
-			root, self, check, _ := windowsHookSessionReplacementTestRoot(t, drift)
+	for _, tc := range []struct {
+		name          string
+		drift, system bool
+	}{{"drifted", true, false}, {"looks trusted", false, false}, {"SYSTEM", false, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, self, check, _ := windowsHookSessionReplacementTestRoot(t, tc.drift)
 			previous := windowsHookSessionOwnerRestorePrivilege
 			windowsHookSessionOwnerRestorePrivilege = func(func() error) error {
 				return errors.New("a required privilege is not held by the client")
 			}
 			t.Cleanup(func() { windowsHookSessionOwnerRestorePrivilege = previous })
+			if tc.system {
+				previousAccount := windowsHookSessionLifecycleAccount
+				windowsHookSessionLifecycleAccount = func() (*windows.SID, error) {
+					return windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+				}
+				t.Cleanup(func() { windowsHookSessionLifecycleAccount = previousAccount })
+			}
 			pointer, err := winpath.UTF16Ptr(root)
 			if err != nil {
 				t.Fatal(err)
@@ -549,17 +590,27 @@ func TestWindowsHookSessionRepairWithoutTheRestorePrivilegeHoldsTheRecords(t *te
 			}
 			// The account deletes the hold through a handle it kept on the
 			// hook runtime folder.
-			if err := enterprisepolicy.RemovePublishedSessionHolds(root); err != nil {
-				t.Fatal(err)
-			}
-			if trusted, err := windowsPathOwnedByAdministrators(root); err != nil || trusted {
-				t.Fatalf("a root the repair could not replace must keep an owner the hook refuses, hold or not: %v %v", trusted, err)
-			}
-			if owner := windowsHookSessionTestOwner(t, root); !windowsHookSessionOwnerRefused(owner) {
-				t.Fatalf("the hook must refuse the owner %s of a root the repair could not replace", owner)
-			}
-			if problem := windowsHookSessionRootProblem(); !strings.Contains(problem, "not owned by Administrators or SYSTEM") {
-				t.Fatalf("status must report the refused root: %q", problem)
+			removeWindowsHookSessionHoldFolderHolds(t, root)
+			if tc.system {
+				if !enterprisepolicy.PublishedSessionHeld(root) {
+					t.Fatal("the refusal next to a root the repair could not refuse otherwise must still hold the records")
+				}
+				if err := check(); !errors.Is(err, enterprisepolicy.ErrPublishedSessionUnavailable) {
+					t.Fatalf("with the hold gone and a trusted DACL back the old allow must still prove nothing: %v", err)
+				}
+				if problem := windowsHookSessionRootProblem(); !strings.Contains(problem, ".refused-") {
+					t.Fatalf("status must name the refusal: %q", problem)
+				}
+			} else {
+				if trusted, err := windowsPathOwnedByAdministrators(root); err != nil || trusted {
+					t.Fatalf("a root the repair could not replace must keep an owner the hook refuses, hold or not: %v %v", trusted, err)
+				}
+				if owner := windowsHookSessionTestOwner(t, root); !windowsHookSessionOwnerRefused(owner) {
+					t.Fatalf("the hook must refuse the owner %s of a root the repair could not replace", owner)
+				}
+				if problem := windowsHookSessionRootProblem(); !strings.Contains(problem, "not owned by Administrators or SYSTEM") {
+					t.Fatalf("status must report the refused root: %q", problem)
+				}
 			}
 			closeHandle()
 			windowsHookSessionOwnerRestorePrivilege = previous

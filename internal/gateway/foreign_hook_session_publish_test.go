@@ -570,3 +570,138 @@ func TestForeignHookSessionGatewayWithdrawsTheProtectedAllowBeforeItRecordsABloc
 		t.Fatalf("the block is published: %+v", published)
 	}
 }
+
+// foreignHookPublishTestBlock is a session start of process in session that
+// found an unapproved project hook.
+func foreignHookPublishTestBlock(session, process string) map[string]any {
+	return map[string]any{"key": map[string]any{"connector": "claudecode", "session": session, "process": process}, "session_start": true,
+		"decision": map[string]any{"deny": true, "reason": "enterprise_foreign_hook_blocked: project hook",
+			"findings": []map[string]any{{"connector": "claudecode", "scope": "project", "path": "/repo/.claude/settings.json", "digest": "abcd"}}}}
+}
+
+// Review P1 (GAP-0352, 1.0.4 guard loop round 3): a gateway whose lookup
+// of the record folder failed (on Windows, the protected ProgramData
+// registration) denied the session start that found an unapproved hook
+// before it recorded the block, and withdrew nothing: the agent process's
+// earlier allow stayed where the hook reads it, and once the lookup
+// recovered the gateway allowed the process too. The gateway now falls back
+// to the folder it located last, or else to the one its data directory
+// names, withdraws the records there before it records the block, and
+// publishes the block there; the process stays blocked once the lookup
+// recovers.
+func TestForeignHookSessionGatewayRecordsABlockWhileItsLayoutLookupFails(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		located bool
+	}{{"the folder it located last", true}, {"the folder its data directory names", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			var writes []foreignHookPublished
+			server := newForeignHookPublishTestServer(t, root, func(r, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, generation string, _ time.Time) error {
+				writes = append(writes, foreignHookPublished{r, identity, key, decision.Deny, generation})
+				return nil
+			})
+			var withdrawn []string
+			previousWithdraw, previousDataDir := foreignHookSessionWithdraw, foreignHookSessionRootForDataDir
+			t.Cleanup(func() {
+				foreignHookSessionWithdraw, foreignHookSessionRootForDataDir = previousWithdraw, previousDataDir
+			})
+			foreignHookSessionWithdraw = func(r, _ string, _ enterprisepolicy.SessionKey) error {
+				withdrawn = append(withdrawn, r)
+				return nil
+			}
+			foreignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
+				return root, !tc.located && dataDir == server.dataDir
+			}
+			process := runtime.GOOS + ":b:1:500"
+			clean := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": process}, "decision": map[string]any{"deny": false}}
+			if tc.located {
+				if got := server.call(server.aliceToken, clean); got.Deny {
+					t.Fatalf("a clean exchange is allowed: %+v", got)
+				}
+			}
+			foreignHookSessionPublishRoot = func() (string, error) {
+				return "", errors.New("the protected ProgramData registration cannot be read")
+			}
+			if got := server.call(server.aliceToken, foreignHookPublishTestBlock("s-2", process)); !got.Deny {
+				t.Fatalf("the session start that found the hook is blocked: %+v", got)
+			}
+			if len(withdrawn) != 1 || withdrawn[0] != root {
+				t.Fatalf("the records the block overrules must be withdrawn where the hook reads them: %v", withdrawn)
+			}
+			if len(writes) == 0 || writes[len(writes)-1].root != root || !writes[len(writes)-1].deny {
+				t.Fatalf("the block is published where the hook reads it: %+v", writes)
+			}
+			foreignHookSessionPublishRoot = func() (string, error) { return root, nil }
+			if got := server.call(server.aliceToken, clean); !got.Deny {
+				t.Fatalf("the agent process the block recorded stays blocked once the lookup recovers: %+v", got)
+			}
+		})
+	}
+}
+
+// Review P1 (GAP-0352, 1.0.4 guard loop round 3): a withdrawal before a
+// block that fails (a read-only record volume: deletion, expiry and deny
+// marker all refused) was only logged, and the earlier allow stayed usable
+// during an outage. The gateway now closes the record generation instead,
+// so no allow there proves anything, and the answers it stamps until the
+// next bump carry no generation. A block whose publication fails withdraws
+// again. When the generation cannot be closed either, the block is still
+// recorded and the call denied.
+func TestForeignHookSessionGatewayClosesTheGenerationWhenAWithdrawalFails(t *testing.T) {
+	root := t.TempDir()
+	var writes []foreignHookPublished
+	var publishErr error
+	server := newForeignHookPublishTestServer(t, root, func(r, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, generation string, _ time.Time) error {
+		writes = append(writes, foreignHookPublished{r, identity, key, decision.Deny, generation})
+		return publishErr
+	})
+	withdrawals, closes := 0, 0
+	var closeErr error
+	previousWithdraw, previousClose := foreignHookSessionWithdraw, foreignHookSessionCloseGeneration
+	t.Cleanup(func() {
+		foreignHookSessionWithdraw, foreignHookSessionCloseGeneration = previousWithdraw, previousClose
+	})
+	foreignHookSessionWithdraw = func(string, string, enterprisepolicy.SessionKey) error {
+		withdrawals++
+		return errors.New("read-only file system")
+	}
+	foreignHookSessionCloseGeneration = func(r string) error {
+		closes++
+		if closeErr != nil {
+			return closeErr
+		}
+		return previousClose(r)
+	}
+	process := runtime.GOOS + ":b:1:500"
+	clean := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": process}, "decision": map[string]any{"deny": false}}
+	if got := server.call(server.aliceToken, clean); got.Deny || len(writes) != 1 || writes[0].generation == "" {
+		t.Fatalf("a clean exchange is allowed and stamped with the generation: %+v %+v", got, writes)
+	}
+	if got := server.call(server.aliceToken, foreignHookPublishTestBlock("s-2", process)); !got.Deny {
+		t.Fatalf("the session start that found the hook is blocked: %+v", got)
+	}
+	if withdrawals != 1 || closes != 1 || server.generation() != "" {
+		t.Fatalf("a withdrawal that fails must close the generation (withdrawals %d, closes %d, generation %q)", withdrawals, closes, server.generation())
+	}
+	other := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-3", "process": runtime.GOOS + ":b:1:600"}, "decision": map[string]any{"deny": false}}
+	if got := server.call(server.bobToken, other); got.Deny || writes[len(writes)-1].generation != "" {
+		t.Fatalf("until the next bump an allow carries no generation: %+v %+v", got, writes[len(writes)-1])
+	}
+	if got := server.call(server.aliceToken, clean); !got.Deny || withdrawals != 2 {
+		t.Fatalf("the block is carried to the process's other session after a withdrawal (%d): %+v", withdrawals, got)
+	}
+	publishErr = errors.New("no space left on device")
+	if got := server.call(server.aliceToken, clean); !got.Deny || withdrawals != 3 {
+		t.Fatalf("a block whose publication fails withdraws again (%d): %+v", withdrawals, got)
+	}
+	publishErr = nil
+	server.bump()
+	closeErr = errors.New("access is denied")
+	if got := server.call(server.aliceToken, foreignHookPublishTestBlock("s-4", runtime.GOOS+":b:1:700")); !got.Deny {
+		t.Fatalf("a block is recorded when nothing can be closed: %+v", got)
+	}
+	if got := server.call(server.aliceToken, map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-5", "process": runtime.GOOS + ":b:1:700"}, "decision": map[string]any{"deny": false}}); !got.Deny {
+		t.Fatalf("the process stays blocked in the gateway: %+v", got)
+	}
+}

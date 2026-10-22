@@ -68,6 +68,13 @@ func createPublishedSessionGeneration(path string) error {
 // gateway service can change.
 func publishedSessionHoldDir(root string) string { return filepath.Dir(root) }
 
+// publishedSessionRootRefusals and releasePublishedSessionRootRefusals have
+// nothing to do on Linux and macOS: root can always give a record folder it
+// cannot replace an owner the hook refuses, so no refusal is ever made.
+func publishedSessionRootRefusals(string) ([]string, error) { return nil, nil }
+
+func releasePublishedSessionRootRefusals(string) error { return nil }
+
 // createPublishedSessionHold creates the hold file at path with text: 0644,
 // owned by this process (root). The hook only checks that something is
 // there.

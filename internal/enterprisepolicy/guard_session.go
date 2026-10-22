@@ -224,9 +224,19 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	if removed := ApplyForeignHookRemovals(decision, key, update.Removals, update.RemovalsErr, now); update.RemovalsErr != nil || removed.Deny != decision.Deny {
+	removed := ApplyForeignHookRemovals(decision, key, update.Removals, update.RemovalsErr, now)
+	if update.RemovalsErr == nil && removed.Deny != decision.Deny {
 		return removed
 	}
+	// Removals that cannot be read (a ledger that fails its check, the
+	// account's pending mark, a record folder the gateway cannot locate)
+	// deny the call, but they do not skip the session state: a session
+	// start that found an unapproved hook still records its block, after
+	// BeforeBlock took the records it overrules out of use, and a block is
+	// still carried to the other key. Before, the block was never recorded,
+	// so an earlier allow outlived it once the removals could be read again
+	// (GAP-0352, 1.0.4 guard loop round 3). Nothing else is written.
+	removalsDeny := update.RemovalsErr != nil
 	type loaded struct {
 		path   string
 		record SessionRecord
@@ -367,6 +377,9 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		return result
 	}
 
+	if removalsDeny {
+		return removed
+	}
 	if process.path != "" && !process.exists {
 		if !write(process.path, fresh(process)) {
 			return sessionUnavailableDecision(decision)

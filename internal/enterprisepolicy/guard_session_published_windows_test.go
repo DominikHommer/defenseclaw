@@ -279,3 +279,71 @@ func TestPublishedSessionHoldReplacesAFileOthersMayDelete(t *testing.T) {
 		t.Fatalf("the new hold must be closed to everyone else: %s", sddl)
 	}
 }
+
+// Review P2 (GAP-0352, 1.0.4 guard loop round 3): a lifecycle that can give
+// a record folder it cannot replace no owner the hook refuses (SYSTEM
+// without SeRestorePrivilege) refuses it with a file next to it, outside
+// the record folder and the hook runtime folder. While it is there the
+// records are held, whatever is in the hold folder; a second refusal keeps
+// the first; standard users may only read its attributes and owner; a file
+// with the refusal's name that others may change is ignored; and the
+// release after a replacement removes it.
+func TestPublishedSessionRootRefusalHoldsUntilTheRelease(t *testing.T) {
+	root := filepath.Join(t.TempDir(), managed.StandaloneWindowsHookSessionDirName)
+	publishedSessionTestHoldDir(t, root)
+	if PublishedSessionHeld(root) {
+		t.Fatal("nothing holds the records yet")
+	}
+	parent := filepath.Dir(root)
+	junk := filepath.Join(parent, filepath.Base(root)+publishedSessionRefusalInfix+"junk")
+	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attributes := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
+	pointer, err := winpath.UTF16Ptr(junk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE, attributes,
+		windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = windows.CloseHandle(handle)
+	if PublishedSessionHeld(root) {
+		t.Fatal("a file everyone may change is no refusal")
+	}
+	if err := RefusePublishedSessionRoot(root); err != nil {
+		t.Fatal(err)
+	}
+	refusals, err := publishedSessionRootRefusals(root)
+	if err != nil || len(refusals) != 1 || !strings.EqualFold(filepath.Dir(refusals[0]), parent) {
+		t.Fatalf("one refusal next to the record folder: %v %v", refusals, err)
+	}
+	if !PublishedSessionHeld(root) {
+		t.Fatal("the refusal holds the records")
+	}
+	if holds, err := os.ReadDir(publishedSessionHoldDir(root)); err != nil || len(holds) != 0 {
+		t.Fatalf("the refusal is not in the hold folder: %v %v", holds, err)
+	}
+	current, err := windows.GetNamedSecurityInfo(refusals[0], windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sddl := current.String(); !strings.Contains(sddl, "D:P") || strings.Contains(sddl, ";WD)") || strings.Contains(sddl, "FA;;;BU)") {
+		t.Fatalf("standard users may only read the refusal's attributes and owner: %s", sddl)
+	}
+	if err := RefusePublishedSessionRoot(root); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := publishedSessionRootRefusals(root); err != nil || len(again) != 1 {
+		t.Fatalf("a refusal in place is kept: %v %v", again, err)
+	}
+	if err := ReleasePublishedSessionRecords(root); err != nil {
+		t.Fatal(err)
+	}
+	if PublishedSessionHeld(root) {
+		t.Fatal("the release after a replacement removes the refusal")
+	}
+}

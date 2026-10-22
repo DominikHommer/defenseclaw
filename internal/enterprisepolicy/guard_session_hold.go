@@ -150,12 +150,16 @@ func HoldPublishedSessionRecords(root string) error {
 }
 
 // ReleasePublishedSessionRecords removes the lifecycle's hold of the record
-// folder root, once the folder was replaced or closed and its generation
-// bumped. The guardian's holds stay.
+// folder root, and on Windows its refusals of the folder, once the folder
+// was replaced or closed and its generation bumped. The guardian's holds
+// stay.
 func ReleasePublishedSessionRecords(root string) error {
 	path, ok := PublishedSessionHoldPath(root)
 	if !ok {
 		return fmt.Errorf("no protected session record folder %q", root)
+	}
+	if err := releasePublishedSessionRootRefusals(root); err != nil {
+		return err
 	}
 	return releasePublishedSessionAt(path)
 }
@@ -246,20 +250,18 @@ func publishedSessionRemovalHoldIdentity(path string) string {
 }
 
 // PublishedSessionHolds lists every hold of the record folder root in
-// place, the lifecycle's and the guardian's. A missing hold folder holds
-// nothing: on Windows the hook then finds no machine policy summary, and on
-// Linux and macOS no record folder, so neither proves an allow. A folder
-// that cannot be listed is an error.
+// place, the lifecycle's and the guardian's, and on Windows the lifecycle's
+// refusals of the folder (RefusePublishedSessionRoot). A missing hold
+// folder holds nothing: on Windows the hook then finds no machine policy
+// summary, and on Linux and macOS no record folder, so neither proves an
+// allow. A folder that cannot be listed is an error.
 func PublishedSessionHolds(root string) ([]string, error) {
 	dir, prefix, ok := publishedSessionHoldPlace(root)
 	if !ok {
 		return nil, fmt.Errorf("no protected session record folder %q", root)
 	}
 	names, err := publishedSessionHoldList(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
 	var holds []string
@@ -268,7 +270,11 @@ func PublishedSessionHolds(root string) ([]string, error) {
 			holds = append(holds, filepath.Join(dir, name))
 		}
 	}
-	return holds, nil
+	refusals, err := publishedSessionRootRefusals(root)
+	if err != nil {
+		return nil, err
+	}
+	return append(holds, refusals...), nil
 }
 
 // RemovePublishedSessionHolds removes every hold of the record folder root,

@@ -96,7 +96,10 @@ import (
 // the agent process and the session out of use
 // (WithdrawPublishedForeignHookSession), so a gateway that stops before it
 // published the block leaves no allow the block overrules (1.0.4 guard
-// loop round 2). When the
+// loop round 2). When it cannot take them out of use, it removes the
+// generation file instead (ClosePublishedSessionGeneration), and the hook
+// refuses every record on a volume that is read-only, where neither could
+// be done (1.0.4 guard loop round 3). When the
 // record can be neither replaced nor deleted (on Windows the account may
 // hold it open for reading without delete sharing), revokePublishedSessionRecord
 // overrides it twice, so that no single write decides: it expires the
@@ -162,6 +165,10 @@ var (
 // (checkPublishedSessionGenerationOwner; replaceable in tests, which do not
 // run as root).
 var publishedSessionGenerationOwner = checkPublishedSessionGenerationOwner
+
+// publishedSessionVolumeReadOnly reports whether the volume of a path is
+// mounted read-only (replaceable in tests, which cannot mount one).
+var publishedSessionVolumeReadOnly = publishedSessionVolumeIsReadOnly
 
 // ErrPublishedSessionUnavailable is a protected session record that does
 // not prove the session unblocked: missing, unreadable, untrusted, corrupt,
@@ -504,17 +511,81 @@ func WithdrawPublishedSessionGeneration(root string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("no protected session record folder %q", root)
 	}
 	floor := PublishedSessionGenerationFloor(root)
-	err := publishedSessionRemove(path)
-	if err == nil || errors.Is(err, fs.ErrNotExist) {
-		if _, statErr := os.Lstat(path); errors.Is(statErr, fs.ErrNotExist) {
-			return floor, nil
-		}
-		err = fmt.Errorf("%s is still there", path)
+	err := closePublishedSessionGeneration(path)
+	if err == nil {
+		return floor, nil
 	}
 	if bumpErr := BumpPublishedSessionGenerationPast(root, floor); bumpErr != nil {
 		return floor, fmt.Errorf("withdraw the generation: %w; bump it: %v", err, bumpErr)
 	}
 	return floor, fmt.Errorf("withdraw the generation: %w; it was bumped instead", err)
+}
+
+// ClosePublishedSessionGeneration removes the generation file of the record
+// folder root without starting the next generation: no allow proves
+// anything during an outage until a lifecycle run or a guardian pass bumps
+// it again. The gateway calls it when it cannot take out of use the
+// protected records a block it is about to record overrules
+// (WithdrawPublishedForeignHookSession): the generation file is the one
+// thing the hook checks that those records do not decide, so a failed
+// withdrawal does not leave their allow honored (GAP-0352, 1.0.4 guard loop
+// round 3). On Linux and macOS the gateway service owns the record folder,
+// so it may remove the root-owned file; on Windows only SYSTEM and
+// Administrators may, and this fails.
+func ClosePublishedSessionGeneration(root string) error {
+	path, ok := PublishedSessionGenerationPath(root)
+	if !ok {
+		return fmt.Errorf("no protected session record folder %q", root)
+	}
+	return closePublishedSessionGeneration(path)
+}
+
+// closePublishedSessionGeneration removes the generation file at path and
+// checks that it is gone.
+func closePublishedSessionGeneration(path string) error {
+	if err := publishedSessionRemove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%s is still there", path)
+	}
+	return nil
+}
+
+// RevokePublishedSessionAccount takes every protected session record of
+// identity under root out of use (revokePublishedSessionRecord: deleted, or
+// else expired and overruled by a deny marker), with no hold and no
+// generation change. The guardian calls it before it publishes a removal
+// for which it could neither hold the records nor withdraw their
+// generation, after it held the account closed in the gateway
+// (MarkForeignHookRemovalPending), so that an allow the gateway publishes
+// after the revocation is denied again by the gateway's recheck (GAP-0352,
+// 1.0.4 guard loop round 3). An account with no record folder has nothing
+// to revoke. Deny markers and a writer's temporary files are left alone.
+func RevokePublishedSessionAccount(root, identity string) error {
+	dir, ok := PublishedSessionIdentityDir(root, identity)
+	if !ok {
+		return fmt.Errorf("no protected session record folder %q or account %q", root, identity)
+	}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	marker := PublishedSessionRecord{Version: publishedSessionVersion, Blocked: true, At: time.Now().UTC().Format(time.RFC3339)}
+	var errs []error
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		if err := revokePublishedSessionRecord(filepath.Join(dir, name), marker); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // BumpPublishedSessionGeneration starts a new generation of the record
@@ -680,6 +751,13 @@ func CheckPublishedForeignHookSession(root, identity string, key SessionKey, dec
 	}
 	if !proven {
 		return decision, ErrPublishedSessionUnavailable
+	}
+	// A record folder on a volume that is read-only now proves nothing: the
+	// gateway could not have taken out of use there an allow that a block
+	// it recorded since overrules, nor closed the generation (1.0.4 guard
+	// loop round 3).
+	if readOnly, err := publishedSessionVolumeReadOnly(root); err != nil || readOnly {
+		return decision, fmt.Errorf("%w: the record folder's volume is read-only, or its state cannot be read: %v", ErrPublishedSessionUnavailable, err)
 	}
 	// Every record read must still be the same file, and fresh: a
 	// revocation that could not delete a record expired it before it
