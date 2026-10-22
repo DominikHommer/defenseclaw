@@ -41,6 +41,33 @@ import (
 // function and has no here-document, the twin analysis is complete, and
 // every command in it is a plain POSIX process with a static argv.
 func ShortCircuitListReduction(input Input, facts Facts) (view Facts, ok bool) {
+	return sequenceReduction(input, facts, false)
+}
+
+// CompoundCommandReduction returns a complete view of a partial POSIX action
+// whose simple commands sit in compound commands, read as if each of them
+// runs alone: a subshell, a { } group, the bodies and conditions of if,
+// while, until, for and case, a negated or background statement, and && or ||
+// lists. A block stops the whole tool call before any of it runs, so a rule
+// that blocks `rm -rf /` also blocks `(rm -rf /)` and
+// `if true; then rm -rf /; fi`. facts must be Analyze(input).
+//
+// The view is the analysis of a twin of the command in which each simple
+// command is a statement of its own. A subshell or group no longer scopes the
+// directory or variables of its commands there, and a loop runs its body
+// once, so callers may count only a match on the view, for an expression that
+// more commands cannot turn off.
+//
+// The view is unavailable when a compound command carries a redirect, a for
+// or case word runs a command, a statement is a coprocess, the command
+// defines a function or has a here-document, the twin analysis is not
+// complete, or a command in it is not a plain POSIX process with a static
+// argv.
+func CompoundCommandReduction(input Input, facts Facts) (view Facts, ok bool) {
+	return sequenceReduction(input, facts, true)
+}
+
+func sequenceReduction(input Input, facts Facts, compound bool) (view Facts, ok bool) {
 	defer func() {
 		if recover() != nil {
 			view, ok = Facts{}, false
@@ -54,7 +81,7 @@ func ShortCircuitListReduction(input Input, facts Facts) (view Facts, ok bool) {
 	if original.Parse.Status != StatusPartial {
 		return Facts{}, false
 	}
-	twinSource, ok := shortCircuitListSequence(capture.source)
+	twinSource, ok := shortCircuitListSequence(capture.source, compound)
 	if !ok {
 		return Facts{}, false
 	}
@@ -83,12 +110,16 @@ func ShortCircuitListReduction(input Input, facts Facts) (view Facts, ok bool) {
 }
 
 // shortCircuitListSequence returns source with each top-level && or || list
-// replaced by its commands, one statement per line. It declines a source
-// without such a list, one with a negated, background or coprocess statement
-// in a list, and one where a statement could change what another runs (a
+// replaced by its commands, one statement per line; with compound, also each
+// subshell, group, if, while, until, for and case, and each negated or
+// background statement. It declines a source with nothing to replace, one
+// with a negated, background (unless compound) or coprocess statement in a
+// list, one where a dropped word could run a command (a for or case word with
+// a command substitution) or a redirect of a replaced compound command would
+// be lost, and one where a statement could change what another runs (a
 // function definition) or where cutting the text could lose input (a
 // here-document).
-func shortCircuitListSequence(source string) (string, bool) {
+func shortCircuitListSequence(source string, compound bool) (string, bool) {
 	if source == "" {
 		return "", false
 	}
@@ -112,30 +143,109 @@ func shortCircuitListSequence(source string) (string, bool) {
 	}
 	kept := make([]string, 0, len(file.Stmts))
 	reduced := false
-	var flatten func(stmt *syntax.Stmt) bool
-	flatten = func(stmt *syntax.Stmt) bool {
-		if posixStatementHasUnsupportedControl(stmt) {
-			return false
-		}
-		if list, isList := stmt.Cmd.(*syntax.BinaryCmd); isList && len(stmt.Redirs) == 0 &&
-			(list.Op == syntax.AndStmt || list.Op == syntax.OrStmt) {
-			reduced = true
-			return flatten(list.X) && flatten(list.Y)
-		}
-		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
+	keep := func(node syntax.Node) bool {
+		start, end := int(node.Pos().Offset()), int(node.End().Offset())
 		if start < 0 || end <= start || end > len(source) {
 			return false
 		}
 		kept = append(kept, source[start:end])
 		return true
 	}
-	for _, stmt := range file.Stmts {
-		if !flatten(stmt) {
-			return "", false
+	var flatten func(stmt *syntax.Stmt) bool
+	flattenAll := func(stmts []*syntax.Stmt) bool {
+		for _, stmt := range stmts {
+			if !flatten(stmt) {
+				return false
+			}
 		}
+		return true
 	}
-	if !reduced {
+	// flattenCompound replaces a compound command by its statements. It
+	// reports whether command is one it replaces, and whether that worked.
+	flattenCompound := func(command syntax.Command) (replaced, ok bool) {
+		switch typed := command.(type) {
+		case *syntax.BinaryCmd:
+			if typed.Op != syntax.AndStmt && typed.Op != syntax.OrStmt {
+				return false, false
+			}
+			return true, flatten(typed.X) && flatten(typed.Y)
+		}
+		if !compound {
+			return false, false
+		}
+		switch typed := command.(type) {
+		case *syntax.Subshell:
+			return true, flattenAll(typed.Stmts)
+		case *syntax.Block:
+			return true, flattenAll(typed.Stmts)
+		case *syntax.IfClause:
+			for clause := typed; clause != nil; clause = clause.Else {
+				if !flattenAll(clause.Cond) || !flattenAll(clause.Then) {
+					return true, false
+				}
+			}
+			return true, true
+		case *syntax.WhileClause:
+			return true, flattenAll(typed.Cond) && flattenAll(typed.Do)
+		case *syntax.ForClause:
+			iteration, isWords := typed.Loop.(*syntax.WordIter)
+			if !isWords || !inertPOSIXWords(iteration.Items...) {
+				return true, false
+			}
+			return true, flattenAll(typed.Do)
+		case *syntax.CaseClause:
+			if !inertPOSIXWords(typed.Word) {
+				return true, false
+			}
+			for _, item := range typed.Items {
+				if !inertPOSIXWords(item.Patterns...) || !flattenAll(item.Stmts) {
+					return true, false
+				}
+			}
+			return true, true
+		}
+		return false, false
+	}
+	flatten = func(stmt *syntax.Stmt) bool {
+		if stmt == nil || stmt.Coprocess || stmt.Disown {
+			return false
+		}
+		if stmt.Negated || stmt.Background {
+			if !compound || len(stmt.Redirs) != 0 {
+				return false
+			}
+			reduced = true
+			if replaced, ok := flattenCompound(stmt.Cmd); replaced {
+				return ok
+			}
+			return stmt.Cmd != nil && keep(stmt.Cmd)
+		}
+		if len(stmt.Redirs) == 0 {
+			if replaced, ok := flattenCompound(stmt.Cmd); replaced {
+				reduced = true
+				return ok
+			}
+		}
+		return keep(stmt)
+	}
+	if !flattenAll(file.Stmts) || !reduced {
 		return "", false
 	}
 	return strings.Join(kept, "\n"), true
+}
+
+// inertPOSIXWords reports whether words run no command when the shell
+// expands them.
+func inertPOSIXWords(words ...*syntax.Word) bool {
+	inert := true
+	for _, word := range words {
+		syntax.Walk(word, func(node syntax.Node) bool {
+			switch node.(type) {
+			case *syntax.CmdSubst, *syntax.ProcSubst:
+				inert = false
+			}
+			return inert
+		})
+	}
+	return inert
 }

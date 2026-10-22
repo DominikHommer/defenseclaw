@@ -41,8 +41,14 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 		{name: "destructive", body: "#!/bin/sh\nrm -rf /\n", wantRule: "CMD-RM-RF", enforceable: true},
 		{name: "benign", body: "#!/bin/sh\nprintf '%s\\n' build-complete\n"},
 		{
-			name: "control flow remains detection only",
-			body: "#!/bin/sh\nfalse && rm -rf /\n", wantRule: "CMD-RM-RF",
+			// A list or subshell in the script is judged as the same
+			// commands in the tool call would be.
+			name: "list is enforced",
+			body: "#!/bin/sh\nfalse && rm -rf /\n", wantRule: "CMD-RM-RF", enforceable: true,
+		},
+		{
+			name: "subshell is enforced",
+			body: "#!/bin/sh\n(rm -rf /)\n", wantRule: "CMD-RM-RF", enforceable: true,
 		},
 		{
 			name: "exit makes later command unreachable",
@@ -689,34 +695,78 @@ func TestExperimentalArtifactPromotionRequiresReviewedStructuredRoute(t *testing
 	}
 }
 
-func TestPromotedArtifactOuterControlFlowIsDetectionOnly(t *testing.T) {
+// GAP-0616: a script call inside a compound command is judged as if it ran
+// alone, so a migrated 0.8.x literal rule that blocks `bash heredoc.sh` also
+// blocks it in a list, a sequence, a pipeline, a subshell or the background.
+func TestPromotedArtifactInCompoundCommandIsEnforced(t *testing.T) {
 	requireNativePOSIXArtifactHost(t)
-	const connectorName = "artifact-outer-control-test"
-	installDefaultProfileConnector(t, connectorName)
-	path := filepath.Join(t.TempDir(), "destructive.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nrm -rf /\n"), 0o700); err != nil {
+	old := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(old, "rules"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{
-		fmt.Sprintf("false && bash %q", path),
-		fmt.Sprintf("true || bash %q", path),
+	own := "version: 1\ncategory: acme-markers\nrules:\n" +
+		"  - id: ACME-OWN-MARKER\n    pattern: 'acme\\.own-7f3c'\n    title: \"Own marker\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n"
+	if err := os.WriteFile(filepath.Join(old, "rules", "acme.yaml"), []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := guardrail.PlanRulePackRebase(old)
+	if err != nil || plan == nil || len(plan.Expressed) != 1 {
+		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
+	}
+	rebased := t.TempDir()
+	for rel, data := range plan.Files {
+		target := filepath.Join(rebased, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pack, err := guardrail.LoadRulePack(rebased)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const connectorName = "artifact-compound-command-test"
+	if err := ApplyConnectorRulePackOverrides(connectorName, pack); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { RemoveConnectorRulePackOverrides(connectorName) })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "heredoc.sh")
+	body := "#!/bin/sh\ncat > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n"
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		command string
+		want    bool
+	}{
+		{"bash heredoc.sh", true},
+		{"bash heredoc.sh && cat /tmp/acme-marker.txt", true},
+		{"bash heredoc.sh; echo done", true},
+		{"bash heredoc.sh || echo failed", true},
+		{"bash heredoc.sh | cat", true},
+		{"(bash heredoc.sh)", true},
+		{"bash heredoc.sh &", true},
+		{"echo start; bash heredoc.sh", true},
+		{fmt.Sprintf("false && bash %q", path), true},
+		{fmt.Sprintf("true || bash %q", path), true},
+		{fmt.Sprintf("cd /tmp && bash %q", path), true},
+		// After a cd the relative name may be another file.
+		{"cd /tmp && bash heredoc.sh", false},
 	} {
-		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: command})
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: test.command, CWD: dir})
 		findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 			ConnectorName: connectorName,
 		}, facts, true, nil)
-		var matched *RuleFinding
-		for index := range findings {
-			if findings[index].RuleID == "CMD-RM-RF" {
-				matched = &findings[index]
-				break
-			}
-		}
+		matched := findingWithID(findings, "ACME-OWN-MARKER")
 		if matched == nil {
-			t.Fatalf("outer control flow lost detection for %q", command)
+			t.Errorf("%q lost detection: %v", test.command, FindingStrings(findings))
+			continue
 		}
-		if matched.contributesToEnforcement() {
-			t.Fatalf("outer control flow became enforceable for %q: %+v", command, *matched)
+		if got := matched.contributesToEnforcement(); got != test.want {
+			t.Errorf("%q: enforced=%t, want %t", test.command, got, test.want)
 		}
 	}
 }

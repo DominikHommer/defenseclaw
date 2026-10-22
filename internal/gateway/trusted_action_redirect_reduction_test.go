@@ -207,10 +207,29 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": absent, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
-			// A list in the background is not reduced.
+			// GAP-0616: a command in the background, a subshell, a group or
+			// an if, loop or case body is judged as if it ran alone. Only a
+			// match counts there.
 			name:    "background list",
 			command: "cd /tmp && echo " + redirectReductionMarker + " &",
-			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "subshell, group, if, loop and case bodies",
+			command: "(echo " + redirectReductionMarker + "); { echo done; }; if true; then echo done; fi; while false; do echo done; done; for i in 1; do echo done; done; case x in x) echo done;; esac",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "negated command in an if condition",
+			command: "if ! echo " + redirectReductionMarker + "; then echo done; fi",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			// The view would drop what a command substitution in a loop
+			// word runs, so the loop is not reduced.
+			name:    "command substitution in a loop word",
+			command: "for i in $(ls); do echo " + redirectReductionMarker + "; done",
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},
 		},
 		{
 			// GAP-0029: an && or || list member with a runtime-expanded

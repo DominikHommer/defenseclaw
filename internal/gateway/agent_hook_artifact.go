@@ -13,12 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 const (
@@ -151,12 +153,13 @@ func promotedArtifactFindings(
 			DialectHint:                              dialect,
 		}
 		artifactFacts := actionfacts.Analyze(input)
+		bodyFacts := promotedArtifactBodyEnforcementFacts(input, artifactFacts)
 		outerCandidateEnforceable := preExecutionBoundary &&
 			promotedArtifactCandidateEnforcementEligible(facts, candidate)
 		enforcementCapable := outerCandidateEnforceable &&
-			artifactFacts.Authoritative() &&
-			artifactFacts.EnforcementEligible() &&
-			promotedArtifactSequentialReachabilityEligible(artifactFacts)
+			bodyFacts.Authoritative() &&
+			bodyFacts.EnforcementEligible() &&
+			promotedArtifactSequentialReachabilityEligible(bodyFacts)
 		matched := dispatchTrustedAction(ctx, trustedActionRequest{
 			Input:              input,
 			LegacyText:         string(body),
@@ -181,6 +184,23 @@ func promotedArtifactFindings(
 		}
 	}
 	return findings
+}
+
+// promotedArtifactBodyEnforcementFacts returns the facts that decide whether
+// a match in a script may block: its analysis, or for a script whose simple
+// commands sit in && or || lists or other compound commands, those commands
+// read as if each runs, as the same commands in the tool call would be.
+func promotedArtifactBodyEnforcementFacts(
+	input actionfacts.Input,
+	facts actionfacts.Facts,
+) actionfacts.Facts {
+	if view, ok := actionfacts.ShortCircuitListReduction(input, facts); ok {
+		return view
+	}
+	if view, ok := actionfacts.CompoundCommandReduction(input, facts); ok {
+		return view
+	}
+	return facts
 }
 
 // promotedArtifactSequentialReachabilityEligible masks a narrow POSIX case
@@ -269,7 +289,129 @@ func promotedArtifactCandidates(facts actionfacts.Facts) []promotedArtifactCandi
 	return result
 }
 
+// promotedArtifactCandidateEnforcementEligible reports whether a match in the
+// candidate script may block. A script call inside a compound command
+// (`a && b`, `a || b`, `a; b`, `a | b`, `(a)`) is judged as if it ran alone:
+// a block stops the whole tool call before any of it runs, so a rule that
+// blocks `bash run.sh` also blocks `bash run.sh && b`.
 func promotedArtifactCandidateEnforcementEligible(
+	facts actionfacts.Facts,
+	candidate promotedArtifactCandidate,
+) bool {
+	if promotedArtifactActionEnforcementEligible(facts, candidate) {
+		return true
+	}
+	alone, ok := promotedArtifactCandidateAlone(facts, candidate)
+	if !ok {
+		return false
+	}
+	for _, executing := range promotedArtifactCandidates(alone) {
+		if promotedArtifactCandidateKey(executing) ==
+			promotedArtifactCandidateKey(candidate) {
+			return promotedArtifactActionEnforcementEligible(alone, executing)
+		}
+	}
+	return false
+}
+
+// promotedArtifactCandidateAlone returns the analysis of the candidate's own
+// simple command with the action's context, as if the tool call were only that
+// command. It is unavailable unless the command is part of a compound command,
+// and for a relative script path after a command of the action that may have
+// changed the directory that path resolves against.
+func promotedArtifactCandidateAlone(
+	facts actionfacts.Facts,
+	candidate promotedArtifactCandidate,
+) (actionfacts.Facts, bool) {
+	// Only uncertainty that the other commands of a compound command, or
+	// the script itself, may explain. The candidate's own is found again
+	// when it is analysed alone.
+	if facts.Parse.Status != actionfacts.StatusPartial ||
+		slices.ContainsFunc(facts.Parse.Issues, func(issue actionfacts.IssueCode) bool {
+			return !promotedArtifactCompoundIssues[issue]
+		}) {
+		return actionfacts.Facts{}, false
+	}
+	index := slices.IndexFunc(facts.Commands, func(command actionfacts.CommandFact) bool {
+		return command.ID == candidate.commandID
+	})
+	if index < 0 {
+		return actionfacts.Facts{}, false
+	}
+	command := facts.Commands[index]
+	compound := len(facts.Commands) > 1 || command.ControlFlowUncertain ||
+		command.PipelineID != 0 || command.Background
+	if !compound || command.ParentCommandID != 0 || !command.ArgvComplete || len(command.Argv) == 0 ||
+		len(command.Redirects) != 0 ||
+		slices.ContainsFunc(command.Arguments, func(argument actionfacts.ArgumentFact) bool {
+			return argument.Expands
+		}) {
+		return actionfacts.Facts{}, false
+	}
+	relative := slices.ContainsFunc(facts.Paths, func(path actionfacts.PathFact) bool {
+		return path.CommandID == command.ID && !path.Absolute
+	})
+	if relative && slices.ContainsFunc(facts.Commands, func(earlier actionfacts.CommandFact) bool {
+		return earlier.ID < command.ID && promotedArtifactMayChangeDirectory(earlier)
+	}) {
+		return actionfacts.Facts{}, false
+	}
+	input := actionfacts.Input{
+		Tool:                                     facts.Tool,
+		CWD:                                      facts.CWD,
+		ActiveHome:                               facts.ActiveHome,
+		ActiveAgentFiles:                         append([]string(nil), facts.ActiveAgentFiles...),
+		ActiveAgentFilesCaseInsensitive:          append([]string(nil), facts.ActiveAgentFilesCaseInsensitive...),
+		ActiveAgentFilesCaseInsensitiveUncertain: facts.ActiveAgentFilesCaseInsensitiveUncertain,
+		ActiveAgentFilesUncertain:                facts.ActiveAgentFilesUncertain,
+		DialectHint:                              command.Dialect,
+	}
+	if command.Dialect == actionfacts.DialectPOSIX {
+		// The POSIX argv form of an action is not read as a shell command,
+		// so the command is quoted back into shell text.
+		words := make([]string, 0, len(command.Argv))
+		for _, word := range command.Argv {
+			quoted, err := syntax.Quote(word, syntax.LangBash)
+			if err != nil {
+				return actionfacts.Facts{}, false
+			}
+			words = append(words, quoted)
+		}
+		input.Command = strings.Join(words, " ")
+	} else {
+		input.Argv = append([]string(nil), command.Argv...)
+	}
+	return actionfacts.Analyze(input), true
+}
+
+var promotedArtifactCompoundIssues = map[actionfacts.IssueCode]bool{
+	actionfacts.IssueOpaqueArtifact:        true,
+	actionfacts.IssueUnsupportedConstruct:  true,
+	actionfacts.IssueDynamicWord:           true,
+	actionfacts.IssueUnknownOperandGrammar: true,
+}
+
+// promotedArtifactPOSIXDirectoryCommands are the POSIX commands that change
+// the directory of the shell that runs them or run text that may (a function
+// body that does shows up as its own command).
+var promotedArtifactPOSIXDirectoryCommands = map[string]bool{
+	"cd": true, "pushd": true, "popd": true, "source": true, ".": true,
+	"eval": true, "exec": true, "builtin": true, "command": true,
+	"alias": true, "trap": true,
+}
+
+// promotedArtifactMayChangeDirectory reports whether command may change the
+// directory later commands of the action run in. A PowerShell or cmd.exe
+// script shares its caller's location, so there any command may.
+func promotedArtifactMayChangeDirectory(command actionfacts.CommandFact) bool {
+	if command.Dialect != actionfacts.DialectPOSIX {
+		return true
+	}
+	program := strings.ToLower(strings.TrimSpace(command.Program))
+	return program == "" || promotedArtifactPOSIXDirectoryCommands[program]
+}
+
+func promotedArtifactActionEnforcementEligible(
 	facts actionfacts.Facts,
 	candidate promotedArtifactCandidate,
 ) bool {
