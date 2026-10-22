@@ -1879,7 +1879,8 @@ def _direct_alias_variants(tmp_path: Path, agent: str) -> dict:
         return {"command": str(target)}
 
     def renamed_on_path() -> dict:
-        target = tools / "k2"
+        # Windows finds a bare name on PATH only with a PATHEXT suffix.
+        target = tools / ("k2.exe" if os.name == "nt" else "k2")
         target.write_bytes(Path(agent).read_bytes())
         target.chmod(0o700)
         return {"command": "env", "args": ["k2", "acp"]}
