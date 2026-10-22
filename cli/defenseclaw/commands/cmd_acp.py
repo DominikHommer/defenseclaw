@@ -493,7 +493,7 @@ def _is_exact_path(value: str, expected: Path) -> bool:
 
 
 def _lock_names_entry(
-    entry: dict[str, Any], options: dict[str, str], client: str, agent: str, data_dir: str | None
+    entry: dict[str, Any], name: str, options: dict[str, str], client: str, agent: str, data_dir: str | None
 ) -> bool:
     """Whether this runtime's contract lock proves that setup wrote the entry.
 
@@ -506,7 +506,7 @@ def _lock_names_entry(
     must be a regular file, complete (the guard can start from it), private,
     bind this editor file and pin the guard the entry starts, and the entry
     must launch exactly the agent command the lock pins, under its profile
-    and mode.
+    and mode. The client pin must cover its env and gateway.
     A guard-like filename proves nothing on its own: an operator's wrapper
     may also be called defenseclaw-acp. With no runtime (data_dir None) no
     alias is proven.
@@ -530,9 +530,37 @@ def _lock_names_entry(
         token_name = f"{client}-{agent}.token" if lock["guard"].get("managed_custody") else ".token"
         if not _is_exact_path(token_value, runtime / token_name):
             return False
-        return Path(lock["client"]["config_path"]).resolve() == _client_path(client).resolve()
+        return (
+            Path(lock["client"]["config_path"]).resolve() == _client_path(client).resolve()
+            and _pin_covers_launch(entry, name, options, lock["client"], client, agent)
+        )
     except (OSError, ValueError, click.ClickException):
         return False
+
+
+def _pin_covers_launch(
+    entry: dict[str, Any], name: str, options: dict[str, str], lock_client: dict[str, Any], client: str, agent: str
+) -> bool:
+    """Whether the binding's client pin covers the launch fields the lock cannot.
+
+    The lock fixes the guard, agent, profile, mode, token and lock path, but
+    not env or --gateway. An entry pin covers those only for the names it
+    pins (adopted, or the reserved name). A copy under another name launches
+    what the pinned entry launches only with no env and the gateway of a
+    pinned entry the pin still proves. A legacy whole-file pin covers every
+    entry and drifts when one is added.
+    """
+    pinned = _pinned_entry_names(lock_client, agent)
+    if name in pinned or not lock_client["config_sha256"].startswith(_ENTRY_DIGEST_PREFIX):
+        return True
+    if entry.get("env") or not _pin_proves_entry(lock_client, pinned[0], client, agent):
+        return False
+    servers = _read_json_object(_client_path(client)).get(_CLIENT_CAPABILITIES[client].entries_key)
+    return isinstance(servers, dict) and options.get("--gateway") in {
+        _guard_options(servers[pinned_name]).get("--gateway")
+        for pinned_name in pinned
+        if isinstance(servers.get(pinned_name), dict)
+    }
 
 
 def _guarded_pair(entry: dict[str, Any], name: str, data_dir: str | None) -> tuple[str, str] | None:
@@ -552,7 +580,7 @@ def _guarded_pair(entry: dict[str, Any], name: str, data_dir: str | None) -> tup
     # another filename) belongs to DefenseClaw only when this runtime's lock
     # says so. Without that proof it is the operator's (or another
     # runtime's), and setup and remove leave it.
-    return (client, agent) if _lock_names_entry(entry, options, client, agent, data_dir) else None
+    return (client, agent) if _lock_names_entry(entry, name, options, client, agent, data_dir) else None
 
 
 def _pair_entry_names(servers: dict[str, Any], client: str, agent: str, data_dir: str | None) -> list[str]:
@@ -620,9 +648,23 @@ def _set_client_entry(
             raise click.ClickException("the duplicate ACP entry cannot be identified; run defenseclaw acp verify")
         del servers[_managed_name(agent)]
     written = aliases or names or [_managed_name(agent)]
+    lock = _proven_lock(_contract_lock_path(data_dir, client, agent), client, agent)
     for name in written:
         entry = dict(servers.get(name) or {})
         entry.update(command=command, args=args)
+        # Only an explicit adoption takes the operator's env. A guarded entry
+        # keeps the env its pin sealed (the adopted one); an env the pin no
+        # longer proves (added after setup) is reset rather than re-pinned.
+        if name not in taken_over and not (lock and _pin_proves_entry(lock["client"], name, client, agent)):
+            if entry.get("env"):
+                # stderr: setup --json prints exactly one document on stdout.
+                click.echo(
+                    f"⚠ Reset the env of editor entry {name!r} in {path}: its contract pin does not prove it. "
+                    f"To keep an env, point the entry at {agent} directly and run "
+                    f"defenseclaw acp adopt --client {client}.",
+                    err=True,
+                )
+            entry["env"] = {}
         entry.setdefault("env", {})
         if capabilities.managed_type:
             entry["type"] = capabilities.managed_type
@@ -794,12 +836,15 @@ def _entry_launch_shape_known(entry: Any, client: str) -> bool:
     )
 
 
+def _pinned_entry_names(lock_client: dict[str, Any], agent: str) -> list[str]:
+    """The entry names a binding's entry pin covers: its adopted entries, else the reserved name."""
+    return list(lock_client.get("adopted_entries") or [_managed_name(agent)])
+
+
 def _pin_proves_entry(lock_client: dict[str, Any], name: str, client: str, agent: str) -> bool:
     """Whether a binding's own client pin still covers this entry exactly as it is."""
     pinned = lock_client["config_sha256"]
-    if pinned.startswith(_ENTRY_DIGEST_PREFIX) and name not in (
-        lock_client.get("adopted_entries") or [_managed_name(agent)]
-    ):
+    if pinned.startswith(_ENTRY_DIGEST_PREFIX) and name not in _pinned_entry_names(lock_client, agent):
         return False
     return _client_digest(_client_path(client), client, agent, lock_client) == pinned
 

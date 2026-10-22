@@ -128,6 +128,13 @@ ownership of a direct entry that was adopted earlier. Setup also refuses to
 pin an unfamiliar launch field on a managed entry; remove that field before
 re-running setup.
 
+A copy of a guarded entry under another name is outside its binding's pin. It
+verifies only with no environment and the same gateway as the pinned entry;
+otherwise verification is unhealthy until you delete it. Re-running setup keeps
+the environment its binding's pin proves (an adopted entry's own). It resets an
+environment added later to empty and prints a warning; to keep one, point the
+entry at the agent and run `defenseclaw acp adopt` again.
+
 A lock written by an older release pins the whole settings file, so after an
 upgrade any edit to that file, a theme change included, still fails
 `defenseclaw acp verify` and the guard refuses the binding. The installer and

@@ -2378,3 +2378,178 @@ def test_another_pairs_unproven_lock_does_not_block_this_pairs_write(tmp_path, m
         assert runner.invoke(acp_cmd, ["verify"], obj=app).exit_code == 0
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+@pytest.mark.parametrize("entry_names", [[], ["My Kiro"]], ids=["reserved", "adopted"])
+def test_unpinned_copy_of_a_guarded_entry_verifies_only_without_its_own_launch_fields(
+    tmp_path, monkeypatch, entry_names
+):
+    """A same-pair copy is outside its binding's entry pin, so it cannot carry env or another gateway."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    kiro = _binary(tmp_path / "kiro-cli")
+    runner = CliRunner()
+    if entry_names:
+        settings.write_text(json.dumps({"agent_servers": {"My Kiro": {"command": kiro, "args": ["acp"]}}}))
+        args = ["adopt", "--client", "zed", "--guard-binary", guard, "--activate", "--yes"]
+        guarded = "My Kiro"
+    else:
+        args = ["setup", "--client", "zed", "--agent", "kiro", "--activate",
+                "--guard-binary", guard, "--agent-binary", kiro]
+        guarded = "DefenseClaw · Kiro"
+
+    def verify():
+        return runner.invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+
+    def healthy():
+        status = json.loads(runner.invoke(acp_cmd, ["status", "--json"], obj=app).output)
+        return status["bindings"]["zed/kiro"]["healthy"]
+
+    try:
+        result = runner.invoke(acp_cmd, args, obj=app)
+        assert result.exit_code == 0, result.output
+        document = json.loads(settings.read_text())
+        original = document["agent_servers"][guarded]
+
+        def copy_with(env=None, gateway=None):
+            entry = json.loads(json.dumps(original))
+            if env is not None:
+                entry["env"] = env
+            if gateway is not None:
+                entry["args"][entry["args"].index("--gateway") + 1] = gateway
+            return entry
+
+        evil = str(tmp_path / "evil.so")
+        variants = {
+            "env": copy_with(env={"LD_PRELOAD": evil}),
+            "gateway": copy_with(gateway="http://127.0.0.1:1/evil"),
+            "env and gateway": copy_with(env={"LD_PRELOAD": evil}, gateway="http://127.0.0.1:1/evil"),
+        }
+        for label, entry in variants.items():
+            tampered = json.loads(json.dumps(document))
+            tampered["agent_servers"]["Kiro 2"] = entry
+            settings.write_text(json.dumps(tampered))
+            result = verify()
+            assert result.exit_code != 0 and "Kiro 2" in result.output, (label, result.output)
+            assert not healthy(), label
+
+        # Control: an exact copy has no launch field of its own; it launches
+        # what the pinned entry launches and still verifies.
+        same = json.loads(json.dumps(document))
+        same["agent_servers"]["Kiro 2"] = copy_with()
+        settings.write_text(json.dumps(same))
+        assert verify().exit_code == 0, verify().output
+
+        # A clean copy cannot borrow a gateway from a pinned entry that drifted.
+        drifted = json.loads(json.dumps(document))
+        drifted["agent_servers"][guarded] = copy_with(gateway="http://127.0.0.1:1/evil")
+        drifted["agent_servers"]["Kiro 2"] = copy_with(gateway="http://127.0.0.1:1/evil")
+        settings.write_text(json.dumps(drifted))
+        result = verify()
+        assert result.exit_code != 0 and "Kiro 2" in result.output, result.output
+
+        settings.write_text(json.dumps(document))
+        assert verify().exit_code == 0, verify().output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+@pytest.mark.parametrize("entry_names", [[], ["My Kiro"]], ids=["reserved", "adopted"])
+def test_repair_setup_drops_an_env_its_pin_does_not_prove(tmp_path, monkeypatch, entry_names):
+    """Plain setup keeps only the env the binding's pin sealed; explicit adoption keeps the operator's."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    kiro = _binary(tmp_path / "kiro-cli")
+    runner = CliRunner()
+    setup = ["setup", "--client", "zed", "--agent", "kiro", "--activate",
+             "--guard-binary", guard, "--agent-binary", kiro]
+    if entry_names:
+        sealed = {"KIRO_LOG": "1"}
+        settings.write_text(json.dumps({"agent_servers": {
+            "My Kiro": {"command": kiro, "args": ["acp"], "env": sealed},
+        }}))
+        first = ["adopt", "--client", "zed", "--guard-binary", guard, "--activate", "--yes"]
+        guarded = "My Kiro"
+    else:
+        sealed = {}
+        first = setup
+        guarded = "DefenseClaw · Kiro"
+
+    def verify():
+        return runner.invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+
+    def env():
+        return json.loads(settings.read_text())["agent_servers"][guarded]["env"]
+
+    try:
+        result = runner.invoke(acp_cmd, first, obj=app)
+        assert result.exit_code == 0, result.output
+        assert env() == sealed
+        # A healthy repeat setup keeps the env the pin proves (the adopted one).
+        result = runner.invoke(acp_cmd, setup, obj=app)
+        assert result.exit_code == 0, result.output
+        assert env() == sealed and verify().exit_code == 0
+
+        document = json.loads(settings.read_text())
+        document["agent_servers"][guarded]["env"] = {**sealed, "LD_PRELOAD": str(tmp_path / "evil.so")}
+        settings.write_text(json.dumps(document))
+        drifted = verify()
+        assert drifted.exit_code != 0 and "client configuration digest has drifted" in drifted.output
+        result = runner.invoke(acp_cmd, [*_repair_args(drifted.output), "--json-output"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["client"] == "zed"
+        assert "Reset the env of editor entry" in result.stderr
+        assert env() == {}
+        assert verify().exit_code == 0, verify().output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_legacy_adopted_entry_keeps_its_env_through_the_upgrade_setup(tmp_path, monkeypatch):
+    """A 1.0.3 adoption (whole-file pin, no adopted_entries) keeps the env that file pin proves."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    kiro = _binary(tmp_path / "kiro-cli")
+    lock = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+    settings.write_text(json.dumps({"agent_servers": {
+        "My Kiro": {"command": kiro, "args": ["acp"], "env": {"KIRO_LOG": "1"}},
+    }}))
+    runner = CliRunner()
+
+    def verify():
+        return runner.invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+
+    try:
+        result = runner.invoke(
+            acp_cmd, ["adopt", "--client", "zed", "--guard-binary", guard, "--activate", "--yes"], obj=app,
+        )
+        assert result.exit_code == 0, result.output
+        document = json.loads(lock.read_text())
+        del document["client"]["adopted_entries"]
+        document["client"]["config_sha256"] = cmd_acp_module._sha256_file(str(settings))
+        cmd_acp_module.atomic_write_private_bytes(lock, json.dumps(document).encode())
+        assert verify().exit_code == 0, verify().output
+
+        # The setup that moves a legacy pin to entry pins (see the docs).
+        result = runner.invoke(acp_cmd, [
+            "setup", "--client", "zed", "--agent", "kiro", "--activate",
+            "--guard-binary", guard, "--agent-binary", kiro,
+        ], obj=app)
+        assert result.exit_code == 0, result.output
+        servers = json.loads(settings.read_text())["agent_servers"]
+        assert list(servers) == ["My Kiro"] and servers["My Kiro"]["env"] == {"KIRO_LOG": "1"}
+        pin = json.loads(lock.read_text())["client"]
+        assert pin["config_sha256"].startswith(cmd_acp_module._ENTRY_DIGEST_PREFIX)
+        assert pin["adopted_entries"] == ["My Kiro"]
+        assert verify().exit_code == 0, verify().output
+    finally:
+        cleanup_app(app, db_path, data_dir)
