@@ -151,25 +151,37 @@ func runSubreaperHelper() int {
 
 // Killing a direct child makes Linux reparent its children, including a
 // launcher in another process group, to this subreaper. Repeat until every
-// generation is gone. /proc/self/task/.../children belongs only to us, so
-// no unrelated process is selected by name or by a reused process group.
+// generation is gone. Children are listed per thread, and Go may launch a
+// subprocess from any thread. Every task's children belong only to this
+// helper, so no unrelated process is selected by name or process group.
 func killAdoptedChildren() error {
-	childrenPath := fmt.Sprintf("/proc/self/task/%d/children", os.Getpid())
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		raw, err := os.ReadFile(childrenPath)
+		tasks, err := os.ReadDir("/proc/self/task")
 		if err != nil {
 			return err
 		}
-		children := strings.Fields(string(raw))
+		children := map[int]bool{}
+		for _, task := range tasks {
+			raw, err := os.ReadFile(filepath.Join("/proc/self/task", task.Name(), "children"))
+			if errors.Is(err, os.ErrNotExist) {
+				continue // the thread exited during this pass
+			}
+			if err != nil {
+				return err
+			}
+			for _, field := range strings.Fields(string(raw)) {
+				pid, err := strconv.Atoi(field)
+				if err == nil && pid > 0 {
+					children[pid] = true
+				}
+			}
+		}
 		if len(children) == 0 {
 			return nil
 		}
-		for _, field := range children {
-			pid, err := strconv.Atoi(field)
-			if err == nil && pid > 0 {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-			}
+		for pid := range children {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 		for {
 			var status syscall.WaitStatus
