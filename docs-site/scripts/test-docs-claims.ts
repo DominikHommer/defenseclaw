@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,26 @@ const repo = join(site, '..');
 function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
+
+function docPages(dir = join(site, 'content/docs')): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    return entry.isDirectory() ? docPages(path) : entry.name.endsWith('.mdx') ? [path] : [];
+  });
+}
+
+describe('managed ACP support', () => {
+  it('keeps connector route notes consistent with managed enrollment', () => {
+    for (const path of docPages()) {
+      const text = readFileSync(path, 'utf8').split(/\s+/).join(' ');
+      assert.doesNotMatch(text, /ACP editors are not supported in enterprise managed mode/i, path);
+    }
+    const kiro = page('reference/connectors/kiro.mdx');
+    assert.ok(kiro.includes('/docs/features/acp-guard#managed-computers'));
+    assert.match(kiro, /managed ACP.*preview/i);
+    assert.match(page('get-started/support-matrix.mdx'), /enrollment.*preview/i);
+  });
+});
 
 describe('Intune base config versus the signed bundle', () => {
   it('names exactly the blocks the packager compares', () => {
