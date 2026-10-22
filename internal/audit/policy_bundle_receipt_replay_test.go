@@ -9,9 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 )
@@ -210,5 +212,89 @@ func TestSpooledReceiptObligationDoubtBlocks(t *testing.T) {
 	}
 	if err := l.ConfirmPolicyBundleReceipt(t.Context(), "operator:sample", bundle, receipt); err == nil {
 		t.Fatal("a row with an unreadable obligation record was confirmed")
+	}
+}
+
+// ceilingSpoolDestinations is the largest valid routing of one spooled item:
+// every operator destination the compiler accepts, each named with the
+// longest stable token, plus the generated managed-enterprise destination.
+func ceilingSpoolDestinations(t *testing.T) []string {
+	t.Helper()
+	names := make([]string, 0, config.ObservabilityV8MaxDestinations)
+	for index := range config.ObservabilityV8MaxSourceDestinations {
+		prefix := fmt.Sprintf("operator-%02d-", index)
+		names = append(names, prefix+strings.Repeat("x", observability.MaxStableTokenBytes-len(prefix)))
+	}
+	names = append(names, config.ObservabilityV8ManagedAIDDestinationName)
+	if len(names) != config.ObservabilityV8MaxDestinations {
+		t.Fatalf("ceiling routing names %d destinations, want %d", len(names), config.ObservabilityV8MaxDestinations)
+	}
+	return names
+}
+
+// A spooled receipt or change audit that selects every destination the
+// compiler accepts (64 operator destinations and the generated managed one)
+// is persisted locally and confirmed against all of them after a restart. One
+// more than the compiled ceiling is still a doubt that keeps the row out of
+// the store (W6 review, loop round 2).
+func TestSpooledObligationsCoverTheCompiledDestinationCeiling(t *testing.T) {
+	bundle := PolicyBundle{ID: testPolicyBundleID, Version: 5}
+	receipt := PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: PolicyBundleConfirmed, FinishedAt: "2026-10-22T10:00:00Z"}
+	change := ConfigChange{EventID: testConfigChangeID, Kind: ConfigChangeTrustAnchors, Action: "install", Outcome: ConfigChangeApplied}
+	for _, item := range []struct {
+		name    string
+		log     func(*Logger) error
+		confirm func(*Logger) error
+	}{
+		{
+			name: "policy-bundle-receipt",
+			log:  func(l *Logger) error { return l.LogPolicyBundleReceipt("operator:sample", bundle, receipt) },
+			confirm: func(l *Logger) error {
+				return l.ConfirmPolicyBundleReceipt(t.Context(), "operator:sample", bundle, receipt)
+			},
+		},
+		{
+			name:    "config-change",
+			log:     func(l *Logger) error { return l.LogConfigChange(change) },
+			confirm: func(l *Logger) error { return l.ConfirmConfigChange(t.Context(), change) },
+		},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			ceiling := ceilingSpoolDestinations(t)
+
+			over := newTestLogger(t)
+			refused := &receiptReplayEmitter{testRuntimeV8Emitter: newTestRuntimeV8Emitter(t, over.store, router.AdmissionOrdinary)}
+			refused.spoolDestinations = append(slices.Clone(ceiling), "one-past-the-ceiling")
+			over.SetRuntimeV8Emitter(refused)
+			if err := item.log(over); err == nil {
+				t.Fatal("a routing past the compiled destination ceiling was recorded")
+			}
+			if rows, err := over.store.ListEvents(10); err != nil || len(rows) != 0 {
+				t.Fatalf("rows past the ceiling = %d, %v; want none", len(rows), err)
+			}
+
+			l := newTestLogger(t)
+			e := &receiptReplayEmitter{testRuntimeV8Emitter: newTestRuntimeV8Emitter(t, l.store, router.AdmissionOrdinary)}
+			e.spoolDestinations = ceiling
+			l.SetRuntimeV8Emitter(e)
+			if err := item.log(l); err != nil {
+				t.Fatalf("the compiled destination ceiling kept the row out of the store: %v", err)
+			}
+			if rows, err := l.store.ListEvents(10); err != nil || len(rows) != 1 {
+				t.Fatalf("rows at the ceiling = %d, %v; want one", len(rows), err)
+			}
+
+			restarted := NewLogger(l.store)
+			after := &receiptReplayEmitter{testRuntimeV8Emitter: newTestRuntimeV8Emitter(t, l.store, router.AdmissionOrdinary)}
+			restarted.SetRuntimeV8Emitter(after)
+			if err := item.confirm(restarted); err != nil {
+				t.Fatalf("the recorded ceiling obligations were not readable: %v", err)
+			}
+			want := slices.Sorted(slices.Values(ceiling))
+			if len(after.spools) != 1 || !after.spools[0].Confirm || !after.spools[0].Known ||
+				!slices.Equal(after.spools[0].Obligations, want) {
+				t.Fatalf("confirm at the ceiling = %d spools, want one known confirmation owing all %d destinations", len(after.spools), len(want))
+			}
+		})
 	}
 }

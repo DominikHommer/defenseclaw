@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -27,10 +28,18 @@ import (
 // keeps the item pending. It is removed once the delivery is confirmed.
 
 const (
-	spoolObligationsDirName  = "spool-delivery-obligations"
-	spoolObligationsSchema   = 1
-	maxSpoolObligationsBytes = 16 << 10
-	maxSpoolObligations      = 64
+	spoolObligationsDirName = "spool-delivery-obligations"
+	spoolObligationsSchema  = 1
+	// maxSpoolObligations is the compiled destination ceiling: every
+	// operator-authored destination plus the generated managed-enterprise
+	// one. The local SQLite destination is never a remote obligation. A
+	// smaller bound would refuse a valid routing and keep the row out of the
+	// store on every retry.
+	maxSpoolObligations = config.ObservabilityV8MaxDestinations
+	// maxSpoolObligationsBytes fits the largest valid record: the ceiling of
+	// names at the longest stable token, each quoted and comma separated,
+	// inside the envelope.
+	maxSpoolObligationsBytes = int64(maxSpoolObligations*(observability.MaxStableTokenBytes+len(`"",`)) + 64)
 )
 
 type spoolObligationsFile struct {
