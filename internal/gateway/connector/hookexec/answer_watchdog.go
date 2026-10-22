@@ -59,6 +59,7 @@ type answerWatchdog struct {
 	fallbackCode             int
 	logFailure               func()
 	exit                     func(int)
+	deliveryReceipt          func(bool, bool)
 
 	ceiling time.Time
 	waiter  *answerDeadlineWaiter
@@ -356,10 +357,22 @@ func (w *answerWatchdog) finish(code int) int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.fired {
+		if w.deliveryReceipt != nil {
+			w.deliveryReceipt(false, true)
+		}
 		return w.fallbackCode
 	}
 	w.finished = true
 	_, _ = w.stderr.Write(w.err.Bytes())
 	_, _ = w.stdout.Write(w.out.Bytes())
+	if w.deliveryReceipt != nil {
+		w.deliveryReceipt(true, w.closedKnown)
+	}
 	return code
+}
+
+func (w *answerWatchdog) setDeliveryReceipt(receipt func(bool, bool)) {
+	w.mu.Lock()
+	w.deliveryReceipt = receipt
+	w.mu.Unlock()
 }
