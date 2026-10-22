@@ -1149,6 +1149,97 @@ def test_remove_and_setup_leave_unproven_guard_named_entries(tmp_path, monkeypat
         cleanup_app(app, db_path, data_dir)
 
 
+def test_alias_with_another_runtimes_lock_is_not_this_runtimes(tmp_path, monkeypatch):
+    """An alias proven only by another runtime's lock or credential is left alone.
+
+    Setup in a second runtime directory writes a valid lock that binds this
+    editor file and pins the same guard. Removal and setup under the current
+    runtime must neither delete nor rewrite that alias (nor the settings
+    file), and status must not count it as this runtime's binding.
+    """
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    other = str((tmp_path / "other-runtime").resolve())
+    current_lock = cmd_acp_module._contract_lock_path(data_dir, "zed", "kiro")
+
+    def lock_in(runtime: str) -> str:
+        settings.write_text("{}")
+        return str(cmd_acp_module._write_contract_lock(
+            data_dir=runtime, client="zed", agent="kiro", profile="default", mode="observe",
+            guard=guard, agent_executable=agent, client_path=settings.resolve(), managed=False,
+        ))
+
+    def alias(lock: str, token: str) -> dict:
+        return {"command": guard, "args": [
+            "--agent", "kiro", "--client", "zed", "--profile", "default", "--mode", "observe",
+            "--token-file", token, "--gateway", "http://127.0.0.1:1/api/v1/acp/evaluate",
+            "--contract-lock", lock, "--", agent, "acp",
+        ]}
+
+    other_token = str(Path(other) / "acp" / ".token")
+    current_token = str((Path(data_dir) / "acp" / ".token").resolve())
+    variants = {
+        # The other runtime's own lock and token: valid, but not this runtime's.
+        "other runtime lock": lambda: alias(lock_in(other), other_token),
+        # This runtime's lock, but the entry carries another runtime's credential.
+        "other runtime token": lambda: (lock_in(other), alias(lock_in(data_dir), other_token))[1],
+    }
+    if os.name != "nt":
+        def writable_lock() -> dict:
+            entry = alias(lock_in(data_dir), current_token)
+            current_lock.chmod(0o666)
+            return entry
+
+        # This runtime's lock path and token, but a lock others can rewrite.
+        variants["lock out of custody"] = writable_lock
+    try:
+        for label, make in variants.items():
+            entry = make()
+            settings.write_text(json.dumps({"agent_servers": {"Other Kiro": entry}}))
+            before = settings.read_bytes()
+            removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert removed.exit_code == 0, (label, removed.output)
+            assert settings.read_bytes() == before, label
+
+            setup = CliRunner().invoke(
+                acp_cmd,
+                ["setup", "--client", "zed", "--agent", "kiro", "--activate",
+                 "--guard-binary", guard, "--agent-binary", agent],
+                obj=app,
+            )
+            assert setup.exit_code == 0, (label, setup.output)
+            servers = json.loads(settings.read_text())["agent_servers"]
+            assert servers["Other Kiro"] == entry, label
+            assert servers["DefenseClaw · Kiro"]["command"] == guard, label
+            if label == "lock out of custody":
+                # Setup rewrote the lock owner-only, so the copy now names a
+                # lock in this runtime's custody; nothing more to prove here.
+                settings.unlink()
+                continue
+            status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)
+            assert status["bindings"]["zed/kiro"]["healthy"], (label, status)
+            removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert removed.exit_code == 0, (label, removed.output)
+            assert json.loads(settings.read_text())["agent_servers"] == {"Other Kiro": entry}, label
+
+        # Control: this runtime's own adopted alias is still this runtime's.
+        settings.write_text(json.dumps({"agent_servers": {"My Kiro": {"command": agent, "args": ["acp"]}}}))
+        adopted = CliRunner().invoke(
+            acp_cmd, ["adopt", "--client", "zed", "--guard-binary", guard, "--yes", "--json-output"], obj=app
+        )
+        assert adopted.exit_code == 0, adopted.output
+        assert list(json.loads(settings.read_text())["agent_servers"]) == ["My Kiro"]
+        removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert removed.exit_code == 0, removed.output
+        assert not settings.exists()
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def test_bypassed_adopted_entry_stays_in_status_and_verify(tmp_path, monkeypatch):
     """Pointing an adopted entry back at the agent must not make the binding vanish."""
     _isolate_client_config(monkeypatch, tmp_path)

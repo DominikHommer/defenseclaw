@@ -12322,7 +12322,7 @@ def _remove_connector(
         return True
 
     if match in {"opencode", "amp"}:
-        from defenseclaw.commands.cmd_doctor import _managed_plugin_drift
+        from defenseclaw.commands.cmd_doctor import _managed_plugin_drift, managed_backup_target_after_home_move
         from defenseclaw.connector_paths import managed_plugin_path
 
         try:
@@ -12344,7 +12344,9 @@ def _remove_connector(
                     or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("post_sha256") or ""))
                 ):
                     raise ValueError("invalid plugin backup identity")
-                candidates.append(record["path"])
+                # After a supported home move the receipt still names the
+                # old home; it then proves this home's copy, digest included.
+                candidates.append(managed_backup_target_after_home_move(receipt, record["path"]) or record["path"])
             for path in set(candidates):
                 try:
                     os.lstat(path)

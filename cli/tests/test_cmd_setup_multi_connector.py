@@ -34,6 +34,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import stat
 import sys
 import unittest
@@ -1675,6 +1676,53 @@ class TestRemoveConnector(unittest.TestCase):
                 save.assert_not_called()
                 bounce.assert_not_called()
                 self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", connector})
+
+    # A supported home move (usermod -m, or rsync and then emptying the old
+    # home) leaves the receipt naming the old home. The unchanged plugin in
+    # the new home still proves the teardown; an edited one still refuses.
+    def test_remove_plugin_after_home_move(self):
+        from defenseclaw.commands.cmd_doctor import _managed_plugin_drift
+
+        home = self.app.cfg.data_dir
+        for connector in ("amp", "opencode"):
+            for move in ("old home gone", "old home emptied", "edited after move", "old home kept"):
+                with self.subTest(connector=connector, move=move):
+                    old_home = os.path.join(os.path.dirname(home), f"old-{os.path.basename(home)}-{connector}")
+                    plugin = self._seed_intact_plugin(connector, home)
+                    old_plugin = os.path.join(old_home, os.path.relpath(plugin, home))
+                    if move == "old home emptied":
+                        os.makedirs(old_home)
+                    if move == "old home kept":
+                        os.makedirs(os.path.dirname(old_plugin))
+                        shutil.copyfile(plugin, old_plugin)
+                    self._seed_intact_plugin(connector, home, target=old_plugin)
+                    if move == "edited after move":
+                        with open(plugin, "ab") as stream:
+                            stream.write(b"// operator edit\n")
+                    with open(plugin, "rb") as stream:
+                        plugin_bytes = stream.read()
+                    self._seed_map("codex", connector)
+                    with (
+                        self._plugin_home(home),
+                        patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}),
+                        self._no_restart_bounce() as bounce,
+                    ):
+                        drift = _managed_plugin_drift(self.app.cfg, plugin, connector)
+                        result = _invoke(["remove", connector, "--yes", "--no-restart"], self.app)
+                    shutil.rmtree(old_home, ignore_errors=True)
+                    bounce.assert_not_called()
+                    if move in ("old home gone", "old home emptied"):
+                        self.assertEqual(drift, "")
+                        self.assertEqual(result.exit_code, 0, result.output)
+                        self.assertIn(f"Removed connector {connector!r}", result.output)
+                        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex"})
+                    else:
+                        self.assertNotEqual(drift, "")
+                        self.assertNotEqual(result.exit_code, 0, result.output)
+                        self.assertIn("plugin teardown is unverified", result.output)
+                        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", connector})
+                    with open(plugin, "rb") as stream:
+                        self.assertEqual(stream.read(), plugin_bytes)
 
     def test_remove_restart_bounces_gateway(self):
         self._seed_map("codex", "cursor")
