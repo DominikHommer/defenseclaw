@@ -235,6 +235,34 @@ def test_verify_detects_agent_digest_drift(tmp_path, monkeypatch):
         cleanup_app(app, db_path, data_dir)
 
 
+def test_verify_reports_a_copied_guard_entry_the_guard_refuses(tmp_path, monkeypatch):
+    """GAP-0525: the guard sent a refused copy to verify, which said Verified."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    setup = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
+    verify = ["verify", "--client", "zed", "--agent", "kiro"]
+    try:
+        assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
+        document = json.loads(settings.read_text())
+        exact = dict(document["agent_servers"]["DefenseClaw · Kiro"])
+        args = list(exact["args"])
+        args[args.index("--profile") + 1] = "watch"
+        document["agent_servers"]["Exact copy"] = exact
+        document["agent_servers"]["Watch copy"] = dict(exact, args=args)
+        settings.write_text(json.dumps(document))
+        assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
+
+        result = CliRunner().invoke(acp_cmd, verify, obj=app)
+        assert result.exit_code != 0, result.output
+        assert "'Watch copy'" in result.output and "'Exact copy'" not in result.output
+        assert str(settings) in result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def test_doctor_reports_acp_bindings_and_fails_on_drift(tmp_path, monkeypatch):
     """GAP-1534: doctor lists each binding and FAILs with the fix on drift."""
     from defenseclaw.commands.cmd_doctor import _check_acp_bindings, _DoctorResult
@@ -622,8 +650,8 @@ def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch
         # A copied guarded entry with stale metadata must also be checked.
         # Under the reserved name it is DefenseClaw's, and verify reports its
         # launch. Under another name it no longer matches the lock, so it is
-        # not this runtime's alias: verify ignores it and removal would leave
-        # it with a warning.
+        # not this runtime's alias: removal would leave it with a warning,
+        # and verify reports that the guard refuses it (GAP-0525).
         stale = dict(servers["Kiro"], args=list(servers["Kiro"]["args"]))
         stale["args"][stale["args"].index("--profile") + 1] = "default"
         for name in ("DefenseClaw · Kiro", "Stale"):
@@ -632,7 +660,7 @@ def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch
             verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
             problems = cmd_acp_module._verify_binding(str(data_dir), "zed", "kiro", app.cfg.acp)
             if name == "Stale":
-                assert verified.exit_code == 0, verified.output
+                assert verified.exit_code != 0 and "'Stale' cannot start" in verified.output, verified.output
                 assert cmd_acp_module._unproven_pair_entries("zed", "kiro", str(data_dir)) == ["Stale"]
             else:
                 assert verified.exit_code != 0, verified.output
@@ -1231,7 +1259,13 @@ def test_alias_with_another_runtimes_lock_is_not_this_runtimes(tmp_path, monkeyp
                 settings.unlink()
                 continue
             status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)
-            assert status["bindings"]["zed/kiro"]["healthy"], (label, status)
+            binding = status["bindings"]["zed/kiro"]
+            if label == "other runtime token":
+                # It names this runtime's lock, which setup rewrote in action
+                # mode, so the guard refuses it and status says so (GAP-0525).
+                assert ["'Other Kiro' cannot start" in p for p in binding["problems"]] == [True], (label, status)
+            else:
+                assert binding["healthy"], (label, status)
             removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
             assert removed.exit_code == 0, (label, removed.output)
             assert json.loads(settings.read_text())["agent_servers"] == {"Other Kiro": entry}, label

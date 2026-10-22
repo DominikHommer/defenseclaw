@@ -839,6 +839,30 @@ def _verify_binding(
             }.items())
         ):
             problems.append(f"editor launch command does not match the lock: {name}")
+    # An entry setup did not write (a copy) that starts the guard on this
+    # pair's lock with another profile, mode, guard or agent: the guard
+    # refuses it and sends the user here, so Verified contradicted it
+    # (GAP-0525).
+    for name, entry in servers.items() if isinstance(servers, dict) else ():
+        if name in names or not isinstance(entry, dict) or not _entry_is_guarded(entry):
+            continue
+        options = _guard_options(entry)
+        args = entry.get("args")
+        if options.get("--client") != client or options.get("--agent") != agent or (
+            options.get("--contract-lock") != str(lock_path.resolve())
+        ):
+            continue
+        launched = args[args.index("--") + 1:args.index("--") + 2] if isinstance(args, list) and "--" in args else []
+        if (
+            options.get("--profile") != lock.get("profile")
+            or options.get("--mode") != lock.get("mode")
+            or entry.get("command") != (lock_guard.get("path") if isinstance(lock_guard, dict) else None)
+            or launched != [lock_agent.get("path") if isinstance(lock_agent, dict) else None]
+        ):
+            problems.append(
+                f"editor entry {name!r} cannot start: setup did not write it and its profile, mode or "
+                f"executables do not match the lock (delete it from {client_path})"
+            )
     return problems
 
 
