@@ -291,7 +291,6 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 		Use:          action,
 		Short:        summary,
 		SilenceUsage: true,
-		Args:         cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runEnterpriseSecret(cmd, action, opts)
 		},

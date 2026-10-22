@@ -21,6 +21,9 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strings"
+
+	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -80,6 +83,45 @@ func recordWindowsChange(layout managed.StandaloneLayout, reservation *enterpris
 		return err
 	}
 	return spool.Write(ev)
+}
+
+// recordWindowsChangeRefusal audits an early refusal only on a proven
+// installed standalone deployment, from an elevated caller. It never reads
+// the requested credential or trust-anchor input.
+func recordWindowsChangeRefusal(cmd *cobra.Command, ev enterprisestatus.ChangeEvent) {
+	if !windowsSecretIsElevated() || bundleSecureClient() {
+		return
+	}
+	installed, err := windowsSecretDeploymentInstalled()
+	if err == nil && installed {
+		var layout managed.StandaloneLayout
+		layout, err = windowsSecretLayout()
+		if err == nil {
+			err = recordWindowsChange(layout, nil, ev)
+		}
+	}
+	warnChangeUnrecorded(cmd.ErrOrStderr(), err)
+}
+
+// Cobra stops parsing at the first error. A later --trust-anchors, or one
+// missing its value, still requests an anchor change; never inspect its path.
+func windowsAnchorsArgumentRefusal(cmd *cobra.Command, err error) error {
+	requested := cmd.Flags().Changed("trust-anchors")
+	for _, arg := range secretRawArgs() {
+		if arg == "--" {
+			break
+		}
+		if arg == "--trust-anchors" || strings.HasPrefix(arg, "--trust-anchors=") {
+			requested = true
+			break
+		}
+	}
+	if requested {
+		if ev, ok := anchorsFailureEvent("invalid_arguments", false, nil); ok {
+			recordWindowsChangeRefusal(cmd, ev)
+		}
+	}
+	return lifecycleFlagError(cmd, err)
 }
 
 // recordWindowsAnchorsChange records an anchor file a run installed.

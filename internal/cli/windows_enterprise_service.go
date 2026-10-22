@@ -351,6 +351,13 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.BoolVar(&opts.noStart, "no-start", false, "stage with both services disabled and stopped; activate with a later repair")
 	flags.BoolVar(&opts.purge, "purge", false, "also remove managed state (Secure Client; a standalone uninstall always removes it) and each enrolled account's %USERPROFILE%\\.defenseclaw and per-user binaries in %USERPROFILE%\\.local\\bin, naming each account in the result (authenticated purge or fail-closed exact-scope recovery)")
 	if action == "ensure" {
+		cmd.SetFlagErrorFunc(windowsAnchorsArgumentRefusal)
+		cmd.Args = func(c *cobra.Command, args []string) error {
+			if err := strayArgumentError(c, args); err != nil {
+				return windowsAnchorsArgumentRefusal(c, err)
+			}
+			return nil
+		}
 		flags.StringVar(&opts.bundlePath, "bundle", "",
 			"standalone: apply this signed policy bundle (.dcbundle file); the bundle carries the config, so not with --config")
 		flags.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")
