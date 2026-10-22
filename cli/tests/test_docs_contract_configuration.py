@@ -173,3 +173,45 @@ def test_windows_bundle_mode_upgrade_leaves_the_config_out():
     row = next(line for line in (DOCS / 'enterprise/mdm/intune/windows-reference.mdx').read_text().splitlines()
                if line.startswith('| `-ConfigPath`'))
     assert 'bundle_required' in row
+
+
+WRAPPERS = ('packaging/mdm/linux/defenseclaw-enterprise.sh', 'packaging/mdm/macos/defenseclaw-enterprise.sh')
+# Words that promise a refused run left the device as it was.
+NO_CHANGE_CLAIM = re.compile(
+    r'nothing (?:else )?(?:changes|changed|is changed|was changed|is installed|was installed|is applied|was applied|is stored)'
+    r'|changes nothing|leaves the device (?:as it was|unchanged)|device is unchanged',
+    re.IGNORECASE,
+)
+
+
+def _doc_blocks(text):
+    # A paragraph, a list item or a table row.
+    return re.split(r'\n\s*\n|\n(?=\s*(?:[-*]|\d+\.|\|) )', text)
+
+
+@pytest.mark.parametrize('wrapper', WRAPPERS)
+def test_unix_wrapper_runs_package_and_credential_before_the_bundle_mode_check(wrapper):
+    # The page discloses this order; if the wrapper ever refuses first, the
+    # disclosure must change with it.
+    main = (DOCS.parents[2] / wrapper).read_text().split('\ndc_main() {', 1)[1]
+    package = main.index('dc_install_package')
+    secret = main.index('dc_store_secret "$gateway"')
+    ensure = main.index('"--config=$ensure_config"')
+    assert package < ensure and secret < ensure
+
+
+def test_bundle_required_refusal_discloses_the_wrapper_steps_that_already_ran():
+    text = (DOCS / 'enterprise/mdm/signed-bundles.mdx').read_text()
+    section = ' '.join(text.split('## Bundle mode', 1)[1].split('\n## ', 1)[0].split())
+    assert 'the config is not applied' in section
+    assert 'deb, rpm or pkg package (`--source`) is installed' in section
+    assert 'a credential (`--secret-name`) is stored' in section
+
+
+def test_no_page_promises_a_bundle_required_refusal_changes_nothing():
+    offenders = []
+    for page in sorted(DOCS.rglob('*.mdx')):
+        for block in _doc_blocks(page.read_text()):
+            if 'bundle_required' in block and NO_CHANGE_CLAIM.search(block):
+                offenders.append(f'{page.relative_to(DOCS)}: {" ".join(block.split())[:160]}')
+    assert not offenders, '\n'.join(offenders)

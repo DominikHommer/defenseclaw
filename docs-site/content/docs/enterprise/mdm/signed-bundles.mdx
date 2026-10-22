@@ -22,7 +22,10 @@ its config only from signed bundles:
 
 - A config delivered without a bundle (Setup `CONFIG=`, `-ConfigPath`, `--config`,
   `--config-file`, `DC_CONFIG_FILE` or `dc_inline_config`) that is not the current
-  bundle's config is refused with `bundle_required`. Nothing changes.
+  bundle's config is refused with `bundle_required`, and the config is not
+  applied. On Linux and macOS the wrapper runs its earlier steps first: a deb,
+  rpm or pkg package (`--source`) is installed and a credential (`--secret-name`)
+  is stored, and both stay.
 - Windows Setup also refuses `TRUSTANCHORS=` together with `CONFIG=`
   (`bundle_required`, exit `1639`).
 - On Linux and macOS, an edit of the installed `config.yaml` is reverted to the
