@@ -363,6 +363,7 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
     # Members an earlier rule already decided for. Okta applies the first
     # active rule that matches a user, so a later rule never reaches them.
     group_settled: dict[str, set[str]] = {name: set() for name in groups}
+    group_allowed: dict[str, set[str]] = {name: set() for name in groups}
     member_groups: dict[str, set[str]] = {}
     group_members: dict[str, set[str]] = {}
 
@@ -440,9 +441,15 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
         for name, group in groups.items():
             if not group or group_decided[name]:
                 continue
+            settled = group_settled[name]
+            if settled and members_of(group["id"]) <= group_allowed[name]:
+                # Earlier member-specific rules have decided the whole group.
+                # A later group-wide deny cannot replace any first match.
+                group_covered[name] = True
+                group_decided[name] = True
+                continue
             if group["id"] in excluded_groups:
                 continue
-            settled = group_settled[name]
             if user_ids or (group_ids and group["id"] not in group_ids):
                 # A rule for named users or for other groups decides for the
                 # members it matches: a deny or a stronger challenge there
@@ -458,6 +465,8 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
                     group_partial[name].append(f"rule '{rule.get('name')}' {reason}")
                 if unrestricted or not password_allow:
                     settled |= matched
+                    if password_allow:
+                        group_allowed[name] |= matched
                 continue
             if not password_allow and (excluded_users or excluded_groups):
                 # A deny or a stronger challenge for the whole group decides
