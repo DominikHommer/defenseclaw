@@ -13,6 +13,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +25,25 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
+
+// waitEnterpriseHookLookupsDrained waits, up to five seconds, until no
+// startEnterpriseHookLookup lookup whose key starts with kind runs, so a
+// test can put back the seams such a lookup reads.
+func waitEnterpriseHookLookupsDrained(kind string) {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		running := 0
+		enterpriseHookLookupsMu.Lock()
+		for key := range enterpriseHookLookups {
+			if strings.HasPrefix(key, kind+"\x00") {
+				running++
+			}
+		}
+		enterpriseHookLookupsMu.Unlock()
+		if running == 0 {
+			return
+		}
+	}
+}
 
 // stallEnterpriseHookWorkerGroups makes worker launches resolve
 // supplementary groups (as a root parent does) through a lookup that
@@ -37,14 +59,7 @@ func stallEnterpriseHookWorkerGroups(t *testing.T, bound time.Duration, answer [
 	previousTimeout, previousLog := enterpriseHookWorkerGroupLookupTimeout, enterpriseHookWorkerLog
 	t.Cleanup(func() {
 		close(release)
-		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-			enterpriseHookWorkerGroupLookupsMu.Lock()
-			running := len(enterpriseHookWorkerGroupLookups)
-			enterpriseHookWorkerGroupLookupsMu.Unlock()
-			if running == 0 {
-				break
-			}
-		}
+		waitEnterpriseHookLookupsDrained("worker-groups")
 		enterpriseHookWorkerResolvesGroups, enterpriseHookWorkerGroupIDs = previousResolves, previousLookup
 		enterpriseHookWorkerGroupLookupTimeout, enterpriseHookWorkerLog = previousTimeout, previousLog
 	})
@@ -215,7 +230,7 @@ func TestForeignHookCleanupDenialWaitsForTheWorkerLaunch(t *testing.T) {
 		}
 		// A launch the pool resolved is used as it is.
 		enterpriseHookWorkerExecutable = func() (string, error) { return "", errors.New("must not be resolved again") }
-		account.launch = &enterpriseHookWorkerLaunch{exe: trueBin}
+		account.launch = &enterpriseHookWorkerLaunch{exe: trueBin, env: []string{"PATH=/usr/bin:/bin"}}
 		if _, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup}); err == nil || errors.Is(err, errEnterpriseHookWorkerNotStarted) {
 			t.Fatalf("a resolved launch was not used: %v", err)
 		}
@@ -301,4 +316,267 @@ func TestForeignHookCleanupRefusesAnOwnerItCannotSettle(t *testing.T) {
 			t.Fatalf("the finished cleanup kept its denial: %+v", pending)
 		}
 	})
+}
+
+// stallEnterpriseHookWorkerPath makes the worker PATH's directory check
+// (enterpriseHookWorkerSearchDirs) answer /opt/agent/bin, after blocking
+// until the test ends when stall is set, the way a Directory Services
+// lookup on macOS can stall. A launch waits bound for it. entered gets a
+// value when a check starts.
+func stallEnterpriseHookWorkerPath(t *testing.T, bound time.Duration, stall bool) (<-chan struct{}, *atomic.Int32) {
+	t.Helper()
+	release := make(chan struct{})
+	entered := make(chan struct{}, 16)
+	calls := &atomic.Int32{}
+	previousDirs, previousTimeout := enterpriseHookWorkerSearchDirs, enterpriseHookWorkerEnvironmentTimeout
+	t.Cleanup(func() {
+		close(release)
+		waitEnterpriseHookLookupsDrained("worker-environment")
+		enterpriseHookWorkerSearchDirs, enterpriseHookWorkerEnvironmentTimeout = previousDirs, previousTimeout
+	})
+	enterpriseHookWorkerEnvironmentTimeout = bound
+	enterpriseHookWorkerSearchDirs = func(string, int) []string {
+		calls.Add(1)
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		if stall {
+			<-release
+		}
+		return []string{"/opt/agent/bin"}
+	}
+	return entered, calls
+}
+
+// foreignTxNoLedger fails the test when the guardian wrote a removal
+// ledger: a refused cleanup publishes nothing.
+func foreignTxNoLedger(t *testing.T, dataDir string) {
+	t.Helper()
+	if _, err := os.Lstat(foreignTxLedger(dataDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a cleanup whose worker never started wrote the removal ledger (%v)", err)
+	}
+}
+
+// A cleanup's pending denial is published only once its worker's whole
+// environment is resolved. The worker's PATH takes a machine directory only
+// after checking who can change it, which on macOS can ask Directory
+// Services and stall. That check ran after the denial was published and
+// outside the worker's timeout, so a stalled directory kept the denial for
+// as long as the guardian lived. Now a PATH that does not resolve in time
+// refuses the cleanup before anything is published, and once a launch is
+// resolved the runner looks nothing up.
+func TestForeignHookCleanupDenialWaitsForTheWorkerEnvironment(t *testing.T) {
+	t.Run("a stalled PATH check refuses the cleanup", func(t *testing.T) {
+		dataDir, seen := useForeignTxLaunchPass(t)
+		entered, _ := stallEnterpriseHookWorkerPath(t, 300*time.Millisecond, true)
+		done := make(chan struct{})
+		var log string
+		go func() {
+			defer close(done)
+			log = runForeignTxPass(t)
+		}()
+		waitForeignTx(t, entered, "the PATH check")
+		if got := foreignTxPendingConnectors(dataDir); got != "" || foreignTxOpenTransactions() != 0 {
+			t.Fatalf("a denial (%q) was published while the worker's PATH was still resolving", got)
+		}
+		waitForeignTx(t, done, "the pass")
+		if launches, _ := seen(); len(launches) != 0 {
+			t.Fatalf("a cleaning worker ran without its environment: %+v", launches)
+		}
+		foreignTxNoLedger(t, dataDir)
+		if foreignTxOpenTransactions() != 0 {
+			t.Fatal("a refused cleanup left a transaction")
+		}
+		if !strings.Contains(log, errEnterpriseHookWorkerNotStarted.Error()) || !strings.Contains(log, "did not resolve within") {
+			t.Fatalf("the refused cleanup must be reported; log:\n%s", log)
+		}
+	})
+	t.Run("the PATH check answers", func(t *testing.T) {
+		dataDir, seen := useForeignTxLaunchPass(t)
+		stallEnterpriseHookWorkerPath(t, 5*time.Second, false)
+		log := runForeignTxPass(t)
+		launches, pending := seen()
+		if len(launches) != 1 || launches[0] == nil || !slices.Contains(launches[0].env, "PATH=/usr/bin:/bin:/opt/agent/bin") {
+			t.Fatalf("the worker must start with the PATH resolved before the denial: %+v; log:\n%s", launches, log)
+		}
+		if len(pending) != 1 || pending[0] != "cursor" || foreignTxPendingConnectors(dataDir) != "" {
+			t.Fatalf("pending denials while the worker ran %q, after %q", pending, foreignTxPendingConnectors(dataDir))
+		}
+	})
+	t.Run("the pass ends during the PATH check", func(t *testing.T) {
+		dataDir, seen := useForeignTxLaunchPass(t)
+		entered, _ := stallEnterpriseHookWorkerPath(t, time.Minute, true)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		var log bytes.Buffer
+		go func() {
+			defer close(done)
+			runEnterpriseHookStandaloneForeignCleanup(ctx, &log, time.Now(), enterprisehooks.Manifest{}, map[string]map[string]bool{"alice": {"codex": true}}, "")
+		}()
+		waitForeignTx(t, entered, "the PATH check")
+		cancel()
+		waitForeignTx(t, done, "the pass")
+		if launches, _ := seen(); len(launches) != 0 {
+			t.Fatalf("a cleaning worker ran after its launch could not be resolved: %+v", launches)
+		}
+		foreignTxNoLedger(t, dataDir)
+		if !strings.Contains(log.String(), errEnterpriseHookWorkerNotStarted.Error()) {
+			t.Fatalf("the unresolved launch must be reported; log:\n%s", log.String())
+		}
+	})
+	t.Run("a stalled PATH check and a stalled group lookup", func(t *testing.T) {
+		dataDir, seen := useForeignTxLaunchPass(t)
+		stallEnterpriseHookWorkerGroups(t, 200*time.Millisecond, nil, true)
+		stallEnterpriseHookWorkerPath(t, 200*time.Millisecond, true)
+		started := time.Now()
+		runForeignTxPass(t)
+		if elapsed := time.Since(started); elapsed > 5*time.Second {
+			t.Fatalf("the pass waited %s for stalled lookups", elapsed)
+		}
+		if launches, _ := seen(); len(launches) != 0 {
+			t.Fatalf("a cleaning worker ran without its environment: %+v", launches)
+		}
+		foreignTxNoLedger(t, dataDir)
+	})
+	t.Run("a stalled directory gets one PATH check per account", func(t *testing.T) {
+		_, calls := stallEnterpriseHookWorkerPath(t, 100*time.Millisecond, true)
+		account := enterpriseHookWorkerAccount{UID: 4242, GID: 4242, User: "alice", Home: "/home/alice"}
+		for range 3 {
+			started := time.Now()
+			launch, err := resolveEnterpriseHookWorkerLaunch(context.Background(), account)
+			if err == nil || launch != nil {
+				t.Fatalf("a launch whose PATH did not resolve was resolved: %+v, %v", launch, err)
+			}
+			if elapsed := time.Since(started); elapsed > 5*time.Second {
+				t.Fatalf("the launch waited %s for a stalled PATH check", elapsed)
+			}
+		}
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("%d PATH checks ran for one stalled account", got)
+		}
+	})
+	t.Run("the runner looks nothing up for a resolved launch", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("runs the worker as the test's own non-root account")
+		}
+		trueBin, err := exec.LookPath("true")
+		if err != nil {
+			t.Skip("no true(1)")
+		}
+		_, calls := stallEnterpriseHookWorkerPath(t, 5*time.Second, true)
+		account := enterpriseHookWorkerAccount{UID: os.Getuid(), GID: os.Getgid(), User: "self", Home: t.TempDir()}
+		request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup}
+		account.launch = &enterpriseHookWorkerLaunch{exe: trueBin}
+		if _, err := runEnterpriseHookWorker(context.Background(), account, request); !errors.Is(err, errEnterpriseHookWorkerNotStarted) {
+			t.Fatalf("a launch without its environment must not start: %v", err)
+		}
+		account.launch = &enterpriseHookWorkerLaunch{exe: trueBin, env: []string{"PATH=/usr/bin:/bin"}}
+		if _, err := runEnterpriseHookWorker(context.Background(), account, request); err == nil || errors.Is(err, errEnterpriseHookWorkerNotStarted) {
+			t.Fatalf("a resolved launch was not started: %v", err)
+		}
+		if got := calls.Load(); got != 0 {
+			t.Fatalf("the runner checked the PATH %d times for a resolved launch", got)
+		}
+	})
+	t.Run("a runner that resolves its own launch is bounded", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("runs the worker as the test's own non-root account")
+		}
+		stallEnterpriseHookWorkerPath(t, 200*time.Millisecond, true)
+		account := enterpriseHookWorkerAccount{UID: os.Getuid(), GID: os.Getgid(), User: "self", Home: t.TempDir()}
+		started := time.Now()
+		_, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup})
+		if !errors.Is(err, errEnterpriseHookWorkerNotStarted) || time.Since(started) > 5*time.Second {
+			t.Fatalf("a stalled PATH check must end the launch before the worker starts: %v after %s", err, time.Since(started))
+		}
+	})
+}
+
+// The service account lookup of a guardian record write is bounded, runs
+// once per account however many writes wait on it, and its answer is kept:
+// the write that settles a cleanup's pending denial reuses the group the
+// write that published it found, and makes no directory call that could
+// stall and keep the denial.
+func TestEnterpriseHookServiceGroupLookupIsBoundedAndKept(t *testing.T) {
+	const name = "_dc_test_service_group"
+	release := make(chan struct{})
+	var calls atomic.Int32
+	previousLookup, previousTimeout := enterpriseHookServiceUserLookup, enterpriseHookServiceGroupLookupTimeout
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		waitEnterpriseHookLookupsDrained("service-group")
+		enterpriseHookServiceUserLookup, enterpriseHookServiceGroupLookupTimeout = previousLookup, previousTimeout
+		enterpriseHookServiceGroupsMu.Lock()
+		delete(enterpriseHookServiceGroups, name)
+		delete(enterpriseHookServiceGroups, name+"_unknown")
+		enterpriseHookServiceGroupsMu.Unlock()
+	})
+	enterpriseHookServiceGroupLookupTimeout = 100 * time.Millisecond
+	enterpriseHookServiceUserLookup = func(lookup string) (*user.User, error) {
+		calls.Add(1)
+		if lookup != name {
+			return nil, user.UnknownUserError(lookup)
+		}
+		<-release
+		return &user.User{Username: lookup, Gid: "4321"}, nil
+	}
+	for range 3 {
+		started := time.Now()
+		if _, err := enterpriseHookServiceGroup(name); err == nil || !strings.Contains(err.Error(), "did not resolve within") {
+			t.Fatalf("a stalled service account lookup answered: %v", err)
+		}
+		if elapsed := time.Since(started); elapsed > 5*time.Second {
+			t.Fatalf("a write waited %s for a stalled service account lookup", elapsed)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("%d lookups ran for one stalled service account", got)
+	}
+	close(release)
+	waitEnterpriseHookLookupsDrained("service-group")
+	if gid, err := enterpriseHookServiceGroup(name); err != nil || gid != 4321 {
+		t.Fatalf("service group %d, %v; want 4321", gid, err)
+	}
+	enterpriseHookServiceUserLookup = func(string) (*user.User, error) {
+		calls.Add(1)
+		return nil, errors.New("the directory must not be asked again")
+	}
+	before := calls.Load()
+	if gid, err := enterpriseHookServiceGroup(name); err != nil || gid != 4321 || calls.Load() != before {
+		t.Fatalf("a found service group was looked up again: %d, %v", gid, err)
+	}
+	enterpriseHookServiceUserLookup = func(lookup string) (*user.User, error) { return nil, user.UnknownUserError(lookup) }
+	for range 2 {
+		var unknown user.UnknownUserError
+		if _, err := enterpriseHookServiceGroup(name + "_unknown"); !errors.As(err, &unknown) {
+			t.Fatalf("an unknown service account must be reported as one: %v", err)
+		}
+	}
+	enterpriseHookServiceGroupsMu.Lock()
+	_, kept := enterpriseHookServiceGroups[name+"_unknown"]
+	enterpriseHookServiceGroupsMu.Unlock()
+	if kept {
+		t.Fatal("a failed lookup was kept")
+	}
+}
+
+// The owner check refuses a record that is not root's and in the service
+// group.
+func TestEnterpriseHookRecordOwnershipIsVerified(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("needs a file root does not own")
+	}
+	path := filepath.Join(t.TempDir(), "record.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyEnterpriseHookRecordOwnership(path, os.Getgid()); err == nil {
+		t.Fatal("a record the test account owns passed the root owner check")
+	}
 }

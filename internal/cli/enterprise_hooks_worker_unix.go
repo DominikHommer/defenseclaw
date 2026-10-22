@@ -304,6 +304,9 @@ type enterpriseHookWorkerAccount struct {
 // process starts.
 type enterpriseHookWorkerLaunch struct {
 	exe string
+	// env is the worker's whole environment
+	// (enterpriseHookWorkerEnvironment).
+	env []string
 	// groups are the supplementary groups a root parent gives the worker
 	// (nil: the primary group only).
 	groups []int
@@ -1199,11 +1202,16 @@ func runEnterpriseHookWorker(
 			return notStarted(err)
 		}
 	}
+	if launch.exe == "" || len(launch.env) == 0 {
+		// A launch is resolved whole or not at all: once a cleanup has
+		// published its denial, the runner looks nothing up.
+		return notStarted(errors.New("the worker launch is not resolved"))
+	}
 	ctx, cancel := context.WithTimeout(ctx, workerTimeout(request))
 	defer cancel()
 	cmd := exec.CommandContext(ctx, launch.exe, enterpriseHookWorkerArgs...)
 	cmd.Dir = "/"
-	cmd.Env = enterpriseHookWorkerEnvironment(account)
+	cmd.Env = launch.env
 	cmd.Stdin = bytes.NewReader(payload)
 	stdout := &workerOutputBuffer{limit: enterpriseHookWorkerResponseLimit}
 	stderr := &workerOutputBuffer{limit: enterpriseHookWorkerStderrLimit}
@@ -1259,68 +1267,103 @@ var enterpriseHookWorkerResolvesGroups = func() bool { return os.Geteuid() == 0 
 // enterpriseHookWorkerGroupLookupTimeout bounds how long a worker launch
 // waits for the account's supplementary groups. os/user, NSS and Directory
 // Services take no context, and an Open Directory lookup on macOS can stall
-// without end; the foreign-hook cleanup pool has published a denial for the
-// account by then that only the worker's end settles. A lookup that does
-// not answer in time counts as one that failed: the worker runs with the
-// primary group only, which can only grant less.
+// without end; the foreign-hook cleanup pool publishes the account's denial
+// only once the launch is resolved. A lookup that does not answer in time
+// counts as one that failed: the worker runs with the primary group only,
+// which can only grant less.
 var enterpriseHookWorkerGroupLookupTimeout = 15 * time.Second
 
-// enterpriseHookWorkerGroupLookup is one running group lookup; groups is
-// set before done is closed.
-type enterpriseHookWorkerGroupLookup struct {
-	done   chan struct{}
-	groups []int
+// enterpriseHookWorkerEnvironmentTimeout bounds how long a worker launch
+// waits for the worker's environment. Its PATH takes a machine directory
+// only once enterprisehooks has checked who can change it, and on macOS
+// that asks Directory Services whether the directory's owner is an
+// administrator, which takes no context and can stall. A PATH that left out
+// the directories whose check did not answer could hide an agent from
+// connector setup, so there is no partial answer: a launch whose
+// environment does not resolve in time fails before the cleanup pool
+// publishes any denial, and no worker starts.
+var enterpriseHookWorkerEnvironmentTimeout = 15 * time.Second
+
+// enterpriseHookLookup is one running lookup that takes no context; value
+// is set before done is closed.
+type enterpriseHookLookup struct {
+	done  chan struct{}
+	value any
 }
 
-// enterpriseHookWorkerGroupLookups are the group lookups still running, by
-// account, so a stalled directory holds one lookup per account, not one
-// per pass.
+// enterpriseHookLookups are the lookups still running, by key, so a
+// stalled directory holds one lookup per key, not one per caller.
 var (
-	enterpriseHookWorkerGroupLookupsMu sync.Mutex
-	enterpriseHookWorkerGroupLookups   = map[string]*enterpriseHookWorkerGroupLookup{}
+	enterpriseHookLookupsMu sync.Mutex
+	enterpriseHookLookups   = map[string]*enterpriseHookLookup{}
 )
 
-// resolveEnterpriseHookWorkerLaunch looks up what account's worker launch
-// needs before its process starts: the executable and, for a root parent,
-// the supplementary groups. It returns within
-// enterpriseHookWorkerGroupLookupTimeout, or with ctx's error once ctx
+// startEnterpriseHookLookup runs fn for key, or joins the run for key that
+// has not ended. The caller bounds how long it waits for done.
+func startEnterpriseHookLookup(key string, fn func() any) *enterpriseHookLookup {
+	enterpriseHookLookupsMu.Lock()
+	defer enterpriseHookLookupsMu.Unlock()
+	if lookup := enterpriseHookLookups[key]; lookup != nil {
+		return lookup
+	}
+	lookup := &enterpriseHookLookup{done: make(chan struct{})}
+	enterpriseHookLookups[key] = lookup
+	go func() {
+		defer func() {
+			enterpriseHookLookupsMu.Lock()
+			delete(enterpriseHookLookups, key)
+			enterpriseHookLookupsMu.Unlock()
+			close(lookup.done)
+		}()
+		lookup.value = fn()
+	}()
+	return lookup
+}
+
+// resolveEnterpriseHookWorkerLaunch looks up everything account's worker
+// launch needs before its process starts: the executable, the environment
+// and, for a root parent, the supplementary groups. The environment and the
+// groups are looked up at the same time, one lookup of each per account.
+// It returns within the longer of enterpriseHookWorkerEnvironmentTimeout
+// and enterpriseHookWorkerGroupLookupTimeout, or with ctx's error once ctx
 // ends; on an error no worker may start.
 func resolveEnterpriseHookWorkerLaunch(ctx context.Context, account enterpriseHookWorkerAccount) (*enterpriseHookWorkerLaunch, error) {
 	exe, err := enterpriseHookWorkerExecutable()
 	if err != nil {
 		return nil, err
 	}
-	launch := &enterpriseHookWorkerLaunch{exe: exe}
-	if !enterpriseHookWorkerResolvesGroups() {
-		return launch, nil
-	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	key := fmt.Sprintf("%d\x00%d\x00%s", account.UID, account.GID, account.User)
-	enterpriseHookWorkerGroupLookupsMu.Lock()
-	lookup := enterpriseHookWorkerGroupLookups[key]
-	if lookup == nil {
-		lookup = &enterpriseHookWorkerGroupLookup{done: make(chan struct{})}
-		enterpriseHookWorkerGroupLookups[key] = lookup
+	envTimer := time.NewTimer(enterpriseHookWorkerEnvironmentTimeout)
+	defer envTimer.Stop()
+	groupTimer := time.NewTimer(enterpriseHookWorkerGroupLookupTimeout)
+	defer groupTimer.Stop()
+	key := fmt.Sprintf("%d\x00%d\x00%s\x00%s", account.UID, account.GID, account.User, account.Home)
+	environment := startEnterpriseHookLookup("worker-environment\x00"+key, func() any { return enterpriseHookWorkerEnvironment(account) })
+	var groups *enterpriseHookLookup
+	if enterpriseHookWorkerResolvesGroups() {
 		groupIDs := enterpriseHookWorkerGroupIDs
-		go func() {
-			lookup.groups = groupIDs(account)
-			enterpriseHookWorkerGroupLookupsMu.Lock()
-			delete(enterpriseHookWorkerGroupLookups, key)
-			enterpriseHookWorkerGroupLookupsMu.Unlock()
-			close(lookup.done)
-		}()
+		groups = startEnterpriseHookLookup("worker-groups\x00"+key, func() any { return groupIDs(account) })
 	}
-	enterpriseHookWorkerGroupLookupsMu.Unlock()
-	timer := time.NewTimer(enterpriseHookWorkerGroupLookupTimeout)
-	defer timer.Stop()
+	launch := &enterpriseHookWorkerLaunch{exe: exe}
 	select {
-	case <-lookup.done:
-		launch.groups = lookup.groups
+	case <-environment.done:
+		launch.env, _ = environment.value.([]string)
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-timer.C:
+	case <-envTimer.C:
+		return nil, fmt.Errorf("the worker environment for uid %d did not resolve within %s", account.UID, enterpriseHookWorkerEnvironmentTimeout)
+	}
+	if groups == nil {
+		return launch, nil
+	}
+	select {
+	case <-groups.done:
+		launch.groups, _ = groups.value.([]int)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-groupTimer.C:
 		if enterpriseHookWorkerLog != nil {
 			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] worker uid=%d: supplementary groups did not resolve within %s, using the primary group only\n", account.UID, enterpriseHookWorkerGroupLookupTimeout)
 		}
@@ -1365,6 +1408,13 @@ func enterpriseHookWorkerCredential(account enterpriseHookWorkerAccount, supplem
 	return &syscall.Credential{Uid: uint32(account.UID), Gid: uint32(account.GID), Groups: groups}
 }
 
+// enterpriseHookWorkerSearchDirs lists the agent directories of the
+// worker's PATH (enterprisehooks.UnixAgentSearchDirsFor). On macOS it can
+// ask Directory Services who administers a machine directory, so a launch
+// resolves it within enterpriseHookWorkerEnvironmentTimeout. Replaceable in
+// tests.
+var enterpriseHookWorkerSearchDirs = enterprisehooks.UnixAgentSearchDirsFor
+
 // enterpriseHookWorkerPath lets connector setup find an agent where
 // discovery found it, after the system directories so they always win. The worker runs as the user, so the
 // user-owned entries grant nothing the user does not already have; a
@@ -1373,7 +1423,7 @@ func enterpriseHookWorkerCredential(account enterpriseHookWorkerAccount, supplem
 func enterpriseHookWorkerPath(home string, uid int) string {
 	parts := []string{"/usr/bin", "/bin"}
 	seen := map[string]bool{"/usr/bin": true, "/bin": true}
-	for _, dir := range enterprisehooks.UnixAgentSearchDirsFor(home, uid) {
+	for _, dir := range enterpriseHookWorkerSearchDirs(home, uid) {
 		dir = filepath.Clean(dir)
 		if seen[dir] || !filepath.IsAbs(dir) || strings.ContainsAny(dir, ":\x00") {
 			continue
