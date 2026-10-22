@@ -59,7 +59,7 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 			"`closed` blocks `preToolUse` and `permissionRequest`",
 		}},
 		{filepath.Join("..", "..", "envvars", "registry.json"), []string{
-			"Not read by 1.0.4 hooks",
+			"every other hook uses the guardrail.hook_fail_mode installed with it",
 		}},
 	} {
 		data, err := os.ReadFile(doc.path)
