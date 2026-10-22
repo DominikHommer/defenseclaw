@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -29,6 +30,14 @@ type verifiedUserScopedIdentityContextKey struct{}
 // handleForeignHookSession keeps the standalone session snapshot in the
 // gateway's data directory. The namespace comes only from hook-socket peer
 // credentials or a per-user hook token authenticated by tokenAuth.
+//
+// On a standalone host an exchange holds its account's removal lock shared
+// (enterprisepolicy.LockForeignHookAccountExchange) from before it reads the
+// record key and the guardian's removals until its answer is written, and
+// answers allow only within foreignHookExchangeHold of taking it. A hook
+// removal of the account (the guardian holds the lock exclusively) therefore
+// either waits for this answer or makes this exchange deny; other accounts
+// never wait on it (GAP-0348, GAP-0414).
 func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -75,17 +84,37 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	stateDir := enterprisepolicy.ForeignHookSessionStoreDir(dataDir, identity)
-	places := a.foreignHookSessionPlaces(dataDir)
-	// The record key first, then the guardian's removals (GAP-0352): the
-	// guardian removes the key before it records a removal and creates a new
-	// one only after, so an allow made with a key read before a removal
-	// proves nothing during an outage, and one made with the current key was
-	// decided from removals at least as new as that key.
-	recordKey := places.key()
-	removals, removalsErr := a.readForeignHookRemovals(places, identity, recordKey.ID())
 	// Each identity has its own store, so only that identity's exchanges
 	// are serialized; another account's exchange never waits on this one.
-	unlock := a.foreignHookSessionLocks.lock(stateDir)
+	unlock := sync.OnceFunc(a.foreignHookSessionLocks.lock(stateDir))
+	defer unlock()
+	places := a.foreignHookSessionPlaces(dataDir)
+	var lockErr error
+	release := func() {}
+	if places.standalone {
+		ctx, cancel := context.WithTimeout(r.Context(), foreignHookExchangeWait)
+		held, err := foreignHookAccountExchangeLock(ctx, dataDir, identity)
+		cancel()
+		if err != nil {
+			lockErr = err
+		} else {
+			release = held
+		}
+	}
+	defer release()
+	answerBy := time.Now().Add(foreignHookExchangeHold)
+	// The record key first, then the guardian's removals, both under the
+	// account's lock: a removal rotates the key and records itself while it
+	// holds the lock exclusively, so an allow made with the key read here was
+	// decided from removals at least as new as that key, and one made with a
+	// key read before a removal proves nothing during an outage.
+	recordKey := places.key(identity)
+	removals, ledgerErr := a.foreignHookRemovals.forIdentity(places.removalsDir, identity)
+	removalsErr := errors.Join(lockErr, ledgerErr, places.rootErr)
+	if lockErr != nil && errors.Is(lockErr, enterprisepolicy.ErrForeignHookRemovalPending) {
+		// A removal in progress has its own reason; join hides it otherwise.
+		removalsErr = lockErr
+	}
 	killed := false
 	decision := enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
 		StateDir:     stateDir,
@@ -95,63 +124,77 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		Removals:     removals,
 		RemovalsErr:  removalsErr,
 		Now:          time.Now(),
-		// A block is recorded in the private store only after the key is
-		// gone: the block is published only after that write, and a
+		// A block is recorded in the private store only after the account's
+		// key is gone: the block is published only after that write, and a
 		// gateway that stops in between, or whose publication fails, must
 		// not leave an allow the hook honors during the outage (the kill
-		// switch, GAP-0352 1.0.4 guard loop).
-		BeforeBlock: func() { killed = a.killForeignHookSessionKey(places, identity, exchange.Key, false) },
+		// switch, GAP-0352).
+		BeforeBlock: func() { killed = a.killForeignHookSessionKey(places, identity, exchange.Key) },
 	})
 	if decision.Deny && !killed {
 		// Every denial is published only after the key is gone.
-		a.killForeignHookSessionKey(places, identity, exchange.Key, true)
+		a.killForeignHookSessionKey(places, identity, exchange.Key)
 	}
-	// Under the same lock, so the protected record follows the store's
+	if !decision.Deny && !time.Now().Before(answerBy) {
+		// Too late to answer allow: a removal of the account may already
+		// have stopped waiting for this exchange. Nothing is published.
+		decision = enterprisepolicy.ApplyForeignHookRemovals(decision, exchange.Key, nil, errForeignHookExchangeExpired, time.Now())
+		a.killForeignHookSessionKey(places, identity, exchange.Key)
+	}
+	// Under the same locks, so the protected record follows the store's
 	// order: the hook reads it when the gateway is down.
 	a.publishForeignHookSessionDecision(places.recordRoot, identity, exchange.Key, decision, recordKey)
-	decision = a.recheckForeignHookSessionAllow(places, identity, exchange.Key, decision, recordKey)
-	unlock()
 	if decision.Deny {
 		// A denial cannot become an allow when the guardian commits a
-		// removal, so do not hold the fence through audit export or the
+		// removal, so neither lock is held through the audit export or the
 		// response write.
-		fenceUnlock()
+		release()
 		unlock()
 		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(decision)
 		return
 	}
+	if !places.standalone {
+		unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(decision)
+		return
+	}
 	if refusal := writeFencedForeignHookAllow(w, decision, answerBy); refusal != "" {
-		fenceUnlock()
+		release()
 		unlock()
 		writeManagedHookRefusal(w, http.StatusServiceUnavailable, refusal)
 	}
 }
 
-// foreignHookFenceWait bounds how long an exchange waits for the removal
-// fence before it is refused; only a guardian's brief exclusive check holds
-// the fence against it. foreignHookFencedWriteTimeout bounds an allow's
-// response write, so a client that stops reading its response does not
-// hold the fence for long. A response that fits the socket buffer is
-// written without the client reading; one the client does not take in time
-// is cut, and the client's hook fails closed on the incomplete response.
-const (
-	foreignHookFenceWait          = 500 * time.Millisecond
-	foreignHookFencedWriteTimeout = 250 * time.Millisecond
-)
+// errForeignHookExchangeExpired is an exchange that could not answer within
+// foreignHookExchangeHold of taking its account's removal lock.
+var errForeignHookExchangeExpired = errors.New("the exchange did not answer in time")
 
-// foreignHookExchangeHold bounds an allow from the moment the exchange took
-// the fence (enterprisepolicy.ForeignHookRemovalExchangeHold); tests
-// shorten it.
-var foreignHookExchangeHold = enterprisepolicy.ForeignHookRemovalExchangeHold
+// foreignHookExchangeWait bounds how long an exchange waits for its
+// account's removal lock (enterprisepolicy.ForeignHookExchangeWait),
+// foreignHookExchangeHold how long after taking it the exchange may answer
+// allow (enterprisepolicy.ForeignHookExchangeHold), and
+// foreignHookFencedWriteTimeout an allow's response write, so a client that
+// stops reading its response does not hold the lock for long. A response
+// that fits the socket buffer is written without the client reading; one the
+// client does not take in time is cut, and the client's hook fails closed on
+// the incomplete response. foreignHookAccountExchangeLock takes the lock
+// (replaceable in tests).
+var (
+	foreignHookExchangeWait        = enterprisepolicy.ForeignHookExchangeWait
+	foreignHookExchangeHold        = enterprisepolicy.ForeignHookExchangeHold
+	foreignHookFencedWriteTimeout  = 250 * time.Millisecond
+	foreignHookAccountExchangeLock = enterprisepolicy.LockForeignHookAccountExchange
+)
 
 // writeFencedForeignHookAllow writes an allow and flushes it to the
 // connection within foreignHookFencedWriteTimeout, and never past answerBy.
 // It returns a refusal reason, having written nothing, when the connection
 // cannot bound the write or answerBy has passed: the caller then refuses the
-// call instead of answering an allow that a guardian no longer waits for.
-// A write cut at the deadline leaves the expired deadline in place, so the
+// call instead of answering an allow that a removal no longer waits for. A
+// write cut at the deadline leaves the expired deadline in place, so the
 // server's own finishing writes fail at once too.
 func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolicy.GuardDecision, answerBy time.Time) string {
 	var body bytes.Buffer
@@ -184,42 +227,14 @@ func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolic
 	return ""
 }
 
-// recheckForeignHookSessionAllow reads the record key and the guardian's
-// removals again after an exchange decided and published an allow, right
-// before it answers (GAP-0352, 1.0.4 review loop round 4): a removal the
-// guardian recorded (its ledger, or the account's pending mark) while the
-// exchange decided from the removals it read first must deny this call,
-// not only the next one. A removal that now denies the call, or removals
-// that can no longer be read, replace the allow with that denial: the key
-// is removed first, and the denial is published. An allow the new removals
-// still allow is published again under the key read for them when the key
-// changed, so the hook keeps a current answer during an outage. A denial
-// is final and is returned as it is.
-func (a *APIServer) recheckForeignHookSessionAllow(places foreignHookSessionPlaces, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, recordKey enterprisepolicy.SessionRecordKey) enterprisepolicy.GuardDecision {
-	if decision.Deny {
-		return decision
-	}
-	current := places.key()
-	removals, removalsErr := a.readForeignHookRemovals(places, identity, current.ID())
-	rechecked := enterprisepolicy.ApplyForeignHookRemovals(decision, key, removals, removalsErr, time.Now())
-	switch {
-	case rechecked.Deny:
-		a.killForeignHookSessionKey(places, identity, key, false)
-		a.publishForeignHookSessionDecision(places.recordRoot, identity, key, rechecked, enterprisepolicy.SessionRecordKey{})
-	case current.ID() != recordKey.ID():
-		a.publishForeignHookSessionDecision(places.recordRoot, identity, key, rechecked, current)
-	}
-	return rechecked
-}
-
 // foreignHookSessionPublishRoot is the folder of the protected session
 // records on a standalone host (managed.StandaloneLayout.HookSessionDir),
 // foreignHookSessionRootForDataDir the same folder named by the gateway's
 // data directory (managed.StandaloneHookSessionDirForDataDir),
-// foreignHookSessionKey reads its key
+// foreignHookSessionKey reads an account's key
 // (enterprisepolicy.ReadPublishedSessionKey), foreignHookSessionPublish
-// writes the protected record and foreignHookSessionKill removes the key
-// (replaceable in tests).
+// writes the protected record and foreignHookSessionKill removes an
+// account's key (replaceable in tests).
 var (
 	foreignHookSessionPublishRoot    = standaloneHookSessionDir
 	foreignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
@@ -232,23 +247,24 @@ var (
 
 // foreignHookSessionPlaces are where one exchange reads the guardian's
 // removals and writes its protected session record: the guardian's ledger
-// folder (managed.HookGuardianAuthorizationDir), the gateway's data
-// directory, which holds each account's private session store and so its
-// pending mark (enterprisepolicy.ForeignHookRemovalPending), and the
-// protected session record root ("" where this gateway publishes none).
-// rootErr is a record root a standalone gateway could not locate at all
-// (foreignHookSessionRecordRoot): the exchange is denied, because the
-// gateway can then neither remove the key nor publish its answer (GAP-0352
-// review).
+// folder (managed.HookGuardianAuthorizationDir) and the protected session
+// record root ("" where this gateway publishes none). standalone is a
+// standalone gateway (not Secure Client, not per-user): it takes the
+// account's removal lock. rootErr is a record root a standalone gateway
+// could not locate at all (foreignHookSessionRecordRoot): the exchange is
+// denied, because the gateway can then neither remove the key nor publish
+// its answer.
 type foreignHookSessionPlaces struct {
 	removalsDir string
-	dataDir     string
 	recordRoot  string
+	standalone  bool
 	rootErr     error
 }
 
 func (a *APIServer) foreignHookSessionPlaces(dataDir string) foreignHookSessionPlaces {
-	places := foreignHookSessionPlaces{removalsDir: managed.HookGuardianAuthorizationDir(dataDir), dataDir: dataDir}
+	places := foreignHookSessionPlaces{removalsDir: managed.HookGuardianAuthorizationDir(dataDir)}
+	cfg := a.scannerCfg
+	places.standalone = cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration()
 	root, err := a.foreignHookSessionRecordRoot(dataDir)
 	if err != nil {
 		places.rootErr = fmt.Errorf("the protected foreign-hook session record folder cannot be located: %w", err)
@@ -258,35 +274,18 @@ func (a *APIServer) foreignHookSessionPlaces(dataDir string) foreignHookSessionP
 	return places
 }
 
-// key is the record folder's current key, or none where there is no record
-// folder or its key cannot be read: an allow published without a key
-// proves nothing during an outage.
-func (p foreignHookSessionPlaces) key() enterprisepolicy.SessionRecordKey {
+// key is the account's current record key, or none where there is no record
+// folder or the key cannot be read: an allow published without a key proves
+// nothing during an outage.
+func (p foreignHookSessionPlaces) key(identity string) enterprisepolicy.SessionRecordKey {
 	if p.recordRoot == "" {
 		return enterprisepolicy.SessionRecordKey{}
 	}
-	key, err := foreignHookSessionKey(p.recordRoot)
+	key, err := foreignHookSessionKey(p.recordRoot, identity)
 	if err != nil {
 		return enterprisepolicy.SessionRecordKey{}
 	}
 	return key
-}
-
-// readForeignHookRemovals reads the guardian's removals for identity: those
-// of the ledger, and an error that denies the call (a ledger that cannot be
-// read, a record root that cannot be located, or the account's pending
-// mark, enterprisepolicy.ErrForeignHookRemovalPending). The mark lives in
-// the account's private session store, out of every standard user's reach.
-// keyID names the record key the exchange read first: the ledger is read
-// again whenever it changed (foreignHookRemovalCache.forIdentity).
-func (a *APIServer) readForeignHookRemovals(places foreignHookSessionPlaces, identity, keyID string) ([]enterprisepolicy.ForeignHookRemoval, error) {
-	removals, ledgerErr := a.foreignHookRemovals.forIdentity(places.removalsDir, identity, keyID)
-	pending, pendingErr := enterprisepolicy.ForeignHookRemovalPending(places.dataDir, identity)
-	err := errors.Join(ledgerErr, pendingErr, places.rootErr)
-	if pending {
-		err = errors.Join(err, enterprisepolicy.ErrForeignHookRemovalPending)
-	}
-	return removals, err
 }
 
 // foreignHookSessionRecordRoot is the protected session record folder of a
@@ -295,8 +294,8 @@ func (a *APIServer) readForeignHookRemovals(places foreignHookSessionPlaces, ide
 // Windows layout that fails (the protected ProgramData registration cannot
 // be read for a moment) falls back to the folder this gateway located last,
 // and else to the one its data directory names (dataDir), so that an
-// exchange still removes the key where the hook reads it (GAP-0352, 1.0.4
-// guard loop round 3). Only when none names a folder is it an error.
+// exchange still removes the key where the hook reads it. Only when none
+// names a folder is it an error.
 func (a *APIServer) foreignHookSessionRecordRoot(dataDir string) (string, error) {
 	cfg := a.scannerCfg
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
@@ -322,18 +321,15 @@ func (a *APIServer) foreignHookSessionRecordRoot(dataDir string) (string, error)
 // exchange into the caller's protected session records under root, which
 // the hook reads during a gateway outage under fail mode open (GAP-0352):
 // an allow with a MAC made with recordKey, a denial without one. A failure
-// is logged; the key was removed before every denial, so a record the
-// gateway could not replace proves nothing. Publishing an allow ends what
-// the key removal cache knows about the key (foreignHookSessionKillCache).
-// Without a root nothing is published.
+// is logged; the account's key was removed before every denial, so a record
+// the gateway could not replace proves nothing. Without a root nothing is
+// published.
 func (a *APIServer) publishForeignHookSessionDecision(root, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, recordKey enterprisepolicy.SessionRecordKey) {
 	if root == "" {
 		return
 	}
 	if decision.Deny {
 		recordKey = enterprisepolicy.SessionRecordKey{}
-	} else {
-		a.foreignHookSessionKilled.forget(identity, key)
 	}
 	if err := foreignHookSessionPublish(root, identity, key, decision, recordKey, time.Now()); err != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record for %s was not written (the hook blocks during a gateway outage): %v\n",
@@ -341,19 +337,15 @@ func (a *APIServer) publishForeignHookSessionDecision(root, identity string, key
 	}
 }
 
-// killForeignHookSessionKey removes the record folder's key before the
+// killForeignHookSessionKey removes the account's record key before the
 // exchange records a block, and before it publishes any denial (the kill
-// switch, GAP-0352 1.0.4 guard loop): every allow written before proves
-// nothing during an outage from then on, of every account, until the hook
-// guardian creates a new key (it does at every pass). reuse lets a denial
-// skip the removal when this gateway already removed the key for it and
-// published no allow for its process or session since
-// (foreignHookSessionKillCache): a blocked agent that keeps calling then
-// does not end every other account's outage allows at each call. A removal
+// switch, GAP-0352): every allow of the account written before proves
+// nothing during an outage from then on, until the hook guardian makes a
+// new key (it does at every pass). Other accounts keep theirs. A removal
 // that fails is logged; the block is still recorded and published, and the
 // published block denies during an outage. It reports whether the key is
-// gone for this denial.
-func (a *APIServer) killForeignHookSessionKey(places foreignHookSessionPlaces, identity string, key enterprisepolicy.SessionKey, reuse bool) bool {
+// gone.
+func (a *APIServer) killForeignHookSessionKey(places foreignHookSessionPlaces, identity string, key enterprisepolicy.SessionKey) bool {
 	connectorName := clipForeignHookAuditField(key.Connector, 64)
 	if places.recordRoot == "" {
 		if places.rootErr != nil {
@@ -361,75 +353,12 @@ func (a *APIServer) killForeignHookSessionKey(places foreignHookSessionPlaces, i
 		}
 		return false
 	}
-	if reuse && a.foreignHookSessionKilled.covers(identity, key) {
-		return true
-	}
-	if err := foreignHookSessionKill(places.recordRoot); err != nil {
+	if err := foreignHookSessionKill(places.recordRoot, identity); err != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record key for %s could not be removed before a block, so only the published block denies during a gateway outage: %v\n",
 			connectorName, err)
 		return false
 	}
-	a.foreignHookSessionKilled.add(identity, key)
 	return true
-}
-
-// foreignHookSessionKillCache names the agent processes and sessions, per
-// account and connector, whose denial this gateway already removed the key
-// for and that it published no allow for since. Only those may skip the
-// removal (killForeignHookSessionKey): the key they could have been allowed
-// under is gone, and no allow under a later key was published for them, so
-// no allow of theirs proves anything. It forgets everything past
-// foreignHookSessionKillCacheLimit entries and on a restart, which only
-// makes a later denial remove the key again.
-type foreignHookSessionKillCache struct {
-	mu      sync.Mutex
-	entries map[string]struct{}
-}
-
-const foreignHookSessionKillCacheLimit = 4096
-
-func foreignHookSessionKillNames(identity string, key enterprisepolicy.SessionKey) []string {
-	var names []string
-	for _, entry := range []struct{ kind, id string }{{"p", key.Process}, {"s", key.Session}} {
-		if entry.id != "" {
-			names = append(names, identity+"\x00"+key.Connector+"\x00"+entry.kind+"\x00"+entry.id)
-		}
-	}
-	return names
-}
-
-// covers reports a denial of key whose process and session (each it names)
-// are both known.
-func (c *foreignHookSessionKillCache) covers(identity string, key enterprisepolicy.SessionKey) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	names := foreignHookSessionKillNames(identity, key)
-	for _, name := range names {
-		if _, ok := c.entries[name]; !ok {
-			return false
-		}
-	}
-	return len(names) != 0
-}
-
-func (c *foreignHookSessionKillCache) add(identity string, key enterprisepolicy.SessionKey) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	names := foreignHookSessionKillNames(identity, key)
-	if c.entries == nil || len(c.entries)+len(names) > foreignHookSessionKillCacheLimit {
-		c.entries = map[string]struct{}{}
-	}
-	for _, name := range names {
-		c.entries[name] = struct{}{}
-	}
-}
-
-func (c *foreignHookSessionKillCache) forget(identity string, key enterprisepolicy.SessionKey) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, name := range foreignHookSessionKillNames(identity, key) {
-		delete(c.entries, name)
-	}
 }
 
 // foreignHookAuditReasonLimit bounds the reason an audit row repeats, and

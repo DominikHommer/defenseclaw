@@ -818,7 +818,7 @@ func TestWindowsTokenRunsAsService(t *testing.T) {
 // verdicts fatal.
 func TestWindowsStrictAncestorScopeIsNeverAdvisory(t *testing.T) {
 	for level := 0; level < 6; level++ {
-		scope := windowsStrictAncestorScope(level, 2)
+		scope := windowsStrictServiceAncestorScope(level, 2)
 		if scope.advisory {
 			t.Fatalf("level %d is advisory", level)
 		}

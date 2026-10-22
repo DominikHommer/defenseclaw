@@ -160,8 +160,8 @@ type SessionUpdate struct {
 	RemovalsErr error
 	Now         time.Time
 	// BeforeBlock (gateway only) runs once, right before the first write
-	// that records a block in StateDir: the gateway removes the key of the
-	// protected session records (KillPublishedSessionKey), so that a gateway
+	// that records a block in StateDir: the gateway removes the account's key
+	// of the protected session records (KillPublishedSessionKey), so that a gateway
 	// that stops between that write and the publication of the block, or
 	// whose publication fails, leaves no allow behind that the hook would
 	// honor during the outage (GAP-0352, 1.0.4 guard loop).
@@ -227,8 +227,8 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 	if update.RemovalsErr == nil && removed.Deny != decision.Deny {
 		return removed
 	}
-	// Removals that cannot be read (a ledger that fails its check, the
-	// account's pending mark, a record folder the gateway cannot locate)
+	// Removals that cannot be read (a ledger that fails its check, a removal
+	// of the account in progress, a record folder the gateway cannot locate)
 	// deny the call, but they do not skip the session state: a session
 	// start that found an unapproved hook still records its block, after
 	// BeforeBlock took the records it overrules out of use, and a block is
@@ -447,18 +447,17 @@ func sessionUnavailableDecision(decision GuardDecision) GuardDecision {
 	return decision
 }
 
-// ErrForeignHookRemovalPending is the guardian's pending mark of an account
-// (ForeignHookRemovalPending): it removed one of the account's hooks and
-// could not record the removal in its ledger yet, or could not trust its
-// revocation of the account's protected session records.
-var ErrForeignHookRemovalPending = errors.New("a foreign-hook removal of this account is not recorded yet")
+// ErrForeignHookRemovalPending is an exchange that could not take its
+// account's removal lock in time (LockForeignHookAccountExchange): the hook
+// guardian is removing one of the account's hooks. The call is denied; the
+// next call after the removal is decided from the removal it recorded.
+var ErrForeignHookRemovalPending = errors.New("a foreign-hook removal of this account is in progress")
 
 // ApplyForeignHookRemovals is the removal step of ApplyForeignHookSession.
-// The gateway runs it again when the guardian changed its removals while an
-// exchange ran. removalsErr denies the call (the account's pending mark
-// with its own reason), and an allowed call of an agent process that
-// started before a removal of its connector for this account is denied.
-// Anything else returns decision unchanged.
+// removalsErr denies the call (a removal in progress with its own reason),
+// and an allowed call of an agent process that started before a removal of
+// its connector for this account is denied. Anything else returns decision
+// unchanged.
 func ApplyForeignHookRemovals(decision GuardDecision, key SessionKey, removals []ForeignHookRemoval, removalsErr error, now time.Time) GuardDecision {
 	switch {
 	case errors.Is(removalsErr, ErrForeignHookRemovalPending):
@@ -474,13 +473,13 @@ func ApplyForeignHookRemovals(decision GuardDecision, key SessionKey, removals [
 	return decision
 }
 
-// pendingRemovalDecision denies a call of an account the guardian holds
-// closed (ErrForeignHookRemovalPending).
+// pendingRemovalDecision denies a call of an account whose hook removal is
+// in progress (ErrForeignHookRemovalPending).
 func pendingRemovalDecision(decision GuardDecision, connector string) GuardDecision {
 	decision.Deny = true
-	decision.Reason = "enterprise_foreign_hook_blocked: DefenseClaw removed an unapproved " + connector +
-		" hook from your account but could not record the removal yet, so it blocks your agents' tool calls until it can. Then restart the agent: it may still run the hook it loaded."
-	decision.Findings = append([]Finding{{Connector: connector, Reason: "a hook removal is not recorded yet"}}, decision.Findings...)
+	decision.Reason = "enterprise_foreign_hook_blocked: DefenseClaw is removing an unapproved hook from your account, so it blocks your agents' " + connector +
+		" tool calls until the removal is recorded. Retry the tool call; if the agent loaded the hook, restart it."
+	decision.Findings = append([]Finding{{Connector: connector, Reason: "a hook removal is in progress"}}, decision.Findings...)
 	return decision
 }
 
