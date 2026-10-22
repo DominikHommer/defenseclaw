@@ -243,9 +243,18 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 			}
 			return true
 		}
-		if (program == "sh" || program == "bash") && len(call.Args) >= 3 {
-			if option, ok := StaticWord(call.Args[1], home); ok && option == "-c" {
-				if code, fixed := StaticWord(call.Args[2], home); fixed {
+		if program == "sh" || program == "bash" {
+			words := make([]string, 0, len(call.Args))
+			for _, arg := range call.Args {
+				word, fixed := StaticWord(arg, home)
+				if !fixed {
+					set("dynamic-argument", false)
+					return true
+				}
+				words = append(words, word)
+			}
+			if body, ok := shellCommandBodyIndex(words); ok {
+				if code, fixed := StaticWord(call.Args[body], home); fixed {
 					if nested := unprovenProtectedWriteDepth(code, cwd, home, depth+1); nested != "" {
 						set(nested, true)
 					}
@@ -528,10 +537,10 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 			dynamicOperand = dynamicOperand || !valueFixed
 		}
 	}
-	if !dynamicOperand {
-		return false
-	}
-	if unknownOption || !programKnown {
+	// A program supplied by -f runs even when every input operand is fixed.
+	// The file may be unreadable or may write through a protected link; neither
+	// case becomes safe merely because awk was given no dynamic argument.
+	if !programKnown {
 		return true
 	}
 	for _, program := range programs {
@@ -539,7 +548,7 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 			return true
 		}
 	}
-	return false
+	return dynamicOperand && unknownOption
 }
 
 // Flags that take no value and add no file or command effect. Every other
@@ -1219,8 +1228,80 @@ func interpreterCodeOperand(call *syntax.CallExpr, program, home string) (string
 	return "", 0, false
 }
 
+var (
+	pythonReceiverName   = regexp.MustCompile(`(?:^|[^\w.])([A-Za-z_]\w*)\s*\.\s*write_(?:text|bytes)\s*\($`)
+	pythonPathAssignment = regexp.MustCompile(`^([A-Za-z_]\w*)\s*=\s*(?:pathlib\.)?Path(?:\.home\(\)(?:\s*/\s*['"][^'"\\]*['"])*|\(\s*['"]([^'"\\]+)['"]\s*\))$`)
+)
+
+var pythonHomePath = regexp.MustCompile(`\b(?:pathlib\.)?Path\.home\(\)((?:\s*/\s*['"][^'"\\]*['"])+)`)
+
+// pythonStringWriterText reports writer call text outside executable code.
+func pythonStringWriterText(code string) bool {
+	for _, location := range unprovenWriter.FindAllStringIndex(code, -1) {
+		if !pythonExecutableCodePosition(code, location[0]) {
+			return true
+		}
+	}
+	return false
+}
+
+// pythonProtectedHomePath reports a Path.home() / "..." expression, in code or
+// string text, that reaches a protected file or the SSH directory.
+func pythonProtectedHomePath(code, home string) bool {
+	protected, ssh := newProtectedFiles(home), filepath.Join(home, ".ssh")
+	for _, match := range pythonHomePath.FindAllStringSubmatch(code, 64) {
+		path := home
+		for _, segment := range strings.Split(match[1], "/")[1:] {
+			path = filepath.Join(path, strings.Trim(strings.TrimSpace(segment), `'"`))
+		}
+		if protectedReachPath(path, protected, ssh) {
+			return true
+		}
+	}
+	return false
+}
+
+// pythonReboundReceiver resolves the receiver of name.write_text( ending at
+// call when the program before it is a straight line of simple statements:
+// pathlib imports and Path assignments only, the last binding of name being
+// a literal Path("..."). Any other statement (a call, a link, a chdir, a
+// compound statement) can change what the name or a relative path refers
+// to, so the receiver stays unresolved.
+func pythonReboundReceiver(code string, call int) (string, bool) {
+	receiver := pythonReceiverName.FindStringSubmatchIndex(code[:call])
+	if receiver == nil {
+		return "", false
+	}
+	name, prefix := code[receiver[2]:receiver[3]], code[:receiver[2]]
+	if strings.ContainsAny(prefix, "\n\r\\#") {
+		return "", false
+	}
+	destination, bound := "", false
+	for _, statement := range strings.Split(prefix, ";") {
+		switch statement = strings.TrimSpace(statement); statement {
+		case "", "from pathlib import Path", "import pathlib":
+		default:
+			match := pythonPathAssignment.FindStringSubmatch(statement)
+			if match == nil {
+				return "", false
+			}
+			if match[1] == name {
+				destination, bound = match[2], match[2] != ""
+			}
+		}
+	}
+	return destination, bound
+}
+
 func unprovenInterpreterCode(code, language, cwd, home string) (string, bool) {
 	if len(code) > 16<<10 {
+		return "interpreter-path", true
+	}
+	if (language == "python" || strings.HasPrefix(language, "python3")) && pythonStringWriterText(code) &&
+		pythonProtectedHomePath(code, home) {
+		// exec, eval, an f-string field, getattr or an agent-controlled
+		// sitecustomize or import can run string text, so a writer spelled
+		// in a string is not proved inert once the code builds the path.
 		return "interpreter-path", true
 	}
 	if language == "python" || strings.HasPrefix(language, "python3") {
@@ -1302,7 +1383,10 @@ func unprovenInterpreterCode(code, language, cwd, home string) (string, bool) {
 					}
 				}
 				if !fixedReceiver {
-					return "interpreter-path", true
+					destination, bound := pythonReboundReceiver(code, location[1])
+					if !bound || protectedReachPath(OperandPath(destination, cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
+						return "interpreter-path", true
+					}
 				}
 				continue
 			}

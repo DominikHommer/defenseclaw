@@ -52,7 +52,7 @@ func TestR104Refix3WriteEvidence(t *testing.T) {
 		{"copyfile keyword literal expression", `python3 -c 'import shutil; shutil.copyfile(src="payload",dst="ali" "as")'`, "interpreter-path"},
 		{"copyfile optional literal expression", `python3 -c 'import shutil; shutil.copyfile("payload","ali" "as",follow_symlinks=True)'`, "interpreter-path"},
 		{"GAP-0475 f-string with inert argv", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("marker")}"""' .`, "interpreter-path"},
-		{"GAP-0475 inert triple string", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """{p.write_text("marker")}"""'`, ""},
+		{"GAP-0475 triple string beside the protected path", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """{p.write_text("marker")}"""'`, "interpreter-path"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := UnprovenProtectedWrite(tc.command, cwd, home); got != tc.reason {

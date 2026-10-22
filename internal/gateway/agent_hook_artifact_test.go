@@ -295,6 +295,28 @@ func TestInheritedShellFunctionReadsAHeredoc(t *testing.T) {
 	}
 }
 
+func TestR104GAP0463HeredocDecisionDoesNotDependOnLaterCommand(t *testing.T) {
+	const connectorName = "r104-heredoc-migrated-literal"
+	installMigratedLiteralConnector(t, connectorName)
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "notes.txt"), []byte("ordinary notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := "cat notes.txt <<'EOF'\nacme.own-7f3c\nEOF\n"
+	for _, command := range []string{base, base + "date\n"} {
+		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
+			ActiveHome: t.TempDir(), DialectHint: actionfacts.DialectPOSIX}
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: input, Connector: connectorName, EnforcementCapable: true,
+		})
+		finding := findingWithID(findings, "ACME-OWN-MARKER")
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Fatalf("heredoc with later command %v was not conservatively blocked: %v",
+				command != base, FindingStrings(findings))
+		}
+	}
+}
+
 func TestPromotedArtifactPreservesActiveAgentInstructionContext(t *testing.T) {
 	requireNativePOSIXArtifactHost(t)
 	const connectorName = "artifact-active-agent-context-test"

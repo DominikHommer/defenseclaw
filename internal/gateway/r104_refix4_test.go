@@ -25,6 +25,9 @@ func TestR104Refix4VisibleWriteDecisions(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cwd, "read.awk"), []byte("{print}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(cwd, "writer.awk"), []byte("BEGIN {print \"marker\" >> \"alias\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name, command string
 		block         bool
@@ -41,6 +44,9 @@ func TestR104Refix4VisibleWriteDecisions(t *testing.T) {
 		{"GAP-0509 no visible file output", `awk "BEGIN {print $field}" input.txt`, false},
 		{"BEN-0482 read-only dynamic AWK", `awk "{print $1}" ~/.ssh/known_hosts > out/known-hostnames.txt`, false},
 		{"GAP-0508 visible companion output", `gawk -f read.awk -e 'BEGIN {print "marker" >> "alias"}' -- "$input"`, true},
+		{"GAP-0508 static AWK program file", `awk -f writer.awk input.txt`, true},
+		{"GAP-0508 attached AWK program file", `awk -fwriter.awk input.txt`, true},
+		{"GAP-0508 ordinary AWK program file", `awk -f read.awk input.txt`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for i, got := range r104ReviewProtectedWrite(t, tc.command, cwd, home) {

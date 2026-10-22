@@ -156,7 +156,7 @@ func TestR104InterpreterTextNeedsAnExecutableWrite(t *testing.T) {
 		name, code string
 		want       bool
 	}{
-		{"docstring", `"""p = Path.home() / '.ssh' / 'authorized_keys'; p.write_text('example')"""; print('ok')`, false},
+		{"docstring", `"""p = Path.home() / '.ssh' / 'authorized_keys'; p.write_text('example')"""; print('ok')`, true},
 		{"reassigned path", `from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('notes.txt'); p.write_text('hello')`, false},
 		{"relative path after chdir", `from pathlib import Path; import os; os.chdir(Path.home() / '.ssh'); p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('authorized_keys'); p.write_text('hello')`, true},
 		{"relative path after aliased chdir", `from pathlib import Path; from os import chdir as enter; enter(Path.home() / '.ssh'); p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('authorized_keys'); p.write_text('hello')`, true},
@@ -164,7 +164,7 @@ func TestR104InterpreterTextNeedsAnExecutableWrite(t *testing.T) {
 		{"absolute path after runtime link", fmt.Sprintf(`from pathlib import Path; import os; os.symlink(Path.home() / '.ssh' / 'authorized_keys', %q); p = Path.home() / '.ssh' / 'authorized_keys'; p = Path(%q); p.write_text('hello')`, runtimeAlias, runtimeAlias), true},
 		{"hardlink reassignment", `from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('linked.txt'); p.write_text('hello')`, true},
 		{"direct path", `from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p.write_text('hello')`, true},
-		{"docstring direct call", `"""Path('~/.ssh/authorized_keys').expanduser().write_text('example')"""; print('ok')`, false},
+		{"docstring direct call", `"""Path('~/.ssh/authorized_keys').expanduser().write_text('example')"""; print('ok')`, true},
 		{"executable direct call", `Path('~/.ssh/authorized_keys').expanduser().write_text('hello')`, true},
 		{"expression before direct call", `x=1//2; Path('~/.ssh/authorized_keys').expanduser().write_text('hello')`, true},
 		{"comment without space", `#open('~/.ssh/authorized_keys','a').write('hello')`, false},

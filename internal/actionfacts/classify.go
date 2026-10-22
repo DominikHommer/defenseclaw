@@ -376,8 +376,9 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		addOperation(command, OperationSearch)
 		classifySearchPaths(out, command, program)
 	case "gawk", "awk", "mawk", "nawk":
-		classifyAwkOutputOperands(out, command, program)
-		classifyPOSIXAwkRead(out, command)
+		if !classifyPOSIXAwkRead(out, command) {
+			classifyAwkOutputOperands(out, command, program)
+		}
 	case "uniq":
 		classifyUniqOutputOperand(out, command)
 	case "getcap":
@@ -3250,27 +3251,30 @@ func ApplyStaticPOSIXSedInPlaceLiteralMutation(
 // classifyPOSIXAwkRead accepts a bounded read-only AWK program and its fixed
 // file operands. An unrecognized program or option does not acquire a
 // complete file-read proof.
-func classifyPOSIXAwkRead(out *parseOutput, command *CommandFact) {
+func classifyPOSIXAwkRead(out *parseOutput, command *CommandFact) bool {
 	if command.Dialect != DialectPOSIX || !command.ArgvComplete || len(command.Argv) < 2 {
-		out.markPartial(IssueUnknownOperandGrammar)
-		return
+		return false
 	}
 	program := command.Argv[1]
 	if program != "NR==1 {print}" && program != "{print}" && program != "{print $0}" {
-		out.markPartial(IssueUnknownOperandGrammar)
-		return
+		return false
+	}
+	for _, operand := range command.Argv[2:] {
+		if operand == "-" {
+			continue
+		}
+		if operand == "" || strings.HasPrefix(operand, "-") || strings.Contains(operand, "=") {
+			return false
+		}
 	}
 	addOperation(command, OperationRead)
 	for _, operand := range command.Argv[2:] {
 		if operand == "-" {
 			continue
 		}
-		if operand == "" || strings.HasPrefix(operand, "-") || strings.Contains(operand, "=") {
-			out.markPartial(IssueUnknownOperandGrammar)
-			return
-		}
 		appendCommandPath(out, command, PathAccessRead, operand)
 	}
+	return true
 }
 
 func classifyPOSIXSed(out *parseOutput, command *CommandFact) {

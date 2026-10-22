@@ -31,7 +31,11 @@ func TestR104Refix4AWKVisibleOutput(t *testing.T) {
 		{"GAP-0509 fixed ordinary output", `awk 'BEGIN {print "marker" >> "report.txt"}' input.txt`, ""},
 		{"GAP-0509 no visible file output", `awk "BEGIN {print $field}" input.txt`, ""},
 		{"BEN-0482 read-only dynamic AWK", `awk "{print $1}" ~/.ssh/known_hosts > out/known-hostnames.txt`, ""},
-		{"GAP-0508 external source alone is outside visible-call check", `awk -f writer.awk input.txt`, ""},
+		{"GAP-0508 external source writes protected link", `awk -f writer.awk input.txt`, "dynamic-argument"},
+		{"GAP-0508 attached program path", `awk -fwriter.awk input.txt`, "dynamic-argument"},
+		{"GAP-0508 long program option", `gawk --file=writer.awk input.txt`, "dynamic-argument"},
+		{"GAP-0508 unreadable program", `awk -f missing.awk input.txt`, "dynamic-argument"},
+		{"GAP-0508 read-only program", `awk -f read.awk input.txt`, ""},
 		{"GAP-0508 visible companion output", `gawk -f read.awk -e 'BEGIN {print "marker" >> "alias"}' -- "$input"`, "dynamic-argument"},
 	} {
 		t.Run(tc.name, func(t *testing.T) { r104Loop2Check(t, tc.command, cwd, home, tc.reason) })

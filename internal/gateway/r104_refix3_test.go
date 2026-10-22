@@ -33,7 +33,7 @@ func TestR104CodexNativeExecWorkdirRefix3(t *testing.T) {
 		{"native exec_command ordinary writer", "make safe", project, false},
 		{"GAP-0475 native f-string trailing argument", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("marker")}"""' .`, project, true},
 		{"GAP-0475 native f-string exact", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("marker")}"""'`, project, true},
-		{"GAP-0475 inert plain string", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """{p.write_text("marker")}"""'`, project, false},
+		{"GAP-0475 plain string beside the protected path", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """{p.write_text("marker")}"""'`, project, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := mustJSON(t, map[string]any{
@@ -101,13 +101,44 @@ func TestR104ProtectedWriteRefix3(t *testing.T) {
 		{"copyfile ordinary destination", `python3 -c 'import shutil; shutil.copyfile("payload","out.txt")'`, false},
 		{"GAP-0475 trailing Python argument", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("marker")}"""' .`, true},
 		{"GAP-0475 exact Python argument", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("marker")}"""'`, true},
-		{"GAP-0475 inert triple string", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """{p.write_text("marker")}"""'`, false},
+		{"GAP-0475 triple string beside the protected path", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """{p.write_text("marker")}"""'`, true},
+		{"GAP-0495 nested bash login shell", `bash -lc 'echo marker >> alias'`, true},
+		{"GAP-0495 nested sh shell", `sh -c 'echo marker >> alias'`, true},
+		{"GAP-0495 separate login option", `bash -l -c 'echo marker >> alias'`, true},
+		{"GAP-0495 environment wrapper", `env -u UNUSED bash -lc 'echo marker >> alias'`, true},
+		{"GAP-0495 priority wrapper", `nice -n 5 bash -lc 'echo marker >> alias'`, true},
+		{"GAP-0495 deadline wrapper", `timeout 30 bash -lc 'echo marker >> alias'`, true},
+		{"GAP-0495 nested ordinary shell", `bash -lc 'echo marker >> report.txt'`, false},
+		{"GAP-0495 ordinary wrapped shell", `env -u UNUSED bash -lc 'echo marker >> report.txt'`, false},
+		{"GAP-0284 managed Codex quoted home", `echo marker >> "$HOME/.ssh/authorized_keys"`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for i, got := range r104ReviewProtectedWrite(t, tc.command, cwd, home) {
 				if got != tc.block {
 					t.Fatalf("route %d blocked=%v, want %v", i, got, tc.block)
 				}
+			}
+		})
+	}
+}
+
+func TestR104NestedShellProtectedPath(t *testing.T) {
+	home, cwd := r104ReviewHome(t)
+	for _, tc := range []struct {
+		name, command string
+		block         bool
+	}{
+		{"GAP-0495 login shell", `bash -lc 'echo marker >> ~/.ssh/authorized_keys'`, true},
+		{"GAP-0495 separate login option", `bash -l -c 'echo marker >> ~/.ssh/authorized_keys'`, true},
+		{"GAP-0495 ordinary nested write", `bash -lc 'echo marker >> report.txt'`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			facts := actionfacts.Analyze(input)
+			write := trustedExistingAuthorizedKeysSymlinkWrite(trustedActionRequest{Input: input}, facts)
+			if got := trustedAuthorizedKeysWriteProof(input, facts, write); got != tc.block {
+				t.Fatalf("protected write = %v, want %v", got, tc.block)
 			}
 		})
 	}

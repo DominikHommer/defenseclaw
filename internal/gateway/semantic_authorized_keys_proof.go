@@ -250,13 +250,15 @@ func trustedPythonAssignedArgv(input actionfacts.Input, argv []string) bool {
 	return ok && slices.Equal(fields, argv)
 }
 
+// trustedPathlibAuthorizedKeysWriteProof matches the protected Path and its
+// write_text call anywhere in the code, string text included: exec, eval, an
+// f-string field, getattr or an agent-controlled sitecustomize or import can
+// run text that the Python lexer reads as data, so string position is not a
+// proof that the write cannot run.
 func trustedPathlibAuthorizedKeysWriteProof(code, home, cwd string) bool {
 	for _, assignment := range trustedPathlibAuthorizedKeysWrite.FindAllStringIndex(code, -1) {
-		if !interpreterCodePosition(code, assignment[0], "python") {
-			continue
-		}
 		for _, write := range trustedPathlibWriteText.FindAllStringIndex(code, -1) {
-			if write[0] < assignment[1] || !interpreterCodePosition(code, write[0], "python") {
+			if write[0] < assignment[1] {
 				continue
 			}
 			between := code[assignment[1]:write[0]]
@@ -271,13 +273,58 @@ func trustedPathlibAuthorizedKeysWriteProof(code, home, cwd string) bool {
 	return false
 }
 
+// trustedPythonPathAuthorizedKeysWriteProof also matches string text, for the
+// reason given at trustedPathlibAuthorizedKeysWriteProof.
 func trustedPythonPathAuthorizedKeysWriteProof(code string) bool {
-	for _, match := range trustedPythonPathAuthorizedKeysWrite.FindAllStringIndex(code, -1) {
-		if interpreterCodePosition(code, match[0], "python") {
-			return true
+	return trustedPythonPathAuthorizedKeysWrite.MatchString(code)
+}
+
+// A module docstring is inert to Python itself, but an agent-controlled
+// sitecustomize or imported module can execute __main__.__doc__. Other string
+// literals are data unless a separate executable effect refers to them.
+func trustedPythonCodeOrModuleDocstring(code string, position int) bool {
+	return interpreterCodePosition(code, position, "python") ||
+		trustedPythonModuleDocstringContains(code, position)
+}
+
+func trustedPythonModuleDocstringContains(code string, position int) bool {
+	i := 0
+	for i < len(code) {
+		switch code[i] {
+		case ' ', '\t', '\r', '\n':
+			i++
+		case '#':
+			for i < len(code) && code[i] != '\n' {
+				i++
+			}
+		default:
+			goto literal
 		}
 	}
-	return false
+literal:
+	if i >= len(code) {
+		return false
+	}
+	start := i
+	for i < len(code) && (code[i] == 'r' || code[i] == 'R' || code[i] == 'u' || code[i] == 'U') {
+		i++
+	}
+	if i+3 > len(code) || code[i:i+3] != `"""` && code[i:i+3] != `'''` {
+		return false
+	}
+	quote := code[i : i+3]
+	i += 3
+	for i+3 <= len(code) {
+		if code[i] == '\\' {
+			i += 2
+			continue
+		}
+		if code[i:i+3] == quote {
+			return position >= start && position < i
+		}
+		i++
+	}
+	return position >= start && position < len(code)
 }
 
 // A relative Path is resolved when write_text runs, and any Path can be
@@ -540,7 +587,8 @@ func trustedInterpreterAuthorizedKeysWrite(code, activeHome, language string) bo
 		return false
 	}
 	for _, location := range trustedInterpreterOpenCall.FindAllStringIndex(code, -1) {
-		if !interpreterCodePosition(code, location[0], language) {
+		if language == "python" && !trustedPythonCodeOrModuleDocstring(code, location[0]) ||
+			language != "python" && !interpreterCodePosition(code, location[0], language) {
 			continue
 		}
 		call, ok := boundedInterpreterCall(code, location[1]-1)
@@ -558,7 +606,8 @@ func trustedInterpreterAuthorizedKeysWrite(code, activeHome, language string) bo
 		}
 	}
 	for _, location := range trustedInterpreterWriteCall.FindAllStringIndex(code, -1) {
-		if !interpreterCodePosition(code, location[0], language) {
+		if language == "python" && !trustedPythonCodeOrModuleDocstring(code, location[0]) ||
+			language != "python" && !interpreterCodePosition(code, location[0], language) {
 			continue
 		}
 		if call, ok := boundedInterpreterCall(code, location[1]-1); ok {

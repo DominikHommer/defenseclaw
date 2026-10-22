@@ -174,14 +174,14 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 			}
 			words = words[index+1:]
 		case "sh", "bash":
-			if len(words) >= 3 && words[1] == "-c" {
+			if body, ok := shellCommandBodyIndex(words); ok {
 				var operands []string
-				if redirects, parsed, _ := ShellWriteOperands(words[2], cwd, home); parsed {
+				if redirects, parsed, _ := ShellWriteOperands(words[body], cwd, home); parsed {
 					operands = append(operands, redirects...)
 				}
-				operands = append(operands, literalWriteOperandsDepth(words[2], cwd, home, depth+1)...)
-				if len(words) >= 5 {
-					operands = append(operands, literalPositionalShellRedirects(words[2], words[4], cwd, home)...)
+				operands = append(operands, literalWriteOperandsDepth(words[body], cwd, home, depth+1)...)
+				if len(words) >= body+3 {
+					operands = append(operands, literalPositionalShellRedirects(words[body], words[body+2], cwd, home)...)
 				}
 				return operands
 			}
