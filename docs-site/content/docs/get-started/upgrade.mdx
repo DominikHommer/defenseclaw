@@ -484,13 +484,21 @@ or OmniGent before 1.0.4:
   - Then delete the stub, `.hookcfg.openhands` and
     `~/.defenseclaw/connector_backups/<connector>`. The backups hold the
     files as they were before DefenseClaw's setup (`pristine_bytes`, base64),
-    if you want them back.
+    if you want them back. `defenseclaw uninstall --all` and Windows Setup
+    `/uninstall DELETEUSERDATA=1` keep them: before they remove the data
+    folder, they move that folder to
+    `~/.defenseclaw-removed-connector-backups/<connector>` and list it there.
 
   Until you do these steps, OpenHands and OmniGent are blocked. Your other
   connectors start either way. The upgrade accepts a `config.yaml` that still
-  lists them: their settings are ignored with a warning, including a
-  telemetry destination whose every route selected only these connectors;
-  `defenseclaw migrate` saves that.
+  lists them next to another connector: their settings are ignored with a
+  warning, including a telemetry destination whose every route selected only
+  these connectors; `defenseclaw migrate` saves that. If OpenHands or OmniGent
+  is the only connector it lists, the upgrade stops before it changes
+  anything, because the new gateway would have no connector to start. With
+  the DefenseClaw you have now, run
+  `defenseclaw setup remove openhands --yes --force` (or `omnigent`), or set
+  up another connector, then upgrade again.
 
 <Accordions type="multiple">
 

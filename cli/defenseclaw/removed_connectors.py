@@ -207,14 +207,56 @@ class RemovedConnectorLeftovers:
             "items": [{"path": i.path, "what": i.what, "step": i.step} for i in self.items],
         }
 
-    def lines(self, *, without_under: str = "") -> list[str]:
-        """Text lines for a person; items under *without_under* are left out."""
-        items = [i for i in self.items if not (without_under and _is_under(i.path, without_under))]
+    def lines(self, *, without_under: str = "", moved: dict[str, str] | None = None) -> list[str]:
+        """Text lines for a person; items under *without_under* are left out.
+
+        An item under a folder in *moved* (old path to new path) is named at
+        its new path and is listed even under *without_under*.
+        """
+        items: list[Leftover] = []
+        for item in self.items:
+            path = _moved_path(item.path, moved or {})
+            if path == item.path and without_under and _is_under(item.path, without_under):
+                continue
+            items.append(Leftover(path, item.what, item.step))
         if not items:
             return []
         return [f"{self.label} support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:"] + [
             f"  - {i.path}: {i.what}. To remove: {i.step}." for i in items
         ]
+
+
+def _moved_path(path: str, moved: dict[str, str]) -> str:
+    for old, new in moved.items():
+        if _same_path(path, old):
+            return new
+        if _is_under(path, old):
+            return os.path.join(new, os.path.relpath(path, old))
+    return path
+
+
+def kept_backups_root(data_dir: str) -> str:
+    """Where a data folder removal moves the removed connectors' backups.
+
+    connector_backups/<connector> holds the only copy of the files as they
+    were before an older DefenseClaw's setup changed them (the removed
+    connectors' teardown never puts them back), and the leftover list tells
+    the user to copy back what they need from it. So ``uninstall --all`` and
+    Windows Setup (DELETEUSERDATA=1) move it beside the data folder before
+    they remove it: ``<data folder>-removed-connector-backups/<connector>``.
+    Windows Setup uses the same name (removedConnectorBackupsKeptRoot).
+    """
+    return os.path.normpath(data_dir) + "-removed-connector-backups"
+
+
+def backup_dirs(data_dir: str) -> list[tuple[str, str]]:
+    """(connector, connector_backups/<connector> folder) for each removed connector that has one."""
+    out: list[tuple[str, str]] = []
+    for c in _CONNECTORS:
+        path = os.path.join(data_dir, "connector_backups", c.name)
+        if os.path.lexists(path):
+            out.append((c.name, path))
+    return out
 
 
 def _is_under(path: str, root: str) -> bool:
