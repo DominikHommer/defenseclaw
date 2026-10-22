@@ -140,10 +140,63 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 	provisional := *r
 	provisional.ctx = context.WithValue(r.context(), provisionalProofsKey{}, true)
 	candidate, candidateErr := provisional.provenFactsForUID(uid, now, includeGroups)
+	if shared := (*SharedUIDError)(nil); errors.As(candidateErr, &shared) {
+		// The uid is shared whatever the directory that did not answer
+		// holds (two /etc/passwd entries while SSSD is stopped): that is
+		// proved, and the gateway refuses the requests a shared uid decides
+		// (review of r104 W2B, loop round 2).
+		return useridentity.DirectoryFacts{}, candidateErr
+	}
 	if candidateErr != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
 	return useridentity.DirectoryFacts{}, &UnprovenFactsError{Candidate: candidate, Err: err}
+}
+
+// LocalCandidateForUID is what uid's facts are if no directory holds the uid
+// or more groups of its account: its /etc/passwd entry with its /etc/group
+// memberships, as DefenseClaw took a local account before the directory
+// proofs. It reads the local files only, so the gateway has it before a
+// slow directory answers: a request that stopped waiting for the lookup
+// selected default_profile, weaker than the profile of the account's local
+// groups (review of r104 W2B, loop round 2). Like the Candidate of an
+// UnprovenFactsError it is a hypothesis: nothing may cache, record or apply
+// it. ok is false when the passwd line names no local source or
+// /etc/passwd holds no entry of uid. Entries of two names give a
+// SharedUIDError.
+func LocalCandidateForUID(uid int, now time.Time) (name string, facts useridentity.DirectoryFacts, ok bool, err error) {
+	data, err := readSmallFile(nsswitchPath, 1<<20)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", useridentity.DirectoryFacts{}, false, fmt.Errorf("unixidentity: read NSS configuration: %w", err)
+	}
+	// glibc reads the local files without the file or its passwd line.
+	if line := nssSwitchLine(string(data), "passwd"); len(line) > 0 && !slices.Contains(line, "files") && !slices.Contains(line, "compat") {
+		return "", useridentity.DirectoryFacts{}, false, nil
+	}
+	entries, err := localPasswdEntriesForUID(uid)
+	if err != nil || len(entries) == 0 {
+		return "", useridentity.DirectoryFacts{}, false, err
+	}
+	holders := []string{entries[0].Name + " (files)"}
+	for _, entry := range entries[1:] {
+		if holder := entry.Name + " (files)"; !slices.Contains(holders, holder) {
+			holders = append(holders, holder)
+		}
+	}
+	if len(holders) > 1 {
+		return "", useridentity.DirectoryFacts{}, false, &SharedUIDError{UID: uid, Accounts: holders}
+	}
+	_, groups, err := localAccountGroups(entries[0])
+	if err != nil {
+		return "", useridentity.DirectoryFacts{}, false, fmt.Errorf("unixidentity: groups of %s: %w", entries[0].Name, err)
+	}
+	return entries[0].Name, useridentity.DirectoryFacts{
+		Directory:  useridentity.DirectoryLocal,
+		Source:     useridentity.SourceNSSFiles,
+		Assurance:  useridentity.AssuranceVerified,
+		ResolvedAt: now,
+		Groups:     groups,
+	}, true, nil
 }
 
 // UnprovenFactsError is a lookup of an account's facts that failed for

@@ -1049,8 +1049,9 @@ func directoryHealthView(h identityCacheHealth, now time.Time) (view map[string]
 	}
 	unproven := unprovenAccounts(now)
 	if unproven > 0 {
-		message += fmt.Sprintf("; for %d account(s) only a proof is missing (a directory service did not show that it holds nothing more "+
-			"of the account), and their requests are refused while that decides their profile", unproven)
+		message += fmt.Sprintf("; for %d account(s) the account or its groups are not proven (a directory service did not show, or "+
+			"has not shown yet, that it holds nothing more of the account, or more than one account holds the uid), and their requests "+
+			"are refused while that decides their profile", unproven)
 	}
 	view = map[string]any{
 		"unproven":           unproven,

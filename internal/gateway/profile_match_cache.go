@@ -89,6 +89,10 @@ func profileMatchKey(subject *profileSubject, source, connectorName, agent strin
 			put(subject.unprovenReason)
 			putSubject(subject.unproven)
 		}
+		if subject.ownershipAmbiguous {
+			put("ownership-ambiguous")
+			put(subject.unprovenReason)
+		}
 	}
 	if subject == nil {
 		put("\x00nil")

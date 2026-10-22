@@ -248,7 +248,7 @@ func TestDirectoryHealthSaysUnprovenAccountsAreRefused(t *testing.T) {
 		"1004": localCandidate(now.Add(-identityDirectoryTTL-time.Second), "olddev"),
 	})
 	view, message := directoryHealthView(identityCacheHealth{Failing: 2, Since: now, LastError: unprovenTestReason}, now)
-	if view["unproven"] != 1 || !strings.Contains(message, "for 1 account(s) only a proof is missing") ||
+	if view["unproven"] != 1 || !strings.Contains(message, "for 1 account(s) the account or its groups are not proven") ||
 		!strings.Contains(message, "requests are refused") {
 		t.Fatalf("health = %v, %q; want one unproven account whose requests are refused", view, message)
 	}

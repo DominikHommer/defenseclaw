@@ -81,6 +81,10 @@ type profileSubject struct {
 	// set by withUnprovenCandidate, for match only.
 	unproven       *profileSubject
 	unprovenReason string
+	// ownershipAmbiguous marks a subject whose uid more than one account
+	// holds (unixidentity.SharedUIDError): no candidate tells which one it
+	// is. Set by withUnprovenCandidate, for match only.
+	ownershipAmbiguous bool
 	// viaProcessOwner marks a subject verified as the per-user gateway's own
 	// account, so explain and telemetry report it as process_owner.
 	viaProcessOwner bool
@@ -933,6 +937,10 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 			set.matchUncached(subject.unproven, source, connectorName, agent).Name != decision.Name {
 			decision.Refused = unprovenRefusal(subject)
 		}
+		if subject.ownershipAmbiguous && source != "" && decision.Match == profileMatchDefaultLookupFailed &&
+			set.anotherProfileCouldApply(subject, decision.Name, connectorName, agent) {
+			decision.Refused = ambiguousRefusal(subject)
+		}
 		return decision
 	}
 	if subject != nil && subject.GroupsUnknown {
@@ -965,39 +973,86 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 // any account or group the directory could not rule out is the other, which
 // the failed lookup stands for (matchUncached).
 func withUnprovenCandidate(subject *profileSubject) *profileSubject {
-	if subject == nil || !subject.LookupFailed || subject.unproven != nil || subject.UserID == "" ||
+	if subject == nil || !subject.LookupFailed || subject.unproven != nil || subject.ownershipAmbiguous || subject.UserID == "" ||
 		subject.IDKind != useridentity.KindPOSIXUID {
 		return subject
 	}
-	facts, reason, ok := unprovenFactsFor(subject.UserID, time.Now())
+	entry, ok := unprovenFactsFor(subject.UserID, time.Now())
 	if !ok {
 		return subject
 	}
+	if entry.ambiguous {
+		with := *subject
+		with.ownershipAmbiguous, with.unprovenReason = true, entry.reason
+		return &with
+	}
 	candidate := profileSubjectFromVerified(VerifiedSubject{
 		UserID: subject.UserID, IDKind: subject.IDKind,
-		UserName: firstNonEmpty(subject.accountName, subject.UserName), Directory: facts,
+		UserName: firstNonEmpty(subject.accountName, subject.UserName, entry.name), Directory: entry.facts,
 	}, true)
 	if candidate.LookupFailed {
 		return subject
 	}
 	candidate.viaProcessOwner = subject.viaProcessOwner
 	with := *subject
-	with.unproven, with.unprovenReason = &candidate, reason
+	with.unproven, with.unprovenReason = &candidate, entry.reason
 	return &with
 }
 
 // unprovenRefusal is the refusal of a request whose account's lookup failed
-// for want of a proof (profileDecision.Refused).
+// for want of a proof, or has not finished (profileDecision.Refused).
 func unprovenRefusal(subject *profileSubject) string {
 	return fmt.Sprintf("DefenseClaw cannot confirm which account uid %s is or which groups it is in, because a directory service "+
-		"on this computer did not answer, and that decides its guardrail profile: the request is refused until the directory answers",
-		subject.UserID)
+		"on this computer did not answer or has not answered yet, and that decides its guardrail profile: the request is refused "+
+		"until the directory answers", subject.UserID)
+}
+
+// ambiguousRefusal is the refusal of a request whose uid more than one
+// account holds (profileDecision.Refused).
+func ambiguousRefusal(subject *profileSubject) string {
+	return fmt.Sprintf("DefenseClaw cannot confirm which account uid %s is, because more than one account holds the uid, "+
+		"and that decides its guardrail profile: the request is refused until each account has its own uid", subject.UserID)
+}
+
+// anotherProfileCouldApply reports whether an assignment the request could
+// match selects another profile than name, when the subject's account and
+// groups are unknown: every assignment its connector, agent and uid do not
+// rule out counts, since the facts that decide it are missing.
+func (set *guardrailProfileSet) anotherProfileCouldApply(subject *profileSubject, name, connectorName, agent string) bool {
+	for _, assignment := range set.assignments {
+		m := assignment.Match
+		if m.Empty() || assignment.Profile == name {
+			continue
+		}
+		if len(m.Connectors) > 0 && !anyMatches(m.Connectors, func(v string) bool {
+			return config.NormalizeConnectorName(v) == connectorName && connectorName != ""
+		}) {
+			continue
+		}
+		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool {
+			return strings.EqualFold(strings.TrimSpace(v), agent) && agent != ""
+		}) {
+			continue
+		}
+		if len(m.Users) > 0 && !anyMatches(m.Users, func(v string) bool {
+			return useridentity.KindForID(v) == "" || useridentity.EqualFold(strings.TrimSpace(v), subject.UserID)
+		}) {
+			continue // only other accounts' IDs
+		}
+		return true
+	}
+	return false
 }
 
 // unprovenRefusalNote is explain's account of a refusal: the profile the
 // candidate facts select, the one the failed lookup selects, and why.
 func unprovenRefusalNote(set *guardrailProfileSet, subject *profileSubject, decision profileDecision, connectorName, agent string) string {
 	subject = withUnprovenCandidate(subject)
+	if subject != nil && subject.ownershipAmbiguous {
+		return fmt.Sprintf("requests from this account are refused (hooks fail closed): more than one account holds its uid (%s), "+
+			"so which account it is and which groups it is in cannot be proven, and an assignment could select another profile than "+
+			"the failed lookup's. Give each account its own uid", subject.unprovenReason)
+	}
 	if subject == nil || subject.unproven == nil {
 		return decision.Refused
 	}
@@ -1008,7 +1063,7 @@ func unprovenRefusalNote(set *guardrailProfileSet, subject *profileSubject, deci
 		}
 		return fmt.Sprintf("profile %q", profile)
 	}
-	return fmt.Sprintf("requests from this account are refused (hooks fail closed): its directory lookup failed for want of a proof (%s). "+
+	return fmt.Sprintf("requests from this account are refused (hooks fail closed): its directory lookup has not proved the account (%s). "+
 		"If the directory holds nothing more of it, the account selects %s; a failed lookup selects %s. Neither applies until the directory answers; "+
 		"an assignment by uid selects a profile without the proof", subject.unprovenReason, name(candidate.Name), name(decision.Name))
 }

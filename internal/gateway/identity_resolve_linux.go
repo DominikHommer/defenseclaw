@@ -8,6 +8,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -65,39 +66,100 @@ func holderSpoolRecord(key string, account unixidentity.Account, now time.Time) 
 	return record, true
 }
 
-// resolvePeerDirectoryFacts is resolveNSSPeerFacts. It keeps the candidate
-// facts of a lookup that failed for want of a proof only
-// (unixidentity.UnprovenFactsError) for the profile matcher, and drops them
-// when a lookup ends any other way.
+// peerLocalCandidate and peerNSSFacts are the two halves of
+// resolvePeerDirectoryFacts. Tests replace them.
+var (
+	peerLocalCandidate = unixidentity.LocalCandidateForUID
+	peerNSSFacts       = resolveNSSPeerFacts
+)
+
+// resolvePeerDirectoryFacts is resolveNSSPeerFacts. For the profile matcher
+// it keeps what the lookup leaves unproven (unprovenFacts):
+//   - while the lookup runs, the uid's local candidate from the local files
+//     (unixidentity.LocalCandidateForUID), unless an earlier lookup left
+//     one: a request that stops waiting for a slow directory is not given a
+//     weaker default_profile than the profile of the account's local groups;
+//   - after a lookup that failed for want of a proof only, its candidate
+//     (unixidentity.UnprovenFactsError);
+//   - after a uid more than one account holds (unixidentity.SharedUIDError),
+//     that ambiguity, whose requests are refused when an assignment could
+//     select another profile;
+//   - after any other failure, the local candidate.
+//
+// A lookup that resolves drops them. Facts are never cached from them.
 func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) {
-	facts, err := resolveNSSPeerFacts(key)
-	var unproven *unixidentity.UnprovenFactsError
-	if errors.As(err, &unproven) {
-		noteUnprovenFacts(key, unproven.Candidate, err.Error(), time.Now())
-	} else {
+	now := time.Now()
+	early, haveEarly := localPeerCandidate(key, now)
+	if haveEarly {
+		noteUnprovenFacts(key, early, false)
+	}
+	facts, err := peerNSSFacts(key)
+	var (
+		unproven *unixidentity.UnprovenFactsError
+		shared   *unixidentity.SharedUIDError
+	)
+	switch {
+	case err == nil:
+		forgetUnprovenFacts(key)
+	case errors.As(err, &unproven):
+		noteUnprovenFacts(key, unprovenFactsEntry{facts: unproven.Candidate, name: early.name, reason: err.Error(), at: time.Now()}, true)
+	case errors.As(err, &shared):
+		noteUnprovenFacts(key, unprovenFactsEntry{reason: err.Error(), at: time.Now(), ambiguous: true}, true)
+	case haveEarly:
+		if !early.ambiguous {
+			early.reason = err.Error()
+		}
+		early.at = time.Now()
+		noteUnprovenFacts(key, early, true)
+	default:
 		forgetUnprovenFacts(key)
 	}
 	return facts, err
 }
 
-// noteUnprovenFacts keeps the candidate facts of key's failed lookup, for at
-// most identityDirectoryMax accounts (the oldest goes first).
-func noteUnprovenFacts(key string, facts useridentity.DirectoryFacts, reason string, now time.Time) {
+// localPeerCandidate is key's local candidate (peerLocalCandidate) as an
+// unprovenFacts entry: the local account, or the ambiguity of a uid two
+// /etc/passwd entries hold. false when the local files hold no account of
+// the uid or cannot be read.
+func localPeerCandidate(key string, now time.Time) (unprovenFactsEntry, bool) {
+	uid, err := strconv.Atoi(key)
+	if err != nil {
+		return unprovenFactsEntry{}, false
+	}
+	name, facts, ok, err := peerLocalCandidate(uid, now)
+	var shared *unixidentity.SharedUIDError
+	switch {
+	case errors.As(err, &shared):
+		return unprovenFactsEntry{reason: err.Error(), at: now, ambiguous: true}, true
+	case err != nil || !ok:
+		return unprovenFactsEntry{}, false
+	}
+	return unprovenFactsEntry{facts: facts, name: name, at: now,
+		reason: fmt.Sprintf("the directory lookup of uid %s has not finished", key)}, true
+}
+
+// noteUnprovenFacts keeps entry for key's lookup, for at most
+// identityDirectoryMax accounts (the oldest goes first). Without replace it
+// keeps an entry key already has within identityDirectoryTTL.
+func noteUnprovenFacts(key string, entry unprovenFactsEntry, replace bool) {
 	unprovenFacts.Lock()
 	defer unprovenFacts.Unlock()
 	if unprovenFacts.entries == nil {
 		unprovenFacts.entries = map[string]unprovenFactsEntry{}
 	}
+	if held, known := unprovenFacts.entries[key]; known && !replace && entry.at.Sub(held.at) < identityDirectoryTTL {
+		return
+	}
 	if _, known := unprovenFacts.entries[key]; !known && len(unprovenFacts.entries) >= identityDirectoryMax {
 		oldest := ""
-		for k, entry := range unprovenFacts.entries {
-			if oldest == "" || entry.at.Before(unprovenFacts.entries[oldest].at) {
+		for k, held := range unprovenFacts.entries {
+			if oldest == "" || held.at.Before(unprovenFacts.entries[oldest].at) {
 				oldest = k
 			}
 		}
 		delete(unprovenFacts.entries, oldest)
 	}
-	unprovenFacts.entries[key] = unprovenFactsEntry{facts: facts, reason: reason, at: now}
+	unprovenFacts.entries[key] = entry
 }
 
 // resolveNSSPeerFacts resolves a verified uid's facts through NSS and
