@@ -2791,6 +2791,7 @@ function Invoke-Install {
         }
         # Again once it is stopped: it may have rendered them while it ran.
         if (-not (Update-HookFailModes $stagedGateway)) {
+            Invoke-Quietly { Undo-Snapshot $Snap }
             Clear-StagedRelease
             Restart-Old
             Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down. $(Get-RestoredNote)"
@@ -2802,6 +2803,7 @@ function Invoke-Install {
             Assert-GatewayQuiescent "Version change to $Ver"
             Assert-NoActiveConnectorRecovery "Version change to $Ver"
         } catch {
+            Invoke-Quietly { Undo-Snapshot $Snap }
             Restart-Old
             throw
         }
