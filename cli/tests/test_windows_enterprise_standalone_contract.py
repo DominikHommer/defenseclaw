@@ -825,6 +825,24 @@ def _run_lifecycle_functions(tmp_path, names, body, replacements=()) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+_FAKE_RENAME_NATIVE = r"""
+class FakeNative {
+    static [object[]] GetFileHolders([string[]]$Paths) {
+        if ($global:RmThrows) { throw 'Restart Manager session start failed' }
+        return $global:RmHolders
+    }
+    static [int] GetDirectoryOpenError([string]$Path, [uint32]$Access) {
+        if ($global:OpenThrows) { throw 'CreateFileW is unavailable' }
+        $code = $global:OpenErrors[[int]$Access]
+        if ($null -eq $code) { return 0 }
+        return [int]$code
+    }
+}
+$global:OpenErrors = @{}
+$global:OpenThrows = $false
+"""
+
+
 def test_a_committed_retirement_defers_only_to_a_holder_it_finds(tmp_path) -> None:
     # W4 review, loop round 1: access denied is what both a program holding
     # a file in InstallRoot and an access list (a deny on InstallRoot or its
@@ -841,15 +859,11 @@ def test_a_committed_retirement_defers_only_to_a_holder_it_finds(tmp_path) -> No
             "Test-DefenseClawInstallRootInUseException",
             "Format-DefenseClawProcessInUse",
             "Get-DefenseClawInstallRootHolders",
+            "Get-DefenseClawInstallRootRenameDenial",
             "Invoke-DefenseClawCommittedInstallRootRetirement",
         ],
-        r"""
-class FakeNative {
-    static [object[]] GetFileHolders([string[]]$Paths) {
-        if ($global:RmThrows) { throw 'Restart Manager session start failed' }
-        return $global:RmHolders
-    }
-}
+        _FAKE_RENAME_NATIVE
+        + r"""
 function Initialize-DefenseClawNativeSecurity { return [FakeNative] }
 $script:StateFileInUseCheckLimit = 16384
 $source = '""" + str(source) + r"""'
@@ -863,7 +877,10 @@ function Move-DefenseClawInstallRootForRetirement([string]$Source, [string]$Dest
         default { [IO.Directory]::Move($Source, $Destination) }
     }
 }
-function Invoke-Case([string]$Name, [string]$Failure, $Images, $RmHolders, [bool]$RmThrows, [string]$Expect, [string]$Text) {
+function Invoke-Case([string]$Name, [string]$Failure, $Images, $RmHolders, [bool]$RmThrows, [string]$Expect, [string]$Text,
+    [hashtable]$OpenErrors = @{}, [bool]$OpenThrows = $false) {
+    $global:OpenErrors = $OpenErrors
+    $global:OpenThrows = $OpenThrows
     if ([IO.Directory]::Exists($destination)) { [IO.Directory]::Delete($destination, $true) }
     if ([IO.Directory]::Exists($source)) { [IO.Directory]::Delete($source, $true) }
     [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($source, 'bin'))
@@ -905,12 +922,88 @@ Invoke-Case 'an image from InstallRoot' 'denied' @($hook, $caller) @() $false 'd
 Invoke-Case 'a Restart Manager holder' 'sharing' @($elsewhere) @($scanner, $callerHolder) $false 'deferred' 'Scanner (pid 5151)'
 Invoke-Case 'another error' 'missing' @($hook) @() $false 'failed' 'Could not find a part of the path'
 Invoke-Case 'a free InstallRoot' 'none' @() @() $false 'retired' ''
+# W4 review, loop round 2: a holder defers only a rename this account has
+# the rights for. DELETE is 0x10000 on InstallRoot, add-subfolder 0x4 on
+# its parent; 5 is access denied, 19 a read-only volume, 32 a sharing
+# violation (a window on InstallRoot, which ends when it closes).
+Invoke-Case 'a deny on InstallRoot with a holder' 'denied' @($hook) @() $false 'failed' 'may not rename' @{ 65536 = 5 }
+Invoke-Case 'a deny in the parent with a holder' 'denied' @($hook) @($scanner) $false 'failed' 'may not create a folder in' @{ 4 = 5 }
+Invoke-Case 'a deny in the parent with a sharing holder' 'sharing' @($elsewhere) @($scanner) $false 'failed' 'does not end when a program exits' @{ 4 = 5 }
+Invoke-Case 'a read-only volume with a holder' 'denied' @($hook) @() $false 'failed' 'may not rename' @{ 65536 = 19 }
+Invoke-Case 'the rights check fails with a holder' 'denied' @($hook) @() $false 'failed' 'could not be checked' @{} $true
+Invoke-Case 'a window on InstallRoot with a holder' 'denied' @($hook) @() $false 'deferred' 'defenseclaw-hook.exe (pid 4242' @{ 65536 = 32 }
 """,
     )
     module = _text(MODULE)
     uninstall = _function_body(module, "Invoke-DefenseClawUninstallLifecycle")
     call = uninstall.index("$retirementDeferred = Invoke-DefenseClawCommittedInstallRootRetirement `")
     assert "-SelfUninstallCallerPID $SelfUninstallCallerPID" in uninstall[call : call + 300]
+
+
+def test_the_deferred_retirement_stops_at_once_on_a_rename_this_account_may_not_do(tmp_path) -> None:
+    # W4 review, loop round 2: the finalizer waited out its deadline on any
+    # access denied, though a deny entry set after the deferral does not end
+    # when the holder exits. It stops at once on a missing right; a holder
+    # alone is still waited for, and a free InstallRoot is retired.
+    install_root = tmp_path / "DefenseClaw"
+    _run_lifecycle_functions(
+        tmp_path,
+        [
+            "Test-DefenseClawInstallRootInUseException",
+            "Get-DefenseClawInstallRootRenameDenial",
+            "Complete-DefenseClawDeferredSelfUninstallRetirement",
+        ],
+        _FAKE_RENAME_NATIVE
+        + r"""
+function Initialize-DefenseClawNativeSecurity { return [FakeNative] }
+function Enter-DefenseClawLifecycleLock($Layout) { return 'lock' }
+function Exit-DefenseClawLifecycleLock($Lock) {}
+function Test-DefenseClawSelfUninstallCallerRunning($Layout, $Receipt) { return $false }
+function Assert-DefenseClawDeferredRetirementState($Layout, $Receipt) {}
+function Complete-DefenseClawCommittedManagedHooksFinalization($Layout, $GatewayServiceName, $GuardianServiceName, [switch]$Purge) {}
+function Assert-DefenseClawInstallRootNameReserved($InstallRoot) {}
+function Complete-DefenseClawRetiredSelfUninstallCommit($Layout, $Receipt) {}
+$installRoot = '""" + str(install_root) + r"""'
+$retired = $installRoot + '.retired'
+$layout = @{ InstallRoot = $installRoot }
+$receipt = [pscustomobject]@{ phase = 'prepared_install_retirement'; retired_install_root = $retired; purge_requested = $false; gateway_service = 'g'; guardian_service = 'h' }
+function Get-DefenseClawSelfUninstallReceipt($Layout, $GatewayServiceName, $GuardianServiceName) { return $receipt }
+function Invoke-TestRename([string]$From, [string]$To) {
+    $global:Renames++
+    if ($global:Renames -le $global:Refusals) { throw [UnauthorizedAccessException]::new("Access to the path '$From' is denied.") }
+    [IO.Directory]::Move($From, $To)
+}
+function Invoke-Case([string]$Name, [int]$Refusals, [hashtable]$OpenErrors, [int]$Seconds, [string]$Expect, [string]$Text) {
+    if ([IO.Directory]::Exists($retired)) { [IO.Directory]::Delete($retired, $true) }
+    [void][IO.Directory]::CreateDirectory($installRoot)
+    $global:Renames = 0
+    $global:Refusals = $Refusals
+    $global:OpenErrors = $OpenErrors
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $outcome = Complete-DefenseClawDeferredSelfUninstallRetirement -Layout $layout -Receipt $receipt `
+            -Deadline ([DateTime]::UtcNow.AddSeconds($Seconds)) -RetryIntervalMilliseconds 50
+        $message = ''
+    }
+    catch {
+        $outcome = 'failed'
+        $message = $_.Exception.Message
+    }
+    if ($outcome -ne $Expect -or ($Text -and $message -notlike "*$Text*")) {
+        throw "${Name}: $outcome, '$message' (want $Expect, *$Text*)"
+    }
+    if ($Name -like 'a deny*' -and ($global:Renames -ne 1 -or $clock.Elapsed.TotalSeconds -ge 5)) {
+        throw "${Name}: waited ($global:Renames renames, $($clock.Elapsed.TotalSeconds) s)"
+    }
+    Write-Host "${Name}: $outcome"
+}
+Invoke-Case 'a deny in the parent' 99 @{ 4 = 5 } 20 'failed' 'may not create a folder in'
+Invoke-Case 'a deny on InstallRoot' 99 @{ 65536 = 5 } 20 'failed' 'may not rename'
+Invoke-Case 'a holder past the deadline' 99 @{} 1 'failed' 'a program still holds a file in InstallRoot'
+Invoke-Case 'a holder that lets go' 3 @{} 20 'retired' ''
+""",
+        replacements=[("[IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)", "Invoke-TestRename $Layout.InstallRoot $retiredRoot")],
+    )
 
 
 def test_install_preparation_keeps_existing_service_read_access(tmp_path) -> None:

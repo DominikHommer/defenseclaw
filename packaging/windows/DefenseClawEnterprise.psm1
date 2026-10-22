@@ -2595,6 +2595,29 @@ namespace $nativeNamespace
             }
         }
 
+        // The Win32 error opening a folder for one right with every sharing
+        // mode allowed, or 0 when it opens: 5 is a missing right, 19 a
+        // read-only volume, 32 a handle that does not share the folder.
+        public static int GetDirectoryOpenError(string path, uint desiredAccess)
+        {
+            const uint FILE_SHARE_ALL = 0x00000007;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+            IntPtr handle = CreateFileW(
+                path,
+                desiredAccess,
+                FILE_SHARE_ALL,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                IntPtr.Zero);
+            if (handle == new IntPtr(-1))
+                return Marshal.GetLastWin32Error();
+            CloseHandle(handle);
+            return 0;
+        }
+
         // The processes the Windows Restart Manager reports with one of
         // these files open (GAP-0136). It names every holder, whichever
         // account or session runs it, without opening the files.
@@ -28040,6 +28063,17 @@ function Complete-DefenseClawDeferredSelfUninstallRetirement {
                 }
                 $inUse = $_
             }
+            if ($null -ne $inUse) {
+                # A deny entry set since the deferral does not end when the
+                # holder exits: stop now, not at the deadline.
+                $denial = Get-DefenseClawInstallRootRenameDenial -Source $Layout.InstallRoot -Destination $retiredRoot
+                if (-not [string]::IsNullOrEmpty($denial)) {
+                    throw (
+                        "the deferred self-uninstall retirement stopped: Windows refused to rename InstallRoot " +
+                        "($($inUse.Exception.Message)) and $denial; remove that deny entry, then run the uninstall again"
+                    )
+                }
+            }
             if ($null -eq $inUse) {
                 if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.InstallRoot) -or
                     -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $retiredRoot -PathType Container)) {
@@ -29233,6 +29267,41 @@ function Get-DefenseClawInstallRootHolders {
     return [string[]]@($named.Values)
 }
 
+# Why this account may not rename InstallRoot aside whichever program
+# exits, or '' when it may. The rename needs DELETE on InstallRoot (or
+# delete-child on its parent) and the right to create a folder in the parent
+# the retired root goes to. Each is checked by opening the folder for that
+# right with every sharing mode allowed, so a program that holds a file in
+# InstallRoot does not change the answer. A sharing violation (a window
+# whose current folder is InstallRoot) ends when that program does, so it is
+# not a missing right. A check that cannot run is a reason too: an access
+# denied that is not proven transient is never deferred (W4 review, loop
+# round 2).
+function Get-DefenseClawInstallRootRenameDenial {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    $parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Destination).TrimEnd('\'))
+    $checks = @(
+        @{ Path = $Source; Access = [uint32]0x00010000; What = "rename $Source" },
+        @{ Path = $parent; Access = [uint32]0x00000004; What = "create a folder in $parent" }
+    )
+    try {
+        $native = Initialize-DefenseClawNativeSecurity
+        foreach ($check in $checks) {
+            $code = [int]$native::GetDirectoryOpenError([string]$check.Path, [uint32]$check.Access)
+            if ($code -notin @(0, 32, 33)) {
+                return ('this account may not {0} ({1})' -f $check.What, [ComponentModel.Win32Exception]::new($code).Message.TrimEnd('.'))
+            }
+        }
+    }
+    catch {
+        return "the rights to rename it could not be checked ($($_.Exception.Message))"
+    }
+    return ''
+}
+
 # Renames InstallRoot aside after the uninstall committed. A program can
 # hold a file in InstallRoot past the retry window (an antivirus scan, an
 # administrator's window); that failed the committed uninstall with 1603 and
@@ -29242,7 +29311,9 @@ function Get-DefenseClawInstallRootHolders {
 # 1). Only a holder found now defers: access denied is also what an access
 # list on InstallRoot or its parent answers, and no program exit ends that,
 # so a refusal with no holder fails the uninstall (W4 review, loop round 1).
-# Returns '' when InstallRoot was retired, or the holders and the error when
+# A holder defers only a rename this account has the rights for: a deny entry
+# fails the uninstall even while a program holds a file (W4 review, loop
+# round 2). Returns '' when InstallRoot was retired, or the holders and the error when
 # the retirement is deferred; any other failure is thrown.
 function Invoke-DefenseClawCommittedInstallRootRetirement {
     param(
@@ -29259,6 +29330,14 @@ function Invoke-DefenseClawCommittedInstallRootRetirement {
             -not [IO.Directory]::Exists($Source) -or
             [IO.Directory]::Exists($Destination)) {
             throw
+        }
+        $denial = Get-DefenseClawInstallRootRenameDenial -Source $Source -Destination $Destination
+        if (-not [string]::IsNullOrEmpty($denial)) {
+            throw (
+                "Windows refused to rename $Source aside ($($failure.Exception.Message)) and $denial, " +
+                'so the refusal does not end when a program exits. Remove the deny entry on that folder (or make its ' +
+                'file system writable), then run the uninstall again'
+            )
         }
         $holders = @(Get-DefenseClawInstallRootHolders -InstallRoot $Source -SelfUninstallCallerPID $SelfUninstallCallerPID)
         if ($holders.Count -eq 0) {
