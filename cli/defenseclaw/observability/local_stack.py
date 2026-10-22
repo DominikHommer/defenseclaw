@@ -636,7 +636,7 @@ def _validate_windows_docker_certification(
         )
 
 
-def _docker_daemon_unreachable_message(detail: str, os_name: str) -> str:
+def docker_daemon_unreachable_message(detail: str, os_name: str) -> str:
     """Say why ``docker info`` failed and what to do on this OS (GAP-1335)."""
 
     if os_name.startswith("win") or os_name == "darwin":
@@ -673,7 +673,7 @@ def validate_native_docker_preflight(
     if info_result.returncode != 0:
         detail = (info_result.stderr or info_result.stdout).strip()
         suffix = f" ({detail.splitlines()[0]})" if detail else ""
-        raise LocalStackError(_docker_daemon_unreachable_message(detail, os_name) + suffix)
+        raise LocalStackError(docker_daemon_unreachable_message(detail, os_name) + suffix)
     info = _parse_json_object(info_result.stdout.strip(), description="info")
     if str(info.get("OSType", "")).lower() != "linux":
         raise LocalStackError("Docker is using Windows containers. Switch Docker Desktop to Linux containers.")
