@@ -1269,127 +1269,25 @@ public static extern bool MoveFileExW(string existingFileName, string newFileNam
     }
 }
 
-function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {
-    [IO.File]::Replace($New, $Destination, $Backup, $true)
-}
-
-function Invoke-FileMove([string]$From, [string]$To) {
-    [IO.File]::Move($From, $To)
-}
-
-function Invoke-FileCopy([string]$From, [string]$To) {
-    [IO.File]::Copy($From, $To, $false)
-}
-
-function New-VerifiedCopy([string]$From, [string]$To) {
-    # Copy $From to $To, a path no hook names, and keep it only when it is a
-    # whole copy. A copy that fails or stops partway is removed and $false
-    # returned, so a partial file is never published or counted as a copy of
-    # the old launcher.
-    try {
-        Invoke-FileCopy $From $To
-        if ((Get-Sha256 $From) -eq (Get-Sha256 $To)) { return $true }
-    } catch { }
-    Remove-Item -LiteralPath $To -Force -ErrorAction SilentlyContinue
-    return $false
-}
-
-function Close-SwapGap([string]$New, [string]$Backup, [string]$Restore, [string]$Destination) {
-    # ReplaceFile stopped after it renamed the installed file to the backup
-    # (ERROR_UNABLE_TO_MOVE_REPLACEMENT_2), so nothing is at $Destination.
-    # Put a file back at once: the new one if it moves now, else the old one
-    # from the backup, else the restore copy Switch-InPlace made before the
-    # swap (a scanner can hold both the new file and the backup against a
-    # rename), else a copy of the old file (a hold against a rename still lets
-    # it be read). Only renames reach $Destination: a copy is made to a ready
-    # file beside it, checked, and renamed in, so a hook never runs a partial
-    # launcher and a failed copy never passes for the old one. No step waits
-    # with the path missing. Returns $true when the new file is in place,
-    # $false when the old one is back.
-    $ready = ""
-    $copies = 0
-    try {
-        for ($tries = 0; ; $tries++) {
-            if (Test-Path -LiteralPath $New) { try { Invoke-FileMove $New $Destination; return $true } catch { } }
-            foreach ($old in @($Backup, $Restore)) {
-                if ($old -and (Test-Path -LiteralPath $old)) { try { Invoke-FileMove $old $Destination; return $false } catch { } }
-            }
-            if (-not $ready) {
-                foreach ($old in @($Restore, $Backup)) {
-                    if (-not $old -or -not (Test-Path -LiteralPath $old)) { continue }
-                    $copies++
-                    $candidate = "$Backup.ready$copies"
-                    if (New-VerifiedCopy $old $candidate) { $ready = $candidate; break }
-                }
-            }
-            if ($ready) { try { Invoke-FileMove $ready $Destination; $ready = ""; return $false } catch { } }
-            if ($tries -ge 200) { throw "Could not put $Destination back after a partial replace; the installed file is $Backup" }
-            Start-Sleep -Milliseconds 50
-        }
-    } finally {
-        if ($ready) { Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue }
-    }
-}
-
 function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) {
-    # Switch with one atomic rename of the new file over the installed one
-    # (Invoke-AtomicReplace), so the path always names a whole launcher. A
-    # shim, the hook state and an idle binary always switch that way. Only a
-    # launcher that runs as a program at that moment (a hook an agent
-    # started), which no rename can replace, is swapped with one ReplaceFile
-    # call, so the path is never missing. Renaming the old file aside and the
-    # new one in left a gap,
-    # often a second or more while a virus scanner held the new copy, in which
-    # a hook an agent started found no defenseclaw-hook.exe and its PowerShell
-    # bridge exited 1, which the agent does not treat as a block (rel-1-0-4
-    # GAP-0004). ReplaceFile renames the old file to the backup name, which a
-    # running program allows; the backup of a running hook stays until the
-    # next install removes it. While a scanner or another program holds a
-    # file, retry; if it never lets go, fail and leave the installed file in
-    # place (the install is then undone) rather than fall back to the rename.
-    # A ReplaceFile that stops halfway is closed at once (Close-SwapGap), and
-    # the retries then run with the installed file back in place. The restore
-    # copy, an independent copy of the installed file made before each
-    # attempt, is what Close-SwapGap publishes when a scanner holds both the
-    # new file and the backup; only a verified whole copy is used. Its name
-    # starts like the backup's, so the next install removes one this run
-    # could not.
-    $aside = "$Destination.old-" + (Get-Date -Format "yyyyMMddTHHmmssfff")
-    $restore = "$aside.restore"
-    $restoreReady = $false
-    try {
-        for ($waited = 0; ; $waited++) {
-            try {
-                Invoke-AtomicReplace $New $Destination
-                return
-            } catch {
-                $reason = $_.Exception.Message
-            }
-            # A recovery may have moved the last restore copy in: make another.
-            if (-not $restoreReady -or -not (Test-Path -LiteralPath $restore)) { $restoreReady = New-VerifiedCopy $Destination $restore }
-            try {
-                Invoke-FileReplace $New $Destination $aside
-                return
-            } catch {
-                $reason = $_.Exception.Message
-            }
-            $restoreCopy = if ($restoreReady) { $restore } else { "" }
-            if (-not (Test-Path -LiteralPath $Destination) -and (Close-SwapGap $New $aside $restoreCopy $Destination)) {
-                return
-            }
-            if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
-                Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
-                throw "Could not replace $Destination in place ($reason); it was left as it was"
-            }
-            Start-Sleep -Milliseconds 500
+    # Only one atomic rename publishes an installed file. ReplaceFile opens
+    # the old launcher for replacement and can deny a concurrent hook's
+    # execution with a sharing violation (GAP-0352); its partial-failure
+    # recovery also cannot prove uninterrupted availability. A running hook
+    # or scanner may refuse the rename. Retry while the whole old launcher
+    # remains callable, then refuse the upgrade without changing it.
+    for ($waited = 0; ; $waited++) {
+        try {
+            Invoke-AtomicReplace $New $Destination
+            return
+        } catch {
+            $reason = $_.Exception.Message
         }
-    } finally {
-        # Keep them when nothing is at $Destination: they are the old file.
-        # Only whole files are ever renamed to $Destination, so one there is a
-        # launcher.
-        if (Test-Path -LiteralPath $Destination -PathType Leaf) {
-            foreach ($leftover in @($aside, $restore)) { Remove-Item -LiteralPath $leftover -Force -ErrorAction SilentlyContinue }
+        if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
+            Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
+            throw "Could not replace $Destination in place ($reason); it was left as it was. Retry the same install command after the running hook finishes"
         }
+        Start-Sleep -Milliseconds 500
     }
 }
 
