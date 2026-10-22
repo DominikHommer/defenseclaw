@@ -530,6 +530,10 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 			if existed = readErr == nil && subtle.ConstantTimeCompare(stored, value) == 1; existed {
 				return nil
 			}
+			// A value the signed bundle does not bind is not stored.
+			if err := checkSecretBinding(ctx, opts.name, value, opts.bundle); err != nil {
+				return err
+			}
 			return env.WriteSecret(ctx, opts.name, value)
 		}
 	case "remove":
@@ -553,10 +557,6 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret", Mutate: mutate})
 	return result, existed, reservation, nil
 }
-
-// codeSecretChangeFailed is the code of a write or removal that did not
-// happen, as the lifecycle reports a failed protected-state change.
-const codeSecretChangeFailed = "change_failed"
 
 // secretCallerPID is the parent of this process. A seam for tests.
 var secretCallerPID = os.Getppid

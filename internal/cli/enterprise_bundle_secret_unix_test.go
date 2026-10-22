@@ -20,14 +20,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// The Linux and macOS presence reader of bundle verify (and of the apply,
-// which shares Env.SecretPresent) runs the gateway's read checks: a stored
+// The Linux and macOS credential reader of bundle verify (and of the apply,
+// which shares Env.SecretValue) runs the gateway's read checks: a stored
 // credential is present only when the gateway could use it. An empty,
 // multi-line, oversized or other-readable file, one that fails the path
 // trust check, a link, a folder and a name that is not a credential name are
 // missing; a store the caller cannot read is an error, so verify warns
 // instead of refusing.
-func TestManagedBundleSecretPresentUsesTheGatewayChecks(t *testing.T) {
+func TestManagedBundleSecretValueUsesTheGatewayChecks(t *testing.T) {
 	layout, err := managed.StandaloneLayoutFor(enterpriseunix.CurrentGOOS())
 	if err != nil {
 		t.Skip(err)
@@ -82,8 +82,8 @@ func TestManagedBundleSecretPresentUsesTheGatewayChecks(t *testing.T) {
 		"untrusted-key": false, "splunk-hec-token": false, ".splunk-hec-token": false, "a-directory": false,
 		"linked-key": false, "not-stored": false,
 	} {
-		if present, err := managedBundleSecretPresent(name); err != nil || present != want {
-			t.Errorf("%s: present %v, err %v; want %v", name, present, err, want)
+		if value, err := managedBundleSecretValue(name); err != nil || (value != nil) != want {
+			t.Errorf("%s: value %v, err %v; want %v", name, value != nil, err, want)
 		}
 	}
 	if os.Geteuid() == 0 {
@@ -93,7 +93,7 @@ func TestManagedBundleSecretPresentUsesTheGatewayChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	if _, err := managedBundleSecretPresent("ai-defense-api-key"); !errors.Is(err, fs.ErrPermission) {
+	if _, err := managedBundleSecretValue("ai-defense-api-key"); !errors.Is(err, fs.ErrPermission) {
 		t.Fatalf("unreadable store: %v", err)
 	}
 }

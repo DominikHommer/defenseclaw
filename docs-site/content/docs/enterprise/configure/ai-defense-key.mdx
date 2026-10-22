@@ -177,6 +177,26 @@ Run `enterprise secret set` again with the same name and the new value.
 The file is replaced atomically and the gateway restarts, as above. Revoke
 the old key in AI Defense after `secret status` shows the new digest.
 
+A device that applies signed policy bundles keeps the key the confirmed
+bundle signs: from 1.0.4 each bundle binds the value of every credential it
+names (`bundle sign --secret-file ai-defense-api-key=<file>`), and
+`secret set` refuses another value with `secret_ref_mismatch`. To rotate the
+key there, sign a new bundle version with the new key, store the key with
+that bundle, then apply it:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-file <key file> --bundle <new>.dcbundle
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise bundle apply --bundle <new>.dcbundle
+```
+
+On macOS the gateway is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`; on Windows run
+`defenseclaw.exe enterprise secret set` with `--bundle` from an elevated prompt, then
+`defenseclaw.exe enterprise windows ensure --profile standalone --bundle <new>.dcbundle`.
+
+A bundle signed before 1.0.4 names the key without its value, so `secret set`
+and the apply refuse it with `secret_ref_unbound`: sign the bundle again with
+`--secret-file`.
+
 ## Deliver the key with an MDM
 
 Never put the key in an MDM script body or on a command line: neither is

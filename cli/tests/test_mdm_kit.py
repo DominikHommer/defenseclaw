@@ -223,7 +223,7 @@ def test_same_version_package_reinstalls_when_a_required_binary_is_damaged(tmp_p
 
 def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
-    assert 'enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >' in text
+    assert 'enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json "$@" >' in text
     # The value reaches the lifecycle through a pipe, never a staged file
     # that a killed run would leave behind (GAP-0632).
     assert "printf '%s' \"$secret_data\" |" in text
@@ -233,6 +233,46 @@ def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
     # inline-secret setting.
     assert "DC_SECRET_VALUE" not in text
     assert "Never put credentials here" in text
+
+
+# GAP-0335: a signed bundle binds each credential value, and secret set
+# changes a credential the confirmed bundle signs only to a value a newer
+# signed bundle signs. The wrapper stores a credential it delivers with a
+# bundle together with that bundle (--bundle), and without one as before.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("bundle", ["", "/stage/policy.dcbundle"])
+def test_unix_wrapper_stores_a_credential_with_the_bundle_it_delivers(tmp_path: Path, os_dir: str, bundle: str) -> None:
+    wrapper = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in (
+        "dc_json_escape", "dc_print_result", "dc_log", "dc_fail_result",
+        "dc_secret_json_error", "dc_store_secret",
+    ))
+    log = tmp_path / "calls.log"
+    gateway = tmp_path / "gateway"
+    gateway.write_text(f"#!/bin/sh\ncat >/dev/null\necho \"$*\" >>'{log}'\necho '{{\"ok\":true}}'\n", encoding="utf-8")
+    gateway.chmod(0o755)
+    script = (
+        f'DC_ACTION=ensure DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"}\n'
+        f'DC_STAGE="{tmp_path}" DC_LOG="" DC_FORMAT=json DC_EXIT_FAILURE=1\n'
+        f"DC_SECRET_NAME=test-key secret_data=placeholder bundle='{bundle}'\n"
+        f'{functions}\ndc_store_secret "{gateway}"\n'
+    )
+    result = subprocess.run(["sh", "-c", script], env={"PATH": os.environ["PATH"]}, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    want = "enterprise secret set --name test-key --from-stdin --lock-wait 10m --json"
+    if bundle:
+        want += f" --bundle {bundle}"
+    assert log.read_text(encoding="utf-8").splitlines() == [want]
+
+
+def test_windows_wrapper_stores_a_bundled_credential_before_the_apply() -> None:
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    first = text.index("Set-WrapperSecret -Extra @('--bundle', $bundle)")
+    guard = text.rindex("if ($secret -and $bundle -and -not $SetupPath", 0, first)
+    lifecycle = text.index("$arguments = @('enterprise', 'windows', $normalizedAction")
+    after = text.index("if ($exitCode -eq 0 -and $secret -and -not $secretStored)")
+    assert guard < first < lifecycle < after
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")

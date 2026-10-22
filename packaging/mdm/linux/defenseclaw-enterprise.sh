@@ -1607,9 +1607,14 @@ dc_secret_json_error() {
 
 dc_store_secret() {
     gateway=$1
+    # A credential delivered with a bundle goes with it: a value the
+    # confirmed bundle does not sign is stored only when this bundle signs it
+    # (secret set --bundle).
+    set --
+    [ -z "${bundle:-}" ] || set -- --bundle "$bundle"
     set +e
     printf '%s' "$secret_data" |
-        "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err" &
+        "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json "$@" >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err" &
     DC_CHILD=$!
     wait "$DC_CHILD"
     secret_status=$?

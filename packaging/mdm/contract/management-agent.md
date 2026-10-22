@@ -197,8 +197,8 @@ device's maintenance window without `--defer-restart` (section 4.3).
 
 A refusal is final even when the same bytes are resubmitted:
 `version_not_newer`, `signature_invalid`, `key_unknown`, `secret_ref_missing`,
-`digest_mismatch`, `capability_loss` and the rest repeat until the input
-changes.
+`secret_ref_mismatch`, `secret_ref_unbound`, `digest_mismatch`,
+`capability_loss` and the rest repeat until the input changes.
 
 One 1603 is not final: Windows `secret set` / `remove` with `errors[0].code`
 `restart_failed` changed the stored credential but did not restart the
@@ -282,7 +282,14 @@ or exit 1 `not_root`, `change_failed` or `state_invalid`).
 Credentials go only through `enterprise secret set --name N --from-stdin`
 (section 4.7). Bundles carry no secrets: a bundle lists `secret_refs`, and
 apply refuses with `secret_ref_missing` until each named credential is
-stored. Send the value as one line without surrounding whitespace and close
+stored. From 1.0.4 each entry also signs a digest of the value
+(`value_sha256`, from `bundle sign --secret-file N=<file>`): apply refuses
+`secret_ref_mismatch` while the device stores another value, and
+`secret_ref_unbound` for an entry without a digest (every bundle signed
+before 1.0.4: sign it again with `--secret-file`). `secret set` stores a
+credential the confirmed bundle signs only with that value; to change it,
+sign a newer bundle for the new value and pass it to `secret set --bundle B`,
+then apply B. Send the value as one line without surrounding whitespace and close
 stdin, within 60 s of starting the command on Linux and macOS
 (`change_failed` after that). Linux and macOS strip one trailing `\n` or `\r\n` and keep other
 spaces; Windows trims all surrounding whitespace. On Linux and macOS a value
@@ -457,7 +464,8 @@ Exit 0.
   `anchor_missing`, `key_unknown`, `key_revoked`, `key_expired`,
   `signature_invalid`, `tenant_mismatch`, `target_mismatch`,
   `version_not_newer`, `product_too_old`, `secret_ref_missing`,
-  `digest_mismatch`, `config_invalid`); 2 / 1639 `invalid_arguments`.
+  `secret_ref_mismatch`, `secret_ref_unbound`, `digest_mismatch`,
+  `config_invalid`); 2 / 1639 `invalid_arguments`.
 - `secret_refs_missing` and `restart_prediction` are optional: absent on
   builds before 1.0.3 and added without a `management_contract` bump, so the
   agent gates on `management_contract` 1 and on the member being present
@@ -476,6 +484,14 @@ Exit 0.
   device could not check is only a warning in verify; apply refuses it
   `secret_ref_missing` (from 1.0.4) with the same warning. Store it again
   (4.7).
+- Credentials not the signed value, `secret_refs_mismatch` (absent on builds
+  before 1.0.4): present exactly when `secret_refs_missing` is, the names of
+  every stored `secret_refs` credential whose value the bundle does not sign
+  (`value_sha256`), in manifest order; `[]` when every stored one is the
+  signed value. A `secret_ref_mismatch` refusal lists all of them. Names only,
+  never a value. Store the signed values (4.7: a value the confirmed bundle
+  does not sign needs `--bundle` with this bundle), or sign the bundle again
+  with `--secret-file` for the stored ones.
 - Restart prediction, `restart_prediction` (absent on builds before 1.0.3):
   on a device, for `verified` and `already_applied`, whether the apply
   restarts the gateway, from the installed config.yaml and the bundle
@@ -522,8 +538,11 @@ Exit 0.
      `config_drift` `true`, the installed config drifted: apply the same
      bundle again, scheduled as in step 3. With `config_drift` absent, run
      verify again as root or SYSTEM.
-  2. `refused` with `secret_ref_missing`: store every name in
-     `secret_refs_missing` (4.7), then run verify again. The refusal is
+  2. `refused` with `secret_ref_missing` or `secret_ref_mismatch`: store
+     every name in `secret_refs_missing` and `secret_refs_mismatch` with the
+     value the bundle signs (4.7, with `--bundle` and this bundle), then run
+     verify again. `secret_ref_unbound`: sign the bundle again with
+     `--secret-file` for every credential. The refusal is
      final until the credentials change (2.2). A `verified` result can list
      optional names: the apply succeeds and what needs them stays off until
      they are stored.
@@ -911,8 +930,9 @@ off the device. The agent does not read `/health` itself (section 7); the
 
 ### 4.7 Credentials: `enterprise secret set` / `remove` / `status`
 
-- argv: `enterprise secret set --name <name> --from-stdin [--lock-wait 10m]
-  --json`; `enterprise secret remove --name <name> [--lock-wait 10m] --json`;
+- argv: `enterprise secret set --name <name> --from-stdin [--bundle <B>]
+  [--lock-wait 10m] --json`; `enterprise secret remove --name <name>
+  [--lock-wait 10m] --json`;
   `enterprise secret status --json`. On Windows pass `--lock-wait` only to a
   `management_contract` 1 build.
 - Privilege: root on Linux and macOS (checked first: `not_root`, exit 1); an elevated
@@ -929,6 +949,19 @@ off the device. The agent does not read `/health` itself (section 7); the
   with `state_invalid`, exit 1603 (`<folder> is not a real directory`):
   nothing is read, written or deleted, and the target of a junction is never
   touched. Replace it with a real folder.
+- Signed value (from 1.0.4): when the confirmed bundle lists the credential
+  in `secret_refs`, `set` stores only the value its `value_sha256` signs.
+  Another value is refused `secret_ref_mismatch` (an entry without a digest,
+  from a bundle signed before 1.0.4, `secret_ref_unbound`), nothing is
+  written and the exit is 1 / 1603. To change the value, pass the newer
+  bundle that signs it with `--bundle <B>`: `set` verifies B as an apply
+  would (anchors, signature, version floor, files and digest, apart from the
+  stored credentials) and stores the value when B signs it; B's own refusal
+  code is reported otherwise. Then apply B. An identical value, a credential
+  no confirmed bundle lists and a device with no confirmed bundle are not
+  checked. The MDM shell kit and `Invoke-DefenseClawEnterprise.ps1` pass the
+  bundle they deliver (Windows: not with `-SetupPath`, which stores the
+  credential after Setup as before).
 - Lock: Linux and macOS write and apply under one `lifecycle.lock` and wait
   `--lock-wait` (default 5 s). Windows takes the two locks in the order a
   bundle apply takes them: `bundle.lock` (waiting up to `--lock-wait`,
@@ -1267,9 +1300,9 @@ Later bundles go through 5.2.
 
 ### 5.2 Deliver a bundle
 
-1. Store every credential the bundle's `secret_refs` names (4.7), only when
-   `sha256_prefix` differs or the last call for that name did not end with
-   exit 0 (2.5).
+1. Store every credential the bundle's `secret_refs` names (4.7, with
+   `--bundle` and this bundle), only when `sha256_prefix` differs or the last
+   call for that name did not end with exit 0 (2.5).
 2. If the anchors must change and the agent owns them (4.8), install them
    first.
 3. Run 4.2 verify. `already_applied`: done, unless `config_drift` is

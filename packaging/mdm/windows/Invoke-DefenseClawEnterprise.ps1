@@ -722,6 +722,35 @@ if ($SecretName) {
     }
 }
 
+function Set-WrapperSecret {
+    param([string[]]$Extra = @())
+    try {
+        $deployment = Get-DefenseClawInstalledDeployment
+        if ($null -eq $deployment) { throw 'the deployment did not register its marker' }
+        $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -StandardInputPath $secret -ArgumentList (@(
+            'enterprise', 'secret', 'set', '--name', $SecretName, '--from-stdin', '--json') + $Extra)
+    } catch {
+        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "storing credential '$SecretName' failed: $($_.Exception.Message)"
+    }
+    if ($run.ExitCode -ne 0) {
+        $detail = ([string]$run.StdErr).Trim()
+        if ($detail.Length -gt 1024) { $detail = $detail.Substring(0, 1024) }
+        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "storing credential '$SecretName' failed (exit $($run.ExitCode)): $detail"
+    }
+    Write-WrapperLog -Message "stored credential $SecretName"
+}
+
+# A credential delivered with a bundle to an installed deployment is stored
+# first, with the bundle: the apply refuses a stored value the bundle does
+# not sign, and a credential the confirmed bundle signs changes only to a
+# value a newer signed bundle signs (secret set --bundle). With -SetupPath the
+# installed CLI can predate --bundle, so the credential is stored after Setup.
+$secretStored = $false
+if ($secret -and $bundle -and -not $SetupPath -and $null -ne (Get-DefenseClawInstalledDeployment)) {
+    Set-WrapperSecret -Extra @('--bundle', $bundle)
+    $secretStored = $true
+}
+
 $exitCode = 0
 try {
     if ($SetupPath) {
@@ -757,21 +786,8 @@ try {
     Exit-Wrapper $script:ExitFailure 'mdm_lifecycle_launch_failed' $_.Exception.Message
 }
 
-if ($exitCode -eq 0 -and $secret) {
-    try {
-        $deployment = Get-DefenseClawInstalledDeployment
-        if ($null -eq $deployment) { throw 'the deployment did not register its marker' }
-        $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -StandardInputPath $secret -ArgumentList @(
-            'enterprise', 'secret', 'set', '--name', $SecretName, '--from-stdin', '--json')
-    } catch {
-        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "storing credential '$SecretName' failed: $($_.Exception.Message)"
-    }
-    if ($run.ExitCode -ne 0) {
-        $detail = ([string]$run.StdErr).Trim()
-        if ($detail.Length -gt 1024) { $detail = $detail.Substring(0, 1024) }
-        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "storing credential '$SecretName' failed (exit $($run.ExitCode)): $detail"
-    }
-    Write-WrapperLog -Message "stored credential $SecretName"
+if ($exitCode -eq 0 -and $secret -and -not $secretStored) {
+    Set-WrapperSecret
 }
 Remove-WrapperStaging
 exit $exitCode

@@ -19,21 +19,28 @@ import (
 // confirmed manifest whose bytes no longer match the recorded hash is an
 // error. Other bundle files are checked when they are applied.
 func (s *Store) ConfirmedProductFloor() (string, error) {
-	st, err := s.LoadState()
-	if err != nil {
-		return "", err
-	}
-	if st.Current == nil {
-		return "", nil
-	}
 	// Recovery may need to replace a damaged file from the committed config.
 	// The release floor lives in the manifest, whose exact bytes are pinned by
 	// the confirmed state. Reading all files here would prevent that recovery.
-	m, err := s.confirmedManifest(st.Current)
-	if err != nil {
+	m, err := s.ConfirmedManifest()
+	if err != nil || m == nil {
 		return "", err
 	}
 	return m.MinProductVersion, nil
+}
+
+// ConfirmedManifest is the manifest of the confirmed bundle, nil when no
+// bundle is confirmed. A stored manifest whose bytes no longer match the
+// recorded hash is an error.
+func (s *Store) ConfirmedManifest() (*Manifest, error) {
+	st, err := s.LoadState()
+	if err != nil {
+		return nil, err
+	}
+	if st.Current == nil {
+		return nil, nil
+	}
+	return s.confirmedManifest(st.Current)
 }
 
 func (s *Store) confirmedManifest(ref *Ref) (*Manifest, error) {

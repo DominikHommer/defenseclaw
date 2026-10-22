@@ -74,18 +74,17 @@ func readSystemdCredential(dir, name string) ([]byte, error) {
 	return readBoundedCredential(path)
 }
 
-// StoredCredentialPresence reports whether the credential name in
-// secretsDir is stored and usable, with the checks the gateway reads a
-// protected credential file with (path trust, mode, one link, a bounded,
-// non-empty, single-line value): Linux and macOS bundle verify and apply
-// call it, so a credential the gateway cannot read is missing, as on
-// Windows. trust is the path trust check of the caller's rooted layout (nil:
-// ValidateTrustedFilePath). The value is dropped at once. A store the caller
-// cannot read is an error (ServiceCredentialPresence), so verify warns
-// secret_presence_unchecked.
-func StoredCredentialPresence(name, secretsDir string, trust func(path string) error) (bool, error) {
+// StoredCredentialValue reads the credential name in secretsDir with the
+// checks the gateway reads a protected credential file with (path trust,
+// mode, one link, a bounded, non-empty, single-line value): Linux and macOS
+// bundle verify and apply call it to compare the value with the signed
+// value_sha256, so a credential the gateway cannot read is missing (nil),
+// as on Windows. trust is the path trust check of the caller's rooted layout
+// (nil: ValidateTrustedFilePath). A store the caller cannot read is an error
+// (ServiceCredentialValue), so verify warns secret_presence_unchecked.
+func StoredCredentialValue(name, secretsDir string, trust func(path string) error) ([]byte, error) {
 	if !ValidCredentialName(name) || strings.TrimSpace(secretsDir) == "" {
-		return false, nil
+		return nil, nil
 	}
 	if trust == nil {
 		trust = func(path string) error { return ValidateTrustedFilePath(path, "protected credential") }
@@ -94,17 +93,13 @@ func StoredCredentialPresence(name, secretsDir string, trust func(path string) e
 	info, err := os.Lstat(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return false, nil
+		return nil, nil
 	case err != nil:
-		return false, fmt.Errorf("inspect credential %s: %w", name, err)
+		return nil, fmt.Errorf("inspect credential %s: %w", name, err)
 	case !info.Mode().IsRegular():
-		return false, nil
+		return nil, nil
 	}
-	value, err := readStoredCredential(name, path, trust, validateProtectedCredentialMode)
-	for i := range value {
-		value[i] = 0
-	}
-	return ServiceCredentialPresence(err)
+	return ServiceCredentialValue(readStoredCredential(name, path, trust, validateProtectedCredentialMode))
 }
 
 // validateProtectedCredentialFile requires a root-owned regular file whose

@@ -30,7 +30,7 @@ func validManifest() *Manifest {
 			{Path: ConfigName, SHA256: strings.Repeat("a", 64), Size: 10},
 			{Path: "policies/guardrail/strict/rules.yaml", SHA256: strings.Repeat("b", 64), Size: 3},
 		},
-		SecretRefs:      []SecretRef{{Ref: "secret://ai-defense-api-key", Required: true}},
+		SecretRefs:      []SecretRef{{Ref: "secret://ai-defense-api-key", Required: true, ValueSHA256: strings.Repeat("d", 64)}},
 		EffectivePolicy: EffectivePolicy{ProductVersion: "1.0.2", ComputedOn: PlatformLinux, Digests: map[string]string{PlatformLinux: testDigest, PlatformDarwin: testDigest}},
 	}
 }
@@ -120,6 +120,8 @@ func TestDecodeManifestRefuses(t *testing.T) {
 		"secret ref scheme": mutate(func(m *Manifest) { m.SecretRefs[0].Ref = "env://X" }),
 		"secret ref name":   mutate(func(m *Manifest) { m.SecretRefs[0].Ref = "secret://../x" }),
 		"secret ref twice":  mutate(func(m *Manifest) { m.SecretRefs = append(m.SecretRefs, m.SecretRefs[0]) }),
+		"secret value hex":  mutate(func(m *Manifest) { m.SecretRefs[0].ValueSHA256 = strings.Repeat("D", 64) }),
+		"secret value size": mutate(func(m *Manifest) { m.SecretRefs[0].ValueSHA256 = strings.Repeat("d", 63) }),
 		"product version":   mutate(func(m *Manifest) { m.EffectivePolicy.ProductVersion = "" }),
 		"missing digest":    mutate(func(m *Manifest) { delete(m.EffectivePolicy.Digests, PlatformDarwin) }),
 		"other platform": mutate(func(m *Manifest) {
