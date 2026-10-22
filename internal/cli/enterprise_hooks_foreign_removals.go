@@ -4,6 +4,8 @@
 package cli
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -44,11 +46,11 @@ func enterpriseForeignHookAccountID(sid string, uid int) string {
 // hook they loaded. It runs after the files were cleaned, so every process
 // that could have loaded one started before the recorded time. Failures are
 // logged; the per-call check still applies.
-func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connectorName string, paths []string) {
+func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connectorName string, paths []string) error {
 	identity, ok := connector.CanonicalUserScopedIdentity(account)
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	if !ok || connectorName == "" || len(paths) == 0 || cfg == nil || !cfg.StandaloneEnterprise() {
-		return
+		return nil
 	}
 	enterpriseForeignHookRemovalsMu.Lock()
 	defer enterpriseForeignHookRemovalsMu.Unlock()
@@ -83,6 +85,22 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 		if err != nil {
 			return err
 		}
+		kept, err := enterprisepolicy.ParseForeignHookRemovals(data)
+		if err != nil {
+			return err
+		}
+		for _, want := range added {
+			found := false
+			for _, got := range kept {
+				if got == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return errors.New("the removal ledger cannot retain the new denial")
+			}
+		}
 		if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
 			return err
 		}
@@ -101,6 +119,71 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s: %v\n",
 			connectorName, foreignGuardLogField(account, 256), err)
 	}
+	return err
+}
+
+// beginEnterpriseForeignHookCleanup publishes a denial before any user hook
+// file can be removed. All governed connectors are covered because several
+// can load the same file. A failed publication refuses cleanup.
+func beginEnterpriseForeignHookCleanup(stderr io.Writer, account, home string) (string, error) {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return "", nil
+	}
+	var id [8]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	token := enterprisepolicy.ForeignHookCleanupPendingPrefix + hex.EncodeToString(id[:]) + ">"
+	for _, name := range enterprisepolicy.StandaloneConnectors(cfg) {
+		if err := recordEnterpriseForeignHookRemovals(stderr, account, home, name, []string{token}); err != nil {
+			return "", err
+		}
+	}
+	return token, nil
+}
+
+// finishEnterpriseForeignHookCleanup removes only this cleanup's pending
+// denial, after all of its actual removals were committed. On failure the
+// pending denial stays, so an uncertain write cannot permit an old hook.
+func finishEnterpriseForeignHookCleanup(account, token string) error {
+	if token == "" || cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	identity, ok := connector.CanonicalUserScopedIdentity(account)
+	if !ok {
+		return errors.New("cannot bind the cleanup to an account")
+	}
+	enterpriseForeignHookRemovalsMu.Lock()
+	defer enterpriseForeignHookRemovalsMu.Unlock()
+	dataDir := cfg.DataDir
+	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile)
+	existing, err := loadEnterpriseForeignHookRemovals(path)
+	if err != nil {
+		return err
+	}
+	kept := existing[:0:0]
+	for _, removal := range existing {
+		if removal.Identity != identity || removal.Path != token {
+			kept = append(kept, removal)
+		}
+	}
+	data, err := enterprisepolicy.EncodeForeignHookRemovals(kept, nil, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
+		return err
+	}
+	if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		return err
+	}
+	if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
+		return err
+	}
+	return enterpriseHookAuthorizationFileTrustCheck(path)
 }
 
 func loadEnterpriseForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {

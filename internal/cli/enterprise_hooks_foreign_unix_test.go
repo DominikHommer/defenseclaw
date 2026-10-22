@@ -33,6 +33,45 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
+func TestForeignHookRemovalIsDeniedBeforeItsLedgerCommit(t *testing.T) {
+	dataDir := useUserCleanupStateDir(t)
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+	cfg = standaloneTestConfig(dataDir)
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"cursor": {}}
+	home := t.TempDir()
+	hook := filepath.Join(home, ".cursor", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hook, []byte("foreign hook"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	token, err := beginEnterpriseForeignHookCleanup(io.Discard, "1000", home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+	ledger := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile)
+	pending, err := loadEnterpriseForeignHookRemovals(ledger)
+	if err != nil || !slices.ContainsFunc(pending, func(r enterprisepolicy.ForeignHookRemoval) bool { return r.Path == token && r.Connector == "cursor" }) {
+		t.Fatalf("removal visible without a pending denial: %+v (%v)", pending, err)
+	}
+	if err := recordEnterpriseForeignHookRemovals(io.Discard, "1000", home, "cursor", []string{hook}); err != nil {
+		t.Fatal(err)
+	}
+	if err := finishEnterpriseForeignHookCleanup("1000", token); err != nil {
+		t.Fatal(err)
+	}
+	committed, err := loadEnterpriseForeignHookRemovals(ledger)
+	if err != nil || slices.ContainsFunc(committed, func(r enterprisepolicy.ForeignHookRemoval) bool { return r.Path == token }) ||
+		!slices.ContainsFunc(committed, func(r enterprisepolicy.ForeignHookRemoval) bool { return r.Path == hook && r.Connector == "cursor" }) {
+		t.Fatalf("cleanup did not commit the exact removal: %+v (%v)", committed, err)
+	}
+}
+
 func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
 	home := t.TempDir()
 	hooks := filepath.Join(home, ".cursor", "hooks.json")

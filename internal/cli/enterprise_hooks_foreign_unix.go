@@ -339,6 +339,27 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	for _, account := range stale {
 		staleUIDs[account.UID] = true
 	}
+	// Publish a denial before any worker can remove a file. A worker whose
+	// denial cannot be published must not touch that connector's hooks.
+	pending := map[int]map[string]string{}
+	for i := range jobs {
+		account := &jobs[i].Account
+		kept := jobs[i].Request.ForeignCleanup[:0:0]
+		for _, cleanup := range jobs[i].Request.ForeignCleanup {
+			token, err := beginEnterpriseForeignHookCleanup(stderr, strconv.Itoa(account.UID), account.Home)
+			if err != nil {
+				clean = false
+				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s %s refused before file removal: %v\n", account.User, cleanup.Connector, err)
+				continue
+			}
+			if pending[account.UID] == nil {
+				pending[account.UID] = map[string]string{}
+			}
+			pending[account.UID][cleanup.Connector] = token
+			kept = append(kept, cleanup)
+		}
+		jobs[i].Request.ForeignCleanup = kept
+	}
 	// Each account's removals are recorded for the gateway as soon as its
 	// worker ends, so its agent processes that started before them stay
 	// denied (recordEnterpriseForeignHookRemovals). Only the connectors the
@@ -346,8 +367,14 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	recordRemovals := func(outcome enterpriseHookWorkerOutcome) {
 		for _, cleanup := range outcome.Job.Request.ForeignCleanup {
 			if report, ok := outcome.Response.Cleanup[cleanup.Connector]; ok {
-				recordEnterpriseForeignHookRemovals(stderr, strconv.Itoa(outcome.Job.Account.UID), outcome.Job.Account.Home,
+				account := strconv.Itoa(outcome.Job.Account.UID)
+				err := recordEnterpriseForeignHookRemovals(stderr, account, outcome.Job.Account.Home,
 					cleanup.Connector, boundedStrings(report.Removed, 32))
+				if err == nil && report.Error == "" && outcome.Err == nil {
+					if err := finishEnterpriseForeignHookCleanup(account, pending[outcome.Job.Account.UID][cleanup.Connector]); err != nil {
+						fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: keep the pending denial for %s %s: %v\n", account, cleanup.Connector, err)
+					}
+				}
 			}
 		}
 	}

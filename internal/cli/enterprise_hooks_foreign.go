@@ -57,7 +57,19 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		Policy:        policy,
 		OwnedCommands: perUserOwnedHookCommandsForBinary(name, target.UserHome, dataDir, opts.HookBinary),
 	}
-	return cleanEnterpriseForeignHooksAsTarget(target, request, time.Now())
+	account := enterpriseForeignHookAccountID(target.SID, target.UID)
+	pending, err := beginEnterpriseForeignHookCleanup(os.Stderr, account, target.UserHome)
+	if err != nil {
+		return enterprisepolicy.CleanupResult{}, fmt.Errorf("publish the foreign-hook cleanup denial before editing hooks: %w", err)
+	}
+	result, err := cleanEnterpriseForeignHooksAsTarget(target, request, time.Now())
+	if err != nil {
+		return result, err // an uncertain cleanup keeps its pending denial
+	}
+	if err := recordEnterpriseForeignHookRemovals(os.Stderr, account, target.UserHome, name, removedForeignHookPaths(result)); err != nil {
+		return result, err
+	}
+	return result, finishEnterpriseForeignHookCleanup(account, pending)
 }
 
 // enterpriseForeignHookRunAsTarget runs fn as the user. Replaceable in tests

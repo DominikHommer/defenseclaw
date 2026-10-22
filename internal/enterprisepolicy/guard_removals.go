@@ -36,6 +36,12 @@ import (
 // authorization directory. The guardian writes it; the gateway reads it.
 const ForeignHookRemovalsFile = "foreign-hook-removals.json"
 
+// ForeignHookCleanupPendingPrefix marks an account/connector cleanup whose
+// file edits have not yet been committed to the removal ledger. The gateway
+// denies that connector while it is present, including processes with no
+// provable start time. A unique suffix lets concurrent cleanups coexist.
+const ForeignHookCleanupPendingPrefix = "<foreign-hook cleanup pending:"
+
 const (
 	foreignHookRemovalsVersion = 1
 	// ForeignHookRemovalsMaxBytes bounds the ledger file.
@@ -113,7 +119,7 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 	latest := map[string]dated{}
 	for _, removal := range append(append([]ForeignHookRemoval{}, existing...), added...) {
 		at, err := time.Parse(time.RFC3339Nano, removal.At)
-		if err != nil || now.Sub(at) > sessionRecordTTL || !removal.complete() {
+		if err != nil || now.Sub(at) > sessionRecordTTL && !strings.HasPrefix(removal.Path, ForeignHookCleanupPendingPrefix) || !removal.complete() {
 			continue
 		}
 		key := removal.Identity + "\x00" + removal.Connector + "\x00" + removal.Path
@@ -126,6 +132,11 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool {
+		pi := strings.HasPrefix(entries[i].removal.Path, ForeignHookCleanupPendingPrefix)
+		pj := strings.HasPrefix(entries[j].removal.Path, ForeignHookCleanupPendingPrefix)
+		if pi != pj {
+			return pi
+		}
 		if !entries[i].at.Equal(entries[j].at) {
 			return entries[i].at.After(entries[j].at)
 		}
@@ -140,6 +151,9 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 		}
 		size += len(encoded) + foreignHookRemovalIndent
 		if len(ledger.Removals) == foreignHookRemovalsLimit || size > ForeignHookRemovalsMaxBytes {
+			if strings.HasPrefix(entry.removal.Path, ForeignHookCleanupPendingPrefix) {
+				return nil, errors.New("foreign-hook removal ledger cannot retain every pending cleanup denial")
+			}
 			break
 		}
 		ledger.Removals = append(ledger.Removals, entry.removal)
@@ -182,11 +196,12 @@ func removalAfterProcessStart(removals []ForeignHookRemoval, key SessionKey, now
 	var found ForeignHookRemoval
 	var foundAt time.Time
 	for _, removal := range removals {
-		if !strings.EqualFold(removal.Connector, key.Connector) || !agentprocess.StartedBefore(key.Process, removal.Mark) {
+		if !strings.EqualFold(removal.Connector, key.Connector) ||
+			!strings.HasPrefix(removal.Path, ForeignHookCleanupPendingPrefix) && !agentprocess.StartedBefore(key.Process, removal.Mark) {
 			continue
 		}
 		at, err := time.Parse(time.RFC3339Nano, removal.At)
-		if err != nil || now.Sub(at) > sessionRecordTTL {
+		if err != nil || now.Sub(at) > sessionRecordTTL && !strings.HasPrefix(removal.Path, ForeignHookCleanupPendingPrefix) {
 			continue
 		}
 		if foundAt.IsZero() || at.Before(foundAt) {
@@ -208,6 +223,11 @@ const removedSessionReason = "removed after this agent process started"
 // the guardian removed an unapproved hook of its connector for this account.
 func removedHookDecision(decision GuardDecision, connector string, removal ForeignHookRemoval) GuardDecision {
 	decision.Deny = true
+	if strings.HasPrefix(removal.Path, ForeignHookCleanupPendingPrefix) {
+		decision.Reason = "enterprise_foreign_hook_blocked: DefenseClaw is removing unapproved " + connector +
+			" hooks; the cleanup and its denial record are not complete. Retry the tool call after the guardian finishes."
+		return decision
+	}
 	decision.Reason = fmt.Sprintf(
 		"enterprise_foreign_hook_blocked: your organization blocks %s hooks it has not approved, because they can change a tool call after DefenseClaw checks it. This agent started before DefenseClaw removed an unapproved hook from %s at %s. %s",
 		connector, removal.Path, removal.At, sessionRemovedNote,
