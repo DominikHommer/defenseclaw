@@ -16,6 +16,7 @@ scripts/test-install-lifecycle.ps1. These checks pin what other code relies on.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -1218,18 +1219,34 @@ def test_hook_fail_mode_refresh_refuses_a_probe_that_fails(tmp_path: Path) -> No
 
 @pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
 @pytest.mark.parametrize("shell", _POWERSHELLS)
-@pytest.mark.parametrize("case", ["upgrade", "first-install", "interrupted-before-marker"])
+@pytest.mark.parametrize(
+    "case", ["upgrade", "first-install", "interrupted-before-marker", "copy-lost", "copy-changed", "legacy-marker"]
+)
 def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path, shell: str, case: str) -> None:
+    # r104 W4 loop 2: the rollback copy is the only old hook once the new one
+    # is in, so the new hook goes in only over a copy with the old hook's
+    # bytes (copy-lost, copy-changed refuse with nothing changed). HOOK_FIRST
+    # records that SHA-256; a 1.0.3 marker (empty) still undoes from the copy.
     bin_dir, staging, slot = tmp_path / "bin", tmp_path / "staging", tmp_path / "slot"
     (staging / "bin").mkdir(parents=True)
     (staging / "bin" / "defenseclaw-hook.exe").write_text("new", encoding="utf-8")
     if case != "first-install":
         bin_dir.mkdir()
         (bin_dir / "defenseclaw-hook.exe").write_text("old", encoding="utf-8")
-    steps = (
-        "Copy-BinDir (Join-Path $Slot bin); Undo-HookFirst $Slot"
-        if case == "interrupted-before-marker"
-        else "Copy-BinDir (Join-Path $Slot bin); Install-HookFirst $Slot; Write-Host \"after: $(Get-Content -Raw (Join-Path $BinDir 'defenseclaw-hook.exe') -ErrorAction SilentlyContinue)\"; Undo-HookFirst $Slot"
+    saved_copy = "(Join-Path (Join-Path $Slot bin) 'defenseclaw-hook.exe')"
+    refuse = "try { Install-HookFirst $Slot } catch { Write-Host \"refused: $($_.Exception.Message)\" }"
+    steps = {
+        "interrupted-before-marker": "Copy-BinDir (Join-Path $Slot bin); Undo-HookFirst $Slot",
+        "copy-lost": f"Copy-BinDir (Join-Path $Slot bin); Remove-Item -LiteralPath {saved_copy}; {refuse}",
+        "copy-changed": f"Copy-BinDir (Join-Path $Slot bin); Set-Content -LiteralPath {saved_copy} -Value 'tampered'; {refuse}",
+        "legacy-marker": (
+            "Copy-BinDir (Join-Path $Slot bin); Set-Content -LiteralPath (Join-Path $Slot HOOK_FIRST) -Value '' -Encoding Ascii; "
+            "Copy-Item -LiteralPath (Join-Path (Join-Path $Staging bin) 'defenseclaw-hook.exe') -Destination (Join-Path $BinDir 'defenseclaw-hook.exe') -Force; "
+            "Undo-HookFirst $Slot"
+        ),
+    }.get(
+        case,
+        "Copy-BinDir (Join-Path $Slot bin); Install-HookFirst $Slot; Write-Host \"after: $(Get-Content -Raw (Join-Path $BinDir 'defenseclaw-hook.exe') -ErrorAction SilentlyContinue)\"; Undo-HookFirst $Slot",
     )
     script = tmp_path / "case.ps1"
     script.write_text(
@@ -1240,6 +1257,7 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         "function Wait-PreviousHookExit([DateTime]$PublishedAt) {}\n"
         "function Remove-Aside([string]$Path) { Remove-Item -LiteralPath $Path -Force }\n"
         + _bin_dir_functions()
+        + _ps1_function("Read-Text")
         + _ps1_function("Get-Sha256")
         + _ps1_function("Install-HookFirst")
         + _ps1_function("Undo-HookFirst")
@@ -1265,9 +1283,12 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         return
     if case == "upgrade":
         assert "after: new" in out, out
-        assert (slot / "HOOK_FIRST").exists()
+        assert (slot / "HOOK_FIRST").read_text(encoding="ascii").strip() == hashlib.sha256(b"old").hexdigest()
         assert (slot / "bin" / "defenseclaw-hook.exe").read_text(encoding="utf-8") == "old"
-    else:
+    elif case in ("copy-lost", "copy-changed"):
+        assert "refused: Could not keep a whole rollback copy" in out and "nothing was changed" in out, out
+        assert not (slot / "HOOK_FIRST").exists(), out
+    elif case == "interrupted-before-marker":
         assert not (slot / "HOOK_FIRST").exists()
     # Undo leaves the old hook live.
     assert live.read_text(encoding="utf-8").strip() == "old", out
@@ -1278,7 +1299,7 @@ _EARLY_UNDO_SITES = ["hook-drain", "stop", "fail-modes", "quiescence", "save"]
 
 @pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
 @pytest.mark.parametrize("shell", _POWERSHELLS)
-@pytest.mark.parametrize("block", ["none", "once", "always", "silent"])
+@pytest.mark.parametrize("block", ["none", "once", "always", "silent", "copy-lost", "copy-changed"])
 @pytest.mark.parametrize("site", _EARLY_UNDO_SITES)
 def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, shell: str, block: str, site: str) -> None:
     # r104 W4 loop 3: the new hook goes in before the gateway stops. A later
@@ -1290,6 +1311,10 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
     # or "copied" without the bytes changing. A restore that is not verified
     # keeps .install.lock and the slot for the next run, never says nothing
     # was changed, and the old gateway runs either way.
+    # r104 W4 loop 2: the same holds when the rollback copy of the old hook
+    # is quarantined (copy-lost) or changed (copy-changed) after the swap:
+    # the undo skipped a missing copy and removed the slot. The next run
+    # stays locked until the copy is back, then finishes the undo.
     data_dir, bin_dir, staging = tmp_path / "dc", tmp_path / "bin", tmp_path / "staging"
     (staging / "bin").mkdir(parents=True)
     bin_dir.mkdir()
@@ -1299,7 +1324,7 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
     (bin_dir / "defenseclaw-gateway.exe").write_text("old gateway", encoding="utf-8")
     install = _ps1_function("Invoke-Install")
     phase = install[install.index("    $WasRunning = [bool](Get-GatewayProcess)") : install.index("    $previousLabel =")]
-    blocks = {"none": 0, "once": 1, "always": 99, "silent": 99}[block]
+    blocks = {"none": 0, "once": 1, "always": 99, "silent": 99}.get(block, 0)
     real = "".join(
         _ps1_function(name)
         for name in (
@@ -1316,7 +1341,7 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
         "$ManagedFiles = @('defenseclaw-hook.exe', 'defenseclaw-gateway.exe')\n"
         "$Run = @{ Lock = $true; OldGatewayDown = $false; UndoPending = $false; RestorePending = $false }\n"
         "$Setup = $null; $PrevVersion = '1.0.2'; $Ver = '1.0.4'; $versionChange = $true; $stagedGateway = 'staged'\n"
-        f"$script:site = '{site}'; $script:blocks = {blocks}; $script:silent = ${str(block == 'silent').lower()}\n"
+        f"$script:site = '{site}'; $script:blocks = {blocks}; $script:silent = ${str(block == 'silent').lower()}; $script:lose = '{block}'\n"
         "$script:running = $true; $script:starts = 0; $script:modeCalls = 0\n"
         "function Write-Info([string]$m) { Write-Host \"info: $m\" }\n"
         "function Write-Ok([string]$m) { Write-Host \"ok: $m\" }\n"
@@ -1335,7 +1360,12 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
         "    }\n"
         "    Copy-Item -LiteralPath $Source -Destination $Destination -Force\n"
         "}\n"
-        "function Wait-PreviousHookExit([DateTime]$PublishedAt) { if ($script:site -eq 'hook-drain') { throw 'Previous hook calls did not finish within 30 seconds' } }\n"
+        "function Wait-PreviousHookExit([DateTime]$PublishedAt) {\n"
+        "    $copy = Join-Path (Join-Path $Snap bin) 'defenseclaw-hook.exe'\n"
+        "    if ($script:lose -eq 'copy-lost') { Remove-Item -LiteralPath $copy }\n"
+        "    if ($script:lose -eq 'copy-changed') { Set-Content -LiteralPath $copy -Value 'tampered' -NoNewline }\n"
+        "    if ($script:site -eq 'hook-drain') { throw 'Previous hook calls did not finish within 30 seconds' }\n"
+        "}\n"
         "function Get-GatewayProcess { return $script:running }\n"
         "function Update-HookFailModes([string]$Gateway) { $script:modeCalls++; return -not ($script:site -eq 'fail-modes' -and $script:modeCalls -eq 2) }\n"
         "function Stop-Gateway { if ($script:site -eq 'stop') { return $false }; $script:running = $false; return $true }\n"
@@ -1358,8 +1388,13 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
         "Write-Host \"hook: $(Get-Content -Raw -LiteralPath (Join-Path $BinDir 'defenseclaw-hook.exe'))\"\n"
         "# The next run, with the file free again, finishes the undo.\n"
         "$script:blocks = 0\n"
+        "try { Resume-InterruptedRun; Write-Host 'resume: ok' } catch { Write-Host \"resume: failed $($_.Exception.Message)\" }\n"
+        "Write-Host \"resumed hook: $(Get-Content -Raw -LiteralPath (Join-Path $BinDir 'defenseclaw-hook.exe'))\"\n"
+        "Write-Host \"resumed slot: $(Test-Path -LiteralPath $Snap)\"\n"
+        "# The copy is back (out of quarantine): the run after that finishes the undo.\n"
+        "if (Test-Path -LiteralPath $Snap) { Set-Content -LiteralPath (Join-Path (Join-Path $Snap bin) 'defenseclaw-hook.exe') -Value 'old' -NoNewline }\n"
         "Resume-InterruptedRun\n"
-        "Write-Host \"resumed hook: $(Get-Content -Raw -LiteralPath (Join-Path $BinDir 'defenseclaw-hook.exe'))\"\n",
+        "Write-Host \"final hook: $(Get-Content -Raw -LiteralPath (Join-Path $BinDir 'defenseclaw-hook.exe'))\"\n",
         encoding="utf-8",
     )
     completed = subprocess.run(
@@ -1376,7 +1411,8 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
     assert "the refusal did not happen" not in out, out
     # Only Restart-Old retries; the two refusals before the gateway stopped
     # have no second try.
-    pending = block in ("always", "silent") or (block == "once" and site in ("hook-drain", "stop"))
+    lost = block in ("copy-lost", "copy-changed")
+    pending = lost or block in ("always", "silent") or (block == "once" and site in ("hook-drain", "stop"))
     slot = data_dir / "previous.new"
     lock = data_dir / ".install.lock"
     assert f"pending: {pending}" in out, out
@@ -1394,8 +1430,15 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
     else:
         assert not lock.exists(), out
         assert "hook: old" in out, out
-    # Either way the next run leaves the old hook live and no slot.
-    assert "resumed hook: old" in out, out
+    if lost:
+        # No copy of the old hook, no restore: the next run refuses, keeps
+        # the slot and the new hook, until the copy is back.
+        assert "is missing or changed" in out, out
+        assert "resume: failed" in out and "resumed hook: new" in out and "resumed slot: True" in out, out
+    else:
+        # Either way the next run leaves the old hook live and no slot.
+        assert "resume: ok" in out and "resumed hook: old" in out, out
+    assert "final hook: old" in out, out
     assert not slot.exists(), out
 
 

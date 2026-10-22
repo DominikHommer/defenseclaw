@@ -1549,13 +1549,20 @@ function Install-HookFirst([string]$Slot) {
     # .install.lock, waits for the install and names it. So the new hook goes
     # in as soon as the rollback copy holds the old one. HOOK_FIRST, written
     # once that copy is whole, tells Undo-Snapshot to put the old hook back.
+    # It holds the old hook's SHA-256, so an undo tells the old hook back in
+    # place from a rollback copy that went missing or changed after the swap
+    # (an antivirus quarantine): that copy is then the only old hook.
     $live = Join-Path $BinDir "defenseclaw-hook.exe"
     $saved = Join-Path $Slot "bin\defenseclaw-hook.exe"
     $staged = Join-Path $Staging "bin\defenseclaw-hook.exe"
-    foreach ($path in @($live, $saved, $staged)) {
+    foreach ($path in @($live, $staged)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
     }
-    Set-Content -LiteralPath (Join-Path $Slot "HOOK_FIRST") -Value "" -Encoding Ascii
+    $old = Get-Sha256 $live
+    if (-not (Test-Path -LiteralPath $saved -PathType Leaf) -or (Get-Sha256 $saved) -ne $old) {
+        throw "Could not keep a whole rollback copy of $live in $(Split-Path -Parent $saved) (an antivirus may have removed it); nothing was changed. Run the installer again"
+    }
+    Set-Content -LiteralPath (Join-Path $Slot "HOOK_FIRST") -Value $old -Encoding Ascii
     Install-File $staged $live
     Wait-PreviousHookExit ([DateTime]::UtcNow)
 }
@@ -1585,15 +1592,25 @@ function Wait-PreviousHookExit([DateTime]$PublishedAt) {
 }
 
 function Undo-HookFirst([string]$Slot) {
+    $marker = Join-Path $Slot "HOOK_FIRST"
+    if (-not (Test-Path -LiteralPath $marker)) { return }
     $saved = Join-Path $Slot "bin\defenseclaw-hook.exe"
-    if ((Test-Path -LiteralPath (Join-Path $Slot "HOOK_FIRST")) -and (Test-Path -LiteralPath $saved -PathType Leaf)) {
-        $live = Join-Path $BinDir "defenseclaw-hook.exe"
-        Install-File $saved $live
-        # Only the old hook's bytes in place are a restore.
-        if (-not (Test-Path -LiteralPath $live -PathType Leaf) -or (Get-Sha256 $live) -ne (Get-Sha256 $saved)) {
-            throw "The previous defenseclaw-hook.exe is not back in $BinDir"
-        }
+    $live = Join-Path $BinDir "defenseclaw-hook.exe"
+    # The old hook's SHA-256. A 1.0.3 installer wrote the marker empty; then
+    # the rollback copy is all there is to compare with.
+    $old = Read-Text $marker
+    $copy = if (Test-Path -LiteralPath $saved -PathType Leaf) { Get-Sha256 $saved } else { "" }
+    if (-not $old) { $old = $copy }
+    # Only the old hook's bytes in place are a restore.
+    $back = { $old -and (Test-Path -LiteralPath $live -PathType Leaf) -and (Get-Sha256 $live) -eq $old }
+    if (& $back) { return }
+    # A rollback copy that is gone or changed restores nothing: the new hook
+    # stays live, so the slot and .install.lock stay too (Undo-EarlySnapshot).
+    if (-not $copy -or $copy -ne $old) {
+        throw "The rollback copy of the previous defenseclaw-hook.exe ($saved) is missing or changed, so the new hook is still in $BinDir. Put that file back (an antivirus may have quarantined it), then run the installer again"
     }
+    Install-File $saved $live
+    if (-not (& $back)) { throw "The previous defenseclaw-hook.exe is not back in $BinDir" }
 }
 
 function Undo-Snapshot([string]$Slot) {
