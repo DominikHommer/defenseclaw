@@ -102,3 +102,20 @@ def test_hilt_scripts_can_answer_confirmation_or_skip_it(app, answer, yes, appli
     assert (result.exit_code == 0) == applied, result.output
     assert app.cfg.guardrail.hilt.enabled == applied
     assert app.cfg.save.call_count == int(applied)
+
+
+@pytest.mark.parametrize("field,value,command", [
+    ("hook_fail_mode", "closed", cmd_guardrail.fail_mode_cmd),
+    ("block_message", "marker policy refused", cmd_guardrail.block_message_cmd),
+])
+def test_bare_policy_writes_resolve_the_same_alias_keys(app, field, value, command) -> None:
+    gc = app.cfg.guardrail
+    gc.connectors = {
+        key: PerConnectorGuardrailConfig(hook_fail_mode="open", block_message="prior message")
+        for key in ("claude-code", "codex")
+    }
+    result = CliRunner().invoke(command, [value, "--no-restart", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    app.cfg.save.assert_called_once()
+    assert set(gc.connectors) == {"claude-code", "codex"}
+    assert all(getattr(entry, field) == value for entry in gc.connectors.values())

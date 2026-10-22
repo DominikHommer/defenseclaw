@@ -250,6 +250,15 @@ def _resolve_member_connector(app, requested: str) -> str | None:
     return None
 
 
+def _active_connector_keys(app: AppContext) -> list[str]:
+    """Resolve active names to existing map keys before a bare policy write."""
+    return [
+        key
+        for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
+        if (key := _resolve_member_connector(app, name)) is not None
+    ]
+
+
 def _verify_agents_before_enable(app: AppContext, connectors: list[str]) -> None:
     """Re-verify the agent executables an enable is about to set up.
 
@@ -1590,14 +1599,6 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     )
 
 
-def _multi_connector_fail_mode_targets(app: AppContext) -> list[str]:
-    """Return active connectors for bare fail-mode writes in multi installs."""
-    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
-    if not conns:
-        return []
-    return [name for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg)) if name in conns]
-
-
 def _apply_global_fail_mode_transaction(
     app: AppContext,
     *,
@@ -1624,17 +1625,12 @@ def _apply_global_fail_mode_transaction(
             raise click.Abort() from exc
 
         old_global = gc.hook_fail_mode
-        old_entries: dict[str, tuple[object | None, str]] = {}
+        old_entries: dict[str, tuple[object, str]] = {}
         gc.hook_fail_mode = mode
         if fail_mode_targets:
-            from defenseclaw.config import PerConnectorGuardrailConfig
-
             for name in fail_mode_targets:
-                entry = gc.connectors.get(name)
+                entry = gc.connectors[name]
                 old_entries[name] = (entry, str(getattr(entry, "hook_fail_mode", "") or ""))
-                if entry is None:
-                    entry = PerConnectorGuardrailConfig()
-                    gc.connectors[name] = entry
                 # Explicit fan-out makes the operation truthful in mixed
                 # observe/action installs and prevents old overrides from
                 # silently defeating the requested global posture.
@@ -1671,10 +1667,7 @@ def _apply_global_fail_mode_transaction(
             # registration file has been touched yet.
             gc.hook_fail_mode = old_global
             for name, (old_entry, old_mode) in old_entries.items():
-                if old_entry is None:
-                    gc.connectors.pop(name, None)
-                else:
-                    old_entry.hook_fail_mode = old_mode
+                old_entry.hook_fail_mode = old_mode
             ux.err(
                 f"Cannot write {config_path_for_data_dir(app.cfg.data_dir)}: {exc.strerror or exc}; "
                 "the previous config.yaml is unchanged.", indent="  ",
@@ -1721,10 +1714,7 @@ def _apply_global_fail_mode_transaction(
             except (OSError, RuntimeError, click.ClickException) as exc:
                 gc.hook_fail_mode = old_global
                 for name, (old_entry, old_mode) in old_entries.items():
-                    if old_entry is None:
-                        gc.connectors.pop(name, None)
-                    else:
-                        old_entry.hook_fail_mode = old_mode
+                    old_entry.hook_fail_mode = old_mode
                 try:
                     _rollback_fail_mode_transaction(app, snapshots)
                 except (OSError, ConfigWriteError) as rollback_exc:
@@ -1906,7 +1896,7 @@ def fail_mode_cmd(
         click.echo()
         return
 
-    fail_mode_targets = _multi_connector_fail_mode_targets(app)
+    fail_mode_targets = _active_connector_keys(app)
     target_modes: dict[str, str] = {}
     runtime_states = {}
     if fail_mode_targets:
@@ -2367,15 +2357,6 @@ def _log_hilt(app: AppContext, details: str) -> None:
     _log_guardrail_action(app, "guardrail-hilt", details)
 
 
-def _multi_connector_hilt_targets(app: AppContext) -> list[str]:
-    """Resolve active names to their configured keys for bare HILT writes."""
-    return [
-        key
-        for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
-        if (key := _resolve_member_connector(app, name)) is not None
-    ]
-
-
 @guardrail.command("hilt")
 @click.argument("state", required=False, type=click.Choice(["on", "off"]))
 @click.option(
@@ -2474,7 +2455,7 @@ def hilt_cmd(
         click.echo()
         return
 
-    hilt_targets = _multi_connector_hilt_targets(app)
+    hilt_targets = _active_connector_keys(app)
     target_hilts: dict[str, tuple[bool, str, bool, str]] = {}
     if hilt_targets:
         for name in hilt_targets:
@@ -2716,18 +2697,6 @@ def _set_connector_block_message(
     )
 
 
-def _multi_connector_block_message_targets(app: AppContext) -> list[str]:
-    """Return active connectors for bare block-message writes in multi installs."""
-    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
-    if not conns:
-        return []
-    return [
-        name
-        for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
-        if name in conns
-    ]
-
-
 @guardrail.command("block-message")
 @click.argument("message", required=False)
 @click.option(
@@ -2815,7 +2784,7 @@ def block_message_cmd(
         click.echo()
         return
 
-    block_message_targets = _multi_connector_block_message_targets(app)
+    block_message_targets = _active_connector_keys(app)
     target_messages: dict[str, str] = {}
     if block_message_targets:
         target_messages = {
@@ -2877,14 +2846,8 @@ def block_message_cmd(
 
     gc.block_message = new_msg
     if block_message_targets:
-        from defenseclaw.config import PerConnectorGuardrailConfig
-
         for name in block_message_targets:
-            entry = gc.connectors.get(name)
-            if entry is None:
-                entry = PerConnectorGuardrailConfig()
-                gc.connectors[name] = entry
-            entry.block_message = new_msg
+            gc.connectors[name].block_message = new_msg
     try:
         app.cfg.save()
         if block_message_targets:
