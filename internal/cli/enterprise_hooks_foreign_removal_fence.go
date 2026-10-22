@@ -13,10 +13,11 @@ import (
 )
 
 // ensureEnterpriseForeignHookRemovalFence prepares the stable lock inodes
-// (the fence and its turnstile) before the guardian can publish a removal.
-// The gateway gets read access through the same narrow ownership rule as
-// the removal ledger. Reconcile creates a missing one, including on an
-// upgrade, and never replaces one.
+// (the fence and the ledger lock). The gateway gets read access through
+// the same narrow ownership rule as the removal ledger. Reconcile creates a
+// missing one, including on an upgrade, and never replaces one. One that is
+// not an empty regular file is refused here, by the guardian's locks and by
+// the gateway, which then refuses every online exchange.
 func ensureEnterpriseForeignHookRemovalFence(dir string) error {
 	for _, name := range enterprisepolicy.ForeignHookRemovalFenceFiles() {
 		if err := ensureEnterpriseForeignHookRemovalLockFile(filepath.Join(dir, name)); err != nil {

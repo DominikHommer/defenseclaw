@@ -83,6 +83,17 @@ func writeEnterpriseHookProtectedFile(path string, data []byte) error {
 	return nil
 }
 
+// publishEnterpriseHookProtectedFile replaces a guardian record that the
+// gateway reads without a lock. The staged file already carries the machine
+// ACL; ReplaceFileW merges the old record's DACL, so the ACL is stamped
+// again after the replacement, as writes of the record always did.
+func publishEnterpriseHookProtectedFile(path string, data []byte) error {
+	if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
+		return err
+	}
+	return enterpriseHookAuthorizationOwnershipSetter(path)
+}
+
 // writeEnterpriseHookAdminOnlyFile publishes an installer-only machine file
 // whose readers are always elevated (never a running service). It stamps the
 // exact two-ACE AdminFile SDDL — Administrators owner+group, protected DACL

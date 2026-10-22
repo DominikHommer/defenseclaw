@@ -15,14 +15,12 @@ import (
 )
 
 // lockForeignHookRemovalFile takes a shared or exclusive lock on the file's
-// first byte. Locks of different handles exclude each other, as flocks of
-// different opens do. A guardian commit (exclusive) polls more often than an
-// exchange, so it takes the turnstile between two exchanges' brief shared
-// holds.
-func lockForeignHookRemovalFile(ctx context.Context, file *os.File, exclusive bool) error {
-	flags, poll := uint32(windows.LOCKFILE_FAIL_IMMEDIATELY), foreignHookRemovalExchangePoll
+// first byte within ctx, trying again every poll. Locks of different handles
+// exclude each other, as flocks of different opens do.
+func lockForeignHookRemovalFile(ctx context.Context, file *os.File, exclusive bool, poll time.Duration) error {
+	flags := uint32(windows.LOCKFILE_FAIL_IMMEDIATELY)
 	if exclusive {
-		flags, poll = flags|windows.LOCKFILE_EXCLUSIVE_LOCK, foreignHookRemovalCommitPoll
+		flags |= windows.LOCKFILE_EXCLUSIVE_LOCK
 	}
 	for {
 		var overlapped windows.Overlapped

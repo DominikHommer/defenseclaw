@@ -5,6 +5,7 @@ package enterprisepolicy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -17,81 +18,100 @@ import (
 // The guardian may replace the removal ledger, but never this file: locking
 // the ledger itself would leave a reader and writer on different inodes.
 // Online exchanges hold it shared through their decision and allow response
-// write; a guardian ledger commit holds it exclusively.
+// write. A guardian holds it exclusively only for the moment it takes to
+// see that the exchanges that may have read the previous ledger are done.
 const ForeignHookRemovalsFenceFile = "foreign-hook-removals.lock"
 
-// ForeignHookRemovalsTurnstileFile is the fence's second permanent,
-// guardian-owned lock file. A guardian commit holds it exclusively from
-// before it waits for the fence until the commit is done. An exchange holds
-// it shared only for the moment it takes the fence, so a pending commit
-// admits no new exchange and takes the fence as soon as the exchanges
-// already holding it finish their bounded response writes. Without it,
-// exchanges that overlap without a gap (of any identities, from the gateway
-// or any other process) would keep the fence shared and starve the commit.
-const ForeignHookRemovalsTurnstileFile = "foreign-hook-removals-turnstile.lock"
+// ForeignHookRemovalsLedgerLockFile is the guardian's second permanent lock
+// file. It serializes ledger commits, from every guardian process, through
+// their read, publish and wait; exchanges never take it, so it never delays
+// one.
+const ForeignHookRemovalsLedgerLockFile = "foreign-hook-removals-ledger.lock"
 
-// An exchange polls a held lock every foreignHookRemovalExchangePoll, a
-// guardian commit every foreignHookRemovalCommitPoll.
+// ForeignHookRemovalExchangeHold bounds an online exchange's allow: an
+// exchange answers allow only within this time after it took the fence,
+// and refuses or cuts the answer after it. ForeignHookRemovalDrainWait is
+// the longest a guardian waits, after it published a ledger, for the
+// exchanges that may have read the previous one: past it, every such
+// exchange has answered or has been cut, whatever holds the fence.
 const (
-	foreignHookRemovalExchangePoll = 5 * time.Millisecond
-	foreignHookRemovalCommitPoll   = time.Millisecond
+	ForeignHookRemovalExchangeHold = time.Second
+	ForeignHookRemovalDrainWait    = ForeignHookRemovalExchangeHold + 500*time.Millisecond
 )
 
-// ForeignHookRemovalFenceFiles names the lock files the guardian creates and
-// both sides check before they lock.
+// An exchange polls a held lock every foreignHookRemovalExchangePoll, a
+// guardian every foreignHookRemovalGuardianPoll.
+const (
+	foreignHookRemovalExchangePoll = 5 * time.Millisecond
+	foreignHookRemovalGuardianPoll = time.Millisecond
+)
+
+// ForeignHookRemovalFenceFiles names the lock files the guardian creates.
+// Each must stay an empty regular file; both sides refuse one that is not.
 func ForeignHookRemovalFenceFiles() []string {
-	return []string{ForeignHookRemovalsFenceFile, ForeignHookRemovalsTurnstileFile}
+	return []string{ForeignHookRemovalsFenceFile, ForeignHookRemovalsLedgerLockFile}
 }
 
 // LockForeignHookRemovalsExchange holds the fence shared through an online
 // exchange's decision and allow response write. Exchanges of every identity
-// hold it together; only a guardian commit excludes them. It waits, within
-// ctx, while a commit holds or waits for the fence. Both users open the
-// protected files for reading only; the gateway needs no write permission in
-// the guardian's directory. The caller checks the files' trusted ownership
-// and permissions before calling this function.
+// hold it together. It waits, within ctx, only while a guardian holds the
+// fence for its brief exclusive check. The gateway opens the file for
+// reading only; it needs no write permission in the guardian's directory.
+// The caller checks the file's trusted ownership and permissions before
+// calling this function.
 func LockForeignHookRemovalsExchange(ctx context.Context, dir string) (func(), error) {
-	turnstile, fence, err := openForeignHookRemovalLocks(dir)
-	if err != nil {
-		return nil, err
-	}
-	defer turnstile.close()
-	if err := turnstile.lock(ctx, false); err != nil {
-		fence.close()
-		return nil, err
-	}
-	err = fence.lock(ctx, false)
-	turnstile.unlock()
-	if err != nil {
-		fence.close()
-		return nil, err
-	}
-	return sync.OnceFunc(fence.release), nil
+	return lockForeignHookRemovalPath(ctx, filepath.Join(dir, ForeignHookRemovalsFenceFile), false)
 }
 
-// LockForeignHookRemovalsCommit holds the fence exclusively through a
-// guardian ledger commit. It takes the turnstile first, which stops new
-// exchanges from taking the fence, then waits for the exchanges that hold
-// it.
-func LockForeignHookRemovalsCommit(ctx context.Context, dir string) (func(), error) {
-	turnstile, fence, err := openForeignHookRemovalLocks(dir)
+// LockForeignHookRemovalsDrain holds the fence exclusively. It succeeds only
+// when no exchange holds it, so a guardian that takes it after publishing a
+// ledger knows that every exchange that may have read the previous ledger
+// is done. The guardian releases it at once (AwaitForeignHookRemovalExchanges).
+func LockForeignHookRemovalsDrain(ctx context.Context, dir string) (func(), error) {
+	return lockForeignHookRemovalPath(ctx, filepath.Join(dir, ForeignHookRemovalsFenceFile), true)
+}
+
+// LockForeignHookRemovalsLedger holds the guardian's ledger lock through one
+// commit (read, publish and AwaitForeignHookRemovalExchanges), so commits of
+// different guardian processes do not lose each other's removals.
+func LockForeignHookRemovalsLedger(ctx context.Context, dir string) (func(), error) {
+	return lockForeignHookRemovalPath(ctx, filepath.Join(dir, ForeignHookRemovalsLedgerLockFile), true)
+}
+
+// AwaitForeignHookRemovalExchanges runs after the guardian published a new
+// removal ledger. Exchanges that start after the publication read the new
+// ledger, so it waits only for those that may have read the previous one:
+// it returns drained once it takes the fence exclusively (it releases it at
+// once), or after ForeignHookRemovalDrainWait, by when each of them has
+// answered or been cut at its ForeignHookRemovalExchangeHold deadline.
+// Exchanges that keep the fence shared without a gap therefore delay the
+// guardian by a bounded time, and never past the publication. A fence that
+// cannot be locked is an error, returned after the same wait.
+func AwaitForeignHookRemovalExchanges(dir string) (drained bool, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), ForeignHookRemovalDrainWait)
+	defer cancel()
+	unlock, err := LockForeignHookRemovalsDrain(ctx, dir)
+	if err == nil {
+		unlock()
+		return true, nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return false, nil
+	}
+	<-ctx.Done()
+	return false, err
+}
+
+func lockForeignHookRemovalPath(ctx context.Context, path string, exclusive bool) (func(), error) {
+	lock, err := openForeignHookRemovalLock(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := turnstile.lock(ctx, true); err != nil {
-		turnstile.close()
-		fence.close()
+	if err := lock.lock(ctx, exclusive); err != nil {
+		lock.close()
 		return nil, err
 	}
-	if err := fence.lock(ctx, true); err != nil {
-		turnstile.release()
-		fence.close()
-		return nil, err
-	}
-	return sync.OnceFunc(func() {
-		fence.release()
-		turnstile.release()
-	}), nil
+	return sync.OnceFunc(lock.release), nil
 }
 
 type foreignHookRemovalLock struct {
@@ -100,48 +120,58 @@ type foreignHookRemovalLock struct {
 	file *os.File
 }
 
-func openForeignHookRemovalLocks(dir string) (turnstile, fence *foreignHookRemovalLock, err error) {
-	turnstile, err = openForeignHookRemovalLock(filepath.Join(dir, ForeignHookRemovalsTurnstileFile))
-	if err != nil {
-		return nil, nil, err
-	}
-	fence, err = openForeignHookRemovalLock(filepath.Join(dir, ForeignHookRemovalsFenceFile))
-	if err != nil {
-		turnstile.close()
-		return nil, nil, err
-	}
-	return turnstile, fence, nil
-}
-
+// openForeignHookRemovalLock opens an empty regular lock file. A lock file
+// with content is not one the guardian made: both sides refuse it, as they
+// refuse a missing or replaced one.
 func openForeignHookRemovalLock(path string) (*foreignHookRemovalLock, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, fmt.Errorf("inspect foreign-hook removal fence: %w", err)
 	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("foreign-hook removal fence %s is not a regular file", path)
+	if err := checkForeignHookRemovalLockInfo(path, info); err != nil {
+		return nil, err
 	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open foreign-hook removal fence: %w", err)
 	}
 	opened, err := file.Stat()
-	if err != nil || !os.SameFile(info, opened) {
+	if err == nil && (!os.SameFile(info, opened) || opened.Size() != 0) {
+		err = errors.New("not the empty file inspected")
+	}
+	if err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("foreign-hook removal fence %s changed while opening: %v", path, err)
 	}
 	return &foreignHookRemovalLock{path: path, info: info, file: file}, nil
 }
 
+func checkForeignHookRemovalLockInfo(path string, info fs.FileInfo) error {
+	if !info.Mode().IsRegular() || info.Size() != 0 {
+		return fmt.Errorf("foreign-hook removal fence %s is not an empty regular file", path)
+	}
+	return nil
+}
+
 // lock takes the file lock within ctx and checks that the path still names
-// the locked file: a reader and a writer on different inodes would not
-// exclude each other.
+// the locked, empty file: a reader and a writer on different inodes would
+// not exclude each other.
 func (l *foreignHookRemovalLock) lock(ctx context.Context, exclusive bool) error {
-	if err := lockForeignHookRemovalFile(ctx, l.file, exclusive); err != nil {
+	poll := foreignHookRemovalExchangePoll
+	if exclusive {
+		poll = foreignHookRemovalGuardianPoll
+	}
+	if err := lockForeignHookRemovalFile(ctx, l.file, exclusive, poll); err != nil {
 		return fmt.Errorf("lock foreign-hook removals: %w", err)
 	}
 	current, err := os.Lstat(l.path)
-	if err != nil || !os.SameFile(l.info, current) {
+	if err == nil && !os.SameFile(l.info, current) {
+		err = errors.New("replaced")
+	}
+	if err == nil {
+		err = checkForeignHookRemovalLockInfo(l.path, current)
+	}
+	if err != nil {
 		l.unlock()
 		return fmt.Errorf("foreign-hook removal fence %s changed while locking: %v", l.path, err)
 	}

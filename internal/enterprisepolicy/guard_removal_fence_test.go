@@ -31,9 +31,9 @@ func tryForeignHookRemovalLock(lock func(context.Context, string) (func(), error
 }
 
 // Exchanges of different identities hold the fence together, so one slow
-// response never refuses another account's exchange; a guardian commit
-// still waits for every one of them.
-func TestForeignHookRemovalExchangesShareTheFenceACommitExcludes(t *testing.T) {
+// response never refuses another account's exchange; a guardian's drain
+// check still waits for every one of them.
+func TestForeignHookRemovalExchangesShareTheFenceADrainExcludes(t *testing.T) {
 	dir := writeForeignHookRemovalFenceFiles(t)
 	first, err := tryForeignHookRemovalLock(LockForeignHookRemovalsExchange, dir, time.Second)
 	if err != nil {
@@ -51,178 +51,251 @@ func TestForeignHookRemovalExchangesShareTheFenceACommitExcludes(t *testing.T) {
 		t.Fatalf("a third exchange waited on the first two: %v", err)
 	}
 	for i, release := range []func(){first, second, third} {
-		if unlock, err := tryForeignHookRemovalLock(LockForeignHookRemovalsCommit, dir, 50*time.Millisecond); err == nil {
+		if unlock, err := tryForeignHookRemovalLock(LockForeignHookRemovalsDrain, dir, 50*time.Millisecond); err == nil {
 			unlock()
-			t.Fatalf("a commit overtook %d exchanges that hold the fence", 3-i)
+			t.Fatalf("a drain check overtook %d exchanges that hold the fence", 3-i)
 		}
 		release()
 		release() // releasing twice is harmless
 	}
-	commit, err := tryForeignHookRemovalLock(LockForeignHookRemovalsCommit, dir, time.Second)
+	drain, err := tryForeignHookRemovalLock(LockForeignHookRemovalsDrain, dir, time.Second)
 	if err != nil {
-		t.Fatalf("the commit did not take the free fence: %v", err)
+		t.Fatalf("the drain check did not take the free fence: %v", err)
 	}
 	if unlock, err := tryForeignHookRemovalLock(LockForeignHookRemovalsExchange, dir, 50*time.Millisecond); err == nil {
 		unlock()
-		commit()
-		t.Fatal("an exchange took the fence during a commit")
+		drain()
+		t.Fatal("an exchange took the fence during a drain check")
 	}
-	if unlock, err := tryForeignHookRemovalLock(LockForeignHookRemovalsCommit, dir, 50*time.Millisecond); err == nil {
-		unlock()
-		commit()
-		t.Fatal("two commits held the fence together")
-	}
-	commit()
+	drain()
 	exchange, err := tryForeignHookRemovalLock(LockForeignHookRemovalsExchange, dir, time.Second)
 	if err != nil {
-		t.Fatalf("an exchange after the commit: %v", err)
+		t.Fatalf("an exchange after the drain check: %v", err)
 	}
 	exchange()
 }
 
-// A commit that waits for an exchange admits no new exchange: otherwise
-// exchanges that overlap without a gap would keep the fence shared forever.
-func TestForeignHookRemovalPendingCommitAdmitsNoNewExchange(t *testing.T) {
+// relayForeignHookRemovalFence keeps the fence shared without a gap, as
+// exchanges that overlap do, or as a read-only process that relays flocks
+// between two open files: each holder takes the lock before the previous
+// one lets go.
+func relayForeignHookRemovalFence(t *testing.T, dir string) (served *atomic.Int64) {
+	t.Helper()
+	served = new(atomic.Int64)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	path := filepath.Join(dir, ForeignHookRemovalsFenceFile)
+	held := make(chan struct{}, 1)
+	held <- struct{}{}
+	previous, err := openForeignHookRemovalLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := previous.lock(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				previous.release()
+				return
+			default:
+			}
+			next, err := openForeignHookRemovalLock(path)
+			if err != nil {
+				t.Error(err)
+				previous.release()
+				return
+			}
+			if err := next.lock(context.Background(), false); err != nil {
+				t.Error(err)
+				next.close()
+				previous.release()
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+			previous.release()
+			previous = next
+			served.Add(1)
+		}
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		wg.Wait()
+	})
+	return served
+}
+
+type foreignHookRemovalAwaitResult struct {
+	drained bool
+	err     error
+}
+
+func awaitForeignHookRemovalExchanges(dir string) <-chan foreignHookRemovalAwaitResult {
+	result := make(chan foreignHookRemovalAwaitResult, 1)
+	go func() {
+		drained, err := AwaitForeignHookRemovalExchanges(dir)
+		result <- foreignHookRemovalAwaitResult{drained, err}
+	}()
+	return result
+}
+
+// A guardian that published a removal is never held off by exchanges that
+// keep the fence shared without a gap: it waits at most
+// ForeignHookRemovalDrainWait, by when each exchange that may have read the
+// previous ledger has answered or been cut. New exchanges take the fence at
+// once all the while.
+func TestForeignHookRemovalAwaitIsBoundedUnderContinuousExchanges(t *testing.T) {
+	dir := writeForeignHookRemovalFenceFiles(t)
+	served := relayForeignHookRemovalFence(t, dir)
+	for served.Load() < 10 {
+		time.Sleep(time.Millisecond)
+	}
+	started := time.Now()
+	awaited := awaitForeignHookRemovalExchanges(dir)
+	for i := 0; i < 5; i++ {
+		unlock, err := tryForeignHookRemovalLock(LockForeignHookRemovalsExchange, dir, 50*time.Millisecond)
+		if err != nil {
+			t.Fatalf("an exchange waited while a guardian awaited the exchanges: %v", err)
+		}
+		unlock()
+		time.Sleep(20 * time.Millisecond)
+	}
+	select {
+	case result := <-awaited:
+		if result.err != nil || result.drained {
+			t.Fatalf("the guardian's wait under continuous exchanges: drained %v, %v", result.drained, result.err)
+		}
+		if elapsed := time.Since(started); elapsed < ForeignHookRemovalDrainWait-50*time.Millisecond {
+			t.Fatalf("the guardian stopped waiting after %v, before every exchange that may have read the previous ledger was bound to have answered", elapsed)
+		}
+	case <-time.After(ForeignHookRemovalDrainWait + 2*time.Second):
+		t.Fatal("continuous exchanges held the guardian off past the drain wait")
+	}
+}
+
+// With the exchanges that held the fence done, the guardian goes on at once.
+func TestForeignHookRemovalAwaitReturnsWhenTheExchangesFinish(t *testing.T) {
 	dir := writeForeignHookRemovalFenceFiles(t)
 	held, err := tryForeignHookRemovalLock(LockForeignHookRemovalsExchange, dir, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	committed := make(chan func(), 1)
-	go func() {
-		unlock, err := LockForeignHookRemovalsCommit(context.Background(), dir)
-		if err != nil {
-			t.Error(err)
-			close(committed)
-			return
-		}
-		committed <- unlock
-	}()
-	// Wait until the commit is pending: it holds the turnstile.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		probe, err := openForeignHookRemovalLock(filepath.Join(dir, ForeignHookRemovalsTurnstileFile))
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-		err = probe.lock(ctx, false)
-		cancel()
-		if err != nil {
-			probe.close()
-			break
-		}
-		probe.release()
-		if time.Now().After(deadline) {
-			held()
-			t.Fatal("the commit never became pending")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if unlock, err := tryForeignHookRemovalLock(LockForeignHookRemovalsExchange, dir, 100*time.Millisecond); err == nil {
-		unlock()
+	started := time.Now()
+	awaited := awaitForeignHookRemovalExchanges(dir)
+	select {
+	case <-awaited:
 		held()
-		t.Fatal("a new exchange took the fence ahead of a pending commit")
+		t.Fatal("the guardian went on while an exchange held the fence")
+	case <-time.After(50 * time.Millisecond):
 	}
 	held()
 	select {
-	case unlock, ok := <-committed:
-		if !ok {
-			t.Fatal("commit failed")
+	case result := <-awaited:
+		if result.err != nil || !result.drained || time.Since(started) >= ForeignHookRemovalDrainWait {
+			t.Fatalf("drained = %v, %v after %v", result.drained, result.err, time.Since(started))
 		}
-		unlock()
-	case <-time.After(3 * time.Second):
-		t.Fatal("the commit did not take the fence once the exchange finished")
+	case <-time.After(ForeignHookRemovalDrainWait):
+		t.Fatal("the guardian did not go on once the exchange finished")
 	}
 }
 
-// A guardian commit lands under sustained online exchanges, of the gateway
-// or of any other process, that overlap so the fence is never free, and no
-// exchange holds the fence while the commit does.
-func TestForeignHookRemovalCommitLandsUnderSustainedExchanges(t *testing.T) {
+// The ledger lock serializes guardian commits and nothing else: exchanges
+// and drain checks never wait on it.
+func TestForeignHookRemovalLedgerLockSerializesGuardiansOnly(t *testing.T) {
 	dir := writeForeignHookRemovalFenceFiles(t)
-	var holders, served atomic.Int64
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			time.Sleep(time.Duration(i) * 5 * time.Millisecond)
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				unlock, err := tryForeignHookRemovalLock(LockForeignHookRemovalsExchange, dir, 500*time.Millisecond)
-				if err != nil {
-					continue
-				}
-				holders.Add(1)
-				served.Add(1)
-				time.Sleep(20 * time.Millisecond)
-				holders.Add(-1)
-				unlock()
-			}
-		}(i)
+	ledger, err := tryForeignHookRemovalLock(LockForeignHookRemovalsLedger, dir, time.Second)
+	if err != nil {
+		t.Fatal(err)
 	}
-	defer func() {
-		close(stop)
-		wg.Wait()
-	}()
-	for served.Load() < 8 {
-		time.Sleep(time.Millisecond)
-	}
-	for round := 0; round < 3; round++ {
-		started := time.Now()
-		unlock, err := tryForeignHookRemovalLock(LockForeignHookRemovalsCommit, dir, 3*time.Second)
-		if err != nil {
-			t.Fatalf("commit %d starved by sustained exchanges: %v", round, err)
-		}
-		if n := holders.Load(); n != 0 {
-			unlock()
-			t.Fatalf("commit %d holds the fence with %d exchanges", round, n)
-		}
-		time.Sleep(10 * time.Millisecond)
-		if n := holders.Load(); n != 0 {
-			unlock()
-			t.Fatalf("an exchange took the fence during commit %d", round)
-		}
+	defer ledger()
+	if unlock, err := tryForeignHookRemovalLock(LockForeignHookRemovalsLedger, dir, 50*time.Millisecond); err == nil {
 		unlock()
-		t.Logf("commit %d took %v", round, time.Since(started))
-		before := served.Load()
-		for served.Load() < before+4 {
-			time.Sleep(time.Millisecond)
-		}
+		t.Fatal("two guardian commits held the ledger lock together")
 	}
+	exchange, err := tryForeignHookRemovalLock(LockForeignHookRemovalsExchange, dir, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("an exchange waited on the ledger lock: %v", err)
+	}
+	exchange()
+	drain, err := tryForeignHookRemovalLock(LockForeignHookRemovalsDrain, dir, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("a drain check waited on the ledger lock: %v", err)
+	}
+	drain()
 }
 
-// Any doubt about the fence refuses the lock: a missing or replaced lock
-// file, or one that is not a regular file.
-func TestForeignHookRemovalFenceRefusesMissingOrReplacedFiles(t *testing.T) {
+// Any doubt about a lock file refuses its locks: a missing or replaced one,
+// one that is not a regular file, or one with content.
+func TestForeignHookRemovalFenceRefusesMissingReplacedOrNonEmptyFiles(t *testing.T) {
+	locks := map[string][]func(context.Context, string) (func(), error){
+		ForeignHookRemovalsFenceFile:      {LockForeignHookRemovalsExchange, LockForeignHookRemovalsDrain},
+		ForeignHookRemovalsLedgerLockFile: {LockForeignHookRemovalsLedger},
+	}
+	if len(locks) != len(ForeignHookRemovalFenceFiles()) {
+		t.Fatal("a lock file has no lock under test")
+	}
 	for _, name := range ForeignHookRemovalFenceFiles() {
 		t.Run(name, func(t *testing.T) {
 			dir := writeForeignHookRemovalFenceFiles(t)
 			path := filepath.Join(dir, name)
+			refused := func(state string) {
+				t.Helper()
+				for _, lock := range locks[name] {
+					if unlock, err := tryForeignHookRemovalLock(lock, dir, 50*time.Millisecond); err == nil {
+						unlock()
+						t.Fatalf("locked %s", state)
+					}
+				}
+			}
+			if err := os.WriteFile(path, []byte("x"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			refused("a lock file with content")
 			if err := os.Remove(path); err != nil {
 				t.Fatal(err)
 			}
-			for _, lock := range []func(context.Context, string) (func(), error){LockForeignHookRemovalsExchange, LockForeignHookRemovalsCommit} {
-				if unlock, err := tryForeignHookRemovalLock(lock, dir, 50*time.Millisecond); err == nil {
-					unlock()
-					t.Fatal("locked without the lock file")
-				}
-			}
+			refused("without the lock file")
 			if err := os.Mkdir(path, 0o750); err != nil {
 				t.Fatal(err)
 			}
-			for _, lock := range []func(context.Context, string) (func(), error){LockForeignHookRemovalsExchange, LockForeignHookRemovalsCommit} {
-				if unlock, err := tryForeignHookRemovalLock(lock, dir, 50*time.Millisecond); err == nil {
-					unlock()
-					t.Fatal("locked a directory")
-				}
-			}
+			refused("a directory")
 		})
+	}
+	// An unusable fence is an error for the guardian, after the full wait:
+	// an exchange that opened the fence before it went bad is still bound by
+	// its hold.
+	dir := writeForeignHookRemovalFenceFiles(t)
+	if err := os.WriteFile(filepath.Join(dir, ForeignHookRemovalsFenceFile), []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if drained, err := AwaitForeignHookRemovalExchanges(dir); err == nil || drained {
+		t.Fatalf("awaited an unusable fence: drained %v, %v", drained, err)
+	}
+	if elapsed := time.Since(started); elapsed < ForeignHookRemovalDrainWait-50*time.Millisecond {
+		t.Fatalf("the guardian stopped waiting on an unusable fence after %v", elapsed)
+	}
+}
+
+// A lock file that gains content after an exchange opened it is refused
+// when the exchange locks it.
+func TestForeignHookRemovalFenceRefusesALockFileThatGainedContent(t *testing.T) {
+	dir := writeForeignHookRemovalFenceFiles(t)
+	path := filepath.Join(dir, ForeignHookRemovalsFenceFile)
+	lock, err := openForeignHookRemovalLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.close()
+	if err := os.WriteFile(path, []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.lock(context.Background(), false); err == nil {
+		lock.unlock()
+		t.Fatal("locked a fence that gained content")
 	}
 }
