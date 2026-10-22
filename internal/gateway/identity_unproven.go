@@ -33,6 +33,11 @@ import (
 // a proof and names no candidate (a service before the owner did not
 // answer, and the facts still could not be resolved): which account the uid
 // is, or its groups, are unknown (review of r104 W2B, loop round 3).
+//
+// An entry is never dropped for room while the peer directory cache holds
+// its key without facts (evictUnprovenFactsLocked): the candidate decides
+// the requests of the account for as long as its lookup can give them none
+// (review of r104 W2B G-ident, loop round 1).
 var unprovenFacts = struct {
 	sync.Mutex
 	entries map[string]unprovenFactsEntry
