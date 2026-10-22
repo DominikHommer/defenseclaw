@@ -83,17 +83,17 @@ func (a *App) holdSession(name string) (release func(), err error) {
 	dir, _ := a.sessionsDir(name)
 	var id [6]byte
 	if _, err := rand.Read(id[:]); err != nil {
-		return nil, fmt.Errorf("cannot record the session with %s: %w", name, err)
+		return nil, fmt.Errorf("cannot record the session with %s: %w; run `%s status %s` before retrying", name, err, CommandName, name)
 	}
 	path := filepath.Join(dir, strconv.Itoa(os.Getpid())+"-"+hex.EncodeToString(id[:])+leaseSuffix)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("cannot record the session with %s: %w", name, err)
+		return nil, fmt.Errorf("cannot record the session with %s: %w; run `%s status %s` before retrying", name, err, CommandName, name)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
-		return nil, fmt.Errorf("cannot lock the session with %s: %w", name, err)
+		return nil, fmt.Errorf("cannot lock the session with %s: %w; run `%s status %s` before retrying", name, err, CommandName, name)
 	}
 	var once sync.Once
 	return func() {
