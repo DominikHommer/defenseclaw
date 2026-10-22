@@ -72,6 +72,8 @@ func TestLifecycle_DockerRunArgsAreLoopbackReadOnlyAndVersioned(t *testing.T) {
 			!slices.Contains(args, configDir+":/app/config:ro,Z") {
 			t.Fatalf("Linux router cannot read its private SELinux-labeled config: %q", joined)
 		}
+	} else if !slices.Contains(args, configDir+":/app/config:ro") || slices.Contains(args, "--user") {
+		t.Fatalf("non-Linux router mount changed: %q", joined)
 	}
 }
 
