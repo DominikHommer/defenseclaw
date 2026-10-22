@@ -239,13 +239,6 @@ func forgetOnSpoolGroupChange(cache *identityDirectoryCache, key string, now tim
 	forgetOnSpoolChange(cache, key, now, true)
 }
 
-// forgetOnSpoolAccountChange also checks a managed Unix UID's spool identity.
-// The account database cache may still name the preceding owner of the same
-// UID, name and home, while the guardian has already published a new SID.
-func forgetOnSpoolAccountChange(cache *identityDirectoryCache, key string, now time.Time) {
-	forgetOnSpoolChange(cache, key, now, false)
-}
-
 func forgetOnSpoolChange(cache *identityDirectoryCache, key string, now time.Time, checkGroups bool) {
 	if cache == nil || key == "" || currentIdentitySpoolDir() == "" {
 		return

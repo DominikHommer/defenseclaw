@@ -379,6 +379,13 @@ func (c *managedHookPeerHomeCache) incarnation(uid int) (string, bool) {
 	}
 }
 
+// forgetOnSpoolAccountChange checks a managed Unix UID's spool identity. The
+// account database cache may still name the preceding owner of the same UID,
+// name and home while the guardian has published a new SID.
+func forgetOnSpoolAccountChange(cache *identityDirectoryCache, key string, now time.Time) {
+	forgetOnSpoolChange(cache, key, now, false)
+}
+
 // directory returns uid's verified directory facts from the cache, waiting
 // for a cold lookup up to its budget only when block is set.
 func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.DirectoryFacts, bool) {
