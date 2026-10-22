@@ -274,7 +274,7 @@ func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Co
 		// sandbox; it cannot affect the host OpenShell gateway and may not
 		// have a writable OpenShell configuration directory.
 		if (runtime.GOOS == "linux" || runtime.GOOS == "darwin") &&
-			!(cmd.Name() == "run" && os.Getenv(openshell.EnvSandboxID) != "") {
+			(cmd.Name() != "run" || os.Getenv(openshell.EnvSandboxID) == "") {
 			var unlock func()
 			unlock, err = openshell.LockSandboxCommand(cmd.Context(), "")
 			if err == nil {
