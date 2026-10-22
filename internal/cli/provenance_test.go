@@ -217,6 +217,10 @@ func TestProvenanceShowOutput(t *testing.T) {
 // resolved once to loopback addresses, the dial is pinned to one of them,
 // and the holder of that exact address is checked.
 func TestProvenanceShowLocalhostBind(t *testing.T) {
+	// No token or home that another test left in the environment.
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 	gateway := newProvenanceTestGateway()
 	server := httptest.NewServer(gateway)
 	defer server.Close()
