@@ -1353,14 +1353,14 @@ class RemovedConnectorUninstallTests(unittest.TestCase):
                 os.path.join("connector_backups", "omnigent", "config.json"),
                 os.path.join("connector_backups", "omnigent", "module.json"),
                 os.path.join("connector_backups", "omnigent", "pth.json"),
-                os.path.join("removed_connector_cleanup", "omnigent.json"),
+                os.path.join("hooks", "defenseclaw_omnigent_policy.py"),
             },
         )
         self.assertEqual(
             set(cmd_uninstall._CONNECTOR_BACKUP_MARKERS["openhands"]),
             {
                 os.path.join("connector_backups", "openhands", "config.json"),
-                os.path.join("removed_connector_cleanup", "openhands.json"),
+                os.path.join("hooks", "openhands-hook.sh"),
             },
         )
 
@@ -1370,9 +1370,9 @@ class RemovedConnectorUninstallTests(unittest.TestCase):
             (os.path.join("connector_backups", "omnigent", "config.json"), "omnigent"),
             (os.path.join("connector_backups", "omnigent", "module.json"), "omnigent"),
             (os.path.join("connector_backups", "omnigent", "pth.json"), "omnigent"),
-            # A teardown that left manual steps runs again, so it can finish.
-            (os.path.join("removed_connector_cleanup", "omnigent.json"), "omnigent"),
-            (os.path.join("removed_connector_cleanup", "openhands.json"), "openhands"),
+            # The hook script an older release wrote: its teardown writes the stub.
+            (os.path.join("hooks", "defenseclaw_omnigent_policy.py"), "omnigent"),
+            (os.path.join("hooks", "openhands-hook.sh"), "openhands"),
         ):
             with self.subTest(marker=marker), tempfile.TemporaryDirectory() as data_dir:
                 self._write(data_dir, marker)
@@ -1420,26 +1420,17 @@ class RemovedConnectorUninstallTests(unittest.TestCase):
         unknown.assert_not_called()
 
 
-class RemovedConnectorManualCleanupGateTests(unittest.TestCase):
-    """until 1.1: data and binaries stay while a removed connector's manual cleanup is pending."""
+class RemovedConnectorLeftoversTests(unittest.TestCase):
+    """until 1.1: uninstall never waits on a removed connector's leftovers; it lists them."""
 
-    def _record(self, data_dir: str, name: str, body: str) -> None:
-        path = os.path.join(data_dir, "removed_connector_cleanup", name + ".json")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(body)
-
-    def _run(self, plan: cmd_uninstall.UninstallPlan, deferred: bool = False, teardown=None) -> dict:
+    def _run(self, plan: cmd_uninstall.UninstallPlan, deferred: bool = False) -> dict:
         calls: dict = {}
 
         def record(name):
             return lambda *args, **kwargs: calls.setdefault(name, True)
 
-        def connector_teardown(plan, connectors=None):
-            names = tuple(plan.connectors if connectors is None else connectors)
-            calls.setdefault("teardown", []).append(names)
-            if teardown is not None:
-                teardown(names)
+        def connector_teardown(plan):
+            calls.setdefault("teardown", []).append(tuple(plan.connectors))
 
         with (
             patch.object(cmd_uninstall, "_validate_plan"),
@@ -1461,6 +1452,7 @@ class RemovedConnectorManualCleanupGateTests(unittest.TestCase):
             patch.object(cmd_uninstall, "_remove_data_dir", side_effect=lambda *a, **k: calls.setdefault("data", True)),
             patch.object(cmd_uninstall, "_remove_binaries", side_effect=lambda _: calls.setdefault("binaries", True)),
             patch.object(cmd_uninstall, "_render_execution_result"),
+            patch.object(cmd_uninstall.click, "echo", side_effect=lambda text="", **_: calls.setdefault("echo", []).append(text)),
         ):
             try:
                 cmd_uninstall._execute_plan(plan)
@@ -1468,123 +1460,53 @@ class RemovedConnectorManualCleanupGateTests(unittest.TestCase):
                 calls["error"] = exc.format_message()
         return calls
 
-    def test_pending_manual_cleanup_keeps_data_and_binaries(self):
-        record = json.dumps(
-            {
-                "version": 1,
-                "connector": "omnigent",
-                "label": "OmniGent",
-                "items": [{"path": "/home/u/.omnigent/config.yaml", "reason": "it changed", "step": "remove the entry"}],
-                "finish": "defenseclaw-gateway connector teardown --connector omnigent",
-            }
-        )
-        for name, body, want in (
-            ("omnigent", record, "/home/u/.omnigent/config.yaml (it changed): remove the entry"),
-            ("openhands", "not json", "could not read"),
-        ):
-            for flags in ({"remove_data_dir": True}, {"remove_binaries": True}, {"remove_data_dir": True, "remove_binaries": True}):
-                for deferred in (False, True):
-                    with (
-                        self.subTest(name=name, flags=flags, deferred=deferred),
-                        tempfile.TemporaryDirectory() as data_dir,
-                    ):
-                        self._record(data_dir, name, body)
-                        plan = cmd_uninstall.UninstallPlan(data_dir=data_dir, connectors=(name,), **flags)
-                        calls = self._run(plan, deferred=deferred)
-                        self.assertTrue(calls.get("teardown"))
-                        self.assertIn("No data or binaries were removed", calls.get("error", ""))
-                        self.assertIn(want, calls["error"])
-                        for removed in ("data", "binaries", "deferred"):
-                            self.assertNotIn(removed, calls)
+    def _stage(self, home: str) -> tuple[str, str]:
+        data_dir = os.path.join(home, ".defenseclaw")
+        script = os.path.join(data_dir, "hooks", "openhands-hook.sh")
+        os.makedirs(os.path.dirname(script))
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh -p\n# defenseclaw-managed-hook v0 (disabled tombstone)\n# support was removed in DefenseClaw 1.0.4\nexit 2\n")
+        config = os.path.join(home, ".openhands", "hooks.json")
+        os.makedirs(os.path.dirname(config))
+        with open(config, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"pre_tool_use": [{"hooks": [{"command": script}]}]}))
+        return data_dir, config
 
-    def test_finished_cleanup_lets_removal_go_on(self):
+    def test_every_removal_goes_on_and_lists_what_is_left(self):
+        # Review loop round 1 (simplified teardown): a removed connector's
+        # manual steps held data and binary removal and reordered the
+        # teardown. Now every form runs in its usual order and lists them.
+        for flags in ({}, {"remove_data_dir": True}, {"remove_binaries": True}, {"remove_data_dir": True, "remove_binaries": True}):
+            for deferred in (False, True):
+                with (
+                    self.subTest(flags=flags, deferred=deferred),
+                    tempfile.TemporaryDirectory() as home,
+                    patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+                ):
+                    data_dir, config = self._stage(home)
+                    plan = cmd_uninstall.UninstallPlan(
+                        data_dir=data_dir, connectors=("codex", "openhands"), sandbox_teardown=True, stop_gateway=True, **flags
+                    )
+                    calls = self._run(plan, deferred=deferred)
+                    self.assertNotIn("error", calls)
+                    self.assertEqual(calls.get("teardown"), [("codex", "openhands")])
+                    self.assertTrue(calls.get("sandbox") and calls.get("gateway_stop"))
+                    if flags.get("remove_data_dir"):
+                        self.assertTrue(calls.get("data") or calls.get("deferred"))
+                    if flags.get("remove_binaries"):
+                        self.assertTrue(calls.get("binaries") or calls.get("deferred"))
+                    text = "\n".join(calls.get("echo", []))
+                    self.assertIn("OpenHands support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:", text)
+                    self.assertIn(f"  - {config}: ", text)
+                    script_listed = os.path.join(data_dir, "hooks", "openhands-hook.sh") in text
+                    self.assertEqual(script_listed, not flags.get("remove_data_dir"))
+                    self.assertEqual("data folder is removed by this uninstall" in text, bool(flags.get("remove_data_dir")))
+
+    def test_nothing_left_prints_nothing(self):
         with tempfile.TemporaryDirectory() as data_dir:
-            plan = cmd_uninstall.UninstallPlan(
-                data_dir=data_dir, connectors=("omnigent",), remove_data_dir=True, remove_binaries=True
-            )
-            calls = self._run(plan)
+            calls = self._run(cmd_uninstall.UninstallPlan(data_dir=data_dir, connectors=("codex",)))
         self.assertNotIn("error", calls)
-        self.assertTrue(calls.get("data") and calls.get("binaries"))
-
-    def test_plain_uninstall_does_not_check(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            self._record(data_dir, "omnigent", "{}")
-            calls = self._run(cmd_uninstall.UninstallPlan(data_dir=data_dir, connectors=("omnigent",)))
-        self.assertNotIn("error", calls)
-
-    _PENDING = json.dumps(
-        {
-            "connector": "omnigent",
-            "label": "OmniGent",
-            "items": [{"path": "/home/u/.omnigent/config.yaml", "reason": "it changed", "step": "remove the entry"}],
-        }
-    )
-
-    def test_blocked_removal_leaves_the_surviving_connectors_protected(self):
-        # Review loop round 3: the check ran after the gateway stop, every
-        # connector's teardown and (with --binaries alone) guardrail.enabled =
-        # false, so a blocked uninstall left Codex unprotected. Only the
-        # removed connector's own teardown may run before the check.
-        for flags in ({"remove_data_dir": True}, {"remove_binaries": True}, {"remove_data_dir": True, "remove_binaries": True}):
-            for when in ("recorded before", "recorded by its teardown"):
-                for deferred in (False, True):
-                    with (
-                        self.subTest(flags=flags, when=when, deferred=deferred),
-                        tempfile.TemporaryDirectory() as data_dir,
-                    ):
-                        teardown = None
-                        if when == "recorded before":
-                            self._record(data_dir, "omnigent", self._PENDING)
-                        else:
-
-                            def teardown(names, data_dir=data_dir):
-                                if "omnigent" in names:
-                                    self._record(data_dir, "omnigent", self._PENDING)
-
-                        plan = cmd_uninstall.UninstallPlan(
-                            data_dir=data_dir,
-                            connectors=("codex", "omnigent", "claudecode"),
-                            sandbox_teardown=True,
-                            **flags,
-                        )
-                        calls = self._run(plan, deferred=deferred, teardown=teardown)
-                        self.assertIn("No data or binaries were removed", calls.get("error", ""))
-                        self.assertIn("/home/u/.omnigent/config.yaml (it changed): remove the entry", calls["error"])
-                        self.assertEqual(calls.get("teardown"), [("omnigent",)])
-                        for skipped in ("sandbox", "gateway_stop", "guardrail_off", "data", "binaries", "deferred"):
-                            self.assertNotIn(skipped, calls)
-
-    def test_finished_manual_cleanup_lets_the_uninstall_go_on(self):
-        # The rerun after the steps: the removed connector's teardown clears
-        # its record, so the check passes and the rest runs in order.
-        for flags in ({"remove_data_dir": True}, {"remove_binaries": True}):
-            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as data_dir:
-                self._record(data_dir, "omnigent", self._PENDING)
-                record = os.path.join(data_dir, "removed_connector_cleanup", "omnigent.json")
-
-                def teardown(names, record=record):
-                    if "omnigent" in names:
-                        os.remove(record)
-
-                plan = cmd_uninstall.UninstallPlan(data_dir=data_dir, connectors=("codex", "omnigent"), **flags)
-                calls = self._run(plan, teardown=teardown)
-                self.assertNotIn("error", calls)
-                self.assertEqual(calls.get("teardown"), [("omnigent",), ("codex",)])
-                self.assertTrue(calls.get("gateway_stop"))
-                if flags.get("remove_data_dir"):
-                    self.assertTrue(calls.get("data"))
-                    self.assertNotIn("guardrail_off", calls)
-                else:
-                    self.assertTrue(calls.get("binaries"))
-                    self.assertTrue(calls.get("guardrail_off"))
-
-    def test_plain_uninstall_tears_down_in_plan_order(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            self._record(data_dir, "omnigent", self._PENDING)
-            calls = self._run(cmd_uninstall.UninstallPlan(data_dir=data_dir, connectors=("codex", "omnigent")))
-        self.assertNotIn("error", calls)
-        self.assertEqual(calls.get("teardown"), [("codex", "omnigent")])
-        self.assertTrue(calls.get("gateway_stop") and calls.get("guardrail_off"))
+        self.assertNotIn("echo", calls)
 
 
 class ConnectorTeardownDispatchTests(unittest.TestCase):
@@ -1972,7 +1894,7 @@ class ExecutePlanConnectorTests(unittest.TestCase):
             stop_mock, teardown_mock, plugin_mock, wipe_mock, bin_mock = mocks
             cmd_uninstall._execute_plan(plan)
             stop_mock.assert_called_once()
-            teardown_mock.assert_called_once_with(plan, ("codex",))
+            teardown_mock.assert_called_once_with(plan)
             plugin_mock.assert_not_called()
             wipe_mock.assert_not_called()
             bin_mock.assert_not_called()

@@ -259,8 +259,9 @@ func jsonString(t *testing.T, value string) string {
 
 // The whole deferred path for a prior OmniGent install: the private
 // authorization accepts the bound home, and VerifyClean then runs the
-// teardown-only OmniGent check (clean exits 0; a config that still names
-// DefenseClaw's module exits 1).
+// teardown-only OmniGent check. Both exit 0: a config that still names
+// DefenseClaw's module is a leftover the teardown lists for the user, never
+// residue that holds the uninstall (until 1.1).
 func TestDeferredUninstallVerifyAuthenticatesPriorOmnigentInstall(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -268,7 +269,7 @@ func TestDeferredUninstallVerifyAuthenticatesPriorOmnigentInstall(t *testing.T) 
 		wantExit int
 	}{
 		{name: "clean", wantExit: 0},
-		{name: "residue", residue: true, wantExit: 1},
+		{name: "config still names the module", residue: true, wantExit: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newDeferredVerifyFixtureForConnector(t, "omnigent")

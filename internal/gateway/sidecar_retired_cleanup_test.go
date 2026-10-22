@@ -16,16 +16,18 @@
 
 package gateway
 
-// until 1.1: how boot treats a removed connector's cleanup. A cleanup that
-// fails is kept and retried; one that leaves files for manual cleanup records
-// the steps and never blocks the surviving connectors. Delete with
-// internal/gateway/connector/removed.go.
+// until 1.1: how boot treats a removed connector. Its teardown changes only
+// its hook script (it becomes the stub that blocks every call) and its
+// tokens; no boot path changes the agent config, the import path, the hook
+// contract lock or the shared hook state. A teardown that fails is kept and
+// retried. Delete with internal/gateway/connector/removed.go.
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -80,18 +82,64 @@ func writeRetiredFile(t *testing.T, path, body string) {
 	}
 }
 
+// retiredSnapshot reads every file, link and folder under roots, except the
+// paths in skip and the token writers' shared lock.
+func retiredSnapshot(t *testing.T, roots []string, skip ...string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			for _, skipped := range skip {
+				if path == skipped {
+					return nil
+				}
+			}
+			if entry.Name() == ".hook-api-token-publish.lock" {
+				return nil
+			}
+			switch {
+			case entry.Type()&fs.ModeSymlink != 0:
+				target, err := os.Readlink(path)
+				if err != nil {
+					return err
+				}
+				out[path] = "symlink:" + target
+			case entry.IsDir():
+				out[path] = "<dir>"
+			default:
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				out[path] = string(data)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return out
+}
+
 type retiredOmnigentHost struct {
-	dataDir, configPath, modulePath, pthPath string
+	home, dataDir, configPath, modulePath, pthPath string
 }
 
 const (
 	retiredOperatorConfig = "policy_modules: [corp_policy]\n"
 	retiredPatchedConfig  = "policy_modules: [corp_policy, " + retiredOmnigentModule + "]\n" +
 		"policies:\n  defenseclaw_guardrail:\n    handler: " + retiredOmnigentModule + ".defenseclaw_policy\n"
+	retiredOmnigentModuleBody = "# defenseclaw-managed-policy v1\ndef defenseclaw_policy(event):\n    return {\"result\": \"ALLOW\"}\n"
 )
 
-// stageRetiredOmnigent leaves what an older release's OmniGent setup wrote,
-// with its backup records and the connector's lock entry.
+// stageRetiredOmnigent leaves what an older release's OmniGent setup wrote:
+// the patched config.yaml, the .pth file, the policy module, their backup
+// records, the shared hook state, the connector's hook token and a hook
+// contract lock with its entry and Codex's.
 func stageRetiredOmnigent(t *testing.T) retiredOmnigentHost {
 	t.Helper()
 	home := testenv.PrivateTempDir(t)
@@ -102,50 +150,60 @@ func stageRetiredOmnigent(t *testing.T) retiredOmnigentHost {
 	t.Cleanup(restoreHome)
 	t.Setenv("OMNIGENT_CONFIG_HOME", "")
 	t.Setenv("OMNIGENT_CONFIG", "")
-	h := retiredOmnigentHost{dataDir: testenv.PrivateTempDir(t)}
+	h := retiredOmnigentHost{home: home, dataDir: filepath.Join(home, ".defenseclaw")}
 	h.configPath = filepath.Join(home, ".omnigent", "config.yaml")
 	h.modulePath = filepath.Join(h.dataDir, "hooks", retiredOmnigentModule+".py")
-	h.pthPath = filepath.Join(testenv.PrivateTempDir(t), "site-packages", "defenseclaw_omnigent.pth")
+	h.pthPath = filepath.Join(home, "venv", "site-packages", "defenseclaw_omnigent.pth")
 	writeRetiredSetupRecord(t, h.dataDir, "omnigent", "config", h.configPath, []byte(retiredOperatorConfig), retiredPatchedConfig)
 	writeRetiredSetupRecord(t, h.dataDir, "omnigent", "pth", h.pthPath, nil, filepath.Dir(h.modulePath)+"\n")
-	writeRetiredSetupRecord(t, h.dataDir, "omnigent", "module", h.modulePath, nil, "# defenseclaw-managed-policy v1\ndef defenseclaw_policy(event):\n    pass\n")
-	retired, _ := connector.RetiredConnector("omnigent")
-	entry := connector.NewHookContractLockEntry(connector.SetupOpts{DataDir: h.dataDir, HookFailMode: "closed", GuardrailMode: "action"}, retired, "1.0.3")
-	if err := connector.SaveFreshHookContractLockEntry(h.dataDir, entry); err != nil {
-		t.Fatalf("stage omnigent lock: %v", err)
+	writeRetiredSetupRecord(t, h.dataDir, "omnigent", "module", h.modulePath, nil, retiredOmnigentModuleBody)
+	writeRetiredFile(t, filepath.Join(h.dataDir, "hooks", ".hookcfg"), "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=closed\n")
+	writeRetiredFile(t, filepath.Join(h.dataDir, "hook_contract_lock.json"), `{"version":2,"updated_at":"2026-10-01T00:00:00Z","connectors":{`+
+		`"codex":{"connector":"codex","contract_id":"codex-hooks-v1","defenseclaw_version":"1.0.3","hook_fail_mode":"closed","updated_at":"2026-10-01T00:00:00Z"},`+
+		`"omnigent":{"connector":"omnigent","contract_id":"omnigent-policy-v1","defenseclaw_version":"1.0.3","hook_fail_mode":"closed","updated_at":"2026-10-01T00:00:00Z"}}}`+"\n")
+	if got := connector.LoadHookContractLockEntry(h.dataDir, "omnigent"); got.Connector != "omnigent" {
+		t.Fatalf("staged omnigent lock entry did not load: %+v", got)
+	}
+	if _, err := connector.EnsureHookAPIToken(h.dataDir, "omnigent"); err != nil {
+		t.Fatal(err)
 	}
 	return h
 }
 
-func (h retiredOmnigentHost) files(t *testing.T) map[string]string {
+func (h retiredOmnigentHost) token(t *testing.T) string {
 	t.Helper()
-	out := map[string]string{}
-	for _, path := range []string{h.configPath, h.modulePath, h.pthPath} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			out[path] = "<missing>"
-			continue
-		}
-		out[path] = string(data)
+	path, err := connector.HookAPITokenFilePath(h.dataDir, "omnigent")
+	if err != nil {
+		t.Fatal(err)
 	}
-	return out
+	return path
 }
 
-func requireRetiredOmnigentLock(t *testing.T, dataDir string) {
+// snapshot is everything on the host but the module and the token.
+func (h retiredOmnigentHost) snapshot(t *testing.T) map[string]string {
 	t.Helper()
-	if got := connector.LoadHookContractLockEntry(dataDir, "omnigent"); got.Connector == "" {
-		t.Fatal("the omnigent lock entry was cleared before its cleanup finished")
+	return retiredSnapshot(t, []string{h.home}, h.modulePath, h.token(t))
+}
+
+func (h retiredOmnigentHost) requireStub(t *testing.T) {
+	t.Helper()
+	data, err := os.ReadFile(h.modulePath)
+	if err != nil || !strings.Contains(string(data), "disabled tombstone") || !strings.Contains(string(data), `"DENY"`) {
+		t.Fatalf("policy module = %q, %v; want the stub that denies every request", data, err)
+	}
+	if _, err := os.Lstat(h.token(t)); !os.IsNotExist(err) {
+		t.Fatalf("omnigent token survived: %v", err)
 	}
 }
 
-// readOnlyRetiredConfig makes config.yaml's directory read-only, so the
-// cleanup's first change fails.
-func readOnlyRetiredConfig(t *testing.T, h retiredOmnigentHost) func() {
+// readOnlyRetiredHooks makes the hook folder read-only, so the stub cannot be
+// written.
+func readOnlyRetiredHooks(t *testing.T, h retiredOmnigentHost) func() {
 	t.Helper()
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("directory modes do not stop writes here")
 	}
-	dir := filepath.Dir(h.configPath)
+	dir := filepath.Dir(h.modulePath)
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
 	}
@@ -154,51 +212,48 @@ func readOnlyRetiredConfig(t *testing.T, h retiredOmnigentHost) func() {
 	return restore
 }
 
-// Every boot path that meets a removed connector whose cleanup fails returns
-// the failure, keeps the lock entry and keeps the name for the next boot,
-// with no file changed; once the cause is gone, the retry finishes.
+// Every boot path that meets a removed connector whose teardown fails (the
+// stub cannot be written) returns the failure and keeps the name for the
+// next boot, with no file changed; once the cause is gone, the retry
+// finishes, and still changes nothing but the module and the token.
 func TestRetiredConnectorCleanupFailureIsKeptForRetry(t *testing.T) {
 	ctx := context.Background()
 	registry := connector.NewDefaultRegistry()
 
 	t.Run("direct", func(t *testing.T) {
 		h := stageRetiredOmnigent(t)
-		before := h.files(t)
-		restore := readOnlyRetiredConfig(t, h)
+		before := retiredSnapshot(t, []string{h.home})
+		restore := readOnlyRetiredHooks(t, h)
 		err := retireOrDropUnregisteredConnector(ctx, registry, h.dataDir, "omnigent", "removed", nil)
 		if err == nil || !strings.Contains(err.Error(), "omnigent") {
 			t.Fatalf("retire = %v, want the cleanup failure", err)
 		}
-		requireRetiredOmnigentLock(t, h.dataDir)
-		if got := h.files(t); !reflect.DeepEqual(got, before) {
+		restore()
+		if got := retiredSnapshot(t, []string{h.home}); !reflect.DeepEqual(got, before) {
 			t.Fatalf("a failed cleanup changed files:\n got %v\nwant %v", got, before)
 		}
-		restore()
+		kept := h.snapshot(t)
 		if err := retireOrDropUnregisteredConnector(ctx, registry, h.dataDir, "omnigent", "removed", nil); err != nil {
 			t.Fatalf("retry: %v", err)
 		}
-		if got := connector.LoadHookContractLockEntry(h.dataDir, "omnigent"); got.Connector != "" {
-			t.Fatalf("lock survived a clean retry: %+v", got)
-		}
-		want := map[string]string{h.configPath: retiredOperatorConfig, h.modulePath: "<missing>", h.pthPath: "<missing>"}
-		if got := h.files(t); !reflect.DeepEqual(got, want) {
-			t.Fatalf("after the retry:\n got %v\nwant %v", got, want)
+		h.requireStub(t)
+		if got := h.snapshot(t); !reflect.DeepEqual(got, kept) {
+			t.Fatalf("the retry changed more than the module and the token:\n got %v\nwant %v", got, kept)
 		}
 	})
 
 	t.Run("removed from the roster", func(t *testing.T) {
 		h := stageRetiredOmnigent(t)
-		readOnlyRetiredConfig(t, h)
+		readOnlyRetiredHooks(t, h)
 		failed, dropped := teardownRemovedConnectorsReport(registry, []string{"omnigent"}, nil, connector.SetupOpts{DataDir: h.dataDir}, ctx)
 		if !reflect.DeepEqual(failed, []string{"omnigent"}) || len(dropped) != 0 {
 			t.Fatalf("failed=%v dropped=%v, want omnigent kept for retry", failed, dropped)
 		}
-		requireRetiredOmnigentLock(t, h.dataDir)
 	})
 
 	t.Run("removed from the roster with rollback authority", func(t *testing.T) {
 		h := stageRetiredOmnigent(t)
-		readOnlyRetiredConfig(t, h)
+		readOnlyRetiredHooks(t, h)
 		s := multiBootSidecar(t)
 		s.cfg.DataDir = h.dataDir
 		lockState, err := connector.CaptureHookContractLockSnapshot(h.dataDir)
@@ -212,12 +267,11 @@ func TestRetiredConnectorCleanupFailureIsKeptForRetry(t *testing.T) {
 		if len(candidates) != 0 || !reflect.DeepEqual(unavailable, []string{"omnigent"}) {
 			t.Fatalf("candidates=%v unavailable=%v, want omnigent kept for retry", candidates, unavailable)
 		}
-		requireRetiredOmnigentLock(t, h.dataDir)
 	})
 
 	t.Run("lock only", func(t *testing.T) {
 		h := stageRetiredOmnigent(t)
-		readOnlyRetiredConfig(t, h)
+		readOnlyRetiredHooks(t, h)
 		roster := []string{"codex"}
 		if err := connector.SaveActiveConnectors(h.dataDir, roster); err != nil {
 			t.Fatal(err)
@@ -231,63 +285,95 @@ func TestRetiredConnectorCleanupFailureIsKeptForRetry(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "omnigent") {
 			t.Fatalf("reconcile = %v, want the cleanup failure", err)
 		}
-		requireRetiredOmnigentLock(t, h.dataDir)
 		if got := connector.LoadActiveConnectors(h.dataDir); !reflect.DeepEqual(got, roster) {
 			t.Fatalf("active roster = %v, want %v", got, roster)
 		}
 	})
 }
 
-// A removed connector whose files the user changed is left for manual
-// cleanup: no file changes, the steps are recorded, and every boot path goes
-// on with the surviving connectors (the name is dropped, not retried).
-func TestRetiredConnectorManualCleanupDoesNotBlockSurvivors(t *testing.T) {
+// Review fixes (G-deadcode loop round 1, simplified teardown): every boot
+// path put the removed connector's config.yaml back, removed the .pth file,
+// the backups and the manual-cleanup record, and cleared the shared hook
+// contract lock and .hookcfg with the per-user writer. Now each path goes on
+// with the surviving connectors (the name is dropped) and changes only the
+// module, which becomes the stub, and the token; the lock-only path also
+// leaves an entry whose teardown is done alone on the next boot, with no
+// audit.
+func TestRemovedConnectorBootChangesOnlyTheScriptAndTokens(t *testing.T) {
 	ctx := context.Background()
 	registry := connector.NewDefaultRegistry()
-	stage := func(t *testing.T) (retiredOmnigentHost, map[string]string) {
-		h := stageRetiredOmnigent(t)
-		writeRetiredFile(t, h.configPath, retiredPatchedConfig+"model: local\n")
-		return h, h.files(t)
+	for _, path := range []struct {
+		name string
+		run  func(t *testing.T, h retiredOmnigentHost)
+	}{
+		{"direct", func(t *testing.T, h retiredOmnigentHost) {
+			if err := retireOrDropUnregisteredConnector(ctx, registry, h.dataDir, "omnigent", "removed", nil); err != nil {
+				t.Fatalf("retire: %v", err)
+			}
+		}},
+		{"removed from the roster", func(t *testing.T, h retiredOmnigentHost) {
+			failed, dropped := teardownRemovedConnectorsReport(registry, []string{"omnigent", "codex"}, []string{"codex"}, connector.SetupOpts{DataDir: h.dataDir}, ctx)
+			if len(failed) != 0 || !reflect.DeepEqual(dropped, []string{"omnigent"}) {
+				t.Fatalf("failed=%v dropped=%v, want omnigent dropped", failed, dropped)
+			}
+		}},
+		{"single connector switch", func(t *testing.T, h retiredOmnigentHost) {
+			if err := teardownPreviousConnector(registry, "codex", connector.SetupOpts{DataDir: h.dataDir}, ctx); err != nil {
+				t.Fatalf("switch to codex = %v, want it to go on", err)
+			}
+		}},
+		{"lock only", func(t *testing.T, h retiredOmnigentHost) {
+			audited := []string{}
+			for run := 1; run <= 2; run++ {
+				err := reconcileOrphanedConnectorRegistrations(ctx, registry, h.dataDir, []string{"codex"}, orphanConnectorReconcileOps{
+					resolveOpts: func(conn connector.Connector) (connector.SetupOpts, error) {
+						return connector.SetupOpts{DataDir: h.dataDir}, nil
+					},
+					clearLock: connector.ClearHookContractLockEntry,
+					audit:     func(name string) { audited = append(audited, name) },
+				})
+				if err != nil {
+					t.Fatalf("reconcile run %d: %v", run, err)
+				}
+			}
+			if !reflect.DeepEqual(audited, []string{"omnigent"}) {
+				t.Fatalf("audited %v, want the one teardown that changed something", audited)
+			}
+		}},
+	} {
+		t.Run(path.name, func(t *testing.T) {
+			h := stageRetiredOmnigent(t)
+			roster := []string{"codex"}
+			if path.name == "single connector switch" {
+				roster = []string{"omnigent"}
+			}
+			if err := connector.SaveActiveConnectors(h.dataDir, roster); err != nil {
+				t.Fatal(err)
+			}
+			before := h.snapshot(t)
+			path.run(t, h)
+			h.requireStub(t)
+			after := h.snapshot(t)
+			// The active roster is the gateway's own bookkeeping of the names
+			// it still sets up.
+			rosterFile := filepath.Join(h.dataDir, "active_connector.json")
+			delete(before, rosterFile)
+			delete(after, rosterFile)
+			if !reflect.DeepEqual(after, before) {
+				for file, body := range before {
+					if after[file] != body {
+						t.Errorf("%s changed:\n got %q\nwant %q", file, after[file], body)
+					}
+				}
+				for file := range after {
+					if _, ok := before[file]; !ok {
+						t.Errorf("%s was created", file)
+					}
+				}
+			}
+			if got := connector.LoadHookContractLockEntry(h.dataDir, "omnigent"); got.Connector != "omnigent" {
+				t.Fatalf("the omnigent lock entry was cleared: %+v", got)
+			}
+		})
 	}
-	requireLeft := func(t *testing.T, h retiredOmnigentHost, before map[string]string) {
-		t.Helper()
-		if got := h.files(t); !reflect.DeepEqual(got, before) {
-			t.Fatalf("manual cleanup changed files:\n got %v\nwant %v", got, before)
-		}
-		data, err := os.ReadFile(filepath.Join(h.dataDir, "removed_connector_cleanup", "omnigent.json"))
-		if err != nil || !strings.Contains(string(data), h.configPath) {
-			t.Fatalf("manual cleanup record = %s, %v; want it to name %s", data, err, h.configPath)
-		}
-	}
-
-	t.Run("direct", func(t *testing.T) {
-		h, before := stage(t)
-		if err := retireOrDropUnregisteredConnector(ctx, registry, h.dataDir, "omnigent", "removed", nil); err != nil {
-			t.Fatalf("retire = %v, want the files left for manual cleanup", err)
-		}
-		requireLeft(t, h, before)
-		if got := connector.LoadHookContractLockEntry(h.dataDir, "omnigent"); got.Connector != "" {
-			t.Fatalf("lock kept for a connector left for manual cleanup: %+v", got)
-		}
-	})
-
-	t.Run("removed from the roster", func(t *testing.T) {
-		h, before := stage(t)
-		failed, dropped := teardownRemovedConnectorsReport(registry, []string{"omnigent", "codex"}, []string{"codex"}, connector.SetupOpts{DataDir: h.dataDir}, ctx)
-		if len(failed) != 0 || !reflect.DeepEqual(dropped, []string{"omnigent"}) {
-			t.Fatalf("failed=%v dropped=%v, want omnigent dropped", failed, dropped)
-		}
-		requireLeft(t, h, before)
-	})
-
-	t.Run("single connector switch", func(t *testing.T) {
-		h, before := stage(t)
-		if err := connector.SaveActiveConnector(h.dataDir, "omnigent"); err != nil {
-			t.Fatal(err)
-		}
-		if err := teardownPreviousConnector(registry, "codex", connector.SetupOpts{DataDir: h.dataDir}, ctx); err != nil {
-			t.Fatalf("switch to codex = %v, want it to go on", err)
-		}
-		requireLeft(t, h, before)
-	})
 }

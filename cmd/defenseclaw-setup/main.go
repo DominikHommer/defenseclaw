@@ -300,6 +300,9 @@ func main() {
 	}
 
 	code, err := run(opts)
+	if notes := removedConnectorNotesText(); notes != "" && opts.Quiet {
+		fmt.Fprint(os.Stdout, notes)
+	}
 	if opts.Quiet && err != nil && opts.Action != "help" && opts.Action != "verify" {
 		if _, logErr := writeQuietSetupLog(opts.Action, code, err); logErr != nil {
 			fmt.Fprintf(os.Stderr, "DefenseClaw setup log failed: %v\n", logErr)
@@ -1282,6 +1285,9 @@ func runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action s
 	output, err := runCapturedSetupCommand(setupControlCommandTimeout, env, gatewayPath, args...)
 	if err != nil {
 		return fmt.Errorf("connector %s %s failed: %w: %s", connectorName, action, err, strings.TrimSpace(string(output)))
+	}
+	if action == "teardown" && isRetiredNativeConnector(connectorName) {
+		recordRemovedConnectorLeftovers(connectorName, output)
 	}
 	return nil
 }

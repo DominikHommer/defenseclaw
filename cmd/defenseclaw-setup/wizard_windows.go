@@ -744,11 +744,14 @@ func (w *setupWizard) finish() {
 	switch w.opts.Action {
 	case "uninstall":
 		setText(w.heading, "DefenseClaw was removed")
+		description := "DefenseClaw application files were removed. Configuration, connector backups, and audit history were preserved under %USERPROFILE%\\.defenseclaw."
 		if w.opts.DeleteUserData {
-			setText(w.description, "DefenseClaw application files and user data were removed.")
-		} else {
-			setText(w.description, "DefenseClaw application files were removed. Configuration, connector backups, and audit history were preserved under %USERPROFILE%\\.defenseclaw.")
+			description = "DefenseClaw application files and user data were removed."
 		}
+		if notes := removedConnectorNotesText(); notes != "" {
+			description += "\r\n\r\n" + notes
+		}
+		setText(w.description, description)
 	case "repair":
 		setText(w.heading, "DefenseClaw was repaired")
 		setText(w.description, wizardRepairCompletionDescription())
@@ -909,6 +912,9 @@ func writeWizardLog(action string, code int, resultErr error) (string, error) {
 		phase,
 		detail,
 	)
+	if notes := removedConnectorNotesText(); notes != "" {
+		contents += "\r\n" + notes
+	}
 	path := filepath.Join(root, "setup.log")
 	if err := safefile.WritePrivate(path, []byte(contents)); err != nil {
 		return "", err
