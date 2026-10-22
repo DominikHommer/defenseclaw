@@ -10,6 +10,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,4 +207,70 @@ func TestWindowsAnchorsArgumentRefusalsRecordOneChangeEvent(t *testing.T) {
 			t.Fatalf("a computer that is not installed recorded %+v", events)
 		}
 	})
+}
+
+// An anchor-only ensure whose new anchor file fails its check once it
+// replaced the installed one (anchor_insecure here) puts the previous file
+// back (none when there was none) and records one failed anchor install
+// with the file left installed. Before, the run left the new file in place
+// and recorded the change as refused, which says nothing was changed.
+func TestWindowsAnchorsThatFailTheirCheckAfterTheReplaceRecordAFailedChange(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	for _, tc := range []struct {
+		name   string
+		before bool
+	}{{"replacing installed anchors", true}, {"with no anchors before", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			layout := stubWindowsBundleHost(t)
+			installedPath := newWindowsBundleDriver(layout).AnchorsPath
+			var previous []byte
+			if tc.before {
+				if _, _, err := installWindowsBundleAnchors(e.anchors, installedPath); err != nil {
+					t.Fatal(err)
+				}
+				previous = readWindowsBundleAnchors(t, installedPath)
+			}
+			candidate := windowsBundleCandidateAnchors(t, e)
+			spool := stubWindowsChangeSpool(t)
+			trust := bundleAnchorTrust // stubWindowsBundleHost restores it.
+			checked := 0
+			bundleAnchorTrust = func(path string) error {
+				if filepath.Clean(path) == filepath.Clean(installedPath) {
+					checked++
+					return errors.New("a standard user can write the installed trust anchor file")
+				}
+				if trust == nil {
+					return nil
+				}
+				return trust(path)
+			}
+			cmd, out := windowsBundleCommand()
+			opts := &windowsEnterpriseLifecycleOptions{trustAnchors: candidate, profile: managed.ProfileStandalone,
+				jsonOutput: true, installedBeforeRun: true}
+			done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
+			cleanupPreparedWindowsBundle(t, opts)
+			if !done || err == nil || checked == 0 {
+				t.Fatalf("anchors that failed their check were accepted: done=%v err=%v checked=%d\n%s", done, err, checked, out)
+			}
+			if !strings.Contains(out.String(), string(enterprisebundle.CodeAnchorInsecure)) || !strings.Contains(out.String(), "put back") {
+				t.Fatalf("result does not say the anchors failed their check and were put back:\n%s", out)
+			}
+			assertWindowsBundleInstalledAnchors(t, layout, previous, "after the failed check")
+			events := windowsChangeEvents(t, spool)
+			if len(events) != 1 {
+				t.Fatalf("change events = %+v, want one failed anchor install", events)
+			}
+			ev := events[0]
+			wantSHA := ""
+			if previous != nil {
+				wantSHA = anchorsSHA256(previous)
+			}
+			if ev.Kind != enterprisestatus.ChangeKindTrustAnchors || ev.Outcome != enterprisestatus.ChangeFailed ||
+				ev.ReasonCode != string(enterprisebundle.CodeAnchorInsecure) || ev.SHA256 != wantSHA {
+				t.Fatalf("change event = %+v, want a failed anchor install (anchor_insecure) with sha256 %q", ev, wantSHA)
+			}
+			assertNoWindowsChangeReservations(t, spool)
+		})
+	}
 }

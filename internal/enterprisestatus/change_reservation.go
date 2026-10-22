@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 )
 
 // A command that changes the trust anchors or a credential reserves room
@@ -63,6 +65,12 @@ var (
 
 	errChangeSpoolBusy       = errors.New("another command is writing a change event; try again")
 	errChangeReservationUsed = errors.New("the change event reservation was already used")
+
+	// syncChangeDir and syncChangeFile flush a folder of the spool (a new
+	// entry in it) and a file whose access Publish changed. Tests replace
+	// them.
+	syncChangeDir  = configwrite.SyncDir
+	syncChangeFile = configwrite.SyncFile
 )
 
 // ChangeReservation is the room in the spool for the event of one change in
@@ -78,7 +86,9 @@ type ChangeReservation struct {
 // action and name (the credential, "" for none) say what it changes. It
 // returns ErrChangeSpoolFull when the spool cannot take one more event.
 // The command then writes the outcome with Write, or calls Release when it
-// changed nothing.
+// changed nothing. The reservation is durable when Reserve returns: its
+// file, its entry in the reserved folder and the folders created for it
+// are flushed, so a power loss after the change cannot lose the event.
 func (s ChangeSpool) Reserve(kind, action, name string) (*ChangeReservation, error) {
 	ev, err := NewChangeEvent(kind, action, ChangeFailed, ChangeInterrupted)
 	if err != nil {
@@ -128,6 +138,9 @@ func (s ChangeSpool) Reserve(kind, action, name string) (*ChangeReservation, err
 		return fail(err)
 	}
 	if err := file.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := syncChangeDir(dir); err != nil {
 		return fail(err)
 	}
 	return &ChangeReservation{spool: s, id: ev.EventID, path: path, file: file}, nil
@@ -305,10 +318,14 @@ func (s ChangeSpool) recordInterrupted(id string, file *os.File) error {
 	}
 	path := filepath.Join(s.Dir, id+".json")
 	if ev, err := ReadChangeEvent(path); err == nil && ev.EventID == id {
-		if s.Publish != nil {
-			return s.Publish(path)
+		if s.Publish == nil {
+			return nil
 		}
-		return nil
+		if err := s.Publish(path); err != nil {
+			return err
+		}
+		// The access is durable before the reservation goes.
+		return syncChangeFile(path)
 	}
 	raw, _, ok := readReservation(file, id)
 	if !ok {

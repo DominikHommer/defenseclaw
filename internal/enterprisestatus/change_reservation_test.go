@@ -633,3 +633,179 @@ func spoolTempFiles(t *testing.T, spool ChangeSpool) []string {
 	}
 	return out
 }
+
+// recordChangeSyncs records, in order, the folders ("dir <path>") and files
+// ("file <path>") the spool flushes; check runs on each before the flush.
+func recordChangeSyncs(t *testing.T, check func(entry string) error) *[]string {
+	t.Helper()
+	savedDir, savedFile := syncChangeDir, syncChangeFile
+	t.Cleanup(func() { syncChangeDir, syncChangeFile = savedDir, savedFile })
+	var mu sync.Mutex
+	var log []string
+	record := func(entry string, flush func(string) error, path string) error {
+		mu.Lock()
+		log = append(log, entry)
+		mu.Unlock()
+		if check != nil {
+			if err := check(entry); err != nil {
+				return err
+			}
+		}
+		return flush(path)
+	}
+	syncChangeDir = func(dir string) error { return record("dir "+dir, savedDir, dir) }
+	syncChangeFile = func(path string) error { return record("file "+path, savedFile, path) }
+	return &log
+}
+
+// A reservation is durable when Reserve returns: the reserved folder is
+// flushed after the reservation is in it, and the parent of every folder
+// the spool creates for it is flushed, so a power loss after the change
+// cannot lose the event. Before, only the reservation file was flushed:
+// its entry, and on the first change the spool folders, could be lost
+// with the change already made.
+func TestChangeReservationIsDurableWhenReserveReturns(t *testing.T) {
+	base := t.TempDir()
+	spool := ChangeSpool{Dir: filepath.Join(base, "bundles", ChangeEventsDirName), StateDir: t.TempDir()}
+	reserved := filepath.Join(spool.Dir, ChangeReservedDirName)
+	log := recordChangeSyncs(t, func(entry string) error {
+		if entry == "dir "+reserved && len(reservationFiles(t, spool)) == 0 {
+			t.Fatalf("the reserved folder was flushed before the reservation was in it")
+		}
+		return nil
+	})
+	first, err := spool.Reserve(ChangeKindTrustAnchors, ChangeActionInstall, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release()
+	want := []string{"dir " + base, "dir " + filepath.Join(base, "bundles"), "dir " + spool.Dir, "dir " + reserved}
+	if strings.Join(*log, "|") != strings.Join(want, "|") {
+		t.Fatalf("first reservation flushed %v, want %v", *log, want)
+	}
+	*log = nil
+	second, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "splunk-hec-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+	if strings.Join(*log, "|") != "dir "+reserved {
+		t.Fatalf("second reservation flushed %v, want only the reserved folder", *log)
+	}
+}
+
+// A reservation that cannot be made durable is not made: Reserve fails and
+// leaves no reservation, so the command changes nothing (fail closed). The
+// same holds when a folder created for it cannot be flushed into its parent.
+func TestChangeReservationThatCannotBeFlushedIsNotMade(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func(spool ChangeSpool) string
+	}{
+		{"reserved folder", func(s ChangeSpool) string { return filepath.Join(s.Dir, ChangeReservedDirName) }},
+		{"new reserved folder in the spool", func(s ChangeSpool) string { return s.Dir }},
+		{"new spool folder in its parent", func(s ChangeSpool) string { return filepath.Dir(s.Dir) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spool := newTestSpool(t)
+			failing := tc.fail(spool)
+			flushErr := errors.New("flush failed")
+			recordChangeSyncs(t, func(entry string) error {
+				if entry == "dir "+failing {
+					return flushErr
+				}
+				return nil
+			})
+			if _, err := spool.Reserve(ChangeKindTrustAnchors, ChangeActionInstall, ""); !errors.Is(err, flushErr) {
+				t.Fatalf("Reserve err = %v, want the flush error", err)
+			}
+			if files := reservationFiles(t, spool); len(files) != 0 {
+				t.Fatalf("reservations left after a failed flush: %v", files)
+			}
+		})
+	}
+}
+
+// An event a stopped command left in the spool gets the gateway's access
+// again (Publish) and that access is flushed before the next writer removes
+// the reservation; a failed flush keeps the reservation. Before, the
+// reservation could go while the new access was not yet durable.
+func TestChangeSpoolFlushesARepublishedEventBeforeItRemovesTheReservation(t *testing.T) {
+	for _, flushFails := range []bool{false, true} {
+		t.Run(map[bool]string{false: "flushed", true: "flush fails"}[flushFails], func(t *testing.T) {
+			pub := &publishLog{}
+			spool := newTestSpool(t)
+			spool.Publish = pub.publish
+			r, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "splunk-hec-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ev := appliedSecretChange(t, "splunk-hec-token")
+			ev.EventID = r.id
+			data, err := marshalChangeEvent(ev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := spool.writeEvent(r.id, data); err != nil {
+				t.Fatal(err)
+			}
+			r.abandon() // The command stopped after its event, before it let go of the reservation.
+			final := filepath.Join(spool.Dir, r.id+".json")
+			reservation := filepath.Join(spool.reservedDir(), r.id+".json")
+			flushErr := errors.New("flush failed")
+			log := recordChangeSyncs(t, func(entry string) error {
+				if entry != "file "+final {
+					return nil
+				}
+				if _, err := os.Lstat(reservation); err != nil {
+					t.Fatalf("the reservation went before the event's access was flushed: %v", err)
+				}
+				pub.mu.Lock()
+				defer pub.mu.Unlock()
+				if len(pub.paths) == 0 || pub.paths[len(pub.paths)-1] != final {
+					t.Fatalf("flushed %s before Publish ran on it: %v", final, pub.paths)
+				}
+				if flushFails {
+					return flushErr
+				}
+				return nil
+			})
+			refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = spool.Write(refusal)
+			if !strings.Contains(strings.Join(*log, "|"), "file "+final) {
+				t.Fatalf("the republished event was never flushed: %v", *log)
+			}
+			_, statErr := os.Lstat(reservation)
+			if flushFails {
+				if !errors.Is(err, flushErr) || statErr != nil {
+					t.Fatalf("failed flush: write err = %v, reservation %v; want the flush error and the reservation kept", err, statErr)
+				}
+				return
+			}
+			if err != nil || !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("write err = %v, reservation %v; want the reservation removed", err, statErr)
+			}
+		})
+	}
+}
+
+// reservationFiles lists the files in the reserved folder (none when it is
+// not there).
+func reservationFiles(t *testing.T, spool ChangeSpool) []string {
+	t.Helper()
+	entries, err := os.ReadDir(spool.reservedDir())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, entry := range entries {
+		out = append(out, entry.Name())
+	}
+	return out
+}

@@ -412,9 +412,22 @@ func WriteFileDurable(path string, data []byte, mode os.FileMode) error {
 	return WriteFileDurablePublished(path, data, mode, nil)
 }
 
+// SyncDir flushes dir so a new entry in it is durable (fsync on POSIX; a
+// no-op on Windows, where NTFS journals the directory).
+func SyncDir(dir string) error { return syncDir(dir) }
+
+// SyncFile flushes path, its owner and access included.
+func SyncFile(path string) error { return syncFile(path) }
+
+// syncPublished flushes the temp file again after publish changed its
+// owner and access, so the rename never makes durable a file whose access
+// a power loss can take back. A test replaces it.
+var syncPublished = syncFile
+
 // WriteFileDurablePublished is WriteFileDurable with publish run on the
 // written and closed temp file before the rename, to give it its final
-// owner and access: path never exists with the temp file's. A publish error
+// owner and access: path never exists with the temp file's. The temp file
+// is flushed again after publish, before the rename. A publish error
 // removes the temp file and leaves path as it was.
 func WriteFileDurablePublished(path string, data []byte, mode os.FileMode, publish func(tmp string) error) error {
 	if mode == 0 {
@@ -449,6 +462,9 @@ func WriteFileDurablePublished(path string, data []byte, mode os.FileMode, publi
 	if publish != nil {
 		if err := publish(tmpName); err != nil {
 			return err
+		}
+		if err := syncPublished(tmpName); err != nil {
+			return fmt.Errorf("configwrite: fsync %s after publish: %w", tmpName, err)
 		}
 	}
 	if err := replaceDurable(tmpName, path); err != nil {

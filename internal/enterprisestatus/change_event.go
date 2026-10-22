@@ -344,8 +344,10 @@ func (s ChangeSpool) ready() error {
 }
 
 // prepareDir creates (or repairs) dir, the spool or its reserved folder,
-// with the spool's owner and access.
+// with the spool's owner and access. The parent of every folder it creates
+// is flushed, so the new folder survives a power loss.
 func (s ChangeSpool) prepareDir(dir string) error {
+	created := missingDirs(dir)
 	if s.Prepare != nil {
 		if err := s.Prepare(dir); err != nil {
 			return err
@@ -353,7 +355,30 @@ func (s ChangeSpool) prepareDir(dir string) error {
 	} else if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	return requireDirectory(dir)
+	if err := requireDirectory(dir); err != nil {
+		return err
+	}
+	for _, d := range created {
+		if err := syncChangeDir(filepath.Dir(d)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// missingDirs lists dir and its missing parents, outermost first.
+func missingDirs(dir string) []string {
+	var missing []string
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Lstat(d); !errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		missing = append([]string{d}, missing...)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	return missing
 }
 
 // prune makes room for one more event: it removes the oldest reported

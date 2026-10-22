@@ -54,3 +54,18 @@ func TestRecordGenerationKeepsTheRecordMode(t *testing.T) {
 		}
 	}
 }
+
+// A temp file published read-only (the gateway's 0440 or a root-owned
+// 0640) is still flushed: fsync needs no write access.
+func TestSyncFileFlushesAReadOnlyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o440); err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncFile(path); err != nil {
+		t.Fatalf("flush of a read-only file: %v", err)
+	}
+	if err := SyncFile(filepath.Join(filepath.Dir(path), "missing.json")); err == nil {
+		t.Fatal("a missing file flushed")
+	}
+}

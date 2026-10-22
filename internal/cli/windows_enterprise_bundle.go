@@ -842,12 +842,27 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 			run.anchorOnly = &anchorOnlyChange{path: anchorPath, existed: !errors.Is(readErr, fs.ErrNotExist), previous: previous}
 		}
 		anchorRefusalPending = false
-		installed, err := installWindowsBundleAnchors(opts.trustAnchors, driver.AnchorsPath)
+		installed, replaced, err := installWindowsBundleAnchors(opts.trustAnchors, driver.AnchorsPath)
 		if err != nil {
-			code := windowsBundleCode(err, enterprisebundle.CodeAnchorInsecure)
+			code := string(windowsBundleCode(err, enterprisebundle.CodeAnchorInsecure))
+			failed := code == string(enterprisebundle.CodeStateInvalid)
+			message := "the trust anchors were not installed: " + err.Error()
+			if replaced && run.anchorOnly != nil {
+				// The installed file was replaced and then failed its
+				// check: the previous file is put back, as Linux and macOS
+				// do, and the change is recorded as failed with the file
+				// left installed, never as refused.
+				failed = true
+				if restoreErr := restoreWindowsBundleAnchors(anchorPath, run.anchorOnly.existed, run.anchorOnly.previous); restoreErr != nil {
+					code = "anchor_restore_failed"
+					message += "; the previous trust anchors could not be put back: " + restoreErr.Error()
+				} else {
+					message += "; the previous trust anchors were put back"
+				}
+			}
 			current, _ := safefile.ReadRegularFileBounded(anchorPath, windowsBundleMaxAnchors)
-			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsAnchorsFailure(layout, run.anchorReservation, string(code), code == enterprisebundle.CodeStateInvalid, current))
-			return refuse(string(code), "the trust anchors were not installed: "+err.Error())
+			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsAnchorsFailure(layout, run.anchorReservation, code, failed, current))
+			return refuse(code, message)
 		}
 		if run.anchorOnly != nil {
 			run.anchorOnly.installed = installed
@@ -1209,11 +1224,11 @@ func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions ent
 // previous anchors back and fails the run.
 func (run *windowsBundleRun) commitAnchors(result *enterprisestatus.Result) {
 	run.anchorStaged = false // The commit records its own outcome.
-	installed, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath)
+	installed, _, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath)
 	if err != nil {
 		result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
 		code := "anchor_install_failed"
-		if restoreErr := run.restoreAnchors(); restoreErr != nil {
+		if restoreErr := restoreWindowsBundleAnchors(run.anchorPath, run.anchorExisted, run.anchorPrevious); restoreErr != nil {
 			result.AddError("anchor_restore_failed", "could not restore the previous trust anchors: "+restoreErr.Error())
 			code = "anchor_restore_failed"
 		}
@@ -1231,11 +1246,17 @@ func (run *windowsBundleRun) commitAnchors(result *enterprisestatus.Result) {
 	}
 }
 
-func (run *windowsBundleRun) restoreAnchors() error {
-	if run.anchorExisted {
-		return writeWindowsBundleAdminFile(run.anchorPath, run.anchorPrevious)
+// restoreWindowsBundleAnchors puts the anchor file a run replaced back at
+// path: previous when a file existed, no file when none did. A file that
+// existed and could not be read (previous nil) cannot be put back.
+func restoreWindowsBundleAnchors(path string, existed bool, previous []byte) error {
+	if existed {
+		if previous == nil {
+			return errors.New("the previous trust anchor file could not be read before the run")
+		}
+		return writeWindowsBundleAdminFile(path, previous)
 	}
-	if err := os.Remove(run.anchorPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return nil
@@ -1579,23 +1600,30 @@ func writeWindowsBundleAdminFile(path string, data []byte) error {
 // installWindowsBundleAnchors installs the administrator anchor file src
 // as <state root>\etc\trust\bundle-anchors.json once it decodes and passes
 // the trust check, then checks the installed copy the same way. It returns
-// the bytes it wrote, which are the bytes it read and checked once.
-func installWindowsBundleAnchors(src, dst string) ([]byte, error) {
+// the bytes it wrote, which are the bytes it read and checked once, and
+// whether dst was replaced: an error after the replace (its access or its
+// check failed) leaves dst changed, which the caller puts back and records
+// as a failed change.
+func installWindowsBundleAnchors(src, dst string) (installed []byte, replaced bool, err error) {
 	// One read: the bytes written are the ones decoded and trust-checked.
 	_, raw, err := enterprisebundle.ReadAnchorsFile(src, bundleAnchorTrust)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := windowsBundleEnsurePrivateDirectory(filepath.Dir(dst)); err != nil {
-		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+		return nil, false, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
 	}
-	if err := writeWindowsBundleAdminFile(dst, raw); err != nil {
-		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+	// writeWindowsBundleFile replaces dst by a rename, its last step.
+	if err := writeWindowsBundleFile(dst, raw); err != nil {
+		return nil, false, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+	}
+	if err := windowsBundlePublishPrivateFile(dst); err != nil {
+		return nil, true, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
 	}
 	if _, err := enterprisebundle.LoadAnchors(dst, bundleAnchorTrust); err != nil {
-		return nil, err
+		return nil, true, err
 	}
-	return raw, nil
+	return raw, true, nil
 }
 
 // lockWindowsBundleStore takes the bundle store lock for the run, or
