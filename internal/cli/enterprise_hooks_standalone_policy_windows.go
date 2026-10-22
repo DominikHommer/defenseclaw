@@ -384,6 +384,22 @@ func enterpriseHookWindowsEligibleProfilesFor(ctx context.Context, current *conf
 	return enterpriseHookWindowsStandaloneEligibleList(ctx, opts)
 }
 
+// migrateWindowsClaudeUserHooks removes DefenseClaw's own older per-user
+// Claude Code hooks (those naming the per-user launcher in ~/.local/bin)
+// from the user's Claude settings, as the Unix guardian removes its leftover
+// registrations each pass. Claude Code is enrolled by machine policy; left in
+// place, the old hooks make every agent that reads the file (Copilot CLI in a
+// project under the home) block as on a foreign hook (GAP-0587).
+func migrateWindowsClaudeUserHooks(stderr io.Writer, target enterprisehooks.TargetCredentials) {
+	settings := filepath.Join(target.UserHome, ".claude", "settings.json")
+	removed, _, err := windowsManagedClaudeSettingsRemover(target.UserHome, target.SID, "")
+	if err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: older DefenseClaw hooks in %s: %v\n", settings, err)
+	} else if removed > 0 {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: removed %d older DefenseClaw hook command(s) from %s\n", removed, settings)
+	}
+}
+
 // enterpriseHookStandalonePlatformFinish removes unapproved foreign hooks
 // for every verified Windows user and every eligible profile without rows
 // (a user whose connectors are all machine policy, such as Cursor, has
@@ -469,6 +485,9 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 			blocksError = blocksErr.Error()
 		}
 		logEnterpriseForeignHookBlocks(stderr, current.creds.UserHome, blocks, dropped, blocksError)
+		if !current.rows["claudecode"] {
+			migrateWindowsClaudeUserHooks(stderr, current.creds)
+		}
 		for _, name := range connectors {
 			if current.rows[name] {
 				continue

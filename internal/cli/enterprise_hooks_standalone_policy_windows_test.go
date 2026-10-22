@@ -53,6 +53,15 @@ func TestWindowsForeignCleanupCoversEligibleUsersWithoutRows(t *testing.T) {
 		collected = append(collected, target.SID)
 		return nil, 0, nil
 	}
+	// GAP-0587: DefenseClaw's own older per-user Claude hooks are migrated
+	// for every user, so Copilot does not block on them as foreign hooks.
+	previousRemover := windowsManagedClaudeSettingsRemover
+	t.Cleanup(func() { windowsManagedClaudeSettingsRemover = previousRemover })
+	var migrated []string
+	windowsManagedClaudeSettingsRemover = func(home, sid, _ string) (int, []string, error) {
+		migrated = append(migrated, sid+"|"+home)
+		return 0, nil, nil
+	}
 	rows := []enterpriseHookReconcileRow{{OK: true, SID: bob, UserHome: `C:\Users\bob`, Connector: "cursor"}}
 	var log bytes.Buffer
 	enterpriseHookStandalonePlatformFinish(context.Background(), &log, rows, time.Now())
@@ -61,6 +70,9 @@ func TestWindowsForeignCleanupCoversEligibleUsersWithoutRows(t *testing.T) {
 	}
 	if strings.Join(collected, ",") != bob+","+alice {
 		t.Fatalf("block records must be collected for every user: %v", collected)
+	}
+	if strings.Join(migrated, ",") != bob+`|C:\Users\bob,`+alice+`|C:\Users\alice` {
+		t.Fatalf("older DefenseClaw Claude hooks must be migrated for every user: %v", migrated)
 	}
 }
 
