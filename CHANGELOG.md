@@ -10,6 +10,11 @@ for current behavior.
 
 ## [Unreleased] — 1.0.4
 
+- **Local observability rejects invalid signals before changing a running stack.** Inspect metrics use fixed tool labels, so caller-chosen tool names do not become metric series.
+- **Standalone ACP setup pins guarded entries rather than unrelated editor settings.** Adopted and numbered entries retain launch-field verification; Zed preferences remain editable. Older whole-file pins stay strict until refreshed.
+- **Hermes sandbox images include the native Anthropic provider's pinned SDK.** Provider initialization no longer requires installing a package inside the sandbox.
+- **Rule-pack directory aliases cannot bypass stale pins.** Selection checks every pin for the directory's filesystem identity before saving, including case-only spellings on macOS.
+- **Per-user provenance survives rejected custom-token configuration edits.** It reads the running gateway only after proving its local listener identity. Migration previews omit unchanged version ranges, and the initial TUI audit-loading notice fits at 80 columns.
 - **Managed local scans and policy tests no longer need service-owned state.** JSON code scans use a process-local redaction key without opening the gateway audit database or correlation key; policy tests report no tests when an installed config-only policy has no Rego directory.
 - **Invalid enterprise profiles keep the source version and field in diagnostics.** Non-string values are refused at `enterprise.profile` before profile resolution, and version-9 error JSON keeps `config_version: 9`.
 - **Fleet policy versions always returns an array.** The empty SQLite-backed response now sends `versions: []`, matching the API contract and the in-memory backend.
