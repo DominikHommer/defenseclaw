@@ -14,7 +14,9 @@ DefenseClaw 1.0.4 removed both connectors (#1182). Their teardown
 (``internal/gateway/connector/removed.go``) does two things only: it replaces
 the hook script an older DefenseClaw wrote (OpenHands' ``openhands-hook.sh``,
 OmniGent's policy module), proven by its DefenseClaw marker, with a stub that
-blocks every call, and it revokes the connector's tokens. Everything else
+blocks every call, and it revokes the connector's tokens, except the OpenHands
+hook token: an old OpenHands hook, or a copy of it in the hooks folder, that
+finds no token lets every call run in fail mode open. Everything else
 stays. :func:`leftovers` lists it, with the step to remove each item by hand,
 for ``defenseclaw status``, ``defenseclaw doctor`` and ``defenseclaw
 uninstall``. It only reads. The Go side lists the same for ``connector
@@ -324,6 +326,20 @@ def _foreign_step(c: _Removed) -> str:
     )
 
 
+def _kept_token(c: _Removed, token: str) -> Leftover:
+    # The teardown keeps the OpenHands hook token (removed.go keepHookToken).
+    what = (
+        f"the {c.label} hook token, which DefenseClaw keeps: an old {c.label} hook ({c.script} or a copy of it in "
+        "this folder) that finds no token lets every call run in fail mode open; with it, the hook reaches the "
+        "gateway, which blocks every call. Nothing in DefenseClaw 1.0.4 accepts it"
+    )
+    step = (
+        f"delete it only once no {c.label} hooks.json, in your home or in any workspace, runs {c.script} "
+        f"or a copy of it, and {c.label} was restarted"
+    )
+    return Leftover(token, what, step)
+
+
 def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
     items: list[Leftover] = []
     teardown = f"run defenseclaw-gateway connector teardown --connector {c.name}"
@@ -398,8 +414,12 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
                 "copy back what you need, then delete this folder",
             )
         )
-    for token in (os.path.join(hooks, f".hook-{c.name}.token"), os.path.join(hooks, f".otlp-{c.name}.token")):
-        if os.path.lexists(token):
+    hook_token = os.path.join(hooks, f".hook-{c.name}.token")
+    if c.name == "openhands" and os.path.lexists(hook_token):
+        items.append(_kept_token(c, hook_token))
+        hook_token = ""
+    for token in (hook_token, os.path.join(hooks, f".otlp-{c.name}.token")):
+        if token and os.path.lexists(token):
             items.append(Leftover(token, "a DefenseClaw token for the removed connector", token_step))
     return items
 

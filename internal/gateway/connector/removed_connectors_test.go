@@ -263,6 +263,10 @@ func (h *removedHost) requireRevoked(t *testing.T, c removedOnlyConnector) {
 			t.Fatalf("token %s survived the teardown: %v", token, err)
 		}
 	}
+	// The OpenHands hook token stays (keepHookToken); OmniGent's goes.
+	if token, err := LoadHookAPIToken(h.dataDir, c.name); err != nil || (token == "") == (c.name == removedOpenHandsID) {
+		t.Fatalf("%s hook token after the teardown = %q, %v; want kept only for OpenHands", c.name, token, err)
+	}
 	if token, err := LoadHookAPIToken(h.dataDir, "codex"); err != nil || token == "" {
 		t.Fatalf("the surviving connector's token = %q, %v", token, err)
 	}
@@ -734,6 +738,8 @@ func TestRemovedConnectorLeftoversListWhatIsLeft(t *testing.T) {
 			}
 			if c.name == removedOpenHandsID {
 				want[filepath.Join(h.dataDir, "hooks", hookConfigSidecarName+".openhands")] = "delete it"
+				// The hook token stays (keepHookToken), with when it may go.
+				want[removedTokenPath(t, h.dataDir, c.name)] = c.keptTokenStep()
 			} else {
 				want[h.pth] = "delete this file once no OmniGent config.yaml names " + removedOmnigentModuleName
 			}
@@ -802,5 +808,83 @@ func TestRemovedConnectorLeftoversReadEveryConfigTheAgentMayRead(t *testing.T) {
 	leftovers, _ = RemovedConnectorLeftovers(removedOpenHandsID, opts)
 	if !removedListsPath(leftovers, hooks) {
 		t.Errorf("leftovers %+v do not name the Windows launcher hook in %s", leftovers, hooks)
+	}
+}
+
+// Review fix (G-deadcode loop round 2): a copy of the old OpenHands hook
+// under another name in the hooks folder reads the same hook token, and an
+// old OpenHands hook that finds no token lets every call run in fail mode
+// open before it contacts the gateway. So the OpenHands teardown keeps that
+// token whatever is left at the script path (the stub, or nothing), on every
+// run, and VerifyClean passes with it; its OTLP token goes, and copies are
+// not changed. The leftovers say when the token may go. OmniGent, whose
+// module blocks when it finds no token, still loses both tokens.
+func TestRemovedOpenHandsTeardownKeepsTheHookTokenForCopiesOfTheHook(t *testing.T) {
+	for _, c := range removedConnectorsUnderTest() {
+		for _, deleted := range []bool{false, true} {
+			name := c.name + "/a copy beside the script"
+			if deleted {
+				name = c.name + "/the script deleted, a copy left"
+			}
+			t.Run(name, func(t *testing.T) {
+				// Only OpenHands keeps its hook token.
+				keep := c.name == removedOpenHandsID
+				h := newRemovedHost(t)
+				h.stage(t, c)
+				before, err := LoadHookAPIToken(h.dataDir, c.name)
+				if err != nil || before == "" {
+					t.Fatalf("staged token = %q, %v", before, err)
+				}
+				old, err := os.ReadFile(h.script(c))
+				if err != nil {
+					t.Fatal(err)
+				}
+				copied := filepath.Join(h.dataDir, "hooks", "mine-"+c.script)
+				writeRemovedFile(t, copied, string(old), c.mode)
+				if deleted {
+					if err := os.Remove(h.script(c)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				conn, _ := RetiredConnector(c.name)
+				for run := 1; run <= 2; run++ {
+					if err := conn.Teardown(context.Background(), h.opts); err != nil {
+						t.Fatalf("run %d: %v", run, err)
+					}
+					if err := conn.VerifyClean(h.opts); err != nil {
+						t.Fatalf("run %d: VerifyClean = %v", run, err)
+					}
+					got, err := LoadHookAPIToken(h.dataDir, c.name)
+					switch {
+					case err != nil:
+						t.Fatalf("run %d: %v", run, err)
+					case keep && got != before:
+						t.Fatalf("run %d: the %s hook token = %q, want the one its copied hook reads kept", run, c.name, got)
+					case !keep && got != "":
+						t.Fatalf("run %d: the %s hook token survived", run, c.name)
+					}
+					if _, err := os.Lstat(c.otlpTokenPath(h.dataDir)); !os.IsNotExist(err) {
+						t.Fatalf("run %d: the OTLP token survived: %v", run, err)
+					}
+					if body, err := os.ReadFile(copied); err != nil || !bytes.Equal(body, old) {
+						t.Fatalf("run %d: the copy %s was changed: %q, %v", run, copied, body, err)
+					}
+				}
+				leftovers, _ := RemovedConnectorLeftovers(c.name, h.opts)
+				token := removedTokenPath(t, h.dataDir, c.name)
+				listed := false
+				for _, item := range leftovers {
+					if item.Path == token {
+						listed = true
+						if item.What != c.keptTokenWhat() || item.Step != c.keptTokenStep() {
+							t.Fatalf("the kept token is listed as %+v", item)
+						}
+					}
+				}
+				if listed != keep {
+					t.Fatalf("leftovers %+v list the hook token %v, want %v", leftovers, listed, keep)
+				}
+			})
+		}
 	}
 }

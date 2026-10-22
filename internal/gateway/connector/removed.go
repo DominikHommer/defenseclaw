@@ -38,7 +38,17 @@ package connector
 //     them it reaches the retired gateway route, which blocks every call
 //     whatever the token. The teardown then fails with the step that
 //     resolves it by hand (removedOnlyConnector.hookLeft), and the next
-//     start tries again.
+//     start tries again. The OpenHands hook token is never revoked
+//     (removedOnlyConnector.keepHookToken): a 1.0.0 to 1.0.3 OpenHands hook
+//     reads it from the folder the script is in and, when it finds none,
+//     lets every call run in fail mode open before it contacts the gateway.
+//     A copy of the script under another name in the hooks folder reads the
+//     same token, and no check can prove that no hooks.json (in the home or
+//     in any workspace) runs such a copy. Nothing in 1.0.4 accepts the token
+//     (the gateway loads hook tokens only for the connectors it ships), and
+//     the retired route blocks whatever the token, so keeping it only keeps
+//     old hooks blocking. An OmniGent module that finds no token blocks, so
+//     its token goes.
 //
 // Nothing else is touched: agent config files (hooks.json, config.yaml),
 // import paths (.pth), runtime records (.hookcfg), backups, the hook
@@ -163,6 +173,10 @@ type removedOnlyConnector struct {
 	inPlaceTail string
 	mode        os.FileMode
 	configStep  string
+	// keepHookToken keeps the hook API token at teardown: an old hook of the
+	// connector that finds no token lets the call run (fail mode open), and
+	// copies of its script read the same token (see the file comment).
+	keepHookToken bool
 }
 
 // removedOpenHandsLauncherFlag is how a Windows hooks.json command names the
@@ -175,7 +189,8 @@ var (
 		name: removedOpenHandsID, label: "OpenHands",
 		script: removedOpenHandsHookScript, marker: "# defenseclaw-managed-hook v",
 		tombstone: removedOpenHandsTombstone, inPlaceTail: "exit 2\n", mode: 0o700,
-		configStep: "remove every hook whose command runs " + removedOpenHandsHookScript + " (or defenseclaw-hook --connector openhands) from this file, then restart OpenHands",
+		keepHookToken: true,
+		configStep:    "remove every hook whose command runs " + removedOpenHandsHookScript + " (or defenseclaw-hook --connector openhands) from this file, then restart OpenHands",
 	}
 	removedOmnigent = removedOnlyConnector{
 		name: removedOmnigentID, label: "OmniGent",
@@ -526,11 +541,11 @@ func (c removedOnlyConnector) otlpTokenPath(dataDir string) string {
 	return filepath.Join(dataDir, "hooks", otlpPathTokenFileName(OTLPPathTokenScope(c.name)))
 }
 
-// revokeTokens removes the connector's hook API and OTLP tokens. Nothing in
-// 1.0.4 accepts them.
+// revokeTokens removes the connector's hook API and OTLP tokens, except a
+// hook token it keeps (keepHookToken). Nothing in 1.0.4 accepts them.
 func (c removedOnlyConnector) revokeTokens(dataDir string) error {
 	var errs []error
-	if c.hookTokenPresent(dataDir) {
+	if !c.keepHookToken && c.hookTokenPresent(dataDir) {
 		if err := RemoveHookAPIToken(dataDir, c.name); err != nil {
 			errs = append(errs, fmt.Errorf("%s teardown: revoke the hook token: %w", c.name, err))
 		}
@@ -559,12 +574,40 @@ func (c removedOnlyConnector) hookTokenPresent(dataDir string) bool {
 	return false
 }
 
+// tokenPaths are the tokens teardown revokes.
 func (c removedOnlyConnector) tokenPaths(dataDir string) []string {
 	var paths []string
-	if path, err := HookAPITokenFilePath(dataDir, c.name); err == nil {
+	if path := c.hookTokenPath(dataDir); path != "" && !c.keepHookToken {
 		paths = append(paths, path)
 	}
 	return append(paths, c.otlpTokenPath(dataDir))
+}
+
+// keptTokenPath is the hook token teardown keeps (keepHookToken), or "".
+func (c removedOnlyConnector) keptTokenPath(dataDir string) string {
+	if !c.keepHookToken {
+		return ""
+	}
+	return c.hookTokenPath(dataDir)
+}
+
+func (c removedOnlyConnector) hookTokenPath(dataDir string) string {
+	path, err := HookAPITokenFilePath(dataDir, c.name)
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
+// keptTokenWhat and keptTokenStep describe the hook token teardown keeps.
+func (c removedOnlyConnector) keptTokenWhat() string {
+	return "the " + c.label + " hook token, which DefenseClaw keeps: an old " + c.label + " hook (" + c.script +
+		" or a copy of it in this folder) that finds no token lets every call run in fail mode open; with it, the hook reaches the gateway, which blocks every call. Nothing in DefenseClaw 1.0.4 accepts it"
+}
+
+func (c removedOnlyConnector) keptTokenStep() string {
+	return "delete it only once no " + c.label + " hooks.json, in your home or in any workspace, runs " + c.script +
+		" or a copy of it, and " + c.label + " was restarted"
 }
 
 // VerifyClean fails while an old hook may still run at the script path
@@ -662,6 +705,11 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 	if _, err := os.Lstat(backups); err == nil {
 		add(backups, "the copies of your files DefenseClaw saved before its setup changed them (pristine_bytes, base64)",
 			"copy back what you need, then delete this folder")
+	}
+	if kept := c.keptTokenPath(opts.DataDir); kept != "" {
+		if _, err := os.Lstat(kept); err == nil {
+			add(kept, c.keptTokenWhat(), c.keptTokenStep())
+		}
 	}
 	for _, token := range c.tokenPaths(opts.DataDir) {
 		if _, err := os.Lstat(token); err == nil {

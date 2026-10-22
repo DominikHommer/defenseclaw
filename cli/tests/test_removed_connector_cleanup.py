@@ -113,11 +113,31 @@ class LeftoversTests(_Host):
 
     def test_a_script_the_teardown_has_not_replaced_says_to_run_it(self):
         self.openhands(_OPENHANDS_103)
-        _write(os.path.join(self.hooks, ".hook-openhands.token"), "t")
+        _write(os.path.join(self.hooks, ".otlp-openhands.token"), "t")
         items = self.items("openhands")
         teardown = "run defenseclaw-gateway connector teardown --connector openhands"
         self.assertEqual(items[os.path.join(self.hooks, "openhands-hook.sh")].step, teardown)
-        self.assertEqual(items[os.path.join(self.hooks, ".hook-openhands.token")].step, teardown)
+        self.assertEqual(items[os.path.join(self.hooks, ".otlp-openhands.token")].step, teardown)
+
+    # Review fix (G-deadcode loop round 2): a copy of the old OpenHands hook
+    # in the hooks folder reads the hook token, and without it lets every
+    # call run in fail mode open, so the teardown keeps it, whatever is at
+    # the script path, and the leftovers say when it may go. OmniGent's token
+    # still points at the teardown.
+    def test_the_openhands_hook_token_is_listed_as_kept(self):
+        token = os.path.join(self.hooks, ".hook-openhands.token")
+        for script in (_OPENHANDS_103, None):
+            with self.subTest(stub=script is None):
+                self.openhands(script or _OPENHANDS_STUB)
+                _write(token, "t")
+                item = self.items("openhands")[token]
+                self.assertIn("which DefenseClaw keeps", item.what)
+                self.assertIn("or a copy of it in this folder", item.what)
+                self.assertEqual(
+                    item.step,
+                    "delete it only once no OpenHands hooks.json, in your home or in any workspace, runs "
+                    "openhands-hook.sh or a copy of it, and OpenHands was restarted",
+                )
 
     def test_a_script_defenseclaw_did_not_write_is_named_as_not_changed(self):
         self.openhands("#!/bin/sh\necho mine\n")
@@ -128,7 +148,7 @@ class LeftoversTests(_Host):
     # what to do by hand first, and the tokens point at that step.
     def test_a_script_defenseclaw_cannot_prove_it_wrote_keeps_the_tokens_behind_its_step(self):
         script = os.path.join(self.hooks, "openhands-hook.sh")
-        token = _write(os.path.join(self.hooks, ".hook-openhands.token"), "t")
+        token = _write(os.path.join(self.hooks, ".otlp-openhands.token"), "t")
         target = _write(os.path.join(self.hooks, "old-hook.sh"), _OPENHANDS_103)
         for plant in ("#!/bin/sh\n#\n#\n" + _OPENHANDS_103.split("\n", 1)[1], None):
             with self.subTest(symlink=plant is None):
@@ -150,7 +170,7 @@ class LeftoversTests(_Host):
     def test_a_hard_linked_script_keeps_the_tokens_behind_its_step(self):
         self.openhands(_OPENHANDS_103)
         script = os.path.join(self.hooks, "openhands-hook.sh")
-        token = _write(os.path.join(self.hooks, ".hook-openhands.token"), "t")
+        token = _write(os.path.join(self.hooks, ".otlp-openhands.token"), "t")
         try:
             os.link(script, os.path.join(self.home, "elsewhere-hook.sh"))
         except OSError as exc:

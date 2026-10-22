@@ -79,8 +79,10 @@ func (h retiredOpenHandsHost) requireTornDown(t *testing.T) {
 	if got := connector.LoadHookContractLockEntry(h.dataDir, "openhands"); got.Connector != "openhands" {
 		t.Fatalf("the openhands lock entry was cleared: %+v", got)
 	}
-	if token, err := connector.LoadHookAPIToken(h.dataDir, "openhands"); err != nil || token != "" {
-		t.Fatalf("openhands token = %q, %v; want revoked", token, err)
+	// The hook token stays: a copy of the old hook reads it (G-deadcode loop
+	// round 2, removed_connector_copied_hook_unix_test.go).
+	if token, err := connector.LoadHookAPIToken(h.dataDir, "openhands"); err != nil || token == "" {
+		t.Fatalf("openhands token = %q, %v; want it kept", token, err)
 	}
 	if _, err := os.Lstat(filepath.Join(h.dataDir, "connector_backups", "openhands", "config.json")); err != nil {
 		t.Fatalf("the hooks.json backup record was removed: %v", err)
@@ -93,7 +95,7 @@ func (h retiredOpenHandsHost) requireTornDown(t *testing.T) {
 
 // until 1.1: the first gateway start after an upgrade from a release that
 // set up OpenHands turns the hook script into the stub that blocks every call
-// and revokes the token; hooks.json, the backups and the lock stay, and are
+// and keeps the hook token; hooks.json, the backups and the lock stay, and are
 // listed for the user to remove by hand.
 func TestUpgradeTearsDownTheRemovedOpenHandsConnector(t *testing.T) {
 	h := stageRetiredOpenHands(t)
