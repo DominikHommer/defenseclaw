@@ -32,12 +32,12 @@ A host-run agent is covered by hooks, the runtime planes and, on managed Linux, 
 | --- | --- | --- | --- |
 | **Hooks, guardrail rules, the judge and asset policy** | Each agent calls the hook before and after a tool call; the gateway decides | The tool name, the tool input or command text, the session and the working directory. Not what a script does once it runs, the agent's `!` shell mode, detached jobs, or MCP servers that start outside a tool call | Deny or ask per tool call. Asset policy blocks skills, MCP servers and tools by name |
 | **Hook registration guard** | The computer | Edits to the agent's hook configuration | Puts the registration back after the edit. On a managed computer the guardian does it and machine policy is root-owned |
-| **OpenShell sandbox** | A Linux container, or a MicroVM on a Mac | Network and HTTP events for the sandbox, and process starts the OpenShell supervisor launches | The sandbox boundary: filesystem rules (Landlock), seccomp, no network of its own, your uid without capabilities |
+| **OpenShell sandbox** | A Linux container, an optional MicroVM on managed Linux with KVM, or a MicroVM on a Mac | Network and HTTP events for the sandbox, and process starts the OpenShell supervisor launches | The sandbox boundary: filesystem rules (Landlock), seccomp, no network of its own, your uid without capabilities |
 | **Workspace protections** | The host side of a sandbox | New `.git` entries, hidden files, changed files at the end | Read-only `.git/hooks` and `.git/config`, empty stand-ins for secret files, quarantine of nested repositories |
 | **The egress proxy** | The DefenseClaw gateway, reached from the sandbox | Every site a sandboxed agent contacts | Allow list, block feeds, admin lists and large-upload blocks, per sandbox |
 | **The runtime planes** (A, B and C) | The computer | A: process compute. B: connections per process. C: process starts, file opens and identity changes | Nothing. They detect and score; see [AI discovery](/docs/reference/scanning/ai-discovery) |
 | **Tetragon** (customer-owned, Linux only) | The Linux kernel | Every process start with its arguments, file opens of credential and persistence paths, and connects. The events of your own kprobe and LSM policies, when they hit an AI agent | DefenseClaw: on managed Linux only, `EPERM` for two fixed controls, when the administrator approves it. Your own policies enforce whatever you wrote in them. See [Tetragon on managed Linux](#what-tetragon-adds-on-managed-linux) |
-| **The sandbox manager** | The per-user gateway | Hook traffic, destinations, the process tree and the agent's activity inside each sandbox | Stops the sandbox on tampering or hook silence, turns its egress off in deny mode, raises alerts |
+| **The sandbox manager** | The per-user gateway, or the user's sandbox daemon on a managed computer | Hook traffic, destinations, the process tree and the agent's activity inside each sandbox | Stops the sandbox on tampering or hook silence, turns its egress off in deny mode, raises alerts |
 
 A sandboxed agent's hooks run inside the sandbox and reach the gateway through a dedicated hook port.
 
@@ -46,11 +46,11 @@ A sandboxed agent's hooks run inside the sandbox and reach the gateway through a
 | Computer | Hooks | Sandbox layers | Runtime planes | Tetragon |
 | --- | --- | --- | --- | --- |
 | **Linux, open-source (per-user)** | Yes | Yes, on the Docker driver (rootful Docker and the `docker` group) | A and B. C needs capabilities a per-user install does not have; see [What to grant](/docs/reference/scanning/ai-discovery) | Detected and explained; the per-user gateway never connects to it. For docker sandboxes, see the next row |
-| **Linux, managed (standalone enterprise)** | Yes; the native hook is a root-owned binary | No: sandboxes are refused on a managed computer | A, B and C, through the root sensor helper | Consume, observe or enforce, through the root sensor helper |
+| **Linux, managed (standalone enterprise)** | Yes; the native hook is a root-owned binary | Yes, Docker or an optional MicroVM driver with KVM; copy mode only, under the administrator's [sandbox policy](/docs/enterprise/runtime/sandboxes) | A, B and C, through the root sensor helper | Consume, observe or enforce, through the root sensor helper |
 | **Linux sandbox** (Docker driver) | Yes, always fail closed | Yes | None inside the sandbox; the per-user gateway has no Plane C | Read only, when an administrator runs Tetragon and installs the opt-in [sandbox kernel feed](/docs/how-to/sandboxes/set-up-on-linux): every process start and exit in your sandboxes joins their process tree. No policy and no enforcement; the sandbox is contained by OpenShell |
 | **macOS, open-source** | Yes | Yes, MicroVM driver on Apple silicon | A and B | Not available: Tetragon has no macOS agent |
 | **macOS sandbox** (MicroVM) | Yes, always fail closed | Yes; copy mode only | None inside the guest | Not available: the guest kernel is not visible to the host |
-| **macOS, managed** | Yes | No | A, B and C (Endpoint Security, notify only) | Not available |
+| **macOS, managed** | Yes | Yes, MicroVM driver on Apple silicon; copy mode only, under the administrator's [sandbox policy](/docs/enterprise/runtime/sandboxes). Intel Macs refuse | A, B and C (Endpoint Security, notify only) | Not available |
 | **Windows** | Yes; native hook runner | No: sandboxes are refused | A and B. C needs an elevated token and the Advanced Audit Policy | Not available |
 
 The Secure Client profile is outside this page. It does not use the Tetragon
