@@ -325,18 +325,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required"})
 				return
 			}
-			// GAP-1903: the VS Code Local harness also runs the per-user
-			// Copilot CLI hook file, under the Local event the bound CLI
-			// event maps to, and sends it the Local payload (snake_case
-			// tool_name/tool_input). Decoded as a CLI body, the call had no
-			// authoritative arguments and its command rules stayed
-			// detection-only. The Copilot CLI's own camelCase bodies carry no
-			// hook_event_name, and the body may only name the event the hook
-			// command is bound to. The managed hook reads the body for its
-			// write evidence with the same decision.
+			// The registered hook surface and event own the dialect. Body
+			// fields cannot select a different parser.
 			var vscodeLocal bool
-			event, vscodeLocal = copilotargs.LocalDialect(copilotHookDialectFromHeaders(r.Header), event,
-				payloadString(payload, "hook_event_name"), payload["toolName"] != nil || payload["toolArgs"] != nil)
+			event, vscodeLocal = copilotargs.LocalDialect(copilotHookDialectFromHeaders(r.Header), event)
 			if vscodeLocal {
 				// The VS Code Local harness names the event in its body.
 				// It must be the event the hook command is bound to, so a
@@ -416,6 +408,17 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if toolRoute == connector.ToolEventRouteStructuredAction ||
 			profile.ToolCallLifecycle.Version == 0 && isGenericToolInspectionEvent(req.HookEventName) {
 			if !hookToolCallJSONUnambiguous(connectorName, rawBody) {
+				req.ToolCallUnparsed = true
+			}
+			// A mapped Local event owns snake_case tool fields. A CLI-shaped
+			// decoy cannot switch the registered route or hide its target.
+			if connectorName == "copilot" && copilotVSCodeLocalFromContext(r.Context()) &&
+				(payload["toolName"] != nil || payload["toolArgs"] != nil) {
+				req.ToolCallUnparsed = true
+			}
+			if connectorName == "copilot" && !copilotVSCodeLocalFromContext(r.Context()) &&
+				(payload["hook_event_name"] != nil || payload["tool_name"] != nil ||
+					payload["tool_input"] != nil) {
 				req.ToolCallUnparsed = true
 			}
 			if connectorName == "copilot" && copilotWriteCallUnproven(req.ToolName, req.ToolArgs, req.CWD, hookActiveHome(r.Context())) {

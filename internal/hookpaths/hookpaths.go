@@ -689,8 +689,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 func copilotCall(envelope map[string]json.RawMessage, surface, event string) (json.RawMessage, json.RawMessage, bool, bool) {
 	var hookEvent string
 	_ = json.Unmarshal(envelope["hook_event_name"], &hookEvent)
-	_, local := copilotargs.LocalDialect(surface, event, hookEvent,
-		aliasSet(envelope["toolName"]) || aliasSet(envelope["toolArgs"]))
+	_, local := copilotargs.LocalDialect(surface, event)
 	toolNames := []string{"toolName", "tool_name"}
 	argNames := []string{"toolArgs", "tool_input", "toolInput", "tool_args", "args", "arguments"}
 	if local {
@@ -699,6 +698,12 @@ func copilotCall(envelope map[string]json.RawMessage, surface, event string) (js
 	}
 	toolRaw, toolConflict := dialectAlias(envelope, toolNames)
 	rawArgs, argsConflict := dialectAlias(envelope, argNames)
+	if !local && (hookEvent != "" || aliasSet(envelope["tool_name"]) || aliasSet(envelope["tool_input"])) {
+		toolConflict = true
+	}
+	if local && (aliasSet(envelope["toolName"]) || aliasSet(envelope["toolArgs"])) {
+		toolConflict = true
+	}
 	var tool string
 	_ = json.Unmarshal(toolRaw, &tool)
 	tool = strings.TrimSpace(tool)

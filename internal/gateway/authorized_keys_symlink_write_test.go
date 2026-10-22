@@ -427,6 +427,15 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		{"true redirect", "true > ~/.ssh/authorized_keys", project, true},
 		{"absolute keys", "hostname > " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"normalized keys", "hostname > " + filepath.Join(project, "..", ".ssh", "authorized_keys"), project, true},
+		{"find fprint output", "find . -fprint " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"find fprintf output", "find . -fprintf " + filepath.Join(home, ".ssh", "authorized_keys") + " %p", project, true},
+		{"git config file output", "git config -f " + filepath.Join(home, ".ssh", "authorized_keys") + " verifier.value x", project, true},
+		{"git config environment output", "GIT_CONFIG_GLOBAL=" + filepath.Join(home, ".ssh", "authorized_keys") + " git config --global verifier.value x", project, true},
+		{"gawk inplace output", "gawk -i inplace '{print}' " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"uniq second operand output", "uniq input.txt " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"unknown output option", "fixture-tool --output=" + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
+		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: row.cwd,

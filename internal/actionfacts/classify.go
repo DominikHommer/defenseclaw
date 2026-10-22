@@ -375,6 +375,10 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "grep", "rg", "ripgrep", "find", "fd":
 		addOperation(command, OperationSearch)
 		classifySearchPaths(out, command, program)
+	case "gawk", "awk", "mawk", "nawk":
+		classifyAwkOutputOperands(out, command, program)
+	case "uniq":
+		classifyUniqOutputOperand(out, command)
 	case "getcap":
 		classifyGetcap(out, command)
 	case "where", "where.exe":
@@ -753,6 +757,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		// Known command grammar; the parser or wrapper analysis owns any nested
 		// command source.
 	default:
+		classifyUnknownOutputOperand(out, command)
 		if posixVersionedPythonProgram(program) {
 			classifyPOSIXStdinScriptInterpreter(out, command)
 			break
@@ -2856,6 +2861,7 @@ func classifySearchPaths(out *parseOutput, command *CommandFact, program string)
 			addOperation(command, OperationExecute)
 			out.markPartial(IssueUnsupportedConstruct)
 		}
+		classifyFindOutputOperands(out, command)
 	case "fd":
 		operands := pathOperands(command.Argv, optionValues(
 			"-c", "-e", "-j", "-d", "-o", "-s", "-t", "-x",
@@ -9985,6 +9991,12 @@ func classifyGit(out *parseOutput, command *CommandFact) {
 		}
 		if gitConfigMutates(command.Argv[index+1:]) {
 			addOperation(command, OperationConfigChange)
+			for _, key := range []string{"-f", "--file"} {
+				if target := parsed.values[key]; target != "" {
+					addOperation(command, OperationWrite)
+					appendCommandPath(out, command, PathAccessWrite, target)
+				}
+			}
 		}
 	case "show", "log", "diff", "whatchanged":
 		classifyGitReadOutput(out, command, index)
