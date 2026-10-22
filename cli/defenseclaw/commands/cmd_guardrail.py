@@ -96,11 +96,9 @@ _CONNECTOR_LABELS = {
     "cursor": "Cursor",
     "devin": "Devin",
     "copilot": "GitHub Copilot CLI",
-    "openhands": "OpenHands",
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
     "amp": "Amp",
-    "omnigent": "OmniGent",
     "kiro": "Kiro",
 }
 
@@ -240,7 +238,7 @@ def _resolve_member_connector(app, requested: str) -> str | None:
 def _verify_agents_before_enable(app: AppContext, connectors: list[str]) -> None:
     """Re-verify the agent executables an enable is about to set up.
 
-    Windows (and OpenHands on macOS) admit a connector only against a freshly
+    Windows admits a connector only against a freshly
     verified agent executable. ``guardrail disable`` removes the connector's
     proof and the short-lived selection from the last setup has expired, so an
     enable that only restarted the gateway left it refusing the connector as

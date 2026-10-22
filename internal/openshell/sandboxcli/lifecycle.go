@@ -324,10 +324,7 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	}
 	row("Project", a.tildePath(sb.Project)+" → "+sb.Workdir+" ("+sb.WorkdirMode+")")
 	yolo := "skip-permissions on"
-	switch text, own := ownApprovals[sb.Harness]; {
-	case own:
-		yolo = text
-	case !sb.Launch.Yolo:
+	if !sb.Launch.Yolo {
 		yolo = "skip-permissions off (harness prompts kept)"
 	}
 	row("Permissions", yolo)

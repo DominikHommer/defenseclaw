@@ -331,10 +331,9 @@ events below:
 | Antigravity | `PreToolUse` | `PreToolUse` | No |
 | Hermes | `pre_tool_call` | None | No (managed standalone: blocks `pre_tool_call` when DefenseClaw cannot check it) |
 | OpenCode | `tool.execute.before` | None | Yes |
-| OpenHands | `pre_tool_use`, `user_prompt_submit`, `stop` | None | Yes |
 | Kiro | `UserPromptSubmit`, `PreToolUse` | None | Yes |
 | Amp | `tool.call`, `tool.result` | `tool.call`, `tool.result` (foreground thread) | Yes |
-| OmniGent | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `AfterAgentResponse`, `BeforeModel`, `AfterModel` | `UserPromptSubmit`, `PreToolUse`, `BeforeModel` | Yes |
+
 
 - An already-completed result event cannot undo its original side effect.
 - An observation-only event remains observation-only even when fail mode is

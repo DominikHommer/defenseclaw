@@ -217,7 +217,7 @@ func agentIdentityInstallFP(connectorName string, user agentIdentityUser) string
 	cfg := agentIdentityConfig.Load()
 	if user.Self {
 		switch strings.ToLower(strings.TrimSpace(connectorName)) {
-		case "claudecode", "codex", "hermes", "opencode", "omnigent":
+		case "claudecode", "codex", "hermes", "opencode":
 		default:
 			return filepath.Clean(cfg.ConnectorHomeDir(connectorName))
 		}
@@ -247,8 +247,6 @@ func connectorConfigRootRelative(cfg *config.Config, connectorName string) strin
 		return ".hermes"
 	case "opencode":
 		return filepath.Join(".config", "opencode")
-	case "omnigent":
-		return ".omnigent"
 	}
 	if cached, ok := connectorConfigRootRel.Load(connectorName); ok {
 		return cached.(string)

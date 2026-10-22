@@ -1074,8 +1074,8 @@ class TestConfigLoadSave(unittest.TestCase):
         cfg = AssetPolicyConfig(
             enabled=True,
             connectors={
-                "open-hands": PerConnectorAssetPolicy(mode="action"),
-                "openhands": PerConnectorAssetPolicy(mode="observe"),
+                "claude-code": PerConnectorAssetPolicy(mode="action"),
+                "claude_code": PerConnectorAssetPolicy(mode="observe"),
             },
         )
         with self.assertRaises(ValueError):

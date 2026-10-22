@@ -52,9 +52,7 @@ var refusalHarnesses = map[string]refusalHarness{
 	"devin":       {"Devin CLI", "devin"},
 	"hermes":      {"Hermes Agent", "hermes"},
 	"kiro":        {"Kiro CLI", "kiro"},
-	"omnigent":    {"OmniGent", "omnigent"},
 	"opencode":    {"OpenCode", "opencode"},
-	"openhands":   {"OpenHands", "openhands"},
 }
 
 // harnessFor names conn (a connector, or a harness command) for a message.

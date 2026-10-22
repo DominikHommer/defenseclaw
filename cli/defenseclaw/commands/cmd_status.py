@@ -205,21 +205,6 @@ def _opencode_runtime_truth(
     return raw_state, f"managed bridge authenticated load heartbeat is fresh (received at {heartbeat_raw.strip()})"
 
 
-def _omnigent_effective_runtime_state(cfg, state: str) -> tuple[str, str]:
-    """Project adapter liveness through passive OmniGent policy readiness."""
-
-    raw_state = str(state or "")
-    if raw_state.strip().lower() not in {"running", "active", "ready", "up"}:
-        return raw_state, ""
-    try:
-        from defenseclaw.commands.cmd_doctor import _omnigent_runtime_readiness
-
-        readiness, detail = _omnigent_runtime_readiness(cfg)
-    except Exception as exc:  # noqa: BLE001 - presentation must remain available.
-        readiness, detail = "warn", f"policy readiness unavailable: {exc}"
-    if readiness not in {"pass", "bound"}:
-        return "degraded", detail
-    return raw_state, detail
 
 
 # GAP-1149: counting alerts reads every audit row, which took minutes on a
@@ -400,6 +385,7 @@ def status(app: AppContext, as_json: bool) -> None:
         )
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
+    _print_removed_connector_cleanup(cfg)
     ux.echo()
 
     if _host_is_windows():
@@ -589,6 +575,18 @@ def status(app: AppContext, as_json: bool) -> None:
         raise SystemExit(1)
 
 
+def _print_removed_connector_cleanup(cfg) -> None:
+    """until 1.1: name a removed connector that left things to remove by hand."""
+    from defenseclaw.removed_connectors import leftovers
+
+    for left in leftovers(str(getattr(cfg, "data_dir", "") or "")):
+        _status_row(
+            "Cleanup",
+            ux._style(f"{left.label} was removed in 1.0.4; {len(left.items)} item(s) to remove by hand", fg="yellow")
+            + ux.dim(" (steps: defenseclaw doctor)"),
+        )
+
+
 def _live_gateway_pid(cfg) -> int:
     """PID of a live gateway recorded in ``gateway.pid``, else 0 (best effort)."""
     data_dir = str(getattr(cfg, "data_dir", "") or "")
@@ -640,11 +638,9 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "cursor": "Cursor",
     "devin": "Devin",
     "copilot": "GitHub Copilot CLI",
-    "openhands": "OpenHands",
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
     "amp": "Amp",
-    "omnigent": "OmniGent",
     "kiro": "Kiro",
 }
 # Plain words, as on the TUI Overview (GAP-2561).
@@ -852,8 +848,6 @@ def _print_agents(
                     gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
                     gateway_available=isinstance(health, dict),
                 )
-            elif conn == "omnigent":
-                runtime_state, runtime_detail = _omnigent_effective_runtime_state(cfg, runtime_state)
             elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
                 # The gateway does not dial an OpenClaw gateway that is only
                 # the claw.mode default and is not installed (#958).
@@ -1769,18 +1763,6 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
         rows["opencode"]["state"] = runtime_state
         rows["opencode"]["runtime_detail"] = runtime_detail
-    if (
-        "omnigent" in rows
-        and rows["omnigent"].get("enabled")
-        and (omnigent_health := health_map.get("omnigent")) is not None
-    ):
-        runtime_state, readiness_detail = _omnigent_effective_runtime_state(
-            cfg,
-            str(omnigent_health.get("state") or ""),
-        )
-        rows["omnigent"]["state"] = runtime_state
-        if readiness_detail:
-            rows["omnigent"]["readiness_detail"] = readiness_detail
     cursor = rows.get("cursor")
     if cursor is not None:
         if cursor.get("enabled") and cursor.get("state") == "running":
@@ -1832,6 +1814,11 @@ def _status_payload(app) -> dict:
             "scanners": _scanner_status_map(cfg),
         }
     )
+    from defenseclaw.removed_connectors import leftovers
+
+    if left := [item.as_json() for item in leftovers(str(cfg.data_dir or ""))]:
+        # until 1.1: what the removed OpenHands/OmniGent teardown left.
+        payload["removed_connector_cleanup"] = left
 
     if app.store:
         try:

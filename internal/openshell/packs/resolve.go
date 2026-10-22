@@ -1174,6 +1174,8 @@ var reviewFloor = []string{
 	"**/" + legacyconnector.InventoryDotDirs[0] + "/**", "." + legacyconnector.VendorToken + "rules",
 	"**/.kiro/**", "**/.amazonq/**", "**/.continue/**", "**/.roo/**", ".roomodes",
 	".clinerules", "**/.clinerules/**", "**/.opencode/**", "opencode.json", "opencode.jsonc", ".aider.conf.yml",
+	// OpenHands and OmniGent have no DefenseClaw connector any more, but an
+	// installed one still loads its project folder.
 	"**/.devin/**", "**/.openhands/**", "**/.omnigent/**",
 	".github/copilot-instructions.md", ".github/instructions/**", ".github/prompts/**", ".github/chatmodes/**",
 	".github/hooks/**", ".github/copilot/**",

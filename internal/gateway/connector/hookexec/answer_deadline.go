@@ -136,7 +136,7 @@ func progressCeiling(opts Options, startedAt time.Time) time.Time {
 func toolGateEvent(connector, event string) bool {
 	event = strings.TrimSpace(event)
 	switch strings.ToLower(strings.TrimSpace(connector)) {
-	case "claudecode", "codex", "devin", "kiro", "omnigent", "antigravity":
+	case "claudecode", "codex", "devin", "kiro", "antigravity":
 		return event == "PreToolUse" || event == "PermissionRequest"
 	case "copilot":
 		return event == "preToolUse" || event == "permissionRequest"

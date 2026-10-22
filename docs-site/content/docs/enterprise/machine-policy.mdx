@@ -41,9 +41,8 @@ publishes.
 | Devin (`devin`) | Per user, with the foreign-hook guard; Cascade in builds before 3.9.19 is turned off through machine policy (`devincascade`) | Per user (hook binary), with the guard; Cascade as on Linux and macOS |
 | Hermes (`hermes`) | Per user, with the foreign-hook guard | Per user (hook binary) |
 | Antigravity (`antigravity`) | Per user | Per user (hook binary) |
-| OpenHands (`openhands`), OmniGent (`omnigent`) | Per user | Not managed: the enumerator writes no targets for them, and a manifest row that names one is refused |
 | Kiro (`kiro`) | Per user: each user's global `~/.kiro/hooks/defenseclaw.json` plus the CLI 2.x `defenseclaw` agent | Per user: `%USERPROFILE%\.kiro\hooks\defenseclaw.json` plus the CLI 2.x `defenseclaw` agent, through the hook binary |
-| OpenClaw (`openclaw`), ZeptoClaw (`zeptoclaw`) | Not managed: they need the guardrail proxy, which a managed host does not run, so the enumerator skips them (route `unsupported`) | Not managed, as for OpenHands |
+| OpenClaw (`openclaw`), ZeptoClaw (`zeptoclaw`) | Not managed: they need the guardrail proxy, which a managed host does not run, so the enumerator skips them (route `unsupported`) | Not managed |
 
 - **Vendor lock.** A setting in the agent's machine policy that stops user
   and project hooks from running. Only Codex and Claude Code have one.
@@ -75,11 +74,10 @@ The per-user registrations differ by OS:
   `status` and the hook-contract lock report it that way. A registration an
   earlier release wrote (`~/.defenseclaw/hooks/devin-hook.sh`) is replaced at
   the guardian's next repair.
-- **Linux and macOS, other per-user agents.** Antigravity, Hermes,
-  OpenHands and Kiro run a DefenseClaw hook script that the guardian writes
-  into the user's `~/.defenseclaw/hooks` (for example `hermes-hook.sh`), and
-  OmniGent a DefenseClaw policy bridge there. The script sends the event to
-  the gateway over the hook socket itself, and the guardian verifies and
+- **Linux and macOS, other per-user agents.** Antigravity, Hermes and Kiro
+  run a DefenseClaw hook script that the guardian writes
+  into the user's `~/.defenseclaw/hooks` (for example `hermes-hook.sh`).
+  The script sends the event to the gateway over the hook socket, and the guardian verifies and
   repairs it. Amp and the per-user OpenCode plugin call the gateway from
   inside the agent and run `defenseclaw-hook` for the foreign-hook check,
   and so does `hermes-hook.sh` before each Hermes tool call.

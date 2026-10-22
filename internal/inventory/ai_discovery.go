@@ -1752,7 +1752,7 @@ var sharedSurfaceDetectors = map[string]bool{"config": true, "skill": true, "rul
 // ~/.agents/skills, where DefenseClaw's own CodeGuard skill goes, or
 // ~/.claude/skills) when that product has no evidence of its own. A shell
 // history mention is not such evidence. Without this, one CodeGuard install
-// made Cursor, Devin, Amp, Antigravity, Copilot and OpenHands "seen" for a
+// made Cursor, Devin, Amp, Antigravity and Copilot "seen" for a
 // user who has none of them (GAP-1378).
 func (s *ContinuousDiscoveryService) dropUnbackedSharedSurfaceSignals(signals []AISignal) []AISignal {
 	owners := map[string]map[string]bool{}

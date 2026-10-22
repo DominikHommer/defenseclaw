@@ -91,17 +91,8 @@ connector-scoped token on a generic `/api/v1/inspect/*` route is accepted only
 over loopback and only when `X-DefenseClaw-Connector` names the same registered
 connector.
 
-OTLP credentials are source-specific for Codex and Claude Code. They send their scoped
-bearer to `/v1/{logs,metrics,traces}` together with
-`X-DefenseClaw-Source: codex|claudecode`; that header selects and must match the
-scoped credential. Once a scoped token exists for one of those sources, the
-master gateway token is rejected for that source's scoped route. Copilot CLI
-upstream documents optional OTel traces and metrics, but DefenseClaw does not
-configure, authenticate, ingest as a Copilot-native source, or certify that
-surface. Copilot connector telemetry therefore reaches this API through its
-authenticated hook route only. OmniGent's separately documented optional
-native source currently authenticates loopback `/v1/{signal}` requests with
-the master gateway token.
+OTLP credentials are source-specific for Codex and Claude Code. They send their scoped bearer to `/v1/{logs,metrics,traces}` together with `X-DefenseClaw-Source: codex|claudecode`; that header selects and must match the scoped credential. Once a scoped token exists for one of those sources, the master gateway token is rejected for that source's scoped route. Copilot CLI upstream documents optional OTel traces and metrics, but DefenseClaw does not configure, authenticate, ingest as a Copilot-native source, or certify that surface. Copilot connector telemetry therefore reaches this API through its authenticated hook route only.
+
 
 The token is resolved from one of, in priority order:
 
@@ -259,7 +250,7 @@ Where `openshell.enabled` is `false`, the `sandbox` subsystem is absent from
   report the effective `observe`/`action` posture; `hook_fail_mode` is the
   effective hook fail mode; `enabled` is the connector's effective guardrail
   enablement; `hook_enforcement` is true for a non-proxy connector in action
-  mode; `enforcement_surface` identifies the proxy, lifecycle-hook, or OmniGent
+ mode; `enforcement_surface` identifies the proxy, lifecycle-hook
   policy API path; `telemetry` lists reported wiring channels; and
   `proxy_intercept` is true only for proxy connectors. `mode`,
   `enforcement_surface`, and `proxy_intercept` are derived from the
@@ -329,12 +320,10 @@ register a connector hook route.
 | `POST` | `/api/v1/cursor/hook` | Cursor | [`internal/gateway/connector/hook_only.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/hook_only.go) |
 | `POST` | `/api/v1/devin/hook` | Devin | same; native CLI lifecycle events only |
 | `POST` | `/api/v1/copilot/hook` | GitHub Copilot CLI | same |
-| `POST` | `/api/v1/openhands/hook` | OpenHands | same |
 | `POST` | `/api/v1/antigravity/hook` | Antigravity | same |
 | `POST` | `/api/v1/hermes/hook` | Hermes | same |
 | `POST` | `/api/v1/opencode/hook` | OpenCode | same |
 | `POST` | `/api/v1/amp/hook` | Amp | [`internal/gateway/connector/amp.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/amp.go) |
-| `POST` | `/api/v1/omnigent/hook` | OmniGent | [`internal/gateway/connector/omnigent.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/omnigent.go) |
 | `POST` | `/api/v1/kiro/hook` | Kiro | [`internal/gateway/connector/kiro.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/kiro.go) |
 
 A connector that is unsupported on the host OS registers no route. In a

@@ -231,8 +231,6 @@ func buildWebhookEndpoints(cfgs []config.WebhookConfig, logger *log.Logger) []we
 func normalizeWebhookConnector(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
 	switch n {
-	case "open-hands", "open_hands":
-		return "openhands"
 	default:
 		return n
 	}

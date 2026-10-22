@@ -523,8 +523,8 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
 - **The Kerberos principal and the session can be changed by the user.** They
   are always `claimed`, except an SSH session the gateway confirmed through
   logind or utmp.
-- **Three bridges send no Kerberos principal.** The OpenCode plugin, the Amp
-  plugin and the Omnigent policy bridge run inside the agent process. They
+- **Two plugins send no Kerberos principal.** The OpenCode and Amp plugins
+  run inside the agent process. They
   report the SSH and login-session facts but do not read the ticket cache, so
   the records of those connectors carry no
   `defenseclaw.session.kerberos_principal`. Hooks that go through the

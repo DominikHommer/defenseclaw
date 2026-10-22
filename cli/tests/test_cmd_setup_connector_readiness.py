@@ -32,7 +32,6 @@ TEN_CONNECTORS = (
     "opencode",
     "amp",
     "hermes",
-    "omnigent",
 )
 
 
@@ -206,78 +205,6 @@ def test_opencode_protected_executable_requires_exact_sst_location(monkeypatch, 
     assert agent_selection.setup_agent_lock_executable_invariant(str(tmp_path), "opencode", entry) == "location"
 
 
-def test_real_doctor_dispatch_exercises_exact_eleven(monkeypatch, tmp_path: Path) -> None:
-    cfg = _config(tmp_path)
-    assert set(TEN_CONNECTORS) <= set(cmd_doctor._SETUP_READINESS_PRIMARY_LABELS)
-    assert set(cmd_doctor._SETUP_READINESS_PRIMARY_LABELS) - set(TEN_CONNECTORS) == {
-        "kiro",
-        "openhands",
-    }
-    config_paths: dict[str, str] = {}
-    runtime_paths: dict[str, list[str]] = {}
-    for connector in TEN_CONNECTORS:
-        config = tmp_path / f"{connector}.json"
-        runtime = tmp_path / f"{connector}.bin"
-        config.write_text("defenseclaw", encoding="utf-8")
-        runtime.write_bytes(b"runtime")
-        config_paths[connector] = str(config)
-        runtime_paths[connector] = [str(runtime)]
-
-    omni_module = tmp_path / "defenseclaw_omnigent_policy.py"
-    omni_pth = tmp_path / "defenseclaw_omnigent_policy.pth"
-    omni_module.write_text("POLICY_REGISTRY = {'defenseclaw_policy': True}\n", encoding="utf-8")
-    omni_pth.write_text(str(tmp_path), encoding="utf-8")
-    runtime_paths["omnigent"] = [str(omni_module), str(omni_pth)]
-
-    native_calls: list[str] = []
-
-    def native_check(_cfg, connector: str, **_kwargs) -> WindowsHookCheck:
-        native_calls.append(connector)
-        return WindowsHookCheck("healthy", "registered", target=str(tmp_path / "defenseclaw-hook.exe"))
-
-    monkeypatch.setattr(cmd_doctor, "_windows_native_hook_check", native_check)
-    monkeypatch.setattr(cmd_doctor, "_hook_health_paths_from_lock", lambda _cfg, name: [config_paths[name]])
-    monkeypatch.setattr(cmd_doctor, "_hook_runtime_paths_from_lock", lambda _cfg, name: runtime_paths[name])
-    monkeypatch.setattr(cmd_doctor, "_file_references_marker", lambda *_args: True)
-    monkeypatch.setattr(
-        cmd_doctor,
-        "validate_cursor_registration",
-        lambda *_args, **_kwargs: CursorRegistrationValidation(
-            True,
-            "registered",
-            runtime_path=runtime_paths["cursor"][0],
-            entry_count=14,
-        ),
-    )
-    monkeypatch.setattr(cmd_doctor, "_opencode_managed_plugin_drift", lambda *_args: "")
-    monkeypatch.setattr(cmd_doctor, "_opencode_load_heartbeat_status", lambda _cfg: ("pass", "loaded"))
-    monkeypatch.setattr(cmd_doctor, "_omnigent_managed_artifact_drift", lambda *_args: "")
-    monkeypatch.setattr(
-        cmd_doctor,
-        "_omnigent_runtime_readiness",
-        lambda _cfg: ("warn", "loaded policy generation is unverified pending reload/restart"),
-    )
-    monkeypatch.setattr(cmd_doctor, "hermes_profile_unsupported_reason", lambda *_args: "")
-    monkeypatch.setattr(
-        cmd_doctor,
-        "copilot_settings_resolution",
-        lambda *_args: SimpleNamespace(errors=(), disable_all_hooks=False),
-    )
-
-    expected_labels = {cmd_doctor._SETUP_READINESS_PRIMARY_LABELS[name] for name in TEN_CONNECTORS}
-    observed_labels: set[str] = set()
-    for connector in TEN_CONNECTORS:
-        result = cmd_doctor._DoctorResult(passive=True, quiet=True)
-        cmd_doctor._check_connector_hooks(cfg, connector, result)
-        observed_labels.update(row["label"] for row in result.checks if row["label"] in expected_labels)
-
-    assert observed_labels == expected_labels
-    expected_native_calls = (
-        ["codex", "claudecode", "devin", "copilot", "antigravity", "hermes"]
-        if agent_selection.os.name == "nt"
-        else []
-    )
-    assert native_calls == expected_native_calls
 
 
 def _write_amp_runtime(tmp_path: Path) -> tuple[SimpleNamespace, dict[str, object]]:
@@ -901,52 +828,6 @@ def test_readiness_rejects_lock_that_disagrees_with_mode_aware_desired_fail_mode
     assert readiness.detail == "lock=open configured=closed effective=open"
 
 
-@pytest.mark.parametrize(("runtime_status", "ready"), (("warn", True), ("fail", False)))
-def test_omnigent_native_degraded_is_accepted_but_failure_is_not(
-    monkeypatch,
-    tmp_path: Path,
-    runtime_status: str,
-    ready: bool,
-) -> None:
-    cfg = _config(tmp_path)
-    entry = _entry("omnigent", tmp_path)
-    _patch_registration_ready(monkeypatch, entry)
-    config_path = Path(entry["locations"]["hook_config_paths"][0])
-    atomic_write_private_bytes(config_path, b"defenseclaw_omnigent_policy defenseclaw_guardrail")
-    module_path = tmp_path / "defenseclaw_omnigent_policy.py"
-    pth_path = tmp_path / "defenseclaw_omnigent.pth"
-    atomic_write_private_bytes(module_path, b"POLICY_REGISTRY = {'defenseclaw_policy': True}\n")
-    atomic_write_private_bytes(pth_path, str(tmp_path).encode())
-    entry["locations"]["hook_script_paths"] = [str(module_path), str(pth_path)]
-    entry["hook_script_digests"] = {
-        path.name: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() for path in (module_path, pth_path)
-    }
-    atomic_write_private_bytes(
-        tmp_path / "hook_contract_lock.json",
-        json.dumps({"version": 2, "connectors": {"omnigent": entry}}).encode(),
-    )
-    monkeypatch.setattr(agent_selection, "setup_agent_lock_executable_invariant", lambda *_args: "")
-    monkeypatch.setattr(
-        cmd_doctor,
-        "_omnigent_custody_json",
-        lambda path, **_kwargs: ("ok", json.loads(Path(path).read_text(encoding="utf-8")), ""),
-    )
-    monkeypatch.setattr(
-        cmd_doctor,
-        "_omnigent_custody_text",
-        lambda path, **_kwargs: (Path(path).read_text(encoding="utf-8"), ""),
-    )
-    monkeypatch.setattr(cmd_doctor, "_file_references_marker", lambda *_args: True)
-    monkeypatch.setattr(cmd_doctor, "_omnigent_managed_artifact_drift", lambda *_args: "")
-    monkeypatch.setattr(
-        cmd_doctor,
-        "_omnigent_runtime_readiness",
-        lambda *_args, **_kwargs: (runtime_status, "loaded policy generation remains unverified"),
-    )
-    readiness = cmd_doctor.connector_setup_readiness(cfg, "omnigent")
-    assert bool(readiness) is ready
-    if ready:
-        assert readiness.detail == "configured=open; effective=open"
 
 
 def test_copilot_stale_launcher_returns_executable_invariant(monkeypatch, tmp_path: Path) -> None:
@@ -1032,7 +913,7 @@ def test_wait_targets_keep_the_complete_desired_roster(tmp_path: Path) -> None:
         json.dumps(
             {
                 "version": 3,
-                "names": ["amp", "codex", "openhands"],
+                "names": ["amp", "codex", ],
                 "inactive_names": [],
             }
         ),
@@ -1040,10 +921,10 @@ def test_wait_targets_keep_the_complete_desired_roster(tmp_path: Path) -> None:
     )
 
     assert cmd_setup._hook_runtime_wait_targets(
-        ["amp", "claudecode", "codex", "kiro", "openhands", "opencode"],
+        ["amp", "claudecode", "codex", "kiro",  "opencode"],
         str(tmp_path),
         "kiro",
-    ) == ["amp", "claudecode", "codex", "kiro", "opencode", "openhands"]
+    ) == ["amp", "claudecode", "codex", "kiro", "opencode", ]
 
 
 def test_snapshot_accepts_superset_active_roster(tmp_path: Path) -> None:

@@ -218,7 +218,7 @@ These are the settings each pack controls. The
   `balanced` and `strict` stop. Claude Code, Codex, OpenCode, Kiro CLI and
   GitHub Copilot CLI sandboxes get this check (and Cursor Agent, Amp and
   Devin CLI will, once they can run in a sandbox). For
-  Hermes, OpenHands, Antigravity and OmniGent it is not measured yet which
+  Hermes and Antigravity it is not measured yet which
   call a hook belongs to, so for those DefenseClaw relies on noticing hooks
   that go silent.
 - **Silent hooks response** (`hooks.on_silence`, `hooks.silence_after`):
@@ -227,8 +227,8 @@ These are the settings each pack controls. The
   commands without network traffic don't count) for `silence_after`
   without one hook request reaching DefenseClaw, as a hook registration
   the agent switched off looks. It applies to user-tier harnesses, whose hook settings the agent
-  can edit (OpenCode, Kiro CLI, Amp, Devin CLI, Antigravity, Hermes,
-  OpenHands; the run's banner says so on its `Hooks` line): `stop` stops the
+  can edit (OpenCode, Kiro CLI, Amp, Devin CLI, Antigravity, Hermes;
+  the run's banner says so on its `Hooks` line): `stop` stops the
   sandbox, as a hook tamper does; `alert` reports a high-severity
   `hook_silence` finding and keeps it running. A managed-tier harness, whose
   hooks are root-owned, only alerts. `open` alerts; `balanced` and `strict`

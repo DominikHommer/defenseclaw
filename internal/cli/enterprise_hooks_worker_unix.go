@@ -956,7 +956,7 @@ func enterpriseHookWorkerConfigReferenceLine(data []byte, customDataDir string) 
 		"defenseclaw-managed-hook", "x-defenseclaw-source", "x-defenseclaw-client",
 		"x-defenseclaw-token", "defenseclaw-hook", "defenseclaw-gateway",
 		"defenseclaw.js", "defenseclaw.ts", "defenseclaw.json",
-		"defenseclaw_omnigent_policy", "defenseclaw.listener-proof.v1",
+		"defenseclaw.listener-proof.v1",
 	}
 	for index, raw := range bytes.Split(data, []byte{'\n'}) {
 		line := strings.TrimSpace(string(raw))
@@ -1261,8 +1261,7 @@ func enterpriseHookWorkerCredential(account enterpriseHookWorkerAccount, supplem
 }
 
 // enterpriseHookWorkerPath lets connector setup find an agent where
-// discovery found it (OmniGent locates itself on PATH), after the system
-// directories so they always win. The worker runs as the user, so the
+// discovery found it, after the system directories so they always win. The worker runs as the user, so the
 // user-owned entries grant nothing the user does not already have; a
 // standalone worker leaves out machine directories another account could
 // change (enterprisehooks.UnixAgentSearchDirsFor).

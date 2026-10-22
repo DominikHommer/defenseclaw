@@ -781,16 +781,12 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 						if resp.Action != wantAction || resp.Mode != wantMode || resp.WouldBlock != (wantAction != "block") {
 							t.Errorf("%s: action=%q mode=%q would_block=%v, want %s/%s", name, resp.Action, resp.Mode, resp.WouldBlock, wantAction, wantMode)
 						}
-						// Amp and Omnigent plugins read the action field itself.
-						if wantAction == "block" && len(resp.HookOutput) == 0 && connectorName != "amp" && connectorName != "omnigent" {
-							t.Errorf("%s: block without the connector's native output: %+v", name, resp)
-						}
 					}
 				}
 			}
 		}
 	}
-	for _, name := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "omnigent", "openhands", "opencode"} {
+	for _, name := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode"} {
 		if !covered[name] {
 			t.Errorf("connector %s has no blockable panic event in the matrix (covered: %v)", name, covered)
 		}

@@ -3768,17 +3768,11 @@ def signatures() -> None:
     """Manage AI discovery signature packs."""
 
 
-@signatures.command("list")
-@click.option("--json", "as_json", is_flag=True, help="Output merged signatures as JSON.")
-@click.option("--include-disabled", is_flag=True, help="Include configured disabled signatures.")
-@pass_ctx
-def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> None:
-    """List the merged AI discovery signature catalog."""
-    cfg = _load_config_best_effort(app)
+def _signature_catalog(cfg, disabled: list[str]):
+    """Load the merged signature catalog the way ``signatures list`` shows it."""
     from defenseclaw.commands.cmd_status import _enterprise_profile
 
     secure_client = _enterprise_profile(cfg) == "secure_client"
-    disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     pins, require_pins = ai_signatures.pack_pins(cfg)
     configured = list(cfg.ai_discovery.signature_packs)
     if secure_client:
@@ -3799,6 +3793,31 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
         )
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
+    return sigs, refused
+
+
+def _require_known_signature(cfg, normalized: str) -> None:
+    """Refuse a signature ID that no loaded pack defines (GAP-0557)."""
+    sigs, _ = _signature_catalog(cfg, [])
+    if normalized not in {ai_signatures.normalize_signature_id(sig.id) for sig in sigs}:
+        raise click.ClickException(
+            f"unknown AI signature ID: {normalized}. Run 'defenseclaw agent signatures list "
+            "--include-disabled' to find the ID."
+        )
+
+
+@signatures.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Output merged signatures as JSON.")
+@click.option("--include-disabled", is_flag=True, help="Include configured disabled signatures.")
+@pass_ctx
+def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> None:
+    """List the merged AI discovery signature catalog."""
+    cfg = _load_config_best_effort(app)
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    secure_client = _enterprise_profile(cfg) == "secure_client"
+    disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
+    sigs, refused = _signature_catalog(cfg, disabled)
 
     if as_json:
         payload = [asdict(sig) for sig in sigs]
@@ -3910,6 +3929,7 @@ def signatures_disable(app: AppContext, signature_id: str) -> None:
         raise click.ClickException("signature id must not be empty")
     disabled = list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     if normalized not in disabled:
+        _require_known_signature(cfg, normalized)
         disabled.append(normalized)
         cfg.ai_discovery.disabled_signature_ids = sorted(disabled)
         cfg.save()
@@ -3927,6 +3947,8 @@ def signatures_enable(app: AppContext, signature_id: str) -> None:
     if normalized in disabled:
         cfg.ai_discovery.disabled_signature_ids = [s for s in disabled if s != normalized]
         cfg.save()
+    else:
+        _require_known_signature(cfg, normalized)
     click.echo(f"Enabled AI signature: {normalized}")
 
 

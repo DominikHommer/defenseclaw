@@ -240,7 +240,7 @@ A result applies to every OS unless the cell names one.
 | Delete or edit DefenseClaw's hook registration or plugin in your own agent config, including the Codex `notify` entry (per-user connectors) | Repaired within about a minute; a file change usually triggers repair within seconds | The guardian watches the files and reconciles every minute, writing as the user. Windows: repair runs while the user has an active (connected) session. |
 | Turn hooks off in user or project settings: Claude Code `disableAllHooks` (also through `--settings`), Codex `[features] hooks = false`, `-c features.hooks=false` or `--disable hooks` | Still inspected | Machine policy. Claude Code runs managed hooks whatever lower settings say. Codex machine requirements pin `features.hooks = true` and managed hooks only. |
 | Point the agent at another config directory with `CLAUDE_CONFIG_DIR`, `HOME`, `CODEX_HOME` or `COPILOT_HOME` | Still inspected | Codex, Claude Code and Copilot load DefenseClaw's hooks from fixed machine paths, not from the user's config directory. |
-| Start a per-user agent (Devin, Antigravity, Hermes, Amp, OpenHands, OmniGent) with another config home, such as `XDG_CONFIG_HOME`, `HOME` or `HERMES_HOME`, with `devin --config <file>`, or with Hermes `--safe-mode` | Not inspected, not logged, not repaired; status and verify still report the user's agent ready | DefenseClaw's registration is only in the default location, and the guardian cannot see how a session was started. See [Residual risks](#residual-risks). |
+| Start a per-user agent (Devin, Antigravity, Hermes, Amp) with another config home, such as `XDG_CONFIG_HOME`, `HOME` or `HERMES_HOME`, with `devin --config <file>`, or with Hermes `--safe-mode` | Not inspected, not logged, not repaired; status and verify still report the user's agent ready | DefenseClaw's registration is only in the default location, and the guardian cannot see how a session was started. See [Residual risks](#residual-risks). |
 | Run a copy of a supported agent, at a supported version, from another path | Still inspected | Machine policy applies to every copy of Codex, Claude Code, Cursor, Copilot and OpenCode on the computer. An old or self-built client can ignore it; see [Residual risks](#residual-risks). |
 | Change DefenseClaw's own environment, such as `DEFENSECLAW_FAIL_MODE=open` or another gateway address or token | Still inspected, or fails closed | `defenseclaw-hook` in a managed deployment always fails closed, never open, and talks only to a gateway it has verified. Linux and macOS: it reads the gateway address and listener identity only from the administrator-owned runtime descriptor. Windows: it checks that the listener is the `DefenseClawGateway` service process. |
 
@@ -337,7 +337,6 @@ writes when you supply none lists no agents. On Windows you supply the config. S
 | OpenCode | Vendor machine policy, through DefenseClaw's managed OpenCode plugin; per user while that plugin is not in force | Yes | Yes | Yes |
 | Devin, Antigravity, Hermes | Hook registration in each user's config | Yes | Yes | Yes |
 | Amp | Plugin in each user's config | Yes | Yes | Yes |
-| OpenHands, OmniGent | Registration in each user's config | Not supported | Yes | Yes |
 | Kiro | Hook registration in each user's global `~/.kiro/hooks` and the CLI 2.x `defenseclaw` agent, on every OS | Yes | Yes | Yes |
 | OpenClaw, ZeptoClaw | Not supported: they need DefenseClaw's model-traffic proxy, which the enterprise profile does not run | No | No | No |
 
@@ -356,8 +355,7 @@ Which users are protected is set by enrollment. See
   DefenseClaw's supported minimum version.
 - A per-user agent started with a config home other than the user's default
   or in a mode that skips user configuration (Hermes `--safe-mode`), a
-  per-user agent below its supported minimum version (for example OpenHands
-  before 1.12.0 started with `uvx`), and agents installed where discovery
+  per-user agent below its supported minimum version, and agents installed where discovery
   does not look. See [Residual risks](#residual-risks).
 - Agents that run in a container, a virtual machine, WSL, a dev container or
   on a remote host. Hooks run where the agent runs, so DefenseClaw must be
@@ -380,9 +378,11 @@ DefenseClaw's registration or plugin lives in the user's own default config. A u
 
 On Linux and macOS a user can also leave a path the guardian refuses in their own home, such as a link or a file where the agent's config folder belongs; the registration is then not repaired until the path is fixed, and status and verify report it only as the warning `guardian_target_user_path`, which does not fail verify or `detect.sh --require-healthy`.
 
-This applies to Amp (`XDG_CONFIG_HOME`, `HOME`), Devin (`XDG_CONFIG_HOME`, `--config`), Antigravity and OpenHands (`HOME`), and Hermes (`--safe-mode`, `HERMES_HOME`). Machine-policy agents are not affected.
+This applies to Amp (`XDG_CONFIG_HOME`, `HOME`), Devin (`XDG_CONFIG_HOME`, `--config`), Antigravity (`HOME`), and Hermes (`--safe-mode`, `HERMES_HOME`). Machine-policy agents are not affected.
 
-**Where:** Devin, Antigravity, Hermes, Amp, OpenHands, OmniGent, and OpenCode while it is on the per-user route.
+
+**Where:** Devin, Antigravity, Hermes, Amp, and OpenCode while it is on the per-user route.
+
 
 **What reduces it:** Prefer agents that use machine policy where you need enforcement. Use application control to control how users launch these agents, for example by allowing the agent to run only from an administrator-owned launcher that resets these variables and refuses these flags, or a vendor machine policy where the agent has one.
 
@@ -404,7 +404,8 @@ Agents used only as a desktop app or editor extension are not enrolled. Enrollme
 
 #### Agents without a lock or the guard
 
-Antigravity, OpenHands and OmniGent have neither, and neither has Hermes on Windows, so hooks a user or project adds for them run next to DefenseClaw's.
+Antigravity has neither, and neither has Hermes on Windows, so hooks a user or project adds for them run next to DefenseClaw's.
+
 
 **Where:** Those agents, every OS; Hermes on Windows.
 
@@ -420,7 +421,6 @@ No other connector has a vendor setting that stops an older client. For builds f
 
 On Linux and macOS, Claude Code releases that do not read `managed-settings.d` (for example 1.0.128, 2.0.0 and 2.0.77) ignore both DefenseClaw drop-ins, the hooks and the floor: a user who installs one under their home runs it with no DefenseClaw hook and no audit record, and `status` and `verify` do not report it. Tracked in [#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
 
-Per-user agents below their supported minimum are the same: OpenHands 1.11.0 (the minimum is 1.12.0), started with `uvx --from openhands==1.11.0 openhands`, does not load DefenseClaw's hooks, so its tool calls run with no audit record. Nothing refuses it, and because `uvx` runs it from its cache, it is not reported either.
 
 **Where:** Every OS.
 
@@ -472,7 +472,8 @@ A higher-precedence vendor policy, such as Codex cloud or MDM requirements or Cl
 
 `defenseclaw-hook` and the per-user hook scripts run as the user, so that user can end, suspend or slow them until the agent's hook timeout. Agents that block only on an explicit deny or exit code then run the call, and no DefenseClaw decision or audit record is written before it runs.
 
-Claude Code and Codex run the call when the user kills their own hook (a failed hook) or stops it (a 30-second timeout), and OpenHands, Devin and Hermes run it when the hook is killed. OpenHands can also run it when the hook stalls until its 60-second timeout, leaving only OpenHands' own confirmation prompt, which the user answers. GitHub Copilot stays closed unless every one of its hooks is stopped (Copilot CLI 1.0.91 stays closed even then), and OpenCode, Amp and Antigravity stay closed.
+Claude Code and Codex run the call when the user kills their own hook (a failed hook) or stops it (a 30-second timeout), Devin and Hermes run it when the hook is killed. GitHub Copilot stays closed unless every one of its hooks is stopped (Copilot CLI 1.0.91 stays closed even then), and OpenCode, Amp and Antigravity stay closed.
+
 
 "Fail-closed" in the [capability matrix](/docs/connectors/capability-matrix) means blocking when the hook cannot reach the gateway, not when the user ends the hook.
 
@@ -498,13 +499,9 @@ On Linux and macOS the [foreign-hook guard](/docs/enterprise/foreign-hook-guard)
 
 **What reduces it:** Treat Hermes coverage as advisory; use application control over Hermes plugins and how users launch Hermes.
 
-#### OpenHands project hooks replace DefenseClaw's
 
-OpenHands loads a project's `.openhands/hooks.json` instead of the user's `~/.openhands/hooks.json`: it uses the first of the two it finds, so in a project that has its own file, even one with a single unrelated hook, none of DefenseClaw's OpenHands hooks run. Tool calls there are not inspected or logged, OpenHands shows no DefenseClaw message, and status and verify do not report it. A repository a developer clones can carry the file.
 
-**Where:** OpenHands, Linux and macOS.
 
-**What reduces it:** Treat OpenHands coverage as advisory. Keep `.openhands/hooks.json` out of the repositories developers use (for example with a repository rule or a server-side push check), search existing checkouts for it, and use application control where you need more.
 
 #### Limits of the foreign-hook guard's session block
 
@@ -636,7 +633,8 @@ Each account has its own hook budget (see `enterprise_managed_rate_limited` in [
 
 The agents' own telemetry exporters send to `127.0.0.1:18970` without verifying the listener. A user who holds the port while the gateway is down receives that telemetry, which can include prompt text, and the sending user's per-user telemetry credential, and can then post telemetry attributed to that user for that agent until the user leaves enrollment. The credential never authenticates hook, inspect or management routes, or another agent.
 
-**Where:** Codex, Claude Code, OpenHands and OmniGent telemetry. Every gateway restart on macOS and Windows; on Linux only while an administrator has the socket unit stopped.
+**Where:** Codex and Claude Code telemetry. Every gateway restart on macOS and Windows; on Linux only while an administrator has the socket unit stopped.
+
 
 **What reduces it:** Alert on any process other than the gateway listening on `127.0.0.1:18970`, and treat per-user telemetry attribution as advisory after a gateway restart. Per-user (non-managed) installs on Linux, macOS and Windows have the same residual on the account's gateway API port: DefenseClaw's hooks and CLI send nothing to another account's listener there, but Claude Code's exporter sends its Claude-scoped OTLP bearer to whoever holds the port while that account's gateway is stopped. Give each account its own port and keep its gateway running; see [Claude Code](/docs/connectors/claudecode#how-claude-code-reaches-the-gateway).
 

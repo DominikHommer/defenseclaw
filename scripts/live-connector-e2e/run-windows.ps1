@@ -714,7 +714,7 @@ function Assert-AuthenticatedAntigravityExistingInstallState(
     }
     if ([string]$State.connector -cnotin @(
             'none', 'codex', 'claudecode', 'copilot', 'cursor', 'hermes', 'antigravity',
-            'devin', 'opencode', 'omnigent'
+            'devin', 'opencode'
         ) -or [string]$State.mode -cnotin @('observe', 'action')) {
         throw "$Context has an invalid preexisting connector/mode identity"
     }
@@ -7462,16 +7462,15 @@ function Assert-ProtectedCopilotLocalTransaction([switch]$CleanupContext) {
     $expectedRoster = @(
         'claudecode|action|closed|True|manual',
         'codex|observe|open|True|manual',
-        'cursor|action|closed|True|manual',
-        'omnigent|observe|open|True|manual'
+        'cursor|action|closed|True|manual'
     )
     if ([int]$baseline.schema_version -ne 1 -or
-        [string]$baseline.kind -cne 'copilot-four-connector-sealed-current' -or
+        [string]$baseline.kind -cne 'copilot-three-connector-sealed-current' -or
         [string]$baseline.package_source_commit -cne $ExpectedPackageSourceCommit -or
         [bool]$baseline.hitl_claimed -or [bool]$baseline.opencode_active -or
         (@($baseline.roster) -join "`n") -cne ($expectedRoster -join "`n") -or
         [int]$baseline.doctor.pass -ne 70 -or [int]$baseline.doctor.fail -ne 0) {
-        throw 'local protected Copilot baseline manifest four-roster/Doctor identity is invalid'
+        throw 'local protected Copilot baseline manifest three-roster/Doctor identity is invalid'
     }
     $prefix = ([string]$transaction.baseline_manifest_sha256).Substring(0, 12)
     $installRoot = Split-Path -Parent (Split-Path -Parent `

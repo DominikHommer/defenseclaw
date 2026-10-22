@@ -178,7 +178,7 @@ func (a *App) llmCandidates(spec *harness.Spec) []llmCandidate {
 			{LLMAnthropic, profiles.CopilotAnthropicID, "COPILOT_PROVIDER_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
 			{LLMBedrock, profiles.CopilotBedrockMantleID, "COPILOT_PROVIDER_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
 		}
-	case "hermes", "openhands":
+	case "hermes":
 		return []llmCandidate{
 			{LLMOpenAI, profiles.OpenAIID, "OPENAI_API_KEY", "OPENAI_API_KEY", fromEnv("OPENAI_API_KEY")},
 			{LLMAnthropic, profiles.AnthropicID, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
@@ -189,13 +189,6 @@ func (a *App) llmCandidates(spec *harness.Spec) []llmCandidate {
 		// the sandbox.
 		return []llmCandidate{
 			{LLMGemini, profiles.GeminiID, "GEMINI_API_KEY", "GEMINI_API_KEY", fromEnv("GEMINI_API_KEY")},
-		}
-	case "omnigent":
-		// The sandbox agent runs on OmniGent's openai-agents harness.
-		return []llmCandidate{
-			{LLMOpenAI, profiles.OpenAIID, "OPENAI_API_KEY", "OPENAI_API_KEY", fromEnv("OPENAI_API_KEY")},
-			{LLMAnthropic, profiles.AnthropicID, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
-			{LLMBedrock, profiles.BedrockMantleOpenAIID, "BEDROCK_MANTLE_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
 		}
 	}
 	return nil
@@ -380,7 +373,7 @@ func (a *App) providerHint(spec *harness.Spec, choice string) string {
 		return "set ANTHROPIC_API_KEY or OPENAI_API_KEY"
 	case harnessName == "copilot":
 		return "set ANTHROPIC_API_KEY"
-	case harnessName == "hermes", harnessName == "openhands", harnessName == "omnigent":
+	case harnessName == "hermes":
 		return "set OPENAI_API_KEY or ANTHROPIC_API_KEY"
 	case harnessName == "antigravity":
 		return "set GEMINI_API_KEY"

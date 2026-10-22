@@ -106,8 +106,6 @@ def normalize_connector(name: str | None) -> str:
     value = (name or "").strip().lower()
     if value in {"claude", "claude-code", "claude_code"}:
         return "claudecode"
-    if value in {"open-hands", "open_hands"}:
-        return "openhands"
     return value
 
 

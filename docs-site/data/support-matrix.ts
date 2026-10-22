@@ -60,8 +60,6 @@ export const generated: GeneratedStatus = {
     opencode: 'SS SS SS',
     amp: 'SS SS SS',
     hermes: 'SS SS SS',
-    openhands: 'SS SS UU',
-    omnigent: 'SS SS PP',
   },
   enterprise: {
     claudecode: 'SSS',
@@ -74,8 +72,6 @@ export const generated: GeneratedStatus = {
     opencode: 'SSS',
     amp: 'SSS',
     hermes: 'SSS',
-    openhands: 'SSU',
-    omnigent: 'PPU',
   },
   features: {
     guardrails: { oss: 'SSS', enterprise: 'SSS' },
@@ -273,25 +269,6 @@ const connectorSources: ConnectorSource[] = [
     versionNote: 'Contract covers 0.19.0 up to 0.22.0.',
     notes: { windows: "Hermes' own terminal tool needs its bundled Git Bash." },
     route: PER_USER,
-  },
-  {
-    id: 'openhands',
-    integration: 'Native hooks',
-    minVersion: '1.12.0',
-    notes: { windows: 'OpenHands CLI needs WSL, and DefenseClaw has no WSL connector path.' },
-    route: PER_USER_NO_WINDOWS,
-  },
-  {
-    id: 'omnigent',
-    integration: 'Policy API',
-    minVersion: '0.7.0',
-    versionNote: 'Contract covers 0.7.0 up to 0.14.0.',
-    notes: {
-      linux: 'Managed terminal harnesses require tmux 3.3 or newer; RHEL 9 ships 3.2a.',
-      macos: 'Managed terminal harnesses require tmux 3.3 or newer.',
-      windows: 'Degraded mode: server and SDK policy path only, without terminal wrappers or sandbox parity.',
-    },
-    route: PER_USER_NO_WINDOWS,
   },
 ];
 

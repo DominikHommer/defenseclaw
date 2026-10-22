@@ -69,8 +69,7 @@ $installer = irm "$release/install.ps1"
 | `-CosignPath FILE` | The `cosign` to check the release signature with (default: `cosign` on `PATH`) |
 | `-Help` | Show the installer's help |
 
-`-Connector` takes `codex`, `claudecode`, `hermes`, `cursor`, `devin`,
-`copilot`, `antigravity`, `opencode`, `amp`, `omnigent`, `kiro`, or `none`.
+
 
 The installer checks every download against the release's `checksums.txt`
 (and its Sigstore signature when `cosign` 2.0 or later is on `PATH` or given
@@ -122,20 +121,11 @@ already have:
 defenseclaw setup -c codex -c claudecode -c cursor --mode observe --yes
 ```
 
-The Windows connector names are `claudecode`, `codex`, `amp`, `cursor`,
-`devin`, `hermes`, `omnigent`, `opencode`, `copilot`, `antigravity`, and
-`kiro`. Instead of `-c`, `--detected` picks the agents installed on this
-computer and `--all` picks every supported one. To add newly installed agents
-without changing the others, run `defenseclaw setup --add-detected --yes`.
+Instead of `-c`, `--detected` picks the agents installed on this computer and `--all` picks every supported one. To add newly installed agents without changing the others, run `defenseclaw setup --add-detected --yes`.
 
-Setup honors the agents' own home-folder variables (`CODEX_HOME`,
-`CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `OMNIGENT_CONFIG_HOME`,
-`OPENCODE_CONFIG_DIR`, and `HERMES_HOME`) and remembers the folder it set up.
-Repair, upgrade, and uninstall use that remembered folder, even if the
-variable changes later; to move an agent's home, run its setup again. The data
-root is the current profile's `.defenseclaw` unless `DEFENSECLAW_HOME` is set;
-see [Supported path overrides](/docs/get-started/windows/paths-troubleshooting#supported-path-overrides).
-Restart OpenCode after setup changes so it loads the updated plugin.
+
+Repair, upgrade, and uninstall use that remembered folder, even if the variable changes later; to move an agent's home, run its setup again. The data root is the current profile's `.defenseclaw` unless `DEFENSECLAW_HOME` is set; see [Supported path overrides](/docs/get-started/windows/paths-troubleshooting#supported-path-overrides). Restart OpenCode after setup changes so it loads the updated plugin.
+
 
 Amp's plugin is always
 `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`. Fully exit and relaunch

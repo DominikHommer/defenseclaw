@@ -1475,7 +1475,7 @@ func TestUnverifiedHookContractIsVisible(t *testing.T) {
 	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
 		{"user": "alice", "connector": "codex", "ok": true},
 		{"user": "bob", "connector": "devin", "ok": false, "error": `enterprise hooks: connector devin agent version "3999.0.0" is not verified against a known hook contract: no hook contract matches normalized agent version`},
-		{"user": "carol", "connector": "omnigent", "ok": false, "error": "enterprise hooks: connector omnigent setup failed: interpreter is not in a trusted install prefix"},
+		{"user": "carol", "connector": "codex", "ok": false, "error": "enterprise hooks: connector codex setup failed: executable is not in a trusted install prefix"},
 	}})
 	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
 		t.Fatal(err)
@@ -1496,7 +1496,7 @@ func TestUnverifiedHookContractIsVisible(t *testing.T) {
 	}
 	failedTarget := false
 	for _, w := range status.Warnings {
-		if w.Code == codeGuardianTargetFailed && strings.Contains(w.Message, "omnigent for user carol is not protected: connector omnigent setup failed") {
+		if w.Code == codeGuardianTargetFailed && strings.Contains(w.Message, "codex for user carol is not protected: connector codex setup failed") {
 			failedTarget = true
 		}
 	}
@@ -1520,9 +1520,9 @@ func TestGuardianTargetReasonKeepsItsRemedy(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	remedy := "install it under an administrator-owned prefix listed in enterprise.enrollment.agent_prefixes"
-	oversized := "connector omnigent setup failed: " + strings.Repeat("path/segment/", 300) + "python3.12 is refused; " + remedy
+	oversized := "connector codex setup failed: " + strings.Repeat("path/segment/", 300) + "python3.12 is refused; " + remedy
 	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
-		{"user": "alice", "connector": "omnigent", "ok": false, "error": "enterprise hooks: " + oversized},
+		{"user": "alice", "connector": "codex", "ok": false, "error": "enterprise hooks: " + oversized},
 	}})
 	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
 		t.Fatal(err)

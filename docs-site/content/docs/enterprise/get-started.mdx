@@ -46,16 +46,12 @@ one of two ways:
 | Route | Agents | What DefenseClaw writes |
 | --- | --- | --- |
 | [Machine policy](/docs/enterprise/concepts#machine-policy-connector) | Claude Code, Codex, Cursor, GitHub Copilot, and OpenCode with DefenseClaw's managed OpenCode plugin | Its hooks in the vendor's administrator-owned policy files, which apply to every user of the computer |
-| [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp and Kiro, and OpenCode while the managed plugin is not in force. On Linux and macOS also OpenHands and OmniGent | The guardian writes the hook, or plugin, into each enrolled user's own agent config and repairs it |
+| [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp and Kiro, and OpenCode while the managed plugin is not in force. | The guardian writes the hook, or plugin, into each enrolled user's own agent config and repairs it |
 
 ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.
 
-OpenHands and OmniGent are refused on Windows. Which agent and OS combinations
-were verified in this release is in the
-[enterprise route table](/docs/support-matrix#enterprise). How to list agents,
-users and per-agent modes is in
-[Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
-and [Plan a rollout](/docs/enterprise/rollout#step-1-choose-the-agents).
+Which agent and OS combinations were verified in this release is in the [enterprise route table](/docs/support-matrix#enterprise). How to list agents, users and per-agent modes is in [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect) and [Plan a rollout](/docs/enterprise/rollout#step-1-choose-the-agents).
+
 
 ## 3. Pick your MDM
 

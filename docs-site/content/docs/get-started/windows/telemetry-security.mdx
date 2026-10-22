@@ -85,7 +85,7 @@ DefenseClaw uses distinct credentials for distinct jobs:
 | --- | --- | --- |
 | Gateway master token | Local gateway control/lifecycle authentication. Stored through the protected DefenseClaw environment file. | Rotate with the CLI; do not edit, print, or pass it on an argv. |
 | Connector hook/plugin credential | One connector's hook or plugin API route. | Managed by setup/teardown; never copy its sidecar or the credential-bearing Amp plugin. |
-| Connector native-OTLP credential | One connector's OTLP routes where configured: Codex, Claude Code, or opt-in OmniGent. Hermes has no official native OTLP surface. | Stable across unrelated master-token rotation and revoked during connector teardown. |
+| Connector native-OTLP credential | One connector's OTLP routes where configured: Codex or Claude Code. Hermes has no official native OTLP surface. | Stable across unrelated master-token rotation and revoked during connector teardown. |
 | Provider or destination credentials | Only the configured external provider/destination. | Reference protected environment names; do not place literal values in YAML or support output. |
 
 ### Rotate safely

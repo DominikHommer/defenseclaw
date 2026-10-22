@@ -630,7 +630,10 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	presented = strings.TrimSpace(presented)
-	if name == "" || presented == "" {
+	// until 1.1: the hook token an upgraded host keeps for a connector 1.0.4
+	// removed (OpenHands) authenticates nothing; old hooks reach the route
+	// that blocks them whatever the token.
+	if name == "" || presented == "" || connector.IsRemovedConnector(name) {
 		return false
 	}
 
@@ -1905,7 +1908,7 @@ func sameRuntimeDataDir(left, right string) bool {
 //	  "connector":  "codex" | "claudecode" | "openclaw" | "zeptoclaw",
 //	  "mode":       "guardrail" | "observability", // legacy data-path field
 //	  "policy_mode": "observe" | "action",
-//	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks" | "omnigent_policy_api",
+//	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks",
 //	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
 //	  "proxy_intercept": true | false,
 //	}
@@ -1981,8 +1984,8 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 	// connector, showed up in `defenseclaw-gateway status` as "Data path:
 	// DefenseClaw proxy" in the same output whose Guardrail subsystem said
 	// "proxy_port: closed" and "the local guardrail proxy is not in the LLM
-	// data path". The list below now contributes only the telemetry channels
-	// and OmniGent's policy-API surface, which are genuinely per-connector.
+	// data path". The list below now contributes only the telemetry
+	// channels, which are genuinely per-connector.
 	if !connectorProxyBindsByName(name) {
 		mode = "observability"
 		intercept = false
@@ -1998,14 +2001,9 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "devin", "copilot", "openhands",
+	case "hermes", "cursor", "devin", "copilot",
 		"antigravity", "opencode", "amp", "kiro":
 		telemetry = []string{"hooks"}
-	case "omnigent":
-		// OmniGent enforces through its own policy API rather than the
-		// shared lifecycle-hook bridge, so it keeps a distinct surface.
-		surface = "omnigent_policy_api"
-		telemetry = []string{"policy-api"}
 	default:
 		// openclaw / zeptoclaw / unknown: enforcement is the only
 		// supported mode today. Hooks are wired by the connector;
@@ -3790,6 +3788,10 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
+// Unwrap lets http.ResponseController reach the connection through the
+// metrics writer (read deadlines, full duplex).
+func (sw *statusWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
+
 type authenticatedInspectConnectorKey struct{}
 
 func withAuthenticatedInspectConnector(ctx context.Context, connectorName string) context.Context {
@@ -3831,6 +3833,12 @@ func requestGatewayToken(r *http.Request) string {
 // and never reaches next.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// until 1.1: a removed connector's hook route blocks every call
+		// before any credential check (retired_connector_hook.go): with a
+		// valid token, a revoked one, none or a sandbox credential.
+		if serveRetiredConnectorHook(w, r) {
+			return
+		}
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
 			return
@@ -4020,7 +4028,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
 			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
 			registered := false
-			if a.connectorRegistry != nil {
+			if a.connectorRegistry != nil && !connector.IsRemovedConnector(hookScope) {
 				_, registered = a.connectorRegistry.Get(hookScope)
 			}
 			if registered {

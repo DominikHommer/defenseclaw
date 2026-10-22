@@ -411,7 +411,7 @@ func TestSandboxRelayMatchesLocalIngressForEveryHarness(t *testing.T) {
 	relay := newRelayFixture(t)
 
 	names := harness.Names()
-	if len(names) < 12 {
+	if len(names) < 10 {
 		t.Fatalf("harnesses = %v", names)
 	}
 	for _, name := range names {

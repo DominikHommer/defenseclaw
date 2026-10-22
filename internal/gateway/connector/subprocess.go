@@ -318,7 +318,6 @@ var connectorHookScripts = map[string][]string{
 	"devin":       {"devin-hook.sh"},
 	"hermes":      {"hermes-hook.sh"},
 	"kiro":        {"kiro-hook.sh"},
-	"openhands":   {"openhands-hook.sh"},
 }
 
 // hookScripts returns the full list of hook scripts (generic + all
@@ -674,7 +673,7 @@ type renderedHookRuntimeFile struct {
 // opts, and returns the first file that is missing or differs, or "" when
 // every file matches. For a shell hook connector these are its own hook
 // scripts, the shared inspect-* scripts and the _hardening.sh helper they
-// source; for OmniGent, its policy module. A connector whose Setup publishes
+// source. A connector whose Setup publishes
 // a managed in-agent plugin (Amp, OpenCode) writes none of them:
 // ManagedPluginArtifactDrift covers the plugin. The standalone Unix guardian
 // relies on this rather than on the digests recorded at the last write: after
@@ -730,13 +729,6 @@ func HookRuntimeTokenFile(opts SetupOpts, conn Connector) (path, token string, e
 func renderedHookRuntimeFiles(conn Connector, opts SetupOpts) ([]renderedHookRuntimeFile, error) {
 	if conn == nil || strings.TrimSpace(opts.DataDir) == "" {
 		return nil, nil
-	}
-	if omnigent, ok := conn.(*OmnigentConnector); ok {
-		body, err := omnigent.renderPolicyModule(opts)
-		if err != nil {
-			return nil, err
-		}
-		return []renderedHookRuntimeFile{{path: omnigentPolicyModulePath(opts), body: body}}, nil
 	}
 	if _, ok := conn.(HookScriptOwner); !ok || len(ManagedPluginArtifacts(conn, opts)) > 0 {
 		return nil, nil

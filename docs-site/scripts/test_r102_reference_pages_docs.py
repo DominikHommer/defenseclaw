@@ -1,6 +1,5 @@
 """Regression checks for the 1.0.2 reference and sandbox pages."""
 
-import re
 import unittest
 from pathlib import Path
 
@@ -11,14 +10,6 @@ def page(name: str) -> str:
     return (DOCS / name).read_text()
 
 
-def deprecated_harness_rows(text: str) -> None:
-    for line in text.splitlines():
-        if not line.startswith("|"):
-            continue
-        if not re.search(r"OpenHands|OmniGent", line, re.IGNORECASE):
-            continue
-        if re.search(r"verified|supported", line, re.IGNORECASE):
-            assert "deprecated" in line.lower(), line
 
 
 class R102ReferencePagesDocsTest(unittest.TestCase):
@@ -132,22 +123,7 @@ class R102ReferencePagesDocsTest(unittest.TestCase):
         self.assertIn("7 plugin(s) shown; 7 in total, 4 AI", text)
         self.assertNotIn("7 plugin(s) shown; 7 in total, 3 AI", text)
 
-    def test_row_37_deprecated_harnesses_have_no_resume_recipe(self):
-        reference = page("reference/sandbox-cli.mdx")
-        guide = page("sandboxes/guide.mdx")
-        self.assertIn("OpenHands and OmniGent are deprecated", reference)
-        self.assertNotIn("| OpenHands | `defenseclaw sandbox connect", reference)
-        self.assertNotIn("OmniGent | `defenseclaw sandbox connect", reference)
-        deprecated_harness_rows(reference)
-        deprecated_harness_rows(guide)
 
-    def test_gap_0064_guide_marks_both_harnesses_deprecated(self):
-        guide = page("sandboxes/guide.mdx")
-        reference = page("reference/sandbox-cli.mdx")
-        self.assertRegex(guide, r"\| OpenHands \| `openhands` \| user \| Deprecated\. \|")
-        self.assertRegex(guide, r"\| OmniGent \| `omnigent` \| managed \| Deprecated\. \|")
-        deprecated_harness_rows(guide)
-        deprecated_harness_rows(reference)
 
     def test_gap_0320_opencode_does_not_offer_user_removal_of_managed_hook(self):
         text = page("connectors/opencode.mdx")

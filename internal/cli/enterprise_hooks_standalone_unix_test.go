@@ -206,7 +206,7 @@ func TestEnterpriseHookWorkerRunsTargetsWithAMinimalEnvironment(t *testing.T) {
 	}
 
 	// The worker PATH keeps the system directories first and then the
-	// discovery directories (OmniGent setup looks itself up on PATH).
+	// discovery directories.
 	path := enterpriseHookWorkerPath("/home/alice", 1000)
 	parts := strings.Split(path, ":")
 	if len(parts) < 3 || parts[0] != "/usr/bin" || parts[1] != "/bin" {
@@ -1505,18 +1505,6 @@ func TestStandaloneAIDiscoveryPassPausesAHomeWhoseScanKeepsFailing(t *testing.T)
 	}
 }
 
-// A worker error ends with its cause. The remove-all report cut it at 256
-// bytes, in the middle of a path, so the uninstall never said why a
-// registration stayed. An oversized error keeps its start and its cause.
-func TestRemoveAllReportKeepsTheWorkerErrorCause(t *testing.T) {
-	path := "/Users/alice/.openhands/" + strings.Repeat("nested/", 60) + "hooks.json"
-	cause := "enterprise hooks: connector openhands teardown failed: restore config backup: rename " + path + ".tmp \u2192 " + path + ": operation not permitted"
-	got := boundedWorkerError(cause)
-	if len(got) > workerErrorMaxBytes || !utf8.ValidString(got) || !strings.HasPrefix(got, "enterprise hooks: connector openhands") || !strings.HasSuffix(got, ": operation not permitted") {
-		t.Fatalf("bounded worker error = %q", got)
-	}
-}
-
 // A deployment that selects only machine-policy connectors has no manifest
 // rows; the guardian still writes identity records and per-user scans for
 // every eligible account the enumerator published (GAP-0021).
@@ -1699,5 +1687,17 @@ func TestIdentitySpoolNamesHomeOnlyTarget(t *testing.T) {
 	})
 	if len(accounts) != 1 || accounts[0].UID != 4242 || accounts[0].User != "alice" {
 		t.Fatalf("identity spool accounts = %+v; want alice for uid 4242", accounts)
+	}
+}
+
+// A worker error ends with its cause. The remove-all report cut it at 256
+// bytes, in the middle of a path, so the uninstall never said why a
+// registration stayed. An oversized error keeps its start and its cause.
+func TestRemoveAllReportKeepsTheWorkerErrorCause(t *testing.T) {
+	path := "/Users/alice/.cursor/" + strings.Repeat("nested/", 60) + "hooks.json"
+	cause := "enterprise hooks: connector cursor teardown failed: restore config backup: rename " + path + ".tmp \u2192 " + path + ": operation not permitted"
+	got := boundedWorkerError(cause)
+	if len(got) > workerErrorMaxBytes || !utf8.ValidString(got) || !strings.HasPrefix(got, "enterprise hooks: connector cursor") || !strings.HasSuffix(got, ": operation not permitted") {
+		t.Fatalf("bounded worker error = %q", got)
 	}
 }

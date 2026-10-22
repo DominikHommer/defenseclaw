@@ -57,16 +57,8 @@ new install the fail mode prompt offers `closed`, so Enter picks it; a re-run
 offers the value already saved. `--non-interactive` and `quickstart` use the
 config's value, `closed` for a new install.
 
-Near the end the wizard asks **Start gateway after setup?** (default Yes,
-because the hooks need a running gateway). `--start-gateway` or
-`--no-start-gateway` answers it in advance. When you add the optional LLM judge
-on AWS Bedrock, the wizard asks for the region and auth mode first, and asks for
-an API key only for the `api_key` auth mode. On macOS, an OpenHands installed
-with `uv tool` sits outside the trusted prefixes, so the wizard offers to trust
-its directory instead of skipping it. Proxy connectors are detected but left
-out of the observe-all set, because they own the single LLM proxy port and
-can't run beside other connectors. The wizard prints a one-line note that
-points you to `defenseclaw setup <proxy>` for them.
+Near the end the wizard asks **Start gateway after setup?** (default Yes, because the hooks need a running gateway). `--start-gateway` or `--no-start-gateway` answers it in advance. When you add the optional LLM judge on AWS Bedrock, the wizard asks for the region and auth mode first, and asks for an API key only for the `api_key` auth mode. Proxy connectors are detected but left out of the observe-all set, because they own the single LLM proxy port and can't run beside other connectors. The wizard prints a one-line note that points you to `defenseclaw setup <proxy>` for them.
+
 
 <Callout type="warn">
 An agent version newer than DefenseClaw's tested versions keeps action mode and
@@ -207,7 +199,7 @@ To also write events to a JSONL file as they happen, add a JSONL destination
   type={{
     "--connector / --agent": {
       type: "connector name",
-      description: "Agent connector: claudecode, codex, copilot, cursor, devin, antigravity, kiro, opencode, amp, hermes, openhands or omnigent (defenseclaw quickstart --help lists every name). Required when more than one connector is configured or detected. Otherwise quickstart uses the single configured or detected connector, then the installer's hint if none can be detected.",
+ description: "Agent connector: claudecode, codex, copilot, cursor, devin, antigravity, kiro, opencode, amp, hermes (defenseclaw quickstart --help lists every name). Required when more than one connector is configured or detected. Otherwise quickstart uses the single configured or detected connector, then the installer's hint if none can be detected.",
     },
     "--mode": {
       type: "observe|action",

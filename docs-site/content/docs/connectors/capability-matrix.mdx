@@ -77,28 +77,18 @@ The component renders from `data/capability-matrix.json`, which is the single ed
 
 ### "I want maximum safety on a single connector"
 
-Pick a row with **Block: Yes**, **Native ask: Yes** and **Fail-closed: Yes**,
-and a **managed tier** sandbox that is verified end to end:
-[Claude Code](/docs/connectors/claudecode) and
-[OmniGent](/docs/connectors/omnigent). Both ask for approval inside the
-agent, and in a sandbox their hooks sit in a root-owned policy file the agent
-can't switch off.
+Pick a row with **Block: Yes**, **Native ask: Yes** and **Fail-closed: Yes**, and a **managed tier** sandbox that is verified end to end: [Claude Code](/docs/connectors/claudecode). It asks for approval inside the agent, and in a sandbox its hooks sit in a root-owned policy file the agent can't switch off.
+
 
 ### "I want my agent's own hooks to enforce"
 
-Direct-to-upstream hook enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Hermes](/docs/connectors/hermes), [Devin](/docs/connectors/devin), [Copilot CLI](/docs/connectors/copilot), [OpenHands](/docs/connectors/openhands), [Antigravity](/docs/connectors/antigravity), [OpenCode](/docs/connectors/opencode), [Kiro](/docs/connectors/kiro), and [OmniGent](/docs/connectors/omnigent). [Amp](/docs/connectors/amp) uses a direct-to-upstream system policy plugin instead. Cursor action uses documented event-native deny from the user hook. Cursor exposes no safe API for detecting an actual higher-priority Enterprise, Team, or Project conflict, so DefenseClaw reports that limitation and does not infer a conflict. The broader constraint is that these connectors cannot block a request the agent has not yet presented to their hook or policy surface.
+Direct-to-upstream hook enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Hermes](/docs/connectors/hermes), [Devin](/docs/connectors/devin), [Copilot CLI](/docs/connectors/copilot), [Antigravity](/docs/connectors/antigravity), [OpenCode](/docs/connectors/opencode), and [Kiro](/docs/connectors/kiro). [Amp](/docs/connectors/amp) uses a direct-to-upstream system policy plugin instead. Cursor action uses documented event-native deny from the user hook. Cursor exposes no safe API for detecting an actual higher-priority Enterprise, Team, or Project conflict, so DefenseClaw reports that limitation and does not infer a conflict. The broader constraint is that these connectors cannot block a request the agent has not yet presented to their hook or policy surface.
+
 
 ### "I want HITL approvals to surface inside the agent UI"
 
-Pick a row with **Native ask: Yes**: Claude Code (`PreToolUse`), GitHub Copilot
-CLI (`preToolUse`), Antigravity (`PreToolUse` only), Amp (`tool.call` and
-model-bound `tool.result` in the active foreground thread), OmniGent
-(`UserPromptSubmit`, `PreToolUse` and `BeforeModel`, which OmniGent calls its
-`request`, `tool_call` and `llm_request` policy phases), or OpenClaw.
-Cursor is not counted because DefenseClaw does not enable its native ask response;
-confirm verdicts remain attributed alerts and cannot resume the original call.
-Confirm verdicts on every other connector/event take an immediate
-connector-specific fallback; there is no TUI approval queue.
+Pick a row with **Native ask: Yes**: Claude Code (`PreToolUse`), GitHub Copilot CLI (`preToolUse`), Antigravity (`PreToolUse` only), Amp (`tool.call` and model-bound `tool.result` in the active foreground thread), or OpenClaw. Cursor is not counted because DefenseClaw does not enable its native ask response; confirm verdicts remain attributed alerts and cannot resume the original call. Confirm verdicts on every other connector/event take an immediate connector-specific fallback; there is no TUI approval queue.
+
 
 ### "I want to run the agent in an OpenShell sandbox"
 
@@ -149,6 +139,7 @@ Every sandbox hook fails closed.
 
 ### "I want fail-closed on transport failures"
 
-Fail-closed here means the hook blocks when it cannot reach the gateway (a transport failure). It does not cover a hook process that the user kills, stops or starves: the agent then decides, and Claude Code, Codex, OpenHands and Devin treat a hook that dies or times out as non-blocking and run the call (see the [enterprise threat model](/docs/enterprise/threat-model#residual-risks)).
+Fail-closed here means the hook blocks when it cannot reach the gateway (a transport failure). It does not cover a hook process that the user kills, stops or starves: the agent then decides, and Claude Code, Codex and Devin treat a hook that dies or times out as non-blocking and run the call (see the [enterprise threat model](/docs/enterprise/threat-model#residual-risks)).
 
-Pick a row with **Fail-closed: Yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, OpenCode, Amp, OpenHands, Kiro, and OmniGent. GitHub Copilot CLI, Hermes, and Antigravity do not expose a generic DefenseClaw-controlled fail-closed transport response. On a managed standalone host (Linux, macOS and Windows) the administrator-owned GitHub Copilot CLI and Hermes hooks still block a tool call DefenseClaw cannot check, and every connector's hook there fails closed in observe mode too; a managed hook never fails open on a gateway outage. On a per-user install a fail-open call is not silent: when the gateway starts again it records a `guardrail-degraded` alert per connector for the calls that ran unchecked ([Fail modes](/docs/reference/fail-modes#reporting-and-diagnosis)). Cursor's support is mode-matched: action writes `failClosed: true`, while observe writes `failClosed: false`. Devin can map DefenseClaw availability failures to vendor exit `2` only on its four declared block-capable events.
+
+GitHub Copilot CLI, Hermes, and Antigravity do not expose a generic DefenseClaw-controlled fail-closed transport response. On a managed standalone host (Linux, macOS and Windows) the administrator-owned GitHub Copilot CLI and Hermes hooks still block a tool call DefenseClaw cannot check, and every connector's hook there fails closed in observe mode too; a managed hook never fails open on a gateway outage. On a per-user install a fail-open call is not silent: when the gateway starts again it records a `guardrail-degraded` alert per connector for the calls that ran unchecked ([Fail modes](/docs/reference/fail-modes#reporting-and-diagnosis)). Cursor's support is mode-matched: action writes `failClosed: true`, while observe writes `failClosed: false`. Devin can map DefenseClaw availability failures to vendor exit `2` only on its four declared block-capable events.

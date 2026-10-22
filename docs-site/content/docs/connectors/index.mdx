@@ -8,13 +8,11 @@ keywords:
   - Cursor connector
   - OpenClaw connector
   - GitHub Copilot CLI connector
-  - OpenHands connector
   - Antigravity connector
   - Devin connector
   - Hermes connector
   - OpenCode connector
   - Amp connector
-  - OmniGent connector
   - Kiro connector
   - ZeptoClaw connector
 ---
@@ -31,8 +29,7 @@ native telemetry, and approval support therefore vary by connector.
 
 <Cards>
   <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. Model requests routed through the DefenseClaw proxy and their responses are inspected; OpenClaw classifies recognized provider/request shapes, while ZeptoClaw rewrites configured provider api_base values." />
-  <Card title="Hook connectors" description="Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, and Kiro. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream. Kiro also has native ACP support." />
-  <Card title="Custom policy connector" description="OmniGent. DefenseClaw installs an in-process Python policy bridge and maps six awaited policy phases to ALLOW, ASK, or DENY without proxying model traffic." />
+ <Card title="Hook connectors" description="Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, Antigravity, Hermes, OpenCode, and Kiro. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream. Kiro also has native ACP support." />
   <Card title="ACP guard" href="/docs/acp-guard" description="The shared guard protects verified native ACP entry points for Kiro and other connectors without creating an IDE-specific extension." />
   <Card title="Compatibility contracts" href="/docs/connectors/compatibility" description="Versioned hook contracts, setup-time connector version checks, and the runtime hook_contract_lock.json." />
 </Cards>
@@ -67,19 +64,11 @@ removed, are listed with migration steps in
 | Family | Connectors | Data path | Enforcement boundary |
 | --- | --- | --- | --- |
 | Proxy | OpenClaw, ZeptoClaw | DefenseClaw receives and forwards model traffic | Request/response policy in the proxy |
-| Hook | Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Kiro | Agent remains connected directly to its upstream | Only the blocking events declared by that connector's selected hook contract; Cursor action uses event-native deny from its user hook. Kiro also exposes native ACP. |
-| Custom policy | OmniGent | Agent remains connected directly to its upstream | Six in-process policy phases mapped to `ALLOW`, `ASK`, or `DENY` |
+| Hook | Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, Antigravity, Hermes, OpenCode, Kiro | Agent remains connected directly to its upstream | Only the blocking events declared by that connector's selected hook contract; Cursor action uses event-native deny from its user hook. Kiro also exposes native ACP. |
 | ACP | Tested Kiro + Zed path; cataloged native modes for Cursor, Hermes, OpenCode, Copilot, and Devin. Native entry points only — no bridges | DefenseClaw mediates client ↔ agent JSON-RPC | Bidirectional prompt, output, approval, filesystem, terminal, and extension-method policy |
 
-Native ask is event-specific: OpenClaw (`before_tool_call`), Claude Code
-(`PreToolUse`), Copilot CLI (`preToolUse`), Antigravity (`PreToolUse` only),
-Amp (`tool.call` and model-bound `tool.result` in the active foreground
-thread), and OmniGent's three pre-action phases. DefenseClaw does not enable
-Cursor's native ask response; Cursor confirm verdicts remain attributed
-alerts. Other confirmation verdicts use the connector's documented fallback.
-See the [HITL reference](/docs/hitl) for the canonical per-event matrix and
-[Connector Compatibility](/docs/connectors/compatibility) for exact version
-ranges and script generations.
+Native ask is event-specific: OpenClaw (`before_tool_call`), Claude Code (`PreToolUse`), Copilot CLI (`preToolUse`), Antigravity (`PreToolUse` only), Amp (`tool.call` and model-bound `tool.result` in the active foreground thread). DefenseClaw does not enable Cursor's native ask response; Cursor confirm verdicts remain attributed alerts. Other confirmation verdicts use the connector's documented fallback. See the [HITL reference](/docs/hitl) for the canonical per-event matrix and [Connector Compatibility](/docs/connectors/compatibility) for exact version ranges and script generations.
+
 
 ## OpenShell sandbox
 
@@ -96,8 +85,6 @@ DefenseClaw builds sandbox images for these harnesses:
   [GitHub Copilot CLI](/docs/connectors/copilot#in-an-openshell-sandbox),
   [Kiro CLI](/docs/connectors/kiro#in-an-openshell-sandbox),
   [Hermes Agent](/docs/connectors/hermes#openshell-sandbox),
-  [OpenHands](/docs/connectors/openhands#openshell-sandbox),
-  [OmniGent](/docs/connectors/omnigent#openshell-sandbox) and
   [Antigravity](/docs/connectors/antigravity#openshell-sandbox).
 - **Cannot run yet:** [Amp](/docs/connectors/amp#in-an-openshell-sandbox),
   [Cursor Agent](/docs/connectors/cursor#in-an-openshell-sandbox) and
@@ -105,12 +92,8 @@ DefenseClaw builds sandbox images for these harnesses:
   account before any agent turn, so their images have not passed
   DefenseClaw's hook check.
 
-Claude Code, Codex, Copilot CLI, Cursor Agent and OmniGent register their
-hooks in a root-owned managed policy or configuration, so user and project
-settings cannot switch them off. The others are in the user tier: the agent
-can edit their hook file, or code the agent or a repository adds runs beside
-the hooks. Every other connector is pending. The [capability matrix](/docs/connectors/capability-matrix#i-want-to-run-the-agent-in-an-openshell-sandbox)
-shows each harness's image pin, tier and verification.
+Claude Code, Codex, Copilot CLI and Cursor Agent register their hooks in a root-owned managed policy or configuration, so user and project settings cannot switch them off. The others are in the user tier: the agent can edit their hook file, or code the agent or a repository adds runs beside the hooks. Every other connector is pending. The [capability matrix](/docs/connectors/capability-matrix#i-want-to-run-the-agent-in-an-openshell-sandbox) shows each harness's image pin, tier and verification.
+
 
 ## How a connector is structured
 

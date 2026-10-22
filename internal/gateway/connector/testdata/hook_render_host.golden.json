@@ -1451,11 +1451,6 @@
       "mode": "-rwx------",
       "size": 8407,
       "sha256": "a1def057540af5305b31690d8189b0c7d8b86c6ed86d981b97765b38c41d7957"
-    },
-    "openhands-hook.sh": {
-      "mode": "-rwx------",
-      "size": 7399,
-      "sha256": "ac20d3b7e825cd4831609a873fbfc1b9af8825bbbe8bbfaeaa147745ff853ce1"
     }
   },
   "legacy/all-scripts-no-token": {
@@ -1538,105 +1533,6 @@
       "mode": "-rwx------",
       "size": 8407,
       "sha256": "c54a7c36c8cda0fa24551ffd69a1dea9926b374572d1a5c39d6c0da65e7a462c"
-    },
-    "openhands-hook.sh": {
-      "mode": "-rwx------",
-      "size": 7399,
-      "sha256": "f817bbea0f65d8c7e51e877df3ed7753f6d0176f55ba6b7e54cd3cbe01908023"
-    }
-  },
-  "openhands/managed=0/scoped=1/fail=closed": {
-    ".hook-openhands.token": {
-      "mode": "-rw-------",
-      "size": 30,
-      "sha256": "0ab8efd17f76d57d8dab5bdfa39a5cf1aedaac17ccd22a057ccb01e38ecd77ec"
-    },
-    ".hookcfg": {
-      "mode": "-rw-------",
-      "size": 105,
-      "sha256": "46e797986697f41a82c39736d14779f2e714b86ef49972394d7f86b8f718cb8d"
-    },
-    ".hookcfg.openhands": {
-      "mode": "-rw-------",
-      "size": 61,
-      "sha256": "309a665dda8e4c2de9c3dfa4cad2cbe4fbdfe72fa0999d918351ada7fe6b386d"
-    },
-    "_hardening.sh": {
-      "mode": "-rw-------",
-      "size": 83776,
-      "sha256": "ad4934cc5690a10258d8792949e4e751ed1dbffec3134fe7f9756e74a669f74a"
-    },
-    "inspect-request.sh": {
-      "mode": "-rwx------",
-      "size": 7820,
-      "sha256": "26a003496b72eaef4d063ced0c26c0320efa3a73cf493d7e212723ebc5d8f8a7"
-    },
-    "inspect-response.sh": {
-      "mode": "-rwx------",
-      "size": 7011,
-      "sha256": "0513264c2f99dced999b85636a0fc7b80a5f69816b70d3c27c80b9184cdfaeac"
-    },
-    "inspect-tool-response.sh": {
-      "mode": "-rwx------",
-      "size": 7313,
-      "sha256": "d685cd09112984a3fc3b375a83cd91b8d8492f1d6ee6ef674fb31cd98d193b0a"
-    },
-    "inspect-tool.sh": {
-      "mode": "-rwx------",
-      "size": 7662,
-      "sha256": "daad7af680c9f703fea09e2d3ae8fc13049c2d3a7cfaef5bac9b36d05f1e6091"
-    },
-    "openhands-hook.sh": {
-      "mode": "-rwx------",
-      "size": 7601,
-      "sha256": "6fc996dc139b4d84666120840b56f81130675514dd96c500d5b5864c3d36841b"
-    }
-  },
-  "openhands/managed=1/scoped=1/fail=open": {
-    ".hook-openhands.token": {
-      "mode": "-rw-------",
-      "size": 30,
-      "sha256": "0ab8efd17f76d57d8dab5bdfa39a5cf1aedaac17ccd22a057ccb01e38ecd77ec"
-    },
-    ".hookcfg": {
-      "mode": "-rw-------",
-      "size": 133,
-      "sha256": "1e97afcb3ad8b7a2f2df816558da54f5ba7100eb5826d6d1f708e56212c75687"
-    },
-    ".hookcfg.openhands": {
-      "mode": "-rw-------",
-      "size": 59,
-      "sha256": "b77b35b4203c8b8bcf6f418289efb20d119f8d87f5c3661866d6b37e26a91442"
-    },
-    "_hardening.sh": {
-      "mode": "-rw-------",
-      "size": 83776,
-      "sha256": "ad4934cc5690a10258d8792949e4e751ed1dbffec3134fe7f9756e74a669f74a"
-    },
-    "inspect-request.sh": {
-      "mode": "-rwx------",
-      "size": 7601,
-      "sha256": "4b5b3eefa358cb796fe826f3508ade1677cf62aae72335f82f434e37dde13d19"
-    },
-    "inspect-response.sh": {
-      "mode": "-rwx------",
-      "size": 6792,
-      "sha256": "584781e28e4ff137bd0709ae7de22a319ca705062efc7188c40af0eefb96be43"
-    },
-    "inspect-tool-response.sh": {
-      "mode": "-rwx------",
-      "size": 7094,
-      "sha256": "4497d25b588300da4b44ae39b44d57aaa30069e574d4f76adf390e3295739d81"
-    },
-    "inspect-tool.sh": {
-      "mode": "-rwx------",
-      "size": 7443,
-      "sha256": "c1b0a91ef675ceb6986e407ac2062a0fec74fc6ed094f47e57010a2a2f29d8f1"
-    },
-    "openhands-hook.sh": {
-      "mode": "-rwx------",
-      "size": 7492,
-      "sha256": "6ef263005d933ca703366883fb1fab903674b65afbaa41152f2e48fd390a4dab"
     }
   },
   "plugin/amp-plugin.ts/managed=0/fail=closed": {

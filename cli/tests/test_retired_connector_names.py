@@ -70,7 +70,7 @@ ANY_RE = re.compile("|".join(DESKTOP_PATTERNS + GEMINI_PATTERNS), re.IGNORECASE)
 # "Hermes / <name> / Copilot". Case-sensitive and limited to agent names that
 # are not also model families, so provider lists and Antigravity's ~/.gemini
 # paths do not match.
-_HOOK_AGENTS = r"(?:Claude Code|Cursor|Devin|Hermes|Copilot|OpenCode|Amp|Kiro|OpenHands)"
+_HOOK_AGENTS = r"(?:Claude Code|Cursor|Devin|Hermes|Copilot|OpenCode|Amp|Kiro)"
 _LISTED = _GEMINI.capitalize()
 _LIST_SEP = r"\s*[/,]\s*"
 GEMINI_LIST_RE = re.compile(rf"\b{_LISTED}{_LIST_SEP}{_HOOK_AGENTS}\b|\b{_HOOK_AGENTS}{_LIST_SEP}{_LISTED}\b")

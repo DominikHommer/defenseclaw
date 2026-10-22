@@ -38,7 +38,6 @@ var inventoryDACLDotdirs = append([]string{
 	// Antigravity hook path, so it is granted even where the guardian owns
 	// .gemini (GAP-1863).
 	`.gemini\antigravity-cli`,
-	".openhands",
 	".openclaw",
 	".hermes",
 	".amp",

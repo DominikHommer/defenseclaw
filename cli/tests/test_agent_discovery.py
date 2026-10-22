@@ -197,37 +197,6 @@ def test_antigravity_binary_digest_is_bounded_and_matches_stable_bytes(monkeypat
         ad._stable_binary_sha512(str(binary))
 
 
-def test_omnigent_version_probe_uses_bounded_slow_start_timeout(monkeypatch) -> None:
-    invocation: dict[str, object] = {}
-
-    def run(command, **kwargs):
-        invocation["command"] = command
-        invocation.update(kwargs)
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=b"omnigent 0.7.0 (built 2026-07-27T22:01:50Z)\r\n",
-            stderr=b"",
-        )
-
-    monkeypatch.setattr(ad.subprocess, "run", run)
-
-    version, error = ad._version_for_agent_binary(
-        "omnigent",
-        r"C:\Users\tester\.local\bin\omnigent.exe",
-        ("--version",),
-        require_trusted_binary_paths=False,
-    )
-
-    assert (version, error) == ("omnigent 0.7.0 (built 2026-07-27T22:01:50Z)", "")
-    assert invocation["command"] == [
-        r"C:\Users\tester\.local\bin\omnigent.exe",
-        "--version",
-    ]
-    assert invocation["shell"] is False
-    assert invocation["timeout"] == 8.0
-    assert invocation["capture_output"] is True
-    assert invocation["text"] is False
 
 
 @pytest.fixture
@@ -359,7 +328,7 @@ def test_read_only_refresh_returns_fresh_scan_without_replacing_cache(monkeypatc
     monkeypatch.setattr(
         ad,
         "_scan_agent",
-        lambda name, **_kwargs: _signal(name, installed=name == "omnigent"),
+        lambda name, **_kwargs: _signal(name, installed=name == "hermes"),
     )
 
     refreshed = ad.discover_agents(
@@ -370,7 +339,7 @@ def test_read_only_refresh_returns_fresh_scan_without_replacing_cache(monkeypatc
     )
 
     assert refreshed.cache_hit is False
-    assert refreshed.agents["omnigent"].installed is True
+    assert refreshed.agents["hermes"].installed is True
     assert refreshed.agents["cursor"].installed is False
     assert cache.read_bytes() == original
 
@@ -494,10 +463,8 @@ def test_config_evidence_helper_rejects_directories(tmp_path):
     ("connector", "empty_dir"),
     [
         ("claudecode", (".claude",)),
-        ("openhands", (".openhands",)),
         ("antigravity", (".gemini", "antigravity-cli")),
         ("amp", (".config", "amp")),
-        ("omnigent", (".omnigent",)),
     ],
 )
 def test_empty_connector_directories_are_not_install_evidence(
@@ -612,11 +579,9 @@ def test_devin_canonical_user_mcp_file_is_configuration_evidence(
         ("copilot", (".copilot", "mcp-config.json")),
         # GAP-1481: the user-level hooks file DefenseClaw writes for Copilot.
         ("copilot", (".copilot", "hooks", "defenseclaw.json")),
-        ("openhands", (".openhands", "hooks.json")),
         ("antigravity", (".gemini", "config", "hooks.json")),
         ("opencode", (".config", "opencode", "opencode.json")),
         ("amp", (".config", "amp", "settings.json")),
-        ("omnigent", (".omnigent", "config.yaml")),
     ],
 )
 def test_each_connector_tracks_meaningful_config_separately_from_installation(
@@ -1801,11 +1766,9 @@ def test_devin_windows_cli_uses_exact_product_trust_root(monkeypatch, tmp_path):
         ("cursor", ("local", "cursor-agent", "agent.exe")),
         ("devin", ("local", "devin", "cli", "bin", "devin.exe")),
         ("copilot", ("roaming", "npm", "copilot.cmd")),
-        ("openhands", ("home", ".local", "bin", "openhands.exe")),
         ("antigravity", ("local", "agy", "bin", "agy.exe")),
         ("opencode", ("home", ".opencode", "bin", "opencode.exe")),
         ("amp", ("roaming", "npm", "amp.cmd")),
-        ("omnigent", ("home", ".local", "bin", "omnigent.exe")),
     ],
 )
 def test_windows_discovery_finds_known_binary_outside_path(
@@ -2114,33 +2077,6 @@ def test_cold_start_probe_timeout_is_retried_once_and_shown_short(monkeypatch, t
     assert ad._display_error(slow) == ad.VERSION_PROBE_TIMED_OUT
 
 
-def test_openhands_version_probe_prefers_cli_line_after_banner(monkeypatch, tmp_path):
-    _pin_home(monkeypatch, tmp_path)
-    calls = []
-    monkeypatch.setattr(ad.shutil, "which", lambda name: "/opt/bin/openhands")
-    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda path: True)
-
-    banner = """+----------------------------------------------------------------------+
-|  OpenHands SDK v1.21.0                                               |
-+----------------------------------------------------------------------+
-
-OpenHands CLI 1.16.0
-"""
-
-    def fake_run(args, **kwargs):
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout=banner, stderr="")
-
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
-
-    signal = ad._scan_agent("openhands")
-
-    assert signal.installed is True
-    assert signal.version == "OpenHands CLI 1.16.0"
-    args, kwargs = calls[0]
-    assert args == [os.path.abspath("/opt/bin/openhands"), "--version"]
-    assert kwargs["timeout"] == 30.0
-    assert kwargs["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
 
 
 def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
@@ -2263,27 +2199,6 @@ def test_version_probe_decoder_preserves_legacy_windows_output(monkeypatch):
     assert output == "Cursor 3.9.16 caf\u00e9"
 
 
-def test_windows_executable_suffixes_preserve_agent_specific_probe_rules(monkeypatch):
-    calls = []
-    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
-
-    def fake_run(args, **kwargs):
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(
-            args=args,
-            returncode=0,
-            stdout="SDK banner\nOpenHands CLI 1.16.0\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
-
-    version, error = ad._version_for_binary(r"C:\Tools\openhands.EXE", ("--version",))
-
-    assert error == ""
-    assert version == "OpenHands CLI 1.16.0"
-    assert calls[0][1]["timeout"] == 30.0
-    assert calls[0][1]["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
 
 
 def test_claude_version_probe_gets_longer_timeout_with_exe_suffix(monkeypatch):
@@ -2330,20 +2245,6 @@ def test_which_discovers_cmd_wrapper(monkeypatch, tmp_path):
     assert ad._path_key(ad._which("cursor")) == ad._path_key(str(wrapper))
 
 
-def test_omnigent_discovery_honors_config_home(monkeypatch, tmp_path):
-    _pin_home(monkeypatch, tmp_path)
-    config_home = tmp_path / "omnigent-config-home"
-    config_home.mkdir()
-    config_path = config_home / "config.yaml"
-    config_path.write_text("policies: {}\n", encoding="utf-8")
-    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
-    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
-
-    signal = ad._scan_agent("omnigent")
-
-    assert signal.installed is False
-    assert signal.configured is True
-    assert signal.config_path == str(config_path)
 
 
 def test_config_state_marks_selected_observe_connectors_active():
@@ -2381,18 +2282,6 @@ def test_config_state_marks_selected_observe_connectors_active():
         assert disc.agents[name].mode == "observe"
 
 
-def test_omnigent_discovery_does_not_fall_back_when_config_home_is_set(monkeypatch, tmp_path):
-    _pin_home(monkeypatch, tmp_path)
-    default_home = tmp_path / ".omnigent"
-    default_home.mkdir()
-    (default_home / "config.yaml").write_text("policies: {}\n", encoding="utf-8")
-    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "missing-custom-home"))
-    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
-
-    signal = ad._scan_agent("omnigent")
-
-    assert signal.installed is False
-    assert signal.config_path == ""
 
 
 # M-4 regression coverage: the version probe MUST refuse to exec a
@@ -2496,20 +2385,6 @@ def test_windows_defaults_are_narrow_and_reject_drive_root():
     assert ad._expand_bin_prefixes((Path(local_app_data).anchor,)) == []
 
 
-@pytest.mark.skipif(os.name == "nt", reason="requires unprivileged POSIX symlinks")
-def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path):
-    real_root = tmp_path / "real-tools"
-    binary = real_root / "bin" / "omnigent"
-    binary.parent.mkdir(parents=True)
-    binary.write_text("#!/bin/sh\nexit 0\n")
-    binary.chmod(0o755)
-    binary.parent.chmod(0o755)
-    alias = tmp_path / "tools-alias"
-    alias.symlink_to(real_root, target_is_directory=True)
-
-    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(alias))
-
-    assert ad._is_trusted_binary_path(str(alias / "bin" / "omnigent")) is True
 
 
 def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
