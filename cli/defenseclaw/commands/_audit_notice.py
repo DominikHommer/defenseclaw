@@ -39,8 +39,9 @@ NOT_RECORDED_WARNING = not_recorded_warning()
 
 
 class _SavedChangeAudit:
-    def __init__(self, logger: Any) -> None:
+    def __init__(self, logger: Any, *, unavailable_warning: str | None = None) -> None:
         self._logger = logger
+        self._unavailable_warning = unavailable_warning or NOT_RECORDED_WARNING
 
     def _record(self, method: str, *args: Any, **kwargs: Any) -> None:
         from defenseclaw.logger import CanonicalObservabilityUnavailableError
@@ -51,7 +52,7 @@ class _SavedChangeAudit:
         except CanonicalObservabilityUnavailableError:
             if not _NOTED:
                 _NOTED = True
-                ux.echo(NOT_RECORDED_WARNING, err=True)
+                ux.echo(self._unavailable_warning, err=True)
 
     def log_action(self, *args: Any, **kwargs: Any) -> None:
         self._record("log_action", *args, **kwargs)
@@ -63,9 +64,9 @@ class _SavedChangeAudit:
         self._record("log_scan", *args, **kwargs)
 
 
-def saved_change_audit(logger: Any) -> _SavedChangeAudit:
+def saved_change_audit(logger: Any, *, unavailable_warning: str | None = None) -> _SavedChangeAudit:
     """Wrap *logger* for the audit event of an already applied change."""
-    return _SavedChangeAudit(logger)
+    return _SavedChangeAudit(logger, unavailable_warning=unavailable_warning)
 
 
 def note_asset_policy_observed(

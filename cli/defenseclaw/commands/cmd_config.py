@@ -779,7 +779,15 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     # Listener settings take effect on restart. Send this write's audit fact
     # to the listener that was running before the save, using its credentials.
     logger = getattr(app, "logger", None) or Logger.from_config(before_cfg or cfg)
-    saved_change_audit(logger).log_config_change(
+    if any(key in result.changed for key in ("gateway", "gateway.api_port", "gateway.api_bind", "gateway.token_env")):
+        # More than one edit may precede restart. Failure to reach the last
+        # configured endpoint does not prove the old gateway has stopped.
+        audit = saved_change_audit(logger, unavailable_warning=(
+            "Config saved, but the CLI audit endpoint could not be reached. Run: defenseclaw-gateway restart."
+        ))
+    else:
+        audit = saved_change_audit(logger)
+    audit.log_config_change(
         f"config-{verb}", f"{key}=" + ("(unset)" if verb == "unset" else "(set)")
     )
     return True

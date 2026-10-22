@@ -1278,10 +1278,11 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		exportCandidateKey()
 		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
-		// A saved listener change is held until restart, but it is still a
-		// writer-attributed change. Record it on the current runtime before
-		// advancing the source/generation watermark, once per saved write.
-		if len(pendingRestart) > 0 && m.logger != nil && !next.SecureClientIntegration() {
+		// Saved intent can change without changing the running settings:
+		// holding a listener until restart, cancelling that pending change,
+		// or removing an explicit default. Attribute each saved write before
+		// advancing the source/generation watermark.
+		if m.logger != nil && !next.SecureClientIntegration() {
 			if activity, _, recorded := configChangeActivity(m.path, m.appliedRaw, source.raw,
 				pendingRestart, pendingRestart, m.appliedGeneration, m.appliedGenerationKnown); recorded {
 				_ = m.logger.LogActivity(activity)

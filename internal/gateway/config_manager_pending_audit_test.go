@@ -66,4 +66,18 @@ func TestConfigManagerAttributesPendingListenerChangeOnce(t *testing.T) {
 			t.Fatalf("pending audit omitted %s: %s", want, wire)
 		}
 	}
+	// Cancelling the pending move also changes saved intent, even though
+	// the resulting listener already matches the running gateway.
+	if _, err := configwrite.Locked(t.Context(), path, configwrite.Options{Actor: "cli:operator", Reason: "cancel listener move"},
+		func() (bool, error) { return true, os.WriteFile(path, raw, 0o600) }); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := mgr.Reload(t.Context(), "cancel"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if records := capture.snapshot(); len(records) != 2 {
+		t.Fatalf("cancelling the pending write produced %d total audit records, want exactly two", len(records))
+	}
 }
