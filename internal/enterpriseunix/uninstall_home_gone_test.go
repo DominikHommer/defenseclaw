@@ -44,6 +44,26 @@ func TestUninstallRetainsDeploymentForAPerUserHomeThatIsNotAvailable(t *testing.
 	}
 }
 
+func TestUninstallRetainsDeploymentForUnprovenRemovalReports(t *testing.T) {
+	for _, report := range []string{"null", "{}", `{"ok":false}`, "invalid JSON"} {
+		t.Run(report, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+				return CommandResult{Stdout: []byte(report)}, nil
+			}}
+			done := h.run(Options{Action: ActionUninstall})
+			requireError(t, done, codeUninstallIncomplete)
+			if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || !exists(h.env.deploymentPath()) {
+				t.Fatal("unproven cleanup removed the retryable deployment")
+			}
+			if !strings.Contains(messagesOf(done.Errors, codePerUserHooks), "rerun `"+h.env.lifecycleCommand(ActionUninstall)) {
+				t.Fatal("missing exact retry command")
+			}
+		})
+	}
+}
+
 // GAP-0553: remove-all reports the pending cleanup of a removed account
 // with a reason that names its recorded home and a remedy. The uninstall
 // keeps the deployment and reports that reason with the retry command.

@@ -3971,6 +3971,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	}
 	out, err := env.runGatewayCLILong(ctx, removeAllTimeout, args...)
 	var report struct {
+		OK           *bool                       `json:"ok"`
 		Pending      []string                    `json:"pending"`
 		Failed       []string                    `json:"failed"`
 		StateFailed  []string                    `json:"state_failed"`
@@ -3985,6 +3986,10 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	l.perUserRemoved = report.Removed
 	rerun := "`" + l.uninstallCommand() + "`"
 	left := false
+	if report.OK == nil || !*report.OK {
+		r.AddError(codePerUserHooks, "the per-user hook removal report did not confirm cleanup; fix the cause and rerun "+rerun)
+		left = true
+	}
 	for _, entry := range report.Failed {
 		user, connector, reason, ok := cutPerUserEntry(entry)
 		if !ok {
