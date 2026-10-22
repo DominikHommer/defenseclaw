@@ -15014,7 +15014,7 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
         else:
             # Setup re-pins the agent and the guard; refresh never re-pins
             # a changed agent binary.
-            fix = f"defenseclaw acp setup --client {client} --agent {agent}"
+            fix = cmd_acp.setup_repair_command(cfg, client, agent, data_dir)
         if managed:
             # A managed enrollment keeps its locks in a per-user runtime dir
             # that doctor does not know, so only acp verify can be sure.
@@ -17214,7 +17214,7 @@ def _fix_acp_guard_pins(
     agent_note = ""
     if agent_drift:
         commands = ", ".join(
-            "'defenseclaw acp setup --client {} --agent {}'".format(*pair.split("/")) for pair in agent_drift
+            f"`{cmd_acp.setup_repair_command(cfg, *pair.split('/'), data_dir)}`" for pair in agent_drift
         )
         agent_note = (
             f"{', '.join(agent_drift)}: the agent executable changed since setup (for example, it updated); "

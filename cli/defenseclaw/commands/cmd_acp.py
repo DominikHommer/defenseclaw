@@ -186,9 +186,10 @@ def _write_contract_lock(
     agent_executable: str,
     client_path: Path,
     managed: bool,
+    adopted_entries: list[str] | None = None,
 ) -> Path:
     path = _contract_lock_path(data_dir, client, agent)
-    document = {
+    document: dict[str, Any] = {
         "version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "protocol": {"schema_version": _SCHEMA_VERSION, "schema_sha256": _SCHEMA_SHA256},
@@ -203,8 +204,40 @@ def _write_contract_lock(
         "profile": profile,
         "mode": mode,
     }
+    if adopted_entries:
+        # The operator's own picker entries this binding routes through the
+        # guard. Verify reports one that stops launching the guard, and the
+        # next setup routes it back, so pointing it at the agent again is not
+        # a silent bypass. Omitted when only the reserved entry is written.
+        document["client"]["adopted_entries"] = sorted(adopted_entries)
     atomic_write_private_bytes(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
     return path.resolve()
+
+
+def _lock_document(path: Path, client: str, agent: str) -> dict[str, Any] | None:
+    """The pair's contract lock when it is a safe, readable lock for this pair."""
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 << 10:
+            return None
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    lock_client, lock_agent = document.get("client"), document.get("agent")
+    if (
+        not isinstance(lock_client, dict)
+        or not isinstance(lock_agent, dict)
+        or lock_client.get("id") != client
+        or lock_agent.get("id") != agent
+    ):
+        return None
+    return document
+
+
+def _adopted_entries(document: dict[str, Any] | None) -> list[str]:
+    names = document["client"].get("adopted_entries") if document else None
+    return [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
 
 
 def _client_contract_snapshots(data_dir: str, client: str, agent: str) -> list[tuple[Path, tuple[bool, bytes]]]:
@@ -261,86 +294,112 @@ def _guard_options(entry: dict[str, Any]) -> dict[str, str]:
     return options if len(options) * 2 == len(prefix) else {}
 
 
-def _guarded_pair(entry: dict[str, Any]) -> tuple[str, str] | None:
+def _lock_names_entry(entry: dict[str, Any], options: dict[str, str], client: str, agent: str) -> bool:
+    """Whether the entry's own contract lock proves that setup wrote it.
+
+    Only setup writes the lock, in the private ACP runtime directory. It must
+    be this pair's lock for this editor file and pin exactly the executable
+    the entry launches. A guard-like filename proves nothing on its own: an
+    operator's wrapper may also be called defenseclaw-acp.
+    """
+    lock_path = Path(options.get("--contract-lock", ""))
+    if not lock_path.is_absolute() or lock_path.name != f"{client}-{agent}.contract-lock.json":
+        return False
+    lock = _lock_document(lock_path, client, agent)
+    guard = lock.get("guard") if lock else None
+    if not isinstance(guard, dict) or guard.get("path") != entry.get("command"):
+        return False
+    config_path = lock["client"].get("config_path")
+    try:
+        return isinstance(config_path, str) and Path(config_path).resolve() == _client_path(client).resolve()
+    except (OSError, click.ClickException):
+        return False
+
+
+def _guarded_pair(entry: dict[str, Any], name: str) -> tuple[str, str] | None:
+    """The pair a DefenseClaw-written editor entry guards, or None."""
     options = _guard_options(entry)
     client, agent = options.get("--client", ""), options.get("--agent", "")
     if client not in _CLIENTS or agent not in _AGENTS:
         return None
-    if not _entry_is_guarded(entry):
-        # An explicitly selected guard may have another filename. Its lock
-        # must identify that exact executable before we claim this entry.
-        lock_path = Path(options.get("--contract-lock", ""))
-        if not lock_path.is_absolute() or lock_path.name != f"{client}-{agent}.contract-lock.json":
-            return None
-        try:
-            lock = _read_json_object(lock_path)
-        except click.ClickException:
-            return None
-        identities = [lock.get(key) for key in ("guard", "client", "agent")]
-        if not all(isinstance(item, dict) for item in identities):
-            return None
-        if (
-            identities[0].get("path") != entry.get("command")
-            or identities[1].get("id") != client
-            or identities[2].get("id") != agent
-        ):
-            return None
-    return client, agent
+    if name == _managed_name(agent) and _entry_is_guarded(entry):
+        # The reserved entry name launching the guard is what setup has
+        # always written for this pair.
+        return client, agent
+    # Any other entry (an adopted picker entry, a copy, or a guard with
+    # another filename) belongs to DefenseClaw only when its lock says so.
+    # Without that proof it is the operator's, and setup and remove leave it.
+    return (client, agent) if _lock_names_entry(entry, options, client, agent) else None
 
 
 def _pair_entry_names(servers: dict[str, Any], client: str, agent: str) -> list[str]:
     return [
         name for name, entry in servers.items()
-        if name == _managed_name(agent) or isinstance(entry, dict) and _guarded_pair(entry) == (client, agent)
+        if name == _managed_name(agent) or isinstance(entry, dict) and _guarded_pair(entry, name) == (client, agent)
     ]
 
 
-def _check_reserved_entry(client: str, agent: str, action: str, adopting: str | None = None) -> None:
+def _check_reserved_entry(client: str, agent: str, adopting: str | None = None) -> None:
     path = _client_path(client)
     servers = _read_json_object(path).get("agent_servers")
     name = _managed_name(agent)
     if not isinstance(servers, dict) or name not in servers or name == adopting:
         return
     entry = servers[name]
-    if not isinstance(entry, dict) or _guarded_pair(entry) != (client, agent):
+    if not isinstance(entry, dict) or _guarded_pair(entry, name) != (client, agent):
+        # Ask for the same command again, not a shortened one: a bare
+        # `acp setup` would rebind the pair in observe mode.
         raise click.ClickException(
             f"cannot identify editor entry {name!r} as DefenseClaw-owned; "
-            f"rename that entry in {path}, then run defenseclaw acp {action} --client {client} --agent {agent}"
+            f"rename that entry in {path}, then run the same command again"
         )
 
 
 def _set_client_entry(
-    client: str, agent: str, command: str, args: list[str], entry_name: str | None = None,
-) -> Path:
+    client: str,
+    agent: str,
+    command: str,
+    args: list[str],
+    entry_name: str | None = None,
+    retained: list[str] | None = None,
+) -> tuple[Path, list[str]]:
+    """Write the pair's guard entries; return the file and the entry names written."""
     path = _client_path(client)
     document = _read_json_object(path)
     servers = document.setdefault("agent_servers", {})
     if not isinstance(servers, dict):
         raise click.ClickException(f"agent_servers must be an object in {path}")
     names = _pair_entry_names(servers, client, agent)
+    taken_over: set[str] = set()
     if entry_name is not None:
         adopted = servers.get(entry_name)
         if not isinstance(adopted, dict) or _agent_for_entry(adopted) != agent:
-            raise click.ClickException(
-                f"ACP entry {entry_name!r} changed before adoption; run defenseclaw acp adopt again"
-            )
-        names.append(entry_name)
+            raise click.ClickException(f"ACP entry {entry_name!r} changed before adoption; run the same command again")
+        taken_over.add(entry_name)
+    # An entry this binding adopted earlier (its lock names it) that now
+    # launches the agent directly is a bypass; route it back through the guard.
+    for name in retained or []:
+        candidate = servers.get(name)
+        if name not in names and isinstance(candidate, dict) and _agent_for_entry(candidate) == agent:
+            taken_over.add(name)
+    names.extend(sorted(taken_over - set(names)))
     for name in names:
-        if name == entry_name:
+        if name in taken_over:
             continue
         existing = servers[name]
-        if not isinstance(existing, dict) or _guarded_pair(existing) != (client, agent):
+        if not isinstance(existing, dict) or _guarded_pair(existing, name) != (client, agent):
             raise click.ClickException(
                 f"cannot identify editor entry {name!r} as DefenseClaw-owned; "
-                f"rename that entry in {path}, then run defenseclaw acp setup --client {client} --agent {agent}"
+                f"rename that entry in {path}, then run the same command again"
             )
     aliases = [name for name in names if name != _managed_name(agent)]
     if aliases and _managed_name(agent) in servers:
         canonical = servers[_managed_name(agent)]
-        if not isinstance(canonical, dict) or _guarded_pair(canonical) != (client, agent):
+        if not isinstance(canonical, dict) or _guarded_pair(canonical, _managed_name(agent)) != (client, agent):
             raise click.ClickException("the duplicate ACP entry cannot be identified; run defenseclaw acp verify")
         del servers[_managed_name(agent)]
-    for name in aliases or names or [_managed_name(agent)]:
+    written = aliases or names or [_managed_name(agent)]
+    for name in written:
         entry = dict(servers.get(name) or {})
         entry.update(command=command, args=args)
         entry.setdefault("env", {})
@@ -348,7 +407,7 @@ def _set_client_entry(
             entry["type"] = "custom"
         servers[name] = entry
     _write_json(path, document)
-    return path
+    return path, written
 
 
 def _has_client_entry(client: str, agent: str) -> bool:
@@ -365,10 +424,10 @@ def _remove_client_entry(client: str, agent: str) -> Path:
     names = _pair_entry_names(servers, client, agent)
     for name in names:
         entry = servers[name]
-        if not isinstance(entry, dict) or _guarded_pair(entry) != (client, agent):
+        if not isinstance(entry, dict) or _guarded_pair(entry, name) != (client, agent):
             raise click.ClickException(
                 f"cannot identify editor entry {name!r} as DefenseClaw-owned; "
-                f"rename that entry in {path}, then run defenseclaw acp remove --client {client} --agent {agent}"
+                f"rename that entry in {path}, then run the same command again"
             )
     for name in names:
         servers.pop(name)
@@ -392,6 +451,29 @@ def _managed_pairs() -> set[tuple[str, str]]:
             continue
         for agent in _AGENTS:
             if _pair_entry_names(servers, client, agent):
+                pairs.add((client, agent))
+    return pairs
+
+
+def _binding_pairs(cfg: Any, data_dir: str) -> set[tuple[str, str]]:
+    """Every pair bound here: editor entries, contract locks and configured bindings.
+
+    An adopted entry pointed back at the agent no longer looks like a guard
+    entry, so reading the editor files alone dropped the binding from status
+    and verify exactly when it was bypassed. Its lock and its configured
+    binding remain. A managed host's central bindings name pairs for every
+    user, so only this user's locks count there.
+    """
+    pairs = _managed_pairs()
+    for client in _CLIENTS:
+        for agent in _AGENTS:
+            lock = _contract_lock_path(data_dir, client, agent)
+            if lock.is_symlink() or lock.exists():
+                pairs.add((client, agent))
+    if cfg.deployment_mode != "managed_enterprise":
+        for key, binding in cfg.acp.bindings.items():
+            client, _, agent = str(key).partition("/")
+            if getattr(binding, "enabled", False) and client in _CLIENTS and agent in _AGENTS:
                 pairs.add((client, agent))
     return pairs
 
@@ -477,6 +559,15 @@ def _verify_binding(
         or lock_agent.get("id") != agent
     ):
         problems.append("contract lock identity does not match")
+    adopted = lock_client.get("adopted_entries", []) if isinstance(lock_client, dict) else []
+    if not isinstance(adopted, list) or not all(isinstance(name, str) for name in adopted):
+        problems.append("contract lock adopted entries are malformed")
+    else:
+        problems.extend(
+            f"adopted editor entry {name!r} no longer launches the DefenseClaw guard"
+            for name in adopted
+            if name not in names
+        )
     if isinstance(lock_client, dict):
         locked_client_path = lock_client.get("config_path")
         client_digest = lock_client.get("config_sha256")
@@ -647,7 +738,7 @@ def setup_cmd(
     # at `bindings` would silently promote or demote it.
     other_pairs_using_profile = sorted(
         f"{other_client}/{other_agent}"
-        for other_client, other_agent in _managed_pairs()
+        for other_client, other_agent in _binding_pairs(app.cfg, data_dir)
         if app.cfg.acp.binding_key(other_client, other_agent) != pair_key
         and app.cfg.acp.profile_for_pair(other_client, other_agent) == profile
     )
@@ -683,11 +774,12 @@ def setup_cmd(
                 f"central enterprise ACP policy does not authorize {client}/{agent} in {profile} {mode} mode"
             )
     client_path = _client_path(client)
-    _check_reserved_entry(client, agent, "setup", entry_name)
+    _check_reserved_entry(client, agent, entry_name)
     token_candidate = (
         Path(data_dir) / "acp" / f"{client}-{agent}.token" if managed else Path(data_dir) / "acp" / ".token"
     )
     lock_candidate = _contract_lock_path(data_dir, client, agent)
+    retained = _adopted_entries(_lock_document(lock_candidate, client, agent))
     client_snapshot = _snapshot(client_path)
     token_snapshot = _snapshot(token_candidate)
     lock_snapshots = _client_contract_snapshots(data_dir, client, agent)
@@ -714,7 +806,7 @@ def setup_cmd(
     ]
     try:
         _progress(show, f"Writing the DefenseClaw {agent} entry to {client_path}...")
-        path = _set_client_entry(client, agent, guard, args, entry_name)
+        path, written = _set_client_entry(client, agent, guard, args, entry_name, retained)
         _progress(show, "Pinning the guard and agent executable digests...")
         lock_path = _write_contract_lock(
             data_dir=data_dir,
@@ -726,6 +818,7 @@ def setup_cmd(
             agent_executable=agent_executable,
             client_path=path,
             managed=managed,
+            adopted_entries=[name for name in written if name != _managed_name(agent)],
         )
         _refresh_client_contract_digests(data_dir, client, path)
         if not managed:
@@ -738,7 +831,7 @@ def setup_cmd(
             # own mode lives on its profile.
             existing_pairs = {
                 app.cfg.acp.binding_key(other_client, other_agent)
-                for other_client, other_agent in _managed_pairs()
+                for other_client, other_agent in _binding_pairs(app.cfg, data_dir)
             } - {pair_key}
             if not existing_pairs:
                 # The first binding seeds both fallbacks; leaving
@@ -884,7 +977,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
     path = _client_path(client)
-    _check_reserved_entry(client, agent, "remove")
+    _check_reserved_entry(client, agent)
     path_snapshot = _snapshot(path)
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
     if managed and app.cfg.deployment_mode != "managed_enterprise":
@@ -902,7 +995,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
     try:
         _progress(True, f"Removing the DefenseClaw {agent} entry from {path}...")
         path = _remove_client_entry(client, agent)
-        remaining = _managed_pairs()
+        remaining = _binding_pairs(app.cfg, data_dir) - {(client, agent)}
         if not managed:
             # The pair's own policy goes with the pair. The client and agent
             # pins survive while any other pair still uses that half.
@@ -960,7 +1053,7 @@ def status_cmd(app: AppContext, runtime_data_dir: Path | None, json_output: bool
         raise click.ClickException("configuration is unavailable")
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
     bindings = {}
-    for client, agent in sorted(_managed_pairs()):
+    for client, agent in sorted(_binding_pairs(app.cfg, data_dir)):
         problems = _verify_binding(data_dir, client, agent, app.cfg.acp)
         profile = app.cfg.acp.profile_for_pair(client, agent)
         resolved = app.cfg.acp.profiles.get(profile)
@@ -1054,7 +1147,7 @@ def verify_cmd(app: AppContext, client: str | None, agent: str | None, runtime_d
     else:
         pairs = sorted(
             (pair_client, pair_agent)
-            for pair_client, pair_agent in _managed_pairs()
+            for pair_client, pair_agent in _binding_pairs(app.cfg, data_dir)
             if (client is None or pair_client == client) and (agent is None or pair_agent == agent)
         )
         if not pairs:
@@ -1067,21 +1160,41 @@ def verify_cmd(app: AppContext, client: str | None, agent: str | None, runtime_d
     for pair_client, pair_agent in pairs:
         problems = _verify_binding(data_dir, pair_client, pair_agent, app.cfg.acp)
         if problems:
-            repair = [
-                "defenseclaw", "acp", "setup", "--client", pair_client, "--agent", pair_agent,
-                "--profile", app.cfg.acp.profile_for_pair(pair_client, pair_agent),
-            ]
-            if app.cfg.deployment_mode == "managed_enterprise":
-                repair.extend(["--managed", "--runtime-data-dir", data_dir])
-            command = (
-                "defenseclaw " + " ".join("'" + value.replace("'", "''") + "'" for value in repair[1:])
-                if os.name == "nt" else shlex.join(repair)
-            )
+            command = setup_repair_command(app.cfg, pair_client, pair_agent, data_dir)
             failures.append(f"{pair_client}/{pair_agent}: " + "; ".join(problems) + f"; run {command}")
         else:
             click.echo(f"Verified {pair_client}/{pair_agent}: editor entry and executable digests match")
     if failures:
         raise click.ClickException("ACP binding verification failed: " + " | ".join(failures))
+
+
+def setup_repair_command(cfg: Any, client: str, agent: str, data_dir: str) -> str:
+    """The `acp setup` command that restores this binding as configured.
+
+    It keeps the binding's profile and mode. Setup without --activate writes
+    observe mode and fail-open, so a repair hint without it turned an action
+    binding into an unenforced one. The lock's guard and agent executables are
+    named when the lock still identifies them, so the repair rebinds the same
+    files rather than whatever is first on PATH.
+    """
+    profile = cfg.acp.profile_for_pair(client, agent)
+    resolved = cfg.acp.profiles.get(profile)
+    mode = (resolved.mode if resolved else "") or cfg.acp.mode or "observe"
+    command = ["defenseclaw", "acp", "setup", "--client", client, "--agent", agent, "--profile", profile]
+    if mode != "observe":
+        # Every mode but observe enforces; never print a command that demotes it.
+        command.append("--activate")
+    lock = _lock_document(_contract_lock_path(data_dir, client, agent), client, agent)
+    for flag, key in (("--guard-binary", "guard"), ("--agent-binary", "agent")):
+        item = lock.get(key) if lock else None
+        executable = item.get("path") if isinstance(item, dict) else None
+        if isinstance(executable, str) and Path(executable).is_absolute() and Path(executable).is_file():
+            command.extend([flag, executable])
+    if cfg.deployment_mode == "managed_enterprise":
+        command.extend(["--managed", "--runtime-data-dir", data_dir])
+    if os.name == "nt":
+        return "defenseclaw " + " ".join("'" + value.replace("'", "''") + "'" for value in command[1:])
+    return shlex.join(command)
 
 
 def refresh_guard_pins(
@@ -1253,7 +1366,7 @@ def _detect_acp_clients() -> list[dict[str, Any]]:
                 for name, entry in sorted(servers.items()):
                     if not isinstance(entry, dict):
                         continue
-                    pair = _guarded_pair(entry)
+                    pair = _guarded_pair(entry, name)
                     if pair is not None or _entry_is_guarded(entry):
                         record["guarded"].append({"entry": name, "agent": pair[1] if pair else ""})
                         continue
