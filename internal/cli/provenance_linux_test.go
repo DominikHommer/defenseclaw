@@ -91,8 +91,10 @@ func TestProvenanceShowUnderSocketActivation(t *testing.T) {
 	}
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
-	previous, oldIdentity, oldHolders := cfg, provenanceGatewayIdentity, gatewayPortHolders
-	t.Cleanup(func() { cfg, provenanceGatewayIdentity, gatewayPortHolders = previous, oldIdentity, oldHolders })
+	stubProvenanceSeams(t)
+	// The gateway's environment has no token: it authenticates with the
+	// inline one. Who holds the listener and each connection is real.
+	provenanceGatewayEnvironment = func(int, string) ([]string, error) { return nil, nil }
 	gatewayPortHolders = daemon.FindPortHolders
 	cfg = provenanceTestConfigAt(host, portNumber)
 	cmd, out, _ := provenanceTestCommand()

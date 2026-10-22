@@ -426,7 +426,7 @@ func TestChildEnvUsesDotenvGatewayTokenOverStaleParent(t *testing.T) {
 		t.Fatalf("write dotenv: %v", err)
 	}
 
-	env := d.childEnv([]string{
+	env := d.ChildEnvironment([]string{
 		"PATH=/bin",
 		"DEFENSECLAW_GATEWAY_TOKEN=stale-parent",
 		"OPENCLAW_GATEWAY_TOKEN=legacy-parent",
@@ -453,7 +453,7 @@ func TestChildEnvPreservesParentGatewayTokenWhenDotenvMissing(t *testing.T) {
 	dir := t.TempDir()
 	d := New(dir)
 
-	env := d.childEnv([]string{
+	env := d.ChildEnvironment([]string{
 		"DEFENSECLAW_GATEWAY_TOKEN=operator-env",
 	})
 	got := envMap(env)
@@ -471,7 +471,7 @@ func TestChildEnvUsesLegacyDotenvGatewayTokenOverStaleParent(t *testing.T) {
 		t.Fatalf("write dotenv: %v", err)
 	}
 
-	env := d.childEnv([]string{
+	env := d.ChildEnvironment([]string{
 		"OPENCLAW_GATEWAY_TOKEN=legacy-parent",
 	})
 	got := envMap(env)
@@ -492,7 +492,7 @@ func TestChildEnvUsesWindowsCaseInsensitiveDotenvTokenOverStaleParent(t *testing
 		t.Fatalf("write dotenv: %v", err)
 	}
 
-	env := d.childEnv([]string{
+	env := d.ChildEnvironment([]string{
 		"DefenseClaw_Gateway_Token=stale-parent",
 		"OpenClaw_Gateway_Token=legacy-parent",
 		EnvDaemon + "=0",

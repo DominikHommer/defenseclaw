@@ -50,6 +50,7 @@ func serveProvenanceTestGateway(t *testing.T, gateway *provenanceTestGateway, pi
 		return []daemon.TCPListenAddr{{IP: addr.IP, Port: addr.Port}}, nil
 	}
 	gatewayPortHolders = func(string, int) ([]daemon.PortHolder, error) { return []daemon.PortHolder{{PID: pid}}, nil }
+	provenanceGatewayAccepts(pid)
 	gatewayManagedState = func() (bool, int) { return true, pid }
 	return server
 }
@@ -164,9 +165,10 @@ func TestProvenanceShowReadsAGatewayOnTheDataDirItStartedWith(t *testing.T) {
 					t.Fatalf("a rejected config.yaml stopped the read: %v", err)
 				}
 			} else {
-				// The CLI loaded the edited config and, after the
-				// environment it started with, the edited data_dir's .env.
-				provenanceStartEnvironment = os.Environ()
+				// The CLI loaded the edited config and the edited
+				// data_dir's .env; the gateway's environment has neither.
+				gatewayEnvironment := os.Environ()
+				provenanceGatewayEnvironment = func(int, string) ([]string, error) { return gatewayEnvironment, nil }
 				t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "token of the edited data_dir")
 				cfg = provenanceTestConfig(t, server)
 				cfg.Gateway.Token, cfg.Gateway.TokenEnv = "", ""
@@ -186,7 +188,7 @@ func TestProvenanceShowReadsAGatewayOnTheDataDirItStartedWith(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", provenanceTestToken)
-	provenanceStartEnvironment = nil
+	provenanceGatewayEnvironment = func(int, string) ([]string, error) { return os.Environ(), nil }
 	cfg = provenanceTestConfig(t, server)
 	cfg.DataDir = config.DefaultDataPath()
 	cmd, out, _ := provenanceTestCommand()

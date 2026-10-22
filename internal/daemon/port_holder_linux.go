@@ -87,8 +87,7 @@ func findProcPortHolder(procRoot, host string, port int) (PortHolder, error) {
 }
 
 // findProcPortHolders is findProcPortHolder for every process holding the
-// socket, in /proc order. A socket no readable process holds is one holder
-// with PID 0.
+// socket (procSocketHolders).
 func findProcPortHolders(procRoot, host string, port int) ([]PortHolder, error) {
 	holder := PortHolder{UID: -1}
 	inodes := map[string]struct{}{}
@@ -124,9 +123,17 @@ func findProcPortHolders(procRoot, host string, port int) ([]PortHolder, error) 
 	if len(inodes) == 0 {
 		return nil, ErrNoListener
 	}
+	return procSocketHolders(procRoot, inodes, holder), nil
+}
+
+// procSocketHolders lists, in /proc order, every process whose descriptors
+// this account may read that holds one of the sockets inodes ("socket:[N]"),
+// as holder with that process's PID and command. Sockets no readable process
+// holds are one holder with PID 0.
+func procSocketHolders(procRoot string, inodes map[string]struct{}, holder PortHolder) []PortHolder {
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
-		return []PortHolder{holder}, nil
+		return []PortHolder{holder}
 	}
 	var holders []PortHolder
 	for _, entry := range entries {
@@ -156,9 +163,9 @@ func findProcPortHolders(procRoot, host string, port int) ([]PortHolder, error) 
 		}
 	}
 	if len(holders) == 0 {
-		return []PortHolder{holder}, nil
+		return []PortHolder{holder}
 	}
-	return holders, nil
+	return holders
 }
 
 // procAddrIP decodes a /proc/net/tcp{,6} address: 32-bit words in host byte

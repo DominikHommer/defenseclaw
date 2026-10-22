@@ -36,9 +36,9 @@ const (
 
 var getExtendedTCPTable = windows.NewLazySystemDLL("iphlpapi.dll").NewProc("GetExtendedTcpTable")
 
-var callExtendedTCPTable = func(table unsafe.Pointer, size *uint32, family uint32) windows.Errno {
+var callExtendedTCPTable = func(table unsafe.Pointer, size *uint32, family, class uint32) windows.Errno {
 	result, _, _ := getExtendedTCPTable.Call(
-		uintptr(table), uintptr(unsafe.Pointer(size)), 0, uintptr(family), tcpTableOwnerPIDListener, 0,
+		uintptr(table), uintptr(unsafe.Pointer(size)), 0, uintptr(family), uintptr(class), 0,
 	)
 	return windows.Errno(result)
 }
@@ -130,7 +130,7 @@ func listenerAddressMatches(host string, actual net.IP) bool {
 }
 
 func collectTCP4Owners(port int, host string, found *[]Listener) error {
-	return walkExtendedTCPTable(windows.AF_INET, unsafe.Sizeof(tcp4OwnerPIDRow{}), func(row unsafe.Pointer) {
+	return walkExtendedTCPTable(windows.AF_INET, tcpTableOwnerPIDListener, unsafe.Sizeof(tcp4OwnerPIDRow{}), func(row unsafe.Pointer) {
 		r := (*tcp4OwnerPIDRow)(row)
 		if int(windows.Ntohs(uint16(r.LocalPort))) != port {
 			return
@@ -143,7 +143,7 @@ func collectTCP4Owners(port int, host string, found *[]Listener) error {
 }
 
 func collectTCP6Owners(port int, host string, found *[]Listener) error {
-	return walkExtendedTCPTable(windows.AF_INET6, unsafe.Sizeof(tcp6OwnerPIDRow{}), func(row unsafe.Pointer) {
+	return walkExtendedTCPTable(windows.AF_INET6, tcpTableOwnerPIDListener, unsafe.Sizeof(tcp6OwnerPIDRow{}), func(row unsafe.Pointer) {
 		r := (*tcp6OwnerPIDRow)(row)
 		if int(windows.Ntohs(uint16(r.LocalPort))) != port {
 			return
@@ -156,7 +156,7 @@ func collectTCP6Owners(port int, host string, found *[]Listener) error {
 
 func processTCPListeners(pid int) ([]TCPListenAddr, error) {
 	var found []TCPListenAddr
-	if err := walkExtendedTCPTable(windows.AF_INET, unsafe.Sizeof(tcp4OwnerPIDRow{}), func(row unsafe.Pointer) {
+	if err := walkExtendedTCPTable(windows.AF_INET, tcpTableOwnerPIDListener, unsafe.Sizeof(tcp4OwnerPIDRow{}), func(row unsafe.Pointer) {
 		r := (*tcp4OwnerPIDRow)(row)
 		if int(r.PID) == pid {
 			addrBytes := *(*[4]byte)(unsafe.Pointer(&r.LocalAddr))
@@ -165,7 +165,7 @@ func processTCPListeners(pid int) ([]TCPListenAddr, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := walkExtendedTCPTable(windows.AF_INET6, unsafe.Sizeof(tcp6OwnerPIDRow{}), func(row unsafe.Pointer) {
+	if err := walkExtendedTCPTable(windows.AF_INET6, tcpTableOwnerPIDListener, unsafe.Sizeof(tcp6OwnerPIDRow{}), func(row unsafe.Pointer) {
 		r := (*tcp6OwnerPIDRow)(row)
 		if int(r.PID) == pid {
 			found = append(found, TCPListenAddr{IP: net.IP(append([]byte(nil), r.LocalAddr[:]...)), Port: int(windows.Ntohs(uint16(r.LocalPort)))})
@@ -176,9 +176,11 @@ func processTCPListeners(pid int) ([]TCPListenAddr, error) {
 	return found, nil
 }
 
-func walkExtendedTCPTable(family uint32, rowSize uintptr, visit func(unsafe.Pointer)) error {
+// walkExtendedTCPTable visits every row of the owner-PID TCP table class
+// (listeners or connections) of family.
+func walkExtendedTCPTable(family, class uint32, rowSize uintptr, visit func(unsafe.Pointer)) error {
 	var size uint32
-	result := callExtendedTCPTable(nil, &size, family)
+	result := callExtendedTCPTable(nil, &size, family, class)
 	if result != errorInsufficientBuffer && result != 0 {
 		return listenerTableError(result)
 	}
@@ -187,7 +189,7 @@ func walkExtendedTCPTable(family uint32, rowSize uintptr, visit func(unsafe.Poin
 			return nil
 		}
 		buffer := make([]byte, size)
-		result = callExtendedTCPTable(unsafe.Pointer(&buffer[0]), &size, family)
+		result = callExtendedTCPTable(unsafe.Pointer(&buffer[0]), &size, family, class)
 		if result == errorInsufficientBuffer {
 			continue
 		}

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -97,14 +98,26 @@ func stubProvenanceSeams(t *testing.T) {
 	previous, previousVersion := cfg, appVersion
 	oldIdentity, oldHolders, oldLookup := provenanceGatewayIdentity, gatewayPortHolders, provenanceLookupIP
 	oldState, oldProve, oldListeners := gatewayManagedState, provenanceProveGateway, provenanceGatewayListeners
-	oldStartEnvironment := provenanceStartEnvironment
+	oldEnvironment, oldConnections := provenanceGatewayEnvironment, provenanceConnectionHolders
 	t.Cleanup(func() {
 		cfg, appVersion = previous, previousVersion
 		provenanceGatewayIdentity, gatewayPortHolders, provenanceLookupIP = oldIdentity, oldHolders, oldLookup
 		gatewayManagedState, provenanceProveGateway, provenanceGatewayListeners = oldState, oldProve, oldListeners
-		provenanceStartEnvironment = oldStartEnvironment
+		provenanceGatewayEnvironment, provenanceConnectionHolders = oldEnvironment, oldConnections
 	})
 	appVersion = "cli-test"
+	// The stand-in gateway is this test process: its environment is the
+	// gateway's. Who accepted each connection is inspected for real.
+	provenanceGatewayEnvironment = func(int, string) ([]string, error) { return os.Environ(), nil }
+}
+
+// provenanceGatewayAccepts makes pid the process the operating system names
+// as the holder of every connection's server end: the stand-in gateway pid
+// accepted the connections this test process serves for it.
+func provenanceGatewayAccepts(pid int) {
+	provenanceConnectionHolders = func(netip.AddrPort, netip.AddrPort) ([]daemon.PortHolder, error) {
+		return []daemon.PortHolder{{PID: pid}}, nil
+	}
 }
 
 func provenanceTestConfig(t *testing.T, server *httptest.Server) *config.Config {
@@ -457,18 +470,19 @@ func TestProvenanceGatewayHelperProcess(*testing.T) {
 }
 
 // startProvenanceTestGateway starts this test binary with the environment
-// Daemon.Start gives the gateway of home: the per-user gateway of home that
-// the operating system can prove.
+// Daemon.Start gives the gateway of home from this process's shell: the
+// per-user gateway of home that the operating system can prove.
 func startProvenanceTestGateway(t *testing.T, home string) int {
 	t.Helper()
+	return startProvenanceTestGatewayFrom(t, home, os.Environ())
+}
+
+// startProvenanceTestGatewayFrom is startProvenanceTestGateway from a shell
+// whose environment is shell (Daemon.ChildEnvironment).
+func startProvenanceTestGatewayFrom(t *testing.T, home string, shell []string) int {
+	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestProvenanceGatewayHelperProcess$")
-	for _, entry := range os.Environ() {
-		key, _, _ := strings.Cut(entry, "=")
-		if !provenanceEnvironmentKeyIs(key, daemon.EnvDaemon) && !provenanceEnvironmentKeyIs(key, daemon.EnvDataDir) {
-			cmd.Env = append(cmd.Env, entry)
-		}
-	}
-	cmd.Env = append(cmd.Env, provenanceGatewayHelperEnv+"=1", daemon.EnvDaemon+"=1", daemon.EnvDataDir+"="+home)
+	cmd.Env = append(daemon.New(home).ChildEnvironment(shell), provenanceGatewayHelperEnv+"=1")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -582,8 +596,10 @@ func TestProvenanceShowSendsTheTokenOnlyToAGatewayProvenNow(t *testing.T) {
 		})
 	}
 
-	// The holder is this home's gateway of this account: it is read.
+	// The holder is this home's gateway of this account, and it accepted
+	// the connection: it is read.
 	gatewayPortHolders = func(string, int) ([]daemon.PortHolder, error) { return []daemon.PortHolder{{PID: pid}}, nil }
+	provenanceGatewayAccepts(pid)
 	cfg.Gateway.Token = provenanceTestToken
 	cmd, buf, _ := provenanceTestCommand()
 	if err := runProvenanceShow(cmd, nil); err != nil || !strings.Contains(buf.String(), "generation: 7\n") {

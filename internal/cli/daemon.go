@@ -1374,7 +1374,7 @@ func daemonGatewayToken(cfg *config.Config) string {
 		legacyTokenEnv    = "OPENCLAW_GATEWAY_TOKEN"
 	)
 
-	// Daemon.childEnv preserves a genuinely custom token environment
+	// Daemon.ChildEnvironment preserves a genuinely custom token environment
 	// override, but replaces the canonical/legacy process variables with the
 	// data directory's dotenv values when those exist. Resolve the parent's
 	// readiness credential in that same order so it always authenticates with

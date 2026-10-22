@@ -149,10 +149,6 @@ func prepareProvenanceShow(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
-	// The environment before this command reads any .env: the gateway
-	// resolved its token from its own environment, then the home's .env,
-	// then its data directory's (provenanceResolveToken).
-	provenanceStartEnvironment = os.Environ()
 	if err := loadGatewayCommandConfigFor(cmd); err != nil {
 		ctx, cancel := context.WithTimeout(provenanceContext(cmd), 5*time.Second)
 		defer cancel()
@@ -445,10 +441,12 @@ func provenanceListenerHeldBy(holders []daemon.PortHolder, gateway provenanceGat
 }
 
 // dialProvenanceGateway connects to the first address whose listener the
-// gateway holds. It inspects the listener after connecting, so the one that
-// accepted is the one checked, and before HTTP can send the credential. A
-// per-user gateway is proven again on every connection: the same process,
-// still this account's gateway.
+// gateway holds and where the gateway itself accepted the connection. Both
+// are inspected after connecting and before HTTP can send the credential:
+// the listener, and the socket at the other end of this connection, which
+// another process may have accepted before the gateway bound the port again
+// (provenanceConnectionAcceptedBy). A per-user gateway is proven again on
+// every connection: the same process, still this account's gateway.
 func dialProvenanceGateway(ctx context.Context, addresses []net.IP, port int, gateway provenanceGateway) (net.Conn, error) {
 	for _, ip := range addresses {
 		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(port)))
@@ -456,12 +454,64 @@ func dialProvenanceGateway(ctx context.Context, addresses []net.IP, port int, ga
 			continue
 		}
 		holders, err := gatewayPortHolders(ip.String(), port)
-		if err == nil && provenanceListenerHeldBy(holders, gateway) && provenanceStillProven(gateway) {
+		if err == nil && provenanceListenerHeldBy(holders, gateway) &&
+			provenanceConnectionAcceptedBy(ctx, conn, gateway) && provenanceStillProven(gateway) {
 			return conn, nil
 		}
 		_ = conn.Close()
 	}
-	return nil, provenanceNotVerified(errors.New("the listener is not held by the proven gateway process"))
+	return nil, provenanceNotVerified(errors.New("the connection was not accepted by the proven gateway process"))
+}
+
+// provenanceConnectionHolders lists the processes that hold the socket at
+// local whose peer is remote (daemon.FindConnectionHolders). A seam for
+// tests.
+var provenanceConnectionHolders = daemon.FindConnectionHolders
+
+// provenanceAcceptWait bounds how long a connection may wait in the
+// gateway's listen queue for the gateway to accept it.
+const provenanceAcceptWait = time.Second
+
+// provenanceConnectionAcceptedBy reports whether the operating system names
+// the gateway process, and only it, as the holder of the socket at the
+// other end of conn: the one that reads what is sent on conn. The listener
+// the gateway holds now does not say who accepted conn. A connection that
+// cannot be inspected, or whose holder this account cannot see, is not
+// proven; one that still waits in a listen queue is waited for, briefly.
+func provenanceConnectionAcceptedBy(ctx context.Context, conn net.Conn, gateway provenanceGateway) bool {
+	client, clientOK := conn.LocalAddr().(*net.TCPAddr)
+	server, serverOK := conn.RemoteAddr().(*net.TCPAddr)
+	if !clientOK || !serverOK || gateway.PID <= 0 {
+		return false
+	}
+	deadline := time.Now().Add(provenanceAcceptWait)
+	for wait := 2 * time.Millisecond; ; wait = min(2*wait, 50*time.Millisecond) {
+		holders, err := provenanceConnectionHolders(server.AddrPort(), client.AddrPort())
+		if err != nil && !errors.Is(err, daemon.ErrNoConnection) {
+			return false
+		}
+		accepted := err == nil && len(holders) > 0
+		for _, holder := range holders {
+			if holder.PID > 0 && holder.PID != gateway.PID {
+				return false // another process holds it
+			}
+			accepted = accepted && holder.PID == gateway.PID
+		}
+		if accepted {
+			return true
+		}
+		// Not accepted yet, or held by a process this account cannot see.
+		if time.Now().Add(wait).After(deadline) {
+			return false
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
 }
 
 // provenanceStillProven reports whether a per-user gateway is still the
@@ -478,42 +528,49 @@ func provenanceStillProven(gateway provenanceGateway) bool {
 // provenanceGatewayCredential is the credential the proven gateway applied
 // and the data directory it runs on. A per-user gateway reads both once,
 // when it starts, and records the token_env, inline token and data
-// directory it started with (daemon.AppliedAuth); the token resolves here as
-// the gateway resolved it (provenanceResolveToken), through the environment,
-// the home's .env and that data directory's .env. A config.yaml edited
-// since, whether the gateway rejected the edit or holds it until a restart,
-// is not what it authenticates with or where it runs, so an explicit
-// data_dir survives a rejected file or a held data_dir edit. Without that
-// record (a gateway of an earlier release) the loaded config's fields are
-// used, which for a rejected file leave only the default gateway token and
-// the home; a standalone deployment's are those its lifecycle last applied.
-func provenanceGatewayCredential(c *config.Config, gateway provenanceGateway) (string, string) {
+// directory it started with (daemon.AppliedAuth). The token resolves here as
+// the gateway resolved it (provenanceResolveToken): from the gateway
+// process's own environment, which Daemon.Start built from the shell that
+// started it with a gateway token of the home's .env in place of that
+// shell's, then the home's .env and that data directory's .env. The
+// environment of this command is not the gateway's: its shell may hold a
+// stale token, or another one than the shell that started the gateway. A
+// config.yaml edited since, whether the gateway rejected the edit or holds
+// it until a restart, is not what it authenticates with or where it runs,
+// so an explicit data_dir survives a rejected file or a held data_dir edit.
+// Without that record (a gateway of an earlier release) the loaded config's
+// fields are resolved so, which for a rejected file leave only the default
+// gateway token and the home; a standalone deployment's are those its
+// lifecycle last applied.
+func provenanceGatewayCredential(c *config.Config, gateway provenanceGateway) (string, string, error) {
 	fields, dataDir := c.Gateway, c.DataDir
 	if c.StandaloneEnterprise() {
-		return strings.TrimSpace(fields.ResolvedToken()), dataDir
+		return strings.TrimSpace(fields.ResolvedToken()), dataDir, nil
 	}
-	applied, ok := daemon.New(config.DefaultDataPath()).AppliedAuth(gateway.PID)
-	if !ok {
-		return strings.TrimSpace(fields.ResolvedToken()), dataDir
+	if applied, ok := daemon.New(config.DefaultDataPath()).AppliedAuth(gateway.PID); ok {
+		fields.TokenEnv, fields.Token = applied.TokenEnv, applied.Token
+		if strings.TrimSpace(applied.DataDir) != "" {
+			dataDir = applied.DataDir
+		}
 	}
-	fields.TokenEnv, fields.Token = applied.TokenEnv, applied.Token
-	if strings.TrimSpace(applied.DataDir) != "" {
-		dataDir = applied.DataDir
+	environment, err := provenanceGatewayEnvironment(gateway.PID, gateway.StartIdentity)
+	if err != nil {
+		return "", "", provenanceNotVerified(err)
 	}
-	return strings.TrimSpace(provenanceResolveToken(fields, dataDir)), dataDir
+	return strings.TrimSpace(provenanceResolveToken(fields, environment, dataDir)), dataDir, nil
 }
 
-// provenanceStartEnvironment is the environment of this command before it
-// read any .env; nil (a test that set cfg itself) is the current one.
-var provenanceStartEnvironment []string
+// provenanceGatewayEnvironment is the environment of the proven gateway
+// process (daemon.GatewayEnvironment). A seam for tests.
+var provenanceGatewayEnvironment = daemon.GatewayEnvironment
 
 // provenanceResolveToken resolves fields as the gateway resolved them when
-// it started: a variable comes from the environment, else the home's .env,
-// else the .env of the data directory the gateway runs on (the order and
-// first-wins rule of loadDotEnvIntoOS). The .env of a data_dir the gateway
-// does not run on is not read.
-func provenanceResolveToken(fields config.GatewayConfig, dataDir string) string {
-	sources := [][][2]string{provenanceEnvironmentPairs(provenanceStartEnvironment)}
+// it started: a variable comes from the gateway's environment, else the
+// home's .env, else the .env of the data directory the gateway runs on (the
+// order and first-wins rule of loadDotEnvIntoOS). The .env of a data_dir the
+// gateway does not run on is not read.
+func provenanceResolveToken(fields config.GatewayConfig, environment []string, dataDir string) string {
+	sources := [][][2]string{provenanceEnvironmentPairs(environment)}
 	home := filepath.Join(config.DefaultDataPath(), ".env")
 	sources = append(sources, dotEnvValues(home))
 	if own := filepath.Join(dataDir, ".env"); strings.TrimSpace(dataDir) != "" && own != home {
@@ -531,12 +588,8 @@ func provenanceResolveToken(fields config.GatewayConfig, dataDir string) string 
 	})
 }
 
-// provenanceEnvironmentPairs is environment (nil: this process's now) as
-// KEY, VALUE pairs.
+// provenanceEnvironmentPairs is environment as KEY, VALUE pairs.
 func provenanceEnvironmentPairs(environment []string) [][2]string {
-	if environment == nil {
-		environment = os.Environ()
-	}
 	pairs := make([][2]string, 0, len(environment))
 	for _, entry := range environment {
 		if key, value, ok := strings.Cut(entry, "="); ok && key != "" {
@@ -586,7 +639,10 @@ func runningGatewayProvenance(cmd *cobra.Command) (version.Provenance, error) {
 	if err != nil {
 		return version.Provenance{}, err
 	}
-	token, dataDir := provenanceGatewayCredential(cfg, gateway)
+	token, dataDir, err := provenanceGatewayCredential(cfg, gateway)
+	if err != nil {
+		return version.Provenance{}, err
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

@@ -88,7 +88,8 @@ func proveOwnGateway(pid int, expected, home string) (string, error) {
 // gatewayStartedForHome proves from the kernel's copy of pid's environment
 // that Daemon.Start launched it as the gateway of home: exactly one
 // EnvDaemon=1 and exactly one EnvDataDir, naming home. Every release since
-// 0.8 starts its gateway so (childEnv), and .env cannot set either variable.
+// 0.8 starts its gateway so (ChildEnvironment), and .env cannot set either
+// variable.
 func gatewayStartedForHome(pid int, home string) error {
 	environment, err := processEnvironment(pid)
 	if err != nil {
@@ -121,6 +122,27 @@ func gatewayStartedForHome(pid int, home string) error {
 			"start this home's gateway with `defenseclaw-gateway start`", ErrGatewayNotVerified, pid)
 	}
 	return nil
+}
+
+// GatewayEnvironment is the environment of gateway process pid, which
+// ProveOwnGateway proved with startIdentity: the kernel's copy of the
+// environment it started with (Linux, macOS), its environment block
+// (Windows). That is where the gateway resolved its token before its .env
+// files, which Daemon.Start's environment (ChildEnvironment) decided: a
+// gateway token of the home's .env replaces the launching shell's. A process
+// that is no longer the one proven has none.
+func GatewayEnvironment(pid int, startIdentity string) ([]string, error) {
+	if pid <= 0 || startIdentity == "" {
+		return nil, fmt.Errorf("%w: no proven gateway process", ErrGatewayNotVerified)
+	}
+	environment, err := processEnvironment(pid)
+	if err != nil {
+		return nil, fmt.Errorf("%w: the environment of PID %d is unreadable: %v", ErrGatewayNotVerified, pid, err)
+	}
+	if live, err := processStartIdentity(pid); err != nil || live != startIdentity {
+		return nil, fmt.Errorf("%w: PID %d is no longer the proven gateway", ErrGatewayNotVerified, pid)
+	}
+	return environment, nil
 }
 
 // environmentKeyIs compares environment variable names as the operating

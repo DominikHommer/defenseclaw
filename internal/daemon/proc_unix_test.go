@@ -117,7 +117,7 @@ func TestProveStaleDaemonProcessRequiresExactLinuxIdentity(t *testing.T) {
 		}
 	}
 
-	matching := start(d.childEnv(os.Environ()))
+	matching := start(d.ChildEnvironment(os.Environ()))
 	deadline := time.Now().Add(250 * time.Millisecond)
 	for attempts := 1; ; attempts++ {
 		identity, ok := d.proveStaleDaemonProcess(matching.Process.Pid, resolvedSleep)
@@ -148,13 +148,13 @@ func TestProveStaleDaemonProcessRequiresExactLinuxIdentity(t *testing.T) {
 		t.Fatal("mismatched data directory was accepted")
 	}
 
-	withoutMarker := start(withoutIdentityKey(d.childEnv(os.Environ()), EnvDaemon))
+	withoutMarker := start(withoutIdentityKey(d.ChildEnvironment(os.Environ()), EnvDaemon))
 	waitForVisibleEnvironment(withoutMarker)
 	if _, ok := d.proveStaleDaemonProcess(withoutMarker.Process.Pid, resolvedSleep); ok {
 		t.Fatal("process without daemon marker was accepted")
 	}
 
-	withoutDataDir := start(withoutIdentityKey(d.childEnv(os.Environ()), EnvDataDir))
+	withoutDataDir := start(withoutIdentityKey(d.ChildEnvironment(os.Environ()), EnvDataDir))
 	waitForVisibleEnvironment(withoutDataDir)
 	if _, ok := d.proveStaleDaemonProcess(withoutDataDir.Process.Pid, resolvedSleep); ok {
 		t.Fatal("process without data-directory marker was accepted")

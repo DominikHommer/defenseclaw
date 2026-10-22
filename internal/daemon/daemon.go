@@ -595,7 +595,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 	// line".
 	args = stripTokenArgs(args)
 
-	env := d.childEnv(os.Environ())
+	env := d.ChildEnvironment(os.Environ())
 	// The child runs the file this process checked (pinDaemonLaunch) and
 	// keeps the install path as argv[0], which the process identity checks
 	// read.
@@ -787,7 +787,12 @@ func (d *Daemon) waitForChildPIDRegistration(
 	}
 }
 
-func (d *Daemon) childEnv(parentEnv []string) []string {
+// ChildEnvironment is the environment Start gives the gateway it launches
+// from parentEnv, the launching shell's: without the daemon markers of that
+// shell, with this data directory's markers, and with the gateway token
+// variables of this data directory's .env in place of the shell's when that
+// .env sets one.
+func (d *Daemon) ChildEnvironment(parentEnv []string) []string {
 	dotenv := readGatewayTokenDotenv(filepath.Join(d.dataDir, ".env"))
 	hasDotenvToken := len(dotenv) > 0
 

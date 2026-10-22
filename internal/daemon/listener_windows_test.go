@@ -106,7 +106,7 @@ func TestWalkExtendedTCPTableRetriesWhenTheTableGrows(t *testing.T) {
 	original := callExtendedTCPTable
 	t.Cleanup(func() { callExtendedTCPTable = original })
 	calls := 0
-	callExtendedTCPTable = func(table unsafe.Pointer, size *uint32, _ uint32) windows.Errno {
+	callExtendedTCPTable = func(table unsafe.Pointer, size *uint32, _, _ uint32) windows.Errno {
 		calls++
 		switch calls {
 		case 1:
@@ -121,7 +121,7 @@ func TestWalkExtendedTCPTableRetriesWhenTheTableGrows(t *testing.T) {
 		}
 	}
 
-	if err := walkExtendedTCPTable(windows.AF_INET, unsafe.Sizeof(tcp4OwnerPIDRow{}), func(unsafe.Pointer) {
+	if err := walkExtendedTCPTable(windows.AF_INET, tcpTableOwnerPIDListener, unsafe.Sizeof(tcp4OwnerPIDRow{}), func(unsafe.Pointer) {
 		t.Fatal("empty synthetic table must not visit rows")
 	}); err != nil {
 		t.Fatalf("walkExtendedTCPTable: %v", err)
