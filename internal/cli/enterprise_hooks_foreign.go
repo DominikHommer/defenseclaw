@@ -145,7 +145,7 @@ func foreignGuardLogField(value string, limit int) string {
 // unapproved hook remains, so a failure here never fails the row.
 func reconcileEnterpriseForeignHooks(opts enterprisehooks.InstallOptions) {
 	var result enterprisepolicy.CleanupResult
-	err := withEnterpriseForeignHookCleanupFence(opts.DataDir, func() error {
+	err := withEnterpriseForeignHookCleanupFence(func() error {
 		var cleanErr error
 		result, cleanErr = enterpriseForeignHookCleanup(enterprisehooks.TargetCredentials{
 			UserHome: opts.UserHome,

@@ -355,25 +355,14 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	createdDirs := map[int][]string{}
 	var auditRepairs []enterpriseHookGuardianAuditReport
 	reportedUIDs := map[int]bool{}
-	var outcomes []enterpriseHookWorkerOutcome
-	foreignCleanup := false
-	for _, job := range jobs {
-		if len(job.Request.ForeignCleanup) != 0 {
-			foreignCleanup = true
-			break
-		}
-	}
-	if foreignCleanup {
-		if err := withEnterpriseForeignHookCleanupFence(cfg.DataDir, func() error {
-			outcomes = runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, recordRemovals)
+	guardCleanup := func(job enterpriseHookWorkerJob, run func()) error {
+		if len(job.Request.ForeignCleanup) == 0 {
+			run()
 			return nil
-		}); err != nil {
-			clean = false
-			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup fence: %v\n", err)
 		}
-	} else {
-		outcomes = runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, recordRemovals)
+		return withEnterpriseForeignHookCleanupFence(func() error { run(); return nil })
 	}
+	outcomes := runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, recordRemovals, guardCleanup)
 	for _, outcome := range outcomes {
 		user := outcome.Job.Account.User
 		if outcome.Err != nil {

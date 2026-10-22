@@ -116,7 +116,7 @@ func TestGuardianCleanupWaitsForAnAllowBeforeUnlink(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- withEnterpriseForeignHookCleanupFence(dataDir, func() error {
+		done <- withEnterpriseForeignHookCleanupFence(func() error {
 			if err := os.Remove(hook); err != nil {
 				return err
 			}

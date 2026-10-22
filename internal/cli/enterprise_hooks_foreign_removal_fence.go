@@ -58,11 +58,14 @@ func ensureEnterpriseForeignHookFenceFile(path string) error {
 // The gateway holds this lock until an allow has been sent, while the guardian
 // holds it across cleanup and the removal-ledger commit. If it cannot be
 // acquired, cleanup does not start and the existing foreign-hook guard stays.
-func withEnterpriseForeignHookCleanupFence(dataDir string, fn func() error) error {
+// The fence belongs to the machine guardian, even when the cleanup target
+// keeps its hook scripts in a different per-user data directory.
+func withEnterpriseForeignHookCleanupFence(fn func() error) error {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return fn()
 	}
-	if dataDir != cfg.DataDir || !filepath.IsAbs(dataDir) {
+	dataDir := cfg.DataDir
+	if !filepath.IsAbs(dataDir) {
 		return errors.New("foreign-hook cleanup data directory is unverified")
 	}
 	dir, err := prepareEnterpriseHookAuthorizationDir(dataDir)

@@ -1334,13 +1334,14 @@ var enterpriseHookWorkerRunner = runEnterpriseHookWorker
 // runEnterpriseHookWorkerPool runs one worker per job with bounded
 // parallelism and returns outcomes in job order.
 func runEnterpriseHookWorkerPool(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int) []enterpriseHookWorkerOutcome {
-	return runEnterpriseHookWorkerPoolReporting(ctx, jobs, parallelism, nil)
+	return runEnterpriseHookWorkerPoolReporting(ctx, jobs, parallelism, nil, nil)
 }
 
 // runEnterpriseHookWorkerPoolReporting is runEnterpriseHookWorkerPool that
 // also hands each outcome to done, when set, as soon as its worker ends
-// (concurrently with the other workers).
-func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int, done func(enterpriseHookWorkerOutcome)) []enterpriseHookWorkerOutcome {
+// (concurrently with the other workers). guard, when present, holds a
+// caller-supplied boundary through both the worker and its report callback.
+func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int, done func(enterpriseHookWorkerOutcome), guard func(enterpriseHookWorkerJob, func()) error) []enterpriseHookWorkerOutcome {
 	if parallelism <= 0 {
 		parallelism = enterpriseHookWorkerParallelism
 	}
@@ -1353,10 +1354,17 @@ func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterprise
 			defer wg.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
-			response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
-			outcomes[i] = enterpriseHookWorkerOutcome{Job: jobs[i], Response: response, Err: err}
-			if done != nil {
-				done(outcomes[i])
+			run := func() {
+				response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
+				outcomes[i] = enterpriseHookWorkerOutcome{Job: jobs[i], Response: response, Err: err}
+				if done != nil {
+					done(outcomes[i])
+				}
+			}
+			if guard == nil {
+				run()
+			} else if err := guard(jobs[i], run); err != nil {
+				outcomes[i] = enterpriseHookWorkerOutcome{Job: jobs[i], Err: err}
 			}
 		}(i)
 	}

@@ -474,7 +474,7 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 				continue
 			}
 			var result enterprisepolicy.CleanupResult
-			err := withEnterpriseForeignHookCleanupFence(current.dataDir, func() error {
+			err := withEnterpriseForeignHookCleanupFence(func() error {
 				var cleanErr error
 				result, cleanErr = enterpriseForeignHookCleanup(current.creds, name, current.dataDir)
 				recordEnterpriseForeignHookRemovals(stderr, current.creds.SID, current.creds.UserHome, name, removedForeignHookPaths(result))
