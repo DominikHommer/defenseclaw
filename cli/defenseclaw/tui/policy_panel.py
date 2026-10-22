@@ -663,7 +663,13 @@ class PolicyPanelMixin:
                 previews=previews,
             )
         )
-        if not chosen or chosen == (current if current == "off" else current.upper()):
+        targets = model.approval_targets(row)
+        if chosen and not targets:
+            self._set_status("Approval scopes unavailable; run defenseclaw guardrail hilt.")  # type: ignore[attr-defined]
+            return
+        if not chosen or all(
+            chosen.casefold() == str(getattr(target, "hilt", "") or "off").casefold() for target in targets
+        ):
             self._set_status("Approval unchanged.")  # type: ignore[attr-defined]
             return
         from defenseclaw.enforce import asset_lists
@@ -1012,9 +1018,14 @@ def level_change_modal(model: PoliciesPanelModel, row: Any, kind: str, choice: s
 def hilt_change_modal(
     model: PoliciesPanelModel, row: Any, level: str, *, secure_client: bool = False
 ) -> ConsequenceModalModel:
-    """Human approval for one scope; red when it asks for fewer severities."""
+    """Human approval; red when any affected scope asks for fewer severities."""
     old = str(getattr(row, "hilt", "") or "off")
-    weaker = hilt_weakens(old, level)
+    weakened = [
+        target
+        for target in model.approval_targets(row)
+        if hilt_weakens(str(getattr(target, "hilt", "") or "off"), level)
+    ]
+    weaker = bool(weakened)
     scope = str(getattr(row, "scope", "") or "global")
     mode = str(getattr(row, "mode", "") or "observe")
     block, alert = model.scope_levels(row)
@@ -1037,14 +1048,21 @@ def hilt_change_modal(
     else:
         details.append(_run_line(intent, "; a running gateway applies it now."))
     consequence = ""
-    if weaker:
-        lost = actions_weaken(severity_actions(block, alert, old), severity_actions(block, alert, level))
+    losses: list[str] = []
+    for target in weakened:
+        target_scope = str(getattr(target, "scope", "") or "global")
+        target_old = str(getattr(target, "hilt", "") or "off")
+        target_block, target_alert = model.scope_levels(target)
+        lost = actions_weaken(
+            severity_actions(target_block, target_alert, target_old),
+            severity_actions(target_block, target_alert, level),
+        )
         if lost:
-            consequence = (
-                f"This weakens protection: {', '.join(lost)} findings on {scope} are no longer held for a person."
-            )
+            losses.append(f"{', '.join(lost)} findings on {target_scope} are no longer held for a person")
         else:
-            consequence = f"This weakens protection: {scope} asks a person for fewer findings."
+            losses.append(f"{target_scope} asks a person for fewer findings")
+    if losses:
+        consequence = f"This weakens protection: {'; '.join(losses)}."
     title = "Turn off human approval" if level == "off" else f"Ask a human for {level}"
     return _modal(
         f"{title} on {_scope_words(model, row)}?",
