@@ -131,6 +131,18 @@ func TestProveOwnGatewayNeedsThisAccountThisBinaryAndThisHomeNow(t *testing.T) {
 	if _, err := ProveOwnGateway(pid, ""); !errors.Is(err, ErrGatewayNotVerified) {
 		t.Fatalf("no home: %v", err)
 	}
+	// A relative home is a directory only with a working directory, and the
+	// gateway's need not be this one's: never proven, even spelled the same.
+	relative := startThisBinary(t, EnvDaemon+"=1", EnvDataDir+"=relative-home")
+	for _, asked := range []string{"relative-home", home} {
+		if _, err := ProveOwnGateway(relative.Process.Pid, asked); !errors.Is(err, ErrGatewayNotVerified) ||
+			!strings.Contains(err.Error(), "relative DefenseClaw home") {
+			t.Fatalf("a gateway of the relative home, asked for %q: %v", asked, err)
+		}
+	}
+	if _, err := ProveOwnGateway(pid, "relative-home"); !errors.Is(err, ErrGatewayNotVerified) {
+		t.Fatalf("this gateway asked for a relative home: %v", err)
+	}
 
 	program := otherProgramOfThisAccount(t, home)
 	programPID := program.Process.Pid

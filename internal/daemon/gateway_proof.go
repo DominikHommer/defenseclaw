@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -109,17 +110,17 @@ func gatewayStartedForHome(pid int, home string) error {
 		return fmt.Errorf("%w: PID %d was not started by `defenseclaw-gateway start`; "+
 			"restart the gateway with `defenseclaw-gateway restart`", ErrGatewayNotVerified, pid)
 	}
-	if strings.TrimSpace(home) == "" || !sameHomePath(dataDirs[0], home) {
+	if !filepath.IsAbs(dataDirs[0]) || !filepath.IsAbs(home) {
+		// A relative home names a directory only with a working directory,
+		// and the gateway's is not this command's.
+		return fmt.Errorf("%w: PID %d or this command uses a relative DefenseClaw home; "+
+			"set DEFENSECLAW_HOME to an absolute path and restart the gateway with `defenseclaw-gateway restart`", ErrGatewayNotVerified, pid)
+	}
+	if !pathidentity.Same(dataDirs[0], home) {
 		return fmt.Errorf("%w: PID %d is the gateway of another DefenseClaw home; "+
 			"start this home's gateway with `defenseclaw-gateway start`", ErrGatewayNotVerified, pid)
 	}
 	return nil
-}
-
-// sameHomePath reports whether the data directory a gateway was started for
-// is home: the same string Daemon.Start was given, or the same directory.
-func sameHomePath(started, home string) bool {
-	return started == home || pathidentity.Same(started, home)
 }
 
 // environmentKeyIs compares environment variable names as the operating
