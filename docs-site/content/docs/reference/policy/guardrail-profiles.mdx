@@ -137,6 +137,13 @@ How the keys combine:
   means "in group a or b, **and** using Codex".
 - **First match wins.** Put the narrowest assignment first (an agent or a user
   and connector), the broad group assignments after it.
+- **Unproven legacy agent ownership blocks tool calls.** After an upgrade from
+  1.0.0–1.0.3, a bare account gets a distinct agent ID. If an older `agents`
+  entry could belong to that account or to a previous holder of its uid, the
+  gateway refuses blockable tool calls regardless of assignment order or the
+  default profile. Read the current ID with `defenseclaw agent identities`,
+  replace the old `agents` entry in `config.yaml`, and run
+  `defenseclaw-gateway restart`.
 - **Case and accents' encoding do not matter.** Groups, account names,
   principals and UPNs compare without regard to case, so
   `alice@CORP.EXAMPLE.COM` and `alice@corp.example.com` are the same user. They
