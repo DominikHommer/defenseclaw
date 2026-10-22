@@ -20,6 +20,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -332,4 +334,302 @@ func TestChangeSpoolNeedsItsStateDirectory(t *testing.T) {
 	if _, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "splunk-hec-token"); err == nil {
 		t.Fatal("reserved in a missing state directory")
 	}
+}
+
+// publishLog is a Publish hook that records each path it was given and
+// whether <event_id>.json already existed then; fail makes it refuse.
+type publishLog struct {
+	mu     sync.Mutex
+	paths  []string
+	early  []string
+	fail   error
+	onCall func(path string)
+}
+
+func (l *publishLog) publish(path string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.paths = append(l.paths, path)
+	if base := filepath.Base(path); strings.HasPrefix(base, ".") {
+		rest, _ := strings.CutPrefix(base, ".")
+		if id, _, ok := strings.Cut(rest, ".json."); ok {
+			if _, err := os.Lstat(filepath.Join(filepath.Dir(path), id+".json")); err == nil {
+				l.early = append(l.early, id)
+			}
+		}
+	}
+	if l.onCall != nil {
+		l.onCall(path)
+	}
+	return l.fail
+}
+
+// An event gets the gateway's access before it is in the spool: Publish
+// runs on the temp file, and <event_id>.json never exists with another
+// access. Before, the event was renamed into place root-only and Publish
+// gave it the gateway's group after, so a command that stopped in between
+// left an event the gateway could not read.
+func TestChangeEventIsPublishedBeforeItIsInTheSpool(t *testing.T) {
+	log := &publishLog{}
+	spool := newTestSpool(t)
+	spool.Publish = log.publish
+	refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.Write(refusal); err != nil {
+		t.Fatal(err)
+	}
+	r, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "splunk-hec-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Write(appliedSecretChange(t, "splunk-hec-token")); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{refusal.EventID, r.id} {
+		final := filepath.Join(spool.Dir, id+".json")
+		published := false
+		for _, path := range log.paths {
+			if path == final {
+				t.Fatalf("Publish ran on %s after the rename", final)
+			}
+			published = published || strings.HasPrefix(filepath.Base(path), "."+id+".json.")
+		}
+		if !published {
+			t.Fatalf("Publish never ran on the temp file of %s: %v", id, log.paths)
+		}
+	}
+	if len(log.early) != 0 {
+		t.Fatalf("events in the spool before Publish: %v", log.early)
+	}
+	if got := len(readSpool(t, spool)); got != 2 {
+		t.Fatalf("spool holds %d events, want 2", got)
+	}
+}
+
+// A command stops while its event is being given the gateway's access (or
+// the access cannot be set): no event is in the spool, the reservation
+// stays, the gateway reports it as interrupted, and the next writer moves
+// it into the spool with the gateway's access, once. Before, the event was
+// already in the spool root-only: the gateway could not read it, skipped
+// the reservation because the event existed, and the next writer removed
+// the reservation, so the change was never reported.
+func TestChangeSpoolKeepsTheReservationOfACommandThatStoppedWhilePublishing(t *testing.T) {
+	for _, stop := range []string{"process stopped", "publish refused"} {
+		t.Run(stop, func(t *testing.T) {
+			log := &publishLog{}
+			spool := newTestSpool(t)
+			spool.Publish = log.publish
+			r, err := spool.Reserve(ChangeKindTrustAnchors, ChangeActionInstall, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			applied, err := NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeApplied, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			log.mu.Lock()
+			if stop == "process stopped" {
+				log.onCall = func(string) { runtime.Goexit() } // Goexit runs the deferred unlock
+			} else {
+				log.fail = errors.New("chown refused")
+			}
+			log.mu.Unlock()
+			done := make(chan error, 1)
+			go func() {
+				defer close(done)
+				done <- r.Write(applied)
+			}()
+			if err := <-done; stop == "publish refused" && err == nil {
+				t.Fatal("the write reported success without the gateway's access")
+			}
+			// The process ended: its reservation lock goes with it.
+			if r.file != nil {
+				r.abandon()
+			}
+			log.mu.Lock()
+			log.onCall, log.fail = nil, nil
+			log.mu.Unlock()
+			if _, err := os.Lstat(filepath.Join(spool.Dir, r.id+".json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the event is in the spool without the gateway's access: %v", err)
+			}
+			got := EndedChangeReservations(spool.Dir)
+			if len(got) != 1 || got[0].EventID != r.id || got[0].ReasonCode != ChangeInterrupted {
+				t.Fatalf("the gateway sees %+v, want the interrupted install %s", got, r.id)
+			}
+			refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := spool.Write(refusal); err != nil {
+				t.Fatal(err)
+			}
+			events := readSpool(t, spool)
+			if len(events) != 2 || events[0].EventID != r.id || events[0].ReasonCode != ChangeInterrupted {
+				t.Fatalf("spool = %+v, want the interrupted install first", events)
+			}
+			if len(log.early) != 0 {
+				t.Fatalf("events in the spool before Publish: %v", log.early)
+			}
+			if entries, _ := os.ReadDir(spool.reservedDir()); len(entries) != 0 {
+				t.Fatalf("reservations left: %v", entries)
+			}
+			if leftovers := spoolTempFiles(t, spool); len(leftovers) != 0 {
+				t.Fatalf("temp files left: %v", leftovers)
+			}
+		})
+	}
+}
+
+// The next writer removes a reservation whose event is in the spool only
+// once that event validates and Publish gave it the gateway's access
+// again; a failed Publish keeps the reservation for a later writer. An
+// event file that does not validate is replaced by the reservation's
+// event. Before, any file at <event_id>.json made the writer drop the
+// reservation, so an event the gateway could not read or validate lost
+// the change.
+func TestChangeSpoolKeepsAReservationUntilItsEventIsReadable(t *testing.T) {
+	for _, stored := range []string{"valid event, access lost", "damaged event"} {
+		t.Run(stored, func(t *testing.T) {
+			log := &publishLog{}
+			spool := newTestSpool(t)
+			spool.Publish = log.publish
+			r, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "splunk-hec-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := filepath.Join(spool.Dir, r.id+".json")
+			body := []byte("{\"event_id\":\"" + r.id + "\"}\n")
+			want := ChangeInterrupted
+			if stored == "valid event, access lost" {
+				applied := appliedSecretChange(t, "splunk-hec-token")
+				applied.EventID = r.id
+				if body, err = marshalChangeEvent(applied); err != nil {
+					t.Fatal(err)
+				}
+				want = ""
+			}
+			if err := os.WriteFile(final, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r.abandon() // The process stopped before its cleanup.
+			if stored == "damaged event" {
+				// The gateway cannot use the stored event, so it reports the
+				// reservation.
+				if got := EndedChangeReservations(spool.Dir); len(got) != 1 || got[0].EventID != r.id {
+					t.Fatalf("the gateway sees %+v, want the reservation %s", got, r.id)
+				}
+			}
+			log.mu.Lock()
+			log.fail = errors.New("chown refused")
+			log.mu.Unlock()
+			refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := spool.Write(refusal); err == nil {
+				t.Fatal("the writer settled the reservation without the gateway's access")
+			}
+			if _, err := os.Lstat(filepath.Join(spool.reservedDir(), r.id+".json")); err != nil {
+				t.Fatalf("the reservation was removed before its event was readable: %v", err)
+			}
+			log.mu.Lock()
+			log.fail, log.paths = nil, nil
+			log.mu.Unlock()
+			if err := spool.Write(refusal); err != nil {
+				t.Fatal(err)
+			}
+			if entries, _ := os.ReadDir(spool.reservedDir()); len(entries) != 0 {
+				t.Fatalf("reservations left: %v", entries)
+			}
+			ev, err := ReadChangeEvent(final)
+			if err != nil || ev.ReasonCode != want {
+				t.Fatalf("stored event = %+v (%v), want reason %q", ev, err, want)
+			}
+			published := false
+			for _, path := range log.paths {
+				published = published || path == final || strings.HasPrefix(filepath.Base(path), "."+r.id+".json.")
+			}
+			if !published {
+				t.Fatalf("Publish never ran on the event of %s: %v", r.id, log.paths)
+			}
+		})
+	}
+}
+
+// The gateway reports the reservation of a command that ended when the
+// event in the spool is one it cannot read. Before, the event's existence
+// alone made it skip the reservation.
+func TestEndedChangeReservationsReportsAReservationWhoseEventTheGatewayCannotRead(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a POSIX account that a 0000 file locks out")
+	}
+	spool := newTestSpool(t)
+	r, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "splunk-hec-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := appliedSecretChange(t, "splunk-hec-token")
+	applied.EventID = r.id
+	data, err := marshalChangeEvent(applied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := filepath.Join(spool.Dir, r.id+".json")
+	if err := os.WriteFile(final, data, 0); err != nil {
+		t.Fatal(err)
+	}
+	r.abandon()
+	got := EndedChangeReservations(spool.Dir)
+	if len(got) != 1 || got[0].EventID != r.id || got[0].ReasonCode != ChangeInterrupted {
+		t.Fatalf("the gateway sees %+v, want the interrupted set %s", got, r.id)
+	}
+}
+
+// The next writer removes the temp file an event write left when its
+// command stopped before the rename, and nothing else.
+func TestChangeSpoolRemovesTheTempFileOfAStoppedEventWrite(t *testing.T) {
+	spool := newTestSpool(t)
+	if err := spool.Write(appliedSecretChange(t, "splunk-hec-token")); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leftover := filepath.Join(spool.Dir, "."+stopped.EventID+".json.1234567.tmp")
+	other := filepath.Join(spool.Dir, ".notes.tmp")
+	for _, path := range []string{leftover, other} {
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := spool.Write(appliedSecretChange(t, "otlp-token")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(leftover); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the stopped write's temp file is still there: %v", err)
+	}
+	if _, err := os.Lstat(other); err != nil {
+		t.Fatalf("a file that is not an event temp file was removed: %v", err)
+	}
+	if got := len(readSpool(t, spool)); got != 2 {
+		t.Fatalf("spool holds %d events, want 2", got)
+	}
+}
+
+func spoolTempFiles(t *testing.T, spool ChangeSpool) []string {
+	t.Helper()
+	entries, err := os.ReadDir(spool.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".tmp") {
+			out = append(out, entry.Name())
+		}
+	}
+	return out
 }

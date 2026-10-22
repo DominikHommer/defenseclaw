@@ -136,3 +136,43 @@ func TestCommitRejectsHandEditAfterCandidateRead(t *testing.T) {
 		t.Fatalf("generation advanced after conflict: %v", err)
 	}
 }
+
+// WriteFileDurablePublished runs publish on the written temp file before
+// the rename: the target is never there with the temp file's access, and a
+// publish error leaves the old target and no temp file.
+func TestWriteFileDurablePublishedPublishesTheTempFileBeforeTheRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "event.json")
+	var seen []string
+	publish := func(tmp string) error {
+		if filepath.Dir(tmp) != dir || tmp == path {
+			t.Fatalf("publish got %s, want a temp file in %s", tmp, dir)
+		}
+		if raw, err := os.ReadFile(tmp); err != nil || string(raw) != "new" {
+			t.Fatalf("temp file = %q (%v), want the written bytes", raw, err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the target exists before publish: %v", err)
+		}
+		seen = append(seen, tmp)
+		return nil
+	}
+	if err := WriteFileDurablePublished(path, []byte("new"), 0o640, publish); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("publish ran %d times", len(seen))
+	}
+	refused := errors.New("chown refused")
+	err := WriteFileDurablePublished(path, []byte("newer"), 0o640, func(string) error { return refused })
+	if !errors.Is(err, refused) {
+		t.Fatalf("err = %v, want the publish error", err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != "new" {
+		t.Fatalf("target = %q after a refused publish, want the old bytes", raw)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("files left: %v", entries)
+	}
+}

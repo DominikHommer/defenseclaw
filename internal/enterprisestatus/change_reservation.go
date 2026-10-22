@@ -292,13 +292,22 @@ func (s ChangeSpool) settleReservations() (held int, err error) {
 }
 
 // recordInterrupted writes the event of a reservation whose command ended,
-// unless that command wrote its own (the same id) or the gateway already
-// reported it. A damaged reservation records nothing.
+// unless the gateway already reported it or that command wrote its own
+// (the same id). The caller removes the reservation only when it returns
+// nil, so an event of the command is kept as the outcome only once it
+// validates and Publish gave it the gateway's access again (an access
+// changed since is restored; a failure keeps the reservation). An event
+// file that does not validate is replaced by the reservation's event. A
+// damaged reservation records nothing.
 func (s ChangeSpool) recordInterrupted(id string, file *os.File) error {
-	if _, err := os.Lstat(filepath.Join(s.Dir, id+".json")); err == nil {
+	if s.Reported != nil && s.Reported(id) {
 		return nil
 	}
-	if s.Reported != nil && s.Reported(id) {
+	path := filepath.Join(s.Dir, id+".json")
+	if ev, err := ReadChangeEvent(path); err == nil && ev.EventID == id {
+		if s.Publish != nil {
+			return s.Publish(path)
+		}
 		return nil
 	}
 	raw, _, ok := readReservation(file, id)
@@ -326,10 +335,11 @@ func readReservation(file *os.File, id string) ([]byte, ChangeEvent, bool) {
 // EndedChangeReservations is for the gateway, which reads the change spool
 // dir and cannot write it. It returns, oldest first, the event of every
 // reservation whose command ended before it wrote its outcome and whose
-// event is not in the spool: the change it held room for may have been
-// made, so it is reported as failed (interrupted) at the gateway's next
-// poll, even when no later command moves it into the spool. A reservation
-// still held, an emptied one and one that does not validate are skipped.
+// event the spool does not hold in a form the gateway can read and
+// validate: the change it held room for may have been made, so it is
+// reported as failed (interrupted) at the gateway's next poll, even when
+// no later command moves it into the spool. A reservation still held, an
+// emptied one and one that does not validate are skipped.
 // The writer that settles the reservation later keeps its id, so the
 // gateway reports it once.
 func EndedChangeReservations(dir string) []ChangeEvent {
@@ -365,8 +375,9 @@ func readEndedReservation(dir, path, id string) (ChangeEvent, bool) {
 	}
 	defer unlockChangeFile(file)
 	// Its command writes the event into the spool before it lets go of the
-	// reservation, so an event there is the outcome.
-	if _, err := os.Lstat(filepath.Join(dir, id+".json")); !errors.Is(err, fs.ErrNotExist) {
+	// reservation, so an event there that the gateway reads is the outcome.
+	// One it cannot read or validate is not reported, so the reservation is.
+	if ev, err := ReadChangeEvent(filepath.Join(dir, id+".json")); err == nil && ev.EventID == id {
 		return ChangeEvent{}, false
 	}
 	_, ev, ok := readReservation(file, id)

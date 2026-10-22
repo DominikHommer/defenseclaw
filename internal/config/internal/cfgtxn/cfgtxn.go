@@ -409,6 +409,14 @@ func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, 
 // write-through on Windows), then an fsync of the directory on POSIX. A
 // failed directory fsync is an error.
 func WriteFileDurable(path string, data []byte, mode os.FileMode) error {
+	return WriteFileDurablePublished(path, data, mode, nil)
+}
+
+// WriteFileDurablePublished is WriteFileDurable with publish run on the
+// written and closed temp file before the rename, to give it its final
+// owner and access: path never exists with the temp file's. A publish error
+// removes the temp file and leaves path as it was.
+func WriteFileDurablePublished(path string, data []byte, mode os.FileMode, publish func(tmp string) error) error {
 	if mode == 0 {
 		mode = 0o600
 	}
@@ -437,6 +445,11 @@ func WriteFileDurable(path string, data []byte, mode os.FileMode) error {
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("configwrite: close %s: %w", tmpName, err)
+	}
+	if publish != nil {
+		if err := publish(tmpName); err != nil {
+			return err
+		}
 	}
 	if err := replaceDurable(tmpName, path); err != nil {
 		return fmt.Errorf("configwrite: replace %s: %w", path, err)

@@ -286,6 +286,13 @@ func WriteFileDurable(path string, data []byte, mode os.FileMode) error {
 	return cfgtxn.WriteFileDurable(path, data, mode)
 }
 
+// WriteFileDurablePublished is WriteFileDurable with publish run on the
+// temp file before the rename (its final owner and access), so path never
+// exists with the temp file's. A publish error leaves path as it was.
+func WriteFileDurablePublished(path string, data []byte, mode os.FileMode, publish func(tmp string) error) error {
+	return cfgtxn.WriteFileDurablePublished(path, data, mode, publish)
+}
+
 // CurrentActor returns prefix + the OS user name ("cli:alice").
 func CurrentActor(prefix string) string {
 	name := ""

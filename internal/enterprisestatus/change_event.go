@@ -256,8 +256,8 @@ func ChangedKeyIDs(previous, next []string) (added, removed []string) {
 // gateway has reported (ChangeReported); nil counts none as reported.
 // Prepare creates (or repairs) the spool directory and its reserved
 // folder with their owner and access, and Publish sets the owner and
-// access of one written file (an event or a reservation); both are
-// platform hooks. A nil Prepare creates the folder 0750, a nil Publish
+// access of one written file (an event's temp file before its rename, an
+// event kept as an outcome, or a reservation); both are platform hooks. A nil Prepare creates the folder 0750, a nil Publish
 // does nothing. StateDir is the existing root-only (Windows: SYSTEM and
 // Administrators) lifecycle directory that holds the spool lock (Reserve).
 type ChangeSpool struct {
@@ -299,29 +299,43 @@ func marshalChangeEvent(ev ChangeEvent) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// writeEvent writes one validated event durably and publishes it.
+// writeEvent writes one validated event durably with the gateway's access:
+// Publish runs on the temp file before the rename, so <event_id>.json never
+// exists with an access the gateway cannot read. A command that stops in
+// between leaves only the temp file (removeWriteLeftovers) and keeps its
+// reservation, which the gateway and the next writer then report.
 func (s ChangeSpool) writeEvent(id string, data []byte) error {
-	path := filepath.Join(s.Dir, id+".json")
-	if err := configwrite.WriteFileDurable(path, data, 0o640); err != nil {
-		return err
-	}
-	if s.Publish != nil {
-		if err := s.Publish(path); err != nil {
-			_ = os.Remove(path)
-			return err
-		}
-	}
-	return nil
+	return configwrite.WriteFileDurablePublished(filepath.Join(s.Dir, id+".json"), data, 0o640, s.Publish)
 }
 
-// ready prepares the spool directory, moves the event of every reservation
-// whose command ended into the spool, removes the oldest reported events
-// beyond maxReportedChangeEvents and checks that one more event fits beside
-// the reservations still held. The caller holds the spool lock.
+// removeWriteLeftovers removes the temp file (.<event_id>.json.*.tmp) of
+// an event write that stopped before its rename. Every event write holds
+// the spool lock, which the caller holds, so none is in progress.
+func (s ChangeSpool) removeWriteLeftovers() {
+	entries, err := os.ReadDir(s.Dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		rest, hidden := strings.CutPrefix(name, ".")
+		id, _, named := strings.Cut(rest, ".json.")
+		if hidden && named && strings.HasSuffix(name, ".tmp") && ValidChangeEventID(id) && entry.Type().IsRegular() {
+			_ = os.Remove(filepath.Join(s.Dir, name))
+		}
+	}
+}
+
+// ready prepares the spool directory, removes the temp files of stopped
+// event writes, moves the event of every reservation whose command ended
+// into the spool, removes the oldest reported events beyond
+// maxReportedChangeEvents and checks that one more event fits beside the
+// reservations still held. The caller holds the spool lock.
 func (s ChangeSpool) ready() error {
 	if err := s.prepareDir(s.Dir); err != nil {
 		return err
 	}
+	s.removeWriteLeftovers()
 	held, err := s.settleReservations()
 	if err != nil {
 		return err
