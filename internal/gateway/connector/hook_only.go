@@ -1678,6 +1678,14 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	if err := validatePluginArtifactDestination(path); err != nil {
 		return fmt.Errorf("%s validate plugin destination: %w", c.name, err)
 	}
+	// The plugin carries its own fail mode and reads no shell hook runtime
+	// record. One an earlier release or reconcile left kept its old mode
+	// after a fail-mode change and misled every read of it (GAP-0635).
+	if !opts.ManagedEnterprise {
+		if err := clearHookConfigSidecarEntry(filepath.Join(opts.DataDir, "hooks"), c.name); err != nil {
+			return fmt.Errorf("%s remove the unused hook runtime record: %w", c.name, err)
+		}
+	}
 	if err := captureManagedFileBackup(opts.DataDir, c.name, "config", path); err != nil {
 		return rollback(fmt.Errorf("%s capture plugin backup: %w", c.name, err))
 	}
