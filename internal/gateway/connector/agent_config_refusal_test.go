@@ -190,6 +190,7 @@ func TestCheckAgentSettingsRefusesUnreadableAndEscapingPaths(t *testing.T) {
 		{"codex directory", "codex", "directory", "config.toml"},
 		{"claude outside link", "claudecode", "outside", "outside your home folder"},
 		{"claude dangling link", "claudecode", "dangling", "cannot be followed"},
+		{"claude foreign owner link", "claudecode", "foreign owner", "another account owns"},
 		{"claude parent link", "claudecode", "parent outside", "outside your home folder"},
 		{"codex outside link", "codex", "outside", "leads outside the home"},
 		{"codex dangling link", "codex", "dangling", "config.toml"},
@@ -237,6 +238,17 @@ func TestCheckAgentSettingsRefusesUnreadableAndEscapingPaths(t *testing.T) {
 				if err := os.Symlink(filepath.Join(home, "missing", filename), path); err != nil {
 					t.Fatal(err)
 				}
+			case "foreign owner":
+				target := filepath.Join(home, "other-owned.json")
+				if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+				previous := pluginGetUID
+				pluginGetUID = func() int { return os.Getuid() + 1 }
+				t.Cleanup(func() { pluginGetUID = previous })
 			}
 			if tc.connector == "codex" {
 				pointCodexConfig(t, path)
