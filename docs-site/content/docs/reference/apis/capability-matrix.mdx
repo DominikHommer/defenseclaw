@@ -64,7 +64,7 @@ OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, OpenCode, Amp and Kiro. 
 
 - Fail-closed means the hook blocks when it cannot reach the gateway. A hook process that dies or times out is non-blocking in Claude Code, Codex and Devin (see the [enterprise threat model](/docs/enterprise/plan/threat-model#residual-risks)).
 - On a managed standalone host, every connector's hook fails closed, also in observe mode, and the administrator-owned Copilot CLI and Hermes hooks block a tool call DefenseClaw cannot check.
-- On a per-user install a fail-open call is recorded as a `guardrail-degraded` alert when the gateway starts again ([Fail modes](/docs/reference/configuration/fail-modes#reporting-and-diagnosis)).
+- On a per-user install, fail-open calls recorded by the shell hooks, native hook and OpenCode plugin become a `guardrail-degraded` alert when the gateway starts again. Amp does not write these failure records ([Fail modes](/docs/reference/configuration/fail-modes#reporting-and-diagnosis)).
 - Cursor is mode-matched: action writes `failClosed: true` and observe writes `failClosed: false`.
 
 ### I want to run the agent in an OpenShell sandbox

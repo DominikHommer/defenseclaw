@@ -12,6 +12,8 @@ for current behavior.
 
 ### Known limits
 
+- Amp fail-open outages do not produce failure-file alerts. The fail-mode reference now distinguishes this reporting limit and the stricter managed standalone failure outcomes (GAP-0448, GAP-0451).
+
 - On a managed standalone host with `foreign_hooks: remove`, guarded connectors (GitHub Copilot CLI, Cursor, Devin, OpenCode, Amp, Hermes) still block every tool call during a gateway outage, also under `hook_fail_mode: open`, as in 1.0.3 (GAP-0352).
 
 ### Changed
