@@ -302,14 +302,21 @@ wait_for_hec_ready() {
   while (( SECONDS < deadline )); do
     local status
     status="$(
-      curl -sk -o /dev/null -w '%{http_code}' \
+      curl -sk --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' \
         -H "Authorization: Splunk ${DEFENSECLAW_HEC_TOKEN}" \
         -H 'Content-Type: application/json' \
         "${DEFENSECLAW_HEC_URL}" \
         -d '{"event":"bridge-ready-check"}' || true
     )"
-    if [[ "${status}" == "200" ]]; then
-      return 0
+    # HEC can answer while app installation is still failing. Require the
+    # installed app (not its bind-mounted source) and Web UI before ready.
+    if [[ "${status}" == "200" ]] && run_compose exec -T -u splunk splunk \
+      test -r /opt/splunk/etc/apps/defenseclaw_local_mode/default/app.conf >/dev/null 2>&1; then
+      local web_status
+      web_status="$(curl -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/ || true)"
+      case "${web_status}" in
+        2??|3??) return 0 ;;
+      esac
     fi
     # Splunk does not restart while it starts: a container that keeps
     # exiting never gets ready, so say so now with its last log lines
@@ -495,7 +502,7 @@ cmd_up() {
   package_path="$(package_app)"
   cleanup_stopped_service_containers
   run_compose up -d --remove-orphans
-  wait_for_hec_ready || fail "timed out waiting for HEC readiness on ${DEFENSECLAW_HEC_URL}"
+  wait_for_hec_ready || fail "timed out waiting for the Splunk app, Web UI and HEC; run defenseclaw setup splunk --logs again after repairing the local stack"
   emit_product_telemetry startup
   if is_truthy "${DEFENSECLAW_INTEGRATION_ENABLED:-false}"; then
     emit_product_telemetry integration_configured

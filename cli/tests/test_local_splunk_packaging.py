@@ -7,15 +7,78 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = REPO_ROOT / "bundles" / "splunk_local_bridge"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX bind-mount permissions")
+def test_app_packages_are_container_readable_under_private_umask(tmp_path: Path, monkeypatch) -> None:
+    from defenseclaw.observability.local_splunk import NativeLocalSplunkController, package_splunk_app
+    from defenseclaw.observability.local_stack import LocalStackError
+
+    stack = tmp_path / "stack"
+    shutil.copytree(BUNDLE, stack)
+    archive = stack / "splunk" / "build" / "defenseclaw_local_mode.tgz"
+    # Both the Unix bridge and the native controller rebuild this mounted
+    # public asset. Neither may inherit the operator's private file modes.
+    for packager in ("shell", "native"):
+        if archive.parent.exists():
+            shutil.rmtree(archive.parent)
+        if packager == "shell":
+            completed = subprocess.run(
+                ["bash", str(stack / "splunk" / "package_local_mode_app.sh")],
+                capture_output=True, text=True, umask=0o077, timeout=30, check=False,
+            )
+            assert completed.returncode == 0, completed.stderr
+        else:
+            previous = os.umask(0o077)
+            try:
+                package_splunk_app(stack)
+            finally:
+                os.umask(previous)
+        assert stat.S_IMODE(archive.parent.stat().st_mode) == 0o755
+        assert stat.S_IMODE(archive.stat().st_mode) == 0o644
+
+    # Healthy listeners alone cannot prove that Splunk installed the app.
+    bridge = (BUNDLE / "bin" / "splunk-claw-bridge").read_text(encoding="utf-8")
+    readiness = bridge[bridge.index("wait_for_hec_ready() {"):bridge.index("\nprint_up_text() {")]
+    probe = tmp_path / "readiness.sh"
+    probe.write_text(
+        'set -euo pipefail\nDEFENSECLAW_HEC_TOKEN="fixture credential"\n'
+        'DEFENSECLAW_HEC_URL="https://127.0.0.1:8088/services/collector/event"\n'
+        'SERVICE_NAME=splunk\ncurl() { printf 200; }\n'
+        'run_compose() { [[ "$APP_READY" == true ]]; }\n'
+        'service_restart_count() { echo 2; }\ncompose_project_name() { echo fixture; }\n'
+        'fail() { printf "%s\\n" "$1" >&2; exit 1; }\n'
+        + readiness + '\nwait_for_hec_ready\n', encoding="utf-8",
+    )
+    for ready in (False, True):
+        result = subprocess.run(
+            ["bash", str(probe)], env={**os.environ, "APP_READY": str(ready).lower()},
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert (result.returncode == 0) is ready, result.stdout + result.stderr
+
+    controller = NativeLocalSplunkController(stack, docker_path="docker")
+    monkeypatch.setattr(controller, "_web_ready", lambda _timeout: True)
+    monkeypatch.setattr(controller, "_hec_ready", lambda _timeout: True)
+    compose = Mock(return_value=SimpleNamespace(returncode=1))
+    monkeypatch.setattr(controller, "_run_compose", compose)
+    with pytest.raises(LocalStackError, match="readiness timeout"):
+        controller.wait_for_readiness(1)
+    compose.return_value.returncode = 0
+    controller.wait_for_readiness(1)
+    assert "test" in compose.call_args.args
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required to build wheels")

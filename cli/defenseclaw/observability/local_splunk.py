@@ -396,6 +396,8 @@ def package_splunk_app(stack_dir: str | os.PathLike[str]) -> Path:
     reject_reparse_path(build_dir)
     build_dir.mkdir(parents=True, exist_ok=True)
     reject_reparse_path(build_dir)
+    if os.name != "nt":
+        build_dir.chmod(0o755)
     package_path = root / APP_PACKAGE_REL
     descriptor, temp_name = tempfile.mkstemp(prefix=".defenseclaw_local_mode-", suffix=".tgz", dir=build_dir)
     os.close(descriptor)
@@ -432,6 +434,8 @@ def package_splunk_app(stack_dir: str | os.PathLike[str]) -> Path:
                         else:
                             raise LocalStackError(f"unsupported Splunk app asset: {candidate}")
         reject_reparse_path(package_path)
+        if os.name != "nt":
+            temp_path.chmod(0o644)
         os.replace(temp_path, package_path)
     finally:
         try:
@@ -842,17 +846,26 @@ class NativeLocalSplunkController:
         deadline = time.monotonic() + timeout
         web_ready = False
         hec_ready = False
+        app_ready = False
         while time.monotonic() < deadline:
             remaining = max(0.05, deadline - time.monotonic())
             web_ready = self._web_ready(min(1.5, remaining))
             hec_ready = self._hec_ready(min(1.5, remaining))
             if web_ready and hec_ready:
+                remaining = max(0.05, deadline - time.monotonic())
+                app_ready = self._run_compose(
+                    "exec", "--no-TTY", "--user", "splunk", "splunk",
+                    "test", "-r", "/opt/splunk/etc/apps/defenseclaw_local_mode/default/app.conf",
+                    timeout=min(5.0, remaining),
+                ).returncode == 0
+            if web_ready and hec_ready and app_ready:
                 return
             time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
         raise LocalStackError(
             "Local Splunk readiness timeout after "
             f"{timeout}s: web={'ready' if web_ready else 'fail'} "
-            f"hec={'ready' if hec_ready else 'fail'}"
+            f"hec={'ready' if hec_ready else 'fail'} app={'ready' if app_ready else 'fail'}. "
+            "Repair the local stack, then run defenseclaw setup splunk --logs again."
         )
 
     @staticmethod
@@ -862,6 +875,8 @@ class NativeLocalSplunkController:
         try:
             with opener.open(request, timeout=timeout) as response:
                 return 200 <= response.status < 400
+        except urllib.error.HTTPError as exc:
+            return 300 <= exc.code < 400
         except (OSError, urllib.error.URLError, ValueError):
             return False
 

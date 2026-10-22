@@ -35,6 +35,8 @@ Local Splunk keeps its generated HEC credential separate from your remote collec
 
    Setup starts Splunk in Free mode, installs the **DefenseClaw Local Mode** app, and adds a `splunk_hec` destination for index `defenseclaw_local`. Open [http://localhost:8000](http://localhost:8000). The HEC token stays hidden unless you pass `--show-credentials`.
 
+   Setup reports ready only after the installed app, Web UI and HEC are available. If startup fails, repair the reported local stack problem and run the setup command again.
+
 ## Splunk Enterprise
 
 1. Put the token in the environment, then configure the destination.
