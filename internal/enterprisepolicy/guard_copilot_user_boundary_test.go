@@ -146,4 +146,13 @@ func TestCopilotCleanupRetiresLegacyClaudeUserHook(t *testing.T) {
 			t.Fatal("unproven hook became allowed")
 		}
 	}
+	// Earlier installs used the gateway itself as the native hook runner.
+	writeFile(t, path, encode(strings.Replace(legacy, "defenseclaw-hook.exe", "defenseclaw-gateway.exe", 1)))
+	result, err = CleanUserForeignHooks(req, time.Now().Add(time.Minute))
+	if err != nil || len(result.Removed) != 1 {
+		t.Fatalf("legacy gateway registration was not retired: %+v, %v", result, err)
+	}
+	if got := EvaluateForeignHooks(req); got.Deny {
+		t.Fatalf("retired legacy gateway still blocks: %+v", got)
+	}
 }

@@ -3405,8 +3405,13 @@ func IsLegacyClaudeCodeUserHookCommand(command, home string) bool {
 	if !ok || !filepath.IsAbs(home) {
 		return false
 	}
-	want := filepath.Join(home, ".local", "bin", "defenseclaw-hook.exe")
-	return strings.EqualFold(normalizeWindowsHookExecutable(executable), normalizeWindowsHookExecutable(want))
+	for _, name := range []string{windowsHookBinaryName, windowsGatewayBinaryName} {
+		want := filepath.Join(home, ".local", "bin", name)
+		if strings.EqualFold(normalizeWindowsHookExecutable(executable), normalizeWindowsHookExecutable(want)) {
+			return true
+		}
+	}
+	return false
 }
 
 func hookUsesTrackedClaudeCodeCommand(rawHook interface{}, commands []string) bool {
