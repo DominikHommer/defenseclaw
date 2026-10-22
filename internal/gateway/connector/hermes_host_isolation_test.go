@@ -13,17 +13,19 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 )
 
-// runIsolatedFromTheHostsHermes runs the package's tests off the host's
-// Hermes setup (hermespath.IsolateHostForTests): a HERMES_HOME a Hermes
-// developer exported failed the Hermes Setup and Verify tests.
-func runIsolatedFromTheHostsHermes(m *testing.M) int {
+// TestMain runs the package's tests off the host's Hermes setup
+// (hermespath.IsolateHostForTests): a HERMES_HOME a Hermes developer
+// exported failed the Hermes Setup and Verify tests.
+func TestMain(m *testing.M) {
+	prepareConnectorTestProcess()
 	cleanup, err := hermespath.IsolateHostForTests()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the host's Hermes:", err)
-		return 1
+		os.Exit(1)
 	}
-	defer cleanup()
-	return m.Run()
+	code := m.Run()
+	cleanup()
+	os.Exit(code)
 }
 
 // Run with HERMES_HOME exported, the tests still see none.

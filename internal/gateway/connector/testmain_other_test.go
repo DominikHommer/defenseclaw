@@ -6,11 +6,5 @@
 
 package connector
 
-import (
-	"os"
-	"testing"
-)
-
-func TestMain(m *testing.M) {
-	os.Exit(runIsolatedFromTheHostsHermes(m))
-}
+// prepareConnectorTestProcess has no helper modes or fixtures off Windows.
+func prepareConnectorTestProcess() {}
