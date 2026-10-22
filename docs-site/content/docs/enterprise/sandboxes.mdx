@@ -513,9 +513,11 @@ order, without changing anything on the computer until step 2.
 1. **Validate the file.** `defenseclaw-gateway config validate ./config.yaml`
    runs the compiler and loader the gateway runs, including every profile's
    sandbox section combined with `openshell.admin`, and the layout rules
-   `ensure` applies: `gateway.api_bind` must be `127.0.0.1` and
-   `gateway.api_port` `18970`, or unset, on any computer; on a managed computer
-   `data_dir` and the rule pack and jsonl folders must also fit its layout. It
+   `ensure` applies: every OS refuses a `gateway.api_bind` other than
+   `127.0.0.1`, and Linux and macOS also refuse a `gateway.api_port` other than
+   `18970` (off a managed computer, a file that could be for Windows gets a
+   warning instead); on a managed computer `data_dir` and the rule pack and
+   jsonl folders must also fit its layout. It
    exits 1 where the gateway or `ensure` would refuse, and a refusal names the
    setting and the profile. Without a file it checks the installed managed
    config, for example `/etc/defenseclaw/config.yaml` on Linux.
