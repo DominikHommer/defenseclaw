@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -347,12 +348,13 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 	if installedConfig != nil {
 		installed = sha256Hex(installedConfig)
 	}
-	completed, rollback, err := d.settleCommitted(installed, policy)
+	completed, interrupted, rollback, err := d.settleCommitted(installed, installedDirs, policy)
 	if err != nil {
 		return report, rollback, err
 	}
 	report, err = d.Store.settle(false, installedDirs...)
 	report.Completed = append(completed, report.Completed...)
+	report.Interrupted = append(interrupted, report.Interrupted...)
 	if err != nil {
 		return report, rollback, err
 	}
@@ -391,29 +393,52 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 // the live config still holds those bytes, and the gateway adopted that exact
 // generation. Missing or stale evidence never confirms a receipt.
 func (d *Driver) TransactionApplied(rc *Receipt, installed string, policy *GatewayPolicy) bool {
-	if d.ConfigPath == "" || rc == nil || rc.Principal == "" || rc.SignerKeyID == "" || policy == nil || !policy.Applied || policy.ReloadError != "" ||
-		installed == "" || installed != rc.ConfigSHA256 || policy.BundleID != rc.BundleID || policy.BundleVersion != rc.Version {
+	if rc == nil || policy == nil || !policy.Applied || policy.ReloadError != "" || policy.BundleID != rc.BundleID || policy.BundleVersion != rc.Version {
 		return false
 	}
+	generation, committed := d.committedGeneration(rc, installed)
+	return committed && policy.Generation == generation.Generation &&
+		(rc.State != StateApplied || rc.ConfigGeneration == generation.Generation)
+}
+
+// committedGeneration reports whether config.generation.json records the
+// lifecycle commit of rc's signed bundle for the installed bytes. Without
+// that record the installed bytes are the config the run found, even when
+// they equal the bundle's rendered config.
+func (d *Driver) committedGeneration(rc *Receipt, installed string) (configwrite.GenerationState, bool) {
+	if d.ConfigPath == "" || rc == nil || rc.Principal == "" || rc.SignerKeyID == "" || installed == "" || installed != rc.ConfigSHA256 {
+		return configwrite.GenerationState{}, false
+	}
 	generation, err := configwrite.ReadGenerationState(d.ConfigPath)
-	return err == nil && generation.Generation > 0 && generation.ConfigSHA256 == installed &&
+	return generation, err == nil && generation.Generation > 0 && generation.ConfigSHA256 == installed &&
 		generation.BundleID == rc.BundleID && generation.BundleVersion == rc.Version &&
-		generation.SignerKeyID == rc.SignerKeyID && generation.Actor == rc.Principal &&
-		policy.Generation == generation.Generation && (rc.State != StateApplied || rc.ConfigGeneration == generation.Generation)
+		generation.SignerKeyID == rc.SignerKeyID && generation.Actor == rc.Principal
 }
 
 // settleCommitted settles the staged receipts whose rendered config is the
-// installed one (see SettleRun).
-func (d *Driver) settleCommitted(installed string, policy *GatewayPolicy) (completed []string, rollback []*Receipt, err error) {
+// installed one (see SettleRun). Only a receipt the lifecycle installed can
+// need a rollback: its bundle generation was committed, or the installed
+// config names its own version directory (installedDirs), which no other
+// config can. Identical bytes without either ended before the transaction
+// installed anything (interrupted), so the installed config stays the last
+// good config of the next run.
+func (d *Driver) settleCommitted(installed string, installedDirs []string, policy *GatewayPolicy) (completed, interrupted []string, rollback []*Receipt, err error) {
 	if installed == "" {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	receipts, err := d.Store.Receipts()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for _, rc := range receipts {
 		if rc.State != StateStaged || rc.ConfigSHA256 != installed {
+			continue
+		}
+		if _, committed := d.committedGeneration(rc, installed); !committed && !slices.Contains(installedDirs, rc.Dir) {
+			if err := d.Store.Fail(rc, CodeInterrupted, "the run that received this bundle ended before its transaction installed it; the installed config kept enforcing"); err != nil {
+				return completed, interrupted, rollback, err
+			}
+			interrupted = append(interrupted, rc.ReceiptID)
 			continue
 		}
 		var digestErr error
@@ -427,7 +452,7 @@ func (d *Driver) settleCommitted(installed string, policy *GatewayPolicy) (compl
 			if err := d.Store.Advance(rc, StateApplied, func(r *Receipt) {
 				r.EffectivePolicyDigest, r.ConfigGeneration, r.AppliedAt = policy.EffectiveDigest, policy.Generation, at
 			}); err != nil {
-				return completed, rollback, err
+				return completed, interrupted, rollback, err
 			}
 			if _, err := d.Store.Confirm(rc); err == nil {
 				completed = append(completed, rc.ReceiptID)
@@ -442,11 +467,11 @@ func (d *Driver) settleCommitted(installed string, policy *GatewayPolicy) (compl
 			code = CodeDigestMismatch
 		}
 		if err := d.Store.Fail(rc, code, "the interrupted run has no proven bundle apply and gateway confirmation; run `defenseclaw enterprise windows ensure --profile standalone --bundle <bundle file>` to apply it again"); err != nil {
-			return completed, rollback, err
+			return completed, interrupted, rollback, err
 		}
 		rollback = append(rollback, rc)
 	}
-	return completed, rollback, nil
+	return completed, interrupted, rollback, nil
 }
 
 func (d *Driver) failAfterRollback(rc *Receipt, code Code, message string, rollback func() (string, bool)) error {
