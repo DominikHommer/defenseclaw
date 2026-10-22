@@ -49,9 +49,9 @@ func TestChangeSpoolPreparesItsBundleParentBeforeReserving(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer reservation.Release()
-			event, err := enterprisestatus.NewChangeEvent(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionRemove, enterprisestatus.ChangeApplied, "")
-			if err != nil {
-				t.Fatal(err)
+			event, ok := secretChangeEvent(enterprisestatus.ChangeActionRemove, "test-credential", true, "", nil, false)
+			if !ok {
+				t.Fatal("credential removal produced no change event")
 			}
 			if err := reservation.Write(event); err != nil {
 				t.Fatal(err)
