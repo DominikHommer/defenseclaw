@@ -528,6 +528,24 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		if r.Noop {
 			r.NoopReason = "already_applied"
 		}
+		// The old receipt proves only that the bundle was enforced when it
+		// was first confirmed. A repeated delivery may repair config.yaml
+		// and restart the gateway without its policy ever converging. Do not
+		// report that cached confirmation as this delivery's outcome.
+		if code == 0 && len(r.Errors) == 0 {
+			current, err := store.CurrentSummary()
+			if err != nil || current == nil || r.Policy == nil || !r.Policy.Applied ||
+				r.Policy.EffectiveDigest != current.EffectivePolicyDigest ||
+				r.Policy.GatewayReportedDigest != current.EffectivePolicyDigest {
+				r.Noop, r.NoopReason = false, ""
+				// ensureInstalled describes the historical confirmed receipt.
+				// This repeated delivery has not earned that result block.
+				r.Bundle = nil
+				r.AddError(codeBundleNotConfirmed, fmt.Sprintf(
+					"the repeated policy bundle is installed, but the gateway has not confirmed its effective policy; check `defenseclaw-gateway enterprise bundle status`, then resubmit the same signed bundle with `%s`", bundleApplyCommand))
+				return code
+			}
+		}
 		l.describeCurrentBundle()
 		return code
 	}
