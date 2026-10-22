@@ -2294,7 +2294,7 @@ func (r *NSSResolver) checkUIDNotShared(uid int, owner string, account Account, 
 		case err == nil:
 		case IsNotFound(err):
 			if absentErr := r.passwdAbsent(service, strconv.Itoa(uid), true); absentErr != nil && !errors.Is(absentErr, errServiceUncheckable) &&
-				!(unsharedRecorded && errors.Is(absentErr, errSSSDOnlineNeedsRoot)) {
+				(!unsharedRecorded || !errors.Is(absentErr, errSSSDOnlineNeedsRoot)) {
 				return fmt.Errorf("unixidentity: uid %d: NSS service %s cannot show that it holds no other account of the uid: %w", uid, service, absentErr)
 			}
 			continue
