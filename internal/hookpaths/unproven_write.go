@@ -440,6 +440,18 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 		if fixed && awkUnprovenOutput(word, cwd, home) {
 			return true
 		}
+		if options && !fixed {
+			// An option with an attached computed value, such as -vn="$N".
+			switch awkDynamicOptionName(args[i]) {
+			case "v":
+				dynamicOperand = true
+				continue
+			case "F":
+				continue
+			case "f", "e":
+				return true
+			}
+		}
 		if !options || !fixed || word == "-" || !strings.HasPrefix(word, "-") {
 			if !programSupplied {
 				programSupplied, options = true, false
@@ -542,6 +554,20 @@ func awkOptionValue(word string) (name, value string, attached bool) {
 		}
 	}
 	return "", "", false
+}
+
+// awkDynamicOptionName names the value option of a computed word whose
+// literal first part is that option, so its value is attached.
+func awkDynamicOptionName(word *syntax.Word) string {
+	if word == nil || len(word.Parts) < 2 {
+		return ""
+	}
+	literal, ok := word.Parts[0].(*syntax.Lit)
+	if !ok {
+		return ""
+	}
+	name, _, _ := awkOptionValue(literal.Value)
+	return name
 }
 
 // awkDynamicProgram keeps the bounded check for program text with a shell
