@@ -552,6 +552,21 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     assert shown in _reference_page("commands/cli.mdx")
 
 
+@pytest.mark.parametrize("relative", ["proxy-root-ca.pem", "./proxy-root-ca.pem", "certs/root.pem", "../root.pem"])
+def test_relative_trusted_ca_refusal_names_the_path_requirement(tmp_path, monkeypatch, relative):
+    # rel-1-0-3 GAP-0180: the real writer validates before touching config.yaml.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path)
+    before = (tmp_path / "config.yaml").read_bytes()
+    with pytest.raises(V8ConfigError) as refused:
+        config_writer.apply([Change("openshell.trusted_ca_bundle", relative)], "cli:test", "t", path=path)
+    message = config_writer.plain_error(refused.value, value=relative)
+    assert "openshell.trusted_ca_bundle" in message
+    assert "absolute path" in message and "~/" in message
+    assert (tmp_path / "config.yaml").read_bytes() == before
+    assert not os.path.exists(config_writer.generation_path(path))
+
+
 def test_plain_error_reports_length_and_write_directory() -> None:
     import errno
 

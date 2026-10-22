@@ -292,6 +292,9 @@ func managedErrorText(e *sandboxapi.Error, m *sandboxapi.ManagedStatus) (string,
 		return sandboxapi.ManagedRefusal(adminKeyNote.ReplaceAllString(why, ""), profile, quote, access), true
 	}
 	sentence, code := managedSentence(e)
+	if sentence != "" && (code == sandboxrelay.ReasonDaemonOutdated || code == sandboxrelay.DetailSetupChanging) {
+		return sentence, true
+	}
 	switch e.Code {
 	case sandboxapi.CodeAdminViolation:
 		quote := ""
