@@ -217,6 +217,19 @@ def test_verify_detects_agent_digest_drift(tmp_path, monkeypatch):
         result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
         assert result.exit_code != 0
         assert "agent executable digest has drifted" in result.output
+
+        agent_path.write_bytes(b"test-binary")
+        lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+        lock = json.loads(lock_path.read_text())
+        for invalid_agent in (None, [], "unproven", 42):
+            lock_path.write_text(json.dumps(dict(lock, agent=invalid_agent)))
+            before = lock_path.read_bytes()
+            result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert result.exit_code != 0
+            assert "contract lock identity does not match" in result.output
+            assert "run defenseclaw" in result.output
+            assert "--profile" in result.output
+            assert lock_path.read_bytes() == before
     finally:
         cleanup_app(app, db_path, data_dir)
 

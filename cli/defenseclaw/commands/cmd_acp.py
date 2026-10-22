@@ -12,6 +12,7 @@ import io
 import json
 import os
 import secrets
+import shlex
 import shutil
 import stat
 import time
@@ -533,6 +534,7 @@ def _verify_binding(
             entry.get("command") != (lock_guard.get("path") if isinstance(lock_guard, dict) else None)
             or not isinstance(args, list)
             or not options
+            or not isinstance(lock_agent, dict)
             or args[args.index("--") + 1:] != [lock_agent.get("path"), *_AGENTS[agent][1]]
             or any(options.get(flag) != expected for flag, expected in {
                 "--client": client, "--agent": agent,
@@ -1065,7 +1067,17 @@ def verify_cmd(app: AppContext, client: str | None, agent: str | None, runtime_d
     for pair_client, pair_agent in pairs:
         problems = _verify_binding(data_dir, pair_client, pair_agent, app.cfg.acp)
         if problems:
-            failures.append(f"{pair_client}/{pair_agent}: " + "; ".join(problems))
+            repair = [
+                "defenseclaw", "acp", "setup", "--client", pair_client, "--agent", pair_agent,
+                "--profile", app.cfg.acp.profile_for_pair(pair_client, pair_agent),
+            ]
+            if app.cfg.deployment_mode == "managed_enterprise":
+                repair.extend(["--managed", "--runtime-data-dir", data_dir])
+            command = (
+                "defenseclaw " + " ".join("'" + value.replace("'", "''") + "'" for value in repair[1:])
+                if os.name == "nt" else shlex.join(repair)
+            )
+            failures.append(f"{pair_client}/{pair_agent}: " + "; ".join(problems) + f"; run {command}")
         else:
             click.echo(f"Verified {pair_client}/{pair_agent}: editor entry and executable digests match")
     if failures:
