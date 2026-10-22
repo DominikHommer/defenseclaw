@@ -1346,9 +1346,11 @@ const (
 		"  defenseclaw_log_hook_failure copilot copilot-hook \"$1\" response \"$FAIL_MODE\"\n" +
 		"  echo \"defenseclaw: copilot hook error: $1\" >&2\n" +
 		"  exit 0\n}\n"
-	copilotToolDenial = `  case "${COPILOT_HOOK_EVENT:-}" in` + "\n" +
-		`    preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;` + "\n" +
-		`    permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;` + "\n" +
+	copilotReleasedPreToolDenial    = `printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}'`
+	copilotReleasedPermissionDenial = `printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}'`
+	copilotToolDenial               = `  case "${COPILOT_HOOK_EVENT:-}" in` + "\n" +
+		`    preToolUse) ` + copilotReleasedPreToolDenial + ` ;;` + "\n" +
+		`    permissionRequest) ` + copilotReleasedPermissionDenial + ` ;;` + "\n" +
 		"  esac\n"
 )
 
@@ -1472,6 +1474,14 @@ func closeReleasedCopilotEarlyFailures(body string) (string, error) {
 		return "", fmt.Errorf("unrecognized released hook layout")
 	}
 	prefix, suffix := body[:cut], body[cut:]
+	// The 1.0.3 no-home branch prints its own denial before its exit; the
+	// early-failure function below prints the only answer, so Copilot never
+	// receives two JSON documents.
+	prefix = strings.ReplaceAll(prefix, copilotReleasedPreToolDenial, ":")
+	prefix = strings.ReplaceAll(prefix, copilotReleasedPermissionDenial, ":")
+	if strings.Contains(prefix, `"permissionDecision"`) || strings.Contains(prefix, `"behavior"`) {
+		return "", fmt.Errorf("unrecognized released early denial")
+	}
 	// The old scripts explicitly allowed helper and token failures with
 	// exit 0. Convert every such early exit, including the no-home and
 	// malformed-event branches, to a native denial on tool boundaries.
@@ -1480,14 +1490,22 @@ func closeReleasedCopilotEarlyFailures(body string) (string, error) {
 	prefix = strings.Replace(prefix,
 		"defenseclaw_handle_missing_token copilot copilot-hook \"copilot tool\"",
 		"(defenseclaw_handle_missing_token copilot copilot-hook \"copilot tool\") || true\n  _dc_copilot_upgrade_early_failure", 1)
+	// The event is captured from the script's own argv before anything can
+	// fail: inside the function (and the EXIT trap) "$2" is the function's
+	// argument, not the registered event. A hook registered without a
+	// reviewed event (0.8.10 registered none) prints one object carrying
+	// both denials, as the current hook does.
 	preamble := copilotUpgradeEarlyMarker + `
+_DC_COPILOT_UPGRADE_EVENT=""
+if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then
+  _DC_COPILOT_UPGRADE_EVENT="$2"
+fi
 _dc_copilot_upgrade_early_failure() {
-  case "${2:-}" in
+  case "$_DC_COPILOT_UPGRADE_EVENT" in
     preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;
     permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
     sessionStart|sessionEnd|userPromptSubmitted|userPromptTransformed|postToolUse|agentStop|subagentStart|subagentStop|postToolUseFailure|errorOccurred|preCompact|notification) ;;
-    *) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}'
-       printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+    *) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed","behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
   esac
   exit 0
 }

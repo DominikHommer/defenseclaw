@@ -14,11 +14,14 @@ package connector
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -226,53 +229,125 @@ func TestRefreshMakesReleasedHooksBlockWhileTheGatewayIsDown(t *testing.T) {
 	}
 }
 
+// TestRefreshClosesReleasedCopilotEarlyFailures runs each released Copilot
+// hook, refreshed for closed mode, through every failure that happens before
+// its gateway request. Copilot reads the whole stdout as one JSON document,
+// so each answer must parse as exactly one object carrying the denial of the
+// registered event (both denials when no reviewed event is registered) and
+// nothing at all for an event that cannot block.
 func TestRefreshClosesReleasedCopilotEarlyFailures(t *testing.T) {
 	requireShellHookToolsForTest(t)
+	failures := []struct {
+		name  string
+		setup func(t *testing.T, hookDir string) (dataDir string)
+	}{
+		{"missing helper", func(t *testing.T, hookDir string) string {
+			if err := os.Remove(filepath.Join(hookDir, "_hardening.sh")); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Dir(hookDir)
+		}},
+		{"broken helper", func(t *testing.T, hookDir string) string {
+			if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), []byte("return 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Dir(hookDir)
+		}},
+		{"missing token", func(_ *testing.T, hookDir string) string { return filepath.Dir(hookDir) }},
+		{"missing home", func(_ *testing.T, hookDir string) string {
+			return filepath.Join(filepath.Dir(hookDir), "absent")
+		}},
+	}
+	calls := []struct {
+		name string
+		args []string
+		want []string // denial keys the one JSON object must carry; nil = no output
+	}{
+		{"preToolUse", []string{"--event", "preToolUse"}, []string{"permissionDecision"}},
+		{"permissionRequest", []string{"--event", "permissionRequest"}, []string{"behavior"}},
+		{"sessionStart", []string{"--event", "sessionStart"}, nil},
+		{"unbound", nil, []string{"permissionDecision", "behavior"}},
+		{"unreviewed event", []string{"--event", "toolUse"}, []string{"permissionDecision", "behavior"}},
+	}
 	for _, release := range []string{"0.8.10", "1.0.0", "1.0.3"} {
-		t.Run(release, func(t *testing.T) {
-			home := t.TempDir()
-			dataDir := filepath.Join(home, ".defenseclaw")
-			hookDir := filepath.Join(dataDir, "hooks")
-			if err := os.MkdirAll(hookDir, 0o700); err != nil {
-				t.Fatal(err)
+		for _, failure := range failures {
+			for _, call := range calls {
+				t.Run(release+"/"+failure.name+"/"+call.name, func(t *testing.T) {
+					home := t.TempDir()
+					hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+					if err := os.MkdirAll(hookDir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					for _, name := range []string{"_hardening.sh", "copilot-hook.sh"} {
+						body, err := os.ReadFile(filepath.Join("testdata", "released-hooks", release, name))
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(filepath.Join(hookDir, name), body, 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if _, err := RefreshHookFailModes(hookDir, func(string) string { return "closed" }); err != nil {
+						t.Fatal(err)
+					}
+					dataDir := failure.setup(t, hookDir)
+					out, code := runReleasedCopilotEarlyFailure(t, filepath.Join(hookDir, "copilot-hook.sh"), home, dataDir, call.args)
+					if code != 0 {
+						t.Fatalf("exit %d stdout=%q", code, out)
+					}
+					requireOneCopilotDenial(t, out, call.want)
+				})
 			}
-			for _, name := range []string{"_hardening.sh", "copilot-hook.sh"} {
-				body, err := os.ReadFile(filepath.Join("testdata", "released-hooks", release, name))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(hookDir, name), body, 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if _, err := RefreshHookFailModes(hookDir, func(string) string { return "closed" }); err != nil {
-				t.Fatal(err)
-			}
-			hook := filepath.Join(hookDir, "copilot-hook.sh")
-			for _, event := range []string{"preToolUse", "permissionRequest"} {
-				if err := os.Remove(filepath.Join(hookDir, "_hardening.sh")); err != nil {
-					t.Fatal(err)
-				}
-				out, code := runReleasedCopilotEarlyFailure(t, hook, home, dataDir, event)
-				if code != 0 || !strings.Contains(out, `"deny"`) {
-					t.Fatalf("missing helper %s: exit %d stdout=%q", event, code, out)
-				}
-				body, _ := os.ReadFile(filepath.Join("testdata", "released-hooks", release, "_hardening.sh"))
-				if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), body, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				out, code = runReleasedCopilotEarlyFailure(t, hook, home, dataDir, event)
-				if code != 0 || !strings.Contains(out, `"deny"`) {
-					t.Fatalf("missing token %s: exit %d stdout=%q", event, code, out)
-				}
-			}
-		})
+		}
 	}
 }
 
-func runReleasedCopilotEarlyFailure(t *testing.T, hook, home, dataDir, event string) (string, int) {
+func TestReleasedCopilotEarlyFailureRefusesAnUnknownDenial(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("testdata", "released-hooks", "1.0.3", "copilot-hook.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(body), `"DefenseClaw hook failed closed"}'`, `"DefenseClaw denied"}'`, 1)
+	if edited == string(body) {
+		t.Fatal("fixture has no early denial to edit")
+	}
+	if _, err := closeReleasedCopilotEarlyFailures(edited); err == nil {
+		t.Fatal("an early denial the refresh does not know must be refused, not answered twice")
+	}
+}
+
+// requireOneCopilotDenial fails unless out is exactly one JSON object whose
+// deny keys are want (permissionDecision and/or behavior), or empty for nil.
+func requireOneCopilotDenial(t *testing.T, out string, want []string) {
 	t.Helper()
-	cmd := exec.Command("bash", hook, "--event", event)
+	if want == nil {
+		if out != "" {
+			t.Fatalf("stdout = %q, want no answer", out)
+		}
+		return
+	}
+	dec := json.NewDecoder(strings.NewReader(out))
+	var answer map[string]any
+	if err := dec.Decode(&answer); err != nil {
+		t.Fatalf("stdout %q is not a JSON object: %v", out, err)
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		t.Fatalf("stdout %q holds more than one JSON document (%v)", out, err)
+	}
+	for _, key := range []string{"permissionDecision", "behavior"} {
+		_, has := answer[key]
+		if has != slices.Contains(want, key) {
+			t.Fatalf("stdout %q: %s present=%v, want keys %v", out, key, has, want)
+		}
+		if has && answer[key] != "deny" {
+			t.Fatalf("stdout %q: %s = %v, want deny", out, key, answer[key])
+		}
+	}
+}
+
+func runReleasedCopilotEarlyFailure(t *testing.T, hook, home, dataDir string, args []string) (string, int) {
+	t.Helper()
+	cmd := exec.Command("bash", append([]string{hook}, args...)...)
 	cmd.Stdin = strings.NewReader(`{"sessionId":"s","toolName":"bash","toolArgs":{"command":"echo ok"}}`)
 	cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+dataDir)
 	out, err := cmd.Output()
