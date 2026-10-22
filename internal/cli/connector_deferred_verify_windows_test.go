@@ -18,6 +18,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func newDeferredVerifyFixture(t *testing.T) deferredVerifyFixture {
+	return newDeferredVerifyFixtureForConnector(t, "claudecode")
+}
+
 func TestDeferredUninstallVerifyAuthenticatesWithoutV8Config(t *testing.T) {
 	fixture := newDeferredVerifyFixture(t)
 	withDeferredVerifyFixtureGlobals(t, fixture)

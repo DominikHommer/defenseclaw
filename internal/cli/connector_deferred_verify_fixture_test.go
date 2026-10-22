@@ -36,10 +36,6 @@ type deferredVerifyFixture struct {
 	journal       deferredVerifyJournal
 }
 
-func newDeferredVerifyFixture(t *testing.T) deferredVerifyFixture {
-	return newDeferredVerifyFixtureForConnector(t, "claudecode")
-}
-
 func newDeferredVerifyFixtureForConnector(t *testing.T, connectorName string) deferredVerifyFixture {
 	t.Helper()
 	root := t.TempDir()
