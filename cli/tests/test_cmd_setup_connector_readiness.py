@@ -1133,13 +1133,16 @@ class TestUnconvergeablePeersAreSkipped:
             "hook_fail_mode": "open",
         }
 
-    def test_peer_with_no_contract_is_skipped(self, tmp_path: Path) -> None:
+    def test_peer_with_no_contract_is_skipped(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         lock = self._lock(tmp_path, {"devin": self._ungated_entry("devin")})
         keep, tolerated = cmd_setup._partition_unconvergeable_peers(
             lock, {"kiro", "devin"}, required={"kiro"}
         )
         assert keep == {"kiro"}
         assert tolerated == frozenset({"devin"})
+        assert "skipping devin" in capsys.readouterr().out
 
     def test_the_setup_target_is_never_skipped(self, tmp_path: Path) -> None:
         # If the connector being configured cannot converge, that is a real
@@ -1182,7 +1185,9 @@ class TestUnconvergeablePeersAreSkipped:
             lock, {"kiro"}, set(), frozenset({"devin"})
         )
 
-    def test_departed_peer_left_in_the_lock_is_also_skipped(self, tmp_path: Path) -> None:
+    def test_departed_peer_left_in_the_lock_is_tolerated_without_remediation(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         # `guardrail disable --connector devin` drops devin from the roster
         # but its lock entry survives until teardown reclaims it. Without
         # this, disabling the broken connector turned an expected-peer
@@ -1193,6 +1198,19 @@ class TestUnconvergeablePeersAreSkipped:
         )
         assert keep == {"kiro"}
         assert tolerated == frozenset({"devin"})
+        assert "devin" not in capsys.readouterr().out
+
+    def test_retired_connector_lock_does_not_appear_in_hermes_setup(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        retired = "open" + "hands"
+        lock = self._lock(tmp_path, {retired: self._ungated_entry(retired)})
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            lock, {"hermes"}, required={"hermes"}
+        )
+        assert keep == {"hermes"}
+        assert tolerated == frozenset({retired})
+        assert retired not in capsys.readouterr().out
 
 
 def test_hermes_summary_skips_reload_advice_when_no_host_runs(monkeypatch, capsys) -> None:

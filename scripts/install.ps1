@@ -99,6 +99,7 @@ $LockDir = Join-Path $DataDir ".install.lock"
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 # The per-user DefenseClaw Setup of 0.8.7-0.8.10, which an upgrade replaces.
 $SetupRoot = Join-Path $env:LOCALAPPDATA "Programs\DefenseClaw"
+$Setup = $null
 $SetupUninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw"
 $SetupCache = Join-Path $env:LOCALAPPDATA "DefenseClaw\InstallerCache"
 $SetupHookState = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\hook-runtime-state.json"
@@ -1627,7 +1628,8 @@ function Write-LifecycleManifest([string]$Operation, [string]$From, [string]$To,
     $state["From"] = $From
     $state["To"] = $To
     $state["Slot"] = $Slot
-    $state["SetupRoot"] = $(if ($Setup) { [string]$Setup.Root } else { "" })
+    # Rollback enters before the install path discovers a legacy Setup install.
+    $state["SetupRoot"] = $(if ($Operation -eq "rollback") { "" } elseif ($Setup) { [string]$Setup.Root } else { "" })
     $state["Committed"] = $false
     $state["Created"] = (Get-Date).ToUniversalTime().ToString("o")
     foreach ($key in $Extra.Keys) { $state[$key] = $Extra[$key] }
