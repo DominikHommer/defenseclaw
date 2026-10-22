@@ -2525,14 +2525,15 @@ func LoadFromFile(configFile string) (*Config, error) {
 }
 
 // LoadManagedFileForLifecycleRecovery loads a managed config like
-// LoadFromFile, without publishing provenance and without requiring the
+// LoadFromFile, without publishing provenance, without requiring the
 // standalone policy inputs (policy_dir, rule-pack dirs) to be readable by
-// the gateway service. The Windows managed-hook lifecycle snapshot and
-// teardown read only listener settings from it, and they run during the
-// rollback of an install whose new config the services could not load:
-// refusing that config there failed the rollback too, and left every
-// service stopped (GAP-1291). The gateway and every activation keep the
-// strict loaders.
+// the gateway service, and without the loopback API bind check. The Windows
+// managed-hook lifecycle snapshot and teardown read only the API port (the
+// hooks always dial 127.0.0.1) and the connectors from it, and they run
+// during the rollback of an install whose new config the services could not
+// load: refusing that config there failed the rollback too, and left every
+// service stopped (GAP-1291, GAP-0647). The gateway and every activation
+// keep the strict loaders.
 func LoadManagedFileForLifecycleRecovery(configFile string) (*Config, error) {
 	return loadFromFile(configFile, false, false)
 }
@@ -2974,13 +2975,13 @@ func loadConfigSourceCheckedWithLayout(
 			}
 			return nil, fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
 		}
-		if err := validateManagedEnterpriseListenerBindings(&cfg); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_listener_non_loopback")
-			}
-			return nil, err
-		}
 		if checkPolicyInputs {
+			if err := ValidateManagedEnterpriseListenerBindings(&cfg); err != nil {
+				if ReportConfigLoadError != nil {
+					ReportConfigLoadError(context.Background(), "managed_listener_non_loopback")
+				}
+				return nil, err
+			}
 			if err := validateManagedStandalonePolicyInputs(&cfg); err != nil {
 				if ReportConfigLoadError != nil {
 					ReportConfigLoadError(context.Background(), "managed_policy_input_untrusted")
@@ -3419,12 +3420,12 @@ func applyManagedEnterpriseListenerDefault(cfg *Config) {
 	}
 }
 
-// validateManagedEnterpriseListenerBindings keeps every inbound enterprise
+// ValidateManagedEnterpriseListenerBindings keeps every inbound enterprise
 // surface on loopback. The managed hook transport is intentionally pinned to
 // canonical numeric IPv4, so the API listener must be exactly 127.0.0.1 rather
 // than another loopback spelling or address. This is enterprise-only:
 // unmanaged/BYOD deployments retain their existing remote-bind behavior.
-func validateManagedEnterpriseListenerBindings(cfg *Config) error {
+func ValidateManagedEnterpriseListenerBindings(cfg *Config) error {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}

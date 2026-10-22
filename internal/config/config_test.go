@@ -542,9 +542,9 @@ func TestManagedEnterpriseListenerBindingsModeMatrix(t *testing.T) {
 			cfg.Gateway.APIBind = test.apiBind
 			cfg.Guardrail.Host = test.guardrailHost
 			cfg.Guardrail.Enabled = test.guardrail
-			err := validateManagedEnterpriseListenerBindings(cfg)
+			err := ValidateManagedEnterpriseListenerBindings(cfg)
 			if test.wantErr == "" && err != nil {
-				t.Fatalf("validateManagedEnterpriseListenerBindings: %v", err)
+				t.Fatalf("ValidateManagedEnterpriseListenerBindings: %v", err)
 			}
 			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
 				t.Fatalf("error = %v, want %q", err, test.wantErr)
