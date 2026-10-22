@@ -66,19 +66,39 @@ func scannerFixturePID(t *testing.T, path string) int {
 	return 0
 }
 
-// scannerFixtureRunning reports whether pid exists and is not a zombie.
-func scannerFixtureRunning(pid int) bool {
-	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
-	state := strings.TrimSpace(string(out))
-	return err == nil && state != "" && !strings.HasPrefix(state, "Z")
-}
-
-func scannerFixtureGone(pid int) bool {
+func scannerFixtureGone(t *testing.T, pid int) bool {
+	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
-	for scannerFixtureRunning(pid) && time.Now().Before(deadline) {
+	for scannerFixtureRunning(t, pid) && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	return !scannerFixtureRunning(pid)
+	return !scannerFixtureRunning(t, pid)
+}
+
+// The liveness check must not depend on an external tool: with ps missing,
+// the old check reported every process gone, so the containment tests
+// passed without checking anything.
+func TestScannerFixtureRunningNeedsNoTools(t *testing.T) {
+	cmd := exec.Command("/bin/sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	t.Setenv("PATH", t.TempDir())
+	pid := cmd.Process.Pid
+	if !scannerFixtureRunning(t, pid) {
+		t.Fatalf("running process %d reported gone", pid)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if !scannerFixtureGone(t, pid) {
+		t.Fatalf("killed process %d still reported running", pid)
+	}
+	_ = cmd.Wait()
+	if scannerFixtureRunning(t, pid) {
+		t.Fatalf("reaped process %d still reported running", pid)
+	}
 }
 
 func scannerRoutes() []struct {
@@ -111,7 +131,7 @@ func TestScannersContainDetachedChildren(t *testing.T) {
 			defer cancel()
 			result, err := tc.new(fixture).Scan(ctx, t.TempDir())
 			pid := scannerFixturePID(t, pidFile)
-			if !scannerFixtureGone(pid) {
+			if !scannerFixtureGone(t, pid) {
 				t.Fatalf("Scan() = %+v, %v; detached scanner child %d is still running", result, err, pid)
 			}
 			if err != nil {
@@ -164,7 +184,7 @@ func TestScannerDetachedChildDiesWithGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = gateway.Wait()
-	if !scannerFixtureGone(pid) {
+	if !scannerFixtureGone(t, pid) {
 		t.Fatalf("detached scanner child %d survived gateway death", pid)
 	}
 }

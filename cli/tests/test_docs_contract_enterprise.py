@@ -35,6 +35,10 @@ def _flat(page: str) -> str:
 
 # (fact, [(pages that may hold the phrase, phrase), ...])
 FACTS = [
+    ('scanner_tree_names_the_macos_escape_limit', [
+        (('reference/scanning/scanners.mdx',),
+         "macOS has one known limit: a child that forks, starts a new session and exits between two reads of the process table (about 100 ms apart) can hand its own child to launchd before the gateway sees it. If that child keeps a descriptor it inherited, the scan fails closed; if it closes every descriptor, it is not found and keeps running."),
+    ]),
     ('account_outage_refusal_matches_the_cli', [
         (('enterprise/runtime/sandbox-reference.mdx',),
          "This isn't your organization's sandbox policy."),
